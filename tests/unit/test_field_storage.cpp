@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "hundun/runtime/error.hpp"
+#include "hundun/runtime/field_descriptor.hpp"
+#include "hundun/runtime/field_registry.hpp"
+#include "hundun/runtime/field_storage.hpp"
+#include "tests/support/test_main.hpp"
+
+namespace {
+
+using hundun::runtime::Error;
+using hundun::runtime::FieldDescriptor;
+using hundun::runtime::FieldId;
+using hundun::runtime::FieldRegistry;
+using hundun::runtime::FieldStorage;
+using hundun::runtime::FunctionSpace;
+using hundun::runtime::Int3;
+using hundun::runtime::OutputPolicy;
+using hundun::runtime::RestartPolicy;
+using hundun::runtime::ScalarType;
+
+FieldDescriptor descriptor(std::string name = "passive_scalar",
+                           ScalarType scalar_type = ScalarType::float64,
+                           std::uint32_t components = 1, int ghost_width = 2,
+                           FunctionSpace space = FunctionSpace::cell_average) {
+  return FieldDescriptor{std::move(name),
+                         "1",
+                         "passive_scalar_solver",
+                         space,
+                         scalar_type,
+                         components,
+                         ghost_width,
+                         true,
+                         RestartPolicy::persistent,
+                         OutputPolicy::selected};
+}
+
+template <class Function>
+void expect_error(Function &&function) {
+  bool threw = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const Error &error) {
+    threw = true;
+    HUNDUN_CHECK(std::string(error.what()).empty() == false);
+  }
+  HUNDUN_CHECK(threw);
+}
+
+void test_registry_validation_and_stable_ids() {
+  FieldRegistry registry;
+  HUNDUN_CHECK(registry.frozen() == false);
+  HUNDUN_CHECK(registry.size() == 0U);
+
+  auto empty_name = descriptor("");
+  expect_error([&] { registry.declare_field(std::move(empty_name)); });
+  auto missing_unit = descriptor();
+  missing_unit.unit.clear();
+  expect_error([&] { registry.declare_field(std::move(missing_unit)); });
+  auto missing_owner = descriptor();
+  missing_owner.owner.clear();
+  expect_error([&] { registry.declare_field(std::move(missing_owner)); });
+  expect_error([&] {
+    registry.declare_field(descriptor("zero", ScalarType::float64, 0));
+  });
+  expect_error([&] {
+    registry.declare_field(
+        descriptor("negative_ghost", ScalarType::float64, 1, -1));
+  });
+
+  for (const auto space :
+       {static_cast<FunctionSpace>(-1), static_cast<FunctionSpace>(6)}) {
+    auto invalid = descriptor("invalid_space");
+    invalid.space = space;
+    expect_error([&] { registry.declare_field(std::move(invalid)); });
+  }
+  for (const auto scalar :
+       {static_cast<ScalarType>(-1), static_cast<ScalarType>(3)}) {
+    auto invalid = descriptor("invalid_scalar");
+    invalid.scalar_type = scalar;
+    expect_error([&] { registry.declare_field(std::move(invalid)); });
+  }
+  for (const auto policy :
+       {static_cast<RestartPolicy>(-1), static_cast<RestartPolicy>(2)}) {
+    auto invalid = descriptor("invalid_restart");
+    invalid.restart = policy;
+    expect_error([&] { registry.declare_field(std::move(invalid)); });
+  }
+  for (const auto policy :
+       {static_cast<OutputPolicy>(-1), static_cast<OutputPolicy>(3)}) {
+    auto invalid = descriptor("invalid_output");
+    invalid.output = policy;
+    expect_error([&] { registry.declare_field(std::move(invalid)); });
+  }
+  HUNDUN_CHECK(registry.size() == 0U);
+
+  const FieldId scalar_id = registry.declare_field(descriptor());
+  const FieldId marker_id =
+      registry.declare_field(descriptor("marker", ScalarType::uint8, 1, 0));
+  HUNDUN_CHECK(scalar_id == 0U);
+  HUNDUN_CHECK(marker_id == 1U);
+  HUNDUN_CHECK(registry.size() == 2U);
+  HUNDUN_CHECK(registry.field_id("passive_scalar") == scalar_id);
+  HUNDUN_CHECK(registry.field_id("marker") == marker_id);
+  HUNDUN_CHECK(registry.descriptor(scalar_id).name == "passive_scalar");
+  HUNDUN_CHECK(registry.descriptor(marker_id).scalar_type == ScalarType::uint8);
+
+  expect_error([&] { registry.declare_field(descriptor()); });
+  HUNDUN_CHECK(registry.size() == 2U);
+  expect_error([&] { static_cast<void>(registry.field_id("unknown")); });
+  expect_error([&] {
+    static_cast<void>(registry.descriptor(std::numeric_limits<FieldId>::max()));
+  });
+
+  registry.freeze();
+  registry.freeze();
+  HUNDUN_CHECK(registry.frozen());
+  expect_error(
+      [&] { registry.declare_field(descriptor("declared_too_late")); });
+  HUNDUN_CHECK(registry.size() == 2U);
+}
+
+void test_storage_preconditions_and_function_spaces() {
+  FieldRegistry unfrozen;
+  unfrozen.declare_field(descriptor());
+  expect_error([&] { FieldStorage storage(unfrozen, Int3{1, 1, 1}); });
+
+  FieldRegistry registry;
+  registry.declare_field(descriptor());
+  registry.freeze();
+  for (const auto extent : {Int3{0, 1, 1}, Int3{-1, 1, 1}, Int3{1, 0, 1},
+                            Int3{1, -1, 1}, Int3{1, 1, 0}, Int3{1, 1, -1}}) {
+    expect_error([&] { FieldStorage storage(registry, extent); });
+  }
+
+  for (const auto space :
+       {FunctionSpace::face_value, FunctionSpace::vertex_value,
+        FunctionSpace::element_dof, FunctionSpace::quadrature_point,
+        FunctionSpace::particle}) {
+    FieldRegistry unsupported;
+    unsupported.declare_field(
+        descriptor("unsupported", ScalarType::float64, 1, 0, space));
+    unsupported.freeze();
+    expect_error([&] { FieldStorage storage(unsupported, Int3{1, 1, 1}); });
+  }
+}
+
+void test_typed_views_layout_bounds_and_constness() {
+  FieldRegistry registry;
+  const FieldId q_id =
+      registry.declare_field(descriptor("q", ScalarType::float64, 2, 1));
+  const FieldId index_id =
+      registry.declare_field(descriptor("index", ScalarType::int32, 1, 2));
+  const FieldId mask_id =
+      registry.declare_field(descriptor("mask", ScalarType::uint8, 1, 0));
+  registry.freeze();
+
+  FieldStorage storage(registry, Int3{2, 2, 2});
+  HUNDUN_CHECK(storage.interior_extent().x == 2);
+  HUNDUN_CHECK(storage.interior_extent().y == 2);
+  HUNDUN_CHECK(storage.interior_extent().z == 2);
+
+  auto q = storage.view<double>(q_id);
+  static_assert(std::is_same_v<decltype(q(-1, -1, -1, 0)), double &>,
+                "mutable storage must return mutable references");
+  HUNDUN_CHECK(q.interior_extent().x == 2);
+  HUNDUN_CHECK(q.interior_extent().y == 2);
+  HUNDUN_CHECK(q.interior_extent().z == 2);
+  HUNDUN_CHECK(q.ghost_width() == 1);
+  HUNDUN_CHECK(q.components() == 2U);
+
+  q(-1, -1, -1, 0) = 10.0;
+  q(-1, -1, -1, 1) = 11.0;
+  q(0, -1, -1, 0) = 12.0;
+  q(-1, 0, -1, 0) = 13.0;
+  q(-1, -1, 0, 0) = 14.0;
+  q(0, 0, 0, 0) = 15.0;
+  q(1, 1, 1, 1) = 16.0;
+  q(2, 2, 2, 0) = 17.0;
+  q(2, 2, 2, 1) = 18.0;
+
+  HUNDUN_CHECK_NEAR(q(-1, -1, -1, 0), 10.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(-1, -1, -1, 1), 11.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(0, -1, -1, 0), 12.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(-1, 0, -1, 0), 13.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(-1, -1, 0, 0), 14.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(0, 0, 0, 0), 15.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(1, 1, 1, 1), 16.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(2, 2, 2, 0), 17.0, 0.0);
+  HUNDUN_CHECK_NEAR(q(2, 2, 2, 1), 18.0, 0.0);
+
+  const auto base = reinterpret_cast<std::uintptr_t>(&q(-1, -1, -1, 0));
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&q(-1, -1, -1, 1)) ==
+               base + sizeof(double));
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&q(0, -1, -1, 0)) ==
+               base + 2U * sizeof(double));
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&q(-1, 0, -1, 0)) ==
+               base + 8U * sizeof(double));
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&q(-1, -1, 0, 0)) ==
+               base + 32U * sizeof(double));
+  HUNDUN_CHECK(base % alignof(double) == 0U);
+
+  auto index = storage.view<std::int32_t>(index_id);
+  HUNDUN_CHECK(index.ghost_width() == 2);
+  index(-2, -2, -2, 0) = -123;
+  index(3, 3, 3, 0) = 456;
+  HUNDUN_CHECK(index(-2, -2, -2, 0) == -123);
+  HUNDUN_CHECK(index(3, 3, 3, 0) == 456);
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&index(-2, -2, -2, 0)) %
+                   alignof(std::int32_t) ==
+               0U);
+
+  auto mask = storage.view<std::uint8_t>(mask_id);
+  mask(0, 0, 0, 0) = static_cast<std::uint8_t>(7);
+  mask(1, 1, 1, 0) = static_cast<std::uint8_t>(251);
+  HUNDUN_CHECK(mask(0, 0, 0, 0) == static_cast<std::uint8_t>(7));
+  HUNDUN_CHECK(mask(1, 1, 1, 0) == static_cast<std::uint8_t>(251));
+  HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&mask(0, 0, 0, 0)) %
+                   alignof(std::uint8_t) ==
+               0U);
+
+  const FieldStorage &const_storage = storage;
+  auto const_q = const_storage.view<double>(q_id);
+  static_assert(
+      std::is_same_v<decltype(const_q(-1, -1, -1, 0)), const double &>,
+      "const storage must return read-only references");
+  HUNDUN_CHECK_NEAR(const_q(2, 2, 2, 1), 18.0, 0.0);
+
+  expect_error([&] { static_cast<void>(storage.view<std::int32_t>(q_id)); });
+  expect_error([&] { static_cast<void>(storage.view<double>(index_id)); });
+  expect_error([&] { static_cast<void>(storage.view<double>(mask_id)); });
+  expect_error([&] {
+    static_cast<void>(
+        storage.view<double>(std::numeric_limits<FieldId>::max()));
+  });
+
+  for (const auto coordinate : {Int3{-2, 0, 0}, Int3{3, 0, 0}, Int3{0, -2, 0},
+                                Int3{0, 3, 0}, Int3{0, 0, -2}, Int3{0, 0, 3}}) {
+    expect_error([&] {
+      static_cast<void>(q(coordinate.x, coordinate.y, coordinate.z, 0));
+    });
+  }
+  expect_error([&] { static_cast<void>(q(0, 0, 0, -1)); });
+  expect_error([&] { static_cast<void>(q(0, 0, 0, 2)); });
+}
+
+void test_checked_size_overflow() {
+  FieldRegistry element_overflow;
+  element_overflow.declare_field(
+      descriptor("element_overflow", ScalarType::uint8,
+                 std::numeric_limits<std::uint32_t>::max(),
+                 std::numeric_limits<int>::max()));
+  element_overflow.freeze();
+  expect_error([&] {
+    FieldStorage storage(
+        element_overflow,
+        Int3{std::numeric_limits<int>::max(), std::numeric_limits<int>::max(),
+             std::numeric_limits<int>::max()});
+  });
+
+  FieldRegistry byte_overflow;
+  byte_overflow.declare_field(
+      descriptor("byte_overflow", ScalarType::float64, 1, 0));
+  byte_overflow.freeze();
+  expect_error([&] {
+    FieldStorage storage(byte_overflow,
+                         Int3{std::numeric_limits<int>::max(),
+                              std::numeric_limits<int>::max(), 1});
+  });
+}
+
+}  // namespace
+
+int main() {
+  return hundun::test::run([] {
+    test_registry_validation_and_stable_ids();
+    test_storage_preconditions_and_function_spaces();
+    test_typed_views_layout_bounds_and_constness();
+    test_checked_size_overflow();
+  });
+}

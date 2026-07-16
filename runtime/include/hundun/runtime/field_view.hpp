@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <type_traits>
+
+#include "hundun/runtime/error.hpp"
+#include "hundun/runtime/types.hpp"
+
+namespace hundun::runtime {
+
+class FieldStorage;
+
+template <class T>
+class FieldView final {
+ public:
+  Int3 interior_extent() const noexcept;
+  int ghost_width() const noexcept;
+  std::uint32_t components() const noexcept;
+  T &operator()(int i, int j, int k, int component) const;
+
+ private:
+  friend class FieldStorage;
+
+  using Byte =
+      std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
+  using Value = std::remove_const_t<T>;
+
+  FieldView(Byte *data, Int3 interior_extent, int ghost_width,
+            std::uint32_t components, std::size_t x_stride,
+            std::size_t y_stride, std::size_t z_stride) noexcept;
+
+  Byte *data_{};
+  Int3 interior_extent_{};
+  int ghost_width_{};
+  std::uint32_t components_{};
+  std::size_t x_stride_{};
+  std::size_t y_stride_{};
+  std::size_t z_stride_{};
+};
+
+template <class T>
+FieldView<T>::FieldView(Byte *data, Int3 interior_extent, int ghost_width,
+                        std::uint32_t components, std::size_t x_stride,
+                        std::size_t y_stride, std::size_t z_stride) noexcept
+    : data_(data),
+      interior_extent_(interior_extent),
+      ghost_width_(ghost_width),
+      components_(components),
+      x_stride_(x_stride),
+      y_stride_(y_stride),
+      z_stride_(z_stride) {}
+
+template <class T>
+Int3 FieldView<T>::interior_extent() const noexcept {
+  return interior_extent_;
+}
+
+template <class T>
+int FieldView<T>::ghost_width() const noexcept {
+  return ghost_width_;
+}
+
+template <class T>
+std::uint32_t FieldView<T>::components() const noexcept {
+  return components_;
+}
+
+template <class T>
+T &FieldView<T>::operator()(int i, int j, int k, int component) const {
+  const auto coordinate_in_bounds = [this](int coordinate, int extent) {
+    const auto wide_coordinate = static_cast<std::int64_t>(coordinate);
+    const auto lower = -static_cast<std::int64_t>(ghost_width_);
+    const auto upper = static_cast<std::int64_t>(extent) + ghost_width_;
+    return wide_coordinate >= lower && wide_coordinate < upper;
+  };
+  if (!coordinate_in_bounds(i, interior_extent_.x) ||
+      !coordinate_in_bounds(j, interior_extent_.y) ||
+      !coordinate_in_bounds(k, interior_extent_.z)) {
+    throw Error("field view spatial index is outside the ghosted extent");
+  }
+  if (component < 0 || static_cast<std::uint64_t>(component) >= components_) {
+    throw Error("field view component index is out of bounds");
+  }
+
+  const auto ii =
+      static_cast<std::size_t>(static_cast<std::int64_t>(i) + ghost_width_);
+  const auto jj =
+      static_cast<std::size_t>(static_cast<std::int64_t>(j) + ghost_width_);
+  const auto kk =
+      static_cast<std::size_t>(static_cast<std::int64_t>(k) + ghost_width_);
+  const auto component_index = static_cast<std::size_t>(component);
+  const auto linear =
+      kk * z_stride_ + jj * y_stride_ + ii * x_stride_ + component_index;
+  auto *value =
+      std::launder(reinterpret_cast<T *>(data_ + linear * sizeof(Value)));
+  return *value;
+}
+
+}  // namespace hundun::runtime

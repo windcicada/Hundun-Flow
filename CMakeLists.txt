@@ -51,7 +51,9 @@ target_link_libraries(hundun_cli
 add_library(hundun_runtime STATIC
   runtime/src/mpi_environment.cpp
   runtime/src/collective_status.cpp
-  runtime/src/structured_decomposition.cpp)
+  runtime/src/structured_decomposition.cpp
+  runtime/src/field_registry.cpp
+  runtime/src/field_storage.cpp)
 target_include_directories(hundun_runtime PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
 target_link_libraries(hundun_runtime
@@ -85,6 +87,11 @@ if(HUNDUN_BUILD_TESTS)
   hundun_add_test(test_cli_options tests/unit/test_cli_options.cpp)
   target_include_directories(test_cli_options PRIVATE "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_cli_options PRIVATE hundun_cli)
+
+  hundun_add_test(test_field_storage tests/unit/test_field_storage.cpp)
+  target_include_directories(test_field_storage PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_field_storage PRIVATE hundun_runtime)
 
   hundun_add_mpi_test(test_collective_status 2
     tests/mpi/test_collective_status.cpp)
