@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -15,6 +16,9 @@ using hundun::runtime::CollectiveStatus;
 using hundun::runtime::MpiEnvironment;
 using hundun::runtime::collective_status;
 using hundun::runtime::require_expected_ranks;
+
+constexpr std::string_view kIntercommunicatorError =
+    "collective_status requires an intracommunicator";
 
 void check_status(const CollectiveStatus& status, bool ok, int failing_rank,
                   const std::string& message) {
@@ -33,6 +37,52 @@ void expect_rank_error(MPI_Comm comm, std::optional<int> expected_ranks,
     HUNDUN_CHECK(std::string(error.what()) == expected_message);
   }
   HUNDUN_CHECK(threw);
+}
+
+template <class Function>
+void expect_intercommunicator_error(Function&& function) {
+  bool threw = false;
+  try {
+    function();
+  } catch (const hundun::runtime::Error& error) {
+    threw = true;
+    HUNDUN_CHECK(std::string_view(error.what()) == kIntercommunicatorError);
+  }
+  HUNDUN_CHECK(threw);
+}
+
+void test_intercommunicator_rejection(MpiEnvironment& mpi) {
+  MPI_Comm local_comm = MPI_COMM_NULL;
+  HUNDUN_CHECK(MPI_Comm_split(mpi.comm(), mpi.rank(), 0, &local_comm) ==
+               MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Comm_set_errhandler(local_comm, MPI_ERRORS_RETURN) ==
+               MPI_SUCCESS);
+
+  int local_size = 0;
+  HUNDUN_CHECK(MPI_Comm_size(local_comm, &local_size) == MPI_SUCCESS);
+  HUNDUN_CHECK(local_size == 1);
+
+  MPI_Comm intercomm = MPI_COMM_NULL;
+  const int remote_leader = 1 - mpi.rank();
+  HUNDUN_CHECK(MPI_Intercomm_create(local_comm, 0, mpi.comm(), remote_leader,
+                                    17, &intercomm) == MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Comm_set_errhandler(intercomm, MPI_ERRORS_RETURN) ==
+               MPI_SUCCESS);
+
+  int is_inter = 0;
+  HUNDUN_CHECK(MPI_Comm_test_inter(intercomm, &is_inter) == MPI_SUCCESS);
+  HUNDUN_CHECK(is_inter != 0);
+
+  expect_intercommunicator_error([&] {
+    static_cast<void>(collective_status(
+        intercomm, mpi.rank() != 0,
+        mpi.rank() == 0 ? "intercommunicator failure" : ""));
+  });
+  expect_intercommunicator_error(
+      [&] { require_expected_ranks(intercomm, local_size); });
+
+  HUNDUN_CHECK(MPI_Comm_free(&intercomm) == MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Comm_free(&local_comm) == MPI_SUCCESS);
 }
 
 void test_collectives(MpiEnvironment& mpi, int& argc, char**& argv) {
@@ -92,6 +142,8 @@ void test_collectives(MpiEnvironment& mpi, int& argc, char**& argv) {
                         ? std::optional<int>{mpi.size() + 2}
                         : std::optional<int>{mpi.size() + 1},
                     rank_zero_message);
+
+  test_intercommunicator_rejection(mpi);
 
   mpi.barrier();
 }

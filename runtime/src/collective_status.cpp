@@ -26,6 +26,12 @@ void check_mpi(int result, const char* operation) {
 
 CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
                                    std::string_view local_message) {
+  int is_inter = 0;
+  check_mpi(MPI_Comm_test_inter(comm, &is_inter), "MPI_Comm_test_inter");
+  if (is_inter != 0) {
+    throw Error("collective_status requires an intracommunicator");
+  }
+
   int rank = 0;
   int size = 0;
   check_mpi(MPI_Comm_rank(comm, &rank), "MPI_Comm_rank");
