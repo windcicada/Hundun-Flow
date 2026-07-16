@@ -2,9 +2,10 @@
 
 ## Current State
 
-This directory is a documentation-only handoff skeleton. It intentionally has
-no Git repository and no implementation source yet. Do not start implementation
-unless the user explicitly asks to execute the approved Stage 0/1 plan.
+This repository was initialized from a documentation-only handoff skeleton.
+Do not reinitialize it. Execute only the approved Stage 0/1 plan after explicit
+user authorization, and determine progress from Git history and the coordinator
+ledger.
 
 ## Required Reading
 

@@ -11,6 +11,6 @@ This engineering interpretation is not presented as a literal translation.
 The primary text reference is:
 https://ctext.org/text.pl?if=gb&node=83583&show=parallel
 
-Stage 1 currently provides the independent MPI runtime and passive-scalar
-verification kernel. Reacting flow, IBM, TPDF-TCR, and spray are roadmap items,
-not current capabilities.
+Stage 1 is under development. Its approved scope includes the independent MPI
+runtime and passive-scalar verification kernel. Reacting flow, IBM, TPDF-TCR,
+and spray are roadmap items, not current capabilities.
