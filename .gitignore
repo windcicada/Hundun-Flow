@@ -1,0 +1,14 @@
+/build/
+/build-*/
+/output/
+/.cache/
+/.idea/
+/.vscode/
+*.o
+*.a
+*.so
+*.dylib
+*.mod
+compile_commands.json
+CTestTestfile.cmake
+Testing/
