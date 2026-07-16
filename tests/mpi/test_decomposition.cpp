@@ -37,6 +37,19 @@ std::array<int, 3> as_array(Int3 value) {
   return {value.x, value.y, value.z};
 }
 
+std::array<int, 2> expected_axis_bounds(int global_cells,
+                                        int process_count,
+                                        int process_coordinate) {
+  const int quotient = global_cells / process_count;
+  const int remainder = global_cells % process_count;
+  const int earlier_remainder_cells =
+      process_coordinate < remainder ? process_coordinate : remainder;
+  const int begin = process_coordinate * quotient + earlier_remainder_cells;
+  const int end = begin + quotient +
+                  (process_coordinate < remainder ? 1 : 0);
+  return {begin, end};
+}
+
 template <class Function>
 void expect_runtime_error(Function&& function) {
   bool threw = false;
@@ -118,6 +131,23 @@ std::vector<Box3> gather_boxes(const StructuredDecomposition& decomposition,
 
 void test_boxes_and_coverage(const StructuredDecomposition& decomposition,
                              const MpiEnvironment& mpi) {
+  const Int3 global_extent = decomposition.global_extent();
+  const Int3 process_grid = decomposition.process_grid();
+  const Int3 process_coordinates = decomposition.process_coordinates();
+  const Box3 owned = decomposition.owned_box();
+  const auto expected_x = expected_axis_bounds(
+      global_extent.x, process_grid.x, process_coordinates.x);
+  const auto expected_y = expected_axis_bounds(
+      global_extent.y, process_grid.y, process_coordinates.y);
+  const auto expected_z = expected_axis_bounds(
+      global_extent.z, process_grid.z, process_coordinates.z);
+  HUNDUN_CHECK(owned.begin.x == expected_x[0]);
+  HUNDUN_CHECK(owned.end.x == expected_x[1]);
+  HUNDUN_CHECK(owned.begin.y == expected_y[0]);
+  HUNDUN_CHECK(owned.end.y == expected_y[1]);
+  HUNDUN_CHECK(owned.begin.z == expected_z[0]);
+  HUNDUN_CHECK(owned.end.z == expected_z[1]);
+
   const Int3 local_extent = decomposition.local_extent();
   HUNDUN_CHECK(local_extent.x > 0);
   HUNDUN_CHECK(local_extent.y > 0);
