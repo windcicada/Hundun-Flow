@@ -5,6 +5,7 @@
 #include "tests/support/test_main.hpp"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -12,6 +13,9 @@ namespace {
 using hundun::application::CliOptions;
 using hundun::application::kCliUsage;
 using hundun::application::parse_cli;
+
+constexpr std::string_view kExpectedUsage =
+    "usage: hundun <case.json> [--validate|--print-resolved] | hundun --version";
 
 CliOptions parse(std::vector<std::string> arguments) {
   std::vector<char*> argv;
@@ -60,9 +64,13 @@ void expect_usage_error(std::vector<std::string> arguments) {
     (void)parse(std::move(arguments));
   } catch (const hundun::runtime::Error& error) {
     threw = true;
-    HUNDUN_CHECK(std::string(error.what()) == kCliUsage);
+    HUNDUN_CHECK(std::string_view(error.what()) == kExpectedUsage);
   }
   HUNDUN_CHECK(threw);
+}
+
+void test_usage_contract() {
+  HUNDUN_CHECK(std::string_view(kCliUsage) == kExpectedUsage);
 }
 
 void test_rejected_forms() {
@@ -94,6 +102,7 @@ void test_rejected_forms() {
 
 int main() {
   return hundun::test::run([] {
+    test_usage_contract();
     test_accepted_forms();
     test_rejected_forms();
   });
