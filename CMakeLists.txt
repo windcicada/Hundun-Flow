@@ -33,6 +33,14 @@ set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(yyjson PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/yyjson>")
 
+add_library(hundun_config STATIC config/src/case_config_loader.cpp)
+target_include_directories(hundun_config PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/config/include>"
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
+target_link_libraries(hundun_config
+  PRIVATE yyjson hundun_warnings
+  PUBLIC hundun_options)
+
 function(hundun_add_test target)
   add_executable("${target}" ${ARGN})
   target_link_libraries("${target}" PRIVATE hundun_options hundun_warnings)
@@ -52,6 +60,10 @@ endfunction()
 
 if(HUNDUN_BUILD_TESTS)
   enable_testing()
+
+  hundun_add_test(test_case_config tests/unit/test_case_config.cpp)
+  target_include_directories(test_case_config PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_case_config PRIVATE hundun_config)
 
   add_test(NAME provenance_clean
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=clean
