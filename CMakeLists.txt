@@ -50,7 +50,8 @@ target_link_libraries(hundun_cli
 
 add_library(hundun_runtime STATIC
   runtime/src/mpi_environment.cpp
-  runtime/src/collective_status.cpp)
+  runtime/src/collective_status.cpp
+  runtime/src/structured_decomposition.cpp)
 target_include_directories(hundun_runtime PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
 target_link_libraries(hundun_runtime
@@ -91,6 +92,23 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_collective_status PRIVATE hundun_runtime)
   set_tests_properties(test_collective_status PROPERTIES TIMEOUT 20)
+
+  add_executable(test_decomposition tests/mpi/test_decomposition.cpp)
+  target_include_directories(test_decomposition PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_decomposition PRIVATE
+    hundun_options hundun_warnings hundun_runtime MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(decomposition_test "test_decomposition_${ranks}_rank")
+    add_test(NAME "${decomposition_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_decomposition>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${decomposition_test}" PROPERTIES
+      LABELS mpi
+      TIMEOUT 30
+      PROCESSORS "${ranks}")
+  endforeach()
 
   add_test(NAME provenance_clean
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=clean
