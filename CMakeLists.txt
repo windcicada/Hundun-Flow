@@ -41,6 +41,22 @@ target_link_libraries(hundun_config
   PRIVATE yyjson hundun_warnings
   PUBLIC hundun_options)
 
+add_library(hundun_cli STATIC applications/hundun/cli_options.cpp)
+target_include_directories(hundun_cli PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>")
+target_link_libraries(hundun_cli
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options)
+
+add_library(hundun_runtime STATIC
+  runtime/src/mpi_environment.cpp
+  runtime/src/collective_status.cpp)
+target_include_directories(hundun_runtime PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
+target_link_libraries(hundun_runtime
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options MPI::MPI_CXX)
+
 function(hundun_add_test target)
   add_executable("${target}" ${ARGN})
   target_link_libraries("${target}" PRIVATE hundun_options hundun_warnings)
@@ -64,6 +80,17 @@ if(HUNDUN_BUILD_TESTS)
   hundun_add_test(test_case_config tests/unit/test_case_config.cpp)
   target_include_directories(test_case_config PRIVATE "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_case_config PRIVATE hundun_config)
+
+  hundun_add_test(test_cli_options tests/unit/test_cli_options.cpp)
+  target_include_directories(test_cli_options PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_cli_options PRIVATE hundun_cli)
+
+  hundun_add_mpi_test(test_collective_status 2
+    tests/mpi/test_collective_status.cpp)
+  target_include_directories(test_collective_status PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_collective_status PRIVATE hundun_runtime)
+  set_tests_properties(test_collective_status PROPERTIES TIMEOUT 20)
 
   add_test(NAME provenance_clean
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=clean
