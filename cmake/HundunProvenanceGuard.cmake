@@ -9,12 +9,8 @@ function(hundun_assert_clean_tree root)
     message(FATAL_ERROR "Forbidden legacy-language files: ${offending_path}")
   endif()
 
-  file(GLOB_RECURSE candidate_files LIST_DIRECTORIES false
-    "${root}/*.c" "${root}/*.h"
-    "${root}/*.cc" "${root}/*.hh"
-    "${root}/*.cpp" "${root}/*.hpp"
-    "${root}/*.cxx" "${root}/*.hxx"
-    "${root}/*.cmake" "${root}/CMakeLists.txt")
+  file(GLOB_RECURSE candidate_files LIST_DIRECTORIES false "${root}/*")
+  set(candidate_suffixes c h cc hh cpp hpp cxx hxx cmake)
 
   set(forbidden_tokens
     "boffin"
@@ -26,6 +22,16 @@ function(hundun_assert_clean_tree root)
     file(RELATIVE_PATH relative_path "${root}" "${candidate}")
     if(relative_path STREQUAL "cmake/HundunProvenanceGuard.cmake"
        OR relative_path MATCHES "(^|/)third_party(/|$)")
+      continue()
+    endif()
+
+    get_filename_component(candidate_name "${candidate}" NAME)
+    get_filename_component(candidate_suffix "${candidate}" LAST_EXT)
+    string(REGEX REPLACE "^\\." "" candidate_suffix "${candidate_suffix}")
+    string(TOLOWER "${candidate_suffix}" candidate_suffix)
+    list(FIND candidate_suffixes "${candidate_suffix}" candidate_suffix_index)
+    if(NOT candidate_name STREQUAL "CMakeLists.txt"
+       AND candidate_suffix_index EQUAL -1)
       continue()
     endif()
 

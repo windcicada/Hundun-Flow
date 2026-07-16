@@ -62,14 +62,31 @@ if(HUNDUN_BUILD_TESTS)
   add_test(NAME provenance_forbidden_token
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=token
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME provenance_forbidden_uppercase_suffix
+    COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=uppercase
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME provenance_forbidden_fortran_diagnostic
+    COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=verify_fortran
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME provenance_forbidden_token_diagnostic
+    COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=verify_token
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME provenance_forbidden_uppercase_suffix_diagnostic
+    COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=verify_uppercase
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
 
   set_tests_properties(
     provenance_clean
     provenance_forbidden_fortran
     provenance_forbidden_token
+    provenance_forbidden_uppercase_suffix
+    provenance_forbidden_fortran_diagnostic
+    provenance_forbidden_token_diagnostic
+    provenance_forbidden_uppercase_suffix_diagnostic
     PROPERTIES LABELS provenance)
   set_tests_properties(
     provenance_forbidden_fortran
     provenance_forbidden_token
+    provenance_forbidden_uppercase_suffix
     PROPERTIES WILL_FAIL TRUE)
 endif()
