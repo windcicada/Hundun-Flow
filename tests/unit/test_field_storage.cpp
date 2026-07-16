@@ -295,6 +295,23 @@ void test_unindexable_component_count() {
   }
 }
 
+void test_unindexable_upper_ghost_coordinate() {
+  FieldRegistry registry;
+  registry.declare_field(
+      descriptor("unindexable_upper_ghost", ScalarType::uint8, 1, 2));
+  registry.freeze();
+
+  bool rejected_by_coordinate_domain_guard = false;
+  try {
+    FieldStorage storage(registry, Int3{std::numeric_limits<int>::max(), 1, 1});
+  } catch (const Error &error) {
+    rejected_by_coordinate_domain_guard =
+        std::string(error.what()) ==
+        "field storage upper ghost coordinate exceeds the view index range";
+  }
+  HUNDUN_CHECK(rejected_by_coordinate_domain_guard);
+}
+
 }  // namespace
 
 int main() {
@@ -304,5 +321,6 @@ int main() {
     test_typed_views_layout_bounds_and_constness();
     test_checked_size_overflow();
     test_unindexable_component_count();
+    test_unindexable_upper_ghost_coordinate();
   });
 }

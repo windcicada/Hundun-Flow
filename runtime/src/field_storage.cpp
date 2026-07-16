@@ -112,6 +112,20 @@ AllocationPlan make_plan(const FieldDescriptor &descriptor_value,
     throw Error("field storage component count exceeds the view index range");
   }
 
+  constexpr auto max_indexable_axis_span =
+      static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) + 1U;
+  const auto coordinate_ghost_width =
+      static_cast<std::uintmax_t>(descriptor_value.ghost_width);
+  if (static_cast<std::uintmax_t>(interior_extent.x) + coordinate_ghost_width >
+          max_indexable_axis_span ||
+      static_cast<std::uintmax_t>(interior_extent.y) + coordinate_ghost_width >
+          max_indexable_axis_span ||
+      static_cast<std::uintmax_t>(interior_extent.z) + coordinate_ghost_width >
+          max_indexable_axis_span) {
+    throw Error(
+        "field storage upper ghost coordinate exceeds the view index range");
+  }
+
   const auto ghost_width =
       static_cast<std::size_t>(descriptor_value.ghost_width);
   const auto double_ghost =
