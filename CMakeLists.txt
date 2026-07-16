@@ -83,7 +83,9 @@ if(HUNDUN_BUILD_TESTS)
     provenance_forbidden_fortran_diagnostic
     provenance_forbidden_token_diagnostic
     provenance_forbidden_uppercase_suffix_diagnostic
-    PROPERTIES LABELS provenance)
+    PROPERTIES
+      LABELS provenance
+      RESOURCE_LOCK hundun_provenance_fixture_tree)
   set_tests_properties(
     provenance_forbidden_fortran
     provenance_forbidden_token
