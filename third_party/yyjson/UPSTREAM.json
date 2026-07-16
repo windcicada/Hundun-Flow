@@ -1,0 +1,10 @@
+{
+  "name": "yyjson",
+  "version": "0.12.0",
+  "repository": "https://github.com/ibireme/yyjson",
+  "tag": "0.12.0",
+  "tag_object": "7871d321ff4cd8068c1f777c97975dc2fb640ab3",
+  "commit": "8b4a38dc994a110abaec8a400615567bd996105f",
+  "license": "MIT",
+  "vendored_files": ["yyjson.c", "yyjson.h"]
+}
