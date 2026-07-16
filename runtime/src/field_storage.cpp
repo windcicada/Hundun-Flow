@@ -105,6 +105,12 @@ AllocationPlan make_plan(const FieldDescriptor &descriptor_value,
   if (descriptor_value.space != FunctionSpace::cell_average) {
     throw Error("Stage 1 field storage supports cell_average fields only");
   }
+  constexpr auto max_indexable_components =
+      static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) + 1U;
+  if (static_cast<std::uintmax_t>(descriptor_value.components) >
+      max_indexable_components) {
+    throw Error("field storage component count exceeds the view index range");
+  }
 
   const auto ghost_width =
       static_cast<std::size_t>(descriptor_value.ghost_width);

@@ -277,6 +277,24 @@ void test_checked_size_overflow() {
   });
 }
 
+void test_unindexable_component_count() {
+  constexpr auto max_indexable_components =
+      static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) + 1U;
+  constexpr auto first_unindexable_component_count =
+      max_indexable_components + 1U;
+
+  if constexpr (first_unindexable_component_count <=
+                static_cast<std::uintmax_t>(
+                    std::numeric_limits<std::uint32_t>::max())) {
+    FieldRegistry registry;
+    registry.declare_field(descriptor(
+        "unindexable_components", ScalarType::uint8,
+        static_cast<std::uint32_t>(first_unindexable_component_count), 0));
+    registry.freeze();
+    expect_error([&] { FieldStorage storage(registry, Int3{1, 1, 1}); });
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -285,5 +303,6 @@ int main() {
     test_storage_preconditions_and_function_spaces();
     test_typed_views_layout_bounds_and_constness();
     test_checked_size_overflow();
+    test_unindexable_component_count();
   });
 }
