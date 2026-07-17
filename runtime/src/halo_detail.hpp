@@ -19,7 +19,8 @@ int halo_offset_code(Int3 offset);
 Int3 reverse_offset(Int3 offset);
 int halo_receive_tag(Int3 offset);
 
-void validate_halo_tag_upper_bound(bool attribute_present, int upper_bound);
+int effective_halo_tag_upper_bound(bool attribute_present,
+                                   const int* upper_bound);
 
 std::size_t checked_region_payload_bytes(Box3 box, std::uint32_t components,
                                          std::size_t scalar_bytes);

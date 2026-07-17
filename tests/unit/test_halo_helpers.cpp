@@ -26,7 +26,7 @@ using hundun::runtime::detail::halo_offset_code;
 using hundun::runtime::detail::halo_receive_tag;
 using hundun::runtime::detail::reverse_offset;
 using hundun::runtime::detail::split_count_ranges;
-using hundun::runtime::detail::validate_halo_tag_upper_bound;
+using hundun::runtime::detail::effective_halo_tag_upper_bound;
 
 template <class Function>
 void expect_error(Function&& function, const std::string& text) {
@@ -89,12 +89,24 @@ void test_direction_codes_and_tags() {
 }
 
 void test_tag_upper_bound() {
-  expect_error([] { validate_halo_tag_upper_bound(false, 26); },
-               "attribute");
-  expect_error([] { validate_halo_tag_upper_bound(true, 25); },
-               "upper bound");
-  validate_halo_tag_upper_bound(true, 26);
-  validate_halo_tag_upper_bound(true, INT_MAX);
+  HUNDUN_CHECK(effective_halo_tag_upper_bound(false, nullptr) == 32767);
+  expect_error(
+      [] {
+        static_cast<void>(effective_halo_tag_upper_bound(true, nullptr));
+      },
+      "null");
+
+  const int too_small = 25;
+  const int minimum_required = 26;
+  const int maximum = INT_MAX;
+  expect_error(
+      [&] {
+        static_cast<void>(effective_halo_tag_upper_bound(true, &too_small));
+      },
+      "upper bound");
+  HUNDUN_CHECK(effective_halo_tag_upper_bound(
+                   true, &minimum_required) == minimum_required);
+  HUNDUN_CHECK(effective_halo_tag_upper_bound(true, &maximum) == maximum);
 }
 
 void check_range(const hundun::runtime::detail::CountRange& range,

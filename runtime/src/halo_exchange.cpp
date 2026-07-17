@@ -284,10 +284,8 @@ class HaloExchange::Impl final {
           MPI_Comm_get_attr(context.comm(), MPI_TAG_UB, &attribute,
                             &attribute_present),
           "MPI_Comm_get_attr");
-      const bool has_attribute = attribute_present != 0 && attribute != nullptr;
-      const int upper_bound =
-          has_attribute ? *static_cast<int*>(attribute) : 0;
-      detail::validate_halo_tag_upper_bound(has_attribute, upper_bound);
+      static_cast<void>(detail::effective_halo_tag_upper_bound(
+          attribute_present != 0, static_cast<const int*>(attribute)));
 
       MPI_Errhandler handler = MPI_ERRHANDLER_NULL;
       detail::check_mpi(MPI_Comm_get_errhandler(context.comm(), &handler),

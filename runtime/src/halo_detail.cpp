@@ -59,13 +59,19 @@ int halo_receive_tag(Int3 offset) {
   return halo_offset_code(reverse_offset(offset));
 }
 
-void validate_halo_tag_upper_bound(bool attribute_present, int upper_bound) {
+int effective_halo_tag_upper_bound(bool attribute_present,
+                                   const int* upper_bound) {
+  constexpr int mpi3_guaranteed_minimum = 32767;
   if (!attribute_present) {
-    throw Error("MPI_TAG_UB attribute is unavailable on the halo communicator");
+    return mpi3_guaranteed_minimum;
   }
-  if (upper_bound < 26) {
+  if (upper_bound == nullptr) {
+    throw Error("MPI_TAG_UB attribute pointer is null");
+  }
+  if (*upper_bound < 26) {
     throw Error("MPI tag upper bound is below the halo direction range");
   }
+  return *upper_bound;
 }
 
 std::size_t checked_region_payload_bytes(Box3 box, std::uint32_t components,
