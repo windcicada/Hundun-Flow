@@ -8,8 +8,13 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace hundun::runtime {
+
+struct DecompositionOptions {
+  std::optional<Int3> process_grid;
+};
 
 class StructuredDecomposition final {
  public:
@@ -17,7 +22,8 @@ class StructuredDecomposition final {
   // a compatible order; the returned decomposition owns its Cartesian
   // communicator.
   static StructuredDecomposition create(
-      const MpiContext&, Int3 global_extent, std::array<bool, 3> periodic);
+      const MpiContext&, Int3 global_extent, std::array<bool, 3> periodic,
+      DecompositionOptions options = {});
   // While MPI is active, destruction collectively frees the Cartesian
   // communicator, so member ranks must destroy decompositions in a compatible
   // order and normally before MpiEnvironment. After MPI_Finalize, destruction

@@ -24,6 +24,7 @@
 namespace {
 
 using hundun::runtime::Box3;
+using hundun::runtime::DecompositionOptions;
 using hundun::runtime::Int3;
 using hundun::runtime::MpiContext;
 using hundun::runtime::MpiEnvironment;
@@ -79,6 +80,57 @@ void expect_runtime_error_with_text(Function&& function,
   HUNDUN_CHECK(threw);
 }
 
+template <class Function>
+void expect_collective_error(const MpiContext& mpi, Function&& function) {
+  bool threw = false;
+  std::string message;
+  try {
+    function();
+  } catch (const hundun::runtime::Error& error) {
+    threw = true;
+    message = error.what();
+  }
+
+  const int local_threw = threw ? 1 : 0;
+  int total_threw = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_threw, &total_threw, 1, MPI_INT, MPI_SUM,
+                             mpi.comm()) == MPI_SUCCESS);
+
+  HUNDUN_CHECK(message.size() <=
+               static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  const int local_length = static_cast<int>(message.size());
+  std::vector<int> lengths(static_cast<std::size_t>(mpi.size()));
+  HUNDUN_CHECK(MPI_Allgather(&local_length, 1, MPI_INT, lengths.data(), 1,
+                             MPI_INT, mpi.comm()) == MPI_SUCCESS);
+  std::vector<int> displacements(static_cast<std::size_t>(mpi.size()));
+  int total_length = 0;
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    displacements[static_cast<std::size_t>(rank)] = total_length;
+    HUNDUN_CHECK(lengths[static_cast<std::size_t>(rank)] >= 0);
+    HUNDUN_CHECK(total_length <=
+                 std::numeric_limits<int>::max() -
+                     lengths[static_cast<std::size_t>(rank)]);
+    total_length += lengths[static_cast<std::size_t>(rank)];
+  }
+  std::vector<char> messages(static_cast<std::size_t>(total_length));
+  HUNDUN_CHECK(MPI_Allgatherv(message.data(), local_length, MPI_BYTE,
+                              messages.data(), lengths.data(),
+                              displacements.data(), MPI_BYTE,
+                              mpi.comm()) == MPI_SUCCESS);
+
+  HUNDUN_CHECK(total_threw == mpi.size());
+  HUNDUN_CHECK(!message.empty());
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    const std::size_t begin = static_cast<std::size_t>(
+        displacements[static_cast<std::size_t>(rank)]);
+    const std::size_t length =
+        static_cast<std::size_t>(lengths[static_cast<std::size_t>(rank)]);
+    HUNDUN_CHECK(std::string(messages.data() + begin, length) == message);
+  }
+
+  mpi.barrier();
+}
+
 bool boxes_overlap(const Box3& lhs, const Box3& rhs) {
   return std::max(lhs.begin.x, rhs.begin.x) <
              std::min(lhs.end.x, rhs.end.x) &&
@@ -88,8 +140,24 @@ bool boxes_overlap(const Box3& lhs, const Box3& rhs) {
              std::min(lhs.end.z, rhs.end.z);
 }
 
+Int3 expected_invariant_grid(int ranks) {
+  switch (ranks) {
+    case 1:
+      return {1, 1, 1};
+    case 2:
+      return {1, 2, 1};
+    case 4:
+      return {2, 2, 1};
+    case 12:
+      return {4, 3, 1};
+    default:
+      throw hundun::runtime::Error("unsupported decomposition test size");
+  }
+}
+
 void test_cartesian_topology(const StructuredDecomposition& decomposition,
-                             const MpiContext& mpi) {
+                             const MpiContext& mpi,
+                             Int3 expected_grid) {
   HUNDUN_CHECK(same(decomposition.global_extent(), kGlobalExtent));
 
   int topology = MPI_UNDEFINED;
@@ -105,16 +173,12 @@ void test_cartesian_topology(const StructuredDecomposition& decomposition,
   HUNDUN_CHECK(MPI_Comm_rank(decomposition.comm(), &cart_rank) == MPI_SUCCESS);
   HUNDUN_CHECK(cart_rank == mpi.rank());
 
-  std::array<int, 3> expected_dims{0, 0, 0};
-  HUNDUN_CHECK(MPI_Dims_create(mpi.size(), 3, expected_dims.data()) ==
-               MPI_SUCCESS);
-
   std::array<int, 3> dims{};
   std::array<int, 3> periods{};
   std::array<int, 3> coordinates{};
   HUNDUN_CHECK(MPI_Cart_get(decomposition.comm(), 3, dims.data(),
                             periods.data(), coordinates.data()) == MPI_SUCCESS);
-  HUNDUN_CHECK(dims == expected_dims);
+  HUNDUN_CHECK(dims == as_array(expected_grid));
   HUNDUN_CHECK(dims == as_array(decomposition.process_grid()));
   HUNDUN_CHECK(coordinates ==
                as_array(decomposition.process_coordinates()));
@@ -345,6 +409,135 @@ void test_neighbors(const StructuredDecomposition& decomposition,
   }
 }
 
+Int3 legal_explicit_grid(int ranks) {
+  switch (ranks) {
+    case 1:
+      return {1, 1, 1};
+    case 2:
+      return {2, 1, 1};
+    case 4:
+      return {4, 1, 1};
+    case 12:
+      return {3, 4, 1};
+    default:
+      throw hundun::runtime::Error("unsupported explicit-grid test size");
+  }
+}
+
+Int3 alternate_explicit_grid(int ranks) {
+  switch (ranks) {
+    case 2:
+      return {1, 2, 1};
+    case 4:
+      return {2, 2, 1};
+    case 12:
+      return {4, 3, 1};
+    default:
+      throw hundun::runtime::Error("unsupported alternate-grid test size");
+  }
+}
+
+void test_frozen_shape_selection(const MpiContext& mpi) {
+  if (mpi.size() == 4) {
+    auto decomposition = StructuredDecomposition::create(
+        mpi, Int3{1, 2, 2}, {false, false, false});
+    HUNDUN_CHECK(same(decomposition.process_grid(), Int3{1, 2, 2}));
+  }
+  if (mpi.size() == 12) {
+    auto decomposition = StructuredDecomposition::create(
+        mpi, Int3{1, 3, 4}, {false, false, false});
+    HUNDUN_CHECK(same(decomposition.process_grid(), Int3{1, 3, 4}));
+  }
+  mpi.barrier();
+}
+
+void test_legal_explicit_grid(const MpiContext& mpi) {
+  const Int3 expected = legal_explicit_grid(mpi.size());
+  auto decomposition = StructuredDecomposition::create(
+      mpi, kGlobalExtent, kPeriodic, DecompositionOptions{expected});
+  HUNDUN_CHECK(same(decomposition.process_grid(), expected));
+  mpi.barrier();
+}
+
+void test_collective_input_agreement(const MpiContext& mpi) {
+  if (mpi.size() == 1) {
+    return;
+  }
+
+  expect_collective_error(mpi, [&] {
+    const Int3 extent = mpi.rank() == 0 ? Int3{18, 11, 7} : kGlobalExtent;
+    static_cast<void>(
+        StructuredDecomposition::create(mpi, extent, kPeriodic));
+  });
+
+  expect_collective_error(mpi, [&] {
+    auto periodic = kPeriodic;
+    periodic[1] = mpi.rank() == 0;
+    static_cast<void>(
+        StructuredDecomposition::create(mpi, kGlobalExtent, periodic));
+  });
+
+  expect_collective_error(mpi, [&] {
+    DecompositionOptions options{};
+    if (mpi.rank() == 0) {
+      options.process_grid = legal_explicit_grid(mpi.size());
+    }
+    static_cast<void>(StructuredDecomposition::create(
+        mpi, kGlobalExtent, kPeriodic, options));
+  });
+
+  expect_collective_error(mpi, [&] {
+    const Int3 grid = mpi.rank() == 0
+                          ? legal_explicit_grid(mpi.size())
+                          : alternate_explicit_grid(mpi.size());
+    static_cast<void>(StructuredDecomposition::create(
+        mpi, kGlobalExtent, kPeriodic, DecompositionOptions{grid}));
+  });
+}
+
+void test_collective_selection_failures(const MpiContext& mpi) {
+  for (const Int3 grid : {Int3{0, 1, 1}, Int3{-1, 1, 1},
+                          Int3{INT_MAX, INT_MAX, INT_MAX}}) {
+    expect_collective_error(mpi, [&] {
+      static_cast<void>(StructuredDecomposition::create(
+          mpi, kGlobalExtent, kPeriodic, DecompositionOptions{grid}));
+    });
+  }
+
+  const Int3 wrong_product =
+      mpi.size() == 1 ? Int3{2, 1, 1} : Int3{1, 1, 1};
+  expect_collective_error(mpi, [&] {
+    static_cast<void>(StructuredDecomposition::create(
+        mpi, kGlobalExtent, kPeriodic,
+        DecompositionOptions{wrong_product}));
+  });
+
+  if (mpi.size() > 1) {
+    const Int3 cells{mpi.size() - 1, 2, 2};
+    const Int3 axis_too_large{mpi.size(), 1, 1};
+    expect_collective_error(mpi, [&] {
+      static_cast<void>(StructuredDecomposition::create(
+          mpi, cells, kPeriodic, DecompositionOptions{axis_too_large}));
+    });
+  }
+
+  if (mpi.size() == 12) {
+    MPI_Comm subgroup = MPI_COMM_NULL;
+    const int color = mpi.rank() < 6 ? 0 : 1;
+    HUNDUN_CHECK(MPI_Comm_split(mpi.comm(), color, mpi.rank(), &subgroup) ==
+                 MPI_SUCCESS);
+    {
+      MpiContext six_rank_context = MpiContext::duplicate(subgroup);
+      HUNDUN_CHECK(MPI_Comm_free(&subgroup) == MPI_SUCCESS);
+      expect_collective_error(six_rank_context, [&] {
+        static_cast<void>(StructuredDecomposition::create(
+            six_rank_context, Int3{2, 2, 2}, {false, false, false}));
+      });
+    }
+    mpi.barrier();
+  }
+}
+
 void test_move_ownership(const MpiContext& mpi) {
   std::optional<StructuredDecomposition> moved;
   MPI_Comm cartesian = MPI_COMM_NULL;
@@ -427,11 +620,17 @@ void test_intercommunicator_rejection(const MpiContext& mpi) {
 
 void run_decomposition_tests(const MpiContext& mpi,
                              const StructuredDecomposition& decomposition) {
-  HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
-  test_cartesian_topology(decomposition, mpi);
+  HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4 ||
+               mpi.size() == 12);
+  test_cartesian_topology(decomposition, mpi,
+                          expected_invariant_grid(mpi.size()));
   test_boxes_and_coverage(decomposition, mpi);
   test_global_cells_and_ids(decomposition, mpi);
   test_neighbors(decomposition, mpi);
+  test_frozen_shape_selection(mpi);
+  test_legal_explicit_grid(mpi);
+  test_collective_input_agreement(mpi);
+  test_collective_selection_failures(mpi);
   test_move_ownership(mpi);
   test_extent_validation(mpi);
   test_intercommunicator_rejection(mpi);
@@ -449,8 +648,18 @@ int main(int argc, char** argv) {
     mpi.emplace(MpiContext::duplicate(MPI_COMM_WORLD));
     decomposition.emplace(StructuredDecomposition::create(
         *mpi, kGlobalExtent, kPeriodic));
-    result = hundun::test::run(
-        [&] { run_decomposition_tests(*mpi, *decomposition); });
+    const std::string_view mode = argc > 1 ? argv[1] : "full";
+    result = hundun::test::run([&] {
+      if (mode == "full") {
+        run_decomposition_tests(*mpi, *decomposition);
+      } else if (mode == "mismatch") {
+        test_collective_input_agreement(*mpi);
+      } else if (mode == "shape") {
+        test_frozen_shape_selection(*mpi);
+      } else {
+        throw hundun::runtime::Error("unknown decomposition test mode");
+      }
+    });
   }
 
   const int finalized_result = hundun::test::run([&] {

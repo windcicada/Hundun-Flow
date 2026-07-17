@@ -6,6 +6,7 @@
 #include "tests/support/test_main.hpp"
 
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -25,7 +26,7 @@ using hundun::config::validate_case_config;
 using hundun::runtime::ConfigError;
 
 const char* valid_json() {
-  return R"({"schema_version":1,"case":{"name":"advection"},"resources":{"expected_ranks":4},"mesh":{"cells":[8,4,2],"origin_m":[0.25,-0.5,1.25],"length_m":[2.5,3.5,4.5],"periodic":[true,false,true]},"time":{"dt_s":0.125,"steps":12},"transport":{"velocity_m_per_s":[1.25,-2.25,0.5],"diffusivity_m2_per_s":0.01},"initial_condition":{"type":"sine_x"},"output":{"directory":"results/./fields","write_interval":2,"restart_interval":4}})";
+  return R"({"schema_version":1,"case":{"name":"advection"},"resources":{"expected_ranks":4,"process_grid":[2,2,1]},"mesh":{"cells":[8,4,2],"origin_m":[0.25,-0.5,1.25],"length_m":[2.5,3.5,4.5],"periodic":[true,false,true]},"time":{"dt_s":0.125,"steps":12},"transport":{"velocity_m_per_s":[1.25,-2.25,0.5],"diffusivity_m2_per_s":0.01},"initial_condition":{"type":"sine_x"},"output":{"directory":"results/./fields","write_interval":2,"restart_interval":4}})";
 }
 
 std::string replace_once(std::string text, const std::string& from,
@@ -139,6 +140,10 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   HUNDUN_CHECK(config.schema_version == 1);
   HUNDUN_CHECK(config.case_name == "advection");
   HUNDUN_CHECK(config.expected_ranks == std::optional<int>(4));
+  HUNDUN_CHECK(config.process_grid.has_value());
+  HUNDUN_CHECK(config.process_grid->x == 2);
+  HUNDUN_CHECK(config.process_grid->y == 2);
+  HUNDUN_CHECK(config.process_grid->z == 1);
   HUNDUN_CHECK(config.mesh.cells.x == 8);
   HUNDUN_CHECK(config.mesh.cells.y == 4);
   HUNDUN_CHECK(config.mesh.cells.z == 2);
@@ -165,30 +170,69 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   check_keys_in_order(first,
                       {"schema_version", "case", "resources", "mesh", "time",
                        "transport", "initial_condition", "output"});
+  check_keys_in_order(first, {"expected_ranks", "process_grid"});
   check_keys_in_order(first, {"cells", "origin_m", "length_m", "periodic"});
   check_keys_in_order(first, {"directory", "write_interval", "restart_interval"});
 
   const CaseConfig round_trip = load_case_config(directory.write(first));
   HUNDUN_CHECK(round_trip.case_name == config.case_name);
+  HUNDUN_CHECK(round_trip.process_grid.has_value());
+  HUNDUN_CHECK(round_trip.process_grid->x == config.process_grid->x);
+  HUNDUN_CHECK(round_trip.process_grid->y == config.process_grid->y);
+  HUNDUN_CHECK(round_trip.process_grid->z == config.process_grid->z);
   HUNDUN_CHECK(round_trip.output.directory == config.output.directory);
   HUNDUN_CHECK(round_trip.mesh.cells.x == config.mesh.cells.x);
 
   const std::string without_resources =
-      replace_once(valid_json(), "\"resources\":{\"expected_ranks\":4},", "");
+      replace_once(
+          valid_json(),
+          "\"resources\":{\"expected_ranks\":4,\"process_grid\":[2,2,1]},",
+          "");
   const CaseConfig no_resources = load_case_config(directory.write(without_resources));
   HUNDUN_CHECK(!no_resources.expected_ranks.has_value());
-  HUNDUN_CHECK(to_resolved_json(no_resources).find("\"resources\"") ==
+  HUNDUN_CHECK(!no_resources.process_grid.has_value());
+  const std::string no_resources_resolved = to_resolved_json(no_resources);
+  HUNDUN_CHECK(no_resources_resolved.find("\"resources\"") ==
                std::string::npos);
+  const CaseConfig no_resources_round_trip =
+      load_case_config(directory.write(no_resources_resolved));
+  HUNDUN_CHECK(!no_resources_round_trip.expected_ranks.has_value());
+  HUNDUN_CHECK(!no_resources_round_trip.process_grid.has_value());
 
   const std::string empty_resources =
       replace_once(valid_json(),
-                   "\"resources\":{\"expected_ranks\":4}",
+                   "\"resources\":{\"expected_ranks\":4,\"process_grid\":[2,2,1]}",
                    "\"resources\":{}");
   const CaseConfig no_expected_ranks =
       load_case_config(directory.write(empty_resources));
   HUNDUN_CHECK(!no_expected_ranks.expected_ranks.has_value());
+  HUNDUN_CHECK(!no_expected_ranks.process_grid.has_value());
   HUNDUN_CHECK(to_resolved_json(no_expected_ranks).find("\"resources\"") ==
                std::string::npos);
+
+  const std::string process_grid_only =
+      replace_once(valid_json(), "\"expected_ranks\":4,", "");
+  const CaseConfig no_expected_with_grid =
+      load_case_config(directory.write(process_grid_only));
+  HUNDUN_CHECK(!no_expected_with_grid.expected_ranks.has_value());
+  HUNDUN_CHECK(no_expected_with_grid.process_grid.has_value());
+  const std::string process_only_resolved =
+      to_resolved_json(no_expected_with_grid);
+  HUNDUN_CHECK(process_only_resolved.find("\"resources\"") !=
+               std::string::npos);
+  HUNDUN_CHECK(process_only_resolved.find("\"expected_ranks\"") ==
+               std::string::npos);
+  HUNDUN_CHECK(process_only_resolved.find("\"process_grid\"") !=
+               std::string::npos);
+
+  const std::string expected_ranks_only =
+      replace_once(valid_json(), ",\"process_grid\":[2,2,1]", "");
+  const CaseConfig no_grid_with_expected =
+      load_case_config(directory.write(expected_ranks_only));
+  HUNDUN_CHECK(no_grid_with_expected.expected_ranks == std::optional<int>(4));
+  HUNDUN_CHECK(!no_grid_with_expected.process_grid.has_value());
+  HUNDUN_CHECK(to_resolved_json(no_grid_with_expected).find(
+                   "\"resources\"") != std::string::npos);
 
   std::string integer_numbers =
       replace_once(valid_json(), "[0.25,-0.5,1.25]", "[0,1,2]");
@@ -299,12 +343,18 @@ void test_unknown_and_duplicate_keys(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"schema_version\":1",
                     "\"schema_version\":1,\"schema_version\":1"),
        "/schema_version"},
+      {insert_before_root_end(valid_json(),
+                              ",\"resources\":{\"expected_ranks\":4}"),
+       "/resources"},
       {replace_once(valid_json(), "\"name\":\"advection\"",
                     "\"name\":\"advection\",\"name\":\"again\""),
        "/case/name"},
       {replace_once(valid_json(), "\"expected_ranks\":4",
                     "\"expected_ranks\":4,\"expected_ranks\":5"),
        "/resources/expected_ranks"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,2,1],\"process_grid\":[1,2,2]"),
+       "/resources/process_grid"},
       {replace_once(valid_json(), "\"cells\":[8,4,2]",
                     "\"cells\":[8,4,2],\"cells\":[1,1,1]"),
        "/mesh/cells"},
@@ -334,9 +384,16 @@ void test_wrong_types(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"case\":{\"name\":\"advection\"}",
                     "\"case\":false"),
        "/case"},
-      {replace_once(valid_json(), "\"resources\":{\"expected_ranks\":4}",
+      {replace_once(valid_json(),
+                    "\"resources\":{\"expected_ranks\":4,\"process_grid\":[2,2,1]}",
                     "\"resources\":[]"),
        "/resources"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":false"),
+       "/resources/process_grid"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,false,1]"),
+       "/resources/process_grid/1"},
       {replace_once(valid_json(),
                     "\"mesh\":{\"cells\":[8,4,2],\"origin_m\":[0.25,-0.5,1.25],\"length_m\":[2.5,3.5,4.5],\"periodic\":[true,false,true]}",
                     "\"mesh\":\"bad\""),
@@ -398,6 +455,9 @@ void test_integer_requirements(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"expected_ranks\":4",
                     "\"expected_ranks\":4.0"),
        "/resources/expected_ranks"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,2.0,1]"),
+       "/resources/process_grid/1"},
       {replace_once(valid_json(), "\"cells\":[8,4,2]",
                     "\"cells\":[8,4.0,2]"),
        "/mesh/cells/1"},
@@ -419,6 +479,10 @@ void test_integer_requirements(TemporaryDirectory& directory) {
                                  "\"cells\":[8,2147483648,2]"),
                     "/mesh/cells/1");
   expect_load_error(directory,
+                    replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                                 "\"process_grid\":[2,2147483648,1]"),
+                    "/resources/process_grid/1");
+  expect_load_error(directory,
                     replace_once(valid_json(), "\"steps\":12",
                                  "\"steps\":-2147483649"),
                     "/time/steps");
@@ -429,6 +493,9 @@ void test_vector_lengths_and_ranges(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"cells\":[8,4,2]",
                     "\"cells\":[8,4]"),
        "/mesh/cells"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,2]"),
+       "/resources/process_grid"},
       {replace_once(valid_json(), "\"origin_m\":[0.25,-0.5,1.25]",
                     "\"origin_m\":[0.25,-0.5,1.25,2]"),
        "/mesh/origin_m"},
@@ -476,6 +543,65 @@ void test_vector_lengths_and_ranges(TemporaryDirectory& directory) {
   }
 }
 
+void test_process_grid_constraints(TemporaryDirectory& directory) {
+  const std::vector<std::pair<std::string, std::string>> component_ranges = {
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[0,2,1]"),
+       "/resources/process_grid/0"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,-1,1]"),
+       "/resources/process_grid/1"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[2,2,0]"),
+       "/resources/process_grid/2"},
+      {replace_once(valid_json(), "\"process_grid\":[2,2,1]",
+                    "\"process_grid\":[1,2,1]"),
+       "/resources/process_grid"},
+  };
+  for (const auto& item : component_ranges) {
+    expect_load_error(directory, item.first, item.second);
+  }
+
+  std::string above_int =
+      replace_once(valid_json(), "\"expected_ranks\":4,", "");
+  above_int = replace_once(above_int, "\"process_grid\":[2,2,1]",
+                           "\"process_grid\":[2147483647,2,1]");
+  above_int = replace_once(above_int, "\"cells\":[8,4,2]",
+                           "\"cells\":[2147483647,2,1]");
+  expect_load_error(directory, above_int, "/resources/process_grid");
+
+  std::string product_overflow =
+      replace_once(valid_json(), "\"expected_ranks\":4,", "");
+  product_overflow = replace_once(
+      product_overflow, "\"process_grid\":[2,2,1]",
+      "\"process_grid\":[2147483647,2147483647,2147483647]");
+  product_overflow = replace_once(
+      product_overflow, "\"cells\":[8,4,2]",
+      "\"cells\":[2147483647,2147483647,2147483647]");
+  expect_load_error(directory, product_overflow, "/resources/process_grid");
+
+  const std::vector<std::pair<std::string, std::string>> too_large = {
+      {replace_once(
+           replace_once(valid_json(), "\"expected_ranks\":4",
+                        "\"expected_ranks\":9"),
+           "\"process_grid\":[2,2,1]", "\"process_grid\":[9,1,1]"),
+       "/resources/process_grid/0"},
+      {replace_once(
+           replace_once(valid_json(), "\"expected_ranks\":4",
+                        "\"expected_ranks\":5"),
+           "\"process_grid\":[2,2,1]", "\"process_grid\":[1,5,1]"),
+       "/resources/process_grid/1"},
+      {replace_once(
+           replace_once(valid_json(), "\"expected_ranks\":4",
+                        "\"expected_ranks\":3"),
+           "\"process_grid\":[2,2,1]", "\"process_grid\":[1,1,3]"),
+       "/resources/process_grid/2"},
+  };
+  for (const auto& item : too_large) {
+    expect_load_error(directory, item.first, item.second);
+  }
+}
+
 void test_paths_and_supported_values(TemporaryDirectory& directory) {
   const std::vector<std::pair<std::string, std::string>> paths = {
       {"", "/output/directory"},
@@ -508,6 +634,49 @@ void test_direct_validation(TemporaryDirectory& directory) {
   invalid = valid;
   invalid.expected_ranks = 0;
   expect_validation_error(invalid, "/resources/expected_ranks");
+
+  invalid = valid;
+  invalid.process_grid = hundun::runtime::Int3{0, 2, 1};
+  expect_validation_error(invalid, "/resources/process_grid/0");
+
+  invalid = valid;
+  invalid.process_grid = hundun::runtime::Int3{2, -1, 1};
+  expect_validation_error(invalid, "/resources/process_grid/1");
+
+  invalid = valid;
+  invalid.process_grid = hundun::runtime::Int3{2, 2, 0};
+  expect_validation_error(invalid, "/resources/process_grid/2");
+
+  invalid = valid;
+  invalid.process_grid = hundun::runtime::Int3{1, 2, 1};
+  expect_validation_error(invalid, "/resources/process_grid");
+
+  invalid = valid;
+  invalid.expected_ranks.reset();
+  invalid.mesh.cells = hundun::runtime::Int3{INT_MAX, 2, 1};
+  invalid.process_grid = hundun::runtime::Int3{INT_MAX, 2, 1};
+  expect_validation_error(invalid, "/resources/process_grid");
+
+  invalid = valid;
+  invalid.expected_ranks.reset();
+  invalid.mesh.cells = hundun::runtime::Int3{INT_MAX, INT_MAX, INT_MAX};
+  invalid.process_grid = hundun::runtime::Int3{INT_MAX, INT_MAX, INT_MAX};
+  expect_validation_error(invalid, "/resources/process_grid");
+
+  invalid = valid;
+  invalid.expected_ranks = 9;
+  invalid.process_grid = hundun::runtime::Int3{9, 1, 1};
+  expect_validation_error(invalid, "/resources/process_grid/0");
+
+  invalid = valid;
+  invalid.expected_ranks = 5;
+  invalid.process_grid = hundun::runtime::Int3{1, 5, 1};
+  expect_validation_error(invalid, "/resources/process_grid/1");
+
+  invalid = valid;
+  invalid.expected_ranks = 3;
+  invalid.process_grid = hundun::runtime::Int3{1, 1, 3};
+  expect_validation_error(invalid, "/resources/process_grid/2");
 
   invalid = valid;
   invalid.mesh.cells.y = 0;
@@ -592,6 +761,7 @@ void run_all_tests() {
   test_wrong_types(directory);
   test_integer_requirements(directory);
   test_vector_lengths_and_ranges(directory);
+  test_process_grid_constraints(directory);
   test_paths_and_supported_values(directory);
   test_direct_validation(directory);
   test_runtime_types_and_error();

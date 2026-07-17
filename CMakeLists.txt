@@ -53,6 +53,7 @@ add_library(hundun_runtime STATIC
   runtime/src/mpi_environment.cpp
   runtime/src/mpi_context.cpp
   runtime/src/collective_status.cpp
+  runtime/src/process_grid.cpp
   runtime/src/structured_decomposition.cpp
   runtime/src/field_registry.cpp
   runtime/src/field_storage.cpp)
@@ -85,6 +86,13 @@ if(HUNDUN_BUILD_TESTS)
   hundun_add_test(test_case_config tests/unit/test_case_config.cpp)
   target_include_directories(test_case_config PRIVATE "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_case_config PRIVATE hundun_config)
+
+  hundun_add_test(test_process_grid
+    tests/unit/test_process_grid.cpp
+    runtime/src/process_grid.cpp)
+  target_include_directories(test_process_grid PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/runtime/include")
 
   hundun_add_test(test_cli_options tests/unit/test_cli_options.cpp)
   target_include_directories(test_cli_options PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -121,7 +129,7 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_decomposition PRIVATE
     hundun_options hundun_warnings hundun_runtime MPI::MPI_CXX)
-  foreach(ranks IN ITEMS 1 2 4)
+  foreach(ranks IN ITEMS 1 2 4 12)
     set(decomposition_test "test_decomposition_${ranks}_rank")
     add_test(NAME "${decomposition_test}"
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
@@ -129,9 +137,27 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${decomposition_test}" PROPERTIES
       LABELS mpi
-      TIMEOUT 30
+      TIMEOUT 45
       PROCESSORS "${ranks}")
   endforeach()
+
+  add_test(NAME test_decomposition_rank_mismatch
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_decomposition>"
+            mismatch ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_decomposition_rank_mismatch PROPERTIES
+    LABELS mpi
+    TIMEOUT 30
+    PROCESSORS 4)
+
+  add_test(NAME test_decomposition_12_rank_shape
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "12"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_decomposition>"
+            shape ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_decomposition_12_rank_shape PROPERTIES
+    LABELS mpi
+    TIMEOUT 30
+    PROCESSORS 12)
 
   add_test(NAME provenance_clean
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=clean

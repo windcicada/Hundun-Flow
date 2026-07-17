@@ -2,32 +2,55 @@
 
 #include "hundun/runtime/structured_decomposition.hpp"
 
+#include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #include "mpi_error.hpp"
+#include "process_grid.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <limits>
+#include <exception>
 #include <string>
 #include <utility>
 
 namespace hundun::runtime {
 namespace {
 
-void validate_global_extent(Int3 extent) {
-  if (extent.x <= 0 || extent.y <= 0 || extent.z <= 0) {
-    throw Error("structured decomposition extents must be positive");
-  }
-
-  constexpr std::int64_t limit = std::numeric_limits<std::int64_t>::max();
-  std::int64_t cell_count = extent.x;
-  if (cell_count > limit / extent.y) {
-    throw Error("structured decomposition cell count exceeds INT64_MAX");
-  }
-  cell_count *= extent.y;
-  if (cell_count > limit / extent.z) {
-    throw Error("structured decomposition cell count exceeds INT64_MAX");
+void require_collective_input_agreement(const MpiContext& context,
+                                        Int3 global_extent,
+                                        std::array<bool, 3> periodic,
+                                        const DecompositionOptions& options) {
+  const Int3 grid = options.process_grid.value_or(Int3{});
+  const std::array<int, 10> local{
+      global_extent.x,
+      global_extent.y,
+      global_extent.z,
+      periodic[0] ? 1 : 0,
+      periodic[1] ? 1 : 0,
+      periodic[2] ? 1 : 0,
+      options.process_grid.has_value() ? 1 : 0,
+      grid.x,
+      grid.y,
+      grid.z};
+  std::array<int, 10> minimum{};
+  std::array<int, 10> maximum{};
+  detail::check_mpi(
+      MPI_Allreduce(local.data(), minimum.data(),
+                    static_cast<int>(local.size()), MPI_INT, MPI_MIN,
+                    context.comm()),
+      "MPI_Allreduce");
+  detail::check_mpi(
+      MPI_Allreduce(local.data(), maximum.data(),
+                    static_cast<int>(local.size()), MPI_INT, MPI_MAX,
+                    context.comm()),
+      "MPI_Allreduce");
+  const bool inputs_agree = minimum == maximum;
+  const CollectiveStatus status = collective_status(
+      context, inputs_agree,
+      inputs_agree ? "" : "structured decomposition inputs differ across ranks");
+  if (!status.ok) {
+    throw Error(status.message);
   }
 }
 
@@ -77,24 +100,44 @@ bool resolve_coordinate(int& coordinate, int processes, bool periodic) {
 
 StructuredDecomposition StructuredDecomposition::create(
     const MpiContext& context, Int3 global_extent,
-    std::array<bool, 3> periodic) {
+    std::array<bool, 3> periodic, DecompositionOptions options) {
   detail::require_mpi_active("create structured decomposition");
   const MPI_Comm communicator = context.comm();
   if (communicator == MPI_COMM_NULL) {
     throw Error("structured decomposition requires a valid MPI context");
   }
 
-  validate_global_extent(global_extent);
+  require_collective_input_agreement(context, global_extent, periodic,
+                                     options);
 
   const int process_count = context.size();
-  std::array<int, 3> dimensions{0, 0, 0};
-  detail::check_mpi(MPI_Dims_create(process_count, 3, dimensions.data()),
-                    "MPI_Dims_create");
-  if (dimensions[0] > global_extent.x ||
-      dimensions[1] > global_extent.y ||
-      dimensions[2] > global_extent.z) {
-    throw Error("structured decomposition process grid exceeds global extent");
+  Int3 selected_grid{};
+  bool local_ok = true;
+  std::string local_message;
+  try {
+    if (options.process_grid.has_value()) {
+      detail::validate_explicit_process_grid(
+          *options.process_grid, process_count, global_extent);
+      selected_grid = *options.process_grid;
+    } else {
+      selected_grid =
+          detail::select_process_grid(process_count, global_extent, periodic);
+    }
+  } catch (const std::exception& error) {
+    local_ok = false;
+    local_message = error.what();
+  } catch (...) {
+    local_ok = false;
+    local_message = "unknown process-grid selection failure";
   }
+  const CollectiveStatus selection_status =
+      collective_status(context, local_ok, local_message);
+  if (!selection_status.ok) {
+    throw Error(selection_status.message);
+  }
+
+  const std::array<int, 3> dimensions{selected_grid.x, selected_grid.y,
+                                      selected_grid.z};
 
   const std::array<int, 3> periods{periodic[0] ? 1 : 0,
                                    periodic[1] ? 1 : 0,

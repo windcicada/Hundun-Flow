@@ -346,11 +346,16 @@ CaseConfig parse_case_config(yyjson_val* root,
     if (!yyjson_is_obj(resources)) {
       throw_type_error("/resources", "object", resources);
     }
-    reject_unknown_keys(resources, {"expected_ranks"}, "/resources");
+    reject_unknown_keys(resources, {"expected_ranks", "process_grid"},
+                        "/resources");
     if (yyjson_val* expected_ranks =
             yyjson_obj_get(resources, "expected_ranks")) {
       config.expected_ranks =
           read_integer_value(expected_ranks, "/resources/expected_ranks");
+    }
+    if (yyjson_obj_get(resources, "process_grid") != nullptr) {
+      config.process_grid =
+          require_int3(resources, "process_grid", "/resources");
     }
   }
 
@@ -479,6 +484,48 @@ void validate_case_config(const CaseConfig& config) {
     }
   }
 
+  if (config.process_grid.has_value()) {
+    const std::array<int, 3> grid = {
+        config.process_grid->x, config.process_grid->y,
+        config.process_grid->z};
+    for (std::size_t index = 0; index < grid.size(); ++index) {
+      if (grid[index] <= 0) {
+        throw ConfigError(
+            index_pointer("/resources/process_grid", index),
+            "expected a positive integer, got " +
+                std::to_string(grid[index]));
+      }
+    }
+
+    std::uint64_t product = 1U;
+    for (const int value : grid) {
+      const std::uint64_t factor = static_cast<std::uint64_t>(value);
+      if (product > std::numeric_limits<std::uint64_t>::max() / factor) {
+        throw ConfigError("/resources/process_grid",
+                          "process-grid product overflows uint64_t");
+      }
+      product *= factor;
+    }
+    if (product >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw ConfigError("/resources/process_grid",
+                        "process-grid product exceeds the MPI int domain");
+    }
+    if (config.expected_ranks.has_value() &&
+        static_cast<int>(product) != *config.expected_ranks) {
+      throw ConfigError(
+          "/resources/process_grid",
+          "process-grid product does not equal expected_ranks");
+    }
+    for (std::size_t index = 0; index < grid.size(); ++index) {
+      if (grid[index] > cells[index]) {
+        throw ConfigError(
+            index_pointer("/resources/process_grid", index),
+            "process-grid dimension exceeds the matching cell count");
+      }
+    }
+  }
+
   const std::array<double, 3> origin = {config.mesh.origin_m.x,
                                         config.mesh.origin_m.y,
                                         config.mesh.origin_m.z};
@@ -554,10 +601,17 @@ std::string to_resolved_json(const CaseConfig& config) {
       document.get(), case_object, "name", config.case_name.data(),
       config.case_name.size()));
 
-  if (config.expected_ranks.has_value()) {
+  if (config.expected_ranks.has_value() || config.process_grid.has_value()) {
     yyjson_mut_val* resources = add_object(document.get(), root, "resources");
-    require_json_write(yyjson_mut_obj_add_int(
-        document.get(), resources, "expected_ranks", *config.expected_ranks));
+    if (config.expected_ranks.has_value()) {
+      require_json_write(yyjson_mut_obj_add_int(
+          document.get(), resources, "expected_ranks",
+          *config.expected_ranks));
+    }
+    if (config.process_grid.has_value()) {
+      add_int3(document.get(), resources, "process_grid",
+               *config.process_grid);
+    }
   }
 
   yyjson_mut_val* mesh = add_object(document.get(), root, "mesh");

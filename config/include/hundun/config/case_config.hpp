@@ -37,6 +37,7 @@ struct CaseConfig {
   int schema_version;
   std::string case_name;
   std::optional<int> expected_ranks;
+  std::optional<runtime::Int3> process_grid;
   MeshConfig mesh;
   TimeConfig time;
   TransportConfig transport;
