@@ -66,6 +66,13 @@ target_link_libraries(hundun_runtime
   PRIVATE hundun_warnings
   PUBLIC hundun_options MPI::MPI_CXX)
 
+add_library(hundun_mesh STATIC mesh/src/uniform_structured_mesh.cpp)
+target_include_directories(hundun_mesh PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/mesh/include>")
+target_link_libraries(hundun_mesh
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options hundun_runtime)
+
 function(hundun_add_test target)
   add_executable("${target}" ${ARGN})
   target_link_libraries("${target}" PRIVATE hundun_options hundun_warnings)
@@ -112,6 +119,13 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/runtime/include")
   target_link_libraries(test_halo_helpers PRIVATE hundun_runtime)
   set_tests_properties(test_halo_helpers PROPERTIES TIMEOUT 20)
+
+  hundun_add_mpi_test(test_mesh 2 tests/unit/test_mesh.cpp)
+  target_include_directories(test_mesh PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_mesh PRIVATE hundun_mesh)
+  set_tests_properties(test_mesh PROPERTIES
+    TIMEOUT 30
+    PROCESSORS 2)
 
   add_executable(test_halo_exchange tests/mpi/test_halo_exchange.cpp)
   target_include_directories(test_halo_exchange PRIVATE
