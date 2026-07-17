@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -177,25 +178,62 @@ void test_typed_views_layout_bounds_and_constness() {
   HUNDUN_CHECK(q.ghost_width() == 1);
   HUNDUN_CHECK(q.components() == 2U);
 
-  q(-1, -1, -1, 0) = 10.0;
   q(-1, -1, -1, 1) = 11.0;
   q(0, -1, -1, 0) = 12.0;
   q(-1, 0, -1, 0) = 13.0;
   q(-1, -1, 0, 0) = 14.0;
-  q(0, 0, 0, 0) = 15.0;
   q(1, 1, 1, 1) = 16.0;
-  q(2, 2, 2, 0) = 17.0;
   q(2, 2, 2, 1) = 18.0;
 
-  HUNDUN_CHECK_NEAR(q(-1, -1, -1, 0), 10.0, 0.0);
+  struct CornerSample {
+    Int3 coordinate;
+    double value;
+  };
+  constexpr std::array<CornerSample, 8> ghost_corners{{
+      {{-1, -1, -1}, 101.0},
+      {{2, -1, -1}, 102.0},
+      {{-1, 2, -1}, 103.0},
+      {{2, 2, -1}, 104.0},
+      {{-1, -1, 2}, 105.0},
+      {{2, -1, 2}, 106.0},
+      {{-1, 2, 2}, 107.0},
+      {{2, 2, 2}, 108.0},
+  }};
+  constexpr std::array<CornerSample, 8> interior_corners{{
+      {{0, 0, 0}, 201.0},
+      {{1, 0, 0}, 202.0},
+      {{0, 1, 0}, 203.0},
+      {{1, 1, 0}, 204.0},
+      {{0, 0, 1}, 205.0},
+      {{1, 0, 1}, 206.0},
+      {{0, 1, 1}, 207.0},
+      {{1, 1, 1}, 208.0},
+  }};
+  for (const auto &sample : ghost_corners) {
+    q(sample.coordinate.x, sample.coordinate.y, sample.coordinate.z, 0) =
+        sample.value;
+  }
+  for (const auto &sample : interior_corners) {
+    q(sample.coordinate.x, sample.coordinate.y, sample.coordinate.z, 0) =
+        sample.value;
+  }
+
   HUNDUN_CHECK_NEAR(q(-1, -1, -1, 1), 11.0, 0.0);
   HUNDUN_CHECK_NEAR(q(0, -1, -1, 0), 12.0, 0.0);
   HUNDUN_CHECK_NEAR(q(-1, 0, -1, 0), 13.0, 0.0);
   HUNDUN_CHECK_NEAR(q(-1, -1, 0, 0), 14.0, 0.0);
-  HUNDUN_CHECK_NEAR(q(0, 0, 0, 0), 15.0, 0.0);
   HUNDUN_CHECK_NEAR(q(1, 1, 1, 1), 16.0, 0.0);
-  HUNDUN_CHECK_NEAR(q(2, 2, 2, 0), 17.0, 0.0);
   HUNDUN_CHECK_NEAR(q(2, 2, 2, 1), 18.0, 0.0);
+  for (const auto &sample : ghost_corners) {
+    HUNDUN_CHECK_NEAR(
+        q(sample.coordinate.x, sample.coordinate.y, sample.coordinate.z, 0),
+        sample.value, 0.0);
+  }
+  for (const auto &sample : interior_corners) {
+    HUNDUN_CHECK_NEAR(
+        q(sample.coordinate.x, sample.coordinate.y, sample.coordinate.z, 0),
+        sample.value, 0.0);
+  }
 
   const auto base = reinterpret_cast<std::uintptr_t>(&q(-1, -1, -1, 0));
   HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(&q(-1, -1, -1, 1)) ==
@@ -233,6 +271,7 @@ void test_typed_views_layout_bounds_and_constness() {
       std::is_same_v<decltype(const_q(-1, -1, -1, 0)), const double &>,
       "const storage must return read-only references");
   HUNDUN_CHECK_NEAR(const_q(2, 2, 2, 1), 18.0, 0.0);
+  HUNDUN_CHECK_NEAR(const_q(2, -1, 2, 0), 106.0, 0.0);
 
   expect_error([&] { static_cast<void>(storage.view<std::int32_t>(q_id)); });
   expect_error([&] { static_cast<void>(storage.view<double>(index_id)); });
@@ -301,15 +340,22 @@ void test_unindexable_upper_ghost_coordinate() {
       descriptor("unindexable_upper_ghost", ScalarType::uint8, 1, 2));
   registry.freeze();
 
-  bool rejected_by_coordinate_domain_guard = false;
-  try {
-    FieldStorage storage(registry, Int3{std::numeric_limits<int>::max(), 1, 1});
-  } catch (const Error &error) {
-    rejected_by_coordinate_domain_guard =
-        std::string(error.what()) ==
-        "field storage upper ghost coordinate exceeds the view index range";
+  constexpr std::array<Int3, 3> first_unindexable_extents{{
+      {std::numeric_limits<int>::max(), 1, 1},
+      {1, std::numeric_limits<int>::max(), 1},
+      {1, 1, std::numeric_limits<int>::max()},
+  }};
+  for (const auto extent : first_unindexable_extents) {
+    bool rejected_by_coordinate_domain_guard = false;
+    try {
+      FieldStorage storage(registry, extent);
+    } catch (const Error &error) {
+      rejected_by_coordinate_domain_guard =
+          std::string(error.what()) ==
+          "field storage upper ghost coordinate exceeds the view index range";
+    }
+    HUNDUN_CHECK(rejected_by_coordinate_domain_guard);
   }
-  HUNDUN_CHECK(rejected_by_coordinate_domain_guard);
 }
 
 }  // namespace
