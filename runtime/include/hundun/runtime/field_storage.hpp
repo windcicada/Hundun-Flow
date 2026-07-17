@@ -14,6 +14,8 @@
 
 namespace hundun::runtime {
 
+class HaloExchange;
+
 namespace detail {
 
 template <class T>
@@ -48,6 +50,8 @@ class FieldStorage final {
   FieldView<const T> view(FieldId id) const;
 
  private:
+  friend class HaloExchange;
+
   struct Entry {
     ScalarType scalar_type{};
     int ghost_width{};

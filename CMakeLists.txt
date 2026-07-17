@@ -56,7 +56,10 @@ add_library(hundun_runtime STATIC
   runtime/src/process_grid.cpp
   runtime/src/structured_decomposition.cpp
   runtime/src/field_registry.cpp
-  runtime/src/field_storage.cpp)
+  runtime/src/field_storage.cpp
+  runtime/src/halo_detail.cpp
+  runtime/src/exchange_plan.cpp
+  runtime/src/halo_exchange.cpp)
 target_include_directories(hundun_runtime PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
 target_link_libraries(hundun_runtime
@@ -102,6 +105,61 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  hundun_add_test(test_halo_helpers tests/unit/test_halo_helpers.cpp)
+  target_include_directories(test_halo_helpers PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/runtime/include")
+  target_link_libraries(test_halo_helpers PRIVATE hundun_runtime)
+  set_tests_properties(test_halo_helpers PROPERTIES TIMEOUT 20)
+
+  add_executable(test_halo_exchange tests/mpi/test_halo_exchange.cpp)
+  target_include_directories(test_halo_exchange PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_halo_exchange PRIVATE
+    hundun_options hundun_warnings hundun_runtime MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(halo_test "test_halo_exchange_${ranks}_rank")
+    add_test(NAME "${halo_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
+              full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${halo_test}" PROPERTIES
+      LABELS mpi
+      TIMEOUT 60
+      PROCESSORS "${ranks}")
+  endforeach()
+
+  foreach(mode IN ITEMS state lifetime mismatch small_chunks failure)
+    set(halo_mode_test "test_halo_exchange_${mode}")
+    add_test(NAME "${halo_mode_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
+              "${mode}" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${halo_mode_test}" PROPERTIES
+      LABELS mpi
+      TIMEOUT 60
+      PROCESSORS 4)
+  endforeach()
+
+  add_test(NAME test_halo_exchange_finalized_idle
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
+            finalized_idle ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_halo_exchange_finalized_idle PROPERTIES
+    LABELS mpi
+    TIMEOUT 30
+    PROCESSORS 1)
+
+  add_test(NAME test_halo_exchange_unknown_mode
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
+            unknown_mode ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_halo_exchange_unknown_mode PROPERTIES
+    LABELS mpi
+    TIMEOUT 20
+    PROCESSORS 1
+    WILL_FAIL TRUE)
 
   hundun_add_mpi_test(test_collective_status 2
     tests/mpi/test_collective_status.cpp)
