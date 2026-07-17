@@ -3,6 +3,7 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 
 #include "hundun/runtime/error.hpp"
+#include "mpi_error.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,13 +14,6 @@
 
 namespace hundun::runtime {
 namespace {
-
-void check_mpi(int result, const char* operation) {
-  if (result != MPI_SUCCESS) {
-    throw Error(std::string(operation) + " failed with MPI error " +
-                std::to_string(result));
-  }
-}
 
 void validate_global_extent(Int3 extent) {
   if (extent.x <= 0 || extent.y <= 0 || extent.z <= 0) {
@@ -48,22 +42,6 @@ int split_end(int cells, int processes, int coordinate) noexcept {
   const int remainder = cells % processes;
   return split_begin(cells, processes, coordinate) + quotient +
          (coordinate < remainder ? 1 : 0);
-}
-
-void free_communicator_without_throwing(MPI_Comm& communicator) noexcept {
-  if (communicator == MPI_COMM_NULL) {
-    return;
-  }
-
-  int initialized = 0;
-  if (MPI_Initialized(&initialized) != MPI_SUCCESS || initialized == 0) {
-    return;
-  }
-  int finalized = 0;
-  if (MPI_Finalized(&finalized) != MPI_SUCCESS || finalized != 0) {
-    return;
-  }
-  (void)MPI_Comm_free(&communicator);
 }
 
 std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
@@ -98,26 +76,20 @@ bool resolve_coordinate(int& coordinate, int processes, bool periodic) {
 }  // namespace
 
 StructuredDecomposition StructuredDecomposition::create(
-    MPI_Comm communicator, Int3 global_extent,
+    const MpiContext& context, Int3 global_extent,
     std::array<bool, 3> periodic) {
+  detail::require_mpi_active("create structured decomposition");
+  const MPI_Comm communicator = context.comm();
   if (communicator == MPI_COMM_NULL) {
-    throw Error("structured decomposition requires a valid communicator");
-  }
-
-  int is_intercommunicator = 0;
-  check_mpi(MPI_Comm_test_inter(communicator, &is_intercommunicator),
-            "MPI_Comm_test_inter");
-  if (is_intercommunicator != 0) {
-    throw Error("structured decomposition requires an intracommunicator");
+    throw Error("structured decomposition requires a valid MPI context");
   }
 
   validate_global_extent(global_extent);
 
-  int process_count = 0;
-  check_mpi(MPI_Comm_size(communicator, &process_count), "MPI_Comm_size");
+  const int process_count = context.size();
   std::array<int, 3> dimensions{0, 0, 0};
-  check_mpi(MPI_Dims_create(process_count, 3, dimensions.data()),
-            "MPI_Dims_create");
+  detail::check_mpi(MPI_Dims_create(process_count, 3, dimensions.data()),
+                    "MPI_Dims_create");
   if (dimensions[0] > global_extent.x ||
       dimensions[1] > global_extent.y ||
       dimensions[2] > global_extent.z) {
@@ -128,21 +100,23 @@ StructuredDecomposition StructuredDecomposition::create(
                                    periodic[1] ? 1 : 0,
                                    periodic[2] ? 1 : 0};
   MPI_Comm cartesian = MPI_COMM_NULL;
-  check_mpi(MPI_Cart_create(communicator, 3, dimensions.data(), periods.data(),
-                            0, &cartesian),
-            "MPI_Cart_create");
+  detail::check_mpi(MPI_Cart_create(communicator, 3, dimensions.data(),
+                                    periods.data(), 0, &cartesian),
+                    "MPI_Cart_create");
   if (cartesian == MPI_COMM_NULL) {
     throw Error("MPI_Cart_create returned MPI_COMM_NULL");
   }
 
   try {
-    check_mpi(MPI_Comm_set_errhandler(cartesian, MPI_ERRORS_RETURN),
-              "MPI_Comm_set_errhandler");
+    detail::check_mpi(
+        MPI_Comm_set_errhandler(cartesian, MPI_ERRORS_RETURN),
+        "MPI_Comm_set_errhandler");
     int rank = 0;
-    check_mpi(MPI_Comm_rank(cartesian, &rank), "MPI_Comm_rank");
+    detail::check_mpi(MPI_Comm_rank(cartesian, &rank), "MPI_Comm_rank");
     std::array<int, 3> coordinates{};
-    check_mpi(MPI_Cart_coords(cartesian, rank, 3, coordinates.data()),
-              "MPI_Cart_coords");
+    detail::check_mpi(
+        MPI_Cart_coords(cartesian, rank, 3, coordinates.data()),
+        "MPI_Cart_coords");
 
     const Int3 process_grid{dimensions[0], dimensions[1], dimensions[2]};
     const Int3 process_coordinates{coordinates[0], coordinates[1],
@@ -163,7 +137,7 @@ StructuredDecomposition StructuredDecomposition::create(
     return StructuredDecomposition(cartesian, global_extent, process_grid,
                                    process_coordinates, owned_box, periodic);
   } catch (...) {
-    free_communicator_without_throwing(cartesian);
+    detail::free_communicator_without_throwing(cartesian);
     throw;
   }
 }
@@ -180,7 +154,7 @@ StructuredDecomposition::StructuredDecomposition(
       periodic_(periodic) {}
 
 StructuredDecomposition::~StructuredDecomposition() {
-  free_communicator_without_throwing(communicator_);
+  detail::free_communicator_without_throwing(communicator_);
 }
 
 StructuredDecomposition::StructuredDecomposition(
@@ -227,6 +201,8 @@ int StructuredDecomposition::neighbor_rank(Int3 offset) const {
     throw Error("neighbor offset must identify one of the 26 neighbors");
   }
 
+  detail::require_mpi_active("query a structured-decomposition neighbor");
+
   std::array<int, 3> coordinates{
       process_coordinates_.x + offset.x,
       process_coordinates_.y + offset.y,
@@ -241,8 +217,8 @@ int StructuredDecomposition::neighbor_rank(Int3 offset) const {
   }
 
   int rank = MPI_PROC_NULL;
-  check_mpi(MPI_Cart_rank(communicator_, coordinates.data(), &rank),
-            "MPI_Cart_rank");
+  detail::check_mpi(MPI_Cart_rank(communicator_, coordinates.data(), &rank),
+                    "MPI_Cart_rank");
   return rank;
 }
 

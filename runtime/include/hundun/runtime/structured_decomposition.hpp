@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/types.hpp"
 
 #include <mpi.h>
@@ -13,7 +14,7 @@ namespace hundun::runtime {
 class StructuredDecomposition final {
  public:
   static StructuredDecomposition create(
-      MPI_Comm, Int3 global_extent, std::array<bool, 3> periodic);
+      const MpiContext&, Int3 global_extent, std::array<bool, 3> periodic);
   ~StructuredDecomposition();
   StructuredDecomposition(StructuredDecomposition&&) noexcept;
   StructuredDecomposition(const StructuredDecomposition&) = delete;

@@ -3,6 +3,7 @@
 #include "hundun/runtime/collective_status.hpp"
 
 #include "hundun/runtime/error.hpp"
+#include "mpi_error.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,35 +14,22 @@
 #include <utility>
 
 namespace hundun::runtime {
-namespace {
-
-void check_mpi(int result, const char* operation) {
-  if (result != MPI_SUCCESS) {
-    throw Error(std::string(operation) + " failed with MPI error " +
-                std::to_string(result));
-  }
-}
-
-}  // namespace
-
-CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
+CollectiveStatus collective_status(const MpiContext& context, bool local_ok,
                                    std::string_view local_message) {
-  int is_inter = 0;
-  check_mpi(MPI_Comm_test_inter(comm, &is_inter), "MPI_Comm_test_inter");
-  if (is_inter != 0) {
-    throw Error("collective_status requires an intracommunicator");
+  detail::require_mpi_active("collect MPI status");
+  const MPI_Comm comm = context.comm();
+  if (comm == MPI_COMM_NULL) {
+    throw Error("collective_status requires a valid MPI context");
   }
 
-  int rank = 0;
-  int size = 0;
-  check_mpi(MPI_Comm_rank(comm, &rank), "MPI_Comm_rank");
-  check_mpi(MPI_Comm_size(comm, &size), "MPI_Comm_size");
+  const int rank = context.rank();
+  const int size = context.size();
 
   const int local_failing_rank = local_ok ? size : rank;
   int failing_rank = size;
-  check_mpi(MPI_Allreduce(&local_failing_rank, &failing_rank, 1, MPI_INT,
-                          MPI_MIN, comm),
-            "MPI_Allreduce");
+  detail::check_mpi(MPI_Allreduce(&local_failing_rank, &failing_rank, 1,
+                                  MPI_INT, MPI_MIN, comm),
+                    "MPI_Allreduce");
   if (failing_rank == size) {
     return {true, -1, ""};
   }
@@ -57,9 +45,9 @@ CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
                std::numeric_limits<int>::max()));
   const int local_oversized_value = local_oversized ? 1 : 0;
   int any_oversized = 0;
-  check_mpi(MPI_Allreduce(&local_oversized_value, &any_oversized, 1, MPI_INT,
-                          MPI_MAX, comm),
-            "MPI_Allreduce");
+  detail::check_mpi(MPI_Allreduce(&local_oversized_value, &any_oversized, 1,
+                                  MPI_INT, MPI_MAX, comm),
+                    "MPI_Allreduce");
   if (any_oversized != 0) {
     throw Error("collective status message exceeds MPI count limit");
   }
@@ -68,15 +56,16 @@ CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
   if (rank == failing_rank) {
     message_length = static_cast<std::uint64_t>(local_length);
   }
-  check_mpi(MPI_Bcast(&message_length, 1, MPI_UINT64_T, failing_rank, comm),
-            "MPI_Bcast");
+  detail::check_mpi(
+      MPI_Bcast(&message_length, 1, MPI_UINT64_T, failing_rank, comm),
+      "MPI_Bcast");
 
   const int local_size_oversized =
       message_length > std::numeric_limits<std::size_t>::max() ? 1 : 0;
   int any_size_oversized = 0;
-  check_mpi(MPI_Allreduce(&local_size_oversized, &any_size_oversized, 1,
-                          MPI_INT, MPI_MAX, comm),
-            "MPI_Allreduce");
+  detail::check_mpi(MPI_Allreduce(&local_size_oversized, &any_size_oversized,
+                                  1, MPI_INT, MPI_MAX, comm),
+                    "MPI_Allreduce");
   if (any_size_oversized != 0) {
     throw Error("collective status message exceeds local size limit");
   }
@@ -91,9 +80,10 @@ CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
   }
   const int local_allocation_ok = allocation_ok ? 1 : 0;
   int every_allocation_ok = 0;
-  check_mpi(MPI_Allreduce(&local_allocation_ok, &every_allocation_ok, 1,
-                          MPI_INT, MPI_MIN, comm),
-            "MPI_Allreduce");
+  detail::check_mpi(MPI_Allreduce(&local_allocation_ok,
+                                  &every_allocation_ok, 1, MPI_INT, MPI_MIN,
+                                  comm),
+                    "MPI_Allreduce");
   if (every_allocation_ok == 0) {
     throw Error("unable to allocate collective status message");
   }
@@ -102,15 +92,15 @@ CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
     std::copy(local_message.begin(), local_message.end(), message.begin());
   }
   const int byte_count = static_cast<int>(message_length);
-  check_mpi(MPI_Bcast(message.data(), byte_count, MPI_BYTE, failing_rank, comm),
-            "MPI_Bcast");
+  detail::check_mpi(
+      MPI_Bcast(message.data(), byte_count, MPI_BYTE, failing_rank, comm),
+      "MPI_Bcast");
   return {false, failing_rank, std::move(message)};
 }
 
-void require_expected_ranks(MPI_Comm comm,
+void require_expected_ranks(const MpiContext& context,
                             std::optional<int> expected_ranks) {
-  int size = 0;
-  check_mpi(MPI_Comm_size(comm, &size), "MPI_Comm_size");
+  const int size = context.size();
 
   const bool local_ok = !expected_ranks || *expected_ranks == size;
   std::array<char, 96> buffer{};
@@ -128,7 +118,7 @@ void require_expected_ranks(MPI_Comm comm,
   }
 
   const CollectiveStatus status =
-      collective_status(comm, local_ok, local_message);
+      collective_status(context, local_ok, local_message);
   if (!status.ok) {
     throw Error(status.message);
   }

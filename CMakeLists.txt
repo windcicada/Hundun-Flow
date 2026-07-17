@@ -49,7 +49,9 @@ target_link_libraries(hundun_cli
   PUBLIC hundun_options)
 
 add_library(hundun_runtime STATIC
+  runtime/src/mpi_error.cpp
   runtime/src/mpi_environment.cpp
+  runtime/src/mpi_context.cpp
   runtime/src/collective_status.cpp
   runtime/src/structured_decomposition.cpp
   runtime/src/field_registry.cpp
@@ -99,6 +101,20 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_collective_status PRIVATE hundun_runtime)
   set_tests_properties(test_collective_status PROPERTIES TIMEOUT 20)
+
+  hundun_add_mpi_test(test_mpi_context 4
+    tests/mpi/test_mpi_context.cpp)
+  target_include_directories(test_mpi_context PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_mpi_context PRIVATE hundun_runtime)
+  set_tests_properties(test_mpi_context PROPERTIES TIMEOUT 30 PROCESSORS 4)
+
+  hundun_add_mpi_test(test_mpi_external_lifecycle 1
+    tests/mpi/test_mpi_external_lifecycle.cpp)
+  target_include_directories(test_mpi_external_lifecycle PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_mpi_external_lifecycle PRIVATE hundun_runtime)
+  set_tests_properties(test_mpi_external_lifecycle PROPERTIES TIMEOUT 20)
 
   add_executable(test_decomposition tests/mpi/test_decomposition.cpp)
   target_include_directories(test_decomposition PRIVATE

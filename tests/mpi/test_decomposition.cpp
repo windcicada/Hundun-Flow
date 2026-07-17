@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/runtime/error.hpp"
+#include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "hundun/runtime/types.hpp"
@@ -23,6 +24,7 @@ namespace {
 
 using hundun::runtime::Box3;
 using hundun::runtime::Int3;
+using hundun::runtime::MpiContext;
 using hundun::runtime::MpiEnvironment;
 using hundun::runtime::StructuredDecomposition;
 
@@ -72,7 +74,7 @@ bool boxes_overlap(const Box3& lhs, const Box3& rhs) {
 }
 
 void test_cartesian_topology(const StructuredDecomposition& decomposition,
-                             const MpiEnvironment& mpi) {
+                             const MpiContext& mpi) {
   HUNDUN_CHECK(same(decomposition.global_extent(), kGlobalExtent));
 
   int topology = MPI_UNDEFINED;
@@ -107,7 +109,7 @@ void test_cartesian_topology(const StructuredDecomposition& decomposition,
 }
 
 std::vector<Box3> gather_boxes(const StructuredDecomposition& decomposition,
-                               const MpiEnvironment& mpi) {
+                               const MpiContext& mpi) {
   const Box3 owned = decomposition.owned_box();
   const std::array<int, 6> local{owned.begin.x, owned.begin.y, owned.begin.z,
                                  owned.end.x, owned.end.y, owned.end.z};
@@ -130,7 +132,7 @@ std::vector<Box3> gather_boxes(const StructuredDecomposition& decomposition,
 }
 
 void test_boxes_and_coverage(const StructuredDecomposition& decomposition,
-                             const MpiEnvironment& mpi) {
+                             const MpiContext& mpi) {
   const Int3 global_extent = decomposition.global_extent();
   const Int3 process_grid = decomposition.process_grid();
   const Int3 process_coordinates = decomposition.process_coordinates();
@@ -194,7 +196,7 @@ void test_boxes_and_coverage(const StructuredDecomposition& decomposition,
 }
 
 void test_global_cells_and_ids(const StructuredDecomposition& decomposition,
-                               const MpiEnvironment& mpi) {
+                               const MpiContext& mpi) {
   const Int3 extent = decomposition.local_extent();
   const Box3 owned = decomposition.owned_box();
   const int local_count =
@@ -272,7 +274,7 @@ int rank_with_coordinates(const std::vector<int>& packed_coordinates,
 }
 
 void test_neighbors(const StructuredDecomposition& decomposition,
-                    const MpiEnvironment& mpi) {
+                    const MpiContext& mpi) {
   const Int3 coordinates = decomposition.process_coordinates();
   const Int3 grid = decomposition.process_grid();
   const std::array<int, 3> local_coordinates = as_array(coordinates);
@@ -328,12 +330,12 @@ void test_neighbors(const StructuredDecomposition& decomposition,
   }
 }
 
-void test_move_ownership(const MpiEnvironment& mpi) {
+void test_move_ownership(const MpiContext& mpi) {
   std::optional<StructuredDecomposition> moved;
   MPI_Comm cartesian = MPI_COMM_NULL;
   {
     auto source = StructuredDecomposition::create(
-        mpi.comm(), kGlobalExtent, kPeriodic);
+        mpi, kGlobalExtent, kPeriodic);
     cartesian = source.comm();
     moved.emplace(std::move(source));
   }
@@ -345,24 +347,24 @@ void test_move_ownership(const MpiEnvironment& mpi) {
   HUNDUN_CHECK(moved_rank == mpi.rank());
 }
 
-void test_extent_validation(const MpiEnvironment& mpi) {
+void test_extent_validation(const MpiContext& mpi) {
   for (Int3 invalid : {Int3{0, 11, 7}, Int3{17, 0, 7}, Int3{17, 11, 0},
                        Int3{-1, 11, 7}, Int3{17, -1, 7},
                        Int3{17, 11, -1}}) {
     expect_runtime_error([&] {
       static_cast<void>(StructuredDecomposition::create(
-          mpi.comm(), invalid, kPeriodic));
+          mpi, invalid, kPeriodic));
     });
   }
 
   expect_runtime_error([&] {
     static_cast<void>(StructuredDecomposition::create(
-        mpi.comm(), Int3{INT_MAX, INT_MAX, INT_MAX}, kPeriodic));
+        mpi, Int3{INT_MAX, INT_MAX, INT_MAX}, kPeriodic));
   });
 
   const Int3 near_limit{INT_MAX, INT_MAX, 2};
   auto accepted = StructuredDecomposition::create(
-      mpi.comm(), near_limit, kPeriodic);
+      mpi, near_limit, kPeriodic);
   const Int3 last_local{accepted.local_extent().x - 1,
                         accepted.local_extent().y - 1,
                         accepted.local_extent().z - 1};
@@ -381,12 +383,12 @@ void test_extent_validation(const MpiEnvironment& mpi) {
   if (mpi.size() > 1) {
     expect_runtime_error([&] {
       static_cast<void>(StructuredDecomposition::create(
-          mpi.comm(), Int3{1, 1, 1}, kPeriodic));
+          mpi, Int3{1, 1, 1}, kPeriodic));
     });
   }
 }
 
-void test_intercommunicator_rejection(const MpiEnvironment& mpi) {
+void test_intercommunicator_rejection(const MpiContext& mpi) {
   if (mpi.size() != 2) {
     return;
   }
@@ -402,17 +404,16 @@ void test_intercommunicator_rejection(const MpiEnvironment& mpi) {
                                    &is_intercommunicator) == MPI_SUCCESS);
   HUNDUN_CHECK(is_intercommunicator != 0);
   expect_runtime_error([&] {
-    static_cast<void>(StructuredDecomposition::create(
-        intercommunicator, kGlobalExtent, kPeriodic));
+    static_cast<void>(MpiContext::duplicate(intercommunicator));
   });
   HUNDUN_CHECK(MPI_Comm_free(&intercommunicator) == MPI_SUCCESS);
   HUNDUN_CHECK(MPI_Comm_free(&local) == MPI_SUCCESS);
 }
 
-void run_decomposition_tests(const MpiEnvironment& mpi) {
+void run_decomposition_tests(const MpiContext& mpi) {
   HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
   auto decomposition = StructuredDecomposition::create(
-      mpi.comm(), kGlobalExtent, kPeriodic);
+      mpi, kGlobalExtent, kPeriodic);
   test_cartesian_topology(decomposition, mpi);
   test_boxes_and_coverage(decomposition, mpi);
   test_global_cells_and_ids(decomposition, mpi);
@@ -428,7 +429,8 @@ void run_decomposition_tests(const MpiEnvironment& mpi) {
 int main(int argc, char** argv) {
   int result = EXIT_FAILURE;
   {
-    MpiEnvironment mpi(argc, argv);
+    MpiEnvironment environment(argc, argv);
+    auto mpi = MpiContext::duplicate(MPI_COMM_WORLD);
     result = hundun::test::run([&] { run_decomposition_tests(mpi); });
   }
   return result;

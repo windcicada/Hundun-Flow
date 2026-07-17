@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include <mpi.h>
+#include "hundun/runtime/mpi_context.hpp"
 
 #include <optional>
 #include <string>
@@ -15,10 +15,10 @@ struct CollectiveStatus {
   std::string message;
 };
 
-CollectiveStatus collective_status(MPI_Comm comm, bool local_ok,
+CollectiveStatus collective_status(const MpiContext& context, bool local_ok,
                                    std::string_view local_message);
 
-void require_expected_ranks(MPI_Comm comm,
+void require_expected_ranks(const MpiContext& context,
                             std::optional<int> expected_ranks);
 
 }  // namespace hundun::runtime
