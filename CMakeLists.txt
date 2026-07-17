@@ -73,6 +73,14 @@ target_link_libraries(hundun_mesh
   PRIVATE hundun_warnings
   PUBLIC hundun_options hundun_runtime)
 
+add_library(hundun_plugin_sdk STATIC sdk/src/plugin_loader.cpp)
+target_include_directories(hundun_plugin_sdk
+  PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/sdk/include>"
+  PRIVATE "${PROJECT_SOURCE_DIR}/runtime/include")
+target_link_libraries(hundun_plugin_sdk
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options ${CMAKE_DL_LIBS})
+
 function(hundun_add_test target)
   add_executable("${target}" ${ARGN})
   target_link_libraries("${target}" PRIVATE hundun_options hundun_warnings)
@@ -92,6 +100,113 @@ endfunction()
 
 if(HUNDUN_BUILD_TESTS)
   enable_testing()
+
+  find_package(Threads REQUIRED)
+
+  function(hundun_add_mock_plugin target)
+    add_library("${target}" MODULE tests/plugins/mock_plugin.c)
+    target_include_directories("${target}" PRIVATE
+      "${PROJECT_SOURCE_DIR}/sdk/include")
+    target_link_libraries("${target}" PRIVATE hundun_options)
+    set_target_properties("${target}" PROPERTIES
+      C_STANDARD 11
+      C_STANDARD_REQUIRED ON
+      C_EXTENSIONS OFF
+      PREFIX ""
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options("${target}" PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+  endfunction()
+
+  hundun_add_mock_plugin(mock_plugin)
+  hundun_add_mock_plugin(mock_plugin_larger)
+  target_compile_definitions(mock_plugin_larger PRIVATE HUNDUN_MOCK_LARGER)
+  hundun_add_mock_plugin(mock_plugin_overlap)
+  target_compile_definitions(mock_plugin_overlap PRIVATE HUNDUN_MOCK_OVERLAP)
+  hundun_add_mock_plugin(mock_plugin_short)
+  target_compile_definitions(mock_plugin_short PRIVATE HUNDUN_MOCK_SHORT)
+  hundun_add_mock_plugin(mock_plugin_range_only)
+  target_compile_definitions(mock_plugin_range_only PRIVATE
+    HUNDUN_MOCK_RANGE_ONLY)
+  hundun_add_mock_plugin(mock_plugin_no_overlap)
+  target_compile_definitions(mock_plugin_no_overlap PRIVATE
+    HUNDUN_MOCK_NO_OVERLAP)
+  hundun_add_mock_plugin(mock_plugin_reversed)
+  target_compile_definitions(mock_plugin_reversed PRIVATE
+    HUNDUN_MOCK_REVERSED)
+  hundun_add_mock_plugin(mock_plugin_capability)
+  target_compile_definitions(mock_plugin_capability PRIVATE
+    HUNDUN_MOCK_CAPABILITY)
+  hundun_add_mock_plugin(mock_plugin_null_entry)
+  target_compile_definitions(mock_plugin_null_entry PRIVATE
+    HUNDUN_MOCK_NULL_ENTRY)
+  hundun_add_mock_plugin(mock_plugin_null_name)
+  target_compile_definitions(mock_plugin_null_name PRIVATE
+    HUNDUN_MOCK_NULL_NAME)
+  hundun_add_mock_plugin(mock_plugin_empty_name)
+  target_compile_definitions(mock_plugin_empty_name PRIVATE
+    HUNDUN_MOCK_EMPTY_NAME)
+  hundun_add_mock_plugin(mock_plugin_null_version)
+  target_compile_definitions(mock_plugin_null_version PRIVATE
+    HUNDUN_MOCK_NULL_VERSION)
+  hundun_add_mock_plugin(mock_plugin_empty_version)
+  target_compile_definitions(mock_plugin_empty_version PRIVATE
+    HUNDUN_MOCK_EMPTY_VERSION)
+  hundun_add_mock_plugin(mock_plugin_null_description)
+  target_compile_definitions(mock_plugin_null_description PRIVATE
+    HUNDUN_MOCK_NULL_DESCRIPTION)
+  hundun_add_mock_plugin(mock_plugin_empty_description)
+  target_compile_definitions(mock_plugin_empty_description PRIVATE
+    HUNDUN_MOCK_EMPTY_DESCRIPTION)
+  hundun_add_mock_plugin(mock_plugin_missing_entry)
+  target_compile_definitions(mock_plugin_missing_entry PRIVATE
+    HUNDUN_MOCK_MISSING_ENTRY)
+
+  add_executable(test_plugin_loader tests/unit/test_plugin_loader.cpp)
+  target_include_directories(test_plugin_loader PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/sdk/include")
+  target_link_libraries(test_plugin_loader PRIVATE
+    hundun_plugin_sdk hundun_options hundun_warnings Threads::Threads)
+  add_dependencies(test_plugin_loader
+    mock_plugin
+    mock_plugin_larger
+    mock_plugin_overlap
+    mock_plugin_short
+    mock_plugin_range_only
+    mock_plugin_no_overlap
+    mock_plugin_reversed
+    mock_plugin_capability
+    mock_plugin_null_entry
+    mock_plugin_null_name
+    mock_plugin_empty_name
+    mock_plugin_null_version
+    mock_plugin_empty_version
+    mock_plugin_null_description
+    mock_plugin_empty_description
+    mock_plugin_missing_entry)
+  add_test(NAME test_plugin_loader COMMAND test_plugin_loader
+    "$<TARGET_FILE:mock_plugin>"
+    "$<TARGET_FILE:mock_plugin_larger>"
+    "$<TARGET_FILE:mock_plugin_overlap>"
+    "$<TARGET_FILE:mock_plugin_short>"
+    "$<TARGET_FILE:mock_plugin_range_only>"
+    "$<TARGET_FILE:mock_plugin_no_overlap>"
+    "$<TARGET_FILE:mock_plugin_reversed>"
+    "$<TARGET_FILE:mock_plugin_capability>"
+    "$<TARGET_FILE:mock_plugin_null_entry>"
+    "$<TARGET_FILE:mock_plugin_null_name>"
+    "$<TARGET_FILE:mock_plugin_empty_name>"
+    "$<TARGET_FILE:mock_plugin_null_version>"
+    "$<TARGET_FILE:mock_plugin_empty_version>"
+    "$<TARGET_FILE:mock_plugin_null_description>"
+    "$<TARGET_FILE:mock_plugin_empty_description>"
+    "$<TARGET_FILE:mock_plugin_missing_entry>")
+  set_tests_properties(test_plugin_loader PROPERTIES
+    LABELS unit
+    TIMEOUT 30)
 
   hundun_add_test(test_case_config tests/unit/test_case_config.cpp)
   target_include_directories(test_case_config PRIVATE "${PROJECT_SOURCE_DIR}")
