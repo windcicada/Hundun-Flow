@@ -27,6 +27,19 @@ bool positive(runtime::Real3 value) noexcept {
   return value.x > 0.0 && value.y > 0.0 && value.z > 0.0;
 }
 
+double range_safe_product(runtime::Real3 factors) noexcept {
+  int x_exponent = 0;
+  int y_exponent = 0;
+  int z_exponent = 0;
+  const double x_significand = std::frexp(factors.x, &x_exponent);
+  const double y_significand = std::frexp(factors.y, &y_exponent);
+  const double z_significand = std::frexp(factors.z, &z_exponent);
+  const double significand =
+      x_significand * y_significand * z_significand;
+  const int exponent = x_exponent + y_exponent + z_exponent;
+  return std::scalbn(significand, exponent);
+}
+
 }  // namespace
 
 UniformStructuredMesh::UniformStructuredMesh(
@@ -55,7 +68,7 @@ UniformStructuredMesh::UniformStructuredMesh(
     throw runtime::Error("mesh spacing must be finite and positive");
   }
 
-  const double cell_volume = spacing.x * spacing.y * spacing.z;
+  const double cell_volume = range_safe_product(spacing);
   if (!std::isfinite(cell_volume) || cell_volume <= 0.0) {
     throw runtime::Error("mesh cell volume must be finite and positive");
   }
