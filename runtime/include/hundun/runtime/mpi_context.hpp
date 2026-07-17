@@ -7,16 +7,25 @@ namespace hundun::runtime {
 
 class MpiContext final {
  public:
-  // Collective over source. The returned context owns a duplicate; source is
+  // Collective over source. All source members must call duplicate in a
+  // compatible order. The returned context owns a duplicate; source is
   // borrowed and is never modified.
   static MpiContext duplicate(MPI_Comm source);
 
+  // While MPI is active, destruction collectively frees the owned duplicate;
+  // communicator members must destroy contexts in a compatible order.
+  // After MPI_Finalize, destruction only clears the local handle.
   ~MpiContext() noexcept;
   MpiContext(MpiContext&& other) noexcept;
+  // While MPI is active, replacing a non-null destination collectively frees
+  // its old duplicate and therefore requires compatible member-rank order.
+  // After MPI_Finalize, replacement only clears the local destination handle.
   MpiContext& operator=(MpiContext&& other) noexcept;
   MpiContext(const MpiContext&) = delete;
   MpiContext& operator=(const MpiContext&) = delete;
 
+  // Borrowed handle: never free it. Pass it to MPI only while MPI is active
+  // and this context has not been moved from.
   MPI_Comm comm() const noexcept { return communicator_; }
   int rank() const noexcept { return rank_; }
   int size() const noexcept { return size_; }
@@ -33,8 +42,7 @@ class MpiContext final {
   int thread_level_{MPI_THREAD_SINGLE};
 };
 
-// In normal lexical use, MpiContext objects are destroyed before the
-// MpiEnvironment that keeps MPI active. Destruction is nevertheless guarded
-// so an intentionally reversed order never calls MPI_Comm_free after finalize.
+// Normally every MpiContext is destroyed before the MpiEnvironment that keeps
+// MPI active. Intentionally reversed destruction remains local after finalize.
 
 }  // namespace hundun::runtime

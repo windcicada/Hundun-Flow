@@ -120,6 +120,12 @@ void test_split_duplication(const MpiContext& world) {
                MPI_SUCCESS);
   HUNDUN_CHECK(duplicate_handler == MPI_ERRORS_RETURN);
   HUNDUN_CHECK(unchanged_handler == source_handler);
+  HUNDUN_CHECK(MPI_Errhandler_free(&source_handler) == MPI_SUCCESS);
+  HUNDUN_CHECK(source_handler == MPI_ERRHANDLER_NULL);
+  HUNDUN_CHECK(MPI_Errhandler_free(&duplicate_handler) == MPI_SUCCESS);
+  HUNDUN_CHECK(duplicate_handler == MPI_ERRHANDLER_NULL);
+  HUNDUN_CHECK(MPI_Errhandler_free(&unchanged_handler) == MPI_SUCCESS);
+  HUNDUN_CHECK(unchanged_handler == MPI_ERRHANDLER_NULL);
 
   int queried_thread_level = MPI_THREAD_SINGLE;
   HUNDUN_CHECK(MPI_Query_thread(&queried_thread_level) == MPI_SUCCESS);

@@ -13,11 +13,20 @@ namespace hundun::runtime {
 
 class StructuredDecomposition final {
  public:
+  // Collective over the context communicator. All members must call create in
+  // a compatible order; the returned decomposition owns its Cartesian
+  // communicator.
   static StructuredDecomposition create(
       const MpiContext&, Int3 global_extent, std::array<bool, 3> periodic);
+  // While MPI is active, destruction collectively frees the Cartesian
+  // communicator, so member ranks must destroy decompositions in a compatible
+  // order and normally before MpiEnvironment. After MPI_Finalize, destruction
+  // only clears the local handle.
   ~StructuredDecomposition();
   StructuredDecomposition(StructuredDecomposition&&) noexcept;
   StructuredDecomposition(const StructuredDecomposition&) = delete;
+  // Borrowed handle: never free it. Pass it to MPI only while MPI is active
+  // and this decomposition has not been moved from.
   MPI_Comm comm() const noexcept;
   Int3 global_extent() const noexcept;
   Int3 process_grid() const noexcept;

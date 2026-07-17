@@ -10,9 +10,16 @@
 
 int main(int argc, char** argv) {
   int provided = MPI_THREAD_SINGLE;
-  if (MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided) !=
-          MPI_SUCCESS ||
-      provided < MPI_THREAD_FUNNELED) {
+  const int init_result =
+      MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+  if (init_result != MPI_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+  if (provided < MPI_THREAD_FUNNELED) {
+    const int finalize_result = MPI_Finalize();
+    if (finalize_result != MPI_SUCCESS) {
+      return EXIT_FAILURE;
+    }
     return EXIT_FAILURE;
   }
 
