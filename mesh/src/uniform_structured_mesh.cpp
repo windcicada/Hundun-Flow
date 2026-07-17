@@ -5,7 +5,11 @@
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 
 namespace hundun::mesh {
 namespace {
@@ -27,17 +31,167 @@ bool positive(runtime::Real3 value) noexcept {
   return value.x > 0.0 && value.y > 0.0 && value.z > 0.0;
 }
 
+static_assert(std::numeric_limits<double>::is_iec559);
+static_assert(std::numeric_limits<double>::radix == 2);
+static_assert(std::numeric_limits<double>::digits == 53);
+static_assert(std::numeric_limits<double>::min_exponent == -1021);
+static_assert(std::numeric_limits<double>::max_exponent == 1024);
+static_assert(std::numeric_limits<double>::has_denorm ==
+              std::denorm_present);
+static_assert(std::numeric_limits<double>::has_infinity);
+static_assert(std::numeric_limits<std::uint32_t>::digits == 32);
+static_assert(std::numeric_limits<std::uint64_t>::digits == 64);
+
+constexpr int kSignificandBits = std::numeric_limits<double>::digits;
+constexpr int kMinimumNormalExponent =
+    std::numeric_limits<double>::min_exponent - 1;
+constexpr int kMaximumFiniteExponent =
+    std::numeric_limits<double>::max_exponent - 1;
+constexpr int kSubnormalQuantumExponent =
+    kMinimumNormalExponent - (kSignificandBits - 1);
+constexpr int kLimbBits = std::numeric_limits<std::uint32_t>::digits;
+
+using SignificandLimbs = std::array<std::uint32_t, 2>;
+using ProductLimbs = std::array<std::uint32_t, 5>;
+
+struct BinaryFactor final {
+  std::uint64_t significand;
+  int exponent;
+};
+
+BinaryFactor decompose(double value) noexcept {
+  int exponent = 0;
+  const double fraction = std::frexp(value, &exponent);
+  const auto significand = static_cast<std::uint64_t>(
+      std::ldexp(fraction, kSignificandBits));
+  return BinaryFactor{significand, exponent - kSignificandBits};
+}
+
+SignificandLimbs split(std::uint64_t value) noexcept {
+  return SignificandLimbs{static_cast<std::uint32_t>(value),
+                          static_cast<std::uint32_t>(value >> kLimbBits)};
+}
+
+template <std::size_t LeftSize, std::size_t RightSize>
+std::array<std::uint32_t, LeftSize + RightSize> multiply_limbs(
+    const std::array<std::uint32_t, LeftSize>& lhs,
+    const std::array<std::uint32_t, RightSize>& rhs) noexcept {
+  std::array<std::uint32_t, LeftSize + RightSize> result{};
+  for (std::size_t left = 0; left < LeftSize; ++left) {
+    std::uint64_t carry = 0;
+    for (std::size_t right = 0; right < RightSize; ++right) {
+      const std::uint64_t accumulator =
+          static_cast<std::uint64_t>(lhs[left]) * rhs[right] +
+          result[left + right] + carry;
+      result[left + right] = static_cast<std::uint32_t>(accumulator);
+      carry = accumulator >> kLimbBits;
+    }
+    result[left + RightSize] = static_cast<std::uint32_t>(carry);
+  }
+  return result;
+}
+
+ProductLimbs multiply_significands(std::uint64_t x, std::uint64_t y,
+                                   std::uint64_t z) noexcept {
+  const auto xy = multiply_limbs(split(x), split(y));
+  const auto xyz = multiply_limbs(xy, split(z));
+  // Three 53-bit integers occupy at most 159 bits, so xyz[5] is zero.
+  return ProductLimbs{xyz[0], xyz[1], xyz[2], xyz[3], xyz[4]};
+}
+
+bool product_bit(const ProductLimbs& product, int position) noexcept {
+  if (position < 0 ||
+      position >= static_cast<int>(product.size()) * kLimbBits) {
+    return false;
+  }
+  return ((product[static_cast<std::size_t>(position / kLimbBits)] >>
+           (position % kLimbBits)) &
+          std::uint32_t{1}) != 0;
+}
+
+int product_bit_length(const ProductLimbs& product) noexcept {
+  for (std::size_t index = product.size(); index > 0; --index) {
+    std::uint32_t word = product[index - 1];
+    if (word == 0) {
+      continue;
+    }
+    int word_bits = 0;
+    while (word != 0) {
+      ++word_bits;
+      word >>= 1;
+    }
+    return static_cast<int>((index - 1) * kLimbBits) + word_bits;
+  }
+  return 0;
+}
+
+bool any_product_bit_below(const ProductLimbs& product,
+                           int exclusive_end) noexcept {
+  if (exclusive_end <= 0) {
+    return false;
+  }
+  const int complete_limbs = exclusive_end / kLimbBits;
+  for (int index = 0;
+       index < complete_limbs &&
+       index < static_cast<int>(product.size());
+       ++index) {
+    if (product[static_cast<std::size_t>(index)] != 0) {
+      return true;
+    }
+  }
+  const int remaining_bits = exclusive_end % kLimbBits;
+  if (remaining_bits == 0 ||
+      complete_limbs >= static_cast<int>(product.size())) {
+    return false;
+  }
+  const std::uint32_t mask =
+      (std::uint32_t{1} << remaining_bits) - std::uint32_t{1};
+  return (product[static_cast<std::size_t>(complete_limbs)] & mask) != 0;
+}
+
+std::uint64_t round_right_shift(const ProductLimbs& product,
+                                int shift) noexcept {
+  std::uint64_t quotient = 0;
+  for (int position = product_bit_length(product) - 1; position >= shift;
+       --position) {
+    quotient = (quotient << 1) |
+               static_cast<std::uint64_t>(product_bit(product, position));
+  }
+  const bool guard = product_bit(product, shift - 1);
+  const bool sticky = any_product_bit_below(product, shift - 1);
+  if (guard && (sticky || (quotient & std::uint64_t{1}) != 0)) {
+    ++quotient;
+  }
+  return quotient;
+}
+
 double range_safe_product(runtime::Real3 factors) noexcept {
-  int x_exponent = 0;
-  int y_exponent = 0;
-  int z_exponent = 0;
-  const double x_significand = std::frexp(factors.x, &x_exponent);
-  const double y_significand = std::frexp(factors.y, &y_exponent);
-  const double z_significand = std::frexp(factors.z, &z_exponent);
-  const double significand =
-      x_significand * y_significand * z_significand;
-  const int exponent = x_exponent + y_exponent + z_exponent;
-  return std::scalbn(significand, exponent);
+  const BinaryFactor x = decompose(factors.x);
+  const BinaryFactor y = decompose(factors.y);
+  const BinaryFactor z = decompose(factors.z);
+  const ProductLimbs product =
+      multiply_significands(x.significand, y.significand, z.significand);
+  const int product_exponent = x.exponent + y.exponent + z.exponent;
+  const int leading_exponent =
+      product_exponent + product_bit_length(product) - 1;
+  if (leading_exponent > kMaximumFiniteExponent) {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const int quantum_exponent =
+      leading_exponent >= kMinimumNormalExponent
+          ? leading_exponent - (kSignificandBits - 1)
+          : kSubnormalQuantumExponent;
+  const std::uint64_t rounded =
+      round_right_shift(product, quantum_exponent - product_exponent);
+  if (rounded == 0) {
+    return 0.0;
+  }
+  if (leading_exponent == kMaximumFiniteExponent &&
+      rounded == (std::uint64_t{1} << kSignificandBits)) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return std::ldexp(static_cast<double>(rounded), quantum_exponent);
 }
 
 }  // namespace

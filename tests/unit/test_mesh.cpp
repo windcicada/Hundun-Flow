@@ -220,6 +220,77 @@ void check_volume_case(LocalCheckState& state,
   }
 }
 
+enum class VolumeCaseOutcome {
+  value,
+  runtime_error,
+  unexpected_exception,
+  unexpected_nonstandard_exception,
+};
+
+struct VolumeCaseObservation final {
+  VolumeCaseOutcome outcome;
+  double volume;
+  bool exact_input;
+  bool nonempty_error;
+};
+
+VolumeCaseObservation observe_volume_case(
+    const StructuredDecomposition& decomposition, Real3 spacing) noexcept {
+  const Real3 length{spacing.x * static_cast<double>(kGlobalCells.x),
+                     spacing.y * static_cast<double>(kGlobalCells.y),
+                     spacing.z * static_cast<double>(kGlobalCells.z)};
+  const bool exact_input =
+      std::isfinite(length.x) && std::isfinite(length.y) &&
+      std::isfinite(length.z) &&
+      length.x / static_cast<double>(kGlobalCells.x) == spacing.x &&
+      length.y / static_cast<double>(kGlobalCells.y) == spacing.y &&
+      length.z / static_cast<double>(kGlobalCells.z) == spacing.z;
+  try {
+    const UniformStructuredMesh mesh(kGlobalCells, Real3{}, length,
+                                     decomposition);
+    return VolumeCaseObservation{VolumeCaseOutcome::value,
+                                 mesh.cell_volume_m3(), exact_input, true};
+  } catch (const Error& error) {
+    return VolumeCaseObservation{
+        VolumeCaseOutcome::runtime_error, 0.0, exact_input,
+        error.what() != nullptr && error.what()[0] != '\0'};
+  } catch (const std::exception&) {
+    return VolumeCaseObservation{VolumeCaseOutcome::unexpected_exception,
+                                 0.0, exact_input, false};
+  } catch (...) {
+    return VolumeCaseObservation{
+        VolumeCaseOutcome::unexpected_nonstandard_exception, 0.0,
+        exact_input, false};
+  }
+}
+
+const char* volume_case_outcome_name(VolumeCaseOutcome outcome) noexcept {
+  switch (outcome) {
+    case VolumeCaseOutcome::value:
+      return "value";
+    case VolumeCaseOutcome::runtime_error:
+      return "runtime-error";
+    case VolumeCaseOutcome::unexpected_exception:
+      return "unexpected-exception";
+    case VolumeCaseOutcome::unexpected_nonstandard_exception:
+      return "unexpected-nonstandard-exception";
+  }
+  return "unknown";
+}
+
+bool accepted_as(const VolumeCaseObservation& observation,
+                 double expected) noexcept {
+  return observation.exact_input &&
+         observation.outcome == VolumeCaseOutcome::value &&
+         observation.volume == expected;
+}
+
+bool rejected(const VolumeCaseObservation& observation) noexcept {
+  return observation.exact_input &&
+         observation.outcome == VolumeCaseOutcome::runtime_error &&
+         observation.nonempty_error;
+}
+
 void test_numerical_oracle(const MpiContext& mpi) {
   LocalCheckState state;
   const double infinity = std::numeric_limits<double>::infinity();
@@ -252,6 +323,59 @@ void test_mixed_scale_volumes(const MpiContext& mpi) {
         state, decomposition,
         Real3{small, small, std::ldexp(1.0, 330)},
         std::ldexp(1.0, -1070));
+  }
+  collective_checkpoint(mpi, state);
+}
+
+void test_range_boundary_volumes(const MpiContext& mpi) {
+  LocalCheckState state;
+  {
+    auto decomposition = make_decomposition(mpi);
+    const VolumeCaseObservation upper_finite = observe_volume_case(
+        decomposition,
+        Real3{0x1.128fedbab2a43p+341, 0x1.e05f53e74d73dp+341,
+              0x1.fcd0fe4fe3b83p+340});
+    const VolumeCaseObservation upper_overflow = observe_volume_case(
+        decomposition,
+        Real3{0x1.8ee2bfb0af1e3p+341, 0x1.78cea81633acfp+341,
+              0x1.be7d8ae880d00p+340});
+
+    const double lower_base = std::ldexp(1.0, -500);
+    const double lower_last = std::ldexp(1.0, -75);
+    const VolumeCaseObservation lower_tie = observe_volume_case(
+        decomposition, Real3{lower_base, lower_base, lower_last});
+    const VolumeCaseObservation lower_above = observe_volume_case(
+        decomposition,
+        Real3{lower_base, lower_base,
+              std::nextafter(lower_last,
+                             std::numeric_limits<double>::infinity())});
+    const VolumeCaseObservation lower_below = observe_volume_case(
+        decomposition,
+        Real3{lower_base, lower_base, std::nextafter(lower_last, 0.0)});
+
+    std::array<char, 448> detail{};
+    const int count = std::snprintf(
+        detail.data(), detail.size(),
+        "range observations: upper-finite=%s(%a), upper-overflow=%s(%a); "
+        "lower-tie=%s(%a), lower-above=%s(%a), lower-below=%s(%a)",
+        volume_case_outcome_name(upper_finite.outcome), upper_finite.volume,
+        volume_case_outcome_name(upper_overflow.outcome), upper_overflow.volume,
+        volume_case_outcome_name(lower_tie.outcome), lower_tie.volume,
+        volume_case_outcome_name(lower_above.outcome), lower_above.volume,
+        volume_case_outcome_name(lower_below.outcome), lower_below.volume);
+    const char* const diagnostic =
+        count < 0 ? "range-boundary observation failed" : detail.data();
+
+    state.require(accepted_as(upper_finite,
+                              std::numeric_limits<double>::max()),
+                  diagnostic, __FILE__, __LINE__);
+    state.require(rejected(upper_overflow), diagnostic, __FILE__, __LINE__);
+    state.require(rejected(lower_tie), diagnostic, __FILE__, __LINE__);
+    state.require(
+        accepted_as(lower_above,
+                    std::numeric_limits<double>::denorm_min()),
+        diagnostic, __FILE__, __LINE__);
+    state.require(rejected(lower_below), diagnostic, __FILE__, __LINE__);
   }
   collective_checkpoint(mpi, state);
 }
@@ -523,6 +647,7 @@ void run_tests(const MpiContext& mpi) {
   test_numerical_oracle(mpi);
   test_geometry_and_ownership(mpi);
   test_mixed_scale_volumes(mpi);
+  test_range_boundary_volumes(mpi);
   test_constructor_validation(mpi);
   test_value_state_lifetime(mpi);
 }
