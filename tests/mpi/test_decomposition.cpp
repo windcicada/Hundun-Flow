@@ -17,6 +17,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -60,6 +61,20 @@ void expect_runtime_error(Function&& function) {
   } catch (const hundun::runtime::Error& error) {
     threw = true;
     HUNDUN_CHECK(std::string(error.what()).empty() == false);
+  }
+  HUNDUN_CHECK(threw);
+}
+
+template <class Function>
+void expect_runtime_error_with_text(Function&& function,
+                                    std::string_view expected_text) {
+  bool threw = false;
+  try {
+    function();
+  } catch (const hundun::runtime::Error& error) {
+    threw = true;
+    HUNDUN_CHECK(std::string_view{error.what()}.find(expected_text) !=
+                 std::string_view::npos);
   }
   HUNDUN_CHECK(threw);
 }
@@ -410,10 +425,9 @@ void test_intercommunicator_rejection(const MpiContext& mpi) {
   HUNDUN_CHECK(MPI_Comm_free(&local) == MPI_SUCCESS);
 }
 
-void run_decomposition_tests(const MpiContext& mpi) {
+void run_decomposition_tests(const MpiContext& mpi,
+                             const StructuredDecomposition& decomposition) {
   HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
-  auto decomposition = StructuredDecomposition::create(
-      mpi, kGlobalExtent, kPeriodic);
   test_cartesian_topology(decomposition, mpi);
   test_boxes_and_coverage(decomposition, mpi);
   test_global_cells_and_ids(decomposition, mpi);
@@ -427,11 +441,36 @@ void run_decomposition_tests(const MpiContext& mpi) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::optional<MpiContext> mpi;
+  std::optional<StructuredDecomposition> decomposition;
   int result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
-    auto mpi = MpiContext::duplicate(MPI_COMM_WORLD);
-    result = hundun::test::run([&] { run_decomposition_tests(mpi); });
+    mpi.emplace(MpiContext::duplicate(MPI_COMM_WORLD));
+    decomposition.emplace(StructuredDecomposition::create(
+        *mpi, kGlobalExtent, kPeriodic));
+    result = hundun::test::run(
+        [&] { run_decomposition_tests(*mpi, *decomposition); });
   }
-  return result;
+
+  const int finalized_result = hundun::test::run([&] {
+    int finalized = 0;
+    HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
+    HUNDUN_CHECK(finalized != 0);
+    expect_runtime_error_with_text(
+        [&] {
+          static_cast<void>(StructuredDecomposition::create(
+              *mpi, kGlobalExtent, kPeriodic));
+        },
+        "after MPI_Finalize");
+    expect_runtime_error_with_text(
+        [&] {
+          static_cast<void>(decomposition->neighbor_rank(Int3{1, 0, 0}));
+        },
+        "after MPI_Finalize");
+    decomposition.reset();
+    mpi.reset();
+  });
+
+  return result == EXIT_SUCCESS ? finalized_result : result;
 }

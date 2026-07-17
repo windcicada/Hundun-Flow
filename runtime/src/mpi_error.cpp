@@ -63,6 +63,7 @@ void free_communicator_without_throwing(MPI_Comm& communicator) noexcept {
   if (communicator != MPI_COMM_NULL && mpi_is_active()) {
     (void)MPI_Comm_free(&communicator);
   }
+  communicator = MPI_COMM_NULL;
 }
 
 }  // namespace hundun::runtime::detail

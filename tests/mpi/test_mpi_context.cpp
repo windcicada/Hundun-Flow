@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -42,14 +43,23 @@ void expect_error(Function&& function, const std::string& text) {
 
 int failing_error_string(int, char*, int*) { return MPI_ERR_OTHER; }
 
+int known_error_string(int result, char* buffer, int* length) {
+  if (result != 73 || buffer == nullptr || length == nullptr) {
+    return MPI_ERR_ARG;
+  }
+  constexpr std::string_view text{"known MPI error text"};
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    buffer[index] = text[index];
+  }
+  *length = static_cast<int>(text.size());
+  return MPI_SUCCESS;
+}
+
 void test_error_formatting() {
-  const std::string message =
-      hundun::runtime::detail::mpi_error_message("test operation",
-                                                 MPI_ERR_COMM);
-  HUNDUN_CHECK(message.find("test operation") != std::string::npos);
-  HUNDUN_CHECK(message.find(std::to_string(MPI_ERR_COMM)) !=
-               std::string::npos);
-  HUNDUN_CHECK(message.find(": ") != std::string::npos);
+  const std::string message = hundun::runtime::detail::mpi_error_message(
+      "test operation", 73, known_error_string);
+  HUNDUN_CHECK(message ==
+               "test operation failed with MPI error 73: known MPI error text");
 
   const std::string fallback = hundun::runtime::detail::mpi_error_message(
       "fallback operation", 73, failing_error_string);
@@ -175,6 +185,11 @@ int main(int argc, char** argv) {
     const std::string fallback =
         hundun::runtime::detail::mpi_error_message("finalized operation", 91);
     HUNDUN_CHECK(fallback == "finalized operation failed with MPI error 91");
+
+    MPI_Comm finalized_owned_reference = context->comm();
+    hundun::runtime::detail::free_communicator_without_throwing(
+        finalized_owned_reference);
+    HUNDUN_CHECK(finalized_owned_reference == MPI_COMM_NULL);
     context.reset();
   });
 

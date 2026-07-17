@@ -39,6 +39,19 @@ void expect_rank_error(const MpiContext& context,
   HUNDUN_CHECK(threw);
 }
 
+template <class Function>
+void expect_error(Function&& function, const std::string& expected_text) {
+  bool threw = false;
+  try {
+    function();
+  } catch (const hundun::runtime::Error& error) {
+    threw = true;
+    HUNDUN_CHECK(std::string(error.what()).find(expected_text) !=
+                 std::string::npos);
+  }
+  HUNDUN_CHECK(threw);
+}
+
 void test_collectives(MpiContext& mpi, int& argc, char**& argv) {
   HUNDUN_CHECK(mpi.size() == 2);
 
@@ -104,18 +117,26 @@ void test_collectives(MpiContext& mpi, int& argc, char**& argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::optional<MpiContext> mpi;
   int collective_result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
-    auto mpi = MpiContext::duplicate(MPI_COMM_WORLD);
+    mpi.emplace(MpiContext::duplicate(MPI_COMM_WORLD));
     collective_result = hundun::test::run(
-        [&] { test_collectives(mpi, argc, argv); });
+        [&] { test_collectives(*mpi, argc, argv); });
   }
 
   const int lifecycle_result = hundun::test::run([&] {
     int finalized = 0;
     HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
     HUNDUN_CHECK(finalized != 0);
+
+    expect_error(
+        [&] { static_cast<void>(collective_status(*mpi, true, "")); },
+        "after MPI_Finalize");
+    expect_error([&] { require_expected_ranks(*mpi, mpi->size()); },
+                 "after MPI_Finalize");
+    mpi.reset();
 
     bool threw = false;
     try {
