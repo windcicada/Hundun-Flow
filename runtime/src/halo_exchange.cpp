@@ -973,10 +973,7 @@ class HaloExchange::Impl final {
   detail::CompletionOutcome cancel_and_drain_noexcept() noexcept {
     const auto options = detail::current_halo_test_options();
     bool mpi_error_seen = false;
-    bool injected = false;
     bool cancellation_calls_succeeded = true;
-    cancelled_requests_ = 0U;
-    completed_requests_ = 0U;
     for (auto& request : requests_) {
       if (request != MPI_REQUEST_NULL) {
         const int result = MPI_Cancel(&request);
@@ -1008,25 +1005,14 @@ class HaloExchange::Impl final {
           }
           if (result == MPI_SUCCESS) {
             if (cancelled != 0) {
-              ++cancelled_requests_;
               if (options.observe) {
                 ++detail::mutable_halo_test_snapshot().cancelled_requests;
               }
             } else {
-              ++completed_requests_;
               if (options.observe) {
                 ++detail::mutable_halo_test_snapshot().completed_requests;
               }
             }
-          }
-        }
-        if (result == MPI_SUCCESS && !injected &&
-            context_.rank() == options.inject_cleanup_wait_error_rank) {
-          result = MPI_ERR_OTHER;
-          injected = true;
-          if (options.observe) {
-            ++detail::mutable_halo_test_snapshot()
-                  .cleanup_wait_errors_injected;
           }
         }
         if (result != MPI_SUCCESS) {
@@ -1158,8 +1144,6 @@ class HaloExchange::Impl final {
   FieldId pending_id_{};
   bool active_{};
   std::size_t context_generation_{1U};
-  std::size_t cancelled_requests_{};
-  std::size_t completed_requests_{};
 };
 
 HaloExchange HaloExchange::create(
