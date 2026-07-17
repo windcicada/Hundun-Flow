@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <string>
 #include <utility>
 
