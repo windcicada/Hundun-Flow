@@ -39,6 +39,7 @@ class StructuredDecomposition final {
   Int3 process_coordinates() const noexcept;
   Box3 owned_box() const noexcept;
   Int3 local_extent() const noexcept;
+  std::array<bool, 3> periodic() const noexcept;
   int neighbor_rank(Int3 offset) const;
   std::uint64_t global_cell_id(Int3 local_cell) const;
   Int3 global_cell(Int3 local_cell) const;

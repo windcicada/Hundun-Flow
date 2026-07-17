@@ -73,6 +73,15 @@ target_link_libraries(hundun_mesh
   PRIVATE hundun_warnings
   PUBLIC hundun_options hundun_runtime)
 
+add_library(hundun_io STATIC
+  runtime/src/restart_binary.cpp
+  runtime/src/vtk_legacy.cpp)
+target_include_directories(hundun_io PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
+target_link_libraries(hundun_io
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options hundun_runtime hundun_mesh)
+
 add_library(hundun_plugin_sdk STATIC sdk/src/plugin_loader.cpp)
 target_include_directories(hundun_plugin_sdk
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/sdk/include>"
@@ -260,6 +269,44 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  hundun_add_test(test_restart tests/unit/test_restart.cpp)
+  target_include_directories(test_restart PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_restart PRIVATE hundun_io)
+  set_tests_properties(test_restart PROPERTIES TIMEOUT 30)
+
+  hundun_add_mpi_test(test_vtk 1 tests/unit/test_vtk.cpp)
+  target_include_directories(test_vtk PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_vtk PRIVATE hundun_io)
+  set_tests_properties(test_vtk PROPERTIES TIMEOUT 30 PROCESSORS 1)
+
+  add_executable(test_restart_checkpoint
+    tests/mpi/test_restart_checkpoint.cpp)
+  target_include_directories(test_restart_checkpoint PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_restart_checkpoint PRIVATE
+    hundun_io hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2)
+    set(restart_test "test_restart_checkpoint_${ranks}_rank")
+    add_test(NAME "${restart_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_restart_checkpoint>"
+              full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${restart_test}" PROPERTIES
+      LABELS mpi TIMEOUT 90 PROCESSORS "${ranks}")
+  endforeach()
+  add_test(NAME test_restart_checkpoint_failure
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "2"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_restart_checkpoint>"
+            failure ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_restart_checkpoint_failure PROPERTIES
+    LABELS mpi TIMEOUT 90 PROCESSORS 2)
+  add_test(NAME test_restart_checkpoint_finalized
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_restart_checkpoint>"
+            finalized ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_restart_checkpoint_finalized PROPERTIES
+    LABELS mpi TIMEOUT 30 PROCESSORS 1)
 
   hundun_add_test(test_halo_helpers tests/unit/test_halo_helpers.cpp)
   target_include_directories(test_halo_helpers PRIVATE

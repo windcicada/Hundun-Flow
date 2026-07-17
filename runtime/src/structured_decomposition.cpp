@@ -236,6 +236,10 @@ Int3 StructuredDecomposition::local_extent() const noexcept {
               owned_box_.end.z - owned_box_.begin.z};
 }
 
+std::array<bool, 3> StructuredDecomposition::periodic() const noexcept {
+  return periodic_;
+}
+
 int StructuredDecomposition::neighbor_rank(Int3 offset) const {
   const bool in_range = offset.x >= -1 && offset.x <= 1 &&
                         offset.y >= -1 && offset.y <= 1 &&
