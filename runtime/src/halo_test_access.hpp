@@ -12,6 +12,7 @@ struct HaloTestOptions {
   int inject_post_error_rank{-1};
   int inject_wait_error_rank{-1};
   bool observe{};
+  int inject_cleanup_wait_error_rank{-1};
 };
 
 struct HaloTestSnapshot {
@@ -27,6 +28,7 @@ struct HaloTestSnapshot {
   std::size_t chunk_metadata_capacity{};
   std::size_t wait_batch_capacity{};
   std::size_t destructor_drains{};
+  std::size_t cleanup_wait_errors_injected{};
 };
 
 void set_halo_test_options(HaloTestOptions options);

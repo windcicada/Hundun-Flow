@@ -145,9 +145,13 @@ ActiveDestructionAction active_destruction_action(
                   : ActiveDestructionAction::terminate_process;
 }
 
+bool completion_succeeded(CompletionOutcome outcome) noexcept {
+  return !outcome.mpi_error_seen && outcome.requests_proven_null;
+}
+
 CompletionFailureAction completion_failure_action(
-    bool requests_proven_complete) noexcept {
-  return requests_proven_complete
+    CompletionOutcome outcome) noexcept {
+  return outcome.requests_proven_null
              ? CompletionFailureAction::discard_and_throw
              : CompletionFailureAction::terminate_process;
 }

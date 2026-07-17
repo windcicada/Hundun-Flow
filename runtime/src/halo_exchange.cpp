@@ -201,7 +201,8 @@ class HaloExchange::Impl final {
       if (detail::current_halo_test_options().observe) {
         ++detail::mutable_halo_test_snapshot().destructor_drains;
       }
-      if (!drain_requests_noexcept()) {
+      const detail::CompletionOutcome outcome = drain_requests_noexcept();
+      if (!outcome.requests_proven_null) {
         std::terminate();
       }
     }
@@ -387,7 +388,9 @@ class HaloExchange::Impl final {
     const HaloError global_post_error =
         converge_fixed_error(context_, post_error);
     if (global_post_error != HaloError::none) {
-      const bool local_proven = cancel_and_drain_noexcept();
+      const detail::CompletionOutcome cleanup =
+          cancel_and_drain_noexcept();
+      const bool local_proven = cleanup.requests_proven_null;
       const int local_value = local_proven ? 1 : 0;
       int every_proven = 0;
       if (MPI_Allreduce(&local_value, &every_proven, 1, MPI_INT, MPI_MIN,
@@ -420,18 +423,21 @@ class HaloExchange::Impl final {
       throw_halo_error(target_error);
     }
 
-    bool local_completion_ok = wait_all_noexcept(true);
+    const detail::CompletionOutcome completion =
+        wait_all_noexcept(WaitInjection::explicit_completion);
+    const bool local_completion_ok =
+        detail::completion_succeeded(completion);
     const HaloError completion_error = converge_fixed_error(
         context_, local_completion_ok ? HaloError::none
                                       : HaloError::completion_failure);
     if (completion_error != HaloError::none) {
-      const bool local_proven = all_requests_null(requests_);
+      const bool local_proven = completion.requests_proven_null;
       const int local_value = local_proven ? 1 : 0;
       int every_proven = 0;
       if (MPI_Allreduce(&local_value, &every_proven, 1, MPI_INT, MPI_MIN,
                         context_.comm()) != MPI_SUCCESS ||
           every_proven == 0 ||
-          detail::completion_failure_action(local_proven) ==
+          detail::completion_failure_action(completion) ==
               detail::CompletionFailureAction::terminate_process) {
         std::terminate();
       }
@@ -739,40 +745,56 @@ class HaloExchange::Impl final {
     return result;
   }
 
-  bool wait_all_noexcept(bool allow_injection) noexcept {
+  enum class WaitInjection { explicit_completion, cleanup };
+
+  detail::CompletionOutcome wait_all_noexcept(
+      WaitInjection injection) noexcept {
     const auto options = detail::current_halo_test_options();
     bool injected = false;
-    bool success = true;
+    bool mpi_error_seen = false;
+    int injection_rank = -1;
+    if (injection == WaitInjection::explicit_completion) {
+      injection_rank = options.inject_wait_error_rank;
+    } else if (injection == WaitInjection::cleanup) {
+      injection_rank = options.inject_cleanup_wait_error_rank;
+    }
     for (const auto batch : wait_batches_) {
       int result = MPI_Waitall(
           batch.count, requests_.data() + batch.offset,
           MPI_STATUSES_IGNORE);
-      if (result == MPI_SUCCESS && allow_injection && !injected &&
-          context_.rank() == options.inject_wait_error_rank) {
+      if (result == MPI_SUCCESS && !injected &&
+          context_.rank() == injection_rank) {
         result = MPI_ERR_OTHER;
         injected = true;
+        if (injection == WaitInjection::cleanup && options.observe) {
+          ++detail::mutable_halo_test_snapshot()
+                .cleanup_wait_errors_injected;
+        }
       }
       if (result != MPI_SUCCESS) {
-        success = false;
+        mpi_error_seen = true;
         for (int index = 0; index < batch.count; ++index) {
           MPI_Request& request =
               requests_[batch.offset + static_cast<std::size_t>(index)];
           if (request != MPI_REQUEST_NULL &&
               MPI_Wait(&request, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
-            success = false;
+            mpi_error_seen = true;
           }
         }
       }
     }
-    return success && all_requests_null(requests_);
+    return detail::CompletionOutcome{mpi_error_seen,
+                                     all_requests_null(requests_)};
   }
 
-  bool drain_requests_noexcept() noexcept {
-    return wait_all_noexcept(false);
+  detail::CompletionOutcome drain_requests_noexcept() noexcept {
+    return wait_all_noexcept(WaitInjection::cleanup);
   }
 
-  bool cancel_and_drain_noexcept() noexcept {
-    bool success = true;
+  detail::CompletionOutcome cancel_and_drain_noexcept() noexcept {
+    const auto options = detail::current_halo_test_options();
+    bool mpi_error_seen = false;
+    bool injected = false;
     for (auto& request : requests_) {
       if (request != MPI_REQUEST_NULL) {
         // A cancellation error does not by itself make the backing buffer
@@ -782,12 +804,24 @@ class HaloExchange::Impl final {
       }
     }
     for (auto& request : requests_) {
-      if (request != MPI_REQUEST_NULL &&
-          MPI_Wait(&request, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
-        success = false;
+      if (request != MPI_REQUEST_NULL) {
+        int result = MPI_Wait(&request, MPI_STATUS_IGNORE);
+        if (result == MPI_SUCCESS && !injected &&
+            context_.rank() == options.inject_cleanup_wait_error_rank) {
+          result = MPI_ERR_OTHER;
+          injected = true;
+          if (options.observe) {
+            ++detail::mutable_halo_test_snapshot()
+                  .cleanup_wait_errors_injected;
+          }
+        }
+        if (result != MPI_SUCCESS) {
+          mpi_error_seen = true;
+        }
       }
     }
-    return success && all_requests_null(requests_);
+    return detail::CompletionOutcome{mpi_error_seen,
+                                     all_requests_null(requests_)};
   }
 
   void unpack(FieldStorage& storage) noexcept {

@@ -721,10 +721,11 @@ void test_external_lifetimes_and_active_destructor(const MpiContext& context) {
   auto decomposition =
       StructuredDecomposition::create(context, kGlobal, kPeriodic);
   hundun::runtime::detail::reset_halo_test_observation();
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), -1, -1, true});
+  hundun::runtime::detail::HaloTestOptions lifetime_options;
+  lifetime_options.observe = true;
+  lifetime_options.inject_cleanup_wait_error_rank =
+      context.size() > 1 ? 1 : 0;
+  hundun::runtime::detail::set_halo_test_options(lifetime_options);
   std::optional<HaloExchange> active;
   active.emplace(HaloExchange::create(
       decomposition,
@@ -740,6 +741,14 @@ void test_external_lifetimes_and_active_destructor(const MpiContext& context) {
   context.barrier();
   HUNDUN_CHECK(
       hundun::runtime::detail::halo_test_snapshot().destructor_drains == 1U);
+  const auto cleanup_injections = static_cast<unsigned long long>(
+      hundun::runtime::detail::halo_test_snapshot()
+          .cleanup_wait_errors_injected);
+  unsigned long long total_cleanup_injections = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&cleanup_injections, &total_cleanup_injections, 1,
+                             MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(total_cleanup_injections == 1U);
 
   hundun::runtime::detail::set_halo_test_options({});
   FieldStorage fresh(registry, decomposition.local_extent());
@@ -901,14 +910,24 @@ void test_recoverable_failures(const MpiContext& context) {
   const int injection_rank = context.size() > 1 ? 1 : 0;
 
   initialize_field<double>(storage, id, decomposition, 1);
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), injection_rank, -1, true});
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::HaloTestOptions post_options;
+  post_options.inject_post_error_rank = injection_rank;
+  post_options.inject_cleanup_wait_error_rank = injection_rank;
+  post_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(post_options);
   const std::string post_message = expect_collective_error(
       context, [&] { halo.begin(storage, id); });
   HUNDUN_CHECK(post_message.find("post") != std::string::npos);
   check_field<double>(storage, id, decomposition, kPeriodic, 0, 1, 1);
+  const auto cleanup_injections = static_cast<unsigned long long>(
+      hundun::runtime::detail::halo_test_snapshot()
+          .cleanup_wait_errors_injected);
+  unsigned long long total_cleanup_injections = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&cleanup_injections, &total_cleanup_injections, 1,
+                             MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(total_cleanup_injections == 1U);
 
   hundun::runtime::detail::set_halo_test_options({});
   halo.exchange(storage, id);

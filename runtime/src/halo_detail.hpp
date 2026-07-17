@@ -44,7 +44,14 @@ ActiveDestructionAction active_destruction_action(
 
 enum class CompletionFailureAction { discard_and_throw, terminate_process };
 
+struct CompletionOutcome {
+  bool mpi_error_seen{};
+  bool requests_proven_null{};
+};
+
+bool completion_succeeded(CompletionOutcome outcome) noexcept;
+
 CompletionFailureAction completion_failure_action(
-    bool requests_proven_complete) noexcept;
+    CompletionOutcome outcome) noexcept;
 
 }  // namespace hundun::runtime::detail

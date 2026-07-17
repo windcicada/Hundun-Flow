@@ -18,10 +18,12 @@ using hundun::runtime::Box3;
 using hundun::runtime::Error;
 using hundun::runtime::Int3;
 using hundun::runtime::detail::ActiveDestructionAction;
+using hundun::runtime::detail::CompletionOutcome;
 using hundun::runtime::detail::CompletionFailureAction;
 using hundun::runtime::detail::active_destruction_action;
 using hundun::runtime::detail::checked_region_payload_bytes;
 using hundun::runtime::detail::completion_failure_action;
+using hundun::runtime::detail::completion_succeeded;
 using hundun::runtime::detail::halo_offset_code;
 using hundun::runtime::detail::halo_receive_tag;
 using hundun::runtime::detail::reverse_offset;
@@ -215,9 +217,17 @@ void test_cleanup_policies() {
   HUNDUN_CHECK(active_destruction_action(true, false, false) ==
                ActiveDestructionAction::terminate_process);
 
-  HUNDUN_CHECK(completion_failure_action(true) ==
+  const CompletionOutcome successful_completion{false, true};
+  HUNDUN_CHECK(completion_succeeded(successful_completion));
+
+  const CompletionOutcome failed_but_proven_complete{true, true};
+  HUNDUN_CHECK(!completion_succeeded(failed_but_proven_complete));
+  HUNDUN_CHECK(completion_failure_action(failed_but_proven_complete) ==
                CompletionFailureAction::discard_and_throw);
-  HUNDUN_CHECK(completion_failure_action(false) ==
+
+  const CompletionOutcome failed_and_unproven{true, false};
+  HUNDUN_CHECK(!completion_succeeded(failed_and_unproven));
+  HUNDUN_CHECK(completion_failure_action(failed_and_unproven) ==
                CompletionFailureAction::terminate_process);
 }
 
