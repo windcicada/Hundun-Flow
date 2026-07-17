@@ -165,11 +165,44 @@ if(HUNDUN_BUILD_TESTS)
     HUNDUN_MOCK_MISSING_ENTRY)
 
   add_executable(test_plugin_loader tests/unit/test_plugin_loader.cpp)
+  set(hundun_dlclose_wrap_supported FALSE)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+       CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 9)
+      set(hundun_dlclose_wrap_supported TRUE)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+           CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+      set(hundun_dlclose_wrap_supported TRUE)
+    endif()
+  endif()
+  if(NOT hundun_dlclose_wrap_supported)
+    message(FATAL_ERROR
+      "test_plugin_loader requires Linux and GNU 9+ or Clang 12+ linker wrapping")
+  endif()
   target_include_directories(test_plugin_loader PRIVATE
     "${PROJECT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/sdk/include")
   target_link_libraries(test_plugin_loader PRIVATE
     hundun_plugin_sdk hundun_options hundun_warnings Threads::Threads)
+  target_link_options(test_plugin_loader PRIVATE
+    "-Wl,--wrap=dlclose"
+    "-Wl,--wrap=dlerror"
+    "-Wl,--wrap=dlsym")
+  if(HUNDUN_ENABLE_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    execute_process(
+      COMMAND "${CMAKE_CXX_COMPILER}"
+              --print-file-name=libclang_rt.asan.so
+      OUTPUT_VARIABLE hundun_clang_asan_runtime
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT EXISTS "${hundun_clang_asan_runtime}")
+      message(FATAL_ERROR "Clang shared AddressSanitizer runtime was not found")
+    endif()
+    get_filename_component(hundun_clang_asan_runtime_dir
+      "${hundun_clang_asan_runtime}" DIRECTORY)
+    target_link_options(test_plugin_loader PRIVATE "-shared-libasan")
+    set_property(TARGET test_plugin_loader APPEND PROPERTY BUILD_RPATH
+      "${hundun_clang_asan_runtime_dir}")
+  endif()
   add_dependencies(test_plugin_loader
     mock_plugin
     mock_plugin_larger
