@@ -13,6 +13,8 @@ struct HaloTestOptions {
   int inject_wait_error_rank{-1};
   bool observe{};
   int inject_cleanup_wait_error_rank{-1};
+  int inject_plan_width_first_collective_error_rank{-1};
+  int inject_wire_first_collective_error_rank{-1};
 };
 
 struct HaloTestSnapshot {
@@ -29,6 +31,22 @@ struct HaloTestSnapshot {
   std::size_t wait_batch_capacity{};
   std::size_t destructor_drains{};
   std::size_t cleanup_wait_errors_injected{};
+  std::size_t post_errors_injected{};
+  std::size_t wait_errors_injected{};
+  std::size_t cancel_calls{};
+  std::size_t cancellation_status_checks{};
+  std::size_t cancelled_requests{};
+  std::size_t completed_requests{};
+  std::size_t context_generation{};
+  std::size_t context_replacements{};
+  bool last_context_replacement_distinct_congruent{};
+  std::size_t plan_width_first_collective_errors_injected{};
+  std::size_t wire_first_collective_errors_injected{};
+  std::size_t plan_width_second_collective_entries{};
+  std::size_t wire_second_collective_entries{};
+  std::size_t pack_row_copy_events{};
+  std::size_t unpack_row_copy_events{};
+  std::size_t first_send_sequence{};
 };
 
 void set_halo_test_options(HaloTestOptions options);

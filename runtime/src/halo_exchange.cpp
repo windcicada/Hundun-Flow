@@ -18,7 +18,6 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -32,6 +31,9 @@ namespace hundun::runtime {
 static_assert(std::is_trivially_copyable_v<double>);
 static_assert(std::is_trivially_copyable_v<std::int32_t>);
 static_assert(std::is_trivially_copyable_v<std::uint8_t>);
+static_assert(std::is_trivially_copyable_v<detail::HaloFailureRecord>);
+static_assert(sizeof(detail::HaloFailureRecord) ==
+              8U * sizeof(std::int64_t));
 
 namespace detail {
 namespace {
@@ -117,8 +119,7 @@ enum class HaloError : int {
   wire_layout_mismatch = 6,
   wait_target_mismatch = 7,
   preparation_failure = 8,
-  post_failure = 9,
-  completion_failure = 10
+  agreement_collective_failure = 9
 };
 
 const char* halo_error_text(HaloError error) noexcept {
@@ -141,10 +142,8 @@ const char* halo_error_text(HaloError error) noexcept {
       return "halo wait target differs from the pending field";
     case HaloError::preparation_failure:
       return "halo buffer preparation failed before communication";
-    case HaloError::post_failure:
-      return "halo nonblocking post failed and was drained";
-    case HaloError::completion_failure:
-      return "halo completion failed and received data was discarded";
+    case HaloError::agreement_collective_failure:
+      return "halo agreement collective failed before communication";
   }
   return "halo exchange failed";
 }
@@ -180,12 +179,106 @@ bool all_requests_null(const std::vector<MPI_Request>& requests) noexcept {
                      });
 }
 
+bool has_failure(detail::HaloFailureRecord record) noexcept {
+  return record.category !=
+         static_cast<std::int64_t>(detail::HaloFailureCategory::none);
+}
+
+std::int64_t diagnostic_offset(std::size_t value) noexcept {
+  const auto maximum =
+      static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+  return value > maximum ? std::numeric_limits<std::int64_t>::max()
+                         : static_cast<std::int64_t>(value);
+}
+
+detail::HaloFailureRecord make_failure_record(
+    detail::HaloFailureCategory category, int rank,
+    detail::HaloMpiOperation operation, int mpi_result, int region_index,
+    std::size_t chunk_offset, int chunk_count, int tag) noexcept {
+  return detail::HaloFailureRecord{
+      static_cast<std::int64_t>(category),
+      static_cast<std::int64_t>(rank),
+      static_cast<std::int64_t>(operation),
+      static_cast<std::int64_t>(mpi_result),
+      static_cast<std::int64_t>(region_index),
+      diagnostic_offset(chunk_offset),
+      static_cast<std::int64_t>(chunk_count),
+      static_cast<std::int64_t>(tag)};
+}
+
+bool converge_failure_record(const MpiContext& context,
+                             detail::HaloFailureRecord local,
+                             detail::HaloFailureRecord& global) noexcept {
+  const int local_failing_rank =
+      has_failure(local) ? context.rank() : context.size();
+  int failing_rank = context.size();
+  if (MPI_Allreduce(&local_failing_rank, &failing_rank, 1, MPI_INT, MPI_MIN,
+                    context.comm()) != MPI_SUCCESS) {
+    return false;
+  }
+  if (failing_rank == context.size()) {
+    global = detail::HaloFailureRecord{};
+    return true;
+  }
+  global = context.rank() == failing_rank ? local
+                                           : detail::HaloFailureRecord{};
+  if (MPI_Bcast(&global, static_cast<int>(sizeof(global)), MPI_BYTE,
+                failing_rank, context.comm()) != MPI_SUCCESS) {
+    return false;
+  }
+  global.failing_rank = static_cast<std::int64_t>(failing_rank);
+  return true;
+}
+
+const char* operation_text(std::int64_t operation) noexcept {
+  switch (static_cast<detail::HaloMpiOperation>(operation)) {
+    case detail::HaloMpiOperation::none:
+      return "none";
+    case detail::HaloMpiOperation::irecv:
+      return "MPI_Irecv";
+    case detail::HaloMpiOperation::isend:
+      return "MPI_Isend";
+    case detail::HaloMpiOperation::waitall:
+      return "MPI_Waitall";
+    case detail::HaloMpiOperation::wait:
+      return "MPI_Wait";
+  }
+  return "unknown";
+}
+
+std::string format_failure(detail::HaloFailureRecord record) {
+  const char* category =
+      record.category ==
+              static_cast<std::int64_t>(detail::HaloFailureCategory::post)
+          ? "post"
+          : "completion";
+  std::string message = "halo ";
+  message += category;
+  message += " failure: rank=";
+  message += std::to_string(record.failing_rank);
+  message += " operation=";
+  message += operation_text(record.operation);
+  message += " result=";
+  message += std::to_string(record.mpi_result);
+  message += " region=";
+  message += std::to_string(record.region_index);
+  message += " chunk_offset=";
+  message += std::to_string(record.chunk_offset);
+  message += " chunk_count=";
+  message += std::to_string(record.chunk_count);
+  message += " tag=";
+  message += std::to_string(record.tag);
+  return message;
+}
+
 }  // namespace
 
 class HaloExchange::Impl final {
  public:
   Impl(ExchangePlan plan, MpiContext context) noexcept
-      : plan_(std::move(plan)), context_(std::move(context)) {}
+      : plan_(std::move(plan)), context_(std::move(context)) {
+    observe_context_generation();
+  }
 
   ~Impl() noexcept {
     if (!active_) {
@@ -247,31 +340,41 @@ class HaloExchange::Impl final {
       throw Error(status.message);
     }
 
-    // Phase 2 is collective only after the local plan phase succeeded.
-    local_ok = true;
-    local_message.clear();
-    try {
-      int minimum_width = plan.ghost_width();
-      int maximum_width = plan.ghost_width();
-      detail::check_mpi(MPI_Allreduce(MPI_IN_PLACE, &minimum_width, 1,
-                                      MPI_INT, MPI_MIN, context.comm()),
-                        "MPI_Allreduce");
-      detail::check_mpi(MPI_Allreduce(MPI_IN_PLACE, &maximum_width, 1,
-                                      MPI_INT, MPI_MAX, context.comm()),
-                        "MPI_Allreduce");
-      if (minimum_width != maximum_width) {
-        throw Error("halo plan width differs across communicator ranks");
+    // Phase 2 has a fixed two-collective schedule. The second reduction
+    // carries any first-call failure to every rank, so no rank branches or
+    // throws between the scheduled collectives.
+    const auto width_options = detail::current_halo_test_options();
+    int minimum_width = plan.ghost_width();
+    int first_width_result = MPI_Allreduce(
+        MPI_IN_PLACE, &minimum_width, 1, MPI_INT, MPI_MIN, context.comm());
+    if (first_width_result == MPI_SUCCESS &&
+        context.rank() ==
+            width_options.inject_plan_width_first_collective_error_rank) {
+      first_width_result = MPI_ERR_OTHER;
+      if (width_options.observe) {
+        ++detail::mutable_halo_test_snapshot()
+              .plan_width_first_collective_errors_injected;
       }
-    } catch (const std::exception& error) {
-      local_ok = false;
-      local_message = error.what();
-    } catch (...) {
-      local_ok = false;
-      local_message = "unknown halo width agreement failure";
     }
-    status = collective_status(context, local_ok, local_message);
-    if (!status.ok) {
-      throw Error(status.message);
+    const std::array<int, 2> width_local{
+        plan.ghost_width(), first_width_result == MPI_SUCCESS ? 0 : 1};
+    std::array<int, 2> width_maximum{};
+    if (width_options.observe) {
+      ++detail::mutable_halo_test_snapshot()
+            .plan_width_second_collective_entries;
+    }
+    const int second_width_result = MPI_Allreduce(
+        width_local.data(), width_maximum.data(),
+        static_cast<int>(width_local.size()), MPI_INT, MPI_MAX,
+        context.comm());
+    if (second_width_result != MPI_SUCCESS) {
+      std::terminate();
+    }
+    if (width_maximum[1] != 0) {
+      throw_halo_error(HaloError::agreement_collective_failure);
+    }
+    if (minimum_width != width_maximum[0]) {
+      throw Error("halo plan width differs across communicator ranks");
     }
 
     // Phase 3 contains rank-local communicator attribute checks and converges
@@ -384,10 +487,13 @@ class HaloExchange::Impl final {
     pending_ = layout;
     pending_id_ = id;
     active_ = true;
-    const HaloError post_error = post_all();
-    const HaloError global_post_error =
-        converge_fixed_error(context_, post_error);
-    if (global_post_error != HaloError::none) {
+    const detail::HaloFailureRecord post_failure = post_all();
+    detail::HaloFailureRecord global_post_failure;
+    if (!converge_failure_record(context_, post_failure,
+                                 global_post_failure)) {
+      std::terminate();
+    }
+    if (has_failure(global_post_failure)) {
       const detail::CompletionOutcome cleanup =
           cancel_and_drain_noexcept();
       const bool local_proven = cleanup.requests_proven_null;
@@ -398,8 +504,14 @@ class HaloExchange::Impl final {
           every_proven == 0) {
         std::terminate();
       }
+      if (detail::failure_recovery_action(
+              true, cleanup.requests_proven_null, false, false) !=
+          detail::FailureRecoveryAction::replace_context) {
+        std::terminate();
+      }
+      replace_context_or_terminate();
       clear_pending();
-      throw_halo_error(global_post_error);
+      throw Error(format_failure(global_post_failure));
     }
   }
 
@@ -423,26 +535,39 @@ class HaloExchange::Impl final {
       throw_halo_error(target_error);
     }
 
-    const detail::CompletionOutcome completion =
+    CompletionAttempt completion =
         wait_all_noexcept(WaitInjection::explicit_completion);
     const bool local_completion_ok =
-        detail::completion_succeeded(completion);
-    const HaloError completion_error = converge_fixed_error(
-        context_, local_completion_ok ? HaloError::none
-                                      : HaloError::completion_failure);
-    if (completion_error != HaloError::none) {
-      const bool local_proven = completion.requests_proven_null;
+        detail::completion_succeeded(completion.outcome);
+    if (!local_completion_ok && !has_failure(completion.failure)) {
+      completion.failure = make_failure_record(
+          detail::HaloFailureCategory::completion, context_.rank(),
+          detail::HaloMpiOperation::none, MPI_ERR_OTHER, -1, 0U, 0, -1);
+    }
+    detail::HaloFailureRecord global_completion_failure;
+    if (!converge_failure_record(context_, completion.failure,
+                                 global_completion_failure)) {
+      std::terminate();
+    }
+    if (has_failure(global_completion_failure)) {
+      const bool local_proven = completion.outcome.requests_proven_null;
       const int local_value = local_proven ? 1 : 0;
       int every_proven = 0;
       if (MPI_Allreduce(&local_value, &every_proven, 1, MPI_INT, MPI_MIN,
                         context_.comm()) != MPI_SUCCESS ||
           every_proven == 0 ||
-          detail::completion_failure_action(completion) ==
+          detail::completion_failure_action(completion.outcome) ==
               detail::CompletionFailureAction::terminate_process) {
         std::terminate();
       }
+      if (detail::failure_recovery_action(
+              true, completion.outcome.requests_proven_null, false, false) !=
+          detail::FailureRecoveryAction::replace_context) {
+        std::terminate();
+      }
+      replace_context_or_terminate();
       clear_pending();
-      throw_halo_error(completion_error);
+      throw Error(format_failure(global_completion_failure));
     }
 
     unpack(storage);
@@ -470,6 +595,11 @@ class HaloExchange::Impl final {
     std::vector<std::byte> send;
     std::vector<std::byte> receive;
     std::vector<detail::CountRange> chunks;
+  };
+
+  struct CompletionAttempt {
+    detail::CompletionOutcome outcome;
+    detail::HaloFailureRecord failure;
   };
 
   HaloError inspect_layout(const FieldStorage& storage, FieldId id,
@@ -538,21 +668,46 @@ class HaloExchange::Impl final {
         static_cast<std::uint64_t>(layout.field_ghost_width),
         static_cast<std::uint64_t>(plan_.ghost_width_)};
     std::array<std::uint64_t, 5> minimum{};
-    std::array<std::uint64_t, 5> maximum{};
-    detail::check_mpi(MPI_Allreduce(local.data(), minimum.data(),
-                                    static_cast<int>(local.size()),
-                                    MPI_UINT64_T, MPI_MIN, context_.comm()),
-                      "MPI_Allreduce");
-    detail::check_mpi(MPI_Allreduce(local.data(), maximum.data(),
-                                    static_cast<int>(local.size()),
-                                    MPI_UINT64_T, MPI_MAX, context_.comm()),
-                      "MPI_Allreduce");
-    return minimum == maximum ? HaloError::none
-                              : HaloError::wire_layout_mismatch;
+    const auto options = detail::current_halo_test_options();
+    int first_result = MPI_Allreduce(
+        local.data(), minimum.data(), static_cast<int>(local.size()),
+        MPI_UINT64_T, MPI_MIN, context_.comm());
+    if (first_result == MPI_SUCCESS &&
+        context_.rank() ==
+            options.inject_wire_first_collective_error_rank) {
+      first_result = MPI_ERR_OTHER;
+      if (options.observe) {
+        ++detail::mutable_halo_test_snapshot()
+              .wire_first_collective_errors_injected;
+      }
+    }
+    std::array<std::uint64_t, 6> maximum_and_error{};
+    std::copy(local.begin(), local.end(), maximum_and_error.begin());
+    maximum_and_error.back() = first_result == MPI_SUCCESS ? 0U : 1U;
+    if (options.observe) {
+      ++detail::mutable_halo_test_snapshot().wire_second_collective_entries;
+    }
+    if (MPI_Allreduce(MPI_IN_PLACE, maximum_and_error.data(),
+                      static_cast<int>(maximum_and_error.size()),
+                      MPI_UINT64_T, MPI_MAX, context_.comm()) != MPI_SUCCESS) {
+      std::terminate();
+    }
+    if (maximum_and_error.back() != 0U) {
+      return HaloError::agreement_collective_failure;
+    }
+    return std::equal(minimum.begin(), minimum.end(),
+                      maximum_and_error.begin())
+               ? HaloError::none
+               : HaloError::wire_layout_mismatch;
   }
 
   void prepare(const FieldStorage& storage, const Layout& layout, FieldId id) {
     const auto options = detail::current_halo_test_options();
+    if (options.observe) {
+      auto& snapshot = detail::mutable_halo_test_snapshot();
+      snapshot.pack_row_copy_events = 0U;
+      snapshot.unpack_row_copy_events = 0U;
+    }
     std::size_t request_count = 0U;
     for (std::size_t index = 0; index < plan_.regions_.size(); ++index) {
       const ExchangeRegion& region = plan_.regions_[index];
@@ -588,13 +743,18 @@ class HaloExchange::Impl final {
         (*storage.entries_)[static_cast<std::size_t>(id)];
     for (std::size_t index = 0; index < plan_.regions_.size(); ++index) {
       if (!regions_[index].send.empty()) {
-        pack_region(entry, layout, plan_.regions_[index].send_box,
-                    regions_[index].send);
+        const std::size_t events = pack_region(
+            entry, layout, plan_.regions_[index].send_box,
+            regions_[index].send);
+        if (options.observe) {
+          detail::mutable_halo_test_snapshot().pack_row_copy_events += events;
+        }
       }
     }
 
     if (options.observe) {
       auto& snapshot = detail::mutable_halo_test_snapshot();
+      snapshot.context_generation = context_generation_;
       snapshot.all_receives_preceded_sends = true;
       snapshot.chunk_offsets_ordered = true;
       snapshot.receive_posts = 0U;
@@ -612,67 +772,44 @@ class HaloExchange::Impl final {
     }
   }
 
-  static std::size_t element_byte_offset(const Layout& layout, int i, int j,
-                                         int k, std::uint32_t component) {
-    // inspect_layout proves the complete padded element/byte count fits in
-    // size_t. Plan boxes are a subset of that validated coordinate domain, so
-    // these products are bounded by the already-checked total allocation.
-    const auto ghost = static_cast<std::int64_t>(layout.field_ghost_width);
-    const auto ii = static_cast<std::size_t>(static_cast<std::int64_t>(i) + ghost);
-    const auto jj = static_cast<std::size_t>(static_cast<std::int64_t>(j) + ghost);
-    const auto kk = static_cast<std::size_t>(static_cast<std::int64_t>(k) + ghost);
-    const std::size_t linear =
-        kk * layout.z_stride + jj * layout.y_stride +
-        ii * layout.x_stride + static_cast<std::size_t>(component);
-    return linear * layout.scalar_bytes;
+  static detail::HaloRowLayout row_layout(const Layout& layout) noexcept {
+    return detail::HaloRowLayout{
+        layout.field_ghost_width,
+        layout.components,
+        layout.scalar_bytes,
+        layout.x_stride,
+        layout.y_stride,
+        layout.z_stride,
+        layout.storage_bytes - layout.data_offset};
   }
 
-  static void pack_region(const Entry& entry, const Layout& layout, Box3 box,
-                          std::vector<std::byte>& buffer) noexcept {
+  static std::size_t pack_region(const Entry& entry, const Layout& layout,
+                                 Box3 box,
+                                 std::vector<std::byte>& buffer) {
     const std::byte* source = entry.bytes.data() + entry.data_offset;
-    std::size_t cursor = 0U;
-    for (int k = box.begin.z; k < box.end.z; ++k) {
-      for (int j = box.begin.y; j < box.end.y; ++j) {
-        for (int i = box.begin.x; i < box.end.x; ++i) {
-          for (std::uint32_t component = 0U; component < layout.components;
-               ++component) {
-            const std::size_t source_offset =
-                element_byte_offset(layout, i, j, k, component);
-            std::memcpy(buffer.data() + cursor, source + source_offset,
-                        layout.scalar_bytes);
-            cursor += layout.scalar_bytes;
-          }
-        }
-      }
-    }
+    return detail::pack_halo_region_rows(
+        source, row_layout(layout), box, buffer.data(), buffer.size());
   }
 
-  static void unpack_region(Entry& entry, const Layout& layout, Box3 box,
-                            const std::vector<std::byte>& buffer) noexcept {
+  static std::size_t unpack_region(
+      Entry& entry, const Layout& layout, Box3 box,
+      const std::vector<std::byte>& buffer) noexcept {
     std::byte* destination = entry.bytes.data() + entry.data_offset;
-    std::size_t cursor = 0U;
-    for (int k = box.begin.z; k < box.end.z; ++k) {
-      for (int j = box.begin.y; j < box.end.y; ++j) {
-        for (int i = box.begin.x; i < box.end.x; ++i) {
-          for (std::uint32_t component = 0U; component < layout.components;
-               ++component) {
-            const std::size_t destination_offset =
-                element_byte_offset(layout, i, j, k, component);
-            std::memcpy(destination + destination_offset,
-                        buffer.data() + cursor, layout.scalar_bytes);
-            cursor += layout.scalar_bytes;
-          }
-        }
-      }
+    try {
+      return detail::unpack_halo_region_rows(
+          destination, row_layout(layout), box, buffer.data(), buffer.size());
+    } catch (...) {
+      std::terminate();
     }
   }
 
-  HaloError post_all() noexcept {
+  detail::HaloFailureRecord post_all() noexcept {
     const auto options = detail::current_halo_test_options();
     bool injected = false;
-    bool send_seen = false;
     std::size_t request_index = 0U;
-    HaloError result = HaloError::none;
+    detail::HaloFailureRecord failure;
+    detail::PostEventState post_events;
+    post_events.expected_receive_posts = requests_.size() / 2U;
 
     for (std::size_t region_index = 0; region_index < regions_.size();
          ++region_index) {
@@ -685,20 +822,26 @@ class HaloExchange::Impl final {
             buffers.receive.data() + chunk.offset, chunk.count, MPI_BYTE,
             region.neighbor_rank, detail::halo_receive_tag(region.offset),
             context_.comm(), &requests_[request_index]);
+        detail::observe_post_event(post_events, detail::PostEvent::receive);
         if (mpi_result == MPI_SUCCESS && !injected &&
             context_.rank() == options.inject_post_error_rank) {
           mpi_result = MPI_ERR_OTHER;
           injected = true;
+          if (options.observe) {
+            ++detail::mutable_halo_test_snapshot().post_errors_injected;
+          }
         }
         if (mpi_result != MPI_SUCCESS) {
-          result = HaloError::post_failure;
+          if (!has_failure(failure)) {
+            failure = make_failure_record(
+                detail::HaloFailureCategory::post, context_.rank(),
+                detail::HaloMpiOperation::irecv, mpi_result,
+                static_cast<int>(region_index), chunk.offset, chunk.count,
+                detail::halo_receive_tag(region.offset));
+          }
         }
         if (options.observe) {
           auto& snapshot = detail::mutable_halo_test_snapshot();
-          ++snapshot.receive_posts;
-          if (send_seen) {
-            snapshot.all_receives_preceded_sends = false;
-          }
           if (!first && chunk.offset <= previous_offset) {
             snapshot.chunk_offsets_ordered = false;
           }
@@ -709,7 +852,6 @@ class HaloExchange::Impl final {
       }
     }
 
-    send_seen = true;
     for (std::size_t region_index = 0; region_index < regions_.size();
          ++region_index) {
       RegionBuffers& buffers = regions_[region_index];
@@ -721,17 +863,26 @@ class HaloExchange::Impl final {
             buffers.send.data() + chunk.offset, chunk.count, MPI_BYTE,
             region.neighbor_rank, detail::halo_offset_code(region.offset),
             context_.comm(), &requests_[request_index]);
+        detail::observe_post_event(post_events, detail::PostEvent::send);
         if (mpi_result == MPI_SUCCESS && !injected &&
             context_.rank() == options.inject_post_error_rank) {
           mpi_result = MPI_ERR_OTHER;
           injected = true;
+          if (options.observe) {
+            ++detail::mutable_halo_test_snapshot().post_errors_injected;
+          }
         }
         if (mpi_result != MPI_SUCCESS) {
-          result = HaloError::post_failure;
+          if (!has_failure(failure)) {
+            failure = make_failure_record(
+                detail::HaloFailureCategory::post, context_.rank(),
+                detail::HaloMpiOperation::isend, mpi_result,
+                static_cast<int>(region_index), chunk.offset, chunk.count,
+                detail::halo_offset_code(region.offset));
+          }
         }
         if (options.observe) {
           auto& snapshot = detail::mutable_halo_test_snapshot();
-          ++snapshot.send_posts;
           if (!first && chunk.offset <= previous_offset) {
             snapshot.chunk_offsets_ordered = false;
           }
@@ -741,17 +892,25 @@ class HaloExchange::Impl final {
         ++request_index;
       }
     }
-    static_cast<void>(send_seen);
-    return result;
+    if (options.observe) {
+      auto& snapshot = detail::mutable_halo_test_snapshot();
+      snapshot.all_receives_preceded_sends =
+          detail::post_event_sequence_valid(post_events);
+      snapshot.receive_posts = post_events.receive_posts;
+      snapshot.send_posts = post_events.send_posts;
+      snapshot.first_send_sequence = post_events.first_send_sequence;
+    }
+    return failure;
   }
 
   enum class WaitInjection { explicit_completion, cleanup };
 
-  detail::CompletionOutcome wait_all_noexcept(
+  CompletionAttempt wait_all_noexcept(
       WaitInjection injection) noexcept {
     const auto options = detail::current_halo_test_options();
     bool injected = false;
     bool mpi_error_seen = false;
+    detail::HaloFailureRecord failure;
     int injection_rank = -1;
     if (injection == WaitInjection::explicit_completion) {
       injection_rank = options.inject_wait_error_rank;
@@ -769,43 +928,98 @@ class HaloExchange::Impl final {
         if (injection == WaitInjection::cleanup && options.observe) {
           ++detail::mutable_halo_test_snapshot()
                 .cleanup_wait_errors_injected;
+        } else if (injection == WaitInjection::explicit_completion &&
+                   options.observe) {
+          ++detail::mutable_halo_test_snapshot().wait_errors_injected;
         }
       }
       if (result != MPI_SUCCESS) {
         mpi_error_seen = true;
+        if (!has_failure(failure)) {
+          failure = make_failure_record(
+              detail::HaloFailureCategory::completion, context_.rank(),
+              detail::HaloMpiOperation::waitall, result, -1, batch.offset,
+              batch.count, -1);
+        }
         for (int index = 0; index < batch.count; ++index) {
           MPI_Request& request =
               requests_[batch.offset + static_cast<std::size_t>(index)];
-          if (request != MPI_REQUEST_NULL &&
-              MPI_Wait(&request, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
-            mpi_error_seen = true;
+          if (request != MPI_REQUEST_NULL) {
+            const int wait_result = MPI_Wait(&request, MPI_STATUS_IGNORE);
+            if (wait_result != MPI_SUCCESS) {
+              mpi_error_seen = true;
+              if (!has_failure(failure)) {
+                failure = make_failure_record(
+                    detail::HaloFailureCategory::completion,
+                    context_.rank(), detail::HaloMpiOperation::wait,
+                    wait_result, -1,
+                    batch.offset + static_cast<std::size_t>(index), 1, -1);
+              }
+            }
           }
         }
       }
     }
-    return detail::CompletionOutcome{mpi_error_seen,
-                                     all_requests_null(requests_)};
+    return CompletionAttempt{
+        detail::CompletionOutcome{mpi_error_seen,
+                                  all_requests_null(requests_)},
+        failure};
   }
 
   detail::CompletionOutcome drain_requests_noexcept() noexcept {
-    return wait_all_noexcept(WaitInjection::cleanup);
+    return wait_all_noexcept(WaitInjection::cleanup).outcome;
   }
 
   detail::CompletionOutcome cancel_and_drain_noexcept() noexcept {
     const auto options = detail::current_halo_test_options();
     bool mpi_error_seen = false;
     bool injected = false;
+    bool cancellation_calls_succeeded = true;
+    cancelled_requests_ = 0U;
+    completed_requests_ = 0U;
     for (auto& request : requests_) {
       if (request != MPI_REQUEST_NULL) {
-        // A cancellation error does not by itself make the backing buffer
-        // unsafe. The subsequent successful wait and null handle are the
-        // completion proof that controls recovery.
-        static_cast<void>(MPI_Cancel(&request));
+        const int result = MPI_Cancel(&request);
+        if (options.observe) {
+          ++detail::mutable_halo_test_snapshot().cancel_calls;
+        }
+        if (result != MPI_SUCCESS) {
+          cancellation_calls_succeeded = false;
+        }
       }
+    }
+    const int local_cancellation_ok = cancellation_calls_succeeded ? 1 : 0;
+    int every_cancellation_ok = 0;
+    if (MPI_Allreduce(&local_cancellation_ok, &every_cancellation_ok, 1,
+                      MPI_INT, MPI_MIN, context_.comm()) != MPI_SUCCESS ||
+        every_cancellation_ok == 0) {
+      std::terminate();
     }
     for (auto& request : requests_) {
       if (request != MPI_REQUEST_NULL) {
-        int result = MPI_Wait(&request, MPI_STATUS_IGNORE);
+        MPI_Status status{};
+        int result = MPI_Wait(&request, &status);
+        if (result == MPI_SUCCESS) {
+          int cancelled = 0;
+          result = MPI_Test_cancelled(&status, &cancelled);
+          if (options.observe) {
+            ++detail::mutable_halo_test_snapshot()
+                  .cancellation_status_checks;
+          }
+          if (result == MPI_SUCCESS) {
+            if (cancelled != 0) {
+              ++cancelled_requests_;
+              if (options.observe) {
+                ++detail::mutable_halo_test_snapshot().cancelled_requests;
+              }
+            } else {
+              ++completed_requests_;
+              if (options.observe) {
+                ++detail::mutable_halo_test_snapshot().completed_requests;
+              }
+            }
+          }
+        }
         if (result == MPI_SUCCESS && !injected &&
             context_.rank() == options.inject_cleanup_wait_error_rank) {
           result = MPI_ERR_OTHER;
@@ -824,13 +1038,91 @@ class HaloExchange::Impl final {
                                      all_requests_null(requests_)};
   }
 
+  void observe_context_generation() const noexcept {
+    if (detail::current_halo_test_options().observe) {
+      detail::mutable_halo_test_snapshot().context_generation =
+          context_generation_;
+    }
+  }
+
+  void replace_context_or_terminate() noexcept {
+    try {
+      if (context_generation_ == std::numeric_limits<std::size_t>::max()) {
+        std::terminate();
+      }
+      MpiContext replacement = MpiContext::duplicate(context_.comm());
+
+      bool local_valid = replacement.comm() != context_.comm();
+      int comparison = MPI_UNEQUAL;
+      if (MPI_Comm_compare(context_.comm(), replacement.comm(), &comparison) !=
+              MPI_SUCCESS ||
+          comparison != MPI_CONGRUENT) {
+        local_valid = false;
+      }
+
+      void* attribute = nullptr;
+      int attribute_present = 0;
+      if (MPI_Comm_get_attr(replacement.comm(), MPI_TAG_UB, &attribute,
+                            &attribute_present) != MPI_SUCCESS) {
+        local_valid = false;
+      } else {
+        try {
+          static_cast<void>(detail::effective_halo_tag_upper_bound(
+              attribute_present != 0,
+              static_cast<const int*>(attribute)));
+        } catch (...) {
+          local_valid = false;
+        }
+      }
+
+      MPI_Errhandler handler = MPI_ERRHANDLER_NULL;
+      if (MPI_Comm_get_errhandler(replacement.comm(), &handler) !=
+          MPI_SUCCESS) {
+        local_valid = false;
+      } else {
+        if (handler != MPI_ERRORS_RETURN) {
+          local_valid = false;
+        }
+        if (handler != MPI_ERRHANDLER_NULL &&
+            MPI_Errhandler_free(&handler) != MPI_SUCCESS) {
+          local_valid = false;
+        }
+      }
+
+      const int local_value = local_valid ? 1 : 0;
+      int every_valid = 0;
+      if (MPI_Allreduce(&local_value, &every_valid, 1, MPI_INT, MPI_MIN,
+                        replacement.comm()) != MPI_SUCCESS ||
+          every_valid == 0) {
+        std::terminate();
+      }
+
+      MpiContext retired(std::move(context_));
+      context_ = std::move(replacement);
+      ++context_generation_;
+      if (detail::current_halo_test_options().observe) {
+        auto& snapshot = detail::mutable_halo_test_snapshot();
+        snapshot.context_generation = context_generation_;
+        ++snapshot.context_replacements;
+        snapshot.last_context_replacement_distinct_congruent = true;
+      }
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
   void unpack(FieldStorage& storage) noexcept {
     Entry& entry =
         (*storage.entries_)[static_cast<std::size_t>(pending_id_)];
     for (std::size_t index = 0; index < regions_.size(); ++index) {
       if (!regions_[index].receive.empty()) {
-        unpack_region(entry, pending_, plan_.regions_[index].receive_box,
-                      regions_[index].receive);
+        const std::size_t events = unpack_region(
+            entry, pending_, plan_.regions_[index].receive_box,
+            regions_[index].receive);
+        if (detail::current_halo_test_options().observe) {
+          detail::mutable_halo_test_snapshot().unpack_row_copy_events +=
+              events;
+        }
       }
     }
   }
@@ -865,6 +1157,9 @@ class HaloExchange::Impl final {
   Layout pending_{};
   FieldId pending_id_{};
   bool active_{};
+  std::size_t context_generation_{1U};
+  std::size_t cancelled_requests_{};
+  std::size_t completed_requests_{};
 };
 
 HaloExchange HaloExchange::create(

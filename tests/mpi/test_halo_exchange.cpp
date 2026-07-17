@@ -127,6 +127,39 @@ void expect_local_error(Function&& function) {
   HUNDUN_CHECK(threw);
 }
 
+enum class ExpectedHook { post, wait, cleanup_wait, plan_collective,
+                          wire_collective };
+
+unsigned long long collective_count(const MpiContext& context,
+                                    std::size_t local_count) {
+  const auto local = static_cast<unsigned long long>(local_count);
+  unsigned long long total = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &total, 1, MPI_UNSIGNED_LONG_LONG,
+                             MPI_SUM, context.comm()) == MPI_SUCCESS);
+  return total;
+}
+
+void check_only_hook_fired(
+    const MpiContext& context,
+    const hundun::runtime::detail::HaloTestSnapshot& snapshot,
+    ExpectedHook expected) {
+  HUNDUN_CHECK(collective_count(context, snapshot.post_errors_injected) ==
+               (expected == ExpectedHook::post ? 1U : 0U));
+  HUNDUN_CHECK(collective_count(context, snapshot.wait_errors_injected) ==
+               (expected == ExpectedHook::wait ? 1U : 0U));
+  HUNDUN_CHECK(
+      collective_count(context, snapshot.cleanup_wait_errors_injected) ==
+      (expected == ExpectedHook::cleanup_wait ? 1U : 0U));
+  HUNDUN_CHECK(
+      collective_count(
+          context, snapshot.plan_width_first_collective_errors_injected) ==
+      (expected == ExpectedHook::plan_collective ? 1U : 0U));
+  HUNDUN_CHECK(
+      collective_count(context,
+                       snapshot.wire_first_collective_errors_injected) ==
+      (expected == ExpectedHook::wire_collective ? 1U : 0U));
+}
+
 int wrapped(int value, int extent) {
   int result = value % extent;
   return result < 0 ? result + extent : result;
@@ -435,6 +468,19 @@ void test_plan_geometry(const MpiContext& context) {
   }
 
   if (context.size() == 1) {
+    auto exact_limit = StructuredDecomposition::create(
+        context, Int3{INT_MAX - 1, 1, 1},
+        std::array<bool, 3>{false, false, false});
+    const auto exact_limit_plan = ExchangePlan::create(
+        exact_limit, exact_limit.local_extent(), 1);
+    const auto positive_x = std::find_if(
+        exact_limit_plan.regions().begin(), exact_limit_plan.regions().end(),
+        [](const hundun::runtime::ExchangeRegion& region) {
+          return same(region.offset, Int3{1, 0, 0});
+        });
+    HUNDUN_CHECK(positive_x != exact_limit_plan.regions().end());
+    HUNDUN_CHECK(positive_x->receive_box.end.x == INT_MAX);
+
     auto huge = StructuredDecomposition::create(
         context, Int3{INT_MAX, 1, 1},
         std::array<bool, 3>{false, false, false});
@@ -566,10 +612,9 @@ void test_nonperiodic_and_zero_width(const MpiContext& context) {
   FieldStorage zero_storage(zero_registry, decomposition.local_extent());
   initialize_field<double>(zero_storage, zero_id, decomposition, 1);
   hundun::runtime::detail::reset_halo_test_observation();
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), -1, -1, true});
+  hundun::runtime::detail::HaloTestOptions zero_options;
+  zero_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(zero_options);
   auto zero = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 0));
@@ -663,10 +708,9 @@ void test_context_isolation(const MpiContext& context) {
   initialize_field<double>(second, id, decomposition, 6);
 
   hundun::runtime::detail::reset_halo_test_observation();
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), -1, -1, true});
+  hundun::runtime::detail::HaloTestOptions isolation_options;
+  isolation_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(isolation_options);
   auto first_halo = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
@@ -749,6 +793,9 @@ void test_external_lifetimes_and_active_destructor(const MpiContext& context) {
                              MPI_UNSIGNED_LONG_LONG, MPI_SUM,
                              context.comm()) == MPI_SUCCESS);
   HUNDUN_CHECK(total_cleanup_injections == 1U);
+  check_only_hook_fired(
+      context, hundun::runtime::detail::halo_test_snapshot(),
+      ExpectedHook::cleanup_wait);
 
   hundun::runtime::detail::set_halo_test_options({});
   FieldStorage fresh(registry, decomposition.local_extent());
@@ -764,6 +811,37 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
   auto decomposition =
       StructuredDecomposition::create(context, kGlobal, kPeriodic);
 
+  const int injection_rank = context.size() > 1 ? 1 : 0;
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::HaloTestOptions plan_collective_options;
+  plan_collective_options.inject_plan_width_first_collective_error_rank =
+      injection_rank;
+  plan_collective_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(plan_collective_options);
+  auto matching_plan = ExchangePlan::create(
+      decomposition, decomposition.local_extent(), 1);
+  const std::string plan_collective_message = expect_collective_error(
+      context, [&] {
+        static_cast<void>(
+            HaloExchange::create(decomposition, std::move(matching_plan)));
+      });
+  HUNDUN_CHECK(plan_collective_message.find("agreement") !=
+               std::string::npos);
+  const auto plan_collective_snapshot =
+      hundun::runtime::detail::halo_test_snapshot();
+  HUNDUN_CHECK(plan_collective_snapshot.plan_width_second_collective_entries ==
+               1U);
+  const auto local_plan_injections = static_cast<unsigned long long>(
+      plan_collective_snapshot.plan_width_first_collective_errors_injected);
+  unsigned long long total_plan_injections = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&local_plan_injections, &total_plan_injections, 1,
+                             MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(total_plan_injections == 1U);
+  check_only_hook_fired(context, plan_collective_snapshot,
+                        ExpectedHook::plan_collective);
+  hundun::runtime::detail::set_halo_test_options({});
+
   auto differing_plan = ExchangePlan::create(
       decomposition, decomposition.local_extent(),
       context.rank() == 0 ? 1 : 2);
@@ -776,16 +854,45 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
   hundun::runtime::detail::reset_halo_test_observation();
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), -1, -1, true});
+  hundun::runtime::detail::HaloTestOptions mismatch_options;
+  mismatch_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(mismatch_options);
 
   FieldRegistry normal_registry;
   const FieldId normal_id = normal_registry.declare_field(
       descriptor("normal", ScalarType::float64, 1U, 1));
   normal_registry.freeze();
   FieldStorage normal(normal_registry, decomposition.local_extent());
+  initialize_field<double>(normal, normal_id, decomposition, 1);
+
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::HaloTestOptions wire_collective_options;
+  wire_collective_options.inject_wire_first_collective_error_rank =
+      injection_rank;
+  wire_collective_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(wire_collective_options);
+  const std::string wire_collective_message = expect_collective_error(
+      context, [&] { halo.begin(normal, normal_id); });
+  HUNDUN_CHECK(wire_collective_message.find("agreement") !=
+               std::string::npos);
+  const auto wire_collective_snapshot =
+      hundun::runtime::detail::halo_test_snapshot();
+  HUNDUN_CHECK(wire_collective_snapshot.wire_second_collective_entries ==
+               1U);
+  HUNDUN_CHECK(wire_collective_snapshot.receive_posts == 0U);
+  HUNDUN_CHECK(wire_collective_snapshot.send_posts == 0U);
+  const auto local_wire_injections = static_cast<unsigned long long>(
+      wire_collective_snapshot.wire_first_collective_errors_injected);
+  unsigned long long total_wire_injections = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&local_wire_injections, &total_wire_injections, 1,
+                             MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(total_wire_injections == 1U);
+  check_only_hook_fired(context, wire_collective_snapshot,
+                        ExpectedHook::wire_collective);
+  hundun::runtime::detail::set_halo_test_options({});
+  halo.exchange(normal, normal_id);
+  check_field<double>(normal, normal_id, decomposition, kPeriodic, 1, 1, 1);
   initialize_field<double>(normal, normal_id, decomposition, 1);
 
   FieldRegistry ids_registry;
@@ -865,19 +972,36 @@ void test_small_chunks_and_reuse(const MpiContext& context) {
   initialize_field<double>(storage, wide, decomposition, 1);
   initialize_field<double>(storage, narrow, decomposition, 1);
 
-  auto halo = HaloExchange::create(
-      decomposition,
-      ExchangePlan::create(decomposition, decomposition.local_extent(), 2));
+  auto observed_plan = ExchangePlan::create(
+      decomposition, decomposition.local_extent(), 2);
+  std::size_t expected_row_copies = 0U;
+  for (const auto& region : observed_plan.regions()) {
+    if (region.neighbor_rank != MPI_PROC_NULL &&
+        region.send_box.begin.x < region.send_box.end.x) {
+      expected_row_copies +=
+          static_cast<std::size_t>(region.send_box.end.y -
+                                   region.send_box.begin.y) *
+          static_cast<std::size_t>(region.send_box.end.z -
+                                   region.send_box.begin.z);
+    }
+  }
+  auto halo = HaloExchange::create(decomposition, std::move(observed_plan));
   hundun::runtime::detail::reset_halo_test_observation();
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{7U, 5U, -1, -1, true});
+  hundun::runtime::detail::HaloTestOptions small_chunk_options;
+  small_chunk_options.chunk_limit = 7U;
+  small_chunk_options.waitall_limit = 5U;
+  small_chunk_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(small_chunk_options);
   halo.exchange(storage, wide);
   check_field<double>(storage, wide, decomposition, kPeriodic, 2, 1, 1);
   const auto first = hundun::runtime::detail::halo_test_snapshot();
   HUNDUN_CHECK(first.receive_posts > 26U);
   HUNDUN_CHECK(first.receive_posts == first.send_posts);
   HUNDUN_CHECK(first.all_receives_preceded_sends);
+  HUNDUN_CHECK(first.first_send_sequence == first.receive_posts);
   HUNDUN_CHECK(first.chunk_offsets_ordered);
+  HUNDUN_CHECK(first.pack_row_copy_events == expected_row_copies);
+  HUNDUN_CHECK(first.unpack_row_copy_events == expected_row_copies);
 
   initialize_field<double>(storage, wide, decomposition, 2);
   halo.exchange(storage, wide);
@@ -904,45 +1028,73 @@ void test_recoverable_failures(const MpiContext& context) {
       descriptor("failure", ScalarType::float64, 3U, 1));
   registry.freeze();
   FieldStorage storage(registry, decomposition.local_extent());
-  auto halo = HaloExchange::create(
-      decomposition,
-      ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
   const int injection_rank = context.size() > 1 ? 1 : 0;
 
   initialize_field<double>(storage, id, decomposition, 1);
   hundun::runtime::detail::reset_halo_test_observation();
   hundun::runtime::detail::HaloTestOptions post_options;
   post_options.inject_post_error_rank = injection_rank;
-  post_options.inject_cleanup_wait_error_rank = injection_rank;
   post_options.observe = true;
   hundun::runtime::detail::set_halo_test_options(post_options);
+  auto halo = HaloExchange::create(
+      decomposition,
+      ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
+  HUNDUN_CHECK(hundun::runtime::detail::halo_test_snapshot()
+                   .context_generation == 1U);
   const std::string post_message = expect_collective_error(
       context, [&] { halo.begin(storage, id); });
   HUNDUN_CHECK(post_message.find("post") != std::string::npos);
+  HUNDUN_CHECK(post_message.find("rank=" + std::to_string(injection_rank)) !=
+               std::string::npos);
+  HUNDUN_CHECK(post_message.find("operation=MPI_Irecv") !=
+               std::string::npos);
+  HUNDUN_CHECK(post_message.find("result=" + std::to_string(MPI_ERR_OTHER)) !=
+               std::string::npos);
+  HUNDUN_CHECK(post_message.find("region=0") != std::string::npos);
+  HUNDUN_CHECK(post_message.find("chunk_offset=0") != std::string::npos);
+  HUNDUN_CHECK(post_message.find("tag=26") != std::string::npos);
   check_field<double>(storage, id, decomposition, kPeriodic, 0, 1, 1);
-  const auto cleanup_injections = static_cast<unsigned long long>(
-      hundun::runtime::detail::halo_test_snapshot()
-          .cleanup_wait_errors_injected);
-  unsigned long long total_cleanup_injections = 0U;
-  HUNDUN_CHECK(MPI_Allreduce(&cleanup_injections, &total_cleanup_injections, 1,
-                             MPI_UNSIGNED_LONG_LONG, MPI_SUM,
-                             context.comm()) == MPI_SUCCESS);
-  HUNDUN_CHECK(total_cleanup_injections == 1U);
+  const auto post_snapshot = hundun::runtime::detail::halo_test_snapshot();
+  HUNDUN_CHECK(post_snapshot.context_generation == 2U);
+  HUNDUN_CHECK(post_snapshot.context_replacements == 1U);
+  HUNDUN_CHECK(post_snapshot.last_context_replacement_distinct_congruent);
+  HUNDUN_CHECK(post_snapshot.cancel_calls > 0U);
+  HUNDUN_CHECK(post_snapshot.cancellation_status_checks ==
+               post_snapshot.cancel_calls);
+  HUNDUN_CHECK(post_snapshot.cancelled_requests +
+                   post_snapshot.completed_requests ==
+               post_snapshot.cancellation_status_checks);
+  check_only_hook_fired(context, post_snapshot, ExpectedHook::post);
 
   hundun::runtime::detail::set_halo_test_options({});
   halo.exchange(storage, id);
   check_field<double>(storage, id, decomposition, kPeriodic, 1, 1, 1);
 
   initialize_field<double>(storage, id, decomposition, 2);
-  hundun::runtime::detail::set_halo_test_options(
-      hundun::runtime::detail::HaloTestOptions{
-          static_cast<std::size_t>(INT_MAX),
-          static_cast<std::size_t>(INT_MAX), -1, injection_rank, true});
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::HaloTestOptions wait_options;
+  wait_options.inject_wait_error_rank = injection_rank;
+  wait_options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(wait_options);
   halo.begin(storage, id);
+  HUNDUN_CHECK(hundun::runtime::detail::halo_test_snapshot()
+                   .context_generation == 2U);
   const std::string wait_message = expect_collective_error(
       context, [&] { halo.wait(storage, id); });
   HUNDUN_CHECK(wait_message.find("completion") != std::string::npos);
+  HUNDUN_CHECK(wait_message.find("rank=" + std::to_string(injection_rank)) !=
+               std::string::npos);
+  HUNDUN_CHECK(wait_message.find("operation=MPI_Waitall") !=
+               std::string::npos);
+  HUNDUN_CHECK(wait_message.find("result=" + std::to_string(MPI_ERR_OTHER)) !=
+               std::string::npos);
+  HUNDUN_CHECK(wait_message.find("chunk_offset=0") != std::string::npos);
   check_field<double>(storage, id, decomposition, kPeriodic, 0, 2, 2);
+  const auto wait_snapshot = hundun::runtime::detail::halo_test_snapshot();
+  HUNDUN_CHECK(wait_snapshot.context_generation == 3U);
+  HUNDUN_CHECK(wait_snapshot.context_replacements == 1U);
+  HUNDUN_CHECK(wait_snapshot.last_context_replacement_distinct_congruent);
+  check_only_hook_fired(context, wait_snapshot, ExpectedHook::wait);
 
   hundun::runtime::detail::set_halo_test_options({});
   halo.exchange(storage, id);
