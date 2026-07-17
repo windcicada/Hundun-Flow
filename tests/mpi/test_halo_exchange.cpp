@@ -894,6 +894,8 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
   halo.exchange(normal, normal_id);
   check_field<double>(normal, normal_id, decomposition, kPeriodic, 1, 1, 1);
   initialize_field<double>(normal, normal_id, decomposition, 1);
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::set_halo_test_options(mismatch_options);
 
   FieldRegistry ids_registry;
   const FieldId id_zero = ids_registry.declare_field(
@@ -950,6 +952,7 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
       context, [&] { halo.begin(wrong_extent, normal_id); }));
 
   const auto snapshot = hundun::runtime::detail::halo_test_snapshot();
+  HUNDUN_CHECK(snapshot.wire_second_collective_entries == 4U);
   HUNDUN_CHECK(snapshot.receive_posts == 0U);
   HUNDUN_CHECK(snapshot.send_posts == 0U);
   check_field<double>(normal, normal_id, decomposition, kPeriodic, 0, 1, 1);
