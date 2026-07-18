@@ -8,6 +8,7 @@ project_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd -P)
 cmake_command=${CMAKE_COMMAND:-cmake}
 ctest_command=${CTEST_COMMAND:-ctest}
 mpiexec_command=${MPIEXEC_COMMAND:-mpiexec}
+ldd_command=${LDD_COMMAND:-ldd}
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/hundun-stage1-acceptance.XXXXXX")
 build_dir="${work_root}/build"
 case_dir="${work_root}/case"
@@ -18,6 +19,44 @@ cleanup() {
 trap cleanup EXIT
 
 export OMPI_MCA_rmaps_base_oversubscribe=1
+
+check_normal_log() {
+  local path=$1
+  local -a lines=()
+  if ! mapfile -t lines <"${path}"; then
+    echo "unable to read normal numerical log" >&2
+    return 1
+  fi
+  if test "${#lines[@]}" -ne 5; then
+    echo "normal numerical log must contain exactly five lines" >&2
+    return 1
+  fi
+
+  local step_10='^STEP 10 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
+  local step_20='^STEP 20 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
+  local finished='^FINISHED step=20 time_s=[0-9.eE+-]+$'
+  if test "${lines[0]}" != "HUNDUN-FLOW 0.0.0-stage1"; then
+    echo "normal numerical log line 1 is not the Stage 1 banner" >&2
+    return 1
+  fi
+  if test "${lines[1]}" != \
+      "CASE name=periodic_passive_scalar ranks=2 cells=64x8x8"; then
+    echo "normal numerical log line 2 is not the canonical CASE record" >&2
+    return 1
+  fi
+  if [[ ! ${lines[2]} =~ ${step_10} ]]; then
+    echo "normal numerical log line 3 is not the STEP 10 record" >&2
+    return 1
+  fi
+  if [[ ! ${lines[3]} =~ ${step_20} ]]; then
+    echo "normal numerical log line 4 is not the STEP 20 record" >&2
+    return 1
+  fi
+  if [[ ! ${lines[4]} =~ ${finished} ]]; then
+    echo "normal numerical log line 5 is not the FINISHED record" >&2
+    return 1
+  fi
+}
 
 mkdir -p -- "${case_dir}" "${work_root}/launch-a" "${work_root}/launch-b"
 cp -- "${project_root}/cases/passive_scalar/case.json" "${case_dir}/case.json"
@@ -47,22 +86,28 @@ grep -F '"process_grid":[2,1,1]' "${work_root}/resolved-a.json" >/dev/null
 grep -F '"restart":{"read":false,"write_directory":"Restart"}' \
   "${work_root}/resolved-a.json" >/dev/null
 
+set +e
+timeout 15 "${mpiexec_command}" -n 2 sh -c \
+  'exec "$@" >/dev/full' sh "${build_dir}/hundun" \
+  "${case_dir}/case.json" --print-resolved \
+  2>"${work_root}/resolved-output-failure.log"
+resolved_output_status=$?
+set -e
+if test "${resolved_output_status}" -eq 0; then
+  echo "resolved output unexpectedly succeeded after a write failure" >&2
+  exit 1
+fi
+if test "${resolved_output_status}" -eq 124; then
+  echo "resolved output failure did not converge before timeout" >&2
+  exit 1
+fi
+grep -F 'unable to write resolved case configuration' \
+  "${work_root}/resolved-output-failure.log" >/dev/null
+
 mkdir -p -- "${case_dir}/output"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" "${case_dir}/case.json" \
   >"${case_dir}/output/run.log" 2>&1
-if test "$(grep -E -c '^HUNDUN-FLOW 0\.0\.0-stage1$' \
-    "${case_dir}/output/run.log" || true)" -ne 1; then
-  echo "normal numerical run must contain exactly one Stage 1 version banner" >&2
-  exit 1
-fi
-grep -E '^CASE name=periodic_passive_scalar ranks=2 cells=64x8x8$' \
-  "${case_dir}/output/run.log" >/dev/null
-grep -E '^STEP 10 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \
-  "${case_dir}/output/run.log" >/dev/null
-grep -E '^STEP 20 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \
-  "${case_dir}/output/run.log" >/dev/null
-grep -E '^FINISHED step=20 time_s=[0-9.eE+-]+$' \
-  "${case_dir}/output/run.log" >/dev/null
+check_normal_log "${case_dir}/output/run.log"
 
 check_checkpoint() {
   local directory=$1
@@ -128,11 +173,26 @@ fi
 "${ctest_command}" --test-dir "${build_dir}" -L provenance -j 1 \
   --output-on-failure
 
-if ldd "${build_dir}/hundun" | \
-    grep -E -i 'python|not found|coast|boffin'; then
-  echo "hundun has forbidden or missing dynamic linkage" >&2
+linkage_output="${work_root}/hundun.ldd"
+if ! "${ldd_command}" "${build_dir}/hundun" >"${linkage_output}"; then
+  echo "unable to inspect hundun dynamic linkage" >&2
   exit 1
 fi
+set +e
+grep -E -i 'python|not found|coast|boffin' "${linkage_output}" >/dev/null
+linkage_scan_status=$?
+set -e
+case "${linkage_scan_status}" in
+0)
+  echo "hundun has forbidden or missing dynamic linkage" >&2
+  exit 1
+  ;;
+1) ;;
+*)
+  echo "unable to scan hundun dynamic linkage" >&2
+  exit 1
+  ;;
+esac
 if find "${case_dir}" -type f -name '*.tmp' -print -quit | grep -q .; then
   echo "generated case tree contains a residual temporary file" >&2
   exit 1

@@ -180,9 +180,27 @@ int run_case(const hundun::application::CliOptions &options,
     return EXIT_SUCCESS;
   }
   if (options.print_resolved) {
+    bool local_ok = true;
+    std::string local_message;
     if (context.rank() == 0) {
-      std::cout << hundun::config::to_resolved_json(config) << '\n';
+      try {
+        const std::string resolved = hundun::config::to_resolved_json(config);
+        std::cout << resolved << '\n';
+        std::cout.flush();
+        if (!std::cout) {
+          local_ok = false;
+          local_message = "unable to write resolved case configuration";
+        }
+      } catch (const std::exception &error) {
+        local_ok = false;
+        local_message = exception_message_or_fallback(
+            error, "unable to serialize resolved case configuration");
+      } catch (...) {
+        local_ok = false;
+        local_message = "unable to serialize resolved case configuration";
+      }
     }
+    require_collective_success(context, local_ok, local_message);
     context.barrier();
     return EXIT_SUCCESS;
   }
