@@ -112,6 +112,12 @@ void write_vtk_rank_impl(const std::filesystem::path &output_directory,
   if (!same(extent, storage.interior_extent())) {
     throw Error("VTK storage extent does not match the mesh local extent");
   }
+  const auto values = storage.view<double>(field);
+  if (!same(values.interior_extent(), extent) ||
+      values.components() != descriptor.components ||
+      values.ghost_width() != descriptor.ghost_width) {
+    throw Error("VTK field storage layout does not match the registry");
+  }
   const int point_x = checked_point_dimension(extent.x);
   const int point_y = checked_point_dimension(extent.y);
   const int point_z = checked_point_dimension(extent.z);
@@ -152,7 +158,6 @@ void write_vtk_rank_impl(const std::filesystem::path &output_directory,
          << "CELL_DATA " << cell_count << '\n'
          << "SCALARS " << descriptor.name << " double 1\n"
          << "LOOKUP_TABLE default\n";
-  const auto values = storage.view<double>(field);
   for (int k = 0; k < extent.z; ++k) {
     for (int j = 0; j < extent.y; ++j) {
       for (int i = 0; i < extent.x; ++i) {

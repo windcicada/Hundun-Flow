@@ -325,6 +325,17 @@ void validate_rank_metadata(const detail::RestartRankMetadata &metadata,
   }
 }
 
+template <class T>
+void validate_writer_view_layout(const FieldView<const T> &view,
+                                 Int3 expected_extent,
+                                 const FieldDescriptor &descriptor) {
+  if (!same(view.interior_extent(), expected_extent) ||
+      view.components() != descriptor.components ||
+      view.ghost_width() != descriptor.ghost_width) {
+    throw Error("Restart v1 field storage layout does not match the registry");
+  }
+}
+
 std::string format_step_leaf(std::int64_t step) {
   if (step < 0) {
     throw Error("Restart v1 step must be nonnegative");
@@ -997,6 +1008,7 @@ std::vector<std::byte> encode_restart_rank(RestartRankMetadata metadata,
     encoder.append(value_count);
     if (descriptor.scalar_type == ScalarType::float64) {
       const auto view = storage.view<double>(field_id);
+      validate_writer_view_layout(view, local_extent, descriptor);
       for (int k = 0; k < local_extent.z; ++k) {
         for (int j = 0; j < local_extent.y; ++j) {
           for (int i = 0; i < local_extent.x; ++i) {
@@ -1009,6 +1021,7 @@ std::vector<std::byte> encode_restart_rank(RestartRankMetadata metadata,
       }
     } else {
       const auto view = storage.view<std::int32_t>(field_id);
+      validate_writer_view_layout(view, local_extent, descriptor);
       for (int k = 0; k < local_extent.z; ++k) {
         for (int j = 0; j < local_extent.y; ++j) {
           for (int i = 0; i < local_extent.x; ++i) {

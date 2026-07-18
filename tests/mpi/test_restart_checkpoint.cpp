@@ -208,6 +208,39 @@ private:
   }
 };
 
+enum class WriterMismatch { none, first_components, first_ghost_width };
+
+struct WriterLayout final {
+  FieldRegistry registry;
+  FieldId real{};
+  FieldId integer{};
+  FieldId transient{};
+  FieldStorage storage;
+
+  WriterLayout(Int3 extent, WriterMismatch mismatch)
+      : real(registry.declare_field(FieldDescriptor{
+            "state", "1", "checkpoint-test", FunctionSpace::cell_average,
+            ScalarType::float64,
+            mismatch == WriterMismatch::first_components ? 3U : 2U,
+            mismatch == WriterMismatch::first_ghost_width ? 2 : 1, true,
+            RestartPolicy::persistent, OutputPolicy::selected})),
+        integer(registry.declare_field(FieldDescriptor{
+            "tag", "1", "checkpoint-test", FunctionSpace::cell_average,
+            ScalarType::int32, 1U, 1, false, RestartPolicy::persistent,
+            OutputPolicy::never})),
+        transient(registry.declare_field(FieldDescriptor{
+            "scratch", "1", "checkpoint-test", FunctionSpace::cell_average,
+            ScalarType::float64, 1U, 1, false, RestartPolicy::transient,
+            OutputPolicy::never})),
+        storage(freeze(), extent) {}
+
+private:
+  FieldRegistry &freeze() {
+    registry.freeze();
+    return registry;
+  }
+};
+
 enum class DestinationMismatch { none, first_scalar_type, later_scalar_type };
 
 struct DestinationLayout final {
@@ -617,6 +650,31 @@ void test_preflight_rejection(const MpiContext &context,
   }
 }
 
+void test_writer_layout_preflight(const MpiContext &context,
+                                  const StructuredDecomposition &decomposition,
+                                  const std::filesystem::path &root) {
+  Fields checkpoint_fields(decomposition.local_extent());
+  const std::array<WriterMismatch, 2> mismatches{
+      WriterMismatch::first_components, WriterMismatch::first_ghost_width};
+  for (std::size_t index = 0; index < mismatches.size(); ++index) {
+    const WriterMismatch local_mismatch =
+        context.size() > 1 && context.rank() == 0 ? WriterMismatch::none
+                                                  : mismatches[index];
+    WriterLayout writer(decomposition.local_extent(), local_mismatch);
+    const std::int64_t step = 53 + static_cast<std::int64_t>(index);
+    const auto directory = step_directory(root, step);
+    expect_same_collective_error(context, [&] {
+      hundun::runtime::write_restart_checkpoint(
+          context, decomposition, checkpoint_fields.registry, writer.storage,
+          directory, step, static_cast<double>(step) * kTimeScale);
+    });
+    context.barrier();
+    if (context.rank() == 0) {
+      HUNDUN_CHECK(!std::filesystem::exists(directory));
+    }
+  }
+}
+
 void test_injected_failures(const MpiContext &context,
                             const StructuredDecomposition &decomposition,
                             const std::filesystem::path &root) {
@@ -831,6 +889,7 @@ void run_full(const MpiContext &context,
               const std::filesystem::path &root) {
   test_success(context, decomposition, root);
   test_preflight_rejection(context, decomposition, root);
+  test_writer_layout_preflight(context, decomposition, root);
   test_injected_failures(context, decomposition, root);
   test_transactional_failures(context, decomposition, root);
   test_incompatible_destination_preflight(context, decomposition, root);

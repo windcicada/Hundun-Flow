@@ -82,10 +82,10 @@ struct Fields final {
   FieldStorage storage;
 
   Fields(Int3 extent, std::string name, ScalarType type,
-         std::uint32_t components, OutputPolicy output)
+         std::uint32_t components, OutputPolicy output, int ghost_width = 1)
       : field(registry.declare_field(FieldDescriptor{
             std::move(name), "1", "vtk-test", FunctionSpace::cell_average, type,
-            components, 1, false, RestartPolicy::transient, output})),
+            components, ghost_width, false, RestartPolicy::transient, output})),
         storage(freeze(), extent) {}
 
 private:
@@ -221,6 +221,36 @@ void test_rejections(const MpiContext &context,
   });
 }
 
+void test_storage_layout_rejections(
+    const MpiContext &context, const StructuredDecomposition &decomposition,
+    const std::filesystem::path &root) {
+  const UniformStructuredMesh mesh(Int3{2, 2, 1}, Real3{-1.0, 2.0, 3.0},
+                                   Real3{2.0, 4.0, 5.0}, decomposition);
+  Fields valid(mesh.local_extent(), "layout", ScalarType::float64, 1U,
+               OutputPolicy::selected);
+  Fields components(mesh.local_extent(), "layout", ScalarType::float64, 2U,
+                    OutputPolicy::selected);
+  Fields ghosts(mesh.local_extent(), "layout", ScalarType::float64, 1U,
+                OutputPolicy::selected, 2);
+  Fields integer(mesh.local_extent(), "layout", ScalarType::int32, 1U,
+                 OutputPolicy::selected);
+  const auto output = root / "layout";
+  for (const FieldStorage *storage :
+       {&components.storage, &ghosts.storage, &integer.storage}) {
+    expect_error([&] {
+      hundun::runtime::write_vtk_rank(output, 19, context.rank(), mesh,
+                                      valid.registry, *storage, valid.field);
+    });
+    HUNDUN_CHECK(!std::filesystem::exists(output));
+  }
+
+  hundun::runtime::write_vtk_rank(output, 19, context.rank(), mesh,
+                                  valid.registry, valid.storage, valid.field);
+  const auto final_path = output / "scalar.step00000019.rank000000.vtk";
+  HUNDUN_CHECK(std::filesystem::is_regular_file(final_path));
+  HUNDUN_CHECK(!std::filesystem::exists(final_path.string() + ".tmp"));
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -238,6 +268,7 @@ int main(int argc, char **argv) {
       std::filesystem::remove_all(root);
       test_exact_vtk(context, decomposition, root);
       test_rejections(context, decomposition, root);
+      test_storage_layout_rejections(context, decomposition, root);
       std::filesystem::remove_all(root);
     });
   }
