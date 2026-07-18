@@ -68,6 +68,32 @@ void require_collective_success(const MpiContext &context, bool local_ok,
   }
 }
 
+template <class WriteOperation>
+void write_root_output(const MpiContext &context,
+                       std::string_view write_failure_message,
+                       std::string_view exception_fallback,
+                       WriteOperation &&write_operation) {
+  bool local_ok = true;
+  std::string local_message;
+  if (context.rank() == 0) {
+    try {
+      std::forward<WriteOperation>(write_operation)();
+      std::cout.flush();
+      if (!std::cout) {
+        local_ok = false;
+        local_message = write_failure_message;
+      }
+    } catch (const std::exception &error) {
+      local_ok = false;
+      local_message = exception_message_or_fallback(error, exception_fallback);
+    } catch (...) {
+      local_ok = false;
+      local_message = exception_fallback;
+    }
+  }
+  require_collective_success(context, local_ok, local_message);
+}
+
 std::filesystem::path case_root(const std::filesystem::path &case_path) {
   try {
     return std::filesystem::absolute(case_path)
@@ -173,34 +199,19 @@ int run_case(const hundun::application::CliOptions &options,
   hundun::runtime::require_expected_ranks(context, config.expected_ranks);
 
   if (options.validate_only) {
-    if (context.rank() == 0) {
-      std::cout << "VALID\n";
-    }
+    write_root_output(context, "unable to write validation output",
+                      "unable to write validation output",
+                      [] { std::cout << "VALID\n"; });
     context.barrier();
     return EXIT_SUCCESS;
   }
   if (options.print_resolved) {
-    bool local_ok = true;
-    std::string local_message;
-    if (context.rank() == 0) {
-      try {
-        const std::string resolved = hundun::config::to_resolved_json(config);
-        std::cout << resolved << '\n';
-        std::cout.flush();
-        if (!std::cout) {
-          local_ok = false;
-          local_message = "unable to write resolved case configuration";
-        }
-      } catch (const std::exception &error) {
-        local_ok = false;
-        local_message = exception_message_or_fallback(
-            error, "unable to serialize resolved case configuration");
-      } catch (...) {
-        local_ok = false;
-        local_message = "unable to serialize resolved case configuration";
-      }
-    }
-    require_collective_success(context, local_ok, local_message);
+    write_root_output(
+        context, "unable to write resolved case configuration",
+        "unable to serialize resolved case configuration", [&config] {
+          const std::string resolved = hundun::config::to_resolved_json(config);
+          std::cout << resolved << '\n';
+        });
     context.barrier();
     return EXIT_SUCCESS;
   }
@@ -251,12 +262,15 @@ int run_case(const hundun::application::CliOptions &options,
     throw Error("initial passive-scalar mass must be finite and nonzero");
   }
 
-  if (context.rank() == 0) {
-    std::cout << kVersion << '\n'
-              << "CASE name=" << config.case_name << " ranks=" << context.size()
-              << " cells=" << config.mesh.cells.x << 'x' << config.mesh.cells.y
-              << 'x' << config.mesh.cells.z << '\n';
-  }
+  write_root_output(context, "unable to write Stage 1 output",
+                    "unable to write Stage 1 output", [&config, &context] {
+                      std::cout << kVersion << '\n'
+                                << "CASE name=" << config.case_name
+                                << " ranks=" << context.size()
+                                << " cells=" << config.mesh.cells.x << 'x'
+                                << config.mesh.cells.y << 'x'
+                                << config.mesh.cells.z << '\n';
+                    });
 
   for (std::int64_t step = current_step + 1;
        step <= static_cast<std::int64_t>(config.time.steps); ++step) {
@@ -274,11 +288,16 @@ int run_case(const hundun::application::CliOptions &options,
       }
       write_vtk_collectively(context, output_directory, step, mesh, registry,
                              storage, scalar);
-      if (context.rank() == 0) {
-        std::cout << std::setprecision(17) << "STEP " << step
-                  << " time_s=" << current_time_s << " mass=" << mass
-                  << " relative_mass_error=" << relative_mass_error << '\n';
-      }
+      write_root_output(context, "unable to write Stage 1 output",
+                        "unable to write Stage 1 output",
+                        [step, current_time_s, mass, relative_mass_error] {
+                          std::cout
+                              << std::setprecision(17) << "STEP " << step
+                              << " time_s=" << current_time_s
+                              << " mass=" << mass
+                              << " relative_mass_error=" << relative_mass_error
+                              << '\n';
+                        });
     }
 
     if (step % static_cast<std::int64_t>(config.output.restart_interval) == 0) {
@@ -290,10 +309,13 @@ int run_case(const hundun::application::CliOptions &options,
   }
 
   context.barrier();
-  if (context.rank() == 0) {
-    std::cout << std::setprecision(17) << "FINISHED step=" << current_step
-              << " time_s=" << current_time_s << '\n';
-  }
+  write_root_output(context, "unable to write Stage 1 output",
+                    "unable to write Stage 1 output",
+                    [current_step, current_time_s] {
+                      std::cout << std::setprecision(17)
+                                << "FINISHED step=" << current_step
+                                << " time_s=" << current_time_s << '\n';
+                    });
   return EXIT_SUCCESS;
 }
 
@@ -326,6 +348,10 @@ int main(int argc, char **argv) {
     const auto options = hundun::application::parse_cli(argc, argv);
     if (options.show_version) {
       std::cout << kVersion << '\n';
+      std::cout.flush();
+      if (!std::cout) {
+        throw Error("unable to write version output");
+      }
       return EXIT_SUCCESS;
     }
     return run_with_mpi(argc, argv, options);

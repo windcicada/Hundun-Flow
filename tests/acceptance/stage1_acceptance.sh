@@ -12,6 +12,7 @@ ldd_command=${LDD_COMMAND:-ldd}
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/hundun-stage1-acceptance.XXXXXX")
 build_dir="${work_root}/build"
 case_dir="${work_root}/case"
+failure_case_dir="${work_root}/failure-case"
 
 cleanup() {
   rm -rf -- "${work_root}"
@@ -58,18 +59,94 @@ check_normal_log() {
   fi
 }
 
-mkdir -p -- "${case_dir}" "${work_root}/launch-a" "${work_root}/launch-b"
+require_bounded_diagnostic() {
+  local path=$1
+  local expected=$2
+  local matches
+  matches=$(grep -Fxc -- "${expected}" "${path}" || true)
+  if test "${matches}" -ne 1; then
+    echo "output failure did not emit the required diagnostic" >&2
+    return 1
+  fi
+  local bytes
+  bytes=$(wc -c <"${path}")
+  if test "${bytes}" -gt 256; then
+    echo "output failure diagnostic is not bounded" >&2
+    return 1
+  fi
+}
+
+require_single_newline_record() {
+  local path=$1
+  if ! test -s "${path}"; then
+    echo "resolved output record is empty" >&2
+    return 1
+  fi
+  local newline_count
+  newline_count=$(LC_ALL=C tr -cd '\n' <"${path}" | wc -c)
+  if test "${newline_count}" -ne 1; then
+    echo "resolved output must contain exactly one newline" >&2
+    return 1
+  fi
+  local final_byte
+  final_byte=$(LC_ALL=C tail -c 1 -- "${path}" | od -An -tu1 | \
+    tr -d '[:space:]')
+  if test "${final_byte}" != "10"; then
+    echo "resolved output must end with a newline" >&2
+    return 1
+  fi
+}
+
+mkdir -p -- "${case_dir}" "${failure_case_dir}" \
+  "${work_root}/launch-a" "${work_root}/launch-b"
 cp -- "${project_root}/cases/passive_scalar/case.json" "${case_dir}/case.json"
 cp -- "${project_root}/cases/passive_scalar/case_restart.json" \
   "${case_dir}/case_restart.json"
+cp -- "${project_root}/cases/passive_scalar/case.json" \
+  "${failure_case_dir}/case.json"
 
 "${cmake_command}" -S "${project_root}" -B "${build_dir}" \
   -DCMAKE_BUILD_TYPE=Release -DHUNDUN_BUILD_TESTS=ON
 "${cmake_command}" --build "${build_dir}" -j 2
 
-test "$("${build_dir}/hundun" --version)" = "HUNDUN-FLOW 0.0.0-stage1"
-test "$("${mpiexec_command}" -n 2 "${build_dir}/hundun" \
-  "${case_dir}/case.json" --validate)" = "VALID"
+"${build_dir}/hundun" --version >"${work_root}/version.txt"
+printf '%s\n' "HUNDUN-FLOW 0.0.0-stage1" \
+  >"${work_root}/version.expected"
+cmp --silent "${work_root}/version.expected" "${work_root}/version.txt"
+set +e
+"${build_dir}/hundun" --version >/dev/full \
+  2>"${work_root}/version-output-failure.log"
+version_output_status=$?
+set -e
+if test "${version_output_status}" -eq 0; then
+  echo "version output unexpectedly succeeded after a write failure" >&2
+  exit 1
+fi
+require_bounded_diagnostic "${work_root}/version-output-failure.log" \
+  "unable to write version output"
+
+"${mpiexec_command}" -n 2 "${build_dir}/hundun" \
+  "${case_dir}/case.json" --validate >"${work_root}/validation.txt"
+printf '%s\n' "VALID" >"${work_root}/validation.expected"
+cmp --silent "${work_root}/validation.expected" \
+  "${work_root}/validation.txt"
+set +e
+timeout 15 "${mpiexec_command}" -n 2 sh -c \
+  'exec "$@" >/dev/full' sh "${build_dir}/hundun" \
+  "${case_dir}/case.json" --validate \
+  2>"${work_root}/validation-output-failure.log"
+validation_output_status=$?
+set -e
+if test "${validation_output_status}" -eq 0; then
+  echo "validation output unexpectedly succeeded after a write failure" >&2
+  exit 1
+fi
+if test "${validation_output_status}" -eq 124; then
+  echo "validation output failure did not converge before timeout" >&2
+  exit 1
+fi
+require_bounded_diagnostic "${work_root}/validation-output-failure.log" \
+  "unable to write validation output"
 
 (
   cd -- "${work_root}/launch-a"
@@ -81,6 +158,8 @@ test "$("${mpiexec_command}" -n 2 "${build_dir}/hundun" \
   "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
     "${case_dir}/case.json" --print-resolved
 ) >"${work_root}/resolved-b.json"
+require_single_newline_record "${work_root}/resolved-a.json"
+require_single_newline_record "${work_root}/resolved-b.json"
 cmp --silent "${work_root}/resolved-a.json" "${work_root}/resolved-b.json"
 grep -F '"process_grid":[2,1,1]' "${work_root}/resolved-a.json" >/dev/null
 grep -F '"restart":{"read":false,"write_directory":"Restart"}' \
@@ -103,6 +182,24 @@ if test "${resolved_output_status}" -eq 124; then
 fi
 grep -F 'unable to write resolved case configuration' \
   "${work_root}/resolved-output-failure.log" >/dev/null
+
+set +e
+timeout 30 "${mpiexec_command}" -n 2 sh -c \
+  'exec "$@" >/dev/full' sh "${build_dir}/hundun" \
+  "${failure_case_dir}/case.json" \
+  2>"${work_root}/normal-output-failure.log"
+normal_output_status=$?
+set -e
+if test "${normal_output_status}" -eq 0; then
+  echo "normal output unexpectedly succeeded after a write failure" >&2
+  exit 1
+fi
+if test "${normal_output_status}" -eq 124; then
+  echo "normal output failure did not converge before timeout" >&2
+  exit 1
+fi
+require_bounded_diagnostic "${work_root}/normal-output-failure.log" \
+  "unable to write Stage 1 output"
 
 mkdir -p -- "${case_dir}/output"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" "${case_dir}/case.json" \
