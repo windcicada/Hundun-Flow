@@ -25,6 +25,7 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <new>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -377,21 +378,56 @@ template <class Function>
 void converge_phase(const MpiContext &context, std::string_view phase,
                     Function &&function) {
   bool local_ok = true;
-  std::string local_message;
+  std::string local_message_storage;
+  std::string_view local_message;
+  const auto set_rich_message = [&](std::string_view detail) noexcept {
+    try {
+      local_message_storage.reserve(phase.size() + 2U + detail.size());
+      local_message_storage.append(phase);
+      local_message_storage.append(": ");
+      local_message_storage.append(detail);
+      local_message = local_message_storage;
+    } catch (...) {
+      local_message = "Restart v1 failure diagnostic unavailable";
+    }
+  };
   try {
     function();
+  } catch (const std::bad_alloc &) {
+    local_ok = false;
+    local_message = "Restart v1 allocation failure";
   } catch (const std::exception &error) {
     local_ok = false;
-    local_message = std::string(phase) + ": " + error.what();
+    set_rich_message(error.what());
   } catch (...) {
     local_ok = false;
-    local_message = std::string(phase) + ": unknown failure";
+    set_rich_message("unknown failure");
   }
   const CollectiveStatus status =
       collective_status(context, local_ok, local_message);
   if (!status.ok) {
     throw Error(status.message);
   }
+}
+
+template <class T>
+std::size_t checked_vector_count(int ranks, std::size_t values_per_rank,
+                                 std::string_view operation) {
+  if (ranks <= 0) {
+    throw Error(std::string(operation) + " requires a positive rank count");
+  }
+  if (values_per_rank > std::numeric_limits<std::uint64_t>::max()) {
+    throw Error(std::string(operation) + " exceeds uint64 range");
+  }
+  const std::uint64_t count =
+      checked_multiply(static_cast<std::uint64_t>(ranks),
+                       static_cast<std::uint64_t>(values_per_rank), operation);
+  const std::size_t local_count = checked_size(count, operation);
+  const std::vector<T> empty;
+  if (local_count > empty.max_size()) {
+    throw Error(std::string(operation) + " exceeds vector capacity");
+  }
+  return local_count;
 }
 
 void validate_communicators(const MpiContext &context,
@@ -485,26 +521,38 @@ void require_u64_agreement(const MpiContext &context, std::uint64_t local,
   }
 }
 
-std::vector<Box3> gather_boxes(const MpiContext &context, Box3 local_box) {
+std::vector<Box3> gather_boxes(const MpiContext &context, Box3 local_box,
+                               detail::RestartFailureInjection injection = {}) {
   const std::array<int, 6> local{local_box.begin.x, local_box.begin.y,
                                  local_box.begin.z, local_box.end.x,
                                  local_box.end.y,   local_box.end.z};
-  std::vector<int> gathered(static_cast<std::size_t>(context.size()) *
-                            local.size());
+  std::vector<int> gathered;
+  converge_phase(context, "Restart v1 owned-box gather preparation", [&] {
+    if (injection.phase == detail::RestartFailurePhase::owned_box_preparation &&
+        injection.rank == context.rank()) {
+      throw std::bad_alloc{};
+    }
+    gathered.resize(checked_vector_count<int>(
+        context.size(), local.size(), "Restart v1 owned-box gather count"));
+  });
   detail::check_mpi(MPI_Allgather(local.data(), static_cast<int>(local.size()),
                                   MPI_INT, gathered.data(),
                                   static_cast<int>(local.size()), MPI_INT,
                                   context.comm()),
                     "MPI_Allgather");
   std::vector<Box3> boxes;
-  boxes.reserve(static_cast<std::size_t>(context.size()));
-  for (int process = 0; process < context.size(); ++process) {
-    const std::size_t offset = static_cast<std::size_t>(process) * local.size();
-    boxes.push_back(Box3{
-        Int3{gathered[offset], gathered[offset + 1U], gathered[offset + 2U]},
-        Int3{gathered[offset + 3U], gathered[offset + 4U],
-             gathered[offset + 5U]}});
-  }
+  converge_phase(context, "Restart v1 owned-box result preparation", [&] {
+    boxes.reserve(checked_vector_count<Box3>(
+        context.size(), 1U, "Restart v1 owned-box result count"));
+    for (int process = 0; process < context.size(); ++process) {
+      const std::size_t offset =
+          static_cast<std::size_t>(process) * local.size();
+      boxes.push_back(Box3{
+          Int3{gathered[offset], gathered[offset + 1U], gathered[offset + 2U]},
+          Int3{gathered[offset + 3U], gathered[offset + 4U],
+               gathered[offset + 5U]}});
+    }
+  });
   return boxes;
 }
 
@@ -980,12 +1028,11 @@ StagedRestartRank decode_restart_rank(const std::vector<std::byte> &bytes,
   const double time_s = decoder.read<double>("rank-file time");
   const std::uint32_t field_count =
       decoder.read<std::uint32_t>("rank-file field count");
-  const Box3 owned_box{begin,
-                       Int3{begin.x + local_extent.x, begin.y + local_extent.y,
-                            begin.z + local_extent.z}};
+  const Int3 expected_local_extent = box_extent(expected.owned_box);
   if (rank != expected.rank || ranks != expected.ranks ||
       !same(global_extent, expected.global_extent) ||
-      !same(owned_box, expected.owned_box) || step != expected.step ||
+      !same(begin, expected.owned_box.begin) ||
+      !same(local_extent, expected_local_extent) || step != expected.step ||
       double_bits(time_s) != double_bits(expected.time_s)) {
     throw Error("Restart v1 rank-file metadata does not match");
   }
@@ -1023,41 +1070,82 @@ StagedRestartRank decode_restart_rank(const std::vector<std::byte> &bytes,
   return staged;
 }
 
-void commit_restart_rank(const StagedRestartRank &staged,
-                         const FieldRegistry &registry,
-                         FieldStorage &storage) noexcept {
-  const Int3 extent = box_extent(staged.metadata.owned_box);
-  for (const StagedRestartField &staged_field : staged.fields) {
-    const FieldDescriptor &descriptor = registry.descriptor(staged_field.field);
-    std::size_t cursor = 0;
+RestartCommitPlan make_restart_commit_plan(const FieldRegistry &registry,
+                                           FieldStorage &storage,
+                                           Int3 expected_extent) {
+  validate_extent(expected_extent, "Restart v1 destination extent");
+  if (!same(storage.interior_extent(), expected_extent)) {
+    throw Error("Restart v1 storage extent does not match the decomposition");
+  }
+
+  const auto fields = persistent_fields(registry);
+  RestartCommitPlan plan{expected_extent, {}};
+  plan.fields.reserve(fields.size());
+  for (const FieldId field_id : fields) {
+    const FieldDescriptor &descriptor = registry.descriptor(field_id);
     if (descriptor.scalar_type == ScalarType::float64) {
-      auto view = storage.view<double>(staged_field.field);
+      auto view = storage.view<double>(field_id);
+      if (!same(view.interior_extent(), expected_extent) ||
+          view.components() != descriptor.components ||
+          view.ghost_width() != descriptor.ghost_width) {
+        throw Error(
+            "Restart v1 destination storage does not match the registry");
+      }
+      plan.fields.push_back(RestartCommitField{field_id, descriptor.scalar_type,
+                                               descriptor.components,
+                                               RestartCommitView{view}});
+    } else {
+      auto view = storage.view<std::int32_t>(field_id);
+      if (!same(view.interior_extent(), expected_extent) ||
+          view.components() != descriptor.components ||
+          view.ghost_width() != descriptor.ghost_width) {
+        throw Error(
+            "Restart v1 destination storage does not match the registry");
+      }
+      plan.fields.push_back(RestartCommitField{field_id, descriptor.scalar_type,
+                                               descriptor.components,
+                                               RestartCommitView{view}});
+    }
+  }
+  return plan;
+}
+
+void commit_restart_rank(const StagedRestartRank &staged,
+                         const RestartCommitPlan &plan) noexcept {
+  const Int3 extent = plan.extent;
+  for (std::size_t field_index = 0; field_index < staged.fields.size();
+       ++field_index) {
+    const StagedRestartField &staged_field = staged.fields[field_index];
+    const RestartCommitField &commit_field = plan.fields[field_index];
+    std::size_t cursor = 0;
+    if (commit_field.scalar_type == ScalarType::float64) {
+      auto *view = std::get_if<FieldView<double>>(&commit_field.view);
       for (int k = 0; k < extent.z; ++k) {
         for (int j = 0; j < extent.y; ++j) {
           for (int i = 0; i < extent.x; ++i) {
-            for (std::uint32_t component = 0; component < descriptor.components;
-                 ++component) {
+            for (std::uint32_t component = 0;
+                 component < commit_field.components; ++component) {
               double value = 0.0;
               std::memcpy(&value, staged_field.values.data() + cursor,
                           sizeof(value));
               cursor += sizeof(value);
-              view(i, j, k, static_cast<int>(component)) = value;
+              (*view)(i, j, k, static_cast<int>(component)) = value;
             }
           }
         }
       }
     } else {
-      auto view = storage.view<std::int32_t>(staged_field.field);
+      auto *view = std::get_if<FieldView<std::int32_t>>(&commit_field.view);
       for (int k = 0; k < extent.z; ++k) {
         for (int j = 0; j < extent.y; ++j) {
           for (int i = 0; i < extent.x; ++i) {
-            for (std::uint32_t component = 0; component < descriptor.components;
-                 ++component) {
+            for (std::uint32_t component = 0;
+                 component < commit_field.components; ++component) {
               std::int32_t value = 0;
               std::memcpy(&value, staged_field.values.data() + cursor,
                           sizeof(value));
               cursor += sizeof(value);
-              view(i, j, k, static_cast<int>(component)) = value;
+              (*view)(i, j, k, static_cast<int>(component)) = value;
             }
           }
         }
@@ -1083,7 +1171,8 @@ void write_restart_checkpoint_with_failure(
   require_path_agreement(context, path_text);
   require_metadata_agreement(context, decomposition, step, time_s,
                              schema_fingerprint);
-  const auto boxes = gather_boxes(context, decomposition.owned_box());
+  const auto boxes =
+      gather_boxes(context, decomposition.owned_box(), injection);
   converge_phase(context, "Restart v1 owned-box validation", [&] {
     validate_complete_boxes(boxes, decomposition.global_extent());
   });
@@ -1121,12 +1210,21 @@ void write_restart_checkpoint_with_failure(
       crc64_ecma(rank_bytes.data(), rank_bytes.size())};
   std::vector<int> gathered_records;
   std::vector<std::uint64_t> gathered_integrity;
-  if (context.rank() == 0) {
-    gathered_records.resize(static_cast<std::size_t>(context.size()) *
-                            local_record.size());
-    gathered_integrity.resize(static_cast<std::size_t>(context.size()) *
-                              local_integrity.size());
-  }
+  converge_phase(context, "Restart v1 record-gather preparation", [&] {
+    if (injection.phase == RestartFailurePhase::record_gather_preparation &&
+        injection.rank == context.rank()) {
+      throw std::bad_alloc{};
+    }
+    const std::size_t record_count = checked_vector_count<int>(
+        context.size(), local_record.size(), "Restart v1 record-gather count");
+    const std::size_t integrity_count = checked_vector_count<std::uint64_t>(
+        context.size(), local_integrity.size(),
+        "Restart v1 integrity-gather count");
+    if (context.rank() == 0) {
+      gathered_records.resize(record_count);
+      gathered_integrity.resize(integrity_count);
+    }
+  });
   detail::check_mpi(
       MPI_Gather(
           local_record.data(), static_cast<int>(local_record.size()), MPI_INT,
@@ -1219,6 +1317,7 @@ read_restart_checkpoint(const MpiContext &context,
   std::string path_text;
   std::int64_t path_step = 0;
   std::uint64_t schema_fingerprint = 0;
+  detail::RestartCommitPlan commit_plan{};
   converge_phase(context, "Restart v1 read preflight", [&] {
     validate_communicators(context, decomposition);
     path_step = parse_step_leaf(step_directory);
@@ -1227,9 +1326,8 @@ read_restart_checkpoint(const MpiContext &context,
       throw Error("Restart v1 step directory must not be empty");
     }
     schema_fingerprint = detail::restart_schema_fingerprint(registry);
-    if (!same(storage.interior_extent(), decomposition.local_extent())) {
-      throw Error("Restart v1 storage extent does not match the decomposition");
-    }
+    commit_plan = detail::make_restart_commit_plan(
+        registry, storage, decomposition.local_extent());
   });
   require_path_agreement(context, path_text);
   require_metadata_agreement(context, decomposition, path_step, 0.0,
@@ -1301,7 +1399,7 @@ read_restart_checkpoint(const MpiContext &context,
     staged = detail::decode_restart_rank(rank_bytes, expected, registry);
   });
 
-  detail::commit_restart_rank(staged, registry, storage);
+  detail::commit_restart_rank(staged, commit_plan);
   return RestartMetadata{manifest.step, manifest.time_s};
 }
 

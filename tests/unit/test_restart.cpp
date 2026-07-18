@@ -194,8 +194,9 @@ void test_exact_bytes_and_round_trip() {
 
   const auto staged = hundun::runtime::detail::decode_restart_rank(
       bytes, metadata(), destination.registry);
-  hundun::runtime::detail::commit_restart_rank(staged, destination.registry,
-                                               destination.storage);
+  const auto commit_plan = hundun::runtime::detail::make_restart_commit_plan(
+      destination.registry, destination.storage, kExtent);
+  hundun::runtime::detail::commit_restart_rank(staged, commit_plan);
   std::int32_t ordinal = 0;
   for (int k = 0; k < kExtent.z; ++k) {
     for (int j = 0; j < kExtent.y; ++j) {
@@ -243,6 +244,16 @@ void test_prefix_corruption() {
                                load_native<std::int32_t>(bytes, offset) + 1);
     reject(bytes);
   }
+  bytes = clean;
+  store_native<std::int32_t>(bytes, 36U,
+                             std::numeric_limits<std::int32_t>::max());
+  store_native<std::int32_t>(bytes, 48U, 1);
+  reject(bytes);
+  bytes = clean;
+  store_native<std::int32_t>(bytes, 36U,
+                             std::numeric_limits<std::int32_t>::min());
+  store_native<std::int32_t>(bytes, 48U, -1);
+  reject(bytes);
   bytes = clean;
   store_native<std::int64_t>(bytes, 60U, kStep + 1);
   reject(bytes);

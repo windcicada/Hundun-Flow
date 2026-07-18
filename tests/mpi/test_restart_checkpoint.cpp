@@ -208,6 +208,153 @@ private:
   }
 };
 
+enum class DestinationMismatch { none, first_scalar_type, later_scalar_type };
+
+struct DestinationLayout final {
+  DestinationMismatch mismatch;
+  FieldRegistry registry;
+  FieldId real{};
+  FieldId integer{};
+  FieldId transient{};
+  FieldStorage storage;
+
+  DestinationLayout(Int3 extent, DestinationMismatch mismatch_value)
+      : mismatch(mismatch_value),
+        real(registry.declare_field(FieldDescriptor{
+            "state", "1", "checkpoint-test", FunctionSpace::cell_average,
+            mismatch == DestinationMismatch::first_scalar_type
+                ? ScalarType::int32
+                : ScalarType::float64,
+            2U, 1, true, RestartPolicy::persistent, OutputPolicy::selected})),
+        integer(registry.declare_field(FieldDescriptor{
+            "tag", "1", "checkpoint-test", FunctionSpace::cell_average,
+            mismatch == DestinationMismatch::later_scalar_type
+                ? ScalarType::float64
+                : ScalarType::int32,
+            1U, 1, false, RestartPolicy::persistent, OutputPolicy::never})),
+        transient(registry.declare_field(FieldDescriptor{
+            "scratch", "1", "checkpoint-test", FunctionSpace::cell_average,
+            ScalarType::float64, 1U, 1, false, RestartPolicy::transient,
+            OutputPolicy::never})),
+        storage(freeze(), extent) {}
+
+private:
+  FieldRegistry &freeze() {
+    registry.freeze();
+    return registry;
+  }
+};
+
+void fill_destination_sentinels(DestinationLayout &destination) {
+  const Int3 extent = destination.storage.interior_extent();
+  if (destination.mismatch == DestinationMismatch::first_scalar_type) {
+    auto real = destination.storage.view<std::int32_t>(destination.real);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          real(i, j, k, 0) = 811;
+          real(i, j, k, 1) = 812;
+        }
+      }
+    }
+  } else {
+    auto real = destination.storage.view<double>(destination.real);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          real(i, j, k, 0) = 811.0;
+          real(i, j, k, 1) = 812.0;
+        }
+      }
+    }
+  }
+
+  if (destination.mismatch == DestinationMismatch::later_scalar_type) {
+    auto integer = destination.storage.view<double>(destination.integer);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          integer(i, j, k, 0) = 821.0;
+        }
+      }
+    }
+  } else {
+    auto integer = destination.storage.view<std::int32_t>(destination.integer);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          integer(i, j, k, 0) = 821;
+        }
+      }
+    }
+  }
+
+  auto transient = destination.storage.view<double>(destination.transient);
+  for (int k = -1; k <= extent.z; ++k) {
+    for (int j = -1; j <= extent.y; ++j) {
+      for (int i = -1; i <= extent.x; ++i) {
+        transient(i, j, k, 0) = 831.0;
+      }
+    }
+  }
+}
+
+void verify_destination_sentinels(const DestinationLayout &destination) {
+  const Int3 extent = destination.storage.interior_extent();
+  if (destination.mismatch == DestinationMismatch::first_scalar_type) {
+    const auto real = destination.storage.view<std::int32_t>(destination.real);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          HUNDUN_CHECK(real(i, j, k, 0) == 811);
+          HUNDUN_CHECK(real(i, j, k, 1) == 812);
+        }
+      }
+    }
+  } else {
+    const auto real = destination.storage.view<double>(destination.real);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          HUNDUN_CHECK(real(i, j, k, 0) == 811.0);
+          HUNDUN_CHECK(real(i, j, k, 1) == 812.0);
+        }
+      }
+    }
+  }
+
+  if (destination.mismatch == DestinationMismatch::later_scalar_type) {
+    const auto integer = destination.storage.view<double>(destination.integer);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          HUNDUN_CHECK(integer(i, j, k, 0) == 821.0);
+        }
+      }
+    }
+  } else {
+    const auto integer =
+        destination.storage.view<std::int32_t>(destination.integer);
+    for (int k = -1; k <= extent.z; ++k) {
+      for (int j = -1; j <= extent.y; ++j) {
+        for (int i = -1; i <= extent.x; ++i) {
+          HUNDUN_CHECK(integer(i, j, k, 0) == 821);
+        }
+      }
+    }
+  }
+
+  const auto transient =
+      destination.storage.view<double>(destination.transient);
+  for (int k = -1; k <= extent.z; ++k) {
+    for (int j = -1; j <= extent.y; ++j) {
+      for (int i = -1; i <= extent.x; ++i) {
+        HUNDUN_CHECK(transient(i, j, k, 0) == 831.0);
+      }
+    }
+  }
+}
+
 void fill_source(Fields &fields, int rank) {
   const Int3 extent = fields.storage.interior_extent();
   auto real = fields.storage.view<double>(fields.real);
@@ -475,9 +622,13 @@ void test_injected_failures(const MpiContext &context,
                             const std::filesystem::path &root) {
   Fields fields(decomposition.local_extent());
   fill_source(fields, context.rank());
-  const std::array<RestartFailureInjection, 3> injections{
+  const std::array<RestartFailureInjection, 5> injections{
+      RestartFailureInjection{RestartFailurePhase::owned_box_preparation,
+                              context.size() > 1 ? 1 : 0},
       RestartFailureInjection{RestartFailurePhase::rank_file,
                               context.size() > 1 ? 1 : 0},
+      RestartFailureInjection{RestartFailurePhase::record_gather_preparation,
+                              0},
       RestartFailureInjection{RestartFailurePhase::manifest, 0},
       RestartFailureInjection{RestartFailurePhase::marker, 0}};
   for (std::size_t index = 0; index < injections.size(); ++index) {
@@ -490,8 +641,20 @@ void test_injected_failures(const MpiContext &context,
     });
     context.barrier();
     if (context.rank() == 0) {
-      HUNDUN_CHECK(std::filesystem::exists(directory));
-      HUNDUN_CHECK(!std::filesystem::exists(directory / "COMPLETED"));
+      if (injections[index].phase ==
+          RestartFailurePhase::owned_box_preparation) {
+        HUNDUN_CHECK(!std::filesystem::exists(directory));
+      } else {
+        HUNDUN_CHECK(std::filesystem::exists(directory));
+        HUNDUN_CHECK(!std::filesystem::exists(directory / "COMPLETED"));
+      }
+      if (injections[index].phase ==
+          RestartFailurePhase::record_gather_preparation) {
+        for (int rank = 0; rank < context.size(); ++rank) {
+          HUNDUN_CHECK(
+              std::filesystem::exists(directory / rank_filename(rank)));
+        }
+      }
     }
   }
 }
@@ -629,6 +792,31 @@ void test_transactional_failures(const MpiContext &context,
       });
 }
 
+void test_incompatible_destination_preflight(
+    const MpiContext &context, const StructuredDecomposition &decomposition,
+    const std::filesystem::path &root) {
+  Fields source(decomposition.local_extent());
+  fill_source(source, context.rank());
+  const auto directory = step_directory(root, 52);
+  hundun::runtime::write_restart_checkpoint(context, decomposition,
+                                            source.registry, source.storage,
+                                            directory, 52, 52.0 * kTimeScale);
+
+  const DestinationMismatch mismatch =
+      context.size() == 1
+          ? DestinationMismatch::first_scalar_type
+          : (context.rank() == 0 ? DestinationMismatch::none
+                                 : DestinationMismatch::later_scalar_type);
+  DestinationLayout destination(decomposition.local_extent(), mismatch);
+  fill_destination_sentinels(destination);
+  expect_same_collective_error(context, [&] {
+    static_cast<void>(hundun::runtime::read_restart_checkpoint(
+        context, decomposition, source.registry, destination.storage,
+        directory));
+  });
+  verify_destination_sentinels(destination);
+}
+
 void run_full(const MpiContext &context,
               const StructuredDecomposition &decomposition,
               const std::filesystem::path &root) {
@@ -636,6 +824,7 @@ void run_full(const MpiContext &context,
   test_preflight_rejection(context, decomposition, root);
   test_injected_failures(context, decomposition, root);
   test_transactional_failures(context, decomposition, root);
+  test_incompatible_destination_preflight(context, decomposition, root);
 }
 
 void run_failure_repeat(const MpiContext &context,
