@@ -34,6 +34,20 @@ set(source_vendor_configure_root "${fixture_root}/source-vendor-configure")
 set(source_vendor_conditional_root "${fixture_root}/source-vendor-conditional")
 set(source_vendor_path_retrieval_root
   "${fixture_root}/source-vendor-path-retrieval")
+set(source_vendor_quoted_path_retrieval_root
+  "${fixture_root}/source-vendor-quoted-path-retrieval")
+set(source_vendor_quoted_action_retrieval_root
+  "${fixture_root}/source-vendor-quoted-action-retrieval")
+set(source_vendor_quoted_bare_retrieval_root
+  "${fixture_root}/source-vendor-quoted-bare-retrieval")
+set(source_cmake_message_prose_root
+  "${fixture_root}/source-cmake-message-prose")
+set(source_yaml_notes_prose_root
+  "${fixture_root}/source-yaml-notes-prose")
+set(source_yaml_inline_run_root
+  "${fixture_root}/source-yaml-inline-run")
+set(source_yaml_block_run_root
+  "${fixture_root}/source-yaml-block-run")
 set(source_missing_root "${fixture_root}/source-missing")
 
 file(REMOVE_RECURSE "${fixture_root}")
@@ -72,7 +86,14 @@ file(MAKE_DIRECTORY
   "${source_make_control_root}/control"
   "${source_vendor_configure_root}/third_party/remote"
   "${source_vendor_conditional_root}/third_party/remote"
-  "${source_vendor_path_retrieval_root}/third_party/remote")
+  "${source_vendor_path_retrieval_root}/third_party/remote"
+  "${source_vendor_quoted_path_retrieval_root}/third_party/remote"
+  "${source_vendor_quoted_action_retrieval_root}/third_party/remote"
+  "${source_vendor_quoted_bare_retrieval_root}/third_party/remote"
+  "${source_cmake_message_prose_root}/third_party/remote"
+  "${source_yaml_notes_prose_root}/third_party/remote"
+  "${source_yaml_inline_run_root}/third_party/remote"
+  "${source_yaml_block_run_root}/third_party/remote")
 file(WRITE "${source_clean_root}/CMakeLists.txt"
   "cmake_minimum_required(VERSION 3.21)\n"
   "project(CleanPublicTree LANGUAGES CXX)\n")
@@ -130,6 +151,38 @@ file(WRITE
   "${source_vendor_path_retrieval_root}/third_party/remote/dependency.cmake"
   "execute_process ( COMMAND /usr/bin/${command_line_retrieval_tool} "
   "${command_line_retrieval_action} https://invalid.example/source.git )\n")
+file(WRITE
+  "${source_vendor_quoted_path_retrieval_root}/third_party/remote/dependency.cmake"
+  "execute_process ( COMMAND \"/usr/bin/${command_line_retrieval_tool}\" "
+  "${command_line_retrieval_action} https://invalid.example/source.git )\n")
+file(WRITE
+  "${source_vendor_quoted_action_retrieval_root}/third_party/remote/dependency.cmake"
+  "execute_process ( COMMAND /usr/bin/${command_line_retrieval_tool} "
+  "\"${command_line_retrieval_action}\" https://invalid.example/source.git )\n")
+file(WRITE
+  "${source_vendor_quoted_bare_retrieval_root}/third_party/remote/dependency.cmake"
+  "execute_process ( COMMAND \"${command_line_retrieval_tool}\" "
+  "\"${command_line_retrieval_action}\" https://invalid.example/source.git )\n")
+file(WRITE
+  "${source_cmake_message_prose_root}/third_party/remote/dependency.cmake"
+  "message(STATUS\n"
+  "  \"The disallowed example COMMAND /usr/bin/${command_line_retrieval_tool} "
+  "${command_line_retrieval_action} should stay disabled\")\n")
+file(WRITE
+  "${source_yaml_notes_prose_root}/third_party/remote/notes.yml"
+  "notes:\n"
+  "  - if ${package_tool_a} is unavailable, explain the offline policy\n")
+file(WRITE
+  "${source_yaml_inline_run_root}/third_party/remote/build.yml"
+  "steps:\n"
+  "  - run: ${package_tool_a} install local-package\n")
+file(WRITE
+  "${source_yaml_block_run_root}/third_party/remote/build.yml"
+  "steps:\n"
+  "  - run: |\n"
+  "      if ${package_tool_a} install local-package; then\n"
+  "        exit 1\n"
+  "      fi\n")
 
 function(hundun_verify_negative child_case expected_relative_path
          expected_message expected_token)
@@ -240,6 +293,26 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_conditional")
   hundun_assert_public_dependency_policy("${source_vendor_conditional_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_path_retrieval")
   hundun_assert_public_dependency_policy("${source_vendor_path_retrieval_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_vendor_quoted_path_retrieval")
+  hundun_assert_public_dependency_policy(
+    "${source_vendor_quoted_path_retrieval_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_vendor_quoted_action_retrieval")
+  hundun_assert_public_dependency_policy(
+    "${source_vendor_quoted_action_retrieval_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_vendor_quoted_bare_retrieval")
+  hundun_assert_public_dependency_policy(
+    "${source_vendor_quoted_bare_retrieval_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_cmake_message_prose")
+  hundun_assert_public_dependency_policy("${source_cmake_message_prose_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_notes_prose")
+  hundun_assert_public_dependency_policy("${source_yaml_notes_prose_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_inline_run")
+  hundun_assert_public_dependency_policy("${source_yaml_inline_run_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_block_run")
+  hundun_assert_public_dependency_policy("${source_yaml_block_run_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_missing")
   hundun_assert_public_dependency_policy("${source_missing_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_python_file")
@@ -313,6 +386,36 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_path_retrieval")
     source_vendor_path_retrieval
     "source-vendor-path-retrieval/third_party/remote/dependency.cmake"
     "Forbidden command-line source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "verify_source_vendor_quoted_path_retrieval")
+  hundun_verify_source_policy_negative(
+    source_vendor_quoted_path_retrieval
+    "source-vendor-quoted-path-retrieval/third_party/remote/dependency.cmake"
+    "Forbidden command-line source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "verify_source_vendor_quoted_action_retrieval")
+  hundun_verify_source_policy_negative(
+    source_vendor_quoted_action_retrieval
+    "source-vendor-quoted-action-retrieval/third_party/remote/dependency.cmake"
+    "Forbidden command-line source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "verify_source_vendor_quoted_bare_retrieval")
+  hundun_verify_source_policy_negative(
+    source_vendor_quoted_bare_retrieval
+    "source-vendor-quoted-bare-retrieval/third_party/remote/dependency.cmake"
+    "Forbidden command-line source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_yaml_inline_run")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_yaml_inline_run
+    "source-yaml-inline-run/third_party/remote/build.yml"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_yaml_block_run")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_yaml_block_run
+    "source-yaml-block-run/third_party/remote/build.yml"
+    "Forbidden direct package-manager command '${expected_tool}'")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_missing")
   hundun_verify_source_policy_negative(
     source_missing "source-missing"

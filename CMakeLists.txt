@@ -582,7 +582,24 @@ if(HUNDUN_BUILD_TESTS)
     "${source_policy_script_runtime}_codegen"
     fetch external download missing tool_a tool_a3 tool_b vendor_control
     make_control vendor_configure vendor_conditional vendor_path_retrieval)
-  set(source_policy_tests source_policy_clean)
+  list(APPEND source_policy_cases
+    vendor_quoted_path_retrieval
+    vendor_quoted_action_retrieval
+    vendor_quoted_bare_retrieval
+    yaml_inline_run
+    yaml_block_run)
+  add_test(NAME source_policy_cmake_message_prose
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=source_cmake_message_prose
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME source_policy_yaml_notes_prose
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=source_yaml_notes_prose
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  set(source_policy_tests
+    source_policy_clean
+    source_policy_cmake_message_prose
+    source_policy_yaml_notes_prose)
   foreach(source_policy_case IN LISTS source_policy_cases)
     add_test(NAME "source_policy_${source_policy_case}"
       COMMAND "${CMAKE_COMMAND}"

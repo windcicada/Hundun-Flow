@@ -1,5 +1,173 @@
 # SPDX-License-Identifier: Apache-2.0
 
+function(_hundun_collect_cmake_command_views candidate_text
+         syntax_output execution_output)
+  set(syntax_text "")
+  set(execution_text "")
+  set(execution_commands
+    execute_process add_custom_command add_custom_target)
+  set(pending_command "")
+  set(current_command "")
+  set(current_tokens "")
+  set(current_token "")
+  set(parenthesis_depth 0)
+  set(in_comment FALSE)
+  set(in_quote FALSE)
+  set(quote_escape FALSE)
+
+  string(LENGTH "${candidate_text}" candidate_length)
+  set(candidate_index 0)
+  while(candidate_index LESS candidate_length)
+    string(SUBSTRING "${candidate_text}" ${candidate_index} 1 character)
+    math(EXPR candidate_index "${candidate_index} + 1")
+
+    if(in_comment)
+      if(character STREQUAL "\n")
+        set(in_comment FALSE)
+      endif()
+      continue()
+    endif()
+
+    if(parenthesis_depth EQUAL 0)
+      if(character STREQUAL "#")
+        set(pending_command "")
+        set(in_comment TRUE)
+      elseif(character MATCHES "[a-z0-9_]")
+        string(APPEND pending_command "${character}")
+      elseif(character MATCHES "[ \t\r\n]")
+        # Whitespace between a command name and its opening parenthesis is valid.
+      elseif(character MATCHES "^[(]$")
+        if(NOT pending_command STREQUAL "")
+          set(current_command "${pending_command}")
+          set(pending_command "")
+          set(current_tokens "")
+          set(current_token "")
+          set(parenthesis_depth 1)
+        endif()
+      else()
+        set(pending_command "")
+      endif()
+      continue()
+    endif()
+
+    if(in_quote)
+      if(quote_escape)
+        if(character MATCHES "[ \t\r\n;]")
+          string(APPEND current_token "~")
+        else()
+          string(APPEND current_token "${character}")
+        endif()
+        set(quote_escape FALSE)
+      elseif(character STREQUAL "\\")
+        set(quote_escape TRUE)
+      elseif(character STREQUAL "\"")
+        set(in_quote FALSE)
+      elseif(character MATCHES "[ \t\r\n;]")
+        string(APPEND current_token "~")
+      else()
+        string(APPEND current_token "${character}")
+      endif()
+      continue()
+    endif()
+
+    if(character STREQUAL "#")
+      if(NOT current_token STREQUAL "")
+        list(APPEND current_tokens "${current_token}")
+        set(current_token "")
+      endif()
+      set(in_comment TRUE)
+    elseif(character STREQUAL "\"")
+      set(in_quote TRUE)
+    elseif(character MATCHES "[ \t\r\n]")
+      if(NOT current_token STREQUAL "")
+        list(APPEND current_tokens "${current_token}")
+        set(current_token "")
+      endif()
+    elseif(character MATCHES "^[(]$")
+      if(NOT current_token STREQUAL "")
+        list(APPEND current_tokens "${current_token}")
+        set(current_token "")
+      endif()
+      math(EXPR parenthesis_depth "${parenthesis_depth} + 1")
+    elseif(character MATCHES "^[)]$")
+      if(NOT current_token STREQUAL "")
+        list(APPEND current_tokens "${current_token}")
+        set(current_token "")
+      endif()
+      math(EXPR parenthesis_depth "${parenthesis_depth} - 1")
+      if(parenthesis_depth EQUAL 0)
+        string(JOIN " " command_arguments ${current_tokens})
+        set(command_record "${current_command}")
+        if(NOT command_arguments STREQUAL "")
+          string(APPEND command_record " ${command_arguments}")
+        endif()
+        string(APPEND syntax_text ";${command_record}")
+        list(FIND execution_commands "${current_command}"
+          execution_command_index)
+        if(NOT execution_command_index EQUAL -1)
+          string(APPEND execution_text ";${command_record}")
+        endif()
+        set(current_command "")
+        set(current_tokens "")
+      endif()
+    elseif(character STREQUAL ";")
+      string(APPEND current_token "~")
+    else()
+      string(APPEND current_token "${character}")
+    endif()
+  endwhile()
+
+  set(${syntax_output} "${syntax_text}" PARENT_SCOPE)
+  set(${execution_output} "${execution_text}" PARENT_SCOPE)
+endfunction()
+
+function(_hundun_collect_yaml_run_view candidate_text output_variable)
+  string(REPLACE "\r\n" "\n" yaml_text "${candidate_text}")
+  string(REPLACE "\r" "\n" yaml_text "${yaml_text}")
+  string(REPLACE ";" "\\;" yaml_lines "${yaml_text}")
+  string(REPLACE "\n" ";" yaml_lines "${yaml_lines}")
+  set(run_text "")
+  set(in_run_block FALSE)
+  set(run_block_indent 0)
+
+  foreach(yaml_line IN LISTS yaml_lines)
+    string(LENGTH "${yaml_line}" yaml_line_length)
+    string(REGEX REPLACE "^[ \t]+" "" yaml_line_without_indent
+      "${yaml_line}")
+    string(LENGTH "${yaml_line_without_indent}" yaml_content_length)
+    math(EXPR yaml_indent_length
+      "${yaml_line_length} - ${yaml_content_length}")
+    string(STRIP "${yaml_line}" yaml_line_stripped)
+    set(check_run_key TRUE)
+
+    if(in_run_block)
+      if(yaml_line_stripped STREQUAL "")
+        set(check_run_key FALSE)
+      elseif(yaml_indent_length GREATER run_block_indent)
+        string(REGEX REPLACE "^[ \t]+" "" run_line "${yaml_line}")
+        string(APPEND run_text ";${run_line}")
+        set(check_run_key FALSE)
+      else()
+        set(in_run_block FALSE)
+      endif()
+    endif()
+
+    if(check_run_key AND yaml_line MATCHES
+       "^([ \t]*)(-[ \t]+)?run:[ \t]*(.*)$")
+      set(run_key_prefix "${CMAKE_MATCH_1}${CMAKE_MATCH_2}")
+      string(LENGTH "${run_key_prefix}" run_block_indent)
+      string(STRIP "${CMAKE_MATCH_3}" run_value)
+      if(run_value MATCHES "^[|>][-+]?$")
+        set(in_run_block TRUE)
+      elseif(NOT run_value STREQUAL "")
+        string(APPEND run_text ";${run_value}")
+      endif()
+    endif()
+  endforeach()
+
+  set(${output_variable} "${run_text}" PARENT_SCOPE)
+endfunction()
+
 function(hundun_assert_clean_tree root)
   file(GLOB_RECURSE forbidden_fortran
     "${root}/*.f" "${root}/*.F" "${root}/*.for"
@@ -113,17 +281,37 @@ function(hundun_assert_public_dependency_policy root)
       endif()
     endif()
 
+    set(is_cmake_control FALSE)
+    set(is_shell_control FALSE)
+    set(is_yaml_control FALSE)
+    if(candidate_name STREQUAL "CMakeLists.txt"
+       OR candidate_suffix STREQUAL "cmake")
+      set(is_cmake_control TRUE)
+    elseif(candidate_suffix STREQUAL "sh"
+           OR candidate_name STREQUAL "configure"
+           OR candidate_name STREQUAL "Makefile"
+           OR candidate_name STREQUAL "makefile"
+           OR candidate_name STREQUAL "GNUmakefile")
+      set(is_shell_control TRUE)
+    elseif(candidate_suffix STREQUAL "yml"
+           OR candidate_suffix STREQUAL "yaml")
+      set(is_yaml_control TRUE)
+    endif()
+
     file(READ "${candidate}" candidate_text)
     string(TOLOWER "${candidate_text}" candidate_text_lower)
-    string(REPLACE "\n" ";" command_text "${candidate_text_lower}")
-    set(cmake_command_text "${candidate_text_lower}")
-    foreach(command_separator IN ITEMS "\n" "\r" "\t" "(" ")" "\"" "'")
-      string(REPLACE "${command_separator}" " " cmake_command_text
-        "${cmake_command_text}")
-    endforeach()
-    string(REGEX REPLACE " +" " " cmake_command_text
-      "${cmake_command_text}")
-    set(shell_command_text "${command_text}")
+    set(cmake_syntax_text "")
+    set(cmake_execution_text "")
+    set(shell_command_text "")
+    if(is_cmake_control)
+      _hundun_collect_cmake_command_views("${candidate_text_lower}"
+        cmake_syntax_text cmake_execution_text)
+    elseif(is_shell_control)
+      string(REPLACE "\n" ";" shell_command_text "${candidate_text_lower}")
+    elseif(is_yaml_control)
+      _hundun_collect_yaml_run_view("${candidate_text_lower}"
+        shell_command_text)
+    endif()
     foreach(command_quote IN ITEMS "\"" "'")
       string(REPLACE "${command_quote}" "" shell_command_text
         "${shell_command_text}")
@@ -141,65 +329,82 @@ function(hundun_assert_public_dependency_policy root)
       message(FATAL_ERROR
         "Forbidden Python header dependency in ${candidate}")
     endif()
-    if(candidate_text_lower MATCHES
-       "find_package[ \\t\\r\\n]*\\([ \\t\\r\\n]*(${scripting_runtime}([0-9]+)?|${scripting_runtime}interp|${scripting_runtime}libs(new)?|pybind11|nanobind)([ \\t\\r\\n]|\\))")
+    if(is_cmake_control AND cmake_syntax_text MATCHES
+       "(^|;) *find_package +(${scripting_runtime}([0-9]+)?|${scripting_runtime}interp|${scripting_runtime}libs(new)?|pybind11|nanobind)( |;|$)")
       message(FATAL_ERROR
         "Forbidden Python package discovery in ${candidate}")
     endif()
-    if(candidate_text_lower MATCHES
+    set(has_interpreter_dependency FALSE)
+    if(is_cmake_control AND
+       (cmake_syntax_text MATCHES
           "${scripting_runtime}([0-9]+)?::interpreter"
-       OR candidate_text_lower MATCHES
+        OR cmake_syntax_text MATCHES
           "${scripting_runtime}([0-9]+)?_executable"
-       OR candidate_text_lower MATCHES
-          "find_program[ \\t\\r\\n]*\\([^)]*${scripting_runtime}"
-       OR candidate_text_lower MATCHES
-          "${scripting_runtime}([0-9]+)?_add_(library|executable|module)[ \\t\\r\\n]*\\("
-       OR candidate_text_lower MATCHES
-          "command[ \\t\\r\\n]+${scripting_runtime}([0-9]+([.][0-9]+)*)?([ \\t\\r\\n]|\\))"
-       OR command_text MATCHES
-          "(^|[:;|&])[ \\t-]*(/usr/bin/env[ \\t]+)?${scripting_runtime}([0-9]+([.][0-9]+)*)?([ \\t]|$)")
+        OR cmake_syntax_text MATCHES
+          "(^|;) *find_program +[^;]*${scripting_runtime}"
+        OR cmake_syntax_text MATCHES
+          "(^|;) *${scripting_runtime}([0-9]+)?_add_(library|executable|module)( |;|$)"
+        OR cmake_execution_text MATCHES
+          "(^| )command +${scripting_runtime}([0-9]+([.][0-9]+)*)?( |;|$)"))
+      set(has_interpreter_dependency TRUE)
+    endif()
+    if(shell_command_text MATCHES
+       "${shell_command_prefix}${shell_executable_prefix}${scripting_runtime}([0-9]+([.][0-9]+)*)?( |[:;|&]|$)")
+      set(has_interpreter_dependency TRUE)
+    endif()
+    if(has_interpreter_dependency)
       message(FATAL_ERROR
         "Forbidden Python interpreter dependency in ${candidate}")
     endif()
 
     foreach(package_tool IN ITEMS
         "${package_tool_a}" "${package_tool_a3}" "${package_tool_b}")
-      if(cmake_command_text MATCHES
+      set(has_package_command FALSE)
+      if(is_cmake_control AND
+         (cmake_execution_text MATCHES
            "(^| )command +${package_tool}( |$)"
-         OR cmake_command_text MATCHES
+          OR cmake_execution_text MATCHES
            "(^| )command +[^ ]+[/]${package_tool}( |$)"
-         OR cmake_command_text MATCHES
-           "(^| )command +/usr/bin/env +${package_tool}( |$)"
-         OR shell_command_text MATCHES
-           "${shell_command_prefix}${shell_executable_prefix}${package_tool}( |[:;|&]|$)")
+          OR cmake_execution_text MATCHES
+           "(^| )command +/usr/bin/env +${package_tool}( |$)"))
+        set(has_package_command TRUE)
+      endif()
+      if(shell_command_text MATCHES
+         "${shell_command_prefix}${shell_executable_prefix}${package_tool}( |[:;|&]|$)")
+        set(has_package_command TRUE)
+      endif()
+      if(has_package_command)
         message(FATAL_ERROR
           "Forbidden direct package-manager command '${package_tool}' in ${candidate}")
       endif()
     endforeach()
 
-    if(candidate_text_lower MATCHES
-       "include[ \\t\\r\\n]*\\([ \\t\\r\\n]*${retrieval_a_token}([ \\t\\r\\n]|\\))"
-       OR candidate_text_lower MATCHES
-          "${retrieval_a_token}_(declare|makeavailable|populate)[ \\t\\r\\n]*\\(")
+    if(is_cmake_control AND
+       (cmake_syntax_text MATCHES
+          "(^|;) *include +${retrieval_a_token}( |;|$)"
+        OR cmake_syntax_text MATCHES
+          "(^|;) *${retrieval_a_token}_(declare|makeavailable|populate)( |;|$)"))
       message(FATAL_ERROR
         "Forbidden ${retrieval_a_display} source retrieval in ${candidate}")
     endif()
-    if(candidate_text_lower MATCHES
-       "include[ \\t\\r\\n]*\\([ \\t\\r\\n]*${retrieval_b_token}([ \\t\\r\\n]|\\))"
-       OR candidate_text_lower MATCHES
-          "${retrieval_b_token}_(add|add_step)[ \\t\\r\\n]*\\(")
+    if(is_cmake_control AND
+       (cmake_syntax_text MATCHES
+          "(^|;) *include +${retrieval_b_token}( |;|$)"
+        OR cmake_syntax_text MATCHES
+          "(^|;) *${retrieval_b_token}_(add|add_step)( |;|$)"))
       message(FATAL_ERROR
         "Forbidden ${retrieval_b_display} source retrieval in ${candidate}")
     endif()
-    if(candidate_text_lower MATCHES
-       "file[ \\t\\r\\n]*\\([ \\t\\r\\n]*download([ \\t\\r\\n]|\\))")
+    if(is_cmake_control AND cmake_syntax_text MATCHES
+       "(^|;) *file +download( |;|$)")
       message(FATAL_ERROR
         "Forbidden file download source retrieval in ${candidate}")
     endif()
-    if(candidate_text_lower MATCHES
-       "command[ \\t\\r\\n]+${cmake_executable_prefix}git[ \\t\\r\\n]+clone([ \\t\\r\\n]|\\))"
-       OR candidate_text_lower MATCHES
-          "command[ \\t\\r\\n]+${cmake_executable_prefix}(curl|wget)[ \\t\\r\\n]+[^)]*https?://"
+    if((is_cmake_control AND
+        (cmake_execution_text MATCHES
+           "(^| )command +${cmake_executable_prefix}git +clone( |;|$)"
+         OR cmake_execution_text MATCHES
+           "(^| )command +${cmake_executable_prefix}(curl|wget) +[^;]*https?://"))
        OR shell_command_text MATCHES
           "${shell_command_prefix}${shell_executable_prefix}git +clone( |$)"
        OR shell_command_text MATCHES
