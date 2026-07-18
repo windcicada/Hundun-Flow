@@ -30,6 +30,10 @@ set(source_tool_a3_root "${fixture_root}/source-tool-a3")
 set(source_tool_b_root "${fixture_root}/source-tool-b")
 set(source_vendor_control_root "${fixture_root}/source-vendor-control")
 set(source_make_control_root "${fixture_root}/source-make-control")
+set(source_make_at_control_root "${fixture_root}/source-make-at-control")
+set(source_make_plus_control_root "${fixture_root}/source-make-plus-control")
+set(source_make_combined_control_root
+  "${fixture_root}/source-make-combined-control")
 set(source_vendor_configure_root "${fixture_root}/source-vendor-configure")
 set(source_vendor_conditional_root "${fixture_root}/source-vendor-conditional")
 set(source_vendor_path_retrieval_root
@@ -42,12 +46,22 @@ set(source_vendor_quoted_bare_retrieval_root
   "${fixture_root}/source-vendor-quoted-bare-retrieval")
 set(source_cmake_message_prose_root
   "${fixture_root}/source-cmake-message-prose")
+set(source_cmake_bracket_comment_prose_root
+  "${fixture_root}/source-cmake-bracket-comment-prose")
+set(source_cmake_bracket_message_prose_root
+  "${fixture_root}/source-cmake-bracket-message-prose")
+set(source_vendor_bracket_argument_retrieval_root
+  "${fixture_root}/source-vendor-bracket-argument-retrieval")
 set(source_yaml_notes_prose_root
   "${fixture_root}/source-yaml-notes-prose")
 set(source_yaml_inline_run_root
   "${fixture_root}/source-yaml-inline-run")
 set(source_yaml_block_run_root
   "${fixture_root}/source-yaml-block-run")
+set(source_yaml_folded_retrieval_root
+  "${fixture_root}/source-yaml-folded-retrieval")
+set(source_yaml_literal_split_prose_root
+  "${fixture_root}/source-yaml-literal-split-prose")
 set(source_missing_root "${fixture_root}/source-missing")
 
 file(REMOVE_RECURSE "${fixture_root}")
@@ -84,6 +98,9 @@ file(MAKE_DIRECTORY
   "${source_tool_b_root}/cmake"
   "${source_vendor_control_root}/third_party/remote"
   "${source_make_control_root}/control"
+  "${source_make_at_control_root}/control"
+  "${source_make_plus_control_root}/control"
+  "${source_make_combined_control_root}/control"
   "${source_vendor_configure_root}/third_party/remote"
   "${source_vendor_conditional_root}/third_party/remote"
   "${source_vendor_path_retrieval_root}/third_party/remote"
@@ -91,9 +108,14 @@ file(MAKE_DIRECTORY
   "${source_vendor_quoted_action_retrieval_root}/third_party/remote"
   "${source_vendor_quoted_bare_retrieval_root}/third_party/remote"
   "${source_cmake_message_prose_root}/third_party/remote"
+  "${source_cmake_bracket_comment_prose_root}/third_party/remote"
+  "${source_cmake_bracket_message_prose_root}/third_party/remote"
+  "${source_vendor_bracket_argument_retrieval_root}/third_party/remote"
   "${source_yaml_notes_prose_root}/third_party/remote"
   "${source_yaml_inline_run_root}/third_party/remote"
-  "${source_yaml_block_run_root}/third_party/remote")
+  "${source_yaml_block_run_root}/third_party/remote"
+  "${source_yaml_folded_retrieval_root}/third_party/remote"
+  "${source_yaml_literal_split_prose_root}/third_party/remote")
 file(WRITE "${source_clean_root}/CMakeLists.txt"
   "cmake_minimum_required(VERSION 3.21)\n"
   "project(CleanPublicTree LANGUAGES CXX)\n")
@@ -140,6 +162,12 @@ file(WRITE
   "${fetch_declare} ( remote SOURCE_DIR remote )\n")
 file(WRITE "${source_make_control_root}/control/Makefile"
   "all:\n\t${package_tool_a} install local-package\n")
+file(WRITE "${source_make_at_control_root}/control/Makefile"
+  "all:\n\t@${package_tool_a} install local-package\n")
+file(WRITE "${source_make_plus_control_root}/control/Makefile"
+  "all:\n\t+${package_tool_a} install local-package\n")
+file(WRITE "${source_make_combined_control_root}/control/Makefile"
+  "all:\n\t@-+if ${package_tool_a} install local-package; then :; fi\n")
 file(WRITE "${source_vendor_configure_root}/third_party/remote/configure"
   "#!/bin/sh\n${package_tool_a} install local-package\n")
 file(WRITE "${source_vendor_conditional_root}/third_party/remote/build.sh"
@@ -169,6 +197,25 @@ file(WRITE
   "  \"The disallowed example COMMAND /usr/bin/${command_line_retrieval_tool} "
   "${command_line_retrieval_action} should stay disabled\")\n")
 file(WRITE
+  "${source_cmake_bracket_comment_prose_root}/third_party/remote/dependency.cmake"
+  "#[=[\n"
+  "execute_process(COMMAND /usr/bin/${command_line_retrieval_tool} "
+  "${command_line_retrieval_action} https://invalid.example/source.git)\n"
+  "]=]\n"
+  "message(STATUS \"safe\")\n")
+file(WRITE
+  "${source_cmake_bracket_message_prose_root}/third_party/remote/dependency.cmake"
+  "message([==[\n"
+  "This explanation contains a closing parenthesis )\n"
+  "execute_process(COMMAND /usr/bin/${command_line_retrieval_tool} "
+  "${command_line_retrieval_action} https://invalid.example/source.git)\n"
+  "]==])\n")
+file(WRITE
+  "${source_vendor_bracket_argument_retrieval_root}/third_party/remote/dependency.cmake"
+  "execute_process(COMMAND [[/usr/bin/${command_line_retrieval_tool}]] "
+  "[=[${command_line_retrieval_action}]=] "
+  "https://invalid.example/source.git)\n")
+file(WRITE
   "${source_yaml_notes_prose_root}/third_party/remote/notes.yml"
   "notes:\n"
   "  - if ${package_tool_a} is unavailable, explain the offline policy\n")
@@ -183,6 +230,20 @@ file(WRITE
   "      if ${package_tool_a} install local-package; then\n"
   "        exit 1\n"
   "      fi\n")
+file(WRITE
+  "${source_yaml_folded_retrieval_root}/third_party/remote/build.yml"
+  "steps:\n"
+  "  - run: >\n"
+  "      /usr/bin/${command_line_retrieval_tool}\n"
+  "      ${command_line_retrieval_action} "
+  "https://invalid.example/source.git\n")
+file(WRITE
+  "${source_yaml_literal_split_prose_root}/third_party/remote/build.yml"
+  "steps:\n"
+  "  - run: |\n"
+  "      /usr/bin/${command_line_retrieval_tool}\n"
+  "      ${command_line_retrieval_action} "
+  "https://invalid.example/source.git\n")
 
 function(hundun_verify_negative child_case expected_relative_path
          expected_message expected_token)
@@ -287,6 +348,12 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_control")
   hundun_assert_public_dependency_policy("${source_vendor_control_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_make_control")
   hundun_assert_public_dependency_policy("${source_make_control_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_make_at_control")
+  hundun_assert_public_dependency_policy("${source_make_at_control_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_make_plus_control")
+  hundun_assert_public_dependency_policy("${source_make_plus_control_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_make_combined_control")
+  hundun_assert_public_dependency_policy("${source_make_combined_control_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_configure")
   hundun_assert_public_dependency_policy("${source_vendor_configure_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_conditional")
@@ -307,12 +374,29 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL
     "${source_vendor_quoted_bare_retrieval_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_cmake_message_prose")
   hundun_assert_public_dependency_policy("${source_cmake_message_prose_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_cmake_bracket_comment_prose")
+  hundun_assert_public_dependency_policy(
+    "${source_cmake_bracket_comment_prose_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_cmake_bracket_message_prose")
+  hundun_assert_public_dependency_policy(
+    "${source_cmake_bracket_message_prose_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "source_vendor_bracket_argument_retrieval")
+  hundun_assert_public_dependency_policy(
+    "${source_vendor_bracket_argument_retrieval_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_notes_prose")
   hundun_assert_public_dependency_policy("${source_yaml_notes_prose_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_inline_run")
   hundun_assert_public_dependency_policy("${source_yaml_inline_run_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_block_run")
   hundun_assert_public_dependency_policy("${source_yaml_block_run_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_folded_retrieval")
+  hundun_assert_public_dependency_policy("${source_yaml_folded_retrieval_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_yaml_literal_split_prose")
+  hundun_assert_public_dependency_policy(
+    "${source_yaml_literal_split_prose_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_missing")
   hundun_assert_public_dependency_policy("${source_missing_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_python_file")
@@ -369,6 +453,21 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_make_control")
   hundun_verify_source_policy_negative(
     source_make_control "source-make-control/control/Makefile"
     "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_make_at_control")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_make_at_control "source-make-at-control/control/Makefile"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_make_plus_control")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_make_plus_control "source-make-plus-control/control/Makefile"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_make_combined_control")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_make_combined_control "source-make-combined-control/control/Makefile"
+    "Forbidden direct package-manager command '${expected_tool}'")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_configure")
   string(CONCAT expected_tool "p" "ip")
   hundun_verify_source_policy_negative(
@@ -404,6 +503,12 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL
     source_vendor_quoted_bare_retrieval
     "source-vendor-quoted-bare-retrieval/third_party/remote/dependency.cmake"
     "Forbidden command-line source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "verify_source_vendor_bracket_argument_retrieval")
+  hundun_verify_source_policy_negative(
+    source_vendor_bracket_argument_retrieval
+    "source-vendor-bracket-argument-retrieval/third_party/remote/dependency.cmake"
+    "Forbidden command-line source retrieval")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_yaml_inline_run")
   string(CONCAT expected_tool "p" "ip")
   hundun_verify_source_policy_negative(
@@ -416,6 +521,12 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_yaml_block_run")
     source_yaml_block_run
     "source-yaml-block-run/third_party/remote/build.yml"
     "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL
+       "verify_source_yaml_folded_retrieval")
+  hundun_verify_source_policy_negative(
+    source_yaml_folded_retrieval
+    "source-yaml-folded-retrieval/third_party/remote/build.yml"
+    "Forbidden command-line source retrieval")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_missing")
   hundun_verify_source_policy_negative(
     source_missing "source-missing"

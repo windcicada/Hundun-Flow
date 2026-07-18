@@ -581,25 +581,43 @@ if(HUNDUN_BUILD_TESTS)
     "${source_policy_script_runtime}_package"
     "${source_policy_script_runtime}_codegen"
     fetch external download missing tool_a tool_a3 tool_b vendor_control
-    make_control vendor_configure vendor_conditional vendor_path_retrieval)
+    make_control make_at_control make_plus_control make_combined_control
+    vendor_configure vendor_conditional vendor_path_retrieval)
   list(APPEND source_policy_cases
     vendor_quoted_path_retrieval
     vendor_quoted_action_retrieval
     vendor_quoted_bare_retrieval
+    vendor_bracket_argument_retrieval
     yaml_inline_run
-    yaml_block_run)
+    yaml_block_run
+    yaml_folded_retrieval)
   add_test(NAME source_policy_cmake_message_prose
     COMMAND "${CMAKE_COMMAND}"
             -DHUNDUN_PROVENANCE_CASE=source_cmake_message_prose
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME source_policy_cmake_bracket_comment_prose
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=source_cmake_bracket_comment_prose
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME source_policy_cmake_bracket_message_prose
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=source_cmake_bracket_message_prose
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
   add_test(NAME source_policy_yaml_notes_prose
     COMMAND "${CMAKE_COMMAND}"
             -DHUNDUN_PROVENANCE_CASE=source_yaml_notes_prose
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  add_test(NAME source_policy_yaml_literal_split_prose
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=source_yaml_literal_split_prose
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
   set(source_policy_tests
     source_policy_clean
     source_policy_cmake_message_prose
-    source_policy_yaml_notes_prose)
+    source_policy_cmake_bracket_comment_prose
+    source_policy_cmake_bracket_message_prose
+    source_policy_yaml_notes_prose
+    source_policy_yaml_literal_split_prose)
   foreach(source_policy_case IN LISTS source_policy_cases)
     add_test(NAME "source_policy_${source_policy_case}"
       COMMAND "${CMAKE_COMMAND}"
