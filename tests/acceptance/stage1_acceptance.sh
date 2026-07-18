@@ -13,6 +13,9 @@ work_root=$(mktemp -d "${TMPDIR:-/tmp}/hundun-stage1-acceptance.XXXXXX")
 build_dir="${work_root}/build"
 case_dir="${work_root}/case"
 failure_case_dir="${work_root}/failure-case"
+uneven_valid_case_dir="${work_root}/uneven-valid-partition"
+uneven_automatic_case_dir="${work_root}/uneven-automatic-partition"
+minimum_valid_case_dir="${work_root}/minimum-valid-partition"
 
 cleanup() {
   rm -rf -- "${work_root}"
@@ -97,13 +100,219 @@ require_single_newline_record() {
   fi
 }
 
+require_no_numerical_artifacts() {
+  local directory=$1
+  local output_name=$2
+  local restart_name=$3
+  if test -e "${directory}/${output_name}" || \
+      test -e "${directory}/${restart_name}"; then
+    echo "zero-step partition case created a configured output directory" >&2
+    return 1
+  fi
+  if find "${directory}" -type f \
+      \( -name '*.vtk' -o -name 'restart.rank*.bin' -o -name '*.tmp' \) \
+      -print -quit | grep -q .; then
+    echo "zero-step partition case created a numerical artifact" >&2
+    return 1
+  fi
+}
+
+check_invalid_local_width_case() {
+  local label=$1
+  local directory=$2
+  local output_name=$3
+  local restart_name=$4
+  local validation_output="${work_root}/${label}.validation.txt"
+  local normal_output="${work_root}/${label}.stdout"
+  local normal_error="${work_root}/${label}.stderr"
+
+  set +e
+  timeout --kill-after=2 15 "${mpiexec_command}" -n 2 \
+    "${build_dir}/hundun" "${directory}/case.json" --validate \
+    >"${validation_output}"
+  local validation_status=$?
+  set -e
+  if test "${validation_status}" -ne 0; then
+    echo "${label} validation did not complete successfully" >&2
+    return 1
+  fi
+  cmp --silent "${work_root}/validation.expected" "${validation_output}"
+
+  : >"${normal_output}"
+  : >"${normal_error}"
+  set +e
+  timeout --kill-after=2 5 "${mpiexec_command}" -n 2 sh -c \
+    'normal_output=$1
+normal_error=$2
+shift 2
+exec "$@" >>"${normal_output}" 2>>"${normal_error}"' \
+    sh "${normal_output}" "${normal_error}" "${build_dir}/hundun" \
+    "${directory}/case.json" >>"${normal_error}" 2>&1
+  local normal_status=$?
+  set -e
+  case "${normal_status}" in
+  1) ;;
+  124 | 137)
+    echo "${label} normal execution reached the time limit with status ${normal_status}" >&2
+    return 1
+    ;;
+  *)
+    echo "${label} normal execution returned unknown status ${normal_status}" >&2
+    return 1
+    ;;
+  esac
+  if test -s "${normal_output}"; then
+    echo "${label} normal failure emitted stdout" >&2
+    return 1
+  fi
+  local diagnostic_count
+  diagnostic_count=$(grep -Fxc \
+    'halo plan ghost width exceeds a local dimension' \
+    "${normal_error}" || true)
+  if test "${diagnostic_count}" -ne 1; then
+    echo "${label} did not emit exactly one complete project diagnostic" >&2
+    return 1
+  fi
+  local diagnostic_bytes
+  diagnostic_bytes=$(wc -c <"${normal_error}")
+  if test "${diagnostic_bytes}" -gt 4096; then
+    echo "${label} stderr exceeded the fixed diagnostic bound" >&2
+    return 1
+  fi
+  require_no_numerical_artifacts "${directory}" "${output_name}" \
+    "${restart_name}"
+}
+
+check_minimum_valid_partition() {
+  local normal_output="${work_root}/minimum-valid-partition.stdout"
+  local normal_error="${work_root}/minimum-valid-partition.stderr"
+  local expected_output="${work_root}/minimum-valid-partition.expected"
+
+  set +e
+  timeout --kill-after=2 15 "${mpiexec_command}" -n 2 \
+    "${build_dir}/hundun" "${minimum_valid_case_dir}/case.json" \
+    >"${normal_output}" 2>"${normal_error}"
+  local normal_status=$?
+  set -e
+  if test "${normal_status}" -ne 0; then
+    echo "minimum valid partition returned status ${normal_status}" >&2
+    return 1
+  fi
+  printf '%s\n' \
+    'HUNDUN-FLOW 0.0.0-stage1' \
+    'CASE name=minimum_valid_partition ranks=2 cells=4x2x2' \
+    'FINISHED step=0 time_s=0' >"${expected_output}"
+  cmp --silent "${expected_output}" "${normal_output}"
+  if test -s "${normal_error}"; then
+    echo "minimum valid partition emitted stderr" >&2
+    return 1
+  fi
+  require_no_numerical_artifacts "${minimum_valid_case_dir}" \
+    'output.minimum' 'Restart.minimum'
+}
+
 mkdir -p -- "${case_dir}" "${failure_case_dir}" \
+  "${uneven_valid_case_dir}" "${uneven_automatic_case_dir}" \
+  "${minimum_valid_case_dir}" \
   "${work_root}/launch-a" "${work_root}/launch-b"
 cp -- "${project_root}/cases/passive_scalar/case.json" "${case_dir}/case.json"
 cp -- "${project_root}/cases/passive_scalar/case_restart.json" \
   "${case_dir}/case_restart.json"
 cp -- "${project_root}/cases/passive_scalar/case.json" \
   "${failure_case_dir}/case.json"
+
+cat >"${uneven_valid_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "uneven_valid_partition"},
+  "resources": {
+    "expected_ranks": 2,
+    "process_grid": [2, 1, 1]
+  },
+  "mesh": {
+    "cells": [3, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 0.125, 0.125],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.003125, "steps": 0},
+  "transport": {
+    "velocity_m_per_s": [1.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart.uneven-valid"
+  },
+  "output": {
+    "directory": "output.uneven-valid",
+    "write_interval": 10,
+    "restart_interval": 10
+  }
+}
+EOF
+
+cat >"${uneven_automatic_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "uneven_automatic_partition"},
+  "resources": {"expected_ranks": 2},
+  "mesh": {
+    "cells": [3, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 0.125, 0.125],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.003125, "steps": 0},
+  "transport": {
+    "velocity_m_per_s": [1.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart.uneven-automatic"
+  },
+  "output": {
+    "directory": "output.uneven-automatic",
+    "write_interval": 10,
+    "restart_interval": 10
+  }
+}
+EOF
+
+cat >"${minimum_valid_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "minimum_valid_partition"},
+  "resources": {
+    "expected_ranks": 2,
+    "process_grid": [2, 1, 1]
+  },
+  "mesh": {
+    "cells": [4, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 0.125, 0.125],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.003125, "steps": 0},
+  "transport": {
+    "velocity_m_per_s": [1.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart.minimum"
+  },
+  "output": {
+    "directory": "output.minimum",
+    "write_interval": 10,
+    "restart_interval": 10
+  }
+}
+EOF
 
 "${cmake_command}" -S "${project_root}" -B "${build_dir}" \
   -DCMAKE_BUILD_TYPE=Release -DHUNDUN_BUILD_TESTS=ON
@@ -200,6 +409,14 @@ if test "${normal_output_status}" -eq 124; then
 fi
 require_bounded_diagnostic "${work_root}/normal-output-failure.log" \
   "unable to write Stage 1 output"
+
+check_invalid_local_width_case 'uneven-valid-partition' \
+  "${uneven_valid_case_dir}" 'output.uneven-valid' \
+  'Restart.uneven-valid'
+check_invalid_local_width_case 'uneven-automatic-partition' \
+  "${uneven_automatic_case_dir}" 'output.uneven-automatic' \
+  'Restart.uneven-automatic'
+check_minimum_valid_partition
 
 mkdir -p -- "${case_dir}/output"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" "${case_dir}/case.json" \

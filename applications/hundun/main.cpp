@@ -68,6 +68,29 @@ void require_collective_success(const MpiContext &context, bool local_ok,
   }
 }
 
+hundun::runtime::HaloExchange create_halo_exchange(
+    const MpiContext &context,
+    const hundun::runtime::StructuredDecomposition &decomposition,
+    int ghost_width) {
+  constexpr std::string_view fallback = "unable to create halo exchange plan";
+  std::optional<hundun::runtime::ExchangePlan> local_plan;
+  bool local_ok = true;
+  std::string local_message;
+  try {
+    local_plan.emplace(hundun::runtime::ExchangePlan::create(
+        decomposition, decomposition.local_extent(), ghost_width));
+  } catch (const std::exception &error) {
+    local_ok = false;
+    local_message = exception_message_or_fallback(error, fallback);
+  } catch (...) {
+    local_ok = false;
+    local_message = fallback;
+  }
+  require_collective_success(context, local_ok, local_message);
+  return hundun::runtime::HaloExchange::create(decomposition,
+                                               std::move(local_plan).value());
+}
+
 template <class WriteOperation>
 void write_root_output(const MpiContext &context,
                        std::string_view write_failure_message,
@@ -227,9 +250,7 @@ int run_case(const hundun::application::CliOptions &options,
   const FieldId scalar = fields.first;
   const FieldId stage = fields.second;
   FieldStorage storage(registry, decomposition.local_extent());
-  auto halo = hundun::runtime::HaloExchange::create(
-      decomposition, hundun::runtime::ExchangePlan::create(
-                         decomposition, decomposition.local_extent(), 2));
+  auto halo = create_halo_exchange(context, decomposition, 2);
   hundun::solver::PassiveScalarSolver solver(
       context, decomposition, mesh, halo, config.transport.velocity_m_per_s,
       config.transport.diffusivity_m2_per_s);
