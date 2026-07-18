@@ -77,7 +77,10 @@ void commit_restart_rank(const StagedRestartRank &staged,
 
 enum class RestartFailurePhase {
   none,
+  path_preparation,
+  agreement_preparation,
   owned_box_preparation,
+  filename_preparation,
   rank_file,
   record_gather_preparation,
   manifest,

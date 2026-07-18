@@ -447,7 +447,8 @@ void validate_communicators(const MpiContext &context,
 }
 
 void require_path_agreement(const MpiContext &context,
-                            const std::string &local_path) {
+                            const std::string &local_path,
+                            detail::RestartFailureInjection injection = {}) {
   const bool local_size_ok =
       local_path.size() <=
       static_cast<std::size_t>(std::numeric_limits<int>::max());
@@ -465,10 +466,14 @@ void require_path_agreement(const MpiContext &context,
   std::string root_path;
   converge_phase(context, "Restart v1 path allocation", [&] {
     root_path.resize(checked_size(root_length, "Restart v1 path length"));
+    if (context.rank() == 0) {
+      root_path = local_path;
+    }
+    if (injection.phase == detail::RestartFailurePhase::path_preparation &&
+        injection.rank == context.rank()) {
+      throw std::bad_alloc{};
+    }
   });
-  if (context.rank() == 0) {
-    root_path = local_path;
-  }
   detail::check_mpi(MPI_Bcast(root_path.data(), static_cast<int>(root_length),
                               MPI_BYTE, 0, context.comm()),
                     "MPI_Bcast");
@@ -484,7 +489,8 @@ void require_path_agreement(const MpiContext &context,
 template <std::size_t Size>
 void require_int_agreement(const MpiContext &context,
                            const std::array<int, Size> &local,
-                           std::string_view message) {
+                           std::string_view message,
+                           detail::RestartFailureInjection injection = {}) {
   std::array<int, Size> minimum{};
   std::array<int, Size> maximum{};
   detail::check_mpi(MPI_Allreduce(local.data(), minimum.data(),
@@ -495,16 +501,24 @@ void require_int_agreement(const MpiContext &context,
                                   static_cast<int>(Size), MPI_INT, MPI_MAX,
                                   context.comm()),
                     "MPI_Allreduce");
+  if (injection.phase == detail::RestartFailurePhase::agreement_preparation) {
+    converge_phase(context, "Restart v1 agreement preparation", [&] {
+      if (injection.rank == context.rank()) {
+        throw std::bad_alloc{};
+      }
+    });
+  }
   const bool matches = minimum == maximum;
-  const CollectiveStatus status =
-      collective_status(context, matches, matches ? "" : std::string(message));
+  const CollectiveStatus status = collective_status(
+      context, matches, matches ? std::string_view{} : message);
   if (!status.ok) {
     throw Error(status.message);
   }
 }
 
 void require_u64_agreement(const MpiContext &context, std::uint64_t local,
-                           std::string_view message) {
+                           std::string_view message,
+                           detail::RestartFailureInjection injection = {}) {
   std::uint64_t minimum = 0;
   std::uint64_t maximum = 0;
   detail::check_mpi(
@@ -513,9 +527,16 @@ void require_u64_agreement(const MpiContext &context, std::uint64_t local,
   detail::check_mpi(
       MPI_Allreduce(&local, &maximum, 1, MPI_UINT64_T, MPI_MAX, context.comm()),
       "MPI_Allreduce");
+  if (injection.phase == detail::RestartFailurePhase::agreement_preparation) {
+    converge_phase(context, "Restart v1 agreement preparation", [&] {
+      if (injection.rank == context.rank()) {
+        throw std::bad_alloc{};
+      }
+    });
+  }
   const bool matches = minimum == maximum;
-  const CollectiveStatus status =
-      collective_status(context, matches, matches ? "" : std::string(message));
+  const CollectiveStatus status = collective_status(
+      context, matches, matches ? std::string_view{} : message);
   if (!status.ok) {
     throw Error(status.message);
   }
@@ -592,10 +613,10 @@ void validate_complete_boxes(const std::vector<Box3> &boxes,
   }
 }
 
-void require_metadata_agreement(const MpiContext &context,
-                                const StructuredDecomposition &decomposition,
-                                std::int64_t step, double time_s,
-                                std::uint64_t schema_fingerprint) {
+void require_metadata_agreement(
+    const MpiContext &context, const StructuredDecomposition &decomposition,
+    std::int64_t step, double time_s, std::uint64_t schema_fingerprint,
+    detail::RestartFailureInjection injection = {}) {
   const Int3 global = decomposition.global_extent();
   const Int3 grid = decomposition.process_grid();
   const auto periodic = decomposition.periodic();
@@ -610,15 +631,17 @@ void require_metadata_agreement(const MpiContext &context,
                                   grid.y,
                                   grid.z};
   require_int_agreement(
-      context, local, "Restart v1 decomposition metadata differs across ranks");
+      context, local, "Restart v1 decomposition metadata differs across ranks",
+      injection);
   std::uint64_t step_bits = 0;
   std::memcpy(&step_bits, &step, sizeof(step));
   require_u64_agreement(context, step_bits,
-                        "Restart v1 step differs across ranks");
+                        "Restart v1 step differs across ranks", injection);
   require_u64_agreement(context, double_bits(time_s),
-                        "Restart v1 time bits differ across ranks");
+                        "Restart v1 time bits differ across ranks", injection);
   require_u64_agreement(context, schema_fingerprint,
-                        "Restart v1 persistent schemas differ across ranks");
+                        "Restart v1 persistent schemas differ across ranks",
+                        injection);
 }
 
 std::vector<std::byte> read_file(const std::filesystem::path &path) {
@@ -1168,9 +1191,9 @@ void write_restart_checkpoint_with_failure(
         context, decomposition, registry, storage, step_directory, step, time_s,
         injection, path_text, schema_fingerprint, rank_bytes);
   });
-  require_path_agreement(context, path_text);
+  require_path_agreement(context, path_text, injection);
   require_metadata_agreement(context, decomposition, step, time_s,
-                             schema_fingerprint);
+                             schema_fingerprint, injection);
   const auto boxes =
       gather_boxes(context, decomposition.owned_box(), injection);
   converge_phase(context, "Restart v1 owned-box validation", [&] {
@@ -1189,8 +1212,13 @@ void write_restart_checkpoint_with_failure(
     }
   });
 
-  const std::string local_filename = format_rank_filename(context.rank());
+  std::string local_filename;
   converge_phase(context, "Restart v1 rank-file write", [&] {
+    local_filename = format_rank_filename(context.rank());
+    if (injection.phase == RestartFailurePhase::filename_preparation &&
+        injection.rank == context.rank()) {
+      throw std::bad_alloc{};
+    }
     if (injection.phase == RestartFailurePhase::rank_file &&
         injection.rank == context.rank()) {
       throw Error("injected Restart v1 rank-file failure");

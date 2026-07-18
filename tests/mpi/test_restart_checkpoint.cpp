@@ -622,8 +622,14 @@ void test_injected_failures(const MpiContext &context,
                             const std::filesystem::path &root) {
   Fields fields(decomposition.local_extent());
   fill_source(fields, context.rank());
-  const std::array<RestartFailureInjection, 5> injections{
+  const std::array<RestartFailureInjection, 8> injections{
+      RestartFailureInjection{RestartFailurePhase::path_preparation,
+                              context.size() > 1 ? 1 : 0},
+      RestartFailureInjection{RestartFailurePhase::agreement_preparation,
+                              context.size() > 1 ? 1 : 0},
       RestartFailureInjection{RestartFailurePhase::owned_box_preparation,
+                              context.size() > 1 ? 1 : 0},
+      RestartFailureInjection{RestartFailurePhase::filename_preparation,
                               context.size() > 1 ? 1 : 0},
       RestartFailureInjection{RestartFailurePhase::rank_file,
                               context.size() > 1 ? 1 : 0},
@@ -641,8 +647,11 @@ void test_injected_failures(const MpiContext &context,
     });
     context.barrier();
     if (context.rank() == 0) {
-      if (injections[index].phase ==
-          RestartFailurePhase::owned_box_preparation) {
+      if (injections[index].phase == RestartFailurePhase::path_preparation ||
+          injections[index].phase ==
+              RestartFailurePhase::agreement_preparation ||
+          injections[index].phase ==
+              RestartFailurePhase::owned_box_preparation) {
         HUNDUN_CHECK(!std::filesystem::exists(directory));
       } else {
         HUNDUN_CHECK(std::filesystem::exists(directory));
