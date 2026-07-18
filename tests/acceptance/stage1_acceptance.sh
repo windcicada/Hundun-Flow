@@ -464,23 +464,8 @@ require_restart_rejection_result() {
     return 1
   fi
 
-  local diagnostic_count
-  local diagnostic_status
-  set +e
-  diagnostic_count=$(grep -Fc -- "${expected_diagnostic}" "${stderr_path}")
-  diagnostic_status=$?
-  set -e
-  case "${diagnostic_status}" in
-  0) ;;
-  1) diagnostic_count=0 ;;
-  *)
-    echo "unable to inspect ${label} diagnostic" >&2
-    return 1
-    ;;
-  esac
-  if [[ ! ${diagnostic_count} =~ ^[0-9]+$ ]] || \
-      test "${diagnostic_count}" -ne 1; then
-    echo "${label} did not emit its condition-specific diagnostic once" >&2
+  if ! test -s "${stderr_path}"; then
+    echo "${label} diagnostic is empty" >&2
     return 1
   fi
 
@@ -492,6 +477,57 @@ require_restart_rejection_result() {
   if [[ ! ${diagnostic_bytes} =~ ^[0-9]+$ ]] || \
       test "${diagnostic_bytes}" -gt 4096; then
     echo "${label} diagnostic is not within the fixed byte bound" >&2
+    return 1
+  fi
+
+  local diagnostic_newline_count
+  if ! diagnostic_newline_count=$(LC_ALL=C tr -cd '\n' \
+      <"${stderr_path}" | wc -c); then
+    echo "unable to count ${label} diagnostic LF bytes" >&2
+    return 1
+  fi
+  if [[ ! ${diagnostic_newline_count} =~ ^[0-9]+$ ]] || \
+      test "${diagnostic_newline_count}" -ne 1; then
+    echo "${label} diagnostic must contain exactly one record" >&2
+    return 1
+  fi
+
+  local diagnostic_final_byte
+  if ! diagnostic_final_byte=$(LC_ALL=C tail -c 1 -- "${stderr_path}" | \
+      od -An -tu1); then
+    echo "unable to inspect ${label} diagnostic final byte" >&2
+    return 1
+  fi
+  diagnostic_final_byte=${diagnostic_final_byte//[[:space:]]/}
+  if test "${diagnostic_final_byte}" != "10"; then
+    echo "${label} diagnostic must end with LF" >&2
+    return 1
+  fi
+
+  local diagnostic_count
+  local diagnostic_matches
+  local diagnostic_status
+  set +e
+  diagnostic_matches=$(LC_ALL=C grep -Fao -- \
+    "${expected_diagnostic}" "${stderr_path}")
+  diagnostic_status=$?
+  set -e
+  case "${diagnostic_status}" in
+  0)
+    if ! diagnostic_count=$(printf '%s\n' "${diagnostic_matches}" | wc -l); then
+      echo "unable to count ${label} diagnostic occurrences" >&2
+      return 1
+    fi
+    ;;
+  1) diagnostic_count=0 ;;
+  *)
+    echo "unable to inspect ${label} diagnostic" >&2
+    return 1
+    ;;
+  esac
+  if [[ ! ${diagnostic_count} =~ ^[0-9]+$ ]] || \
+      test "${diagnostic_count}" -ne 1; then
+    echo "${label} did not emit its condition-specific diagnostic once" >&2
     return 1
   fi
 
@@ -696,6 +732,57 @@ run_fast_shell_contract_fixtures() {
   fi
 
   if run_restart_rejection_case \
+      'duplicate restart rejection diagnostic fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s%s\n" "$1" "$1" >&2; exit 1' sh \
+      "${rejection_diagnostic}" >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted two diagnostic occurrences" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'extra restart rejection record fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n%s\n" "$1" "unrelated stderr record" >&2; exit 1' \
+      sh "${rejection_diagnostic}" >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted an extra stderr record" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'unterminated restart rejection record fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s" "$1" >&2; exit 1' sh \
+      "${rejection_diagnostic}" >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted a missing final newline" >&2
+    return 1
+  fi
+
+  local marker_phase='Restart v1 completion marker read:'
+  if ! run_restart_rejection_case \
+      'portable restart marker diagnostic fixture' 1 1 \
+      "${marker_phase}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s filesystem error: fixture suffix\n" "$1" >&2; exit 1' \
+      sh "${marker_phase}"; then
+    echo "restart rejection fixture rejected a portable marker suffix" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'wrong restart phase diagnostic fixture' 1 1 \
+      "${marker_phase}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n" "Restart v1 manifest read: fixture" >&2; exit 1' \
+      >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted a different Restart phase" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
       'unrelated restart rejection status fixture' 1 1 \
       "${rejection_diagnostic}" "${rejection_root}" output.resumed \
       Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
@@ -811,10 +898,6 @@ run_fast_shell_contract_fixtures() {
 }
 
 run_fast_shell_contract_fixtures
-
-if test "${HUNDUN_ACCEPTANCE_FAST_FIXTURES_ONLY:-0}" = 1; then
-  exit 0
-fi
 
 artifact_inspection_missing="${work_root}/missing-artifact-inspection"
 artifact_inspection_error="${work_root}/artifact-inspection.stderr"
@@ -1356,7 +1439,7 @@ check_missing_marker_rejection() {
   mv -- "${marker}" "${saved_marker}"
   run_restart_rejection_case \
     'missing Restart completion marker' 20 2 \
-    'Restart v1 completion marker read: unable to open Restart v1 file:' \
+    'Restart v1 completion marker read:' \
     "${case_dir}" output.resumed Restart.resumed \
     "${work_root}/missing-marker.stdout" \
     "${work_root}/missing-marker.stderr" \

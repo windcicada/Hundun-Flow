@@ -25,6 +25,10 @@ set(source_python_codegen_root "${fixture_root}/source-python-codegen")
 set(source_fetch_root "${fixture_root}/source-fetch")
 set(source_external_root "${fixture_root}/source-external")
 set(source_download_root "${fixture_root}/source-download")
+set(source_tool_a_root "${fixture_root}/source-tool-a")
+set(source_tool_a3_root "${fixture_root}/source-tool-a3")
+set(source_tool_b_root "${fixture_root}/source-tool-b")
+set(source_vendor_control_root "${fixture_root}/source-vendor-control")
 set(source_missing_root "${fixture_root}/source-missing")
 
 file(REMOVE_RECURSE "${fixture_root}")
@@ -55,7 +59,11 @@ file(MAKE_DIRECTORY
   "${source_python_codegen_root}/cmake"
   "${source_fetch_root}/cmake"
   "${source_external_root}/cmake"
-  "${source_download_root}/cmake")
+  "${source_download_root}/cmake"
+  "${source_tool_a_root}/cmake"
+  "${source_tool_a3_root}/cmake"
+  "${source_tool_b_root}/cmake"
+  "${source_vendor_control_root}/third_party/remote")
 file(WRITE "${source_clean_root}/CMakeLists.txt"
   "cmake_minimum_required(VERSION 3.21)\n"
   "project(CleanPublicTree LANGUAGES CXX)\n")
@@ -87,6 +95,19 @@ file(WRITE "${source_external_root}/cmake/dependency.cmake"
 string(CONCAT download_operation "DOWN" "LOAD")
 file(WRITE "${source_download_root}/cmake/dependency.cmake"
   "file ( ${download_operation} https://invalid.example/source.tar downloaded.tar )\n")
+string(CONCAT package_tool_a "p" "ip")
+string(CONCAT package_tool_a3 "p" "ip3")
+string(CONCAT package_tool_b "con" "da")
+file(WRITE "${source_tool_a_root}/cmake/dependency.cmake"
+  "execute_process ( COMMAND ${package_tool_a} install local-package )\n")
+file(WRITE "${source_tool_a3_root}/cmake/dependency.cmake"
+  "add_custom_command ( OUTPUT generated COMMAND /opt/tools/${package_tool_a3} install local-package )\n")
+file(WRITE "${source_tool_b_root}/cmake/dependency.cmake"
+  "execute_process ( COMMAND /usr/bin/env ${package_tool_b} install local-package )\n")
+file(WRITE
+  "${source_vendor_control_root}/third_party/remote/dependency.cmake"
+  "include ( ${fetch_module} )\n"
+  "${fetch_declare} ( remote SOURCE_DIR remote )\n")
 
 function(hundun_verify_negative child_case expected_relative_path
          expected_message expected_token)
@@ -181,6 +202,14 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_external")
   hundun_assert_public_dependency_policy("${source_external_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_download")
   hundun_assert_public_dependency_policy("${source_download_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_tool_a")
+  hundun_assert_public_dependency_policy("${source_tool_a_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_tool_a3")
+  hundun_assert_public_dependency_policy("${source_tool_a3_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_tool_b")
+  hundun_assert_public_dependency_policy("${source_tool_b_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_control")
+  hundun_assert_public_dependency_policy("${source_vendor_control_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_missing")
   hundun_assert_public_dependency_policy("${source_missing_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_python_file")
@@ -211,10 +240,61 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_download")
   hundun_verify_source_policy_negative(
     source_download "source-download/cmake/dependency.cmake"
     "Forbidden file download source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_tool_a")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_tool_a "source-tool-a/cmake/dependency.cmake"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_tool_a3")
+  string(CONCAT expected_tool "p" "ip3")
+  hundun_verify_source_policy_negative(
+    source_tool_a3 "source-tool-a3/cmake/dependency.cmake"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_tool_b")
+  string(CONCAT expected_tool "con" "da")
+  hundun_verify_source_policy_negative(
+    source_tool_b "source-tool-b/cmake/dependency.cmake"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_control")
+  string(CONCAT expected_retrieval "Fetch" "Content")
+  hundun_verify_source_policy_negative(
+    source_vendor_control
+    "source-vendor-control/third_party/remote/dependency.cmake"
+    "Forbidden ${expected_retrieval} source retrieval")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_missing")
   hundun_verify_source_policy_negative(
     source_missing "source-missing"
     "Public dependency scan root does not exist")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_acceptance_complete_gate")
+  set(configure_marker "${fixture_root}/configure-attempted")
+  set(failing_command "${fixture_root}/known-failing-command.sh")
+  file(WRITE "${failing_command}"
+    "#!/bin/sh\n"
+    ": >\"${configure_marker}\"\n"
+    "exit 1\n")
+  file(CHMOD "${failing_command}"
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "HUNDUN_ACCEPTANCE_FAST_FIXTURES_ONLY=1"
+            "CMAKE_COMMAND=${failing_command}"
+            "CTEST_COMMAND=${failing_command}"
+            "MPIEXEC_COMMAND=${failing_command}"
+            "LDD_COMMAND=${failing_command}"
+            bash
+            "${CMAKE_CURRENT_LIST_DIR}/../acceptance/stage1_acceptance.sh"
+    RESULT_VARIABLE acceptance_result
+    OUTPUT_VARIABLE acceptance_stdout
+    ERROR_VARIABLE acceptance_stderr)
+  if(NOT acceptance_result STREQUAL "1")
+    message(FATAL_ERROR
+      "Acceptance complete-gate fixture returned ${acceptance_result}. "
+      "stdout:\n${acceptance_stdout}\nstderr:\n${acceptance_stderr}")
+  endif()
+  if(NOT EXISTS "${configure_marker}")
+    message(FATAL_ERROR
+      "Acceptance complete-gate fixture did not attempt configure")
+  endif()
 else()
   message(FATAL_ERROR
     "Unknown HUNDUN_PROVENANCE_CASE: ${HUNDUN_PROVENANCE_CASE}")

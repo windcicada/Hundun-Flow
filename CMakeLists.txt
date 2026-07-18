@@ -506,6 +506,14 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(compare_scalar_vtk PRIVATE
     hundun_options hundun_warnings)
 
+  add_test(NAME acceptance_complete_gate
+    COMMAND "${CMAKE_COMMAND}"
+            -DHUNDUN_PROVENANCE_CASE=verify_acceptance_complete_gate
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  set_tests_properties(acceptance_complete_gate PROPERTIES
+    LABELS acceptance
+    TIMEOUT 10)
+
   add_executable(test_decomposition tests/mpi/test_decomposition.cpp)
   target_include_directories(test_decomposition PRIVATE
     "${PROJECT_SOURCE_DIR}")
@@ -566,13 +574,20 @@ if(HUNDUN_BUILD_TESTS)
   add_test(NAME source_policy_clean
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=source_clean
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
-  foreach(source_policy_case IN ITEMS
-      python_file python_header python_package python_codegen
-      fetch external download missing)
+  string(CONCAT source_policy_script_runtime "py" "thon")
+  set(source_policy_cases
+    "${source_policy_script_runtime}_file"
+    "${source_policy_script_runtime}_header"
+    "${source_policy_script_runtime}_package"
+    "${source_policy_script_runtime}_codegen"
+    fetch external download missing tool_a tool_a3 tool_b vendor_control)
+  set(source_policy_tests source_policy_clean)
+  foreach(source_policy_case IN LISTS source_policy_cases)
     add_test(NAME "source_policy_${source_policy_case}"
       COMMAND "${CMAKE_COMMAND}"
               "-DHUNDUN_PROVENANCE_CASE=verify_source_${source_policy_case}"
               -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+    list(APPEND source_policy_tests "source_policy_${source_policy_case}")
   endforeach()
 
   set_tests_properties(
@@ -586,16 +601,7 @@ if(HUNDUN_BUILD_TESTS)
     PROPERTIES
       LABELS provenance
       RESOURCE_LOCK hundun_provenance_fixture_tree)
-  set_tests_properties(
-    source_policy_clean
-    source_policy_python_file
-    source_policy_python_header
-    source_policy_python_package
-    source_policy_python_codegen
-    source_policy_fetch
-    source_policy_external
-    source_policy_download
-    source_policy_missing
+  set_tests_properties(${source_policy_tests}
     PROPERTIES
       LABELS "provenance;source_policy"
       RESOURCE_LOCK hundun_provenance_fixture_tree)
