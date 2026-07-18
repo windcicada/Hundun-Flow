@@ -104,14 +104,19 @@ require_no_numerical_artifacts() {
   local directory=$1
   local output_name=$2
   local restart_name=$3
+  local artifact
   if test -e "${directory}/${output_name}" || \
       test -e "${directory}/${restart_name}"; then
     echo "zero-step partition case created a configured output directory" >&2
     return 1
   fi
-  if find "${directory}" -type f \
+  if ! artifact=$(find "${directory}" -type f \
       \( -name '*.vtk' -o -name 'restart.rank*.bin' -o -name '*.tmp' \) \
-      -print -quit | grep -q .; then
+      -print -quit); then
+    echo "unable to inspect zero-step partition artifacts" >&2
+    return 1
+  fi
+  if test -n "${artifact}"; then
     echo "zero-step partition case created a numerical artifact" >&2
     return 1
   fi
@@ -210,6 +215,50 @@ check_minimum_valid_partition() {
   require_no_numerical_artifacts "${minimum_valid_case_dir}" \
     'output.minimum' 'Restart.minimum'
 }
+
+artifact_inspection_missing="${work_root}/missing-artifact-inspection"
+artifact_inspection_error="${work_root}/artifact-inspection.stderr"
+set +e
+require_no_numerical_artifacts "${artifact_inspection_missing}" \
+  'output.artifact-inspection' 'Restart.artifact-inspection' \
+  2>"${artifact_inspection_error}"
+artifact_inspection_status=$?
+set -e
+if test "${artifact_inspection_status}" -eq 0; then
+  echo "artifact inspection traversal error was incorrectly accepted" >&2
+  exit 1
+fi
+
+if ! artifact_inspection_bytes=$(wc -c <"${artifact_inspection_error}"); then
+  echo "unable to measure artifact inspection diagnostic" >&2
+  exit 1
+fi
+if [[ ! ${artifact_inspection_bytes} =~ ^[0-9]+$ ]]; then
+  echo "artifact inspection diagnostic size is invalid" >&2
+  exit 1
+fi
+if test "${artifact_inspection_bytes}" -gt 1024; then
+  echo "artifact inspection diagnostic is not bounded" >&2
+  exit 1
+fi
+
+set +e
+artifact_inspection_matches=$(grep -Fxc -- \
+  'unable to inspect zero-step partition artifacts' \
+  "${artifact_inspection_error}")
+artifact_inspection_match_status=$?
+set -e
+case "${artifact_inspection_match_status}" in
+0 | 1) ;;
+*)
+  echo "unable to count artifact inspection diagnostic" >&2
+  exit 1
+  ;;
+esac
+if test "${artifact_inspection_matches}" -ne 1; then
+  echo "artifact inspection did not emit exactly one project diagnostic" >&2
+  exit 1
+fi
 
 mkdir -p -- "${case_dir}" "${failure_case_dir}" \
   "${uneven_valid_case_dir}" "${uneven_automatic_case_dir}" \
