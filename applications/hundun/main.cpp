@@ -18,9 +18,11 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "hundun/runtime/vtk_legacy.hpp"
 #include "hundun/solver/passive_scalar.hpp"
+#include "runtime/src/mpi_error.hpp"
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -28,6 +30,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <locale>
 #include <optional>
 #include <sstream>
@@ -52,6 +55,8 @@ using hundun::runtime::OutputPolicy;
 using hundun::runtime::RestartPolicy;
 using hundun::runtime::ScalarType;
 
+enum class RunMode : int { normal = 0, validate = 1, print_resolved = 2 };
+
 std::string exception_message_or_fallback(const std::exception &error,
                                           std::string_view fallback) {
   const char *message = error.what();
@@ -65,6 +70,49 @@ void require_collective_success(const MpiContext &context, bool local_ok,
       hundun::runtime::collective_status(context, local_ok, local_message);
   if (!status.ok) {
     throw Error(status.message);
+  }
+}
+
+RunMode run_mode(const hundun::application::CliOptions &options) noexcept {
+  if (options.validate_only) {
+    return RunMode::validate;
+  }
+  if (options.print_resolved) {
+    return RunMode::print_resolved;
+  }
+  return RunMode::normal;
+}
+
+void require_run_mode_agreement(const MpiContext &context, RunMode mode) {
+  const int local_mode = static_cast<int>(mode);
+  int minimum_mode = local_mode;
+  int maximum_mode = local_mode;
+  hundun::runtime::detail::check_mpi(MPI_Allreduce(&local_mode, &minimum_mode,
+                                                   1, MPI_INT, MPI_MIN,
+                                                   context.comm()),
+                                     "MPI_Allreduce run-mode minimum");
+  hundun::runtime::detail::check_mpi(MPI_Allreduce(&local_mode, &maximum_mode,
+                                                   1, MPI_INT, MPI_MAX,
+                                                   context.comm()),
+                                     "MPI_Allreduce run-mode maximum");
+  if (minimum_mode != maximum_mode) {
+    throw Error("MPI run mode differs across communicator ranks");
+  }
+}
+
+void broadcast_bytes(const MpiContext &context, char *bytes,
+                     std::uint64_t byte_count) {
+  constexpr std::uint64_t chunk_limit =
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+  std::uint64_t offset = 0;
+  while (offset < byte_count) {
+    const std::uint64_t remaining = byte_count - offset;
+    const int count = static_cast<int>(std::min(remaining, chunk_limit));
+    hundun::runtime::detail::check_mpi(
+        MPI_Bcast(bytes + static_cast<std::size_t>(offset), count, MPI_BYTE, 0,
+                  context.comm()),
+        "MPI_Bcast authoritative case directory bytes");
+    offset += static_cast<std::uint64_t>(count);
   }
 }
 
@@ -117,7 +165,8 @@ void write_root_output(const MpiContext &context,
   require_collective_success(context, local_ok, local_message);
 }
 
-std::filesystem::path case_root(const std::filesystem::path &case_path) {
+std::filesystem::path
+resolve_case_root(const std::filesystem::path &case_path) {
   try {
     return std::filesystem::absolute(case_path)
         .lexically_normal()
@@ -126,6 +175,64 @@ std::filesystem::path case_root(const std::filesystem::path &case_path) {
     throw Error("unable to resolve case directory: " +
                 std::string(error.what()));
   }
+}
+
+std::filesystem::path
+broadcast_case_root(const MpiContext &context,
+                    const std::filesystem::path &local_case_path) {
+  constexpr std::string_view resolve_fallback =
+      "unable to resolve case directory";
+  std::string root_text;
+  bool local_ok = true;
+  std::string local_message;
+  if (context.rank() == 0) {
+    try {
+      root_text = resolve_case_root(local_case_path).generic_string();
+      if (root_text.size() > std::numeric_limits<std::uint64_t>::max()) {
+        local_ok = false;
+        local_message = "case directory path exceeds the uint64 wire domain";
+      }
+    } catch (const std::exception &error) {
+      local_ok = false;
+      local_message = exception_message_or_fallback(error, resolve_fallback);
+    } catch (...) {
+      local_ok = false;
+      local_message = resolve_fallback;
+    }
+  }
+  require_collective_success(context, local_ok, local_message);
+
+  std::uint64_t root_length = 0;
+  if (context.rank() == 0) {
+    root_length = static_cast<std::uint64_t>(root_text.size());
+  }
+  hundun::runtime::detail::check_mpi(
+      MPI_Bcast(&root_length, 1, MPI_UINT64_T, 0, context.comm()),
+      "MPI_Bcast authoritative case directory length");
+
+  local_ok = root_length <= static_cast<std::uint64_t>(
+                                std::numeric_limits<std::size_t>::max());
+  if (local_ok) {
+    try {
+      root_text.resize(static_cast<std::size_t>(root_length));
+    } catch (...) {
+      local_ok = false;
+    }
+  }
+  require_collective_success(context, local_ok,
+                             "unable to allocate authoritative case directory");
+  broadcast_bytes(context, root_text.data(), root_length);
+
+  std::optional<std::filesystem::path> root;
+  local_ok = true;
+  try {
+    root.emplace(root_text);
+  } catch (...) {
+    local_ok = false;
+  }
+  require_collective_success(
+      context, local_ok, "unable to construct authoritative case directory");
+  return std::move(root).value();
 }
 
 std::string step_directory_name(std::int64_t step) {
@@ -194,6 +301,43 @@ void write_vtk_collectively(const MpiContext &context,
   require_collective_success(context, local_ok, local_message);
 }
 
+void require_finite_owned_passive_scalar_state(const MpiContext &context,
+                                               const FieldRegistry &registry,
+                                               const FieldStorage &storage,
+                                               FieldId scalar) {
+  bool local_ok = true;
+  std::string_view local_message;
+  try {
+    const auto &descriptor = registry.descriptor(scalar);
+    if (descriptor.restart != RestartPolicy::persistent ||
+        descriptor.scalar_type != ScalarType::float64 ||
+        descriptor.components >
+            static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+      throw Error("passive-scalar field descriptor is not inspectable");
+    }
+    const auto values = storage.view<double>(scalar);
+    const auto extent = storage.interior_extent();
+    const int components = static_cast<int>(descriptor.components);
+    for (int k = 0; k < extent.z && local_ok; ++k) {
+      for (int j = 0; j < extent.y && local_ok; ++j) {
+        for (int i = 0; i < extent.x && local_ok; ++i) {
+          for (int component = 0; component < components; ++component) {
+            if (!std::isfinite(values(i, j, k, component))) {
+              local_ok = false;
+              local_message = "passive-scalar state is not finite";
+              break;
+            }
+          }
+        }
+      }
+    }
+  } catch (...) {
+    local_ok = false;
+    local_message = "unable to inspect passive-scalar state";
+  }
+  require_collective_success(context, local_ok, local_message);
+}
+
 CaseConfig load_and_broadcast_case(const MpiContext &context,
                                    const std::filesystem::path &path) {
   std::optional<CaseConfig> root_config;
@@ -218,17 +362,21 @@ CaseConfig load_and_broadcast_case(const MpiContext &context,
 
 int run_case(const hundun::application::CliOptions &options,
              MpiContext &context) {
+  const RunMode mode = run_mode(options);
+  require_run_mode_agreement(context, mode);
+  const std::filesystem::path root =
+      broadcast_case_root(context, options.case_path);
   const CaseConfig config = load_and_broadcast_case(context, options.case_path);
   hundun::runtime::require_expected_ranks(context, config.expected_ranks);
 
-  if (options.validate_only) {
+  if (mode == RunMode::validate) {
     write_root_output(context, "unable to write validation output",
                       "unable to write validation output",
                       [] { std::cout << "VALID\n"; });
     context.barrier();
     return EXIT_SUCCESS;
   }
-  if (options.print_resolved) {
+  if (mode == RunMode::print_resolved) {
     write_root_output(
         context, "unable to write resolved case configuration",
         "unable to serialize resolved case configuration", [&config] {
@@ -255,7 +403,6 @@ int run_case(const hundun::application::CliOptions &options,
       context, decomposition, mesh, halo, config.transport.velocity_m_per_s,
       config.transport.diffusivity_m2_per_s);
 
-  const std::filesystem::path root = case_root(options.case_path);
   const std::filesystem::path output_directory =
       (root / config.output.directory).lexically_normal();
   const std::filesystem::path restart_write_directory =
@@ -295,9 +442,14 @@ int run_case(const hundun::application::CliOptions &options,
 
   for (std::int64_t step = current_step + 1;
        step <= static_cast<std::int64_t>(config.time.steps); ++step) {
+    const double next_time_s = current_time_s + config.time.dt_s;
+    require_collective_success(context, std::isfinite(next_time_s),
+                               "physical time is not finite");
     solver.advance_ssprk2(storage, scalar, stage, config.time.dt_s);
+    require_finite_owned_passive_scalar_state(context, registry, storage,
+                                              scalar);
     current_step = step;
-    current_time_s += config.time.dt_s;
+    current_time_s = next_time_s;
 
     if (step % static_cast<std::int64_t>(config.output.write_interval) == 0) {
       const double mass =

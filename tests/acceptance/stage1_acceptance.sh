@@ -16,6 +16,11 @@ failure_case_dir="${work_root}/failure-case"
 uneven_valid_case_dir="${work_root}/uneven-valid-partition"
 uneven_automatic_case_dir="${work_root}/uneven-automatic-partition"
 minimum_valid_case_dir="${work_root}/minimum-valid-partition"
+mpmd_root_a_dir="${work_root}/mpmd-root-a"
+mpmd_root_b_dir="${work_root}/mpmd-root-b"
+time_overflow_case_dir="${work_root}/time-overflow"
+time_finite_case_dir="${work_root}/time-finite"
+state_nonfinite_case_dir="${work_root}/state-nonfinite"
 
 cleanup() {
   rm -rf -- "${work_root}"
@@ -25,10 +30,45 @@ trap cleanup EXIT
 export OMPI_MCA_rmaps_base_oversubscribe=1
 
 check_normal_log() {
-  local path=$1
+  local stdout_path=$1
+  local stderr_path=$2
+  if ! test -f "${stderr_path}"; then
+    echo "normal numerical stderr capture is missing" >&2
+    return 1
+  fi
+  if test -s "${stderr_path}"; then
+    echo "normal numerical run emitted stderr" >&2
+    return 1
+  fi
+
+  local newline_count
+  if ! newline_count=$(LC_ALL=C tr -cd '\n' <"${stdout_path}" | wc -c); then
+    echo "unable to count normal numerical stdout LF bytes" >&2
+    return 1
+  fi
+  if [[ ! ${newline_count} =~ ^[0-9]+$ ]]; then
+    echo "normal numerical stdout LF count is invalid" >&2
+    return 1
+  fi
+  if test "${newline_count}" -ne 5; then
+    echo "normal numerical stdout must contain exactly five LF bytes" >&2
+    return 1
+  fi
+
+  local final_byte
+  if ! final_byte=$(LC_ALL=C tail -c 1 -- "${stdout_path}" | od -An -tu1); then
+    echo "unable to inspect normal numerical stdout final byte" >&2
+    return 1
+  fi
+  final_byte=${final_byte//[[:space:]]/}
+  if test "${final_byte}" != "10"; then
+    echo "normal numerical stdout must end with LF" >&2
+    return 1
+  fi
+
   local -a lines=()
-  if ! mapfile -t lines <"${path}"; then
-    echo "unable to read normal numerical log" >&2
+  if ! mapfile -t lines <"${stdout_path}"; then
+    echo "unable to read normal numerical stdout" >&2
     return 1
   fi
   if test "${#lines[@]}" -ne 5; then
@@ -62,6 +102,25 @@ check_normal_log() {
   fi
 }
 
+captured_generated_files=()
+
+capture_generated_files() {
+  local find_command=$1
+  shift
+  local captured
+  captured_generated_files=()
+  if ! captured=$("${find_command}" "$@"); then
+    return 1
+  fi
+  if test -z "${captured}"; then
+    return 0
+  fi
+  if ! mapfile -t captured_generated_files <<<"${captured}"; then
+    captured_generated_files=()
+    return 1
+  fi
+}
+
 require_bounded_diagnostic() {
   local path=$1
   local expected=$2
@@ -86,14 +145,24 @@ require_single_newline_record() {
     return 1
   fi
   local newline_count
-  newline_count=$(LC_ALL=C tr -cd '\n' <"${path}" | wc -c)
+  if ! newline_count=$(LC_ALL=C tr -cd '\n' <"${path}" | wc -c); then
+    echo "unable to count resolved output LF bytes" >&2
+    return 1
+  fi
+  if [[ ! ${newline_count} =~ ^[0-9]+$ ]]; then
+    echo "resolved output LF count is invalid" >&2
+    return 1
+  fi
   if test "${newline_count}" -ne 1; then
     echo "resolved output must contain exactly one newline" >&2
     return 1
   fi
   local final_byte
-  final_byte=$(LC_ALL=C tail -c 1 -- "${path}" | od -An -tu1 | \
-    tr -d '[:space:]')
+  if ! final_byte=$(LC_ALL=C tail -c 1 -- "${path}" | od -An -tu1); then
+    echo "unable to inspect resolved output final byte" >&2
+    return 1
+  fi
+  final_byte=${final_byte//[[:space:]]/}
   if test "${final_byte}" != "10"; then
     echo "resolved output must end with a newline" >&2
     return 1
@@ -104,19 +173,18 @@ require_no_numerical_artifacts() {
   local directory=$1
   local output_name=$2
   local restart_name=$3
-  local artifact
   if test -e "${directory}/${output_name}" || \
       test -e "${directory}/${restart_name}"; then
     echo "zero-step partition case created a configured output directory" >&2
     return 1
   fi
-  if ! artifact=$(find "${directory}" -type f \
+  if ! capture_generated_files find "${directory}" -type f \
       \( -name '*.vtk' -o -name 'restart.rank*.bin' -o -name '*.tmp' \) \
-      -print -quit); then
+      -print; then
     echo "unable to inspect zero-step partition artifacts" >&2
     return 1
   fi
-  if test -n "${artifact}"; then
+  if test "${#captured_generated_files[@]}" -ne 0; then
     echo "zero-step partition case created a numerical artifact" >&2
     return 1
   fi
@@ -216,6 +284,197 @@ check_minimum_valid_partition() {
     'output.minimum' 'Restart.minimum'
 }
 
+require_bounded_project_failure() {
+  local label=$1
+  local status=$2
+  local stdout_path=$3
+  local stderr_path=$4
+  local diagnostic=$5
+  if test "${status}" -eq 0; then
+    echo "${label} unexpectedly completed successfully" >&2
+    return 1
+  fi
+  case "${status}" in
+  124 | 137)
+    echo "${label} reached the time limit with status ${status}" >&2
+    return 1
+    ;;
+  esac
+  local diagnostic_count
+  set +e
+  diagnostic_count=$(grep -Fxc -- "${diagnostic}" "${stderr_path}")
+  local diagnostic_status=$?
+  set -e
+  case "${diagnostic_status}" in
+  0) ;;
+  1) diagnostic_count=0 ;;
+  *)
+    echo "unable to count ${label} diagnostic" >&2
+    return 1
+    ;;
+  esac
+  if test "${diagnostic_count}" -ne 1; then
+    echo "${label} did not emit its stable diagnostic exactly once" >&2
+    return 1
+  fi
+  local diagnostic_bytes
+  if ! diagnostic_bytes=$(wc -c <"${stderr_path}"); then
+    echo "unable to measure ${label} diagnostic output" >&2
+    return 1
+  fi
+  if [[ ! ${diagnostic_bytes} =~ ^[0-9]+$ ]]; then
+    echo "${label} diagnostic size is invalid" >&2
+    return 1
+  fi
+  if test "${diagnostic_bytes}" -gt 4096; then
+    echo "${label} diagnostic output is not bounded" >&2
+    return 1
+  fi
+  if grep -E '^(VALID|STEP|FINISHED)( |$)' \
+      "${stdout_path}" >/dev/null; then
+    echo "${label} emitted a success record" >&2
+    return 1
+  else
+    local grep_status=$?
+    if test "${grep_status}" -ne 1; then
+      echo "unable to inspect ${label} stdout" >&2
+      return 1
+    fi
+  fi
+}
+
+require_no_nonfinite_token() {
+  local path=$1
+  set +e
+  grep -E -i '(^|[^[:alnum:]_])(inf|nan)([^[:alnum:]_]|$)' \
+    "${path}" >/dev/null
+  local status=$?
+  set -e
+  case "${status}" in
+  0)
+    echo "successful numerical output contains a nonfinite token" >&2
+    return 1
+    ;;
+  1) ;;
+  *)
+    echo "unable to inspect successful numerical output" >&2
+    return 1
+    ;;
+  esac
+}
+
+fixture_find_failure_empty() {
+  return 23
+}
+
+fixture_find_failure_two() {
+  printf '%s\n' 'rank-a.bin' 'rank-b.bin'
+  return 23
+}
+
+fixture_find_failure_four() {
+  printf '%s\n' 'field-a.vtk' 'field-b.vtk' 'field-c.vtk' 'field-d.vtk'
+  return 23
+}
+
+fixture_find_success_empty() {
+  return 0
+}
+
+fixture_find_success_two() {
+  printf '%s\n' 'rank-a.bin' 'rank-b.bin'
+}
+
+fixture_find_success_four() {
+  printf '%s\n' 'field-a.vtk' 'field-b.vtk' 'field-c.vtk' 'field-d.vtk'
+}
+
+fixture_expect_generated_count() {
+  local expected=$1
+  local find_command=$2
+  shift 2
+  if ! capture_generated_files "${find_command}" "$@"; then
+    return 1
+  fi
+  test "${#captured_generated_files[@]}" -eq "${expected}"
+}
+
+run_fast_shell_contract_fixtures() {
+  local stdout_path="${work_root}/normal-log-fixture.stdout"
+  local stderr_path="${work_root}/normal-log-fixture.stderr"
+  local no_final_lf="${work_root}/normal-log-no-final-lf.stdout"
+  local moved_stdout="${work_root}/normal-log-moved.stdout"
+  local moved_stderr="${work_root}/normal-log-moved.stderr"
+  local extra_stderr="${work_root}/normal-log-extra.stderr"
+
+  printf '%s\n' \
+    'HUNDUN-FLOW 0.0.0-stage1' \
+    'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
+    'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
+    'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
+    'FINISHED step=20 time_s=0.2' >"${stdout_path}"
+  : >"${stderr_path}"
+  check_normal_log "${stdout_path}" "${stderr_path}"
+
+  printf '%s\n' \
+    'HUNDUN-FLOW 0.0.0-stage1' \
+    'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
+    'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
+    'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' >"${no_final_lf}"
+  printf '%s' 'FINISHED step=20 time_s=0.2' >>"${no_final_lf}"
+  if check_normal_log "${no_final_lf}" "${stderr_path}" >/dev/null 2>&1; then
+    echo "normal-log contract accepted a missing final LF" >&2
+    return 1
+  fi
+
+  printf '%s\n' \
+    'HUNDUN-FLOW 0.0.0-stage1' \
+    'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
+    'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
+    'FINISHED step=20 time_s=0.2' >"${moved_stdout}"
+  printf '%s\n' \
+    'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' >"${moved_stderr}"
+  if check_normal_log "${moved_stdout}" "${moved_stderr}" \
+      >/dev/null 2>&1; then
+    echo "normal-log contract accepted a STEP record on stderr" >&2
+    return 1
+  fi
+
+  printf '%s\n' 'arbitrary stderr record' >"${extra_stderr}"
+  if check_normal_log "${stdout_path}" "${extra_stderr}" \
+      >/dev/null 2>&1; then
+    echo "normal-log contract accepted nonempty stderr" >&2
+    return 1
+  fi
+
+  if fixture_expect_generated_count 0 fixture_find_failure_empty; then
+    echo "generated-file capture accepted an empty failing traversal" >&2
+    return 1
+  fi
+  if fixture_expect_generated_count 2 fixture_find_failure_two; then
+    echo "two-file count accepted a partial failing traversal" >&2
+    return 1
+  fi
+  if fixture_expect_generated_count 4 fixture_find_failure_four; then
+    echo "four-file count accepted a partial failing traversal" >&2
+    return 1
+  fi
+  if ! fixture_expect_generated_count 0 fixture_find_success_empty; then
+    echo "expected-zero generated-file control was rejected" >&2
+    return 1
+  fi
+  if ! fixture_expect_generated_count 2 fixture_find_success_two; then
+    echo "exact-two generated-file control was rejected" >&2
+    return 1
+  fi
+  if ! fixture_expect_generated_count 4 fixture_find_success_four; then
+    echo "exact-four generated-file control was rejected" >&2
+    return 1
+  fi
+}
+
+run_fast_shell_contract_fixtures
+
 artifact_inspection_missing="${work_root}/missing-artifact-inspection"
 artifact_inspection_error="${work_root}/artifact-inspection.stderr"
 set +e
@@ -262,7 +521,9 @@ fi
 
 mkdir -p -- "${case_dir}" "${failure_case_dir}" \
   "${uneven_valid_case_dir}" "${uneven_automatic_case_dir}" \
-  "${minimum_valid_case_dir}" \
+  "${minimum_valid_case_dir}" "${mpmd_root_a_dir}" \
+  "${mpmd_root_b_dir}" "${time_overflow_case_dir}" \
+  "${time_finite_case_dir}" "${state_nonfinite_case_dir}" \
   "${work_root}/launch-a" "${work_root}/launch-b"
 cp -- "${project_root}/cases/passive_scalar/case.json" "${case_dir}/case.json"
 cp -- "${project_root}/cases/passive_scalar/case_restart.json" \
@@ -363,6 +624,126 @@ cat >"${minimum_valid_case_dir}/case.json" <<'EOF'
 }
 EOF
 
+cat >"${mpmd_root_a_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "rank_zero_authoritative_root"},
+  "resources": {
+    "expected_ranks": 2,
+    "process_grid": [2, 1, 1]
+  },
+  "mesh": {
+    "cells": [4, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 1.0, 1.0],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.125, "steps": 1},
+  "transport": {
+    "velocity_m_per_s": [0.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart"
+  },
+  "output": {
+    "directory": "output",
+    "write_interval": 1,
+    "restart_interval": 2
+  }
+}
+EOF
+cp -- "${mpmd_root_a_dir}/case.json" "${mpmd_root_b_dir}/case.json"
+
+cat >"${time_overflow_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "time_overflow"},
+  "resources": {"expected_ranks": 1},
+  "mesh": {
+    "cells": [2, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 1.0, 1.0],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 1.7976931348623157e308, "steps": 2},
+  "transport": {
+    "velocity_m_per_s": [0.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart"
+  },
+  "output": {
+    "directory": "output",
+    "write_interval": 2,
+    "restart_interval": 3
+  }
+}
+EOF
+
+cat >"${time_finite_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "time_finite_near_limit"},
+  "resources": {"expected_ranks": 1},
+  "mesh": {
+    "cells": [2, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 1.0, 1.0],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 8.0e307, "steps": 2},
+  "transport": {
+    "velocity_m_per_s": [0.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart"
+  },
+  "output": {
+    "directory": "output",
+    "write_interval": 2,
+    "restart_interval": 3
+  }
+}
+EOF
+
+cat >"${state_nonfinite_case_dir}/case.json" <<'EOF'
+{
+  "schema_version": 1,
+  "case": {"name": "state_nonfinite"},
+  "resources": {"expected_ranks": 1},
+  "mesh": {
+    "cells": [4, 2, 2],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 1.0, 1.0],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 1.0, "steps": 1},
+  "transport": {
+    "velocity_m_per_s": [1.7976931348623157e308, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart"
+  },
+  "output": {
+    "directory": "output",
+    "write_interval": 2,
+    "restart_interval": 1
+  }
+}
+EOF
+
 "${cmake_command}" -S "${project_root}" -B "${build_dir}" \
   -DCMAKE_BUILD_TYPE=Release -DHUNDUN_BUILD_TESTS=ON
 "${cmake_command}" --build "${build_dir}" -j 2
@@ -382,6 +763,133 @@ if test "${version_output_status}" -eq 0; then
 fi
 require_bounded_diagnostic "${work_root}/version-output-failure.log" \
   "unable to write version output"
+
+mode_stdout="${work_root}/mode-mismatch.stdout"
+mode_stderr="${work_root}/mode-mismatch.stderr"
+set +e
+timeout --kill-after=2 10 "${mpiexec_command}" \
+  -n 1 "${build_dir}/hundun" "${mpmd_root_a_dir}/case.json" --validate \
+  : -n 1 "${build_dir}/hundun" "${mpmd_root_a_dir}/case.json" \
+  >"${mode_stdout}" 2>"${mode_stderr}"
+mode_status=$?
+set -e
+require_bounded_project_failure \
+  "communicator run-mode mismatch" "${mode_status}" \
+  "${mode_stdout}" "${mode_stderr}" \
+  "MPI run mode differs across communicator ranks"
+set +e
+grep -E '^(VALID|HUNDUN-FLOW|CASE|STEP|FINISHED)( |$)' \
+  "${mode_stdout}" >/dev/null
+mode_success_record_status=$?
+set -e
+case "${mode_success_record_status}" in
+0)
+  echo "communicator run-mode mismatch emitted a success record" >&2
+  exit 1
+  ;;
+1) ;;
+*)
+  echo "unable to inspect communicator run-mode stdout" >&2
+  exit 1
+  ;;
+esac
+require_no_numerical_artifacts "${mpmd_root_a_dir}" output Restart
+
+root_stdout="${work_root}/authoritative-root.stdout"
+root_stderr="${work_root}/authoritative-root.stderr"
+set +e
+timeout --kill-after=2 20 "${mpiexec_command}" \
+  -n 1 "${build_dir}/hundun" "${mpmd_root_a_dir}/case.json" \
+  : -n 1 "${build_dir}/hundun" "${mpmd_root_b_dir}/case.json" \
+  >"${root_stdout}" 2>"${root_stderr}"
+root_status=$?
+set -e
+if test "${root_status}" -ne 0; then
+  echo "authoritative-root MPMD run returned status ${root_status}" >&2
+  exit 1
+fi
+if test -s "${root_stderr}"; then
+  echo "authoritative-root MPMD run emitted stderr" >&2
+  exit 1
+fi
+grep -Fx 'HUNDUN-FLOW 0.0.0-stage1' "${root_stdout}" >/dev/null
+grep -Fx 'CASE name=rank_zero_authoritative_root ranks=2 cells=4x2x2' \
+  "${root_stdout}" >/dev/null
+grep -E '^STEP 1 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \
+  "${root_stdout}" >/dev/null
+grep -E '^FINISHED step=1 time_s=[0-9.eE+-]+$' \
+  "${root_stdout}" >/dev/null
+test -s "${mpmd_root_a_dir}/output/scalar.step00000001.rank000000.vtk"
+test -s "${mpmd_root_a_dir}/output/scalar.step00000001.rank000001.vtk"
+if ! capture_generated_files find "${mpmd_root_a_dir}/output" -maxdepth 1 \
+    -type f -name 'scalar.step*.rank*.vtk' -print; then
+  echo "unable to enumerate authoritative-root VTK files" >&2
+  exit 1
+fi
+if test "${#captured_generated_files[@]}" -ne 2; then
+  echo "authoritative root must contain exactly two VTK files" >&2
+  exit 1
+fi
+if test -e "${mpmd_root_a_dir}/Restart"; then
+  echo "one-step authoritative-root control created Restart output" >&2
+  exit 1
+fi
+require_no_numerical_artifacts "${mpmd_root_b_dir}" output Restart
+
+time_overflow_stdout="${work_root}/time-overflow.stdout"
+time_overflow_stderr="${work_root}/time-overflow.stderr"
+set +e
+timeout --kill-after=2 10 "${build_dir}/hundun" \
+  "${time_overflow_case_dir}/case.json" \
+  >"${time_overflow_stdout}" 2>"${time_overflow_stderr}"
+time_overflow_status=$?
+set -e
+require_bounded_project_failure \
+  "nonfinite accumulated physical time" "${time_overflow_status}" \
+  "${time_overflow_stdout}" "${time_overflow_stderr}" \
+  "physical time is not finite"
+require_no_numerical_artifacts "${time_overflow_case_dir}" output Restart
+
+time_finite_stdout="${work_root}/time-finite.stdout"
+time_finite_stderr="${work_root}/time-finite.stderr"
+set +e
+timeout --kill-after=2 10 "${build_dir}/hundun" \
+  "${time_finite_case_dir}/case.json" \
+  >"${time_finite_stdout}" 2>"${time_finite_stderr}"
+time_finite_status=$?
+set -e
+if test "${time_finite_status}" -ne 0; then
+  echo "finite near-limit time control returned status ${time_finite_status}" >&2
+  exit 1
+fi
+if test -s "${time_finite_stderr}"; then
+  echo "finite near-limit time control emitted stderr" >&2
+  exit 1
+fi
+grep -E '^STEP 2 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \
+  "${time_finite_stdout}" >/dev/null
+grep -E '^FINISHED step=2 time_s=[0-9.eE+-]+$' \
+  "${time_finite_stdout}" >/dev/null
+require_no_nonfinite_token "${time_finite_stdout}"
+test -s "${time_finite_case_dir}/output/scalar.step00000002.rank000000.vtk"
+if test -e "${time_finite_case_dir}/Restart"; then
+  echo "finite near-limit time control created Restart output" >&2
+  exit 1
+fi
+
+state_stdout="${work_root}/state-nonfinite.stdout"
+state_stderr="${work_root}/state-nonfinite.stderr"
+set +e
+timeout --kill-after=2 10 "${build_dir}/hundun" \
+  "${state_nonfinite_case_dir}/case.json" \
+  >"${state_stdout}" 2>"${state_stderr}"
+state_status=$?
+set -e
+require_bounded_project_failure \
+  "nonfinite passive-scalar state" "${state_status}" \
+  "${state_stdout}" "${state_stderr}" \
+  "passive-scalar state is not finite"
+require_no_numerical_artifacts "${state_nonfinite_case_dir}" output Restart
 
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
   "${case_dir}/case.json" --validate >"${work_root}/validation.txt"
@@ -469,15 +977,23 @@ check_minimum_valid_partition
 
 mkdir -p -- "${case_dir}/output"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" "${case_dir}/case.json" \
-  >"${case_dir}/output/run.log" 2>&1
-check_normal_log "${case_dir}/output/run.log"
+  >"${case_dir}/output/run.log" 2>"${case_dir}/output/run.stderr"
+check_normal_log "${case_dir}/output/run.log" \
+  "${case_dir}/output/run.stderr"
 
 check_checkpoint() {
   local directory=$1
   test -s "${directory}/manifest.v1.bin"
   test -s "${directory}/COMPLETED"
-  test "$(find "${directory}" -maxdepth 1 -type f \
-    -name 'restart.rank*.bin' | wc -l)" -eq 2
+  if ! capture_generated_files find "${directory}" -maxdepth 1 -type f \
+      -name 'restart.rank*.bin' -print; then
+    echo "unable to enumerate rank checkpoint files" >&2
+    return 1
+  fi
+  if test "${#captured_generated_files[@]}" -ne 2; then
+    echo "rank checkpoint directory must contain exactly two rank files" >&2
+    return 1
+  fi
   test -s "${directory}/restart.rank000000.bin"
   test -s "${directory}/restart.rank000001.bin"
   local records
@@ -488,8 +1004,15 @@ check_checkpoint() {
 
 check_checkpoint "${case_dir}/Restart/step00000010"
 check_checkpoint "${case_dir}/Restart/step00000020"
-test "$(find "${case_dir}/output" -maxdepth 1 -type f \
-  -name 'scalar.step*.rank*.vtk' | wc -l)" -eq 4
+if ! capture_generated_files find "${case_dir}/output" -maxdepth 1 \
+    -type f -name 'scalar.step*.rank*.vtk' -print; then
+  echo "unable to enumerate canonical VTK files" >&2
+  exit 1
+fi
+if test "${#captured_generated_files[@]}" -ne 4; then
+  echo "canonical output must contain exactly four VTK files" >&2
+  exit 1
+fi
 
 mv -- "${case_dir}/Restart/step00000010/COMPLETED" \
   "${case_dir}/Restart/step00000010/COMPLETED.saved"
@@ -556,7 +1079,12 @@ case "${linkage_scan_status}" in
   exit 1
   ;;
 esac
-if find "${case_dir}" -type f -name '*.tmp' -print -quit | grep -q .; then
+if ! capture_generated_files find "${case_dir}" -type f -name '*.tmp' \
+    -print; then
+  echo "unable to inspect generated case temporary files" >&2
+  exit 1
+fi
+if test "${#captured_generated_files[@]}" -ne 0; then
   echo "generated case tree contains a residual temporary file" >&2
   exit 1
 fi
