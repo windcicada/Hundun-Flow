@@ -18,6 +18,7 @@ include(HundunSanitizers)
 include(HundunWarnings)
 
 hundun_assert_clean_tree("${PROJECT_SOURCE_DIR}")
+hundun_assert_public_dependency_policy("${PROJECT_SOURCE_DIR}")
 
 find_package(MPI 3 REQUIRED COMPONENTS CXX)
 
@@ -487,6 +488,12 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${case_broadcast_test}" PROPERTIES
       LABELS mpi TIMEOUT 45 PROCESSORS 4)
   endforeach()
+  add_test(NAME test_case_config_broadcast_path_failures
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_case_config_broadcast>"
+            path_failures ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_case_config_broadcast_path_failures PROPERTIES
+    LABELS mpi TIMEOUT 15 PROCESSORS 4)
   add_test(NAME test_case_config_broadcast_finalized
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_case_config_broadcast>"
@@ -556,6 +563,18 @@ if(HUNDUN_BUILD_TESTS)
     COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=verify_uppercase
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
 
+  add_test(NAME source_policy_clean
+    COMMAND "${CMAKE_COMMAND}" -DHUNDUN_PROVENANCE_CASE=source_clean
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  foreach(source_policy_case IN ITEMS
+      python_file python_header python_package python_codegen
+      fetch external download missing)
+    add_test(NAME "source_policy_${source_policy_case}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DHUNDUN_PROVENANCE_CASE=verify_source_${source_policy_case}"
+              -P "${PROJECT_SOURCE_DIR}/tests/cmake/provenance_fixture.cmake")
+  endforeach()
+
   set_tests_properties(
     provenance_clean
     provenance_forbidden_fortran
@@ -566,6 +585,19 @@ if(HUNDUN_BUILD_TESTS)
     provenance_forbidden_uppercase_suffix_diagnostic
     PROPERTIES
       LABELS provenance
+      RESOURCE_LOCK hundun_provenance_fixture_tree)
+  set_tests_properties(
+    source_policy_clean
+    source_policy_python_file
+    source_policy_python_header
+    source_policy_python_package
+    source_policy_python_codegen
+    source_policy_fetch
+    source_policy_external
+    source_policy_download
+    source_policy_missing
+    PROPERTIES
+      LABELS "provenance;source_policy"
       RESOURCE_LOCK hundun_provenance_fixture_tree)
   set_tests_properties(
     provenance_forbidden_fortran

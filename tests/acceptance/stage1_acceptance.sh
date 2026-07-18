@@ -121,6 +121,62 @@ capture_generated_files() {
   fi
 }
 
+require_exact_canonical_vtk_set() {
+  local directory=$1
+  local enumerator=$2
+  local -a expected_basenames=(
+    'scalar.step00000010.rank000000.vtk'
+    'scalar.step00000010.rank000001.vtk'
+    'scalar.step00000020.rank000000.vtk'
+    'scalar.step00000020.rank000001.vtk')
+
+  if ! capture_generated_files "${enumerator}" "${directory}" -maxdepth 1 \
+      -type f -name 'scalar.step*.rank*.vtk' -print; then
+    echo "unable to enumerate canonical VTK files" >&2
+    return 1
+  fi
+  if test "${#captured_generated_files[@]}" -ne \
+      "${#expected_basenames[@]}"; then
+    echo "canonical output does not contain exactly four VTK files" >&2
+    return 1
+  fi
+
+  local expected
+  for expected in "${expected_basenames[@]}"; do
+    if ! test -s "${directory}/${expected}"; then
+      echo "canonical output is missing nonempty VTK file ${expected}" >&2
+      return 1
+    fi
+    local matches=0
+    local generated
+    for generated in "${captured_generated_files[@]}"; do
+      if test "${generated##*/}" = "${expected}"; then
+        matches=$((matches + 1))
+      fi
+    done
+    if test "${matches}" -ne 1; then
+      echo "canonical VTK enumeration does not contain ${expected} once" >&2
+      return 1
+    fi
+  done
+
+  local generated
+  for generated in "${captured_generated_files[@]}"; do
+    local basename=${generated##*/}
+    local allowed=0
+    for expected in "${expected_basenames[@]}"; do
+      if test "${basename}" = "${expected}"; then
+        allowed=1
+        break
+      fi
+    done
+    if test "${allowed}" -ne 1; then
+      echo "canonical output contains stray VTK file ${basename}" >&2
+      return 1
+    fi
+  done
+}
+
 require_bounded_diagnostic() {
   local path=$1
   local expected=$2
@@ -343,6 +399,147 @@ require_bounded_project_failure() {
   fi
 }
 
+require_no_restart_rejection_artifacts() {
+  local case_directory=$1
+  local output_name=$2
+  local restart_name=$3
+  local enumerator=$4
+  local root
+  for root in "${case_directory}/${output_name}" \
+      "${case_directory}/${restart_name}"; do
+    if ! test -e "${root}"; then
+      continue
+    fi
+    if ! test -d "${root}"; then
+      echo "restart rejection artifact root is not a directory: ${root}" >&2
+      return 1
+    fi
+    if ! capture_generated_files "${enumerator}" "${root}" -type f \
+        \( -name '*.vtk' -o -name 'restart.rank*.bin' -o \
+        -name 'manifest.v1.bin' -o -name 'COMPLETED' -o -name '*.tmp' \) \
+        -print; then
+      echo "unable to inspect restart rejection artifacts" >&2
+      return 1
+    fi
+    if test "${#captured_generated_files[@]}" -ne 0; then
+      echo "restart rejection published a forbidden artifact" >&2
+      return 1
+    fi
+  done
+}
+
+require_restart_rejection_result() {
+  local label=$1
+  local status=$2
+  local stdout_path=$3
+  local stderr_path=$4
+  local expected_diagnostic=$5
+  local case_directory=$6
+  local output_name=$7
+  local restart_name=$8
+  local enumerator=$9
+
+  case "${status}" in
+  1) ;;
+  0)
+    echo "${label} unexpectedly completed successfully" >&2
+    return 1
+    ;;
+  124)
+    echo "${label} reached the local time limit" >&2
+    return 1
+    ;;
+  137)
+    echo "${label} required a forced kill" >&2
+    return 1
+    ;;
+  *)
+    echo "${label} returned unrelated status ${status}" >&2
+    return 1
+    ;;
+  esac
+
+  if ! test -f "${stdout_path}" || ! test -f "${stderr_path}"; then
+    echo "${label} did not produce separate output captures" >&2
+    return 1
+  fi
+
+  local diagnostic_count
+  local diagnostic_status
+  set +e
+  diagnostic_count=$(grep -Fc -- "${expected_diagnostic}" "${stderr_path}")
+  diagnostic_status=$?
+  set -e
+  case "${diagnostic_status}" in
+  0) ;;
+  1) diagnostic_count=0 ;;
+  *)
+    echo "unable to inspect ${label} diagnostic" >&2
+    return 1
+    ;;
+  esac
+  if [[ ! ${diagnostic_count} =~ ^[0-9]+$ ]] || \
+      test "${diagnostic_count}" -ne 1; then
+    echo "${label} did not emit its condition-specific diagnostic once" >&2
+    return 1
+  fi
+
+  local diagnostic_bytes
+  if ! diagnostic_bytes=$(wc -c <"${stderr_path}"); then
+    echo "unable to measure ${label} diagnostic" >&2
+    return 1
+  fi
+  if [[ ! ${diagnostic_bytes} =~ ^[0-9]+$ ]] || \
+      test "${diagnostic_bytes}" -gt 4096; then
+    echo "${label} diagnostic is not within the fixed byte bound" >&2
+    return 1
+  fi
+
+  set +e
+  grep -E '^(VALID|STEP|FINISHED)( |$)' "${stdout_path}" >/dev/null
+  local success_record_status=$?
+  set -e
+  case "${success_record_status}" in
+  0)
+    echo "${label} emitted a success record" >&2
+    return 1
+    ;;
+  1) ;;
+  *)
+    echo "unable to inspect ${label} stdout" >&2
+    return 1
+    ;;
+  esac
+
+  require_no_restart_rejection_artifacts \
+    "${case_directory}" "${output_name}" "${restart_name}" "${enumerator}"
+}
+
+run_restart_rejection_case() {
+  local label=$1
+  local time_limit=$2
+  local kill_after=$3
+  local expected_diagnostic=$4
+  local case_directory=$5
+  local output_name=$6
+  local restart_name=$7
+  local stdout_path=$8
+  local stderr_path=$9
+  shift 9
+
+  : >"${stdout_path}"
+  : >"${stderr_path}"
+  set +e
+  timeout --kill-after="${kill_after}" "${time_limit}" "$@" \
+    >"${stdout_path}" 2>"${stderr_path}"
+  local status=$?
+  set -e
+  require_restart_rejection_result \
+    "${label}" "${status}" "${stdout_path}" "${stderr_path}" \
+    "${expected_diagnostic}" "${case_directory}" "${output_name}" \
+    "${restart_name}" find
+}
+
 require_no_nonfinite_token() {
   local path=$1
   set +e
@@ -387,6 +584,16 @@ fixture_find_success_two() {
 
 fixture_find_success_four() {
   printf '%s\n' 'field-a.vtk' 'field-b.vtk' 'field-c.vtk' 'field-d.vtk'
+}
+
+fixture_vtk_enumerator_failure() {
+  local directory=$1
+  printf '%s\n' \
+    "${directory}/scalar.step00000010.rank000000.vtk" \
+    "${directory}/scalar.step00000020.rank000001.vtk" \
+    "${directory}/scalar.step00000010.rank000001.vtk" \
+    "${directory}/scalar.step00000020.rank000000.vtk"
+  return 23
 }
 
 fixture_expect_generated_count() {
@@ -471,9 +678,143 @@ run_fast_shell_contract_fixtures() {
     echo "exact-four generated-file control was rejected" >&2
     return 1
   fi
+
+  local rejection_root="${work_root}/restart-rejection-fixture"
+  local rejection_stdout="${work_root}/restart-rejection-fixture.stdout"
+  local rejection_stderr="${work_root}/restart-rejection-fixture.stderr"
+  local rejection_diagnostic='fixture restart rejection'
+  mkdir -p -- "${rejection_root}"
+
+  if ! run_restart_rejection_case \
+      'intended restart rejection fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n" "$1" >&2; exit 1' sh \
+      "${rejection_diagnostic}"; then
+    echo "intended restart rejection fixture was rejected" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'unrelated restart rejection status fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n" "$1" >&2; exit 42' sh \
+      "${rejection_diagnostic}" >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted unrelated status 42" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'restart rejection timeout fixture' 0.2 0.1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'sleep 2' >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted a timeout" >&2
+    return 1
+  fi
+
+  if run_restart_rejection_case \
+      'restart rejection success-record fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n" "FINISHED step=20 time_s=1"; printf "%s\n" "$1" >&2; exit 1' \
+      sh "${rejection_diagnostic}" >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted a success record" >&2
+    return 1
+  fi
+
+  local -a forbidden_rejection_artifacts=(
+    'output.resumed/stray.vtk'
+    'Restart.resumed/restart.rank000000.bin'
+    'Restart.resumed/manifest.v1.bin'
+    'Restart.resumed/COMPLETED'
+    'Restart.resumed/partial.tmp')
+  local artifact
+  for artifact in "${forbidden_rejection_artifacts[@]}"; do
+    rm -rf -- "${rejection_root}/output.resumed" \
+      "${rejection_root}/Restart.resumed"
+    if run_restart_rejection_case \
+        "restart rejection artifact fixture ${artifact}" 1 1 \
+        "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+        Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+        sh -c 'mkdir -p -- "$(dirname -- "$1")"; : >"$1"; printf "%s\n" "$2" >&2; exit 1' \
+        sh "${rejection_root}/${artifact}" "${rejection_diagnostic}" \
+        >/dev/null 2>&1; then
+      echo "restart rejection fixture accepted artifact ${artifact}" >&2
+      return 1
+    fi
+  done
+  rm -rf -- "${rejection_root}/output.resumed" \
+    "${rejection_root}/Restart.resumed"
+
+  mkdir -p -- "${rejection_root}/output.resumed"
+  : >"${rejection_stdout}"
+  printf '%s\n' "${rejection_diagnostic}" >"${rejection_stderr}"
+  if require_restart_rejection_result \
+      'restart rejection inspection-error fixture' 1 \
+      "${rejection_stdout}" "${rejection_stderr}" \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed fixture_find_failure_empty >/dev/null 2>&1; then
+    echo "restart rejection fixture accepted an inspection error" >&2
+    return 1
+  fi
+
+  local vtk_fixture_root="${work_root}/canonical-vtk-set-fixture"
+  local -a expected_vtk_basenames=(
+    'scalar.step00000010.rank000000.vtk'
+    'scalar.step00000010.rank000001.vtk'
+    'scalar.step00000020.rank000000.vtk'
+    'scalar.step00000020.rank000001.vtk')
+  local vtk_name
+  rm -rf -- "${vtk_fixture_root}"
+  mkdir -p -- "${vtk_fixture_root}"
+  for vtk_name in "${expected_vtk_basenames[@]}"; do
+    printf '%s\n' 'VTK fixture' >"${vtk_fixture_root}/${vtk_name}"
+  done
+  if ! require_exact_canonical_vtk_set "${vtk_fixture_root}" find; then
+    echo "exact canonical VTK-set fixture was rejected" >&2
+    return 1
+  fi
+
+  local replacement_index
+  for replacement_index in 0 1 2 3; do
+    rm -rf -- "${vtk_fixture_root}"
+    mkdir -p -- "${vtk_fixture_root}"
+    local expected_index
+    for expected_index in 0 1 2 3; do
+      if test "${expected_index}" -eq "${replacement_index}"; then
+        vtk_name="scalar.step9999999${replacement_index}.rank99999${replacement_index}.vtk"
+      else
+        vtk_name=${expected_vtk_basenames[expected_index]}
+      fi
+      printf '%s\n' 'VTK fixture' >"${vtk_fixture_root}/${vtk_name}"
+    done
+    if require_exact_canonical_vtk_set "${vtk_fixture_root}" find \
+        >/dev/null 2>&1; then
+      echo "canonical VTK-set fixture accepted substitution ${replacement_index}" >&2
+      return 1
+    fi
+  done
+
+  rm -rf -- "${vtk_fixture_root}"
+  mkdir -p -- "${vtk_fixture_root}"
+  for vtk_name in "${expected_vtk_basenames[@]}"; do
+    printf '%s\n' 'VTK fixture' >"${vtk_fixture_root}/${vtk_name}"
+  done
+  if require_exact_canonical_vtk_set \
+      "${vtk_fixture_root}" fixture_vtk_enumerator_failure \
+      >/dev/null 2>&1; then
+    echo "canonical VTK-set fixture accepted a failing enumerator" >&2
+    return 1
+  fi
 }
 
 run_fast_shell_contract_fixtures
+
+if test "${HUNDUN_ACCEPTANCE_FAST_FIXTURES_ONLY:-0}" = 1; then
+  exit 0
+fi
 
 artifact_inspection_missing="${work_root}/missing-artifact-inspection"
 artifact_inspection_error="${work_root}/artifact-inspection.stderr"
@@ -1004,36 +1345,62 @@ check_checkpoint() {
 
 check_checkpoint "${case_dir}/Restart/step00000010"
 check_checkpoint "${case_dir}/Restart/step00000020"
-if ! capture_generated_files find "${case_dir}/output" -maxdepth 1 \
-    -type f -name 'scalar.step*.rank*.vtk' -print; then
-  echo "unable to enumerate canonical VTK files" >&2
-  exit 1
-fi
-if test "${#captured_generated_files[@]}" -ne 4; then
-  echo "canonical output must contain exactly four VTK files" >&2
-  exit 1
-fi
+require_exact_canonical_vtk_set "${case_dir}/output" find
 
-mv -- "${case_dir}/Restart/step00000010/COMPLETED" \
-  "${case_dir}/Restart/step00000010/COMPLETED.saved"
-if "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
-  "${case_dir}/case_restart.json" >"${work_root}/missing-marker.log" 2>&1; then
-  echo "restart unexpectedly accepted a missing COMPLETED marker" >&2
-  exit 1
-fi
-mv -- "${case_dir}/Restart/step00000010/COMPLETED.saved" \
-  "${case_dir}/Restart/step00000010/COMPLETED"
+check_missing_marker_rejection() {
+  local marker="${case_dir}/Restart/step00000010/COMPLETED"
+  local saved_marker="${marker}.saved"
+  local rejection_status=0
+  local restore_status=0
 
-cp -p -- "${case_dir}/Restart/step00000010/restart.rank000001.bin" \
-  "${case_dir}/Restart/step00000010/restart.rank000001.bin.saved"
-: >"${case_dir}/Restart/step00000010/restart.rank000001.bin"
-if "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
-  "${case_dir}/case_restart.json" >"${work_root}/truncated-rank.log" 2>&1; then
-  echo "restart unexpectedly accepted a truncated rank file" >&2
-  exit 1
-fi
-mv -- "${case_dir}/Restart/step00000010/restart.rank000001.bin.saved" \
-  "${case_dir}/Restart/step00000010/restart.rank000001.bin"
+  mv -- "${marker}" "${saved_marker}"
+  run_restart_rejection_case \
+    'missing Restart completion marker' 20 2 \
+    'Restart v1 completion marker read: unable to open Restart v1 file:' \
+    "${case_dir}" output.resumed Restart.resumed \
+    "${work_root}/missing-marker.stdout" \
+    "${work_root}/missing-marker.stderr" \
+    "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
+    "${case_dir}/case_restart.json" || rejection_status=$?
+  if ! mv -- "${saved_marker}" "${marker}"; then
+    echo "unable to restore Restart completion marker fixture" >&2
+    restore_status=1
+  fi
+  if test "${rejection_status}" -ne 0; then
+    return "${rejection_status}"
+  fi
+  return "${restore_status}"
+}
+
+check_truncated_rank_rejection() {
+  local rank_file=
+  rank_file="${case_dir}/Restart/step00000010/restart.rank000001.bin"
+  local saved_rank_file="${rank_file}.saved"
+  local rejection_status=0
+  local restore_status=0
+
+  cp -p -- "${rank_file}" "${saved_rank_file}"
+  : >"${rank_file}"
+  run_restart_rejection_case \
+    'truncated Restart rank file' 20 2 \
+    'Restart v1 rank-file read: Restart v1 rank-file size or CRC does not match manifest' \
+    "${case_dir}" output.resumed Restart.resumed \
+    "${work_root}/truncated-rank.stdout" \
+    "${work_root}/truncated-rank.stderr" \
+    "${mpiexec_command}" -n 2 "${build_dir}/hundun" \
+    "${case_dir}/case_restart.json" || rejection_status=$?
+  if ! mv -- "${saved_rank_file}" "${rank_file}"; then
+    echo "unable to restore truncated Restart rank-file fixture" >&2
+    restore_status=1
+  fi
+  if test "${rejection_status}" -ne 0; then
+    return "${rejection_status}"
+  fi
+  return "${restore_status}"
+}
+
+check_missing_marker_rejection
+check_truncated_rank_rejection
 
 mkdir -p -- "${case_dir}/output.resumed"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" \

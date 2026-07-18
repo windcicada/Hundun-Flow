@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "applications/hundun/case_config_broadcast.hpp"
+#include "applications/hundun/detail/case_config_broadcast_test.hpp"
 
 #include "hundun/config/case_config_loader.hpp"
 #include "hundun/runtime/error.hpp"
@@ -164,11 +165,60 @@ void broadcast_string(MPI_Comm comm, int root, int rank, std::string &value,
   broadcast_bytes(comm, root, value.data(), length, operation);
 }
 
-void broadcast_path(MPI_Comm comm, int root, int rank,
-                    std::filesystem::path &path, std::string_view operation) {
-  std::string text = rank == root ? path.generic_string() : std::string{};
+bool should_inject_path_failure(
+    const detail::CaseConfigPathFailureInjection *injection,
+    detail::CaseConfigPathTransfer transfer,
+    detail::CaseConfigPathFailurePhase phase, int rank) noexcept {
+  return injection != nullptr && injection->transfer == transfer &&
+         injection->phase == phase && injection->rank == rank;
+}
+
+template <class RootPathSource>
+std::filesystem::path
+broadcast_path(MPI_Comm comm, int root, int rank, int size,
+               detail::CaseConfigPathTransfer transfer,
+               RootPathSource &&root_path_source, std::string_view operation,
+               const detail::CaseConfigPathFailureInjection *injection) {
+  std::string text;
+  bool preparation_ok = true;
+  if (rank == root) {
+    if (should_inject_path_failure(
+            injection, transfer,
+            detail::CaseConfigPathFailurePhase::preparation, rank)) {
+      preparation_ok = false;
+    } else {
+      try {
+        const std::filesystem::path prepared_path(root_path_source());
+        text = prepared_path.generic_string();
+        if (text.size() > std::numeric_limits<std::uint64_t>::max()) {
+          throw Error("case-config path exceeds the uint64 wire domain");
+        }
+      } catch (...) {
+        preparation_ok = false;
+      }
+    }
+  }
+  converge_or_throw(comm, rank, size, preparation_ok,
+                    "unable to prepare case-config path");
+
   broadcast_string(comm, root, rank, text, operation);
-  path = std::filesystem::path(std::move(text));
+
+  std::filesystem::path reconstructed_path;
+  bool reconstruction_ok = true;
+  if (should_inject_path_failure(
+          injection, transfer,
+          detail::CaseConfigPathFailurePhase::reconstruction, rank)) {
+    reconstruction_ok = false;
+  } else {
+    try {
+      reconstructed_path = std::filesystem::path(text);
+    } catch (...) {
+      reconstruction_ok = false;
+    }
+  }
+  converge_or_throw(comm, rank, size, reconstruction_ok,
+                    "unable to reconstruct case-config path");
+  return reconstructed_path;
 }
 
 std::uint64_t checked_grid_product(runtime::Int3 grid) {
@@ -196,9 +246,11 @@ std::string exception_message_or_fallback(const std::exception &error,
 
 } // namespace
 
-config::CaseConfig
-broadcast_case_config(MPI_Comm comm, int root,
-                      const config::CaseConfig *root_config) {
+namespace {
+
+config::CaseConfig broadcast_case_config_impl(
+    MPI_Comm comm, int root, const config::CaseConfig *root_config,
+    const detail::CaseConfigPathFailureInjection *path_failure_injection) {
   runtime::detail::require_mpi_active("broadcast typed case configuration");
   if (comm == MPI_COMM_NULL) {
     throw Error("typed case configuration requires a valid intracommunicator");
@@ -317,19 +369,33 @@ broadcast_case_config(MPI_Comm comm, int root,
   if (has_read_directory != 0 && has_read_directory != 1) {
     throw Error("case-config read-directory flag is invalid");
   }
-  std::filesystem::path read_directory =
-      result.restart.read_directory.value_or(std::filesystem::path{});
   if (has_read_directory != 0) {
-    broadcast_path(comm, root, rank, read_directory,
-                   "MPI_Bcast case-config read directory");
-    result.restart.read_directory = std::move(read_directory);
+    std::filesystem::path read_directory = broadcast_path(
+        comm, root, rank, size,
+        detail::CaseConfigPathTransfer::restart_read_directory,
+        [&result]() -> const std::filesystem::path & {
+          return result.restart.read_directory.value();
+        },
+        "MPI_Bcast case-config read directory", path_failure_injection);
+    result.restart.read_directory.emplace(std::move(read_directory));
   } else {
     result.restart.read_directory.reset();
   }
-  broadcast_path(comm, root, rank, result.restart.write_directory,
-                 "MPI_Bcast case-config write directory");
-  broadcast_path(comm, root, rank, result.output.directory,
-                 "MPI_Bcast case-config output directory");
+  std::filesystem::path write_directory = broadcast_path(
+      comm, root, rank, size,
+      detail::CaseConfigPathTransfer::restart_write_directory,
+      [&result]() -> const std::filesystem::path & {
+        return result.restart.write_directory;
+      },
+      "MPI_Bcast case-config write directory", path_failure_injection);
+  result.restart.write_directory = std::move(write_directory);
+  std::filesystem::path output_directory = broadcast_path(
+      comm, root, rank, size, detail::CaseConfigPathTransfer::output_directory,
+      [&result]() -> const std::filesystem::path & {
+        return result.output.directory;
+      },
+      "MPI_Bcast case-config output directory", path_failure_injection);
+  result.output.directory = std::move(output_directory);
   broadcast_int(comm, root, result.output.write_interval,
                 "MPI_Bcast case-config output interval");
   broadcast_int(comm, root, result.output.restart_interval,
@@ -356,5 +422,23 @@ broadcast_case_config(MPI_Comm comm, int root,
   converge_or_throw(comm, rank, size, validation_ok, validation_message);
   return result;
 }
+
+} // namespace
+
+config::CaseConfig
+broadcast_case_config(MPI_Comm comm, int root,
+                      const config::CaseConfig *root_config) {
+  return broadcast_case_config_impl(comm, root, root_config, nullptr);
+}
+
+namespace detail {
+
+config::CaseConfig broadcast_case_config_with_path_failure(
+    MPI_Comm comm, int root, const config::CaseConfig *root_config,
+    CaseConfigPathFailureInjection injection) {
+  return broadcast_case_config_impl(comm, root, root_config, &injection);
+}
+
+} // namespace detail
 
 } // namespace hundun::application

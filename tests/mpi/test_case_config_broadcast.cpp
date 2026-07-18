@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "applications/hundun/case_config_broadcast.hpp"
+#include "applications/hundun/detail/case_config_broadcast_test.hpp"
 
 #include "hundun/config/case_config.hpp"
 #include "hundun/runtime/error.hpp"
@@ -26,6 +27,7 @@ using hundun::application::broadcast_case_config;
 using hundun::config::CaseConfig;
 using hundun::runtime::Error;
 using hundun::runtime::Int3;
+namespace broadcast_detail = hundun::application::detail;
 
 std::uint64_t double_bits(double value) {
   std::uint64_t result = 0;
@@ -241,6 +243,38 @@ void run_mismatch() {
   HUNDUN_CHECK(MPI_Comm_free(&local) == MPI_SUCCESS);
 }
 
+void run_path_failures() {
+  int argc = 1;
+  char program[] = "test_case_config_broadcast";
+  char *arguments[] = {program, nullptr};
+  char **argv = arguments;
+  hundun::runtime::MpiEnvironment environment(argc, argv);
+
+  int rank = 0;
+  int size = 0;
+  HUNDUN_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank) == MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &size) == MPI_SUCCESS);
+  HUNDUN_CHECK(size == 4);
+
+  const CaseConfig without_read_directory =
+      make_config("path-preparation-failure", true, true, false, size);
+  expect_uniform_error(MPI_COMM_WORLD, [&] {
+    static_cast<void>(broadcast_detail::broadcast_case_config_with_path_failure(
+        MPI_COMM_WORLD, 2, rank == 2 ? &without_read_directory : nullptr,
+        {broadcast_detail::CaseConfigPathTransfer::restart_write_directory,
+         broadcast_detail::CaseConfigPathFailurePhase::preparation, 2}));
+  });
+
+  const CaseConfig with_read_directory =
+      make_config("path-reconstruction-failure", true, true, true, size);
+  expect_uniform_error(MPI_COMM_WORLD, [&] {
+    static_cast<void>(broadcast_detail::broadcast_case_config_with_path_failure(
+        MPI_COMM_WORLD, 0, rank == 0 ? &with_read_directory : nullptr,
+        {broadcast_detail::CaseConfigPathTransfer::restart_read_directory,
+         broadcast_detail::CaseConfigPathFailurePhase::reconstruction, 3}));
+  });
+}
+
 int run_finalized(int argc, char **argv) {
   int provided = MPI_THREAD_SINGLE;
   HUNDUN_CHECK(MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided) ==
@@ -274,6 +308,9 @@ int main(int argc, char **argv) {
   }
   if (mode == "mismatch") {
     return hundun::test::run(run_mismatch);
+  }
+  if (mode == "path_failures") {
+    return hundun::test::run(run_path_failures);
   }
   return 2;
 }
