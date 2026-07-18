@@ -82,6 +82,14 @@ target_link_libraries(hundun_io
   PRIVATE hundun_warnings
   PUBLIC hundun_options hundun_runtime hundun_mesh)
 
+add_library(hundun_solver STATIC solver/src/passive_scalar.cpp)
+target_include_directories(hundun_solver
+  PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/solver/include>"
+  PRIVATE "${PROJECT_SOURCE_DIR}/runtime/src")
+target_link_libraries(hundun_solver
+  PRIVATE hundun_options hundun_warnings
+  PUBLIC hundun_mesh hundun_runtime)
+
 add_library(hundun_plugin_sdk STATIC sdk/src/plugin_loader.cpp)
 target_include_directories(hundun_plugin_sdk
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/sdk/include>"
@@ -269,6 +277,42 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
+  target_include_directories(test_passive_scalar PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/solver/include")
+  target_link_libraries(test_passive_scalar PRIVATE
+    hundun_solver hundun_options hundun_warnings MPI::MPI_CXX)
+  add_test(NAME test_passive_scalar_limiter
+    COMMAND test_passive_scalar limiter)
+  set_tests_properties(test_passive_scalar_limiter PROPERTIES
+    LABELS unit TIMEOUT 20)
+  add_test(NAME test_passive_scalar_serial
+    COMMAND test_passive_scalar serial)
+  set_tests_properties(test_passive_scalar_serial PROPERTIES
+    LABELS numerical TIMEOUT 300 PROCESSORS 1)
+  add_test(NAME test_passive_scalar_oracle
+    COMMAND test_passive_scalar oracle)
+  set_tests_properties(test_passive_scalar_oracle PROPERTIES
+    LABELS numerical TIMEOUT 60 PROCESSORS 1)
+
+  add_executable(test_passive_scalar_mpi
+    tests/mpi/test_passive_scalar_mpi.cpp)
+  target_include_directories(test_passive_scalar_mpi PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/solver/include")
+  target_link_libraries(test_passive_scalar_mpi PRIVATE
+    hundun_solver hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(passive_scalar_test "test_passive_scalar_mpi_${ranks}_rank")
+    add_test(NAME "${passive_scalar_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_passive_scalar_mpi>"
+              full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${passive_scalar_test}" PROPERTIES
+      LABELS "mpi;numerical" TIMEOUT 300 PROCESSORS "${ranks}")
+  endforeach()
 
   hundun_add_test(test_restart tests/unit/test_restart.cpp)
   target_include_directories(test_restart PRIVATE "${PROJECT_SOURCE_DIR}")
