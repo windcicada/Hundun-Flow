@@ -580,7 +580,8 @@ if(HUNDUN_BUILD_TESTS)
     "${source_policy_script_runtime}_header"
     "${source_policy_script_runtime}_package"
     "${source_policy_script_runtime}_codegen"
-    fetch external download missing tool_a tool_a3 tool_b vendor_control)
+    fetch external download missing tool_a tool_a3 tool_b vendor_control
+    make_control vendor_configure vendor_conditional vendor_path_retrieval)
   set(source_policy_tests source_policy_clean)
   foreach(source_policy_case IN LISTS source_policy_cases)
     add_test(NAME "source_policy_${source_policy_case}"

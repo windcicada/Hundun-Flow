@@ -62,6 +62,8 @@ function(hundun_assert_public_dependency_policy root)
   set(control_suffixes
     c h cc hh cpp hpp cxx hxx cmake sh yml yaml json)
   set(vendored_control_suffixes cmake sh yml yaml)
+  set(control_basenames
+    CMakeLists.txt Makefile makefile GNUmakefile configure)
   string(CONCAT scripting_runtime "py" "thon")
   string(CONCAT package_tool_a "p" "ip")
   string(CONCAT package_tool_a3 "p" "ip3")
@@ -87,6 +89,7 @@ function(hundun_assert_public_dependency_policy root)
     get_filename_component(candidate_suffix "${candidate}" LAST_EXT)
     string(REGEX REPLACE "^\\." "" candidate_suffix "${candidate_suffix}")
     string(TOLOWER "${candidate_suffix}" candidate_suffix)
+    list(FIND control_basenames "${candidate_name}" basename_index)
     if(candidate_suffix STREQUAL "py")
       message(FATAL_ERROR
         "Forbidden public Python source file: ${candidate}")
@@ -100,15 +103,12 @@ function(hundun_assert_public_dependency_policy root)
     if(relative_path MATCHES "(^|/)third_party(/|$)")
       list(FIND vendored_control_suffixes
         "${candidate_suffix}" suffix_index)
-      if(NOT candidate_name STREQUAL "CMakeLists.txt"
-         AND NOT candidate_name STREQUAL "Makefile"
-         AND suffix_index EQUAL -1)
+      if(basename_index EQUAL -1 AND suffix_index EQUAL -1)
         continue()
       endif()
     else()
       list(FIND control_suffixes "${candidate_suffix}" suffix_index)
-      if(NOT candidate_name STREQUAL "CMakeLists.txt"
-         AND suffix_index EQUAL -1)
+      if(basename_index EQUAL -1 AND suffix_index EQUAL -1)
         continue()
       endif()
     endif()
@@ -129,6 +129,12 @@ function(hundun_assert_public_dependency_policy root)
         "${shell_command_text}")
     endforeach()
     string(REPLACE "\t" " " shell_command_text "${shell_command_text}")
+    set(shell_command_prefix
+      "(^|[:;|&]) *-* *((if|elif|while|until) +)?")
+    set(shell_executable_prefix
+      "(/usr/bin/env +|[^ ;:|&()]+[/])?")
+    set(cmake_executable_prefix
+      "(/usr/bin/env[ \\t\\r\\n]+|[-+./_a-z0-9]+[/])?")
 
     if(candidate_text_lower MATCHES
        "#[ \\t\\r\\n]*include[ \\t\\r\\n]*[<\"][ \\t\\r\\n]*(${scripting_runtime}[0-9.]*[/])?${scripting_runtime}[.]h[ \\t\\r\\n]*[>\"]")
@@ -165,11 +171,7 @@ function(hundun_assert_public_dependency_policy root)
          OR cmake_command_text MATCHES
            "(^| )command +/usr/bin/env +${package_tool}( |$)"
          OR shell_command_text MATCHES
-           "(^|[:;|&]) *-* *${package_tool}( |[:;|&]|$)"
-         OR shell_command_text MATCHES
-           "(^|[:;|&]) *-* *[^ ;:|&()]+[/]${package_tool}( |[:;|&]|$)"
-         OR shell_command_text MATCHES
-           "(^|[:;|&]) *-* */usr/bin/env +${package_tool}( |[:;|&]|$)")
+           "${shell_command_prefix}${shell_executable_prefix}${package_tool}( |[:;|&]|$)")
         message(FATAL_ERROR
           "Forbidden direct package-manager command '${package_tool}' in ${candidate}")
       endif()
@@ -195,11 +197,13 @@ function(hundun_assert_public_dependency_policy root)
         "Forbidden file download source retrieval in ${candidate}")
     endif()
     if(candidate_text_lower MATCHES
-       "command[ \\t\\r\\n]+git[ \\t\\r\\n]+clone([ \\t\\r\\n]|\\))"
-       OR command_text MATCHES
-          "(^|[:;|&])[ \\t-]*(/usr/bin/env[ \\t]+)?git[ \\t]+clone([ \\t]|$)"
-       OR command_text MATCHES
-          "(^|[:;|&])[ \\t-]*(/usr/bin/env[ \\t]+)?(curl|wget)[ \\t]+[^;]*https?://")
+       "command[ \\t\\r\\n]+${cmake_executable_prefix}git[ \\t\\r\\n]+clone([ \\t\\r\\n]|\\))"
+       OR candidate_text_lower MATCHES
+          "command[ \\t\\r\\n]+${cmake_executable_prefix}(curl|wget)[ \\t\\r\\n]+[^)]*https?://"
+       OR shell_command_text MATCHES
+          "${shell_command_prefix}${shell_executable_prefix}git +clone( |$)"
+       OR shell_command_text MATCHES
+          "${shell_command_prefix}${shell_executable_prefix}(curl|wget) +[^;]*https?://")
       message(FATAL_ERROR
         "Forbidden command-line source retrieval in ${candidate}")
     endif()

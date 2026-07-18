@@ -29,6 +29,11 @@ set(source_tool_a_root "${fixture_root}/source-tool-a")
 set(source_tool_a3_root "${fixture_root}/source-tool-a3")
 set(source_tool_b_root "${fixture_root}/source-tool-b")
 set(source_vendor_control_root "${fixture_root}/source-vendor-control")
+set(source_make_control_root "${fixture_root}/source-make-control")
+set(source_vendor_configure_root "${fixture_root}/source-vendor-configure")
+set(source_vendor_conditional_root "${fixture_root}/source-vendor-conditional")
+set(source_vendor_path_retrieval_root
+  "${fixture_root}/source-vendor-path-retrieval")
 set(source_missing_root "${fixture_root}/source-missing")
 
 file(REMOVE_RECURSE "${fixture_root}")
@@ -63,7 +68,11 @@ file(MAKE_DIRECTORY
   "${source_tool_a_root}/cmake"
   "${source_tool_a3_root}/cmake"
   "${source_tool_b_root}/cmake"
-  "${source_vendor_control_root}/third_party/remote")
+  "${source_vendor_control_root}/third_party/remote"
+  "${source_make_control_root}/control"
+  "${source_vendor_configure_root}/third_party/remote"
+  "${source_vendor_conditional_root}/third_party/remote"
+  "${source_vendor_path_retrieval_root}/third_party/remote")
 file(WRITE "${source_clean_root}/CMakeLists.txt"
   "cmake_minimum_required(VERSION 3.21)\n"
   "project(CleanPublicTree LANGUAGES CXX)\n")
@@ -108,6 +117,19 @@ file(WRITE
   "${source_vendor_control_root}/third_party/remote/dependency.cmake"
   "include ( ${fetch_module} )\n"
   "${fetch_declare} ( remote SOURCE_DIR remote )\n")
+file(WRITE "${source_make_control_root}/control/Makefile"
+  "all:\n\t${package_tool_a} install local-package\n")
+file(WRITE "${source_vendor_configure_root}/third_party/remote/configure"
+  "#!/bin/sh\n${package_tool_a} install local-package\n")
+file(WRITE "${source_vendor_conditional_root}/third_party/remote/build.sh"
+  "#!/bin/sh\n"
+  "if ${package_tool_a} install local-package; then\n  :\nfi\n")
+string(CONCAT command_line_retrieval_tool "g" "it")
+string(CONCAT command_line_retrieval_action "cl" "one")
+file(WRITE
+  "${source_vendor_path_retrieval_root}/third_party/remote/dependency.cmake"
+  "execute_process ( COMMAND /usr/bin/${command_line_retrieval_tool} "
+  "${command_line_retrieval_action} https://invalid.example/source.git )\n")
 
 function(hundun_verify_negative child_case expected_relative_path
          expected_message expected_token)
@@ -210,6 +232,14 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_tool_b")
   hundun_assert_public_dependency_policy("${source_tool_b_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_control")
   hundun_assert_public_dependency_policy("${source_vendor_control_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_make_control")
+  hundun_assert_public_dependency_policy("${source_make_control_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_configure")
+  hundun_assert_public_dependency_policy("${source_vendor_configure_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_conditional")
+  hundun_assert_public_dependency_policy("${source_vendor_conditional_root}")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_vendor_path_retrieval")
+  hundun_assert_public_dependency_policy("${source_vendor_path_retrieval_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "source_missing")
   hundun_assert_public_dependency_policy("${source_missing_root}")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_python_file")
@@ -261,6 +291,28 @@ elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_control")
     source_vendor_control
     "source-vendor-control/third_party/remote/dependency.cmake"
     "Forbidden ${expected_retrieval} source retrieval")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_make_control")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_make_control "source-make-control/control/Makefile"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_configure")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_vendor_configure
+    "source-vendor-configure/third_party/remote/configure"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_conditional")
+  string(CONCAT expected_tool "p" "ip")
+  hundun_verify_source_policy_negative(
+    source_vendor_conditional
+    "source-vendor-conditional/third_party/remote/build.sh"
+    "Forbidden direct package-manager command '${expected_tool}'")
+elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_vendor_path_retrieval")
+  hundun_verify_source_policy_negative(
+    source_vendor_path_retrieval
+    "source-vendor-path-retrieval/third_party/remote/dependency.cmake"
+    "Forbidden command-line source retrieval")
 elseif(HUNDUN_PROVENANCE_CASE STREQUAL "verify_source_missing")
   hundun_verify_source_policy_negative(
     source_missing "source-missing"
