@@ -50,6 +50,11 @@ grep -F '"restart":{"read":false,"write_directory":"Restart"}' \
 mkdir -p -- "${case_dir}/output"
 "${mpiexec_command}" -n 2 "${build_dir}/hundun" "${case_dir}/case.json" \
   >"${case_dir}/output/run.log" 2>&1
+if test "$(grep -E -c '^HUNDUN-FLOW 0\.0\.0-stage1$' \
+    "${case_dir}/output/run.log" || true)" -ne 1; then
+  echo "normal numerical run must contain exactly one Stage 1 version banner" >&2
+  exit 1
+fi
 grep -E '^CASE name=periodic_passive_scalar ranks=2 cells=64x8x8$' \
   "${case_dir}/output/run.log" >/dev/null
 grep -E '^STEP 10 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \

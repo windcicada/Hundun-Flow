@@ -234,7 +234,8 @@ int run_case(const hundun::application::CliOptions &options,
   }
 
   if (context.rank() == 0) {
-    std::cout << "CASE name=" << config.case_name << " ranks=" << context.size()
+    std::cout << kVersion << '\n'
+              << "CASE name=" << config.case_name << " ranks=" << context.size()
               << " cells=" << config.mesh.cells.x << 'x' << config.mesh.cells.y
               << 'x' << config.mesh.cells.z << '\n';
   }
