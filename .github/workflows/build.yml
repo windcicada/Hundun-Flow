@@ -1,0 +1,57 @@
+name: stage1
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            preset: debug
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            preset: release
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            preset: debug
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            preset: release
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      OMPI_MCA_rmaps_base_oversubscribe: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build openmpi-bin libopenmpi-dev
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} -j 2
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+      - name: Acceptance
+        if: matrix.preset == 'release'
+        run: bash tests/acceptance/stage1_acceptance.sh
+      - name: Configure ASan
+        if: matrix.compiler == 'gcc' && matrix.preset == 'debug'
+        run: cmake --preset asan
+      - name: Build ASan
+        if: matrix.compiler == 'gcc' && matrix.preset == 'debug'
+        run: cmake --build --preset asan -j 2
+      - name: Test ASan
+        if: matrix.compiler == 'gcc' && matrix.preset == 'debug'
+        run: ctest --preset asan -L unit --output-on-failure

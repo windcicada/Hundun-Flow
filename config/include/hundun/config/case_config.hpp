@@ -27,6 +27,12 @@ struct TransportConfig {
   double diffusivity_m2_per_s;
 };
 
+struct RestartConfig {
+  bool read;
+  std::optional<std::filesystem::path> read_directory;
+  std::filesystem::path write_directory;
+};
+
 struct OutputConfig {
   std::filesystem::path directory;
   int write_interval;
@@ -42,6 +48,7 @@ struct CaseConfig {
   TimeConfig time;
   TransportConfig transport;
   std::string initial_condition;
+  RestartConfig restart;
   OutputConfig output;
 };
 

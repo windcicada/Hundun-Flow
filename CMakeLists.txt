@@ -66,6 +66,15 @@ target_link_libraries(hundun_runtime
   PRIVATE hundun_warnings
   PUBLIC hundun_options MPI::MPI_CXX)
 
+add_library(hundun_application STATIC
+  applications/hundun/case_config_broadcast.cpp)
+target_include_directories(hundun_application
+  PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
+  PRIVATE "${PROJECT_SOURCE_DIR}/runtime/src")
+target_link_libraries(hundun_application
+  PRIVATE hundun_runtime hundun_warnings
+  PUBLIC hundun_config hundun_options MPI::MPI_CXX)
+
 add_library(hundun_mesh STATIC mesh/src/uniform_structured_mesh.cpp)
 target_include_directories(hundun_mesh PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/mesh/include>")
@@ -89,6 +98,18 @@ target_include_directories(hundun_solver
 target_link_libraries(hundun_solver
   PRIVATE hundun_options hundun_warnings
   PUBLIC hundun_mesh hundun_runtime)
+
+add_executable(hundun applications/hundun/main.cpp)
+target_include_directories(hundun PRIVATE "${PROJECT_SOURCE_DIR}")
+target_link_libraries(hundun PRIVATE
+  hundun_application
+  hundun_cli
+  hundun_config
+  hundun_io
+  hundun_solver
+  hundun_options
+  hundun_warnings
+  MPI::MPI_CXX)
 
 add_library(hundun_plugin_sdk STATIC sdk/src/plugin_loader.cpp)
 target_include_directories(hundun_plugin_sdk
@@ -450,6 +471,33 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_mpi_external_lifecycle PRIVATE hundun_runtime)
   set_tests_properties(test_mpi_external_lifecycle PROPERTIES TIMEOUT 20)
+
+  add_executable(test_case_config_broadcast
+    tests/mpi/test_case_config_broadcast.cpp)
+  target_include_directories(test_case_config_broadcast PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_case_config_broadcast PRIVATE
+    hundun_application hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(mode IN ITEMS full mismatch)
+    set(case_broadcast_test "test_case_config_broadcast_${mode}")
+    add_test(NAME "${case_broadcast_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_case_config_broadcast>"
+              "${mode}" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${case_broadcast_test}" PROPERTIES
+      LABELS mpi TIMEOUT 45 PROCESSORS 4)
+  endforeach()
+  add_test(NAME test_case_config_broadcast_finalized
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_case_config_broadcast>"
+            finalized ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_case_config_broadcast_finalized PROPERTIES
+    LABELS mpi TIMEOUT 20 PROCESSORS 1)
+
+  add_executable(compare_scalar_vtk
+    tests/acceptance/compare_scalar_vtk.cpp)
+  target_link_libraries(compare_scalar_vtk PRIVATE
+    hundun_options hundun_warnings)
 
   add_executable(test_decomposition tests/mpi/test_decomposition.cpp)
   target_include_directories(test_decomposition PRIVATE

@@ -161,6 +161,15 @@ std::string require_string(yyjson_val* object, const char* key,
   return std::string(yyjson_get_str(value), yyjson_get_len(value));
 }
 
+bool require_boolean(yyjson_val* object, const char* key,
+                     std::string_view pointer) {
+  yyjson_val* value = require_member(object, key, pointer);
+  if (!yyjson_is_bool(value)) {
+    throw_type_error(child_pointer(pointer, key), "boolean", value);
+  }
+  return yyjson_get_bool(value);
+}
+
 runtime::Int3 require_int3(yyjson_val* object, const char* key,
                           std::string_view pointer) {
   const std::string field_pointer = child_pointer(pointer, key);
@@ -240,27 +249,32 @@ bool has_path_prefix(const std::filesystem::path& path,
   return true;
 }
 
-std::filesystem::path normalize_output_directory(
-    const std::string& raw, const std::filesystem::path& case_path) {
-  constexpr const char* pointer = "/output/directory";
+std::filesystem::path normalize_case_directory(
+    const std::string& raw, const std::filesystem::path& case_path,
+    std::string_view pointer) {
   if (raw.empty()) {
-    throw ConfigError(pointer, "expected a non-empty relative path");
+    throw ConfigError(std::string(pointer),
+                      "expected a non-empty relative path");
   }
   if (raw.find('\0') != std::string::npos) {
-    throw ConfigError(pointer, "path must not contain a null byte");
+    throw ConfigError(std::string(pointer),
+                      "path must not contain a null byte");
   }
 
   const std::filesystem::path path(raw);
   if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
-    throw ConfigError(pointer, "expected an unrooted relative path");
+    throw ConfigError(std::string(pointer),
+                      "expected an unrooted relative path");
   }
   if (has_parent_component(path)) {
-    throw ConfigError(pointer, "path must not contain a '..' component");
+    throw ConfigError(std::string(pointer),
+                      "path must not contain a '..' component");
   }
 
   const std::filesystem::path normalized = path.lexically_normal();
   if (normalized.empty()) {
-    throw ConfigError(pointer, "expected a non-empty relative path");
+    throw ConfigError(std::string(pointer),
+                      "expected a non-empty relative path");
   }
 
   try {
@@ -269,10 +283,11 @@ std::filesystem::path normalize_output_directory(
     const std::filesystem::path resolved =
         (case_root / normalized).lexically_normal();
     if (!has_path_prefix(resolved, case_root)) {
-      throw ConfigError(pointer, "path escapes the case directory");
+      throw ConfigError(std::string(pointer),
+                        "path escapes the case directory");
     }
   } catch (const std::filesystem::filesystem_error& error) {
-    throw ConfigError(pointer,
+    throw ConfigError(std::string(pointer),
                       "could not resolve path against the case directory: " +
                           std::string(error.what()));
   }
@@ -293,22 +308,27 @@ void require_finite_component(double value, std::string pointer) {
   }
 }
 
-void validate_output_path(const std::filesystem::path& path) {
-  constexpr const char* pointer = "/output/directory";
+void validate_case_directory(const std::filesystem::path& path,
+                             std::string_view pointer) {
   if (path.empty()) {
-    throw ConfigError(pointer, "expected a non-empty relative path");
+    throw ConfigError(std::string(pointer),
+                      "expected a non-empty relative path");
   }
   if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
-    throw ConfigError(pointer, "expected an unrooted relative path");
+    throw ConfigError(std::string(pointer),
+                      "expected an unrooted relative path");
   }
   if (has_parent_component(path)) {
-    throw ConfigError(pointer, "path must not contain a '..' component");
+    throw ConfigError(std::string(pointer),
+                      "path must not contain a '..' component");
   }
   if (path.generic_string().find('\0') != std::string::npos) {
-    throw ConfigError(pointer, "path must not contain a null byte");
+    throw ConfigError(std::string(pointer),
+                      "path must not contain a null byte");
   }
   if (path.generic_string() != path.lexically_normal().generic_string()) {
-    throw ConfigError(pointer, "path must be lexically normalized");
+    throw ConfigError(std::string(pointer),
+                      "path must be lexically normalized");
   }
 }
 
@@ -332,7 +352,7 @@ CaseConfig parse_case_config(yyjson_val* root,
   }
   reject_unknown_keys(root,
                       {"schema_version", "case", "resources", "mesh", "time",
-                       "transport", "initial_condition", "output"},
+                       "transport", "initial_condition", "restart", "output"},
                       "");
 
   CaseConfig config{};
@@ -387,12 +407,39 @@ CaseConfig parse_case_config(yyjson_val* root,
   config.initial_condition =
       require_string(initial_condition, "type", "/initial_condition");
 
+  yyjson_val* restart = require_object_member(root, "restart", "");
+  reject_unknown_keys(restart,
+                      {"read", "read_directory", "write_directory"},
+                      "/restart");
+  config.restart.read = require_boolean(restart, "read", "/restart");
+  yyjson_val* read_directory = yyjson_obj_get(restart, "read_directory");
+  if (config.restart.read) {
+    if (read_directory == nullptr) {
+      throw ConfigError("/restart/read_directory",
+                        "required member is missing when read is true");
+    }
+    if (!yyjson_is_str(read_directory)) {
+      throw_type_error("/restart/read_directory", "string", read_directory);
+    }
+    config.restart.read_directory = normalize_case_directory(
+        std::string(yyjson_get_str(read_directory),
+                    yyjson_get_len(read_directory)),
+        case_path, "/restart/read_directory");
+  } else if (read_directory != nullptr) {
+    throw ConfigError("/restart/read_directory",
+                      "member is forbidden when read is false");
+  }
+  config.restart.write_directory = normalize_case_directory(
+      require_string(restart, "write_directory", "/restart"), case_path,
+      "/restart/write_directory");
+
   yyjson_val* output = require_object_member(root, "output", "");
   reject_unknown_keys(output,
                       {"directory", "write_interval", "restart_interval"},
                       "/output");
-  config.output.directory = normalize_output_directory(
-      require_string(output, "directory", "/output"), case_path);
+  config.output.directory = normalize_case_directory(
+      require_string(output, "directory", "/output"), case_path,
+      "/output/directory");
   config.output.write_interval =
       require_integer(output, "write_interval", "/output");
   config.output.restart_interval =
@@ -566,7 +613,20 @@ void validate_case_config(const CaseConfig& config) {
                           "'");
   }
 
-  validate_output_path(config.output.directory);
+  if (config.restart.read) {
+    if (!config.restart.read_directory.has_value()) {
+      throw ConfigError("/restart/read_directory",
+                        "required member is missing when read is true");
+    }
+    validate_case_directory(*config.restart.read_directory,
+                            "/restart/read_directory");
+  } else if (config.restart.read_directory.has_value()) {
+    throw ConfigError("/restart/read_directory",
+                      "member is forbidden when read is false");
+  }
+  validate_case_directory(config.restart.write_directory,
+                          "/restart/write_directory");
+  validate_case_directory(config.output.directory, "/output/directory");
   if (config.output.write_interval < 1) {
     throw ConfigError("/output/write_interval",
                       "expected an integer of at least 1, got " +
@@ -642,6 +702,22 @@ std::string to_resolved_json(const CaseConfig& config) {
   require_json_write(yyjson_mut_obj_add_strncpy(
       document.get(), initial_condition, "type",
       config.initial_condition.data(), config.initial_condition.size()));
+
+  yyjson_mut_val* restart = add_object(document.get(), root, "restart");
+  require_json_write(yyjson_mut_obj_add_bool(
+      document.get(), restart, "read", config.restart.read));
+  if (config.restart.read_directory.has_value()) {
+    const std::string read_directory =
+        config.restart.read_directory->generic_string();
+    require_json_write(yyjson_mut_obj_add_strncpy(
+        document.get(), restart, "read_directory", read_directory.data(),
+        read_directory.size()));
+  }
+  const std::string write_directory =
+      config.restart.write_directory.generic_string();
+  require_json_write(yyjson_mut_obj_add_strncpy(
+      document.get(), restart, "write_directory", write_directory.data(),
+      write_directory.size()));
 
   yyjson_mut_val* output = add_object(document.get(), root, "output");
   const std::string directory = config.output.directory.generic_string();

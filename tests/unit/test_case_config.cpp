@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -26,7 +27,7 @@ using hundun::config::validate_case_config;
 using hundun::runtime::ConfigError;
 
 const char* valid_json() {
-  return R"({"schema_version":1,"case":{"name":"advection"},"resources":{"expected_ranks":4,"process_grid":[2,2,1]},"mesh":{"cells":[8,4,2],"origin_m":[0.25,-0.5,1.25],"length_m":[2.5,3.5,4.5],"periodic":[true,false,true]},"time":{"dt_s":0.125,"steps":12},"transport":{"velocity_m_per_s":[1.25,-2.25,0.5],"diffusivity_m2_per_s":0.01},"initial_condition":{"type":"sine_x"},"output":{"directory":"results/./fields","write_interval":2,"restart_interval":4}})";
+  return R"({"schema_version":1,"case":{"name":"advection"},"resources":{"expected_ranks":4,"process_grid":[2,2,1]},"mesh":{"cells":[8,4,2],"origin_m":[0.25,-0.5,1.25],"length_m":[2.5,3.5,4.5],"periodic":[true,false,true]},"time":{"dt_s":0.125,"steps":12},"transport":{"velocity_m_per_s":[1.25,-2.25,0.5],"diffusivity_m2_per_s":0.01},"initial_condition":{"type":"sine_x"},"restart":{"read":false,"write_directory":"checkpoints/./primary"},"output":{"directory":"results/./fields","write_interval":2,"restart_interval":4}})";
 }
 
 std::string replace_once(std::string text, const std::string& from,
@@ -99,7 +100,11 @@ void expect_load_error(TemporaryDirectory& directory, const std::string& json,
   try {
     static_cast<void>(load_case_config(directory.write(json)));
   } catch (const ConfigError& error) {
-    HUNDUN_CHECK(error.pointer() == pointer);
+    if (error.pointer() != pointer) {
+      throw std::runtime_error("expected config pointer " + pointer +
+                               ", got " + error.pointer() + ": " +
+                               error.what());
+    }
     HUNDUN_CHECK(!std::string(error.what()).empty());
     rejected = true;
   }
@@ -112,7 +117,11 @@ void expect_validation_error(const CaseConfig& config,
   try {
     validate_case_config(config);
   } catch (const ConfigError& error) {
-    HUNDUN_CHECK(error.pointer() == pointer);
+    if (error.pointer() != pointer) {
+      throw std::runtime_error("expected validation pointer " + pointer +
+                               ", got " + error.pointer() + ": " +
+                               error.what());
+    }
     rejected = true;
   }
   HUNDUN_CHECK(rejected);
@@ -158,6 +167,10 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   HUNDUN_CHECK_NEAR(config.transport.velocity_m_per_s.y, -2.25, 1.0e-15);
   HUNDUN_CHECK_NEAR(config.transport.diffusivity_m2_per_s, 0.01, 1.0e-15);
   HUNDUN_CHECK(config.initial_condition == "sine_x");
+  HUNDUN_CHECK(!config.restart.read);
+  HUNDUN_CHECK(!config.restart.read_directory.has_value());
+  HUNDUN_CHECK(config.restart.write_directory.generic_string() ==
+               "checkpoints/primary");
   HUNDUN_CHECK(config.output.directory.generic_string() == "results/fields");
   HUNDUN_CHECK(config.output.write_interval == 2);
   HUNDUN_CHECK(config.output.restart_interval == 4);
@@ -169,9 +182,10 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   HUNDUN_CHECK(first.find("results/fields") != std::string::npos);
   check_keys_in_order(first,
                       {"schema_version", "case", "resources", "mesh", "time",
-                       "transport", "initial_condition", "output"});
+                       "transport", "initial_condition", "restart", "output"});
   check_keys_in_order(first, {"expected_ranks", "process_grid"});
   check_keys_in_order(first, {"cells", "origin_m", "length_m", "periodic"});
+  check_keys_in_order(first, {"read", "write_directory"});
   check_keys_in_order(first, {"directory", "write_interval", "restart_interval"});
 
   const CaseConfig round_trip = load_case_config(directory.write(first));
@@ -180,6 +194,11 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   HUNDUN_CHECK(round_trip.process_grid->x == config.process_grid->x);
   HUNDUN_CHECK(round_trip.process_grid->y == config.process_grid->y);
   HUNDUN_CHECK(round_trip.process_grid->z == config.process_grid->z);
+  HUNDUN_CHECK(round_trip.restart.read == config.restart.read);
+  HUNDUN_CHECK(round_trip.restart.read_directory ==
+               config.restart.read_directory);
+  HUNDUN_CHECK(round_trip.restart.write_directory ==
+               config.restart.write_directory);
   HUNDUN_CHECK(round_trip.output.directory == config.output.directory);
   HUNDUN_CHECK(round_trip.mesh.cells.x == config.mesh.cells.x);
 
@@ -250,14 +269,44 @@ void test_valid_configs_and_resolved_json(TemporaryDirectory& directory) {
   HUNDUN_CHECK_NEAR(integer_real_fields.mesh.origin_m.y, 1.0, 0.0);
   HUNDUN_CHECK_NEAR(integer_real_fields.transport.velocity_m_per_s.z, 0.0,
                     0.0);
+
+  const std::string restart_read_json = replace_once(
+      valid_json(),
+      "\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"}",
+      "\"restart\":{\"read\":true,\"read_directory\":\"checkpoints/./step00000004\",\"write_directory\":\"checkpoints/./resumed\"}");
+  const CaseConfig restart_read =
+      load_case_config(directory.write(restart_read_json));
+  HUNDUN_CHECK(restart_read.restart.read);
+  HUNDUN_CHECK(restart_read.restart.read_directory.has_value());
+  HUNDUN_CHECK(restart_read.restart.read_directory->generic_string() ==
+               "checkpoints/step00000004");
+  HUNDUN_CHECK(restart_read.restart.write_directory.generic_string() ==
+               "checkpoints/resumed");
+  const std::string restart_read_resolved = to_resolved_json(restart_read);
+  check_keys_in_order(restart_read_resolved,
+                      {"read", "read_directory", "write_directory"});
+  const CaseConfig restart_read_round_trip =
+      load_case_config(directory.write(restart_read_resolved));
+  HUNDUN_CHECK(restart_read_round_trip.restart.read);
+  HUNDUN_CHECK(restart_read_round_trip.restart.read_directory ==
+               restart_read.restart.read_directory);
+  HUNDUN_CHECK(restart_read_round_trip.restart.write_directory ==
+               restart_read.restart.write_directory);
 }
 
 void test_launch_directory_independence(TemporaryDirectory& directory) {
-  const auto case_path = directory.write(valid_json());
+  const std::string restart_read_json = replace_once(
+      valid_json(),
+      "\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"}",
+      "\"restart\":{\"read\":true,\"read_directory\":\"checkpoints/./step00000004\",\"write_directory\":\"checkpoints/./resumed\"}");
+  const auto case_path = directory.write(restart_read_json);
   const CaseConfig before = load_case_config(case_path);
   CurrentPathGuard guard;
   std::filesystem::current_path(directory.root() / "launch");
   const CaseConfig after = load_case_config(case_path);
+  HUNDUN_CHECK(after.restart.read_directory == before.restart.read_directory);
+  HUNDUN_CHECK(after.restart.write_directory ==
+               before.restart.write_directory);
   HUNDUN_CHECK(after.output.directory == before.output.directory);
   HUNDUN_CHECK(to_resolved_json(after) == to_resolved_json(before));
 }
@@ -279,6 +328,7 @@ void test_parse_root_and_missing_errors(TemporaryDirectory& directory) {
       {"\"time\":{\"dt_s\":0.125,\"steps\":12},", "/time"},
       {"\"transport\":{\"velocity_m_per_s\":[1.25,-2.25,0.5],\"diffusivity_m2_per_s\":0.01},", "/transport"},
       {"\"initial_condition\":{\"type\":\"sine_x\"},", "/initial_condition"},
+      {"\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"},", "/restart"},
       {",\"output\":{\"directory\":\"results/./fields\",\"write_interval\":2,\"restart_interval\":4}", "/output"},
   };
   for (const auto& item : missing) {
@@ -304,6 +354,19 @@ void test_parse_root_and_missing_errors(TemporaryDirectory& directory) {
   expect_load_error(directory,
                     replace_once(valid_json(), "\"type\":\"sine_x\"", ""),
                     "/initial_condition/type");
+  expect_load_error(directory,
+                    replace_once(valid_json(), "\"read\":false,", ""),
+                    "/restart/read");
+  expect_load_error(directory,
+                    replace_once(valid_json(),
+                                 ",\"write_directory\":\"checkpoints/./primary\"",
+                                 ""),
+                    "/restart/write_directory");
+  const std::string read_without_directory = replace_once(
+      valid_json(), "\"restart\":{\"read\":false,",
+      "\"restart\":{\"read\":true,");
+  expect_load_error(directory, read_without_directory,
+                    "/restart/read_directory");
   expect_load_error(directory,
                     replace_once(valid_json(), "\"write_interval\":2,", ""),
                     "/output/write_interval");
@@ -331,6 +394,10 @@ void test_unknown_and_duplicate_keys(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"type\":\"sine_x\"",
                     "\"type\":\"sine_x\",\"unexpected\":true"),
        "/initial_condition/unexpected"},
+      {replace_once(valid_json(),
+                    "\"write_directory\":\"checkpoints/./primary\"",
+                    "\"write_directory\":\"checkpoints/./primary\",\"unexpected\":true"),
+       "/restart/unexpected"},
       {replace_once(valid_json(), "\"restart_interval\":4",
                     "\"restart_interval\":4,\"unexpected\":true"),
        "/output/unexpected"},
@@ -346,6 +413,10 @@ void test_unknown_and_duplicate_keys(TemporaryDirectory& directory) {
       {insert_before_root_end(valid_json(),
                               ",\"resources\":{\"expected_ranks\":4}"),
        "/resources"},
+      {insert_before_root_end(
+           valid_json(),
+           ",\"restart\":{\"read\":false,\"write_directory\":\"other\"}"),
+       "/restart"},
       {replace_once(valid_json(), "\"name\":\"advection\"",
                     "\"name\":\"advection\",\"name\":\"again\""),
        "/case/name"},
@@ -367,6 +438,13 @@ void test_unknown_and_duplicate_keys(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"type\":\"sine_x\"",
                     "\"type\":\"sine_x\",\"type\":\"sine_x\""),
        "/initial_condition/type"},
+      {replace_once(valid_json(), "\"read\":false",
+                    "\"read\":false,\"read\":true"),
+       "/restart/read"},
+      {replace_once(valid_json(),
+                    "\"write_directory\":\"checkpoints/./primary\"",
+                    "\"write_directory\":\"checkpoints/./primary\",\"write_directory\":\"other\""),
+       "/restart/write_directory"},
       {replace_once(valid_json(), "\"directory\":\"results/./fields\"",
                     "\"directory\":\"results/./fields\",\"directory\":\"other\""),
        "/output/directory"},
@@ -411,6 +489,10 @@ void test_wrong_types(TemporaryDirectory& directory) {
                     "\"initial_condition\":1"),
        "/initial_condition"},
       {replace_once(valid_json(),
+                    "\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"}",
+                    "\"restart\":[]"),
+       "/restart"},
+      {replace_once(valid_json(),
                     "\"output\":{\"directory\":\"results/./fields\",\"write_interval\":2,\"restart_interval\":4}",
                     "\"output\":[]"),
        "/output"},
@@ -438,6 +520,17 @@ void test_wrong_types(TemporaryDirectory& directory) {
       {replace_once(valid_json(), "\"type\":\"sine_x\"",
                     "\"type\":0"),
        "/initial_condition/type"},
+      {replace_once(valid_json(), "\"read\":false", "\"read\":0"),
+       "/restart/read"},
+      {replace_once(
+           valid_json(),
+           "\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"}",
+           "\"restart\":{\"read\":true,\"read_directory\":[],\"write_directory\":\"checkpoints/./primary\"}"),
+       "/restart/read_directory"},
+      {replace_once(valid_json(),
+                    "\"write_directory\":\"checkpoints/./primary\"",
+                    "\"write_directory\":[]"),
+       "/restart/write_directory"},
       {replace_once(valid_json(), "\"directory\":\"results/./fields\"",
                     "\"directory\":[]"),
        "/output/directory"},
@@ -614,6 +707,44 @@ void test_paths_and_supported_values(TemporaryDirectory& directory) {
         directory,
         replace_once(valid_json(), "results/./fields", item.first), item.second);
   }
+
+  const std::vector<std::pair<std::string, std::string>> restart_paths = {
+      {"", "/restart/write_directory"},
+      {"/tmp/checkpoints", "/restart/write_directory"},
+      {"../checkpoints", "/restart/write_directory"},
+      {"checkpoints/../elsewhere", "/restart/write_directory"},
+      {"checkpoints\\u0000hidden", "/restart/write_directory"},
+  };
+  for (const auto& item : restart_paths) {
+    expect_load_error(
+        directory,
+        replace_once(valid_json(), "checkpoints/./primary", item.first),
+        item.second);
+  }
+
+  const std::string valid_read = replace_once(
+      valid_json(),
+      "\"restart\":{\"read\":false,\"write_directory\":\"checkpoints/./primary\"}",
+      "\"restart\":{\"read\":true,\"read_directory\":\"checkpoints/step00000004\",\"write_directory\":\"checkpoints/resumed\"}");
+  const std::vector<std::pair<std::string, std::string>> read_paths = {
+      {"", "/restart/read_directory"},
+      {"/tmp/checkpoints", "/restart/read_directory"},
+      {"../checkpoints", "/restart/read_directory"},
+      {"checkpoints/../elsewhere", "/restart/read_directory"},
+      {"checkpoints\\u0000hidden", "/restart/read_directory"},
+  };
+  for (const auto& item : read_paths) {
+    expect_load_error(
+        directory,
+        replace_once(valid_read, "checkpoints/step00000004", item.first),
+        item.second);
+  }
+
+  expect_load_error(
+      directory,
+      replace_once(valid_json(), "\"read\":false",
+                   "\"read\":false,\"read_directory\":\"checkpoints/step00000004\""),
+      "/restart/read_directory");
   expect_load_error(directory,
                     replace_once(valid_json(), "\"schema_version\":1",
                                  "\"schema_version\":2"),
@@ -711,6 +842,63 @@ void test_direct_validation(TemporaryDirectory& directory) {
   invalid = valid;
   invalid.initial_condition = "constant";
   expect_validation_error(invalid, "/initial_condition/type");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory.reset();
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.read = false;
+  invalid.restart.read_directory = "checkpoints/step00000004";
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.write_directory = "";
+  expect_validation_error(invalid, "/restart/write_directory");
+
+  invalid = valid;
+  invalid.restart.write_directory = "/tmp/checkpoints";
+  expect_validation_error(invalid, "/restart/write_directory");
+
+  invalid = valid;
+  invalid.restart.write_directory = "checkpoints/../elsewhere";
+  expect_validation_error(invalid, "/restart/write_directory");
+
+  invalid = valid;
+  invalid.restart.write_directory = "checkpoints/./primary";
+  expect_validation_error(invalid, "/restart/write_directory");
+
+  invalid = valid;
+  invalid.restart.write_directory =
+      std::filesystem::path(std::string("checkpoints\0hidden", 18));
+  expect_validation_error(invalid, "/restart/write_directory");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory = "";
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory = "/tmp/checkpoints";
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory = "checkpoints/../elsewhere";
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory = "checkpoints/./step00000004";
+  expect_validation_error(invalid, "/restart/read_directory");
+
+  invalid = valid;
+  invalid.restart.read = true;
+  invalid.restart.read_directory =
+      std::filesystem::path(std::string("checkpoints\0hidden", 18));
+  expect_validation_error(invalid, "/restart/read_directory");
 
   invalid = valid;
   invalid.output.directory = "";

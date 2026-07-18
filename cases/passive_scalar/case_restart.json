@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "case": {"name": "periodic_passive_scalar"},
+  "resources": {
+    "expected_ranks": 2,
+    "process_grid": [2, 1, 1]
+  },
+  "mesh": {
+    "cells": [64, 8, 8],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 0.125, 0.125],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.003125, "steps": 20},
+  "transport": {
+    "velocity_m_per_s": [1.0, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": true,
+    "read_directory": "Restart/step00000010",
+    "write_directory": "Restart.resumed"
+  },
+  "output": {
+    "directory": "output.resumed",
+    "write_interval": 10,
+    "restart_interval": 10
+  }
+}
