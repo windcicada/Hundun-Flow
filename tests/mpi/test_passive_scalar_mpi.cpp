@@ -25,6 +25,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -627,14 +628,89 @@ InvarianceMetrics check_invariance(const MpiContext &context) {
   return metrics;
 }
 
+int run_finalized(int argc, char **argv) {
+  std::optional<MpiContext> context;
+  std::optional<StructuredDecomposition> decomposition;
+  std::optional<UniformStructuredMesh> mesh;
+  std::optional<HaloExchange> halo;
+  std::optional<FieldRegistry> registry;
+  std::optional<FieldStorage> storage;
+  std::optional<PassiveScalarSolver> solver;
+  FieldId scalar{};
+  FieldId stage{};
+  std::vector<double> before;
+
+  int active_result = EXIT_FAILURE;
+  {
+    MpiEnvironment environment(argc, argv);
+    active_result = hundun::test::run([&] {
+      HUNDUN_CHECK(argc == 2);
+      HUNDUN_CHECK(std::string(argv[1]) == "finalized");
+      context.emplace(MpiContext::duplicate(MPI_COMM_WORLD));
+      const Int3 cells{8, 6, 4};
+      decomposition.emplace(
+          StructuredDecomposition::create(*context, cells, kPeriodic));
+      mesh.emplace(cells, Real3{0.0, 0.0, 0.0}, Real3{1.0, 0.75, 0.5},
+                   *decomposition);
+      halo.emplace(HaloExchange::create(
+          *decomposition,
+          ExchangePlan::create(*decomposition, decomposition->local_extent(),
+                               2)));
+      registry.emplace();
+      scalar = declare_field(*registry, "finalized_scalar");
+      stage = declare_field(*registry, "finalized_stage");
+      registry->freeze();
+      storage.emplace(*registry, decomposition->local_extent());
+      initialize_owned(*storage, scalar, 1.0);
+      solver.emplace(*context, *decomposition, *mesh, *halo,
+                     Real3{0.2, -0.1, 0.3}, 0.0);
+      before = owned_snapshot<double>(*storage, scalar);
+    });
+  }
+  if (active_result != EXIT_SUCCESS) {
+    return active_result;
+  }
+
+  return hundun::test::run([&] {
+    int finalized = 0;
+    HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
+    HUNDUN_CHECK(finalized != 0);
+
+    bool caught = false;
+    std::string message;
+    try {
+      solver->advance_ssprk2(*storage, scalar, stage, 0.01);
+    } catch (const Error &error) {
+      caught = true;
+      message = error.what();
+    }
+    HUNDUN_CHECK(caught);
+    HUNDUN_CHECK(!message.empty());
+    HUNDUN_CHECK(message.find("after MPI_Finalize") != std::string::npos);
+    HUNDUN_CHECK(before == owned_snapshot<double>(*storage, scalar));
+
+    solver.reset();
+    storage.reset();
+    registry.reset();
+    halo.reset();
+    mesh.reset();
+    decomposition.reset();
+    context.reset();
+  });
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  const std::string mode = argc > 1 ? argv[1] : "";
+  if (mode == "finalized") {
+    return run_finalized(argc, argv);
+  }
   return hundun::test::run([&] {
     MpiEnvironment environment(argc, argv);
     auto context = MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(argc == 2);
-    HUNDUN_CHECK(std::string(argv[1]) == "full");
+    HUNDUN_CHECK(mode == "full");
 
     check_constructor_matrix(context);
     check_advance_matrix(context);

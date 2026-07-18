@@ -313,6 +313,12 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${passive_scalar_test}" PROPERTIES
       LABELS "mpi;numerical" TIMEOUT 300 PROCESSORS "${ranks}")
   endforeach()
+  add_test(NAME test_passive_scalar_mpi_finalized
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_passive_scalar_mpi>"
+            finalized ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_passive_scalar_mpi_finalized PROPERTIES
+    LABELS mpi TIMEOUT 30 PROCESSORS 1)
 
   hundun_add_test(test_restart tests/unit/test_restart.cpp)
   target_include_directories(test_restart PRIVATE "${PROJECT_SOURCE_DIR}")

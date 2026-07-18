@@ -29,7 +29,8 @@
 namespace hundun::solver {
 namespace {
 
-constexpr std::string_view kMpiFailure = "passive scalar MPI operation failed";
+constexpr std::string_view kMpiFormattingFallback =
+    "passive scalar MPI result formatting failed";
 
 bool same(runtime::Int3 left, runtime::Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
@@ -50,12 +51,30 @@ void converge(const runtime::MpiContext &context, bool local_ok,
   }
 }
 
-void require_mpi_success(const runtime::MpiContext &context, int result) {
-  const bool local_ok = result == MPI_SUCCESS;
-  const runtime::CollectiveStatus status = runtime::collective_status(
-      context, local_ok, local_ok ? std::string_view{} : kMpiFailure);
+void converge_mpi_result(const runtime::MpiContext &context, int result,
+                         std::string_view operation) {
+  bool local_ok = true;
+  std::string retained_message;
+  std::string_view local_message;
+  try {
+    runtime::detail::check_mpi(result, operation);
+  } catch (const runtime::Error &error) {
+    local_ok = false;
+    try {
+      retained_message = error.what();
+      local_message = retained_message;
+    } catch (...) {
+      local_message = kMpiFormattingFallback;
+    }
+  } catch (...) {
+    local_ok = false;
+    local_message = kMpiFormattingFallback;
+  }
+
+  const runtime::CollectiveStatus status =
+      runtime::collective_status(context, local_ok, local_message);
   if (!status.ok) {
-    throw runtime::Error(std::string(kMpiFailure));
+    throw runtime::Error(status.message);
   }
 }
 
@@ -72,12 +91,14 @@ void require_agreed_value(const runtime::MpiContext &context, double value,
   const std::uint64_t local_bits = bit_pattern(value);
   std::uint64_t minimum_bits = 0;
   std::uint64_t maximum_bits = 0;
-  require_mpi_success(context,
+  converge_mpi_result(context,
                       MPI_Allreduce(&local_bits, &minimum_bits, 1, MPI_UINT64_T,
-                                    MPI_MIN, context.comm()));
-  require_mpi_success(context,
+                                    MPI_MIN, context.comm()),
+                      "MPI_Allreduce passive scalar bit-pattern minimum");
+  converge_mpi_result(context,
                       MPI_Allreduce(&local_bits, &maximum_bits, 1, MPI_UINT64_T,
-                                    MPI_MAX, context.comm()));
+                                    MPI_MAX, context.comm()),
+                      "MPI_Allreduce passive scalar bit-pattern maximum");
   converge(context, locally_valid && minimum_bits == maximum_bits,
            failure_message);
 }
@@ -199,9 +220,10 @@ PassiveScalarSolver::PassiveScalarSolver(
   converge(context, local_communicators_present,
            "passive scalar solver requires valid communicators");
   int communicator_relation = MPI_UNEQUAL;
-  require_mpi_success(context,
+  converge_mpi_result(context,
                       MPI_Comm_compare(context.comm(), decomposition.comm(),
-                                       &communicator_relation));
+                                       &communicator_relation),
+                      "MPI_Comm_compare passive scalar communicators");
   const bool communicators_compatible = communicator_relation == MPI_IDENT ||
                                         communicator_relation == MPI_CONGRUENT;
   converge(context, communicators_compatible,
@@ -245,6 +267,7 @@ PassiveScalarSolver::PassiveScalarSolver(
 void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
                                          runtime::FieldId scalar,
                                          runtime::FieldId stage, double dt_s) {
+  runtime::detail::require_mpi_active("advance passive scalar SSPRK2 step");
   require_agreed_value(*context_, dt_s, std::isfinite(dt_s) && dt_s > 0.0,
                        "passive scalar time step is invalid or differs");
 
@@ -425,9 +448,10 @@ double global_mass(const runtime::MpiContext &context,
     }
   }
   double result = 0.0;
-  require_mpi_success(context,
+  converge_mpi_result(context,
                       MPI_Allreduce(&local_mass, &result, 1, MPI_DOUBLE,
-                                    MPI_SUM, context.comm()));
+                                    MPI_SUM, context.comm()),
+                      "MPI_Allreduce passive scalar global mass");
   return result;
 }
 
@@ -468,12 +492,14 @@ double global_l1_error(const runtime::MpiContext &context,
       static_cast<double>(runtime::volume(extent)) * mesh.cell_volume_m3();
   double global_error = 0.0;
   double global_volume = 0.0;
-  require_mpi_success(context,
+  converge_mpi_result(context,
                       MPI_Allreduce(&local_error, &global_error, 1, MPI_DOUBLE,
-                                    MPI_SUM, context.comm()));
-  require_mpi_success(context,
+                                    MPI_SUM, context.comm()),
+                      "MPI_Allreduce passive scalar global L1 numerator");
+  converge_mpi_result(context,
                       MPI_Allreduce(&local_volume, &global_volume, 1,
-                                    MPI_DOUBLE, MPI_SUM, context.comm()));
+                                    MPI_DOUBLE, MPI_SUM, context.comm()),
+                      "MPI_Allreduce passive scalar global L1 volume");
   if (!std::isfinite(global_volume) || global_volume <= 0.0) {
     throw runtime::Error(
         "passive scalar global volume must be finite and positive");
