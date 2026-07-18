@@ -305,6 +305,40 @@ class HaloExchange::Impl final {
   Impl(const Impl&) = delete;
   Impl& operator=(const Impl&) = delete;
 
+  int ghost_width() const noexcept { return plan_.ghost_width_; }
+
+  bool is_compatible_with(
+      const StructuredDecomposition& decomposition) const {
+    if (decomposition.comm() == MPI_COMM_NULL) {
+      throw Error("halo compatibility requires a live decomposition");
+    }
+
+    int communicator_relation = MPI_UNEQUAL;
+    detail::check_mpi(
+        MPI_Comm_compare(context_.comm(), decomposition.comm(),
+                         &communicator_relation),
+        "MPI_Comm_compare halo compatibility");
+    if (communicator_relation != MPI_IDENT &&
+        communicator_relation != MPI_CONGRUENT) {
+      return false;
+    }
+    if (!same(plan_.local_extent_, decomposition.local_extent())) {
+      return false;
+    }
+
+    const ExchangePlan expected = ExchangePlan::create(
+        decomposition, decomposition.local_extent(), plan_.ghost_width_);
+    if (plan_.regions_.size() != expected.regions_.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < plan_.regions_.size(); ++index) {
+      if (!same(plan_.regions_[index], expected.regions_[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static std::unique_ptr<Impl> create(
       const StructuredDecomposition& decomposition, ExchangePlan plan) {
     detail::require_mpi_active("create halo exchange");
@@ -1157,6 +1191,22 @@ HaloExchange::HaloExchange(std::unique_ptr<Impl> implementation) noexcept
 HaloExchange::~HaloExchange() noexcept = default;
 
 HaloExchange::HaloExchange(HaloExchange&&) noexcept = default;
+
+int HaloExchange::ghost_width() const {
+  if (!implementation_) {
+    throw_halo_error(HaloError::moved_from);
+  }
+  return implementation_->ghost_width();
+}
+
+bool HaloExchange::is_compatible_with(
+    const StructuredDecomposition& decomposition) const {
+  detail::require_mpi_active("validate halo compatibility");
+  if (!implementation_) {
+    throw_halo_error(HaloError::moved_from);
+  }
+  return implementation_->is_compatible_with(decomposition);
+}
 
 void HaloExchange::exchange(FieldStorage& storage, FieldId id) {
   begin(static_cast<const FieldStorage&>(storage), id);

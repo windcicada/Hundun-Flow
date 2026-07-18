@@ -33,6 +33,7 @@
 namespace {
 
 using hundun::runtime::Box3;
+using hundun::runtime::DecompositionOptions;
 using hundun::runtime::Error;
 using hundun::runtime::ExchangePlan;
 using hundun::runtime::FieldDescriptor;
@@ -54,6 +55,13 @@ static_assert(!std::is_copy_constructible_v<HaloExchange>);
 static_assert(!std::is_copy_assignable_v<HaloExchange>);
 static_assert(std::is_nothrow_move_constructible_v<HaloExchange>);
 static_assert(!std::is_move_assignable_v<HaloExchange>);
+static_assert(std::is_same_v<decltype(std::declval<const HaloExchange&>()
+                                          .ghost_width()),
+                             int>);
+static_assert(std::is_same_v<decltype(std::declval<const HaloExchange&>()
+                                          .is_compatible_with(
+                                              std::declval<const StructuredDecomposition&>())),
+                             bool>);
 
 constexpr Int3 kGlobal{12, 10, 8};
 constexpr std::array<bool, 3> kPeriodic{true, true, true};
@@ -695,6 +703,70 @@ void test_state_machine_and_moves(const MpiContext& context) {
   check_field<double>(moved_storage, first, decomposition, kPeriodic, 1, 4, 4);
 }
 
+void test_compatibility_metadata(const MpiContext& context) {
+  HUNDUN_CHECK(context.size() == 4);
+  const Int3 cells{16, 4, 4};
+  const DecompositionOptions options{Int3{4, 1, 1}};
+  auto decomposition =
+      StructuredDecomposition::create(context, cells, kPeriodic, options);
+
+  for (int width : {0, 1, 2}) {
+    auto halo = HaloExchange::create(
+        decomposition, ExchangePlan::create(decomposition,
+                                            decomposition.local_extent(),
+                                            width));
+    HUNDUN_CHECK(halo.ghost_width() == width);
+    HUNDUN_CHECK(halo.is_compatible_with(decomposition));
+  }
+
+  auto halo = HaloExchange::create(
+      decomposition,
+      ExchangePlan::create(decomposition, decomposition.local_extent(), 2));
+
+  MPI_Comm reversed = MPI_COMM_NULL;
+  HUNDUN_CHECK(MPI_Comm_split(context.comm(), 0,
+                              context.size() - context.rank(), &reversed) ==
+               MPI_SUCCESS);
+  {
+    auto reversed_context = MpiContext::duplicate(reversed);
+    auto reversed_decomposition = StructuredDecomposition::create(
+        reversed_context, cells, kPeriodic, options);
+    HUNDUN_CHECK(!halo.is_compatible_with(reversed_decomposition));
+  }
+  HUNDUN_CHECK(MPI_Comm_free(&reversed) == MPI_SUCCESS);
+
+  const Int3 alternate_cells{4, 16, 4};
+  const DecompositionOptions alternate_options{Int3{1, 4, 1}};
+  auto alternate_decomposition = StructuredDecomposition::create(
+      context, alternate_cells, kPeriodic, alternate_options);
+  HUNDUN_CHECK(same(decomposition.local_extent(),
+                    alternate_decomposition.local_extent()));
+  int topology_relation = MPI_UNEQUAL;
+  HUNDUN_CHECK(MPI_Comm_compare(decomposition.comm(),
+                                alternate_decomposition.comm(),
+                                &topology_relation) == MPI_SUCCESS);
+  HUNDUN_CHECK(topology_relation == MPI_CONGRUENT);
+  HUNDUN_CHECK(!halo.is_compatible_with(alternate_decomposition));
+
+  auto invalid_decomposition = StructuredDecomposition::create(
+      context, cells, kPeriodic, options);
+  auto valid_moved_decomposition = std::move(invalid_decomposition);
+  expect_local_error([&] {
+    static_cast<void>(halo.is_compatible_with(invalid_decomposition));
+  });
+  HUNDUN_CHECK(halo.is_compatible_with(valid_moved_decomposition));
+
+  auto movable = HaloExchange::create(
+      decomposition,
+      ExchangePlan::create(decomposition, decomposition.local_extent(), 2));
+  HaloExchange moved(std::move(movable));
+  expect_local_error([&] { static_cast<void>(movable.ghost_width()); });
+  expect_local_error(
+      [&] { static_cast<void>(movable.is_compatible_with(decomposition)); });
+  HUNDUN_CHECK(moved.ghost_width() == 2);
+  HUNDUN_CHECK(moved.is_compatible_with(decomposition));
+}
+
 void test_context_isolation(const MpiContext& context) {
   auto decomposition =
       StructuredDecomposition::create(context, kGlobal, kPeriodic);
@@ -1116,6 +1188,7 @@ void run_full(const MpiContext& context) {
 
 void run_state(const MpiContext& context) {
   test_state_machine_and_moves(context);
+  test_compatibility_metadata(context);
   test_context_isolation(context);
 }
 
@@ -1137,17 +1210,21 @@ void run_failure(const MpiContext& context) {
 
 int run_finalized_idle(int argc, char** argv) {
   std::optional<HaloExchange> halo;
+  std::optional<StructuredDecomposition> decomposition;
   int active_result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
     auto context = MpiContext::duplicate(MPI_COMM_WORLD);
     active_result = hundun::test::run([&] {
-      auto decomposition =
-          StructuredDecomposition::create(context, kGlobal, kPeriodic);
+      decomposition.emplace(
+          StructuredDecomposition::create(context, kGlobal, kPeriodic));
       halo.emplace(HaloExchange::create(
-          decomposition,
-          ExchangePlan::create(decomposition, decomposition.local_extent(),
+          *decomposition,
+          ExchangePlan::create(*decomposition,
+                               decomposition->local_extent(),
                                0)));
+      HUNDUN_CHECK(halo->ghost_width() == 0);
+      HUNDUN_CHECK(halo->is_compatible_with(*decomposition));
     });
   }
   if (active_result != EXIT_SUCCESS) {
@@ -1157,7 +1234,19 @@ int run_finalized_idle(int argc, char** argv) {
     int finalized = 0;
     HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
     HUNDUN_CHECK(finalized != 0);
+    HUNDUN_CHECK(halo->ghost_width() == 0);
+    bool rejected = false;
+    std::string message;
+    try {
+      static_cast<void>(halo->is_compatible_with(*decomposition));
+    } catch (const Error& error) {
+      rejected = true;
+      message = error.what();
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(message.find("after MPI_Finalize") != std::string::npos);
     halo.reset();
+    decomposition.reset();
   });
 }
 

@@ -21,6 +21,9 @@ namespace hundun::solver {
 
 class PassiveScalarSolver final {
 public:
+  // Borrows context and halo for the solver lifetime; neither object may be
+  // destroyed or moved first. Construction validates halo against the
+  // supplied decomposition and retains no field view.
   PassiveScalarSolver(const runtime::MpiContext &context,
                       const runtime::StructuredDecomposition &decomposition,
                       const mesh::UniformStructuredMesh &mesh,
@@ -36,6 +39,7 @@ private:
   runtime::Int3 local_extent_{};
   runtime::Real3 spacing_m_{};
   runtime::Real3 velocity_m_per_s_{};
+  int halo_ghost_width_{};
 };
 
 [[nodiscard]] double global_mass(const runtime::MpiContext &context,

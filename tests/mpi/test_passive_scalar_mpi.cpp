@@ -11,6 +11,7 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
+#include "halo_test_access.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <mpi.h>
@@ -49,6 +50,7 @@ using hundun::runtime::OutputPolicy;
 using hundun::runtime::Real3;
 using hundun::runtime::RestartPolicy;
 using hundun::runtime::ScalarType;
+using hundun::runtime::DecompositionOptions;
 using hundun::runtime::StructuredDecomposition;
 using hundun::solver::global_l1_error;
 using hundun::solver::global_mass;
@@ -69,7 +71,8 @@ FieldId declare_field(FieldRegistry &registry, const std::string &name,
 }
 
 template <class Function>
-void expect_consistent_error(const MpiContext &context, Function &&function) {
+std::string capture_consistent_error(const MpiContext &context,
+                                     Function &&function) {
   bool caught = false;
   std::string message;
   try {
@@ -98,6 +101,13 @@ void expect_consistent_error(const MpiContext &context, Function &&function) {
   require_mpi(MPI_Allreduce(&local_equal, &every_equal, 1, MPI_INT, MPI_MIN,
                             context.comm()));
   HUNDUN_CHECK(every_equal == 1);
+  return message;
+}
+
+template <class Function>
+void expect_consistent_error(const MpiContext &context, Function &&function) {
+  static_cast<void>(capture_consistent_error(
+      context, std::forward<Function>(function)));
 }
 
 template <class T>
@@ -445,6 +455,186 @@ void check_diagnostic_matrix(const MpiContext &context) {
   });
 }
 
+void check_halo_compatibility(const MpiContext &context) {
+  HUNDUN_CHECK(context.size() == 4);
+  const Int3 cells{16, 4, 4};
+  const DecompositionOptions decomposition_options{Int3{4, 1, 1}};
+  auto decomposition = StructuredDecomposition::create(
+      context, cells, kPeriodic, decomposition_options);
+  UniformStructuredMesh mesh(cells, Real3{0.0, 0.0, 0.0},
+                             Real3{1.0, 0.25, 0.25}, decomposition);
+
+  FieldRegistry registry;
+  const FieldId scalar = declare_field(registry, "compatibility_scalar",
+                                       ScalarType::float64, 1U, 4);
+  const FieldId stage = declare_field(registry, "compatibility_stage",
+                                      ScalarType::float64, 1U, 4);
+  registry.freeze();
+  FieldStorage storage(registry, decomposition.local_extent());
+  initialize_owned(storage, scalar, 1.0);
+
+  const auto expect_constructor_rejection = [&](HaloExchange &candidate) {
+    const std::vector<double> before = owned_snapshot<double>(storage, scalar);
+    expect_consistent_error(context, [&] {
+      PassiveScalarSolver solver(context, decomposition, mesh, candidate,
+                                 Real3{0.2, -0.1, 0.3}, 0.0);
+      static_cast<void>(solver);
+    });
+    const int local_unchanged =
+        before == owned_snapshot<double>(storage, scalar) ? 1 : 0;
+    int every_unchanged = 0;
+    require_mpi(MPI_Allreduce(&local_unchanged, &every_unchanged, 1, MPI_INT,
+                              MPI_MIN, context.comm()));
+    HUNDUN_CHECK(every_unchanged == 1);
+  };
+
+  for (int width : {0, 1}) {
+    auto candidate = HaloExchange::create(
+        decomposition, ExchangePlan::create(decomposition,
+                                            decomposition.local_extent(),
+                                            width));
+    expect_constructor_rejection(candidate);
+  }
+
+  {
+    auto normal = HaloExchange::create(
+        decomposition, ExchangePlan::create(
+                           decomposition, decomposition.local_extent(), 2));
+    PassiveScalarSolver solver(context, decomposition, mesh, normal,
+                               Real3{0.2, -0.1, 0.3}, 0.0);
+    static_cast<void>(solver);
+  }
+
+  {
+    auto wider = HaloExchange::create(
+        decomposition, ExchangePlan::create(
+                           decomposition, decomposition.local_extent(), 3));
+    PassiveScalarSolver solver(context, decomposition, mesh, wider,
+                               Real3{0.2, -0.1, 0.3}, 0.0);
+    solver.advance_ssprk2(storage, scalar, stage, 0.001);
+  }
+
+  {
+    auto wider = HaloExchange::create(
+        decomposition, ExchangePlan::create(
+                           decomposition, decomposition.local_extent(), 3));
+    PassiveScalarSolver solver(context, decomposition, mesh, wider,
+                               Real3{0.2, -0.1, 0.3}, 0.0);
+    FieldRegistry narrow_registry;
+    const FieldId narrow_scalar =
+        declare_field(narrow_registry, "narrow_scalar");
+    const FieldId narrow_stage = declare_field(narrow_registry, "narrow_stage");
+    narrow_registry.freeze();
+    FieldStorage narrow_storage(narrow_registry,
+                                decomposition.local_extent());
+    initialize_owned(narrow_storage, narrow_scalar, 2.0);
+    hundun::runtime::detail::reset_halo_test_observation();
+    hundun::runtime::detail::HaloTestOptions options;
+    options.inject_post_error_rank = 1;
+    options.observe = true;
+    hundun::runtime::detail::set_halo_test_options(options);
+    expect_advance_error_unchanged<double>(context, narrow_storage,
+                                           narrow_scalar, [&] {
+      solver.advance_ssprk2(narrow_storage, narrow_scalar, narrow_stage,
+                            0.001);
+    });
+    const auto snapshot = hundun::runtime::detail::halo_test_snapshot();
+    hundun::runtime::detail::set_halo_test_options({});
+    HUNDUN_CHECK(snapshot.post_errors_injected == 0U);
+    HUNDUN_CHECK(snapshot.receive_posts == 0U);
+    HUNDUN_CHECK(snapshot.send_posts == 0U);
+  }
+
+  if (context.size() > 1) {
+    MPI_Comm reversed = MPI_COMM_NULL;
+    require_mpi(MPI_Comm_split(context.comm(), 0,
+                               context.size() - context.rank(), &reversed));
+    {
+      auto reversed_context = MpiContext::duplicate(reversed);
+      auto reversed_decomposition = StructuredDecomposition::create(
+          reversed_context, cells, kPeriodic, decomposition_options);
+      auto reversed_halo = HaloExchange::create(
+          reversed_decomposition,
+          ExchangePlan::create(reversed_decomposition,
+                               reversed_decomposition.local_extent(), 2));
+      expect_constructor_rejection(reversed_halo);
+    }
+    require_mpi(MPI_Comm_free(&reversed));
+  }
+
+  {
+    const Int3 alternate_cells{4, 16, 4};
+    const DecompositionOptions alternate_options{Int3{1, 4, 1}};
+    auto alternate_decomposition = StructuredDecomposition::create(
+        context, alternate_cells, kPeriodic, alternate_options);
+    HUNDUN_CHECK(alternate_decomposition.local_extent().x ==
+                 decomposition.local_extent().x);
+    HUNDUN_CHECK(alternate_decomposition.local_extent().y ==
+                 decomposition.local_extent().y);
+    HUNDUN_CHECK(alternate_decomposition.local_extent().z ==
+                 decomposition.local_extent().z);
+    auto alternate_halo = HaloExchange::create(
+        alternate_decomposition,
+        ExchangePlan::create(alternate_decomposition,
+                             alternate_decomposition.local_extent(), 2));
+    expect_constructor_rejection(alternate_halo);
+  }
+}
+
+void check_halo_diagnostics(const MpiContext &context) {
+  HUNDUN_CHECK(context.size() == 4);
+  const Int3 cells{12, 10, 8};
+  auto decomposition =
+      StructuredDecomposition::create(context, cells, kPeriodic);
+  UniformStructuredMesh mesh(cells, Real3{0.0, 0.0, 0.0},
+                             Real3{1.0, 1.0, 1.0}, decomposition);
+  FieldRegistry registry;
+  const FieldId scalar = declare_field(registry, "diagnostic_scalar_state");
+  const FieldId stage = declare_field(registry, "diagnostic_stage_state");
+  registry.freeze();
+  FieldStorage storage(registry, decomposition.local_extent());
+  initialize_owned(storage, scalar, 3.0);
+  auto halo = HaloExchange::create(
+      decomposition,
+      ExchangePlan::create(decomposition, decomposition.local_extent(), 2));
+  PassiveScalarSolver solver(context, decomposition, mesh, halo,
+                             Real3{0.2, -0.1, 0.3}, 0.0);
+
+  const std::vector<double> before = owned_snapshot<double>(storage, scalar);
+  hundun::runtime::detail::reset_halo_test_observation();
+  hundun::runtime::detail::HaloTestOptions options;
+  options.inject_post_error_rank = 1;
+  options.observe = true;
+  hundun::runtime::detail::set_halo_test_options(options);
+  const std::string message = capture_consistent_error(context, [&] {
+    solver.advance_ssprk2(storage, scalar, stage, 0.001);
+  });
+  const auto snapshot = hundun::runtime::detail::halo_test_snapshot();
+  hundun::runtime::detail::set_halo_test_options({});
+
+  HUNDUN_CHECK(message.find("halo post failure") != std::string::npos);
+  HUNDUN_CHECK(message.find("rank=1") != std::string::npos);
+  HUNDUN_CHECK(message.find("operation=MPI_Irecv") != std::string::npos);
+  HUNDUN_CHECK(message.find("result=" + std::to_string(MPI_ERR_OTHER)) !=
+               std::string::npos);
+  HUNDUN_CHECK(message.find("region=0") != std::string::npos);
+  HUNDUN_CHECK(message.find("chunk_offset=0") != std::string::npos);
+  HUNDUN_CHECK(message.find("chunk_count=") != std::string::npos);
+  HUNDUN_CHECK(message.find("tag=26") != std::string::npos);
+  HUNDUN_CHECK(before == owned_snapshot<double>(storage, scalar));
+
+  const auto local_injections =
+      static_cast<unsigned long long>(snapshot.post_errors_injected);
+  unsigned long long total_injections = 0U;
+  require_mpi(MPI_Allreduce(&local_injections, &total_injections, 1,
+                            MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                            context.comm()));
+  HUNDUN_CHECK(total_injections == 1U);
+
+  solver.advance_ssprk2(storage, scalar, stage, 0.001);
+  HUNDUN_CHECK(before != owned_snapshot<double>(storage, scalar));
+}
+
 double initial_value(Int3 global, Int3 extent) {
   const double x =
       2.0 * kPi * static_cast<double>(global.x) / static_cast<double>(extent.x);
@@ -710,7 +900,17 @@ int main(int argc, char **argv) {
     MpiEnvironment environment(argc, argv);
     auto context = MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(argc == 2);
-    HUNDUN_CHECK(mode == "full");
+    HUNDUN_CHECK(mode == "full" || mode == "halo_compatibility" ||
+                 mode == "halo_diagnostics");
+
+    if (mode == "halo_compatibility") {
+      check_halo_compatibility(context);
+      return;
+    }
+    if (mode == "halo_diagnostics") {
+      check_halo_diagnostics(context);
+      return;
+    }
 
     check_constructor_matrix(context);
     check_advance_matrix(context);

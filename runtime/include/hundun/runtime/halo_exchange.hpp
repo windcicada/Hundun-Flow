@@ -22,6 +22,15 @@ class HaloExchange final {
   HaloExchange(const HaloExchange&) = delete;
   HaloExchange& operator=(const HaloExchange&) = delete;
 
+  // Returns the immutable held plan width without calling MPI. The value is
+  // safe to query after MPI finalization; a moved-from object throws Error.
+  [[nodiscard]] int ghost_width() const;
+  // While MPI is active, reports whether the held communicator and immutable
+  // plan match the supplied live decomposition. A moved-from Halo or
+  // decomposition throws Error; rank reordering or a plan mismatch is false.
+  [[nodiscard]] bool is_compatible_with(
+      const StructuredDecomposition& decomposition) const;
+
   void exchange(FieldStorage& storage, FieldId id);
   void begin(const FieldStorage& storage, FieldId id);
   void wait(FieldStorage& storage, FieldId id);

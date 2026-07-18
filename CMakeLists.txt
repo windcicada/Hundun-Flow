@@ -301,6 +301,7 @@ if(HUNDUN_BUILD_TESTS)
     tests/mpi/test_passive_scalar_mpi.cpp)
   target_include_directories(test_passive_scalar_mpi PRIVATE
     "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/runtime/src"
     "${PROJECT_SOURCE_DIR}/solver/include")
   target_link_libraries(test_passive_scalar_mpi PRIVATE
     hundun_solver hundun_options hundun_warnings MPI::MPI_CXX)
@@ -319,6 +320,15 @@ if(HUNDUN_BUILD_TESTS)
             finalized ${MPIEXEC_POSTFLAGS})
   set_tests_properties(test_passive_scalar_mpi_finalized PROPERTIES
     LABELS mpi TIMEOUT 30 PROCESSORS 1)
+  foreach(mode IN ITEMS halo_compatibility halo_diagnostics)
+    set(passive_scalar_mode_test "test_passive_scalar_mpi_${mode}")
+    add_test(NAME "${passive_scalar_mode_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_passive_scalar_mpi>"
+              "${mode}" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${passive_scalar_mode_test}" PROPERTIES
+      LABELS "mpi;numerical" TIMEOUT 60 PROCESSORS 4)
+  endforeach()
 
   hundun_add_test(test_restart tests/unit/test_restart.cpp)
   target_include_directories(test_restart PRIVATE "${PROJECT_SOURCE_DIR}")

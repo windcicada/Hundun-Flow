@@ -31,6 +31,12 @@ namespace {
 
 constexpr std::string_view kMpiFormattingFallback =
     "passive scalar MPI result formatting failed";
+constexpr std::string_view kHaloCompatibilityFallback =
+    "passive scalar halo compatibility validation failed";
+constexpr std::string_view kHaloExchangeFallback =
+    "passive scalar halo exchange failed";
+constexpr std::string_view kStageExchangeFallback =
+    "passive scalar stage exchange failed";
 
 bool same(runtime::Int3 left, runtime::Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
@@ -75,6 +81,23 @@ void converge_mpi_result(const runtime::MpiContext &context, int result,
       runtime::collective_status(context, local_ok, local_message);
   if (!status.ok) {
     throw runtime::Error(status.message);
+  }
+}
+
+void retain_project_error(const runtime::Error &error,
+                          std::string &retained_message,
+                          std::string_view &selected_message,
+                          std::string_view fallback) noexcept {
+  selected_message = fallback;
+  try {
+    const char *message = error.what();
+    if (message != nullptr && message[0] != '\0') {
+      retained_message = message;
+      if (!retained_message.empty()) {
+        selected_message = retained_message;
+      }
+    }
+  } catch (...) {
   }
 }
 
@@ -257,11 +280,35 @@ PassiveScalarSolver::PassiveScalarSolver(
   converge(context, geometry_ok,
            "passive scalar mesh geometry is incompatible");
 
+  int halo_ghost_width = 0;
+  bool local_halo_ok = true;
+  std::string retained_halo_message;
+  std::string_view local_halo_message;
+  try {
+    halo_ghost_width = halo.ghost_width();
+    if (!halo.is_compatible_with(decomposition)) {
+      local_halo_ok = false;
+      local_halo_message = kHaloCompatibilityFallback;
+    }
+  } catch (const runtime::Error &error) {
+    local_halo_ok = false;
+    retain_project_error(error, retained_halo_message, local_halo_message,
+                         kHaloCompatibilityFallback);
+  } catch (...) {
+    local_halo_ok = false;
+    local_halo_message = kHaloCompatibilityFallback;
+  }
+  converge(context, local_halo_ok, local_halo_message);
+  require_agreed_value(context, static_cast<double>(halo_ghost_width),
+                       halo_ghost_width >= 2,
+                       "passive scalar halo width is invalid or differs");
+
   context_ = &context;
   halo_ = &halo;
   local_extent_ = decomposition.local_extent();
   spacing_m_ = spacing;
   velocity_m_per_s_ = velocity_m_per_s;
+  halo_ghost_width_ = halo_ghost_width;
 }
 
 void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
@@ -293,9 +340,9 @@ void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
     if (!same(scalar_view->interior_extent(), local_extent_)) {
       throw runtime::Error("passive scalar field extent is incompatible");
     }
-    if (scalar_view->ghost_width() < 2) {
+    if (scalar_view->ghost_width() < halo_ghost_width_) {
       throw runtime::Error(
-          "passive scalar field requires at least two ghost cells");
+          "passive scalar field has fewer ghosts than the halo width");
     }
     stage_view.emplace(storage.view<double>(stage));
     if (stage_view->components() != 1U) {
@@ -304,9 +351,9 @@ void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
     if (!same(stage_view->interior_extent(), local_extent_)) {
       throw runtime::Error("passive scalar stage extent is incompatible");
     }
-    if (stage_view->ghost_width() < 2) {
+    if (stage_view->ghost_width() < halo_ghost_width_) {
       throw runtime::Error(
-          "passive scalar stage requires at least two ghost cells");
+          "passive scalar stage has fewer ghosts than the halo width");
     }
 
     const std::size_t count = checked_owned_count(local_extent_);
@@ -330,15 +377,17 @@ void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
   converge(*context_, local_preflight_ok, local_preflight_message);
 
   bool local_step_ok = true;
+  std::string retained_step_message;
   std::string_view local_step_message;
   try {
     halo_->exchange(storage, scalar);
-  } catch (const std::exception &) {
+  } catch (const runtime::Error &error) {
     local_step_ok = false;
-    local_step_message = "passive scalar halo exchange failed";
+    retain_project_error(error, retained_step_message, local_step_message,
+                         kHaloExchangeFallback);
   } catch (...) {
     local_step_ok = false;
-    local_step_message = "passive scalar halo exchange failed";
+    local_step_message = kHaloExchangeFallback;
   }
   converge(*context_, local_step_ok, local_step_message);
 
@@ -371,14 +420,16 @@ void PassiveScalarSolver::advance_ssprk2(runtime::FieldStorage &storage,
 
   local_step_ok = true;
   local_step_message = {};
+  std::string retained_stage_message;
   try {
     halo_->exchange(storage, stage);
-  } catch (const std::exception &) {
+  } catch (const runtime::Error &error) {
     local_step_ok = false;
-    local_step_message = "passive scalar stage exchange failed";
+    retain_project_error(error, retained_stage_message, local_step_message,
+                         kStageExchangeFallback);
   } catch (...) {
     local_step_ok = false;
-    local_step_message = "passive scalar stage exchange failed";
+    local_step_message = kStageExchangeFallback;
   }
   converge(*context_, local_step_ok, local_step_message);
 
