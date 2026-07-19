@@ -53,17 +53,73 @@ void expect_error_containing(Function&& function, const std::string& text) {
   }
 }
 
-void join_and_capture(std::thread& thread,
-                      std::exception_ptr& cleanup_error) noexcept {
+enum class JoinFailureInjection { none, once_after_finished };
+
+void join_and_capture(
+    std::thread& thread, const std::atomic<bool>& finished,
+    std::exception_ptr& cleanup_error,
+    JoinFailureInjection injection = JoinFailureInjection::none) noexcept {
   if (!thread.joinable()) {
     return;
   }
   try {
+    if (injection == JoinFailureInjection::once_after_finished) {
+      throw std::runtime_error("injected execution waiter join failure");
+    }
     thread.join();
+    return;
   } catch (...) {
     if (cleanup_error == nullptr) {
       cleanup_error = std::current_exception();
     }
+  }
+
+  while (!finished.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  while (thread.joinable()) {
+    try {
+      thread.detach();
+    } catch (...) {
+      if (cleanup_error == nullptr) {
+        cleanup_error = std::current_exception();
+      }
+    }
+    if (!thread.joinable()) {
+      break;
+    }
+    try {
+      thread.join();
+    } catch (...) {
+      if (cleanup_error == nullptr) {
+        cleanup_error = std::current_exception();
+      }
+    }
+    if (thread.joinable()) {
+      std::this_thread::yield();
+    }
+  }
+}
+
+void test_join_cleanup_failure_fallback() {
+  std::atomic<bool> finished{false};
+  std::thread waiter([&] {
+    finished.store(true, std::memory_order_release);
+  });
+  while (!finished.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  std::exception_ptr cleanup_error;
+  join_and_capture(waiter, finished, cleanup_error,
+                   JoinFailureInjection::once_after_finished);
+  HUNDUN_CHECK(!waiter.joinable());
+  HUNDUN_CHECK(cleanup_error != nullptr);
+  try {
+    std::rethrow_exception(cleanup_error);
+  } catch (const std::runtime_error& error) {
+    HUNDUN_CHECK(std::string(error.what()) ==
+                 "injected execution waiter join failure");
   }
 }
 
@@ -705,8 +761,8 @@ void test_events_and_lifetime() {
         cleanup_error = std::current_exception();
       }
     }
-    join_and_capture(waiter_one, cleanup_error);
-    join_and_capture(waiter_two, cleanup_error);
+    join_and_capture(waiter_one, wait_one_returned, cleanup_error);
+    join_and_capture(waiter_two, wait_two_returned, cleanup_error);
     if (cleanup_error != nullptr) {
       std::rethrow_exception(cleanup_error);
     }
@@ -767,7 +823,7 @@ void test_events_and_lifetime() {
         cleanup_error = std::current_exception();
       }
     }
-    join_and_capture(failed_waiter, cleanup_error);
+    join_and_capture(failed_waiter, failed_wait_returned, cleanup_error);
     if (cleanup_error != nullptr) {
       std::rethrow_exception(cleanup_error);
     }
@@ -792,6 +848,7 @@ void test_events_and_lifetime() {
 
 int main() {
   return hundun::test::run([] {
+    test_join_cleanup_failure_fallback();
     test_public_traits_and_context();
     test_buffers_and_views();
     test_transfers_and_validation();
