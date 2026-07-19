@@ -329,6 +329,12 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_access PRIVATE hundun_runtime)
 
+  hundun_add_test(test_field_kernel_view
+    tests/unit/test_field_kernel_view.cpp)
+  target_include_directories(test_field_kernel_view PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_field_kernel_view PRIVATE hundun_runtime)
+
   hundun_add_test(test_performance_artifact
     tests/unit/test_performance_artifact.cpp)
   target_include_directories(test_performance_artifact PRIVATE

@@ -13,6 +13,22 @@
 namespace hundun::runtime {
 
 class FieldStorage;
+template <class T>
+class FieldView;
+template <class T>
+class FaceFieldView;
+template <class T>
+class KernelCellView;
+template <class T>
+class KernelFaceView;
+
+template <class T, class Callback>
+void with_kernel_cell_view(const FieldView<T> &checked,
+                           Callback &&callback);
+
+template <class T, class Callback>
+void with_kernel_face_view(const FaceFieldView<T> &checked,
+                           Callback &&callback);
 
 namespace detail {
 
@@ -36,6 +52,9 @@ class FieldView final {
 
  private:
   friend class FieldStorage;
+  template <class U, class Callback>
+  friend void with_kernel_cell_view(const FieldView<U> &checked,
+                                    Callback &&callback);
 
   using Byte =
       std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
@@ -67,6 +86,9 @@ class FaceFieldView final {
 
  private:
   friend class FieldStorage;
+  template <class U, class Callback>
+  friend void with_kernel_face_view(const FaceFieldView<U> &checked,
+                                    Callback &&callback);
 
   using Byte =
       std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
