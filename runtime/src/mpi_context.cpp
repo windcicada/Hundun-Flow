@@ -5,6 +5,10 @@
 #include "hundun/runtime/error.hpp"
 #include "mpi_error.hpp"
 
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace hundun::runtime {
@@ -56,7 +60,9 @@ MpiContext::MpiContext(MpiContext&& other) noexcept
     : communicator_(std::exchange(other.communicator_, MPI_COMM_NULL)),
       rank_(other.rank_),
       size_(other.size_),
-      thread_level_(other.thread_level_) {}
+      thread_level_(other.thread_level_),
+      fp64_reduction_counters_(
+          std::exchange(other.fp64_reduction_counters_, {})) {}
 
 MpiContext& MpiContext::operator=(MpiContext&& other) noexcept {
   if (this != &other) {
@@ -65,6 +71,8 @@ MpiContext& MpiContext::operator=(MpiContext&& other) noexcept {
     rank_ = other.rank_;
     size_ = other.size_;
     thread_level_ = other.thread_level_;
+    fp64_reduction_counters_ =
+        std::exchange(other.fp64_reduction_counters_, {});
   }
   return *this;
 }
@@ -75,6 +83,62 @@ void MpiContext::barrier() const {
     throw Error("cannot enter MPI barrier with an empty MPI context");
   }
   detail::check_mpi(MPI_Barrier(communicator_), "MPI_Barrier");
+}
+
+void MpiContext::allreduce_fp64_in_place(
+    double* values, std::size_t count,
+    Fp64ReductionOperation operation) const {
+  detail::require_mpi_active("reduce FP64 values");
+  if (communicator_ == MPI_COMM_NULL) {
+    throw Error("cannot reduce FP64 values with an empty MPI context");
+  }
+
+  MPI_Op mpi_operation = MPI_OP_NULL;
+  switch (operation) {
+    case Fp64ReductionOperation::sum:
+      mpi_operation = MPI_SUM;
+      break;
+    case Fp64ReductionOperation::maximum:
+      mpi_operation = MPI_MAX;
+      break;
+    default:
+      throw Error("unsupported FP64 reduction operation");
+  }
+
+  if (count == 0U) {
+    return;
+  }
+  if (values == nullptr) {
+    throw Error("FP64 reduction requires a non-null value pointer");
+  }
+  if (count > static_cast<std::size_t>(INT_MAX)) {
+    throw Error("FP64 reduction count exceeds MPI INT_MAX");
+  }
+
+  const auto checked_add = [](std::uint64_t current, std::uint64_t increment) {
+    if (increment > std::numeric_limits<std::uint64_t>::max() - current) {
+      throw Error("FP64 reduction counter would overflow");
+    }
+    return current + increment;
+  };
+  const std::uint64_t scalar_count = static_cast<std::uint64_t>(count);
+  if (scalar_count >
+      std::numeric_limits<std::uint64_t>::max() / sizeof(double)) {
+    throw Error("FP64 reduction logical payload byte count would overflow");
+  }
+  const std::uint64_t logical_bytes =
+      scalar_count * static_cast<std::uint64_t>(sizeof(double));
+  const Fp64ReductionCounters updated{
+      checked_add(fp64_reduction_counters_.collective_calls, 1U),
+      checked_add(fp64_reduction_counters_.reduced_scalars, scalar_count),
+      checked_add(fp64_reduction_counters_.logical_payload_bytes,
+                  logical_bytes)};
+
+  fp64_reduction_counters_ = updated;
+  detail::check_mpi(
+      MPI_Allreduce(MPI_IN_PLACE, values, static_cast<int>(count), MPI_DOUBLE,
+                    mpi_operation, communicator_),
+      "MPI_Allreduce FP64 values");
 }
 
 }  // namespace hundun::runtime

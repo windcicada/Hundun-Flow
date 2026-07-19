@@ -3,7 +3,22 @@
 
 #include <mpi.h>
 
+#include <cstddef>
+#include <cstdint>
+
 namespace hundun::runtime {
+
+enum class Fp64ReductionOperation { sum, maximum };
+
+struct Fp64ReductionCounters final {
+  std::uint64_t collective_calls{};
+  std::uint64_t reduced_scalars{};
+  std::uint64_t logical_payload_bytes{};
+};
+
+namespace test {
+class MpiContextTestAccess;
+}
 
 class MpiContext final {
  public:
@@ -31,8 +46,16 @@ class MpiContext final {
   int size() const noexcept { return size_; }
   int thread_level() const noexcept { return thread_level_; }
   void barrier() const;
+  void allreduce_fp64_in_place(
+      double* values, std::size_t count,
+      Fp64ReductionOperation operation) const;
+  Fp64ReductionCounters fp64_reduction_counters() const noexcept {
+    return fp64_reduction_counters_;
+  }
 
  private:
+  friend class test::MpiContextTestAccess;
+
   MpiContext(MPI_Comm communicator, int rank, int size,
              int thread_level) noexcept;
 
@@ -40,6 +63,7 @@ class MpiContext final {
   int rank_{0};
   int size_{0};
   int thread_level_{MPI_THREAD_SINGLE};
+  mutable Fp64ReductionCounters fp64_reduction_counters_{};
 };
 
 // Normally every MpiContext is destroyed before the MpiEnvironment that keeps

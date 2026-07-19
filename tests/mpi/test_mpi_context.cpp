@@ -185,6 +185,18 @@ int main(int argc, char** argv) {
     HUNDUN_CHECK(context->size() == size);
     HUNDUN_CHECK(context->thread_level() == thread_level);
     expect_error([&] { context->barrier(); }, "after MPI_Finalize");
+    double finalized_value = 1.0;
+    const auto counters_before_finalized_call =
+        context->fp64_reduction_counters();
+    expect_error(
+        [&] {
+          context->allreduce_fp64_in_place(
+              &finalized_value, 1U,
+              hundun::runtime::Fp64ReductionOperation::sum);
+        },
+        "after MPI_Finalize");
+    HUNDUN_CHECK(context->fp64_reduction_counters().collective_calls ==
+                 counters_before_finalized_call.collective_calls);
     expect_error(
         [&] { static_cast<void>(MpiContext::duplicate(context->comm())); },
         "after MPI_Finalize");
