@@ -93,6 +93,14 @@ partial(rho*phi_s)/partial(t) + div(mdot_f*phi_s,f)
 
 闭域热膨胀时，空间均匀的热力学压力 `p0` 必须作为全局状态更新，使闭域总质量与热力学闭合一致。`p0` 与机械压力 `pi` 职责分离，不能用压力修正场替代热力学状态。
 
+开放域热膨胀的 `p0` 必须由 resolved case 配置提供，并且是正、有限、时间不变
+的热力学参考量；机械压力出口只约束 `pi`，不能指定或更新 `p0`。最小热膨胀
+入口必须在 `h` 与 `T` 中恰好选择一个权威热状态：选择 `h` 时按 `T = h/cp`
+推导，选择 `T` 时按 `h = cp*T` 推导，两者都按 `rho = p0/(R*T)` 得到入口
+密度。若配置还冗余给出其余 `h`、`T` 或 `rho`，这些值只能用于按同一单位和
+配置容差严格交叉校验，不能按字段优先级覆盖推导值；任何不一致必须在运行前
+拒绝。
+
 本阶段不求解物种，不定义 `cp(T,Y)`、混合物气体常数、反应热或真实气体状态方程。多组分热化学密度反馈属于 Stage 4。非正或非有限的 `rho`、`T` 必须使全部 rank 一致拒绝本次试算，不得静默截断为下限后继续提交。
 
 ## 4. PISO、SIMPLE 与长期耦合策略
@@ -210,12 +218,15 @@ Stage 2 只实现下列 body-fitted 边界物理：
 - 静止无滑移壁面：不可渗透、壁面速度为零；
 - `symmetry`：法向速度和相应法向通量满足对称约束；
 - 规定速度入口：指定速度、密度或闭合所需热状态、焓和通用标量；
-- 机械压力出口：指定机械压力参考并使用一致的出流通量处理。
+- 机械压力出口：只指定机械压力 `pi` 参考并使用一致的出流通量处理，不约束
+  热力学参考量 `p0`。
 
-规定速度入口是 Stage 2 唯一开放入口形式，不实现总质量流量控制。机械压力
-出口一旦检测到回流，必须报告 patch、时间步和法向质量通量证据，并由所有
-rank 一致拒绝整个试算；不得把负通量截为零，也不得在缺少热化学状态时临时
-把出口当入口。
+规定速度入口是 Stage 2 唯一开放入口形式，不实现总质量流量控制。最小热膨胀
+入口的 `h/T/rho/p0` 必须遵守第 3 节的唯一推导和冗余值交叉校验规则。机械压力
+出口以第 8 步得到的最终面质量通量为准；第 9 步一旦在该通量上检测到回流，
+必须报告 patch、时间步和法向质量通量证据，并由所有 rank 一致拒绝整个试算。
+不得根据第 7 步的 provisional 通量作出通过或回流拒绝结论，不得把最终负通量
+截为零，也不得在缺少热化学状态时临时把出口当入口。
 
 复杂边界已经写入总体路线，不在本阶段遗漏或提前实现：Stage 3 交付静态 IBM
 表面；Stage 4 交付反应气相多入口/多出口、质量流量入口、热化学回流、温度、
@@ -349,16 +360,25 @@ Jacobi 对角线和 Halo workspace 只能在 revision 与 layout 匹配时复用
 6. 用实际动量对角系数进行时间一致的 Rhie--Chow 面插值，求解并应用第一次
    pressure corrector，一致更新候选机械压力、速度和面质量通量。
 7. 使用第一次修正的面质量通量校正 `rho`、`rho*h` 和 `rho*phi`，刷新闭合、
-   连续性右端和压力算子系数；不能只修正速度而提交旧输运状态。
+   连续性右端和压力算子系数。该结果只是不可提交的 provisional iterate，既
+   不能作为本步新状态验收，也不能从它再次推进一个时间步；不能只修正速度而
+   提交旧输运状态。
 8. 求解并应用第二次 pressure corrector，得到本步唯一候选最终机械压力、速度
-   和面质量通量，并再次应用压力 nullspace 规范化。
-9. 使用最终通量独立重算质量、动量、焓、标量和线性求解的离散残差，检查所有
-   物理、边界和性能合同；全部 rank 一致成功后原子提交 fields、历史、`dt`、
-   最终面通量和 `p0`。
+   和面质量通量，并再次应用压力 nullspace 规范化。随后从本步起始提交状态及
+   其历史层出发，以该最终通量重新完成 `rho`、`rho*h` 和全部 `rho*phi` 的
+   保守 transport finalization，再刷新 `DensityClosure`、候选 `p0`、连续性
+   右端和供验收使用的压力算子系数；这不是把第 7 步 provisional 状态再推进
+   一个时间步。
+9. 在 finalization 和 closure 刷新后，使用最终通量独立重算质量、三分量动量、
+   焓、全部标量及各线性求解的离散残差，并检查所有物理、边界和性能合同。
+   若刷新使连续性或压力残差超过合同，必须 collective 回滚并按确定规则缩小
+   `dt`；只有全部 rank 一致成功后才原子提交 fields、历史、`dt`、最终面通量
+   和 `p0`。
 
-这是 Stage 2 的固定 reference 路径，不包含焓、组分、热物性与 PISO 的残差
-驱动外循环。Stage 4 可在步骤 3--8 外增加明确的热化学非线性控制器，但不能
-改变这些算子的独立残差和守恒合同。
+步骤 8 的 transport finalization 和 closure 刷新不会增加第三次 pressure
+corrector，也不是残差驱动的热化学外循环。Stage 2 的固定 reference 路径仍然
+恰好执行两次 pressure corrector；Stage 4 才可在步骤 3--8 外增加明确的热化学
+非线性控制器，但不能改变这些算子的独立残差和守恒合同。
 
 任一步的非有限值、非正 `rho/T`、线性求解失败、边界拒绝或 residual failure
 都先通过 collective status 汇总，使所有 rank 得到相同失败类别与最低失败 rank
@@ -369,9 +389,10 @@ Jacobi 对角线和 Halo workspace 只能在 revision 与 layout 匹配时复用
 达到配置的 minimum `dt` 或 maximum retries 时，以最后一次 collective 证据
 明确终止。不可恢复的配置、layout 和数据损坏错误不参与重试。
 
-机械压力出口在任一候选最终面出现回流时属于边界拒绝：报告 patch stable ID、
-step/time、最小法向质量通量及所在全局 face，并 collective 回滚整个试算。Stage 2
-不得截断负通量或构造未配置的回流状态。
+机械压力出口在步骤 9 对最终面质量通量验收时出现回流属于边界拒绝：报告 patch
+stable ID、step/time、最小法向质量通量及所在全局 face，并 collective 回滚
+整个试算、缩小 `dt`。Stage 2 不以第 7 步 provisional 通量作出边界通过或拒绝
+结论，不得截断最终负通量或构造未配置的回流状态。
 
 ## 13. Checkpoint v2 与诊断输出
 
@@ -379,8 +400,13 @@ Stage 2 新增独立、版本化的 Checkpoint v2；Stage 1 Restart v1 的字节
 读取合同保持冻结。v2 至少持久化：
 
 - `rho`、三分量动量、机械压力、焓和全部 persistent 通用标量；
-- BDF2 的 `n`、`n-1` 状态以及所需的历史 `dt`；
-- 最终修正面质量通量和闭域热膨胀状态 `p0`；
+- BDF2 的 `n`、`n-1` 状态、所需的历史 `dt`，以及时间积分器的 startup/history
+  readiness 和当前 order 状态；
+- 所有会影响 Restart 后下一次 `dt` 选择的 adaptive-controller 状态，包括当前
+  limiter/hysteresis、上一步收敛或误差证据及重试相关记忆；控制器不得保留任何
+  未持久化却会改变下一次选择的隐式状态；
+- 最终修正面质量通量和动态闭域热膨胀状态 `p0`；固定的开放域 `p0` 不作为动态
+  字段恢复，但至少必须进入 resolved-case fingerprint；
 - topology、geometry、boundary 和 resolved-case fingerprint；
 - 字段 schema、step、time、rank count、process grid 和每 rank owned boxes；
 - 每 rank 文件名、逻辑 byte size、实际 byte size 和 CRC。
@@ -391,7 +417,7 @@ Stage 2 新增独立、版本化的 Checkpoint v2；Stage 1 Restart v1 的字节
 缺 rank 文件、size/CRC/fingerprint 不一致或存在未声明 trailing bytes 时，整组
 checkpoint 不可恢复。
 
-读取采用事务语义：进入读取事务即使旧 checked view epoch 失效，所有文件、
+读取采用事务语义：进入读取事务时立即使旧 checked view epoch 失效，所有文件、
 schema、fingerprint 和数值范围全部验证后才替换字段；任一失败均保持原有字段
 值和最后提交时间步不变。Checkpoint v2 首版只支持相同 rank 数、process grid
 和 owned boxes 的恢复，并在不匹配时给出明确诊断。
@@ -472,20 +498,27 @@ device 预留为由提前引入厂商依赖或无法测量收益的复杂缓存�
   每次成功都以独立 FP64 残差复算，而非只相信递推残差。
 - 定密度基础：先独立验证 matrix-free Poisson 算子、边界贡献、revision 和
   Jacobi 对角线，再验证固定两次 corrector 的 PISO。Taylor--Green 必须展示
-  时间及空间阶，checkerboard 扰动必须受抑制，最终面质量通量必须满足连续性
-  与分区不变性。
+  时间及空间阶，checkerboard 扰动必须受抑制；第二次 corrector 后的最终面质量
+  通量必须用于 transport finalization，并在 closure/系数刷新后独立满足连续性、
+  压力残差与分区不变性，测试还必须断言没有第三次 corrector。
 - 材料变密度：密度波平移覆盖阶数、正性和总质量守恒；制造解与
   variable-density vortex 覆盖质量、三分量动量、机械压力和共享通量耦合；
   不允许焓在此门隐式改变密度。
 - 最小热膨胀：分别检查常 `cp` 的 `h -> T`、常 `R` 的 `T -> rho`、非正状态
-  拒绝和闭域 `p0` 更新；闭域总质量、`h/T/rho/p0` 一致性、制造解及重试后的
-  时间历史必须通过。
+  拒绝和动态闭域 `p0` 更新；开放域验证配置 `p0` 正、有限且时间不变，机械压力
+  出口只约束 `pi`，入口 `h/T/rho/p0` 的唯一推导与冗余值严格交叉校验会在运行
+  前拒绝矛盾配置。闭域总质量、`h/T/rho/p0` 一致性、制造解及重试后的时间历史
+  必须通过。
 - 输运：焓与至少一个通用标量在最终 PISO 面质量通量上通过守恒、MUSCL/MC、
-  扩散制造解、正性适用范围和 MPI 分解不变性；不得以 predictor flux 提交。
+  扩散制造解、正性适用范围和 MPI 分解不变性；finalization 必须从本步起始提交
+  状态及其历史层重做，不得提交或再次推进第 7 步 provisional iterate，也不得以
+  predictor flux 提交。finalization/closure 刷新造成连续性或压力残差超限时，
+  必须在 1/2/4 rank 上一致回滚并缩小 `dt`。
 - 边界：periodic、静止无滑移壁面和 symmetry 分别验证速度与守恒通量；规定
-  速度入口验证速度、密度或闭合热状态、焓和标量；机械压力出口验证压力参考
-  与纯出流。任一出口回流必须在 1/2/4 rank 上 collective 拒绝整步，证据包含
-  patch、时间步、最小法向质量通量和全局 face，且提交状态保持不变。
+  速度入口验证速度、密度或闭合热状态、焓和标量；机械压力出口验证只约束
+  `pi` 与纯出流。第 9 步在最终面质量通量发现的任一出口回流必须在 1/2/4 rank
+  上 collective 拒绝整步，证据包含 patch、时间步、最小法向质量通量和全局
+  face，且提交状态保持不变。
 - 曲线有限体积：验证 cell closure、free-stream preservation、非正交扩散与
   流动制造解，并比较不同合法 process grid 的守恒量和收敛结果。
 - MPI：所有适用数值案例至少覆盖 1/2/4 rank 的 decomposition invariance；
@@ -494,7 +527,9 @@ device 预留为由提前引入厂商依赖或无法测量收益的复杂缓存�
   分支、transfer/event 顺序与无可用路径拒绝；rank-local 数值、边界、I/O 失败
   必须汇总成一致结果且无挂起。
 - Checkpoint v2：连续运行与中断续算结果一致；BDF2 的 `n/n-1`、历史 `dt`、
-  最终面质量通量和 `p0` 连续；缺失 `COMPLETED`、截断、CRC/size/fingerprint
+  startup/order、全部 adaptive-controller 状态、最终面质量通量和动态闭域 `p0`
+  连续，固定开放域 `p0` 由 fingerprint 校验；Restart 后下一次选定的 `dt` 和
+  积分阶次必须与不中断运行相同。缺失 `COMPLETED`、截断、CRC/size/fingerprint
   错误及 trailing bytes 均被拒绝；失败读取不改变字段值或已提交 step/time，
   但进入事务时旧 view 已失效；不同 rank 数或分区必须明确拒绝。
 - Stage 1 回归：高风险基础合同变更后运行相关 Stage 1 测试；Stage 2 最终出口
@@ -593,10 +628,12 @@ Stage 2 只有同时满足以下条件才可宣布完成：
 
 - 第 16 节八个硬门全部由主 agent 接受，且第 15 节矩阵无跳过或未解释失败；
 - 定密度、材料变密度、最小热膨胀三个门分别留有残差、守恒、阶数与 MPI 证据；
-- 每个成功时间步确实固定两次 PISO corrector，并只提交最终修正面质量通量；
+- 每个成功时间步确实固定两次 PISO corrector，以最终修正面质量通量从步初提交
+  状态及历史层完成 transport finalization，并且不提交第 7 步 provisional 状态；
 - 边界能力与拒绝行为符合第 9 节，出口回流在所有 rank 上事务回滚；
-- Checkpoint v2 只按相同 rank 数、process grid 和 owned boxes 恢复，连续性与
-  损坏拒绝通过；Stage 1 Restart v1 与 primitive VTK 合同保持不变；
+- Checkpoint v2 只按相同 rank 数、process grid 和 owned boxes 恢复，连续性、
+  下一次 `dt`/积分阶次精确续算与损坏拒绝通过；Stage 1 Restart v1 与 primitive
+  VTK 合同保持不变；
 - `cpu_reference` 通过共同 FP64 残差、守恒和收敛合同，device 只保留诚实接口；
 - 完整 85 项 Stage 1 gate、source-policy、离线构建、sanitizer 和 linkage 检查
   全部通过，公开构建及运行不依赖 Python；
