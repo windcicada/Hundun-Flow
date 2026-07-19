@@ -107,6 +107,24 @@ target_link_libraries(hundun_mesh
   PRIVATE hundun_warnings
   PUBLIC hundun_options hundun_runtime)
 
+add_library(hundun_linear STATIC
+  linear/src/ghosted_vector.cpp
+  linear/src/ghosted_vector_halo.cpp
+  linear/src/ghosted_vector_halo_detail.cpp)
+target_include_directories(hundun_linear
+  PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/linear/include>"
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/runtime/src")
+target_link_libraries(hundun_linear
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_execution
+    hundun_mesh
+    hundun_runtime
+    hundun_options
+    MPI::MPI_CXX)
+
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
   runtime/src/vtk_legacy.cpp)
@@ -364,6 +382,53 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_execution PRIVATE hundun_execution)
   set_tests_properties(test_execution PROPERTIES TIMEOUT 30)
+
+  hundun_add_test(test_ghosted_vector
+    tests/unit/test_ghosted_vector.cpp)
+  target_include_directories(test_ghosted_vector PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_ghosted_vector PRIVATE hundun_linear)
+  set_tests_properties(test_ghosted_vector PROPERTIES TIMEOUT 30)
+
+  hundun_add_test(test_ghosted_vector_header_contract
+    tests/unit/test_ghosted_vector_header_contract.cpp)
+  target_include_directories(test_ghosted_vector_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}/linear/include")
+  target_link_libraries(test_ghosted_vector_header_contract PRIVATE
+    hundun_linear)
+  set_tests_properties(test_ghosted_vector_header_contract PROPERTIES
+    TIMEOUT 30)
+
+  add_executable(test_ghosted_vector_halo
+    tests/mpi/test_ghosted_vector_halo.cpp)
+  target_include_directories(test_ghosted_vector_halo PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_ghosted_vector_halo PRIVATE
+    hundun_linear hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(vector_halo_test "test_ghosted_vector_halo_${ranks}_rank")
+    add_test(NAME "${vector_halo_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
+              full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${vector_halo_test}" PROPERTIES
+      LABELS mpi TIMEOUT 60 PROCESSORS "${ranks}")
+  endforeach()
+  foreach(mode IN ITEMS mismatch failure)
+    set(vector_halo_mode_test "test_ghosted_vector_halo_${mode}")
+    add_test(NAME "${vector_halo_mode_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
+              "${mode}" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${vector_halo_mode_test}" PROPERTIES
+      LABELS mpi TIMEOUT 60 PROCESSORS 4)
+  endforeach()
+  add_test(NAME test_ghosted_vector_halo_finalized_idle
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
+            finalized_idle ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_ghosted_vector_halo_finalized_idle PROPERTIES
+    LABELS mpi TIMEOUT 30 PROCESSORS 1)
 
   add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
   target_include_directories(test_passive_scalar PRIVATE
