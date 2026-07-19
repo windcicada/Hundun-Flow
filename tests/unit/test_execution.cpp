@@ -53,6 +53,20 @@ void expect_error_containing(Function&& function, const std::string& text) {
   }
 }
 
+void join_and_capture(std::thread& thread,
+                      std::exception_ptr& cleanup_error) noexcept {
+  if (!thread.joinable()) {
+    return;
+  }
+  try {
+    thread.join();
+  } catch (...) {
+    if (cleanup_error == nullptr) {
+      cleanup_error = std::current_exception();
+    }
+  }
+}
+
 class ConfigurableContext final : public ExecutionContext {
  public:
   ConfigurableContext(BackendIdentity identity, ExecutionSpace space,
@@ -641,48 +655,63 @@ void test_events_and_lifetime() {
   std::atomic<bool> wait_two_returned{false};
   std::exception_ptr wait_one_error;
   std::exception_ptr wait_two_error;
-  std::thread waiter_one([&] {
-    try {
-      pending_waiter_copy_one.wait();
-    } catch (...) {
-      wait_one_error = std::current_exception();
-    }
-    wait_one_returned.store(true, std::memory_order_release);
-  });
-  std::thread waiter_two([&] {
-    try {
-      pending_waiter_copy_two.wait();
-    } catch (...) {
-      wait_two_error = std::current_exception();
-    }
-    wait_two_returned.store(true, std::memory_order_release);
-  });
-  try {
-    ExecutionTestAccess::wait_until_waiter_count(pending_copy, 2);
-  } catch (...) {
-    if (!pending_copy.ready()) {
-      ExecutionTestAccess::complete_success(pending_copy);
-    }
-    waiter_one.join();
-    waiter_two.join();
-    throw;
-  }
-  const bool ready_before_completion = pending.ready();
-  const bool wait_one_returned_before_completion =
-      wait_one_returned.load(std::memory_order_acquire);
-  const bool wait_two_returned_before_completion =
-      wait_two_returned.load(std::memory_order_acquire);
-  retained_buffer.reset();
-  const bool retained_before_completion = !observed.expired();
+  std::thread waiter_one;
+  std::thread waiter_two;
+  bool ready_before_completion = false;
+  bool wait_one_returned_before_completion = false;
+  bool wait_two_returned_before_completion = false;
+  bool retained_before_completion = false;
   std::string stale_view_message;
   try {
-    static_cast<void>(retained_view[0]);
-  } catch (const Error& error) {
-    stale_view_message = error.what();
+    waiter_one = std::thread([&] {
+      try {
+        pending_waiter_copy_one.wait();
+      } catch (...) {
+        wait_one_error = std::current_exception();
+      }
+      wait_one_returned.store(true, std::memory_order_release);
+    });
+    waiter_two = std::thread([&] {
+      try {
+        pending_waiter_copy_two.wait();
+      } catch (...) {
+        wait_two_error = std::current_exception();
+      }
+      wait_two_returned.store(true, std::memory_order_release);
+    });
+    ExecutionTestAccess::wait_until_waiter_count(pending_copy, 2);
+    ready_before_completion = pending.ready();
+    wait_one_returned_before_completion =
+        wait_one_returned.load(std::memory_order_acquire);
+    wait_two_returned_before_completion =
+        wait_two_returned.load(std::memory_order_acquire);
+    retained_buffer.reset();
+    retained_before_completion = !observed.expired();
+    try {
+      static_cast<void>(retained_view[0]);
+    } catch (const Error& error) {
+      stale_view_message = error.what();
+    }
+    ExecutionTestAccess::complete_success(pending_copy);
+    waiter_one.join();
+    waiter_two.join();
+  } catch (...) {
+    const auto original_error = std::current_exception();
+    std::exception_ptr cleanup_error;
+    if (!pending_copy.ready()) {
+      try {
+        ExecutionTestAccess::complete_success(pending_copy);
+      } catch (...) {
+        cleanup_error = std::current_exception();
+      }
+    }
+    join_and_capture(waiter_one, cleanup_error);
+    join_and_capture(waiter_two, cleanup_error);
+    if (cleanup_error != nullptr) {
+      std::rethrow_exception(cleanup_error);
+    }
+    std::rethrow_exception(original_error);
   }
-  ExecutionTestAccess::complete_success(pending_copy);
-  waiter_one.join();
-  waiter_two.join();
   HUNDUN_CHECK(!ready_before_completion);
   HUNDUN_CHECK(!wait_one_returned_before_completion);
   HUNDUN_CHECK(!wait_two_returned_before_completion);
@@ -707,26 +736,48 @@ void test_events_and_lifetime() {
   ExecutionEvent failed_copy = failed;
   std::atomic<bool> failed_wait_returned{false};
   std::string failed_wait_message;
-  std::thread failed_waiter([&] {
-    failed_wait_message = expect_error([&] { failed_copy.wait(); });
-    failed_wait_returned.store(true, std::memory_order_release);
-  });
+  std::exception_ptr failed_wait_error;
+  std::thread failed_waiter;
+  bool failed_returned_before_completion = false;
+  std::string normal_completion_message{"fixed numerical event error"};
+  std::string cleanup_completion_message{"fixed numerical event error"};
   try {
+    failed_waiter = std::thread([&] {
+      try {
+        failed_wait_message = expect_error([&] { failed_copy.wait(); });
+      } catch (...) {
+        failed_wait_error = std::current_exception();
+      }
+      failed_wait_returned.store(true, std::memory_order_release);
+    });
     ExecutionTestAccess::wait_until_waiter_count(failed, 1);
-  } catch (...) {
-    if (!failed.ready()) {
-      ExecutionTestAccess::complete_error(
-          failed, "fixed numerical event error");
-    }
+    failed_returned_before_completion =
+        failed_wait_returned.load(std::memory_order_acquire);
+    ExecutionTestAccess::complete_error(
+        failed, std::move(normal_completion_message));
     failed_waiter.join();
-    throw;
+  } catch (...) {
+    const auto original_error = std::current_exception();
+    std::exception_ptr cleanup_error;
+    if (!failed.ready()) {
+      try {
+        ExecutionTestAccess::complete_error(
+            failed, std::move(cleanup_completion_message));
+      } catch (...) {
+        cleanup_error = std::current_exception();
+      }
+    }
+    join_and_capture(failed_waiter, cleanup_error);
+    if (cleanup_error != nullptr) {
+      std::rethrow_exception(cleanup_error);
+    }
+    std::rethrow_exception(original_error);
   }
-  const bool failed_returned_before_completion =
-      failed_wait_returned.load(std::memory_order_acquire);
-  ExecutionTestAccess::complete_error(failed, "fixed numerical event error");
-  failed_waiter.join();
   HUNDUN_CHECK(!failed_returned_before_completion);
   HUNDUN_CHECK(failed_wait_returned.load(std::memory_order_acquire));
+  if (failed_wait_error != nullptr) {
+    std::rethrow_exception(failed_wait_error);
+  }
   HUNDUN_CHECK(failed_wait_message == "fixed numerical event error");
   HUNDUN_CHECK(failed.ready());
   HUNDUN_CHECK(expect_error([&] { failed.wait(); }) ==
