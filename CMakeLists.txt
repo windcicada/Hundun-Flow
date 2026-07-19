@@ -29,6 +29,15 @@ hundun_configure_sanitizers(hundun_options)
 add_library(hundun_warnings INTERFACE)
 hundun_configure_warnings(hundun_warnings)
 
+add_library(hundun_execution STATIC
+  execution/src/execution.cpp)
+target_include_directories(hundun_execution PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/execution/include>"
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
+target_link_libraries(hundun_execution
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options)
+
 add_library(hundun_diagnostics STATIC
   diagnostics/src/performance_artifact.cpp)
 target_include_directories(hundun_diagnostics PUBLIC
@@ -350,6 +359,11 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/diagnostics/include")
   target_link_libraries(test_performance_artifact PRIVATE
     hundun_diagnostics yyjson)
+
+  hundun_add_test(test_execution tests/unit/test_execution.cpp)
+  target_include_directories(test_execution PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_execution PRIVATE hundun_execution)
 
   add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
   target_include_directories(test_passive_scalar PRIVATE
