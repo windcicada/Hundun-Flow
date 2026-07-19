@@ -1,7 +1,8 @@
 # Scientific and runtime sources
 
-Stage 1 uses published equations and standards, not external implementation
-source. The approved references and the decisions they support are:
+HUNDUN-FLOW uses published equations and standards, not external
+implementation source. The approved references and the decisions they support
+are:
 
 1. R. J. LeVeque, *Finite Volume Methods for Hyperbolic Problems* (2002),
    DOI [10.1017/CBO9780511791253](https://doi.org/10.1017/CBO9780511791253):
@@ -29,3 +30,19 @@ source. The approved references and the decisions they support are:
    Operator-Splitting” (1986), DOI
    [10.1016/0021-9991(86)90099-9](https://doi.org/10.1016/0021-9991(86)90099-9):
    input for future PISO pressure correction, not a Stage 1 capability.
+8. P. D. Thomas and C. K. Lombard (1979), DOI
+   [10.2514/3.61273](https://doi.org/10.2514/3.61273): metric identities and
+   geometric-conservation-law checks for independent curvilinear-grid work.
+9. J. B. Bell and D. L. Marcus (1992), DOI
+   [10.1016/0021-9991(92)90011-M](https://doi.org/10.1016/0021-9991(92)90011-M):
+   variable-density projection-method background.
+10. S. K. Choi (1999), DOI
+    [10.1080/104077899274679](https://doi.org/10.1080/104077899274679):
+    time-step-consistent momentum-interpolation background.
+11. S. Zhang, X. Zhao, and S. Bayyuk (2014), DOI
+    [10.1016/j.jcp.2013.11.006](https://doi.org/10.1016/j.jcp.2013.11.006):
+    transient momentum interpolation and checkerboard-suppression background.
+
+These citations support independent derivation and tests. They do not
+authorize copying an implementation or treating software source as an
+algorithm reference.

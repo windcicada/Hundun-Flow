@@ -29,6 +29,14 @@ hundun_configure_sanitizers(hundun_options)
 add_library(hundun_warnings INTERFACE)
 hundun_configure_warnings(hundun_warnings)
 
+add_library(hundun_diagnostics STATIC
+  diagnostics/src/performance_artifact.cpp)
+target_include_directories(hundun_diagnostics PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_link_libraries(hundun_diagnostics
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options)
+
 add_library(yyjson STATIC third_party/yyjson/yyjson.c)
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(yyjson PUBLIC
@@ -299,6 +307,14 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  hundun_add_test(test_performance_artifact
+    tests/unit/test_performance_artifact.cpp)
+  target_include_directories(test_performance_artifact PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_performance_artifact PRIVATE
+    hundun_diagnostics yyjson)
 
   add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
   target_include_directories(test_passive_scalar PRIVATE
