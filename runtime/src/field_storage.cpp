@@ -2,6 +2,7 @@
 
 #include "hundun/runtime/field_storage.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -13,9 +14,58 @@
 #include <vector>
 
 #include "hundun/runtime/error.hpp"
+#include "field_epoch_test_access.hpp"
 
 namespace hundun::runtime {
+namespace detail {
+
+class FieldEpochControl final {
+ public:
+  std::atomic<std::uint64_t> generation{1U};
+  std::atomic<bool> alive{true};
+};
+
+std::uint64_t field_epoch_generation(
+    const std::shared_ptr<FieldEpochControl> &epoch) noexcept {
+  if (!epoch) {
+    return 0U;
+  }
+  return epoch->generation.load(std::memory_order_acquire);
+}
+
+void validate_field_epoch(
+    const std::shared_ptr<const FieldEpochControl> &epoch,
+    std::uint64_t captured_generation) {
+  if (!epoch || !epoch->alive.load(std::memory_order_acquire)) {
+    throw Error("field view owner is no longer alive");
+  }
+  if (epoch->generation.load(std::memory_order_acquire) !=
+      captured_generation) {
+    throw Error("field view generation is stale");
+  }
+}
+
+}  // namespace detail
 namespace {
+
+void invalidate_epoch(
+    const std::shared_ptr<detail::FieldEpochControl> &epoch) noexcept {
+  if (epoch) {
+    epoch->alive.store(false, std::memory_order_release);
+  }
+}
+
+void advance_epoch(const std::shared_ptr<detail::FieldEpochControl> &epoch) {
+  if (!epoch || !epoch->alive.load(std::memory_order_acquire)) {
+    throw Error("field storage has no active generation");
+  }
+  const auto generation =
+      epoch->generation.load(std::memory_order_acquire);
+  if (generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw Error("field storage generation would wrap");
+  }
+  epoch->generation.store(generation + 1U, std::memory_order_release);
+}
 
 std::size_t checked_add(std::size_t left, std::size_t right,
                         const char *quantity) {
@@ -202,10 +252,44 @@ FieldStorage::FieldStorage(const FieldRegistry &registry, Int3 interior_extent)
     begin_scalar_lifetimes(plan.scalar_type, aligned_bytes, plan.element_count);
     entries->push_back(std::move(field));
   }
+  epoch_ = std::make_shared<detail::FieldEpochControl>();
   entries_ = std::move(entries);
 }
 
+FieldStorage::~FieldStorage() noexcept { invalidate_epoch(epoch_); }
+
+FieldStorage::FieldStorage(FieldStorage &&other) noexcept
+    : interior_extent_(other.interior_extent_),
+      epoch_(std::move(other.epoch_)),
+      entries_(std::move(other.entries_)) {
+  other.interior_extent_ = Int3{};
+}
+
+FieldStorage &FieldStorage::operator=(FieldStorage &&other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+
+  invalidate_epoch(epoch_);
+  entries_.reset();
+  epoch_.reset();
+
+  interior_extent_ = other.interior_extent_;
+  epoch_ = std::move(other.epoch_);
+  entries_ = std::move(other.entries_);
+  other.interior_extent_ = Int3{};
+  return *this;
+}
+
 Int3 FieldStorage::interior_extent() const noexcept { return interior_extent_; }
+
+void FieldStorage::begin_rebuild() { advance_epoch(epoch_); }
+
+void FieldStorage::begin_repartition() { advance_epoch(epoch_); }
+
+void FieldStorage::begin_restart_v2_read_transaction() {
+  advance_epoch(epoch_);
+}
 
 FieldStorage::Entry &FieldStorage::entry(FieldId id) {
   const auto index = static_cast<std::size_t>(id);
@@ -221,6 +305,18 @@ const FieldStorage::Entry &FieldStorage::entry(FieldId id) const {
     throw Error("field storage ID is out of bounds");
   }
   return (*entries_)[index];
+}
+
+std::uint64_t detail::FieldEpochTestAccess::generation(
+    const FieldStorage &storage) noexcept {
+  return detail::field_epoch_generation(storage.epoch_);
+}
+
+void detail::FieldEpochTestAccess::force_generation(
+    FieldStorage &storage, std::uint64_t generation) noexcept {
+  if (storage.epoch_) {
+    storage.epoch_->generation.store(generation, std::memory_order_release);
+  }
 }
 
 }  // namespace hundun::runtime

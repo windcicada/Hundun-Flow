@@ -18,6 +18,9 @@ class HaloExchange;
 
 namespace detail {
 
+class FieldEpochControl;
+struct FieldEpochTestAccess;
+
 template <class T>
 struct FieldScalarType;
 
@@ -41,7 +44,17 @@ struct FieldScalarType<std::uint8_t> {
 class FieldStorage final {
  public:
   FieldStorage(const FieldRegistry &, Int3 interior_extent);
+  ~FieldStorage() noexcept;
+  FieldStorage(const FieldStorage &) = delete;
+  FieldStorage &operator=(const FieldStorage &) = delete;
+  FieldStorage(FieldStorage &&other) noexcept;
+  FieldStorage &operator=(FieldStorage &&other) noexcept;
+
   Int3 interior_extent() const noexcept;
+
+  void begin_rebuild();
+  void begin_repartition();
+  void begin_restart_v2_read_transaction();
 
   template <class T>
   FieldView<T> view(FieldId id);
@@ -51,6 +64,7 @@ class FieldStorage final {
 
  private:
   friend class HaloExchange;
+  friend struct detail::FieldEpochTestAccess;
 
   struct Entry {
     ScalarType scalar_type{};
@@ -67,6 +81,9 @@ class FieldStorage final {
   const Entry &entry(FieldId id) const;
 
   Int3 interior_extent_{};
+  // Declaration order keeps the control state alive while entries_ is torn
+  // down; checked views may retain it after the storage itself is gone.
+  std::shared_ptr<detail::FieldEpochControl> epoch_;
   std::unique_ptr<std::vector<Entry>> entries_;
 };
 
@@ -78,9 +95,9 @@ FieldView<T> FieldStorage::view(FieldId id) {
     throw Error("field view scalar type does not match its descriptor");
   }
   auto *data = field.bytes.data() + field.data_offset;
-  return FieldView<T>(data, interior_extent_, field.ghost_width,
-                      field.components, field.x_stride, field.y_stride,
-                      field.z_stride);
+  return FieldView<T>(data, epoch_, detail::field_epoch_generation(epoch_),
+                      interior_extent_, field.ghost_width, field.components,
+                      field.x_stride, field.y_stride, field.z_stride);
 }
 
 template <class T>
@@ -91,9 +108,10 @@ FieldView<const T> FieldStorage::view(FieldId id) const {
     throw Error("field view scalar type does not match its descriptor");
   }
   const auto *data = field.bytes.data() + field.data_offset;
-  return FieldView<const T>(data, interior_extent_, field.ghost_width,
-                            field.components, field.x_stride, field.y_stride,
-                            field.z_stride);
+  return FieldView<const T>(
+      data, epoch_, detail::field_epoch_generation(epoch_), interior_extent_,
+      field.ghost_width, field.components, field.x_stride, field.y_stride,
+      field.z_stride);
 }
 
 }  // namespace hundun::runtime

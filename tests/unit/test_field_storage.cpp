@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -13,6 +14,7 @@
 #include "hundun/runtime/field_descriptor.hpp"
 #include "hundun/runtime/field_registry.hpp"
 #include "hundun/runtime/field_storage.hpp"
+#include "runtime/src/field_epoch_test_access.hpp"
 #include "tests/support/test_main.hpp"
 
 namespace {
@@ -22,11 +24,20 @@ using hundun::runtime::FieldDescriptor;
 using hundun::runtime::FieldId;
 using hundun::runtime::FieldRegistry;
 using hundun::runtime::FieldStorage;
+using hundun::runtime::FieldView;
 using hundun::runtime::FunctionSpace;
 using hundun::runtime::Int3;
 using hundun::runtime::OutputPolicy;
 using hundun::runtime::RestartPolicy;
 using hundun::runtime::ScalarType;
+using hundun::runtime::detail::FieldEpochTestAccess;
+
+constexpr const char *kDeadOwnerMessage =
+    "field view owner is no longer alive";
+constexpr const char *kStaleGenerationMessage =
+    "field view generation is stale";
+constexpr const char *kGenerationWrapMessage =
+    "field storage generation would wrap";
 
 FieldDescriptor descriptor(std::string name = "passive_scalar",
                            ScalarType scalar_type = ScalarType::float64,
@@ -54,6 +65,26 @@ void expect_error(Function &&function) {
     HUNDUN_CHECK(std::string(error.what()).empty() == false);
   }
   HUNDUN_CHECK(threw);
+}
+
+template <class Function>
+void expect_error_message(Function &&function, const char *expected_message) {
+  bool threw = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const Error &error) {
+    threw = true;
+    HUNDUN_CHECK(std::string(error.what()) == expected_message);
+  }
+  HUNDUN_CHECK(threw);
+}
+
+FieldRegistry make_epoch_registry() {
+  FieldRegistry registry;
+  registry.declare_field(
+      descriptor("epoch_value", ScalarType::float64, 1, 1));
+  registry.freeze();
+  return registry;
 }
 
 void test_registry_validation_and_stable_ids() {
@@ -358,6 +389,108 @@ void test_unindexable_upper_ghost_coordinate() {
   }
 }
 
+void test_view_rejects_access_after_owner_destruction() {
+  auto registry = make_epoch_registry();
+  std::optional<FieldView<double>> surviving_view;
+  {
+    FieldStorage storage(registry, Int3{2, 1, 1});
+    auto view = storage.view<double>(0U);
+    view(1, 0, 0, 0) = 19.0;
+    surviving_view.emplace(view);
+  }
+
+  HUNDUN_CHECK(surviving_view->interior_extent().x == 2);
+  HUNDUN_CHECK(surviving_view->ghost_width() == 1);
+  HUNDUN_CHECK(surviving_view->components() == 1U);
+  expect_error_message(
+      [&] { static_cast<void>((*surviving_view)(1, 0, 0, 0)); },
+      kDeadOwnerMessage);
+}
+
+void test_lifecycle_transitions_invalidate_old_views() {
+  auto registry = make_epoch_registry();
+  FieldStorage storage(registry, Int3{2, 1, 1});
+  auto current = storage.view<double>(0U);
+  current(0, 0, 0, 0) = 23.0;
+
+  using Transition = void (FieldStorage::*)();
+  constexpr std::array<Transition, 3> transitions{{
+      &FieldStorage::begin_rebuild,
+      &FieldStorage::begin_repartition,
+      &FieldStorage::begin_restart_v2_read_transaction,
+  }};
+
+  for (const auto transition : transitions) {
+    const auto previous = current;
+    (storage.*transition)();
+    expect_error_message(
+        [&] { static_cast<void>(previous(0, 0, 0, 0)); },
+        kStaleGenerationMessage);
+
+    current = storage.view<double>(0U);
+    HUNDUN_CHECK_NEAR(current(0, 0, 0, 0), 23.0, 0.0);
+    current(0, 0, 0, 0) = 23.0;
+  }
+}
+
+void test_move_construction_preserves_source_views() {
+  static_assert(std::is_nothrow_move_constructible_v<FieldStorage>);
+
+  auto registry = make_epoch_registry();
+  FieldStorage source(registry, Int3{2, 1, 1});
+  auto source_view = source.view<double>(0U);
+  source_view(1, 0, 0, 0) = 29.0;
+
+  FieldStorage destination(std::move(source));
+  HUNDUN_CHECK_NEAR(source_view(1, 0, 0, 0), 29.0, 0.0);
+  auto destination_view = destination.view<double>(0U);
+  HUNDUN_CHECK_NEAR(destination_view(1, 0, 0, 0), 29.0, 0.0);
+}
+
+void test_move_assignment_invalidates_target_and_preserves_source_views() {
+  static_assert(std::is_nothrow_move_assignable_v<FieldStorage>);
+
+  auto registry = make_epoch_registry();
+  FieldStorage target(registry, Int3{2, 1, 1});
+  FieldStorage source(registry, Int3{2, 1, 1});
+  auto target_old_view = target.view<double>(0U);
+  auto source_old_view = source.view<double>(0U);
+  target_old_view(0, 0, 0, 0) = 31.0;
+  source_old_view(0, 0, 0, 0) = 37.0;
+
+  target = std::move(source);
+
+  expect_error_message(
+      [&] { static_cast<void>(target_old_view(0, 0, 0, 0)); },
+      kDeadOwnerMessage);
+  HUNDUN_CHECK_NEAR(source_old_view(0, 0, 0, 0), 37.0, 0.0);
+  auto target_new_view = target.view<double>(0U);
+  HUNDUN_CHECK_NEAR(target_new_view(0, 0, 0, 0), 37.0, 0.0);
+}
+
+void test_generation_is_monotonic_and_wrap_is_rejected() {
+  auto registry = make_epoch_registry();
+  FieldStorage storage(registry, Int3{2, 1, 1});
+
+  const auto initial = FieldEpochTestAccess::generation(storage);
+  storage.begin_rebuild();
+  HUNDUN_CHECK(FieldEpochTestAccess::generation(storage) == initial + 1U);
+  storage.begin_repartition();
+  HUNDUN_CHECK(FieldEpochTestAccess::generation(storage) == initial + 2U);
+  storage.begin_restart_v2_read_transaction();
+  HUNDUN_CHECK(FieldEpochTestAccess::generation(storage) == initial + 3U);
+
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  FieldEpochTestAccess::force_generation(storage, maximum);
+  auto active_view = storage.view<double>(0U);
+  active_view(0, 0, 0, 0) = 41.0;
+
+  expect_error_message([&] { storage.begin_rebuild(); },
+                       kGenerationWrapMessage);
+  HUNDUN_CHECK(FieldEpochTestAccess::generation(storage) == maximum);
+  HUNDUN_CHECK_NEAR(active_view(0, 0, 0, 0), 41.0, 0.0);
+}
+
 }  // namespace
 
 int main() {
@@ -368,5 +501,10 @@ int main() {
     test_checked_size_overflow();
     test_unindexable_component_count();
     test_unindexable_upper_ghost_coordinate();
+    test_view_rejects_access_after_owner_destruction();
+    test_lifecycle_transitions_invalidate_old_views();
+    test_move_construction_preserves_source_views();
+    test_move_assignment_invalidates_target_and_preserves_source_views();
+    test_generation_is_monotonic_and_wrap_is_rejected();
   });
 }

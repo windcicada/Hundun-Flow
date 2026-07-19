@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/types.hpp"
@@ -12,6 +13,18 @@
 namespace hundun::runtime {
 
 class FieldStorage;
+
+namespace detail {
+
+class FieldEpochControl;
+
+std::uint64_t field_epoch_generation(
+    const std::shared_ptr<FieldEpochControl> &epoch) noexcept;
+void validate_field_epoch(
+    const std::shared_ptr<const FieldEpochControl> &epoch,
+    std::uint64_t captured_generation);
+
+}  // namespace detail
 
 template <class T>
 class FieldView final {
@@ -28,11 +41,15 @@ class FieldView final {
       std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
   using Value = std::remove_const_t<T>;
 
-  FieldView(Byte *data, Int3 interior_extent, int ghost_width,
+  FieldView(Byte *data,
+            std::shared_ptr<const detail::FieldEpochControl> epoch,
+            std::uint64_t generation, Int3 interior_extent, int ghost_width,
             std::uint32_t components, std::size_t x_stride,
             std::size_t y_stride, std::size_t z_stride) noexcept;
 
   Byte *data_{};
+  std::shared_ptr<const detail::FieldEpochControl> epoch_;
+  std::uint64_t generation_{};
   Int3 interior_extent_{};
   int ghost_width_{};
   std::uint32_t components_{};
@@ -42,10 +59,14 @@ class FieldView final {
 };
 
 template <class T>
-FieldView<T>::FieldView(Byte *data, Int3 interior_extent, int ghost_width,
-                        std::uint32_t components, std::size_t x_stride,
-                        std::size_t y_stride, std::size_t z_stride) noexcept
+FieldView<T>::FieldView(
+    Byte *data, std::shared_ptr<const detail::FieldEpochControl> epoch,
+    std::uint64_t generation, Int3 interior_extent, int ghost_width,
+    std::uint32_t components, std::size_t x_stride, std::size_t y_stride,
+    std::size_t z_stride) noexcept
     : data_(data),
+      epoch_(std::move(epoch)),
+      generation_(generation),
       interior_extent_(interior_extent),
       ghost_width_(ghost_width),
       components_(components),
@@ -70,6 +91,8 @@ std::uint32_t FieldView<T>::components() const noexcept {
 
 template <class T>
 T &FieldView<T>::operator()(int i, int j, int k, int component) const {
+  detail::validate_field_epoch(epoch_, generation_);
+
   const auto coordinate_in_bounds = [this](int coordinate, int extent) {
     const auto wide_coordinate = static_cast<std::int64_t>(coordinate);
     const auto lower = -static_cast<std::int64_t>(ghost_width_);
