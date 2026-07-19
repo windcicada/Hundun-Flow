@@ -50,7 +50,15 @@ runtime::Real3 cross(runtime::Real3 lhs, runtime::Real3 rhs) noexcept {
 }
 
 double norm(runtime::Real3 value) noexcept {
-  return std::hypot(value.x, value.y, value.z);
+  const double scale =
+      std::max({std::abs(value.x), std::abs(value.y), std::abs(value.z)});
+  if (scale == 0.0 || !std::isfinite(scale)) {
+    return scale;
+  }
+  const double x = value.x / scale;
+  const double y = value.y / scale;
+  const double z = value.z / scale;
+  return scale * std::sqrt(x * x + y * y + z * z);
 }
 
 bool finite(runtime::Real3 value) noexcept {
@@ -217,11 +225,13 @@ std::array<runtime::Real3, 4> mapped_face_vertices(const Mapping& mapping,
 
 runtime::Real3 face_center(
     const std::array<runtime::Real3, 4>& vertices) noexcept {
-  runtime::Real3 sum{};
-  for (const auto vertex : vertices) {
-    sum = add(sum, vertex);
+  const auto anchor = vertices[0];
+  auto center = anchor;
+  for (std::size_t index = 1; index < vertices.size(); ++index) {
+    center = add(
+        center, multiply(subtract(vertices[index], anchor), 0.25));
   }
-  return multiply(sum, 0.25);
+  return center;
 }
 
 runtime::Real3 positive_axis_area(
@@ -258,31 +268,56 @@ std::array<runtime::Real3, 8> mapped_cell_vertices(const Mapping& mapping,
 PolyhedralCell calculate_warped_cell(const Mapping& mapping,
                                      runtime::Int3 extent, runtime::Int3 cell) {
   const auto vertices = mapped_cell_vertices(mapping, extent, cell);
-  runtime::Real3 reference{};
-  for (const auto vertex : vertices) {
+  const auto anchor = vertices[0];
+  auto reference = anchor;
+  for (std::size_t index = 0; index < vertices.size(); ++index) {
+    const auto vertex = vertices[index];
     if (!finite(vertex)) {
       throw runtime::Error("mapped cell vertex is non-finite");
     }
-    reference = add(reference, vertex);
+    if (index != 0) {
+      reference = add(
+          reference, multiply(subtract(vertex, anchor), 0.125));
+    }
   }
-  reference = multiply(reference, 0.125);
+  if (!finite(reference)) {
+    throw runtime::Error("mesh cell reference point is non-finite");
+  }
 
+  struct TetrahedronContribution {
+    double signed_volume{};
+    runtime::Real3 relative_centroid{};
+  };
+  std::array<TetrahedronContribution, 12> contributions{};
+  std::size_t contribution_count = 0;
   double volume = 0.0;
-  runtime::Real3 first_moment{};
   const auto accumulate_triangle = [&](runtime::Real3 a, runtime::Real3 b,
                                        runtime::Real3 c) {
+    const auto relative_a = subtract(a, reference);
+    const auto relative_b = subtract(b, reference);
+    const auto relative_c = subtract(c, reference);
     const double signed_volume =
-        dot(subtract(a, reference),
-            cross(subtract(b, reference), subtract(c, reference))) /
-        6.0;
+        dot(relative_a, cross(relative_b, relative_c)) / 6.0;
     if (!std::isfinite(signed_volume)) {
       throw runtime::Error("cell tetrahedron volume is non-finite");
     }
+    runtime::Real3 relative_centroid{};
+    for (const auto relative :
+         std::array<runtime::Real3, 3>{relative_a, relative_b, relative_c}) {
+      relative_centroid =
+          add(relative_centroid, multiply(relative, 0.25));
+    }
+    if (!finite(relative_a) || !finite(relative_b) || !finite(relative_c) ||
+        !finite(relative_centroid) ||
+        contribution_count >= contributions.size()) {
+      throw runtime::Error("cell tetrahedron centroid is non-finite");
+    }
+    contributions[contribution_count++] =
+        {signed_volume, relative_centroid};
     volume += signed_volume;
-    first_moment =
-        add(first_moment,
-            multiply(multiply(add(add(add(reference, a), b), c), 0.25),
-                     signed_volume));
+    if (!std::isfinite(volume)) {
+      throw runtime::Error("cell tetrahedron volume sum is non-finite");
+    }
   };
 
   const auto accumulate_quad = [&](LogicalFace face, bool reverse) {
@@ -304,10 +339,23 @@ PolyhedralCell calculate_warped_cell(const Mapping& mapping,
   accumulate_quad(faces[4], true);
   accumulate_quad(faces[5], false);
 
-  if (!std::isfinite(volume) || volume <= 0.0) {
+  if (contribution_count != contributions.size() || !std::isfinite(volume) ||
+      volume <= 0.0) {
     throw runtime::Error("mesh cell volume must be finite and positive");
   }
-  const runtime::Real3 center = multiply(first_moment, 1.0 / volume);
+  runtime::Real3 relative_center{};
+  for (const auto contribution : contributions) {
+    const double weight = contribution.signed_volume / volume;
+    const auto term = multiply(contribution.relative_centroid, weight);
+    if (!std::isfinite(weight) || !finite(term)) {
+      throw runtime::Error("mesh cell relative centroid is non-finite");
+    }
+    relative_center = add(relative_center, term);
+    if (!finite(relative_center)) {
+      throw runtime::Error("mesh cell relative centroid sum is non-finite");
+    }
+  }
+  const runtime::Real3 center = add(reference, relative_center);
   if (!finite(center)) {
     throw runtime::Error("mesh cell centre must be finite");
   }
@@ -599,9 +647,17 @@ struct MeshGeometry::Impl {
                                ? negate(positive_area)
                                : positive_area;
       metrics.area = norm(metrics.owner_area);
-      if (!finite(metrics.center) || !finite(metrics.owner_area) ||
-          !std::isfinite(metrics.area) || metrics.area <= 0.0) {
-        throw runtime::Error("mesh face geometry is non-finite or degenerate");
+      if (!finite(metrics.center)) {
+        throw runtime::Error("mesh face centre is non-finite");
+      }
+      if (!finite(metrics.owner_area)) {
+        throw runtime::Error("mesh face area vector is non-finite");
+      }
+      if (!std::isfinite(metrics.area)) {
+        throw runtime::Error("mesh face area magnitude is non-finite");
+      }
+      if (metrics.area <= 0.0) {
+        throw runtime::Error("mesh face area is degenerate");
       }
       face_identity.push_back(identity);
       faces.push_back(metrics);

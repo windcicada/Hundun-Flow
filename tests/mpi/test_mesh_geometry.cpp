@@ -19,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -48,6 +49,7 @@ using hundun::runtime::StructuredDecomposition;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr Int3 kExtent{7, 5, 4};
 constexpr Int3 kSeamExtent{1, 5, 4};
+constexpr Int3 kMixedScaleExtent{1, 2, 2};
 constexpr Real3 kOrigin{-1.25, 0.375, 2.5};
 constexpr Real3 kLength{2.75, 1.625, 4.5};
 constexpr Real3 kAmplitude{0.02, -0.015, 0.01};
@@ -635,6 +637,49 @@ void test_extent_one_periodic_seam(const MpiContext& context,
   context.barrier();
 }
 
+void test_mixed_scale_geometry(const MpiContext& context) {
+  constexpr Real3 origin{5.0e307, 0.0, 0.0};
+  constexpr Real3 length{8.0e292, 1.0e-150, 1.0e-150};
+  const DecompositionOptions options{process_grid_for(context.size())};
+  auto decomposition = StructuredDecomposition::create(
+      context, kMixedScaleExtent, {false, false, false}, options);
+  MeshTopology topology(decomposition);
+  const UniformStructuredMesh legacy(kMixedScaleExtent, origin, length,
+                                     decomposition);
+  MeshGeometry uniform(topology, UniformBoxMapping(origin, length));
+  MeshGeometry analytic(
+      topology, AnalyticWarpedBoxMapping(origin, length, {0.0, 0.0, 0.0}));
+
+  HUNDUN_CHECK(bitwise_equal(*uniform.uniform_spacing_m(), legacy.spacing_m()));
+  for (LocalCellId local = 0; local < topology.owned_cell_count(); ++local) {
+    const Int3 global = topology.global_cell(local);
+    const Box3 box = topology.owned_global_box();
+    const Int3 legacy_local{global.x - box.begin.x, global.y - box.begin.y,
+                            global.z - box.begin.z};
+    HUNDUN_CHECK(bitwise_equal(uniform.cell_center_m(local),
+                               legacy.cell_center(legacy_local)));
+    HUNDUN_CHECK(bits(uniform.cell_volume_m3(local)) ==
+                 bits(legacy.cell_volume_m3()));
+    const Real3 analytic_center = analytic.cell_center_m(local);
+    HUNDUN_CHECK(std::isfinite(analytic_center.x));
+    HUNDUN_CHECK(std::isfinite(analytic_center.y));
+    HUNDUN_CHECK(std::isfinite(analytic_center.z));
+    HUNDUN_CHECK(std::isfinite(analytic.cell_volume_m3(local)));
+    HUNDUN_CHECK(analytic.cell_volume_m3(local) > 0.0);
+  }
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    const Real3 center = analytic.face_center_m(face);
+    HUNDUN_CHECK(std::isfinite(center.x));
+    HUNDUN_CHECK(std::isfinite(center.y));
+    HUNDUN_CHECK(std::isfinite(center.z));
+    HUNDUN_CHECK(std::isfinite(analytic.face_area_m2(face)));
+    HUNDUN_CHECK(analytic.face_area_m2(face) > 0.0);
+    HUNDUN_CHECK(std::isfinite(analytic.face_skewness(face)));
+    HUNDUN_CHECK(
+        std::isfinite(analytic.face_non_orthogonality_degrees(face)));
+  }
+}
+
 void test_invalid_geometry_queries(const MeshTopology& topology,
                                    const MeshGeometry& geometry) {
   expect_error([&] {
@@ -696,19 +741,49 @@ void run_mpi_tests(const MpiContext& context,
   });
 
   test_extent_one_periodic_seam(context, detached);
+  test_mixed_scale_geometry(context);
   context.barrier();
+}
+
+void run_injected_geometry_sample_failure(const MpiContext& context) {
+  if (context.rank() == 1) {
+    throw std::runtime_error(
+        "injected numerical geometry sample failure 2718");
+  }
+  context.barrier();
+}
+
+[[noreturn]] void abort_active_mpi_test(const MpiContext& context) noexcept {
+  int initialized = 0;
+  int finalized = 1;
+  if (MPI_Initialized(&initialized) == MPI_SUCCESS && initialized != 0 &&
+      MPI_Finalized(&finalized) == MPI_SUCCESS && finalized == 0 &&
+      context.comm() != MPI_COMM_NULL) {
+    (void)MPI_Abort(context.comm(), EXIT_FAILURE);
+  }
+  std::abort();
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  const bool inject_sample_failure =
+      argc == 2 && std::string(argv[1]) == "injected_sample_failure";
   std::optional<MeshGeometry> detached;
   int active_result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
     MpiContext context = MpiContext::duplicate(MPI_COMM_WORLD);
-    active_result =
-        hundun::test::run([&] { run_mpi_tests(context, detached); });
+    active_result = hundun::test::run([&] {
+      if (inject_sample_failure) {
+        run_injected_geometry_sample_failure(context);
+      } else {
+        run_mpi_tests(context, detached);
+      }
+    });
+    if (active_result != EXIT_SUCCESS) {
+      abort_active_mpi_test(context);
+    }
   }
 
   const int finalized_result = hundun::test::run([&] {

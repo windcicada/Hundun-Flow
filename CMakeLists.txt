@@ -488,6 +488,19 @@ if(HUNDUN_BUILD_TESTS)
       TIMEOUT 90
       PROCESSORS "${ranks}")
   endforeach()
+  add_test(NAME test_mesh_geometry_injected_sample_failure
+    COMMAND "${CMAKE_COMMAND}"
+            "-DMPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE}"
+            "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+            "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+            "-DMPIEXEC_POSTFLAGS=${MPIEXEC_POSTFLAGS}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:test_mesh_geometry>"
+            -P "${PROJECT_SOURCE_DIR}/tests/support/expected_geometry_sample_failure.cmake")
+  set_tests_properties(test_mesh_geometry_injected_sample_failure PROPERTIES
+    LABELS "mpi;numerical"
+    TIMEOUT 10
+    PROCESSORS 2
+    WILL_FAIL TRUE)
 
   add_executable(test_halo_exchange tests/mpi/test_halo_exchange.cpp)
   target_include_directories(test_halo_exchange PRIVATE
