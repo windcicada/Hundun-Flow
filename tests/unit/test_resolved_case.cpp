@@ -107,6 +107,43 @@ std::string ideal_gas_open_case() {
       "\"pressure_perturbation_pa\":0.0}");
 }
 
+std::string ideal_gas_temperature_only_case(const std::string& cp,
+                                            const std::string& gas_constant,
+                                            const std::string& pressure,
+                                            const std::string& temperature) {
+  std::string json = ideal_gas_open_case();
+  json = replace_once(json, ",\"enthalpy_J_per_kg\":301500.0", "");
+  json = replace_once(json, ",\"density_kg_per_m3\":1.176829268292683", "");
+  json = replace_once(json, "\"cp_J_per_kg_K\":1005.0",
+                      "\"cp_J_per_kg_K\":" + cp);
+  json = replace_once(json, "\"gas_constant_J_per_kg_K\":287.0",
+                      "\"gas_constant_J_per_kg_K\":" + gas_constant);
+  json = replace_once(json, "\"thermodynamic_pressure_pa\":101325.0",
+                      "\"thermodynamic_pressure_pa\":" + pressure);
+  return replace_once(json, "\"temperature_K\":300.0",
+                      "\"temperature_K\":" + temperature);
+}
+
+std::string ideal_gas_enthalpy_only_case(const std::string& cp,
+                                         const std::string& gas_constant,
+                                         const std::string& pressure,
+                                         const std::string& enthalpy) {
+  std::string json = ideal_gas_open_case();
+  json = replace_once(
+      json,
+      "\"thermal_authority\":\"temperature\",\"temperature_K\":300.0,"
+      "\"enthalpy_J_per_kg\":301500.0",
+      "\"thermal_authority\":\"enthalpy\",\"enthalpy_J_per_kg\":" +
+          enthalpy);
+  json = replace_once(json, ",\"density_kg_per_m3\":1.176829268292683", "");
+  json = replace_once(json, "\"cp_J_per_kg_K\":1005.0",
+                      "\"cp_J_per_kg_K\":" + cp);
+  json = replace_once(json, "\"gas_constant_J_per_kg_K\":287.0",
+                      "\"gas_constant_J_per_kg_K\":" + gas_constant);
+  return replace_once(json, "\"thermodynamic_pressure_pa\":101325.0",
+                      "\"thermodynamic_pressure_pa\":" + pressure);
+}
+
 void expect_error(TemporaryDirectory& directory, const std::string& json,
                   const std::string& pointer) {
   bool rejected = false;
@@ -800,6 +837,66 @@ void test_inlet_cross_checks(TemporaryDirectory& directory) {
                "/boundaries/0/density_kg_per_m3");
 }
 
+void test_ideal_gas_derived_binary64_ranges(TemporaryDirectory& directory) {
+  constexpr const char* maximum = "1.7976931348623157e308";
+  constexpr const char* minimum = "2.2250738585072014e-308";
+
+  expect_error(
+      directory,
+      ideal_gas_temperature_only_case(maximum, maximum, "1.0", maximum),
+      "/boundaries/0/enthalpy_J_per_kg",
+      "derived enthalpy is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_temperature_only_case(minimum, "1.0", minimum, minimum),
+      "/boundaries/0/enthalpy_J_per_kg",
+      "derived enthalpy is not a positive finite binary64 value");
+
+  // R*T overflows in binary64, but p0/(R*T) is exactly representable.
+  expect_round_trip(directory, ideal_gas_temperature_only_case(
+                                   "1.0", maximum, maximum, "2.0"));
+  // R*T underflows in binary64, but the final density remains representable.
+  expect_round_trip(directory, ideal_gas_temperature_only_case(
+                                   "1.0", minimum, minimum, minimum));
+
+  expect_error(
+      directory,
+      ideal_gas_temperature_only_case("1.0", maximum, minimum, "1.0"),
+      "/boundaries/0/density_kg_per_m3",
+      "derived density is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_temperature_only_case("1.0", minimum, "1.0", minimum),
+      "/boundaries/0/density_kg_per_m3",
+      "derived density is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_temperature_only_case("1.0", maximum, "1.0", maximum),
+      "/boundaries/0/density_kg_per_m3",
+      "derived density is not a positive finite binary64 value");
+
+  expect_error(
+      directory,
+      ideal_gas_enthalpy_only_case(minimum, "1.0", "1.0", maximum),
+      "/boundaries/0/enthalpy_J_per_kg",
+      "derived temperature is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_enthalpy_only_case(maximum, "1.0", "1.0", minimum),
+      "/boundaries/0/enthalpy_J_per_kg",
+      "derived temperature is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_enthalpy_only_case("1.0", minimum, "1.0", minimum),
+      "/boundaries/0/density_kg_per_m3",
+      "derived density is not a positive finite binary64 value");
+  expect_error(
+      directory,
+      ideal_gas_enthalpy_only_case("1.0", maximum, minimum, maximum),
+      "/boundaries/0/density_kg_per_m3",
+      "derived density is not a positive finite binary64 value");
+}
+
 void test_unknown_duplicate_and_paths(TemporaryDirectory& directory) {
   const std::vector<std::pair<std::string, std::string>> unknown = {
       {insert_before_root_end(closed_case(), ",\"unexpected\":true"),
@@ -889,6 +986,7 @@ int main() {
     test_nonfinite_boundary_values(directory);
     test_scalar_and_boundary_sets(directory);
     test_inlet_cross_checks(directory);
+    test_ideal_gas_derived_binary64_ranges(directory);
     test_unknown_duplicate_and_paths(directory);
   });
 }

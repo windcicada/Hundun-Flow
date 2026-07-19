@@ -2,6 +2,8 @@
 
 #include "hundun/config/case_config_loader.hpp"
 
+#include "case_config_loader_detail.hpp"
+
 #include "hundun/runtime/error.hpp"
 #include "yyjson.h"
 
@@ -491,13 +493,15 @@ void add_real3(yyjson_mut_doc* document, yyjson_mut_val* parent,
 
 }  // namespace
 
-CaseConfig load_case_config(const std::filesystem::path& path) {
-  std::string contents = read_complete_file(path);
+namespace detail {
+
+CaseConfig load_case_config_from_json(
+    std::string_view contents, const std::filesystem::path& case_path) {
   yyjson_read_err read_error{};
   using Document = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
   Document document(
-      yyjson_read_opts(contents.data(), contents.size(), YYJSON_READ_NOFLAG,
-                       nullptr, &read_error),
+      yyjson_read_opts(const_cast<char*>(contents.data()), contents.size(),
+                       YYJSON_READ_NOFLAG, nullptr, &read_error),
       &yyjson_doc_free);
   if (!document) {
     const std::string detail =
@@ -505,7 +509,14 @@ CaseConfig load_case_config(const std::filesystem::path& path) {
     throw ConfigError("", "invalid JSON at byte " +
                               std::to_string(read_error.pos) + ": " + detail);
   }
-  return parse_case_config(yyjson_doc_get_root(document.get()), path);
+  return parse_case_config(yyjson_doc_get_root(document.get()), case_path);
+}
+
+}  // namespace detail
+
+CaseConfig load_case_config(const std::filesystem::path& path) {
+  const std::string contents = read_complete_file(path);
+  return detail::load_case_config_from_json(contents, path);
 }
 
 void validate_case_config(const CaseConfig& config) {

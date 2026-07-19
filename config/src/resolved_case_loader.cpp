@@ -2,6 +2,8 @@
 
 #include "hundun/config/resolved_case_loader.hpp"
 
+#include "case_config_loader_detail.hpp"
+
 #include "hundun/runtime/error.hpp"
 #include "yyjson.h"
 
@@ -456,6 +458,44 @@ void require_finite(double value, std::string pointer) {
   }
 }
 
+void require_derived_positive(double value, std::string pointer,
+                              std::string_view quantity) {
+  if (!std::isfinite(value) || value <= 0.0) {
+    throw ConfigError(
+        std::move(pointer),
+        "derived " + std::string(quantity) +
+            " is not a positive finite binary64 value");
+  }
+}
+
+double scaled_positive_ratio(double numerator, double denominator_a,
+                             double denominator_b) {
+  int numerator_exponent = 0;
+  int denominator_a_exponent = 0;
+  int denominator_b_exponent = 0;
+  const double numerator_fraction =
+      std::frexp(numerator, &numerator_exponent);
+  const double denominator_a_fraction =
+      std::frexp(denominator_a, &denominator_a_exponent);
+  const double denominator_b_fraction =
+      std::frexp(denominator_b, &denominator_b_exponent);
+
+  const double fraction =
+      (numerator_fraction / denominator_a_fraction) /
+      denominator_b_fraction;
+  const std::int64_t exponent =
+      static_cast<std::int64_t>(numerator_exponent) -
+      static_cast<std::int64_t>(denominator_a_exponent) -
+      static_cast<std::int64_t>(denominator_b_exponent);
+  if (exponent > std::numeric_limits<int>::max()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  if (exponent < std::numeric_limits<int>::min()) {
+    return 0.0;
+  }
+  return std::scalbn(fraction, static_cast<int>(exponent));
+}
+
 bool valid_scalar_name(std::string_view name) {
   if (name.empty()) {
     return false;
@@ -764,6 +804,8 @@ FlowCaseConfig canonicalize_and_validate(FlowCaseConfig config) {
                                        "density_kg_per_m3"));
       }
       if (ideal_gas) {
+        const std::string boundary_pointer =
+            index_pointer("/boundaries", index);
         double temperature = 0.0;
         if (*boundary.thermal_authority ==
             InletThermalAuthority::temperature) {
@@ -781,14 +823,21 @@ FlowCaseConfig canonicalize_and_validate(FlowCaseConfig config) {
           }
           temperature = *boundary.enthalpy_J_per_kg /
                         *config.physics.cp_J_per_kg_K;
-          require_positive(temperature,
-                           child_pointer(index_pointer("/boundaries", index),
-                                         "enthalpy_J_per_kg"));
+          require_derived_positive(
+              temperature,
+              child_pointer(boundary_pointer, "enthalpy_J_per_kg"),
+              "temperature");
         }
         const double enthalpy = *config.physics.cp_J_per_kg_K * temperature;
-        const double density = *config.physics.thermodynamic_pressure_pa /
-                               (*config.physics.gas_constant_J_per_kg_K *
-                                temperature);
+        require_derived_positive(
+            enthalpy, child_pointer(boundary_pointer, "enthalpy_J_per_kg"),
+            "enthalpy");
+        const double density = scaled_positive_ratio(
+            *config.physics.thermodynamic_pressure_pa,
+            *config.physics.gas_constant_J_per_kg_K, temperature);
+        require_derived_positive(
+            density, child_pointer(boundary_pointer, "density_kg_per_m3"),
+            "density");
         const double tolerance = config.physics.inlet_consistency_rtol;
         if (boundary.temperature_K.has_value() &&
             !relatively_equal(temperature, *boundary.temperature_K,
@@ -1553,7 +1602,7 @@ ResolvedCase load_resolved_case(const std::filesystem::path& path) {
   yyjson_val* root = yyjson_doc_get_root(document.get());
   const int version = dispatch_schema_version(root);
   if (version == 1) {
-    return ResolvedCase(load_case_config(path));
+    return ResolvedCase(detail::load_case_config_from_json(contents, path));
   }
   if (version == 2) {
     return ResolvedCase(parse_flow_case(root, path));

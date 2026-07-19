@@ -3,6 +3,7 @@
 #include "hundun/config/case_config_loader.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/types.hpp"
+#include "config/src/case_config_loader_detail.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <chrono>
@@ -309,6 +310,42 @@ void test_launch_directory_independence(TemporaryDirectory& directory) {
                before.restart.write_directory);
   HUNDUN_CHECK(after.output.directory == before.output.directory);
   HUNDUN_CHECK(to_resolved_json(after) == to_resolved_json(before));
+}
+
+void test_private_json_snapshot_parser(TemporaryDirectory& directory) {
+  const auto virtual_path = directory.root() / "snapshot.json";
+  const CaseConfig from_bytes =
+      hundun::config::detail::load_case_config_from_json(valid_json(),
+                                                         virtual_path);
+  HUNDUN_CHECK(from_bytes.case_name == "advection");
+  HUNDUN_CHECK(from_bytes.restart.write_directory.generic_string() ==
+               "checkpoints/primary");
+  HUNDUN_CHECK(from_bytes.output.directory.generic_string() ==
+               "results/fields");
+
+  bool rejected = false;
+  try {
+    static_cast<void>(hundun::config::detail::load_case_config_from_json(
+        insert_before_root_end(valid_json(), ",\"unexpected\":true"),
+        virtual_path));
+  } catch (const ConfigError& error) {
+    HUNDUN_CHECK(error.pointer() == "/unexpected");
+    HUNDUN_CHECK(std::string(error.what()) ==
+                 "/unexpected: unknown member");
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
+
+  rejected = false;
+  try {
+    static_cast<void>(hundun::config::detail::load_case_config_from_json(
+        "{", virtual_path));
+  } catch (const ConfigError& error) {
+    HUNDUN_CHECK(error.pointer().empty());
+    HUNDUN_CHECK(std::string(error.what()).find("invalid JSON at byte ") == 0U);
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
 }
 
 void test_parse_root_and_missing_errors(TemporaryDirectory& directory) {
@@ -944,6 +981,7 @@ void run_all_tests() {
   TemporaryDirectory directory;
   test_valid_configs_and_resolved_json(directory);
   test_launch_directory_independence(directory);
+  test_private_json_snapshot_parser(directory);
   test_parse_root_and_missing_errors(directory);
   test_unknown_and_duplicate_keys(directory);
   test_wrong_types(directory);
