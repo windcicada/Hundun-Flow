@@ -21,7 +21,9 @@
 - 字段安全分离为带 epoch/capability 的 checked view 和短生命周期 kernel view。
 - 项目自有的后端中立线性代数与执行合同必须先于压力流实现；CPU reference 是本阶段数值基线，device 只保留接口语义，不实现生产 GPU 后端。
 
-上述决定细化了总体设计中的 Stage 2 变密度流动范围，依据见[总体设计第 7、15、16 节](../../design/2026-07-16-hundun-flow-clean-cpp-solver-design.md)与[Stage 2 架构影响评估](../../../.superpowers/sdd/architecture-stage2-scope-assessment.md)。
+上述决定细化了总体设计中的 Stage 2 变密度流动范围，并落实了
+[Stage 1 runtime architecture](../../architecture/runtime.md) 中记录的 Stage 2
+强制前置项；总体阶段边界仍以[总体设计第 7、15、16 节](../../design/2026-07-16-hundun-flow-clean-cpp-solver-design.md)为准。
 
 ## 2. 范围与非目标
 
@@ -151,8 +153,9 @@ application / time driver
 线性求解与执行合同必须使用项目自有类型，不得泄漏 CUDA、HIP、PETSc、
 HYPRE、MPI 缓冲区或外部 allocator。Stage 2 的生产基线是 `cpu_reference`；
 `cpu_optimized` 只能在计数证据定位热点后增加；device 类别仅冻结 execution
-space、驻留、显式传输、event、生命周期与错误语义。具体要求见
-[execution/backend input](../../../.superpowers/sdd/2026-07-17-stage2-execution-backend-input.md)。
+space、驻留、显式传输、event、生命周期与错误语义。CPU 与未来 device 后端
+都只能替换粗粒度执行机制，不得改变项目自有的算子、残差、守恒、收敛、
+分解不变性或失败合同。
 
 ## 7. Field epoch、capability 与 checked/kernel view
 
@@ -170,6 +173,11 @@ kernel view 是独立且 trivially-copyable 的指针、extent 和 stride 借用
 epoch、边界、权限、共享所有权、虚调用或逐元素原子检查。它只能从已验证的
 checked view 为一次词法受限的 kernel 调用生成，不得由 solver、Halo、I/O、
 插件回调或跨步 lambda 长期保存。
+
+kernel view 的安全边界由受限构造作用域、静态类型性质和 kernel review 建立，
+而不是靠运行时 sanitizer 探测越界。测试必须静态验证其 trivially-copyable 且
+不含 owner token，验证只有受限构造入口能够产生它，并比较 checked/kernel
+路径的数值等价性；测试不得为验证失败行为而解引用陈旧或越界 kernel view。
 
 checked view 与 kernel view 必须在所有 Stage 2 标量、分量及 ghost 布局上产生
 相同数值。Stage 1 的现有 `FieldView` 仍作为冻结回归接口处理，迁移不得改变
@@ -217,7 +225,7 @@ parcel 进出及静态壁碰撞；Stage 7 交付复杂选择器、优先级、�
 
 运动或变形壁面、多部件运动几何、全可压缩/激波边界和 WENO/DG 专属边界
 属于首版之后。各阶段必须随新增物理同步交付类型化 JSON schema、交叉校验和
-unsupported-combination 拒绝测试。完整分配见[总体设计“边界条件能力分配”](../../design/2026-07-16-hundun-flow-clean-cpp-solver-design.md)。
+unsupported-combination 拒绝测试。本节给出这些复杂边界的完整阶段分配。
 
 ## 10. 执行资源与数据驻留合同
 
@@ -251,10 +259,21 @@ inline event，从而让同一调用路径不需要以空句柄或特殊分支�
 偷偷复制，也不允许 host 代码直接解引用 device view。需要回迁时必须显式
 transfer 并等待其 event。
 
+Halo 数据交换路径必须由运行时能力查询选择，而不能只凭编译宏推断：host 数据
+使用 `host-direct`；未来 device 数据只有在运行时确认该 context、buffer 与 MPI
+路径共同支持时才可使用 `device-direct`；否则必须选择显式
+`device-host-staged` fallback，在通信前后分别提交 transfer 并按 event 依赖顺序
+等待。若 direct 与 staged 路径都不满足能力、驻留或生命周期合同，则在开始 Halo
+前明确拒绝，不得尝试隐式复制或未经确认的直接路径。
+
 Stage 2 只交付生产 `cpu_reference` context。device context 只冻结上述类型、
 能力拒绝、event 与生命周期语义，并使用不执行真实设备计算的 test double 验证
-调用顺序和错误传播；它不能注册为可运行生产后端，也不能被性能或科学声明称为
-GPU 支持。公共合同和测试不得出现 CUDA、HIP、SYCL、PETSc、HYPRE 或厂商句柄。
+能力选择、transfer/event 顺序、staged fallback、无可用路径时的拒绝及错误传播。
+本阶段不实现真实 device buffer、device-aware MPI 或生产 GPU 后端；device test
+double 不能注册为可运行生产后端，也不能被性能或科学声明称为 GPU 支持。公共
+合同和测试不得出现 CUDA、HIP、SYCL、PETSc、HYPRE 或厂商句柄。未来任何 CPU
+或 device 生产后端都必须通过同一项目自有 FP64 residual、conservation、
+convergence、decomposition-invariance 和 failure 合同。
 
 ## 11. 线性代数与 matrix-free 压力算子
 
@@ -384,14 +403,27 @@ reader/writer 测试冻结。本阶段不加入 HDF5、MPI-IO 或 rank-changing 
 
 ## 14. 测量、性能证据与优化准入
 
-每次性能测量 artifact 至少记录：commit、resolved-case fingerprint、编译器与
-构建类型、MPI 实现、rank/thread 数、process grid、网格与每 rank owned cells、
-执行后端、数值配置、测量轮次和 correctness 结果。未先通过相同残差、守恒、
-分解不变性及输出合同的运行，不得作为性能基线。
+每次性能测量 artifact 至少记录：commit、工作树 clean/dirty 状态、
+resolved-case fingerprint、编译器版本、完整 compiler/link flags、构建类型、MPI
+实现、node 身份、CPU affinity、rank placement、rank/thread 数、process grid、
+网格与每 rank owned cells、执行后端、数值配置、warmup steps、measured steps、
+repetitions 和 correctness 结果。dirty 运行还必须保存可唯一识别该工作树差异的
+摘要，不能与 clean commit 基线混同。未先通过相同残差、守恒、分解不变性及
+输出合同的运行，不得作为性能基线。
 
 wall-clock 使用 `MPI_Wtime` 包围定义清楚的 phase，排除或单独报告初始化与冷启动；
-每个 phase 以所有 rank elapsed time 的 maximum 作为并行步耗时。报告同时保留
-迭代次数和工作量，避免把少做一次 corrector 或放宽容差误记为优化。
+warmup 不计入测量。对 rank 数为 `p` 的每次重复 `r`，artifact 保存每个 rank 的
+原始 measured-phase elapsed time 及换算后的 step-time sample `t[p,r,k]`；其中
+phase elapsed time 除以 measured steps 得到该 rank 的 step time。该次重复值定义
+为 maximum-rank step time `t[p,r] = max_k(t[p,r,k])`，报告值
+`T_p = median_r(t[p,r])`。报告不得只保留聚合值，必须保留所有 raw per-rank
+samples、重复编号和换算所需元数据，使 `t[p,r]` 与 `T_p` 可以重新计算。报告
+同时保留迭代次数和工作量，避免把少做一次 corrector 或放宽容差误记为优化。
+
+strong scaling 使用同一全局问题，定义 `S_p = T_1/T_p`、
+`E_p = T_1/(p*T_p)`；weak scaling 保持每 rank 问题规模与数值配置一致，定义
+`W_p = T_1/T_p`。两种 `T_1` 都必须来自与对应 `T_p` 满足下述兼容性条件的
+单 rank 测量，并使用同一 warmup、measured steps、repetitions 与聚合规则。
 
 Stage 2 必须测量并输出：
 
@@ -425,8 +457,10 @@ device 预留为由提前引入厂商依赖或无法测量收益的复杂缓存�
 
 - 字段安全：陈旧 epoch 在销毁、替换、重建、重分区和 Checkpoint 读取事务进入
   后均被拒绝；read/write capability、重复 writer、类型、范围和 generation
-  回绕均明确失败；checked view 与 kernel view 数值一致，并由 ASan/UBSan
-  覆盖陈旧借用和 kernel view 生命周期误用。
+  回绕均明确失败；ASan/UBSan 只覆盖 stale checked view 的安全拒绝。kernel view
+  通过受限构造作用域、trivially-copyable 且无 owner token 的静态性质、
+  checked/kernel 数值等价和逐 kernel review 验收；测试不得解引用 stale 或
+  out-of-bounds kernel view。
 - 网格拓扑：cell/face owner-neighbour、owned/ghost、全局 ID 和分区面分类一致；
   `BoundaryPatch` stable ID、membership 与周期配对唯一且互反，分区面不能成为
   物理 patch。
@@ -456,7 +490,9 @@ device 预留为由提前引入厂商依赖或无法测量收益的复杂缓存�
   流动制造解，并比较不同合法 process grid 的守恒量和收敛结果。
 - MPI：所有适用数值案例至少覆盖 1/2/4 rank 的 decomposition invariance；
   Halo 使用 `begin -> interior -> wait -> boundary`，并核对 payload、message 和
-  collective 计数；rank-local 数值、边界、I/O 失败必须汇总成一致结果且无挂起。
+  collective 计数；device test double 覆盖 runtime capability 选择、direct/staged
+  分支、transfer/event 顺序与无可用路径拒绝；rank-local 数值、边界、I/O 失败
+  必须汇总成一致结果且无挂起。
 - Checkpoint v2：连续运行与中断续算结果一致；BDF2 的 `n/n-1`、历史 `dt`、
   最终面质量通量和 `p0` 连续；缺失 `COMPLETED`、截断、CRC/size/fingerprint
   错误及 trailing bytes 均被拒绝；失败读取不改变字段值或已提交 step/time，
@@ -474,8 +510,8 @@ review 或主 agent 独立复验未通过，均不得开始后一门的实现：
 
 1. **规格与测量门**：冻结方程符号、残差与守恒定义、边界符号、测试参数、
    source references、resolved-case schema 增量和确定性性能计数。
-2. **字段门**：实现 epoch/liveness、capability、checked/kernel view 分层及其
-   sanitizer 测试，同时保持 Stage 1 `FieldView` 回归。
+2. **字段门**：实现 epoch/liveness、capability、checked/kernel view 分层及 stale
+   checked view sanitizer 测试，同时保持 Stage 1 `FieldView` 回归。
 3. **网格门**：实现 `MeshTopology`、`BoundaryPatch`、uniform adapter 与独立
    `MeshGeometry`，再通过曲线 topology/metrics 的纯几何验收。
 4. **执行与线性门**：冻结 `ExecutionContext`、buffer/view/event/transfer 合同，
@@ -510,9 +546,11 @@ RED test
 -> 主 agent 接受该任务并关闭全部相关 worker
 ```
 
-同一时刻只能有一个 implementation worker 活跃；review worker 也必须是 fresh
-worker，且不得用实现者的完成陈述替代仓库证据。每次接受前检查改动文件、提交
-边界、残留进程、构建依赖、诊断输出和未解释的测试跳过。不得 publish 或 push。
+同一时刻最多保留五个 worker，且只能有一个 implementation worker 活跃；review
+worker 也必须是 fresh worker。worker 不得联系用户或向用户索取审批，完成任务
+或不再需要后必须立即关闭。不得用实现者的完成陈述替代仓库证据。每次接受前
+检查改动文件、提交边界、残留进程、构建依赖、诊断输出和未解释的测试跳过。
+不得 publish 或 push。
 
 正式实施计划必须在不扩大本规格范围的前提下，逐项冻结精确容差、误差范数、
 网格与映射、rank/process-grid 集合、时间步和步长比限制、失败类别、maximum
