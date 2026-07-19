@@ -157,7 +157,8 @@ void expect_round_trip(TemporaryDirectory& directory, const std::string& json) {
 }
 
 void expect_serialization_error(const ResolvedCase& resolved,
-                                const std::string& pointer) {
+                                const std::string& pointer,
+                                const std::string& stable_message = {}) {
   bool rejected = false;
   try {
     static_cast<void>(hundun::config::to_resolved_json(resolved));
@@ -166,6 +167,13 @@ void expect_serialization_error(const ResolvedCase& resolved,
       throw std::runtime_error("expected config pointer " + pointer +
                                ", got " + error.pointer() + ": " +
                                error.what());
+    }
+    if (!stable_message.empty()) {
+      const std::string expected = pointer + ": " + stable_message;
+      if (std::string(error.what()) != expected) {
+        throw std::runtime_error("expected config error '" + expected +
+                                 "', got '" + error.what() + "'");
+      }
     }
     rejected = true;
   }
@@ -473,6 +481,71 @@ void test_conditionals(TemporaryDirectory& directory) {
                replace_once(ideal_gas_open_case(),
                             "\"temperature_K\":300.0,", ""),
                "/boundaries/0/temperature_K");
+
+  expect_error(directory,
+               replace_once(ideal_gas_open_case(),
+                            "\"velocity_m_per_s\":[1.0,0.0,0.0],", ""),
+               "/boundaries/0/velocity_m_per_s",
+               "member is required for velocity_inlet");
+  expect_error(directory,
+               replace_once(ideal_gas_open_case(),
+                            "\"thermal_authority\":\"temperature\",", ""),
+               "/boundaries/0/thermal_authority",
+               "valid thermal authority is required");
+  expect_error(
+      directory,
+      replace_once(ideal_gas_open_case(),
+                   ",\"scalar_values\":[{\"name\":\"mixture_fraction\","
+                   "\"value\":1.0}]",
+                   ""),
+      "/boundaries/0/scalar_values",
+      "member is required for velocity_inlet");
+  expect_error(directory,
+               replace_once(ideal_gas_open_case(),
+                            ",\"pressure_perturbation_pa\":0.0", ""),
+               "/boundaries/1/pressure_perturbation_pa",
+               "member is required for pressure_outlet");
+}
+
+void test_nonfinite_boundary_values(TemporaryDirectory& directory) {
+  const auto valid_open = [&directory] {
+    return hundun::config::load_resolved_case(
+        directory.write(ideal_gas_open_case()));
+  };
+
+  ResolvedCase nonfinite_velocity = valid_open();
+  std::get<FlowCaseConfig>(nonfinite_velocity)
+      .boundaries[0]
+      .velocity_m_per_s->y = std::numeric_limits<double>::infinity();
+  expect_serialization_error(nonfinite_velocity,
+                             "/boundaries/0/velocity_m_per_s/1",
+                             "expected a finite number");
+
+  ResolvedCase nonfinite_enthalpy = valid_open();
+  std::get<FlowCaseConfig>(nonfinite_enthalpy)
+      .boundaries[0]
+      .enthalpy_J_per_kg = std::numeric_limits<double>::quiet_NaN();
+  expect_serialization_error(nonfinite_enthalpy,
+                             "/boundaries/0/enthalpy_J_per_kg",
+                             "expected a finite number");
+
+  ResolvedCase nonfinite_scalar = valid_open();
+  std::get<FlowCaseConfig>(nonfinite_scalar)
+      .boundaries[0]
+      .scalar_values->at(0)
+      .value = std::numeric_limits<double>::infinity();
+  expect_serialization_error(nonfinite_scalar,
+                             "/boundaries/0/scalar_values/0/value",
+                             "expected a finite number");
+
+  ResolvedCase nonfinite_pressure = valid_open();
+  std::get<FlowCaseConfig>(nonfinite_pressure)
+      .boundaries[1]
+      .pressure_perturbation_pa =
+      -std::numeric_limits<double>::infinity();
+  expect_serialization_error(nonfinite_pressure,
+                             "/boundaries/1/pressure_perturbation_pa",
+                             "expected a finite number");
 }
 
 void test_numeric_domains_and_controller(TemporaryDirectory& directory) {
@@ -813,6 +886,7 @@ int main() {
     test_version_enum_and_type_failures(directory);
     test_conditionals(directory);
     test_numeric_domains_and_controller(directory);
+    test_nonfinite_boundary_values(directory);
     test_scalar_and_boundary_sets(directory);
     test_inlet_cross_checks(directory);
     test_unknown_duplicate_and_paths(directory);
