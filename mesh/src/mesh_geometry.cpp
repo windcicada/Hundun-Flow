@@ -747,8 +747,22 @@ struct MeshGeometry::Impl {
           projection <= 0.0) {
         throw runtime::Error("mesh face centre displacement is invalid");
       }
-      const double cosine = std::clamp(
-          projection / (metrics.area * displacement_norm), -1.0, 1.0);
+      const runtime::Real3 unit_area{
+          metrics.owner_area.x / metrics.area,
+          metrics.owner_area.y / metrics.area,
+          metrics.owner_area.z / metrics.area};
+      const runtime::Real3 unit_displacement{
+          displacement.x / displacement_norm,
+          displacement.y / displacement_norm,
+          displacement.z / displacement_norm};
+      if (!finite(unit_area) || !finite(unit_displacement)) {
+        throw runtime::Error("mesh face normalized direction is invalid");
+      }
+      const double normalized_projection = dot(unit_area, unit_displacement);
+      if (!std::isfinite(normalized_projection)) {
+        throw runtime::Error("mesh face normalized projection is invalid");
+      }
+      const double cosine = std::clamp(normalized_projection, -1.0, 1.0);
       metrics.non_orthogonality_degrees =
           spacing.has_value() ? 0.0 : std::acos(cosine) * kRadiansToDegrees;
       if (physical_boundary || spacing.has_value()) {

@@ -51,6 +51,7 @@ constexpr Int3 kExtent{7, 5, 4};
 constexpr Int3 kSeamExtent{1, 5, 4};
 constexpr Int3 kMixedScaleExtent{1, 2, 2};
 constexpr Int3 kClosureScaleExtent{4, 1, 1};
+constexpr Int3 kNonorthScaleExtent{7, 5, 4};
 constexpr Real3 kOrigin{-1.25, 0.375, 2.5};
 constexpr Real3 kLength{2.75, 1.625, 4.5};
 constexpr Real3 kAmplitude{0.02, -0.015, 0.01};
@@ -89,6 +90,48 @@ Real3 cross(Real3 lhs, Real3 rhs) {
 }
 
 double norm(Real3 value) { return std::hypot(value.x, value.y, value.z); }
+
+struct Long3 {
+  long double x{};
+  long double y{};
+  long double z{};
+};
+
+Long3 subtract(Long3 lhs, Long3 rhs) {
+  return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
+}
+
+Long3 add(Long3 lhs, Long3 rhs) {
+  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
+}
+
+Long3 multiply(Long3 value, long double factor) {
+  return {value.x * factor, value.y * factor, value.z * factor};
+}
+
+long double dot(Long3 lhs, Long3 rhs) {
+  return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+}
+
+Long3 cross(Long3 lhs, Long3 rhs) {
+  return {lhs.y * rhs.z - lhs.z * rhs.y,
+          lhs.z * rhs.x - lhs.x * rhs.z,
+          lhs.x * rhs.y - lhs.y * rhs.x};
+}
+
+long double norm(Long3 value) {
+  return std::hypot(value.x, value.y, value.z);
+}
+
+Real3 narrow(Long3 value) {
+  const Real3 narrowed{static_cast<double>(value.x),
+                       static_cast<double>(value.y),
+                       static_cast<double>(value.z)};
+  HUNDUN_CHECK(std::isfinite(narrowed.x));
+  HUNDUN_CHECK(std::isfinite(narrowed.y));
+  HUNDUN_CHECK(std::isfinite(narrowed.z));
+  return narrowed;
+}
 
 std::uint64_t bits(double value) {
   std::uint64_t result = 0;
@@ -310,6 +353,116 @@ OracleCellGeometry oracle_warped_cell(Int3 cell) {
   HUNDUN_CHECK(std::isfinite(volume));
   HUNDUN_CHECK(volume > 0.0);
   return {multiply(first_moment, 1.0 / volume), volume};
+}
+
+constexpr long double kLongPi =
+    3.141592653589793238462643383279502884L;
+
+Long3 nonorth_scale_map(Long3 logical) {
+  constexpr Long3 length{1.0e96L, 1.0e109L, 1.0e96L};
+  constexpr Long3 amplitude{0.0L, -0.015L, 0.0L};
+  return {
+      length.x *
+          (logical.x + amplitude.x * std::sin(2.0L * kLongPi * logical.x) *
+                           std::sin(kLongPi * logical.y) *
+                           std::sin(kLongPi * logical.z)),
+      length.y *
+          (logical.y + amplitude.y * std::sin(kLongPi * logical.x) *
+                           std::sin(2.0L * kLongPi * logical.y) *
+                           std::sin(kLongPi * logical.z)),
+      length.z *
+          (logical.z + amplitude.z * std::sin(kLongPi * logical.x) *
+                           std::sin(kLongPi * logical.y) *
+                           std::sin(2.0L * kLongPi * logical.z))};
+}
+
+Long3 nonorth_scale_vertex(Int3 vertex) {
+  return nonorth_scale_map(
+      {static_cast<long double>(vertex.x) /
+           static_cast<long double>(kNonorthScaleExtent.x),
+       static_cast<long double>(vertex.y) /
+           static_cast<long double>(kNonorthScaleExtent.y),
+       static_cast<long double>(vertex.z) /
+           static_cast<long double>(kNonorthScaleExtent.z)});
+}
+
+std::pair<Long3, Long3> nonorth_scale_face_geometry(LogicalFace face) {
+  const auto coordinates = oracle_face_vertices(face);
+  std::array<Long3, 4> vertices{};
+  for (std::size_t index = 0; index < vertices.size(); ++index) {
+    vertices[index] = nonorth_scale_vertex(coordinates[index]);
+  }
+  const Long3 reference = vertices[0];
+  const Long3 center =
+      add(reference,
+          multiply(add(add(subtract(vertices[1], reference),
+                           subtract(vertices[2], reference)),
+                       subtract(vertices[3], reference)),
+                   0.25L));
+  const Long3 first = cross(subtract(vertices[1], vertices[0]),
+                            subtract(vertices[2], vertices[0]));
+  const Long3 second = cross(subtract(vertices[2], vertices[0]),
+                             subtract(vertices[3], vertices[0]));
+  return {center, multiply(add(first, second), 0.5L)};
+}
+
+struct LongCellGeometry {
+  Long3 center{};
+  long double volume{};
+};
+
+LongCellGeometry nonorth_scale_cell_geometry(Int3 cell) {
+  const std::array<Int3, 8> coordinates{
+      Int3{cell.x, cell.y, cell.z},
+      Int3{cell.x + 1, cell.y, cell.z},
+      Int3{cell.x + 1, cell.y + 1, cell.z},
+      Int3{cell.x, cell.y + 1, cell.z},
+      Int3{cell.x, cell.y, cell.z + 1},
+      Int3{cell.x + 1, cell.y, cell.z + 1},
+      Int3{cell.x + 1, cell.y + 1, cell.z + 1},
+      Int3{cell.x, cell.y + 1, cell.z + 1}};
+  std::array<Long3, 8> vertices{};
+  for (std::size_t index = 0; index < vertices.size(); ++index) {
+    vertices[index] = nonorth_scale_vertex(coordinates[index]);
+  }
+  const Long3 anchor = vertices[0];
+  Long3 relative_sum{};
+  for (const Long3 vertex : vertices) {
+    relative_sum = add(relative_sum, subtract(vertex, anchor));
+  }
+  const Long3 reference = add(anchor, multiply(relative_sum, 0.125L));
+
+  constexpr std::array<std::array<std::size_t, 4>, 6> quads{
+      std::array<std::size_t, 4>{0, 4, 7, 3},
+      std::array<std::size_t, 4>{1, 2, 6, 5},
+      std::array<std::size_t, 4>{0, 1, 5, 4},
+      std::array<std::size_t, 4>{3, 7, 6, 2},
+      std::array<std::size_t, 4>{0, 3, 2, 1},
+      std::array<std::size_t, 4>{4, 5, 6, 7}};
+  long double volume = 0.0L;
+  Long3 relative_first_moment{};
+  const auto add_triangle = [&](Long3 a, Long3 b, Long3 c) {
+    const long double signed_volume =
+        dot(subtract(a, reference),
+            cross(subtract(b, reference), subtract(c, reference))) /
+        6.0L;
+    const Long3 relative_tetra_center =
+        multiply(add(add(subtract(a, reference), subtract(b, reference)),
+                     subtract(c, reference)),
+                 0.25L);
+    volume += signed_volume;
+    relative_first_moment =
+        add(relative_first_moment,
+            multiply(relative_tetra_center, signed_volume));
+  };
+  for (const auto quad : quads) {
+    add_triangle(vertices[quad[0]], vertices[quad[1]], vertices[quad[2]]);
+    add_triangle(vertices[quad[0]], vertices[quad[2]], vertices[quad[3]]);
+  }
+  HUNDUN_CHECK(std::isfinite(volume));
+  HUNDUN_CHECK(volume > 0.0L);
+  return {add(reference, multiply(relative_first_moment, 1.0L / volume)),
+          volume};
 }
 
 double oracle_minimum_sampled_jacobian(Int3 cell) {
@@ -751,6 +904,97 @@ void check_anisotropic_metrics(const MeshTopology& topology,
   }
 }
 
+void test_nonorthogonality_scale_geometry(const MpiContext& context) {
+  constexpr Real3 origin{0.0, 0.0, 0.0};
+  constexpr Real3 length{1.0e96, 1.0e109, 1.0e96};
+  constexpr Real3 amplitude{0.0, -0.015, 0.0};
+  const DecompositionOptions options{process_grid_for(context.size())};
+  auto decomposition = StructuredDecomposition::create(
+      context, kNonorthScaleExtent, {false, false, false}, options);
+  MeshTopology topology(decomposition);
+  MeshGeometry geometry(
+      topology, AnalyticWarpedBoxMapping(origin, length, amplitude));
+  check_anisotropic_metrics(topology, geometry);
+
+  const LogicalFace target{FaceAxis::x, {1, 0, 0}};
+  const auto local_face =
+      topology.find_local_face(topology.global_face_id(target));
+  int local_hits = 0;
+  if (local_face.has_value()) {
+    local_hits = 1;
+    const LocalCellId owner = topology.owner(*local_face);
+    HUNDUN_CHECK(topology.neighbour(*local_face).has_value());
+    const LocalCellId neighbour = *topology.neighbour(*local_face);
+    HUNDUN_CHECK(same(topology.global_cell(owner), Int3{0, 0, 0}));
+    HUNDUN_CHECK(same(topology.global_cell(neighbour), Int3{1, 0, 0}));
+
+    const auto expected_face = nonorth_scale_face_geometry(target);
+    const auto expected_owner = nonorth_scale_cell_geometry({0, 0, 0});
+    const auto expected_neighbour = nonorth_scale_cell_geometry({1, 0, 0});
+    check_near(geometry.face_center_m(*local_face),
+               narrow(expected_face.first), 1024.0);
+    check_near(geometry.face_area_vector_m2(*local_face, FaceSide::owner),
+               narrow(expected_face.second), 1024.0);
+    check_near(geometry.cell_center_m(owner), narrow(expected_owner.center),
+               4096.0);
+    check_near(geometry.cell_center_m(neighbour),
+               narrow(expected_neighbour.center), 4096.0);
+    check_near(geometry.cell_volume_m3(owner),
+               static_cast<double>(expected_owner.volume), 4096.0);
+
+    const Long3 expected_displacement =
+        subtract(expected_neighbour.center, expected_owner.center);
+    const long double expected_area_norm = norm(expected_face.second);
+    const long double expected_displacement_norm = norm(expected_displacement);
+    const long double expected_projection =
+        dot(expected_face.second, expected_displacement);
+    HUNDUN_CHECK(std::isfinite(expected_area_norm));
+    HUNDUN_CHECK(expected_area_norm > 0.0L);
+    HUNDUN_CHECK(std::isfinite(expected_displacement_norm));
+    HUNDUN_CHECK(expected_displacement_norm > 0.0L);
+    HUNDUN_CHECK(std::isfinite(expected_projection));
+    HUNDUN_CHECK(expected_projection > 0.0L);
+    const long double expected_cosine = std::clamp(
+        expected_projection /
+            (expected_area_norm * expected_displacement_norm),
+        -1.0L, 1.0L);
+    HUNDUN_CHECK(std::isfinite(expected_cosine));
+    const double expected_angle = static_cast<double>(
+        std::acos(expected_cosine) * 180.0L / kLongPi);
+    HUNDUN_CHECK(std::isfinite(expected_angle));
+    HUNDUN_CHECK(expected_angle > 89.999999);
+    HUNDUN_CHECK(expected_angle < 90.0);
+
+    const Real3 displacement =
+        subtract(geometry.cell_center_m(neighbour),
+                 geometry.cell_center_m(owner));
+    const double area = geometry.face_area_m2(*local_face);
+    const double displacement_norm = norm(displacement);
+    const double projection = dot(
+        geometry.face_area_vector_m2(*local_face, FaceSide::owner),
+        displacement);
+    HUNDUN_CHECK(std::isfinite(area));
+    HUNDUN_CHECK(area > 0.0);
+    HUNDUN_CHECK(std::isfinite(displacement_norm));
+    HUNDUN_CHECK(displacement_norm > 0.0);
+    HUNDUN_CHECK(std::isfinite(projection));
+    HUNDUN_CHECK(projection > 0.0);
+    // The requested metric remains representable even though this ordinary
+    // dimensional intermediate is outside binary64's range.
+    HUNDUN_CHECK(!std::isfinite(area * displacement_norm));
+    const double actual_angle =
+        geometry.face_non_orthogonality_degrees(*local_face);
+    HUNDUN_CHECK(actual_angle > 89.999999);
+    HUNDUN_CHECK(actual_angle < 90.0);
+    check_near(actual_angle, expected_angle, 1024.0);
+  }
+
+  int global_hits = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_hits, &global_hits, 1, MPI_INT, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_hits > 0);
+}
+
 void test_closure_scale_geometry(const MpiContext& context) {
   constexpr Real3 origin{0.0, 0.0, 0.0};
   constexpr Real3 length{1.0e-300, 1.0e154, 1.0e154};
@@ -865,6 +1109,7 @@ void run_mpi_tests(const MpiContext& context,
   test_extent_one_periodic_seam(context, detached);
   test_mixed_scale_geometry(context);
   test_closure_scale_geometry(context);
+  test_nonorthogonality_scale_geometry(context);
   context.barrier();
 }
 
