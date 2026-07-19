@@ -3,12 +3,13 @@
 
 set -euo pipefail
 
-if test "$#" -ne 1; then
-  echo "usage: stage2_task2_dispatch.sh <hundun>" >&2
+if test "$#" -ne 2; then
+  echo "usage: stage2_task2_dispatch.sh <hundun> <mpiexec>" >&2
   exit 2
 fi
 
 hundun=$1
+mpiexec=$2
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/hundun-stage2-dispatch.XXXXXX")
 cleanup() {
   rm -rf -- "${work_root}"
@@ -45,3 +46,55 @@ fi
 test ! -s "${work_root}/normal.stdout"
 test "$(cat "${work_root}/normal.stderr")" = \
   "Stage 2 variable-density flow driver is not implemented before Task 24"
+
+mkdir -p "${work_root}/rank-zero" "${work_root}/rank-one"
+cat >"${work_root}/rank-zero/invalid-v1.json" <<'JSON'
+{"schema_version":1,"case":{"name":"invalid_cells"},"resources":{"expected_ranks":1},"mesh":{"cells":[0,4,2],"origin_m":[0.0,0.0,0.0],"length_m":[1.0,1.0,1.0],"periodic":[true,true,true]},"time":{"dt_s":0.01,"steps":2},"transport":{"velocity_m_per_s":[1.0,0.0,0.0],"diffusivity_m2_per_s":0.0},"initial_condition":{"type":"sine_x"},"restart":{"read":false,"write_directory":"Restart"},"output":{"directory":"output","write_interval":1,"restart_interval":1}}
+JSON
+cat >"${work_root}/rank-one/competing-v1.json" <<'JSON'
+{"schema_version":1,"case":{"name":"non_authoritative"},"resources":{"expected_ranks":2},"mesh":{"cells":[8,4,2],"origin_m":[0.0,0.0,0.0],"length_m":[1.0,1.0,1.0],"periodic":[true,true,true]},"time":{"dt_s":0.01,"steps":2},"transport":{"velocity_m_per_s":[1.0,0.0,0.0],"diffusivity_m2_per_s":0.0},"initial_condition":{"type":"sine_x"},"restart":{"read":false,"write_directory":"Restart"},"output":{"directory":"output","write_interval":1,"restart_interval":1}}
+JSON
+if "${mpiexec}" -n 1 "${hundun}" \
+      "${work_root}/rank-zero/invalid-v1.json" --validate : \
+      -n 1 "${hundun}" \
+      "${work_root}/rank-one/competing-v1.json" --validate \
+      >"${work_root}/invalid-v1.stdout" \
+      2>"${work_root}/invalid-v1.stderr"; then
+  echo "invalid authoritative schema-v1 case unexpectedly succeeded" >&2
+  exit 1
+fi
+if grep -Fxq 'VALID' "${work_root}/invalid-v1.stdout"; then
+  echo "invalid authoritative schema-v1 case printed VALID" >&2
+  exit 1
+fi
+if ! grep -Fxq '/mesh/cells/0: expected an integer of at least 1, got 0' \
+    "${work_root}/invalid-v1.stderr"; then
+  echo "schema-v1 invalid-case failure was not stable" >&2
+  cat "${work_root}/invalid-v1.stdout" >&2
+  cat "${work_root}/invalid-v1.stderr" >&2
+  exit 1
+fi
+
+cat >"${work_root}/rank-zero/rank-mismatch-v1.json" <<'JSON'
+{"schema_version":1,"case":{"name":"rank_mismatch"},"resources":{"expected_ranks":1},"mesh":{"cells":[8,4,2],"origin_m":[0.0,0.0,0.0],"length_m":[1.0,1.0,1.0],"periodic":[true,true,true]},"time":{"dt_s":0.01,"steps":2},"transport":{"velocity_m_per_s":[1.0,0.0,0.0],"diffusivity_m2_per_s":0.0},"initial_condition":{"type":"sine_x"},"restart":{"read":false,"write_directory":"Restart"},"output":{"directory":"output","write_interval":1,"restart_interval":1}}
+JSON
+if "${mpiexec}" -n 1 "${hundun}" \
+      "${work_root}/rank-zero/rank-mismatch-v1.json" --validate : \
+      -n 1 "${hundun}" \
+      "${work_root}/rank-one/competing-v1.json" --validate \
+      >"${work_root}/rank-mismatch-v1.stdout" \
+      2>"${work_root}/rank-mismatch-v1.stderr"; then
+  echo "schema-v1 expected-ranks mismatch unexpectedly succeeded" >&2
+  exit 1
+fi
+if grep -Fxq 'VALID' "${work_root}/rank-mismatch-v1.stdout"; then
+  echo "schema-v1 expected-ranks mismatch printed VALID" >&2
+  exit 1
+fi
+if ! grep -Fxq 'expected MPI rank count 1, got 2' \
+    "${work_root}/rank-mismatch-v1.stderr"; then
+  echo "schema-v1 rank-mismatch failure was not stable" >&2
+  cat "${work_root}/rank-mismatch-v1.stdout" >&2
+  cat "${work_root}/rank-mismatch-v1.stderr" >&2
+  exit 1
+fi

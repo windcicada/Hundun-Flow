@@ -32,7 +32,7 @@ std::string v1_json() {
 }
 
 std::string v2_json() {
-  return R"({"schema_version":2,"case":{"name":"broadcast_v2"},"simulation":{"type":"variable_density_flow","density_model":"constant"},"mesh":{"cells":[8,8,4],"origin_m":[0.0,0.0,0.0],"length_m":[1.0,1.0,1.0],"mapping":"uniform_box"},"time":{"mode":"fixed","steps":10,"initial_dt_s":0.001,"min_dt_s":0.000125,"max_dt_s":0.001,"cfl_target":0.5,"diffusion_number_target":0.25,"growth_factor":1.25,"retry_factor":0.5,"max_retries":8},"physics":{"rho_ref_kg_per_m3":1.0,"dynamic_viscosity_pa_s":0.001,"inlet_consistency_rtol":1e-12},"scalars":[{"name":"mixture_fraction","diffusivity_m2_per_s":0.001}],"boundaries":[{"patch":"x_min","type":"no_slip_wall"},{"patch":"x_max","type":"no_slip_wall"},{"patch":"y_min","type":"symmetry"},{"patch":"y_max","type":"symmetry"},{"patch":"z_min","type":"periodic"},{"patch":"z_max","type":"periodic"}],"restart":{"read":false,"write_directory":"checkpoints","write_interval":10},"diagnostics":{"directory":"diagnostics","write_interval":1,"write_mesh":true},"performance":{"enabled":false,"directory":"performance","warmup_steps":5,"measured_steps":20,"repetitions":5}})";
+  return R"({"performance":{"repetitions":5,"measured_steps":20,"warmup_steps":5,"directory":"performance","enabled":false},"diagnostics":{"write_mesh":true,"write_interval":1,"directory":"diagnostics"},"restart":{"write_interval":10,"write_directory":"checkpoints","read_directory":"previous/step00000010","read":true},"boundaries":[{"type":"periodic","patch":"z_max"},{"type":"symmetry","patch":"y_min"},{"type":"pressure_outlet","patch":"x_max","pressure_perturbation_pa":0.0},{"type":"periodic","patch":"z_min"},{"scalar_values":[{"value":0.75,"name":"zeta"},{"value":0.25,"name":"alpha"}],"density_kg_per_m3":1.176829268292683,"enthalpy_J_per_kg":301500.0,"temperature_K":300.0,"thermal_authority":"temperature","velocity_m_per_s":[1.0,0.0,0.0],"type":"velocity_inlet","patch":"x_min"},{"type":"symmetry","patch":"y_max"}],"scalars":[{"diffusivity_m2_per_s":0.0,"name":"zeta"},{"diffusivity_m2_per_s":0.001,"name":"alpha"}],"physics":{"thermodynamic_pressure_pa":101325.0,"gas_constant_J_per_kg_K":287.0,"cp_J_per_kg_K":1005.0,"inlet_consistency_rtol":1e-12,"dynamic_viscosity_pa_s":0.001,"rho_ref_kg_per_m3":1.0},"time":{"max_retries":8,"retry_factor":0.5,"growth_factor":1.25,"diffusion_number_target":0.25,"cfl_target":0.5,"max_dt_s":0.001,"min_dt_s":0.000125,"initial_dt_s":0.001,"steps":10,"mode":"fixed"},"mesh":{"warp_amplitude":[0.02,-0.015,0.01],"mapping":"analytic_warped_box","length_m":[1.0,1.0,1.0],"origin_m":[0.0,0.0,0.0],"cells":[8,8,4]},"simulation":{"density_model":"ideal_gas","type":"variable_density_flow"},"case":{"name":"broadcast_v2"},"schema_version":2})";
 }
 
 class RootCaseFile final {
@@ -109,7 +109,8 @@ void check_broadcast_case(MPI_Comm comm, int rank, ResolvedCase root_case) {
 }
 
 template <class Operation>
-void expect_collective_error(MPI_Comm comm, Operation&& operation) {
+void expect_collective_error(MPI_Comm comm, Operation&& operation,
+                             const std::string& stable_message = {}) {
   bool caught = false;
   std::string message;
   try {
@@ -130,6 +131,9 @@ void expect_collective_error(MPI_Comm comm, Operation&& operation) {
   broadcast_expected_string(comm, rank, expected);
   HUNDUN_CHECK(!expected.empty());
   HUNDUN_CHECK(message == expected);
+  if (!stable_message.empty()) {
+    HUNDUN_CHECK(message == stable_message);
+  }
 }
 
 void run_full(int rank, int size) {
@@ -167,6 +171,21 @@ void run_errors(int rank, int size) {
     static_cast<void>(hundun::application::broadcast_resolved_case(
         MPI_COMM_WORLD, 0, rank == 0 ? &mismatch : nullptr));
   });
+
+  ResolvedCase grid_only_mismatch = valid;
+  if (rank == 0) {
+    auto& flow = std::get<FlowCaseConfig>(grid_only_mismatch);
+    flow.resources.expected_ranks.reset();
+    flow.resources.process_grid = hundun::runtime::Int3{1, 1, 1};
+  }
+  expect_collective_error(
+      MPI_COMM_WORLD,
+      [&] {
+        static_cast<void>(hundun::application::broadcast_resolved_case(
+            MPI_COMM_WORLD, 0,
+            rank == 0 ? &grid_only_mismatch : nullptr));
+      },
+      "resolved-case process-grid product does not equal communicator size");
 
   bool null_rejected = false;
   try {

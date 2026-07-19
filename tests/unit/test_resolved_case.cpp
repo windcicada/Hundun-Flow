@@ -124,6 +124,38 @@ void expect_error(TemporaryDirectory& directory, const std::string& json,
   HUNDUN_CHECK(rejected);
 }
 
+void expect_error(TemporaryDirectory& directory, const std::string& json,
+                  const std::string& pointer,
+                  const std::string& stable_message) {
+  bool rejected = false;
+  try {
+    static_cast<void>(
+        hundun::config::load_resolved_case(directory.write(json)));
+  } catch (const ConfigError& error) {
+    if (error.pointer() != pointer) {
+      throw std::runtime_error("expected config pointer " + pointer +
+                               ", got " + error.pointer() + ": " +
+                               error.what());
+    }
+    const std::string expected = pointer + ": " + stable_message;
+    if (std::string(error.what()) != expected) {
+      throw std::runtime_error("expected config error '" + expected +
+                               "', got '" + error.what() + "'");
+    }
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
+}
+
+void expect_round_trip(TemporaryDirectory& directory, const std::string& json) {
+  const ResolvedCase resolved =
+      hundun::config::load_resolved_case(directory.write(json));
+  const std::string canonical = hundun::config::to_resolved_json(resolved);
+  const ResolvedCase reparsed =
+      hundun::config::load_resolved_case(directory.write(canonical));
+  HUNDUN_CHECK(hundun::config::to_resolved_json(reparsed) == canonical);
+}
+
 void expect_serialization_error(const ResolvedCase& resolved,
                                 const std::string& pointer) {
   bool rejected = false;
@@ -231,6 +263,121 @@ void test_valid_variants_and_canonical_round_trip(
   static_cast<void>(hundun::config::load_resolved_case(directory.write(
       replace_once(closed_case(), "\"mode\":\"fixed\"",
                    "\"mode\":\"adaptive\""))));
+}
+
+void test_case_name_resources_and_restart_matrix(
+    TemporaryDirectory& directory) {
+  expect_error(directory,
+               replace_once(closed_case(), "\"name\":\"closed_case\"",
+                            "\"name\":\"\""),
+               "/case/name", "case name must not be empty");
+
+  const std::string expected_only =
+      replace_once(closed_case(), ",\"process_grid\":[1,1,1]", "");
+  const std::string expected_only_canonical = hundun::config::to_resolved_json(
+      hundun::config::load_resolved_case(directory.write(expected_only)));
+  HUNDUN_CHECK(expected_only_canonical.find("\"expected_ranks\":1") !=
+               std::string::npos);
+  HUNDUN_CHECK(expected_only_canonical.find("\"process_grid\"") ==
+               std::string::npos);
+
+  const std::string grid_only =
+      replace_once(closed_case(), "\"expected_ranks\":1,", "");
+  const std::string grid_only_canonical = hundun::config::to_resolved_json(
+      hundun::config::load_resolved_case(directory.write(grid_only)));
+  HUNDUN_CHECK(grid_only_canonical.find("\"expected_ranks\"") ==
+               std::string::npos);
+  HUNDUN_CHECK(grid_only_canonical.find("\"process_grid\":[1,1,1]") !=
+               std::string::npos);
+
+  expect_error(directory,
+               replace_once(closed_case(), "\"expected_ranks\":1",
+                            "\"expected_ranks\":0"),
+               "/resources/expected_ranks",
+               "expected an integer of at least one");
+  expect_error(directory,
+               replace_once(closed_case(), "\"process_grid\":[1,1,1]",
+                            "\"process_grid\":[0,1,1]"),
+               "/resources/process_grid/0",
+               "process-grid entry must be positive");
+  expect_error(directory,
+               replace_once(closed_case(), "\"process_grid\":[1,1,1]",
+                            "\"process_grid\":[2,1,1]"),
+               "/resources/process_grid",
+               "process-grid product does not equal expected_ranks");
+
+  expect_error(
+      directory,
+      replace_once(closed_case(),
+                   "\"diagnostics\":{\"directory\":\"diagnostics\","
+                   "\"write_interval\":1",
+                   "\"diagnostics\":{\"directory\":\"diagnostics\","
+                   "\"write_interval\":0"),
+      "/diagnostics/write_interval", "write interval must be positive");
+
+  const std::string restart_read = replace_once(
+      closed_case(), "\"read\":false,\"write_directory\":\"checkpoints\"",
+      "\"read\":true,\"read_directory\":\"previous/step00000010\","
+      "\"write_directory\":\"checkpoints\"");
+  expect_round_trip(directory, restart_read);
+  const std::string restart_canonical = hundun::config::to_resolved_json(
+      hundun::config::load_resolved_case(directory.write(restart_read)));
+  HUNDUN_CHECK(restart_canonical.find(
+                   "\"read\":true,\"read_directory\":"
+                   "\"previous/step00000010\"") != std::string::npos);
+}
+
+void test_ideal_gas_parameter_matrix(TemporaryDirectory& directory) {
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            "\"cp_J_per_kg_K\":1005.0,", ""),
+               "/physics/cp_J_per_kg_K",
+               "member is required for ideal_gas");
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            "\"gas_constant_J_per_kg_K\":287.0,", ""),
+               "/physics/gas_constant_J_per_kg_K",
+               "member is required for ideal_gas");
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            ",\"thermodynamic_pressure_pa\":101325.0", ""),
+               "/physics/thermodynamic_pressure_pa",
+               "member is required for ideal_gas");
+
+  for (const auto& member : {
+           std::pair<std::string, std::string>{"cp_J_per_kg_K",
+                                               "/physics/cp_J_per_kg_K"},
+           {"gas_constant_J_per_kg_K",
+            "/physics/gas_constant_J_per_kg_K"},
+           {"thermodynamic_pressure_pa",
+            "/physics/thermodynamic_pressure_pa"}}) {
+    expect_error(directory,
+                 replace_once(closed_case(),
+                              "\"inlet_consistency_rtol\":1e-12",
+                              "\"inlet_consistency_rtol\":1e-12,\"" +
+                                  member.first + "\":1.0"),
+                 member.second,
+                 "member is forbidden for this density model");
+  }
+
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            "\"cp_J_per_kg_K\":1005.0",
+                            "\"cp_J_per_kg_K\":0.0"),
+               "/physics/cp_J_per_kg_K",
+               "expected a finite value greater than zero");
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            "\"gas_constant_J_per_kg_K\":287.0",
+                            "\"gas_constant_J_per_kg_K\":0.0"),
+               "/physics/gas_constant_J_per_kg_K",
+               "expected a finite value greater than zero");
+  expect_error(directory,
+               replace_once(ideal_gas_closed_case(),
+                            "\"thermodynamic_pressure_pa\":101325.0",
+                            "\"thermodynamic_pressure_pa\":0.0"),
+               "/physics/thermodynamic_pressure_pa",
+               "expected a finite value greater than zero");
 }
 
 void test_version_enum_and_type_failures(TemporaryDirectory& directory) {
@@ -481,6 +628,22 @@ void test_scalar_and_boundary_sets(TemporaryDirectory& directory) {
 }
 
 void test_inlet_cross_checks(TemporaryDirectory& directory) {
+  const std::string temperature_only = replace_once(
+      replace_once(ideal_gas_open_case(),
+                   ",\"enthalpy_J_per_kg\":301500.0", ""),
+      ",\"density_kg_per_m3\":1.176829268292683", "");
+  expect_round_trip(directory, temperature_only);
+  expect_round_trip(
+      directory,
+      replace_once(temperature_only, "\"temperature_K\":300.0",
+                   "\"temperature_K\":300.0,"
+                   "\"enthalpy_J_per_kg\":301500.0"));
+  expect_round_trip(
+      directory,
+      replace_once(temperature_only, "\"temperature_K\":300.0",
+                   "\"temperature_K\":300.0,"
+                   "\"density_kg_per_m3\":1.176829268292683"));
+
   std::string enthalpy_authority = replace_once(
       ideal_gas_open_case(),
       "\"thermal_authority\":\"temperature\",\"temperature_K\":300.0,"
@@ -489,6 +652,31 @@ void test_inlet_cross_checks(TemporaryDirectory& directory) {
       "\"enthalpy_J_per_kg\":301500.0,\"temperature_K\":300.0");
   static_cast<void>(hundun::config::load_resolved_case(
       directory.write(enthalpy_authority)));
+  const std::string enthalpy_only = replace_once(
+      replace_once(enthalpy_authority, "\"temperature_K\":300.0,", ""),
+      ",\"density_kg_per_m3\":1.176829268292683", "");
+  expect_round_trip(directory, enthalpy_only);
+  expect_round_trip(
+      directory,
+      replace_once(enthalpy_only, "\"enthalpy_J_per_kg\":301500.0",
+                   "\"enthalpy_J_per_kg\":301500.0,"
+                   "\"temperature_K\":300.0"));
+  expect_round_trip(
+      directory,
+      replace_once(enthalpy_only, "\"enthalpy_J_per_kg\":301500.0",
+                   "\"enthalpy_J_per_kg\":301500.0,"
+                   "\"density_kg_per_m3\":1.176829268292683"));
+  expect_error(directory,
+               replace_once(enthalpy_only,
+                            "\"enthalpy_J_per_kg\":301500.0,", ""),
+               "/boundaries/0/enthalpy_J_per_kg",
+               "authoritative enthalpy is required");
+  expect_error(directory,
+               replace_once(enthalpy_authority,
+                            "\"temperature_K\":300.0",
+                            "\"temperature_K\":301.0"),
+               "/boundaries/0/temperature_K",
+               "temperature is inconsistent with authority");
   expect_error(directory,
                replace_once(ideal_gas_open_case(),
                             "\"enthalpy_J_per_kg\":301500.0",
@@ -620,6 +808,8 @@ int main() {
     TemporaryDirectory directory;
     test_v1_identity(directory);
     test_valid_variants_and_canonical_round_trip(directory);
+    test_case_name_resources_and_restart_matrix(directory);
+    test_ideal_gas_parameter_matrix(directory);
     test_version_enum_and_type_failures(directory);
     test_conditionals(directory);
     test_numeric_domains_and_controller(directory);

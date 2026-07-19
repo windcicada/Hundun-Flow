@@ -300,6 +300,13 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_resolved_case PRIVATE "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_resolved_case PRIVATE hundun_config)
 
+  hundun_add_test(test_stage1_dispatch_contract
+    tests/unit/test_stage1_dispatch_contract.cpp)
+  target_include_directories(test_stage1_dispatch_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_stage1_dispatch_contract PRIVATE
+    hundun_application)
+
   hundun_add_test(test_process_grid
     tests/unit/test_process_grid.cpp
     runtime/src/process_grid.cpp)
@@ -557,9 +564,9 @@ if(HUNDUN_BUILD_TESTS)
   add_test(NAME test_stage2_task2_dispatch
     COMMAND bash
             "${PROJECT_SOURCE_DIR}/tests/acceptance/stage2_task2_dispatch.sh"
-            "$<TARGET_FILE:hundun>")
+            "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
   set_tests_properties(test_stage2_task2_dispatch PROPERTIES
-    LABELS acceptance TIMEOUT 30 PROCESSORS 1)
+    LABELS acceptance TIMEOUT 45 PROCESSORS 2)
 
   add_executable(compare_scalar_vtk
     tests/acceptance/compare_scalar_vtk.cpp)

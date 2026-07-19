@@ -124,11 +124,15 @@ int run_case(const hundun::application::CliOptions& options,
              MpiContext& context) {
   const RunMode mode = run_mode(options);
   require_run_mode_agreement(context, mode);
+  const std::filesystem::path authoritative_case_root =
+      hundun::application::establish_authoritative_case_root(
+          context, options.case_path);
   const hundun::config::ResolvedCase resolved =
       load_and_broadcast_resolved_case(context, options.case_path);
   if (const auto* stage1 =
           std::get_if<hundun::config::CaseConfig>(&resolved)) {
-    return hundun::application::run_stage1_case(options, context, *stage1);
+    return hundun::application::run_stage1_case(
+        options, context, *stage1, authoritative_case_root);
   }
 
   if (mode == RunMode::validate) {

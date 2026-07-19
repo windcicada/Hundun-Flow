@@ -923,14 +923,6 @@ config::ResolvedCase broadcast_resolved_case(
   std::string validation_message;
   try {
     static_cast<void>(config::to_resolved_json(result));
-    if (const auto *stage1 = std::get_if<config::CaseConfig>(&result)) {
-      if (stage1->expected_ranks.has_value() &&
-          *stage1->expected_ranks != identity.size) {
-        throw Error("expected MPI rank count " +
-                    std::to_string(*stage1->expected_ranks) + ", got " +
-                    std::to_string(identity.size));
-      }
-    }
     if (const auto *flow = std::get_if<config::FlowCaseConfig>(&result)) {
       if (flow->resources.expected_ranks.has_value() &&
           *flow->resources.expected_ranks != identity.size) {

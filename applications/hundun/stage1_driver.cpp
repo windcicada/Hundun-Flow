@@ -322,10 +322,9 @@ void require_finite_owned_passive_scalar_state(const MpiContext &context,
 }
 
 int run_stage1_case_impl(const hundun::application::CliOptions &options,
-                         MpiContext &context, const CaseConfig &config) {
+                         MpiContext &context, const CaseConfig &config,
+                         const std::filesystem::path &root) {
   const RunMode mode = run_mode(options);
-  const std::filesystem::path root =
-      broadcast_case_root(context, options.case_path);
   hundun::runtime::require_expected_ranks(context, config.expected_ranks);
 
   if (mode == RunMode::validate) {
@@ -455,9 +454,17 @@ int run_stage1_case_impl(const hundun::application::CliOptions &options,
 
 namespace hundun::application {
 
+std::filesystem::path establish_authoritative_case_root(
+    const runtime::MpiContext &context,
+    const std::filesystem::path &local_case_path) {
+  return broadcast_case_root(context, local_case_path);
+}
+
 int run_stage1_case(const CliOptions &options, runtime::MpiContext &context,
-                    const config::CaseConfig &config) {
-  return run_stage1_case_impl(options, context, config);
+                    const config::CaseConfig &config,
+                    const std::filesystem::path &authoritative_case_root) {
+  return run_stage1_case_impl(options, context, config,
+                              authoritative_case_root);
 }
 
 } // namespace hundun::application
