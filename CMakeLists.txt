@@ -87,7 +87,9 @@ target_link_libraries(hundun_application
   PRIVATE hundun_runtime hundun_warnings
   PUBLIC hundun_config hundun_options MPI::MPI_CXX)
 
-add_library(hundun_mesh STATIC mesh/src/uniform_structured_mesh.cpp)
+add_library(hundun_mesh STATIC
+  mesh/src/mesh_topology.cpp
+  mesh/src/uniform_structured_mesh.cpp)
 target_include_directories(hundun_mesh PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/mesh/include>")
 target_link_libraries(hundun_mesh
@@ -451,6 +453,23 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_mesh PROPERTIES
     TIMEOUT 30
     PROCESSORS 2)
+
+  add_executable(test_mesh_topology tests/mpi/test_mesh_topology.cpp)
+  target_include_directories(test_mesh_topology PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_mesh_topology PRIVATE
+    hundun_mesh hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(mesh_topology_test "test_mesh_topology_${ranks}_rank")
+    add_test(NAME "${mesh_topology_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_mesh_topology>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${mesh_topology_test}" PROPERTIES
+      LABELS mpi
+      TIMEOUT 60
+      PROCESSORS "${ranks}")
+  endforeach()
 
   add_executable(test_halo_exchange tests/mpi/test_halo_exchange.cpp)
   target_include_directories(test_halo_exchange PRIVATE
