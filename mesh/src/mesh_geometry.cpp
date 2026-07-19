@@ -70,8 +70,9 @@ bool finite(runtime::Real3 value) noexcept {
 
 // frexp represents every nonzero binary64 value with a 53-bit significand and
 // a base-two exponent in [-1126, 971].  Four factors (the three determinant
-// entries and the optional scale) plus the sum of three same-sign terms fit
-// within this fixed interval without allocation.
+// entries and the optional scale) plus the sum of at most six same-sign terms
+// remain below exponent 4099, which fits within this fixed interval ending at
+// exponent 4351 without allocation.
 constexpr int kDeterminantAccumulatorMinExponent = -4608;
 constexpr std::size_t kDeterminantAccumulatorWords = 280;
 using DeterminantMagnitude =
@@ -341,61 +342,6 @@ double range_safe_determinant(runtime::Real3 first,
   if (x_scale == 0.0 || y_scale == 0.0 || z_scale == 0.0) {
     return 0.0;
   }
-  const runtime::Real3 normalized_first{first.x / x_scale,
-                                         first.y / y_scale,
-                                         first.z / z_scale};
-  const runtime::Real3 normalized_second{second.x / x_scale,
-                                          second.y / y_scale,
-                                          second.z / z_scale};
-  const runtime::Real3 normalized_third{third.x / x_scale,
-                                         third.y / y_scale,
-                                         third.z / z_scale};
-  const bool normalization_lost_nonzero =
-      (first.x != 0.0 && normalized_first.x == 0.0) ||
-      (first.y != 0.0 && normalized_first.y == 0.0) ||
-      (first.z != 0.0 && normalized_first.z == 0.0) ||
-      (second.x != 0.0 && normalized_second.x == 0.0) ||
-      (second.y != 0.0 && normalized_second.y == 0.0) ||
-      (second.z != 0.0 && normalized_second.z == 0.0) ||
-      (third.x != 0.0 && normalized_third.x == 0.0) ||
-      (third.y != 0.0 && normalized_third.y == 0.0) ||
-      (third.z != 0.0 && normalized_third.z == 0.0);
-  const std::array<double, 6> normalized_terms{{
-      normalized_first.x * normalized_second.y * normalized_third.z,
-      normalized_first.y * normalized_second.z * normalized_third.x,
-      normalized_first.z * normalized_second.x * normalized_third.y,
-      normalized_first.z * normalized_second.y * normalized_third.x,
-      normalized_first.y * normalized_second.x * normalized_third.z,
-      normalized_first.x * normalized_second.z * normalized_third.y,
-  }};
-  const double normalized_determinant =
-      normalized_terms[0] + normalized_terms[1] + normalized_terms[2] -
-      normalized_terms[3] - normalized_terms[4] - normalized_terms[5];
-  double term_magnitude_sum = 0.0;
-  for (const double term : normalized_terms) {
-    term_magnitude_sum += std::abs(term);
-  }
-  constexpr double kCancellationGuard =
-      32.0 * std::numeric_limits<double>::epsilon();
-  if (!normalization_lost_nonzero &&
-      std::abs(normalized_determinant) >
-          kCancellationGuard * term_magnitude_sum) {
-    int x_exponent = 0;
-    int y_exponent = 0;
-    int z_exponent = 0;
-    int determinant_exponent = 0;
-    int factor_exponent = 0;
-    const double mantissa =
-        std::frexp(x_scale, &x_exponent) *
-        std::frexp(y_scale, &y_exponent) *
-        std::frexp(z_scale, &z_exponent) *
-        std::frexp(normalized_determinant, &determinant_exponent) *
-        std::frexp(factor, &factor_exponent);
-    return std::scalbn(mantissa, x_exponent + y_exponent + z_exponent +
-                                     determinant_exponent + factor_exponent);
-  }
-
-  // Ambiguous cancellation and normalization underflow take the exact path.
   // Each signed triple product retains its original binary significands and
   // exponent until the final correctly rounded binary64 conversion.
   const std::array<std::array<double, 4>, 6> terms{{

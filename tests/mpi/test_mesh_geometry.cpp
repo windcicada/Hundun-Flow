@@ -147,6 +147,36 @@ bool bitwise_equal(Real3 lhs, Real3 rhs) {
          bits(lhs.z) == bits(rhs.z);
 }
 
+MappingJacobian transpose(MappingJacobian value) {
+  return {{value.d_xi_m.x, value.d_eta_m.x, value.d_zeta_m.x},
+          {value.d_xi_m.y, value.d_eta_m.y, value.d_zeta_m.y},
+          {value.d_xi_m.z, value.d_eta_m.z, value.d_zeta_m.z}};
+}
+
+MappingJacobian swap_first_two_columns(MappingJacobian value) {
+  return {value.d_eta_m, value.d_xi_m, value.d_zeta_m};
+}
+
+MappingJacobian negate_first_column(MappingJacobian value) {
+  value.d_xi_m = {-value.d_xi_m.x, -value.d_xi_m.y, -value.d_xi_m.z};
+  return value;
+}
+
+void check_exact_determinant(double actual, double expected) {
+  HUNDUN_CHECK(bits(actual) == bits(expected));
+}
+
+void check_exact_determinant_variants(const MappingJacobian& value,
+                                      double expected) {
+  check_exact_determinant(value.determinant_m3(), expected);
+  check_exact_determinant(transpose(value).determinant_m3(), expected);
+  const double negative_expected = std::copysign(expected, -1.0);
+  check_exact_determinant(
+      swap_first_two_columns(value).determinant_m3(), negative_expected);
+  check_exact_determinant(negate_first_column(value).determinant_m3(),
+                          negative_expected);
+}
+
 void check_near(double actual, double expected, double factor = 128.0) {
   const double scale = std::max({1.0, std::abs(actual), std::abs(expected)});
   HUNDUN_CHECK(std::abs(actual - expected) <=
@@ -621,6 +651,57 @@ void test_range_safe_mapping_jacobians() {
       {0.0, 0.0, 1.0}};
   HUNDUN_CHECK(rounded_subnormal.determinant_m3() ==
                std::numeric_limits<double>::denorm_min());
+
+  // Dividing the carrying entry by the row scale produces the exact ratio
+  // 3*2^-1076, which rounds to a nonzero subnormal.  The determinant itself
+  // remains the exactly representable normal value 3*2^-53.
+  const double row_scale = std::ldexp(1.0, 1023);
+  const double carrying = std::ldexp(3.0, -53);
+  const MappingJacobian subnormal_normalization{
+      {1.0, 0.0, row_scale}, {0.0, 1.0, 0.0}, {0.0, 0.0, carrying}};
+  check_exact_determinant_variants(subnormal_normalization, carrying);
+
+  // DBL_MAX is 2^1024-2^971, so adding 2^970 is exactly the overflow
+  // midpoint.  The predecessor/successor below are exact binary64 values on
+  // either side of that mathematical boundary.
+  const double half_ulp_at_overflow = std::ldexp(1.0, 970);
+  const double just_below_overflow_midpoint =
+      half_ulp_at_overflow - std::ldexp(1.0, 917);
+  const double just_above_overflow_midpoint =
+      half_ulp_at_overflow + std::ldexp(1.0, 918);
+  const auto max_finite_boundary = [](double addend) {
+    return MappingJacobian{{std::numeric_limits<double>::max(), 1.0, 0.0},
+                           {0.0, 1.0, 1.0},
+                           {addend, 0.0, 1.0}};
+  };
+  check_exact_determinant_variants(
+      max_finite_boundary(just_below_overflow_midpoint),
+      std::numeric_limits<double>::max());
+  check_exact_determinant_variants(
+      max_finite_boundary(half_ulp_at_overflow),
+      std::numeric_limits<double>::infinity());
+  check_exact_determinant_variants(
+      max_finite_boundary(just_above_overflow_midpoint),
+      std::numeric_limits<double>::infinity());
+
+  // Multiplying denorm_min by values immediately below, at, and above 0.5
+  // places the exact determinant immediately below, at, and above the
+  // half-denorm rounding boundary without requiring an unrepresentable input.
+  const double half = std::ldexp(1.0, -1);
+  const double just_below_half = half - std::ldexp(1.0, -54);
+  const double just_above_half = half + std::ldexp(1.0, -53);
+  const auto half_denorm_boundary = [](double multiplier) {
+    return MappingJacobian{
+        {std::numeric_limits<double>::denorm_min(), 0.0, 0.0},
+        {0.0, multiplier, 0.0},
+        {0.0, 0.0, 1.0}};
+  };
+  check_exact_determinant_variants(half_denorm_boundary(just_below_half),
+                                   0.0);
+  check_exact_determinant_variants(half_denorm_boundary(half), 0.0);
+  check_exact_determinant_variants(
+      half_denorm_boundary(just_above_half),
+      std::numeric_limits<double>::denorm_min());
 }
 
 void test_mapping_rejections() {
