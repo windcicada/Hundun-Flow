@@ -67,6 +67,7 @@ add_library(hundun_runtime STATIC
   runtime/src/process_grid.cpp
   runtime/src/structured_decomposition.cpp
   runtime/src/field_registry.cpp
+  runtime/src/field_access_plan.cpp
   runtime/src/field_storage.cpp
   runtime/src/halo_detail.cpp
   runtime/src/exchange_plan.cpp
@@ -322,6 +323,11 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  hundun_add_test(test_field_access tests/unit/test_field_access.cpp)
+  target_include_directories(test_field_access PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_field_access PRIVATE hundun_runtime)
 
   hundun_add_test(test_performance_artifact
     tests/unit/test_performance_artifact.cpp)

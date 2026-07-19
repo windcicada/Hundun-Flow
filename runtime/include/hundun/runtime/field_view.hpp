@@ -59,6 +59,32 @@ class FieldView final {
 };
 
 template <class T>
+class FaceFieldView final {
+ public:
+  std::size_t face_count() const noexcept;
+  std::uint32_t components() const noexcept;
+  T &operator()(std::size_t face, int component) const;
+
+ private:
+  friend class FieldStorage;
+
+  using Byte =
+      std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
+  using Value = std::remove_const_t<T>;
+
+  FaceFieldView(Byte *data,
+                std::shared_ptr<const detail::FieldEpochControl> epoch,
+                std::uint64_t generation, std::size_t face_count,
+                std::uint32_t components) noexcept;
+
+  Byte *data_{};
+  std::shared_ptr<const detail::FieldEpochControl> epoch_;
+  std::uint64_t generation_{};
+  std::size_t face_count_{};
+  std::uint32_t components_{};
+};
+
+template <class T>
 FieldView<T>::FieldView(
     Byte *data, std::shared_ptr<const detail::FieldEpochControl> epoch,
     std::uint64_t generation, Int3 interior_extent, int ghost_width,
@@ -117,6 +143,45 @@ T &FieldView<T>::operator()(int i, int j, int k, int component) const {
   const auto component_index = static_cast<std::size_t>(component);
   const auto linear =
       kk * z_stride_ + jj * y_stride_ + ii * x_stride_ + component_index;
+  auto *value =
+      std::launder(reinterpret_cast<T *>(data_ + linear * sizeof(Value)));
+  return *value;
+}
+
+template <class T>
+FaceFieldView<T>::FaceFieldView(
+    Byte *data, std::shared_ptr<const detail::FieldEpochControl> epoch,
+    std::uint64_t generation, std::size_t face_count,
+    std::uint32_t components) noexcept
+    : data_(data),
+      epoch_(std::move(epoch)),
+      generation_(generation),
+      face_count_(face_count),
+      components_(components) {}
+
+template <class T>
+std::size_t FaceFieldView<T>::face_count() const noexcept {
+  return face_count_;
+}
+
+template <class T>
+std::uint32_t FaceFieldView<T>::components() const noexcept {
+  return components_;
+}
+
+template <class T>
+T &FaceFieldView<T>::operator()(std::size_t face, int component) const {
+  detail::validate_field_epoch(epoch_, generation_);
+  if (face >= face_count_) {
+    throw Error("face field view face index is out of bounds");
+  }
+  if (component < 0 || static_cast<std::uint64_t>(component) >= components_) {
+    throw Error("face field view component index is out of bounds");
+  }
+
+  const auto linear =
+      face * static_cast<std::size_t>(components_) +
+      static_cast<std::size_t>(component);
   auto *value =
       std::launder(reinterpret_cast<T *>(data_ + linear * sizeof(Value)));
   return *value;

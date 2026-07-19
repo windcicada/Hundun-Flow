@@ -138,9 +138,11 @@ void begin_scalar_lifetimes(ScalarType scalar_type, std::byte *storage,
 }
 
 struct AllocationPlan {
+  FunctionSpace space{};
   ScalarType scalar_type{};
   int ghost_width{};
   std::uint32_t components{};
+  std::size_t face_count{};
   std::size_t x_stride{};
   std::size_t y_stride{};
   std::size_t z_stride{};
@@ -150,17 +152,18 @@ struct AllocationPlan {
   std::size_t storage_byte_count{};
 };
 
-AllocationPlan make_plan(const FieldDescriptor &descriptor_value,
-                         Int3 interior_extent) {
-  if (descriptor_value.space != FunctionSpace::cell_average) {
-    throw Error("Stage 1 field storage supports cell_average fields only");
-  }
+void validate_component_index_range(const FieldDescriptor &descriptor_value) {
   constexpr auto max_indexable_components =
       static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) + 1U;
   if (static_cast<std::uintmax_t>(descriptor_value.components) >
       max_indexable_components) {
     throw Error("field storage component count exceeds the view index range");
   }
+}
+
+AllocationPlan make_cell_plan(const FieldDescriptor &descriptor_value,
+                              Int3 interior_extent) {
+  validate_component_index_range(descriptor_value);
 
   constexpr auto max_indexable_axis_span =
       static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) + 1U;
@@ -189,6 +192,7 @@ AllocationPlan make_plan(const FieldDescriptor &descriptor_value,
   const auto components = static_cast<std::size_t>(descriptor_value.components);
 
   AllocationPlan plan;
+  plan.space = descriptor_value.space;
   plan.scalar_type = descriptor_value.scalar_type;
   plan.ghost_width = descriptor_value.ghost_width;
   plan.components = descriptor_value.components;
@@ -205,32 +209,95 @@ AllocationPlan make_plan(const FieldDescriptor &descriptor_value,
   return plan;
 }
 
+AllocationPlan make_face_plan(const FieldDescriptor &descriptor_value,
+                              std::size_t face_count) {
+  if (face_count == 0U) {
+    throw Error("face field storage requires a positive face count");
+  }
+  if (descriptor_value.ghost_width != 0) {
+    throw Error("face_value fields require zero ghost width");
+  }
+  validate_component_index_range(descriptor_value);
+
+  AllocationPlan plan;
+  plan.space = descriptor_value.space;
+  plan.scalar_type = descriptor_value.scalar_type;
+  plan.ghost_width = descriptor_value.ghost_width;
+  plan.components = descriptor_value.components;
+  plan.face_count = face_count;
+  plan.x_stride = static_cast<std::size_t>(descriptor_value.components);
+  plan.element_count = checked_multiply(
+      face_count, plan.x_stride, "face element count");
+  plan.byte_count = checked_multiply(
+      plan.element_count, scalar_size(plan.scalar_type), "face byte count");
+  plan.alignment = scalar_alignment(plan.scalar_type);
+  plan.storage_byte_count = checked_add(
+      plan.byte_count, plan.alignment - 1U, "aligned face byte count");
+  return plan;
+}
+
 }  // namespace
 
 FieldStorage::FieldStorage(const FieldRegistry &registry, Int3 interior_extent)
-    : interior_extent_(interior_extent) {
+    : FieldStorage(registry, FieldLayoutSet{interior_extent, 0U},
+                   ConstructionMode::legacy_cell_only) {}
+
+FieldStorage::FieldStorage(const FieldRegistry &registry,
+                           FieldLayoutSet layout_set)
+    : FieldStorage(registry, layout_set, ConstructionMode::cell_and_face) {}
+
+FieldStorage::FieldStorage(const FieldRegistry &registry,
+                           FieldLayoutSet layout_set,
+                           ConstructionMode construction_mode)
+    : interior_extent_(layout_set.cell_interior_extent),
+      layout_set_(layout_set) {
   if (!registry.frozen()) {
     throw Error("field storage requires a frozen registry");
   }
-  if (interior_extent.x <= 0 || interior_extent.y <= 0 ||
-      interior_extent.z <= 0) {
+  if (interior_extent_.x <= 0 || interior_extent_.y <= 0 ||
+      interior_extent_.z <= 0) {
     throw Error("field storage interior extents must be positive");
   }
 
   std::vector<AllocationPlan> plans;
   plans.reserve(registry.size());
   for (std::size_t index = 0; index < registry.size(); ++index) {
-    plans.push_back(make_plan(registry.descriptor(static_cast<FieldId>(index)),
-                              interior_extent));
+    const auto &descriptor_value =
+        registry.descriptor(static_cast<FieldId>(index));
+    if (construction_mode == ConstructionMode::legacy_cell_only) {
+      if (descriptor_value.space != FunctionSpace::cell_average) {
+        throw Error(
+            "Stage 1 field storage supports cell_average fields only");
+      }
+      plans.push_back(make_cell_plan(descriptor_value, interior_extent_));
+      continue;
+    }
+
+    switch (descriptor_value.space) {
+      case FunctionSpace::cell_average:
+        plans.push_back(make_cell_plan(descriptor_value, interior_extent_));
+        break;
+      case FunctionSpace::face_value:
+        plans.push_back(
+            make_face_plan(descriptor_value, layout_set_.face_count));
+        break;
+      case FunctionSpace::vertex_value:
+      case FunctionSpace::element_dof:
+      case FunctionSpace::quadrature_point:
+      case FunctionSpace::particle:
+        throw Error("field storage does not support this function space");
+    }
   }
 
   auto entries = std::make_unique<std::vector<Entry>>();
   entries->reserve(plans.size());
   for (const auto &plan : plans) {
     Entry field;
+    field.space = plan.space;
     field.scalar_type = plan.scalar_type;
     field.ghost_width = plan.ghost_width;
     field.components = plan.components;
+    field.face_count = plan.face_count;
     field.x_stride = plan.x_stride;
     field.y_stride = plan.y_stride;
     field.z_stride = plan.z_stride;
@@ -260,9 +327,11 @@ FieldStorage::~FieldStorage() noexcept { invalidate_epoch(epoch_); }
 
 FieldStorage::FieldStorage(FieldStorage &&other) noexcept
     : interior_extent_(other.interior_extent_),
+      layout_set_(other.layout_set_),
       epoch_(std::move(other.epoch_)),
       entries_(std::move(other.entries_)) {
   other.interior_extent_ = Int3{};
+  other.layout_set_ = FieldLayoutSet{};
 }
 
 FieldStorage &FieldStorage::operator=(FieldStorage &&other) noexcept {
@@ -275,13 +344,17 @@ FieldStorage &FieldStorage::operator=(FieldStorage &&other) noexcept {
   epoch_.reset();
 
   interior_extent_ = other.interior_extent_;
+  layout_set_ = other.layout_set_;
   epoch_ = std::move(other.epoch_);
   entries_ = std::move(other.entries_);
   other.interior_extent_ = Int3{};
+  other.layout_set_ = FieldLayoutSet{};
   return *this;
 }
 
 Int3 FieldStorage::interior_extent() const noexcept { return interior_extent_; }
+
+FieldLayoutSet FieldStorage::layout_set() const noexcept { return layout_set_; }
 
 void FieldStorage::begin_rebuild() { advance_epoch(epoch_); }
 
@@ -305,6 +378,10 @@ const FieldStorage::Entry &FieldStorage::entry(FieldId id) const {
     throw Error("field storage ID is out of bounds");
   }
   return (*entries_)[index];
+}
+
+std::size_t FieldStorage::field_count() const noexcept {
+  return entries_ ? entries_->size() : 0U;
 }
 
 std::uint64_t detail::FieldEpochTestAccess::generation(
