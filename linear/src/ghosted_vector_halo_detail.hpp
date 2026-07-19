@@ -82,6 +82,9 @@ NonblockingPostIssueAction nonblocking_post_issue_action(
 
 inline constexpr int kInjectAllEligibleRanks = -2;
 
+std::size_t injection_selection_collective_count(
+    int configured_rank) noexcept;
+
 struct VectorHaloTestOptions {
   std::size_t chunk_limit{static_cast<std::size_t>(INT_MAX)};
   bool observe{};
@@ -113,6 +116,8 @@ struct FailureDiagnosticSnapshot {
 };
 
 struct VectorHaloTestSnapshot {
+  bool observation_storage_prepared{};
+  std::size_t injection_selection_collectives{};
   bool receives_preceded_sends{true};
   bool chunk_offsets_ordered{true};
   std::size_t receive_posts{};
@@ -139,8 +144,15 @@ struct VectorHaloTestSnapshot {
 void set_vector_halo_test_options(VectorHaloTestOptions options) noexcept;
 VectorHaloTestOptions current_vector_halo_test_options() noexcept;
 void reset_vector_halo_test_observation() noexcept;
-void prepare_vector_halo_test_observation(std::size_t peer_count,
-                                          std::size_t request_count);
+void begin_vector_halo_creation_observation() noexcept;
+void prepare_vector_halo_creation_observation(std::size_t peer_count,
+                                              std::size_t request_count);
+VectorHaloTestSnapshot take_vector_halo_creation_observation() noexcept;
+void activate_vector_halo_test_observation(
+    VectorHaloTestSnapshot* snapshot) noexcept;
+void deactivate_vector_halo_test_observation(
+    const VectorHaloTestSnapshot* snapshot) noexcept;
+bool vector_halo_test_observation_storage_prepared() noexcept;
 VectorHaloTestSnapshot vector_halo_test_snapshot();
 VectorHaloTestSnapshot& mutable_vector_halo_test_snapshot() noexcept;
 

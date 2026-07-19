@@ -364,8 +364,22 @@ void run_exchange_case(const MpiContext& world,
   }
 
   GhostedVector vector(execution, layout);
+  hundun::linear::detail::set_vector_halo_test_options({});
+  hundun::linear::detail::reset_vector_halo_test_observation();
   GhostedVectorHalo halo =
       GhostedVectorHalo::create(decomposition, topology, execution);
+  HUNDUN_CHECK(
+      !hundun::linear::detail::vector_halo_test_observation_storage_prepared());
+  hundun::linear::detail::VectorHaloTestOptions late_observation{};
+  late_observation.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(late_observation);
+  const std::string late_observation_message = expect_collective_error(
+      world, [&] { halo.exchange(vector); });
+  HUNDUN_CHECK(late_observation_message.find("enabled at creation") !=
+               std::string::npos);
+  HUNDUN_CHECK(
+      !hundun::linear::detail::vector_halo_test_observation_storage_prepared());
+  hundun::linear::detail::set_vector_halo_test_options({});
   HUNDUN_CHECK(halo.path() == BufferHaloPath::host_direct);
   HUNDUN_CHECK(halo.owned_count() == topology.owned_cell_count());
   HUNDUN_CHECK(halo.ghost_count() == topology.ghost_cell_count());
@@ -429,6 +443,7 @@ void run_exchange_case(const MpiContext& world,
   HUNDUN_CHECK(sent_values == small_chunk_halo.send_value_count());
   HUNDUN_CHECK(first_snapshot.post_events.size() ==
                first_snapshot.receive_posts + first_snapshot.send_posts);
+  HUNDUN_CHECK(first_snapshot.injection_selection_collectives == 0U);
 
   fill_vector(vector, topology, 3, -3.0);
   std::size_t split_allocations = 0U;
@@ -469,14 +484,57 @@ void run_exchange_case(const MpiContext& world,
   HUNDUN_CHECK(repeated_allocations == 0U);
   check_vector(vector, topology, 31);
 
+  hundun::linear::detail::VectorHaloTestOptions other_options{};
+  other_options.chunk_limit = 2U;
+  other_options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(other_options);
   GhostedVectorHalo other =
       GhostedVectorHalo::create(decomposition, topology, execution);
+  GhostedVector other_vector(execution, layout);
+  HUNDUN_CHECK(small_chunk_halo.receive_value_count() ==
+               other.receive_value_count());
+
+  hundun::linear::detail::VectorHaloTestOptions observed_options{};
+  observed_options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(observed_options);
   fill_vector(vector, topology, 4, -4.0);
-  small_chunk_halo.begin(vector);
-  other.begin(vector);
-  other.wait(vector);
-  small_chunk_halo.wait(vector);
+  fill_vector(other_vector, topology, 41, -41.0);
+  std::size_t interleaved_allocations = 0U;
+  {
+    AllocationAttemptGuard guard;
+    small_chunk_halo.begin(vector);
+    other.begin(other_vector);
+    other.wait(other_vector);
+    small_chunk_halo.wait(vector);
+    interleaved_allocations = guard.attempts();
+  }
+  HUNDUN_CHECK(interleaved_allocations == 0U);
   check_vector(vector, topology, 4);
+  check_vector(other_vector, topology, 41);
+  const auto small_interleaved_snapshot =
+      hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(small_interleaved_snapshot.request_capacity ==
+               first_snapshot.request_capacity);
+
+  fill_vector(other_vector, topology, 42, -42.0);
+  {
+    AllocationAttemptGuard guard;
+    other.exchange(other_vector);
+    interleaved_allocations = guard.attempts();
+  }
+  HUNDUN_CHECK(interleaved_allocations == 0U);
+  check_vector(other_vector, topology, 42);
+  const auto other_interleaved_snapshot =
+      hundun::linear::detail::vector_halo_test_snapshot();
+  if (world.size() == 1) {
+    HUNDUN_CHECK(other_interleaved_snapshot.request_capacity == 0U);
+    HUNDUN_CHECK(small_interleaved_snapshot.request_capacity == 0U);
+  } else {
+    HUNDUN_CHECK(other_interleaved_snapshot.request_capacity <
+                 small_interleaved_snapshot.request_capacity);
+  }
+  HUNDUN_CHECK(other_interleaved_snapshot.injection_selection_collectives ==
+               0U);
 
   {
     GhostedVectorHalo draining =
@@ -514,6 +572,7 @@ void run_full(const MpiContext& world) {
     auto snapshot = hundun::linear::detail::vector_halo_test_snapshot();
     HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
     HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
+    HUNDUN_CHECK(snapshot.injection_selection_collectives == 1U);
 
     options = {};
     options.observe = true;
@@ -528,6 +587,7 @@ void run_full(const MpiContext& world) {
     snapshot = hundun::linear::detail::vector_halo_test_snapshot();
     HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
     HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
+    HUNDUN_CHECK(snapshot.injection_selection_collectives == 0U);
 
     options = {};
     options.observe = true;
@@ -543,7 +603,9 @@ void run_full(const MpiContext& world) {
     HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
     HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
 
-    hundun::linear::detail::set_vector_halo_test_options({});
+    options = {};
+    options.observe = true;
+    hundun::linear::detail::set_vector_halo_test_options(options);
     GhostedVectorHalo halo =
         GhostedVectorHalo::create(decomposition, topology, execution);
     options = {};
@@ -689,7 +751,9 @@ void run_failure(const MpiContext& world) {
   HUNDUN_CHECK(mismatch_snapshot.metadata_post_calls == 0U);
   HUNDUN_CHECK(mismatch_snapshot.metadata_wait_calls == 0U);
 
-  hundun::linear::detail::set_vector_halo_test_options({});
+  mismatched_options = {};
+  mismatched_options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
   GhostedVector mismatch_vector(execution, layout);
   GhostedVectorHalo mismatch_halo =
       GhostedVectorHalo::create(decomposition, topology, execution);

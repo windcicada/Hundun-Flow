@@ -13,10 +13,24 @@ namespace hundun::linear::detail {
 namespace {
 
 thread_local VectorHaloTestOptions test_options;
-thread_local VectorHaloTestSnapshot test_snapshot;
+thread_local VectorHaloTestSnapshot creation_snapshot;
+thread_local VectorHaloTestSnapshot* active_snapshot;
 
 [[noreturn]] void throw_injected_trace_failure() {
   throw runtime::Error("injected device-path test-double failure");
+}
+
+void reset_snapshot_preserving_storage(
+    VectorHaloTestSnapshot& snapshot) noexcept {
+  auto send_wire_identities = std::move(snapshot.send_wire_identities);
+  auto receive_wire_identities = std::move(snapshot.receive_wire_identities);
+  auto post_events = std::move(snapshot.post_events);
+  const bool storage_prepared = snapshot.observation_storage_prepared;
+  snapshot = VectorHaloTestSnapshot{};
+  snapshot.observation_storage_prepared = storage_prepared;
+  snapshot.send_wire_identities = std::move(send_wire_identities);
+  snapshot.receive_wire_identities = std::move(receive_wire_identities);
+  snapshot.post_events = std::move(post_events);
 }
 
 }  // namespace
@@ -176,6 +190,11 @@ NonblockingPostIssueAction nonblocking_post_issue_action(
              : NonblockingPostIssueAction::terminate_process;
 }
 
+std::size_t injection_selection_collective_count(
+    int configured_rank) noexcept {
+  return configured_rank == -1 ? 0U : 1U;
+}
+
 void set_vector_halo_test_options(VectorHaloTestOptions options) noexcept {
   test_options = options;
 }
@@ -185,29 +204,51 @@ VectorHaloTestOptions current_vector_halo_test_options() noexcept {
 }
 
 void reset_vector_halo_test_observation() noexcept {
-  auto send_wire_identities =
-      std::move(test_snapshot.send_wire_identities);
-  auto receive_wire_identities =
-      std::move(test_snapshot.receive_wire_identities);
-  auto post_events = std::move(test_snapshot.post_events);
-  test_snapshot = VectorHaloTestSnapshot{};
-  test_snapshot.send_wire_identities = std::move(send_wire_identities);
-  test_snapshot.receive_wire_identities =
-      std::move(receive_wire_identities);
-  test_snapshot.post_events = std::move(post_events);
+  reset_snapshot_preserving_storage(
+      active_snapshot == nullptr ? creation_snapshot : *active_snapshot);
 }
 
-void prepare_vector_halo_test_observation(std::size_t peer_count,
-                                          std::size_t request_count) {
-  test_snapshot.send_wire_identities.resize(peer_count);
-  test_snapshot.receive_wire_identities.resize(peer_count);
-  test_snapshot.post_events.resize(request_count);
+void begin_vector_halo_creation_observation() noexcept {
+  active_snapshot = &creation_snapshot;
+  creation_snapshot = VectorHaloTestSnapshot{};
 }
 
-VectorHaloTestSnapshot vector_halo_test_snapshot() { return test_snapshot; }
+void prepare_vector_halo_creation_observation(std::size_t peer_count,
+                                              std::size_t request_count) {
+  creation_snapshot.send_wire_identities.resize(peer_count);
+  creation_snapshot.receive_wire_identities.resize(peer_count);
+  creation_snapshot.post_events.resize(request_count);
+  creation_snapshot.observation_storage_prepared = true;
+}
+
+VectorHaloTestSnapshot take_vector_halo_creation_observation() noexcept {
+  active_snapshot = nullptr;
+  return std::move(creation_snapshot);
+}
+
+void activate_vector_halo_test_observation(
+    VectorHaloTestSnapshot* snapshot) noexcept {
+  active_snapshot = snapshot;
+}
+
+void deactivate_vector_halo_test_observation(
+    const VectorHaloTestSnapshot* snapshot) noexcept {
+  if (active_snapshot == snapshot) {
+    active_snapshot = nullptr;
+  }
+}
+
+bool vector_halo_test_observation_storage_prepared() noexcept {
+  return active_snapshot != nullptr &&
+         active_snapshot->observation_storage_prepared;
+}
+
+VectorHaloTestSnapshot vector_halo_test_snapshot() {
+  return active_snapshot == nullptr ? creation_snapshot : *active_snapshot;
+}
 
 VectorHaloTestSnapshot& mutable_vector_halo_test_snapshot() noexcept {
-  return test_snapshot;
+  return active_snapshot == nullptr ? creation_snapshot : *active_snapshot;
 }
 
 }  // namespace hundun::linear::detail

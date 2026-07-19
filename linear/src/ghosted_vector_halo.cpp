@@ -180,22 +180,6 @@ std::string_view injection_message(InjectionPhase phase,
 InjectionSelection validate_injection_selection(
     const runtime::MpiContext& context, int configured_rank,
     std::size_t local_descriptor_count, InjectionPhase phase) {
-  const std::array<std::int64_t, 2> local_rank_bounds{
-      static_cast<std::int64_t>(configured_rank),
-      -static_cast<std::int64_t>(configured_rank)};
-  std::array<std::int64_t, 2> global_rank_bounds{};
-  runtime::detail::check_mpi(
-      MPI_Allreduce(local_rank_bounds.data(), global_rank_bounds.data(),
-                    static_cast<int>(local_rank_bounds.size()), MPI_INT64_T,
-                    MPI_MIN, context.comm()),
-      "MPI_Allreduce compact Halo injection rank bounds");
-  const std::int64_t minimum_rank = global_rank_bounds[0];
-  const std::int64_t maximum_rank = -global_rank_bounds[1];
-  if (minimum_rank != maximum_rank) {
-    throw runtime::Error(
-        std::string(injection_message(phase, InjectionMessage::mismatch)));
-  }
-
   const bool disabled = configured_rank == -1;
   const bool all_eligible =
       configured_rank == detail::kInjectAllEligibleRanks;
@@ -218,6 +202,11 @@ InjectionSelection validate_injection_selection(
     local_selected = 1;
   }
   int selected_count = 0;
+  if (detail::current_vector_halo_test_options().observe) {
+    detail::mutable_vector_halo_test_snapshot()
+        .injection_selection_collectives +=
+        detail::injection_selection_collective_count(configured_rank);
+  }
   runtime::detail::check_mpi(
       MPI_Allreduce(&local_selected, &selected_count, 1, MPI_INT, MPI_SUM,
                     context.comm()),
@@ -446,12 +435,18 @@ void validate_create_inputs(
   }
   require_collective(context, local_ok, local_message);
 
-  const std::array<std::uint64_t, 3> local_contract{
+  const auto options = detail::current_vector_halo_test_options();
+  const std::array<std::uint64_t, 6> local_contract{
       execution_context.backend_identity(),
       static_cast<std::uint64_t>(execution_context.space()),
-      static_cast<std::uint64_t>(BufferHaloPath::host_direct)};
-  std::array<std::uint64_t, 3> minimum{};
-  std::array<std::uint64_t, 3> maximum{};
+      static_cast<std::uint64_t>(BufferHaloPath::host_direct),
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(options.inject_metadata_post_failure_rank)),
+      static_cast<std::uint64_t>(static_cast<std::int64_t>(
+          options.inject_metadata_completion_failure_rank)),
+      options.observe ? 1U : 0U};
+  std::array<std::uint64_t, 6> minimum{};
+  std::array<std::uint64_t, 6> maximum{};
   runtime::detail::check_mpi(
       MPI_Allreduce(local_contract.data(), minimum.data(),
                     static_cast<int>(local_contract.size()), MPI_UINT64_T,
@@ -462,11 +457,23 @@ void validate_create_inputs(
                     static_cast<int>(local_contract.size()), MPI_UINT64_T,
                     MPI_MAX, context.comm()),
       "MPI_Allreduce compact Halo contract maximum");
-  require_collective(
-      context, minimum == maximum,
-      "compact Buffer Halo context or path differs across ranks");
+  if (minimum[3] != maximum[3]) {
+    throw runtime::Error(std::string(injection_message(
+        InjectionPhase::metadata_post, InjectionMessage::mismatch)));
+  }
+  if (minimum[4] != maximum[4]) {
+    throw runtime::Error(std::string(injection_message(
+        InjectionPhase::metadata_completion, InjectionMessage::mismatch)));
+  }
+  if (minimum[5] != maximum[5]) {
+    throw runtime::Error(
+        "compact Buffer Halo observation option differs across ranks");
+  }
+  require_collective(context,
+                     std::equal(minimum.begin(), minimum.begin() + 3,
+                                maximum.begin()),
+                     "compact Buffer Halo context or path differs across ranks");
 
-  const auto options = detail::current_vector_halo_test_options();
   const auto local_chunk = static_cast<std::uint64_t>(options.chunk_limit);
   std::uint64_t minimum_chunk = 0U;
   std::uint64_t maximum_chunk = 0U;
@@ -984,7 +991,8 @@ class GhostedVectorHalo::Impl final {
        execution::BackendIdentity backend_identity,
        std::vector<PeerState> peers, std::size_t send_value_count,
        std::size_t receive_value_count, std::vector<MPI_Request> requests,
-       std::vector<RequestDescriptor> request_descriptors) noexcept
+       std::vector<RequestDescriptor> request_descriptors,
+       std::optional<detail::VectorHaloTestSnapshot> observation) noexcept
       : context_(std::move(context)),
         layout_(std::move(layout)),
         backend_identity_(backend_identity),
@@ -992,9 +1000,17 @@ class GhostedVectorHalo::Impl final {
         send_value_count_(send_value_count),
         receive_value_count_(receive_value_count),
         requests_(std::move(requests)),
-        request_descriptors_(std::move(request_descriptors)) {}
+        request_descriptors_(std::move(request_descriptors)),
+        observation_(std::move(observation)) {
+    if (observation_.has_value()) {
+      detail::activate_vector_halo_test_observation(&*observation_);
+    }
+  }
 
   ~Impl() noexcept {
+    if (observation_.has_value()) {
+      detail::deactivate_vector_halo_test_observation(&*observation_);
+    }
     if (!active_) {
       return;
     }
@@ -1014,17 +1030,20 @@ class GhostedVectorHalo::Impl final {
 
   void begin(const GhostedVector& vector) {
     require_public_operation(PublicOperation::begin);
+    activate_observation_if_requested();
     begin_internal(vector);
   }
 
   void wait(GhostedVector& vector) {
     require_public_operation(PublicOperation::wait);
+    activate_observation_if_requested();
     require_wait_target(vector);
     finish_internal(vector);
   }
 
   void exchange(GhostedVector& vector) {
     require_public_operation(PublicOperation::exchange);
+    activate_observation_if_requested();
     begin_internal(vector);
     finish_internal(vector);
   }
@@ -1037,10 +1056,13 @@ class GhostedVectorHalo::Impl final {
 
   void require_public_operation(PublicOperation operation) const {
     runtime::detail::require_mpi_active("enter compact Buffer Halo operation");
-    const std::array<int, 2> local{static_cast<int>(operation),
-                                   active_ ? 1 : 0};
-    std::array<int, 2> minimum{};
-    std::array<int, 2> maximum{};
+    const auto options = detail::current_vector_halo_test_options();
+    const std::array<int, 5> local{
+        static_cast<int>(operation), active_ ? 1 : 0,
+        options.inject_post_failure_rank,
+        options.inject_completion_failure_rank, options.observe ? 1 : 0};
+    std::array<int, 5> minimum{};
+    std::array<int, 5> maximum{};
     runtime::detail::check_mpi(
         MPI_Allreduce(local.data(), minimum.data(),
                       static_cast<int>(local.size()), MPI_INT, MPI_MIN,
@@ -1051,8 +1073,22 @@ class GhostedVectorHalo::Impl final {
                       static_cast<int>(local.size()), MPI_INT, MPI_MAX,
                       context_.comm()),
         "MPI_Allreduce compact Halo operation maximum");
-    const bool contract_agrees = minimum == maximum;
-    const bool local_is_reference = local == minimum;
+    if (minimum[2] != maximum[2]) {
+      throw runtime::Error(std::string(injection_message(
+          InjectionPhase::payload_post, InjectionMessage::mismatch)));
+    }
+    if (minimum[3] != maximum[3]) {
+      throw runtime::Error(std::string(injection_message(
+          InjectionPhase::payload_completion, InjectionMessage::mismatch)));
+    }
+    if (minimum[4] != maximum[4]) {
+      throw runtime::Error(
+          "compact Buffer Halo observation option differs across ranks");
+    }
+    const bool contract_agrees = minimum[0] == maximum[0] &&
+                                 minimum[1] == maximum[1];
+    const bool local_is_reference = local[0] == minimum[0] &&
+                                    local[1] == minimum[1];
     require_collective(
         context_, contract_agrees || local_is_reference,
         "compact Buffer Halo public operation or state mismatch");
@@ -1067,6 +1103,17 @@ class GhostedVectorHalo::Impl final {
         requires_active
             ? "compact Buffer Halo wait requires an active operation"
             : "compact Buffer Halo begin/exchange requires an idle operation");
+  }
+
+  void activate_observation_if_requested() {
+    if (!detail::current_vector_halo_test_options().observe) {
+      return;
+    }
+    if (!observation_.has_value()) {
+      throw runtime::Error(
+          "compact Buffer Halo observation was not enabled at creation");
+    }
+    detail::activate_vector_halo_test_observation(&*observation_);
   }
 
   VectorIssue inspect_vector(const GhostedVector& vector,
@@ -1109,6 +1156,11 @@ class GhostedVectorHalo::Impl final {
     if (!options.observe) {
       return;
     }
+    if (!observation_.has_value()) {
+      throw runtime::Error(
+          "compact Buffer Halo observation was not enabled at creation");
+    }
+    detail::activate_vector_halo_test_observation(&*observation_);
     auto& snapshot = detail::mutable_vector_halo_test_snapshot();
     snapshot.receives_preceded_sends = true;
     snapshot.chunk_offsets_ordered = true;
@@ -1413,6 +1465,7 @@ class GhostedVectorHalo::Impl final {
   std::size_t receive_value_count_{};
   std::vector<MPI_Request> requests_;
   const std::vector<RequestDescriptor> request_descriptors_;
+  std::optional<detail::VectorHaloTestSnapshot> observation_;
   bool active_{};
   execution::AllocationIdentity pending_allocation_{};
   std::uint64_t pending_epoch_{};
@@ -1423,6 +1476,11 @@ GhostedVectorHalo GhostedVectorHalo::create(
     const mesh::MeshTopology& topology,
     execution::ExecutionContext& execution_context) {
   runtime::detail::require_mpi_active("create compact Buffer Halo");
+  const bool observe =
+      detail::current_vector_halo_test_options().observe;
+  if (observe) {
+    detail::begin_vector_halo_creation_observation();
+  }
   runtime::MpiContext context =
       runtime::MpiContext::duplicate(decomposition.comm());
   validate_create_inputs(context, decomposition, topology, execution_context);
@@ -1476,8 +1534,10 @@ GhostedVectorHalo GhostedVectorHalo::create(
       throw runtime::Error(
           "compact Halo request descriptors disagree with slots");
     }
-    detail::prepare_vector_halo_test_observation(peers.size(),
-                                                 requests.size());
+    if (observe) {
+      detail::prepare_vector_halo_creation_observation(peers.size(),
+                                                       requests.size());
+    }
   } catch (const std::exception& error) {
     local_ok = false;
     local_message = error.what();
@@ -1505,11 +1565,16 @@ GhostedVectorHalo GhostedVectorHalo::create(
     ::operator delete(storage);
     throw;
   }
+  std::optional<detail::VectorHaloTestSnapshot> observation;
+  if (observe) {
+    observation.emplace(
+        detail::take_vector_halo_creation_observation());
+  }
   auto* implementation = ::new (storage) Impl(
       std::move(context), std::move(layout),
       execution_context.backend_identity(), std::move(peers),
       plan.send_value_count, plan.receive_value_count, std::move(requests),
-      std::move(request_descriptors));
+      std::move(request_descriptors), std::move(observation));
   return GhostedVectorHalo(std::unique_ptr<Impl>(implementation));
 }
 

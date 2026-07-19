@@ -214,6 +214,16 @@ void test_path_selection_and_trace() {
 }
 
 void test_pure_plan_helpers() {
+  HUNDUN_CHECK(
+      hundun::linear::detail::injection_selection_collective_count(-1) ==
+      0U);
+  HUNDUN_CHECK(
+      hundun::linear::detail::injection_selection_collective_count(0) ==
+      1U);
+  HUNDUN_CHECK(
+      hundun::linear::detail::injection_selection_collective_count(
+          hundun::linear::detail::kInjectAllEligibleRanks) == 1U);
+
   HUNDUN_CHECK(hundun::linear::detail::nonblocking_post_issue_action(
                    NonblockingPostIssueOrigin::synthetic_before_call) ==
                NonblockingPostIssueAction::recover_known_prefix);
