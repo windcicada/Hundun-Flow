@@ -4,6 +4,7 @@
 
 #include "hundun/runtime/error.hpp"
 #include "mpi_error.hpp"
+#include "mpi_context_test_seam.hpp"
 
 #include <climits>
 #include <cstddef>
@@ -12,6 +13,29 @@
 #include <utility>
 
 namespace hundun::runtime {
+namespace {
+
+thread_local int next_fp64_allreduce_result_for_test = MPI_SUCCESS;
+
+int consume_next_fp64_allreduce_result_for_test() noexcept {
+  return std::exchange(next_fp64_allreduce_result_for_test, MPI_SUCCESS);
+}
+
+}  // namespace
+
+namespace detail {
+
+void inject_next_fp64_allreduce_result_for_test(int mpi_result) {
+  if (mpi_result == MPI_SUCCESS) {
+    throw Error("FP64 allreduce test result must be an MPI error");
+  }
+  if (next_fp64_allreduce_result_for_test != MPI_SUCCESS) {
+    throw Error("FP64 allreduce test result is already pending");
+  }
+  next_fp64_allreduce_result_for_test = mpi_result;
+}
+
+}  // namespace detail
 
 MpiContext MpiContext::duplicate(MPI_Comm source) {
   detail::require_mpi_active("duplicate MPI communicator");
@@ -135,9 +159,15 @@ void MpiContext::allreduce_fp64_in_place(
                   logical_bytes)};
 
   fp64_reduction_counters_ = updated;
+  const int injected_result =
+      consume_next_fp64_allreduce_result_for_test();
+  const int mpi_result =
+      injected_result == MPI_SUCCESS
+          ? MPI_Allreduce(MPI_IN_PLACE, values, static_cast<int>(count),
+                          MPI_DOUBLE, mpi_operation, communicator_)
+          : injected_result;
   detail::check_mpi(
-      MPI_Allreduce(MPI_IN_PLACE, values, static_cast<int>(count), MPI_DOUBLE,
-                    mpi_operation, communicator_),
+      mpi_result,
       "MPI_Allreduce FP64 values");
 }
 

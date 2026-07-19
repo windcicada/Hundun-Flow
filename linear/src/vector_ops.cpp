@@ -3,6 +3,7 @@
 #include "hundun/linear/vector_ops.hpp"
 
 #include "hundun/runtime/error.hpp"
+#include "linear/src/vector_ops_detail.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -13,6 +14,14 @@
 #include <type_traits>
 
 namespace hundun::linear {
+namespace detail {
+
+double bad_dot_product_sentinel() noexcept {
+  return std::numeric_limits<double>::infinity();
+}
+
+}  // namespace detail
+
 namespace {
 
 template <class T>
@@ -288,7 +297,7 @@ void VectorOps::dot_batch(
   }
 
   for (std::size_t pair = 0; pair < pair_count; ++pair) {
-    double local_result = std::numeric_limits<double>::quiet_NaN();
+    double local_result = detail::bad_dot_product_sentinel();
     try {
       const auto left = pairs[pair].left;
       const auto right = pairs[pair].right;
@@ -315,7 +324,7 @@ void VectorOps::dot_batch(
         local_result = local_sum.value();
       }
     } catch (const runtime::Error&) {
-      local_result = std::numeric_limits<double>::quiet_NaN();
+      local_result = detail::bad_dot_product_sentinel();
     }
     result_pointer[pair] = local_result;
   }

@@ -4,9 +4,11 @@
 #include "hundun/linear/vector_ops.hpp"
 #include "hundun/runtime/error.hpp"
 #include "execution/src/execution_test_access.hpp"
+#include "linear/src/vector_ops_detail.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -103,6 +105,13 @@ void test_constructor_and_empty_operations() {
   expect_error_containing([&] { VectorOps invalid(device); }, "host");
   TestContext inaccessible(72U, ExecutionSpace::host, false);
   expect_error_containing([&] { VectorOps invalid(inaccessible); }, "host");
+}
+
+void test_bad_dot_product_sentinel_policy() {
+  const double sentinel =
+      hundun::linear::detail::bad_dot_product_sentinel();
+  HUNDUN_CHECK(std::isinf(sentinel));
+  HUNDUN_CHECK(sentinel > 0.0);
 }
 
 void test_contiguous_strided_and_aliases() {
@@ -227,6 +236,9 @@ void test_rejected_views_and_transactionality() {
   destination_values[0] = std::numeric_limits<double>::max();
   const auto overflow_before = read(destination_values);
   expect_error_containing(
+      [&] { operations.scale(2.0, destination_values); }, "finite");
+  HUNDUN_CHECK(read(destination_values) == overflow_before);
+  expect_error_containing(
       [&] { operations.axpy(1.0, finite_values, destination_values); },
       "finite");
   HUNDUN_CHECK(read(destination_values) == overflow_before);
@@ -268,6 +280,7 @@ void test_successful_operations_do_not_allocate() {
 
 int main() {
   return hundun::test::run([] {
+    test_bad_dot_product_sentinel_policy();
     test_constructor_and_empty_operations();
     test_contiguous_strided_and_aliases();
     test_rejected_views_and_transactionality();

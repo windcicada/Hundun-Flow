@@ -406,13 +406,17 @@ if(HUNDUN_BUILD_TESTS)
     hundun_linear)
   set_tests_properties(test_vector_ops_header_contract PROPERTIES TIMEOUT 30)
 
-  hundun_add_test(test_vector_ops tests/unit/test_vector_ops.cpp)
+  hundun_add_test(test_vector_ops
+    tests/unit/test_vector_ops.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_vector_ops PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_vector_ops PRIVATE hundun_linear)
   set_tests_properties(test_vector_ops PROPERTIES TIMEOUT 30)
 
-  add_executable(test_vector_ops_mpi tests/mpi/test_vector_ops_mpi.cpp)
+  add_executable(test_vector_ops_mpi
+    tests/mpi/test_vector_ops_mpi.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_vector_ops_mpi PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_vector_ops_mpi PRIVATE

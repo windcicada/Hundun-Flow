@@ -6,6 +6,7 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "execution/src/execution_test_access.hpp"
+#include "runtime/src/mpi_context_test_seam.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
@@ -194,6 +195,34 @@ void test_counter_overflow_and_moves(const MpiContext& world) {
                2U * sizeof(double));
 }
 
+void test_failed_allreduce_attempt_is_counted(const MpiContext& world) {
+  auto context = MpiContext::duplicate(world.comm());
+  std::array<double, 2> values{static_cast<double>(world.rank() + 1), 2.0};
+  const auto before = context.fp64_reduction_counters();
+
+  hundun::runtime::detail::inject_next_fp64_allreduce_result_for_test(
+      MPI_ERR_OTHER);
+  expect_error_containing(
+      [&] {
+        context.allreduce_fp64_in_place(
+            values.data(), values.size(), Fp64ReductionOperation::sum);
+      },
+      "MPI_Allreduce");
+  check_counter_delta(before, context.fp64_reduction_counters(), 1U, 2U,
+                      2U * sizeof(double));
+
+  double recovery = static_cast<double>(world.rank() + 1);
+  const auto before_recovery = context.fp64_reduction_counters();
+  context.allreduce_fp64_in_place(&recovery, 1U,
+                                  Fp64ReductionOperation::sum);
+  const double expected =
+      0.5 * static_cast<double>(world.size()) *
+      static_cast<double>(world.size() + 1);
+  HUNDUN_CHECK_NEAR(recovery, expected, 0.0);
+  check_counter_delta(before_recovery, context.fp64_reduction_counters(), 1U,
+                      1U, sizeof(double));
+}
+
 void fill_norm_values(VectorView<double> values, int rank, double factor) {
   for (std::size_t index = 0; index < values.size(); ++index) {
     values[index] = factor *
@@ -290,6 +319,19 @@ double expected_dot(int ranks, int pair) {
   return sum;
 }
 
+double expected_strided_dot(int ranks) {
+  double sum = 0.0;
+  for (int rank = 0; rank < ranks; ++rank) {
+    const int count = rank + 4;
+    for (int index = 0; index < count; ++index) {
+      const double left = static_cast<double>(rank + index + 1);
+      const double right = static_cast<double>(2 * index + 3);
+      sum += left * right;
+    }
+  }
+  return sum;
+}
+
 void fill_dot_inputs(VectorView<double> a, VectorView<double> b,
                      VectorView<double> c, VectorView<double> d,
                      VectorView<double> e, VectorView<double> f, int rank) {
@@ -342,6 +384,24 @@ void test_dot_batch(const MpiContext& world) {
   }
   check_counter_delta(before, world.fp64_reduction_counters(), 1U, 3U,
                       3U * sizeof(double));
+
+  Buffer strided_left_buffer(execution, 2U * count * sizeof(double));
+  Buffer strided_right_buffer(execution, 2U * count * sizeof(double));
+  auto strided_left = strided_left_buffer.view(1U, count, 2U);
+  auto strided_right = strided_right_buffer.view(0U, count, 2U);
+  for (std::size_t index = 0; index < count; ++index) {
+    strided_left[index] = static_cast<double>(
+        world.rank() + static_cast<int>(index) + 1);
+    strided_right[index] = static_cast<double>(2U * index + 3U);
+  }
+  const DotProductPair strided_pair{strided_left, strided_right};
+  const auto before_strided = world.fp64_reduction_counters();
+  operations.dot_batch(&strided_pair, 1U, results_buffer.view(0U, 1U),
+                       world);
+  HUNDUN_CHECK_NEAR(results_buffer.view(0U, 1U)[0],
+                    expected_strided_dot(world.size()), 0.0);
+  check_counter_delta(before_strided, world.fp64_reduction_counters(), 1U,
+                      1U, sizeof(double));
 
   const auto before_empty = world.fp64_reduction_counters();
   operations.dot_batch(nullptr, 0U, results_buffer.view(0U, 0U), world);
@@ -398,6 +458,28 @@ void test_dot_batch(const MpiContext& world) {
       "finite");
   check_counter_delta(before_bad_value, world.fp64_reduction_counters(), 1U,
                       3U, 3U * sizeof(double));
+
+  Buffer stale_buffer(execution, count * sizeof(double));
+  auto stale_values = stale_buffer.view(0U, count);
+  for (std::size_t index = 0; index < count; ++index) {
+    stale_values[index] = static_cast<double>(index + 1U);
+  }
+  auto stale_metadata = ExecutionTestAccess::metadata(stale_values);
+  if (world.rank() == world.size() - 1) {
+    ++stale_metadata.epoch;
+  }
+  const auto one_rank_stale =
+      ExecutionTestAccess::const_view(stale_buffer, stale_metadata);
+  const DotProductPair stale_pair{one_rank_stale, b};
+  const auto before_stale = world.fp64_reduction_counters();
+  expect_error_containing(
+      [&] {
+        operations.dot_batch(&stale_pair, 1U,
+                             results_buffer.view(0U, 1U), world);
+      },
+      "finite");
+  check_counter_delta(before_stale, world.fp64_reduction_counters(), 1U, 1U,
+                      sizeof(double));
 }
 
 }  // namespace
@@ -408,6 +490,7 @@ int main(int argc, char** argv) {
   return hundun::test::run([&] {
     test_runtime_reductions(world);
     test_counter_overflow_and_moves(world);
+    test_failed_allreduce_attempt_is_counted(world);
     test_global_norm(world);
     test_dot_batch(world);
   });
