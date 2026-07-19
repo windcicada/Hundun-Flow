@@ -50,6 +50,7 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr Int3 kExtent{7, 5, 4};
 constexpr Int3 kSeamExtent{1, 5, 4};
 constexpr Int3 kMixedScaleExtent{1, 2, 2};
+constexpr Int3 kClosureScaleExtent{4, 1, 1};
 constexpr Real3 kOrigin{-1.25, 0.375, 2.5};
 constexpr Real3 kLength{2.75, 1.625, 4.5};
 constexpr Real3 kAmplitude{0.02, -0.015, 0.01};
@@ -680,6 +681,127 @@ void test_mixed_scale_geometry(const MpiContext& context) {
   }
 }
 
+void check_scaled_closure(const MeshTopology& topology,
+                          const MeshGeometry& geometry,
+                          LocalCellId local) {
+  const Real3 closure = geometry.cell_closure_m2(local);
+  HUNDUN_CHECK(std::isfinite(closure.x));
+  HUNDUN_CHECK(std::isfinite(closure.y));
+  HUNDUN_CHECK(std::isfinite(closure.z));
+
+  std::array<double, 6> areas{};
+  double scale = 0.0;
+  std::size_t index = 0;
+  for (const auto logical : cell_faces(topology.global_cell(local))) {
+    const auto face =
+        topology.find_local_face(topology.global_face_id(logical));
+    HUNDUN_CHECK(face.has_value());
+    const double area = geometry.face_area_m2(*face);
+    HUNDUN_CHECK(std::isfinite(area));
+    HUNDUN_CHECK(area > 0.0);
+    areas[index++] = area;
+    scale = std::max(scale, area);
+  }
+  HUNDUN_CHECK(index == areas.size());
+  HUNDUN_CHECK(std::isfinite(scale));
+  HUNDUN_CHECK(scale > 0.0);
+
+  double scaled_sum = 0.0;
+  for (const double area : areas) {
+    scaled_sum += area / scale;
+  }
+  const Real3 scaled_closure{closure.x / scale, closure.y / scale,
+                             closure.z / scale};
+  HUNDUN_CHECK(std::isfinite(scaled_sum));
+  HUNDUN_CHECK(scaled_sum > 0.0);
+  HUNDUN_CHECK(std::isfinite(norm(scaled_closure)));
+  HUNDUN_CHECK(norm(scaled_closure) <=
+               256.0 * std::numeric_limits<double>::epsilon() * scaled_sum);
+}
+
+void check_anisotropic_metrics(const MeshTopology& topology,
+                               const MeshGeometry& geometry) {
+  for (LocalCellId local = 0; local < topology.local_cell_count(); ++local) {
+    const Real3 center = geometry.cell_center_m(local);
+    HUNDUN_CHECK(std::isfinite(center.x));
+    HUNDUN_CHECK(std::isfinite(center.y));
+    HUNDUN_CHECK(std::isfinite(center.z));
+    HUNDUN_CHECK(std::isfinite(geometry.cell_volume_m3(local)));
+    HUNDUN_CHECK(geometry.cell_volume_m3(local) > 0.0);
+    HUNDUN_CHECK(
+        std::isfinite(geometry.minimum_jacobian_determinant_m3(local)));
+    HUNDUN_CHECK(geometry.minimum_jacobian_determinant_m3(local) > 0.0);
+  }
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    const Real3 center = geometry.face_center_m(face);
+    HUNDUN_CHECK(std::isfinite(center.x));
+    HUNDUN_CHECK(std::isfinite(center.y));
+    HUNDUN_CHECK(std::isfinite(center.z));
+    HUNDUN_CHECK(std::isfinite(geometry.face_area_m2(face)));
+    HUNDUN_CHECK(geometry.face_area_m2(face) > 0.0);
+    HUNDUN_CHECK(std::isfinite(geometry.face_skewness(face)));
+    HUNDUN_CHECK(geometry.face_skewness(face) >= 0.0);
+    HUNDUN_CHECK(
+        std::isfinite(geometry.face_non_orthogonality_degrees(face)));
+    HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) >= 0.0);
+    HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) < 90.0);
+  }
+  for (LocalCellId local = 0; local < topology.owned_cell_count(); ++local) {
+    check_scaled_closure(topology, geometry, local);
+  }
+}
+
+void test_closure_scale_geometry(const MpiContext& context) {
+  constexpr Real3 origin{0.0, 0.0, 0.0};
+  constexpr Real3 length{1.0e-300, 1.0e154, 1.0e154};
+  const DecompositionOptions options{Int3{context.size(), 1, 1}};
+  auto decomposition = StructuredDecomposition::create(
+      context, kClosureScaleExtent, {false, false, false}, options);
+  MeshTopology topology(decomposition);
+  const UniformStructuredMesh legacy(kClosureScaleExtent, origin, length,
+                                     decomposition);
+  MeshGeometry uniform(topology, UniformBoxMapping(origin, length));
+  MeshGeometry analytic(
+      topology, AnalyticWarpedBoxMapping(origin, length, {0.0, 0.0, 0.0}));
+
+  HUNDUN_CHECK(std::isfinite(legacy.cell_volume_m3()));
+  HUNDUN_CHECK(legacy.cell_volume_m3() > 0.0);
+  HUNDUN_CHECK(bitwise_equal(*uniform.uniform_spacing_m(), legacy.spacing_m()));
+  for (LocalCellId local = 0; local < topology.owned_cell_count(); ++local) {
+    const Int3 global = topology.global_cell(local);
+    const Box3 box = topology.owned_global_box();
+    const Int3 legacy_local{global.x - box.begin.x, global.y - box.begin.y,
+                            global.z - box.begin.z};
+    HUNDUN_CHECK(bitwise_equal(uniform.cell_center_m(local),
+                               legacy.cell_center(legacy_local)));
+    HUNDUN_CHECK(bits(uniform.cell_volume_m3(local)) ==
+                 bits(legacy.cell_volume_m3()));
+
+    const auto faces = cell_faces(global);
+    const auto x_min =
+        topology.find_local_face(topology.global_face_id(faces[0]));
+    const auto x_max =
+        topology.find_local_face(topology.global_face_id(faces[1]));
+    HUNDUN_CHECK(x_min.has_value());
+    HUNDUN_CHECK(x_max.has_value());
+    const double first = uniform.face_area_m2(*x_min);
+    const double second = uniform.face_area_m2(*x_max);
+    HUNDUN_CHECK(first > std::numeric_limits<double>::max() / 2.0);
+    HUNDUN_CHECK(second > std::numeric_limits<double>::max() / 2.0);
+    HUNDUN_CHECK(!std::isfinite(first + second));
+    const double analytic_first = analytic.face_area_m2(*x_min);
+    const double analytic_second = analytic.face_area_m2(*x_max);
+    HUNDUN_CHECK(analytic_first >
+                 std::numeric_limits<double>::max() / 2.0);
+    HUNDUN_CHECK(analytic_second >
+                 std::numeric_limits<double>::max() / 2.0);
+    HUNDUN_CHECK(!std::isfinite(analytic_first + analytic_second));
+  }
+
+  check_anisotropic_metrics(topology, uniform);
+  check_anisotropic_metrics(topology, analytic);
+}
+
 void test_invalid_geometry_queries(const MeshTopology& topology,
                                    const MeshGeometry& geometry) {
   expect_error([&] {
@@ -742,6 +864,7 @@ void run_mpi_tests(const MpiContext& context,
 
   test_extent_one_periodic_seam(context, detached);
   test_mixed_scale_geometry(context);
+  test_closure_scale_geometry(context);
   context.barrier();
 }
 

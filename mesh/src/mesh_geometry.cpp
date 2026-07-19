@@ -665,7 +665,9 @@ struct MeshGeometry::Impl {
 
     for (LocalCellId local = 0; local < owned_cell_count; ++local) {
       runtime::Real3 closure{};
-      double area_sum = 0.0;
+      std::array<double, 6> area_magnitudes{};
+      double area_scale = 0.0;
+      std::size_t area_index = 0;
       for (const auto logical : cell_faces(cell_identity[local].global_cell)) {
         const auto face =
             topology.find_local_face(topology.global_face_id(logical));
@@ -683,12 +685,43 @@ struct MeshGeometry::Impl {
           throw runtime::Error("owned cell face connectivity is inconsistent");
         }
         closure = add(closure, outward);
-        area_sum += norm(outward);
+        const double area = faces[*face].area;
+        if (!std::isfinite(area) || area <= 0.0 ||
+            area_index >= area_magnitudes.size()) {
+          throw runtime::Error("mesh cell face area is invalid");
+        }
+        area_magnitudes[area_index++] = area;
+        area_scale = std::max(area_scale, area);
       }
-      if (!finite(closure) || !std::isfinite(area_sum) || area_sum <= 0.0 ||
-          norm(closure) > kClosureFactor *
-                              std::numeric_limits<double>::epsilon() *
-                              area_sum) {
+      if (!finite(closure) || area_index != area_magnitudes.size() ||
+          !std::isfinite(area_scale) || area_scale <= 0.0) {
+        throw runtime::Error("mesh cell face-area closure check failed");
+      }
+
+      double scaled_area_sum = 0.0;
+      for (const double area : area_magnitudes) {
+        const double normalized_area = area / area_scale;
+        // A positive area may underflow relative to an extreme finite scale;
+        // zero then has no representable contribution to the scaled sum.
+        if (!std::isfinite(normalized_area) || normalized_area < 0.0) {
+          throw runtime::Error("mesh cell scaled face area is invalid");
+        }
+        scaled_area_sum += normalized_area;
+        if (!std::isfinite(scaled_area_sum) || scaled_area_sum < 0.0) {
+          throw runtime::Error("mesh cell scaled face-area sum is invalid");
+        }
+      }
+      if (scaled_area_sum <= 0.0) {
+        throw runtime::Error("mesh cell scaled face-area sum is invalid");
+      }
+      const runtime::Real3 scaled_closure{
+          closure.x / area_scale, closure.y / area_scale,
+          closure.z / area_scale};
+      const double scaled_closure_norm = norm(scaled_closure);
+      if (!finite(scaled_closure) || !std::isfinite(scaled_closure_norm) ||
+          scaled_closure_norm > kClosureFactor *
+                                    std::numeric_limits<double>::epsilon() *
+                                    scaled_area_sum) {
         throw runtime::Error("mesh cell face-area closure check failed");
       }
       cells[local].closure = closure;
