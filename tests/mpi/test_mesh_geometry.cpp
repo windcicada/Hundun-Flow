@@ -46,7 +46,8 @@ using hundun::runtime::Real3;
 using hundun::runtime::StructuredDecomposition;
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
-constexpr Int3 kExtent{1, 5, 4};
+constexpr Int3 kExtent{7, 5, 4};
+constexpr Int3 kSeamExtent{1, 5, 4};
 constexpr Real3 kOrigin{-1.25, 0.375, 2.5};
 constexpr Real3 kLength{2.75, 1.625, 4.5};
 constexpr Real3 kAmplitude{0.02, -0.015, 0.01};
@@ -65,6 +66,14 @@ bool same(Box3 lhs, Box3 rhs) {
 
 Real3 subtract(Real3 lhs, Real3 rhs) {
   return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
+}
+
+Real3 add(Real3 lhs, Real3 rhs) {
+  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
+}
+
+Real3 multiply(Real3 value, double factor) {
+  return {value.x * factor, value.y * factor, value.z * factor};
 }
 
 double dot(Real3 lhs, Real3 rhs) {
@@ -200,6 +209,15 @@ Real3 oracle_vertex(Int3 vertex) {
        static_cast<double>(vertex.z) / static_cast<double>(kExtent.z)});
 }
 
+Real3 affine_vertex(Int3 vertex) {
+  return {kOrigin.x + kLength.x * static_cast<double>(vertex.x) /
+                          static_cast<double>(kExtent.x),
+          kOrigin.y + kLength.y * static_cast<double>(vertex.y) /
+                          static_cast<double>(kExtent.y),
+          kOrigin.z + kLength.z * static_cast<double>(vertex.z) /
+                          static_cast<double>(kExtent.z)};
+}
+
 bool oracle_minimum_face(LogicalFace face) {
   switch (face.axis) {
     case FaceAxis::x:
@@ -235,6 +253,99 @@ std::pair<Real3, Real3> oracle_face_geometry(LogicalFace face) {
     area = {-area.x, -area.y, -area.z};
   }
   return {center, area};
+}
+
+struct OracleCellGeometry {
+  Real3 center{};
+  double volume{};
+};
+
+OracleCellGeometry oracle_warped_cell(Int3 cell) {
+  const std::array<Int3, 8> coordinates{
+      Int3{cell.x, cell.y, cell.z},
+      Int3{cell.x + 1, cell.y, cell.z},
+      Int3{cell.x + 1, cell.y + 1, cell.z},
+      Int3{cell.x, cell.y + 1, cell.z},
+      Int3{cell.x, cell.y, cell.z + 1},
+      Int3{cell.x + 1, cell.y, cell.z + 1},
+      Int3{cell.x + 1, cell.y + 1, cell.z + 1},
+      Int3{cell.x, cell.y + 1, cell.z + 1}};
+  std::array<Real3, 8> vertices{};
+  Real3 reference{};
+  for (std::size_t index = 0; index < vertices.size(); ++index) {
+    vertices[index] = oracle_vertex(coordinates[index]);
+    reference = add(reference, vertices[index]);
+  }
+  reference = multiply(reference, 0.125);
+
+  // These outward quads are derived directly from the frozen face orders.
+  // Minimum faces are reversed while retaining the fixed v0-v2 diagonal.
+  constexpr std::array<std::array<std::size_t, 4>, 6> quads{
+      std::array<std::size_t, 4>{0, 4, 7, 3},
+      std::array<std::size_t, 4>{1, 2, 6, 5},
+      std::array<std::size_t, 4>{0, 1, 5, 4},
+      std::array<std::size_t, 4>{3, 7, 6, 2},
+      std::array<std::size_t, 4>{0, 3, 2, 1},
+      std::array<std::size_t, 4>{4, 5, 6, 7}};
+
+  double volume = 0.0;
+  Real3 first_moment{};
+  const auto add_triangle = [&](Real3 a, Real3 b, Real3 c) {
+    const double signed_volume =
+        dot(subtract(a, reference),
+            cross(subtract(b, reference), subtract(c, reference))) /
+        6.0;
+    const Real3 tetra_center =
+        multiply(add(add(add(reference, a), b), c), 0.25);
+    volume += signed_volume;
+    first_moment = add(first_moment, multiply(tetra_center, signed_volume));
+  };
+  for (const auto quad : quads) {
+    add_triangle(vertices[quad[0]], vertices[quad[1]], vertices[quad[2]]);
+    add_triangle(vertices[quad[0]], vertices[quad[2]], vertices[quad[3]]);
+  }
+  HUNDUN_CHECK(std::isfinite(volume));
+  HUNDUN_CHECK(volume > 0.0);
+  return {multiply(first_moment, 1.0 / volume), volume};
+}
+
+double oracle_minimum_sampled_jacobian(Int3 cell) {
+  double minimum = std::numeric_limits<double>::infinity();
+  const auto sample = [&](double x, double y, double z) {
+    const Real3 logical{
+        (static_cast<double>(cell.x) + x) /
+            static_cast<double>(kExtent.x),
+        (static_cast<double>(cell.y) + y) /
+            static_cast<double>(kExtent.y),
+        (static_cast<double>(cell.z) + z) /
+            static_cast<double>(kExtent.z)};
+    const auto jacobian = oracle_jacobian(logical);
+    minimum = std::min(
+        minimum,
+        dot(jacobian.d_xi_m, cross(jacobian.d_eta_m, jacobian.d_zeta_m)));
+  };
+  for (int z = 0; z <= 1; ++z) {
+    for (int y = 0; y <= 1; ++y) {
+      for (int x = 0; x <= 1; ++x) {
+        sample(static_cast<double>(x), static_cast<double>(y),
+               static_cast<double>(z));
+      }
+    }
+  }
+  sample(0.5, 0.5, 0.5);
+  const double offset = 1.0 / (2.0 * std::sqrt(3.0));
+  for (int z = -1; z <= 1; z += 2) {
+    for (int y = -1; y <= 1; y += 2) {
+      for (int x = -1; x <= 1; x += 2) {
+        sample(0.5 + static_cast<double>(x) * offset,
+               0.5 + static_cast<double>(y) * offset,
+               0.5 + static_cast<double>(z) * offset);
+      }
+    }
+  }
+  HUNDUN_CHECK(std::isfinite(minimum));
+  HUNDUN_CHECK(minimum > 0.0);
+  return minimum;
 }
 
 void test_mapping_formulas() {
@@ -307,7 +418,7 @@ void test_uniform_adapter(const StructuredDecomposition& decomposition,
   HUNDUN_CHECK(!topology.patch(0U).local_faces().empty());
   const LocalFaceId x_min = topology.patch(0U).local_faces().front();
   HUNDUN_CHECK(topology.neighbour(x_min).has_value());
-  HUNDUN_CHECK(topology.owner(x_min) == *topology.neighbour(x_min));
+  HUNDUN_CHECK(topology.owner(x_min) != *topology.neighbour(x_min));
   HUNDUN_CHECK(geometry.face_area_vector_m2(x_min, FaceSide::owner).x < 0.0);
 }
 
@@ -372,6 +483,51 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
                             const MeshGeometry& geometry) {
   HUNDUN_CHECK(geometry.mapping_kind() == MappingKind::analytic_warped_box);
   HUNDUN_CHECK(!geometry.uniform_spacing_m().has_value());
+
+  int local_curved_vertex = 0;
+  for (int k = 1; k < kExtent.z; ++k) {
+    for (int j = 1; j < kExtent.y; ++j) {
+      for (int i = 1; i < kExtent.x; ++i) {
+        if (norm(subtract(geometry.vertex_position_m({i, j, k}),
+                          affine_vertex({i, j, k}))) > 1.0e-12) {
+          local_curved_vertex = 1;
+        }
+      }
+    }
+  }
+  int global_curved_vertex = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_curved_vertex, &global_curved_vertex, 1,
+                             MPI_INT, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_curved_vertex == 1);
+
+  int local_curved_cell = 0;
+  for (LocalCellId local = 0; local < topology.local_cell_count(); ++local) {
+    const Int3 global = topology.global_cell(local);
+    const auto expected = oracle_warped_cell(global);
+    check_near(geometry.cell_center_m(local), expected.center, 512.0);
+    check_near(geometry.cell_volume_m3(local), expected.volume, 512.0);
+    check_near(geometry.minimum_jacobian_determinant_m3(local),
+               oracle_minimum_sampled_jacobian(global), 256.0);
+
+    const Real3 affine_center{
+        kOrigin.x +
+            (static_cast<double>(global.x) + 0.5) * kLength.x /
+                static_cast<double>(kExtent.x),
+        kOrigin.y +
+            (static_cast<double>(global.y) + 0.5) * kLength.y /
+                static_cast<double>(kExtent.y),
+        kOrigin.z +
+            (static_cast<double>(global.z) + 0.5) * kLength.z /
+                static_cast<double>(kExtent.z)};
+    if (norm(subtract(expected.center, affine_center)) > 1.0e-12) {
+      local_curved_cell = 1;
+    }
+  }
+  int global_curved_cell = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_curved_cell, &global_curved_cell, 1,
+                             MPI_INT, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_curved_cell == 1);
+
   double local_volume = 0.0;
   for (LocalCellId local = 0; local < topology.owned_cell_count(); ++local) {
     HUNDUN_CHECK(geometry.cell_volume_m3(local) > 0.0);
@@ -402,6 +558,7 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
   HUNDUN_CHECK(std::abs(global_volume - box_volume) <=
                1024.0 * std::numeric_limits<double>::epsilon() * box_volume);
 
+  int local_curved_metric = 0;
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
     const auto expected = oracle_face_geometry(topology.logical_face(face));
     check_near(geometry.face_center_m(face), expected.first, 256.0);
@@ -412,6 +569,10 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
     HUNDUN_CHECK(std::isfinite(geometry.face_non_orthogonality_degrees(face)));
     HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) >= 0.0);
     HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) < 90.0);
+    if (geometry.face_skewness(face) > 1.0e-12 ||
+        geometry.face_non_orthogonality_degrees(face) > 1.0e-10) {
+      local_curved_metric = 1;
+    }
     if (topology.neighbour(face).has_value()) {
       const Real3 owner = geometry.face_area_vector_m2(face, FaceSide::owner);
       const Real3 neighbour =
@@ -427,7 +588,51 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
       });
     }
   }
+  int global_curved_metric = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_curved_metric, &global_curved_metric, 1,
+                             MPI_INT, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_curved_metric == 1);
   test_duplicate_face_bits(mpi, topology, geometry);
+}
+
+void test_extent_one_periodic_seam(const MpiContext& context,
+                                   std::optional<MeshGeometry>& detached) {
+  const DecompositionOptions options{process_grid_for(context.size())};
+  auto decomposition = StructuredDecomposition::create(
+      context, kSeamExtent, kPeriodic, options);
+  MeshTopology topology(decomposition);
+
+  MeshGeometry uniform(topology, UniformBoxMapping(kOrigin, kLength));
+  HUNDUN_CHECK(uniform.compatible(topology));
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    HUNDUN_CHECK(uniform.face_skewness(face) == 0.0);
+    HUNDUN_CHECK(uniform.face_non_orthogonality_degrees(face) == 0.0);
+  }
+
+  detached.emplace(topology,
+                   AnalyticWarpedBoxMapping(kOrigin, kLength, kAmplitude));
+  HUNDUN_CHECK(detached->compatible(topology));
+  HUNDUN_CHECK(!topology.patch(0U).local_faces().empty());
+  const LocalFaceId x_min = topology.patch(0U).local_faces().front();
+  HUNDUN_CHECK(topology.neighbour(x_min).has_value());
+  HUNDUN_CHECK(topology.owner(x_min) == *topology.neighbour(x_min));
+  const Real3 owner =
+      detached->face_area_vector_m2(x_min, FaceSide::owner);
+  const Real3 neighbour =
+      detached->face_area_vector_m2(x_min, FaceSide::neighbour);
+  HUNDUN_CHECK(owner.x < 0.0);
+  HUNDUN_CHECK(bits(neighbour.x) == bits(-owner.x));
+  HUNDUN_CHECK(bits(neighbour.y) == bits(-owner.y));
+  HUNDUN_CHECK(bits(neighbour.z) == bits(-owner.z));
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    HUNDUN_CHECK(std::isfinite(detached->face_skewness(face)));
+    HUNDUN_CHECK(detached->face_skewness(face) >= 0.0);
+    HUNDUN_CHECK(
+        std::isfinite(detached->face_non_orthogonality_degrees(face)));
+    HUNDUN_CHECK(detached->face_non_orthogonality_degrees(face) >= 0.0);
+    HUNDUN_CHECK(detached->face_non_orthogonality_degrees(face) < 90.0);
+  }
+  context.barrier();
 }
 
 void test_invalid_geometry_queries(const MeshTopology& topology,
@@ -490,8 +695,7 @@ void run_mpi_tests(const MpiContext& context,
     static_cast<void>(invalid);
   });
 
-  detached.emplace(topology,
-                   AnalyticWarpedBoxMapping(kOrigin, kLength, kAmplitude));
+  test_extent_one_periodic_seam(context, detached);
   context.barrier();
 }
 
