@@ -42,7 +42,9 @@ set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(yyjson PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/yyjson>")
 
-add_library(hundun_config STATIC config/src/case_config_loader.cpp)
+add_library(hundun_config STATIC
+  config/src/case_config_loader.cpp
+  config/src/resolved_case_loader.cpp)
 target_include_directories(hundun_config PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/config/include>"
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
@@ -108,7 +110,9 @@ target_link_libraries(hundun_solver
   PRIVATE hundun_options hundun_warnings
   PUBLIC hundun_mesh hundun_runtime)
 
-add_executable(hundun applications/hundun/main.cpp)
+add_executable(hundun
+  applications/hundun/main.cpp
+  applications/hundun/stage1_driver.cpp)
 target_include_directories(hundun PRIVATE "${PROJECT_SOURCE_DIR}")
 target_link_libraries(hundun PRIVATE
   hundun_application
@@ -291,6 +295,10 @@ if(HUNDUN_BUILD_TESTS)
   hundun_add_test(test_case_config tests/unit/test_case_config.cpp)
   target_include_directories(test_case_config PRIVATE "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_case_config PRIVATE hundun_config)
+
+  hundun_add_test(test_resolved_case tests/unit/test_resolved_case.cpp)
+  target_include_directories(test_resolved_case PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_resolved_case PRIVATE hundun_config)
 
   hundun_add_test(test_process_grid
     tests/unit/test_process_grid.cpp
@@ -516,6 +524,42 @@ if(HUNDUN_BUILD_TESTS)
             finalized ${MPIEXEC_POSTFLAGS})
   set_tests_properties(test_case_config_broadcast_finalized PROPERTIES
     LABELS mpi TIMEOUT 20 PROCESSORS 1)
+
+  add_executable(test_resolved_case_broadcast
+    tests/mpi/test_resolved_case_broadcast.cpp)
+  target_include_directories(test_resolved_case_broadcast PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_resolved_case_broadcast PRIVATE
+    hundun_application hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(resolved_broadcast_test
+      "test_resolved_case_broadcast_${ranks}_rank")
+    add_test(NAME "${resolved_broadcast_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_resolved_case_broadcast>"
+              full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${resolved_broadcast_test}" PROPERTIES
+      LABELS mpi TIMEOUT 45 PROCESSORS "${ranks}")
+  endforeach()
+  add_test(NAME test_resolved_case_broadcast_errors
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_resolved_case_broadcast>"
+            errors ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_resolved_case_broadcast_errors PROPERTIES
+    LABELS mpi TIMEOUT 45 PROCESSORS 4)
+  add_test(NAME test_resolved_case_broadcast_finalized
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_resolved_case_broadcast>"
+            finalized ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_resolved_case_broadcast_finalized PROPERTIES
+    LABELS mpi TIMEOUT 20 PROCESSORS 1)
+
+  add_test(NAME test_stage2_task2_dispatch
+    COMMAND bash
+            "${PROJECT_SOURCE_DIR}/tests/acceptance/stage2_task2_dispatch.sh"
+            "$<TARGET_FILE:hundun>")
+  set_tests_properties(test_stage2_task2_dispatch PROPERTIES
+    LABELS acceptance TIMEOUT 30 PROCESSORS 1)
 
   add_executable(compare_scalar_vtk
     tests/acceptance/compare_scalar_vtk.cpp)

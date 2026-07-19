@@ -38,6 +38,16 @@
         "HUNDUN_BUILD_TESTS": "ON",
         "HUNDUN_ENABLE_ASAN": "ON"
       }
+    },
+    {
+      "name": "ubsan",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "HUNDUN_BUILD_TESTS": "ON",
+        "HUNDUN_ENABLE_UBSAN": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -52,6 +62,10 @@
     {
       "name": "asan",
       "configurePreset": "asan"
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan"
     }
   ],
   "testPresets": [
@@ -72,6 +86,13 @@
     {
       "name": "asan",
       "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan",
       "output": {
         "outputOnFailure": true
       }
