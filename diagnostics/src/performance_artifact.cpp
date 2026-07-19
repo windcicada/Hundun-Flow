@@ -128,8 +128,70 @@ const char *status_name(ComparisonStatus status) {
   throw std::invalid_argument("invalid comparison status");
 }
 
+bool is_utf8_continuation(unsigned char byte) {
+  return (byte & 0xc0U) == 0x80U;
+}
+
+void validate_utf8(std::string_view value) {
+  std::size_t index = 0U;
+  while (index < value.size()) {
+    const auto leading = static_cast<unsigned char>(value[index]);
+    if (leading <= 0x7fU) {
+      ++index;
+      continue;
+    }
+
+    if (leading >= 0xc2U && leading <= 0xdfU) {
+      if (value.size() - index < 2U ||
+          !is_utf8_continuation(
+              static_cast<unsigned char>(value[index + 1U]))) {
+        throw std::invalid_argument("JSON strings must contain valid UTF-8");
+      }
+      index += 2U;
+      continue;
+    }
+
+    if (leading >= 0xe0U && leading <= 0xefU) {
+      if (value.size() - index < 3U) {
+        throw std::invalid_argument("JSON strings must contain valid UTF-8");
+      }
+      const auto second = static_cast<unsigned char>(value[index + 1U]);
+      const auto third = static_cast<unsigned char>(value[index + 2U]);
+      const bool valid_second = is_utf8_continuation(second) &&
+                                (leading != 0xe0U || second >= 0xa0U) &&
+                                (leading != 0xedU || second <= 0x9fU);
+      if (!valid_second || !is_utf8_continuation(third)) {
+        throw std::invalid_argument("JSON strings must contain valid UTF-8");
+      }
+      index += 3U;
+      continue;
+    }
+
+    if (leading >= 0xf0U && leading <= 0xf4U) {
+      if (value.size() - index < 4U) {
+        throw std::invalid_argument("JSON strings must contain valid UTF-8");
+      }
+      const auto second = static_cast<unsigned char>(value[index + 1U]);
+      const auto third = static_cast<unsigned char>(value[index + 2U]);
+      const auto fourth = static_cast<unsigned char>(value[index + 3U]);
+      const bool valid_second = is_utf8_continuation(second) &&
+                                (leading != 0xf0U || second >= 0x90U) &&
+                                (leading != 0xf4U || second <= 0x8fU);
+      if (!valid_second || !is_utf8_continuation(third) ||
+          !is_utf8_continuation(fourth)) {
+        throw std::invalid_argument("JSON strings must contain valid UTF-8");
+      }
+      index += 4U;
+      continue;
+    }
+
+    throw std::invalid_argument("JSON strings must contain valid UTF-8");
+  }
+}
+
 void append_json_string(std::string &output, std::string_view value) {
   constexpr char hexadecimal[] = "0123456789abcdef";
+  validate_utf8(value);
   output.push_back('"');
   for (const char source_character : value) {
     const auto character = static_cast<unsigned char>(source_character);

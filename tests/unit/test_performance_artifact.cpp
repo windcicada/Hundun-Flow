@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,19 @@ using hundun::diagnostics::ComparisonStatus;
 using hundun::diagnostics::CompatibilityMetadata;
 using hundun::diagnostics::ProcessGrid;
 using hundun::diagnostics::RawSample;
+
+void check_finite_near(double actual, double expected, double tolerance,
+                       const char *file, int line) {
+  if (!std::isfinite(actual) || !std::isfinite(expected) ||
+      !std::isfinite(tolerance) || tolerance < 0.0 ||
+      std::abs(actual - expected) > tolerance) {
+    throw std::runtime_error(std::string(file) + ":" + std::to_string(line) +
+                             " finite numerical check failed");
+  }
+}
+
+#define HUNDUN_CHECK_FINITE_NEAR(actual, expected, tolerance)                  \
+  check_finite_near((actual), (expected), (tolerance), __FILE__, __LINE__)
 
 template <class Function> void expect_invalid(Function &&function) {
   bool rejected = false;
@@ -90,6 +104,27 @@ yyjson_val *required(yyjson_val *object, const char *key) {
   return value;
 }
 
+std::string byte_string(std::initializer_list<unsigned int> bytes) {
+  std::string value;
+  value.reserve(bytes.size());
+  for (const unsigned int byte : bytes) {
+    HUNDUN_CHECK(byte <= 0xffU);
+    value.push_back(static_cast<char>(byte));
+  }
+  return value;
+}
+
+void test_finite_aware_comparison() {
+  bool rejected = false;
+  try {
+    HUNDUN_CHECK_FINITE_NEAR(std::numeric_limits<double>::quiet_NaN(), 0.0,
+                             0.0);
+  } catch (const std::runtime_error &) {
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
+}
+
 void test_elapsed_phase_measurement() {
   std::vector<double> times{10.0, 10.25};
   std::size_t next = 0;
@@ -97,7 +132,7 @@ void test_elapsed_phase_measurement() {
   const double elapsed = hundun::diagnostics::measure_elapsed_phase(
       [&] { return times.at(next++); }, [&] { phase_called = true; });
   HUNDUN_CHECK(phase_called);
-  HUNDUN_CHECK_NEAR(elapsed, 0.25, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(elapsed, 0.25, 0.0);
 
   expect_invalid([] {
     std::vector<double> backwards{2.0, 1.0};
@@ -144,20 +179,20 @@ void test_aggregation_and_medians() {
   HUNDUN_CHECK(changing_slowest.repetition_maxima.size() == 2U);
   HUNDUN_CHECK(changing_slowest.repetition_maxima[0].slowest_relative_rank ==
                1);
-  HUNDUN_CHECK_NEAR(changing_slowest.repetition_maxima[0].step_seconds, 3.0,
-                    0.0);
+  HUNDUN_CHECK_FINITE_NEAR(changing_slowest.repetition_maxima[0].step_seconds,
+                           3.0, 0.0);
   HUNDUN_CHECK(changing_slowest.repetition_maxima[1].slowest_relative_rank ==
                2);
-  HUNDUN_CHECK_NEAR(changing_slowest.repetition_maxima[1].step_seconds, 5.0,
-                    0.0);
-  HUNDUN_CHECK_NEAR(changing_slowest.median_step_seconds, 4.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(changing_slowest.repetition_maxima[1].step_seconds,
+                           5.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(changing_slowest.median_step_seconds, 4.0, 0.0);
 
   const auto odd = hundun::diagnostics::aggregate_samples(
       {{0, 0, 9.0, 1}, {1, 0, 1.0, 1}, {2, 0, 5.0, 1}}, 3, 1);
-  HUNDUN_CHECK_NEAR(odd.median_step_seconds, 5.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(odd.median_step_seconds, 5.0, 0.0);
   const auto even = hundun::diagnostics::aggregate_samples(
       {{0, 0, 1.0, 1}, {1, 0, 9.0, 1}, {2, 0, 3.0, 1}, {3, 0, 7.0, 1}}, 4, 1);
-  HUNDUN_CHECK_NEAR(even.median_step_seconds, 5.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(even.median_step_seconds, 5.0, 0.0);
 }
 
 void test_invalid_aggregation_inputs() {
@@ -295,12 +330,12 @@ void test_compatibility_keys_and_scaling_rules() {
 }
 
 void test_scaling_formulas() {
-  HUNDUN_CHECK_NEAR(hundun::diagnostics::strong_scaling_speedup(8.0, 2.0), 4.0,
-                    0.0);
-  HUNDUN_CHECK_NEAR(hundun::diagnostics::strong_scaling_efficiency(8.0, 2.0, 4),
-                    1.0, 0.0);
-  HUNDUN_CHECK_NEAR(hundun::diagnostics::weak_scaling_efficiency(8.0, 10.0),
-                    0.8, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(
+      hundun::diagnostics::strong_scaling_speedup(8.0, 2.0), 4.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(
+      hundun::diagnostics::strong_scaling_efficiency(8.0, 2.0, 4), 1.0, 0.0);
+  HUNDUN_CHECK_FINITE_NEAR(
+      hundun::diagnostics::weak_scaling_efficiency(8.0, 10.0), 0.8, 0.0);
   for (const double invalid :
        {0.0, -1.0, std::numeric_limits<double>::infinity(),
         std::numeric_limits<double>::quiet_NaN()}) {
@@ -325,6 +360,45 @@ void test_scaling_formulas() {
     static_cast<void>(
         hundun::diagnostics::strong_scaling_efficiency(1.0, 1.0, 0));
   });
+}
+
+void test_json_utf8_contract() {
+  const std::string valid_multibyte = u8"节点🔥";
+  Artifact artifact = make_artifact();
+  artifact.metadata.compatibility.node_identity = valid_multibyte;
+  artifact.counters.allocated_bytes[valid_multibyte] = 7U;
+  const std::string encoded = hundun::diagnostics::to_json(artifact);
+  yyjson_doc *document = yyjson_read(encoded.data(), encoded.size(), 0);
+  HUNDUN_CHECK(document != nullptr);
+  yyjson_val *root = yyjson_doc_get_root(document);
+  HUNDUN_CHECK(std::string(yyjson_get_str(required(root, "node_identity"))) ==
+               valid_multibyte);
+  yyjson_val *allocated =
+      required(required(root, "exact_counters"), "allocated_bytes");
+  yyjson_val *multibyte_counter =
+      yyjson_obj_get(allocated, valid_multibyte.c_str());
+  HUNDUN_CHECK(multibyte_counter != nullptr);
+  HUNDUN_CHECK(yyjson_get_uint(multibyte_counter) == 7U);
+  yyjson_doc_free(document);
+
+  const std::vector<std::string> malformed{
+      byte_string({0x80U}),                      // Isolated continuation.
+      byte_string({0xe2U, 0x82U}),               // Truncated sequence.
+      byte_string({0xc0U, 0xafU}),               // Overlong encoding.
+      byte_string({0xedU, 0xa0U, 0x80U}),        // UTF-16 surrogate.
+      byte_string({0xf4U, 0x90U, 0x80U, 0x80U}), // Above U+10FFFF.
+  };
+  for (const std::string &invalid_utf8 : malformed) {
+    artifact = make_artifact();
+    artifact.metadata.compatibility.node_identity = invalid_utf8;
+    expect_invalid(
+        [&] { static_cast<void>(hundun::diagnostics::to_json(artifact)); });
+
+    artifact = make_artifact();
+    artifact.counters.allocated_bytes[invalid_utf8] = 1U;
+    expect_invalid(
+        [&] { static_cast<void>(hundun::diagnostics::to_json(artifact)); });
+  }
 }
 
 void test_deterministic_json_contract() {
@@ -376,14 +450,14 @@ void test_deterministic_json_contract() {
   yyjson_val *maxima = required(root, "repetition_maxima");
   HUNDUN_CHECK(yyjson_is_arr(maxima));
   HUNDUN_CHECK(yyjson_arr_size(maxima) == 2U);
-  HUNDUN_CHECK_NEAR(
+  HUNDUN_CHECK_FINITE_NEAR(
       yyjson_get_real(required(yyjson_arr_get(maxima, 0), "step_seconds")), 2.0,
       0.0);
-  HUNDUN_CHECK_NEAR(
+  HUNDUN_CHECK_FINITE_NEAR(
       yyjson_get_real(required(yyjson_arr_get(maxima, 1), "step_seconds")), 4.0,
       0.0);
-  HUNDUN_CHECK_NEAR(yyjson_get_real(required(root, "median_step_seconds")), 3.0,
-                    0.0);
+  HUNDUN_CHECK_FINITE_NEAR(
+      yyjson_get_real(required(root, "median_step_seconds")), 3.0, 0.0);
   HUNDUN_CHECK(yyjson_is_obj(required(root, "comparison")));
   yyjson_val *counters = required(root, "exact_counters");
   HUNDUN_CHECK(yyjson_is_obj(counters));
@@ -438,11 +512,13 @@ void test_artifact_validation() {
 
 int main() {
   return hundun::test::run([] {
+    test_finite_aware_comparison();
     test_elapsed_phase_measurement();
     test_aggregation_and_medians();
     test_invalid_aggregation_inputs();
     test_compatibility_keys_and_scaling_rules();
     test_scaling_formulas();
+    test_json_utf8_contract();
     test_deterministic_json_contract();
     test_artifact_validation();
   });
