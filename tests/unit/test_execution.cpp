@@ -631,30 +631,47 @@ void test_events_and_lifetime() {
   const auto observed = ExecutionTestAccess::observe_allocation(*retained_buffer);
   auto pending = ExecutionTestAccess::pending_event({retained_buffer.get()});
   ExecutionEvent pending_copy = pending;
+  ExecutionEvent pending_waiter_copy_one = pending;
+  ExecutionEvent pending_waiter_copy_two = pending;
   HUNDUN_CHECK(!pending.ready());
   HUNDUN_CHECK(!pending_copy.ready());
-  std::atomic<bool> wait_returned{false};
-  std::exception_ptr wait_error;
-  std::thread waiter([&] {
+  HUNDUN_CHECK(!pending_waiter_copy_one.ready());
+  HUNDUN_CHECK(!pending_waiter_copy_two.ready());
+  std::atomic<bool> wait_one_returned{false};
+  std::atomic<bool> wait_two_returned{false};
+  std::exception_ptr wait_one_error;
+  std::exception_ptr wait_two_error;
+  std::thread waiter_one([&] {
     try {
-      pending.wait();
+      pending_waiter_copy_one.wait();
     } catch (...) {
-      wait_error = std::current_exception();
+      wait_one_error = std::current_exception();
     }
-    wait_returned.store(true, std::memory_order_release);
+    wait_one_returned.store(true, std::memory_order_release);
+  });
+  std::thread waiter_two([&] {
+    try {
+      pending_waiter_copy_two.wait();
+    } catch (...) {
+      wait_two_error = std::current_exception();
+    }
+    wait_two_returned.store(true, std::memory_order_release);
   });
   try {
-    ExecutionTestAccess::wait_until_waiter_count(pending_copy, 1);
+    ExecutionTestAccess::wait_until_waiter_count(pending_copy, 2);
   } catch (...) {
     if (!pending_copy.ready()) {
       ExecutionTestAccess::complete_success(pending_copy);
     }
-    waiter.join();
+    waiter_one.join();
+    waiter_two.join();
     throw;
   }
   const bool ready_before_completion = pending.ready();
-  const bool returned_before_completion =
-      wait_returned.load(std::memory_order_acquire);
+  const bool wait_one_returned_before_completion =
+      wait_one_returned.load(std::memory_order_acquire);
+  const bool wait_two_returned_before_completion =
+      wait_two_returned.load(std::memory_order_acquire);
   retained_buffer.reset();
   const bool retained_before_completion = !observed.expired();
   std::string stale_view_message;
@@ -664,18 +681,26 @@ void test_events_and_lifetime() {
     stale_view_message = error.what();
   }
   ExecutionTestAccess::complete_success(pending_copy);
-  waiter.join();
+  waiter_one.join();
+  waiter_two.join();
   HUNDUN_CHECK(!ready_before_completion);
-  HUNDUN_CHECK(!returned_before_completion);
+  HUNDUN_CHECK(!wait_one_returned_before_completion);
+  HUNDUN_CHECK(!wait_two_returned_before_completion);
   HUNDUN_CHECK(retained_before_completion);
   HUNDUN_CHECK(stale_view_message.find("live") != std::string::npos);
-  HUNDUN_CHECK(wait_returned.load(std::memory_order_acquire));
-  HUNDUN_CHECK(wait_error == nullptr);
+  HUNDUN_CHECK(wait_one_returned.load(std::memory_order_acquire));
+  HUNDUN_CHECK(wait_two_returned.load(std::memory_order_acquire));
+  HUNDUN_CHECK(wait_one_error == nullptr);
+  HUNDUN_CHECK(wait_two_error == nullptr);
   HUNDUN_CHECK(pending.ready());
   HUNDUN_CHECK(pending_copy.ready());
+  HUNDUN_CHECK(pending_waiter_copy_one.ready());
+  HUNDUN_CHECK(pending_waiter_copy_two.ready());
   HUNDUN_CHECK(observed.expired());
   pending.wait();
   pending_copy.wait();
+  pending_waiter_copy_one.wait();
+  pending_waiter_copy_two.wait();
 
   auto failed = ExecutionTestAccess::pending_event({});
   HUNDUN_CHECK(!failed.ready());

@@ -363,6 +363,7 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_execution PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_execution PRIVATE hundun_execution)
+  set_tests_properties(test_execution PROPERTIES TIMEOUT 30)
 
   add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
   target_include_directories(test_passive_scalar PRIVATE
