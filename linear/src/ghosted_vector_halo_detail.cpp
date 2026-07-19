@@ -181,6 +181,16 @@ void reset_vector_halo_test_observation() noexcept {
   test_snapshot = VectorHaloTestSnapshot{};
 }
 
+void prepare_vector_halo_test_observation(std::size_t peer_count,
+                                          std::size_t request_count) {
+  if (!test_options.observe) {
+    return;
+  }
+  test_snapshot.send_wire_identities.resize(peer_count);
+  test_snapshot.receive_wire_identities.resize(peer_count);
+  test_snapshot.post_events.resize(request_count);
+}
+
 VectorHaloTestSnapshot vector_halo_test_snapshot() { return test_snapshot; }
 
 VectorHaloTestSnapshot& mutable_vector_halo_test_snapshot() noexcept {

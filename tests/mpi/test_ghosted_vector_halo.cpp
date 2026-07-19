@@ -16,7 +16,9 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <new>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,6 +26,124 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+namespace {
+
+thread_local bool count_allocation_attempts = false;
+thread_local std::size_t allocation_attempts = 0U;
+
+void record_allocation_attempt() noexcept {
+  if (count_allocation_attempts) {
+    ++allocation_attempts;
+  }
+}
+
+void* allocate_bytes(std::size_t bytes) {
+  record_allocation_attempt();
+  if (void* pointer = std::malloc(bytes == 0U ? 1U : bytes)) {
+    return pointer;
+  }
+  throw std::bad_alloc();
+}
+
+void* allocate_aligned_bytes(std::size_t bytes, std::size_t alignment) {
+  record_allocation_attempt();
+  void* pointer = nullptr;
+  if (posix_memalign(&pointer, alignment, bytes == 0U ? 1U : bytes) == 0) {
+    return pointer;
+  }
+  throw std::bad_alloc();
+}
+
+class AllocationAttemptGuard final {
+ public:
+  AllocationAttemptGuard() noexcept {
+    allocation_attempts = 0U;
+    count_allocation_attempts = true;
+  }
+  ~AllocationAttemptGuard() noexcept { count_allocation_attempts = false; }
+  AllocationAttemptGuard(const AllocationAttemptGuard&) = delete;
+  AllocationAttemptGuard& operator=(const AllocationAttemptGuard&) = delete;
+  std::size_t attempts() const noexcept { return allocation_attempts; }
+};
+
+}  // namespace
+
+void* operator new(std::size_t bytes) { return allocate_bytes(bytes); }
+void* operator new[](std::size_t bytes) { return allocate_bytes(bytes); }
+void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+  try {
+    return allocate_bytes(bytes);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void* operator new[](std::size_t bytes, const std::nothrow_t&) noexcept {
+  try {
+    return allocate_bytes(bytes);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void* operator new(std::size_t bytes, std::align_val_t alignment) {
+  return allocate_aligned_bytes(bytes, static_cast<std::size_t>(alignment));
+}
+void* operator new[](std::size_t bytes, std::align_val_t alignment) {
+  return allocate_aligned_bytes(bytes, static_cast<std::size_t>(alignment));
+}
+void* operator new(std::size_t bytes, std::align_val_t alignment,
+                   const std::nothrow_t&) noexcept {
+  try {
+    return allocate_aligned_bytes(bytes,
+                                  static_cast<std::size_t>(alignment));
+  } catch (...) {
+    return nullptr;
+  }
+}
+void* operator new[](std::size_t bytes, std::align_val_t alignment,
+                     const std::nothrow_t&) noexcept {
+  try {
+    return allocate_aligned_bytes(bytes,
+                                  static_cast<std::size_t>(alignment));
+  } catch (...) {
+    return nullptr;
+  }
+}
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete[](void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, std::size_t,
+                       std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::align_val_t,
+                     const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, std::align_val_t,
+                       const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
 
 namespace {
 
@@ -104,6 +224,15 @@ void expect_local_error(Function&& function) {
   HUNDUN_CHECK(threw);
 }
 
+std::size_t collective_max(const MpiContext& context,
+                           std::size_t local_value) {
+  const auto local = static_cast<std::uint64_t>(local_value);
+  std::uint64_t global = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &global, 1, MPI_UINT64_T, MPI_MAX,
+                             context.comm()) == MPI_SUCCESS);
+  return static_cast<std::size_t>(global);
+}
+
 double sample(hundun::mesh::GlobalCellId id, int pattern) {
   return static_cast<double>(id) + 10000.0 * static_cast<double>(pattern);
 }
@@ -140,6 +269,50 @@ void check_ghost_sentinel(const GhostedVector& vector,
   HUNDUN_CHECK(ghosts.size() == topology.ghost_cell_count());
   for (std::size_t index = 0; index < ghosts.size(); ++index) {
     HUNDUN_CHECK_NEAR(ghosts[index], sentinel, 0.0);
+  }
+}
+
+void check_failure_diagnostic(
+    const std::string& message,
+    const hundun::linear::detail::VectorHaloTestSnapshot& snapshot,
+    int expected_rank, int expected_category, int expected_operation,
+    std::size_t expected_value_offset, int expected_tag) {
+  HUNDUN_CHECK(snapshot.failure.valid);
+  HUNDUN_CHECK(snapshot.failure.rank == expected_rank);
+  HUNDUN_CHECK(snapshot.failure.category == expected_category);
+  HUNDUN_CHECK(snapshot.failure.operation == expected_operation);
+  HUNDUN_CHECK(snapshot.failure.peer >= 0);
+  HUNDUN_CHECK(snapshot.failure.value_offset == expected_value_offset);
+  HUNDUN_CHECK(snapshot.failure.value_count == 1);
+  HUNDUN_CHECK(snapshot.failure.tag == expected_tag);
+  HUNDUN_CHECK(message.find("rank=" + std::to_string(expected_rank)) !=
+               std::string::npos);
+  HUNDUN_CHECK(message.find("peer=" +
+                            std::to_string(snapshot.failure.peer)) !=
+               std::string::npos);
+  HUNDUN_CHECK(message.find(
+                   "chunk_offset=" +
+                   std::to_string(snapshot.failure.value_offset)) !=
+               std::string::npos);
+  HUNDUN_CHECK(message.find(
+                   "chunk_count=" +
+                   std::to_string(snapshot.failure.value_count)) !=
+               std::string::npos);
+  HUNDUN_CHECK(message.find("tag=" + std::to_string(expected_tag)) !=
+               std::string::npos);
+}
+
+std::vector<double> copy_values(const GhostedVector& vector) {
+  const auto view = vector.local_view();
+  return std::vector<double>(view.data(), view.data() + view.size());
+}
+
+void check_values_unchanged(const GhostedVector& vector,
+                            const std::vector<double>& expected) {
+  const auto view = vector.local_view();
+  HUNDUN_CHECK(view.size() == expected.size());
+  for (std::size_t index = 0; index < view.size(); ++index) {
+    HUNDUN_CHECK_NEAR(view[index], expected[index], 0.0);
   }
 }
 
@@ -203,7 +376,13 @@ void run_exchange_case(const MpiContext& world,
   GhostedVectorHalo small_chunk_halo =
       GhostedVectorHalo::create(decomposition, topology, execution);
   fill_vector(vector, topology, 2, -2.0);
-  small_chunk_halo.exchange(vector);
+  std::size_t exchange_allocations = 0U;
+  {
+    AllocationAttemptGuard guard;
+    small_chunk_halo.exchange(vector);
+    exchange_allocations = guard.attempts();
+  }
+  HUNDUN_CHECK(exchange_allocations == 0U);
   check_vector(vector, topology, 2);
   const auto first_snapshot =
       hundun::linear::detail::vector_halo_test_snapshot();
@@ -243,14 +422,24 @@ void run_exchange_case(const MpiContext& world,
                first_snapshot.receive_posts + first_snapshot.send_posts);
 
   fill_vector(vector, topology, 3, -3.0);
-  small_chunk_halo.begin(vector);
+  std::size_t split_allocations = 0U;
+  {
+    AllocationAttemptGuard guard;
+    small_chunk_halo.begin(vector);
+    split_allocations += guard.attempts();
+  }
   check_ghost_sentinel(vector, topology, -3.0);
   std::optional<std::size_t> changed;
   if (vector.owned_count() != 0U) {
     changed = 0U;
     vector.owned_view()[0] += 777.0;
   }
-  small_chunk_halo.wait(vector);
+  {
+    AllocationAttemptGuard guard;
+    small_chunk_halo.wait(vector);
+    split_allocations += guard.attempts();
+  }
+  HUNDUN_CHECK(split_allocations == 0U);
   check_vector(vector, topology, 3, changed, changed ? 777.0 : 0.0);
   const auto second_snapshot =
       hundun::linear::detail::vector_halo_test_snapshot();
@@ -260,6 +449,16 @@ void run_exchange_case(const MpiContext& world,
                first_snapshot.receive_wire_identities);
   HUNDUN_CHECK(second_snapshot.request_capacity ==
                first_snapshot.request_capacity);
+
+  fill_vector(vector, topology, 31, -31.0);
+  std::size_t repeated_allocations = 0U;
+  {
+    AllocationAttemptGuard guard;
+    small_chunk_halo.exchange(vector);
+    repeated_allocations = guard.attempts();
+  }
+  HUNDUN_CHECK(repeated_allocations == 0U);
+  check_vector(vector, topology, 31);
 
   GhostedVectorHalo other =
       GhostedVectorHalo::create(decomposition, topology, execution);
@@ -368,6 +567,67 @@ void run_failure(const MpiContext& world) {
   const VectorLayout layout = VectorLayout::from_topology(topology);
 
   hundun::linear::detail::VectorHaloTestOptions options{};
+  options.chunk_limit = 1U;
+  options.observe = true;
+  options.inject_metadata_post_failure_rank = 1;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  const std::string metadata_post_message = expect_collective_error(world, [&] {
+    static_cast<void>(
+        GhostedVectorHalo::create(decomposition, topology, execution));
+  });
+  auto snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(collective_max(world, snapshot.metadata_posts_before_failure) >=
+               1U);
+  HUNDUN_CHECK(collective_max(
+                   world, snapshot.metadata_non_null_before_cleanup) > 0U);
+  HUNDUN_CHECK(snapshot.metadata_non_null_after_cleanup == 0U);
+  HUNDUN_CHECK(snapshot.metadata_context_replacements == 1U);
+  check_failure_diagnostic(metadata_post_message, snapshot, 1, 1, 4, 1U,
+                           17);
+
+  options = {};
+  options.chunk_limit = 1U;
+  options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  GhostedVector vector(execution, layout);
+  GhostedVectorHalo after_metadata_post =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  fill_vector(vector, topology, 10, -10.0);
+  after_metadata_post.exchange(vector);
+  check_vector(vector, topology, 10);
+
+  options.inject_metadata_completion_failure_rank = 2;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  const std::string metadata_completion_message =
+      expect_collective_error(world, [&] {
+        static_cast<void>(
+            GhostedVectorHalo::create(decomposition, topology, execution));
+      });
+  snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(collective_max(world, snapshot.metadata_completion_prefix) >=
+               1U);
+  HUNDUN_CHECK(collective_max(
+                   world, snapshot.metadata_non_null_before_cleanup) > 0U);
+  HUNDUN_CHECK(snapshot.metadata_non_null_after_cleanup == 0U);
+  HUNDUN_CHECK(snapshot.metadata_context_replacements == 1U);
+  check_failure_diagnostic(metadata_completion_message, snapshot, 2, 2, 6,
+                           1U, 17);
+
+  options = {};
+  options.chunk_limit = 1U;
+  options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  GhostedVectorHalo after_metadata_completion =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  fill_vector(vector, topology, 11, -11.0);
+  after_metadata_completion.exchange(vector);
+  check_vector(vector, topology, 11);
+
+  options = {};
+  options.chunk_limit = 1U;
+  options.observe = true;
   options.inject_request_id_mismatch_rank = 1;
   hundun::linear::detail::set_vector_halo_test_options(options);
   const std::string request_message = expect_collective_error(world, [&] {
@@ -377,37 +637,48 @@ void run_failure(const MpiContext& world) {
   HUNDUN_CHECK(request_message.find("request") != std::string::npos);
 
   options = {};
+  options.chunk_limit = 1U;
   options.observe = true;
   hundun::linear::detail::set_vector_halo_test_options(options);
   GhostedVectorHalo halo =
       GhostedVectorHalo::create(decomposition, topology, execution);
-  GhostedVector vector(execution, layout);
 
   options.inject_post_failure_rank = 1;
   options.observe = true;
   hundun::linear::detail::set_vector_halo_test_options(options);
   fill_vector(vector, topology, 1, -1.0);
+  const auto before_post_failure = copy_values(vector);
   const std::string post_message =
       expect_collective_error(world, [&] { halo.begin(vector); });
-  HUNDUN_CHECK(post_message.find("post") != std::string::npos);
-  HUNDUN_CHECK(post_message.find("rank=1") != std::string::npos);
-  check_ghost_sentinel(vector, topology, -1.0);
-  HUNDUN_CHECK(hundun::linear::detail::vector_halo_test_snapshot()
-                   .context_replacements == 1U);
+  check_values_unchanged(vector, before_post_failure);
+  snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(collective_max(world, snapshot.runtime_posts_before_failure) >=
+               1U);
+  HUNDUN_CHECK(collective_max(
+                   world, snapshot.runtime_non_null_before_cleanup) > 0U);
+  HUNDUN_CHECK(snapshot.runtime_non_null_after_cleanup == 0U);
+  HUNDUN_CHECK(snapshot.context_replacements == 1U);
+  check_failure_diagnostic(post_message, snapshot, 1, 1, 1, 1U, 23);
 
   options = {};
+  options.chunk_limit = 1U;
   options.inject_completion_failure_rank = 2;
   options.observe = true;
   hundun::linear::detail::set_vector_halo_test_options(options);
   fill_vector(vector, topology, 2, -2.0);
+  const auto before_completion_failure = copy_values(vector);
   halo.begin(vector);
   const std::string completion_message =
       expect_collective_error(world, [&] { halo.wait(vector); });
-  HUNDUN_CHECK(completion_message.find("completion") != std::string::npos);
-  HUNDUN_CHECK(completion_message.find("rank=2") != std::string::npos);
-  check_ghost_sentinel(vector, topology, -2.0);
-  HUNDUN_CHECK(hundun::linear::detail::vector_halo_test_snapshot()
-                   .context_replacements == 2U);
+  check_values_unchanged(vector, before_completion_failure);
+  snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(collective_max(world, snapshot.runtime_completion_prefix) >=
+               1U);
+  HUNDUN_CHECK(collective_max(
+                   world, snapshot.runtime_non_null_before_cleanup) > 0U);
+  HUNDUN_CHECK(snapshot.runtime_non_null_after_cleanup == 0U);
+  HUNDUN_CHECK(snapshot.context_replacements == 2U);
+  check_failure_diagnostic(completion_message, snapshot, 2, 2, 3, 1U, 23);
 
   hundun::linear::detail::set_vector_halo_test_options({});
   fill_vector(vector, topology, 3, -3.0);

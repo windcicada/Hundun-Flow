@@ -71,6 +71,8 @@ struct VectorHaloTestOptions {
   std::size_t chunk_limit{static_cast<std::size_t>(INT_MAX)};
   bool observe{};
   int inject_request_id_mismatch_rank{-1};
+  int inject_metadata_post_failure_rank{-1};
+  int inject_metadata_completion_failure_rank{-1};
   int inject_post_failure_rank{-1};
   int inject_completion_failure_rank{-1};
 };
@@ -83,6 +85,18 @@ struct WirePostEvent {
   int tag{};
 };
 
+struct FailureDiagnosticSnapshot {
+  bool valid{};
+  int category{};
+  int rank{-1};
+  int operation{};
+  int result{};
+  int peer{-1};
+  std::size_t value_offset{};
+  int value_count{};
+  int tag{-1};
+};
+
 struct VectorHaloTestSnapshot {
   bool receives_preceded_sends{true};
   bool chunk_offsets_ordered{true};
@@ -90,6 +104,16 @@ struct VectorHaloTestSnapshot {
   std::size_t send_posts{};
   std::size_t request_capacity{};
   std::size_t context_replacements{};
+  std::size_t metadata_context_replacements{};
+  std::size_t metadata_posts_before_failure{};
+  std::size_t metadata_completion_prefix{};
+  std::size_t metadata_non_null_before_cleanup{};
+  std::size_t metadata_non_null_after_cleanup{};
+  std::size_t runtime_posts_before_failure{};
+  std::size_t runtime_completion_prefix{};
+  std::size_t runtime_non_null_before_cleanup{};
+  std::size_t runtime_non_null_after_cleanup{};
+  FailureDiagnosticSnapshot failure;
   std::vector<execution::AllocationIdentity> send_wire_identities;
   std::vector<execution::AllocationIdentity> receive_wire_identities;
   std::vector<WirePostEvent> post_events;
@@ -98,6 +122,8 @@ struct VectorHaloTestSnapshot {
 void set_vector_halo_test_options(VectorHaloTestOptions options) noexcept;
 VectorHaloTestOptions current_vector_halo_test_options() noexcept;
 void reset_vector_halo_test_observation() noexcept;
+void prepare_vector_halo_test_observation(std::size_t peer_count,
+                                          std::size_t request_count);
 VectorHaloTestSnapshot vector_halo_test_snapshot();
 VectorHaloTestSnapshot& mutable_vector_halo_test_snapshot() noexcept;
 

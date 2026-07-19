@@ -80,14 +80,184 @@ struct BuiltPlan {
   std::size_t receive_value_count{};
 };
 
-void wait_all_metadata(std::vector<MPI_Request>& requests) {
-  const auto batches = detail::split_count_ranges(
-      requests.size(), static_cast<std::size_t>(INT_MAX));
-  for (const detail::CountRange batch : batches) {
-    runtime::detail::check_mpi(
-        MPI_Waitall(batch.count, requests.data() + batch.offset,
-                    MPI_STATUSES_IGNORE),
-        "MPI_Waitall compact Halo request IDs");
+struct FailureRecord {
+  std::int64_t category{};
+  std::int64_t rank{-1};
+  std::int64_t operation{};
+  std::int64_t result{};
+  std::int64_t peer{-1};
+  std::int64_t chunk_offset{};
+  std::int64_t chunk_count{};
+  std::int64_t tag{-1};
+};
+
+static_assert(std::is_trivially_copyable_v<FailureRecord>);
+static_assert(sizeof(FailureRecord) == 8U * sizeof(std::int64_t));
+
+bool failed(FailureRecord record) noexcept { return record.category != 0; }
+
+bool converge_failure(const runtime::MpiContext& context,
+                      FailureRecord local, FailureRecord& global) noexcept {
+  const int local_rank = failed(local) ? context.rank() : context.size();
+  int failing_rank = context.size();
+  if (MPI_Allreduce(&local_rank, &failing_rank, 1, MPI_INT, MPI_MIN,
+                    context.comm()) != MPI_SUCCESS) {
+    return false;
+  }
+  if (failing_rank == context.size()) {
+    global = FailureRecord{};
+    return true;
+  }
+  global = context.rank() == failing_rank ? local : FailureRecord{};
+  if (MPI_Bcast(&global, static_cast<int>(sizeof(global)), MPI_BYTE,
+                failing_rank, context.comm()) != MPI_SUCCESS) {
+    return false;
+  }
+  global.rank = failing_rank;
+  return true;
+}
+
+std::string format_failure(FailureRecord record) {
+  std::string message = "compact Buffer Halo ";
+  message += record.category == 1 ? "post" : "completion";
+  message += " failure: rank=" + std::to_string(record.rank);
+  message += " operation=";
+  switch (record.operation) {
+    case 1:
+      message += "MPI_Irecv";
+      break;
+    case 2:
+      message += "MPI_Isend";
+      break;
+    case 3:
+      message += "MPI_Wait";
+      break;
+    case 4:
+      message += "MPI_Irecv_request_ID";
+      break;
+    case 5:
+      message += "MPI_Isend_request_ID";
+      break;
+    case 6:
+      message += "MPI_Wait_request_ID";
+      break;
+    default:
+      message += "unknown_MPI_operation";
+      break;
+  }
+  message += " result=" + std::to_string(record.result);
+  message += " peer=" + std::to_string(record.peer);
+  message += " chunk_offset=" + std::to_string(record.chunk_offset);
+  message += " chunk_count=" + std::to_string(record.chunk_count);
+  message += " tag=" + std::to_string(record.tag);
+  return message;
+}
+
+void observe_failure(FailureRecord record) noexcept {
+  if (!detail::current_vector_halo_test_options().observe) {
+    return;
+  }
+  auto& destination = detail::mutable_vector_halo_test_snapshot().failure;
+  destination.valid = failed(record);
+  destination.category = static_cast<int>(record.category);
+  destination.rank = static_cast<int>(record.rank);
+  destination.operation = static_cast<int>(record.operation);
+  destination.result = static_cast<int>(record.result);
+  destination.peer = static_cast<int>(record.peer);
+  destination.value_offset =
+      record.chunk_offset < 0
+          ? 0U
+          : static_cast<std::size_t>(record.chunk_offset);
+  destination.value_count = static_cast<int>(record.chunk_count);
+  destination.tag = static_cast<int>(record.tag);
+}
+
+std::size_t non_null_request_count(
+    const std::vector<MPI_Request>& requests) noexcept {
+  return static_cast<std::size_t>(std::count_if(
+      requests.begin(), requests.end(), [](MPI_Request request) {
+        return request != MPI_REQUEST_NULL;
+      }));
+}
+
+bool requests_are_null(const std::vector<MPI_Request>& requests) noexcept {
+  return non_null_request_count(requests) == 0U;
+}
+
+bool drain_requests_noexcept(std::vector<MPI_Request>& requests,
+                             bool cancel) noexcept {
+  bool success = true;
+  if (cancel) {
+    for (MPI_Request& request : requests) {
+      if (request != MPI_REQUEST_NULL && MPI_Cancel(&request) != MPI_SUCCESS) {
+        success = false;
+      }
+    }
+  }
+  for (MPI_Request& request : requests) {
+    if (request != MPI_REQUEST_NULL &&
+        MPI_Wait(&request, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      success = false;
+    }
+  }
+  return success && requests_are_null(requests);
+}
+
+struct RequestDescriptor {
+  bool receive{};
+  std::size_t peer_index{};
+  int peer{};
+  std::size_t value_offset{};
+  int value_count{};
+  int tag{};
+};
+
+FailureRecord failure_for(const RequestDescriptor& descriptor,
+                          std::int64_t category, int result) noexcept {
+  return FailureRecord{category,
+                       -1,
+                       descriptor.receive ? 1 : 2,
+                       result,
+                       descriptor.peer,
+                       static_cast<std::int64_t>(descriptor.value_offset),
+                       descriptor.value_count,
+                       descriptor.tag};
+}
+
+struct MetadataRequestDescriptor {
+  bool receive{};
+  int peer{};
+  std::size_t storage_offset{};
+  std::size_t value_offset{};
+  int value_count{};
+  int tag{kMetadataTag};
+};
+
+FailureRecord metadata_failure_for(
+    const MetadataRequestDescriptor& descriptor, std::int64_t category,
+    int result, bool completion) noexcept {
+  return FailureRecord{category,
+                       -1,
+                       completion ? 6 : descriptor.receive ? 4 : 5,
+                       result,
+                       descriptor.peer,
+                       static_cast<std::int64_t>(descriptor.value_offset),
+                       descriptor.value_count,
+                       descriptor.tag};
+}
+
+void quarantine_context_or_terminate(runtime::MpiContext& context,
+                                     bool metadata) noexcept {
+  try {
+    runtime::MpiContext replacement =
+        runtime::MpiContext::duplicate(context.comm());
+    context = std::move(replacement);
+    if (detail::current_vector_halo_test_options().observe && metadata) {
+      ++detail::mutable_vector_halo_test_snapshot()
+            .metadata_context_replacements;
+    }
+  } catch (...) {
+    std::terminate();
   }
 }
 
@@ -230,7 +400,7 @@ void validate_create_inputs(
   require_collective(context, local_ok, local_message);
 }
 
-BuiltPlan build_plan(const runtime::MpiContext& context,
+BuiltPlan build_plan(runtime::MpiContext& context,
                      const runtime::StructuredDecomposition& decomposition,
                      const mesh::MeshTopology& topology) {
   const auto options = detail::current_vector_halo_test_options();
@@ -346,6 +516,7 @@ BuiltPlan build_plan(const runtime::MpiContext& context,
   require_collective(context, local_ok, local_message);
 
   std::vector<MPI_Request> traffic;
+  std::vector<MetadataRequestDescriptor> metadata_descriptors;
   local_ok = true;
   local_message.clear();
   try {
@@ -367,6 +538,32 @@ BuiltPlan build_plan(const runtime::MpiContext& context,
           "compact request-ID message count");
     }
     traffic.assign(request_count, MPI_REQUEST_NULL);
+    metadata_descriptors.reserve(request_count);
+    for (std::size_t rank = 0; rank < incoming_counts.size(); ++rank) {
+      const auto chunks = detail::split_count_ranges(
+          incoming_offsets[rank + 1U] - incoming_offsets[rank],
+          options.chunk_limit);
+      for (const detail::CountRange chunk : chunks) {
+        metadata_descriptors.push_back(MetadataRequestDescriptor{
+            true, static_cast<int>(rank), incoming_offsets[rank] + chunk.offset,
+            chunk.offset, chunk.count, kMetadataTag});
+      }
+    }
+    for (std::size_t rank = 0; rank < outgoing_counts.size(); ++rank) {
+      const auto chunks = detail::split_count_ranges(
+          outgoing_offsets[rank + 1U] - outgoing_offsets[rank],
+          options.chunk_limit);
+      for (const detail::CountRange chunk : chunks) {
+        metadata_descriptors.push_back(MetadataRequestDescriptor{
+            false, static_cast<int>(rank),
+            outgoing_offsets[rank] + chunk.offset, chunk.offset, chunk.count,
+            kMetadataTag});
+      }
+    }
+    if (metadata_descriptors.size() != traffic.size()) {
+      throw runtime::Error(
+          "compact request-ID descriptor count disagrees with slots");
+    }
   } catch (const std::exception& error) {
     local_ok = false;
     local_message = error.what();
@@ -376,34 +573,114 @@ BuiltPlan build_plan(const runtime::MpiContext& context,
   }
   require_collective(context, local_ok, local_message);
 
-  std::size_t slot = 0U;
-  for (std::size_t rank = 0; rank < incoming_counts.size(); ++rank) {
-    const auto chunks = detail::split_count_ranges(
-        incoming_offsets[rank + 1U] - incoming_offsets[rank],
-        options.chunk_limit);
-    for (const detail::CountRange chunk : chunks) {
-      runtime::detail::check_mpi(
-          MPI_Irecv(incoming_ids.data() + incoming_offsets[rank] +
-                        chunk.offset,
-                    chunk.count, MPI_UINT64_T, static_cast<int>(rank),
-                    kMetadataTag, context.comm(), &traffic[slot++]),
-          "MPI_Irecv compact Halo request IDs");
+  FailureRecord local_traffic_failure{};
+  std::size_t successful_posts = 0U;
+  for (std::size_t slot = 0U; slot < metadata_descriptors.size(); ++slot) {
+    const MetadataRequestDescriptor& descriptor = metadata_descriptors[slot];
+    if (context.rank() == options.inject_metadata_post_failure_rank &&
+        successful_posts == 1U) {
+      local_traffic_failure = metadata_failure_for(
+          descriptor, 1, MPI_ERR_OTHER, false);
+      if (options.observe) {
+        detail::mutable_vector_halo_test_snapshot()
+            .metadata_posts_before_failure = successful_posts;
+      }
+      break;
     }
-  }
-  for (std::size_t rank = 0; rank < outgoing_counts.size(); ++rank) {
-    const auto chunks = detail::split_count_ranges(
-        outgoing_offsets[rank + 1U] - outgoing_offsets[rank],
-        options.chunk_limit);
-    for (const detail::CountRange chunk : chunks) {
-      runtime::detail::check_mpi(
-          MPI_Isend(outgoing_ids.data() + outgoing_offsets[rank] +
-                        chunk.offset,
-                    chunk.count, MPI_UINT64_T, static_cast<int>(rank),
-                    kMetadataTag, context.comm(), &traffic[slot++]),
-          "MPI_Isend compact Halo request IDs");
+    const int result = descriptor.receive
+                           ? MPI_Irecv(incoming_ids.data() +
+                                           descriptor.storage_offset,
+                                       descriptor.value_count, MPI_UINT64_T,
+                                       descriptor.peer, descriptor.tag,
+                                       context.comm(), &traffic[slot])
+                           : MPI_Isend(outgoing_ids.data() +
+                                           descriptor.storage_offset,
+                                       descriptor.value_count, MPI_UINT64_T,
+                                       descriptor.peer, descriptor.tag,
+                                       context.comm(), &traffic[slot]);
+    if (result != MPI_SUCCESS) {
+      local_traffic_failure =
+          metadata_failure_for(descriptor, 1, result, false);
+      break;
     }
+    ++successful_posts;
   }
-  wait_all_metadata(traffic);
+  if (failed(local_traffic_failure)) {
+    local_traffic_failure.rank = context.rank();
+  }
+  FailureRecord global_traffic_failure{};
+  if (!converge_failure(context, local_traffic_failure,
+                        global_traffic_failure)) {
+    std::terminate();
+  }
+  if (failed(global_traffic_failure)) {
+    auto& snapshot = detail::mutable_vector_halo_test_snapshot();
+    if (options.observe) {
+      snapshot.metadata_non_null_before_cleanup =
+          non_null_request_count(traffic);
+    }
+    if (!drain_requests_noexcept(traffic, true)) {
+      std::terminate();
+    }
+    if (options.observe) {
+      snapshot.metadata_non_null_after_cleanup =
+          non_null_request_count(traffic);
+    }
+    observe_failure(global_traffic_failure);
+    quarantine_context_or_terminate(context, true);
+    throw runtime::Error(format_failure(global_traffic_failure));
+  }
+
+  FailureRecord local_completion_failure{};
+  std::size_t completed_prefix = 0U;
+  for (std::size_t slot = 0U; slot < metadata_descriptors.size(); ++slot) {
+    const MetadataRequestDescriptor& descriptor = metadata_descriptors[slot];
+    if (context.rank() == options.inject_metadata_completion_failure_rank &&
+        completed_prefix == 1U) {
+      local_completion_failure = metadata_failure_for(
+          descriptor, 2, MPI_ERR_OTHER, true);
+      if (options.observe) {
+        detail::mutable_vector_halo_test_snapshot()
+            .metadata_completion_prefix = completed_prefix;
+      }
+      break;
+    }
+    const int result = MPI_Wait(&traffic[slot], MPI_STATUS_IGNORE);
+    if (result != MPI_SUCCESS) {
+      local_completion_failure =
+          metadata_failure_for(descriptor, 2, result, true);
+      break;
+    }
+    ++completed_prefix;
+  }
+  if (failed(local_completion_failure)) {
+    local_completion_failure.rank = context.rank();
+  }
+  global_traffic_failure = FailureRecord{};
+  if (!converge_failure(context, local_completion_failure,
+                        global_traffic_failure)) {
+    std::terminate();
+  }
+  if (failed(global_traffic_failure)) {
+    auto& snapshot = detail::mutable_vector_halo_test_snapshot();
+    if (options.observe) {
+      snapshot.metadata_non_null_before_cleanup =
+          non_null_request_count(traffic);
+    }
+    if (!drain_requests_noexcept(traffic, true)) {
+      std::terminate();
+    }
+    if (options.observe) {
+      snapshot.metadata_non_null_after_cleanup =
+          non_null_request_count(traffic);
+    }
+    observe_failure(global_traffic_failure);
+    quarantine_context_or_terminate(context, true);
+    throw runtime::Error(format_failure(global_traffic_failure));
+  }
+  if (!requests_are_null(traffic)) {
+    std::terminate();
+  }
 
   std::vector<std::vector<std::size_t>> sends_by_rank;
   local_ok = true;
@@ -480,59 +757,6 @@ BuiltPlan build_plan(const runtime::MpiContext& context,
   }
   require_collective(context, local_ok, local_message);
   return result;
-}
-
-struct FailureRecord {
-  std::int64_t category{};
-  std::int64_t rank{-1};
-  std::int64_t operation{};
-  std::int64_t result{};
-  std::int64_t peer{-1};
-  std::int64_t chunk_offset{};
-  std::int64_t chunk_count{};
-  std::int64_t tag{-1};
-};
-
-static_assert(std::is_trivially_copyable_v<FailureRecord>);
-static_assert(sizeof(FailureRecord) == 8U * sizeof(std::int64_t));
-
-bool failed(FailureRecord record) noexcept { return record.category != 0; }
-
-bool converge_failure(const runtime::MpiContext& context,
-                      FailureRecord local, FailureRecord& global) noexcept {
-  const int local_rank = failed(local) ? context.rank() : context.size();
-  int failing_rank = context.size();
-  if (MPI_Allreduce(&local_rank, &failing_rank, 1, MPI_INT, MPI_MIN,
-                    context.comm()) != MPI_SUCCESS) {
-    return false;
-  }
-  if (failing_rank == context.size()) {
-    global = FailureRecord{};
-    return true;
-  }
-  global = context.rank() == failing_rank ? local : FailureRecord{};
-  if (MPI_Bcast(&global, static_cast<int>(sizeof(global)), MPI_BYTE,
-                failing_rank, context.comm()) != MPI_SUCCESS) {
-    return false;
-  }
-  global.rank = failing_rank;
-  return true;
-}
-
-std::string format_failure(FailureRecord record) {
-  std::string message = "compact Buffer Halo ";
-  message += record.category == 1 ? "post" : "completion";
-  message += " failure: rank=" + std::to_string(record.rank);
-  message += " operation=";
-  message += record.operation == 1
-                 ? "MPI_Irecv"
-                 : record.operation == 2 ? "MPI_Isend" : "MPI_Waitall";
-  message += " result=" + std::to_string(record.result);
-  message += " peer=" + std::to_string(record.peer);
-  message += " chunk_offset=" + std::to_string(record.chunk_offset);
-  message += " chunk_count=" + std::to_string(record.chunk_count);
-  message += " tag=" + std::to_string(record.tag);
-  return message;
 }
 
 enum class PublicOperation : int { exchange = 1, begin = 2, wait = 3 };
@@ -612,7 +836,7 @@ class GhostedVectorHalo::Impl final {
        execution::BackendIdentity backend_identity,
        std::vector<PeerState> peers, std::size_t send_value_count,
        std::size_t receive_value_count, std::vector<MPI_Request> requests,
-       std::vector<detail::CountRange> wait_batches) noexcept
+       std::vector<RequestDescriptor> request_descriptors) noexcept
       : context_(std::move(context)),
         layout_(std::move(layout)),
         backend_identity_(backend_identity),
@@ -620,7 +844,7 @@ class GhostedVectorHalo::Impl final {
         send_value_count_(send_value_count),
         receive_value_count_(receive_value_count),
         requests_(std::move(requests)),
-        wait_batches_(std::move(wait_batches)) {}
+        request_descriptors_(std::move(request_descriptors)) {}
 
   ~Impl() noexcept {
     if (!active_) {
@@ -738,17 +962,21 @@ class GhostedVectorHalo::Impl final {
     snapshot.receive_posts = 0U;
     snapshot.send_posts = 0U;
     snapshot.request_capacity = requests_.capacity();
-    snapshot.send_wire_identities.clear();
-    snapshot.receive_wire_identities.clear();
-    snapshot.post_events.clear();
-    snapshot.send_wire_identities.reserve(peers_.size());
-    snapshot.receive_wire_identities.reserve(peers_.size());
-    snapshot.post_events.reserve(requests_.size());
-    for (const PeerState& peer : peers_) {
-      snapshot.send_wire_identities.push_back(
-          peer.send_buffer.allocation_identity());
-      snapshot.receive_wire_identities.push_back(
-          peer.receive_buffer.allocation_identity());
+    snapshot.runtime_posts_before_failure = 0U;
+    snapshot.runtime_completion_prefix = 0U;
+    snapshot.runtime_non_null_before_cleanup = 0U;
+    snapshot.runtime_non_null_after_cleanup = 0U;
+    snapshot.failure = detail::FailureDiagnosticSnapshot{};
+    if (snapshot.send_wire_identities.size() != peers_.size() ||
+        snapshot.receive_wire_identities.size() != peers_.size() ||
+        snapshot.post_events.size() != requests_.size()) {
+      std::terminate();
+    }
+    for (std::size_t index = 0U; index < peers_.size(); ++index) {
+      snapshot.send_wire_identities[index] =
+          peers_[index].send_buffer.allocation_identity();
+      snapshot.receive_wire_identities[index] =
+          peers_[index].receive_buffer.allocation_identity();
     }
   }
 
@@ -786,62 +1014,6 @@ class GhostedVectorHalo::Impl final {
     }
     require_collective(context_, local_prepared, preparation_message);
 
-    const auto options = detail::current_vector_halo_test_options();
-    const int local_injected_rank =
-        context_.rank() == options.inject_post_failure_rank
-            ? context_.rank()
-            : context_.size();
-    int injected_rank = context_.size();
-    runtime::detail::check_mpi(
-        MPI_Allreduce(&local_injected_rank, &injected_rank, 1, MPI_INT,
-                      MPI_MIN, context_.comm()),
-        "MPI_Allreduce compact Halo injected post failure");
-    if (injected_rank != context_.size()) {
-      int operation = 1;
-      int peer_rank = -1;
-      int chunk_count = 0;
-      std::size_t chunk_offset = 0U;
-      if (context_.rank() == injected_rank) {
-        for (const PeerState& peer : peers_) {
-          if (!peer.receive_chunks.empty()) {
-            peer_rank = peer.rank;
-            chunk_offset = peer.receive_chunks.front().offset;
-            chunk_count = peer.receive_chunks.front().count;
-            break;
-          }
-          if (!peer.send_chunks.empty()) {
-            operation = 2;
-            peer_rank = peer.rank;
-            chunk_offset = peer.send_chunks.front().offset;
-            chunk_count = peer.send_chunks.front().count;
-            break;
-          }
-        }
-      }
-      std::array<int, 3> diagnostic{operation, peer_rank, chunk_count};
-      std::uint64_t diagnostic_offset =
-          static_cast<std::uint64_t>(chunk_offset);
-      runtime::detail::check_mpi(
-          MPI_Bcast(diagnostic.data(), static_cast<int>(diagnostic.size()),
-                    MPI_INT, injected_rank, context_.comm()),
-          "MPI_Bcast compact Halo injected post diagnostic");
-      runtime::detail::check_mpi(
-          MPI_Bcast(&diagnostic_offset, 1, MPI_UINT64_T, injected_rank,
-                    context_.comm()),
-          "MPI_Bcast compact Halo injected post offset");
-      FailureRecord injected{
-          1,
-          injected_rank,
-          diagnostic[0],
-          MPI_ERR_OTHER,
-          diagnostic[1],
-          static_cast<std::int64_t>(diagnostic_offset),
-          diagnostic[2],
-          kPayloadTag};
-      replace_context();
-      throw runtime::Error(format_failure(injected));
-    }
-
     pending_allocation_ = vector.allocation_identity();
     pending_epoch_ = vector.epoch();
     active_ = true;
@@ -852,9 +1024,19 @@ class GhostedVectorHalo::Impl final {
       std::terminate();
     }
     if (failed(global_failure)) {
+      auto& snapshot = detail::mutable_vector_halo_test_snapshot();
+      if (detail::current_vector_halo_test_options().observe) {
+        snapshot.runtime_non_null_before_cleanup =
+            non_null_request_count(requests_);
+      }
       if (!cancel_and_drain_noexcept()) {
         std::terminate();
       }
+      if (detail::current_vector_halo_test_options().observe) {
+        snapshot.runtime_non_null_after_cleanup =
+            non_null_request_count(requests_);
+      }
+      observe_failure(global_failure);
       replace_context();
       clear_active();
       throw runtime::Error(format_failure(global_failure));
@@ -862,100 +1044,108 @@ class GhostedVectorHalo::Impl final {
   }
 
   FailureRecord post_all() noexcept {
-    std::size_t slot = 0U;
     FailureRecord failure{};
-    std::size_t sequence = 0U;
-    std::size_t first_send_sequence = std::numeric_limits<std::size_t>::max();
     auto& snapshot = detail::mutable_vector_halo_test_snapshot();
-    const bool observe = detail::current_vector_halo_test_options().observe;
-    for (PeerState& peer : peers_) {
-      for (const detail::CountRange chunk : peer.receive_chunks) {
-        const int result = MPI_Irecv(
-            peer.receive_buffer.view(chunk.offset,
-                                     static_cast<std::size_t>(chunk.count))
-                .data(),
-            chunk.count, MPI_DOUBLE, peer.rank, kPayloadTag, context_.comm(),
-            &requests_[slot++]);
+    const auto options = detail::current_vector_halo_test_options();
+    const bool observe = options.observe;
+    std::size_t successful_posts = 0U;
+    for (std::size_t slot = 0U; slot < request_descriptors_.size(); ++slot) {
+      const RequestDescriptor& descriptor = request_descriptors_[slot];
+      if (context_.rank() == options.inject_post_failure_rank &&
+          successful_posts == 1U) {
+        failure = failure_for(descriptor, 1, MPI_ERR_OTHER);
         if (observe) {
+          snapshot.runtime_posts_before_failure = successful_posts;
+        }
+        break;
+      }
+      PeerState& peer = peers_[descriptor.peer_index];
+      const int result =
+          descriptor.receive
+              ? MPI_Irecv(peer.receive_buffer
+                              .view(descriptor.value_offset,
+                                    static_cast<std::size_t>(
+                                        descriptor.value_count))
+                              .data(),
+                          descriptor.value_count, MPI_DOUBLE, descriptor.peer,
+                          descriptor.tag, context_.comm(), &requests_[slot])
+              : MPI_Isend(peer.send_buffer
+                              .view(descriptor.value_offset,
+                                    static_cast<std::size_t>(
+                                        descriptor.value_count))
+                              .data(),
+                          descriptor.value_count, MPI_DOUBLE, descriptor.peer,
+                          descriptor.tag, context_.comm(), &requests_[slot]);
+      if (observe) {
+        if (descriptor.receive) {
           ++snapshot.receive_posts;
-          snapshot.post_events.push_back(detail::WirePostEvent{
-              true, peer.rank, chunk.offset, chunk.count, kPayloadTag});
-        }
-        ++sequence;
-        if (result != MPI_SUCCESS && !failed(failure)) {
-          failure = FailureRecord{1,
-                                  context_.rank(),
-                                  1,
-                                  result,
-                                  peer.rank,
-                                  static_cast<std::int64_t>(chunk.offset),
-                                  chunk.count,
-                                  kPayloadTag};
-        }
-      }
-    }
-    for (PeerState& peer : peers_) {
-      for (const detail::CountRange chunk : peer.send_chunks) {
-        if (first_send_sequence ==
-            std::numeric_limits<std::size_t>::max()) {
-          first_send_sequence = sequence;
-        }
-        const int result = MPI_Isend(
-            peer.send_buffer.view(chunk.offset,
-                                  static_cast<std::size_t>(chunk.count))
-                .data(),
-            chunk.count, MPI_DOUBLE, peer.rank, kPayloadTag, context_.comm(),
-            &requests_[slot++]);
-        if (observe) {
+        } else {
           ++snapshot.send_posts;
-          snapshot.post_events.push_back(detail::WirePostEvent{
-              false, peer.rank, chunk.offset, chunk.count, kPayloadTag});
         }
-        ++sequence;
-        if (result != MPI_SUCCESS && !failed(failure)) {
-          failure = FailureRecord{1,
-                                  context_.rank(),
-                                  2,
-                                  result,
-                                  peer.rank,
-                                  static_cast<std::int64_t>(chunk.offset),
-                                  chunk.count,
-                                  kPayloadTag};
-        }
+        snapshot.post_events[slot] = detail::WirePostEvent{
+            descriptor.receive, descriptor.peer, descriptor.value_offset,
+            descriptor.value_count, descriptor.tag};
       }
+      if (result != MPI_SUCCESS) {
+        failure = failure_for(descriptor, 1, result);
+        break;
+      }
+      ++successful_posts;
     }
     if (observe) {
-      snapshot.receives_preceded_sends =
-          first_send_sequence == std::numeric_limits<std::size_t>::max() ||
-          first_send_sequence >= snapshot.receive_posts;
+      bool send_seen = false;
+      snapshot.receives_preceded_sends = true;
+      for (std::size_t slot = 0U; slot < successful_posts; ++slot) {
+        if (!request_descriptors_[slot].receive) {
+          send_seen = true;
+        } else if (send_seen) {
+          snapshot.receives_preceded_sends = false;
+        }
+      }
+    }
+    if (failed(failure)) {
+      failure.rank = context_.rank();
     }
     return failure;
   }
 
   FailureRecord complete_all() noexcept {
     FailureRecord failure{};
-    for (const detail::CountRange batch : wait_batches_) {
-      const int result = MPI_Waitall(batch.count,
-                                     requests_.data() + batch.offset,
-                                     MPI_STATUSES_IGNORE);
-      if (result != MPI_SUCCESS && !failed(failure)) {
-        failure = FailureRecord{2,
-                                context_.rank(),
-                                3,
-                                result,
-                                -1,
-                                static_cast<std::int64_t>(batch.offset),
-                                batch.count,
-                                kPayloadTag};
-      }
-    }
     const auto options = detail::current_vector_halo_test_options();
-    if (!failed(failure) &&
-        context_.rank() == options.inject_completion_failure_rank) {
-      const int peer_rank = peers_.empty() ? -1 : peers_.front().rank;
-      const int chunk_count = requests_.empty() ? 0 : 1;
-      failure = FailureRecord{2, context_.rank(), 3, MPI_ERR_OTHER,
-                              peer_rank, 0, chunk_count, kPayloadTag};
+    std::size_t completed_prefix = 0U;
+    for (std::size_t slot = 0U; slot < requests_.size(); ++slot) {
+      const RequestDescriptor& descriptor = request_descriptors_[slot];
+      if (context_.rank() == options.inject_completion_failure_rank &&
+          completed_prefix == 1U) {
+        failure = FailureRecord{
+            2,
+            context_.rank(),
+            3,
+            MPI_ERR_OTHER,
+            descriptor.peer,
+            static_cast<std::int64_t>(descriptor.value_offset),
+            descriptor.value_count,
+            descriptor.tag};
+        if (options.observe) {
+          detail::mutable_vector_halo_test_snapshot()
+              .runtime_completion_prefix = completed_prefix;
+        }
+        break;
+      }
+      const int result = MPI_Wait(&requests_[slot], MPI_STATUS_IGNORE);
+      if (result != MPI_SUCCESS) {
+        failure = FailureRecord{
+            2,
+            context_.rank(),
+            3,
+            result,
+            descriptor.peer,
+            static_cast<std::int64_t>(descriptor.value_offset),
+            descriptor.value_count,
+            descriptor.tag};
+        break;
+      }
+      ++completed_prefix;
     }
     return failure;
   }
@@ -967,9 +1157,19 @@ class GhostedVectorHalo::Impl final {
       std::terminate();
     }
     if (failed(global_failure)) {
-      if (!drain_requests_noexcept()) {
+      auto& snapshot = detail::mutable_vector_halo_test_snapshot();
+      if (detail::current_vector_halo_test_options().observe) {
+        snapshot.runtime_non_null_before_cleanup =
+            non_null_request_count(requests_);
+      }
+      if (!cancel_and_drain_noexcept()) {
         std::terminate();
       }
+      if (detail::current_vector_halo_test_options().observe) {
+        snapshot.runtime_non_null_after_cleanup =
+            non_null_request_count(requests_);
+      }
+      observe_failure(global_failure);
       replace_context();
       clear_active();
       throw runtime::Error(format_failure(global_failure));
@@ -1020,10 +1220,8 @@ class GhostedVectorHalo::Impl final {
     return drain_requests_noexcept() && success;
   }
 
-  void replace_context() {
-    runtime::MpiContext replacement =
-        runtime::MpiContext::duplicate(context_.comm());
-    context_ = std::move(replacement);
+  void replace_context() noexcept {
+    quarantine_context_or_terminate(context_, false);
     if (detail::current_vector_halo_test_options().observe) {
       ++detail::mutable_vector_halo_test_snapshot().context_replacements;
     }
@@ -1042,7 +1240,7 @@ class GhostedVectorHalo::Impl final {
   std::size_t send_value_count_{};
   std::size_t receive_value_count_{};
   std::vector<MPI_Request> requests_;
-  std::vector<detail::CountRange> wait_batches_;
+  const std::vector<RequestDescriptor> request_descriptors_;
   bool active_{};
   execution::AllocationIdentity pending_allocation_{};
   std::uint64_t pending_epoch_{};
@@ -1060,7 +1258,7 @@ GhostedVectorHalo GhostedVectorHalo::create(
   VectorLayout layout;
   std::vector<Impl::PeerState> peers;
   std::vector<MPI_Request> requests;
-  std::vector<detail::CountRange> wait_batches;
+  std::vector<RequestDescriptor> request_descriptors;
   bool local_ok = true;
   std::string local_message;
   try {
@@ -1083,8 +1281,31 @@ GhostedVectorHalo GhostedVectorHalo::create(
       peers.emplace_back(execution_context, std::move(peer), chunk_limit);
     }
     requests.assign(request_count, MPI_REQUEST_NULL);
-    wait_batches = detail::split_count_ranges(
-        request_count, static_cast<std::size_t>(INT_MAX));
+    request_descriptors.reserve(request_count);
+    for (std::size_t peer_index = 0U; peer_index < peers.size();
+         ++peer_index) {
+      const Impl::PeerState& peer = peers[peer_index];
+      for (const detail::CountRange chunk : peer.receive_chunks) {
+        request_descriptors.push_back(RequestDescriptor{
+            true, peer_index, peer.rank, chunk.offset, chunk.count,
+            kPayloadTag});
+      }
+    }
+    for (std::size_t peer_index = 0U; peer_index < peers.size();
+         ++peer_index) {
+      const Impl::PeerState& peer = peers[peer_index];
+      for (const detail::CountRange chunk : peer.send_chunks) {
+        request_descriptors.push_back(RequestDescriptor{
+            false, peer_index, peer.rank, chunk.offset, chunk.count,
+            kPayloadTag});
+      }
+    }
+    if (request_descriptors.size() != requests.size()) {
+      throw runtime::Error(
+          "compact Halo request descriptors disagree with slots");
+    }
+    detail::prepare_vector_halo_test_observation(peers.size(),
+                                                 requests.size());
   } catch (const std::exception& error) {
     local_ok = false;
     local_message = error.what();
@@ -1116,7 +1337,7 @@ GhostedVectorHalo GhostedVectorHalo::create(
       std::move(context), std::move(layout),
       execution_context.backend_identity(), std::move(peers),
       plan.send_value_count, plan.receive_value_count, std::move(requests),
-      std::move(wait_batches));
+      std::move(request_descriptors));
   return GhostedVectorHalo(std::unique_ptr<Impl>(implementation));
 }
 
