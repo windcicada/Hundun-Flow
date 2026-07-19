@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -66,6 +68,258 @@ bool finite(runtime::Real3 value) noexcept {
          std::isfinite(value.z);
 }
 
+// frexp represents every nonzero binary64 value with a 53-bit significand and
+// a base-two exponent in [-1126, 971].  Four factors (the three determinant
+// entries and the optional scale) plus the sum of three same-sign terms fit
+// within this fixed interval without allocation.
+constexpr int kDeterminantAccumulatorMinExponent = -4608;
+constexpr std::size_t kDeterminantAccumulatorWords = 280;
+using DeterminantMagnitude =
+    std::array<std::uint32_t, kDeterminantAccumulatorWords>;
+using SignificandProduct = std::array<std::uint32_t, 8>;
+
+struct BinaryFactor {
+  std::uint64_t significand{};
+  int exponent{};
+  bool negative{};
+};
+
+BinaryFactor decompose_binary_factor(double value) noexcept {
+  int exponent = 0;
+  const double fraction = std::frexp(std::abs(value), &exponent);
+  return {static_cast<std::uint64_t>(std::ldexp(fraction, 53)),
+          exponent - 53, std::signbit(value)};
+}
+
+SignificandProduct multiply_significands(
+    const std::array<std::uint64_t, 4>& factors) noexcept {
+  SignificandProduct product{};
+  product[0] = 1U;
+  std::size_t used = 1;
+  for (const std::uint64_t factor : factors) {
+    const std::array<std::uint32_t, 2> factor_words{
+        static_cast<std::uint32_t>(factor),
+        static_cast<std::uint32_t>(factor >> 32U)};
+    SignificandProduct next{};
+    for (std::size_t i = 0; i < used; ++i) {
+      std::uint64_t carry = 0;
+      for (std::size_t j = 0; j < factor_words.size(); ++j) {
+        const std::size_t index = i + j;
+        const std::uint64_t accumulated =
+            static_cast<std::uint64_t>(next[index]) +
+            static_cast<std::uint64_t>(product[i]) * factor_words[j] + carry;
+        next[index] = static_cast<std::uint32_t>(accumulated);
+        carry = accumulated >> 32U;
+      }
+      std::size_t index = i + factor_words.size();
+      while (carry != 0U && index < next.size()) {
+        const std::uint64_t accumulated =
+            static_cast<std::uint64_t>(next[index]) + carry;
+        next[index] = static_cast<std::uint32_t>(accumulated);
+        carry = accumulated >> 32U;
+        ++index;
+      }
+    }
+    product = next;
+    used = std::min(product.size(), used + factor_words.size());
+  }
+  return product;
+}
+
+bool add_word(DeterminantMagnitude& magnitude,
+              std::size_t index,
+              std::uint32_t word) noexcept {
+  std::uint64_t carry = word;
+  while (carry != 0U) {
+    if (index >= magnitude.size()) {
+      return false;
+    }
+    const std::uint64_t sum =
+        static_cast<std::uint64_t>(magnitude[index]) + carry;
+    magnitude[index] = static_cast<std::uint32_t>(sum);
+    carry = sum >> 32U;
+    ++index;
+  }
+  return true;
+}
+
+bool add_significand_product(DeterminantMagnitude& magnitude,
+                             const SignificandProduct& product,
+                             int exponent) noexcept {
+  const int bit_offset = exponent - kDeterminantAccumulatorMinExponent;
+  if (bit_offset < 0) {
+    return false;
+  }
+  const auto word_offset = static_cast<std::size_t>(bit_offset / 32);
+  const auto shift = static_cast<unsigned int>(bit_offset % 32);
+  for (std::size_t i = 0; i < product.size(); ++i) {
+    const std::uint64_t shifted =
+        static_cast<std::uint64_t>(product[i]) << shift;
+    if (!add_word(magnitude, word_offset + i,
+                  static_cast<std::uint32_t>(shifted)) ||
+        !add_word(magnitude, word_offset + i + 1U,
+                  static_cast<std::uint32_t>(shifted >> 32U))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int compare_magnitudes(const DeterminantMagnitude& lhs,
+                       const DeterminantMagnitude& rhs) noexcept {
+  for (std::size_t i = lhs.size(); i-- > 0;) {
+    if (lhs[i] != rhs[i]) {
+      return lhs[i] < rhs[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+DeterminantMagnitude subtract_magnitudes(
+    const DeterminantMagnitude& larger,
+    const DeterminantMagnitude& smaller) noexcept {
+  DeterminantMagnitude result{};
+  std::uint64_t borrow = 0;
+  constexpr std::uint64_t kWordBase = std::uint64_t{1} << 32U;
+  for (std::size_t i = 0; i < result.size(); ++i) {
+    const std::uint64_t minuend = larger[i];
+    const std::uint64_t subtrahend =
+        static_cast<std::uint64_t>(smaller[i]) + borrow;
+    if (minuend >= subtrahend) {
+      result[i] = static_cast<std::uint32_t>(minuend - subtrahend);
+      borrow = 0;
+    } else {
+      result[i] =
+          static_cast<std::uint32_t>(kWordBase + minuend - subtrahend);
+      borrow = 1;
+    }
+  }
+  return result;
+}
+
+int highest_set_bit(const DeterminantMagnitude& magnitude) noexcept {
+  for (std::size_t i = magnitude.size(); i-- > 0;) {
+    const std::uint32_t word = magnitude[i];
+    if (word == 0U) {
+      continue;
+    }
+    int bit = 31;
+    while ((word & (std::uint32_t{1} << static_cast<unsigned int>(bit))) ==
+           0U) {
+      --bit;
+    }
+    return static_cast<int>(i * 32U) + bit;
+  }
+  return -1;
+}
+
+bool magnitude_bit(const DeterminantMagnitude& magnitude, int bit) noexcept {
+  if (bit < 0) {
+    return false;
+  }
+  const auto word = static_cast<std::size_t>(bit / 32);
+  if (word >= magnitude.size()) {
+    return false;
+  }
+  const auto offset = static_cast<unsigned int>(bit % 32);
+  return (magnitude[word] & (std::uint32_t{1} << offset)) != 0U;
+}
+
+bool any_magnitude_bits_below(const DeterminantMagnitude& magnitude,
+                              int exclusive_bit) noexcept {
+  if (exclusive_bit <= 0) {
+    return false;
+  }
+  const auto complete_words =
+      static_cast<std::size_t>(exclusive_bit / 32);
+  for (std::size_t i = 0;
+       i < complete_words && i < magnitude.size(); ++i) {
+    if (magnitude[i] != 0U) {
+      return true;
+    }
+  }
+  const auto remaining = static_cast<unsigned int>(exclusive_bit % 32);
+  if (remaining == 0U || complete_words >= magnitude.size()) {
+    return false;
+  }
+  const std::uint32_t mask =
+      (std::uint32_t{1} << remaining) - std::uint32_t{1};
+  return (magnitude[complete_words] & mask) != 0U;
+}
+
+std::uint64_t rounded_magnitude_shift(
+    const DeterminantMagnitude& magnitude,
+    int shift) noexcept {
+  const int highest = highest_set_bit(magnitude);
+  std::uint64_t result = 0;
+  const int retained_bits = highest - shift + 1;
+  for (int bit = 0; bit < retained_bits; ++bit) {
+    if (magnitude_bit(magnitude, shift + bit)) {
+      result |= std::uint64_t{1} << static_cast<unsigned int>(bit);
+    }
+  }
+  if (shift > 0 && magnitude_bit(magnitude, shift - 1) &&
+      (any_magnitude_bits_below(magnitude, shift - 1) ||
+       (result & std::uint64_t{1}) != 0U)) {
+    ++result;
+  }
+  return result;
+}
+
+double magnitude_to_binary64(const DeterminantMagnitude& magnitude,
+                             bool negative) noexcept {
+  const int highest = highest_set_bit(magnitude);
+  if (highest < 0) {
+    return 0.0;
+  }
+  int value_exponent = kDeterminantAccumulatorMinExponent + highest;
+  double result = 0.0;
+  if (value_exponent < -1022) {
+    constexpr int kSubnormalExponent = -1074;
+    const int shift =
+        kSubnormalExponent - kDeterminantAccumulatorMinExponent;
+    const std::uint64_t significand =
+        rounded_magnitude_shift(magnitude, shift);
+    result = std::scalbn(static_cast<double>(significand),
+                         kSubnormalExponent);
+  } else {
+    const int shift = highest - 52;
+    std::uint64_t significand = rounded_magnitude_shift(magnitude, shift);
+    if (significand == (std::uint64_t{1} << 53U)) {
+      significand >>= 1U;
+      ++value_exponent;
+    }
+    if (value_exponent > 1023) {
+      result = std::numeric_limits<double>::infinity();
+    } else {
+      result = std::scalbn(static_cast<double>(significand),
+                           value_exponent - 52);
+    }
+  }
+  return std::copysign(result, negative ? -1.0 : 1.0);
+}
+
+bool accumulate_determinant_term(
+    const std::array<double, 4>& factors,
+    bool subtract,
+    DeterminantMagnitude& positive,
+    DeterminantMagnitude& negative) noexcept {
+  std::array<std::uint64_t, 4> significands{};
+  int exponent = 0;
+  bool is_negative = subtract;
+  for (std::size_t i = 0; i < factors.size(); ++i) {
+    if (factors[i] == 0.0) {
+      return true;
+    }
+    const BinaryFactor decomposed = decompose_binary_factor(factors[i]);
+    significands[i] = decomposed.significand;
+    exponent += decomposed.exponent;
+    is_negative = is_negative != decomposed.negative;
+  }
+  return add_significand_product(is_negative ? negative : positive,
+                                 multiply_significands(significands), exponent);
+}
+
 double range_safe_determinant(runtime::Real3 first,
                               runtime::Real3 second,
                               runtime::Real3 third,
@@ -87,7 +341,6 @@ double range_safe_determinant(runtime::Real3 first,
   if (x_scale == 0.0 || y_scale == 0.0 || z_scale == 0.0) {
     return 0.0;
   }
-
   const runtime::Real3 normalized_first{first.x / x_scale,
                                          first.y / y_scale,
                                          first.z / z_scale};
@@ -97,29 +350,82 @@ double range_safe_determinant(runtime::Real3 first,
   const runtime::Real3 normalized_third{third.x / x_scale,
                                          third.y / y_scale,
                                          third.z / z_scale};
-  // Row normalization bounds every cross-product operand.  Restore the three
-  // physical row scales by exponent so their intermediate product is never
-  // formed in binary64.
+  const bool normalization_lost_nonzero =
+      (first.x != 0.0 && normalized_first.x == 0.0) ||
+      (first.y != 0.0 && normalized_first.y == 0.0) ||
+      (first.z != 0.0 && normalized_first.z == 0.0) ||
+      (second.x != 0.0 && normalized_second.x == 0.0) ||
+      (second.y != 0.0 && normalized_second.y == 0.0) ||
+      (second.z != 0.0 && normalized_second.z == 0.0) ||
+      (third.x != 0.0 && normalized_third.x == 0.0) ||
+      (third.y != 0.0 && normalized_third.y == 0.0) ||
+      (third.z != 0.0 && normalized_third.z == 0.0);
+  const std::array<double, 6> normalized_terms{{
+      normalized_first.x * normalized_second.y * normalized_third.z,
+      normalized_first.y * normalized_second.z * normalized_third.x,
+      normalized_first.z * normalized_second.x * normalized_third.y,
+      normalized_first.z * normalized_second.y * normalized_third.x,
+      normalized_first.y * normalized_second.x * normalized_third.z,
+      normalized_first.x * normalized_second.z * normalized_third.y,
+  }};
   const double normalized_determinant =
-      dot(normalized_first, cross(normalized_second, normalized_third));
-  if (!std::isfinite(normalized_determinant) ||
-      normalized_determinant == 0.0) {
-    return normalized_determinant;
+      normalized_terms[0] + normalized_terms[1] + normalized_terms[2] -
+      normalized_terms[3] - normalized_terms[4] - normalized_terms[5];
+  double term_magnitude_sum = 0.0;
+  for (const double term : normalized_terms) {
+    term_magnitude_sum += std::abs(term);
+  }
+  constexpr double kCancellationGuard =
+      32.0 * std::numeric_limits<double>::epsilon();
+  if (!normalization_lost_nonzero &&
+      std::abs(normalized_determinant) >
+          kCancellationGuard * term_magnitude_sum) {
+    int x_exponent = 0;
+    int y_exponent = 0;
+    int z_exponent = 0;
+    int determinant_exponent = 0;
+    int factor_exponent = 0;
+    const double mantissa =
+        std::frexp(x_scale, &x_exponent) *
+        std::frexp(y_scale, &y_exponent) *
+        std::frexp(z_scale, &z_exponent) *
+        std::frexp(normalized_determinant, &determinant_exponent) *
+        std::frexp(factor, &factor_exponent);
+    return std::scalbn(mantissa, x_exponent + y_exponent + z_exponent +
+                                     determinant_exponent + factor_exponent);
   }
 
-  int x_exponent = 0;
-  int y_exponent = 0;
-  int z_exponent = 0;
-  int determinant_exponent = 0;
-  int factor_exponent = 0;
-  const double mantissa =
-      std::frexp(x_scale, &x_exponent) *
-      std::frexp(y_scale, &y_exponent) *
-      std::frexp(z_scale, &z_exponent) *
-      std::frexp(normalized_determinant, &determinant_exponent) *
-      std::frexp(factor, &factor_exponent);
-  return std::scalbn(mantissa, x_exponent + y_exponent + z_exponent +
-                                   determinant_exponent + factor_exponent);
+  // Ambiguous cancellation and normalization underflow take the exact path.
+  // Each signed triple product retains its original binary significands and
+  // exponent until the final correctly rounded binary64 conversion.
+  const std::array<std::array<double, 4>, 6> terms{{
+      {{first.x, second.y, third.z, factor}},
+      {{first.y, second.z, third.x, factor}},
+      {{first.z, second.x, third.y, factor}},
+      {{first.z, second.y, third.x, factor}},
+      {{first.y, second.x, third.z, factor}},
+      {{first.x, second.z, third.y, factor}},
+  }};
+  constexpr std::array<bool, 6> subtract{{false, false, false,
+                                          true, true, true}};
+  DeterminantMagnitude positive{};
+  DeterminantMagnitude negative{};
+  for (std::size_t i = 0; i < terms.size(); ++i) {
+    if (!accumulate_determinant_term(terms[i], subtract[i], positive,
+                                     negative)) {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+
+  const int comparison = compare_magnitudes(positive, negative);
+  if (comparison == 0) {
+    return 0.0;
+  }
+  const bool is_negative = comparison < 0;
+  const DeterminantMagnitude magnitude =
+      is_negative ? subtract_magnitudes(negative, positive)
+                  : subtract_magnitudes(positive, negative);
+  return magnitude_to_binary64(magnitude, is_negative);
 }
 
 bool positive(runtime::Real3 value) noexcept {

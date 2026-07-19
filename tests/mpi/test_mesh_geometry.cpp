@@ -566,6 +566,61 @@ void test_range_safe_mapping_jacobians() {
                                         {0.0, 1.0e-200, 0.0},
                                         {0.0, 0.0, 1.0e-200}};
   check_relative(underflow_first.determinant_m3(), 1.0e-190, 32.0);
+
+  const MappingJacobian mixed_rows{{1.0e200, 0.0, 1.0e200},
+                                   {0.0, 1.0e200, 0.0},
+                                   {0.0, 0.0, 1.0e-300}};
+  check_relative(mixed_rows.determinant_m3(), 1.0e100, 32.0);
+
+  const MappingJacobian mixed_columns{{1.0e200, 0.0, 0.0},
+                                      {0.0, 1.0e200, 0.0},
+                                      {1.0e200, 0.0, 1.0e-300}};
+  check_relative(mixed_columns.determinant_m3(), 1.0e100, 32.0);
+
+  const MappingJacobian even_column_permutation{
+      mixed_rows.d_eta_m, mixed_rows.d_zeta_m, mixed_rows.d_xi_m};
+  check_relative(even_column_permutation.determinant_m3(), 1.0e100, 32.0);
+
+  const MappingJacobian odd_column_permutation{
+      mixed_rows.d_eta_m, mixed_rows.d_xi_m, mixed_rows.d_zeta_m};
+  check_relative(odd_column_permutation.determinant_m3(), -1.0e100, 32.0);
+
+  constexpr double exactly_integral = 4503599627370496.0;
+  const MappingJacobian cancellation{
+      {exactly_integral, exactly_integral + 1.0, 0.0},
+      {exactly_integral - 1.0, exactly_integral, 0.0},
+      {0.0, 0.0, 1.0}};
+  HUNDUN_CHECK(cancellation.determinant_m3() == 1.0);
+
+  const MappingJacobian exact_zero{{1.0, 2.0, 3.0},
+                                   {1.0, 2.0, 3.0},
+                                   {4.0, 5.0, 6.0}};
+  HUNDUN_CHECK(exact_zero.determinant_m3() == 0.0);
+
+  const MappingJacobian non_finite{
+      {std::numeric_limits<double>::infinity(), 0.0, 0.0},
+      {0.0, 1.0, 0.0},
+      {0.0, 0.0, 1.0}};
+  HUNDUN_CHECK(std::isnan(non_finite.determinant_m3()));
+
+  const MappingJacobian genuine_overflow{
+      {std::numeric_limits<double>::max(), 0.0, 0.0},
+      {0.0, 2.0, 0.0},
+      {0.0, 0.0, 1.0}};
+  HUNDUN_CHECK(std::isinf(genuine_overflow.determinant_m3()));
+
+  const MappingJacobian genuine_underflow{
+      {std::numeric_limits<double>::denorm_min(), 0.0, 0.0},
+      {0.0, 0.5, 0.0},
+      {0.0, 0.0, 1.0}};
+  HUNDUN_CHECK(genuine_underflow.determinant_m3() == 0.0);
+
+  const MappingJacobian rounded_subnormal{
+      {std::numeric_limits<double>::denorm_min(), 0.0, 0.0},
+      {0.0, 0.75, 0.0},
+      {0.0, 0.0, 1.0}};
+  HUNDUN_CHECK(rounded_subnormal.determinant_m3() ==
+               std::numeric_limits<double>::denorm_min());
 }
 
 void test_mapping_rejections() {
