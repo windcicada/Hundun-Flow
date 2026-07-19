@@ -67,6 +67,21 @@ void run_device_path_script(
     std::optional<DeviceTraceStep> injected_failure,
     std::vector<DeviceTraceStep>& trace);
 
+enum class NonblockingPostIssueOrigin {
+  synthetic_before_call,
+  mpi_call_error
+};
+
+enum class NonblockingPostIssueAction {
+  recover_known_prefix,
+  terminate_process
+};
+
+NonblockingPostIssueAction nonblocking_post_issue_action(
+    NonblockingPostIssueOrigin origin) noexcept;
+
+inline constexpr int kInjectAllEligibleRanks = -2;
+
 struct VectorHaloTestOptions {
   std::size_t chunk_limit{static_cast<std::size_t>(INT_MAX)};
   bool observe{};
@@ -105,6 +120,8 @@ struct VectorHaloTestSnapshot {
   std::size_t request_capacity{};
   std::size_t context_replacements{};
   std::size_t metadata_context_replacements{};
+  std::size_t metadata_post_calls{};
+  std::size_t metadata_wait_calls{};
   std::size_t metadata_posts_before_failure{};
   std::size_t metadata_completion_prefix{};
   std::size_t metadata_non_null_before_cleanup{};

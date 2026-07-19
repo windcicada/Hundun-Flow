@@ -117,6 +117,130 @@ bool converge_failure(const runtime::MpiContext& context,
   return true;
 }
 
+struct InjectionSelection {
+  bool local_selected{};
+};
+
+enum class InjectionPhase {
+  metadata_post,
+  metadata_completion,
+  payload_post,
+  payload_completion
+};
+
+enum class InjectionMessage { mismatch, invalid, insufficient };
+
+std::string_view injection_message(InjectionPhase phase,
+                                   InjectionMessage message) noexcept {
+  if (phase == InjectionPhase::metadata_post) {
+    if (message == InjectionMessage::mismatch) {
+      return "compact Buffer Halo request-ID post injection rank differs "
+             "across ranks";
+    }
+    if (message == InjectionMessage::invalid) {
+      return "compact Buffer Halo request-ID post injection rank is invalid";
+    }
+    return "compact Buffer Halo request-ID post injection requires at least "
+           "two request descriptors on the selected rank";
+  }
+  if (phase == InjectionPhase::metadata_completion) {
+    if (message == InjectionMessage::mismatch) {
+      return "compact Buffer Halo request-ID completion injection rank "
+             "differs across ranks";
+    }
+    if (message == InjectionMessage::invalid) {
+      return "compact Buffer Halo request-ID completion injection rank is "
+             "invalid";
+    }
+    return "compact Buffer Halo request-ID completion injection requires at "
+           "least two request descriptors on the selected rank";
+  }
+  if (phase == InjectionPhase::payload_post) {
+    if (message == InjectionMessage::mismatch) {
+      return "compact Buffer Halo payload post injection rank differs across "
+             "ranks";
+    }
+    if (message == InjectionMessage::invalid) {
+      return "compact Buffer Halo payload post injection rank is invalid";
+    }
+    return "compact Buffer Halo payload post injection requires at least two "
+           "request descriptors on the selected rank";
+  }
+  if (message == InjectionMessage::mismatch) {
+    return "compact Buffer Halo payload completion injection rank differs "
+           "across ranks";
+  }
+  if (message == InjectionMessage::invalid) {
+    return "compact Buffer Halo payload completion injection rank is invalid";
+  }
+  return "compact Buffer Halo payload completion injection requires at least "
+         "two request descriptors on the selected rank";
+}
+
+InjectionSelection validate_injection_selection(
+    const runtime::MpiContext& context, int configured_rank,
+    std::size_t local_descriptor_count, InjectionPhase phase) {
+  const std::array<std::int64_t, 2> local_rank_bounds{
+      static_cast<std::int64_t>(configured_rank),
+      -static_cast<std::int64_t>(configured_rank)};
+  std::array<std::int64_t, 2> global_rank_bounds{};
+  runtime::detail::check_mpi(
+      MPI_Allreduce(local_rank_bounds.data(), global_rank_bounds.data(),
+                    static_cast<int>(local_rank_bounds.size()), MPI_INT64_T,
+                    MPI_MIN, context.comm()),
+      "MPI_Allreduce compact Halo injection rank bounds");
+  const std::int64_t minimum_rank = global_rank_bounds[0];
+  const std::int64_t maximum_rank = -global_rank_bounds[1];
+  if (minimum_rank != maximum_rank) {
+    throw runtime::Error(
+        std::string(injection_message(phase, InjectionMessage::mismatch)));
+  }
+
+  const bool disabled = configured_rank == -1;
+  const bool all_eligible =
+      configured_rank == detail::kInjectAllEligibleRanks;
+  const bool legal = disabled || all_eligible ||
+                     (configured_rank >= 0 &&
+                      configured_rank < context.size());
+  if (!legal) {
+    throw runtime::Error(
+        std::string(injection_message(phase, InjectionMessage::invalid)));
+  }
+  if (disabled) {
+    return {};
+  }
+
+  const bool local_eligible = local_descriptor_count >= 2U;
+  int local_selected = 0;
+  if (all_eligible) {
+    local_selected = local_eligible ? 1 : 0;
+  } else if (context.rank() == configured_rank && local_eligible) {
+    local_selected = 1;
+  }
+  int selected_count = 0;
+  runtime::detail::check_mpi(
+      MPI_Allreduce(&local_selected, &selected_count, 1, MPI_INT, MPI_SUM,
+                    context.comm()),
+      "MPI_Allreduce compact Halo injection eligible count");
+  const bool enough = all_eligible ? selected_count >= 2 : selected_count == 1;
+  if (!enough) {
+    throw runtime::Error(std::string(
+        injection_message(phase, InjectionMessage::insufficient)));
+  }
+  return InjectionSelection{local_selected != 0};
+}
+
+void terminate_if_uncertain_post_output(
+    const runtime::MpiContext& context, bool local_uncertain) noexcept {
+  const int local = local_uncertain ? 1 : 0;
+  int any_uncertain = 0;
+  if (MPI_Allreduce(&local, &any_uncertain, 1, MPI_INT, MPI_MAX,
+                    context.comm()) != MPI_SUCCESS ||
+      any_uncertain != 0) {
+    std::terminate();
+  }
+}
+
 std::string format_failure(FailureRecord record) {
   std::string message = "compact Buffer Halo ";
   message += record.category == 1 ? "post" : "completion";
@@ -573,19 +697,35 @@ BuiltPlan build_plan(runtime::MpiContext& context,
   }
   require_collective(context, local_ok, local_message);
 
+  const InjectionSelection metadata_post_injection =
+      validate_injection_selection(
+          context, options.inject_metadata_post_failure_rank,
+          metadata_descriptors.size(), InjectionPhase::metadata_post);
+  const InjectionSelection metadata_completion_injection =
+      validate_injection_selection(
+          context, options.inject_metadata_completion_failure_rank,
+          metadata_descriptors.size(), InjectionPhase::metadata_completion);
+
   FailureRecord local_traffic_failure{};
+  bool uncertain_post_output = false;
   std::size_t successful_posts = 0U;
   for (std::size_t slot = 0U; slot < metadata_descriptors.size(); ++slot) {
     const MetadataRequestDescriptor& descriptor = metadata_descriptors[slot];
-    if (context.rank() == options.inject_metadata_post_failure_rank &&
-        successful_posts == 1U) {
+    if (metadata_post_injection.local_selected && successful_posts == 1U) {
       local_traffic_failure = metadata_failure_for(
           descriptor, 1, MPI_ERR_OTHER, false);
+      uncertain_post_output =
+          detail::nonblocking_post_issue_action(
+              detail::NonblockingPostIssueOrigin::synthetic_before_call) ==
+          detail::NonblockingPostIssueAction::terminate_process;
       if (options.observe) {
         detail::mutable_vector_halo_test_snapshot()
             .metadata_posts_before_failure = successful_posts;
       }
       break;
+    }
+    if (options.observe) {
+      ++detail::mutable_vector_halo_test_snapshot().metadata_post_calls;
     }
     const int result = descriptor.receive
                            ? MPI_Irecv(incoming_ids.data() +
@@ -601,10 +741,15 @@ BuiltPlan build_plan(runtime::MpiContext& context,
     if (result != MPI_SUCCESS) {
       local_traffic_failure =
           metadata_failure_for(descriptor, 1, result, false);
+      uncertain_post_output =
+          detail::nonblocking_post_issue_action(
+              detail::NonblockingPostIssueOrigin::mpi_call_error) ==
+          detail::NonblockingPostIssueAction::terminate_process;
       break;
     }
     ++successful_posts;
   }
+  terminate_if_uncertain_post_output(context, uncertain_post_output);
   if (failed(local_traffic_failure)) {
     local_traffic_failure.rank = context.rank();
   }
@@ -635,7 +780,7 @@ BuiltPlan build_plan(runtime::MpiContext& context,
   std::size_t completed_prefix = 0U;
   for (std::size_t slot = 0U; slot < metadata_descriptors.size(); ++slot) {
     const MetadataRequestDescriptor& descriptor = metadata_descriptors[slot];
-    if (context.rank() == options.inject_metadata_completion_failure_rank &&
+    if (metadata_completion_injection.local_selected &&
         completed_prefix == 1U) {
       local_completion_failure = metadata_failure_for(
           descriptor, 2, MPI_ERR_OTHER, true);
@@ -644,6 +789,9 @@ BuiltPlan build_plan(runtime::MpiContext& context,
             .metadata_completion_prefix = completed_prefix;
       }
       break;
+    }
+    if (options.observe) {
+      ++detail::mutable_vector_halo_test_snapshot().metadata_wait_calls;
     }
     const int result = MPI_Wait(&traffic[slot], MPI_STATUS_IGNORE);
     if (result != MPI_SUCCESS) {
@@ -882,6 +1030,11 @@ class GhostedVectorHalo::Impl final {
   }
 
  private:
+  struct PostOutcome {
+    FailureRecord failure;
+    bool uncertain_output{};
+  };
+
   void require_public_operation(PublicOperation operation) const {
     runtime::detail::require_mpi_active("enter compact Buffer Halo operation");
     const std::array<int, 2> local{static_cast<int>(operation),
@@ -1014,11 +1167,19 @@ class GhostedVectorHalo::Impl final {
     }
     require_collective(context_, local_prepared, preparation_message);
 
+    const InjectionSelection post_injection = validate_injection_selection(
+        context_,
+        detail::current_vector_halo_test_options().inject_post_failure_rank,
+        request_descriptors_.size(), InjectionPhase::payload_post);
+
     pending_allocation_ = vector.allocation_identity();
     pending_epoch_ = vector.epoch();
     active_ = true;
     std::fill(requests_.begin(), requests_.end(), MPI_REQUEST_NULL);
-    const FailureRecord local_failure = post_all();
+    const PostOutcome post_outcome = post_all(post_injection);
+    terminate_if_uncertain_post_output(context_,
+                                       post_outcome.uncertain_output);
+    const FailureRecord local_failure = post_outcome.failure;
     FailureRecord global_failure;
     if (!converge_failure(context_, local_failure, global_failure)) {
       std::terminate();
@@ -1043,17 +1204,20 @@ class GhostedVectorHalo::Impl final {
     }
   }
 
-  FailureRecord post_all() noexcept {
-    FailureRecord failure{};
+  PostOutcome post_all(InjectionSelection injection) noexcept {
+    PostOutcome outcome{};
     auto& snapshot = detail::mutable_vector_halo_test_snapshot();
     const auto options = detail::current_vector_halo_test_options();
     const bool observe = options.observe;
     std::size_t successful_posts = 0U;
     for (std::size_t slot = 0U; slot < request_descriptors_.size(); ++slot) {
       const RequestDescriptor& descriptor = request_descriptors_[slot];
-      if (context_.rank() == options.inject_post_failure_rank &&
-          successful_posts == 1U) {
-        failure = failure_for(descriptor, 1, MPI_ERR_OTHER);
+      if (injection.local_selected && successful_posts == 1U) {
+        outcome.failure = failure_for(descriptor, 1, MPI_ERR_OTHER);
+        outcome.uncertain_output =
+            detail::nonblocking_post_issue_action(
+                detail::NonblockingPostIssueOrigin::synthetic_before_call) ==
+            detail::NonblockingPostIssueAction::terminate_process;
         if (observe) {
           snapshot.runtime_posts_before_failure = successful_posts;
         }
@@ -1087,7 +1251,11 @@ class GhostedVectorHalo::Impl final {
             descriptor.value_count, descriptor.tag};
       }
       if (result != MPI_SUCCESS) {
-        failure = failure_for(descriptor, 1, result);
+        outcome.failure = failure_for(descriptor, 1, result);
+        outcome.uncertain_output =
+            detail::nonblocking_post_issue_action(
+                detail::NonblockingPostIssueOrigin::mpi_call_error) ==
+            detail::NonblockingPostIssueAction::terminate_process;
         break;
       }
       ++successful_posts;
@@ -1103,20 +1271,19 @@ class GhostedVectorHalo::Impl final {
         }
       }
     }
-    if (failed(failure)) {
-      failure.rank = context_.rank();
+    if (failed(outcome.failure)) {
+      outcome.failure.rank = context_.rank();
     }
-    return failure;
+    return outcome;
   }
 
-  FailureRecord complete_all() noexcept {
+  FailureRecord complete_all(InjectionSelection injection) noexcept {
     FailureRecord failure{};
     const auto options = detail::current_vector_halo_test_options();
     std::size_t completed_prefix = 0U;
     for (std::size_t slot = 0U; slot < requests_.size(); ++slot) {
       const RequestDescriptor& descriptor = request_descriptors_[slot];
-      if (context_.rank() == options.inject_completion_failure_rank &&
-          completed_prefix == 1U) {
+      if (injection.local_selected && completed_prefix == 1U) {
         failure = FailureRecord{
             2,
             context_.rank(),
@@ -1151,7 +1318,12 @@ class GhostedVectorHalo::Impl final {
   }
 
   void finish_internal(GhostedVector& vector) {
-    const FailureRecord local_failure = complete_all();
+    const InjectionSelection completion_injection =
+        validate_injection_selection(
+            context_, detail::current_vector_halo_test_options()
+                          .inject_completion_failure_rank,
+            request_descriptors_.size(), InjectionPhase::payload_completion);
+    const FailureRecord local_failure = complete_all(completion_injection);
     FailureRecord global_failure;
     if (!converge_failure(context_, local_failure, global_failure)) {
       std::terminate();

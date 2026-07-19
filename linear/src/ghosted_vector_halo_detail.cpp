@@ -169,6 +169,13 @@ void run_device_path_script(
   }
 }
 
+NonblockingPostIssueAction nonblocking_post_issue_action(
+    NonblockingPostIssueOrigin origin) noexcept {
+  return origin == NonblockingPostIssueOrigin::synthetic_before_call
+             ? NonblockingPostIssueAction::recover_known_prefix
+             : NonblockingPostIssueAction::terminate_process;
+}
+
 void set_vector_halo_test_options(VectorHaloTestOptions options) noexcept {
   test_options = options;
 }
@@ -178,14 +185,20 @@ VectorHaloTestOptions current_vector_halo_test_options() noexcept {
 }
 
 void reset_vector_halo_test_observation() noexcept {
+  auto send_wire_identities =
+      std::move(test_snapshot.send_wire_identities);
+  auto receive_wire_identities =
+      std::move(test_snapshot.receive_wire_identities);
+  auto post_events = std::move(test_snapshot.post_events);
   test_snapshot = VectorHaloTestSnapshot{};
+  test_snapshot.send_wire_identities = std::move(send_wire_identities);
+  test_snapshot.receive_wire_identities =
+      std::move(receive_wire_identities);
+  test_snapshot.post_events = std::move(post_events);
 }
 
 void prepare_vector_halo_test_observation(std::size_t peer_count,
                                           std::size_t request_count) {
-  if (!test_options.observe) {
-    return;
-  }
   test_snapshot.send_wire_identities.resize(peer_count);
   test_snapshot.receive_wire_identities.resize(peer_count);
   test_snapshot.post_events.resize(request_count);

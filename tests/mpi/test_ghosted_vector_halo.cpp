@@ -233,6 +233,15 @@ std::size_t collective_max(const MpiContext& context,
   return static_cast<std::size_t>(global);
 }
 
+std::size_t collective_sum(const MpiContext& context,
+                           std::size_t local_value) {
+  const auto local = static_cast<std::uint64_t>(local_value);
+  std::uint64_t global = 0U;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &global, 1, MPI_UINT64_T, MPI_SUM,
+                             context.comm()) == MPI_SUCCESS);
+  return static_cast<std::size_t>(global);
+}
+
 double sample(hundun::mesh::GlobalCellId id, int pattern) {
   return static_cast<double>(id) + 10000.0 * static_cast<double>(pattern);
 }
@@ -484,6 +493,85 @@ void run_exchange_case(const MpiContext& world,
 void run_full(const MpiContext& world) {
   run_exchange_case(world, {true, true, true});
   run_exchange_case(world, {false, false, false});
+
+  if (world.size() == 1) {
+    const auto decomposition = StructuredDecomposition::create(
+        world, kExtent, {false, false, false},
+        DecompositionOptions{process_grid_for(world.size())});
+    const MeshTopology topology(decomposition);
+    CpuReferenceContext execution;
+    GhostedVector vector(execution, VectorLayout::from_topology(topology));
+    hundun::linear::detail::VectorHaloTestOptions options{};
+    options.observe = true;
+    options.inject_metadata_post_failure_rank = 0;
+    hundun::linear::detail::set_vector_halo_test_options(options);
+    hundun::linear::detail::reset_vector_halo_test_observation();
+    std::string message = expect_collective_error(world, [&] {
+      static_cast<void>(
+          GhostedVectorHalo::create(decomposition, topology, execution));
+    });
+    HUNDUN_CHECK(message.find("at least two") != std::string::npos);
+    auto snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+    HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
+    HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
+
+    options = {};
+    options.observe = true;
+    options.inject_metadata_post_failure_rank = 1;
+    hundun::linear::detail::set_vector_halo_test_options(options);
+    hundun::linear::detail::reset_vector_halo_test_observation();
+    message = expect_collective_error(world, [&] {
+      static_cast<void>(
+          GhostedVectorHalo::create(decomposition, topology, execution));
+    });
+    HUNDUN_CHECK(message.find("invalid") != std::string::npos);
+    snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+    HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
+    HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
+
+    options = {};
+    options.observe = true;
+    options.inject_metadata_completion_failure_rank = 0;
+    hundun::linear::detail::set_vector_halo_test_options(options);
+    hundun::linear::detail::reset_vector_halo_test_observation();
+    message = expect_collective_error(world, [&] {
+      static_cast<void>(
+          GhostedVectorHalo::create(decomposition, topology, execution));
+    });
+    HUNDUN_CHECK(message.find("at least two") != std::string::npos);
+    snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+    HUNDUN_CHECK(snapshot.metadata_post_calls == 0U);
+    HUNDUN_CHECK(snapshot.metadata_wait_calls == 0U);
+
+    hundun::linear::detail::set_vector_halo_test_options({});
+    GhostedVectorHalo halo =
+        GhostedVectorHalo::create(decomposition, topology, execution);
+    options = {};
+    options.observe = true;
+    options.inject_post_failure_rank = 0;
+    hundun::linear::detail::set_vector_halo_test_options(options);
+    hundun::linear::detail::reset_vector_halo_test_observation();
+    message =
+        expect_collective_error(world, [&] { halo.begin(vector); });
+    HUNDUN_CHECK(message.find("at least two") != std::string::npos);
+    snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+    HUNDUN_CHECK(snapshot.receive_posts == 0U);
+    HUNDUN_CHECK(snapshot.send_posts == 0U);
+
+    hundun::linear::detail::set_vector_halo_test_options({});
+    halo.begin(vector);
+    options = {};
+    options.observe = true;
+    options.inject_completion_failure_rank = 0;
+    hundun::linear::detail::set_vector_halo_test_options(options);
+    hundun::linear::detail::reset_vector_halo_test_observation();
+    message = expect_collective_error(world, [&] { halo.wait(vector); });
+    HUNDUN_CHECK(message.find("at least two") != std::string::npos);
+    snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+    HUNDUN_CHECK(snapshot.runtime_completion_prefix == 0U);
+    hundun::linear::detail::set_vector_halo_test_options({});
+    halo.wait(vector);
+  }
 }
 
 void run_mismatch(const MpiContext& world) {
@@ -565,6 +653,77 @@ void run_failure(const MpiContext& world) {
   const MeshTopology topology(decomposition);
   CpuReferenceContext execution;
   const VectorLayout layout = VectorLayout::from_topology(topology);
+
+  hundun::linear::detail::VectorHaloTestOptions mismatched_options{};
+  mismatched_options.chunk_limit = 1U;
+  mismatched_options.observe = true;
+  mismatched_options.inject_metadata_post_failure_rank =
+      world.rank() == 0 ? 1 : 2;
+  hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  std::string mismatch_message = expect_collective_error(world, [&] {
+    static_cast<void>(
+        GhostedVectorHalo::create(decomposition, topology, execution));
+  });
+  HUNDUN_CHECK(mismatch_message.find("differs across ranks") !=
+               std::string::npos);
+  auto mismatch_snapshot =
+      hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(mismatch_snapshot.metadata_post_calls == 0U);
+  HUNDUN_CHECK(mismatch_snapshot.metadata_wait_calls == 0U);
+
+  mismatched_options = {};
+  mismatched_options.chunk_limit = 1U;
+  mismatched_options.observe = true;
+  mismatched_options.inject_metadata_completion_failure_rank =
+      world.rank() == 0 ? 1 : 2;
+  hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  mismatch_message = expect_collective_error(world, [&] {
+    static_cast<void>(
+        GhostedVectorHalo::create(decomposition, topology, execution));
+  });
+  HUNDUN_CHECK(mismatch_message.find("differs across ranks") !=
+               std::string::npos);
+  mismatch_snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(mismatch_snapshot.metadata_post_calls == 0U);
+  HUNDUN_CHECK(mismatch_snapshot.metadata_wait_calls == 0U);
+
+  hundun::linear::detail::set_vector_halo_test_options({});
+  GhostedVector mismatch_vector(execution, layout);
+  GhostedVectorHalo mismatch_halo =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  mismatched_options = {};
+  mismatched_options.chunk_limit = 1U;
+  mismatched_options.observe = true;
+  mismatched_options.inject_post_failure_rank = world.rank() == 0 ? 1 : 2;
+  hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  mismatch_message = expect_collective_error(
+      world, [&] { mismatch_halo.begin(mismatch_vector); });
+  HUNDUN_CHECK(mismatch_message.find("differs across ranks") !=
+               std::string::npos);
+  mismatch_snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(mismatch_snapshot.receive_posts == 0U);
+  HUNDUN_CHECK(mismatch_snapshot.send_posts == 0U);
+
+  hundun::linear::detail::set_vector_halo_test_options({});
+  mismatch_halo.begin(mismatch_vector);
+  mismatched_options = {};
+  mismatched_options.chunk_limit = 1U;
+  mismatched_options.observe = true;
+  mismatched_options.inject_completion_failure_rank =
+      world.rank() == 0 ? 1 : 2;
+  hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
+  hundun::linear::detail::reset_vector_halo_test_observation();
+  mismatch_message = expect_collective_error(
+      world, [&] { mismatch_halo.wait(mismatch_vector); });
+  HUNDUN_CHECK(mismatch_message.find("differs across ranks") !=
+               std::string::npos);
+  mismatch_snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(mismatch_snapshot.runtime_completion_prefix == 0U);
+  hundun::linear::detail::set_vector_halo_test_options({});
+  mismatch_halo.wait(mismatch_vector);
 
   hundun::linear::detail::VectorHaloTestOptions options{};
   options.chunk_limit = 1U;
@@ -679,6 +838,31 @@ void run_failure(const MpiContext& world) {
   HUNDUN_CHECK(snapshot.runtime_non_null_after_cleanup == 0U);
   HUNDUN_CHECK(snapshot.context_replacements == 2U);
   check_failure_diagnostic(completion_message, snapshot, 2, 2, 3, 1U, 23);
+
+  options = {};
+  options.chunk_limit = 1U;
+  options.inject_completion_failure_rank =
+      hundun::linear::detail::kInjectAllEligibleRanks;
+  options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  fill_vector(vector, topology, 21, -21.0);
+  const auto before_multi_completion_failure = copy_values(vector);
+  halo.begin(vector);
+  const std::string multi_completion_message =
+      expect_collective_error(world, [&] { halo.wait(vector); });
+  check_values_unchanged(vector, before_multi_completion_failure);
+  snapshot = hundun::linear::detail::vector_halo_test_snapshot();
+  HUNDUN_CHECK(collective_sum(
+                   world, snapshot.runtime_completion_prefix >= 1U ? 1U : 0U) >=
+               2U);
+  HUNDUN_CHECK(collective_sum(
+                   world,
+                   snapshot.runtime_non_null_before_cleanup > 0U ? 1U : 0U) >=
+               2U);
+  HUNDUN_CHECK(snapshot.runtime_non_null_after_cleanup == 0U);
+  HUNDUN_CHECK(snapshot.context_replacements == 3U);
+  check_failure_diagnostic(multi_completion_message, snapshot, 0, 2, 3, 1U,
+                           23);
 
   hundun::linear::detail::set_vector_halo_test_options({});
   fill_vector(vector, topology, 3, -3.0);

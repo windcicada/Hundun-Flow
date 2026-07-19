@@ -27,6 +27,8 @@ using hundun::linear::GhostedVector;
 using hundun::linear::VectorLayout;
 using hundun::linear::detail::DevicePathCapabilities;
 using hundun::linear::detail::DeviceTraceStep;
+using hundun::linear::detail::NonblockingPostIssueAction;
+using hundun::linear::detail::NonblockingPostIssueOrigin;
 using hundun::linear::detail::OrderedRequest;
 using hundun::runtime::Error;
 
@@ -212,6 +214,13 @@ void test_path_selection_and_trace() {
 }
 
 void test_pure_plan_helpers() {
+  HUNDUN_CHECK(hundun::linear::detail::nonblocking_post_issue_action(
+                   NonblockingPostIssueOrigin::synthetic_before_call) ==
+               NonblockingPostIssueAction::recover_known_prefix);
+  HUNDUN_CHECK(hundun::linear::detail::nonblocking_post_issue_action(
+                   NonblockingPostIssueOrigin::mpi_call_error) ==
+               NonblockingPostIssueAction::terminate_process);
+
   const auto chunks = hundun::linear::detail::split_count_ranges(8U, 3U);
   HUNDUN_CHECK(chunks.size() == 3U);
   HUNDUN_CHECK(chunks[0].offset == 0U && chunks[0].count == 3);
