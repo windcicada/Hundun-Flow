@@ -218,6 +218,24 @@ void run_errors(int rank, int size) {
   HUNDUN_CHECK(MPI_Comm_free(&local) == MPI_SUCCESS);
 }
 
+void run_v1_expected_rank_mismatch(int rank, int size) {
+  ResolvedCase mismatch = make_v1_root_case(rank, size);
+  const int expected_ranks = size == 1 ? 2 : 1;
+  if (rank == 0) {
+    auto& stage1 = std::get<CaseConfig>(mismatch);
+    stage1.expected_ranks = expected_ranks;
+    stage1.process_grid.reset();
+  }
+  expect_collective_error(
+      MPI_COMM_WORLD,
+      [&] {
+        static_cast<void>(hundun::application::broadcast_resolved_case(
+            MPI_COMM_WORLD, 0, rank == 0 ? &mismatch : nullptr));
+      },
+      "expected MPI rank count " + std::to_string(expected_ranks) + ", got " +
+          std::to_string(size));
+}
+
 int run_active(int argc, char** argv) {
   hundun::runtime::MpiEnvironment environment(argc, argv);
   int rank = 0;
@@ -230,6 +248,8 @@ int run_active(int argc, char** argv) {
     run_full(rank, size);
   } else if (mode == "errors") {
     run_errors(rank, size);
+  } else if (mode == "v1_mismatch") {
+    run_v1_expected_rank_mismatch(rank, size);
   } else {
     throw std::runtime_error("unknown test mode");
   }

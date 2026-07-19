@@ -2,6 +2,7 @@
 
 #include "applications/hundun/case_config_broadcast.hpp"
 #include "applications/hundun/cli_options.hpp"
+#include "applications/hundun/detail/dispatch_order.hpp"
 #include "applications/hundun/stage1_driver.hpp"
 
 #include "hundun/config/resolved_case_loader.hpp"
@@ -124,35 +125,41 @@ int run_case(const hundun::application::CliOptions& options,
              MpiContext& context) {
   const RunMode mode = run_mode(options);
   require_run_mode_agreement(context, mode);
-  const std::filesystem::path authoritative_case_root =
-      hundun::application::establish_authoritative_case_root(
-          context, options.case_path);
-  const hundun::config::ResolvedCase resolved =
-      load_and_broadcast_resolved_case(context, options.case_path);
-  if (const auto* stage1 =
-          std::get_if<hundun::config::CaseConfig>(&resolved)) {
-    return hundun::application::run_stage1_case(
-        options, context, *stage1, authoritative_case_root);
-  }
+  return hundun::application::detail::dispatch_in_root_config_rank_order(
+      [&] {
+        return hundun::application::establish_authoritative_case_root(
+            context, options.case_path);
+      },
+      [&] {
+        return load_and_broadcast_resolved_case(context, options.case_path);
+      },
+      [&](const hundun::config::ResolvedCase& resolved,
+          const std::filesystem::path& authoritative_case_root) -> int {
+        if (const auto* stage1 =
+                std::get_if<hundun::config::CaseConfig>(&resolved)) {
+          return hundun::application::run_stage1_case(
+              options, context, *stage1, authoritative_case_root);
+        }
 
-  if (mode == RunMode::validate) {
-    write_root_output(context, "unable to write validation output",
-                      [] { std::cout << "VALID\n"; });
-    context.barrier();
-    return EXIT_SUCCESS;
-  }
-  if (mode == RunMode::print_resolved) {
-    write_root_output(context, "unable to write resolved case configuration",
-                      [&resolved] {
-                        std::cout
-                            << hundun::config::to_resolved_json(resolved)
-                            << '\n';
-                      });
-    context.barrier();
-    return EXIT_SUCCESS;
-  }
-  throw Error(
-      "Stage 2 variable-density flow driver is not implemented before Task 24");
+        if (mode == RunMode::validate) {
+          write_root_output(context, "unable to write validation output",
+                            [] { std::cout << "VALID\n"; });
+          context.barrier();
+          return EXIT_SUCCESS;
+        }
+        if (mode == RunMode::print_resolved) {
+          write_root_output(
+              context, "unable to write resolved case configuration",
+              [&resolved] {
+                std::cout << hundun::config::to_resolved_json(resolved)
+                          << '\n';
+              });
+          context.barrier();
+          return EXIT_SUCCESS;
+        }
+        throw Error(
+            "Stage 2 variable-density flow driver is not implemented before Task 24");
+      });
 }
 
 int run_with_mpi(int argc, char** argv,

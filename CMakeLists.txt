@@ -547,6 +547,15 @@ if(HUNDUN_BUILD_TESTS)
               full ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${resolved_broadcast_test}" PROPERTIES
       LABELS mpi TIMEOUT 45 PROCESSORS "${ranks}")
+
+    set(resolved_v1_mismatch_test
+      "test_resolved_case_broadcast_v1_mismatch_${ranks}_rank")
+    add_test(NAME "${resolved_v1_mismatch_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_resolved_case_broadcast>"
+              v1_mismatch ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${resolved_v1_mismatch_test}" PROPERTIES
+      LABELS mpi TIMEOUT 45 PROCESSORS "${ranks}")
   endforeach()
   add_test(NAME test_resolved_case_broadcast_errors
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "4"
