@@ -53,8 +53,8 @@ double* checked_view_element(
     AllocationIdentity allocation_identity, std::uint64_t epoch,
     BackendIdentity backend_identity, ExecutionSpace space,
     std::size_t offset_bytes, std::size_t element_count,
-    std::size_t stride_elements, bool writable, std::size_t index,
-    bool require_index);
+    std::size_t stride_elements, bool mutable_access_allowed,
+    std::size_t index, bool require_index);
 }  // namespace detail
 
 namespace test {
@@ -115,15 +115,16 @@ class VectorView final {
   T* data() const {
     double* pointer = detail::checked_view_element(
         control_, allocation_identity_, epoch_, backend_identity_, space_,
-        offset_bytes_, element_count_, stride_elements_, writable_, 0, false);
+        offset_bytes_, element_count_, stride_elements_,
+        !std::is_same_v<T, double> || writable_, 0, false);
     return pointer;
   }
 
   T& operator[](std::size_t index) const {
     double* pointer = detail::checked_view_element(
         control_, allocation_identity_, epoch_, backend_identity_, space_,
-        offset_bytes_, element_count_, stride_elements_, writable_, index,
-        true);
+        offset_bytes_, element_count_, stride_elements_,
+        !std::is_same_v<T, double> || writable_, index, true);
     return *pointer;
   }
 

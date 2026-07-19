@@ -5,6 +5,7 @@
 #include "execution_test_access.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -117,6 +118,8 @@ struct AllocationControl final {
 struct EventState final {
   std::atomic<EventResult> result{EventResult::pending};
   std::mutex mutex;
+  std::condition_variable condition;
+  std::size_t waiter_count{0};
   std::string error_message;
   std::vector<std::shared_ptr<AllocationControl>> retained_allocations;
 };
@@ -171,12 +174,16 @@ double* checked_view_element(
     AllocationIdentity allocation_identity, std::uint64_t epoch,
     BackendIdentity backend_identity, ExecutionSpace space,
     std::size_t offset_bytes, std::size_t element_count,
-    std::size_t stride_elements, bool, std::size_t index,
-    bool require_index) {
+    std::size_t stride_elements, bool mutable_access_allowed,
+    std::size_t index, bool require_index) {
   const auto control = weak_control.lock();
   validate_view_metadata(control, allocation_identity, epoch, backend_identity,
                          space, offset_bytes, element_count, stride_elements,
                          true);
+  if (!mutable_access_allowed) {
+    throw runtime::Error(
+        "mutable vector view access requires writable capability");
+  }
   if (require_index && index >= element_count) {
     throw runtime::Error("vector view index is out of bounds");
   }
@@ -374,12 +381,18 @@ void ExecutionEvent::wait() const {
   if (!state_) {
     throw runtime::Error("moved-from execution event has no state");
   }
-  const EventResult result = state_->result.load(std::memory_order_acquire);
-  if (result == EventResult::pending) {
-    throw runtime::Error("execution event is not complete");
+  std::unique_lock<std::mutex> lock(state_->mutex);
+  if (state_->result.load(std::memory_order_acquire) == EventResult::pending) {
+    ++state_->waiter_count;
+    state_->condition.notify_all();
+    state_->condition.wait(lock, [&] {
+      return state_->result.load(std::memory_order_acquire) !=
+             EventResult::pending;
+    });
+    --state_->waiter_count;
   }
+  const EventResult result = state_->result.load(std::memory_order_acquire);
   if (result == EventResult::error) {
-    const std::lock_guard<std::mutex> lock(state_->mutex);
     throw runtime::Error(state_->error_message);
   }
 }
@@ -465,7 +478,7 @@ ExecutionEvent transfer(VectorView<const double> source,
   double* source_pointer = detail::checked_view_element(
       source.control_, source.allocation_identity_, source.epoch_,
       source.backend_identity_, source.space_, source.offset_bytes_,
-      source.element_count_, source.stride_elements_, false, 0, false);
+      source.element_count_, source.stride_elements_, true, 0, false);
   double* destination_pointer = detail::checked_view_element(
       destination.control_, destination.allocation_identity_,
       destination.epoch_, destination.backend_identity_, destination.space_,
@@ -479,6 +492,18 @@ ExecutionEvent transfer(VectorView<const double> source,
 }
 
 namespace test {
+
+MetadataOnlyViewFixture::MetadataOnlyViewFixture(
+    std::shared_ptr<detail::AllocationControl> control) noexcept
+    : control_(std::move(control)) {}
+
+MetadataOnlyViewFixture::~MetadataOnlyViewFixture() = default;
+
+MetadataOnlyViewFixture::MetadataOnlyViewFixture(
+    MetadataOnlyViewFixture&&) noexcept = default;
+
+MetadataOnlyViewFixture& MetadataOnlyViewFixture::operator=(
+    MetadataOnlyViewFixture&&) noexcept = default;
 
 AllocationIdentity ExecutionTestAccess::next_allocation_identity() noexcept {
   const std::lock_guard<std::mutex> lock(identity_mutex);
@@ -536,6 +561,53 @@ VectorView<const double> ExecutionTestAccess::const_view(
       metadata_value.backend_identity, metadata_value.space, false);
 }
 
+MetadataOnlyViewFixture ExecutionTestAccess::metadata_only_allocation(
+    std::size_t byte_size, AllocationIdentity allocation_identity,
+    std::uint64_t epoch, BackendIdentity backend_identity,
+    ExecutionSpace space) {
+  if (allocation_identity == 0 || epoch == 0 || backend_identity == 0) {
+    throw runtime::Error(
+        "metadata-only allocation identities and epoch must be nonzero");
+  }
+  if (space != ExecutionSpace::device) {
+    throw runtime::Error(
+        "metadata-only allocation test seam requires device space");
+  }
+  auto control = std::make_shared<detail::AllocationControl>(
+      std::unique_ptr<std::byte, AlignedDelete>{}, byte_size,
+      allocation_identity, epoch, backend_identity, space);
+  return MetadataOnlyViewFixture(std::move(control));
+}
+
+bool ExecutionTestAccess::has_storage(
+    const MetadataOnlyViewFixture& fixture) noexcept {
+  return fixture.control_ && fixture.control_->storage != nullptr;
+}
+
+VectorView<double> ExecutionTestAccess::mutable_view(
+    const MetadataOnlyViewFixture& fixture, std::size_t offset_bytes,
+    std::size_t element_count, std::size_t stride_elements, bool writable) {
+  if (!fixture.control_ || !fixture.control_->owner_live) {
+    throw runtime::Error("metadata-only allocation fixture is not live");
+  }
+  return VectorView<double>(
+      fixture.control_, offset_bytes, element_count, stride_elements,
+      fixture.control_->allocation_identity, fixture.control_->epoch,
+      fixture.control_->backend_identity, fixture.control_->space, writable);
+}
+
+VectorView<const double> ExecutionTestAccess::const_view(
+    const MetadataOnlyViewFixture& fixture, std::size_t offset_bytes,
+    std::size_t element_count, std::size_t stride_elements) {
+  if (!fixture.control_ || !fixture.control_->owner_live) {
+    throw runtime::Error("metadata-only allocation fixture is not live");
+  }
+  return VectorView<const double>(
+      fixture.control_, offset_bytes, element_count, stride_elements,
+      fixture.control_->allocation_identity, fixture.control_->epoch,
+      fixture.control_->backend_identity, fixture.control_->space, false);
+}
+
 std::weak_ptr<void> ExecutionTestAccess::observe_allocation(
     const Buffer& buffer) {
   buffer.require_live();
@@ -560,13 +632,17 @@ void ExecutionTestAccess::complete_success(ExecutionEvent& event) {
   if (!event.state_) {
     throw runtime::Error("moved-from execution event has no state");
   }
-  std::lock_guard<std::mutex> lock(event.state_->mutex);
-  if (event.state_->result.load(std::memory_order_relaxed) !=
-      EventResult::pending) {
-    throw runtime::Error("execution event is already complete");
+  {
+    const std::lock_guard<std::mutex> lock(event.state_->mutex);
+    if (event.state_->result.load(std::memory_order_relaxed) !=
+        EventResult::pending) {
+      throw runtime::Error("execution event is already complete");
+    }
+    event.state_->retained_allocations.clear();
+    event.state_->result.store(EventResult::success,
+                               std::memory_order_release);
   }
-  event.state_->retained_allocations.clear();
-  event.state_->result.store(EventResult::success, std::memory_order_release);
+  event.state_->condition.notify_all();
 }
 
 void ExecutionTestAccess::complete_error(ExecutionEvent& event,
@@ -574,14 +650,35 @@ void ExecutionTestAccess::complete_error(ExecutionEvent& event,
   if (!event.state_) {
     throw runtime::Error("moved-from execution event has no state");
   }
-  std::lock_guard<std::mutex> lock(event.state_->mutex);
-  if (event.state_->result.load(std::memory_order_relaxed) !=
-      EventResult::pending) {
-    throw runtime::Error("execution event is already complete");
+  {
+    const std::lock_guard<std::mutex> lock(event.state_->mutex);
+    if (event.state_->result.load(std::memory_order_relaxed) !=
+        EventResult::pending) {
+      throw runtime::Error("execution event is already complete");
+    }
+    event.state_->error_message = std::move(message);
+    event.state_->retained_allocations.clear();
+    event.state_->result.store(EventResult::error,
+                               std::memory_order_release);
   }
-  event.state_->error_message = std::move(message);
-  event.state_->retained_allocations.clear();
-  event.state_->result.store(EventResult::error, std::memory_order_release);
+  event.state_->condition.notify_all();
+}
+
+void ExecutionTestAccess::wait_until_waiter_count(
+    const ExecutionEvent& event, std::size_t expected) {
+  if (!event.state_) {
+    throw runtime::Error("moved-from execution event has no state");
+  }
+  std::unique_lock<std::mutex> lock(event.state_->mutex);
+  event.state_->condition.wait(lock, [&] {
+    return event.state_->waiter_count >= expected ||
+           event.state_->result.load(std::memory_order_acquire) !=
+               EventResult::pending;
+  });
+  if (event.state_->waiter_count < expected) {
+    throw runtime::Error(
+        "execution event completed before the expected waiter arrived");
+  }
 }
 
 }  // namespace test

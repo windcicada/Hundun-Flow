@@ -21,6 +21,7 @@ hundun_assert_clean_tree("${PROJECT_SOURCE_DIR}")
 hundun_assert_public_dependency_policy("${PROJECT_SOURCE_DIR}")
 
 find_package(MPI 3 REQUIRED COMPONENTS CXX)
+find_package(Threads REQUIRED)
 
 add_library(hundun_options INTERFACE)
 target_compile_features(hundun_options INTERFACE cxx_std_17)
@@ -36,7 +37,7 @@ target_include_directories(hundun_execution PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/include>")
 target_link_libraries(hundun_execution
   PRIVATE hundun_warnings
-  PUBLIC hundun_options)
+  PUBLIC hundun_options Threads::Threads)
 
 add_library(hundun_diagnostics STATIC
   diagnostics/src/performance_artifact.cpp)
@@ -164,8 +165,6 @@ endfunction()
 
 if(HUNDUN_BUILD_TESTS)
   enable_testing()
-
-  find_package(Threads REQUIRED)
 
   function(hundun_add_mock_plugin target)
     add_library("${target}" MODULE tests/plugins/mock_plugin.c)

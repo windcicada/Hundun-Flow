@@ -5,11 +5,14 @@
 #include "execution/src/execution_test_access.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -27,6 +30,7 @@ using hundun::execution::ExecutionSpace;
 using hundun::execution::ScalarFormat;
 using hundun::execution::VectorView;
 using hundun::execution::test::ExecutionTestAccess;
+using hundun::execution::test::MetadataOnlyViewFixture;
 using hundun::execution::test::TestViewMetadata;
 using hundun::runtime::Error;
 
@@ -196,6 +200,7 @@ void test_buffers_and_views() {
   HUNDUN_CHECK(odds.allocation_identity() == first.allocation_identity());
   HUNDUN_CHECK(odds.backend_identity() == context.backend_identity());
   HUNDUN_CHECK(odds.space() == ExecutionSpace::host);
+  HUNDUN_CHECK(odds.data() != nullptr);
   check_values(odds, {2.0, 4.0, 6.0});
 
   auto at_end = first.view(6, 0, 3);
@@ -510,6 +515,11 @@ void test_transfers_and_validation() {
                                     valid_destination.backend_identity,
                                     valid_destination.space,
                                     false});
+  expect_error_containing(
+      [&] { static_cast<void>(non_writable.data()); }, "writable");
+  expect_error_containing(
+      [&] { static_cast<void>(non_writable[0]); }, "writable");
+  HUNDUN_CHECK(destination.view(0, 2)[0] == 10.0);
   require_unchanged_failure(
       [&] {
         static_cast<void>(hundun::execution::transfer(
@@ -518,21 +528,41 @@ void test_transfers_and_validation() {
       },
       "writable");
 
-  auto device_view = ExecutionTestAccess::const_view(
-      source, TestViewMetadata{0,
-                               2,
-                               1,
-                               source.allocation_identity(),
-                               source.epoch(),
-                               999,
-                               ExecutionSpace::device,
-                               false});
-  require_unchanged_failure(
+  constexpr BackendIdentity device_identity = 999;
+  constexpr AllocationIdentity device_allocation = 7001;
+  constexpr std::uint64_t device_epoch = 9;
+  MetadataOnlyViewFixture device_fixture =
+      ExecutionTestAccess::metadata_only_allocation(
+          2 * sizeof(double), device_allocation, device_epoch,
+          device_identity, ExecutionSpace::device);
+  HUNDUN_CHECK(!ExecutionTestAccess::has_storage(device_fixture));
+  auto device_source = ExecutionTestAccess::const_view(
+      device_fixture, 0, 2, 1);
+  auto device_destination = ExecutionTestAccess::mutable_view(
+      device_fixture, 0, 2, 1, true);
+  ConfigurableContext matching_device_context(
+      device_identity, ExecutionSpace::device, true, false, true, true);
+  expect_error_containing(
       [&] {
         static_cast<void>(hundun::execution::transfer(
-            device_view, destination.view(0, 2), context));
+            device_source, device_destination, matching_device_context));
       },
-      "metadata");
+      "host context");
+
+  constexpr AllocationIdentity cpu_device_allocation = 7002;
+  MetadataOnlyViewFixture cpu_device_fixture =
+      ExecutionTestAccess::metadata_only_allocation(
+          2 * sizeof(double), cpu_device_allocation, device_epoch,
+          context.backend_identity(), ExecutionSpace::device);
+  HUNDUN_CHECK(!ExecutionTestAccess::has_storage(cpu_device_fixture));
+  auto cpu_identity_device_source = ExecutionTestAccess::const_view(
+      cpu_device_fixture, 0, 2, 1);
+  expect_error_containing(
+      [&] {
+        static_cast<void>(hundun::execution::transfer(
+            cpu_identity_device_source, destination.view(0, 2), context));
+      },
+      "host vector views");
 
   auto misaligned = ExecutionTestAccess::const_view(
       source, TestViewMetadata{1,
@@ -603,13 +633,44 @@ void test_events_and_lifetime() {
   ExecutionEvent pending_copy = pending;
   HUNDUN_CHECK(!pending.ready());
   HUNDUN_CHECK(!pending_copy.ready());
-  expect_error_containing([&] { pending.wait(); }, "not complete");
-  HUNDUN_CHECK(!pending.ready());
+  std::atomic<bool> wait_returned{false};
+  std::exception_ptr wait_error;
+  std::thread waiter([&] {
+    try {
+      pending.wait();
+    } catch (...) {
+      wait_error = std::current_exception();
+    }
+    wait_returned.store(true, std::memory_order_release);
+  });
+  try {
+    ExecutionTestAccess::wait_until_waiter_count(pending_copy, 1);
+  } catch (...) {
+    if (!pending_copy.ready()) {
+      ExecutionTestAccess::complete_success(pending_copy);
+    }
+    waiter.join();
+    throw;
+  }
+  const bool ready_before_completion = pending.ready();
+  const bool returned_before_completion =
+      wait_returned.load(std::memory_order_acquire);
   retained_buffer.reset();
-  HUNDUN_CHECK(!observed.expired());
-  expect_error_containing([&] { static_cast<void>(retained_view[0]); },
-                          "live");
+  const bool retained_before_completion = !observed.expired();
+  std::string stale_view_message;
+  try {
+    static_cast<void>(retained_view[0]);
+  } catch (const Error& error) {
+    stale_view_message = error.what();
+  }
   ExecutionTestAccess::complete_success(pending_copy);
+  waiter.join();
+  HUNDUN_CHECK(!ready_before_completion);
+  HUNDUN_CHECK(!returned_before_completion);
+  HUNDUN_CHECK(retained_before_completion);
+  HUNDUN_CHECK(stale_view_message.find("live") != std::string::npos);
+  HUNDUN_CHECK(wait_returned.load(std::memory_order_acquire));
+  HUNDUN_CHECK(wait_error == nullptr);
   HUNDUN_CHECK(pending.ready());
   HUNDUN_CHECK(pending_copy.ready());
   HUNDUN_CHECK(observed.expired());
@@ -618,13 +679,35 @@ void test_events_and_lifetime() {
 
   auto failed = ExecutionTestAccess::pending_event({});
   HUNDUN_CHECK(!failed.ready());
+  ExecutionEvent failed_copy = failed;
+  std::atomic<bool> failed_wait_returned{false};
+  std::string failed_wait_message;
+  std::thread failed_waiter([&] {
+    failed_wait_message = expect_error([&] { failed_copy.wait(); });
+    failed_wait_returned.store(true, std::memory_order_release);
+  });
+  try {
+    ExecutionTestAccess::wait_until_waiter_count(failed, 1);
+  } catch (...) {
+    if (!failed.ready()) {
+      ExecutionTestAccess::complete_error(
+          failed, "fixed numerical event error");
+    }
+    failed_waiter.join();
+    throw;
+  }
+  const bool failed_returned_before_completion =
+      failed_wait_returned.load(std::memory_order_acquire);
   ExecutionTestAccess::complete_error(failed, "fixed numerical event error");
+  failed_waiter.join();
+  HUNDUN_CHECK(!failed_returned_before_completion);
+  HUNDUN_CHECK(failed_wait_returned.load(std::memory_order_acquire));
+  HUNDUN_CHECK(failed_wait_message == "fixed numerical event error");
   HUNDUN_CHECK(failed.ready());
   HUNDUN_CHECK(expect_error([&] { failed.wait(); }) ==
                "fixed numerical event error");
   HUNDUN_CHECK(expect_error([&] { failed.wait(); }) ==
                "fixed numerical event error");
-  ExecutionEvent failed_copy = failed;
   HUNDUN_CHECK(expect_error([&] { failed_copy.wait(); }) ==
                "fixed numerical event error");
 }
