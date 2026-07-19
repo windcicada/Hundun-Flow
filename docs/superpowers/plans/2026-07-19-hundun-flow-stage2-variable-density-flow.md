@@ -134,6 +134,8 @@ ExecutionEvent transfer(
     VectorView<const double>, VectorView<double>, ExecutionContext&);
 ```
 
+`ExecutionContext` 以及任何作为公开多态执行基类的类型必须具有等价的安全虚析构合同；本计划只冻结该析构安全要求，不臆造其余未冻结 API。
+
 生产只注册 `CpuReferenceContext`。Device context、direct/staged Halo 和 event 路径只由不可注册的 test double 验证；公共头不出现厂商类型。
 
 线性接口固定为：
@@ -141,6 +143,7 @@ ExecutionEvent transfer(
 ```cpp
 class LinearOperator {
  public:
+  virtual ~LinearOperator() noexcept = default;
   virtual VectorLayout domain_layout() const = 0;
   virtual VectorLayout range_layout() const = 0;
   virtual const ExecutionContext& context() const = 0;
@@ -153,6 +156,7 @@ class LinearOperator {
 
 class Preconditioner {
  public:
+  virtual ~Preconditioner() noexcept = default;
   virtual void update(const LinearOperator&, std::uint64_t revision) = 0;
   virtual ExecutionEvent apply(
       VectorView<const double> r, VectorView<double> z) const = 0;
@@ -160,6 +164,7 @@ class Preconditioner {
 
 class LinearSolver {
  public:
+  virtual ~LinearSolver() noexcept = default;
   virtual SolveReport solve(
       const LinearOperator&, Preconditioner&,
       VectorView<const double> b, VectorView<double> x,
@@ -424,6 +429,6 @@ bash tests/acceptance/stage2_acceptance.sh
 - 自适应时间步采用确定性 CFL/扩散控制，不实现嵌入误差 PI controller。
 - wall-clock/RSS/带宽/I/O 吞吐先记录而不硬判；exact counters 是 CI 门禁。
 - 无滑移壁面上的 h/标量固定零法向通量不是可配置热壁能力。
-- `cpu_optimized` 只有在已接受热点证据后才能另立 Stage 2 内任务；它不是本计划出口条件。
+- `cpu_optimized` 不属于当前授权的 Tasks 1--26；即使已经接受热点证据，也必须先另行批准计划修订（separately approved plan amendment）。本计划不得自动增加任务，且该能力不是本计划出口条件。
 - Device、GPU-aware MPI、mixed precision 和 vendor backend 只冻结可替换接口及 test-double 合同，不宣称已经实现。
 - 计划覆盖 Stage 2 低马赫流动、五类基础边界、曲线网格、线性求解、Restart 和性能证据；COAST 黑盒矩阵中的化学、LES、IBM、TPDF-TCR、喷雾和复杂边界继续明确标记为后续阶段，Stage 2 不宣称完全替代旧工作流。
