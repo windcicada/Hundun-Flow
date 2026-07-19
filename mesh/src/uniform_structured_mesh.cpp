@@ -2,6 +2,8 @@
 
 #include "hundun/mesh/uniform_structured_mesh.hpp"
 
+#include "geometry_arithmetic.hpp"
+
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 
@@ -165,7 +167,7 @@ std::uint64_t round_right_shift(const ProductLimbs& product,
   return quotient;
 }
 
-double range_safe_product(runtime::Real3 factors) noexcept {
+double range_safe_product_impl(runtime::Real3 factors) noexcept {
   const BinaryFactor x = decompose(factors.x);
   const BinaryFactor y = decompose(factors.y);
   const BinaryFactor z = decompose(factors.z);
@@ -196,6 +198,14 @@ double range_safe_product(runtime::Real3 factors) noexcept {
 
 }  // namespace
 
+namespace detail {
+
+double range_safe_product(runtime::Real3 factors) noexcept {
+  return range_safe_product_impl(factors);
+}
+
+}  // namespace detail
+
 UniformStructuredMesh::UniformStructuredMesh(
     runtime::Int3 global_cells, runtime::Real3 origin_m,
     runtime::Real3 length_m,
@@ -222,7 +232,7 @@ UniformStructuredMesh::UniformStructuredMesh(
     throw runtime::Error("mesh spacing must be finite and positive");
   }
 
-  const double cell_volume = range_safe_product(spacing);
+  const double cell_volume = detail::range_safe_product(spacing);
   if (!std::isfinite(cell_volume) || cell_volume <= 0.0) {
     throw runtime::Error("mesh cell volume must be finite and positive");
   }
