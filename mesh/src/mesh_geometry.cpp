@@ -66,6 +66,62 @@ bool finite(runtime::Real3 value) noexcept {
          std::isfinite(value.z);
 }
 
+double range_safe_determinant(runtime::Real3 first,
+                              runtime::Real3 second,
+                              runtime::Real3 third,
+                              double factor = 1.0) noexcept {
+  if (!finite(first) || !finite(second) || !finite(third) ||
+      !std::isfinite(factor)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (factor == 0.0) {
+    return 0.0;
+  }
+
+  const double x_scale =
+      std::max({std::abs(first.x), std::abs(second.x), std::abs(third.x)});
+  const double y_scale =
+      std::max({std::abs(first.y), std::abs(second.y), std::abs(third.y)});
+  const double z_scale =
+      std::max({std::abs(first.z), std::abs(second.z), std::abs(third.z)});
+  if (x_scale == 0.0 || y_scale == 0.0 || z_scale == 0.0) {
+    return 0.0;
+  }
+
+  const runtime::Real3 normalized_first{first.x / x_scale,
+                                         first.y / y_scale,
+                                         first.z / z_scale};
+  const runtime::Real3 normalized_second{second.x / x_scale,
+                                          second.y / y_scale,
+                                          second.z / z_scale};
+  const runtime::Real3 normalized_third{third.x / x_scale,
+                                         third.y / y_scale,
+                                         third.z / z_scale};
+  // Row normalization bounds every cross-product operand.  Restore the three
+  // physical row scales by exponent so their intermediate product is never
+  // formed in binary64.
+  const double normalized_determinant =
+      dot(normalized_first, cross(normalized_second, normalized_third));
+  if (!std::isfinite(normalized_determinant) ||
+      normalized_determinant == 0.0) {
+    return normalized_determinant;
+  }
+
+  int x_exponent = 0;
+  int y_exponent = 0;
+  int z_exponent = 0;
+  int determinant_exponent = 0;
+  int factor_exponent = 0;
+  const double mantissa =
+      std::frexp(x_scale, &x_exponent) *
+      std::frexp(y_scale, &y_exponent) *
+      std::frexp(z_scale, &z_exponent) *
+      std::frexp(normalized_determinant, &determinant_exponent) *
+      std::frexp(factor, &factor_exponent);
+  return std::scalbn(mantissa, x_exponent + y_exponent + z_exponent +
+                                   determinant_exponent + factor_exponent);
+}
+
 bool positive(runtime::Real3 value) noexcept {
   return value.x > 0.0 && value.y > 0.0 && value.z > 0.0;
 }
@@ -121,6 +177,15 @@ runtime::Real3 map_point(const Mapping& mapping, runtime::Real3 logical) {
 MappingJacobian map_jacobian(const Mapping& mapping, runtime::Real3 logical) {
   return std::visit([&](const auto& value) { return value.jacobian(logical); },
                     mapping);
+}
+
+bool is_affine_mapping(const Mapping& mapping) noexcept {
+  if (std::holds_alternative<UniformBoxMapping>(mapping)) {
+    return true;
+  }
+  const auto amplitude =
+      std::get<AnalyticWarpedBoxMapping>(mapping).amplitude();
+  return amplitude.x == 0.0 && amplitude.y == 0.0 && amplitude.z == 0.0;
 }
 
 runtime::Real3 logical_vertex(runtime::Int3 vertex,
@@ -224,8 +289,13 @@ std::array<runtime::Real3, 4> mapped_face_vertices(const Mapping& mapping,
 }
 
 runtime::Real3 face_center(
-    const std::array<runtime::Real3, 4>& vertices) noexcept {
+    const std::array<runtime::Real3, 4>& vertices, bool affine) noexcept {
   const auto anchor = vertices[0];
+  if (affine) {
+    // For a parallelogram this is the same arithmetic mean, expressed without
+    // tangential cancellation across extreme physical aspect ratios.
+    return add(anchor, multiply(subtract(vertices[2], anchor), 0.5));
+  }
   auto center = anchor;
   for (std::size_t index = 1; index < vertices.size(); ++index) {
     center = add(
@@ -270,15 +340,21 @@ PolyhedralCell calculate_warped_cell(const Mapping& mapping,
   const auto vertices = mapped_cell_vertices(mapping, extent, cell);
   const auto anchor = vertices[0];
   auto reference = anchor;
+  const bool affine = is_affine_mapping(mapping);
   for (std::size_t index = 0; index < vertices.size(); ++index) {
     const auto vertex = vertices[index];
     if (!finite(vertex)) {
       throw runtime::Error("mapped cell vertex is non-finite");
     }
-    if (index != 0) {
+    if (!affine && index != 0) {
       reference = add(
           reference, multiply(subtract(vertex, anchor), 0.125));
     }
+  }
+  if (affine) {
+    // The opposite-vertex midpoint equals the eight-vertex mean for this
+    // affine hexahedron and stays aligned with the affine face-centre path.
+    reference = add(anchor, multiply(subtract(vertices[6], anchor), 0.5));
   }
   if (!finite(reference)) {
     throw runtime::Error("mesh cell reference point is non-finite");
@@ -296,8 +372,8 @@ PolyhedralCell calculate_warped_cell(const Mapping& mapping,
     const auto relative_a = subtract(a, reference);
     const auto relative_b = subtract(b, reference);
     const auto relative_c = subtract(c, reference);
-    const double signed_volume =
-        dot(relative_a, cross(relative_b, relative_c)) / 6.0;
+    const double signed_volume = range_safe_determinant(
+        relative_a, relative_b, relative_c, 1.0 / 6.0);
     if (!std::isfinite(signed_volume)) {
       throw runtime::Error("cell tetrahedron volume is non-finite");
     }
@@ -342,6 +418,9 @@ PolyhedralCell calculate_warped_cell(const Mapping& mapping,
   if (contribution_count != contributions.size() || !std::isfinite(volume) ||
       volume <= 0.0) {
     throw runtime::Error("mesh cell volume must be finite and positive");
+  }
+  if (affine) {
+    return {reference, volume};
   }
   runtime::Real3 relative_center{};
   for (const auto contribution : contributions) {
@@ -439,7 +518,7 @@ auto translate_allocation_failures(Function&& function) {
 }  // namespace
 
 double MappingJacobian::determinant_m3() const noexcept {
-  return dot(d_xi_m, cross(d_eta_m, d_zeta_m));
+  return range_safe_determinant(d_xi_m, d_eta_m, d_zeta_m);
 }
 
 UniformBoxMapping::UniformBoxMapping(runtime::Real3 origin_m,
@@ -540,15 +619,21 @@ MappingJacobian AnalyticWarpedBoxMapping::jacobian(
   MappingJacobian result{};
   result.d_xi_m = {
       length_m_.x * (1.0 + 2.0 * kPi * amplitude_.x * cos_2x * sin_y * sin_z),
-      length_m_.y * kPi * amplitude_.y * cos_x * sin_2y * sin_z,
-      length_m_.z * kPi * amplitude_.z * cos_x * sin_y * sin_2z};
+      length_m_.y *
+          (kPi * amplitude_.y * cos_x * sin_2y * sin_z),
+      length_m_.z *
+          (kPi * amplitude_.z * cos_x * sin_y * sin_2z)};
   result.d_eta_m = {
-      length_m_.x * kPi * amplitude_.x * sin_2x * cos_y * sin_z,
+      length_m_.x *
+          (kPi * amplitude_.x * sin_2x * cos_y * sin_z),
       length_m_.y * (1.0 + 2.0 * kPi * amplitude_.y * sin_x * cos_2y * sin_z),
-      length_m_.z * kPi * amplitude_.z * sin_x * cos_y * sin_2z};
+      length_m_.z *
+          (kPi * amplitude_.z * sin_x * cos_y * sin_2z)};
   result.d_zeta_m = {
-      length_m_.x * kPi * amplitude_.x * sin_2x * sin_y * cos_z,
-      length_m_.y * kPi * amplitude_.y * sin_x * sin_2y * cos_z,
+      length_m_.x *
+          (kPi * amplitude_.x * sin_2x * sin_y * cos_z),
+      length_m_.y *
+          (kPi * amplitude_.y * sin_x * sin_2y * cos_z),
       length_m_.z * (1.0 + 2.0 * kPi * amplitude_.z * sin_x * sin_y * cos_2z)};
   if (!finite(result.d_xi_m) || !finite(result.d_eta_m) ||
       !finite(result.d_zeta_m)) {
@@ -641,7 +726,7 @@ struct MeshGeometry::Impl {
       const auto vertices =
           mapped_face_vertices(mapping, extent, identity.logical);
       FaceMetrics metrics{};
-      metrics.center = face_center(vertices);
+      metrics.center = face_center(vertices, is_affine_mapping(mapping));
       const auto positive_area = positive_axis_area(vertices);
       metrics.owner_area = is_logical_minimum(identity.logical)
                                ? negate(positive_area)

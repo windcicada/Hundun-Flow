@@ -33,6 +33,7 @@ using hundun::mesh::FaceSide;
 using hundun::mesh::LocalCellId;
 using hundun::mesh::LocalFaceId;
 using hundun::mesh::LogicalFace;
+using hundun::mesh::MappingJacobian;
 using hundun::mesh::MappingKind;
 using hundun::mesh::MeshGeometry;
 using hundun::mesh::MeshTopology;
@@ -52,6 +53,7 @@ constexpr Int3 kSeamExtent{1, 5, 4};
 constexpr Int3 kMixedScaleExtent{1, 2, 2};
 constexpr Int3 kClosureScaleExtent{4, 1, 1};
 constexpr Int3 kNonorthScaleExtent{7, 5, 4};
+constexpr Int3 kJacobianScaleExtent{1, 10, 10};
 constexpr Real3 kOrigin{-1.25, 0.375, 2.5};
 constexpr Real3 kLength{2.75, 1.625, 4.5};
 constexpr Real3 kAmplitude{0.02, -0.015, 0.01};
@@ -155,6 +157,14 @@ void check_near(Real3 actual, Real3 expected, double factor = 128.0) {
   check_near(actual.x, expected.x, factor);
   check_near(actual.y, expected.y, factor);
   check_near(actual.z, expected.z, factor);
+}
+
+void check_relative(double actual, double expected, double factor = 128.0) {
+  HUNDUN_CHECK(std::isfinite(actual));
+  HUNDUN_CHECK(std::isfinite(expected));
+  HUNDUN_CHECK(expected != 0.0);
+  HUNDUN_CHECK(std::abs(actual / expected - 1.0) <=
+               factor * std::numeric_limits<double>::epsilon());
 }
 
 template <class Function>
@@ -522,6 +532,40 @@ void test_mapping_formulas() {
               kOrigin.z + kLength.z * point.z});
   check_near(uniform.jacobian(point).determinant_m3(),
              kLength.x * kLength.y * kLength.z);
+}
+
+void test_range_safe_mapping_jacobians() {
+  constexpr Real3 origin{0.0, 0.0, 0.0};
+  constexpr Real3 length{1.0e308, 1.0e-154, 1.0e-154};
+  constexpr Real3 amplitude{0.005, 0.0, 0.0};
+  constexpr Real3 logical{0.25, 0.0, 0.5};
+  const AnalyticWarpedBoxMapping mapping(origin, length, amplitude);
+  const Real3 point = mapping.map(logical);
+  HUNDUN_CHECK(std::isfinite(point.x));
+  HUNDUN_CHECK(std::isfinite(point.y));
+  HUNDUN_CHECK(std::isfinite(point.z));
+  const MappingJacobian jacobian = mapping.jacobian(logical);
+  const double expected_off_diagonal =
+      length.x * ((kPi * amplitude.x) *
+                  std::sin(2.0 * kPi * logical.x) *
+                  std::cos(kPi * logical.y) * std::sin(kPi * logical.z));
+  HUNDUN_CHECK(std::isfinite(expected_off_diagonal));
+  check_relative(jacobian.d_eta_m.x, expected_off_diagonal, 32.0);
+  const double expected_determinant = static_cast<double>(
+      static_cast<long double>(length.x) *
+      static_cast<long double>(length.y) *
+      static_cast<long double>(length.z));
+  check_relative(jacobian.determinant_m3(), expected_determinant, 32.0);
+
+  const MappingJacobian overflow_first{{1.0e-210, 0.0, 0.0},
+                                       {0.0, 1.0e160, 0.0},
+                                       {0.0, 0.0, 1.0e150}};
+  check_relative(overflow_first.determinant_m3(), 1.0e100, 32.0);
+
+  const MappingJacobian underflow_first{{1.0e210, 0.0, 0.0},
+                                        {0.0, 1.0e-200, 0.0},
+                                        {0.0, 0.0, 1.0e-200}};
+  check_relative(underflow_first.determinant_m3(), 1.0e-190, 32.0);
 }
 
 void test_mapping_rejections() {
@@ -1046,6 +1090,100 @@ void test_closure_scale_geometry(const MpiContext& context) {
   check_anisotropic_metrics(topology, analytic);
 }
 
+void test_jacobian_scale_geometry(const MpiContext& context) {
+  constexpr Real3 origin{0.0, 0.0, 0.0};
+  constexpr Real3 length{1.0e-210, 1.0e160, 1.0e150};
+  const DecompositionOptions options{Int3{1, context.size(), 1}};
+  auto decomposition = StructuredDecomposition::create(
+      context, kJacobianScaleExtent, {false, false, false}, options);
+  MeshTopology topology(decomposition);
+  const UniformStructuredMesh legacy(kJacobianScaleExtent, origin, length,
+                                     decomposition);
+  MeshGeometry uniform(topology, UniformBoxMapping(origin, length));
+  MeshGeometry analytic(
+      topology, AnalyticWarpedBoxMapping(origin, length, {0.0, 0.0, 0.0}));
+
+  HUNDUN_CHECK(bitwise_equal(*uniform.uniform_spacing_m(), legacy.spacing_m()));
+  HUNDUN_CHECK(std::isfinite(legacy.cell_volume_m3()));
+  HUNDUN_CHECK(legacy.cell_volume_m3() > 0.0);
+  const double expected_jacobian = static_cast<double>(
+      static_cast<long double>(length.x) *
+      static_cast<long double>(length.y) *
+      static_cast<long double>(length.z));
+  check_relative(expected_jacobian, 1.0e100, 32.0);
+
+  for (LocalCellId local = 0; local < topology.owned_cell_count(); ++local) {
+    const Int3 global = topology.global_cell(local);
+    const Box3 box = topology.owned_global_box();
+    const Int3 legacy_local{global.x - box.begin.x, global.y - box.begin.y,
+                            global.z - box.begin.z};
+    HUNDUN_CHECK(bitwise_equal(uniform.cell_center_m(local),
+                               legacy.cell_center(legacy_local)));
+    HUNDUN_CHECK(bits(uniform.cell_volume_m3(local)) ==
+                 bits(legacy.cell_volume_m3()));
+    check_relative(uniform.minimum_jacobian_determinant_m3(local),
+                   expected_jacobian, 32.0);
+    check_relative(analytic.minimum_jacobian_determinant_m3(local),
+                   expected_jacobian, 32.0);
+    check_relative(analytic.cell_volume_m3(local), legacy.cell_volume_m3(),
+                   512.0);
+    check_scaled_closure(topology, uniform, local);
+    check_scaled_closure(topology, analytic, local);
+  }
+
+  std::array<bool, 3> saw_axis{};
+  const auto check_faces = [&](const MeshGeometry& geometry) {
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      const auto axis = topology.logical_face(face).axis;
+      double expected_area = 0.0;
+      switch (axis) {
+        case FaceAxis::x:
+          expected_area = static_cast<double>(
+              static_cast<long double>(legacy.spacing_m().y) *
+              static_cast<long double>(legacy.spacing_m().z));
+          saw_axis[0] = true;
+          break;
+        case FaceAxis::y:
+          expected_area = static_cast<double>(
+              static_cast<long double>(legacy.spacing_m().x) *
+              static_cast<long double>(legacy.spacing_m().z));
+          saw_axis[1] = true;
+          break;
+        case FaceAxis::z:
+          expected_area = static_cast<double>(
+              static_cast<long double>(legacy.spacing_m().x) *
+              static_cast<long double>(legacy.spacing_m().y));
+          saw_axis[2] = true;
+          break;
+      }
+      check_relative(geometry.face_area_m2(face), expected_area, 128.0);
+      const LocalCellId owner = topology.owner(face);
+      const Real3 displacement = topology.neighbour(face).has_value()
+                                    ? subtract(geometry.cell_center_m(
+                                                   *topology.neighbour(face)),
+                                               geometry.cell_center_m(owner))
+                                    : subtract(geometry.face_center_m(face),
+                                               geometry.cell_center_m(owner));
+      const double projection =
+          dot(geometry.face_area_vector_m2(face, FaceSide::owner),
+              displacement);
+      HUNDUN_CHECK(std::isfinite(projection));
+      HUNDUN_CHECK(projection > 0.0);
+      HUNDUN_CHECK(std::isfinite(geometry.face_skewness(face)));
+      HUNDUN_CHECK(geometry.face_skewness(face) >= 0.0);
+      HUNDUN_CHECK(
+          std::isfinite(geometry.face_non_orthogonality_degrees(face)));
+      HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) >= 0.0);
+      HUNDUN_CHECK(geometry.face_non_orthogonality_degrees(face) < 90.0);
+    }
+  };
+  check_faces(uniform);
+  check_faces(analytic);
+  HUNDUN_CHECK(saw_axis[0]);
+  HUNDUN_CHECK(saw_axis[1]);
+  HUNDUN_CHECK(saw_axis[2]);
+}
+
 void test_invalid_geometry_queries(const MeshTopology& topology,
                                    const MeshGeometry& geometry) {
   expect_error([&] {
@@ -1074,6 +1212,7 @@ void test_invalid_geometry_queries(const MeshTopology& topology,
 void run_mpi_tests(const MpiContext& context,
                    std::optional<MeshGeometry>& detached) {
   test_mapping_formulas();
+  test_range_safe_mapping_jacobians();
   test_mapping_rejections();
 
   const DecompositionOptions options{process_grid_for(context.size())};
@@ -1110,6 +1249,7 @@ void run_mpi_tests(const MpiContext& context,
   test_mixed_scale_geometry(context);
   test_closure_scale_geometry(context);
   test_nonorthogonality_scale_geometry(context);
+  test_jacobian_scale_geometry(context);
   context.barrier();
 }
 
