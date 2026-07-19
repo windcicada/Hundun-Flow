@@ -39,9 +39,7 @@ class KernelCellView final {
   }
 
  private:
-  template <class U, class Callback>
-  friend void with_kernel_cell_view(const FieldView<U> &checked,
-                                    Callback &&callback);
+  friend class detail::KernelFieldViewAccess;
 
   using Byte =
       std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
@@ -85,9 +83,7 @@ class KernelFaceView final {
   }
 
  private:
-  template <class U, class Callback>
-  friend void with_kernel_face_view(const FaceFieldView<U> &checked,
-                                    Callback &&callback);
+  friend class detail::KernelFieldViewAccess;
 
   using Byte =
       std::conditional_t<std::is_const_v<T>, const std::byte, std::byte>;
@@ -102,29 +98,68 @@ class KernelFaceView final {
   std::uint32_t components_;
 };
 
+template <class T, class Callback>
+void with_kernel_cell_view(const FieldView<T> &checked,
+                           Callback &&callback);
+
+template <class T, class Callback>
+void with_kernel_face_view(const FaceFieldView<T> &checked,
+                           Callback &&callback);
+
+namespace detail {
+
+// This private bridge is the only type trusted by both checked and kernel
+// views. Keeping its factories private prevents a second public construction
+// path while allowing field_view.hpp to remain independent of the unchecked
+// API.
+class KernelFieldViewAccess final {
+ private:
+  KernelFieldViewAccess() = delete;
+
+  template <class T>
+  static KernelCellView<T> cell(const FieldView<T> &checked) {
+    validate_field_epoch(checked.epoch_, checked.generation_);
+    return KernelCellView<T>(
+        checked.data_, checked.interior_extent_, checked.ghost_width_,
+        checked.components_, checked.x_stride_, checked.y_stride_,
+        checked.z_stride_);
+  }
+
+  template <class T>
+  static KernelFaceView<T> face(const FaceFieldView<T> &checked) {
+    validate_field_epoch(checked.epoch_, checked.generation_);
+    return KernelFaceView<T>(checked.data_, checked.face_count_,
+                             checked.components_);
+  }
+
+  template <class T, class Callback>
+  friend void ::hundun::runtime::with_kernel_cell_view(
+      const FieldView<T> &checked, Callback &&callback);
+
+  template <class T, class Callback>
+  friend void ::hundun::runtime::with_kernel_face_view(
+      const FaceFieldView<T> &checked, Callback &&callback);
+};
+
+}  // namespace detail
+
 // Each helper validates the checked borrow once, then invokes the callback
 // once with a by-value kernel borrow. Callback results are deliberately
 // discarded and exceptions propagate unchanged.
 template <class T, class Callback>
 void with_kernel_cell_view(const FieldView<T> &checked,
                            Callback &&callback) {
-  detail::validate_field_epoch(checked.epoch_, checked.generation_);
   static_cast<void>(std::invoke(
       std::forward<Callback>(callback),
-      KernelCellView<T>(checked.data_, checked.interior_extent_,
-                        checked.ghost_width_, checked.components_,
-                        checked.x_stride_, checked.y_stride_,
-                        checked.z_stride_)));
+      detail::KernelFieldViewAccess::cell(checked)));
 }
 
 template <class T, class Callback>
 void with_kernel_face_view(const FaceFieldView<T> &checked,
                            Callback &&callback) {
-  detail::validate_field_epoch(checked.epoch_, checked.generation_);
   static_cast<void>(std::invoke(
       std::forward<Callback>(callback),
-      KernelFaceView<T>(checked.data_, checked.face_count_,
-                        checked.components_)));
+      detail::KernelFieldViewAccess::face(checked)));
 }
 
 }  // namespace hundun::runtime
