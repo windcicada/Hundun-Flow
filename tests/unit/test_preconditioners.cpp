@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -81,6 +82,13 @@ std::vector<double> read_values(VectorView<const double> view) {
     result.push_back(view[index]);
   }
   return result;
+}
+
+bool bitwise_equal(const std::vector<double>& left,
+                   const std::vector<double>& right) {
+  return left.size() == right.size() &&
+         std::memcmp(left.data(), right.data(),
+                     left.size() * sizeof(double)) == 0;
 }
 
 class ConfigurableContext final : public ExecutionContext {
@@ -263,6 +271,27 @@ void test_completed_event_factory() {
   expect_error_containing([&] { event.wait(); }, "moved-from");
 }
 
+void test_completed_event_allocation_failure_is_one_shot() {
+  CpuReferenceContext context;
+  Buffer source(context, sizeof(double));
+  Buffer destination(context, sizeof(double));
+  source.view(0U, 1U)[0] = 3.0;
+  destination.view(0U, 1U)[0] = -1.0;
+
+  ExecutionTestAccess::fail_next_completed_event_allocation();
+  hundun::execution::transfer(source.view(0U, 1U),
+                              destination.view(0U, 1U), context)
+      .wait();
+  HUNDUN_CHECK(destination.view(0U, 1U)[0] == 3.0);
+  expect_error_containing(
+      [] { static_cast<void>(ExecutionEvent::completed()); },
+      "completed event allocation");
+
+  auto recovered = ExecutionEvent::completed();
+  HUNDUN_CHECK(recovered.ready());
+  recovered.wait();
+}
+
 void test_virtual_destruction() {
   CpuReferenceContext context;
   const auto layout = make_layout(1U);
@@ -337,6 +366,81 @@ void test_context_and_update_validation() {
                           "decrease");
   linear_operator.set_revision(5U);
   identity.apply(input.view(0U, 2U), output.view(0U, 2U)).wait();
+}
+
+void test_current_operator_revision_lineages() {
+  CpuReferenceContext context;
+  const auto layout = make_layout(2U);
+  FakeOperator identity_first(context, layout, layout, 5U, {1.0, 1.0});
+  FakeOperator identity_second(context, layout, layout, 2U, {1.0, 1.0});
+  IdentityPreconditioner identity(context);
+  identity.update(identity_first, 5U);
+  identity.update(identity_second, 2U);
+  identity_second.set_revision(1U);
+  expect_error_containing([&] { identity.update(identity_second, 1U); },
+                          "decrease");
+  identity_second.set_revision(2U);
+
+  Buffer input(context, 2U * sizeof(double));
+  Buffer output(context, 2U * sizeof(double));
+  set_values(input.view(0U, 2U), {4.0, -6.0});
+  set_values(output.view(0U, 2U), {9.0, 9.0});
+  identity.apply(input.view(0U, 2U), output.view(0U, 2U)).wait();
+  HUNDUN_CHECK(read_values(output.view(0U, 2U)) ==
+               std::vector<double>({4.0, -6.0}));
+
+  FakeOperator jacobi_first(context, layout, layout, 8U, {2.0, 4.0});
+  FakeOperator jacobi_second(context, layout, layout, 3U, {4.0, -2.0});
+  JacobiPreconditioner jacobi(context);
+  jacobi.update(jacobi_first, 8U);
+  jacobi.update(jacobi_second, 3U);
+  HUNDUN_CHECK(jacobi_second.diagonal_calls() == 1U);
+  jacobi_second.set_revision(2U);
+  expect_error_containing([&] { jacobi.update(jacobi_second, 2U); },
+                          "decrease");
+  HUNDUN_CHECK(jacobi_second.diagonal_calls() == 1U);
+  jacobi_second.set_revision(3U);
+
+  set_values(input.view(0U, 2U), {8.0, 6.0});
+  set_values(output.view(0U, 2U), {-7.0, -7.0});
+  jacobi.apply(input.view(0U, 2U), output.view(0U, 2U)).wait();
+  HUNDUN_CHECK(read_values(output.view(0U, 2U)) ==
+               std::vector<double>({2.0, -3.0}));
+}
+
+void test_completed_event_failure_preserves_apply_outputs() {
+  CpuReferenceContext context;
+  const auto layout = make_layout(3U);
+  FakeOperator linear_operator(context, layout, layout, 4U,
+                               {2.0, -4.0, 0.5});
+  IdentityPreconditioner identity(context);
+  JacobiPreconditioner jacobi(context);
+  identity.update(linear_operator, 4U);
+  jacobi.update(linear_operator, 4U);
+
+  Buffer input(context, 3U * sizeof(double));
+  Buffer output(context, 3U * sizeof(double));
+  set_values(input.view(0U, 3U), {4.0, 8.0, -1.0});
+
+  set_values(output.view(0U, 3U), {-0.0, 17.0, -23.0});
+  const auto identity_before = read_values(output.view(0U, 3U));
+  ExecutionTestAccess::fail_next_completed_event_allocation();
+  expect_error_containing(
+      [&] { identity.apply(input.view(0U, 3U), output.view(0U, 3U)); },
+      "completed event allocation");
+  HUNDUN_CHECK(bitwise_equal(read_values(output.view(0U, 3U)),
+                             identity_before));
+  ExecutionEvent::completed().wait();
+
+  set_values(output.view(0U, 3U), {-0.0, -31.0, 47.0});
+  const auto jacobi_before = read_values(output.view(0U, 3U));
+  ExecutionTestAccess::fail_next_completed_event_allocation();
+  expect_error_containing(
+      [&] { jacobi.apply(input.view(0U, 3U), output.view(0U, 3U)); },
+      "completed event allocation");
+  HUNDUN_CHECK(bitwise_equal(read_values(output.view(0U, 3U)),
+                             jacobi_before));
+  ExecutionEvent::completed().wait();
 }
 
 void test_identity_apply_contract() {
@@ -633,8 +737,11 @@ void test_jacobi_apply_failures_do_not_mutate() {
 int main() {
   return hundun::test::run([] {
     test_completed_event_factory();
+    test_completed_event_allocation_failure_is_one_shot();
     test_virtual_destruction();
     test_context_and_update_validation();
+    test_current_operator_revision_lineages();
+    test_completed_event_failure_preserves_apply_outputs();
     test_identity_apply_contract();
     test_jacobi_apply_and_cache();
     test_jacobi_update_failures_are_transactional();

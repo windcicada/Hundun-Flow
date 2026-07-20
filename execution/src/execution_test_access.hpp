@@ -44,6 +44,7 @@ class ExecutionTestAccess final {
   static AllocationIdentity next_allocation_identity() noexcept;
   static void set_next_allocation_identity(AllocationIdentity next) noexcept;
   static void fail_next_allocation() noexcept;
+  static void fail_next_completed_event_allocation() noexcept;
   static void set_epoch(Buffer& buffer, std::uint64_t epoch);
 
   static TestViewMetadata metadata(const VectorView<double>& view) noexcept;

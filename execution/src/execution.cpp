@@ -25,6 +25,7 @@ constexpr BackendIdentity kCpuReferenceIdentity =
 std::mutex identity_mutex;
 AllocationIdentity next_identity = 1;
 std::atomic<bool> inject_allocation_failure{false};
+std::atomic<bool> inject_completed_event_allocation_failure{false};
 
 std::size_t checked_multiply(std::size_t left, std::size_t right,
                              const char* message) {
@@ -378,6 +379,10 @@ bool ExecutionEvent::ready() const noexcept {
 }
 
 ExecutionEvent ExecutionEvent::completed() {
+  if (inject_completed_event_allocation_failure.exchange(false)) {
+    throw runtime::Error(
+        "completed event allocation failed by the test seam");
+  }
   return ExecutionEvent(inline_success_state());
 }
 
@@ -522,6 +527,10 @@ void ExecutionTestAccess::set_next_allocation_identity(
 
 void ExecutionTestAccess::fail_next_allocation() noexcept {
   inject_allocation_failure.store(true);
+}
+
+void ExecutionTestAccess::fail_next_completed_event_allocation() noexcept {
+  inject_completed_event_allocation_failure.store(true);
 }
 
 void ExecutionTestAccess::set_epoch(Buffer& buffer, std::uint64_t epoch) {
