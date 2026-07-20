@@ -28,6 +28,7 @@
 namespace {
 
 using hundun::mesh::AnalyticWarpedBoxMapping;
+using hundun::mesh::EntityOwnership;
 using hundun::mesh::FaceAxis;
 using hundun::mesh::FaceSide;
 using hundun::mesh::LocalCellId;
@@ -219,6 +220,86 @@ Int3 process_grid_for(int ranks) {
     default:
       throw hundun::runtime::Error("unsupported mesh-geometry test size");
   }
+}
+
+Real3 expected_face_displacement(const MeshTopology& topology,
+                                 const MeshGeometry& geometry,
+                                 LocalFaceId face) {
+  const LocalCellId owner = topology.owner(face);
+  if (!topology.neighbour(face).has_value()) {
+    return subtract(geometry.face_center_m(face),
+                    geometry.cell_center_m(owner));
+  }
+  Real3 displacement =
+      subtract(geometry.cell_center_m(*topology.neighbour(face)),
+               geometry.cell_center_m(owner));
+  if (!topology.periodic_pair(face).has_value()) {
+    return displacement;
+  }
+  const LogicalFace logical = topology.logical_face(face);
+  const Real3 length = geometry.length_m();
+  switch (logical.axis) {
+    case FaceAxis::x:
+      displacement.x += logical.coordinate.x == 0 ? -length.x : length.x;
+      break;
+    case FaceAxis::y:
+      displacement.y += logical.coordinate.y == 0 ? -length.y : length.y;
+      break;
+    case FaceAxis::z:
+      displacement.z += logical.coordinate.z == 0 ? -length.z : length.z;
+      break;
+  }
+  return displacement;
+}
+
+void check_face_displacements(const MpiContext& context,
+                              const MeshTopology& topology,
+                              const MeshGeometry& geometry,
+                              bool require_remote_periodic) {
+  std::array<int, 5> local_counts{};
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    const Real3 actual = geometry.face_displacement_m(face);
+    const Real3 expected = expected_face_displacement(topology, geometry, face);
+    HUNDUN_CHECK(bitwise_equal(actual, expected));
+    if (!topology.neighbour(face).has_value()) {
+      ++local_counts[1];
+    } else if (topology.periodic_pair(face).has_value()) {
+      const LogicalFace logical = topology.logical_face(face);
+      const bool minimum =
+          (logical.axis == FaceAxis::x && logical.coordinate.x == 0) ||
+          (logical.axis == FaceAxis::y && logical.coordinate.y == 0) ||
+          (logical.axis == FaceAxis::z && logical.coordinate.z == 0);
+      ++local_counts[minimum ? 2U : 3U];
+      if (topology.cell_ownership(*topology.neighbour(face)) ==
+          EntityOwnership::ghost) {
+        ++local_counts[4];
+      }
+    } else {
+      ++local_counts[0];
+    }
+  }
+  std::array<int, 5> global_counts{};
+  HUNDUN_CHECK(MPI_Allreduce(local_counts.data(), global_counts.data(),
+                             static_cast<int>(global_counts.size()), MPI_INT,
+                             MPI_SUM, context.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_counts[0] > 0);
+  HUNDUN_CHECK(global_counts[1] > 0);
+  HUNDUN_CHECK(global_counts[2] > 0);
+  HUNDUN_CHECK(global_counts[3] > 0);
+  if (require_remote_periodic) {
+    HUNDUN_CHECK(global_counts[4] > 0);
+  }
+}
+
+void test_remote_periodic_displacement(const MpiContext& context) {
+  const Int3 extent{std::max(4, 2 * context.size()), 3, 2};
+  const DecompositionOptions options{Int3{context.size(), 1, 1}};
+  auto decomposition = StructuredDecomposition::create(
+      context, extent, {true, false, false}, options);
+  const MeshTopology topology(decomposition);
+  const MeshGeometry geometry(
+      topology, UniformBoxMapping({0.25, -1.0, 2.0}, {3.5, 2.0, 1.25}));
+  check_face_displacements(context, topology, geometry, context.size() > 1);
 }
 
 Real3 oracle_map(Real3 logical) {
@@ -1333,6 +1414,10 @@ void test_invalid_geometry_queries(const MeshTopology& topology,
   });
   expect_error([&] {
     static_cast<void>(
+        geometry.face_displacement_m(topology.local_face_count()));
+  });
+  expect_error([&] {
+    static_cast<void>(
         geometry.face_area_vector_m2(0, static_cast<FaceSide>(200)));
   });
   expect_error([&] {
@@ -1357,6 +1442,7 @@ void run_mpi_tests(const MpiContext& context,
   MeshTopology topology(decomposition);
   MeshGeometry uniform(topology, UniformBoxMapping(kOrigin, kLength));
   test_uniform_adapter(decomposition, topology, uniform);
+  check_face_displacements(context, topology, uniform, false);
   HUNDUN_CHECK(uniform.compatible(topology));
   uniform.require_compatible(topology);
 
@@ -1382,6 +1468,7 @@ void run_mpi_tests(const MpiContext& context,
   });
 
   test_extent_one_periodic_seam(context, detached);
+  test_remote_periodic_displacement(context);
   test_mixed_scale_geometry(context);
   test_closure_scale_geometry(context);
   test_nonorthogonality_scale_geometry(context);

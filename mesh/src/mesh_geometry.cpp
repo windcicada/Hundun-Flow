@@ -514,6 +514,7 @@ struct CellMetrics {
 
 struct FaceMetrics {
   runtime::Real3 center{};
+  runtime::Real3 displacement{};
   runtime::Real3 owner_area{};
   double area{};
   double skewness{};
@@ -1084,6 +1085,7 @@ struct MeshGeometry::Impl {
           projection <= 0.0) {
         throw runtime::Error("mesh face centre displacement is invalid");
       }
+      metrics.displacement = displacement;
       const runtime::Real3 unit_area{
           metrics.owner_area.x / metrics.area,
           metrics.owner_area.y / metrics.area,
@@ -1248,6 +1250,12 @@ runtime::Real3 MeshGeometry::face_center_m(LocalFaceId local) const {
   return require_local(impl_->faces, local,
                        "local face index is outside mesh geometry")
       .center;
+}
+
+runtime::Real3 MeshGeometry::face_displacement_m(LocalFaceId local) const {
+  return require_local(impl_->faces, local,
+                       "local face index is outside mesh geometry")
+      .displacement;
 }
 
 runtime::Real3 MeshGeometry::face_area_vector_m2(LocalFaceId local,

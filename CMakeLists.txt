@@ -130,6 +130,19 @@ target_link_libraries(hundun_linear
     hundun_options
     MPI::MPI_CXX)
 
+add_library(hundun_finite_volume STATIC
+  finite_volume/src/matrix_free_poisson.cpp)
+target_include_directories(hundun_finite_volume PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/finite_volume/include>")
+target_link_libraries(hundun_finite_volume
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_linear
+    hundun_mesh
+    hundun_runtime
+    hundun_execution
+    hundun_options)
+
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
   runtime/src/vtk_legacy.cpp)
@@ -444,6 +457,53 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_bicgstab_header_contract PRIVATE
     hundun_linear)
   set_tests_properties(test_bicgstab_header_contract PROPERTIES TIMEOUT 30)
+
+  hundun_add_test(test_matrix_free_poisson_header_contract
+    tests/unit/test_matrix_free_poisson_header_contract.cpp)
+  target_link_libraries(test_matrix_free_poisson_header_contract PRIVATE
+    hundun_finite_volume)
+  set_tests_properties(test_matrix_free_poisson_header_contract PROPERTIES
+    TIMEOUT 30)
+
+  add_executable(test_matrix_free_poisson
+    tests/mpi/test_matrix_free_poisson.cpp
+    tests/support/allocation_attempt_guard.cpp)
+  target_include_directories(test_matrix_free_poisson PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_matrix_free_poisson PRIVATE
+    hundun_finite_volume hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(matrix_free_poisson_test
+        "test_matrix_free_poisson_${ranks}_rank")
+    add_test(NAME "${matrix_free_poisson_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_matrix_free_poisson>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${matrix_free_poisson_test}" PROPERTIES
+      LABELS "mpi;numerical"
+      TIMEOUT 90
+      PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_poisson_sine
+    tests/numerical/test_poisson_sine.cpp)
+  target_include_directories(test_poisson_sine PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_poisson_sine PRIVATE
+    hundun_finite_volume hundun_options hundun_warnings MPI::MPI_CXX)
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    foreach(ranks IN ITEMS 1 2 4)
+      set(poisson_sine_test "test_poisson_sine_${ranks}_rank")
+      add_test(NAME "${poisson_sine_test}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_poisson_sine>"
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${poisson_sine_test}" PROPERTIES
+        LABELS "mpi;numerical;acceptance"
+        TIMEOUT 240
+        PROCESSORS "${ranks}")
+    endforeach()
+  endif()
 
   add_executable(test_conjugate_gradient
     tests/mpi/test_conjugate_gradient.cpp

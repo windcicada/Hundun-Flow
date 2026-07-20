@@ -81,6 +81,7 @@ class MeshGeometry final {
   double cell_volume_m3(LocalCellId) const;
   double minimum_jacobian_determinant_m3(LocalCellId) const;
   runtime::Real3 face_center_m(LocalFaceId) const;
+  runtime::Real3 face_displacement_m(LocalFaceId) const;
   runtime::Real3 face_area_vector_m2(LocalFaceId, FaceSide) const;
   double face_area_m2(LocalFaceId) const;
   double face_skewness(LocalFaceId) const;
