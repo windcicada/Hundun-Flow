@@ -158,6 +158,8 @@ add_library(hundun_flow STATIC
   flow/src/momentum_predictor.cpp)
 target_include_directories(hundun_flow PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/include>")
+target_include_directories(hundun_flow PRIVATE
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/src>")
 target_link_libraries(hundun_flow
   PRIVATE hundun_warnings
   PUBLIC

@@ -5,9 +5,12 @@
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
+#include "momentum_predictor_test_access.hpp"
+#include "mpi_error.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +18,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,6 +34,47 @@ using mesh::LocalFaceId;
 using runtime::Error;
 using runtime::Int3;
 using runtime::Real3;
+
+constexpr std::size_t kLocalFailureCapacity = 512U;
+std::atomic<std::size_t> collective_selection_call_count{0U};
+
+class LocalFailureBuffer final {
+public:
+  bool ok() const noexcept { return !failed_; }
+
+  std::string_view message() const noexcept {
+    return std::string_view(storage_.data(), size_);
+  }
+
+  void assign(std::string_view message) noexcept {
+    failed_ = true;
+    size_ = std::min(message.size(), storage_.size() - 1U);
+    for (std::size_t index = 0; index < size_; ++index)
+      storage_[index] = message[index];
+    storage_[size_] = '\0';
+  }
+
+  void assign(std::string_view prefix, std::string_view message) noexcept {
+    failed_ = true;
+    size_ = 0U;
+    append(prefix);
+    append(message);
+    storage_[size_] = '\0';
+  }
+
+private:
+  void append(std::string_view text) noexcept {
+    const std::size_t remaining = storage_.size() - 1U - size_;
+    const std::size_t count = std::min(text.size(), remaining);
+    for (std::size_t index = 0; index < count; ++index)
+      storage_[size_ + index] = text[index];
+    size_ += count;
+  }
+
+  std::array<char, kLocalFailureCapacity> storage_{};
+  std::size_t size_{};
+  bool failed_{};
+};
 
 bool same(Int3 left, Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
@@ -426,7 +471,7 @@ MomentumPredictorReport MomentumPredictor::solve(
   std::array<ViewRange, 9> ranges{};
   std::size_t range_count = 0U;
   std::size_t count = 0U;
-  std::string local_failure;
+  LocalFailureBuffer local_failure;
   try {
     for (std::size_t component_index = 0; component_index < equations.size();
          ++component_index) {
@@ -492,21 +537,23 @@ MomentumPredictorReport MomentumPredictor::solve(
         }
       }
     }
-  } catch (const Error &error) {
-    local_failure = error.what();
+  } catch (const runtime::detail::MpiOperationError &) {
+    throw;
   } catch (const std::bad_alloc &) {
-    local_failure = "momentum diagonal staging allocation failed";
+    local_failure.assign("momentum diagonal staging allocation failed");
   } catch (const std::length_error &) {
-    local_failure = "momentum diagonal staging size is unsupported";
+    local_failure.assign("momentum diagonal staging size is unsupported");
+  } catch (const Error &error) {
+    local_failure.assign(error.what());
   } catch (const std::exception &error) {
-    local_failure =
-        std::string("momentum diagonal extraction failed: ") + error.what();
+    local_failure.assign("momentum diagonal extraction failed: ", error.what());
   } catch (...) {
-    local_failure = "momentum diagonal extraction failed";
+    local_failure.assign("momentum diagonal extraction failed");
   }
 
+  collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
   const runtime::CollectiveStatus preflight = runtime::collective_status(
-      mpi, local_failure.empty(), local_failure);
+      mpi, local_failure.ok(), local_failure.message());
   if (!preflight.ok) {
     throw Error("momentum predictor preflight failed on rank " +
                 std::to_string(preflight.failing_rank) + ": " +
@@ -532,6 +579,16 @@ MomentumPredictorReport MomentumPredictor::solve(
                        equation.rhs, equation.predictor, control);
   }
   return report;
+}
+
+void test::MomentumPredictorTestAccess::
+    reset_collective_selection_calls() noexcept {
+  collective_selection_call_count.store(0U, std::memory_order_relaxed);
+}
+
+std::size_t
+test::MomentumPredictorTestAccess::collective_selection_calls() noexcept {
+  return collective_selection_call_count.load(std::memory_order_relaxed);
 }
 
 struct TimeConsistentFaceVelocity::Impl final {
