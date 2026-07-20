@@ -795,11 +795,18 @@ void apply_constraint_operation(ConstraintImplementation& impl,
       !std::isfinite(mean)) {
     throw runtime::Error("Poisson constraint global mean is invalid");
   }
+  double precommit = 0.0;
   for (std::size_t cell = 0; cell < impl.volumes.size(); ++cell) {
     const double candidate = data[cell * values.stride()] - mean;
     if (!std::isfinite(candidate)) {
-      throw runtime::Error("Poisson constraint candidate is non-finite");
+      precommit = 1.0;
+      break;
     }
+  }
+  impl.mpi->allreduce_fp64_in_place(
+      &precommit, 1U, runtime::Fp64ReductionOperation::maximum);
+  if (precommit != 0.0) {
+    throw runtime::Error("Poisson constraint collective precommit failed");
   }
   for (std::size_t cell = 0; cell < impl.volumes.size(); ++cell) {
     data[cell * values.stride()] -= mean;

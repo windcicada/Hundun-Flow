@@ -487,11 +487,11 @@ void test_constraint_case(const MpiContext& mpi, bool warped) {
   const auto before = mpi.fp64_reduction_counters();
   constraint.project_rhs(values);
   const auto after_project = mpi.fp64_reduction_counters();
-  HUNDUN_CHECK(after_project.collective_calls - before.collective_calls == 2U);
-  HUNDUN_CHECK(after_project.reduced_scalars - before.reduced_scalars == 3U);
+  HUNDUN_CHECK(after_project.collective_calls - before.collective_calls == 3U);
+  HUNDUN_CHECK(after_project.reduced_scalars - before.reduced_scalars == 4U);
   HUNDUN_CHECK(after_project.logical_payload_bytes -
                    before.logical_payload_bytes ==
-               3U * sizeof(double));
+               4U * sizeof(double));
   check_near(global_volume_weighted_mean(mpi, topology, geometry, values),
              0.0, 4096.0);
 
@@ -515,6 +515,70 @@ void test_constraint_case(const MpiContext& mpi, bool warped) {
   expect_error([&] { constraint.project_rhs(values); });
   for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
     HUNDUN_CHECK(bits(values[cell]) == original_bits[cell]);
+  }
+
+  if (!warped && mpi.size() == 4) {
+    const double maximum = std::numeric_limits<double>::max();
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      values[cell] = 0.0;
+    }
+    if (mpi.rank() == 0) {
+      values[0] = maximum;
+    } else if (mpi.rank() == 1 || mpi.rank() == 2) {
+      values[0] = -maximum;
+    }
+
+    double local_sums[2]{};
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const double volume = geometry.cell_volume_m3(cell);
+      const double weighted = volume * values[cell];
+      HUNDUN_CHECK(std::isfinite(values[cell]));
+      HUNDUN_CHECK(std::isfinite(weighted));
+      HUNDUN_CHECK(std::isfinite(local_sums[0] + weighted));
+      HUNDUN_CHECK(std::isfinite(local_sums[1] + volume));
+      local_sums[0] += weighted;
+      local_sums[1] += volume;
+    }
+    double global_sums[2]{};
+    HUNDUN_CHECK(MPI_Allreduce(local_sums, global_sums, 2, MPI_DOUBLE,
+                               MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+    const double extreme_mean = global_sums[0] / global_sums[1];
+    HUNDUN_CHECK(std::isfinite(global_sums[0]));
+    HUNDUN_CHECK(std::isfinite(global_sums[1]));
+    HUNDUN_CHECK(global_sums[1] > 0.0);
+    HUNDUN_CHECK(std::isfinite(extreme_mean));
+
+    int local_nonfinite_candidates = 0;
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      if (!std::isfinite(values[cell] - extreme_mean)) {
+        ++local_nonfinite_candidates;
+      }
+      original_bits[cell] = bits(values[cell]);
+    }
+    int global_nonfinite_candidates = 0;
+    HUNDUN_CHECK(MPI_Allreduce(&local_nonfinite_candidates,
+                               &global_nonfinite_candidates, 1, MPI_INT,
+                               MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+    HUNDUN_CHECK(global_nonfinite_candidates == 1);
+
+    bool rejected = false;
+    try {
+      constraint.project_rhs(values);
+    } catch (const hundun::runtime::Error& error) {
+      rejected = !std::string(error.what()).empty();
+    }
+    bool local_bits_unchanged = true;
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      local_bits_unchanged =
+          local_bits_unchanged && bits(values[cell]) == original_bits[cell];
+    }
+    const int local_outcome[2]{rejected ? 1 : 0,
+                               local_bits_unchanged ? 1 : 0};
+    int global_outcome[2]{};
+    HUNDUN_CHECK(MPI_Allreduce(local_outcome, global_outcome, 2, MPI_INT,
+                               MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+    HUNDUN_CHECK(global_outcome[0] == mpi.size());
+    HUNDUN_CHECK(global_outcome[1] == mpi.size());
   }
 
   auto reference = PoissonConstraint::create(
