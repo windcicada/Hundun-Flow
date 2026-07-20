@@ -6,8 +6,6 @@
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/kernel_field_view.hpp"
 
-#include <mpi.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -434,12 +432,6 @@ ScalarBoundaryValues prescribed(double interior, double boundary) {
       checked_long_double(2.0L * static_cast<long double>(boundary) - interior,
                           "boundary mirror value is not finite");
   return {boundary, exterior};
-}
-
-void check_mpi_result(int result, const char *operation) {
-  if (result != MPI_SUCCESS) {
-    throw runtime::Error(std::string(operation) + " failed");
-  }
 }
 
 } // namespace
@@ -923,28 +915,6 @@ FinalFluxAdmissibility BoundaryRegistry::assess_final_pressure_outlet_flux(
     throw runtime::Error(status.message);
   }
 
-  std::array<std::uint64_t, 2> step_range{step, step};
-  std::uint64_t step_min = 0U;
-  std::uint64_t step_max = 0U;
-  check_mpi_result(MPI_Allreduce(&step_range[0], &step_min, 1, MPI_UINT64_T,
-                                 MPI_MIN, mpi.comm()),
-                   "MPI_Allreduce boundary step minimum");
-  check_mpi_result(MPI_Allreduce(&step_range[1], &step_max, 1, MPI_UINT64_T,
-                                 MPI_MAX, mpi.comm()),
-                   "MPI_Allreduce boundary step maximum");
-  double time_min = 0.0;
-  double time_max = 0.0;
-  check_mpi_result(
-      MPI_Allreduce(&time_s, &time_min, 1, MPI_DOUBLE, MPI_MIN, mpi.comm()),
-      "MPI_Allreduce boundary time minimum");
-  check_mpi_result(
-      MPI_Allreduce(&time_s, &time_max, 1, MPI_DOUBLE, MPI_MAX, mpi.comm()),
-      "MPI_Allreduce boundary time maximum");
-  if (step_min != step_max || time_min != time_max) {
-    throw runtime::Error(
-        "final pressure-outlet evidence inputs differ across ranks");
-  }
-
   double severity = local_negative ? -local_minimum : 0.0;
   mpi.allreduce_fp64_in_place(&severity, 1U,
                               runtime::Fp64ReductionOperation::maximum);
@@ -976,9 +946,8 @@ FinalFluxAdmissibility BoundaryRegistry::assess_final_pressure_outlet_flux(
   const mesh::GlobalFaceId selected_face =
       (static_cast<mesh::GlobalFaceId>(selected_high) << 32U) | selected_low;
   return {FinalFluxDecision::outlet_backflow,
-          OutletBackflowEvidence{*impl_->outlet_id, step_min, time_min,
-                                 -severity, selected_face,
-                                 lowest_failing_rank}};
+          OutletBackflowEvidence{*impl_->outlet_id, step, time_s, -severity,
+                                 selected_face, lowest_failing_rank}};
 }
 
 } // namespace hundun::boundary

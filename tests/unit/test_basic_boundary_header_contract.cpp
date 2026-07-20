@@ -6,8 +6,15 @@
 #include "tests/support/test_main.hpp"
 
 #include <cstdint>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <type_traits>
 #include <utility>
+
+#ifndef HUNDUN_SOURCE_ROOT
+#error "HUNDUN_SOURCE_ROOT must name the bounded source tree"
+#endif
 
 namespace {
 
@@ -87,5 +94,13 @@ int main() {
                  4U);
     HUNDUN_CHECK(static_cast<std::uint8_t>(FinalFluxDecision::admissible) ==
                  0U);
+
+    const std::string source_path =
+        std::string(HUNDUN_SOURCE_ROOT) + "/boundary/src/basic_boundary.cpp";
+    std::ifstream input(source_path, std::ios::binary);
+    HUNDUN_CHECK(input.is_open());
+    const std::string source{std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>()};
+    HUNDUN_CHECK(source.find("MPI_Allreduce") == std::string::npos);
   });
 }

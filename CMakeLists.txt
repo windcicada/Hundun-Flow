@@ -479,12 +479,16 @@ if(HUNDUN_BUILD_TESTS)
     tests/unit/test_basic_boundary_header_contract.cpp)
   target_include_directories(test_basic_boundary_header_contract PRIVATE
     "${PROJECT_SOURCE_DIR}")
+  target_compile_definitions(test_basic_boundary_header_contract PRIVATE
+    HUNDUN_SOURCE_ROOT="${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_basic_boundary_header_contract PRIVATE
     hundun_config hundun_finite_volume hundun_mesh hundun_runtime)
   set_tests_properties(test_basic_boundary_header_contract PROPERTIES
     TIMEOUT 30)
 
-  add_executable(test_basic_boundary tests/mpi/test_basic_boundary.cpp)
+  add_executable(test_basic_boundary
+    tests/mpi/test_basic_boundary.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_basic_boundary PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_basic_boundary PRIVATE

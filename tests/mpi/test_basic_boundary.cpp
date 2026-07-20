@@ -12,6 +12,8 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
+#include "runtime/src/mpi_context_test_seam.hpp"
+#include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <mpi.h>
@@ -71,6 +73,7 @@ using hundun::runtime::Real3;
 using hundun::runtime::RestartPolicy;
 using hundun::runtime::ScalarType;
 using hundun::runtime::StructuredDecomposition;
+namespace allocation_probe = hundun::test::allocation_probe;
 
 constexpr std::array<PatchName, 6> kPatchNames{
     PatchName::x_min, PatchName::x_max, PatchName::y_min,
@@ -207,6 +210,42 @@ std::uint64_t bits(double value) {
   return result;
 }
 
+double range_safe_ratio_oracle(double numerator, double denominator_a,
+                               double denominator_b) {
+  return static_cast<double>(
+      static_cast<long double>(numerator) /
+      (static_cast<long double>(denominator_a) * denominator_b));
+}
+
+void check_scalar_copy(hundun::boundary::ScalarBoundaryValues values,
+                       double interior) {
+  HUNDUN_CHECK(bits(values.face) == bits(interior));
+  HUNDUN_CHECK(bits(values.exterior) == bits(interior));
+}
+
+void check_evaluation_allocation_free(const BoundaryRegistry &registry,
+                                      std::uint32_t patch_id,
+                                      std::size_t scalar_count) {
+  const Real3 interior_velocity{1.25, -2.5, 3.75};
+  const Real3 area{2.0, -1.0, 3.0};
+  allocation_probe::AllocationAttemptGuard guard;
+  const auto velocity =
+      registry.evaluate_velocity(patch_id, interior_velocity, area);
+  const auto pressure = registry.evaluate_pressure(patch_id, 13.0);
+  const auto density = registry.evaluate_density(patch_id, 1.75);
+  const auto enthalpy = registry.evaluate_enthalpy(patch_id, 42.0);
+  double scalar_sum = 0.0;
+  for (std::size_t scalar = 0; scalar < scalar_count; ++scalar) {
+    const auto value = registry.evaluate_scalar(
+        patch_id, scalar, 0.25 + static_cast<double>(scalar));
+    scalar_sum += value.face + value.exterior;
+  }
+  HUNDUN_CHECK(std::isfinite(velocity.face.x + velocity.exterior.y +
+                             pressure.face + density.exterior + enthalpy.face +
+                             scalar_sum));
+  HUNDUN_CHECK(guard.attempts() == 0U);
+}
+
 FieldDescriptor face_descriptor(std::uint32_t components) {
   return FieldDescriptor{"final_face_mass_flux",
                          "kg/s",
@@ -237,7 +276,7 @@ void check_rules(const BoundaryRegistry &registry, std::uint32_t id,
 }
 
 void test_closed_registry_and_zero_touch(const MpiContext &mpi, int size) {
-  FlowCaseConfig config = base_config(size, DensityModel::constant, false);
+  FlowCaseConfig config = base_config(size, DensityModel::constant, false, 2U);
   std::rotate(config.boundaries.begin(), config.boundaries.begin() + 2,
               config.boundaries.end());
   auto decomposition = StructuredDecomposition::create(
@@ -246,11 +285,13 @@ void test_closed_registry_and_zero_touch(const MpiContext &mpi, int size) {
   MeshTopology topology(decomposition);
   BoundaryRegistry registry = BoundaryRegistry::create(config, topology);
 
-  HUNDUN_CHECK(registry.scalar_count() == 0U);
+  HUNDUN_CHECK(registry.scalar_count() == 2U);
   HUNDUN_CHECK(!registry.open_domain());
   HUNDUN_CHECK(!registry.velocity_inlet_patch_id().has_value());
   HUNDUN_CHECK(!registry.pressure_outlet_patch_id().has_value());
-  expect_error([&] { static_cast<void>(registry.scalar_name(0U)); });
+  HUNDUN_CHECK(registry.scalar_name(0U) == "alpha");
+  HUNDUN_CHECK(registry.scalar_name(1U) == "beta");
+  expect_error([&] { static_cast<void>(registry.scalar_name(2U)); });
 
   check_rules(registry, 0U, BoundaryKind::no_slip_wall,
               VelocityRule::prescribed_zero, PressureRule::zero_normal_gradient,
@@ -287,7 +328,15 @@ void test_closed_registry_and_zero_touch(const MpiContext &mpi, int size) {
   HUNDUN_CHECK_NEAR(wall.exterior.x, -wall_interior.x, 0.0);
   HUNDUN_CHECK_NEAR(wall.exterior.y, -wall_interior.y, 0.0);
   HUNDUN_CHECK_NEAR(wall.exterior.z, -wall_interior.z, 0.0);
-  HUNDUN_CHECK_NEAR(registry.evaluate_enthalpy(0U, 91.0).face, 91.0, 0.0);
+  for (std::uint32_t patch_id : {0U, 2U}) {
+    check_scalar_copy(registry.evaluate_pressure(patch_id, -17.0), -17.0);
+    check_scalar_copy(registry.evaluate_density(patch_id, 1.75), 1.75);
+    check_scalar_copy(registry.evaluate_enthalpy(patch_id, 91.0), 91.0);
+    check_scalar_copy(registry.evaluate_scalar(patch_id, 0U, -0.25), -0.25);
+    check_scalar_copy(registry.evaluate_scalar(patch_id, 1U, 0.75), 0.75);
+  }
+  check_evaluation_allocation_free(registry, 0U, registry.scalar_count());
+  check_evaluation_allocation_free(registry, 2U, registry.scalar_count());
 
   FieldRegistry fields;
   const FieldId flux = fields.declare_field(face_descriptor(1U));
@@ -322,8 +371,10 @@ void test_materialization_and_evaluation(const MpiContext &mpi, int size) {
   ideal.physics.thermodynamic_pressure_pa = std::numeric_limits<double>::max();
   auto &inlet_config = ideal.boundaries[0];
   inlet_config.temperature_K = 4.0;
-  inlet_config.enthalpy_J_per_kg = 4.0;
-  inlet_config.density_kg_per_m3 = 0.5;
+  inlet_config.enthalpy_J_per_kg =
+      std::nextafter(4.0, std::numeric_limits<double>::infinity());
+  inlet_config.density_kg_per_m3 =
+      std::nextafter(0.5, std::numeric_limits<double>::infinity());
 
   auto decomposition = StructuredDecomposition::create(
       mpi, ideal.mesh.cells, periodic_axes(),
@@ -354,9 +405,9 @@ void test_materialization_and_evaluation(const MpiContext &mpi, int size) {
 
   const auto &inlet = registry.patch(0U).inlet_state();
   HUNDUN_CHECK(inlet.has_value());
-  HUNDUN_CHECK_NEAR(inlet->temperature_K.value(), 4.0, 0.0);
-  HUNDUN_CHECK_NEAR(inlet->enthalpy_J_per_kg, 4.0, 0.0);
-  HUNDUN_CHECK_NEAR(inlet->density_kg_per_m3, 0.5, 0.0);
+  HUNDUN_CHECK(bits(inlet->temperature_K.value()) == bits(4.0));
+  HUNDUN_CHECK(bits(inlet->enthalpy_J_per_kg) == bits(4.0));
+  HUNDUN_CHECK(bits(inlet->density_kg_per_m3) == bits(0.5));
   HUNDUN_CHECK(inlet->scalar_values.size() == 2U);
   HUNDUN_CHECK_NEAR(inlet->scalar_values[0], 0.125, 0.0);
   HUNDUN_CHECK_NEAR(inlet->scalar_values[1], 0.25, 0.0);
@@ -412,6 +463,9 @@ void test_materialization_and_evaluation(const MpiContext &mpi, int size) {
   HUNDUN_CHECK_NEAR(registry.evaluate_enthalpy(1U, 2.0).exterior, 2.0, 0.0);
   HUNDUN_CHECK_NEAR(registry.evaluate_scalar(1U, 0U, 0.75).exterior, 0.75, 0.0);
 
+  check_evaluation_allocation_free(registry, 0U, registry.scalar_count());
+  check_evaluation_allocation_free(registry, 1U, registry.scalar_count());
+
   for (std::uint32_t periodic : {4U, 5U}) {
     expect_error([&] {
       static_cast<void>(registry.evaluate_velocity(periodic, interior, area));
@@ -462,6 +516,55 @@ void test_materialization_and_evaluation(const MpiContext &mpi, int size) {
       BoundaryRegistry::create(material, topology);
   HUNDUN_CHECK_NEAR(
       material_registry.patch(0U).inlet_state()->density_kg_per_m3, 2.5, 0.0);
+
+  FlowCaseConfig enthalpy_authority = ideal;
+  enthalpy_authority.physics.cp_J_per_kg_K = 4.0;
+  enthalpy_authority.physics.gas_constant_J_per_kg_K =
+      std::numeric_limits<double>::max() / 4.0;
+  enthalpy_authority.physics.thermodynamic_pressure_pa =
+      std::numeric_limits<double>::max();
+  auto &enthalpy_inlet = enthalpy_authority.boundaries[0];
+  enthalpy_inlet.thermal_authority = InletThermalAuthority::enthalpy;
+  enthalpy_inlet.enthalpy_J_per_kg = 20.0;
+  enthalpy_inlet.temperature_K =
+      std::nextafter(5.0, std::numeric_limits<double>::infinity());
+  const double enthalpy_density = range_safe_ratio_oracle(
+      *enthalpy_authority.physics.thermodynamic_pressure_pa,
+      *enthalpy_authority.physics.gas_constant_J_per_kg_K, 5.0);
+  enthalpy_inlet.density_kg_per_m3 =
+      std::nextafter(enthalpy_density, std::numeric_limits<double>::infinity());
+  BoundaryRegistry enthalpy_registry =
+      BoundaryRegistry::create(enthalpy_authority, topology);
+  const auto &derived_enthalpy_state =
+      enthalpy_registry.patch(0U).inlet_state().value();
+  HUNDUN_CHECK(bits(derived_enthalpy_state.enthalpy_J_per_kg) == bits(20.0));
+  HUNDUN_CHECK(bits(derived_enthalpy_state.temperature_K.value()) == bits(5.0));
+  HUNDUN_CHECK(bits(derived_enthalpy_state.density_kg_per_m3) ==
+               bits(enthalpy_density));
+
+  auto temperature_bad_h = ideal;
+  temperature_bad_h.boundaries[0].enthalpy_J_per_kg = 4.25;
+  expect_error([&] {
+    static_cast<void>(BoundaryRegistry::create(temperature_bad_h, topology));
+  });
+  auto temperature_bad_density = ideal;
+  temperature_bad_density.boundaries[0].density_kg_per_m3 = 0.75;
+  expect_error([&] {
+    static_cast<void>(
+        BoundaryRegistry::create(temperature_bad_density, topology));
+  });
+  auto enthalpy_bad_temperature = enthalpy_authority;
+  enthalpy_bad_temperature.boundaries[0].temperature_K = 5.25;
+  expect_error([&] {
+    static_cast<void>(
+        BoundaryRegistry::create(enthalpy_bad_temperature, topology));
+  });
+  auto enthalpy_bad_density = enthalpy_authority;
+  enthalpy_bad_density.boundaries[0].density_kg_per_m3 =
+      enthalpy_density * 1.25;
+  expect_error([&] {
+    static_cast<void>(BoundaryRegistry::create(enthalpy_bad_density, topology));
+  });
 
   FlowCaseConfig huge = ideal;
   huge.boundaries[0].velocity_m_per_s =
@@ -609,6 +712,16 @@ void test_final_flux_assessment(const MpiContext &mpi, int rank, int size) {
   HUNDUN_CHECK(result.decision == FinalFluxDecision::admissible);
   HUNDUN_CHECK(!result.evidence.has_value());
   check_counter_delta(counters_before, counters_after, 1U, 1U, 8U);
+  for (std::size_t face = 0; face < before_bits.size(); ++face) {
+    HUNDUN_CHECK(bits(reader(face, 0)) == before_bits[face]);
+  }
+
+  hundun::runtime::detail::inject_next_fp64_allreduce_result_for_test(
+      MPI_ERR_OTHER);
+  expect_collective_error(mpi, [&] {
+    static_cast<void>(registry.assess_final_pressure_outlet_flux(
+        topology, mpi, reader, 7U, 1.25));
+  });
   for (std::size_t face = 0; face < before_bits.size(); ++face) {
     HUNDUN_CHECK(bits(reader(face, 0)) == before_bits[face]);
   }
