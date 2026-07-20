@@ -586,8 +586,9 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
     if (pair.has_value()) {
       const auto local_pair = topology.find_local_face(*pair);
       if (local_pair.has_value()) {
-        HUNDUN_CHECK(flux_read(face, 0) == -flux_read(*local_pair, 0));
-        HUNDUN_CHECK(rho_face(face, 0) == rho_face(*local_pair, 0));
+        HUNDUN_CHECK(bits(flux_read(face, 0)) ==
+                     bits(-flux_read(*local_pair, 0)));
+        HUNDUN_CHECK(bits(rho_face(face, 0)) == bits(rho_face(*local_pair, 0)));
       }
     }
   }
@@ -637,6 +638,51 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
     }
   }
   HUNDUN_CHECK(saw_partition_replica == (ranks > 1));
+
+  for (int k = -2; k < decomposition.local_extent().z + 2; ++k) {
+    for (int j = -2; j < decomposition.local_extent().y + 2; ++j) {
+      for (int i = -2; i < decomposition.local_extent().x + 2; ++i) {
+        u(i, j, k, 0) = 0.0;
+        u(i, j, k, 1) = 0.0;
+        u(i, j, k, 2) = 0.0;
+      }
+    }
+  }
+  operators.assemble_provisional_mass_flux(boundaries, rho_read, velocity_read,
+                                           registry, storage, access,
+                                           write_phase, actor, mass_flux);
+  operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                        boundaries, flux, rho_read, rho_face);
+  bool saw_local_zero_pair = false;
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    const auto pair = topology.periodic_pair(face);
+    if (!pair.has_value() || topology.global_face_id(face) > *pair) {
+      continue;
+    }
+    const auto local_pair = topology.find_local_face(*pair);
+    if (!local_pair.has_value()) {
+      continue;
+    }
+    saw_local_zero_pair = true;
+    HUNDUN_CHECK(bits(flux_read(face, 0)) == bits(0.0));
+    HUNDUN_CHECK(bits(flux_read(*local_pair, 0)) == bits(-0.0));
+    HUNDUN_CHECK(bits(flux_read(face, 0)) == bits(-flux_read(*local_pair, 0)));
+    HUNDUN_CHECK(bits(rho_face(face, 0)) == bits(rho_face(*local_pair, 0)));
+  }
+  HUNDUN_CHECK(saw_local_zero_pair);
+
+  for (int k = -2; k < decomposition.local_extent().z + 2; ++k) {
+    for (int j = -2; j < decomposition.local_extent().y + 2; ++j) {
+      for (int i = -2; i < decomposition.local_extent().x + 2; ++i) {
+        u(i, j, k, 0) = 0.75;
+        u(i, j, k, 1) = -0.25;
+        u(i, j, k, 2) = 0.125;
+      }
+    }
+  }
+  operators.assemble_provisional_mass_flux(boundaries, rho_read, velocity_read,
+                                           registry, storage, access,
+                                           write_phase, actor, mass_flux);
 
   expect_error([&] {
     operators.reconstruct_transport_faces(
@@ -1775,6 +1821,203 @@ void run_extent_one_periodic_case(const MpiContext &mpi, int ranks) {
   }
 }
 
+void run_topology_identity_mutation_contracts(const MpiContext &mpi,
+                                              int ranks) {
+  constexpr Int3 extent{6, 6, 6};
+  auto decomposition = StructuredDecomposition::create(
+      mpi, extent, std::array<bool, 3>{true, true, true},
+      DecompositionOptions{process_grid_for(ranks)});
+  MeshTopology topology(decomposition);
+  MeshGeometry geometry(
+      topology, UniformBoxMapping(Real3{0.0, 0.0, 0.0}, Real3{1.0, 1.0, 1.0}));
+  BoundaryRegistry boundaries =
+      BoundaryRegistry::create(periodic_case(), topology);
+  CellCenteredFvmOperators operators =
+      CellCenteredFvmOperators::create(topology, geometry);
+
+  FieldRegistry registry;
+  const auto flux_id = declare_face_mass_flux(registry);
+  const auto density =
+      registry.declare_field(cell_descriptor("identity_density", 1, 2));
+  const auto velocity =
+      registry.declare_field(cell_descriptor("identity_velocity", 3, 2));
+  const auto transported =
+      registry.declare_field(face_descriptor("identity_transported", 1));
+  const auto transport_face =
+      registry.declare_field(face_descriptor("identity_transport_face", 1));
+  const auto momentum_face =
+      registry.declare_field(face_descriptor("identity_momentum_face", 3));
+  const auto mass_residual =
+      registry.declare_field(cell_descriptor("identity_mass_residual", 1, 0));
+  const auto convective_residual = registry.declare_field(
+      cell_descriptor("identity_convective_residual", 1, 0));
+  registry.freeze();
+
+  constexpr PhaseId phase = 701U;
+  constexpr ActorId actor = 702U;
+  FieldAccessPlan access(registry);
+  access.declare_access(phase, actor, flux_id, AccessMode::read_write);
+  access.declare_access(phase, actor, transported, AccessMode::read_write);
+  access.declare_access(phase, actor, transport_face, AccessMode::read_write);
+  access.declare_access(phase, actor, momentum_face, AccessMode::read_write);
+  access.freeze();
+  FieldStorage storage(registry, FieldLayoutSet{decomposition.local_extent(),
+                                                topology.local_face_count()});
+  auto flux_write =
+      storage.acquire_face_write<double>(access, phase, actor, flux_id);
+  auto transported_write =
+      storage.acquire_face_write<double>(access, phase, actor, transported);
+  auto transport_face_write =
+      storage.acquire_face_write<double>(access, phase, actor, transport_face);
+  auto momentum_face_write =
+      storage.acquire_face_write<double>(access, phase, actor, momentum_face);
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    flux_write(face, 0) = 0.0;
+    transported_write(face, 0) = 1.0;
+  }
+  auto density_write = storage.view<double>(density);
+  auto velocity_write = storage.view<double>(velocity);
+  for (int k = -2; k < decomposition.local_extent().z + 2; ++k) {
+    for (int j = -2; j < decomposition.local_extent().y + 2; ++j) {
+      for (int i = -2; i < decomposition.local_extent().x + 2; ++i) {
+        density_write(i, j, k, 0) = 1.0;
+        velocity_write(i, j, k, 0) = 0.0;
+        velocity_write(i, j, k, 1) = 0.0;
+        velocity_write(i, j, k, 2) = 0.0;
+      }
+    }
+  }
+  auto mass_residual_write = storage.view<double>(mass_residual);
+  auto convective_residual_write = storage.view<double>(convective_residual);
+  const FieldStorage &read_storage = storage;
+  const auto density_read = read_storage.view<double>(density);
+  const auto velocity_read = read_storage.view<double>(velocity);
+  const auto transported_read =
+      read_storage.acquire_face_read<double>(access, phase, actor, transported);
+
+  const auto verify_rejected_before_mutation = [&](const FaceMassFlux &flux) {
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+      transport_face_write(face, 0) = 19.0;
+      momentum_face_write(face, 0) = 23.0;
+      momentum_face_write(face, 1) = 29.0;
+      momentum_face_write(face, 2) = 31.0;
+    }
+    expect_error([&] {
+      operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                            boundaries, flux, density_read,
+                                            transport_face_write);
+    });
+    expect_error([&] {
+      operators.reconstruct_momentum_faces(boundaries, flux, velocity_read,
+                                           momentum_face_write);
+    });
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+      HUNDUN_CHECK(bits(transport_face_write(face, 0)) == bits(19.0));
+      HUNDUN_CHECK(bits(momentum_face_write(face, 0)) == bits(23.0));
+      HUNDUN_CHECK(bits(momentum_face_write(face, 1)) == bits(29.0));
+      HUNDUN_CHECK(bits(momentum_face_write(face, 2)) == bits(31.0));
+    }
+
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const int i = static_cast<int>(
+          cell % static_cast<std::size_t>(decomposition.local_extent().x));
+      const std::size_t yz =
+          cell / static_cast<std::size_t>(decomposition.local_extent().x);
+      const int j = static_cast<int>(
+          yz % static_cast<std::size_t>(decomposition.local_extent().y));
+      const int k = static_cast<int>(
+          yz / static_cast<std::size_t>(decomposition.local_extent().y));
+      mass_residual_write(i, j, k, 0) = 37.0;
+      convective_residual_write(i, j, k, 0) = 41.0;
+    }
+    expect_error(
+        [&] { operators.accumulate_mass_residual(flux, mass_residual_write); });
+    expect_error([&] {
+      operators.accumulate_convective_residual(flux, transported_read,
+                                               convective_residual_write);
+    });
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const int i = static_cast<int>(
+          cell % static_cast<std::size_t>(decomposition.local_extent().x));
+      const std::size_t yz =
+          cell / static_cast<std::size_t>(decomposition.local_extent().x);
+      const int j = static_cast<int>(
+          yz % static_cast<std::size_t>(decomposition.local_extent().y));
+      const int k = static_cast<int>(
+          yz / static_cast<std::size_t>(decomposition.local_extent().y));
+      HUNDUN_CHECK(bits(mass_residual_write(i, j, k, 0)) == bits(37.0));
+      HUNDUN_CHECK(bits(convective_residual_write(i, j, k, 0)) == bits(41.0));
+    }
+  };
+
+  using Mutation =
+      hundun::finite_volume::test::TopologySignatureMutationForTest;
+  constexpr std::array<Mutation, 18> mutations{
+      Mutation::cell_global_id,
+      Mutation::cell_ownership,
+      Mutation::face_ownership,
+      Mutation::face_owner_local_id,
+      Mutation::face_owner_global_id,
+      Mutation::face_owner_ownership,
+      Mutation::face_neighbour_presence,
+      Mutation::face_neighbour_local_id,
+      Mutation::face_neighbour_global_id,
+      Mutation::face_neighbour_ownership,
+      Mutation::logical_face,
+      Mutation::face_patch_membership,
+      Mutation::periodic_pair,
+      Mutation::patch_stable_id,
+      Mutation::patch_name,
+      Mutation::patch_pairing_kind,
+      Mutation::patch_paired_id,
+      Mutation::patch_exact_membership};
+  for (const Mutation mutation : mutations) {
+    hundun::finite_volume::test::mutate_next_topology_signature(mutation);
+    auto mutated_flux = FaceMassFlux::acquire(registry, read_storage, access,
+                                              phase, actor, flux_id, topology);
+    verify_rejected_before_mutation(mutated_flux);
+  }
+
+  auto same_shape_decomposition = StructuredDecomposition::create(
+      mpi, extent, std::array<bool, 3>{false, true, true},
+      DecompositionOptions{process_grid_for(ranks)});
+  MeshTopology same_shape_topology(same_shape_decomposition);
+  HUNDUN_CHECK(same_shape_topology.global_extent().x ==
+               topology.global_extent().x);
+  HUNDUN_CHECK(same_shape_topology.global_extent().y ==
+               topology.global_extent().y);
+  HUNDUN_CHECK(same_shape_topology.global_extent().z ==
+               topology.global_extent().z);
+  const auto same_shape_box = same_shape_topology.owned_global_box();
+  const auto topology_box = topology.owned_global_box();
+  HUNDUN_CHECK(same_shape_box.begin.x == topology_box.begin.x);
+  HUNDUN_CHECK(same_shape_box.begin.y == topology_box.begin.y);
+  HUNDUN_CHECK(same_shape_box.begin.z == topology_box.begin.z);
+  HUNDUN_CHECK(same_shape_box.end.x == topology_box.end.x);
+  HUNDUN_CHECK(same_shape_box.end.y == topology_box.end.y);
+  HUNDUN_CHECK(same_shape_box.end.z == topology_box.end.z);
+  HUNDUN_CHECK(same_shape_topology.local_face_count() ==
+               topology.local_face_count());
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    HUNDUN_CHECK(same_shape_topology.global_face_id(face) ==
+                 topology.global_face_id(face));
+  }
+  FieldStorage same_shape_storage(
+      registry, FieldLayoutSet{same_shape_decomposition.local_extent(),
+                               same_shape_topology.local_face_count()});
+  auto same_shape_flux_write = same_shape_storage.acquire_face_write<double>(
+      access, phase, actor, flux_id);
+  for (std::size_t face = 0; face < same_shape_topology.local_face_count();
+       ++face) {
+    same_shape_flux_write(face, 0) = 0.0;
+  }
+  const FieldStorage &same_shape_read_storage = same_shape_storage;
+  auto same_shape_flux =
+      FaceMassFlux::acquire(registry, same_shape_read_storage, access, phase,
+                            actor, flux_id, same_shape_topology);
+  verify_rejected_before_mutation(same_shape_flux);
+}
+
 void run_failure_contracts(const MpiContext &mpi, int ranks) {
   constexpr Int3 extent{6, 6, 6};
   auto decomposition = StructuredDecomposition::create(
@@ -1911,6 +2154,7 @@ void run_failure_contracts(const MpiContext &mpi, int ranks) {
                             flux_id, other_topology);
   expect_error(
       [&] { operators.accumulate_mass_residual(other_flux, residual_write); });
+
   FaceMassFlux moved_flux(std::move(other_flux));
   HUNDUN_CHECK(moved_flux.field_id() == flux_id);
   HUNDUN_CHECK(moved_flux.face_count() == other_topology.local_face_count());
@@ -1927,6 +2171,8 @@ int main(int argc, char **argv) {
     run_gradient_case(mpi, mpi.size(), false);
     run_gradient_case(mpi, mpi.size(), true);
     run_gradient_failure_contracts(mpi, mpi.size());
+    run_failure_contracts(mpi, mpi.size());
+    run_topology_identity_mutation_contracts(mpi, mpi.size());
     run_shared_flux_case(mpi, mpi.size());
     const double reconstruction_error16 =
         smooth_transport_reconstruction_error(mpi, mpi.size(), 16);
@@ -1939,7 +2185,6 @@ int main(int argc, char **argv) {
     run_physical_boundary_case(mpi, mpi.size(), false);
     run_physical_boundary_case(mpi, mpi.size(), true);
     run_extent_one_periodic_case(mpi, mpi.size());
-    run_failure_contracts(mpi, mpi.size());
     const double error8 = warped_diffusion_error(mpi, mpi.size(), 8);
     const double error16 = warped_diffusion_error(mpi, mpi.size(), 16);
     const double error32 = warped_diffusion_error(mpi, mpi.size(), 32);

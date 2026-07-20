@@ -158,18 +158,236 @@ T &value_at(const runtime::FieldView<T> &view, StructuredIndex index,
 struct TopologySignature final {
   Int3 global_extent{};
   runtime::Box3 owned_box{};
-  std::size_t owned_cells{};
-  std::vector<GlobalFaceId> global_faces;
+  struct Cell final {
+    LocalCellId local_id{};
+    mesh::GlobalCellId global_id{};
+    Int3 global_cell{};
+    EntityOwnership ownership{};
+
+    bool operator==(const Cell &other) const noexcept {
+      return local_id == other.local_id && global_id == other.global_id &&
+             same(global_cell, other.global_cell) &&
+             ownership == other.ownership;
+    }
+  };
+  struct Face final {
+    LocalFaceId local_id{};
+    GlobalFaceId global_id{};
+    mesh::LogicalFace logical{};
+    EntityOwnership ownership{};
+    LocalCellId owner_local_id{};
+    mesh::GlobalCellId owner_global_id{};
+    EntityOwnership owner_ownership{};
+    std::optional<LocalCellId> neighbour_local_id;
+    std::optional<mesh::GlobalCellId> neighbour_global_id;
+    std::optional<EntityOwnership> neighbour_ownership;
+    std::optional<std::uint32_t> patch_id;
+    std::optional<GlobalFaceId> periodic_pair;
+
+    bool operator==(const Face &other) const noexcept {
+      return local_id == other.local_id && global_id == other.global_id &&
+             logical.axis == other.logical.axis &&
+             same(logical.coordinate, other.logical.coordinate) &&
+             ownership == other.ownership &&
+             owner_local_id == other.owner_local_id &&
+             owner_global_id == other.owner_global_id &&
+             owner_ownership == other.owner_ownership &&
+             neighbour_local_id == other.neighbour_local_id &&
+             neighbour_global_id == other.neighbour_global_id &&
+             neighbour_ownership == other.neighbour_ownership &&
+             patch_id == other.patch_id && periodic_pair == other.periodic_pair;
+    }
+  };
+  struct Patch final {
+    std::uint32_t stable_id{};
+    std::string name;
+    mesh::PatchPairingKind pairing_kind{};
+    std::optional<std::uint32_t> paired_patch_id;
+    std::vector<LocalFaceId> local_faces;
+
+    bool operator==(const Patch &other) const noexcept {
+      return stable_id == other.stable_id && name == other.name &&
+             pairing_kind == other.pairing_kind &&
+             paired_patch_id == other.paired_patch_id &&
+             local_faces == other.local_faces;
+    }
+  };
+
+  std::size_t owned_cell_count{};
+  std::size_t ghost_cell_count{};
+  std::size_t owned_face_count{};
+  std::size_t ghost_face_count{};
+  std::vector<Cell> cells;
+  std::vector<Face> faces;
+  std::array<Patch, 6> patches;
 };
+
+thread_local std::optional<test::TopologySignatureMutationForTest>
+    next_topology_signature_mutation;
+
+template <class Integer> Integer different(Integer value) noexcept {
+  return value == std::numeric_limits<Integer>::max() ? value - 1 : value + 1;
+}
+
+EntityOwnership other_ownership(EntityOwnership ownership) noexcept {
+  return ownership == EntityOwnership::owned ? EntityOwnership::ghost
+                                             : EntityOwnership::owned;
+}
+
+void mutate_signature(TopologySignature &signature,
+                      test::TopologySignatureMutationForTest mutation) {
+  using Mutation = test::TopologySignatureMutationForTest;
+  if (signature.cells.empty() || signature.faces.empty()) {
+    throw Error("topology signature mutation requires non-empty entities");
+  }
+  auto face_with_neighbour = std::find_if(
+      signature.faces.begin(), signature.faces.end(),
+      [](const auto &face) { return face.neighbour_local_id.has_value(); });
+  auto face_with_patch =
+      std::find_if(signature.faces.begin(), signature.faces.end(),
+                   [](const auto &face) { return face.patch_id.has_value(); });
+  auto face_with_pair = std::find_if(
+      signature.faces.begin(), signature.faces.end(),
+      [](const auto &face) { return face.periodic_pair.has_value(); });
+  switch (mutation) {
+  case Mutation::cell_global_id:
+    signature.cells.front().global_id =
+        different(signature.cells.front().global_id);
+    return;
+  case Mutation::cell_ownership:
+    signature.cells.front().ownership =
+        other_ownership(signature.cells.front().ownership);
+    return;
+  case Mutation::face_ownership:
+    signature.faces.front().ownership =
+        other_ownership(signature.faces.front().ownership);
+    return;
+  case Mutation::face_owner_local_id:
+    signature.faces.front().owner_local_id =
+        different(signature.faces.front().owner_local_id);
+    return;
+  case Mutation::face_owner_global_id:
+    signature.faces.front().owner_global_id =
+        different(signature.faces.front().owner_global_id);
+    return;
+  case Mutation::face_owner_ownership:
+    signature.faces.front().owner_ownership =
+        other_ownership(signature.faces.front().owner_ownership);
+    return;
+  case Mutation::face_neighbour_presence:
+    if (face_with_neighbour == signature.faces.end())
+      throw Error("topology signature has no neighbour to mutate");
+    face_with_neighbour->neighbour_local_id.reset();
+    face_with_neighbour->neighbour_global_id.reset();
+    face_with_neighbour->neighbour_ownership.reset();
+    return;
+  case Mutation::face_neighbour_local_id:
+    if (face_with_neighbour == signature.faces.end())
+      throw Error("topology signature has no neighbour to mutate");
+    *face_with_neighbour->neighbour_local_id =
+        different(*face_with_neighbour->neighbour_local_id);
+    return;
+  case Mutation::face_neighbour_global_id:
+    if (face_with_neighbour == signature.faces.end())
+      throw Error("topology signature has no neighbour to mutate");
+    *face_with_neighbour->neighbour_global_id =
+        different(*face_with_neighbour->neighbour_global_id);
+    return;
+  case Mutation::face_neighbour_ownership:
+    if (face_with_neighbour == signature.faces.end())
+      throw Error("topology signature has no neighbour to mutate");
+    *face_with_neighbour->neighbour_ownership =
+        other_ownership(*face_with_neighbour->neighbour_ownership);
+    return;
+  case Mutation::logical_face:
+    signature.faces.front().logical.coordinate.x =
+        different(signature.faces.front().logical.coordinate.x);
+    return;
+  case Mutation::face_patch_membership:
+    if (face_with_patch == signature.faces.end())
+      throw Error("topology signature has no patch face to mutate");
+    face_with_patch->patch_id.reset();
+    return;
+  case Mutation::periodic_pair:
+    if (face_with_pair == signature.faces.end())
+      throw Error("topology signature has no periodic pair to mutate");
+    face_with_pair->periodic_pair.reset();
+    return;
+  case Mutation::patch_stable_id:
+    signature.patches.front().stable_id =
+        different(signature.patches.front().stable_id);
+    return;
+  case Mutation::patch_name:
+    signature.patches.front().name += "_mutated";
+    return;
+  case Mutation::patch_pairing_kind:
+    signature.patches.front().pairing_kind =
+        signature.patches.front().pairing_kind == mesh::PatchPairingKind::none
+            ? mesh::PatchPairingKind::periodic
+            : mesh::PatchPairingKind::none;
+    return;
+  case Mutation::patch_paired_id:
+    if (signature.patches.front().paired_patch_id.has_value()) {
+      signature.patches.front().paired_patch_id.reset();
+    } else {
+      signature.patches.front().paired_patch_id = 1U;
+    }
+    return;
+  case Mutation::patch_exact_membership: {
+    auto patch = std::find_if(
+        signature.patches.begin(), signature.patches.end(),
+        [](const auto &candidate) { return !candidate.local_faces.empty(); });
+    if (patch == signature.patches.end())
+      throw Error("topology signature has no patch membership to mutate");
+    patch->local_faces.pop_back();
+    return;
+  }
+  }
+  throw Error("invalid topology signature mutation");
+}
 
 TopologySignature make_signature(const mesh::MeshTopology &topology) {
   TopologySignature signature{};
   signature.global_extent = topology.global_extent();
   signature.owned_box = topology.owned_global_box();
-  signature.owned_cells = topology.owned_cell_count();
-  signature.global_faces.reserve(topology.local_face_count());
+  signature.owned_cell_count = topology.owned_cell_count();
+  signature.ghost_cell_count = topology.ghost_cell_count();
+  signature.owned_face_count = topology.owned_face_count();
+  signature.ghost_face_count = topology.ghost_face_count();
+  signature.cells.reserve(topology.local_cell_count());
+  for (LocalCellId cell = 0; cell < topology.local_cell_count(); ++cell) {
+    signature.cells.push_back(TopologySignature::Cell{
+        cell, topology.global_cell_id(cell), topology.global_cell(cell),
+        topology.cell_ownership(cell)});
+  }
+  signature.faces.reserve(topology.local_face_count());
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
-    signature.global_faces.push_back(topology.global_face_id(face));
+    const LocalCellId owner = topology.owner(face);
+    const auto neighbour = topology.neighbour(face);
+    signature.faces.push_back(TopologySignature::Face{
+        face, topology.global_face_id(face), topology.logical_face(face),
+        topology.face_ownership(face), owner, topology.global_cell_id(owner),
+        topology.cell_ownership(owner), neighbour,
+        neighbour.has_value()
+            ? std::optional<mesh::GlobalCellId>{topology.global_cell_id(
+                  *neighbour)}
+            : std::nullopt,
+        neighbour.has_value()
+            ? std::optional<EntityOwnership>{topology.cell_ownership(
+                  *neighbour)}
+            : std::nullopt,
+        topology.patch_id(face), topology.periodic_pair(face)});
+  }
+  for (std::size_t index = 0; index < signature.patches.size(); ++index) {
+    const auto &patch = topology.patch(static_cast<std::uint32_t>(index));
+    signature.patches[index] = TopologySignature::Patch{
+        patch.stable_id(), std::string(patch.name()), patch.pairing_kind(),
+        patch.paired_patch_id(), patch.local_faces()};
+  }
+  if (next_topology_signature_mutation.has_value()) {
+    const auto mutation = *next_topology_signature_mutation;
+    next_topology_signature_mutation.reset();
+    mutate_signature(signature, mutation);
   }
   return signature;
 }
@@ -178,8 +396,12 @@ bool same_signature(const TopologySignature &lhs,
                     const TopologySignature &rhs) noexcept {
   return same(lhs.global_extent, rhs.global_extent) &&
          same(lhs.owned_box, rhs.owned_box) &&
-         lhs.owned_cells == rhs.owned_cells &&
-         lhs.global_faces == rhs.global_faces;
+         lhs.owned_cell_count == rhs.owned_cell_count &&
+         lhs.ghost_cell_count == rhs.ghost_cell_count &&
+         lhs.owned_face_count == rhs.owned_face_count &&
+         lhs.ghost_face_count == rhs.ghost_face_count &&
+         lhs.cells == rhs.cells && lhs.faces == rhs.faces &&
+         lhs.patches == rhs.patches;
 }
 
 struct FaceStencil final {
@@ -257,20 +479,9 @@ evaluate_scalar_boundary(const boundary::BoundaryRegistry &boundaries,
 
 double boundary_face_value(const boundary::BoundaryRegistry &boundaries,
                            FiniteVolumeQuantity quantity,
-                           const FaceStencil &face, double interior,
-                           int component) {
+                           const FaceStencil &face, double interior) {
   if (!face.patch.has_value()) {
     throw Error("finite-volume physical face has no boundary patch");
-  }
-  if (quantity.kind == FiniteVolumeQuantityKind::velocity) {
-    const Real3 u = component == 0   ? Real3{interior, 0.0, 0.0}
-                    : component == 1 ? Real3{0.0, interior, 0.0}
-                                     : Real3{0.0, 0.0, interior};
-    const auto values =
-        boundaries.evaluate_velocity(*face.patch, u, face.owner_area);
-    return component == 0   ? values.face.x
-           : component == 1 ? values.face.y
-                            : values.face.z;
   }
   return evaluate_scalar_boundary(boundaries, quantity, *face.patch, interior)
       .face;
@@ -411,6 +622,13 @@ struct CellCenteredFvmOperators::Impl final {
 };
 
 namespace test {
+
+void mutate_next_topology_signature(TopologySignatureMutationForTest mutation) {
+  if (next_topology_signature_mutation.has_value()) {
+    throw Error("finite-volume topology signature mutation is already armed");
+  }
+  next_topology_signature_mutation = mutation;
+}
 
 void override_next_face_metrics(mesh::GlobalFaceId global_face, double skewness,
                                 double non_orthogonality_degrees) {
@@ -733,8 +951,7 @@ void CellCenteredFvmOperators::compute_gradient(
                     : component == 1 ? values.exterior.y
                                      : values.exterior.z;
           } else {
-            phi_face = boundary_face_value(boundaries, quantity, face, phi_p,
-                                           component);
+            phi_face = boundary_face_value(boundaries, quantity, face, phi_p);
             phi_q = boundary_exterior_value(boundaries, quantity, face, Real3{},
                                             phi_p, component);
           }
@@ -909,8 +1126,7 @@ void CellCenteredFvmOperators::reconstruct_transport_faces(
       if (!std::isfinite(interior)) {
         throw Error("transport boundary interior value is non-finite");
       }
-      reconstructed =
-          boundary_face_value(boundaries, quantity, face, interior, 0);
+      reconstructed = boundary_face_value(boundaries, quantity, face, interior);
     } else {
       const CanonicalFace canonical = canonical_face(face);
       const double stored_mass_flux =
@@ -1095,7 +1311,10 @@ void CellCenteredFvmOperators::assemble_provisional_mass_flux(
       if (!(rho_face > 0.0)) {
         throw Error("provisional reconstructed density is not positive");
       }
-      const double canonical_flux = rho_face * volumetric_flux;
+      double canonical_flux = rho_face * volumetric_flux;
+      if (canonical_flux == 0.0) {
+        canonical_flux = 0.0;
+      }
       flux = canonical.reversed ? -canonical_flux : canonical_flux;
     }
     if (!std::isfinite(flux)) {
