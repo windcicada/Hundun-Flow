@@ -108,11 +108,13 @@ target_link_libraries(hundun_mesh
   PUBLIC hundun_options hundun_runtime)
 
 add_library(hundun_linear STATIC
+  linear/src/bicgstab.cpp
   linear/src/conjugate_gradient.cpp
   linear/src/ghosted_vector.cpp
   linear/src/ghosted_vector_halo.cpp
   linear/src/ghosted_vector_halo_detail.cpp
   linear/src/preconditioners.cpp
+  linear/src/solve_collective_detail.cpp
   linear/src/vector_ops.cpp)
 target_include_directories(hundun_linear
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/linear/include>"
@@ -437,6 +439,12 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_conjugate_gradient_header_contract PROPERTIES
     TIMEOUT 30)
 
+  hundun_add_test(test_bicgstab_header_contract
+    tests/unit/test_bicgstab_header_contract.cpp)
+  target_link_libraries(test_bicgstab_header_contract PRIVATE
+    hundun_linear)
+  set_tests_properties(test_bicgstab_header_contract PROPERTIES TIMEOUT 30)
+
   add_executable(test_conjugate_gradient
     tests/mpi/test_conjugate_gradient.cpp
     tests/support/allocation_attempt_guard.cpp)
@@ -451,6 +459,22 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_conjugate_gradient>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${conjugate_gradient_test}" PROPERTIES
+      LABELS mpi TIMEOUT 60 PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_bicgstab
+    tests/mpi/test_bicgstab.cpp
+    tests/support/allocation_attempt_guard.cpp)
+  target_include_directories(test_bicgstab PRIVATE "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_bicgstab PRIVATE
+    hundun_linear hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(bicgstab_test "test_bicgstab_${ranks}_rank")
+    add_test(NAME "${bicgstab_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_bicgstab>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${bicgstab_test}" PROPERTIES
       LABELS mpi TIMEOUT 60 PROCESSORS "${ranks}")
   endforeach()
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "hundun/linear/conjugate_gradient.hpp"
+#include "hundun/linear/bicgstab.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,18 +15,19 @@
 
 #include "hundun/linear/vector_ops.hpp"
 #include "hundun/runtime/error.hpp"
-#include "linear/src/conjugate_gradient_detail.hpp"
+#include "linear/src/bicgstab_detail.hpp"
 #include "linear/src/solve_collective_detail.hpp"
 #include "mpi_error.hpp"
 
 namespace hundun::linear {
 namespace {
 
-constexpr std::size_t kWorkspaceVectorCount = 5U;
+constexpr std::size_t kWorkspaceVectorCount = 9U;
 
 std::uint64_t checked_increment(std::uint64_t value, const char* name) {
   if (value == std::numeric_limits<std::uint64_t>::max()) {
-    throw runtime::Error(std::string("CG ") + name + " counter would overflow");
+    throw runtime::Error(std::string("BiCGStab ") + name +
+                         " counter would overflow");
   }
   return value + 1U;
 }
@@ -35,21 +36,21 @@ std::uint64_t checked_increment(std::uint64_t value, const char* name) {
 
 namespace detail {
 
-std::size_t checked_cg_workspace_bytes(std::size_t owned_count) {
+std::size_t checked_bicgstab_workspace_bytes(std::size_t owned_count) {
   if (owned_count >
       std::numeric_limits<std::size_t>::max() / kWorkspaceVectorCount) {
-    throw runtime::Error("CG workspace vector count overflow");
+    throw runtime::Error("BiCGStab workspace vector count overflow");
   }
   const std::size_t elements = owned_count * kWorkspaceVectorCount;
   if (elements > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
-    throw runtime::Error("CG workspace byte size overflow");
+    throw runtime::Error("BiCGStab workspace byte size overflow");
   }
   return elements * sizeof(double);
 }
 
 }  // namespace detail
 
-struct ConjugateGradientSolver::State final {
+struct BiCGStabSolver::State final {
   State(execution::ExecutionContext& execution_context_value,
         const runtime::MpiContext& mpi_context_value)
       : execution_context(&execution_context_value),
@@ -61,27 +62,25 @@ struct ConjugateGradientSolver::State final {
   VectorOps operations;
 };
 
-ConjugateGradientSolver::ConjugateGradientSolver(
-    execution::ExecutionContext& execution_context,
-    const runtime::MpiContext& mpi_context) {
-  detail::validate_solver_execution_context(execution_context, "CG");
-  detail::validate_solver_mpi_context(mpi_context, "CG");
+BiCGStabSolver::BiCGStabSolver(execution::ExecutionContext& execution_context,
+                               const runtime::MpiContext& mpi_context) {
+  detail::validate_solver_execution_context(execution_context, "BiCGStab");
+  detail::validate_solver_mpi_context(mpi_context, "BiCGStab");
   try {
     state_ = std::make_unique<State>(execution_context, mpi_context);
   } catch (const std::bad_alloc&) {
-    throw runtime::Error("CG solver state allocation failed");
+    throw runtime::Error("BiCGStab solver state allocation failed");
   }
 }
 
-ConjugateGradientSolver::~ConjugateGradientSolver() noexcept = default;
+BiCGStabSolver::~BiCGStabSolver() noexcept = default;
 
-SolveReport ConjugateGradientSolver::solve(
-    const LinearOperator& linear_operator,
-    Preconditioner& preconditioner,
-    execution::VectorView<const double> b,
-    execution::VectorView<double> x,
-    const SolveControl& control) const {
-  detail::validate_solver_mpi_context(*state_->mpi_context, "CG");
+SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
+                                  Preconditioner& preconditioner,
+                                  execution::VectorView<const double> b,
+                                  execution::VectorView<double> x,
+                                  const SolveControl& control) const {
+  detail::validate_solver_mpi_context(*state_->mpi_context, "BiCGStab");
   const detail::SolveCollectiveProtocol protocol(*state_->mpi_context);
   SolveReport report;
   auto finish = [&](SolveTerminationReason reason, int rank = -1) {
@@ -93,10 +92,10 @@ SolveReport ConjugateGradientSolver::solve(
   }
 
   std::size_t owned_count = 0U;
-  detail::LocalSolveFailure local_failure = detail::LocalSolveFailure::none;
+  auto local_failure = detail::LocalSolveFailure::none;
   try {
     owned_count = detail::validate_solver_preflight(
-        linear_operator, *state_->execution_context, b, x, "CG");
+        linear_operator, *state_->execution_context, b, x, "BiCGStab");
     if (!detail::all_finite(b) || !detail::all_finite(x)) {
       local_failure = detail::LocalSolveFailure::non_finite_value;
     }
@@ -114,12 +113,12 @@ SolveReport ConjugateGradientSolver::solve(
   std::optional<execution::Buffer> scalar_buffer;
   try {
     const std::size_t workspace_bytes =
-        detail::checked_cg_workspace_bytes(owned_count);
+        detail::checked_bicgstab_workspace_bytes(owned_count);
     const std::size_t vector_bytes = workspace_bytes / kWorkspaceVectorCount;
     for (auto& buffer : workspace) {
       buffer.emplace(*state_->execution_context, vector_bytes);
     }
-    scalar_buffer.emplace(*state_->execution_context, sizeof(double));
+    scalar_buffer.emplace(*state_->execution_context, 2U * sizeof(double));
   } catch (const runtime::detail::MpiOperationError&) {
     throw;
   } catch (...) {
@@ -130,16 +129,33 @@ SolveReport ConjugateGradientSolver::solve(
     return finish(selected.reason, selected.lowest_rank);
   }
 
-  auto r = workspace[0]->view(0U, owned_count);
-  auto z = workspace[1]->view(0U, owned_count);
-  auto p = workspace[2]->view(0U, owned_count);
-  auto ap = workspace[3]->view(0U, owned_count);
-  auto ax = workspace[4]->view(0U, owned_count);
-  auto reduction = scalar_buffer->view(0U, 1U);
+  const std::size_t n = owned_count;
+  auto r = workspace[0]->view(0U, n);
+  auto r_hat = workspace[1]->view(0U, n);
+  auto p = workspace[2]->view(0U, n);
+  auto v = workspace[3]->view(0U, n);
+  auto s = workspace[4]->view(0U, n);
+  auto t = workspace[5]->view(0U, n);
+  auto p_hat = workspace[6]->view(0U, n);
+  auto s_hat = workspace[7]->view(0U, n);
+  auto ax = workspace[8]->view(0U, n);
+  auto reduction_one = scalar_buffer->view(0U, 1U);
+  auto reduction_two = scalar_buffer->view(0U, 2U);
 
   auto phase_checkpoint = [&](detail::LocalSolveFailure failure) {
     selected = protocol.checkpoint(failure);
     return !selected.failed;
+  };
+  auto vector_phase = [&](auto&& operation) {
+    auto failure = detail::LocalSolveFailure::none;
+    try {
+      operation();
+    } catch (const runtime::detail::MpiOperationError&) {
+      throw;
+    } catch (...) {
+      failure = detail::LocalSolveFailure::collective_failure;
+    }
+    return phase_checkpoint(failure);
   };
   auto apply_operator = [&](execution::VectorView<const double> input,
                             execution::VectorView<double> output) {
@@ -169,27 +185,17 @@ SolveReport ConjugateGradientSolver::solve(
     }
     return phase_checkpoint(failure);
   };
-  auto apply_preconditioner = [&] {
+  auto apply_preconditioner = [&](execution::VectorView<const double> input,
+                                  execution::VectorView<double> output) {
     auto failure = detail::LocalSolveFailure::none;
     try {
       report.preconditioner_apply_count = checked_increment(
           report.preconditioner_apply_count, "preconditioner apply");
-      auto event = preconditioner.apply(r, z);
+      auto event = preconditioner.apply(input, output);
       event.wait();
-      if (!detail::all_finite(z)) {
+      if (!detail::all_finite(output)) {
         failure = detail::LocalSolveFailure::non_finite_value;
       }
-    } catch (const runtime::detail::MpiOperationError&) {
-      throw;
-    } catch (...) {
-      failure = detail::LocalSolveFailure::collective_failure;
-    }
-    return phase_checkpoint(failure);
-  };
-  auto vector_phase = [&](auto&& operation) {
-    auto failure = detail::LocalSolveFailure::none;
-    try {
-      operation();
     } catch (const runtime::detail::MpiOperationError&) {
       throw;
     } catch (...) {
@@ -216,8 +222,9 @@ SolveReport ConjugateGradientSolver::solve(
     auto failure = detail::LocalSolveFailure::none;
     try {
       const DotProductPair pair{left, right};
-      state_->operations.dot_batch(&pair, 1U, reduction, *state_->mpi_context);
-      result = reduction[0];
+      state_->operations.dot_batch(&pair, 1U, reduction_one,
+                                   *state_->mpi_context);
+      result = reduction_one[0];
       if (!std::isfinite(result)) {
         failure = detail::LocalSolveFailure::non_finite_value;
       }
@@ -228,7 +235,24 @@ SolveReport ConjugateGradientSolver::solve(
     }
     return phase_checkpoint(failure);
   };
-
+  auto dot_two = [&](double& ts, double& tt) {
+    auto failure = detail::LocalSolveFailure::none;
+    try {
+      const DotProductPair pairs[2]{{t, s}, {t, t}};
+      state_->operations.dot_batch(pairs, 2U, reduction_two,
+                                   *state_->mpi_context);
+      ts = reduction_two[0];
+      tt = reduction_two[1];
+      if (!std::isfinite(ts) || !std::isfinite(tt)) {
+        failure = detail::LocalSolveFailure::non_finite_value;
+      }
+    } catch (const runtime::detail::MpiOperationError&) {
+      throw;
+    } catch (...) {
+      failure = detail::LocalSolveFailure::non_finite_value;
+    }
+    return phase_checkpoint(failure);
+  };
   auto independent_residual = [&](double& value) {
     if (!apply_operator(x, ax)) {
       return false;
@@ -252,11 +276,11 @@ SolveReport ConjugateGradientSolver::solve(
     return norm(r, value);
   };
 
-  double right_hand_side_norm = std::numeric_limits<double>::infinity();
-  if (!norm(b, right_hand_side_norm)) {
+  double b_norm = std::numeric_limits<double>::infinity();
+  if (!norm(b, b_norm)) {
     return finish(selected.reason, selected.lowest_rank);
   }
-  const double relative_tolerance = control.rtol * right_hand_side_norm;
+  const double relative_tolerance = control.rtol * b_norm;
   const double tolerance = std::max(control.atol, relative_tolerance);
   local_failure = std::isfinite(relative_tolerance) && std::isfinite(tolerance)
                       ? detail::LocalSolveFailure::none
@@ -274,7 +298,7 @@ SolveReport ConjugateGradientSolver::solve(
   report.final_residual = independent;
   bool independent_is_current = true;
 
-  if (right_hand_side_norm == 0.0) {
+  if (b_norm == 0.0) {
     report.final_residual = std::numeric_limits<double>::infinity();
     independent_is_current = false;
     if (!vector_phase([&] { state_->operations.fill(x, 0.0); })) {
@@ -295,24 +319,21 @@ SolveReport ConjugateGradientSolver::solve(
   if (control.max_iterations == 0U) {
     return finish(SolveTerminationReason::maximum_iterations);
   }
-
   if (!update_preconditioner()) {
     return finish(selected.reason, selected.lowest_rank);
   }
-  if (!apply_preconditioner()) {
-    return finish(selected.reason, selected.lowest_rank);
-  }
-  double rho = 0.0;
-  if (!dot(r, z, rho)) {
-    return finish(selected.reason, selected.lowest_rank);
-  }
-  if (rho <= 0.0) {
-    return finish(SolveTerminationReason::numerical_breakdown);
-  }
-  if (!vector_phase([&] { state_->operations.copy(z, p); })) {
+  if (!vector_phase([&] {
+        state_->operations.copy(r, r_hat);
+        state_->operations.fill(p, 0.0);
+        state_->operations.fill(v, 0.0);
+      })) {
     return finish(selected.reason, selected.lowest_rank);
   }
 
+  double rho_old = 1.0;
+  double alpha = 1.0;
+  double omega = 1.0;
+  bool first_or_restart = true;
   auto refresh_final = [&] {
     if (!independent_is_current) {
       if (!independent_residual(independent)) {
@@ -323,23 +344,86 @@ SolveReport ConjugateGradientSolver::solve(
     }
     return true;
   };
+  auto restart = [&] {
+    return vector_phase([&] {
+      state_->operations.copy(r, r_hat);
+      state_->operations.fill(p, 0.0);
+      state_->operations.fill(v, 0.0);
+      rho_old = 1.0;
+      alpha = 1.0;
+      omega = 1.0;
+      first_or_restart = true;
+    });
+  };
 
   while (report.iterations < control.max_iterations) {
-    if (!apply_operator(p, ap)) {
-      return finish(selected.reason, selected.lowest_rank);
-    }
-    double curvature = 0.0;
-    if (!dot(p, ap, curvature)) {
+    double rho = 0.0;
+    if (!dot(r_hat, r, rho)) {
       static_cast<void>(refresh_final());
       return finish(selected.reason, selected.lowest_rank);
     }
-    if (curvature <= 0.0) {
+    if (rho == 0.0) {
       if (!refresh_final()) {
         return finish(selected.reason, selected.lowest_rank);
       }
       return finish(SolveTerminationReason::numerical_breakdown);
     }
-    const double alpha = rho / curvature;
+    if (first_or_restart) {
+      if (!vector_phase([&] { state_->operations.copy(r, p); })) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+    } else {
+      const double beta = (rho / rho_old) * (alpha / omega);
+      if (!std::isfinite(beta)) {
+        if (!refresh_final()) {
+          return finish(selected.reason, selected.lowest_rank);
+        }
+        return finish(SolveTerminationReason::non_finite_value);
+      }
+      local_failure = detail::LocalSolveFailure::none;
+      try {
+        const double* rp = r.data();
+        const double* pp = p.data();
+        const double* vp = v.data();
+        for (std::size_t index = 0; index < n; ++index) {
+          if (!std::isfinite(rp[index * r.stride()] +
+                             beta * (pp[index * p.stride()] -
+                                     omega * vp[index * v.stride()]))) {
+            local_failure = detail::LocalSolveFailure::non_finite_value;
+            break;
+          }
+        }
+      } catch (...) {
+        local_failure = detail::LocalSolveFailure::collective_failure;
+      }
+      if (!phase_checkpoint(local_failure)) {
+        static_cast<void>(refresh_final());
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      if (!vector_phase([&] { state_->operations.axpy(-omega, v, p); }) ||
+          !vector_phase([&] {
+            state_->operations.linear_combination(1.0, r, beta, p, p);
+          })) {
+        static_cast<void>(refresh_final());
+        return finish(selected.reason, selected.lowest_rank);
+      }
+    }
+
+    if (!apply_preconditioner(p, p_hat) || !apply_operator(p_hat, v)) {
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    double denominator = 0.0;
+    if (!dot(r_hat, v, denominator)) {
+      static_cast<void>(refresh_final());
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    if (denominator == 0.0) {
+      if (!refresh_final()) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      return finish(SolveTerminationReason::numerical_breakdown);
+    }
+    alpha = rho / denominator;
     if (!std::isfinite(alpha)) {
       if (!refresh_final()) {
         return finish(selected.reason, selected.lowest_rank);
@@ -348,22 +432,115 @@ SolveReport ConjugateGradientSolver::solve(
     }
     local_failure = detail::LocalSolveFailure::none;
     try {
-      if (!detail::finite_axpy_candidate(alpha, p, x) ||
-          !detail::finite_axpy_candidate(-alpha, ap, r)) {
+      if (!detail::finite_linear_candidate(1.0, r, -alpha, v)) {
         local_failure = detail::LocalSolveFailure::non_finite_value;
       }
     } catch (...) {
       local_failure = detail::LocalSolveFailure::collective_failure;
     }
     if (!phase_checkpoint(local_failure)) {
+      static_cast<void>(refresh_final());
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    if (!vector_phase([&] {
+          state_->operations.linear_combination(1.0, r, -alpha, v, s);
+        })) {
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    double s_norm = 0.0;
+    if (!norm(s, s_norm)) {
+      return finish(selected.reason, selected.lowest_rank);
+    }
+
+    if (s_norm <= tolerance) {
+      local_failure = detail::LocalSolveFailure::none;
+      try {
+        if (!detail::finite_axpy_candidate(alpha, p_hat, x)) {
+          local_failure = detail::LocalSolveFailure::non_finite_value;
+        }
+      } catch (...) {
+        local_failure = detail::LocalSolveFailure::collective_failure;
+      }
+      if (!phase_checkpoint(local_failure)) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      report.final_residual = std::numeric_limits<double>::infinity();
+      independent_is_current = false;
+      if (!vector_phase([&] { state_->operations.axpy(alpha, p_hat, x); })) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      report.iterations = checked_increment(report.iterations, "iteration");
+      if (!independent_residual(independent)) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      independent_is_current = true;
+      report.final_residual = independent;
+      report.recursive_residual = independent;
+      if (independent <= tolerance) {
+        return finish(SolveTerminationReason::converged);
+      }
+      if (report.iterations == control.max_iterations) {
+        return finish(SolveTerminationReason::maximum_iterations);
+      }
+      if (!restart()) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      continue;
+    }
+
+    if (!apply_preconditioner(s, s_hat) || !apply_operator(s_hat, t)) {
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    double ts = 0.0;
+    double tt = 0.0;
+    if (!dot_two(ts, tt)) {
+      static_cast<void>(refresh_final());
+      return finish(selected.reason, selected.lowest_rank);
+    }
+    if (tt <= 0.0) {
+      if (!refresh_final()) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      return finish(SolveTerminationReason::numerical_breakdown);
+    }
+    omega = ts / tt;
+    if (!std::isfinite(omega)) {
+      if (!refresh_final()) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      return finish(SolveTerminationReason::non_finite_value);
+    }
+    local_failure = detail::LocalSolveFailure::none;
+    if (omega == 0.0) {
+      if (!refresh_final()) {
+        return finish(selected.reason, selected.lowest_rank);
+      }
+      return finish(SolveTerminationReason::numerical_breakdown);
+    }
+    if (local_failure == detail::LocalSolveFailure::none) {
+      try {
+        if (!detail::finite_bicgstab_solution_candidate(x, alpha, p_hat, omega,
+                                                        s_hat) ||
+            !detail::finite_linear_candidate(1.0, s, -omega, t)) {
+          local_failure = detail::LocalSolveFailure::non_finite_value;
+        }
+      } catch (...) {
+        local_failure = detail::LocalSolveFailure::collective_failure;
+      }
+    }
+    if (!phase_checkpoint(local_failure)) {
+      static_cast<void>(refresh_final());
       return finish(selected.reason, selected.lowest_rank);
     }
     report.final_residual = std::numeric_limits<double>::infinity();
     independent_is_current = false;
-    if (!vector_phase([&] { state_->operations.axpy(alpha, p, x); })) {
+    if (!vector_phase([&] { state_->operations.axpy(alpha, p_hat, x); })) {
       return finish(selected.reason, selected.lowest_rank);
     }
-    if (!vector_phase([&] { state_->operations.axpy(-alpha, ap, r); })) {
+    if (!vector_phase([&] { state_->operations.axpy(omega, s_hat, x); }) ||
+        !vector_phase([&] {
+          state_->operations.linear_combination(1.0, s, -omega, t, r);
+        })) {
       return finish(selected.reason, selected.lowest_rank);
     }
     report.iterations = checked_increment(report.iterations, "iteration");
@@ -381,71 +558,20 @@ SolveReport ConjugateGradientSolver::solve(
       }
       independent_is_current = true;
       report.final_residual = independent;
+      report.recursive_residual = independent;
       if (independent <= tolerance) {
         return finish(SolveTerminationReason::converged);
       }
       if (exhausted) {
         return finish(SolveTerminationReason::maximum_iterations);
       }
-      report.recursive_residual = independent;
-      if (!apply_preconditioner()) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      if (!dot(r, z, rho)) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      if (rho <= 0.0) {
-        return finish(SolveTerminationReason::numerical_breakdown);
-      }
-      if (!vector_phase([&] { state_->operations.copy(z, p); })) {
+      if (!restart()) {
         return finish(selected.reason, selected.lowest_rank);
       }
       continue;
     }
-
-    if (!apply_preconditioner()) {
-      if (!refresh_final()) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      return finish(selected.reason, selected.lowest_rank);
-    }
-    double rho_new = 0.0;
-    if (!dot(r, z, rho_new)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
-    }
-    if (rho_new <= 0.0) {
-      if (!refresh_final()) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      return finish(SolveTerminationReason::numerical_breakdown);
-    }
-    const double beta = rho_new / rho;
-    if (!std::isfinite(beta)) {
-      if (!refresh_final()) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      return finish(SolveTerminationReason::non_finite_value);
-    }
-    local_failure = detail::LocalSolveFailure::none;
-    try {
-      if (!detail::finite_linear_candidate(1.0, z, beta, p)) {
-        local_failure = detail::LocalSolveFailure::non_finite_value;
-      }
-    } catch (...) {
-      local_failure = detail::LocalSolveFailure::collective_failure;
-    }
-    if (!phase_checkpoint(local_failure)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
-    }
-    if (!vector_phase([&] {
-          state_->operations.linear_combination(1.0, z, beta, p, p);
-        })) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
-    }
-    rho = rho_new;
+    rho_old = rho;
+    first_or_restart = false;
   }
 
   if (!refresh_final()) {

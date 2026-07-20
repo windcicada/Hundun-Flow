@@ -91,7 +91,8 @@ void fill(VectorView<double> values, double value) {
 class ConfigurableContext final : public ExecutionContext {
  public:
   ConfigurableContext(BackendIdentity identity, ExecutionSpace space,
-                      bool buffer, bool host, bool transfer) noexcept
+                      bool buffer, bool host,
+                      bool transfer) noexcept
       : identity_(identity),
         space_(space),
         buffer_(buffer),
@@ -562,10 +563,10 @@ void test_periodic_replacement_restart_and_allocations(
   HUNDUN_CHECK(report.iterations == 2U);
   HUNDUN_CHECK(report.matvec_count == 5U);
   HUNDUN_CHECK(report.preconditioner_apply_count == 2U);
-  HUNDUN_CHECK(report.global_reduction_count == 16U);
+  HUNDUN_CHECK(report.global_reduction_count == 54U);
   HUNDUN_CHECK(world.fp64_reduction_counters().collective_calls -
                    reductions_before ==
-               16U);
+               54U);
   HUNDUN_CHECK(iteration_allocation_attempts == 0U);
   HUNDUN_CHECK(linear_operator.recorded_size(4U) == kSystemSize);
   for (std::size_t index = 0; index < kSystemSize; ++index) {
@@ -611,29 +612,35 @@ void test_control_preflight_and_events(const MpiContext& world) {
   invalid.residual_recompute_interval = 0U;
   const auto invalid_report =
       solver.solve(linear_operator, preconditioner, b, x, invalid);
-  HUNDUN_CHECK(invalid_report.reason == SolveTerminationReason::invalid_control);
+  HUNDUN_CHECK(invalid_report.reason ==
+               SolveTerminationReason::invalid_control);
+  HUNDUN_CHECK(invalid_report.lowest_failing_rank == 0);
+  HUNDUN_CHECK(invalid_report.global_reduction_count == 1U);
   HUNDUN_CHECK(linear_operator.apply_calls() == calls_before);
   HUNDUN_CHECK(preconditioner.update_calls() == updates_before);
   HUNDUN_CHECK(world.fp64_reduction_counters().collective_calls ==
-               reductions_before);
+               reductions_before + 1U);
   for (std::size_t index = 0; index < x.size(); ++index) {
     HUNDUN_CHECK(x[index] == 4.0);
   }
 
   invalid = {};
   invalid.atol = std::numeric_limits<double>::quiet_NaN();
-  HUNDUN_CHECK(solver.solve(linear_operator, preconditioner, b, x, invalid)
-                   .reason == SolveTerminationReason::invalid_control);
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, b, x, invalid).reason ==
+      SolveTerminationReason::invalid_control);
   invalid = {};
   invalid.rtol = -1.0;
-  HUNDUN_CHECK(solver.solve(linear_operator, preconditioner, b, x, invalid)
-                   .reason == SolveTerminationReason::invalid_control);
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, b, x, invalid).reason ==
+      SolveTerminationReason::invalid_control);
 
   invalid = {};
   invalid.atol = -1.0;
   ExecutionTestAccess::fail_next_allocation();
-  HUNDUN_CHECK(solver.solve(linear_operator, preconditioner, b, x, invalid)
-                   .reason == SolveTerminationReason::invalid_control);
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, b, x, invalid).reason ==
+      SolveTerminationReason::invalid_control);
   expect_error_containing(
       [&] { Buffer allocation_would_have_failed(execution, sizeof(double)); },
       "allocation failed");
@@ -642,70 +649,65 @@ void test_control_preflight_and_events(const MpiContext& world) {
   auto shared_x = shared.view(0U, 3U, 2U);
   fill(shared_x, 1.0);
   const auto shared_b = static_cast<VectorView<const double>>(shared_x);
-  const auto before_shared =
-      world.fp64_reduction_counters().collective_calls;
-  expect_error_containing(
-      [&] { solver.solve(linear_operator, preconditioner, shared_b, shared_x, {}); },
-      "share an allocation");
+  const auto before_shared = world.fp64_reduction_counters().collective_calls;
+  const auto shared_report =
+      solver.solve(linear_operator, preconditioner, shared_b, shared_x, {});
+  HUNDUN_CHECK(shared_report.reason ==
+               SolveTerminationReason::collective_failure);
+  HUNDUN_CHECK(shared_report.lowest_failing_rank == 0);
   HUNDUN_CHECK(world.fp64_reduction_counters().collective_calls ==
-               before_shared);
+               before_shared + 4U);
 
   Buffer short_buffer(execution, 2U * sizeof(double));
-  expect_error_containing(
-      [&] {
-        solver.solve(linear_operator, preconditioner,
-                     short_buffer.view(0U, 2U), x, {});
-      },
-      "size");
+  HUNDUN_CHECK(solver
+                   .solve(linear_operator, preconditioner,
+                          short_buffer.view(0U, 2U), x, {})
+                   .reason == SolveTerminationReason::collective_failure);
 
   auto nonwritable_metadata = ExecutionTestAccess::metadata(x);
   nonwritable_metadata.writable = false;
   const auto nonwritable_x =
       ExecutionTestAccess::mutable_view(x_buffer, nonwritable_metadata);
-  expect_error_containing(
-      [&] { solver.solve(linear_operator, preconditioner, b, nonwritable_x, {}); },
-      "writable");
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, b, nonwritable_x, {})
+          .reason == SolveTerminationReason::collective_failure);
 
   auto backend_metadata = ExecutionTestAccess::metadata(x);
   ++backend_metadata.backend_identity;
   const auto wrong_backend_x =
       ExecutionTestAccess::mutable_view(x_buffer, backend_metadata);
-  expect_error_containing(
-      [&] { solver.solve(linear_operator, preconditioner, b, wrong_backend_x, {}); },
-      "backend identity");
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, b, wrong_backend_x, {})
+          .reason == SolveTerminationReason::collective_failure);
 
   const auto other_range = make_layout(3U, world.rank(), 7000000U);
   TridiagonalOperator nonsquare(execution, layout, other_range, 1.0, 0.0);
-  expect_error_containing(
-      [&] { solver.solve(nonsquare, preconditioner, b, x, {}); }, "square");
+  HUNDUN_CHECK(solver.solve(nonsquare, preconditioner, b, x, {}).reason ==
+               SolveTerminationReason::collective_failure);
 
   CpuReferenceContext other_execution;
-  TridiagonalOperator wrong_context(other_execution, layout, layout, 1.0,
-                                     0.0);
-  expect_error_containing(
-      [&] { solver.solve(wrong_context, preconditioner, b, x, {}); },
-      "context object");
+  TridiagonalOperator wrong_context(other_execution, layout, layout, 1.0, 0.0);
+  HUNDUN_CHECK(solver.solve(wrong_context, preconditioner, b, x, {}).reason ==
+               SolveTerminationReason::collective_failure);
 
   Buffer stale_buffer(execution, 3U * sizeof(double));
   auto stale = stale_buffer.view(0U, 3U);
   stale_buffer.reallocate(3U * sizeof(double));
-  expect_error_containing(
-      [&] { solver.solve(linear_operator, preconditioner, stale, x, {}); },
-      "live");
+  HUNDUN_CHECK(
+      solver.solve(linear_operator, preconditioner, stale, x, {}).reason ==
+      SolveTerminationReason::collective_failure);
 
   TridiagonalOperator failed_operator(execution, layout, layout, 1.0, 0.0);
   failed_operator.fail_apply_on(1U);
-  expect_error_containing(
-      [&] { solver.solve(failed_operator, preconditioner, b, x, {}); },
-      "operator event");
+  HUNDUN_CHECK(solver.solve(failed_operator, preconditioner, b, x, {}).reason ==
+               SolveTerminationReason::collective_failure);
 
   TridiagonalOperator identity(execution, layout, layout, 1.0, 0.0);
   InstrumentedPreconditioner failed_preconditioner;
   failed_preconditioner.fail_apply(true);
   fill(x, 0.0);
-  expect_error_containing(
-      [&] { solver.solve(identity, failed_preconditioner, b, x, {}); },
-      "preconditioner event");
+  HUNDUN_CHECK(solver.solve(identity, failed_preconditioner, b, x, {}).reason ==
+               SolveTerminationReason::collective_failure);
 
   SolveControl overflow_tolerance;
   overflow_tolerance.rtol = std::numeric_limits<double>::max();
@@ -715,7 +717,7 @@ void test_control_preflight_and_events(const MpiContext& world) {
       solver.solve(identity, preconditioner, b, x, overflow_tolerance);
   HUNDUN_CHECK(nonfinite.reason == SolveTerminationReason::non_finite_value);
   HUNDUN_CHECK(nonfinite.matvec_count == 0U);
-  HUNDUN_CHECK(nonfinite.global_reduction_count == 2U);
+  HUNDUN_CHECK(nonfinite.global_reduction_count == 9U);
 }
 
 void test_zero_owned_and_workspace_overflow(const MpiContext& world) {

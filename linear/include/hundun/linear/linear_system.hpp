@@ -35,6 +35,7 @@ struct SolveReport final {
   std::uint64_t matvec_count{};
   std::uint64_t preconditioner_apply_count{};
   std::uint64_t global_reduction_count{};
+  int lowest_failing_rank{-1};
 };
 
 class LinearOperator {

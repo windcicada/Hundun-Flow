@@ -41,7 +41,7 @@ std::string mpi_error_message(std::string_view operation, int result,
 
 void check_mpi(int result, std::string_view operation) {
   if (result != MPI_SUCCESS) {
-    throw Error(mpi_error_message(operation, result));
+    throw MpiOperationError(mpi_error_message(operation, result));
   }
 }
 

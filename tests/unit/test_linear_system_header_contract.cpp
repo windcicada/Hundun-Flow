@@ -120,7 +120,8 @@ int main() {
       !std::isinf(report.recursive_residual) ||
       !std::isinf(report.final_residual) || report.matvec_count != 0U ||
       report.preconditioner_apply_count != 0U ||
-      report.global_reduction_count != 0U) {
+      report.global_reduction_count != 0U ||
+      report.lowest_failing_rank != -1) {
     return 1;
   }
 

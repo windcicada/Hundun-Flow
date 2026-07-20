@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "hundun/runtime/error.hpp"
+
 #include <mpi.h>
 
 #include <string>
 #include <string_view>
 
 namespace hundun::runtime::detail {
+
+class MpiOperationError final : public runtime::Error {
+ public:
+  explicit MpiOperationError(const std::string& message)
+      : runtime::Error(message) {}
+};
 
 using MpiErrorStringFunction = int (*)(int, char*, int*);
 
