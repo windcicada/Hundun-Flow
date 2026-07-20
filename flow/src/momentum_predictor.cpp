@@ -5,12 +5,16 @@
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "momentum_predictor_test_access.hpp"
+#endif
 #include "mpi_error.hpp"
 
 #include <algorithm>
 #include <array>
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include <atomic>
+#endif
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +40,9 @@ using runtime::Int3;
 using runtime::Real3;
 
 constexpr std::size_t kLocalFailureCapacity = 512U;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 std::atomic<std::size_t> collective_selection_call_count{0U};
+#endif
 
 class LocalFailureBuffer final {
 public:
@@ -274,92 +280,6 @@ T &value_at(const runtime::FieldView<T> &view, StructuredIndex index,
   return view(index.i, index.j, index.k, component);
 }
 
-struct TopologySignature final {
-  struct Cell final {
-    mesh::GlobalCellId global{};
-    Int3 logical{};
-    EntityOwnership ownership{};
-    bool operator==(const Cell &other) const noexcept {
-      return global == other.global && same(logical, other.logical) &&
-             ownership == other.ownership;
-    }
-  };
-  struct Face final {
-    GlobalFaceId global{};
-    mesh::LogicalFace logical{};
-    EntityOwnership ownership{};
-    mesh::GlobalCellId owner{};
-    std::optional<mesh::GlobalCellId> neighbour;
-    std::optional<std::uint32_t> patch;
-    std::optional<GlobalFaceId> periodic_pair;
-    bool operator==(const Face &other) const noexcept {
-      return global == other.global && logical.axis == other.logical.axis &&
-             same(logical.coordinate, other.logical.coordinate) &&
-             ownership == other.ownership && owner == other.owner &&
-             neighbour == other.neighbour && patch == other.patch &&
-             periodic_pair == other.periodic_pair;
-    }
-  };
-  struct Patch final {
-    std::uint32_t stable_id{};
-    std::string name;
-    mesh::PatchPairingKind pairing{};
-    std::optional<std::uint32_t> paired;
-    std::vector<LocalFaceId> faces;
-    bool operator==(const Patch &other) const noexcept {
-      return stable_id == other.stable_id && name == other.name &&
-             pairing == other.pairing && paired == other.paired &&
-             faces == other.faces;
-    }
-  };
-
-  Int3 extent{};
-  runtime::Box3 box{};
-  std::size_t owned_cells{};
-  std::size_t ghost_cells{};
-  std::size_t owned_faces{};
-  std::size_t ghost_faces{};
-  std::vector<Cell> cells;
-  std::vector<Face> faces;
-  std::array<Patch, 6> patches;
-};
-
-TopologySignature make_signature(const mesh::MeshTopology &topology) {
-  TopologySignature result{};
-  result.extent = topology.global_extent();
-  result.box = topology.owned_global_box();
-  result.owned_cells = topology.owned_cell_count();
-  result.ghost_cells = topology.ghost_cell_count();
-  result.owned_faces = topology.owned_face_count();
-  result.ghost_faces = topology.ghost_face_count();
-  result.cells.reserve(topology.local_cell_count());
-  for (LocalCellId cell = 0; cell < topology.local_cell_count(); ++cell) {
-    result.cells.push_back({topology.global_cell_id(cell),
-                            topology.global_cell(cell),
-                            topology.cell_ownership(cell)});
-  }
-  result.faces.reserve(topology.local_face_count());
-  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
-    const auto neighbour = topology.neighbour(face);
-    result.faces.push_back(
-        {topology.global_face_id(face), topology.logical_face(face),
-         topology.face_ownership(face),
-         topology.global_cell_id(topology.owner(face)),
-         neighbour.has_value()
-             ? std::optional<mesh::GlobalCellId>{topology.global_cell_id(
-                   *neighbour)}
-             : std::nullopt,
-         topology.patch_id(face), topology.periodic_pair(face)});
-  }
-  for (std::size_t index = 0; index < result.patches.size(); ++index) {
-    const auto &patch = topology.patch(static_cast<std::uint32_t>(index));
-    result.patches[index] = {patch.stable_id(), std::string(patch.name()),
-                             patch.pairing_kind(), patch.paired_patch_id(),
-                             patch.local_faces()};
-  }
-  return result;
-}
-
 struct FaceStencil final {
   LocalFaceId local{};
   GlobalFaceId global{};
@@ -471,7 +391,7 @@ MomentumPredictorReport MomentumPredictor::solve(
   std::array<ViewRange, 9> ranges{};
   std::size_t range_count = 0U;
   std::size_t count = 0U;
-  LocalFailureBuffer local_failure;
+  LocalFailureBuffer structural_failure;
   try {
     for (std::size_t component_index = 0; component_index < equations.size();
          ++component_index) {
@@ -518,6 +438,37 @@ MomentumPredictorReport MomentumPredictor::solve(
       }
     }
 
+  } catch (const runtime::detail::MpiOperationError &) {
+    throw;
+  } catch (const std::bad_alloc &) {
+    structural_failure.assign(
+        "momentum structural preflight allocation failed");
+  } catch (const std::length_error &) {
+    structural_failure.assign(
+        "momentum structural preflight size is unsupported");
+  } catch (const Error &error) {
+    structural_failure.assign(error.what());
+  } catch (const std::exception &error) {
+    structural_failure.assign("momentum structural preflight failed: ",
+                              error.what());
+  } catch (...) {
+    structural_failure.assign("momentum structural preflight failed");
+  }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
+#endif
+  const runtime::CollectiveStatus structural_status =
+      runtime::collective_status(mpi, structural_failure.ok(),
+                                 structural_failure.message());
+  if (!structural_status.ok) {
+    throw Error("momentum predictor preflight failed on rank " +
+                std::to_string(structural_status.failing_rank) + ": " +
+                structural_status.message);
+  }
+
+  LocalFailureBuffer diagonal_failure;
+  try {
     count = common_layout->owned_count();
     if (count > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
       throw Error("momentum diagonal staging size overflows");
@@ -540,24 +491,27 @@ MomentumPredictorReport MomentumPredictor::solve(
   } catch (const runtime::detail::MpiOperationError &) {
     throw;
   } catch (const std::bad_alloc &) {
-    local_failure.assign("momentum diagonal staging allocation failed");
+    diagonal_failure.assign("momentum diagonal staging allocation failed");
   } catch (const std::length_error &) {
-    local_failure.assign("momentum diagonal staging size is unsupported");
+    diagonal_failure.assign("momentum diagonal staging size is unsupported");
   } catch (const Error &error) {
-    local_failure.assign(error.what());
+    diagonal_failure.assign(error.what());
   } catch (const std::exception &error) {
-    local_failure.assign("momentum diagonal extraction failed: ", error.what());
+    diagonal_failure.assign("momentum diagonal extraction failed: ",
+                            error.what());
   } catch (...) {
-    local_failure.assign("momentum diagonal extraction failed");
+    diagonal_failure.assign("momentum diagonal extraction failed");
   }
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
-  const runtime::CollectiveStatus preflight = runtime::collective_status(
-      mpi, local_failure.ok(), local_failure.message());
-  if (!preflight.ok) {
+#endif
+  const runtime::CollectiveStatus diagonal_status = runtime::collective_status(
+      mpi, diagonal_failure.ok(), diagonal_failure.message());
+  if (!diagonal_status.ok) {
     throw Error("momentum predictor preflight failed on rank " +
-                std::to_string(preflight.failing_rank) + ": " +
-                preflight.message);
+                std::to_string(diagonal_status.failing_rank) + ": " +
+                diagonal_status.message);
   }
 
   for (std::size_t component_index = 0; component_index < equations.size();
@@ -581,6 +535,7 @@ MomentumPredictorReport MomentumPredictor::solve(
   return report;
 }
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 void test::MomentumPredictorTestAccess::
     reset_collective_selection_calls() noexcept {
   collective_selection_call_count.store(0U, std::memory_order_relaxed);
@@ -590,9 +545,9 @@ std::size_t
 test::MomentumPredictorTestAccess::collective_selection_calls() noexcept {
   return collective_selection_call_count.load(std::memory_order_relaxed);
 }
+#endif
 
 struct TimeConsistentFaceVelocity::Impl final {
-  TopologySignature signature;
   Int3 local_extent{};
   bool needs_ghost{};
   std::vector<FaceStencil> faces;
@@ -607,7 +562,6 @@ TimeConsistentFaceVelocity::create(const mesh::MeshTopology &topology,
   try {
     geometry.require_compatible(topology);
     auto impl = std::make_unique<Impl>();
-    impl->signature = make_signature(topology);
     const auto box = topology.owned_global_box();
     impl->local_extent = {box.end.x - box.begin.x, box.end.y - box.begin.y,
                           box.end.z - box.begin.z};

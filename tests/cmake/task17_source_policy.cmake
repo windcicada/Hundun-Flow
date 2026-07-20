@@ -13,3 +13,12 @@ foreach(forbidden IN ITEMS
     message(FATAL_ERROR "Task 17 public/product source contains ${forbidden}")
   endif()
 endforeach()
+
+foreach(dead_copy IN ITEMS "struct TopologySignature" "make_signature(topology)"
+                           "TopologySignature signature")
+  string(FIND "${task17_source}" "${dead_copy}" position)
+  if(NOT position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 17 face object retains dead topology copy token: ${dead_copy}")
+  endif()
+endforeach()

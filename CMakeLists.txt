@@ -170,6 +170,10 @@ target_link_libraries(hundun_flow
     hundun_runtime
     hundun_execution
     hundun_options)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_flow PRIVATE
+    HUNDUN_FLOW_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp

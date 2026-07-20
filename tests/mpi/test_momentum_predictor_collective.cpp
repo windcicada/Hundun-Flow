@@ -70,8 +70,22 @@ public:
       y[index] = x[index];
     return ExecutionEvent::completed();
   }
-  bool has_diagonal() const override { return has_diagonal_; }
+  bool has_diagonal() const override {
+    if (throw_mpi_operation_error_from_capability_) {
+      throw hundun::runtime::detail::MpiOperationError(
+          "injected structural MPI operation failure");
+    }
+    return has_diagonal_;
+  }
   ExecutionEvent diagonal(VectorView<double> output) const override {
+    ++diagonal_calls_;
+    if (synchronize_on_diagonal_ != nullptr) {
+      double reached = 1.0;
+      synchronize_on_diagonal_->allreduce_fp64_in_place(
+          &reached, 1U, Fp64ReductionOperation::sum);
+      HUNDUN_CHECK(reached ==
+                   static_cast<double>(synchronize_on_diagonal_->size()));
+    }
     if (throw_mpi_operation_error_) {
       throw hundun::runtime::detail::MpiOperationError(
           "injected typed MPI operation failure");
@@ -96,6 +110,13 @@ public:
   void set_throw_mpi_operation_error(bool value) noexcept {
     throw_mpi_operation_error_ = value;
   }
+  void set_throw_mpi_operation_error_from_capability(bool value) noexcept {
+    throw_mpi_operation_error_from_capability_ = value;
+  }
+  void synchronize_diagonal_with(const MpiContext &mpi) noexcept {
+    synchronize_on_diagonal_ = &mpi;
+  }
+  std::size_t diagonal_calls() const noexcept { return diagonal_calls_; }
 
 private:
   ExecutionContext *context_;
@@ -105,7 +126,10 @@ private:
   bool has_diagonal_{true};
   bool failed_event_{false};
   bool throw_mpi_operation_error_{false};
+  bool throw_mpi_operation_error_from_capability_{false};
   std::string diagonal_error_;
+  const MpiContext *synchronize_on_diagonal_{};
+  mutable std::size_t diagonal_calls_{};
 };
 
 class CountingSolver final : public LinearSolver {
@@ -203,12 +227,22 @@ void require_no_solver_calls(const MpiContext &mpi, const Fixture &fixture) {
   fixture.check_sentinels();
 }
 
+void require_global_diagonal_calls(const MpiContext &mpi,
+                                   const Fixture &fixture, double expected) {
+  double calls = static_cast<double>(fixture.op0.diagonal_calls() +
+                                     fixture.op1.diagonal_calls() +
+                                     fixture.op2.diagonal_calls());
+  mpi.allreduce_fp64_in_place(&calls, 1U, Fp64ReductionOperation::sum);
+  HUNDUN_CHECK(calls == expected);
+}
+
 void check_null_pointer_is_collective(const MpiContext &mpi) {
   Fixture fixture(mpi);
   auto equations = fixture.equations();
   if (mpi.rank() == 1)
     equations[0].linear_operator = nullptr;
   MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
   std::string message;
   try {
     static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
@@ -218,6 +252,8 @@ void check_null_pointer_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "equation has a null operator or preconditioner");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 1U);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -240,6 +276,7 @@ void check_lowest_failure_rank_wins(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "operator lacks diagonal capability");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -250,6 +287,7 @@ void check_nonpositive_diagonal_is_collective(const MpiContext &mpi) {
                                {4.0, 0.0});
   }
   MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
   std::string message;
   try {
     static_cast<void>(
@@ -260,15 +298,15 @@ void check_nonpositive_diagonal_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "operator diagonal must be finite and positive");
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 2U);
   require_no_solver_calls(mpi, fixture);
 }
 
 void check_nonfinite_diagonal_is_collective(const MpiContext &mpi) {
   Fixture fixture(mpi);
   if (mpi.rank() == 1) {
-    fixture.op1 = TestOperator(
-        fixture.context, fixture.layout, fixture.layout,
-        {4.0, std::numeric_limits<double>::quiet_NaN()});
+    fixture.op1 = TestOperator(fixture.context, fixture.layout, fixture.layout,
+                               {4.0, std::numeric_limits<double>::quiet_NaN()});
   }
   MomentumPredictor predictor(fixture.solver);
   std::string message;
@@ -301,6 +339,7 @@ void check_common_layout_mismatch_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "equation layouts are not identical");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -321,7 +360,61 @@ void check_nonsquare_layout_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "operator is not square");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
   require_no_solver_calls(mpi, fixture);
+}
+
+void check_view_failure_skips_all_diagonals(const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  auto equations = fixture.equations();
+  if (mpi.rank() == 1) {
+    equations[1].rhs =
+        static_cast<const Buffer &>(fixture.rhs1).view(0U, Fixture::count - 1U);
+  }
+  MomentumPredictor predictor(fixture.solver);
+  std::string message;
+  try {
+    static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+  } catch (const Error &error) {
+    message = error.what();
+  }
+  HUNDUN_CHECK(message ==
+               "momentum predictor preflight failed on rank 1: momentum RHS "
+               "view is incompatible");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
+  require_no_solver_calls(mpi, fixture);
+}
+
+void check_alias_failure_skips_all_diagonals(const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  auto equations = fixture.equations();
+  if (mpi.rank() == 1)
+    equations[0].actual_diagonal = equations[0].predictor;
+  MomentumPredictor predictor(fixture.solver);
+  std::string message;
+  try {
+    static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+  } catch (const Error &error) {
+    message = error.what();
+  }
+  HUNDUN_CHECK(message ==
+               "momentum predictor preflight failed on rank 1: momentum "
+               "input and output views alias");
+  require_global_diagonal_calls(mpi, fixture, 0.0);
+  require_no_solver_calls(mpi, fixture);
+}
+
+void check_synchronized_diagonal_is_reached_collectively(
+    const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  fixture.op0.synchronize_diagonal_with(mpi);
+  fixture.op1.synchronize_diagonal_with(mpi);
+  fixture.op2.synchronize_diagonal_with(mpi);
+  MomentumPredictor predictor(fixture.solver);
+  static_cast<void>(predictor.solve(mpi, fixture.equations(), SolveControl{}));
+  require_global_diagonal_calls(mpi, fixture,
+                                3.0 * static_cast<double>(mpi.size()));
+  HUNDUN_CHECK(fixture.solver.calls() == 3U);
 }
 
 void check_event_failure_is_collective(const MpiContext &mpi) {
@@ -394,7 +487,27 @@ void check_typed_mpi_operation_error_is_rethrown(const MpiContext &mpi) {
         std::string(error.what()) == "injected typed MPI operation failure";
   }
   HUNDUN_CHECK(caught_typed);
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 1U);
+  require_no_solver_calls(mpi, fixture);
+}
+
+void check_structural_typed_mpi_operation_error_is_rethrown(
+    const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  fixture.op0.set_throw_mpi_operation_error_from_capability(true);
+  MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
+  bool caught_typed = false;
+  try {
+    static_cast<void>(
+        predictor.solve(mpi, fixture.equations(), SolveControl{}));
+  } catch (const hundun::runtime::detail::MpiOperationError &error) {
+    caught_typed = std::string(error.what()) ==
+                   "injected structural MPI operation failure";
+  }
+  HUNDUN_CHECK(caught_typed);
   HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 0U);
+  require_global_diagonal_calls(mpi, fixture, 0.0);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -411,9 +524,13 @@ int main(int argc, char **argv) {
     check_nonfinite_diagonal_is_collective(mpi);
     check_common_layout_mismatch_is_collective(mpi);
     check_nonsquare_layout_is_collective(mpi);
+    check_view_failure_skips_all_diagonals(mpi);
+    check_alias_failure_skips_all_diagonals(mpi);
+    check_synchronized_diagonal_is_reached_collectively(mpi);
     check_event_failure_is_collective(mpi);
     check_staging_allocation_failure_is_collective(mpi);
     check_long_diagnostic_is_deterministically_bounded(mpi);
     check_typed_mpi_operation_error_is_rethrown(mpi);
+    check_structural_typed_mpi_operation_error_is_rethrown(mpi);
   });
 }
