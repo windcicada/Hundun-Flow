@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -219,6 +220,43 @@ class FakeOperator final : public LinearOperator {
   bool* destroyed_{nullptr};
 };
 
+class ReusedFakeOperatorStorage final {
+ public:
+  ReusedFakeOperatorStorage() = default;
+  ~ReusedFakeOperatorStorage() noexcept { destroy(); }
+  ReusedFakeOperatorStorage(const ReusedFakeOperatorStorage&) = delete;
+  ReusedFakeOperatorStorage& operator=(const ReusedFakeOperatorStorage&) =
+      delete;
+
+  FakeOperator& emplace(ExecutionContext& context, VectorLayout domain,
+                        VectorLayout range, std::uint64_t revision,
+                        std::vector<double> diagonal) {
+    if (live_) {
+      throw std::logic_error("placement operator storage is already live");
+    }
+    auto* created = ::new (static_cast<void*>(storage_)) FakeOperator(
+        context, std::move(domain), std::move(range), revision,
+        std::move(diagonal));
+    live_ = true;
+    return *created;
+  }
+
+  void destroy() noexcept {
+    if (live_) {
+      current()->~FakeOperator();
+      live_ = false;
+    }
+  }
+
+ private:
+  FakeOperator* current() noexcept {
+    return std::launder(reinterpret_cast<FakeOperator*>(storage_));
+  }
+
+  alignas(FakeOperator) std::byte storage_[sizeof(FakeOperator)];
+  bool live_{false};
+};
+
 class ProbePreconditioner final : public Preconditioner {
  public:
   explicit ProbePreconditioner(bool& destroyed) : destroyed_(destroyed) {}
@@ -406,6 +444,60 @@ void test_current_operator_revision_lineages() {
   jacobi.apply(input.view(0U, 2U), output.view(0U, 2U)).wait();
   HUNDUN_CHECK(read_values(output.view(0U, 2U)) ==
                std::vector<double>({2.0, -3.0}));
+}
+
+void test_reused_operator_address_starts_fresh_lineage() {
+  CpuReferenceContext context;
+  const auto layout = make_layout(2U);
+
+  {
+    ReusedFakeOperatorStorage reused_storage;
+    FakeOperator distinct(context, layout, layout, 2U, {1.0, 1.0});
+    IdentityPreconditioner identity(context);
+
+    auto& first = reused_storage.emplace(context, layout, layout, 9U,
+                                         {1.0, 1.0});
+    identity.update(first, 9U);
+    identity.update(distinct, 2U);
+    reused_storage.destroy();
+
+    auto& replacement = reused_storage.emplace(context, layout, layout, 1U,
+                                               {1.0, 1.0});
+    identity.update(replacement, 1U);
+
+    Buffer input(context, 2U * sizeof(double));
+    Buffer output(context, 2U * sizeof(double));
+    set_values(input.view(0U, 2U), {5.0, -7.0});
+    set_values(output.view(0U, 2U), {11.0, 11.0});
+    identity.apply(input.view(0U, 2U), output.view(0U, 2U)).wait();
+    HUNDUN_CHECK(read_values(output.view(0U, 2U)) ==
+                 std::vector<double>({5.0, -7.0}));
+  }
+
+  {
+    ReusedFakeOperatorStorage reused_storage;
+    FakeOperator distinct(context, layout, layout, 3U, {4.0, 5.0});
+    JacobiPreconditioner jacobi(context);
+
+    auto& first = reused_storage.emplace(context, layout, layout, 10U,
+                                         {2.0, 2.0});
+    jacobi.update(first, 10U);
+    jacobi.update(distinct, 3U);
+    reused_storage.destroy();
+
+    auto& replacement = reused_storage.emplace(context, layout, layout, 1U,
+                                               {2.0, -4.0});
+    jacobi.update(replacement, 1U);
+    HUNDUN_CHECK(replacement.diagonal_calls() == 1U);
+
+    Buffer residual(context, 2U * sizeof(double));
+    Buffer correction(context, 2U * sizeof(double));
+    set_values(residual.view(0U, 2U), {8.0, 12.0});
+    set_values(correction.view(0U, 2U), {-9.0, -9.0});
+    jacobi.apply(residual.view(0U, 2U), correction.view(0U, 2U)).wait();
+    HUNDUN_CHECK(read_values(correction.view(0U, 2U)) ==
+                 std::vector<double>({4.0, -3.0}));
+  }
 }
 
 void test_completed_event_failure_preserves_apply_outputs() {
@@ -741,6 +833,7 @@ int main() {
     test_virtual_destruction();
     test_context_and_update_validation();
     test_current_operator_revision_lineages();
+    test_reused_operator_address_starts_fresh_lineage();
     test_completed_event_failure_preserves_apply_outputs();
     test_identity_apply_contract();
     test_jacobi_apply_and_cache();
