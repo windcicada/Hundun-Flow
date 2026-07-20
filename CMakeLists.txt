@@ -154,6 +154,21 @@ target_link_libraries(hundun_finite_volume
     hundun_execution
     hundun_options)
 
+add_library(hundun_flow STATIC
+  flow/src/momentum_predictor.cpp)
+target_include_directories(hundun_flow PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/include>")
+target_link_libraries(hundun_flow
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_finite_volume
+    hundun_boundary
+    hundun_linear
+    hundun_mesh
+    hundun_runtime
+    hundun_execution
+    hundun_options)
+
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
   runtime/src/vtk_legacy.cpp)
@@ -500,6 +515,48 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_cell_centered_fvm_source_policy PROPERTIES
     LABELS "unit;source_policy"
     TIMEOUT 30)
+
+  hundun_add_test(test_momentum_predictor_header_contract
+    tests/unit/test_momentum_predictor_header_contract.cpp)
+  target_link_libraries(test_momentum_predictor_header_contract PRIVATE
+    hundun_flow)
+  set_tests_properties(test_momentum_predictor_header_contract PROPERTIES
+    TIMEOUT 30)
+
+  hundun_add_test(test_momentum_predictor
+    tests/unit/test_momentum_predictor.cpp)
+  target_include_directories(test_momentum_predictor PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_momentum_predictor PRIVATE hundun_flow)
+  set_tests_properties(test_momentum_predictor PROPERTIES TIMEOUT 30)
+  add_test(NAME test_momentum_predictor_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task17_source_policy.cmake")
+  set_tests_properties(test_momentum_predictor_source_policy PROPERTIES
+    LABELS "unit;source_policy"
+    TIMEOUT 30)
+
+  add_executable(test_time_consistent_face_velocity
+    tests/mpi/test_time_consistent_face_velocity.cpp
+    tests/support/allocation_attempt_guard.cpp)
+  target_include_directories(test_time_consistent_face_velocity PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_time_consistent_face_velocity PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(time_consistent_face_test
+        "test_time_consistent_face_velocity_${ranks}_rank")
+    add_test(NAME "${time_consistent_face_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_time_consistent_face_velocity>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${time_consistent_face_test}" PROPERTIES
+      LABELS "mpi;numerical"
+      TIMEOUT 120
+      PROCESSORS "${ranks}")
+  endforeach()
 
   add_executable(test_basic_boundary
     tests/mpi/test_basic_boundary.cpp
