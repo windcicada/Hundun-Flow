@@ -6,7 +6,11 @@
 #include "hundun/linear/ghosted_vector.hpp"
 #include "hundun/linear/linear_system.hpp"
 #include "hundun/runtime/error.hpp"
+#include "hundun/runtime/mpi_context.hpp"
+#include "hundun/runtime/mpi_environment.hpp"
 #include "tests/support/test_main.hpp"
+
+#include <mpi.h>
 
 #include <array>
 #include <cmath>
@@ -37,6 +41,8 @@ using hundun::linear::SolveReport;
 using hundun::linear::SolveTerminationReason;
 using hundun::linear::VectorLayout;
 using hundun::runtime::Error;
+using hundun::runtime::MpiContext;
+using hundun::runtime::MpiEnvironment;
 
 template <class Function> void expect_error(Function &&function) {
   bool threw = false;
@@ -61,11 +67,16 @@ class DiagonalOperator final : public LinearOperator {
 public:
   DiagonalOperator(ExecutionContext &context, VectorLayout layout,
                    std::vector<double> diagonal)
-      : context_(&context), layout_(std::move(layout)),
+      : context_(&context), domain_(layout), range_(std::move(layout)),
         diagonal_(std::move(diagonal)) {}
 
-  VectorLayout domain_layout() const override { return layout_; }
-  VectorLayout range_layout() const override { return layout_; }
+  DiagonalOperator(ExecutionContext &context, VectorLayout domain,
+                   VectorLayout range, std::vector<double> diagonal)
+      : context_(&context), domain_(std::move(domain)),
+        range_(std::move(range)), diagonal_(std::move(diagonal)) {}
+
+  VectorLayout domain_layout() const override { return domain_; }
+  VectorLayout range_layout() const override { return range_; }
   const ExecutionContext &context() const override { return *context_; }
   std::uint64_t revision() const override { return 7U; }
   ExecutionEvent apply(VectorView<const double> x,
@@ -101,7 +112,8 @@ public:
 
 private:
   ExecutionContext *context_;
-  VectorLayout layout_;
+  VectorLayout domain_;
+  VectorLayout range_;
   std::vector<double> diagonal_;
   bool has_diagonal_{true};
   bool throw_from_diagonal_{false};
@@ -290,11 +302,11 @@ void check_time_stencils() {
   }
 }
 
-void check_predictor_success_and_reports() {
+void check_predictor_success_and_reports(const MpiContext &mpi) {
   PredictorFixture fixture;
   MomentumPredictor predictor(fixture.solver);
   auto equations = fixture.equations();
-  const auto report = predictor.solve(equations, SolveControl{});
+  const auto report = predictor.solve(mpi, equations, SolveControl{});
   HUNDUN_CHECK(fixture.solver.call_count() == 3U);
   HUNDUN_CHECK(report.all_converged());
   for (std::size_t c = 0; c < 3U; ++c) {
@@ -317,20 +329,21 @@ void check_predictor_success_and_reports() {
   failed.solver.reasons[1] = SolveTerminationReason::maximum_iterations;
   MomentumPredictor failed_predictor(failed.solver);
   const auto failed_report =
-      failed_predictor.solve(failed.equations(), SolveControl{});
+      failed_predictor.solve(mpi, failed.equations(), SolveControl{});
   HUNDUN_CHECK(failed.solver.call_count() == 3U);
   HUNDUN_CHECK(!failed_report.all_converged());
   HUNDUN_CHECK(failed_report.components[1].reason ==
                SolveTerminationReason::maximum_iterations);
 }
 
-void check_predictor_preflight_transaction() {
+void check_predictor_preflight_transaction(const MpiContext &mpi) {
   {
     PredictorFixture fixture;
     fixture.op1.set_has_diagonal(false);
     MomentumPredictor predictor(fixture.solver);
     expect_error([&] {
-      static_cast<void>(predictor.solve(fixture.equations(), SolveControl{}));
+      static_cast<void>(
+          predictor.solve(mpi, fixture.equations(), SolveControl{}));
     });
     HUNDUN_CHECK(fixture.solver.call_count() == 0U);
     HUNDUN_CHECK(fixture.op2.diagonal_calls() == 0U);
@@ -341,7 +354,8 @@ void check_predictor_preflight_transaction() {
     fixture.op1.set_failed_event(true);
     MomentumPredictor predictor(fixture.solver);
     expect_error([&] {
-      static_cast<void>(predictor.solve(fixture.equations(), SolveControl{}));
+      static_cast<void>(
+          predictor.solve(mpi, fixture.equations(), SolveControl{}));
     });
     HUNDUN_CHECK(fixture.solver.call_count() == 0U);
     fixture.check_unchanged();
@@ -352,7 +366,91 @@ void check_predictor_preflight_transaction() {
     equations[1].linear_operator = nullptr;
     MomentumPredictor predictor(fixture.solver);
     expect_error(
-        [&] { static_cast<void>(predictor.solve(equations, SolveControl{})); });
+        [&] {
+          static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+        });
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    auto equations = fixture.equations();
+    equations[1].preconditioner = nullptr;
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    CpuReferenceContext other_context;
+    DiagonalOperator other(other_context, fixture.layout, {5.0, 6.0, 7.0});
+    auto equations = fixture.equations();
+    equations[1].linear_operator = &other;
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    const VectorLayout other_layout(
+        PredictorFixture::count,
+        std::vector<hundun::mesh::GlobalCellId>{2U, 1U, 0U});
+    DiagonalOperator nonsquare(fixture.context, fixture.layout, other_layout,
+                               {5.0, 6.0, 7.0});
+    auto equations = fixture.equations();
+    equations[1].linear_operator = &nonsquare;
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    const VectorLayout other_layout(
+        PredictorFixture::count,
+        std::vector<hundun::mesh::GlobalCellId>{2U, 1U, 0U});
+    DiagonalOperator different_layout(fixture.context, other_layout,
+                                      {5.0, 6.0, 7.0});
+    auto equations = fixture.equations();
+    equations[1].linear_operator = &different_layout;
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    auto equations = fixture.equations();
+    equations[0].rhs = static_cast<const Buffer &>(fixture.rhs0).view(
+        0U, PredictorFixture::count - 1U);
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    Buffer strided(fixture.context,
+                   2U * PredictorFixture::count * sizeof(double));
+    auto equations = fixture.equations();
+    equations[0].rhs = static_cast<const Buffer &>(strided).view(
+        0U, PredictorFixture::count, 2U);
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
     fixture.check_unchanged();
   }
   {
@@ -361,7 +459,20 @@ void check_predictor_preflight_transaction() {
     equations[0].actual_diagonal = equations[0].predictor;
     MomentumPredictor predictor(fixture.solver);
     expect_error(
-        [&] { static_cast<void>(predictor.solve(equations, SolveControl{})); });
+        [&] {
+          static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+        });
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    auto equations = fixture.equations();
+    equations[1].predictor = equations[0].predictor;
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
     fixture.check_unchanged();
   }
   {
@@ -372,7 +483,36 @@ void check_predictor_preflight_transaction() {
     stale.reallocate(PredictorFixture::count * sizeof(double));
     MomentumPredictor predictor(fixture.solver);
     expect_error(
-        [&] { static_cast<void>(predictor.solve(equations, SolveControl{})); });
+        [&] {
+          static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+        });
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    auto equations = fixture.equations();
+    Buffer stale(fixture.context, PredictorFixture::count * sizeof(double));
+    equations[0].rhs = static_cast<const Buffer &>(stale).view(
+        0U, PredictorFixture::count);
+    stale.reallocate(PredictorFixture::count * sizeof(double));
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
+    fixture.check_unchanged();
+  }
+  {
+    PredictorFixture fixture;
+    auto equations = fixture.equations();
+    Buffer stale(fixture.context, PredictorFixture::count * sizeof(double));
+    equations[0].actual_diagonal = stale.view(0U, PredictorFixture::count);
+    stale.reallocate(PredictorFixture::count * sizeof(double));
+    MomentumPredictor predictor(fixture.solver);
+    expect_error([&] {
+      static_cast<void>(predictor.solve(mpi, equations, SolveControl{}));
+    });
+    HUNDUN_CHECK(fixture.solver.call_count() == 0U);
     fixture.check_unchanged();
   }
   for (double invalid : {0.0, -1.0, std::numeric_limits<double>::infinity(),
@@ -384,7 +524,8 @@ void check_predictor_preflight_transaction() {
     fixture.solver.expected_operators = fixture.operators;
     MomentumPredictor predictor(fixture.solver);
     expect_error([&] {
-      static_cast<void>(predictor.solve(fixture.equations(), SolveControl{}));
+      static_cast<void>(
+          predictor.solve(mpi, fixture.equations(), SolveControl{}));
     });
     fixture.check_unchanged();
   }
@@ -392,10 +533,12 @@ void check_predictor_preflight_transaction() {
 
 } // namespace
 
-int main() {
-  return hundun::test::run([] {
+int main(int argc, char **argv) {
+  MpiEnvironment environment(argc, argv);
+  MpiContext mpi = MpiContext::duplicate(MPI_COMM_WORLD);
+  return hundun::test::run([&] {
     check_time_stencils();
-    check_predictor_success_and_reports();
-    check_predictor_preflight_transaction();
+    check_predictor_success_and_reports(mpi);
+    check_predictor_preflight_transaction(mpi);
   });
 }

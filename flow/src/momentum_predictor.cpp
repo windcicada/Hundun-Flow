@@ -3,6 +3,7 @@
 #include "hundun/flow/momentum_predictor.hpp"
 
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
+#include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 
 #include <algorithm>
@@ -318,6 +319,7 @@ struct FaceStencil final {
   LocalFaceId local{};
   GlobalFaceId global{};
   std::optional<GlobalFaceId> periodic_pair;
+  std::optional<LocalFaceId> local_periodic_partner;
   std::optional<std::uint32_t> patch;
   StructuredIndex p{};
   StructuredIndex n{};
@@ -415,6 +417,7 @@ MomentumPredictor::MomentumPredictor(
     : solver_(&solver) {}
 
 MomentumPredictorReport MomentumPredictor::solve(
+    const runtime::MpiContext &mpi,
     const std::array<MomentumComponentEquation, 3> &equations,
     const linear::SolveControl &control) const {
   const execution::ExecutionContext *common_context = nullptr;
@@ -422,56 +425,58 @@ MomentumPredictorReport MomentumPredictor::solve(
   std::array<std::optional<execution::Buffer>, 3> staging;
   std::array<ViewRange, 9> ranges{};
   std::size_t range_count = 0U;
-
-  for (std::size_t component_index = 0; component_index < equations.size();
-       ++component_index) {
-    const auto &equation = equations[component_index];
-    if (equation.linear_operator == nullptr ||
-        equation.preconditioner == nullptr) {
-      throw Error("momentum equation has a null operator or preconditioner");
-    }
-    const auto &context = equation.linear_operator->context();
-    validate_host_context(context);
-    if (common_context == nullptr)
-      common_context = &context;
-    if (common_context != &context) {
-      throw Error("momentum equations do not share one execution context");
-    }
-    const auto domain = equation.linear_operator->domain_layout();
-    const auto range = equation.linear_operator->range_layout();
-    if (domain != range)
-      throw Error("momentum operator is not square");
-    if (!common_layout.has_value())
-      common_layout = domain;
-    if (*common_layout != domain) {
-      throw Error("momentum equation layouts are not identical");
-    }
-    const std::size_t count = domain.owned_count();
-    validate_vector_view(equation.rhs, context, count, false, "RHS");
-    validate_vector_view(equation.predictor, context, count, true, "predictor");
-    validate_vector_view(equation.actual_diagonal, context, count, true,
-                         "diagonal output");
-    ranges[range_count++] = view_range(equation.rhs);
-    ranges[range_count++] = view_range(equation.predictor);
-    ranges[range_count++] = view_range(equation.actual_diagonal);
-    if (!equation.linear_operator->has_diagonal()) {
-      throw Error("momentum operator lacks diagonal capability");
-    }
-  }
-  for (std::size_t left = 0; left < range_count; ++left) {
-    for (std::size_t right = left + 1U; right < range_count; ++right) {
-      if (overlaps(ranges[left], ranges[right]) &&
-          (ranges[left].writable || ranges[right].writable)) {
-        throw Error("momentum input and output views alias");
+  std::size_t count = 0U;
+  std::string local_failure;
+  try {
+    for (std::size_t component_index = 0; component_index < equations.size();
+         ++component_index) {
+      const auto &equation = equations[component_index];
+      if (equation.linear_operator == nullptr ||
+          equation.preconditioner == nullptr) {
+        throw Error("momentum equation has a null operator or preconditioner");
+      }
+      const auto &context = equation.linear_operator->context();
+      validate_host_context(context);
+      if (common_context == nullptr)
+        common_context = &context;
+      if (common_context != &context) {
+        throw Error("momentum equations do not share one execution context");
+      }
+      const auto domain = equation.linear_operator->domain_layout();
+      const auto range = equation.linear_operator->range_layout();
+      if (domain != range)
+        throw Error("momentum operator is not square");
+      if (!common_layout.has_value())
+        common_layout = domain;
+      if (*common_layout != domain) {
+        throw Error("momentum equation layouts are not identical");
+      }
+      count = domain.owned_count();
+      validate_vector_view(equation.rhs, context, count, false, "RHS");
+      validate_vector_view(equation.predictor, context, count, true,
+                           "predictor");
+      validate_vector_view(equation.actual_diagonal, context, count, true,
+                           "diagonal output");
+      ranges[range_count++] = view_range(equation.rhs);
+      ranges[range_count++] = view_range(equation.predictor);
+      ranges[range_count++] = view_range(equation.actual_diagonal);
+      if (!equation.linear_operator->has_diagonal()) {
+        throw Error("momentum operator lacks diagonal capability");
       }
     }
-  }
+    for (std::size_t left = 0; left < range_count; ++left) {
+      for (std::size_t right = left + 1U; right < range_count; ++right) {
+        if (overlaps(ranges[left], ranges[right]) &&
+            (ranges[left].writable || ranges[right].writable)) {
+          throw Error("momentum input and output views alias");
+        }
+      }
+    }
 
-  const std::size_t count = common_layout->owned_count();
-  if (count > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
-    throw Error("momentum diagonal staging size overflows");
-  }
-  try {
+    count = common_layout->owned_count();
+    if (count > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
+      throw Error("momentum diagonal staging size overflows");
+    }
     for (std::size_t component_index = 0; component_index < equations.size();
          ++component_index) {
       staging[component_index].emplace(
@@ -487,15 +492,25 @@ MomentumPredictorReport MomentumPredictor::solve(
         }
       }
     }
-  } catch (const Error &) {
-    throw;
+  } catch (const Error &error) {
+    local_failure = error.what();
   } catch (const std::bad_alloc &) {
-    throw Error("momentum diagonal staging allocation failed");
+    local_failure = "momentum diagonal staging allocation failed";
   } catch (const std::length_error &) {
-    throw Error("momentum diagonal staging size is unsupported");
+    local_failure = "momentum diagonal staging size is unsupported";
   } catch (const std::exception &error) {
-    throw Error(std::string("momentum diagonal extraction failed: ") +
-                error.what());
+    local_failure =
+        std::string("momentum diagonal extraction failed: ") + error.what();
+  } catch (...) {
+    local_failure = "momentum diagonal extraction failed";
+  }
+
+  const runtime::CollectiveStatus preflight = runtime::collective_status(
+      mpi, local_failure.empty(), local_failure);
+  if (!preflight.ok) {
+    throw Error("momentum predictor preflight failed on rank " +
+                std::to_string(preflight.failing_rank) + ": " +
+                preflight.message);
   }
 
   for (std::size_t component_index = 0; component_index < equations.size();
@@ -641,6 +656,27 @@ TimeConsistentFaceVelocity::create(const mesh::MeshTopology &topology,
       }
       impl->faces.push_back(face);
     }
+
+    std::vector<std::pair<GlobalFaceId, LocalFaceId>> local_faces_by_global;
+    local_faces_by_global.reserve(impl->faces.size());
+    for (const FaceStencil &face : impl->faces) {
+      local_faces_by_global.emplace_back(face.global, face.local);
+    }
+    std::sort(local_faces_by_global.begin(), local_faces_by_global.end());
+    for (FaceStencil &face : impl->faces) {
+      if (!face.periodic_pair.has_value())
+        continue;
+      const auto found = std::lower_bound(
+          local_faces_by_global.begin(), local_faces_by_global.end(),
+          std::pair<GlobalFaceId, LocalFaceId>{*face.periodic_pair, 0U},
+          [](const auto &left, const auto &right) {
+            return left.first < right.first;
+          });
+      if (found != local_faces_by_global.end() &&
+          found->first == *face.periodic_pair) {
+        face.local_periodic_partner = found->second;
+      }
+    }
     return TimeConsistentFaceVelocity(std::move(impl));
   } catch (const Error &) {
     throw;
@@ -764,6 +800,10 @@ void TimeConsistentFaceVelocity::assemble_constant_density(
   }
 
   for (const FaceStencil &face : impl_->faces) {
+    if (face.local_periodic_partner.has_value() &&
+        face.periodic_pair.has_value() && face.global > *face.periodic_pair) {
+      continue;
+    }
     if (!face.has_neighbour) {
       const Real3 interior{
           value_at(predictor_velocity, face.physical_owner, 0),
@@ -917,6 +957,20 @@ void TimeConsistentFaceVelocity::assemble_constant_density(
     impl_->velocity_scratch[face.local * 3U + 2U] = trial.z;
     impl_->flux_scratch[face.local] =
         face.reversed ? -canonical_flux : canonical_flux;
+  }
+
+  for (const FaceStencil &face : impl_->faces) {
+    if (!face.local_periodic_partner.has_value() ||
+        !face.periodic_pair.has_value() || face.global < *face.periodic_pair) {
+      continue;
+    }
+    const LocalFaceId representative = *face.local_periodic_partner;
+    for (std::size_t component_index = 0; component_index < 3U;
+         ++component_index) {
+      impl_->velocity_scratch[face.local * 3U + component_index] =
+          impl_->velocity_scratch[representative * 3U + component_index];
+    }
+    impl_->flux_scratch[face.local] = -impl_->flux_scratch[representative];
   }
 
   auto flux_writer = storage.acquire_face_write<double>(

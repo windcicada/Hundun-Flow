@@ -144,6 +144,13 @@ FlowCaseConfig mixed_case(double rho_ref) {
   return config;
 }
 
+FlowCaseConfig wall_case(double rho_ref) {
+  auto config = periodic_case(rho_ref);
+  for (auto &patch : config.boundaries)
+    patch.type = BoundaryType::no_slip_wall;
+  return config;
+}
+
 FieldDescriptor cell_descriptor(std::string name, std::uint32_t components) {
   return {std::move(name),
           "1",
@@ -414,6 +421,19 @@ double interpolate(double wp, double p, double wn, double n) {
   return p == n ? p : wp * p + wn * n;
 }
 
+LocalFaceId canonical_history_face(const MeshTopology &topology,
+                                   LocalFaceId face) {
+  const auto pair = topology.periodic_pair(face);
+  if (!pair.has_value() || topology.global_face_id(face) < *pair)
+    return face;
+  for (LocalFaceId candidate = 0; candidate < topology.local_face_count();
+       ++candidate) {
+    if (topology.global_face_id(candidate) == *pair)
+      return candidate;
+  }
+  return face;
+}
+
 void exchange_cells(const StructuredDecomposition &decomposition,
                     FieldStorage &storage, const Fields &ids) {
   auto halo = HaloExchange::create(
@@ -459,7 +479,9 @@ void initialize_periodic_fields(const StructuredDecomposition &decomposition,
           velocity_n(i, j, k, component) = 0.0;
           velocity_nm1(i, j, k, component) = 0.0;
           const double factor =
-              alpha0 * rho_ref / dt + 0.25 * static_cast<double>(component);
+              alpha0 * rho_ref / dt + 0.25 * static_cast<double>(component) +
+              0.03125 * static_cast<double>(1 + global.x + 2 * global.y +
+                                             3 * global.z);
           diagonal(i, j, k, component) = volume * factor;
         }
       }
@@ -578,6 +600,20 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
   BoundaryRegistry boundaries =
       BoundaryRegistry::create(periodic_case(rho_ref), topology);
   auto interpolation = TimeConsistentFaceVelocity::create(topology, geometry);
+  if (warped && extent.x == 4) {
+    constexpr Int3 other_extent{5, 4, 4};
+    auto other_decomposition = StructuredDecomposition::create(
+        mpi, other_extent, std::array<bool, 3>{true, true, true},
+        DecompositionOptions{process_grid_for(ranks, other_extent)});
+    MeshTopology other_topology(other_decomposition);
+    MeshGeometry other_geometry(
+        other_topology,
+        UniformBoxMapping(Real3{0.0, 0.0, 0.0}, Real3{1.0, 1.0, 1.0}));
+    expect_error([&] {
+      static_cast<void>(
+          TimeConsistentFaceVelocity::create(topology, other_geometry));
+    });
+  }
   FieldRegistry registry;
   const Fields ids = declare_fields(registry);
   FieldStorage storage(registry, FieldLayoutSet{decomposition.local_extent(),
@@ -587,6 +623,21 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
       make_momentum_time_stencil(MomentumTimeOrder::bdf2, 0.5, 1.0);
   initialize_periodic_fields(decomposition, topology, geometry, storage, ids,
                              access, rho_ref, stencil.dt_s, stencil.alpha0);
+  if (ranks == 1) {
+    auto face_n_write = storage.acquire_face_write<double>(
+        access, kInitPhase, kInitActor, ids.face_n);
+    auto face_nm1_write = storage.acquire_face_write<double>(
+        access, kInitPhase, kInitActor, ids.face_nm1);
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      const auto pair = topology.periodic_pair(face);
+      if (pair.has_value() && topology.global_face_id(face) > *pair) {
+        for (int component = 0; component < 3; ++component) {
+          face_n_write(face, component) = 90.0 + component;
+          face_nm1_write(face, component) = -80.0 - component;
+        }
+      }
+    }
+  }
   const FieldStorage &read_storage = storage;
   const auto predictor = read_storage.view<double>(ids.predictor);
   const auto pressure = read_storage.view<double>(ids.pressure);
@@ -613,6 +664,7 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
     HUNDUN_CHECK(topology.neighbour(face).has_value());
     const OracleFace oracle = oracle_face(topology, geometry, face);
+    const LocalFaceId history_face = canonical_history_face(topology, face);
     Real3 grad{};
     for (int component = 0; component < 3; ++component) {
       const double p = value(gradient, oracle.p, component);
@@ -641,11 +693,11 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
           interpolate(oracle.weight_p, value(predictor, oracle.p, component),
                       oracle.weight_n, value(predictor, oracle.n, component));
       const double discrepancy_n =
-          face_n(face, component) -
+          face_n(history_face, component) -
           interpolate(oracle.weight_p, value(velocity_n, oracle.p, component),
                       oracle.weight_n, value(velocity_n, oracle.n, component));
       const double discrepancy_nm1 =
-          face_nm1(face, component) -
+          face_nm1(history_face, component) -
           interpolate(oracle.weight_p, value(velocity_nm1, oracle.p, component),
                       oracle.weight_n,
                       value(velocity_nm1, oracle.n, component));
@@ -692,18 +744,20 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
     mass_write(face, 0) = -92.0;
   }
+  const auto require_sentinels = [&] {
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      HUNDUN_CHECK(mass_write(face, 0) == -92.0);
+      for (int component = 0; component < 3; ++component)
+        HUNDUN_CHECK(trial(face, component) == -91.0);
+    }
+  };
   expect_error([&] {
     interpolation.assemble_constant_density(
         boundaries, 0.0, stencil, predictor, pressure, gradient, diagonal,
         history, trial, registry, storage, access, kAssemblePhase,
         kAssembleActor, ids.mass_flux);
   });
-  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
-    HUNDUN_CHECK(mass_write(face, 0) == -92.0);
-    for (int component = 0; component < 3; ++component) {
-      HUNDUN_CHECK(trial(face, component) == -91.0);
-    }
-  }
+  require_sentinels();
   const MomentumFaceHistory missing{velocity_n, face_n, nullptr, nullptr};
   expect_error([&] {
     interpolation.assemble_constant_density(
@@ -711,6 +765,7 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
         missing, trial, registry, storage, access, kAssemblePhase,
         kAssembleActor, ids.mass_flux);
   });
+  require_sentinels();
   auto diagonal_write = storage.view<double>(ids.diagonal);
   diagonal_write(0, 0, 0, 0) = 0.0;
   expect_error([&] {
@@ -719,12 +774,7 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
         history, trial, registry, storage, access, kAssemblePhase,
         kAssembleActor, ids.mass_flux);
   });
-  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
-    HUNDUN_CHECK(mass_write(face, 0) == -92.0);
-    for (int component = 0; component < 3; ++component) {
-      HUNDUN_CHECK(trial(face, component) == -91.0);
-    }
-  }
+  require_sentinels();
   diagonal_write(0, 0, 0, 0) = 1.0;
   expect_error([&] {
     interpolation.assemble_constant_density(
@@ -732,6 +782,7 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
         history, trial, registry, storage, access, kAssemblePhase,
         kAssembleActor, ids.trial_face);
   });
+  require_sentinels();
   FieldAccessPlan denied(registry);
   denied.freeze();
   expect_error([&] {
@@ -740,6 +791,312 @@ void run_periodic_case(const MpiContext &mpi, int ranks, Int3 extent,
         history, trial, registry, storage, denied, kAssemblePhase,
         kAssembleActor, ids.mass_flux);
   });
+  require_sentinels();
+
+  FieldRegistry wrong_registry;
+  auto no_ghost_descriptor = cell_descriptor("no_ghost", 3U);
+  no_ghost_descriptor.ghost_width = 0;
+  const FieldId no_ghost =
+      wrong_registry.declare_field(std::move(no_ghost_descriptor));
+  const FieldId two_component_cell =
+      wrong_registry.declare_field(cell_descriptor("two_cell", 2U));
+  const FieldId two_component_face =
+      wrong_registry.declare_field(face_descriptor("two_face", 2U));
+  const FieldId three_component_face =
+      wrong_registry.declare_field(face_descriptor("three_face", 3U));
+  wrong_registry.freeze();
+  FieldStorage wrong_storage(
+      wrong_registry,
+      FieldLayoutSet{decomposition.local_extent(), topology.local_face_count()});
+  const FieldStorage &wrong_read = wrong_storage;
+  const auto no_ghost_view = wrong_read.view<double>(no_ghost);
+  const auto two_component_cell_view =
+      wrong_read.view<double>(two_component_cell);
+  FieldAccessPlan wrong_access(wrong_registry);
+  wrong_access.declare_access(kInitPhase, kInitActor, two_component_face,
+                              AccessMode::read);
+  wrong_access.declare_access(kInitPhase, kInitActor, three_component_face,
+                              AccessMode::read);
+  wrong_access.declare_access(kAssemblePhase, kAssembleActor,
+                              two_component_face, AccessMode::write);
+  wrong_access.freeze();
+  const auto two_component_face_read = wrong_storage.acquire_face_read<double>(
+      wrong_access, kInitPhase, kInitActor, two_component_face);
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, no_ghost_view, pressure, gradient,
+        diagonal, history, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure,
+        two_component_cell_view, diagonal, history, trial, registry, storage,
+        access, kAssemblePhase, kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+  const MomentumFaceHistory wrong_face_components{
+      velocity_n, two_component_face_read, &velocity_nm1, &face_nm1};
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        wrong_face_components, trial, registry, storage, access,
+        kAssemblePhase, kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+
+  auto wrong_trial = wrong_storage.acquire_face_write<double>(
+      wrong_access, kAssemblePhase, kAssembleActor, two_component_face);
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        history, wrong_trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+
+  FieldRegistry short_registry;
+  const FieldId short_face_id =
+      short_registry.declare_field(face_descriptor("short_face", 3U));
+  short_registry.freeze();
+  FieldStorage short_storage(
+      short_registry,
+      FieldLayoutSet{decomposition.local_extent(),
+                     topology.local_face_count() - 1U});
+  FieldAccessPlan short_access(short_registry);
+  short_access.declare_access(kInitPhase, kInitActor, short_face_id,
+                              AccessMode::read_write);
+  short_access.freeze();
+  const auto short_face = short_storage.acquire_face_read<double>(
+      short_access, kInitPhase, kInitActor, short_face_id);
+  const MomentumFaceHistory wrong_face_count{velocity_n, short_face,
+                                             &velocity_nm1, &face_nm1};
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        wrong_face_count, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+
+  FieldRegistry stale_registry;
+  const Fields stale_ids = declare_fields(stale_registry);
+  FieldStorage stale_storage(
+      stale_registry,
+      FieldLayoutSet{decomposition.local_extent(), topology.local_face_count()});
+  const FieldAccessPlan stale_access =
+      make_access_plan(stale_registry, stale_ids);
+  const FieldStorage &stale_read_storage = stale_storage;
+  const auto stale_predictor =
+      stale_read_storage.view<double>(stale_ids.predictor);
+  const auto stale_face_n = stale_storage.acquire_face_read<double>(
+      stale_access, kInitPhase, kInitActor, stale_ids.face_n);
+  stale_storage.begin_rebuild();
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, stale_predictor, pressure, gradient,
+        diagonal, history, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+  const MomentumFaceHistory stale_face_history{velocity_n, stale_face_n,
+                                               &velocity_nm1, &face_nm1};
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        stale_face_history, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  require_sentinels();
+
+  auto stale_trial = stale_storage.acquire_face_write<double>(
+      stale_access, kAssemblePhase, kAssembleActor, stale_ids.trial_face);
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    for (int component = 0; component < 3; ++component)
+      stale_trial(face, component) = -93.0;
+  }
+  stale_storage.begin_rebuild();
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        history, stale_trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  const auto fresh_trial = stale_storage.acquire_face_write<double>(
+      stale_access, kAssemblePhase, kAssembleActor, stale_ids.trial_face);
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    for (int component = 0; component < 3; ++component)
+      HUNDUN_CHECK(fresh_trial(face, component) == -93.0);
+  }
+  require_sentinels();
+
+  auto velocity_n_write = storage.view<double>(ids.velocity_n);
+  const double saved_cell_history = velocity_n_write(0, 0, 0, 0);
+  velocity_n_write(0, 0, 0, 0) =
+      std::numeric_limits<double>::quiet_NaN();
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        history, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  velocity_n_write(0, 0, 0, 0) = saved_cell_history;
+  require_sentinels();
+
+  LocalFaceId representative = topology.local_face_count();
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    const auto pair = topology.periodic_pair(face);
+    if (pair.has_value() && topology.global_face_id(face) < *pair) {
+      representative = face;
+      break;
+    }
+  }
+  if (representative == topology.local_face_count()) {
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      if (topology.periodic_pair(face).has_value()) {
+        representative = face;
+        break;
+      }
+    }
+  }
+  HUNDUN_CHECK(representative < topology.local_face_count());
+  auto face_n_write = storage.acquire_face_write<double>(
+      access, kInitPhase, kInitActor, ids.face_n);
+  const double saved_face_history = face_n_write(representative, 0);
+  face_n_write(representative, 0) =
+      std::numeric_limits<double>::infinity();
+  expect_error([&] {
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor, pressure, gradient, diagonal,
+        history, trial, registry, storage, access, kAssemblePhase,
+        kAssembleActor, ids.mass_flux);
+  });
+  face_n_write(representative, 0) = saved_face_history;
+  require_sentinels();
+}
+
+void run_affine_exactness_case(const MpiContext &mpi, int ranks) {
+  constexpr Int3 extent{4, 4, 4};
+  constexpr double rho_ref = 1.125;
+  auto decomposition = StructuredDecomposition::create(
+      mpi, extent, std::array<bool, 3>{false, false, false},
+      DecompositionOptions{process_grid_for(ranks, extent)});
+  MeshTopology topology(decomposition);
+  MeshGeometry geometry(
+      topology,
+      UniformBoxMapping(Real3{-0.25, 0.5, 1.0}, Real3{2.0, 1.0, 0.5}));
+  BoundaryRegistry boundaries =
+      BoundaryRegistry::create(wall_case(rho_ref), topology);
+  auto interpolation = TimeConsistentFaceVelocity::create(topology, geometry);
+  FieldRegistry registry;
+  const Fields ids = declare_fields(registry);
+  FieldStorage storage(registry, FieldLayoutSet{decomposition.local_extent(),
+                                                topology.local_face_count()});
+  const FieldAccessPlan access = make_access_plan(registry, ids);
+  auto velocity_n = storage.view<double>(ids.velocity_n);
+  auto velocity_nm1 = storage.view<double>(ids.velocity_nm1);
+  auto diagonal = storage.view<double>(ids.diagonal);
+  const auto box = topology.owned_global_box();
+  for (int k = 0; k < decomposition.local_extent().z; ++k) {
+    for (int j = 0; j < decomposition.local_extent().y; ++j) {
+      for (int i = 0; i < decomposition.local_extent().x; ++i) {
+        const Int3 global{box.begin.x + i, box.begin.y + j, box.begin.z + k};
+        const LocalCellId local =
+            (static_cast<std::size_t>(k) *
+                 static_cast<std::size_t>(decomposition.local_extent().y) +
+             static_cast<std::size_t>(j)) *
+                static_cast<std::size_t>(decomposition.local_extent().x) +
+            static_cast<std::size_t>(i);
+        const double volume = geometry.cell_volume_m3(local);
+        for (int component = 0; component < 3; ++component) {
+          velocity_n(i, j, k, component) = 0.0;
+          velocity_nm1(i, j, k, component) = 0.0;
+          diagonal(i, j, k, component) =
+              volume *
+              (3.0 + 0.2 * component + 0.1 * global.x + 0.05 * global.y);
+        }
+      }
+    }
+  }
+  auto face_n = storage.acquire_face_write<double>(access, kInitPhase,
+                                                   kInitActor, ids.face_n);
+  auto face_nm1 = storage.acquire_face_write<double>(access, kInitPhase,
+                                                     kInitActor, ids.face_nm1);
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    for (int component = 0; component < 3; ++component) {
+      face_n(face, component) = 0.0;
+      face_nm1(face, component) = 0.0;
+    }
+  }
+  const auto stencil = make_momentum_time_stencil(
+      MomentumTimeOrder::backward_euler, 0.25, 0.0);
+  auto trial = storage.acquire_face_write<double>(
+      access, kAssemblePhase, kAssembleActor, ids.trial_face);
+
+  const auto run = [&](double affine_scale) {
+    auto predictor = storage.view<double>(ids.predictor);
+    auto pressure = storage.view<double>(ids.pressure);
+    auto gradient = storage.view<double>(ids.pressure_gradient);
+    for (int k = 0; k < decomposition.local_extent().z; ++k) {
+      for (int j = 0; j < decomposition.local_extent().y; ++j) {
+        for (int i = 0; i < decomposition.local_extent().x; ++i) {
+          const LocalCellId local =
+              (static_cast<std::size_t>(k) *
+                   static_cast<std::size_t>(decomposition.local_extent().y) +
+               static_cast<std::size_t>(j)) *
+                  static_cast<std::size_t>(decomposition.local_extent().x) +
+              static_cast<std::size_t>(i);
+          const Real3 center = geometry.cell_center_m(local);
+          pressure(i, j, k, 0) =
+              7.0 + 2.0 * center.x - 3.0 * center.y + 0.5 * center.z;
+          gradient(i, j, k, 0) = 2.0;
+          gradient(i, j, k, 1) = -3.0;
+          gradient(i, j, k, 2) = 0.5;
+          predictor(i, j, k, 0) =
+              0.75 + affine_scale * (center.x + 2.0 * center.y);
+          predictor(i, j, k, 1) =
+              -0.25 + affine_scale * (0.5 * center.y - center.z);
+          predictor(i, j, k, 2) =
+              0.125 + affine_scale * (center.z - 0.25 * center.x);
+        }
+      }
+    }
+    exchange_cells(decomposition, storage, ids);
+    const FieldStorage &read = storage;
+    const auto predictor_read = read.view<double>(ids.predictor);
+    const auto pressure_read = read.view<double>(ids.pressure);
+    const auto gradient_read = read.view<double>(ids.pressure_gradient);
+    const auto diagonal_read = read.view<double>(ids.diagonal);
+    const auto velocity_n_read = read.view<double>(ids.velocity_n);
+    const auto face_n_read = storage.acquire_face_read<double>(
+        access, kInitPhase, kInitActor, ids.face_n);
+    const MomentumFaceHistory history{velocity_n_read, face_n_read, nullptr,
+                                      nullptr};
+    interpolation.assemble_constant_density(
+        boundaries, rho_ref, stencil, predictor_read, pressure_read,
+        gradient_read, diagonal_read, history, trial, registry, storage,
+        access, kAssemblePhase, kAssembleActor, ids.mass_flux);
+    const double tolerance =
+        128.0 * std::numeric_limits<double>::epsilon() * 16.0;
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      if (!topology.neighbour(face).has_value() ||
+          topology.periodic_pair(face).has_value()) {
+        continue;
+      }
+      const OracleFace oracle = oracle_face(topology, geometry, face);
+      for (int component = 0; component < 3; ++component) {
+        const double expected =
+            interpolate(oracle.weight_p,
+                        value(predictor_read, oracle.p, component),
+                        oracle.weight_n,
+                        value(predictor_read, oracle.n, component));
+        HUNDUN_CHECK_NEAR(trial(face, component), expected, tolerance);
+      }
+    }
+  };
+  run(0.0);
+  run(1.0);
 }
 
 void run_timestep_shrink_case(const MpiContext &mpi, int ranks) {
@@ -776,7 +1133,9 @@ void run_timestep_shrink_case(const MpiContext &mpi, int ranks) {
                 static_cast<std::size_t>(decomposition.local_extent().x) +
             static_cast<std::size_t>(i);
         const double volume = geometry.cell_volume_m3(local);
-        pressure(i, j, k, 0) = 0.0;
+        const Int3 global{box.begin.x + i, box.begin.y + j, box.begin.z + k};
+        pressure(i, j, k, 0) =
+            ((global.x + global.y + global.z) % 2 == 0) ? 1.0 : -1.0;
         for (int component = 0; component < 3; ++component) {
           predictor(i, j, k, component) = 0.0;
           gradient(i, j, k, component) = 0.0;
@@ -787,7 +1146,6 @@ void run_timestep_shrink_case(const MpiContext &mpi, int ranks) {
       }
     }
   }
-  static_cast<void>(box);
   auto face_n = storage.acquire_face_write<double>(access, kInitPhase,
                                                    kInitActor, ids.face_n);
   auto face_nm1 = storage.acquire_face_write<double>(access, kInitPhase,
@@ -849,21 +1207,66 @@ void run_timestep_shrink_case(const MpiContext &mpi, int ranks) {
         gradient_read, diagonal_read, selected, trial, registry, storage,
         access, kAssemblePhase, kAssembleActor, ids.mass_flux);
     double maximum = 0.0;
+    double temporal_maximum = 0.0;
+    bool current_layer_distinguishes = false;
+    bool older_layer_distinguishes =
+        order == MomentumTimeOrder::backward_euler;
+    const double tolerance =
+        128.0 * std::numeric_limits<double>::epsilon() * 32.0;
     for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
       maximum = std::max(maximum, std::abs(trial(face, 0)));
+      const OracleFace oracle = oracle_face(topology, geometry, face);
+      const LocalFaceId history_face = canonical_history_face(topology, face);
+      const double defect =
+          (value(pressure_read, oracle.n, 0) -
+           value(pressure_read, oracle.p, 0)) /
+          oracle.normal_distance;
+      for (int component = 0; component < 3; ++component) {
+        const double lambda =
+            oracle.weight_p *
+                (value(diagonal_read, oracle.p, component) / oracle.volume_p) +
+            oracle.weight_n *
+                (value(diagonal_read, oracle.n, component) / oracle.volume_n);
+        const double mobility = 1.0 / lambda;
+        const double normal = component == 0   ? oracle.unit_normal.x
+                              : component == 1 ? oracle.unit_normal.y
+                                               : oracle.unit_normal.z;
+        const double discrepancy_n = face_n_read(history_face, component);
+        const double discrepancy_nm1 =
+            order == MomentumTimeOrder::bdf2
+                ? face_nm1_read(history_face, component)
+                : 0.0;
+        const double pressure_only = -mobility * defect * normal;
+        const double current_term =
+            mobility * (rho_ref / stencil.dt_s) *
+            (-stencil.alpha1) * discrepancy_n;
+        const double older_term =
+            mobility * (rho_ref / stencil.dt_s) *
+            (-stencil.alpha2) * discrepancy_nm1;
+        const double expected = pressure_only + current_term + older_term;
+        HUNDUN_CHECK_NEAR(trial(face, component), expected, tolerance);
+        temporal_maximum =
+            std::max(temporal_maximum, std::abs(current_term + older_term));
+        current_layer_distinguishes =
+            current_layer_distinguishes || std::abs(current_term) > 0.1;
+        older_layer_distinguishes =
+            older_layer_distinguishes || std::abs(older_term) > 0.01;
+      }
     }
-    return maximum;
+    HUNDUN_CHECK(current_layer_distinguishes);
+    HUNDUN_CHECK(older_layer_distinguishes);
+    return std::array<double, 2>{maximum, temporal_maximum};
   };
-  const double be_full = run(1.0, 0.0, MomentumTimeOrder::backward_euler);
-  const double be_half = run(0.5, 0.0, MomentumTimeOrder::backward_euler);
-  HUNDUN_CHECK_NEAR(be_full, 1.0,
+  const auto be_full = run(1.0, 0.0, MomentumTimeOrder::backward_euler);
+  const auto be_half = run(0.5, 0.0, MomentumTimeOrder::backward_euler);
+  HUNDUN_CHECK_NEAR(be_full[1], 1.0,
                     32.0 * std::numeric_limits<double>::epsilon());
-  HUNDUN_CHECK_NEAR(be_half, be_full,
+  HUNDUN_CHECK_NEAR(be_half[1], be_full[1],
                     32.0 * std::numeric_limits<double>::epsilon());
-  const double bdf_full = run(1.0, 1.0, MomentumTimeOrder::bdf2);
-  const double bdf_half = run(0.5, 1.0, MomentumTimeOrder::bdf2);
-  HUNDUN_CHECK(bdf_full > 1.0);
-  HUNDUN_CHECK(bdf_half > 0.8 * bdf_full);
+  const auto bdf_full = run(1.0, 1.0, MomentumTimeOrder::bdf2);
+  const auto bdf_half = run(0.5, 1.0, MomentumTimeOrder::bdf2);
+  HUNDUN_CHECK(bdf_full[1] > 1.0);
+  HUNDUN_CHECK(bdf_half[1] > 0.8 * bdf_full[1]);
 }
 
 void run_physical_case(const MpiContext &mpi, int ranks) {
@@ -959,6 +1362,7 @@ int main(int argc, char **argv) {
     const int ranks = mpi.size();
     run_periodic_case(mpi, ranks, Int3{4, 4, 4}, true);
     run_periodic_case(mpi, ranks, Int3{1, 4, 4}, false);
+    run_affine_exactness_case(mpi, ranks);
     run_timestep_shrink_case(mpi, ranks);
     run_physical_case(mpi, ranks);
   });

@@ -28,11 +28,12 @@ using hundun::runtime::FieldId;
 using hundun::runtime::FieldRegistry;
 using hundun::runtime::FieldStorage;
 using hundun::runtime::FieldView;
+using hundun::runtime::MpiContext;
 using hundun::runtime::PhaseId;
 
 using MakeStencil = MomentumTimeStencil (*)(MomentumTimeOrder, double, double);
 using PredictorSolve = MomentumPredictorReport (MomentumPredictor::*)(
-    const std::array<MomentumComponentEquation, 3> &,
+    const MpiContext &, const std::array<MomentumComponentEquation, 3> &,
     const SolveControl &) const;
 using FaceCreate = TimeConsistentFaceVelocity (*)(const MeshTopology &,
                                                   const MeshGeometry &);

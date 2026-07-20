@@ -558,6 +558,26 @@ if(HUNDUN_BUILD_TESTS)
       PROCESSORS "${ranks}")
   endforeach()
 
+  add_executable(test_momentum_predictor_collective
+    tests/mpi/test_momentum_predictor_collective.cpp)
+  target_include_directories(test_momentum_predictor_collective PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_momentum_predictor_collective PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 2 4)
+    set(momentum_predictor_collective_test
+        "test_momentum_predictor_collective_${ranks}_rank")
+    add_test(NAME "${momentum_predictor_collective_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_momentum_predictor_collective>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${momentum_predictor_collective_test}" PROPERTIES
+      LABELS "mpi"
+      TIMEOUT 60
+      PROCESSORS "${ranks}")
+  endforeach()
+
   add_executable(test_basic_boundary
     tests/mpi/test_basic_boundary.cpp
     tests/support/allocation_attempt_guard.cpp)

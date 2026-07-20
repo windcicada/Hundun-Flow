@@ -15,6 +15,10 @@
 #include <cstdint>
 #include <memory>
 
+namespace hundun::runtime {
+class MpiContext;
+}
+
 namespace hundun::flow {
 
 enum class MomentumTimeOrder : std::uint8_t { backward_euler = 1, bdf2 = 2 };
@@ -50,7 +54,8 @@ public:
   explicit MomentumPredictor(const linear::LinearSolver &solver) noexcept;
 
   MomentumPredictorReport
-  solve(const std::array<MomentumComponentEquation, 3> &equations,
+  solve(const runtime::MpiContext &mpi,
+        const std::array<MomentumComponentEquation, 3> &equations,
         const linear::SolveControl &control) const;
 
 private:
