@@ -236,6 +236,18 @@ void require_global_diagonal_calls(const MpiContext &mpi,
   HUNDUN_CHECK(calls == expected);
 }
 
+void require_global_component_diagonal_calls(const MpiContext &mpi,
+                                             const Fixture &fixture,
+                                             std::array<double, 3> expected) {
+  std::array<double, 3> calls{
+      static_cast<double>(fixture.op0.diagonal_calls()),
+      static_cast<double>(fixture.op1.diagonal_calls()),
+      static_cast<double>(fixture.op2.diagonal_calls())};
+  mpi.allreduce_fp64_in_place(calls.data(), calls.size(),
+                              Fp64ReductionOperation::sum);
+  HUNDUN_CHECK(calls == expected);
+}
+
 void check_null_pointer_is_collective(const MpiContext &mpi) {
   Fixture fixture(mpi);
   auto equations = fixture.equations();
@@ -286,6 +298,8 @@ void check_nonpositive_diagonal_is_collective(const MpiContext &mpi) {
     fixture.op1 = TestOperator(fixture.context, fixture.layout, fixture.layout,
                                {4.0, 0.0});
   }
+  fixture.op0.synchronize_diagonal_with(mpi);
+  fixture.op1.synchronize_diagonal_with(mpi);
   MomentumPredictor predictor(fixture.solver);
   MomentumPredictorTestAccess::reset_collective_selection_calls();
   std::string message;
@@ -298,7 +312,9 @@ void check_nonpositive_diagonal_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: momentum "
                "operator diagonal must be finite and positive");
-  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 2U);
+  const double ranks = static_cast<double>(mpi.size());
+  require_global_component_diagonal_calls(mpi, fixture, {ranks, ranks, 0.0});
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 4U);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -411,17 +427,21 @@ void check_synchronized_diagonal_is_reached_collectively(
   fixture.op1.synchronize_diagonal_with(mpi);
   fixture.op2.synchronize_diagonal_with(mpi);
   MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
   static_cast<void>(predictor.solve(mpi, fixture.equations(), SolveControl{}));
   require_global_diagonal_calls(mpi, fixture,
                                 3.0 * static_cast<double>(mpi.size()));
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 5U);
   HUNDUN_CHECK(fixture.solver.calls() == 3U);
 }
 
 void check_event_failure_is_collective(const MpiContext &mpi) {
   Fixture fixture(mpi);
   if (mpi.rank() == 1)
-    fixture.op1.set_failed_event(true);
+    fixture.op0.set_failed_event(true);
+  fixture.op0.synchronize_diagonal_with(mpi);
   MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
   std::string message;
   try {
     static_cast<void>(
@@ -432,6 +452,34 @@ void check_event_failure_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: injected "
                "diagonal event failure");
+  require_global_component_diagonal_calls(
+      mpi, fixture, {static_cast<double>(mpi.size()), 0.0, 0.0});
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 3U);
+  require_no_solver_calls(mpi, fixture);
+}
+
+void check_x_value_failure_stops_y_and_z(const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  if (mpi.rank() == 1) {
+    fixture.op0 = TestOperator(fixture.context, fixture.layout, fixture.layout,
+                               {2.0, 0.0});
+  }
+  fixture.op0.synchronize_diagonal_with(mpi);
+  MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
+  std::string message;
+  try {
+    static_cast<void>(
+        predictor.solve(mpi, fixture.equations(), SolveControl{}));
+  } catch (const Error &error) {
+    message = error.what();
+  }
+  HUNDUN_CHECK(message ==
+               "momentum predictor preflight failed on rank 1: momentum "
+               "operator diagonal must be finite and positive");
+  require_global_component_diagonal_calls(
+      mpi, fixture, {static_cast<double>(mpi.size()), 0.0, 0.0});
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 3U);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -440,6 +488,7 @@ void check_staging_allocation_failure_is_collective(const MpiContext &mpi) {
   if (mpi.rank() == 1)
     ExecutionTestAccess::fail_next_allocation();
   MomentumPredictor predictor(fixture.solver);
+  MomentumPredictorTestAccess::reset_collective_selection_calls();
   std::string message;
   try {
     static_cast<void>(
@@ -450,6 +499,8 @@ void check_staging_allocation_failure_is_collective(const MpiContext &mpi) {
   HUNDUN_CHECK(message ==
                "momentum predictor preflight failed on rank 1: buffer "
                "allocation failed by the test seam");
+  require_global_component_diagonal_calls(mpi, fixture, {0.0, 0.0, 0.0});
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 2U);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -487,7 +538,7 @@ void check_typed_mpi_operation_error_is_rethrown(const MpiContext &mpi) {
         std::string(error.what()) == "injected typed MPI operation failure";
   }
   HUNDUN_CHECK(caught_typed);
-  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 1U);
+  HUNDUN_CHECK(MomentumPredictorTestAccess::collective_selection_calls() == 2U);
   require_no_solver_calls(mpi, fixture);
 }
 
@@ -528,6 +579,7 @@ int main(int argc, char **argv) {
     check_alias_failure_skips_all_diagonals(mpi);
     check_synchronized_diagonal_is_reached_collectively(mpi);
     check_event_failure_is_collective(mpi);
+    check_x_value_failure_stops_y_and_z(mpi);
     check_staging_allocation_failure_is_collective(mpi);
     check_long_diagnostic_is_deterministically_bounded(mpi);
     check_typed_mpi_operation_error_is_rethrown(mpi);

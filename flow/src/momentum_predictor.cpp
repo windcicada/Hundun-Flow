@@ -82,6 +82,19 @@ private:
   bool failed_{};
 };
 
+void select_preflight_phase(const runtime::MpiContext &mpi,
+                            const LocalFailureBuffer &failure) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
+#endif
+  const runtime::CollectiveStatus status =
+      runtime::collective_status(mpi, failure.ok(), failure.message());
+  if (!status.ok) {
+    throw Error("momentum predictor preflight failed on rank " +
+                std::to_string(status.failing_rank) + ": " + status.message);
+  }
+}
+
 bool same(Int3 left, Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
 }
@@ -455,19 +468,9 @@ MomentumPredictorReport MomentumPredictor::solve(
     structural_failure.assign("momentum structural preflight failed");
   }
 
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-  collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
-#endif
-  const runtime::CollectiveStatus structural_status =
-      runtime::collective_status(mpi, structural_failure.ok(),
-                                 structural_failure.message());
-  if (!structural_status.ok) {
-    throw Error("momentum predictor preflight failed on rank " +
-                std::to_string(structural_status.failing_rank) + ": " +
-                structural_status.message);
-  }
+  select_preflight_phase(mpi, structural_failure);
 
-  LocalFailureBuffer diagonal_failure;
+  LocalFailureBuffer staging_failure;
   try {
     count = common_layout->owned_count();
     if (count > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
@@ -478,6 +481,26 @@ MomentumPredictorReport MomentumPredictor::solve(
       staging[component_index].emplace(
           const_cast<execution::ExecutionContext &>(*common_context),
           count * sizeof(double));
+    }
+  } catch (const runtime::detail::MpiOperationError &) {
+    throw;
+  } catch (const std::bad_alloc &) {
+    staging_failure.assign("momentum diagonal staging allocation failed");
+  } catch (const std::length_error &) {
+    staging_failure.assign("momentum diagonal staging size is unsupported");
+  } catch (const Error &error) {
+    staging_failure.assign(error.what());
+  } catch (const std::exception &error) {
+    staging_failure.assign("momentum diagonal staging failed: ", error.what());
+  } catch (...) {
+    staging_failure.assign("momentum diagonal staging failed");
+  }
+  select_preflight_phase(mpi, staging_failure);
+
+  for (std::size_t component_index = 0; component_index < equations.size();
+       ++component_index) {
+    LocalFailureBuffer diagonal_failure;
+    try {
       auto candidate = staging[component_index]->view(0U, count);
       auto event =
           equations[component_index].linear_operator->diagonal(candidate);
@@ -487,31 +510,22 @@ MomentumPredictorReport MomentumPredictor::solve(
           throw Error("momentum operator diagonal must be finite and positive");
         }
       }
+    } catch (const runtime::detail::MpiOperationError &) {
+      throw;
+    } catch (const std::bad_alloc &) {
+      diagonal_failure.assign("momentum diagonal extraction allocation failed");
+    } catch (const std::length_error &) {
+      diagonal_failure.assign(
+          "momentum diagonal extraction size is unsupported");
+    } catch (const Error &error) {
+      diagonal_failure.assign(error.what());
+    } catch (const std::exception &error) {
+      diagonal_failure.assign("momentum diagonal extraction failed: ",
+                              error.what());
+    } catch (...) {
+      diagonal_failure.assign("momentum diagonal extraction failed");
     }
-  } catch (const runtime::detail::MpiOperationError &) {
-    throw;
-  } catch (const std::bad_alloc &) {
-    diagonal_failure.assign("momentum diagonal staging allocation failed");
-  } catch (const std::length_error &) {
-    diagonal_failure.assign("momentum diagonal staging size is unsupported");
-  } catch (const Error &error) {
-    diagonal_failure.assign(error.what());
-  } catch (const std::exception &error) {
-    diagonal_failure.assign("momentum diagonal extraction failed: ",
-                            error.what());
-  } catch (...) {
-    diagonal_failure.assign("momentum diagonal extraction failed");
-  }
-
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-  collective_selection_call_count.fetch_add(1U, std::memory_order_relaxed);
-#endif
-  const runtime::CollectiveStatus diagonal_status = runtime::collective_status(
-      mpi, diagonal_failure.ok(), diagonal_failure.message());
-  if (!diagonal_status.ok) {
-    throw Error("momentum predictor preflight failed on rank " +
-                std::to_string(diagonal_status.failing_rank) + ": " +
-                diagonal_status.message);
+    select_preflight_phase(mpi, diagonal_failure);
   }
 
   for (std::size_t component_index = 0; component_index < equations.size();
