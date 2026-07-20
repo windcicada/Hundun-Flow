@@ -139,6 +139,7 @@ target_link_libraries(hundun_linear
     MPI::MPI_CXX)
 
 add_library(hundun_finite_volume STATIC
+  finite_volume/src/cell_centered_fvm.cpp
   finite_volume/src/matrix_free_poisson.cpp
   finite_volume/src/poisson_boundary_adapter.cpp)
 target_include_directories(hundun_finite_volume PUBLIC
@@ -486,6 +487,20 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_basic_boundary_header_contract PROPERTIES
     TIMEOUT 30)
 
+  hundun_add_test(test_cell_centered_fvm_header_contract
+    tests/unit/test_cell_centered_fvm_header_contract.cpp)
+  target_link_libraries(test_cell_centered_fvm_header_contract PRIVATE
+    hundun_finite_volume)
+  set_tests_properties(test_cell_centered_fvm_header_contract PROPERTIES
+    TIMEOUT 30)
+  add_test(NAME test_cell_centered_fvm_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task16_source_policy.cmake")
+  set_tests_properties(test_cell_centered_fvm_source_policy PROPERTIES
+    LABELS "unit;source_policy"
+    TIMEOUT 30)
+
   add_executable(test_basic_boundary
     tests/mpi/test_basic_boundary.cpp
     tests/support/allocation_attempt_guard.cpp)
@@ -503,6 +518,25 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${basic_boundary_test}" PROPERTIES
       LABELS "mpi;numerical"
       TIMEOUT 90
+      PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_cell_centered_fvm
+    tests/mpi/test_cell_centered_fvm.cpp
+    tests/support/allocation_attempt_guard.cpp)
+  target_include_directories(test_cell_centered_fvm PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_cell_centered_fvm PRIVATE
+    hundun_finite_volume hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(cell_centered_fvm_test "test_cell_centered_fvm_${ranks}_rank")
+    add_test(NAME "${cell_centered_fvm_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_cell_centered_fvm>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${cell_centered_fvm_test}" PROPERTIES
+      LABELS "mpi;numerical"
+      TIMEOUT 120
       PROCESSORS "${ranks}")
   endforeach()
 
