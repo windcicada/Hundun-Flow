@@ -1080,6 +1080,133 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
           momentum_snapshot[cell][static_cast<std::size_t>(component)]);
     }
   }
+
+  const auto fill_move_sentinels = [&] {
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+      rho_face(face, 0) = 101.0;
+      u_face(face, 0) = 103.0;
+      u_face(face, 1) = 107.0;
+      u_face(face, 2) = 109.0;
+    }
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const int i = static_cast<int>(
+          cell % static_cast<std::size_t>(decomposition.local_extent().x));
+      const std::size_t yz =
+          cell / static_cast<std::size_t>(decomposition.local_extent().x);
+      const int j = static_cast<int>(
+          yz % static_cast<std::size_t>(decomposition.local_extent().y));
+      const int k = static_cast<int>(
+          yz / static_cast<std::size_t>(decomposition.local_extent().y));
+      scalar_gradient_write(i, j, k, 0) = 113.0;
+      scalar_gradient_write(i, j, k, 1) = 127.0;
+      scalar_gradient_write(i, j, k, 2) = 131.0;
+      mass_r(i, j, k, 0) = 137.0;
+      scalar_r(i, j, k, 0) = 139.0;
+      momentum_r(i, j, k, 0) = 149.0;
+      momentum_r(i, j, k, 1) = 151.0;
+      momentum_r(i, j, k, 2) = 157.0;
+    }
+  };
+  const auto require_move_sentinels = [&] {
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+      HUNDUN_CHECK(bits(rho_face(face, 0)) == bits(101.0));
+      HUNDUN_CHECK(bits(u_face(face, 0)) == bits(103.0));
+      HUNDUN_CHECK(bits(u_face(face, 1)) == bits(107.0));
+      HUNDUN_CHECK(bits(u_face(face, 2)) == bits(109.0));
+    }
+    for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const int i = static_cast<int>(
+          cell % static_cast<std::size_t>(decomposition.local_extent().x));
+      const std::size_t yz =
+          cell / static_cast<std::size_t>(decomposition.local_extent().x);
+      const int j = static_cast<int>(
+          yz % static_cast<std::size_t>(decomposition.local_extent().y));
+      const int k = static_cast<int>(
+          yz / static_cast<std::size_t>(decomposition.local_extent().y));
+      HUNDUN_CHECK(bits(scalar_gradient_write(i, j, k, 0)) == bits(113.0));
+      HUNDUN_CHECK(bits(scalar_gradient_write(i, j, k, 1)) == bits(127.0));
+      HUNDUN_CHECK(bits(scalar_gradient_write(i, j, k, 2)) == bits(131.0));
+      HUNDUN_CHECK(bits(mass_r(i, j, k, 0)) == bits(137.0));
+      HUNDUN_CHECK(bits(scalar_r(i, j, k, 0)) == bits(139.0));
+      HUNDUN_CHECK(bits(momentum_r(i, j, k, 0)) == bits(149.0));
+      HUNDUN_CHECK(bits(momentum_r(i, j, k, 1)) == bits(151.0));
+      HUNDUN_CHECK(bits(momentum_r(i, j, k, 2)) == bits(157.0));
+    }
+  };
+
+  const auto moved_field = flux.field_id();
+  const auto moved_face_count = flux.face_count();
+  FaceMassFlux moved_flux(std::move(flux));
+  HUNDUN_CHECK(flux.field_id() == moved_field);
+  HUNDUN_CHECK(flux.face_count() == moved_face_count);
+  HUNDUN_CHECK(moved_flux.field_id() == moved_field);
+  HUNDUN_CHECK(moved_flux.face_count() == moved_face_count);
+  fill_move_sentinels();
+  expect_error([&] {
+    operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                          boundaries, flux, rho_read, rho_face);
+  });
+  expect_error([&] {
+    operators.reconstruct_momentum_faces(boundaries, flux, velocity_read,
+                                         u_face);
+  });
+  expect_error([&] { operators.accumulate_mass_residual(flux, mass_r); });
+  expect_error([&] {
+    operators.accumulate_convective_residual(flux, rho_face_read, scalar_r);
+  });
+  require_move_sentinels();
+  operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                        boundaries, moved_flux, rho_read,
+                                        rho_face);
+  HUNDUN_CHECK(std::isfinite(rho_face(0, 0)));
+
+  std::vector<std::uint64_t> move_flux_snapshot(topology.local_face_count());
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    move_flux_snapshot[face] = bits(flux_read(face, 0));
+  }
+  fill_move_sentinels();
+  CellCenteredFvmOperators moved_operators(std::move(operators));
+  expect_error([&] {
+    operators.compute_gradient(GradientScheme::green_gauss,
+                               FiniteVolumeQuantity::density(), boundaries,
+                               rho_read, scalar_gradient_write);
+  });
+  expect_error([&] {
+    operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                          boundaries, moved_flux, rho_read,
+                                          rho_face);
+  });
+  expect_error([&] {
+    operators.reconstruct_momentum_faces(boundaries, moved_flux, velocity_read,
+                                         u_face);
+  });
+  expect_error([&] {
+    operators.assemble_provisional_mass_flux(
+        boundaries, rho_read, velocity_read, registry, storage, access,
+        write_phase, actor, mass_flux);
+  });
+  expect_error([&] { operators.accumulate_mass_residual(moved_flux, mass_r); });
+  expect_error([&] {
+    operators.accumulate_convective_residual(moved_flux, rho_face_read,
+                                             scalar_r);
+  });
+  expect_error([&] {
+    operators.accumulate_scalar_diffusive_residual(
+        FiniteVolumeQuantity::density(), boundaries, rho_read,
+        scalar_gradient_read, gamma_read, scalar_r);
+  });
+  expect_error([&] {
+    operators.accumulate_viscous_residual(
+        boundaries, velocity_read, velocity_gradient_read, 1.25, momentum_r);
+  });
+  require_move_sentinels();
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    HUNDUN_CHECK(bits(flux_read(face, 0)) == move_flux_snapshot[face]);
+  }
+  moved_operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
+                                              boundaries, moved_flux, rho_read,
+                                              rho_face);
+  HUNDUN_CHECK(std::isfinite(rho_face(0, 0)));
 }
 
 double smooth_transport_reconstruction_error(const MpiContext &mpi, int ranks,
@@ -2108,6 +2235,20 @@ void run_failure_contracts(const MpiContext &mpi, int ranks) {
     original[cell] = bits(1.0);
   }
   const FieldStorage &read_storage = storage;
+  using ConstructionFailure =
+      hundun::finite_volume::test::FaceMassFluxConstructionFailureForTest;
+  hundun::finite_volume::test::fail_next_face_mass_flux_construction(
+      ConstructionFailure::length_error);
+  expect_error([&] {
+    static_cast<void>(FaceMassFlux::acquire(registry, read_storage, access,
+                                            phase, actor, flux_id, topology));
+  });
+  hundun::finite_volume::test::fail_next_face_mass_flux_construction(
+      ConstructionFailure::bad_alloc);
+  expect_error([&] {
+    static_cast<void>(FaceMassFlux::acquire(registry, read_storage, access,
+                                            phase, actor, flux_id, topology));
+  });
   auto flux = FaceMassFlux::acquire(registry, read_storage, access, phase,
                                     actor, flux_id, topology);
   FieldStorage wrong_face_layout(

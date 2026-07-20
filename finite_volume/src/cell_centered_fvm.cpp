@@ -536,11 +536,27 @@ struct MetricOverride final {
 
 thread_local MetricOverride next_metric_override{};
 thread_local bool force_singular_least_squares{};
+thread_local std::optional<test::FaceMassFluxConstructionFailureForTest>
+    next_face_mass_flux_construction_failure;
 
 MetricOverride consume_metric_override() noexcept {
   const MetricOverride result = next_metric_override;
   next_metric_override = MetricOverride{};
   return result;
+}
+
+void inject_face_mass_flux_construction_failure() {
+  if (!next_face_mass_flux_construction_failure.has_value()) {
+    return;
+  }
+  const auto failure = *next_face_mass_flux_construction_failure;
+  next_face_mass_flux_construction_failure.reset();
+  switch (failure) {
+  case test::FaceMassFluxConstructionFailureForTest::bad_alloc:
+    throw std::bad_alloc{};
+  case test::FaceMassFluxConstructionFailureForTest::length_error:
+    throw std::length_error("injected face mass flux construction failure");
+  }
 }
 
 struct CanonicalFace final {
@@ -649,6 +665,14 @@ void force_next_least_squares_singular() {
   force_singular_least_squares = true;
 }
 
+void fail_next_face_mass_flux_construction(
+    FaceMassFluxConstructionFailureForTest failure) {
+  if (next_face_mass_flux_construction_failure.has_value()) {
+    throw Error("face mass flux construction failure is already armed");
+  }
+  next_face_mass_flux_construction_failure = failure;
+}
+
 } // namespace test
 
 FiniteVolumeQuantity FiniteVolumeQuantity::density() noexcept {
@@ -716,30 +740,36 @@ FaceMassFlux FaceMassFlux::acquire(const runtime::FieldRegistry &registry,
                                    runtime::ActorId actor,
                                    runtime::FieldId field,
                                    const mesh::MeshTopology &topology) {
-  require_face_mass_flux_field(registry, field);
-  if (storage.layout_set().face_count != topology.local_face_count()) {
-    throw Error("face mass flux storage and topology face counts differ");
+  try {
+    require_face_mass_flux_field(registry, field);
+    if (storage.layout_set().face_count != topology.local_face_count()) {
+      throw Error("face mass flux storage and topology face counts differ");
+    }
+    auto view =
+        storage.acquire_face_read<double>(access_plan, phase, actor, field);
+    if (view.face_count() != topology.local_face_count() ||
+        view.components() != 1U) {
+      throw Error("face mass flux view layout is invalid");
+    }
+    inject_face_mass_flux_construction_failure();
+    return FaceMassFlux(std::make_unique<State>(field, std::move(view),
+                                                make_signature(topology)));
+  } catch (const Error &) {
+    throw;
+  } catch (const std::bad_alloc &) {
+    throw Error("face mass flux allocation failed");
+  } catch (const std::length_error &) {
+    throw Error("face mass flux allocation size is unsupported");
   }
-  auto view =
-      storage.acquire_face_read<double>(access_plan, phase, actor, field);
-  if (view.face_count() != topology.local_face_count() ||
-      view.components() != 1U) {
-    throw Error("face mass flux view layout is invalid");
-  }
-  return FaceMassFlux(std::make_unique<State>(field, std::move(view),
-                                              make_signature(topology)));
 }
 
 FaceMassFlux::FaceMassFlux(std::unique_ptr<State> state) noexcept
-    : state_(std::move(state)) {}
+    : field_(state->field), face_count_(state->view.face_count()),
+      state_(std::move(state)) {}
 FaceMassFlux::~FaceMassFlux() noexcept = default;
 FaceMassFlux::FaceMassFlux(FaceMassFlux &&) noexcept = default;
-runtime::FieldId FaceMassFlux::field_id() const noexcept {
-  return state_->field;
-}
-std::size_t FaceMassFlux::face_count() const noexcept {
-  return state_->view.face_count();
-}
+runtime::FieldId FaceMassFlux::field_id() const noexcept { return field_; }
+std::size_t FaceMassFlux::face_count() const noexcept { return face_count_; }
 
 CellCenteredFvmOperators
 CellCenteredFvmOperators::create(const mesh::MeshTopology &topology,
@@ -872,12 +902,19 @@ CellCenteredFvmOperators::~CellCenteredFvmOperators() noexcept = default;
 CellCenteredFvmOperators::CellCenteredFvmOperators(
     CellCenteredFvmOperators &&) noexcept = default;
 
+CellCenteredFvmOperators::Impl &CellCenteredFvmOperators::require_impl() const {
+  if (!impl_) {
+    throw Error("finite-volume operator has been moved from");
+  }
+  return *impl_;
+}
+
 void CellCenteredFvmOperators::compute_gradient(
     GradientScheme scheme, FiniteVolumeQuantity quantity,
     const boundary::BoundaryRegistry &boundaries,
     const runtime::FieldView<const double> &cell_values,
     const runtime::FieldView<double> &cell_gradients) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
   validate_quantity(quantity, boundaries, true);
   const int components =
       quantity.kind == FiniteVolumeQuantityKind::velocity ? 3 : 1;
@@ -1106,8 +1143,11 @@ void CellCenteredFvmOperators::reconstruct_transport_faces(
     const FaceMassFlux &mass_flux,
     const runtime::FieldView<const double> &cell_values,
     const runtime::FaceFieldView<double> &face_values) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
   validate_quantity(quantity, boundaries, false);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
   if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
       mass_flux.state_->view.face_count() != impl_->faces.size()) {
     throw Error("face mass flux topology identity does not match the operator");
@@ -1153,7 +1193,10 @@ void CellCenteredFvmOperators::reconstruct_momentum_faces(
     const boundary::BoundaryRegistry &boundaries, const FaceMassFlux &mass_flux,
     const runtime::FieldView<const double> &velocity,
     const runtime::FaceFieldView<double> &face_velocity) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
   if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
       !same(velocity.interior_extent(), impl_->local_extent) ||
       velocity.components() != 3U || velocity.ghost_width() < 2 ||
@@ -1232,7 +1275,7 @@ void CellCenteredFvmOperators::assemble_provisional_mass_flux(
     const runtime::FieldRegistry &registry, runtime::FieldStorage &storage,
     const runtime::FieldAccessPlan &access_plan, runtime::PhaseId phase,
     runtime::ActorId actor, runtime::FieldId mass_flux_field) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
   require_face_mass_flux_field(registry, mass_flux_field);
   if (!same(density.interior_extent(), impl_->local_extent) ||
       density.components() != 1U || density.ghost_width() < 2 ||
@@ -1330,7 +1373,10 @@ void CellCenteredFvmOperators::assemble_provisional_mass_flux(
 void CellCenteredFvmOperators::accumulate_mass_residual(
     const FaceMassFlux &mass_flux,
     const runtime::FieldView<double> &raw_residual) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
   if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
       !same(raw_residual.interior_extent(), impl_->local_extent) ||
       raw_residual.components() != 1U || raw_residual.ghost_width() < 0) {
@@ -1390,7 +1436,10 @@ void CellCenteredFvmOperators::accumulate_convective_residual(
     const FaceMassFlux &mass_flux,
     const runtime::FaceFieldView<const double> &transported_face_values,
     const runtime::FieldView<double> &raw_residual) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
   const std::uint32_t components = transported_face_values.components();
   if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
       transported_face_values.face_count() != impl_->faces.size() ||
@@ -1469,7 +1518,7 @@ void CellCenteredFvmOperators::accumulate_scalar_diffusive_residual(
     const runtime::FieldView<const double> &cell_gradients,
     const runtime::FaceFieldView<const double> &gamma_by_face,
     const runtime::FieldView<double> &raw_residual) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
   validate_quantity(quantity, boundaries, false);
   const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
   if (!same(cell_values.interior_extent(), impl_->local_extent) ||
@@ -1614,7 +1663,7 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
     const runtime::FieldView<const double> &velocity_gradients,
     double dynamic_viscosity_pa_s,
     const runtime::FieldView<double> &raw_momentum_residual) const {
-  OperationGuard operation(impl_->active);
+  OperationGuard operation(require_impl().active);
   const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
   if (!(dynamic_viscosity_pa_s >= 0.0) ||
       !std::isfinite(dynamic_viscosity_pa_s) ||

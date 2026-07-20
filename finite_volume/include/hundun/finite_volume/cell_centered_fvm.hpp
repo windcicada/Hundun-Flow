@@ -66,6 +66,8 @@ public:
 private:
   struct State;
   explicit FaceMassFlux(std::unique_ptr<State>) noexcept;
+  runtime::FieldId field_{};
+  std::size_t face_count_{};
   std::unique_ptr<State> state_;
   friend class CellCenteredFvmOperators;
 };
@@ -135,6 +137,7 @@ public:
 private:
   struct Impl;
   explicit CellCenteredFvmOperators(std::unique_ptr<Impl>) noexcept;
+  Impl &require_impl() const;
   std::unique_ptr<Impl> impl_;
 };
 
