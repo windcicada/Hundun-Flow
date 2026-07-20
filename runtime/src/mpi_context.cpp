@@ -15,24 +15,29 @@
 namespace hundun::runtime {
 namespace {
 
-thread_local int next_fp64_allreduce_result_for_test = MPI_SUCCESS;
+thread_local int next_synchronous_fp64_allreduce_pre_call_error_for_test =
+    MPI_SUCCESS;
 
-int consume_next_fp64_allreduce_result_for_test() noexcept {
-  return std::exchange(next_fp64_allreduce_result_for_test, MPI_SUCCESS);
+int consume_synchronous_next_fp64_allreduce_pre_call_error_for_test() noexcept {
+  return std::exchange(
+      next_synchronous_fp64_allreduce_pre_call_error_for_test, MPI_SUCCESS);
 }
 
 }  // namespace
 
 namespace detail {
 
-void inject_next_fp64_allreduce_result_for_test(int mpi_result) {
-  if (mpi_result == MPI_SUCCESS) {
-    throw Error("FP64 allreduce test result must be an MPI error");
+void inject_synchronous_next_fp64_allreduce_pre_call_error_for_test(
+    int mpi_error) {
+  if (mpi_error == MPI_SUCCESS) {
+    throw Error("synchronous FP64 allreduce pre-call test result must be an "
+                "MPI error");
   }
-  if (next_fp64_allreduce_result_for_test != MPI_SUCCESS) {
-    throw Error("FP64 allreduce test result is already pending");
+  if (next_synchronous_fp64_allreduce_pre_call_error_for_test != MPI_SUCCESS) {
+    throw Error(
+        "synchronous FP64 allreduce pre-call test error is already pending");
   }
-  next_fp64_allreduce_result_for_test = mpi_result;
+  next_synchronous_fp64_allreduce_pre_call_error_for_test = mpi_error;
 }
 
 }  // namespace detail
@@ -160,7 +165,7 @@ void MpiContext::allreduce_fp64_in_place(
 
   fp64_reduction_counters_ = updated;
   const int injected_result =
-      consume_next_fp64_allreduce_result_for_test();
+      consume_synchronous_next_fp64_allreduce_pre_call_error_for_test();
   const int mpi_result =
       injected_result == MPI_SUCCESS
           ? MPI_Allreduce(MPI_IN_PLACE, values, static_cast<int>(count),

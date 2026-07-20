@@ -3,6 +3,7 @@
 
 namespace hundun::runtime::detail {
 
-void inject_next_fp64_allreduce_result_for_test(int mpi_result);
+void inject_synchronous_next_fp64_allreduce_pre_call_error_for_test(
+    int mpi_error);
 
 }  // namespace hundun::runtime::detail

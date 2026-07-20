@@ -201,8 +201,9 @@ void test_failed_allreduce_attempt_is_counted(const MpiContext& world) {
   std::array<double, 2> values{static_cast<double>(world.rank() + 1), 2.0};
   const auto before = context.fp64_reduction_counters();
 
-  hundun::runtime::detail::inject_next_fp64_allreduce_result_for_test(
-      MPI_ERR_OTHER);
+  hundun::runtime::detail::
+      inject_synchronous_next_fp64_allreduce_pre_call_error_for_test(
+          MPI_ERR_OTHER);
   expect_error_containing(
       [&] {
         context.allreduce_fp64_in_place(

@@ -923,8 +923,9 @@ void test_preflight_stride_overflow_and_mpi_error(const MpiContext& world) {
         hundun::linear::detail::checked_bicgstab_workspace_bytes(too_large));
   });
 
-  hundun::runtime::detail::inject_next_fp64_allreduce_result_for_test(
-      MPI_ERR_OTHER);
+  hundun::runtime::detail::
+      inject_synchronous_next_fp64_allreduce_pre_call_error_for_test(
+          MPI_ERR_OTHER);
   expect_runtime_error([&] {
     static_cast<void>(solver.solve(linear_operator, preconditioner, b, x, {}));
   });

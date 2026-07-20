@@ -2,6 +2,7 @@
 
 #include "hundun/boundary/basic_boundary.hpp"
 
+#include "basic_boundary_test_seam.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/kernel_field_view.hpp"
@@ -21,6 +22,47 @@
 #include <vector>
 
 namespace hundun::boundary {
+namespace detail {
+namespace {
+
+thread_local OutletTopologyObservationForTest
+    next_outlet_topology_observation_for_test =
+        OutletTopologyObservationForTest::unchanged;
+
+} // namespace
+
+std::string_view fixed_preflight_message(const runtime::Error &) noexcept {
+  return "final pressure-outlet preflight rejected local data";
+}
+
+std::string_view fixed_preflight_message(const std::exception &) noexcept {
+  return "final pressure-outlet preflight failed locally";
+}
+
+std::string_view fixed_unknown_preflight_message() noexcept {
+  return "final pressure-outlet preflight failed unexpectedly";
+}
+
+void set_next_outlet_topology_observation_for_test(
+    OutletTopologyObservationForTest observation) {
+  if (observation == OutletTopologyObservationForTest::unchanged) {
+    throw runtime::Error("outlet topology test observation must change data");
+  }
+  if (next_outlet_topology_observation_for_test !=
+      OutletTopologyObservationForTest::unchanged) {
+    throw runtime::Error("outlet topology test observation is already pending");
+  }
+  next_outlet_topology_observation_for_test = observation;
+}
+
+OutletTopologyObservationForTest
+consume_next_outlet_topology_observation_for_test() noexcept {
+  return std::exchange(next_outlet_topology_observation_for_test,
+                       OutletTopologyObservationForTest::unchanged);
+}
+
+} // namespace detail
+
 namespace {
 
 constexpr std::array<std::string_view, 6> kPatchNames{
@@ -389,7 +431,10 @@ TopologySignature topology_signature(const mesh::MeshTopology &topology) {
 }
 
 bool compatible(const TopologySignature &expected,
-                const mesh::MeshTopology &topology) {
+                const mesh::MeshTopology &topology,
+                const std::vector<OutletFace> &expected_owned_outlet_faces,
+                std::uint32_t outlet_id,
+                detail::OutletTopologyObservationForTest observation) {
   if (!same(expected.global_extent, topology.global_extent()) ||
       !same(expected.owned_box, topology.owned_global_box()) ||
       expected.global_face_count != topology.global_face_count() ||
@@ -403,6 +448,84 @@ bool compatible(const TopologySignature &expected,
         patch.local_faces().size() != expected.patch_face_counts[id]) {
       return false;
     }
+  }
+
+  const auto &outlet_patch = topology.patch(outlet_id);
+  std::size_t current_owned_outlet_face_count = 0U;
+  for (const auto local_face : outlet_patch.local_faces()) {
+    if (local_face >= topology.local_face_count()) {
+      return false;
+    }
+    if (topology.face_ownership(local_face) == mesh::EntityOwnership::owned) {
+      ++current_owned_outlet_face_count;
+    }
+  }
+  if (observation ==
+      detail::OutletTopologyObservationForTest::owned_cardinality_differs) {
+    if (current_owned_outlet_face_count ==
+        std::numeric_limits<std::size_t>::max()) {
+      return false;
+    }
+    ++current_owned_outlet_face_count;
+  }
+  if (current_owned_outlet_face_count != expected_owned_outlet_faces.size()) {
+    return false;
+  }
+
+  bool first = true;
+  for (const auto &expected_face : expected_owned_outlet_faces) {
+    const auto local_id = expected_face.local_id;
+    bool local_id_in_range = local_id < topology.local_face_count();
+    if (first &&
+        observation ==
+            detail::OutletTopologyObservationForTest::local_id_out_of_range) {
+      local_id_in_range = false;
+    }
+    if (!local_id_in_range) {
+      return false;
+    }
+
+    auto ownership = topology.face_ownership(local_id);
+    if (first &&
+        observation ==
+            detail::OutletTopologyObservationForTest::ownership_is_ghost) {
+      ownership = mesh::EntityOwnership::ghost;
+    }
+    if (ownership != mesh::EntityOwnership::owned) {
+      return false;
+    }
+
+    auto patch_id = topology.patch_id(local_id);
+    if (first &&
+        observation ==
+            detail::OutletTopologyObservationForTest::patch_id_is_not_outlet) {
+      patch_id = outlet_id == 0U ? 1U : 0U;
+    }
+    if (patch_id != std::optional<std::uint32_t>{outlet_id}) {
+      return false;
+    }
+
+    bool patch_contains = outlet_patch.contains(local_id);
+    if (first && observation == detail::OutletTopologyObservationForTest::
+                                    outlet_patch_does_not_contain) {
+      patch_contains = false;
+    }
+    if (!patch_contains) {
+      return false;
+    }
+
+    auto global_id = topology.global_face_id(local_id);
+    if (first &&
+        observation ==
+            detail::OutletTopologyObservationForTest::global_id_differs) {
+      global_id = global_id == std::numeric_limits<mesh::GlobalFaceId>::max()
+                      ? global_id - 1U
+                      : global_id + 1U;
+    }
+    if (global_id != expected_face.global_id) {
+      return false;
+    }
+    first = false;
   }
   return true;
 }
@@ -865,16 +988,19 @@ FinalFluxAdmissibility BoundaryRegistry::assess_final_pressure_outlet_flux(
   }
 
   bool local_ok = true;
-  std::string local_message;
+  std::string_view local_message;
   double local_minimum = 0.0;
   mesh::GlobalFaceId local_minimum_face =
       std::numeric_limits<mesh::GlobalFaceId>::max();
   bool local_negative = false;
+  const auto topology_observation =
+      detail::consume_next_outlet_topology_observation_for_test();
   try {
     if (!finite(time_s) || time_s < 0.0) {
       throw runtime::Error("final pressure-outlet assessment time is invalid");
     }
-    if (!compatible(impl_->topology, topology)) {
+    if (!compatible(impl_->topology, topology, impl_->owned_outlet_faces,
+                    *impl_->outlet_id, topology_observation)) {
       throw runtime::Error(
           "final pressure-outlet assessment topology is incompatible");
     }
@@ -902,13 +1028,13 @@ FinalFluxAdmissibility BoundaryRegistry::assess_final_pressure_outlet_flux(
     });
   } catch (const runtime::Error &error) {
     local_ok = false;
-    local_message = error.what();
+    local_message = detail::fixed_preflight_message(error);
   } catch (const std::exception &error) {
     local_ok = false;
-    local_message = error.what();
+    local_message = detail::fixed_preflight_message(error);
   } catch (...) {
     local_ok = false;
-    local_message = "final pressure-outlet assessment failed locally";
+    local_message = detail::fixed_unknown_preflight_message();
   }
   const auto status = runtime::collective_status(mpi, local_ok, local_message);
   if (!status.ok) {

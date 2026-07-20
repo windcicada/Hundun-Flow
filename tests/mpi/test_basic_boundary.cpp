@@ -3,6 +3,7 @@
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/finite_volume/poisson_boundary_adapter.hpp"
 
+#include "boundary/src/basic_boundary_test_seam.hpp"
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/mesh/mesh_topology.hpp"
 #include "hundun/runtime/error.hpp"
@@ -13,6 +14,7 @@
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "runtime/src/mpi_context_test_seam.hpp"
+#include "runtime/src/mpi_error.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
@@ -26,7 +28,9 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -203,6 +207,38 @@ void expect_collective_error(const MpiContext &mpi, Function &&function) {
   HUNDUN_CHECK(every == 1);
 }
 
+template <class Function>
+void expect_collective_error_message(const MpiContext &mpi, Function &&function,
+                                     std::string_view expected_message) {
+  bool matched = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const Error &error) {
+    matched = error.what() == expected_message;
+  }
+  int local = matched ? 1 : 0;
+  int every = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &every, 1, MPI_INT, MPI_MIN, mpi.comm()) ==
+               MPI_SUCCESS);
+  HUNDUN_CHECK(every == 1);
+}
+
+template <class Function>
+void expect_synchronous_mpi_operation_error(const MpiContext &mpi,
+                                            Function &&function) {
+  bool typed_error = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const hundun::runtime::detail::MpiOperationError &) {
+    typed_error = true;
+  }
+  int local = typed_error ? 1 : 0;
+  int every = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &every, 1, MPI_INT, MPI_MIN, mpi.comm()) ==
+               MPI_SUCCESS);
+  HUNDUN_CHECK(every == 1);
+}
+
 std::uint64_t bits(double value) {
   std::uint64_t result{};
   static_assert(sizeof(result) == sizeof(value));
@@ -257,6 +293,34 @@ FieldDescriptor face_descriptor(std::uint32_t components) {
                          true,
                          RestartPolicy::transient,
                          OutputPolicy::never};
+}
+
+void test_preflight_message_conversion_allocation_free() {
+  const Error project_error(std::string(1024U, 'p'));
+  const std::runtime_error standard_error(std::string(1024U, 's'));
+  static_assert(noexcept(hundun::boundary::detail::fixed_preflight_message(
+      std::declval<const Error &>())));
+  static_assert(noexcept(hundun::boundary::detail::fixed_preflight_message(
+      std::declval<const std::exception &>())));
+  static_assert(
+      noexcept(hundun::boundary::detail::fixed_unknown_preflight_message()));
+
+  std::string_view project_message;
+  std::string_view standard_message;
+  std::string_view unknown_message;
+  allocation_probe::AllocationAttemptGuard guard;
+  project_message =
+      hundun::boundary::detail::fixed_preflight_message(project_error);
+  standard_message =
+      hundun::boundary::detail::fixed_preflight_message(standard_error);
+  unknown_message = hundun::boundary::detail::fixed_unknown_preflight_message();
+  HUNDUN_CHECK(guard.attempts() == 0U);
+  HUNDUN_CHECK(project_message ==
+               "final pressure-outlet preflight rejected local data");
+  HUNDUN_CHECK(standard_message ==
+               "final pressure-outlet preflight failed locally");
+  HUNDUN_CHECK(unknown_message ==
+               "final pressure-outlet preflight failed unexpectedly");
 }
 
 void check_rules(const BoundaryRegistry &registry, std::uint32_t id,
@@ -705,10 +769,48 @@ void test_final_flux_assessment(const MpiContext &mpi, int rank, int size) {
   for (std::size_t face = 0; face < before_bits.size(); ++face) {
     before_bits[face] = bits(reader(face, 0));
   }
+
+  using TopologyObservation =
+      hundun::boundary::detail::OutletTopologyObservationForTest;
+  constexpr std::array<TopologyObservation, 6> topology_identity_changes{
+      TopologyObservation::local_id_out_of_range,
+      TopologyObservation::ownership_is_ghost,
+      TopologyObservation::patch_id_is_not_outlet,
+      TopologyObservation::outlet_patch_does_not_contain,
+      TopologyObservation::global_id_differs,
+      TopologyObservation::owned_cardinality_differs};
+  for (const auto observation : topology_identity_changes) {
+    if (rank == 0) {
+      hundun::boundary::detail::set_next_outlet_topology_observation_for_test(
+          observation);
+    }
+    const auto identity_counters_before = mpi.fp64_reduction_counters();
+    expect_collective_error_message(
+        mpi,
+        [&] {
+          static_cast<void>(registry.assess_final_pressure_outlet_flux(
+              topology, mpi, reader, 6U, 1.0));
+        },
+        "final pressure-outlet preflight rejected local data");
+    const auto identity_counters_after = mpi.fp64_reduction_counters();
+    check_counter_delta(identity_counters_before, identity_counters_after, 0U,
+                        0U, 0U);
+    for (std::size_t face = 0; face < before_bits.size(); ++face) {
+      HUNDUN_CHECK(bits(reader(face, 0)) == before_bits[face]);
+    }
+  }
+
   auto counters_before = mpi.fp64_reduction_counters();
-  auto result = registry.assess_final_pressure_outlet_flux(topology, mpi,
-                                                           reader, 7U, 1.25);
+  std::size_t admissible_assessment_allocations = 0U;
+  auto result = [&] {
+    allocation_probe::AllocationAttemptGuard guard;
+    auto assessment = registry.assess_final_pressure_outlet_flux(
+        topology, mpi, reader, 7U, 1.25);
+    admissible_assessment_allocations = guard.attempts();
+    return assessment;
+  }();
   auto counters_after = mpi.fp64_reduction_counters();
+  HUNDUN_CHECK(admissible_assessment_allocations == 0U);
   HUNDUN_CHECK(result.decision == FinalFluxDecision::admissible);
   HUNDUN_CHECK(!result.evidence.has_value());
   check_counter_delta(counters_before, counters_after, 1U, 1U, 8U);
@@ -716,12 +818,23 @@ void test_final_flux_assessment(const MpiContext &mpi, int rank, int size) {
     HUNDUN_CHECK(bits(reader(face, 0)) == before_bits[face]);
   }
 
-  hundun::runtime::detail::inject_next_fp64_allreduce_result_for_test(
-      MPI_ERR_OTHER);
-  expect_collective_error(mpi, [&] {
+  writer(owned_outlets.front(), 0) = -2.0;
+  for (std::size_t face = 0; face < before_bits.size(); ++face) {
+    before_bits[face] = bits(reader(face, 0));
+  }
+  counters_before = mpi.fp64_reduction_counters();
+  // Every rank arms this pre-call seam, which skips the MPI operation.  This
+  // verifies typed operation-error propagation and sequence cutoff, not
+  // recovery from a real partial-rank collective failure.
+  hundun::runtime::detail::
+      inject_synchronous_next_fp64_allreduce_pre_call_error_for_test(
+          MPI_ERR_OTHER);
+  expect_synchronous_mpi_operation_error(mpi, [&] {
     static_cast<void>(registry.assess_final_pressure_outlet_flux(
         topology, mpi, reader, 7U, 1.25));
   });
+  counters_after = mpi.fp64_reduction_counters();
+  check_counter_delta(counters_before, counters_after, 1U, 1U, 8U);
   for (std::size_t face = 0; face < before_bits.size(); ++face) {
     HUNDUN_CHECK(bits(reader(face, 0)) == before_bits[face]);
   }
@@ -845,10 +958,13 @@ void test_final_flux_assessment(const MpiContext &mpi, int rank, int size) {
     static_cast<void>(registry.assess_final_pressure_outlet_flux(
         topology, mpi, nonfinite_reader, 13U, 2.75));
   });
-  expect_collective_error(mpi, [&] {
-    static_cast<void>(registry.assess_final_pressure_outlet_flux(
-        topology, mpi, nonfinite_reader, 14U, rank == 0 ? -1.0 : 3.0));
-  });
+  expect_collective_error_message(
+      mpi,
+      [&] {
+        static_cast<void>(registry.assess_final_pressure_outlet_flux(
+            topology, mpi, nonfinite_reader, 14U, rank == 0 ? -1.0 : 3.0));
+      },
+      "final pressure-outlet preflight rejected local data");
 }
 
 } // namespace
@@ -860,6 +976,7 @@ int main(int argc, char **argv) {
     const int rank = mpi.rank();
     const int size = mpi.size();
     HUNDUN_CHECK(size == 1 || size == 2 || size == 4);
+    test_preflight_message_conversion_allocation_free();
     test_closed_registry_and_zero_touch(mpi, size);
     test_materialization_and_evaluation(mpi, size);
     test_registry_rejections(mpi, size);
