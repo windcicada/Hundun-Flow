@@ -17,6 +17,7 @@
 #include "hundun/runtime/error.hpp"
 #include "linear/src/bicgstab_detail.hpp"
 #include "linear/src/solve_collective_detail.hpp"
+#include "linear/src/vector_ops_detail.hpp"
 #include "mpi_error.hpp"
 
 namespace hundun::linear {
@@ -212,8 +213,16 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
       }
     } catch (const runtime::detail::MpiOperationError&) {
       throw;
+    } catch (const detail::SynchronizedReductionError& error) {
+      if (!phase_checkpoint(error.has_local_source()
+                                ? detail::LocalSolveFailure::non_finite_value
+                                : detail::LocalSolveFailure::none)) {
+        return false;
+      }
+      selected = {SolveTerminationReason::non_finite_value, -1, true};
+      return false;
     } catch (...) {
-      failure = detail::LocalSolveFailure::non_finite_value;
+      failure = detail::LocalSolveFailure::collective_failure;
     }
     return phase_checkpoint(failure);
   };
@@ -230,8 +239,16 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
       }
     } catch (const runtime::detail::MpiOperationError&) {
       throw;
+    } catch (const detail::SynchronizedReductionError& error) {
+      if (!phase_checkpoint(error.has_local_source()
+                                ? detail::LocalSolveFailure::non_finite_value
+                                : detail::LocalSolveFailure::none)) {
+        return false;
+      }
+      selected = {SolveTerminationReason::non_finite_value, -1, true};
+      return false;
     } catch (...) {
-      failure = detail::LocalSolveFailure::non_finite_value;
+      failure = detail::LocalSolveFailure::collective_failure;
     }
     return phase_checkpoint(failure);
   };
@@ -248,8 +265,16 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
       }
     } catch (const runtime::detail::MpiOperationError&) {
       throw;
+    } catch (const detail::SynchronizedReductionError& error) {
+      if (!phase_checkpoint(error.has_local_source()
+                                ? detail::LocalSolveFailure::non_finite_value
+                                : detail::LocalSolveFailure::none)) {
+        return false;
+      }
+      selected = {SolveTerminationReason::non_finite_value, -1, true};
+      return false;
     } catch (...) {
-      failure = detail::LocalSolveFailure::non_finite_value;
+      failure = detail::LocalSolveFailure::collective_failure;
     }
     return phase_checkpoint(failure);
   };

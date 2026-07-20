@@ -6,6 +6,7 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "execution/src/execution_test_access.hpp"
+#include "linear/src/vector_ops_detail.hpp"
 #include "runtime/src/mpi_context_test_seam.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
@@ -482,6 +483,58 @@ void test_dot_batch(const MpiContext& world) {
                       sizeof(double));
 }
 
+void test_dot_batch_reports_provenance_for_first_failed_pair(
+    const MpiContext& world) {
+  if (world.size() < 2) {
+    return;
+  }
+  CpuReferenceContext execution;
+  VectorOps operations(execution);
+  Buffer global_left_buffer(execution, sizeof(double));
+  Buffer global_right_buffer(execution, sizeof(double));
+  Buffer local_left_buffer(execution, sizeof(double));
+  Buffer local_right_buffer(execution, sizeof(double));
+  Buffer results_buffer(execution, 2U * sizeof(double));
+  auto global_left = global_left_buffer.view(0U, 1U);
+  auto global_right = global_right_buffer.view(0U, 1U);
+  auto local_left = local_left_buffer.view(0U, 1U);
+  auto local_right = local_right_buffer.view(0U, 1U);
+  auto results = results_buffer.view(0U, 2U);
+  global_left[0] = 0.75 * std::numeric_limits<double>::max();
+  global_right[0] = 1.0;
+  local_left[0] = world.rank() == 1
+                      ? std::numeric_limits<double>::max()
+                      : 1.0;
+  local_right[0] = world.rank() == 1 ? 2.0 : 1.0;
+
+  auto check_failure = [&](const std::array<DotProductPair, 2U>& pairs,
+                           bool expected_local_source) {
+    const auto before = world.fp64_reduction_counters();
+    bool caught = false;
+    try {
+      operations.dot_batch(pairs.data(), pairs.size(), results, world);
+    } catch (const hundun::linear::detail::SynchronizedReductionError& error) {
+      caught = true;
+      HUNDUN_CHECK(error.has_local_source() == expected_local_source);
+      HUNDUN_CHECK(std::string(error.what()).find("global result 0") !=
+                   std::string::npos);
+    }
+    HUNDUN_CHECK(caught);
+    check_counter_delta(before, world.fp64_reduction_counters(), 1U, 2U,
+                        2U * sizeof(double));
+  };
+
+  const std::array<DotProductPair, 2U> global_then_local{
+      DotProductPair{global_left, global_right},
+      DotProductPair{local_left, local_right}};
+  check_failure(global_then_local, false);
+
+  const std::array<DotProductPair, 2U> local_then_global{
+      DotProductPair{local_left, local_right},
+      DotProductPair{global_left, global_right}};
+  check_failure(local_then_global, world.rank() == 1);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -493,5 +546,6 @@ int main(int argc, char** argv) {
     test_failed_allreduce_attempt_is_counted(world);
     test_global_norm(world);
     test_dot_batch(world);
+    test_dot_batch_reports_provenance_for_first_failed_pair(world);
   });
 }

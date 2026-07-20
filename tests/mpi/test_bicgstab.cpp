@@ -559,6 +559,99 @@ void test_tolerance_overflow_is_global(const MpiContext& world) {
   check_identical_report(report, world);
 }
 
+void check_global_norm_overflow_report(const SolveReport& report,
+                                       const MpiContext& world) {
+  HUNDUN_CHECK(report.reason == SolveTerminationReason::non_finite_value);
+  HUNDUN_CHECK(report.lowest_failing_rank == -1);
+  HUNDUN_CHECK(report.iterations == 0U);
+  HUNDUN_CHECK(report.matvec_count == 0U);
+  HUNDUN_CHECK(report.preconditioner_apply_count == 0U);
+  HUNDUN_CHECK(report.global_reduction_count == 8U);
+  HUNDUN_CHECK(std::isinf(report.initial_residual));
+  HUNDUN_CHECK(std::isinf(report.recursive_residual));
+  HUNDUN_CHECK(std::isinf(report.final_residual));
+  check_identical_report(report, world);
+}
+
+void check_local_dot_overflow_report(const SolveReport& report,
+                                     const MpiContext& world,
+                                     int expected_lowest_rank,
+                                     std::uint64_t expected_preconditioners) {
+  HUNDUN_CHECK(report.reason == SolveTerminationReason::non_finite_value);
+  HUNDUN_CHECK(report.lowest_failing_rank == expected_lowest_rank);
+  HUNDUN_CHECK(report.iterations == 0U);
+  HUNDUN_CHECK(report.matvec_count == 1U);
+  HUNDUN_CHECK(report.preconditioner_apply_count ==
+               expected_preconditioners);
+  HUNDUN_CHECK(report.global_reduction_count == 19U);
+  HUNDUN_CHECK(std::isfinite(report.initial_residual));
+  HUNDUN_CHECK(report.recursive_residual == report.initial_residual);
+  HUNDUN_CHECK(report.final_residual == report.initial_residual);
+  check_identical_report(report, world);
+}
+
+void test_synchronized_reduction_overflow_provenance(
+    const MpiContext& world) {
+  CpuReferenceContext execution;
+  const auto layout = make_layout(kSystemSize, world.rank());
+  Buffer b_buffer(execution, kSystemSize * sizeof(double));
+  Buffer x_buffer(execution, kSystemSize * sizeof(double));
+  auto b = b_buffer.view(0U, kSystemSize);
+  auto x = x_buffer.view(0U, kSystemSize);
+  BiCGStabSolver bicgstab(execution, world);
+  ConjugateGradientSolver cg(execution, world);
+
+  const double norm_overflow_value =
+      std::numeric_limits<double>::max() / 4.0;
+  for (std::size_t index = 0; index < kSystemSize; ++index) {
+    b[index] = norm_overflow_value;
+    x[index] = 0.0;
+  }
+  NonsymmetricOperator bicg_norm_operator(execution, layout, world.rank());
+  InstrumentedPreconditioner bicg_norm_preconditioner(world.rank());
+  const auto bicg_norm = bicgstab.solve(
+      bicg_norm_operator, bicg_norm_preconditioner, b, x, {});
+  check_global_norm_overflow_report(bicg_norm, world);
+  HUNDUN_CHECK(bicg_norm_operator.apply_calls() == 0U);
+  HUNDUN_CHECK(bicg_norm_preconditioner.update_calls() == 0U);
+
+  NonsymmetricOperator cg_norm_operator(execution, layout, world.rank());
+  InstrumentedPreconditioner cg_norm_preconditioner(world.rank());
+  const auto cg_norm =
+      cg.solve(cg_norm_operator, cg_norm_preconditioner, b, x, {});
+  check_global_norm_overflow_report(cg_norm, world);
+  HUNDUN_CHECK(cg_norm_operator.apply_calls() == 0U);
+  HUNDUN_CHECK(cg_norm_preconditioner.update_calls() == 0U);
+  for (std::size_t index = 0; index < kSystemSize; ++index) {
+    HUNDUN_CHECK(x[index] == 0.0);
+  }
+
+  const int expected_lowest_rank = world.size() == 1 ? 0 : 1;
+  const bool local_dot_overflow =
+      world.size() == 1 || world.rank() == 1 ||
+      (world.size() == 4 && world.rank() == 3);
+  for (std::size_t index = 0; index < kSystemSize; ++index) {
+    b[index] = local_dot_overflow ? 1.0e154 : 1.0;
+    x[index] = 0.0;
+  }
+  NonsymmetricOperator bicg_dot_operator(execution, layout, world.rank());
+  InstrumentedPreconditioner bicg_dot_preconditioner(world.rank());
+  const auto bicg_dot = bicgstab.solve(
+      bicg_dot_operator, bicg_dot_preconditioner, b, x, {});
+  check_local_dot_overflow_report(bicg_dot, world, expected_lowest_rank, 0U);
+  HUNDUN_CHECK(bicg_dot_preconditioner.update_calls() == 1U);
+
+  NonsymmetricOperator cg_dot_operator(execution, layout, world.rank());
+  InstrumentedPreconditioner cg_dot_preconditioner(world.rank());
+  const auto cg_dot =
+      cg.solve(cg_dot_operator, cg_dot_preconditioner, b, x, {});
+  check_local_dot_overflow_report(cg_dot, world, expected_lowest_rank, 1U);
+  HUNDUN_CHECK(cg_dot_preconditioner.update_calls() == 1U);
+  for (std::size_t index = 0; index < kSystemSize; ++index) {
+    HUNDUN_CHECK(x[index] == 0.0);
+  }
+}
+
 void test_early_exits_and_breakdowns(const MpiContext& world) {
   CpuReferenceContext execution;
   const auto layout = make_layout(5U, world.rank());
@@ -1101,6 +1194,7 @@ int main(int argc, char** argv) {
     test_manufactured(world);
     test_collective_control_and_input(world);
     test_tolerance_overflow_is_global(world);
+    test_synchronized_reduction_overflow_provenance(world);
     test_early_exits_and_breakdowns(world);
     test_counter_batch_and_no_loop_allocation(world);
     test_rho_and_beta_mutations(world);

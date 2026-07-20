@@ -224,45 +224,57 @@ double VectorOps::norm(execution::VectorView<const double> values,
                        const runtime::MpiContext& context) const {
   const double* pointer = nullptr;
   double local_scale = 0.0;
+  bool has_local_source = false;
   try {
     pointer = validate_read_view(values, backend_identity_);
     for (std::size_t index = 0; index < values.size(); ++index) {
       const double value = pointer[index * values.stride()];
       if (!std::isfinite(value)) {
+        has_local_source = true;
         local_scale = std::numeric_limits<double>::infinity();
         break;
       }
       local_scale = std::max(local_scale, std::abs(value));
     }
   } catch (const runtime::Error&) {
+    has_local_source = true;
     local_scale = std::numeric_limits<double>::infinity();
   }
 
   context.allreduce_fp64_in_place(
       &local_scale, 1U, runtime::Fp64ReductionOperation::maximum);
   if (!std::isfinite(local_scale)) {
-    throw runtime::Error("VectorOps norm input must be finite and valid");
+    throw detail::SynchronizedReductionError(
+        "VectorOps norm input must be finite and valid", has_local_source);
   }
 
   CompensatedSum local_sum;
+  bool local_sum_valid = true;
   if (local_scale != 0.0) {
     for (std::size_t index = 0; index < values.size(); ++index) {
       const double ratio = pointer[index * values.stride()] / local_scale;
       if (!std::isfinite(ratio) || !local_sum.add(ratio * ratio)) {
-        throw runtime::Error(
-            "VectorOps norm scaled local sum must be finite");
+        has_local_source = true;
+        local_sum_valid = false;
+        break;
       }
     }
   }
-  double global_sum = local_sum.value();
+  double global_sum = local_sum_valid
+                          ? local_sum.value()
+                          : std::numeric_limits<double>::infinity();
   context.allreduce_fp64_in_place(
       &global_sum, 1U, runtime::Fp64ReductionOperation::sum);
   if (!std::isfinite(global_sum) || global_sum < 0.0) {
-    throw runtime::Error(
-        "VectorOps norm global scaled sum must be finite and nonnegative");
+    throw detail::SynchronizedReductionError(
+        "VectorOps norm global scaled sum must be finite and nonnegative",
+        has_local_source);
   }
   const double result = local_scale * std::sqrt(global_sum);
-  require_finite(result, "VectorOps norm result must be finite");
+  if (!std::isfinite(result)) {
+    throw detail::SynchronizedReductionError(
+        "VectorOps norm result must be finite", false);
+  }
   return result;
 }
 
@@ -296,6 +308,7 @@ void VectorOps::dot_batch(
     }
   }
 
+  std::size_t first_local_source_pair = pair_count;
   for (std::size_t pair = 0; pair < pair_count; ++pair) {
     double local_result = detail::bad_dot_product_sentinel();
     try {
@@ -322,8 +335,12 @@ void VectorOps::dot_batch(
       }
       if (valid && std::isfinite(local_sum.value())) {
         local_result = local_sum.value();
+      } else {
+        first_local_source_pair =
+            std::min(first_local_source_pair, pair);
       }
     } catch (const runtime::Error&) {
+      first_local_source_pair = std::min(first_local_source_pair, pair);
       local_result = detail::bad_dot_product_sentinel();
     }
     result_pointer[pair] = local_result;
@@ -333,9 +350,10 @@ void VectorOps::dot_batch(
       result_pointer, pair_count, runtime::Fp64ReductionOperation::sum);
   for (std::size_t pair = 0; pair < pair_count; ++pair) {
     if (!std::isfinite(result_pointer[pair])) {
-      throw runtime::Error(
+      throw detail::SynchronizedReductionError(
           "VectorOps dot_batch global result " + std::to_string(pair) +
-          " must be finite");
+              " must be finite",
+          first_local_source_pair == pair);
     }
   }
 }
