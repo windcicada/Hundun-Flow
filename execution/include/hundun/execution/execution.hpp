@@ -202,6 +202,8 @@ class Buffer final {
 
 class ExecutionEvent final {
  public:
+  static ExecutionEvent completed();
+
   ExecutionEvent(const ExecutionEvent&) noexcept = default;
   ExecutionEvent& operator=(const ExecutionEvent&) noexcept = default;
   ExecutionEvent(ExecutionEvent&&) noexcept = default;

@@ -111,6 +111,7 @@ add_library(hundun_linear STATIC
   linear/src/ghosted_vector.cpp
   linear/src/ghosted_vector_halo.cpp
   linear/src/ghosted_vector_halo_detail.cpp
+  linear/src/preconditioners.cpp
   linear/src/vector_ops.cpp)
 target_include_directories(hundun_linear
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/linear/include>"
@@ -413,6 +414,20 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_vector_ops PRIVATE hundun_linear)
   set_tests_properties(test_vector_ops PROPERTIES TIMEOUT 30)
+
+  hundun_add_test(test_linear_system_header_contract
+    tests/unit/test_linear_system_header_contract.cpp)
+  target_link_libraries(test_linear_system_header_contract PRIVATE
+    hundun_linear)
+  set_tests_properties(test_linear_system_header_contract PROPERTIES
+    TIMEOUT 30)
+
+  hundun_add_test(test_preconditioners
+    tests/unit/test_preconditioners.cpp)
+  target_include_directories(test_preconditioners PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_preconditioners PRIVATE hundun_linear)
+  set_tests_properties(test_preconditioners PROPERTIES TIMEOUT 30)
 
   add_executable(test_vector_ops_mpi
     tests/mpi/test_vector_ops_mpi.cpp

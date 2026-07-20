@@ -377,6 +377,10 @@ bool ExecutionEvent::ready() const noexcept {
          state_->result.load(std::memory_order_acquire) != EventResult::pending;
 }
 
+ExecutionEvent ExecutionEvent::completed() {
+  return ExecutionEvent(inline_success_state());
+}
+
 void ExecutionEvent::wait() const {
   if (!state_) {
     throw runtime::Error("moved-from execution event has no state");
