@@ -282,10 +282,10 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
   }
   const double relative_tolerance = control.rtol * b_norm;
   const double tolerance = std::max(control.atol, relative_tolerance);
-  local_failure = std::isfinite(relative_tolerance) && std::isfinite(tolerance)
-                      ? detail::LocalSolveFailure::none
-                      : detail::LocalSolveFailure::non_finite_value;
-  if (!phase_checkpoint(local_failure)) {
+  if (!std::isfinite(relative_tolerance) || !std::isfinite(tolerance)) {
+    return finish(SolveTerminationReason::non_finite_value);
+  }
+  if (!phase_checkpoint(detail::LocalSolveFailure::none)) {
     return finish(selected.reason, selected.lowest_rank);
   }
 
@@ -344,6 +344,13 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
     }
     return true;
   };
+  auto finish_failure_after_refresh =
+      [&](detail::FailureSelection original_failure) {
+        if (!refresh_final()) {
+          return finish(selected.reason, selected.lowest_rank);
+        }
+        return finish(original_failure.reason, original_failure.lowest_rank);
+      };
   auto restart = [&] {
     return vector_phase([&] {
       state_->operations.copy(r, r_hat);
@@ -359,8 +366,7 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
   while (report.iterations < control.max_iterations) {
     double rho = 0.0;
     if (!dot(r_hat, r, rho)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (rho == 0.0) {
       if (!refresh_final()) {
@@ -397,15 +403,13 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
         local_failure = detail::LocalSolveFailure::collective_failure;
       }
       if (!phase_checkpoint(local_failure)) {
-        static_cast<void>(refresh_final());
-        return finish(selected.reason, selected.lowest_rank);
+        return finish_failure_after_refresh(selected);
       }
       if (!vector_phase([&] { state_->operations.axpy(-omega, v, p); }) ||
           !vector_phase([&] {
             state_->operations.linear_combination(1.0, r, beta, p, p);
           })) {
-        static_cast<void>(refresh_final());
-        return finish(selected.reason, selected.lowest_rank);
+        return finish_failure_after_refresh(selected);
       }
     }
 
@@ -414,8 +418,7 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
     }
     double denominator = 0.0;
     if (!dot(r_hat, v, denominator)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (denominator == 0.0) {
       if (!refresh_final()) {
@@ -439,8 +442,7 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
       local_failure = detail::LocalSolveFailure::collective_failure;
     }
     if (!phase_checkpoint(local_failure)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (!vector_phase([&] {
           state_->operations.linear_combination(1.0, r, -alpha, v, s);
@@ -494,8 +496,7 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
     double ts = 0.0;
     double tt = 0.0;
     if (!dot_two(ts, tt)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (tt <= 0.0) {
       if (!refresh_final()) {
@@ -529,8 +530,7 @@ SolveReport BiCGStabSolver::solve(const LinearOperator& linear_operator,
       }
     }
     if (!phase_checkpoint(local_failure)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     report.final_residual = std::numeric_limits<double>::infinity();
     independent_is_current = false;

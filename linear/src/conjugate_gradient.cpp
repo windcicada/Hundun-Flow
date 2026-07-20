@@ -258,10 +258,10 @@ SolveReport ConjugateGradientSolver::solve(
   }
   const double relative_tolerance = control.rtol * right_hand_side_norm;
   const double tolerance = std::max(control.atol, relative_tolerance);
-  local_failure = std::isfinite(relative_tolerance) && std::isfinite(tolerance)
-                      ? detail::LocalSolveFailure::none
-                      : detail::LocalSolveFailure::non_finite_value;
-  if (!phase_checkpoint(local_failure)) {
+  if (!std::isfinite(relative_tolerance) || !std::isfinite(tolerance)) {
+    return finish(SolveTerminationReason::non_finite_value);
+  }
+  if (!phase_checkpoint(detail::LocalSolveFailure::none)) {
     return finish(selected.reason, selected.lowest_rank);
   }
 
@@ -323,6 +323,13 @@ SolveReport ConjugateGradientSolver::solve(
     }
     return true;
   };
+  auto finish_failure_after_refresh =
+      [&](detail::FailureSelection original_failure) {
+        if (!refresh_final()) {
+          return finish(selected.reason, selected.lowest_rank);
+        }
+        return finish(original_failure.reason, original_failure.lowest_rank);
+      };
 
   while (report.iterations < control.max_iterations) {
     if (!apply_operator(p, ap)) {
@@ -330,8 +337,7 @@ SolveReport ConjugateGradientSolver::solve(
     }
     double curvature = 0.0;
     if (!dot(p, ap, curvature)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (curvature <= 0.0) {
       if (!refresh_final()) {
@@ -404,15 +410,11 @@ SolveReport ConjugateGradientSolver::solve(
     }
 
     if (!apply_preconditioner()) {
-      if (!refresh_final()) {
-        return finish(selected.reason, selected.lowest_rank);
-      }
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     double rho_new = 0.0;
     if (!dot(r, z, rho_new)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (rho_new <= 0.0) {
       if (!refresh_final()) {
@@ -436,14 +438,12 @@ SolveReport ConjugateGradientSolver::solve(
       local_failure = detail::LocalSolveFailure::collective_failure;
     }
     if (!phase_checkpoint(local_failure)) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     if (!vector_phase([&] {
           state_->operations.linear_combination(1.0, z, beta, p, p);
         })) {
-      static_cast<void>(refresh_final());
-      return finish(selected.reason, selected.lowest_rank);
+      return finish_failure_after_refresh(selected);
     }
     rho = rho_new;
   }

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -43,6 +44,7 @@ using hundun::linear::JacobiPreconditioner;
 using hundun::linear::LinearOperator;
 using hundun::linear::Preconditioner;
 using hundun::linear::SolveControl;
+using hundun::linear::SolveReport;
 using hundun::linear::SolveTerminationReason;
 using hundun::linear::VectorLayout;
 using hundun::linear::VectorOps;
@@ -311,6 +313,37 @@ void check_report_counter_oracles(
   HUNDUN_CHECK(report.global_reduction_count ==
                context.fp64_reduction_counters().collective_calls -
                    reductions_before);
+}
+
+std::uint64_t bits(double value) noexcept {
+  std::uint64_t result = 0U;
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
+
+void check_identical_report(const SolveReport& report,
+                            const MpiContext& world) {
+  constexpr std::size_t kWords = 9U;
+  std::array<std::uint64_t, kWords> local{
+      static_cast<std::uint64_t>(report.reason),
+      report.iterations,
+      bits(report.initial_residual),
+      bits(report.recursive_residual),
+      bits(report.final_residual),
+      report.matvec_count,
+      report.preconditioner_apply_count,
+      report.global_reduction_count,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(report.lowest_failing_rank))};
+  std::array<std::array<std::uint64_t, kWords>, 4U> gathered{};
+  HUNDUN_CHECK(world.size() <= static_cast<int>(gathered.size()));
+  HUNDUN_CHECK(MPI_Allgather(local.data(), static_cast<int>(local.size()),
+                             MPI_UINT64_T, gathered.data(),
+                             static_cast<int>(local.size()), MPI_UINT64_T,
+                             world.comm()) == MPI_SUCCESS);
+  for (int rank = 1; rank < world.size(); ++rank) {
+    HUNDUN_CHECK(gathered[static_cast<std::size_t>(rank)] == gathered[0]);
+  }
 }
 
 void test_manufactured_spd(const MpiContext& world,
@@ -716,8 +749,10 @@ void test_control_preflight_and_events(const MpiContext& world) {
   const auto nonfinite =
       solver.solve(identity, preconditioner, b, x, overflow_tolerance);
   HUNDUN_CHECK(nonfinite.reason == SolveTerminationReason::non_finite_value);
+  HUNDUN_CHECK(nonfinite.lowest_failing_rank == -1);
   HUNDUN_CHECK(nonfinite.matvec_count == 0U);
-  HUNDUN_CHECK(nonfinite.global_reduction_count == 9U);
+  HUNDUN_CHECK(nonfinite.global_reduction_count == 8U);
+  check_identical_report(nonfinite, world);
 }
 
 void test_zero_owned_and_workspace_overflow(const MpiContext& world) {

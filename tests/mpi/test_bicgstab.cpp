@@ -69,6 +69,15 @@ VectorLayout make_layout(std::size_t count, int rank) {
   return VectorLayout(count, std::move(ids));
 }
 
+struct CandidateOverflowState final {
+  int failure_rank{-1};
+  std::uint64_t operator_call{std::numeric_limits<std::uint64_t>::max()};
+  std::uint64_t preconditioner_call{
+      std::numeric_limits<std::uint64_t>::max()};
+  std::optional<VectorView<double>> solution;
+  std::optional<VectorView<double>> candidate;
+};
+
 class NonsymmetricOperator final : public LinearOperator {
  public:
   NonsymmetricOperator(ExecutionContext& context,
@@ -140,6 +149,18 @@ class NonsymmetricOperator final : public LinearOperator {
       }
       return completed_;
     }
+    if (candidate_overflow_ != nullptr &&
+        rank_ == candidate_overflow_->failure_rank &&
+        candidate_overflow_->solution.has_value() &&
+        input.allocation_identity() ==
+            candidate_overflow_->solution->allocation_identity() &&
+        (*candidate_overflow_->solution)[0] ==
+            std::numeric_limits<double>::max()) {
+      for (std::size_t index = 0; index < output.size(); ++index) {
+        output[index] = 0.0;
+      }
+      return completed_;
+    }
     for (std::size_t index = 0; index < output.size(); ++index) {
       double value = 4.0 * input[index];
       if (index != 0U) {
@@ -149,6 +170,21 @@ class NonsymmetricOperator final : public LinearOperator {
         value -= 2.0 * input[index + 1U];
       }
       output[index] = value + bias_;
+    }
+    if (candidate_overflow_ != nullptr &&
+        rank_ == candidate_overflow_->failure_rank &&
+        apply_calls_ == candidate_overflow_->operator_call &&
+        output.size() != 0U) {
+      HUNDUN_CHECK(candidate_overflow_->candidate.has_value());
+      double local_ts = 0.0;
+      for (std::size_t index = 0; index < output.size(); ++index) {
+        local_ts += output[index] * input[index];
+      }
+      HUNDUN_CHECK(local_ts != 0.0);
+      (*candidate_overflow_->solution)[0] =
+          std::numeric_limits<double>::max();
+      (*candidate_overflow_->candidate)[0] = std::copysign(
+          std::numeric_limits<double>::max(), local_ts);
     }
     if (rank_ == nonfinite_output_rank_ && apply_calls_ == failure_call_ &&
         output.size() != 0U) {
@@ -178,6 +214,14 @@ class NonsymmetricOperator final : public LinearOperator {
   }
   void tiny_output_on(std::uint64_t call) noexcept { tiny_output_call_ = call; }
   void set_bias(double bias) noexcept { bias_ = bias; }
+  void overflow_solution_candidate_after_apply_on(
+      int rank, std::uint64_t call, VectorView<double> solution,
+      CandidateOverflowState& state) noexcept {
+    state.failure_rank = rank;
+    state.operator_call = call;
+    state.solution = solution;
+    candidate_overflow_ = &state;
+  }
   std::uint64_t apply_calls() const noexcept { return apply_calls_; }
   double recorded(std::size_t call, std::size_t index) const noexcept {
     return recorded_inputs_[call - 1U][index];
@@ -202,6 +246,7 @@ class NonsymmetricOperator final : public LinearOperator {
   std::uint64_t orthogonal_output_call_{
       std::numeric_limits<std::uint64_t>::max()};
   std::uint64_t tiny_output_call_{std::numeric_limits<std::uint64_t>::max()};
+  CandidateOverflowState* candidate_overflow_{nullptr};
   mutable std::array<std::array<double, kSystemSize>, 8U> recorded_inputs_{};
   mutable std::array<std::size_t, 8U> recorded_sizes_{};
 };
@@ -233,6 +278,11 @@ class InstrumentedPreconditioner final : public Preconditioner {
     for (std::size_t index = 0; index < output.size(); ++index) {
       output[index] = input[index];
     }
+    if (candidate_overflow_ != nullptr &&
+        rank_ == candidate_overflow_->failure_rank &&
+        apply_calls_ == candidate_overflow_->preconditioner_call) {
+      candidate_overflow_->candidate = output;
+    }
     if (rank_ == nonfinite_output_rank_ && apply_calls_ == failure_call_ &&
         output.size() != 0U) {
       output[0] = std::numeric_limits<double>::infinity();
@@ -255,6 +305,11 @@ class InstrumentedPreconditioner final : public Preconditioner {
   void arm_allocation_probe_after_update() noexcept {
     arm_allocation_probe_ = true;
   }
+  void capture_solution_candidate_on(std::uint64_t call,
+                                     CandidateOverflowState& state) noexcept {
+    state.preconditioner_call = call;
+    candidate_overflow_ = &state;
+  }
   std::uint64_t apply_calls() const noexcept { return apply_calls_; }
   std::uint64_t update_calls() const noexcept { return update_calls_; }
 
@@ -269,6 +324,7 @@ class InstrumentedPreconditioner final : public Preconditioner {
   int nonfinite_output_rank_{-1};
   std::uint64_t failure_call_{std::numeric_limits<std::uint64_t>::max()};
   bool arm_allocation_probe_{false};
+  CandidateOverflowState* candidate_overflow_{nullptr};
 };
 
 enum class ScriptedRecurrence { rho_zero, beta_overflow };
@@ -475,6 +531,32 @@ void test_collective_control_and_input(const MpiContext& world) {
     HUNDUN_CHECK(nonfinite_x.lowest_failing_rank == 1);
     check_identical_report(nonfinite_x, world);
   }
+}
+
+void test_tolerance_overflow_is_global(const MpiContext& world) {
+  CpuReferenceContext execution;
+  NonsymmetricOperator linear_operator(execution,
+                                       make_layout(3U, world.rank()));
+  Buffer b_buffer(execution, 3U * sizeof(double));
+  Buffer x_buffer(execution, 3U * sizeof(double));
+  auto b = b_buffer.view(0U, 3U);
+  auto x = x_buffer.view(0U, 3U);
+  for (std::size_t index = 0; index < b.size(); ++index) {
+    b[index] = 2.0;
+    x[index] = 0.0;
+  }
+  SolveControl overflow;
+  overflow.rtol = std::numeric_limits<double>::max();
+  InstrumentedPreconditioner preconditioner(world.rank());
+  BiCGStabSolver solver(execution, world);
+  const auto report =
+      solver.solve(linear_operator, preconditioner, b, x, overflow);
+  HUNDUN_CHECK(report.reason == SolveTerminationReason::non_finite_value);
+  HUNDUN_CHECK(report.lowest_failing_rank == -1);
+  HUNDUN_CHECK(report.matvec_count == 0U);
+  HUNDUN_CHECK(report.preconditioner_apply_count == 0U);
+  HUNDUN_CHECK(report.global_reduction_count == 8U);
+  check_identical_report(report, world);
 }
 
 void test_early_exits_and_breakdowns(const MpiContext& world) {
@@ -924,6 +1006,92 @@ void test_collective_phase_failures(const MpiContext& world) {
   check_identical_report(cg_pre_event, world);
 }
 
+void test_post_iteration_refresh_preserves_failure(const MpiContext& world) {
+  CpuReferenceContext execution;
+  const auto layout = make_layout(7U, world.rank());
+  Buffer b_buffer(execution, 7U * sizeof(double));
+  Buffer x_buffer(execution, 7U * sizeof(double));
+  auto b = b_buffer.view(0U, 7U);
+  auto x = x_buffer.view(0U, 7U);
+  for (std::size_t index = 0; index < b.size(); ++index) {
+    b[index] = 1.0 + static_cast<double>(index);
+    x[index] = 0.0;
+  }
+  const int failure_rank = world.size() == 1 ? 0 : 1;
+  SolveControl control;
+  control.atol = 0.0;
+  control.rtol = 0.0;
+  control.max_iterations = 3U;
+
+  NonsymmetricOperator cg_operator(execution, layout, world.rank());
+  InstrumentedPreconditioner cg_preconditioner(world.rank());
+  cg_preconditioner.fail_event_on(failure_rank, 2U);
+  ConjugateGradientSolver cg(execution, world);
+  const auto cg_report =
+      cg.solve(cg_operator, cg_preconditioner, b, x, control);
+  HUNDUN_CHECK(cg_report.reason ==
+               SolveTerminationReason::collective_failure);
+  HUNDUN_CHECK(cg_report.iterations == 1U);
+  HUNDUN_CHECK(cg_report.lowest_failing_rank == failure_rank);
+  HUNDUN_CHECK(std::isfinite(cg_report.final_residual));
+  double cg_local_residual_squared = 0.0;
+  for (std::size_t index = 0; index < b.size(); ++index) {
+    double applied = 4.0 * x[index];
+    if (index != 0U) {
+      applied -= x[index - 1U];
+    }
+    if (index + 1U != x.size()) {
+      applied -= 2.0 * x[index + 1U];
+    }
+    const double residual = b[index] - applied;
+    cg_local_residual_squared += residual * residual;
+  }
+  const double cg_measured = global_l2(cg_local_residual_squared, world);
+  HUNDUN_CHECK(
+      std::abs(cg_report.final_residual - cg_measured) <=
+      64.0 * std::numeric_limits<double>::epsilon() *
+          std::max(1.0, cg_measured));
+  check_identical_report(cg_report, world);
+
+  for (std::size_t index = 0; index < x.size(); ++index) {
+    x[index] = 0.0;
+  }
+  CandidateOverflowState candidate_overflow;
+  NonsymmetricOperator bicg_operator(execution, layout, world.rank());
+  bicg_operator.overflow_solution_candidate_after_apply_on(failure_rank, 5U,
+                                                            x, candidate_overflow);
+  InstrumentedPreconditioner bicg_preconditioner(world.rank());
+  bicg_preconditioner.capture_solution_candidate_on(4U, candidate_overflow);
+  BiCGStabSolver bicg(execution, world);
+  const auto bicg_report =
+      bicg.solve(bicg_operator, bicg_preconditioner, b, x, control);
+  HUNDUN_CHECK(bicg_report.reason == SolveTerminationReason::non_finite_value);
+  HUNDUN_CHECK(bicg_report.iterations == 1U);
+  HUNDUN_CHECK(bicg_report.lowest_failing_rank == failure_rank);
+  HUNDUN_CHECK(std::isfinite(bicg_report.final_residual));
+  double bicg_local_residual_squared = 0.0;
+  for (std::size_t index = 0; index < b.size(); ++index) {
+    double applied = 0.0;
+    if (world.rank() != failure_rank) {
+      applied = 4.0 * x[index];
+      if (index != 0U) {
+        applied -= x[index - 1U];
+      }
+      if (index + 1U != x.size()) {
+        applied -= 2.0 * x[index + 1U];
+      }
+    }
+    const double residual = b[index] - applied;
+    bicg_local_residual_squared += residual * residual;
+  }
+  const double bicg_measured = global_l2(bicg_local_residual_squared, world);
+  HUNDUN_CHECK(
+      std::abs(bicg_report.final_residual - bicg_measured) <=
+      64.0 * std::numeric_limits<double>::epsilon() *
+          std::max(1.0, bicg_measured));
+  check_identical_report(bicg_report, world);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -932,11 +1100,13 @@ int main(int argc, char** argv) {
   return hundun::test::run([&] {
     test_manufactured(world);
     test_collective_control_and_input(world);
+    test_tolerance_overflow_is_global(world);
     test_early_exits_and_breakdowns(world);
     test_counter_batch_and_no_loop_allocation(world);
     test_rho_and_beta_mutations(world);
     test_periodic_replacement_restart(world);
     test_preflight_stride_overflow_and_mpi_error(world);
     test_collective_phase_failures(world);
+    test_post_iteration_refresh_preserves_failure(world);
   });
 }
