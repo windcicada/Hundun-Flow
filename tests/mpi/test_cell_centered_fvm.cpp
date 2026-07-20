@@ -532,9 +532,12 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
       for (int i = 0; i < decomposition.local_extent().x; ++i) {
         const auto global = decomposition.global_cell(Int3{i, j, k});
         rho(i, j, k, 0) = 1.0 + 0.01 * global.x + 0.005 * global.y;
-        u(i, j, k, 0) = 0.75;
-        u(i, j, k, 1) = -0.25;
-        u(i, j, k, 2) = 0.125;
+        const double gx = static_cast<double>(global.x);
+        const double gy = static_cast<double>(global.y);
+        const double gz = static_cast<double>(global.z);
+        u(i, j, k, 0) = 0.5 + 0.001 * (gx * gx + 3.0 * gy + 5.0 * gz);
+        u(i, j, k, 1) = 0.25 + 0.0015 * (2.0 * gx + gy * gy + 3.0 * gz);
+        u(i, j, k, 2) = 0.125 + 0.002 * (gx + 2.0 * gy + gz * gz);
       }
     }
   }
@@ -572,6 +575,18 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
                                                    velocity_face);
   operators.reconstruct_transport_faces(FiniteVolumeQuantity::density(),
                                         boundaries, flux, rho_read, rho_face);
+  std::optional<std::size_t> canonical_periodic_face;
+  for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
+    const auto pair = topology.periodic_pair(face);
+    if (pair.has_value() && topology.global_face_id(face) < *pair &&
+        topology.find_local_face(*pair).has_value()) {
+      canonical_periodic_face = face;
+      break;
+    }
+  }
+  HUNDUN_CHECK(canonical_periodic_face.has_value());
+  hundun::finite_volume::test::override_next_face_metrics(
+      topology.global_face_id(*canonical_periodic_face), 0.250001, 0.0);
   operators.reconstruct_momentum_faces(boundaries, flux, velocity_read, u_face);
   const auto flux_read = read_storage.acquire_face_read<double>(
       access, read_phase, actor, mass_flux);
@@ -579,9 +594,9 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
     HUNDUN_CHECK(std::isfinite(flux_read(face, 0)));
     HUNDUN_CHECK(std::isfinite(rho_face(face, 0)));
     HUNDUN_CHECK(rho_face(face, 0) > 0.0);
-    HUNDUN_CHECK_NEAR(u_face(face, 0), 0.75, 0.0);
-    HUNDUN_CHECK_NEAR(u_face(face, 1), -0.25, 0.0);
-    HUNDUN_CHECK_NEAR(u_face(face, 2), 0.125, 0.0);
+    HUNDUN_CHECK(std::isfinite(u_face(face, 0)));
+    HUNDUN_CHECK(std::isfinite(u_face(face, 1)));
+    HUNDUN_CHECK(std::isfinite(u_face(face, 2)));
     const auto pair = topology.periodic_pair(face);
     if (pair.has_value()) {
       const auto local_pair = topology.find_local_face(*pair);
@@ -589,6 +604,10 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
         HUNDUN_CHECK(bits(flux_read(face, 0)) ==
                      bits(-flux_read(*local_pair, 0)));
         HUNDUN_CHECK(bits(rho_face(face, 0)) == bits(rho_face(*local_pair, 0)));
+        for (int component = 0; component < 3; ++component) {
+          HUNDUN_CHECK(bits(u_face(face, component)) ==
+                       bits(u_face(*local_pair, component)));
+        }
       }
     }
   }
@@ -597,13 +616,17 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
     std::uint64_t id;
     std::uint64_t flux;
     std::uint64_t transported;
+    std::uint64_t velocity_x;
+    std::uint64_t velocity_y;
+    std::uint64_t velocity_z;
   };
   std::vector<FaceReplicaRecord> local_records;
   local_records.reserve(topology.local_face_count());
   for (std::size_t face = 0; face < topology.local_face_count(); ++face) {
-    local_records.push_back(FaceReplicaRecord{topology.global_face_id(face),
-                                              bits(flux_read(face, 0)),
-                                              bits(rho_face(face, 0))});
+    local_records.push_back(FaceReplicaRecord{
+        topology.global_face_id(face), bits(flux_read(face, 0)),
+        bits(rho_face(face, 0)), bits(u_face(face, 0)), bits(u_face(face, 1)),
+        bits(u_face(face, 2))});
   }
   const int local_bytes =
       static_cast<int>(local_records.size() * sizeof(FaceReplicaRecord));
@@ -635,6 +658,12 @@ void run_shared_flux_case(const MpiContext &mpi, int ranks) {
                    gathered_records[index].flux);
       HUNDUN_CHECK(gathered_records[index - 1U].transported ==
                    gathered_records[index].transported);
+      HUNDUN_CHECK(gathered_records[index - 1U].velocity_x ==
+                   gathered_records[index].velocity_x);
+      HUNDUN_CHECK(gathered_records[index - 1U].velocity_y ==
+                   gathered_records[index].velocity_y);
+      HUNDUN_CHECK(gathered_records[index - 1U].velocity_z ==
+                   gathered_records[index].velocity_z);
     }
   }
   HUNDUN_CHECK(saw_partition_replica == (ranks > 1));
