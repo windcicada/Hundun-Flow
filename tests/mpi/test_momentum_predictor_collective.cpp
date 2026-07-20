@@ -16,6 +16,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -242,6 +243,47 @@ void check_lowest_failure_rank_wins(const MpiContext &mpi) {
   require_no_solver_calls(mpi, fixture);
 }
 
+void check_nonpositive_diagonal_is_collective(const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  if (mpi.rank() == 1) {
+    fixture.op1 = TestOperator(fixture.context, fixture.layout, fixture.layout,
+                               {4.0, 0.0});
+  }
+  MomentumPredictor predictor(fixture.solver);
+  std::string message;
+  try {
+    static_cast<void>(
+        predictor.solve(mpi, fixture.equations(), SolveControl{}));
+  } catch (const Error &error) {
+    message = error.what();
+  }
+  HUNDUN_CHECK(message ==
+               "momentum predictor preflight failed on rank 1: momentum "
+               "operator diagonal must be finite and positive");
+  require_no_solver_calls(mpi, fixture);
+}
+
+void check_nonfinite_diagonal_is_collective(const MpiContext &mpi) {
+  Fixture fixture(mpi);
+  if (mpi.rank() == 1) {
+    fixture.op1 = TestOperator(
+        fixture.context, fixture.layout, fixture.layout,
+        {4.0, std::numeric_limits<double>::quiet_NaN()});
+  }
+  MomentumPredictor predictor(fixture.solver);
+  std::string message;
+  try {
+    static_cast<void>(
+        predictor.solve(mpi, fixture.equations(), SolveControl{}));
+  } catch (const Error &error) {
+    message = error.what();
+  }
+  HUNDUN_CHECK(message ==
+               "momentum predictor preflight failed on rank 1: momentum "
+               "operator diagonal must be finite and positive");
+  require_no_solver_calls(mpi, fixture);
+}
+
 void check_common_layout_mismatch_is_collective(const MpiContext &mpi) {
   Fixture fixture(mpi);
   if (mpi.rank() == 1) {
@@ -365,6 +407,8 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(mpi.size() == 2 || mpi.size() == 4);
     check_null_pointer_is_collective(mpi);
     check_lowest_failure_rank_wins(mpi);
+    check_nonpositive_diagonal_is_collective(mpi);
+    check_nonfinite_diagonal_is_collective(mpi);
     check_common_layout_mismatch_is_collective(mpi);
     check_nonsquare_layout_is_collective(mpi);
     check_event_failure_is_collective(mpi);
