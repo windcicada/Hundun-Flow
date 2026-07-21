@@ -11,6 +11,7 @@
 #include "hundun/linear/preconditioners.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
 #include "hundun/mesh/mesh_topology.hpp"
+#include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/exchange_plan.hpp"
 #include "hundun/runtime/field_access_plan.hpp"
 #include "hundun/runtime/field_registry.hpp"
@@ -392,6 +393,8 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
       registry.declare_field(cell_field("alpha", 1U)));
   const auto rank_mismatch_extra_field =
       registry.declare_field(cell_field("rank_mismatch_extra", 1U));
+  const auto direct_momentum_diagonal =
+      registry.declare_field(cell_field("direct_momentum_diagonal", 3U));
   registry.freeze();
 
   const auto box = decomposition.owned_box();
@@ -453,6 +456,120 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepFailureReason::invalid_input);
   HUNDUN_CHECK(direct_report.lowest_failing_rank == 0);
   HUNDUN_CHECK(!direct_report.accepted);
+
+  hundun::linear::JacobiPreconditioner direct_diagonal_preconditioner(
+      execution);
+  auto direct_diagonal_coupler = hundun::flow::PisoCoupler::create(
+      decomposition, topology, geometry, boundaries, mpi, execution, halo,
+      pressure_solver, direct_diagonal_preconditioner);
+  auto direct_diagonal_state = hundun::flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0,
+       hundun::flow::MomentumTimeOrder::backward_euler});
+  direct_diagonal_state.seed_accepted_layers(initial, initial);
+  direct_diagonal_state.begin_attempt();
+
+  const hundun::runtime::Int3 bad_diagonal_global{
+      extent.x / 2, extent.y / 2, extent.z / 2};
+  const auto bad_diagonal_global_id =
+      topology.global_cell_id(bad_diagonal_global);
+  const auto locally_observed_bad_diagonal =
+      topology.find_local_cell(bad_diagonal_global_id);
+  const auto observer_status = hundun::runtime::collective_status(
+      mpi, !locally_observed_bad_diagonal.has_value(),
+      "rank observes selected momentum diagonal");
+  HUNDUN_CHECK(!observer_status.ok);
+
+  const auto set_direct_diagonal = [&](double selected_value) {
+    auto diagonal = direct_diagonal_state.trial_layer().view<double>(
+        direct_momentum_diagonal);
+    for (int k = -2; k < local.z + 2; ++k) {
+      for (int j = -2; j < local.y + 2; ++j) {
+        for (int i = -2; i < local.x + 2; ++i) {
+          for (int component = 0; component < 3; ++component) {
+            diagonal(i, j, k, component) = 1.0;
+          }
+        }
+      }
+    }
+    if (locally_observed_bad_diagonal.has_value() &&
+        topology.cell_ownership(*locally_observed_bad_diagonal) ==
+            hundun::mesh::EntityOwnership::owned) {
+      const auto direct_box = decomposition.owned_box();
+      const hundun::runtime::Int3 index{
+          bad_diagonal_global.x - direct_box.begin.x,
+          bad_diagonal_global.y - direct_box.begin.y,
+          bad_diagonal_global.z - direct_box.begin.z};
+      for (int component = 0; component < 3; ++component) {
+        diagonal(index.x, index.y, index.z, component) = selected_value;
+      }
+    }
+  };
+
+  const auto check_direct_diagonal_rollback =
+      [&](const hundun::flow::FlowLayerValues &history_before,
+          const hundun::flow::FlowLayerValues &committed_before,
+          const hundun::flow::FlowLayerValues &trial_before,
+          const hundun::flow::AcceptedStepMetadata &metadata_before) {
+        check_layer_equal(
+            direct_diagonal_state.snapshot(hundun::flow::FlowLayer::history),
+            history_before);
+        check_layer_equal(direct_diagonal_state.snapshot(
+                              hundun::flow::FlowLayer::committed),
+                          committed_before);
+        check_layer_equal(
+            direct_diagonal_state.snapshot(hundun::flow::FlowLayer::trial),
+            trial_before);
+        check_metadata_equal(direct_diagonal_state.metadata(), metadata_before);
+      };
+
+  const auto require_direct_diagonal_rejection = [&](double selected_value) {
+    set_direct_diagonal(selected_value);
+    halo.exchange(direct_diagonal_state.trial_layer(),
+                  direct_momentum_diagonal);
+    const auto history_before =
+        direct_diagonal_state.snapshot(hundun::flow::FlowLayer::history);
+    const auto committed_before =
+        direct_diagonal_state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto trial_before =
+        direct_diagonal_state.snapshot(hundun::flow::FlowLayer::trial);
+    const auto metadata_before = direct_diagonal_state.metadata();
+    const auto rejection = direct_diagonal_coupler.correct(
+        direct_diagonal_state, rho_ref,
+        direct_diagonal_state.layer(hundun::flow::FlowLayer::trial)
+            .view<double>(direct_momentum_diagonal),
+        {});
+    HUNDUN_CHECK(
+        rejection.disposition ==
+        hundun::flow::PressureCorrectionDisposition::non_retryable_failure);
+    HUNDUN_CHECK(rejection.reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(rejection.lowest_failing_rank ==
+                 observer_status.failing_rank);
+    HUNDUN_CHECK(!rejection.accepted);
+    check_direct_diagonal_rollback(history_before, committed_before,
+                                   trial_before, metadata_before);
+  };
+
+  require_direct_diagonal_rejection(-0.25);
+  require_direct_diagonal_rejection(
+      std::numeric_limits<double>::quiet_NaN());
+
+  set_direct_diagonal(1.0);
+  halo.exchange(direct_diagonal_state.trial_layer(), direct_momentum_diagonal);
+  const auto direct_diagonal_retry = direct_diagonal_coupler.correct(
+      direct_diagonal_state, rho_ref,
+      direct_diagonal_state.layer(hundun::flow::FlowLayer::trial)
+          .view<double>(direct_momentum_diagonal),
+      {});
+  HUNDUN_CHECK(
+      direct_diagonal_retry.disposition ==
+      hundun::flow::PressureCorrectionDisposition::accepted);
+  HUNDUN_CHECK(direct_diagonal_retry.reason ==
+               hundun::flow::StepFailureReason::none);
+  HUNDUN_CHECK(direct_diagonal_retry.lowest_failing_rank == -1);
+  HUNDUN_CHECK(direct_diagonal_retry.accepted);
+  direct_diagonal_state.rollback_attempt();
 
   auto invalid_quantity_state = hundun::flow::FlowState::create(
       registry, {local, topology.local_face_count()}, fields,
@@ -737,9 +854,10 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     direct_rank_failure_state.seed_accepted_layers(positive_diagonal_values,
                                                    positive_diagonal_values);
     direct_rank_failure_state.begin_attempt();
+    halo.exchange(direct_rank_failure_state.trial_layer(), fields.velocity);
     const auto direct_rank_failure_report = rank_failure_coupler.correct(
         direct_rank_failure_state, rho_ref,
-        direct_rank_failure_state.layer(hundun::flow::FlowLayer::committed)
+        direct_rank_failure_state.layer(hundun::flow::FlowLayer::trial)
             .view<double>(fields.velocity),
         {});
     HUNDUN_CHECK(

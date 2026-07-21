@@ -679,6 +679,8 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
     PressureCorrectionReport &result) const {
   const std::size_t count = impl_->topology->owned_cell_count();
   const Int3 local_extent = impl_->decomposition->local_extent();
+  const auto owned = impl_->topology->owned_global_box();
+  const Int3 global_extent = impl_->topology->global_extent();
   synchronized_local_phase(
       *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure-correction input validation failed", [&] {
@@ -696,14 +698,31 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
           throw runtime::Error(
               "pressure correction diagonal layout is invalid");
         }
+        for (LocalCellId cell = 0; cell < impl_->topology->local_cell_count();
+             ++cell) {
+          const StructuredIndex index = map_cell(
+              impl_->topology->global_cell(cell), owned, global_extent);
+          const double scalar_diagonal =
+              at(actual_momentum_diagonal, index, 0);
+          for (int component_index = 0; component_index < 3;
+               ++component_index) {
+            const double component_diagonal =
+                at(actual_momentum_diagonal, index, component_index);
+            if (!(component_diagonal > 0.0) ||
+                !std::isfinite(component_diagonal) ||
+                component_diagonal != scalar_diagonal) {
+              throw runtime::Error(
+                  "pressure correction requires a positive finite isotropic "
+                  "momentum diagonal");
+            }
+          }
+        }
       });
 
   auto &trial = state.solver_layer(FlowLayer::trial);
   const auto &access = state.solver_access_plan();
   const auto &registry = state.solver_registry();
   const auto fields = state.fields();
-  const auto owned = impl_->topology->owned_global_box();
-  const Int3 global_extent = impl_->topology->global_extent();
   synchronized_local_phase(
       *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure-system derivation failed", [&] {
