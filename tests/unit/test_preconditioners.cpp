@@ -5,8 +5,11 @@
 #include "hundun/linear/preconditioners.hpp"
 #include "hundun/runtime/error.hpp"
 #include "execution/src/execution_test_access.hpp"
+#include "linear/src/preconditioners_test_access.hpp"
+#include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +44,9 @@ using hundun::linear::Preconditioner;
 using hundun::linear::SolveControl;
 using hundun::linear::SolveReport;
 using hundun::linear::VectorLayout;
+using hundun::linear::test::PreconditionerTestAccess;
 using hundun::runtime::Error;
+namespace allocation_probe = hundun::test::allocation_probe;
 
 template <class Function>
 std::string expect_error(Function&& function) {
@@ -161,7 +166,7 @@ class FakeOperator final : public LinearOperator {
     for (std::size_t index = 0; index < y.size(); ++index) {
       y[index] = x[index];
     }
-    return ExecutionEvent::completed();
+    return completed_;
   }
 
   bool has_diagonal() const override { return has_diagonal_; }
@@ -183,7 +188,7 @@ class FakeOperator final : public LinearOperator {
       ExecutionTestAccess::complete_error(event, "fake diagonal event error");
       return event;
     }
-    return ExecutionEvent::completed();
+    return completed_;
   }
 
   void set_revision(std::uint64_t revision) noexcept { revision_ = revision; }
@@ -213,6 +218,7 @@ class FakeOperator final : public LinearOperator {
   VectorLayout range_;
   std::uint64_t revision_;
   std::vector<double> diagonal_;
+  ExecutionEvent completed_{ExecutionEvent::completed()};
   bool has_diagonal_{true};
   bool throw_on_diagonal_{false};
   bool fail_diagonal_event_{false};
@@ -641,6 +647,14 @@ void test_jacobi_apply_and_cache() {
                                {2.0, -4.0, 0.5});
   JacobiPreconditioner jacobi(context);
   jacobi.update(linear_operator, 10U);
+  const auto initial_storage =
+      PreconditionerTestAccess::jacobi_storage(jacobi);
+  HUNDUN_CHECK(initial_storage.cache_valid);
+  HUNDUN_CHECK(initial_storage.revision == 10U);
+  HUNDUN_CHECK(initial_storage.allocation_identities[0] != 0U);
+  HUNDUN_CHECK(initial_storage.allocation_identities[1] != 0U);
+  HUNDUN_CHECK(initial_storage.allocation_identities[0] !=
+               initial_storage.allocation_identities[1]);
   HUNDUN_CHECK(linear_operator.diagonal_calls() == 1U);
   jacobi.update(linear_operator, 10U);
   HUNDUN_CHECK(linear_operator.diagonal_calls() == 1U);
@@ -662,7 +676,26 @@ void test_jacobi_apply_and_cache() {
 
   linear_operator.set_revision(11U);
   linear_operator.set_diagonal({4.0, 2.0, -0.5});
-  jacobi.update(linear_operator, 11U);
+  const auto allocation_identity_before_update =
+      ExecutionTestAccess::next_allocation_identity();
+  std::size_t compatible_update_allocations = 0U;
+  {
+    allocation_probe::AllocationAttemptGuard allocation_guard;
+    jacobi.update(linear_operator, 11U);
+    compatible_update_allocations = allocation_guard.attempts();
+  }
+  HUNDUN_CHECK(compatible_update_allocations == 0U);
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               allocation_identity_before_update);
+  const auto refreshed_storage =
+      PreconditionerTestAccess::jacobi_storage(jacobi);
+  auto initial_identities = initial_storage.allocation_identities;
+  auto refreshed_identities = refreshed_storage.allocation_identities;
+  std::sort(initial_identities.begin(), initial_identities.end());
+  std::sort(refreshed_identities.begin(), refreshed_identities.end());
+  HUNDUN_CHECK(refreshed_storage.cache_valid);
+  HUNDUN_CHECK(refreshed_storage.revision == 11U);
+  HUNDUN_CHECK(refreshed_identities == initial_identities);
   HUNDUN_CHECK(linear_operator.diagonal_calls() == 2U);
   set_values(r, {8.0, 6.0, 1.0});
   jacobi.apply(r, z).wait();
@@ -714,11 +747,19 @@ void test_jacobi_update_failures_are_transactional() {
   FakeOperator good(context, layout, layout, 3U, {2.0, 4.0});
   JacobiPreconditioner jacobi(context);
   jacobi.update(good, 3U);
+  const auto accepted_storage =
+      PreconditionerTestAccess::jacobi_storage(jacobi);
 
   Buffer residual(context, 2U * sizeof(double));
   Buffer correction(context, 2U * sizeof(double));
   set_values(residual.view(0U, 2U), {6.0, 8.0});
   auto prove_old_cache = [&] {
+    const auto current_storage =
+        PreconditionerTestAccess::jacobi_storage(jacobi);
+    HUNDUN_CHECK(current_storage.allocation_identities ==
+                 accepted_storage.allocation_identities);
+    HUNDUN_CHECK(current_storage.revision == accepted_storage.revision);
+    HUNDUN_CHECK(current_storage.cache_valid == accepted_storage.cache_valid);
     set_values(correction.view(0U, 2U), {-9.0, -9.0});
     jacobi.apply(residual.view(0U, 2U), correction.view(0U, 2U)).wait();
     HUNDUN_CHECK(read_values(correction.view(0U, 2U)) ==
@@ -761,7 +802,10 @@ void test_jacobi_update_failures_are_transactional() {
   HUNDUN_CHECK(throwing.diagonal_calls() == 1U);
   prove_old_cache();
 
-  FakeOperator allocation_failure(context, layout, layout, 4U, {1.0, 1.0});
+  const auto allocation_failure_layout = make_layout(3U, 0U, 100U);
+  FakeOperator allocation_failure(context, allocation_failure_layout,
+                                  allocation_failure_layout, 4U,
+                                  {1.0, 1.0, 1.0});
   ExecutionTestAccess::fail_next_allocation();
   expect_error_containing([&] { jacobi.update(allocation_failure, 4U); },
                           "allocation");

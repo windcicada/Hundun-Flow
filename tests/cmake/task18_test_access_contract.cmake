@@ -49,3 +49,10 @@ if(NOT test_access_position EQUAL -1)
   message(FATAL_ERROR
     "Task 18 tests-off header retains ConstantDensityPisoTestAccess")
 endif()
+
+string(FIND "${preprocessed_header}" "PreconditionerTestAccess"
+       linear_test_access_position)
+if(NOT linear_test_access_position EQUAL -1)
+  message(FATAL_ERROR
+    "Task 18 tests-off header retains PreconditionerTestAccess")
+endif()

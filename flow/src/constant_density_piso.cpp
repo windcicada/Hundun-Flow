@@ -3147,18 +3147,13 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     return fatal_failure(report, StepFailureReason::collective_operation,
                          -1);
   } catch (const runtime::Error &) {
-    if (active) {
+    if (active)
       state.rollback_attempt();
-      return numerical_failure(report, StepFailureReason::non_finite_trial,
-                               impl_->mpi->rank());
-    }
-    return fatal_failure(report, StepFailureReason::invalid_input,
-                         impl_->mpi->rank());
+    return fatal_failure(report, StepFailureReason::invalid_input, -1);
   } catch (...) {
     if (active)
       state.rollback_attempt();
-    return fatal_failure(report, StepFailureReason::invalid_input,
-                         impl_->mpi->rank());
+    return fatal_failure(report, StepFailureReason::invalid_input, -1);
   }
 }
 

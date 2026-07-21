@@ -2,6 +2,10 @@
 
 #include "hundun/linear/preconditioners.hpp"
 
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+#include "preconditioners_test_access.hpp"
+#endif
+
 #include "hundun/runtime/error.hpp"
 
 #include <cmath>
@@ -207,8 +211,52 @@ struct JacobiPreconditioner::State final {
   VectorLayout domain;
   VectorLayout range;
   std::optional<execution::Buffer> inverse_diagonal;
+  std::optional<execution::Buffer> staging_inverse_diagonal;
   bool cache_valid{false};
 };
+
+namespace {
+
+void fill_inverse_diagonal(const LinearOperator& linear_operator,
+                           execution::Buffer& destination,
+                           std::size_t count) {
+  auto staging_view = destination.view(0U, count);
+  auto diagonal_event = linear_operator.diagonal(staging_view);
+  diagonal_event.wait();
+
+  for (std::size_t index = 0; index < count; ++index) {
+    const double diagonal = staging_view[index];
+    if (!std::isfinite(diagonal)) {
+      throw runtime::Error("Jacobi diagonal value must be finite");
+    }
+    if (diagonal == 0.0) {
+      throw runtime::Error("Jacobi diagonal value must be nonzero");
+    }
+    if (!std::isfinite(1.0 / diagonal)) {
+      throw runtime::Error("Jacobi diagonal reciprocal must be finite");
+    }
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    staging_view[index] = 1.0 / staging_view[index];
+  }
+}
+
+bool reusable_jacobi_storage(
+    bool cache_valid,
+    const std::optional<execution::Buffer>& inverse_diagonal,
+    const std::optional<execution::Buffer>& staging_inverse_diagonal,
+    const execution::ExecutionContext* context, const VectorLayout& domain,
+    const VectorLayout& range, const CacheCandidate& candidate,
+    std::size_t byte_size) noexcept {
+  return cache_valid && inverse_diagonal.has_value() &&
+         staging_inverse_diagonal.has_value() &&
+         candidate.context == context && candidate.domain == domain &&
+         candidate.range == range &&
+         inverse_diagonal->byte_size() == byte_size &&
+         staging_inverse_diagonal->byte_size() == byte_size;
+}
+
+}  // namespace
 
 IdentityPreconditioner::IdentityPreconditioner(
     execution::ExecutionContext& context) {
@@ -288,25 +336,17 @@ void JacobiPreconditioner::update(
   }
 
   const std::size_t count = candidate.range.owned_count();
-  execution::Buffer staging(*state_->context, checked_vector_bytes(count));
-  auto staging_view = staging.view(0U, count);
-  auto diagonal_event = linear_operator.diagonal(staging_view);
-  diagonal_event.wait();
-
-  for (std::size_t index = 0; index < count; ++index) {
-    const double diagonal = staging_view[index];
-    if (!std::isfinite(diagonal)) {
-      throw runtime::Error("Jacobi diagonal value must be finite");
-    }
-    if (diagonal == 0.0) {
-      throw runtime::Error("Jacobi diagonal value must be nonzero");
-    }
-    if (!std::isfinite(1.0 / diagonal)) {
-      throw runtime::Error("Jacobi diagonal reciprocal must be finite");
-    }
-  }
-  for (std::size_t index = 0; index < count; ++index) {
-    staging_view[index] = 1.0 / staging_view[index];
+  const std::size_t byte_size = checked_vector_bytes(count);
+  if (reusable_jacobi_storage(
+          state_->cache_valid, state_->inverse_diagonal,
+          state_->staging_inverse_diagonal, state_->context, state_->domain,
+          state_->range, candidate, byte_size)) {
+    fill_inverse_diagonal(linear_operator,
+                          *state_->staging_inverse_diagonal, count);
+    state_->inverse_diagonal.swap(state_->staging_inverse_diagonal);
+    state_->linear_operator = candidate.linear_operator;
+    state_->revision = candidate.revision;
+    return;
   }
 
   std::unique_ptr<State> replacement;
@@ -319,7 +359,10 @@ void JacobiPreconditioner::update(
   replacement->revision = candidate.revision;
   replacement->domain = candidate.domain;
   replacement->range = candidate.range;
-  replacement->inverse_diagonal.emplace(std::move(staging));
+  replacement->inverse_diagonal.emplace(*state_->context, byte_size);
+  replacement->staging_inverse_diagonal.emplace(*state_->context, byte_size);
+  fill_inverse_diagonal(linear_operator, *replacement->inverse_diagonal,
+                        count);
   replacement->cache_valid = true;
   state_.swap(replacement);
 }
@@ -359,5 +402,27 @@ execution::ExecutionEvent JacobiPreconditioner::apply(
   }
   return event;
 }
+
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+test::JacobiStorageSnapshot test::PreconditionerTestAccess::jacobi_storage(
+    const JacobiPreconditioner& preconditioner) noexcept {
+  test::JacobiStorageSnapshot snapshot;
+  if (!preconditioner.state_) {
+    return snapshot;
+  }
+  const auto& state = *preconditioner.state_;
+  snapshot.revision = state.revision;
+  snapshot.cache_valid = state.cache_valid;
+  if (state.inverse_diagonal.has_value()) {
+    snapshot.allocation_identities[0] =
+        state.inverse_diagonal->allocation_identity();
+  }
+  if (state.staging_inverse_diagonal.has_value()) {
+    snapshot.allocation_identities[1] =
+        state.staging_inverse_diagonal->allocation_identity();
+  }
+  return snapshot;
+}
+#endif
 
 }  // namespace hundun::linear

@@ -177,18 +177,15 @@ struct FaceStencil final {
   runtime::Real3 nonorthogonal_area{};
 };
 
-std::vector<double> copy_positive_coefficients(
+void fill_positive_coefficients(
     execution::VectorView<const double> coefficients,
-    const execution::ExecutionContext& context, std::size_t expected_size) {
+    const execution::ExecutionContext& context, std::size_t expected_size,
+    std::vector<double>& result) {
   const double* values = validate_const_view(
       coefficients, context, expected_size, "Poisson face coefficient");
-  std::vector<double> result;
-  try {
-    result.resize(expected_size);
-  } catch (const std::bad_alloc&) {
-    throw runtime::Error("Poisson face coefficient allocation failed");
-  } catch (const std::length_error&) {
-    throw runtime::Error("Poisson face coefficient count is unsupported");
+  if (result.size() != expected_size) {
+    throw runtime::Error(
+        "Poisson face coefficient workspace size does not match");
   }
   for (std::size_t face = 0; face < expected_size; ++face) {
     const double value = values[face * coefficients.stride()];
@@ -198,6 +195,20 @@ std::vector<double> copy_positive_coefficients(
     }
     result[face] = value;
   }
+}
+
+std::vector<double> copy_positive_coefficients(
+    execution::VectorView<const double> coefficients,
+    const execution::ExecutionContext& context, std::size_t expected_size) {
+  std::vector<double> result;
+  try {
+    result.resize(expected_size);
+  } catch (const std::bad_alloc&) {
+    throw runtime::Error("Poisson face coefficient allocation failed");
+  } catch (const std::length_error&) {
+    throw runtime::Error("Poisson face coefficient count is unsupported");
+  }
+  fill_positive_coefficients(coefficients, context, expected_size, result);
   return result;
 }
 
@@ -342,17 +353,13 @@ void apply_stencil(const FaceStencil& stencil,
   }
 }
 
-std::vector<double> build_diagonal(
+void fill_diagonal(
     std::size_t owned_count, const std::vector<FaceStencil>& stencils,
-    const std::vector<double>& gamma) {
-  std::vector<double> diagonal;
-  try {
-    diagonal.assign(owned_count, 0.0);
-  } catch (const std::bad_alloc&) {
-    throw runtime::Error("Poisson diagonal allocation failed");
-  } catch (const std::length_error&) {
-    throw runtime::Error("Poisson diagonal count is unsupported");
+    const std::vector<double>& gamma, std::vector<double>& diagonal) {
+  if (diagonal.size() != owned_count) {
+    throw runtime::Error("Poisson diagonal workspace size does not match");
   }
+  std::fill(diagonal.begin(), diagonal.end(), 0.0);
   for (const FaceStencil& stencil : stencils) {
     const double coefficient =
         gamma[stencil.face] * stencil.orthogonal_factor;
@@ -387,6 +394,20 @@ std::vector<double> build_diagonal(
       throw runtime::Error("Poisson diagonal must be finite and nonnegative");
     }
   }
+}
+
+std::vector<double> build_diagonal(
+    std::size_t owned_count, const std::vector<FaceStencil>& stencils,
+    const std::vector<double>& gamma) {
+  std::vector<double> diagonal;
+  try {
+    diagonal.resize(owned_count);
+  } catch (const std::bad_alloc&) {
+    throw runtime::Error("Poisson diagonal allocation failed");
+  } catch (const std::length_error&) {
+    throw runtime::Error("Poisson diagonal count is unsupported");
+  }
+  fill_diagonal(owned_count, stencils, gamma, diagonal);
   return diagonal;
 }
 
@@ -410,7 +431,9 @@ struct MatrixFreePoissonOperator::Impl final {
                    : PoissonSolverFamily::bicgstab),
         stencils(std::move(supplied_stencils)),
         gamma(std::move(supplied_gamma)),
+        candidate_gamma(gamma.size()),
         diagonal_values(std::move(supplied_diagonal)),
+        candidate_diagonal(diagonal_values.size()),
         completed(execution::ExecutionEvent::completed()) {}
 
   execution::ExecutionContext* context;
@@ -422,7 +445,9 @@ struct MatrixFreePoissonOperator::Impl final {
   PoissonSolverFamily solver;
   std::vector<FaceStencil> stencils;
   std::vector<double> gamma;
+  std::vector<double> candidate_gamma;
   std::vector<double> diagonal_values;
+  std::vector<double> candidate_diagonal;
   std::uint64_t revision{kInitialRevision};
   execution::ExecutionEvent completed;
   mutable std::atomic<bool> active{false};
@@ -647,16 +672,19 @@ PoissonSolverFamily MatrixFreePoissonOperator::solver_family() const noexcept {
 std::uint64_t MatrixFreePoissonOperator::replace_face_coefficients(
     execution::VectorView<const double> gamma_by_local_face) {
   OperationGuard guard(impl_->active);
-  std::vector<double> candidate = copy_positive_coefficients(
-      gamma_by_local_face, *impl_->context, impl_->gamma.size());
-  std::vector<double> candidate_diagonal = build_diagonal(
-      impl_->layout.owned_count(), impl_->stencils, candidate);
+  fill_positive_coefficients(gamma_by_local_face, *impl_->context,
+                             impl_->gamma.size(), impl_->candidate_gamma);
+  fill_diagonal(impl_->layout.owned_count(), impl_->stencils,
+                impl_->candidate_gamma, impl_->candidate_diagonal);
+  if (impl_->candidate_gamma == impl_->gamma) {
+    return impl_->revision;
+  }
   if (detail::consume_force_revision_wrap() ||
       impl_->revision == std::numeric_limits<std::uint64_t>::max()) {
     throw runtime::Error("matrix-free Poisson revision would wrap");
   }
-  impl_->gamma = std::move(candidate);
-  impl_->diagonal_values = std::move(candidate_diagonal);
+  impl_->gamma.swap(impl_->candidate_gamma);
+  impl_->diagonal_values.swap(impl_->candidate_diagonal);
   ++impl_->revision;
   return impl_->revision;
 }

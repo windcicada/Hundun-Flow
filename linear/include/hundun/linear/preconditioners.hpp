@@ -8,6 +8,12 @@
 
 namespace hundun::linear {
 
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+namespace test {
+class PreconditionerTestAccess;
+}
+#endif
+
 class IdentityPreconditioner final : public Preconditioner {
  public:
   explicit IdentityPreconditioner(
@@ -42,6 +48,10 @@ class JacobiPreconditioner final : public Preconditioner {
  private:
   struct State;
   std::unique_ptr<State> state_;
+
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+  friend class test::PreconditionerTestAccess;
+#endif
 };
 
 }  // namespace hundun::linear

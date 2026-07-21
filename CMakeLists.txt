@@ -137,6 +137,10 @@ target_link_libraries(hundun_linear
     hundun_runtime
     hundun_options
     MPI::MPI_CXX)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_linear PUBLIC
+    HUNDUN_LINEAR_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_finite_volume STATIC
   finite_volume/src/cell_centered_fvm.cpp
@@ -474,7 +478,8 @@ if(HUNDUN_BUILD_TESTS)
     TIMEOUT 30)
 
   hundun_add_test(test_preconditioners
-    tests/unit/test_preconditioners.cpp)
+    tests/unit/test_preconditioners.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_preconditioners PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_preconditioners PRIVATE hundun_linear)

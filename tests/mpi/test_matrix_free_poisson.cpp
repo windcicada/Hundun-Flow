@@ -361,13 +361,38 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
   const std::uint64_t initial_revision = linear_operator.revision();
   const std::vector<double> replacement = face_coefficients(topology, 0.005);
   copy_to_buffer(replacement, gamma_buffer);
-  HUNDUN_CHECK(linear_operator.replace_face_coefficients(
-                   gamma_buffer.view(0U, replacement.size())) ==
-               initial_revision + 1U);
+  std::size_t changed_refresh_allocations = 0U;
+  {
+    allocation_probe::AllocationAttemptGuard allocation_guard;
+    HUNDUN_CHECK(linear_operator.replace_face_coefficients(
+                     gamma_buffer.view(0U, replacement.size())) ==
+                 initial_revision + 1U);
+    changed_refresh_allocations = allocation_guard.attempts();
+  }
+  HUNDUN_CHECK(changed_refresh_allocations == 0U);
   HUNDUN_CHECK(linear_operator.revision() == initial_revision + 1U);
-  HUNDUN_CHECK(linear_operator.replace_face_coefficients(
-                   gamma_buffer.view(0U, replacement.size())) ==
-               initial_revision + 2U);
+  std::size_t unchanged_refresh_allocations = 0U;
+  {
+    allocation_probe::AllocationAttemptGuard allocation_guard;
+    HUNDUN_CHECK(linear_operator.replace_face_coefficients(
+                     gamma_buffer.view(0U, replacement.size())) ==
+                 initial_revision + 1U);
+    unchanged_refresh_allocations = allocation_guard.attempts();
+  }
+  HUNDUN_CHECK(unchanged_refresh_allocations == 0U);
+  HUNDUN_CHECK(linear_operator.revision() == initial_revision + 1U);
+  linear_operator.diagonal(diagonal).wait();
+  std::vector<std::uint64_t> accepted_diagonal_bits(owned.size());
+  for (std::size_t cell = 0; cell < owned.size(); ++cell) {
+    accepted_diagonal_bits[cell] = bits(diagonal[cell]);
+  }
+
+  const auto require_accepted_diagonal = [&] {
+    linear_operator.diagonal(diagonal).wait();
+    for (std::size_t cell = 0; cell < owned.size(); ++cell) {
+      HUNDUN_CHECK(bits(diagonal[cell]) == accepted_diagonal_bits[cell]);
+    }
+  };
 
   const std::uint64_t before_failure = linear_operator.revision();
   gamma_buffer.view(0U, replacement.size())[0] =
@@ -377,14 +402,19 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
         gamma_buffer.view(0U, replacement.size())));
   });
   HUNDUN_CHECK(linear_operator.revision() == before_failure);
+  require_accepted_diagonal();
   gamma_buffer.view(0U, replacement.size())[0] = replacement[0];
+  const std::vector<double> wrap_candidate =
+      face_coefficients(topology, 0.0075);
+  copy_to_buffer(wrap_candidate, gamma_buffer);
   poisson_detail::set_poisson_test_options({{}, true, false});
   expect_error([&] {
     static_cast<void>(linear_operator.replace_face_coefficients(
-        gamma_buffer.view(0U, replacement.size())));
+        gamma_buffer.view(0U, wrap_candidate.size())));
   });
   poisson_detail::set_poisson_test_options({});
   HUNDUN_CHECK(linear_operator.revision() == before_failure);
+  require_accepted_diagonal();
 }
 
 void test_construction_rejections(const MpiContext& mpi) {

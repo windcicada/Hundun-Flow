@@ -28,6 +28,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -181,6 +182,33 @@ public:
         const hundun::linear::SolveControl &) const override {
     throw hundun::runtime::detail::MpiOperationError(
         "injected Task 18 operation failure");
+  }
+};
+
+class RuntimeErrorThrowingSolver final
+    : public hundun::linear::LinearSolver {
+public:
+  hundun::linear::SolveReport
+  solve(const hundun::linear::LinearOperator &,
+        hundun::linear::Preconditioner &,
+        hundun::execution::VectorView<const double>,
+        hundun::execution::VectorView<double>,
+        const hundun::linear::SolveControl &) const override {
+    throw hundun::runtime::Error(
+        "injected Task 18 unclassified runtime failure");
+  }
+};
+
+class NonRuntimeThrowingSolver final
+    : public hundun::linear::LinearSolver {
+public:
+  hundun::linear::SolveReport
+  solve(const hundun::linear::LinearOperator &,
+        hundun::linear::Preconditioner &,
+        hundun::execution::VectorView<const double>,
+        hundun::execution::VectorView<double>,
+        const hundun::linear::SolveControl &) const override {
+    throw std::logic_error("injected Task 18 non-runtime failure");
   }
 };
 
@@ -598,6 +626,50 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     check_layer_equal(
         operation_failure_state.snapshot(hundun::flow::FlowLayer::committed),
         operation_failure_committed);
+
+    const auto require_unclassified_failure =
+        [&](const hundun::linear::LinearSolver &throwing_solver) {
+          hundun::linear::JacobiPreconditioner failure_x(execution);
+          hundun::linear::JacobiPreconditioner failure_y(execution);
+          hundun::linear::JacobiPreconditioner failure_z(execution);
+          hundun::linear::JacobiPreconditioner failure_pressure(execution);
+          auto failure_flow =
+              hundun::flow::FixedStepConstantDensityFlow::create(
+                  decomposition, topology, geometry, boundaries, mpi,
+                  execution, halo, throwing_solver,
+                  {&failure_x, &failure_y, &failure_z}, pressure_solver,
+                  failure_pressure,
+                  {{fields.transported_cell_fields[0],
+                    hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+                    0.0}});
+          auto failure_state = make_zero_state();
+          const auto history_before =
+              failure_state.snapshot(hundun::flow::FlowLayer::history);
+          const auto committed_before =
+              failure_state.snapshot(hundun::flow::FlowLayer::committed);
+          const auto metadata_before = failure_state.metadata();
+          const auto failure_report = failure_flow.attempt(
+              failure_state, rho_ref, 0.0, stencil, {}, {});
+          HUNDUN_CHECK(
+              failure_report.disposition ==
+              hundun::flow::StepAttemptDisposition::non_retryable_failure);
+          HUNDUN_CHECK(failure_report.reason ==
+                       hundun::flow::StepFailureReason::invalid_input);
+          HUNDUN_CHECK(failure_report.lowest_failing_rank == -1);
+          HUNDUN_CHECK(failure_report.pressure_corrector_count == 0U);
+          HUNDUN_CHECK(failure_report.suggested_dt_s == 0.0);
+          check_metadata_equal(failure_state.metadata(), metadata_before);
+          check_layer_equal(
+              failure_state.snapshot(hundun::flow::FlowLayer::history),
+              history_before);
+          check_layer_equal(
+              failure_state.snapshot(hundun::flow::FlowLayer::committed),
+              committed_before);
+        };
+    RuntimeErrorThrowingSolver runtime_failure_solver;
+    require_unclassified_failure(runtime_failure_solver);
+    NonRuntimeThrowingSolver nonruntime_failure_solver;
+    require_unclassified_failure(nonruntime_failure_solver);
   }
 
   const auto warm_workspace = TestAccess::mesh_workspace_snapshot(flow);
