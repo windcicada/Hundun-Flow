@@ -415,6 +415,42 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
   poisson_detail::set_poisson_test_options({});
   HUNDUN_CHECK(linear_operator.revision() == before_failure);
   require_accepted_diagonal();
+
+  if (mpi.size() > 1) {
+    copy_to_buffer(wrap_candidate, gamma_buffer);
+    gamma_buffer.view(0U, wrap_candidate.size())[0] =
+        mpi.rank() == 1
+            ? std::numeric_limits<double>::quiet_NaN()
+            : wrap_candidate[0];
+    const auto failed_collective =
+        linear_operator.collectively_replace_face_coefficients(
+            gamma_buffer.view(0U, wrap_candidate.size()), mpi);
+    HUNDUN_CHECK(!failed_collective.accepted);
+    HUNDUN_CHECK(!failed_collective.changed);
+    HUNDUN_CHECK(failed_collective.lowest_failing_rank == 1);
+    HUNDUN_CHECK(failed_collective.revision == before_failure);
+    HUNDUN_CHECK(linear_operator.revision() == before_failure);
+    require_accepted_diagonal();
+
+    copy_to_buffer(wrap_candidate, gamma_buffer);
+    const auto accepted_collective =
+        linear_operator.collectively_replace_face_coefficients(
+            gamma_buffer.view(0U, wrap_candidate.size()), mpi);
+    HUNDUN_CHECK(accepted_collective.accepted);
+    HUNDUN_CHECK(accepted_collective.changed);
+    HUNDUN_CHECK(accepted_collective.lowest_failing_rank == -1);
+    HUNDUN_CHECK(accepted_collective.revision == before_failure + 1U);
+    HUNDUN_CHECK(linear_operator.revision() == before_failure + 1U);
+
+    const auto unchanged_collective =
+        linear_operator.collectively_replace_face_coefficients(
+            gamma_buffer.view(0U, wrap_candidate.size()), mpi);
+    HUNDUN_CHECK(unchanged_collective.accepted);
+    HUNDUN_CHECK(!unchanged_collective.changed);
+    HUNDUN_CHECK(unchanged_collective.lowest_failing_rank == -1);
+    HUNDUN_CHECK(unchanged_collective.revision == before_failure + 1U);
+    HUNDUN_CHECK(linear_operator.revision() == before_failure + 1U);
+  }
 }
 
 void test_construction_rejections(const MpiContext& mpi) {

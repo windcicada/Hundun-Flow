@@ -106,6 +106,7 @@ std::array<std::atomic<double>, 3> last_momentum_diagonal{};
 std::atomic<std::size_t> provisional_transport_call_count{0U};
 std::atomic<std::size_t> final_transport_call_count{0U};
 std::atomic<int> pressure_operator_construction_failure_rank{-1};
+std::atomic<int> pressure_operator_refresh_failure_rank{-1};
 #endif
 
 bool finite(Real3 value) noexcept {
@@ -833,17 +834,24 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
                                        error.failing_rank(), false};
     }
   } else {
-    try {
-      synchronized_local_phase(
-          *impl_->mpi, StepFailureReason::invalid_input, false,
-          "Task 18 pressure-operator update failed", [&] {
-            impl_->pressure_operator->replace_face_coefficients(
-                static_cast<const execution::Buffer &>(impl_->gamma)
-                    .view(0U, impl_->topology->local_face_count()));
-          });
-    } catch (const SynchronizedAttemptFailure &) {
-      impl_->pressure_operator.reset();
-      throw;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    const int injected_rank = pressure_operator_refresh_failure_rank.load(
+        std::memory_order_relaxed);
+    if (impl_->mpi->rank() == injected_rank &&
+        impl_->topology->local_face_count() != 0U) {
+      impl_->gamma.view(0U, impl_->topology->local_face_count())[0] =
+          std::numeric_limits<double>::quiet_NaN();
+    }
+#endif
+    const auto replacement =
+        impl_->pressure_operator->collectively_replace_face_coefficients(
+            static_cast<const execution::Buffer &>(impl_->gamma)
+                .view(0U, impl_->topology->local_face_count()),
+            *impl_->mpi);
+    if (!replacement.accepted) {
+      throw SynchronizedAttemptFailure{StepFailureReason::invalid_input,
+                                       replacement.lowest_failing_rank,
+                                       false};
     }
   }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -3221,6 +3229,8 @@ void test::ConstantDensityPisoTestAccess::reset() noexcept {
   final_transport_call_count.store(0U, std::memory_order_relaxed);
   pressure_operator_construction_failure_rank.store(-1,
                                                     std::memory_order_relaxed);
+  pressure_operator_refresh_failure_rank.store(-1,
+                                               std::memory_order_relaxed);
 }
 
 void test::ConstantDensityPisoTestAccess::force_final_continuity_failure(
@@ -3337,6 +3347,12 @@ void test::ConstantDensityPisoTestAccess::
                                                     std::memory_order_relaxed);
 }
 
+void test::ConstantDensityPisoTestAccess::
+    set_pressure_operator_refresh_failure_rank(int rank) noexcept {
+  pressure_operator_refresh_failure_rank.store(rank,
+                                               std::memory_order_relaxed);
+}
+
 void test::ConstantDensityPisoTestAccess::set_provisional_transport_sentinel(
     bool enabled) noexcept {
   provisional_transport_sentinel.store(enabled, std::memory_order_relaxed);
@@ -3449,6 +3465,19 @@ test::ConstantDensityPisoTestAccess::mesh_workspace_snapshot(
   add(coupler.pressure_candidate);
   add(coupler.face_velocity_candidate);
   add(coupler.mass_flux_candidate);
+  return snapshot;
+}
+
+test::PressureOperatorSnapshot
+test::ConstantDensityPisoTestAccess::pressure_operator_snapshot(
+    const FixedStepConstantDensityFlow &flow) noexcept {
+  test::PressureOperatorSnapshot snapshot;
+  const auto &candidate = flow.impl_->coupler.impl_->pressure_operator;
+  snapshot.present = candidate.has_value();
+  if (snapshot.present) {
+    snapshot.identity = reinterpret_cast<std::uintptr_t>(&*candidate);
+    snapshot.revision = candidate->revision();
+  }
   return snapshot;
 }
 #endif

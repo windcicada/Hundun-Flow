@@ -18,9 +18,11 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
+#include "linear/src/preconditioners_test_access.hpp"
 #include "runtime/src/mpi_error.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -237,6 +239,60 @@ void check_metadata_equal(const hundun::flow::AcceptedStepMetadata &left,
   HUNDUN_CHECK(fp64_bits(left.previous_dt_s) ==
                fp64_bits(right.previous_dt_s));
   HUNDUN_CHECK(left.order == right.order);
+}
+
+void check_solve_report_equal(const hundun::linear::SolveReport &left,
+                              const hundun::linear::SolveReport &right) {
+  HUNDUN_CHECK(left.reason == right.reason);
+  HUNDUN_CHECK(left.iterations == right.iterations);
+  HUNDUN_CHECK(fp64_bits(left.initial_residual) ==
+               fp64_bits(right.initial_residual));
+  HUNDUN_CHECK(fp64_bits(left.recursive_residual) ==
+               fp64_bits(right.recursive_residual));
+  HUNDUN_CHECK(fp64_bits(left.final_residual) ==
+               fp64_bits(right.final_residual));
+  HUNDUN_CHECK(left.matvec_count == right.matvec_count);
+  HUNDUN_CHECK(left.preconditioner_apply_count ==
+               right.preconditioner_apply_count);
+  HUNDUN_CHECK(left.global_reduction_count == right.global_reduction_count);
+  HUNDUN_CHECK(left.lowest_failing_rank == right.lowest_failing_rank);
+}
+
+void check_attempt_report_equal(const hundun::flow::StepAttemptReport &left,
+                                const hundun::flow::StepAttemptReport &right) {
+  HUNDUN_CHECK(left.disposition == right.disposition);
+  HUNDUN_CHECK(left.reason == right.reason);
+  HUNDUN_CHECK(left.lowest_failing_rank == right.lowest_failing_rank);
+  HUNDUN_CHECK(left.pressure_corrector_count ==
+               right.pressure_corrector_count);
+  HUNDUN_CHECK(fp64_bits(left.attempted_dt_s) ==
+               fp64_bits(right.attempted_dt_s));
+  HUNDUN_CHECK(fp64_bits(left.suggested_dt_s) ==
+               fp64_bits(right.suggested_dt_s));
+  for (std::size_t index = 0; index < left.momentum.components.size();
+       ++index) {
+    check_solve_report_equal(left.momentum.components[index],
+                             right.momentum.components[index]);
+  }
+  for (std::size_t index = 0; index < left.pressure.size(); ++index) {
+    check_solve_report_equal(left.pressure[index], right.pressure[index]);
+  }
+  HUNDUN_CHECK(fp64_bits(left.final_continuity_normalized_l2) ==
+               fp64_bits(right.final_continuity_normalized_l2));
+  HUNDUN_CHECK(fp64_bits(left.final_pressure_residual_l2) ==
+               fp64_bits(right.final_pressure_residual_l2));
+  HUNDUN_CHECK(left.final_momentum_normalized_l2 ==
+               right.final_momentum_normalized_l2);
+  HUNDUN_CHECK(left.final_transport_normalized_l2 ==
+               right.final_transport_normalized_l2);
+  HUNDUN_CHECK(fp64_bits(left.final_mass_relative_conservation_defect) ==
+               fp64_bits(right.final_mass_relative_conservation_defect));
+  HUNDUN_CHECK(left.final_momentum_relative_conservation_defect ==
+               right.final_momentum_relative_conservation_defect);
+  HUNDUN_CHECK(left.final_transport_relative_conservation_defect ==
+               right.final_transport_relative_conservation_defect);
+  HUNDUN_CHECK(left.final_backflow_evidence.has_value() ==
+               right.final_backflow_evidence.has_value());
 }
 
 double checkerboard_amplitude(const hundun::runtime::MpiContext &mpi,
@@ -521,6 +577,97 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   };
 
   if (mpi.size() > 1) {
+    const auto warm_operator = TestAccess::pressure_operator_snapshot(flow);
+    const auto warm_jacobi =
+        hundun::linear::test::PreconditionerTestAccess::jacobi_storage(
+            pressure_preconditioner);
+    HUNDUN_CHECK(warm_operator.present);
+    HUNDUN_CHECK(warm_operator.identity != 0U);
+    HUNDUN_CHECK(warm_jacobi.cache_valid);
+    HUNDUN_CHECK(warm_jacobi.revision == warm_operator.revision);
+
+    auto refresh_state = make_zero_state();
+    const auto refresh_history_before =
+        refresh_state.snapshot(hundun::flow::FlowLayer::history);
+    const auto refresh_committed_before =
+        refresh_state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto refresh_metadata_before = refresh_state.metadata();
+    const auto changed_stencil = hundun::flow::make_momentum_time_stencil(
+        hundun::flow::MomentumTimeOrder::backward_euler, 0.005, 0.0);
+    TestAccess::set_pressure_operator_refresh_failure_rank(1);
+    const auto refresh_failure = flow.attempt(
+        refresh_state, rho_ref, 0.0, changed_stencil, {}, {});
+    HUNDUN_CHECK(
+        refresh_failure.disposition ==
+        hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(refresh_failure.reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(refresh_failure.lowest_failing_rank == 1);
+    HUNDUN_CHECK(refresh_failure.pressure_corrector_count == 0U);
+    HUNDUN_CHECK(refresh_failure.suggested_dt_s == 0.0);
+    check_metadata_equal(refresh_state.metadata(), refresh_metadata_before);
+    check_layer_equal(
+        refresh_state.snapshot(hundun::flow::FlowLayer::history),
+        refresh_history_before);
+    check_layer_equal(
+        refresh_state.snapshot(hundun::flow::FlowLayer::committed),
+        refresh_committed_before);
+    const auto after_failure_operator =
+        TestAccess::pressure_operator_snapshot(flow);
+    const auto after_failure_jacobi =
+        hundun::linear::test::PreconditionerTestAccess::jacobi_storage(
+            pressure_preconditioner);
+    HUNDUN_CHECK(after_failure_operator.present);
+    HUNDUN_CHECK(after_failure_operator.identity == warm_operator.identity);
+    HUNDUN_CHECK(after_failure_operator.revision == warm_operator.revision);
+    HUNDUN_CHECK(after_failure_jacobi.cache_valid == warm_jacobi.cache_valid);
+    HUNDUN_CHECK(after_failure_jacobi.revision == warm_jacobi.revision);
+    HUNDUN_CHECK(after_failure_jacobi.allocation_identities ==
+                 warm_jacobi.allocation_identities);
+
+    TestAccess::reset();
+    const auto retry_report = flow.attempt(
+        refresh_state, rho_ref, 0.0, changed_stencil, {}, {});
+    HUNDUN_CHECK(retry_report.disposition ==
+                 hundun::flow::StepAttemptDisposition::committed);
+    const auto after_retry_operator =
+        TestAccess::pressure_operator_snapshot(flow);
+    const auto after_retry_jacobi =
+        hundun::linear::test::PreconditionerTestAccess::jacobi_storage(
+            pressure_preconditioner);
+    HUNDUN_CHECK(after_retry_operator.present);
+    HUNDUN_CHECK(after_retry_operator.identity == warm_operator.identity);
+    HUNDUN_CHECK(after_retry_operator.revision == warm_operator.revision + 1U);
+    HUNDUN_CHECK(after_retry_jacobi.cache_valid);
+    HUNDUN_CHECK(after_retry_jacobi.revision == after_retry_operator.revision);
+    auto warm_allocations = warm_jacobi.allocation_identities;
+    auto retry_allocations = after_retry_jacobi.allocation_identities;
+    std::sort(warm_allocations.begin(), warm_allocations.end());
+    std::sort(retry_allocations.begin(), retry_allocations.end());
+    HUNDUN_CHECK(retry_allocations == warm_allocations);
+
+    hundun::linear::JacobiPreconditioner reference_x(execution);
+    hundun::linear::JacobiPreconditioner reference_y(execution);
+    hundun::linear::JacobiPreconditioner reference_z(execution);
+    hundun::linear::JacobiPreconditioner reference_pressure(execution);
+    auto reference_flow = hundun::flow::FixedStepConstantDensityFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&reference_x, &reference_y, &reference_z},
+        pressure_solver, reference_pressure,
+        {{fields.transported_cell_fields[0],
+          hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+    auto reference_state = make_zero_state();
+    const auto reference_report = reference_flow.attempt(
+        reference_state, rho_ref, 0.0, changed_stencil, {}, {});
+    check_attempt_report_equal(retry_report, reference_report);
+    check_metadata_equal(refresh_state.metadata(), reference_state.metadata());
+    check_layer_equal(
+        refresh_state.snapshot(hundun::flow::FlowLayer::history),
+        reference_state.snapshot(hundun::flow::FlowLayer::history));
+    check_layer_equal(
+        refresh_state.snapshot(hundun::flow::FlowLayer::committed),
+        reference_state.snapshot(hundun::flow::FlowLayer::committed));
+
     SelectedRankPressureFailureSolver direct_rank_failure_solver;
     hundun::linear::JacobiPreconditioner direct_rank_failure_preconditioner(
         execution);

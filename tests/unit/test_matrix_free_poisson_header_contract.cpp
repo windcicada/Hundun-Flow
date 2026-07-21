@@ -14,6 +14,7 @@ using hundun::execution::ExecutionEvent;
 using hundun::execution::VectorView;
 using hundun::finite_volume::MatrixFreePoissonOperator;
 using hundun::finite_volume::PoissonBoundarySpec;
+using hundun::finite_volume::PoissonCoefficientReplacementResult;
 using hundun::finite_volume::PoissonConstructionError;
 using hundun::finite_volume::PoissonConstraint;
 using hundun::finite_volume::PoissonSolverFamily;
@@ -36,6 +37,9 @@ using OperatorDiagonal = ExecutionEvent (MatrixFreePoissonOperator::*)(
     VectorView<double>) const;
 using ReplaceFaceCoefficients = std::uint64_t (
     MatrixFreePoissonOperator::*)(VectorView<const double>);
+using CollectivelyReplaceFaceCoefficients =
+    PoissonCoefficientReplacementResult (MatrixFreePoissonOperator::*)(
+        VectorView<const double>, const MpiContext&);
 using AccumulateExplicitCorrection = ExecutionEvent (
     MatrixFreePoissonOperator::*)(VectorView<const double>,
                                   VectorView<const double>,
@@ -55,6 +59,7 @@ static_assert(std::is_enum_v<PoissonSolverFamily>);
 static_assert(std::is_same_v<std::underlying_type_t<PoissonSolverFamily>,
                              std::uint8_t>);
 static_assert(std::is_final_v<PoissonBoundarySpec>);
+static_assert(std::is_final_v<PoissonCoefficientReplacementResult>);
 static_assert(std::is_final_v<PoissonConstructionError>);
 static_assert(
     std::is_base_of_v<hundun::runtime::Error, PoissonConstructionError>);
@@ -87,6 +92,23 @@ static_assert(std::is_same_v<decltype(
                                  &MatrixFreePoissonOperator::
                                      replace_face_coefficients),
                              ReplaceFaceCoefficients>);
+static_assert(std::is_same_v<
+              decltype(&MatrixFreePoissonOperator::
+                           collectively_replace_face_coefficients),
+              CollectivelyReplaceFaceCoefficients>);
+static_assert(std::is_same_v<
+              decltype(PoissonCoefficientReplacementResult::accepted),
+              bool>);
+static_assert(std::is_same_v<
+              decltype(PoissonCoefficientReplacementResult::changed),
+              bool>);
+static_assert(std::is_same_v<decltype(
+                                 PoissonCoefficientReplacementResult::
+                                     lowest_failing_rank),
+                             int>);
+static_assert(std::is_same_v<
+              decltype(PoissonCoefficientReplacementResult::revision),
+              std::uint64_t>);
 static_assert(std::is_same_v<decltype(
                                  &MatrixFreePoissonOperator::
                                      accumulate_explicit_nonorthogonal_rhs),

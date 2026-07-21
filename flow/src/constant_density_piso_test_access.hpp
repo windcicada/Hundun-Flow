@@ -57,6 +57,12 @@ struct MeshWorkspaceSnapshot final {
   std::uintptr_t data_identity{};
 };
 
+struct PressureOperatorSnapshot final {
+  std::uintptr_t identity{};
+  std::uint64_t revision{};
+  bool present{};
+};
+
 class ConstantDensityPisoTestAccess final {
 public:
   static void reset() noexcept;
@@ -88,6 +94,7 @@ public:
   static void set_attempt_failure_stage(AttemptFailureStage stage) noexcept;
   static void
   set_pressure_operator_construction_failure_rank(int rank) noexcept;
+  static void set_pressure_operator_refresh_failure_rank(int rank) noexcept;
   static void set_provisional_transport_sentinel(bool enabled) noexcept;
   static void set_final_uniform_x_mass_flux(double value) noexcept;
   static void set_final_uniform_x_mass_flux_override(bool enabled) noexcept;
@@ -104,6 +111,8 @@ public:
   last_transport_conservation(std::size_t field_index) noexcept;
   static MeshWorkspaceSnapshot
   mesh_workspace_snapshot(const FixedStepConstantDensityFlow &flow) noexcept;
+  static PressureOperatorSnapshot pressure_operator_snapshot(
+      const FixedStepConstantDensityFlow &flow) noexcept;
 };
 
 } // namespace test

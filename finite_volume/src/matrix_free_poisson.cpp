@@ -162,6 +162,30 @@ class OperationGuard final {
   std::atomic<bool>* active_;
 };
 
+class CollectiveOperationGuard final {
+ public:
+  explicit CollectiveOperationGuard(std::atomic<bool>& active) noexcept
+      : active_(&active) {
+    bool expected = false;
+    acquired_ = active_->compare_exchange_strong(expected, true);
+  }
+
+  ~CollectiveOperationGuard() noexcept {
+    if (acquired_) {
+      active_->store(false);
+    }
+  }
+  CollectiveOperationGuard(const CollectiveOperationGuard&) = delete;
+  CollectiveOperationGuard& operator=(const CollectiveOperationGuard&) =
+      delete;
+
+  bool acquired() const noexcept { return acquired_; }
+
+ private:
+  std::atomic<bool>* active_;
+  bool acquired_{};
+};
+
 struct FaceStencil final {
   mesh::LocalFaceId face{};
   mesh::LocalCellId owner{};
@@ -687,6 +711,57 @@ std::uint64_t MatrixFreePoissonOperator::replace_face_coefficients(
   impl_->diagonal_values.swap(impl_->candidate_diagonal);
   ++impl_->revision;
   return impl_->revision;
+}
+
+PoissonCoefficientReplacementResult
+MatrixFreePoissonOperator::collectively_replace_face_coefficients(
+    execution::VectorView<const double> gamma_by_local_face,
+    const runtime::MpiContext& mpi_context) {
+  CollectiveOperationGuard guard(impl_->active);
+  bool local_prepared = guard.acquired();
+  bool local_changed = false;
+  if (local_prepared) {
+    try {
+      fill_positive_coefficients(gamma_by_local_face, *impl_->context,
+                                 impl_->gamma.size(),
+                                 impl_->candidate_gamma);
+      fill_diagonal(impl_->layout.owned_count(), impl_->stencils,
+                    impl_->candidate_gamma, impl_->candidate_diagonal);
+      local_changed = impl_->candidate_gamma != impl_->gamma;
+    } catch (...) {
+      local_prepared = false;
+    }
+  }
+
+  const auto preparation = runtime::collective_status(
+      mpi_context, local_prepared,
+      "Poisson coefficient replacement preparation failed");
+  if (!preparation.ok) {
+    return {false, false, preparation.failing_rank, impl_->revision};
+  }
+
+  double changed = local_changed ? 1.0 : 0.0;
+  mpi_context.allreduce_fp64_in_place(
+      &changed, 1U, runtime::Fp64ReductionOperation::maximum);
+  const bool any_changed = changed != 0.0;
+  if (!any_changed) {
+    return {true, false, -1, impl_->revision};
+  }
+
+  const bool local_revision_valid =
+      !detail::consume_force_revision_wrap() &&
+      impl_->revision != std::numeric_limits<std::uint64_t>::max();
+  const auto revision_status = runtime::collective_status(
+      mpi_context, local_revision_valid,
+      "Poisson coefficient replacement revision would wrap");
+  if (!revision_status.ok) {
+    return {false, false, revision_status.failing_rank, impl_->revision};
+  }
+
+  impl_->gamma.swap(impl_->candidate_gamma);
+  impl_->diagonal_values.swap(impl_->candidate_diagonal);
+  ++impl_->revision;
+  return {true, true, -1, impl_->revision};
 }
 
 execution::ExecutionEvent

@@ -31,6 +31,13 @@ struct PoissonBoundarySpec final {
   std::optional<std::uint32_t> pressure_reference_patch_id{};
 };
 
+struct PoissonCoefficientReplacementResult final {
+  bool accepted{};
+  bool changed{};
+  int lowest_failing_rank{-1};
+  std::uint64_t revision{};
+};
+
 // Construction performs a collective preflight.  This public error preserves
 // the lowest rank selected by that preflight without requiring callers to
 // interpret diagnostic text.
@@ -75,8 +82,21 @@ class MatrixFreePoissonOperator final : public linear::LinearOperator {
   std::optional<std::uint32_t> pressure_reference_patch_id() const noexcept;
   PoissonSolverFamily solver_family() const noexcept;
 
+  // Local transactional replacement. Failure preserves the active
+  // coefficients, diagonal and revision. Distributed callers that require
+  // one common commit must use collectively_replace_face_coefficients().
   std::uint64_t replace_face_coefficients(
       execution::VectorView<const double> gamma_by_local_face);
+
+  // Collective prepare/commit over mpi_context. No rank changes active state
+  // until every rank has prepared a valid candidate and any required revision
+  // increment has been validated.
+  // A rejected result preserves the active coefficients, diagonal and
+  // revision everywhere and carries the lowest failing rank. MPI operation
+  // failures remain typed exceptions from the runtime layer.
+  PoissonCoefficientReplacementResult collectively_replace_face_coefficients(
+      execution::VectorView<const double> gamma_by_local_face,
+      const runtime::MpiContext& mpi_context);
 
   execution::ExecutionEvent accumulate_explicit_nonorthogonal_rhs(
       execution::VectorView<const double> gradient_x_by_local_face,
