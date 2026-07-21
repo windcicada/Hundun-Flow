@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/diagnostics/structured_diagnostics.hpp"
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+#include "structured_diagnostics_test_access.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -418,6 +421,13 @@ DiagnosticCapability level_capability(DiagnosticLevel level) {
 }
 
 } // namespace
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+std::uint64_t test::crc64_ecma(std::string_view bytes) noexcept {
+  return crc64(reinterpret_cast<const unsigned char *>(bytes.data()),
+               bytes.size());
+}
+#endif
 
 DiagnosticCollectionError::DiagnosticCollectionError(
     DiagnosticFailureClass classification, std::string code,

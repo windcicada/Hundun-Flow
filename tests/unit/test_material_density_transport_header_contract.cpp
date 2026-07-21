@@ -10,6 +10,12 @@ static_assert(
 static_assert(std::is_move_constructible_v<hundun::flow::MaterialFaceMassFlux>);
 static_assert(
     !std::is_copy_constructible_v<hundun::flow::MaterialDensityTransport>);
+static_assert(
+    !std::is_aggregate_v<hundun::flow::MaterialDensityTransportReport>);
+static_assert(
+    std::is_copy_constructible_v<hundun::flow::MaterialDensityTransportReport>);
+static_assert(
+    std::is_move_constructible_v<hundun::flow::MaterialDensityTransportReport>);
 
 int main() {
   const hundun::flow::MaterialDensityTransportSpec spec{};

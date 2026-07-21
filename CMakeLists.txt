@@ -54,6 +54,10 @@ target_include_directories(hundun_diagnostics_core PUBLIC
 target_link_libraries(hundun_diagnostics_core
   PRIVATE hundun_warnings
   PUBLIC hundun_options)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_diagnostics_core PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(yyjson STATIC third_party/yyjson/yyjson.c)
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -203,6 +207,10 @@ target_link_libraries(hundun_material_diagnostics
     hundun_runtime
     hundun_options
     MPI::MPI_CXX)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_material_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
@@ -470,6 +478,8 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/diagnostics/include")
   target_link_libraries(test_structured_diagnostics PRIVATE
     hundun_diagnostics_core)
+  target_compile_definitions(test_structured_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
   set_tests_properties(test_structured_diagnostics PROPERTIES
     LABELS "unit;task19" TIMEOUT 30)
 
@@ -490,6 +500,41 @@ if(HUNDUN_BUILD_TESTS)
     hundun_runtime MPI::MPI_CXX)
   set_tests_properties(test_mpi_operation_error PROPERTIES
     LABELS "unit;task19" TIMEOUT 30)
+
+  string(REPLACE ";" "|" task19_mpi_include_dirs
+         "${MPI_CXX_INCLUDE_DIRS}")
+  string(REPLACE ";" "|" task19_mpi_libraries "${MPI_CXX_LIBRARIES}")
+  set(task19_sanitizer_flags)
+  if(HUNDUN_ENABLE_ASAN)
+    list(APPEND task19_sanitizer_flags -fsanitize=address
+         -fno-omit-frame-pointer)
+  endif()
+  if(HUNDUN_ENABLE_UBSAN)
+    list(APPEND task19_sanitizer_flags -fsanitize=undefined
+         -fno-omit-frame-pointer)
+  endif()
+  string(REPLACE ";" "|" task19_sanitizer_flags_argument
+         "${task19_sanitizer_flags}")
+  add_test(NAME test_task19_tests_off_header_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DHUNDUN_MPI_INCLUDE_DIRS=${task19_mpi_include_dirs}"
+            "-DHUNDUN_MPI_LIBRARIES=${task19_mpi_libraries}"
+            "-DHUNDUN_MPI_LINK_FLAGS=${MPI_CXX_LINK_FLAGS}"
+            "-DHUNDUN_SANITIZER_FLAGS=${task19_sanitizer_flags_argument}"
+            "-DHUNDUN_RUNTIME_LIBRARY=$<TARGET_FILE:hundun_runtime>"
+            "-DHUNDUN_CONTRACT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task19_test_access_contract.cmake")
+  set_tests_properties(test_task19_tests_off_header_contract PROPERTIES
+    LABELS "unit;source_policy;task19" TIMEOUT 30)
+  add_test(NAME test_task19_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task19_source_policy.cmake")
+  set_tests_properties(test_task19_source_policy PROPERTIES
+    LABELS "unit;source_policy;task19" TIMEOUT 30)
 
   hundun_add_test(test_execution tests/unit/test_execution.cpp)
   target_include_directories(test_execution PRIVATE
@@ -740,6 +785,9 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_material_density_diagnostics PRIVATE
     hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
     MPI::MPI_CXX)
+  target_compile_definitions(test_material_density_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1
+    HUNDUN_FLOW_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     set(material_diagnostics_test
         "test_material_density_diagnostics_${ranks}_rank")

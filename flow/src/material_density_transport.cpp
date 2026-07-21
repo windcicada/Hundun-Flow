@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -128,6 +129,18 @@ struct SynchronizedFailure final {
   int rank{-1};
 };
 
+class TransportComputationFailure final : public runtime::Error {
+public:
+  TransportComputationFailure(SynchronizedFailure failure,
+                              const std::string &message)
+      : runtime::Error(message), failure_(failure) {}
+
+  SynchronizedFailure failure() const noexcept { return failure_; }
+
+private:
+  SynchronizedFailure failure_;
+};
+
 SynchronizedFailure
 synchronize_failure(const runtime::MpiContext &mpi,
                     MaterialTransportFailureReason local_reason) {
@@ -148,6 +161,40 @@ synchronize_failure(const runtime::MpiContext &mpi,
 
 double relative_defect(double raw, double scale) noexcept {
   return std::abs(raw) / std::max(scale, std::numeric_limits<double>::min());
+}
+
+double conservation_denominator(double current_integral, double next_integral,
+                                double history_integral,
+                                double history_coefficient,
+                                double boundary_scale,
+                                double cancellation_current,
+                                double cancellation_next,
+                                double cancellation_history) noexcept {
+  const double ordinary = std::max(
+      {std::abs(current_integral), std::abs(next_integral),
+       std::abs(history_coefficient * (history_integral - current_integral)),
+       std::abs(boundary_scale), std::numeric_limits<double>::min()});
+  const double cancellation_scale =
+      std::max({cancellation_current, cancellation_next, cancellation_history});
+  if (cancellation_scale > 0.0 &&
+      ordinary <=
+          64.0 * std::numeric_limits<double>::epsilon() * cancellation_scale)
+    return cancellation_scale;
+  return ordinary;
+}
+
+void hash_u64(std::uint64_t &hash, std::uint64_t value) noexcept {
+  for (unsigned shift = 0; shift < 64U; shift += 8U) {
+    hash ^= (value >> shift) & 0xffU;
+    hash *= UINT64_C(1099511628211);
+  }
+}
+
+std::uint64_t double_bits(double value) noexcept {
+  std::uint64_t bits{};
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
 }
 
 class CompensatedSum final {
@@ -209,6 +256,129 @@ std::size_t MaterialFaceMassFlux::face_count() const noexcept {
 }
 MaterialFluxProvenance MaterialFaceMassFlux::provenance() const noexcept {
   return impl_ ? impl_->provenance : MaterialFluxProvenance::predictor;
+}
+
+MaterialTransportDisposition
+MaterialDensityTransportReport::disposition() const noexcept {
+  return disposition_;
+}
+MaterialTransportFailureReason
+MaterialDensityTransportReport::reason() const noexcept {
+  return reason_;
+}
+int MaterialDensityTransportReport::lowest_failing_rank() const noexcept {
+  return lowest_failing_rank_;
+}
+const MomentumTimeStencil &
+MaterialDensityTransportReport::stencil() const noexcept {
+  return stencil_;
+}
+MaterialFluxProvenance
+MaterialDensityTransportReport::flux_provenance() const noexcept {
+  return flux_provenance_;
+}
+std::uint64_t
+MaterialDensityTransportReport::attempt_identity() const noexcept {
+  return attempt_identity_;
+}
+std::uint64_t
+MaterialDensityTransportReport::finalization_identity() const noexcept {
+  return finalization_identity_;
+}
+runtime::FieldId
+MaterialDensityTransportReport::shared_face_mass_flux_field() const noexcept {
+  return shared_face_mass_flux_field_;
+}
+bool MaterialDensityTransportReport::density_residual_available()
+    const noexcept {
+  return density_residual_available_;
+}
+double MaterialDensityTransportReport::density_normalized_l2() const noexcept {
+  return density_normalized_l2_;
+}
+const std::vector<std::uint8_t> &
+MaterialDensityTransportReport::transport_residual_availability()
+    const noexcept {
+  return transport_residual_available_;
+}
+const std::vector<double> &
+MaterialDensityTransportReport::transport_normalized_l2() const noexcept {
+  return transport_normalized_l2_;
+}
+bool MaterialDensityTransportReport::mass_conservation_available()
+    const noexcept {
+  return mass_conservation_available_;
+}
+double MaterialDensityTransportReport::mass_relative_conservation_defect()
+    const noexcept {
+  return mass_relative_conservation_defect_;
+}
+const std::vector<std::uint8_t> &
+MaterialDensityTransportReport::transport_conservation_availability()
+    const noexcept {
+  return transport_conservation_available_;
+}
+const std::vector<double> &
+MaterialDensityTransportReport::transport_relative_conservation_defect()
+    const noexcept {
+  return transport_relative_conservation_defect_;
+}
+bool MaterialDensityTransportReport::minimum_density_available()
+    const noexcept {
+  return minimum_density_available_;
+}
+double
+MaterialDensityTransportReport::minimum_density_kg_per_m3() const noexcept {
+  return minimum_density_kg_per_m3_;
+}
+mesh::GlobalCellId
+MaterialDensityTransportReport::minimum_density_global_cell() const noexcept {
+  return minimum_density_global_cell_;
+}
+int MaterialDensityTransportReport::minimum_density_rank() const noexcept {
+  return minimum_density_rank_;
+}
+
+std::uint64_t MaterialDensityTransportReport::compute_seal() const noexcept {
+  std::uint64_t hash = UINT64_C(14695981039346656037);
+  hash_u64(hash, static_cast<std::uint64_t>(disposition_));
+  hash_u64(hash, static_cast<std::uint64_t>(reason_));
+  hash_u64(hash, static_cast<std::uint64_t>(lowest_failing_rank_));
+  hash_u64(hash, static_cast<std::uint64_t>(stencil_.order));
+  hash_u64(hash, double_bits(stencil_.dt_s));
+  hash_u64(hash, double_bits(stencil_.previous_dt_s));
+  hash_u64(hash, double_bits(stencil_.alpha0));
+  hash_u64(hash, double_bits(stencil_.alpha1));
+  hash_u64(hash, double_bits(stencil_.alpha2));
+  hash_u64(hash, static_cast<std::uint64_t>(flux_provenance_));
+  hash_u64(hash, attempt_identity_);
+  hash_u64(hash, finalization_identity_);
+  hash_u64(hash, static_cast<std::uint64_t>(shared_face_mass_flux_field_));
+  hash_u64(hash, density_residual_available_ ? 1U : 0U);
+  hash_u64(hash, double_bits(density_normalized_l2_));
+  hash_u64(hash, transport_residual_available_.size());
+  for (const auto value : transport_residual_available_)
+    hash_u64(hash, value);
+  hash_u64(hash, transport_normalized_l2_.size());
+  for (const double value : transport_normalized_l2_)
+    hash_u64(hash, double_bits(value));
+  hash_u64(hash, mass_conservation_available_ ? 1U : 0U);
+  hash_u64(hash, double_bits(mass_relative_conservation_defect_));
+  hash_u64(hash, transport_conservation_available_.size());
+  for (const auto value : transport_conservation_available_)
+    hash_u64(hash, value);
+  hash_u64(hash, transport_relative_conservation_defect_.size());
+  for (const double value : transport_relative_conservation_defect_)
+    hash_u64(hash, double_bits(value));
+  hash_u64(hash, minimum_density_available_ ? 1U : 0U);
+  hash_u64(hash, double_bits(minimum_density_kg_per_m3_));
+  hash_u64(hash, minimum_density_global_cell_);
+  hash_u64(hash, static_cast<std::uint64_t>(minimum_density_rank_));
+  return hash == 0U ? 1U : hash;
+}
+void MaterialDensityTransportReport::seal() noexcept { seal_ = compute_seal(); }
+bool MaterialDensityTransportReport::authenticated() const noexcept {
+  return seal_ != 0U && seal_ == compute_seal();
 }
 
 struct MaterialDensityTransport::Impl final {
@@ -314,6 +484,7 @@ struct MaterialDensityTransport::Impl final {
   mutable const FlowState *last_state{};
   mutable std::uint64_t last_attempt_identity{};
   mutable std::uint64_t last_finalization_identity{};
+  mutable std::uint64_t last_report_seal{};
   mutable bool active{};
 };
 
@@ -342,6 +513,37 @@ void MaterialDensityTransportTestAccess::force_finalization_identity_wrap(
     MaterialDensityTransport &transport) noexcept {
   transport.impl_->finalization_identity =
       std::numeric_limits<std::uint64_t>::max();
+}
+double MaterialDensityTransportTestAccess::conservation_denominator(
+    const MaterialConservationScaleInput &input) noexcept {
+  return ::hundun::flow::conservation_denominator(
+      input.current_integral, input.next_integral, input.history_integral,
+      input.history_coefficient, input.boundary_scale,
+      input.cancellation_current, input.cancellation_next,
+      input.cancellation_history);
+}
+void MaterialDensityTransportTestAccess::corrupt_report(
+    MaterialDensityTransportReport &report,
+    MaterialReportCorruption corruption) noexcept {
+  switch (corruption) {
+  case MaterialReportCorruption::scalar:
+    ++report.finalization_identity_;
+    break;
+  case MaterialReportCorruption::vector_size:
+    report.transport_normalized_l2_.push_back(0.0);
+    break;
+  case MaterialReportCorruption::vector_element:
+    if (!report.transport_normalized_l2_.empty())
+      report.transport_normalized_l2_.front() =
+          std::nextafter(report.transport_normalized_l2_.front(), 1.0);
+    break;
+  case MaterialReportCorruption::availability:
+    report.density_residual_available_ = !report.density_residual_available_;
+    break;
+  case MaterialReportCorruption::seal:
+    report.seal_ ^= 1U;
+    break;
+  }
 }
 } // namespace test
 #endif
@@ -427,19 +629,31 @@ TransportResidual compute_transport_residual(
       state.layer(FlowLayer::history)
           .acquire_read<double>(impl.access, kMaterialPhase, kMaterialActor,
                                 conserved_field);
-  for_each_owned_cell(
-      *impl.topology, [&](mesh::LocalCellId, runtime::Int3 index) {
-        const double density_n = rho_n(index.x, index.y, index.z, 0);
-        const double density_h = rho_h(index.x, index.y, index.z, 0);
-        const double value_n = conserved_n(index.x, index.y, index.z, 0);
-        const double value_h = conserved_h(index.x, index.y, index.z, 0);
-        if (!(density_n > 0.0) || !(density_h > 0.0) ||
-            !std::isfinite(density_n) || !std::isfinite(density_h) ||
-            !std::isfinite(value_n) || !std::isfinite(value_h))
-          throw runtime::Error("material transport intensive state is invalid");
-        qn(index.x, index.y, index.z, 0) = value_n / density_n;
-        qh(index.x, index.y, index.z, 0) = value_h / density_h;
-      });
+  MaterialTransportFailureReason local_failure =
+      MaterialTransportFailureReason::none;
+  try {
+    for_each_owned_cell(*impl.topology, [&](mesh::LocalCellId,
+                                            runtime::Int3 index) {
+      const double density_n = rho_n(index.x, index.y, index.z, 0);
+      const double density_h = rho_h(index.x, index.y, index.z, 0);
+      const double value_n = conserved_n(index.x, index.y, index.z, 0);
+      const double value_h = conserved_h(index.x, index.y, index.z, 0);
+      if (!(density_n > 0.0) || !(density_h > 0.0) ||
+          !std::isfinite(density_n) || !std::isfinite(density_h) ||
+          !std::isfinite(value_n) || !std::isfinite(value_h))
+        throw runtime::Error("material transport intensive state is invalid");
+      qn(index.x, index.y, index.z, 0) = value_n / density_n;
+      qh(index.x, index.y, index.z, 0) = value_h / density_h;
+    });
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (const std::exception &) {
+    local_failure = MaterialTransportFailureReason::non_finite_state;
+  }
+  auto synchronized = synchronize_failure(*impl.mpi, local_failure);
+  if (synchronized.reason != MaterialTransportFailureReason::none)
+    throw TransportComputationFailure(
+        synchronized, "material transport intensive state is invalid");
   impl.halo->exchange(scratch, impl.scratch_intensive_n);
   impl.halo->exchange(scratch, impl.scratch_intensive_h);
 
@@ -455,12 +669,23 @@ TransportResidual compute_transport_residual(
   auto grad_h = scratch.template acquire_write<double>(
       *impl.scratch_access, kScratchPhase, kScratchActor,
       impl.scratch_gradient_h);
-  impl.operators.compute_gradient(finite_volume::GradientScheme::green_gauss,
-                                  quantity(field_index), *impl.boundaries,
-                                  qn_read, grad_n);
-  impl.operators.compute_gradient(finite_volume::GradientScheme::green_gauss,
-                                  quantity(field_index), *impl.boundaries,
-                                  qh_read, grad_h);
+  local_failure = MaterialTransportFailureReason::none;
+  try {
+    impl.operators.compute_gradient(finite_volume::GradientScheme::green_gauss,
+                                    quantity(field_index), *impl.boundaries,
+                                    qn_read, grad_n);
+    impl.operators.compute_gradient(finite_volume::GradientScheme::green_gauss,
+                                    quantity(field_index), *impl.boundaries,
+                                    qh_read, grad_h);
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (const std::exception &) {
+    local_failure = MaterialTransportFailureReason::non_finite_state;
+  }
+  synchronized = synchronize_failure(*impl.mpi, local_failure);
+  if (synchronized.reason != MaterialTransportFailureReason::none)
+    throw TransportComputationFailure(synchronized,
+                                      "material transport gradient is invalid");
   impl.halo->exchange(scratch, impl.scratch_gradient_n);
   impl.halo->exchange(scratch, impl.scratch_gradient_h);
 
@@ -602,17 +827,36 @@ MaterialDensityTransport::MaterialDensityTransport(
 MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
     const MomentumTimeStencil &stencil) const {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  const MaterialTestControl overrides =
+      std::exchange(material_test_control, MaterialTestControl{});
+#endif
   MaterialDensityTransportReport report;
-  report.stencil = stencil;
-  report.flux_provenance = final_mass_flux.provenance();
-  report.shared_face_mass_flux_field = final_mass_flux.field_id();
+  const std::size_t transport_field_count =
+      1U + impl_->specification.scalar_densities.size();
+  report.transport_residual_available_.assign(transport_field_count, 0U);
+  report.transport_normalized_l2_.assign(transport_field_count, 0.0);
+  report.transport_conservation_available_.assign(transport_field_count, 0U);
+  report.transport_relative_conservation_defect_.assign(transport_field_count,
+                                                        0.0);
+  report.stencil_ = stencil;
+  report.flux_provenance_ = final_mass_flux.provenance();
+  report.shared_face_mass_flux_field_ = final_mass_flux.field_id();
   if (impl_->active)
     throw runtime::Error("material transport call overlaps another call");
   if (impl_->finalization_identity == std::numeric_limits<std::uint64_t>::max())
     throw runtime::Error("material finalization identity would wrap");
   ++impl_->finalization_identity;
-  report.finalization_identity = impl_->finalization_identity;
-  report.attempt_identity = state.attempt_identity();
+  report.finalization_identity_ = impl_->finalization_identity;
+  report.attempt_identity_ = state.attempt_identity();
+  const auto finish_report = [&]() {
+    report.seal();
+    impl_->last_state = &state;
+    impl_->last_attempt_identity = report.attempt_identity_;
+    impl_->last_finalization_identity = report.finalization_identity_;
+    impl_->last_report_seal = report.seal_;
+    return report;
+  };
   struct Guard final {
     bool &active;
     ~Guard() { active = false; }
@@ -659,13 +903,10 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
   }
   auto failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::non_retryable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
+    report.disposition_ = MaterialTransportDisposition::non_retryable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish_report();
   }
 
   const auto fields = transport_fields(*impl_);
@@ -710,13 +951,10 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
                      : MaterialTransportFailureReason::none);
   failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::recoverable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish_report();
   }
 
   auto &scratch = *impl_->scratch_storage;
@@ -753,24 +991,26 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     });
   } catch (const std::domain_error &) {
     local = MaterialTransportFailureReason::non_positive_density;
+  } catch (const runtime::MpiOperationError &) {
+    throw;
   } catch (const std::exception &) {
     local = MaterialTransportFailureReason::non_finite_state;
   }
   failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::recoverable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish_report();
   }
 
-  local = MaterialTransportFailureReason::none;
-  try {
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-      residuals.push_back(compute_transport_residual(
+  for (std::size_t field = 0; field < fields.size(); ++field) {
+    local = MaterialTransportFailureReason::none;
+    std::optional<TransportResidual> residual;
+    std::vector<double> candidate_values;
+    bool failure_already_synchronized = false;
+    try {
+      residual.emplace(compute_transport_residual(
           *impl_, final_mass_flux.impl_->handle, state, fields[field], field));
       const auto q_n = state.layer(FlowLayer::committed)
                            .acquire_read<double>(impl_->access, kMaterialPhase,
@@ -783,9 +1023,8 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
                                                 runtime::Int3 index) {
         const double spatial =
             stencil.order == MomentumTimeOrder::backward_euler
-                ? residuals[field].current[owned]
-                : 2.0 * residuals[field].current[owned] -
-                      residuals[field].history[owned];
+                ? residual->current[owned]
+                : 2.0 * residual->current[owned] - residual->history[owned];
         const double candidate =
             -(stencil.alpha1 * q_n(index.x, index.y, index.z, 0) +
               stencil.alpha2 * q_h(index.x, index.y, index.z, 0) +
@@ -793,30 +1032,27 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
             stencil.alpha0;
         if (!std::isfinite(candidate))
           throw runtime::Error("material transport candidate is non-finite");
-        candidates[field].push_back(candidate);
+        candidate_values.push_back(candidate);
         ++owned;
       });
+    } catch (const TransportComputationFailure &error) {
+      failure = error.failure();
+      failure_already_synchronized = true;
+    } catch (const runtime::MpiOperationError &) {
+      throw;
+    } catch (const std::exception &) {
+      local = MaterialTransportFailureReason::non_finite_state;
     }
-  } catch (const runtime::MpiOperationError &) {
-    report.disposition = MaterialTransportDisposition::non_retryable_failure;
-    report.reason = MaterialTransportFailureReason::collective_operation;
-    report.lowest_failing_rank = impl_->mpi->rank();
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
-  } catch (const std::exception &) {
-    local = MaterialTransportFailureReason::non_finite_state;
-  }
-  failure = synchronize_failure(*impl_->mpi, local);
-  if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::recoverable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
+    if (!failure_already_synchronized)
+      failure = synchronize_failure(*impl_->mpi, local);
+    if (failure.reason != MaterialTransportFailureReason::none) {
+      report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+      report.reason_ = failure.reason;
+      report.lowest_failing_rank_ = failure.rank;
+      return finish_report();
+    }
+    residuals.push_back(std::move(*residual));
+    candidates[field] = std::move(candidate_values);
   }
 
   auto trial_rho = state.trial_layer().acquire_write<double>(
@@ -934,35 +1170,32 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
               : MaterialTransportFailureReason::non_finite_state;
   failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::recoverable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
-    impl_->last_state = &state;
-    impl_->last_attempt_identity = report.attempt_identity;
-    impl_->last_finalization_identity = report.finalization_identity;
-    return report;
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish_report();
   }
   impl_->mpi->allreduce_fp64_in_place(sums.data(), sums.size(),
                                       runtime::Fp64ReductionOperation::sum);
   impl_->mpi->allreduce_fp64_in_place(&boundary_mass_abs_value, 1U,
                                       runtime::Fp64ReductionOperation::sum);
-  report.density_normalized_l2 = std::sqrt(
+  report.density_normalized_l2_ = std::sqrt(
       sums[0] / std::max(sums[1], std::numeric_limits<double>::min()));
-  report.transport_normalized_l2.resize(fields.size());
-  report.transport_relative_conservation_defect.resize(fields.size());
-  report.mass_relative_conservation_defect = relative_defect(
+  report.density_residual_available_ = true;
+  report.mass_relative_conservation_defect_ = relative_defect(
       sums[4] - sums[2] +
           (stencil.alpha2 / stencil.alpha0) * (sums[3] - sums[2]) +
           (stencil.dt_s / stencil.alpha0) * sums[5],
-      std::max({sums[6], sums[8],
-                std::abs(stencil.alpha2 / stencil.alpha0) * (sums[7] + sums[6]),
-                (stencil.dt_s / stencil.alpha0) * boundary_mass_abs_value,
-                std::numeric_limits<double>::min()}));
+      conservation_denominator(
+          sums[2], sums[4], sums[3], stencil.alpha2 / stencil.alpha0,
+          (stencil.dt_s / stencil.alpha0) * boundary_mass_abs_value, sums[6],
+          sums[8], stencil.order == MomentumTimeOrder::bdf2 ? sums[7] : 0.0));
   for (std::size_t field = 0; field < fields.size(); ++field) {
     const std::size_t offset = mass_terms + field_terms * field;
-    report.transport_normalized_l2[field] =
+    report.transport_normalized_l2_[field] =
         std::sqrt(sums[offset] / std::max(sums[offset + 1U],
                                           std::numeric_limits<double>::min()));
+    report.transport_residual_available_[field] = 1U;
     CompensatedSum next_integral_sum;
     owned = 0U;
     for_each_owned_cell(
@@ -987,13 +1220,10 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
                 : MaterialTransportFailureReason::non_finite_state;
     failure = synchronize_failure(*impl_->mpi, local);
     if (failure.reason != MaterialTransportFailureReason::none) {
-      report.disposition = MaterialTransportDisposition::recoverable_failure;
-      report.reason = failure.reason;
-      report.lowest_failing_rank = failure.rank;
-      impl_->last_state = &state;
-      impl_->last_attempt_identity = report.attempt_identity;
-      impl_->last_finalization_identity = report.finalization_identity;
-      return report;
+      report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+      report.reason_ = failure.reason;
+      report.lowest_failing_rank_ = failure.rank;
+      return finish_report();
     }
     impl_->mpi->allreduce_fp64_in_place(boundary_values, 3U,
                                         runtime::Fp64ReductionOperation::sum);
@@ -1005,13 +1235,17 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
         stencil.order == MomentumTimeOrder::backward_euler
             ? boundary_values[1]
             : 2.0 * boundary_values[1] + boundary_values[2];
-    report.transport_relative_conservation_defect[field] = relative_defect(
-        raw, std::max({sums[offset + 4U], sums[offset + 6U],
-                       std::abs(stencil.alpha2 / stencil.alpha0) *
-                           (sums[offset + 5U] + sums[offset + 4U]),
-                       (stencil.dt_s / stencil.alpha0) * boundary_scale,
-                       std::numeric_limits<double>::min()}));
+    report.transport_relative_conservation_defect_[field] = relative_defect(
+        raw, conservation_denominator(
+                 sums[offset + 2U], next_integral, sums[offset + 3U],
+                 stencil.alpha2 / stencil.alpha0,
+                 (stencil.dt_s / stencil.alpha0) * boundary_scale,
+                 sums[offset + 4U], sums[offset + 6U],
+                 stencil.order == MomentumTimeOrder::bdf2 ? sums[offset + 5U]
+                                                          : 0.0));
+    report.transport_conservation_available_[field] = 1U;
   }
+  report.mass_conservation_available_ = true;
 
   double global_min = local_min;
   runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &global_min, 1,
@@ -1028,41 +1262,40 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
   runtime::check_mpi_result(
       MPI_Bcast(&minimum_id, 1, MPI_UINT64_T, minimum_rank, impl_->mpi->comm()),
       "MPI_Bcast(material minimum cell)");
-  report.minimum_density_kg_per_m3 = global_min;
-  report.minimum_density_rank = minimum_rank;
-  report.minimum_density_global_cell = minimum_id;
+  report.minimum_density_kg_per_m3_ = global_min;
+  report.minimum_density_rank_ = minimum_rank;
+  report.minimum_density_global_cell_ = minimum_id;
+  report.minimum_density_available_ = true;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-  const MaterialTestControl overrides =
-      std::exchange(material_test_control, MaterialTestControl{});
   const auto applies = [&](const GateOverride &item) {
     return item.value.has_value() &&
            (item.rank < 0 || item.rank == impl_->mpi->rank());
   };
   if (applies(overrides.density_residual))
-    report.density_normalized_l2 = *overrides.density_residual.value;
+    report.density_normalized_l2_ = *overrides.density_residual.value;
   if (applies(overrides.transport_residual) &&
       overrides.transport_residual.field <
-          report.transport_normalized_l2.size())
-    report.transport_normalized_l2[overrides.transport_residual.field] =
+          report.transport_normalized_l2_.size())
+    report.transport_normalized_l2_[overrides.transport_residual.field] =
         *overrides.transport_residual.value;
   if (applies(overrides.mass_conservation))
-    report.mass_relative_conservation_defect =
+    report.mass_relative_conservation_defect_ =
         *overrides.mass_conservation.value;
   if (applies(overrides.transport_conservation) &&
       overrides.transport_conservation.field <
-          report.transport_relative_conservation_defect.size())
-    report.transport_relative_conservation_defect
+          report.transport_relative_conservation_defect_.size())
+    report.transport_relative_conservation_defect_
         [overrides.transport_conservation.field] =
         *overrides.transport_conservation.value;
 #endif
 
   local = MaterialTransportFailureReason::none;
-  if (!std::isfinite(report.density_normalized_l2) ||
-      report.density_normalized_l2 > 1.0e-10)
+  if (!std::isfinite(report.density_normalized_l2_) ||
+      report.density_normalized_l2_ > 1.0e-10)
     local = MaterialTransportFailureReason::final_density_residual;
   if (local == MaterialTransportFailureReason::none) {
-    for (double residual : report.transport_normalized_l2) {
+    for (double residual : report.transport_normalized_l2_) {
       if (!std::isfinite(residual) || residual > 1.0e-9) {
         local = MaterialTransportFailureReason::final_transport_residual;
         break;
@@ -1070,11 +1303,11 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     }
   }
   if (local == MaterialTransportFailureReason::none &&
-      (!std::isfinite(report.mass_relative_conservation_defect) ||
-       report.mass_relative_conservation_defect > 5.0e-11))
+      (!std::isfinite(report.mass_relative_conservation_defect_) ||
+       report.mass_relative_conservation_defect_ > 5.0e-11))
     local = MaterialTransportFailureReason::final_conservation_defect;
   if (local == MaterialTransportFailureReason::none) {
-    for (double defect : report.transport_relative_conservation_defect) {
+    for (double defect : report.transport_relative_conservation_defect_) {
       if (!std::isfinite(defect) || defect > 5.0e-11) {
         local = MaterialTransportFailureReason::final_conservation_defect;
         break;
@@ -1083,39 +1316,40 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
   }
   failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason == MaterialTransportFailureReason::none) {
-    report.disposition = MaterialTransportDisposition::finalized;
-    report.reason = MaterialTransportFailureReason::none;
-    report.lowest_failing_rank = -1;
+    report.disposition_ = MaterialTransportDisposition::finalized;
+    report.reason_ = MaterialTransportFailureReason::none;
+    report.lowest_failing_rank_ = -1;
   } else {
-    report.disposition = MaterialTransportDisposition::recoverable_failure;
-    report.reason = failure.reason;
-    report.lowest_failing_rank = failure.rank;
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
   }
-  impl_->last_state = &state;
-  impl_->last_attempt_identity = report.attempt_identity;
-  impl_->last_finalization_identity = report.finalization_identity;
-  return report;
+  return finish_report();
 }
 
 struct MaterialDensityDiagnosticSource::Impl final {
+  Impl(const MaterialDensityTransport::Impl &supplied_transport,
+       const FlowState &supplied_state,
+       MaterialDensityTransportReport supplied_report)
+      : transport(&supplied_transport), state(&supplied_state),
+        report(std::move(supplied_report)) {}
   const MaterialDensityTransport::Impl *transport{};
   const FlowState *state{};
-  const MaterialDensityTransportReport *report{};
+  MaterialDensityTransportReport report;
 };
 
 MaterialDensityDiagnosticSource MaterialDensityTransport::diagnostic_source(
     const FlowState &state,
     const MaterialDensityTransportReport &report) const {
   if (impl_->last_state != &state || !state.attempt_active() ||
-      state.attempt_identity() != report.attempt_identity ||
-      impl_->last_attempt_identity != report.attempt_identity ||
-      impl_->last_finalization_identity != report.finalization_identity ||
-      report.finalization_identity == 0U)
+      !report.authenticated() || impl_->last_report_seal != report.seal_ ||
+      state.attempt_identity() != report.attempt_identity_ ||
+      impl_->last_attempt_identity != report.attempt_identity_ ||
+      impl_->last_finalization_identity != report.finalization_identity_ ||
+      report.finalization_identity_ == 0U)
     throw runtime::Error("material diagnostic source identity is stale");
-  auto source = std::make_unique<MaterialDensityDiagnosticSource::Impl>();
-  source->transport = impl_.get();
-  source->state = &state;
-  source->report = &report;
+  auto source = std::make_unique<MaterialDensityDiagnosticSource::Impl>(
+      *impl_, state, report);
   return MaterialDensityDiagnosticSource(std::move(source));
 }
 
@@ -1130,55 +1364,60 @@ MaterialDensityDiagnosticSource::MaterialDensityDiagnosticSource(
 namespace {
 template <class SourceImplementation>
 void validate_source(const SourceImplementation &source, bool attempt_active,
-                     std::uint64_t attempt_identity) {
+                     std::uint64_t attempt_identity, bool report_authenticated,
+                     std::uint64_t report_seal,
+                     std::uint64_t report_attempt_identity,
+                     std::uint64_t report_finalization_identity) {
   if (source.transport->last_state != source.state || !attempt_active ||
-      attempt_identity != source.report->attempt_identity ||
-      source.transport->last_attempt_identity !=
-          source.report->attempt_identity ||
+      !report_authenticated ||
+      source.transport->last_report_seal != report_seal ||
+      attempt_identity != report_attempt_identity ||
+      source.transport->last_attempt_identity != report_attempt_identity ||
       source.transport->last_finalization_identity !=
-          source.report->finalization_identity)
+          report_finalization_identity)
     throw runtime::Error("material diagnostic source is stale");
 }
 } // namespace
 
+#define HUNDUN_VALIDATE_MATERIAL_SOURCE()                                      \
+  validate_source(*impl_, impl_->state->attempt_active(),                      \
+                  impl_->state->attempt_identity(),                            \
+                  impl_->report.authenticated(), impl_->report.seal_,          \
+                  impl_->report.attempt_identity_,                             \
+                  impl_->report.finalization_identity_)
+
 std::size_t MaterialDensityDiagnosticSource::fingerprint_field_count() const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   return impl_->transport->fingerprint_ids.size();
 }
 std::string_view
 MaterialDensityDiagnosticSource::fingerprint_field_id(std::size_t index) const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   if (index >= impl_->transport->fingerprint_ids.size())
     throw runtime::Error("material diagnostic field index is invalid");
   return impl_->transport->fingerprint_ids[index];
 }
 std::string_view
 MaterialDensityDiagnosticSource::field_unit(std::size_t index) const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   if (index >= impl_->transport->fingerprint_ids.size())
     throw runtime::Error("material diagnostic field index is invalid");
   return index == 0U ? "kg/m3" : (index == 1U ? "J/m3" : "kg/m3");
 }
 std::size_t MaterialDensityDiagnosticSource::owned_cell_count() const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   return impl_->transport->topology->owned_cell_count();
 }
 mesh::GlobalCellId
 MaterialDensityDiagnosticSource::global_cell_id(std::size_t local_cell) const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   if (local_cell >= impl_->transport->topology->owned_cell_count())
     throw runtime::Error("material diagnostic cell index is invalid");
   return impl_->transport->topology->global_cell_id(local_cell);
 }
 double
 MaterialDensityDiagnosticSource::cell_volume_m3(std::size_t local_cell) const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   if (local_cell >= impl_->transport->topology->owned_cell_count())
     throw runtime::Error("material diagnostic cell index is invalid");
   return impl_->transport->geometry->cell_volume_m3(local_cell);
@@ -1186,8 +1425,7 @@ MaterialDensityDiagnosticSource::cell_volume_m3(std::size_t local_cell) const {
 double
 MaterialDensityDiagnosticSource::field_value(std::size_t field,
                                              std::size_t local_cell) const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
   if (field >= impl_->transport->fingerprint_ids.size() ||
       local_cell >= impl_->transport->topology->owned_cell_count())
     throw runtime::Error("material diagnostic state index is invalid");
@@ -1206,9 +1444,10 @@ MaterialDensityDiagnosticSource::field_value(std::size_t field,
 }
 const MaterialDensityTransportReport &
 MaterialDensityDiagnosticSource::report() const {
-  validate_source(*impl_, impl_->state->attempt_active(),
-                  impl_->state->attempt_identity());
-  return *impl_->report;
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
+  return impl_->report;
 }
+
+#undef HUNDUN_VALIDATE_MATERIAL_SOURCE
 
 } // namespace hundun::flow

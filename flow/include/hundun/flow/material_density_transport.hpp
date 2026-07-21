@@ -93,24 +93,77 @@ enum class MaterialTransportFailureReason : std::uint8_t {
   collective_operation
 };
 
-struct MaterialDensityTransportReport final {
-  MaterialTransportDisposition disposition{
+class MaterialDensityTransportReport final {
+public:
+  MaterialDensityTransportReport(const MaterialDensityTransportReport &) =
+      default;
+  MaterialDensityTransportReport(MaterialDensityTransportReport &&) noexcept =
+      default;
+  MaterialDensityTransportReport &
+  operator=(const MaterialDensityTransportReport &) = default;
+  MaterialDensityTransportReport &
+  operator=(MaterialDensityTransportReport &&) noexcept = default;
+  ~MaterialDensityTransportReport() noexcept = default;
+
+  MaterialTransportDisposition disposition() const noexcept;
+  MaterialTransportFailureReason reason() const noexcept;
+  int lowest_failing_rank() const noexcept;
+  const MomentumTimeStencil &stencil() const noexcept;
+  MaterialFluxProvenance flux_provenance() const noexcept;
+  std::uint64_t attempt_identity() const noexcept;
+  std::uint64_t finalization_identity() const noexcept;
+  runtime::FieldId shared_face_mass_flux_field() const noexcept;
+  bool density_residual_available() const noexcept;
+  double density_normalized_l2() const noexcept;
+  const std::vector<std::uint8_t> &
+  transport_residual_availability() const noexcept;
+  const std::vector<double> &transport_normalized_l2() const noexcept;
+  bool mass_conservation_available() const noexcept;
+  double mass_relative_conservation_defect() const noexcept;
+  const std::vector<std::uint8_t> &
+  transport_conservation_availability() const noexcept;
+  const std::vector<double> &
+  transport_relative_conservation_defect() const noexcept;
+  bool minimum_density_available() const noexcept;
+  double minimum_density_kg_per_m3() const noexcept;
+  mesh::GlobalCellId minimum_density_global_cell() const noexcept;
+  int minimum_density_rank() const noexcept;
+
+private:
+  MaterialDensityTransportReport() = default;
+  std::uint64_t compute_seal() const noexcept;
+  void seal() noexcept;
+  bool authenticated() const noexcept;
+
+  MaterialTransportDisposition disposition_{
       MaterialTransportDisposition::non_retryable_failure};
-  MaterialTransportFailureReason reason{
+  MaterialTransportFailureReason reason_{
       MaterialTransportFailureReason::invalid_input};
-  int lowest_failing_rank{-1};
-  MomentumTimeStencil stencil{};
-  MaterialFluxProvenance flux_provenance{MaterialFluxProvenance::predictor};
-  std::uint64_t attempt_identity{};
-  std::uint64_t finalization_identity{};
-  runtime::FieldId shared_face_mass_flux_field{};
-  double density_normalized_l2{};
-  std::vector<double> transport_normalized_l2;
-  double mass_relative_conservation_defect{};
-  std::vector<double> transport_relative_conservation_defect;
-  double minimum_density_kg_per_m3{};
-  mesh::GlobalCellId minimum_density_global_cell{};
-  int minimum_density_rank{-1};
+  int lowest_failing_rank_{-1};
+  MomentumTimeStencil stencil_{};
+  MaterialFluxProvenance flux_provenance_{MaterialFluxProvenance::predictor};
+  std::uint64_t attempt_identity_{};
+  std::uint64_t finalization_identity_{};
+  runtime::FieldId shared_face_mass_flux_field_{};
+  bool density_residual_available_{};
+  double density_normalized_l2_{};
+  std::vector<std::uint8_t> transport_residual_available_;
+  std::vector<double> transport_normalized_l2_;
+  bool mass_conservation_available_{};
+  double mass_relative_conservation_defect_{};
+  std::vector<std::uint8_t> transport_conservation_available_;
+  std::vector<double> transport_relative_conservation_defect_;
+  bool minimum_density_available_{};
+  double minimum_density_kg_per_m3_{};
+  mesh::GlobalCellId minimum_density_global_cell_{};
+  int minimum_density_rank_{-1};
+  std::uint64_t seal_{};
+
+  friend class MaterialDensityTransport;
+  friend class MaterialDensityDiagnosticSource;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  friend class test::MaterialDensityTransportTestAccess;
+#endif
 };
 
 class MaterialDensityDiagnosticSource;

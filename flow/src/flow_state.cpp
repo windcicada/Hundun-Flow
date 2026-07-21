@@ -136,7 +136,8 @@ struct FlowState::Impl final {
         fields(std::move(supplied_fields)), metadata(supplied_metadata),
         access(supplied_registry), history(supplied_registry, supplied_layout),
         committed(supplied_registry, supplied_layout),
-        trial(supplied_registry, supplied_layout) {
+        trial(supplied_registry, supplied_layout),
+        rollback_snapshot(supplied_registry, supplied_layout) {
     for (const auto field : ordered_fields(fields)) {
       access.declare_access(kStatePhase, kStateActor, field,
                             runtime::AccessMode::read_write);
@@ -152,6 +153,8 @@ struct FlowState::Impl final {
   runtime::FieldStorage history;
   runtime::FieldStorage committed;
   runtime::FieldStorage trial;
+  runtime::FieldStorage rollback_snapshot;
+  bool rollback_snapshot_valid{};
   bool attempt_active{};
   std::uint64_t attempt_identity{};
   bool commit_prepared{};
@@ -406,6 +409,24 @@ void test::MaterialDensityTransportTestAccess::force_attempt_identity_wrap(
     FlowState &state) noexcept {
   state.impl_->attempt_identity = std::numeric_limits<std::uint64_t>::max();
 }
+void test::MaterialDensityTransportTestAccess::set_accepted_transport_value(
+    FlowState &state, bool history, std::size_t field, std::size_t local_cell,
+    double value) {
+  if (field >= state.impl_->fields.transported_cell_fields.size() ||
+      local_cell >= cell_count(state.impl_->layout.cell_interior_extent))
+    throw runtime::Error("material test transport index is invalid");
+  const auto extent = state.impl_->layout.cell_interior_extent;
+  const int i =
+      static_cast<int>(local_cell % static_cast<std::size_t>(extent.x));
+  const std::size_t yz = local_cell / static_cast<std::size_t>(extent.x);
+  const int j = static_cast<int>(yz % static_cast<std::size_t>(extent.y));
+  const int k = static_cast<int>(yz / static_cast<std::size_t>(extent.y));
+  auto &storage = history ? state.impl_->history : state.impl_->committed;
+  auto view = storage.acquire_write<double>(
+      state.impl_->access, kStatePhase, kStateActor,
+      state.impl_->fields.transported_cell_fields[field]);
+  view(i, j, k, 0) = value;
+}
 #endif
 
 void FlowState::seed_accepted_layers(const FlowLayerValues &history,
@@ -435,8 +456,28 @@ void FlowState::begin_attempt() {
     throw runtime::Error("FlowState attempt identity would wrap");
   }
   ++impl_->attempt_identity;
+
+  // Preserve the exact inactive trial bytes in a fourth preallocated buffer.
+  // Both control blocks are advanced before rotation, so neither a view of
+  // the former inactive trial nor a view of the reusable buffer can become
+  // live again when storage roles are restored.
   impl_->trial.begin_rebuild();
-  copy_layer(*impl_, impl_->committed, impl_->trial);
+  impl_->rollback_snapshot.begin_rebuild();
+  runtime::FieldStorage reusable(std::move(impl_->rollback_snapshot));
+  impl_->rollback_snapshot = std::move(impl_->trial);
+  impl_->trial = std::move(reusable);
+  impl_->trial.begin_rebuild();
+  impl_->rollback_snapshot_valid = true;
+  try {
+    copy_layer(*impl_, impl_->committed, impl_->trial);
+  } catch (...) {
+    impl_->trial.begin_rebuild();
+    runtime::FieldStorage failed_buffer(std::move(impl_->trial));
+    impl_->trial = std::move(impl_->rollback_snapshot);
+    impl_->rollback_snapshot = std::move(failed_buffer);
+    impl_->rollback_snapshot_valid = false;
+    throw;
+  }
   impl_->attempt_active = true;
 }
 
@@ -444,10 +485,16 @@ void FlowState::rollback_attempt() {
   if (!impl_->attempt_active) {
     throw runtime::Error("FlowState has no active attempt to roll back");
   }
-  if (!impl_->commit_prepared) {
-    impl_->trial.begin_rebuild();
+  if (!impl_->rollback_snapshot_valid) {
+    throw runtime::Error("FlowState rollback snapshot is unavailable");
   }
-  copy_layer(*impl_, impl_->committed, impl_->trial);
+  // Invalidate views of the active candidate even when commit preparation
+  // already invalidated them, then restore the exact pre-attempt storage.
+  impl_->trial.begin_rebuild();
+  runtime::FieldStorage rejected_candidate(std::move(impl_->trial));
+  impl_->trial = std::move(impl_->rollback_snapshot);
+  impl_->rollback_snapshot = std::move(rejected_candidate);
+  impl_->rollback_snapshot_valid = false;
   impl_->commit_prepared = false;
   impl_->attempt_active = false;
 }
@@ -483,6 +530,7 @@ void FlowState::publish_commit_attempt() noexcept {
   impl_->committed = std::move(impl_->trial);
   impl_->trial = std::move(recycled_history);
   impl_->metadata = impl_->prepared_metadata;
+  impl_->rollback_snapshot_valid = false;
   impl_->commit_prepared = false;
   impl_->attempt_active = false;
 }
