@@ -919,12 +919,17 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
       "Task 18 pressure correction did not satisfy the residual contract");
   if (!acceptance.ok) {
     result.accepted = false;
+    const bool solver_failed = !solve_success(result.solve.reason);
+    const int selected_rank =
+        solver_failed && result.solve.lowest_failing_rank >= 0
+            ? result.solve.lowest_failing_rank
+            : acceptance.failing_rank;
     if (result.solve.lowest_failing_rank < 0) {
       result.solve.lowest_failing_rank = acceptance.failing_rank;
     }
     return correction_failure(
         std::move(result), PressureCorrectionDisposition::recoverable_failure,
-        StepFailureReason::pressure_linear_solve, acceptance.failing_rank);
+        StepFailureReason::pressure_linear_solve, selected_rank);
   }
 
   synchronized_local_phase(
@@ -3140,7 +3145,7 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     if (active)
       state.rollback_attempt();
     return fatal_failure(report, StepFailureReason::collective_operation,
-                         impl_->mpi->rank());
+                         -1);
   } catch (const runtime::Error &) {
     if (active) {
       state.rollback_attempt();

@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <type_traits>
 
+#ifndef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#error "Task 18 tests-on targets must share the test-access class definition"
+#endif
+
 using PressureCorrect = hundun::flow::PressureCorrectionReport (
     hundun::flow::PisoCoupler::*)(
     hundun::flow::FlowState &, double,

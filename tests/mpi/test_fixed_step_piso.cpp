@@ -18,10 +18,12 @@
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
+#include "runtime/src/mpi_error.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -151,6 +153,37 @@ public:
   }
 };
 
+class SelectedRankPressureFailureSolver final
+    : public hundun::linear::LinearSolver {
+public:
+  hundun::linear::SolveReport
+  solve(const hundun::linear::LinearOperator &,
+        hundun::linear::Preconditioner &,
+        hundun::execution::VectorView<const double>,
+        hundun::execution::VectorView<double>,
+        const hundun::linear::SolveControl &) const override {
+    hundun::linear::SolveReport report;
+    report.reason =
+        hundun::linear::SolveTerminationReason::non_finite_value;
+    report.final_residual = std::numeric_limits<double>::infinity();
+    report.lowest_failing_rank = 1;
+    return report;
+  }
+};
+
+class MpiOperationThrowingSolver final : public hundun::linear::LinearSolver {
+public:
+  hundun::linear::SolveReport
+  solve(const hundun::linear::LinearOperator &,
+        hundun::linear::Preconditioner &,
+        hundun::execution::VectorView<const double>,
+        hundun::execution::VectorView<double>,
+        const hundun::linear::SolveControl &) const override {
+    throw hundun::runtime::detail::MpiOperationError(
+        "injected Task 18 operation failure");
+  }
+};
+
 void check_layer_equal(const hundun::flow::FlowLayerValues &left,
                        const hundun::flow::FlowLayerValues &right) {
   HUNDUN_CHECK(left.density == right.density);
@@ -159,6 +192,23 @@ void check_layer_equal(const hundun::flow::FlowLayerValues &left,
   HUNDUN_CHECK(left.face_velocity == right.face_velocity);
   HUNDUN_CHECK(left.face_mass_flux == right.face_mass_flux);
   HUNDUN_CHECK(left.transported_cell_fields == right.transported_cell_fields);
+}
+
+std::uint64_t fp64_bits(double value) noexcept {
+  std::uint64_t bits{};
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+void check_metadata_equal(const hundun::flow::AcceptedStepMetadata &left,
+                          const hundun::flow::AcceptedStepMetadata &right) {
+  HUNDUN_CHECK(left.step == right.step);
+  HUNDUN_CHECK(fp64_bits(left.time_s) == fp64_bits(right.time_s));
+  HUNDUN_CHECK(fp64_bits(left.dt_s) == fp64_bits(right.dt_s));
+  HUNDUN_CHECK(fp64_bits(left.previous_dt_s) ==
+               fp64_bits(right.previous_dt_s));
+  HUNDUN_CHECK(left.order == right.order);
 }
 
 double checkerboard_amplitude(const hundun::runtime::MpiContext &mpi,
@@ -441,6 +491,115 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     candidate.seed_accepted_layers(initial, initial);
     return candidate;
   };
+
+  if (mpi.size() > 1) {
+    SelectedRankPressureFailureSolver direct_rank_failure_solver;
+    hundun::linear::JacobiPreconditioner direct_rank_failure_preconditioner(
+        execution);
+    auto rank_failure_coupler = hundun::flow::PisoCoupler::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        direct_rank_failure_solver, direct_rank_failure_preconditioner);
+    auto direct_rank_failure_state = make_zero_state();
+    auto positive_diagonal_values = initial;
+    std::fill(positive_diagonal_values.velocity.begin(),
+              positive_diagonal_values.velocity.end(), 1.0);
+    direct_rank_failure_state.seed_accepted_layers(positive_diagonal_values,
+                                                   positive_diagonal_values);
+    direct_rank_failure_state.begin_attempt();
+    const auto direct_rank_failure_report = rank_failure_coupler.correct(
+        direct_rank_failure_state, rho_ref,
+        direct_rank_failure_state.layer(hundun::flow::FlowLayer::committed)
+            .view<double>(fields.velocity),
+        {});
+    HUNDUN_CHECK(
+        direct_rank_failure_report.disposition ==
+        hundun::flow::PressureCorrectionDisposition::recoverable_failure);
+    HUNDUN_CHECK(direct_rank_failure_report.reason ==
+                 hundun::flow::StepFailureReason::pressure_linear_solve);
+    HUNDUN_CHECK(
+        direct_rank_failure_report.solve.lowest_failing_rank == 1);
+    HUNDUN_CHECK(direct_rank_failure_report.lowest_failing_rank == 1);
+    HUNDUN_CHECK(!direct_rank_failure_report.accepted);
+    direct_rank_failure_state.rollback_attempt();
+
+    SelectedRankPressureFailureSolver fixed_rank_failure_solver;
+    hundun::linear::JacobiPreconditioner fixed_rank_failure_preconditioner(
+        execution);
+    auto fixed_rank_failure_flow =
+        hundun::flow::FixedStepConstantDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi, execution,
+            halo, momentum_solver, {&mx, &my, &mz},
+            fixed_rank_failure_solver, fixed_rank_failure_preconditioner,
+            {{fields.transported_cell_fields[0],
+              hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+              0.0}});
+    auto fixed_rank_failure_state = make_zero_state();
+    const auto fixed_rank_failure_history =
+        fixed_rank_failure_state.snapshot(hundun::flow::FlowLayer::history);
+    const auto fixed_rank_failure_committed =
+        fixed_rank_failure_state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto fixed_rank_failure_metadata = fixed_rank_failure_state.metadata();
+    const auto fixed_rank_failure_report = fixed_rank_failure_flow.attempt(
+        fixed_rank_failure_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(
+        fixed_rank_failure_report.disposition ==
+        hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(fixed_rank_failure_report.reason ==
+                 hundun::flow::StepFailureReason::pressure_linear_solve);
+    HUNDUN_CHECK(
+        fixed_rank_failure_report.pressure[0].lowest_failing_rank == 1);
+    HUNDUN_CHECK(fixed_rank_failure_report.lowest_failing_rank == 1);
+    HUNDUN_CHECK(fixed_rank_failure_report.pressure_corrector_count == 0U);
+    HUNDUN_CHECK(fixed_rank_failure_report.suggested_dt_s == 0.005);
+    check_metadata_equal(fixed_rank_failure_state.metadata(),
+                         fixed_rank_failure_metadata);
+    check_layer_equal(
+        fixed_rank_failure_state.snapshot(hundun::flow::FlowLayer::history),
+        fixed_rank_failure_history);
+    check_layer_equal(
+        fixed_rank_failure_state.snapshot(hundun::flow::FlowLayer::committed),
+        fixed_rank_failure_committed);
+
+    MpiOperationThrowingSolver operation_failure_solver;
+    hundun::linear::JacobiPreconditioner operation_failure_x(execution);
+    hundun::linear::JacobiPreconditioner operation_failure_y(execution);
+    hundun::linear::JacobiPreconditioner operation_failure_z(execution);
+    hundun::linear::JacobiPreconditioner operation_failure_pressure(execution);
+    auto operation_failure_flow =
+        hundun::flow::FixedStepConstantDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi, execution,
+            halo, operation_failure_solver,
+            {&operation_failure_x, &operation_failure_y, &operation_failure_z},
+            pressure_solver, operation_failure_pressure,
+            {{fields.transported_cell_fields[0],
+              hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+              0.0}});
+    auto operation_failure_state = make_zero_state();
+    const auto operation_failure_history =
+        operation_failure_state.snapshot(hundun::flow::FlowLayer::history);
+    const auto operation_failure_committed =
+        operation_failure_state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto operation_failure_metadata = operation_failure_state.metadata();
+    const auto operation_failure_report = operation_failure_flow.attempt(
+        operation_failure_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(
+        operation_failure_report.disposition ==
+        hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(operation_failure_report.reason ==
+                 hundun::flow::StepFailureReason::collective_operation);
+    HUNDUN_CHECK(operation_failure_report.lowest_failing_rank == -1);
+    HUNDUN_CHECK(operation_failure_report.pressure_corrector_count == 0U);
+    HUNDUN_CHECK(operation_failure_report.suggested_dt_s == 0.0);
+    check_metadata_equal(operation_failure_state.metadata(),
+                         operation_failure_metadata);
+    check_layer_equal(
+        operation_failure_state.snapshot(hundun::flow::FlowLayer::history),
+        operation_failure_history);
+    check_layer_equal(
+        operation_failure_state.snapshot(hundun::flow::FlowLayer::committed),
+        operation_failure_committed);
+  }
+
   const auto warm_workspace = TestAccess::mesh_workspace_snapshot(flow);
   auto workspace_success_state = make_zero_state();
   const auto workspace_success_report = flow.attempt(

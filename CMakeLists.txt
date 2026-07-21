@@ -174,7 +174,7 @@ target_link_libraries(hundun_flow
     hundun_execution
     hundun_options)
 if(HUNDUN_BUILD_TESTS)
-  target_compile_definitions(hundun_flow PRIVATE
+  target_compile_definitions(hundun_flow PUBLIC
     HUNDUN_FLOW_ENABLE_TEST_ACCESS=1)
 endif()
 
@@ -536,6 +536,18 @@ if(HUNDUN_BUILD_TESTS)
     tests/unit/test_task18_header_contract.cpp)
   target_link_libraries(test_task18_header_contract PRIVATE hundun_flow)
   set_tests_properties(test_task18_header_contract PROPERTIES TIMEOUT 30)
+  string(REPLACE ";" "|" task18_mpi_include_dirs
+         "${MPI_CXX_INCLUDE_DIRS}")
+  add_test(NAME test_task18_tests_off_header_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DHUNDUN_MPI_INCLUDE_DIRS=${task18_mpi_include_dirs}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task18_test_access_contract.cmake")
+  set_tests_properties(test_task18_tests_off_header_contract PROPERTIES
+    LABELS "unit;source_policy;task18"
+    TIMEOUT 30)
   add_test(NAME test_task18_source_policy
     COMMAND "${CMAKE_COMMAND}"
             "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"

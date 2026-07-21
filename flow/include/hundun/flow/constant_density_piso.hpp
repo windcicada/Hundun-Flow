@@ -20,9 +20,11 @@
 
 namespace hundun::flow {
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class ConstantDensityPisoTestAccess;
 }
+#endif
 
 enum class StepAttemptDisposition : std::uint8_t {
   committed,
@@ -130,7 +132,9 @@ private:
       PressureCorrectionReport &result) const;
   std::unique_ptr<Impl> impl_;
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::ConstantDensityPisoTestAccess;
+#endif
 };
 
 class FixedStepConstantDensityFlow final {
@@ -168,7 +172,9 @@ private:
   explicit FixedStepConstantDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::ConstantDensityPisoTestAccess;
+#endif
 };
 
 } // namespace hundun::flow
