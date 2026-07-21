@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <array>
 #include <cstddef>
 
 namespace hundun::flow::test {
@@ -63,6 +64,12 @@ public:
   static void set_final_transport_norm_squares(
       std::size_t field_index, double residual_square,
       double scale_square) noexcept;
+  static void set_momentum_conservation_parts(
+      std::size_t component, const std::array<double, 8> &values) noexcept;
+  static void force_momentum_conservation_aggregate_overflow(
+      std::size_t component, bool enabled) noexcept;
+  static void force_transport_conservation_aggregate_overflow(
+      std::size_t field_index, bool enabled) noexcept;
   static void set_momentum_assembly_mutation(
       MomentumAssemblyMutation mutation) noexcept;
   static void set_transport_assembly_mutation(

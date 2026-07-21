@@ -80,6 +80,13 @@ std::atomic<std::size_t> final_transport_norm_index{
     std::numeric_limits<std::size_t>::max()};
 std::atomic<double> final_transport_norm_residual_square{0.0};
 std::atomic<double> final_transport_norm_scale_square{0.0};
+std::array<std::atomic<bool>, 3> momentum_conservation_parts_armed{};
+std::array<std::array<std::atomic<double>, 8>, 3>
+    momentum_conservation_parts_values{};
+std::atomic<std::size_t> momentum_conservation_overflow_component{
+    std::numeric_limits<std::size_t>::max()};
+std::atomic<std::size_t> transport_conservation_overflow_index{
+    std::numeric_limits<std::size_t>::max()};
 test::ConservationDiagnostic last_mass_conservation{};
 std::array<test::ConservationDiagnostic, 3> last_momentum_conservation{};
 std::vector<test::ConservationDiagnostic> last_transport_conservation;
@@ -1617,7 +1624,37 @@ struct ConservationParts final {
   CompensatedSum absolute_boundary_flux;
 };
 
-std::array<double, 8>
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void replace_conservation_parts(
+    ConservationParts &parts,
+    const std::array<std::atomic<double>, 8> &values) noexcept {
+  parts = {};
+  parts.quantity_nm1.add(values[0].load(std::memory_order_relaxed));
+  parts.quantity_n.add(values[1].load(std::memory_order_relaxed));
+  parts.quantity_np1.add(values[2].load(std::memory_order_relaxed));
+  parts.absolute_quantity_nm1.add(
+      values[3].load(std::memory_order_relaxed));
+  parts.absolute_quantity_n.add(values[4].load(std::memory_order_relaxed));
+  parts.absolute_quantity_np1.add(
+      values[5].load(std::memory_order_relaxed));
+  parts.signed_boundary_flux.add(values[6].load(std::memory_order_relaxed));
+  parts.absolute_boundary_flux.add(
+      values[7].load(std::memory_order_relaxed));
+}
+
+void inject_finite_terms_that_overflow(ConservationParts &parts) noexcept {
+  const double maximum = std::numeric_limits<double>::max();
+  parts.signed_boundary_flux.add(maximum);
+  parts.signed_boundary_flux.add(maximum);
+}
+#endif
+
+struct ConservationReduction final {
+  runtime::CollectiveStatus status;
+  std::array<double, 8> values{};
+};
+
+ConservationReduction
 reduce_conservation_parts(const runtime::MpiContext &mpi,
                           const ConservationParts &parts) {
   std::array<double, 8> values{
@@ -1627,9 +1664,25 @@ reduce_conservation_parts(const runtime::MpiContext &mpi,
       parts.absolute_quantity_np1.value(),
       parts.signed_boundary_flux.value(),
       parts.absolute_boundary_flux.value()};
+  const bool local_finite =
+      std::all_of(values.begin(), values.end(), [](double value) {
+        return std::isfinite(value);
+      });
+  auto status = runtime::collective_status(
+      mpi, local_finite,
+      "Task 18 local conservation aggregate is non-finite");
+  if (!status.ok)
+    return {std::move(status), {}};
   mpi.allreduce_fp64_in_place(values.data(), values.size(),
                               runtime::Fp64ReductionOperation::sum);
-  return values;
+  const bool global_finite =
+      std::all_of(values.begin(), values.end(), [](double value) {
+        return std::isfinite(value);
+      });
+  status = runtime::collective_status(
+      mpi, global_finite,
+      "Task 18 global conservation aggregate is non-finite");
+  return {std::move(status), values};
 }
 
 struct ConservationDiagnosticValues final {
@@ -1759,11 +1812,12 @@ runtime::CollectiveStatus assess_final_momentum(
                     : 2.0 * current.viscous[component_index] -
                           previous.viscous[component_index];
             const double pressure_value = pressure.pressure[component_index];
+            const double effective_flux =
+                convection + viscosity + pressure_value;
             conservation[component_index].signed_boundary_flux.add(
-                convection + viscosity + pressure_value);
+                effective_flux);
             conservation[component_index].absolute_boundary_flux.add(
-                std::abs(convection) + std::abs(viscosity) +
-                std::abs(pressure_value));
+                std::abs(effective_flux));
           }
         }
         const auto owned = impl.topology->owned_global_box();
@@ -1886,10 +1940,24 @@ runtime::CollectiveStatus assess_final_momentum(
                     report.final_momentum_normalized_l2[component_index]) &&
                 report.final_momentum_normalized_l2[component_index] <=
                     kFinalEquationTolerance;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (momentum_conservation_parts_armed[component_index].load(
+            std::memory_order_relaxed)) {
+      replace_conservation_parts(
+          conservation[component_index],
+          momentum_conservation_parts_values[component_index]);
+    }
+    if (momentum_conservation_overflow_component.load(
+            std::memory_order_relaxed) == component_index) {
+      inject_finite_terms_that_overflow(conservation[component_index]);
+    }
+#endif
     const auto reduced =
         reduce_conservation_parts(*impl.mpi, conservation[component_index]);
+    if (!reduced.status.ok)
+      return reduced.status;
     const auto diagnostic =
-        make_conservation_diagnostic(reduced, stencil, true);
+        make_conservation_diagnostic(reduced.values, stencil, true);
     report.final_momentum_relative_conservation_defect[component_index] =
         diagnostic.relative;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1973,9 +2041,10 @@ runtime::CollectiveStatus assess_final_transport(
                 previous == nullptr
                     ? current.diffusive
                     : 2.0 * current.diffusive - previous->diffusive;
-            conservation.signed_boundary_flux.add(convection + diffusion);
-            conservation.absolute_boundary_flux.add(std::abs(convection) +
-                                                     std::abs(diffusion));
+            const double effective_flux = convection + diffusion;
+            conservation.signed_boundary_flux.add(effective_flux);
+            conservation.absolute_boundary_flux.add(
+                std::abs(effective_flux));
           }
           const auto owned = impl.topology->owned_global_box();
           for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
@@ -2057,9 +2126,17 @@ runtime::CollectiveStatus assess_final_transport(
         norm_sums, 2U, runtime::Fp64ReductionOperation::sum);
     report.final_transport_normalized_l2[transport_index] =
         normalized_l2(norm_sums[0], norm_sums[1]);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (transport_conservation_overflow_index.load(std::memory_order_relaxed) ==
+        transport_index) {
+      inject_finite_terms_that_overflow(conservation);
+    }
+#endif
     const auto reduced = reduce_conservation_parts(*impl.mpi, conservation);
+    if (!reduced.status.ok)
+      return reduced.status;
     const auto diagnostic =
-        make_conservation_diagnostic(reduced, stencil, true);
+        make_conservation_diagnostic(reduced.values, stencil, true);
     report.final_transport_relative_conservation_defect[transport_index] =
         diagnostic.relative;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -2149,6 +2226,8 @@ runtime::CollectiveStatus assess_final_conservation(
         }
       });
   const auto reduced = reduce_conservation_parts(*impl.mpi, conservation);
+  if (!reduced.status.ok)
+    return reduced.status;
   double perturbation = 0.0;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   if (force_final_conservation_failure.load(std::memory_order_relaxed)) {
@@ -2158,7 +2237,8 @@ runtime::CollectiveStatus assess_final_conservation(
       final_mass_defect_perturbation.load(std::memory_order_relaxed);
 #endif
   const auto diagnostic =
-      make_conservation_diagnostic(reduced, stencil, false, perturbation);
+      make_conservation_diagnostic(reduced.values, stencil, false,
+                                   perturbation);
   report.final_mass_relative_conservation_defect =
       diagnostic.relative;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -2950,6 +3030,16 @@ void test::ConstantDensityPisoTestAccess::reset() noexcept {
                                    std::memory_order_relaxed);
   final_transport_norm_residual_square.store(0.0, std::memory_order_relaxed);
   final_transport_norm_scale_square.store(0.0, std::memory_order_relaxed);
+  for (auto &armed : momentum_conservation_parts_armed)
+    armed.store(false, std::memory_order_relaxed);
+  for (auto &component : momentum_conservation_parts_values) {
+    for (auto &value : component)
+      value.store(0.0, std::memory_order_relaxed);
+  }
+  momentum_conservation_overflow_component.store(
+      std::numeric_limits<std::size_t>::max(), std::memory_order_relaxed);
+  transport_conservation_overflow_index.store(
+      std::numeric_limits<std::size_t>::max(), std::memory_order_relaxed);
   ::hundun::flow::last_mass_conservation = {};
   ::hundun::flow::last_momentum_conservation.fill({});
   ::hundun::flow::last_transport_conservation.clear();
@@ -3040,6 +3130,34 @@ void test::ConstantDensityPisoTestAccess::set_final_transport_norm_squares(
                                              std::memory_order_relaxed);
   final_transport_norm_scale_square.store(scale_square,
                                           std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::set_momentum_conservation_parts(
+    std::size_t component, const std::array<double, 8> &values) noexcept {
+  if (component >= momentum_conservation_parts_values.size())
+    return;
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    momentum_conservation_parts_values[component][index].store(
+        values[index], std::memory_order_relaxed);
+  }
+  momentum_conservation_parts_armed[component].store(true,
+                                                     std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::
+    force_momentum_conservation_aggregate_overflow(
+        std::size_t component, bool enabled) noexcept {
+  momentum_conservation_overflow_component.store(
+      enabled ? component : std::numeric_limits<std::size_t>::max(),
+      std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::
+    force_transport_conservation_aggregate_overflow(
+        std::size_t field_index, bool enabled) noexcept {
+  transport_conservation_overflow_index.store(
+      enabled ? field_index : std::numeric_limits<std::size_t>::max(),
+      std::memory_order_relaxed);
 }
 
 void test::ConstantDensityPisoTestAccess::set_momentum_assembly_mutation(

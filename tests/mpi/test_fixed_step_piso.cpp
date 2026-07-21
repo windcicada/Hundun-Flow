@@ -519,7 +519,156 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(non_finite_transport_report.reason ==
                  hundun::flow::StepFailureReason::final_transport_residual);
     HUNDUN_CHECK(non_finite_transport_report.lowest_failing_rank == 1);
+
+    TestAccess::reset();
+    if (mpi.rank() == 1) {
+      TestAccess::force_momentum_conservation_aggregate_overflow(0U, true);
+    }
+    auto momentum_aggregate_state = make_zero_state();
+    const auto momentum_aggregate_before =
+        momentum_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed);
+    const auto momentum_aggregate_report = flow.attempt(
+        momentum_aggregate_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(momentum_aggregate_report.disposition ==
+                 hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(momentum_aggregate_report.reason ==
+                 hundun::flow::StepFailureReason::final_momentum_residual);
+    HUNDUN_CHECK(momentum_aggregate_report.lowest_failing_rank == 1);
+    HUNDUN_CHECK(momentum_aggregate_report.pressure_corrector_count == 2U);
+    HUNDUN_CHECK(momentum_aggregate_report.suggested_dt_s == 0.005);
+    check_layer_equal(
+        momentum_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed),
+        momentum_aggregate_before);
+    HUNDUN_CHECK(momentum_aggregate_state.metadata().step == 0U);
+
+    TestAccess::reset();
+    if (mpi.rank() == 1) {
+      TestAccess::force_transport_conservation_aggregate_overflow(0U, true);
+    }
+    auto transport_aggregate_state = make_zero_state();
+    const auto transport_aggregate_before =
+        transport_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed);
+    const auto transport_aggregate_report = flow.attempt(
+        transport_aggregate_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(transport_aggregate_report.disposition ==
+                 hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(transport_aggregate_report.reason ==
+                 hundun::flow::StepFailureReason::final_transport_residual);
+    HUNDUN_CHECK(transport_aggregate_report.lowest_failing_rank == 1);
+    HUNDUN_CHECK(transport_aggregate_report.pressure_corrector_count == 2U);
+    HUNDUN_CHECK(transport_aggregate_report.suggested_dt_s == 0.005);
+    check_layer_equal(
+        transport_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed),
+        transport_aggregate_before);
+    HUNDUN_CHECK(transport_aggregate_state.metadata().step == 0U);
+
+    TestAccess::reset();
+    std::array<double, 8> globally_overflowing_parts{};
+    globally_overflowing_parts[6] =
+        0.75 * std::numeric_limits<double>::max();
+    globally_overflowing_parts[7] =
+        0.75 * std::numeric_limits<double>::max();
+    TestAccess::set_momentum_conservation_parts(
+        0U, globally_overflowing_parts);
+    auto global_aggregate_state = make_zero_state();
+    const auto global_aggregate_before =
+        global_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed);
+    const auto global_aggregate_report = flow.attempt(
+        global_aggregate_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(global_aggregate_report.disposition ==
+                 hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(global_aggregate_report.reason ==
+                 hundun::flow::StepFailureReason::final_momentum_residual);
+    HUNDUN_CHECK(global_aggregate_report.lowest_failing_rank == 0);
+    HUNDUN_CHECK(global_aggregate_report.pressure_corrector_count == 2U);
+    HUNDUN_CHECK(global_aggregate_report.suggested_dt_s == 0.005);
+    check_layer_equal(
+        global_aggregate_state.snapshot(
+            hundun::flow::FlowLayer::committed),
+        global_aggregate_before);
+    HUNDUN_CHECK(global_aggregate_state.metadata().step == 0U);
+    if (mpi.rank() == 0) {
+      std::cout << "TASK18_R3_LOCAL_AGGREGATE momentum_rank="
+                << momentum_aggregate_report.lowest_failing_rank
+                << " transport_rank="
+                << transport_aggregate_report.lowest_failing_rank
+                << " global_rank="
+                << global_aggregate_report.lowest_failing_rank
+                << " correctors="
+                << transport_aggregate_report.pressure_corrector_count
+                << " suggested_dt="
+                << transport_aggregate_report.suggested_dt_s << '\n';
+    }
   }
+
+  const auto run_cancellation_threshold_oracle = [&](double epsilon_multiple) {
+    TestAccess::reset();
+    const double epsilon = std::numeric_limits<double>::epsilon();
+    std::array<double, 8> local_parts{};
+    local_parts[4] = 1.0;
+    local_parts[5] = 1.0;
+    local_parts[6] = epsilon / stencil.dt_s;
+    local_parts[7] = epsilon_multiple * epsilon / stencil.dt_s;
+    TestAccess::set_momentum_conservation_parts(0U, local_parts);
+    auto threshold_state = make_zero_state();
+    const auto threshold_before = threshold_state.snapshot(
+        hundun::flow::FlowLayer::committed);
+    const auto threshold_report = flow.attempt(
+        threshold_state, rho_ref, 0.0, stencil, {}, {});
+    const auto diagnostic = TestAccess::last_momentum_conservation(0U);
+    const double global_cq = static_cast<double>(mpi.size());
+    const double expected_raw = epsilon * global_cq;
+    const double expected_absolute_flux =
+        epsilon_multiple * epsilon * global_cq / stencil.dt_s;
+    const double expected_relative =
+        epsilon_multiple < 64.0 ? epsilon : 1.0 / epsilon_multiple;
+    const double tolerance =
+        32.0 * epsilon * std::max(1.0, expected_relative);
+    HUNDUN_CHECK_NEAR(diagnostic.quantity_n, 0.0, 0.0);
+    HUNDUN_CHECK_NEAR(diagnostic.quantity_np1, 0.0, 0.0);
+    HUNDUN_CHECK_NEAR(diagnostic.absolute_boundary_flux,
+                      expected_absolute_flux,
+                      32.0 * epsilon * expected_absolute_flux);
+    HUNDUN_CHECK_NEAR(diagnostic.raw_defect, expected_raw,
+                      32.0 * epsilon * expected_raw);
+    HUNDUN_CHECK(diagnostic.raw_defect != 0.0);
+    HUNDUN_CHECK_NEAR(
+        threshold_report.final_momentum_relative_conservation_defect[0],
+        expected_relative, tolerance);
+    if (mpi.rank() == 0) {
+      std::cout << "TASK18_R3_CQ_THRESHOLD multiple=" << epsilon_multiple
+                << " raw=" << diagnostic.raw_defect
+                << " absolute_flux=" << diagnostic.absolute_boundary_flux
+                << " relative="
+                << threshold_report
+                       .final_momentum_relative_conservation_defect[0]
+                << " disposition="
+                << static_cast<int>(threshold_report.disposition) << '\n';
+    }
+    if (epsilon_multiple < 64.0) {
+      HUNDUN_CHECK(threshold_report.disposition ==
+                   hundun::flow::StepAttemptDisposition::committed);
+    } else {
+      HUNDUN_CHECK(threshold_report.disposition ==
+                   hundun::flow::StepAttemptDisposition::recoverable_failure);
+      HUNDUN_CHECK(threshold_report.reason ==
+                   hundun::flow::StepFailureReason::final_conservation_defect);
+      HUNDUN_CHECK(threshold_report.lowest_failing_rank == 0);
+      HUNDUN_CHECK(threshold_report.pressure_corrector_count == 2U);
+      HUNDUN_CHECK(threshold_report.suggested_dt_s == 0.005);
+      check_layer_equal(
+          threshold_state.snapshot(hundun::flow::FlowLayer::committed),
+          threshold_before);
+      HUNDUN_CHECK(threshold_state.metadata().step == 0U);
+    }
+  };
+  run_cancellation_threshold_oracle(63.0);
+  run_cancellation_threshold_oracle(65.0);
 
   TestAccess::reset();
   TestAccess::set_final_mass_defect_perturbation(7.5e-11);
@@ -1392,7 +1541,8 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
 
 void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
   constexpr double rho_ref = 1.25;
-  constexpr double pressure_reference = 2.5;
+  constexpr double pressure_reference = -2.5;
+  constexpr double transport_diffusivity = 0.01;
   constexpr hundun::runtime::Int3 extent{8, 6, 4};
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
       mpi, extent, {false, false, false},
@@ -1484,13 +1634,14 @@ void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
       halo, momentum_solver, {&advective_mx, &advective_my, &advective_mz},
       pressure_solver, advective_pressure,
       {{fields.transported_cell_fields[0],
-        hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+        hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+        transport_diffusivity}});
   auto advective_initial = initial;
   for (hundun::mesh::LocalCellId cell = 0;
        cell < topology.owned_cell_count(); ++cell) {
     const double x = geometry.cell_center_m(cell).x;
     advective_initial.velocity[cell * 3U] = 0.1 + 0.04 * x;
-    advective_initial.transported_cell_fields[0][cell] = 1.0 + 0.3 * x;
+    advective_initial.transported_cell_fields[0][cell] = 3.0 + 0.3 * x;
   }
   for (hundun::mesh::LocalFaceId face = 0;
        face < topology.local_face_count(); ++face) {
@@ -1573,7 +1724,7 @@ void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
       [&](const hundun::flow::FlowLayerValues &previous,
           const hundun::flow::FlowLayerValues &current,
           const hundun::flow::FlowLayerValues &pressure_state, bool bdf2) {
-        std::array<double, 10> values{};
+        std::array<double, 14> values{};
         for (hundun::mesh::LocalFaceId face = 0;
              face < topology.local_face_count(); ++face) {
           const auto patch = topology.patch_id(face);
@@ -1625,8 +1776,10 @@ void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
                 bdf2 ? 2.0 * convection_n - convection_nm1 : convection_n;
             const double pressure =
                 pressure_face * area_components[component];
-            values[2U + component] += convection + pressure;
-            values[5U + component] +=
+            const double effective = convection + pressure;
+            values[2U + component] += effective;
+            values[5U + component] += std::abs(effective);
+            values[10U + component] +=
                 std::abs(convection) + std::abs(pressure);
           }
           const double scalar_n =
@@ -1641,12 +1794,45 @@ void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
                       *patch, 0U,
                       previous.transported_cell_fields[0][owner])
                   .face;
-          const double transport_n = mass_flux * scalar_n;
-          const double transport_nm1 = mass_flux * scalar_nm1;
+          const auto scalar_diffusion = [&](double owner_value) {
+            const auto evaluated = advective_boundaries.evaluate_scalar(
+                *patch, 0U, owner_value);
+            if (advective_boundaries.patch(*patch).scalar_rule() !=
+                hundun::boundary::TransportRule::prescribed_value) {
+              return 0.0;
+            }
+            const auto owner_center = geometry.cell_center_m(owner);
+            const auto face_center = geometry.face_center_m(face);
+            const hundun::runtime::Real3 d{
+                2.0 * (face_center.x - owner_center.x),
+                2.0 * (face_center.y - owner_center.y),
+                2.0 * (face_center.z - owner_center.z)};
+            const double area_square =
+                area.x * area.x + area.y * area.y + area.z * area.z;
+            const double area_dot_d =
+                area.x * d.x + area.y * d.y + area.z * d.z;
+            HUNDUN_CHECK(area_dot_d > 0.0);
+            const double physical_flux =
+                transport_diffusivity * (evaluated.exterior - owner_value) *
+                area_square / area_dot_d;
+            return -physical_flux;
+          };
+          const double convection_n = mass_flux * scalar_n;
+          const double convection_nm1 = mass_flux * scalar_nm1;
+          const double diffusion_n = scalar_diffusion(
+              current.transported_cell_fields[0][owner]);
+          const double diffusion_nm1 = scalar_diffusion(
+              previous.transported_cell_fields[0][owner]);
+          const double transport_convection =
+              bdf2 ? 2.0 * convection_n - convection_nm1 : convection_n;
+          const double transport_diffusion =
+              bdf2 ? 2.0 * diffusion_n - diffusion_nm1 : diffusion_n;
           const double transport =
-              bdf2 ? 2.0 * transport_n - transport_nm1 : transport_n;
+              transport_convection + transport_diffusion;
           values[8] += transport;
           values[9] += std::abs(transport);
+          values[13] +=
+              std::abs(transport_convection) + std::abs(transport_diffusion);
         }
         mpi.allreduce_fp64_in_place(
             values.data(), values.size(),
@@ -1690,6 +1876,21 @@ void run_open_boundary_composition(const hundun::runtime::MpiContext &mpi) {
       advective_initial, advective_initial, advective_after_be);
   const auto be_boundaries = global_boundary_contributions(
       advective_initial, advective_initial, advective_after_be, false);
+  HUNDUN_CHECK(be_boundaries[5] < be_boundaries[10]);
+  HUNDUN_CHECK(be_boundaries[9] < be_boundaries[13]);
+  if (mpi.rank() == 0) {
+    std::cout << "TASK18_R3_FACE_COMPOSITION momentum_qnm1="
+              << be_momentum_diagnostic.quantity_nm1
+              << " expected=" << be_quantities[0]
+              << " momentum_abs="
+              << be_momentum_diagnostic.absolute_boundary_flux
+              << " expected_abs=" << be_boundaries[5]
+              << " termwise_abs=" << be_boundaries[10]
+              << " transport_abs="
+              << be_transport_diagnostic.absolute_boundary_flux
+              << " expected_abs=" << be_boundaries[9]
+              << " termwise_abs=" << be_boundaries[13] << '\n';
+  }
   check_diagnostic(be_momentum_diagnostic, be_quantities[0], be_quantities[1],
                    be_quantities[2], be_boundaries[2], be_boundaries[5],
                    stencil);
