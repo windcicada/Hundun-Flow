@@ -155,6 +155,8 @@ target_link_libraries(hundun_finite_volume
     hundun_options)
 
 add_library(hundun_flow STATIC
+  flow/src/constant_density_piso.cpp
+  flow/src/flow_state.cpp
   flow/src/momentum_predictor.cpp)
 target_include_directories(hundun_flow PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/include>")
@@ -529,6 +531,24 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_momentum_predictor_header_contract PROPERTIES
     TIMEOUT 30)
 
+  hundun_add_test(test_task18_header_contract
+    tests/unit/test_task18_header_contract.cpp)
+  target_link_libraries(test_task18_header_contract PRIVATE hundun_flow)
+  set_tests_properties(test_task18_header_contract PROPERTIES TIMEOUT 30)
+  add_test(NAME test_task18_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task18_source_policy.cmake")
+  set_tests_properties(test_task18_source_policy PROPERTIES
+    LABELS "unit;source_policy;task18"
+    TIMEOUT 30)
+
+  hundun_add_test(test_flow_state tests/unit/test_flow_state.cpp)
+  target_include_directories(test_flow_state PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_flow_state PRIVATE hundun_flow)
+  set_tests_properties(test_flow_state PROPERTIES TIMEOUT 30)
+
   hundun_add_test(test_momentum_predictor
     tests/unit/test_momentum_predictor.cpp)
   target_include_directories(test_momentum_predictor PRIVATE
@@ -581,6 +601,57 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${momentum_predictor_collective_test}" PROPERTIES
       LABELS "mpi"
       TIMEOUT 60
+      PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_fixed_step_piso
+    tests/mpi/test_fixed_step_piso.cpp)
+  target_include_directories(test_fixed_step_piso PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_fixed_step_piso PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(fixed_step_piso_test "test_fixed_step_piso_${ranks}_rank")
+    add_test(NAME "${fixed_step_piso_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_fixed_step_piso>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${fixed_step_piso_test}" PROPERTIES
+      LABELS "mpi;numerical;task18"
+      TIMEOUT 120
+      PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_piso_decomposition
+    tests/mpi/test_piso_decomposition.cpp)
+  target_include_directories(test_piso_decomposition PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_piso_decomposition PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  add_test(NAME test_piso_decomposition_1_2_4
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" 4
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_piso_decomposition>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(test_piso_decomposition_1_2_4 PROPERTIES
+    LABELS "mpi;numerical;task18"
+    TIMEOUT 30
+    PROCESSORS 4)
+
+  add_executable(test_taylor_green_piso
+    tests/mpi/test_taylor_green_piso.cpp)
+  target_include_directories(test_taylor_green_piso PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_taylor_green_piso PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(taylor_green_piso_test "test_taylor_green_piso_${ranks}_rank")
+    add_test(NAME "${taylor_green_piso_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_taylor_green_piso>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${taylor_green_piso_test}" PROPERTIES
+      LABELS "mpi;numerical;task18"
+      TIMEOUT 300
       PROCESSORS "${ranks}")
   endforeach()
 

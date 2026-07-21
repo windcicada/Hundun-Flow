@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include "hundun/boundary/basic_boundary.hpp"
+#include "hundun/execution/execution.hpp"
+#include "hundun/finite_volume/cell_centered_fvm.hpp"
+#include "hundun/flow/flow_state.hpp"
+#include "hundun/linear/linear_system.hpp"
+#include "hundun/mesh/mesh_geometry.hpp"
+#include "hundun/mesh/mesh_topology.hpp"
+#include "hundun/runtime/halo_exchange.hpp"
+#include "hundun/runtime/mpi_context.hpp"
+#include "hundun/runtime/structured_decomposition.hpp"
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace hundun::flow {
+
+enum class StepAttemptDisposition : std::uint8_t {
+  committed,
+  recoverable_failure,
+  non_retryable_failure
+};
+
+enum class StepFailureReason : std::uint8_t {
+  none,
+  invalid_input,
+  momentum_linear_solve,
+  pressure_linear_solve,
+  non_finite_trial,
+  boundary_backflow,
+  transport_failure,
+  final_continuity_residual,
+  final_pressure_residual,
+  collective_operation
+};
+
+struct PressureCorrectionReport final {
+  linear::SolveReport solve;
+  double independent_residual_l2{};
+  double rhs_l2{};
+  bool accepted{};
+};
+
+struct StepAttemptReport final {
+  StepAttemptDisposition disposition{
+      StepAttemptDisposition::non_retryable_failure};
+  StepFailureReason reason{StepFailureReason::invalid_input};
+  int lowest_failing_rank{-1};
+  std::uint32_t pressure_corrector_count{};
+  double attempted_dt_s{};
+  double suggested_dt_s{};
+  MomentumPredictorReport momentum{};
+  std::array<linear::SolveReport, 2> pressure{};
+  double final_continuity_normalized_l2{};
+  double final_pressure_residual_l2{};
+};
+
+struct ConstantDensityTransportSpec final {
+  runtime::FieldId field{};
+  finite_volume::FiniteVolumeQuantity quantity{};
+  double diffusivity_kg_per_m_s{};
+};
+
+class PisoCoupler final {
+public:
+  static PisoCoupler
+  create(const runtime::StructuredDecomposition &decomposition,
+         const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+         const boundary::BoundaryRegistry &boundaries,
+         const runtime::MpiContext &mpi,
+         execution::ExecutionContext &execution_context,
+         runtime::HaloExchange &cell_halo,
+         const linear::LinearSolver &pressure_solver,
+         linear::Preconditioner &pressure_preconditioner);
+
+  ~PisoCoupler() noexcept;
+  PisoCoupler(PisoCoupler &&) noexcept;
+  PisoCoupler &operator=(PisoCoupler &&) = delete;
+  PisoCoupler(const PisoCoupler &) = delete;
+  PisoCoupler &operator=(const PisoCoupler &) = delete;
+
+  PressureCorrectionReport
+  correct(FlowState &state, double rho_ref,
+          const runtime::FieldView<const double> &actual_momentum_diagonal,
+          const linear::SolveControl &control) const;
+
+private:
+  struct Impl;
+  explicit PisoCoupler(std::unique_ptr<Impl>) noexcept;
+  std::unique_ptr<Impl> impl_;
+};
+
+class FixedStepConstantDensityFlow final {
+public:
+  static FixedStepConstantDensityFlow
+  create(const runtime::StructuredDecomposition &decomposition,
+         const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+         const boundary::BoundaryRegistry &boundaries,
+         const runtime::MpiContext &mpi,
+         execution::ExecutionContext &execution_context,
+         runtime::HaloExchange &cell_halo,
+         const linear::LinearSolver &momentum_solver,
+         std::array<linear::Preconditioner *, 3> momentum_preconditioners,
+         const linear::LinearSolver &pressure_solver,
+         linear::Preconditioner &pressure_preconditioner,
+         std::vector<ConstantDensityTransportSpec> transported_fields = {});
+
+  ~FixedStepConstantDensityFlow() noexcept;
+  FixedStepConstantDensityFlow(FixedStepConstantDensityFlow &&) noexcept;
+  FixedStepConstantDensityFlow &
+  operator=(FixedStepConstantDensityFlow &&) = delete;
+  FixedStepConstantDensityFlow(const FixedStepConstantDensityFlow &) = delete;
+  FixedStepConstantDensityFlow &
+  operator=(const FixedStepConstantDensityFlow &) = delete;
+
+  StepAttemptReport attempt(FlowState &state, double rho_ref, double mu,
+                            const MomentumTimeStencil &stencil,
+                            const linear::SolveControl &momentum_control,
+                            const linear::SolveControl &pressure_control) const;
+
+private:
+  struct Impl;
+  explicit FixedStepConstantDensityFlow(std::unique_ptr<Impl>) noexcept;
+  std::unique_ptr<Impl> impl_;
+};
+
+} // namespace hundun::flow
