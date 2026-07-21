@@ -47,6 +47,14 @@ target_link_libraries(hundun_diagnostics
   PRIVATE hundun_warnings
   PUBLIC hundun_options)
 
+add_library(hundun_diagnostics_core STATIC
+  diagnostics/src/structured_diagnostics.cpp)
+target_include_directories(hundun_diagnostics_core PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_link_libraries(hundun_diagnostics_core
+  PRIVATE hundun_warnings
+  PUBLIC hundun_options)
+
 add_library(yyjson STATIC third_party/yyjson/yyjson.c)
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(yyjson PUBLIC
@@ -162,6 +170,7 @@ target_link_libraries(hundun_finite_volume
 add_library(hundun_flow STATIC
   flow/src/constant_density_piso.cpp
   flow/src/flow_state.cpp
+  flow/src/material_density_transport.cpp
   flow/src/momentum_predictor.cpp)
 target_include_directories(hundun_flow PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/include>")
@@ -181,6 +190,19 @@ if(HUNDUN_BUILD_TESTS)
   target_compile_definitions(hundun_flow PUBLIC
     HUNDUN_FLOW_ENABLE_TEST_ACCESS=1)
 endif()
+
+add_library(hundun_material_diagnostics STATIC
+  diagnostics/src/material_density_transport_diagnostics.cpp)
+target_include_directories(hundun_material_diagnostics PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_link_libraries(hundun_material_diagnostics
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_diagnostics_core
+    hundun_flow
+    hundun_runtime
+    hundun_options
+    MPI::MPI_CXX)
 
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
@@ -434,6 +456,41 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_performance_artifact PRIVATE
     hundun_diagnostics yyjson)
 
+  hundun_add_test(test_structured_diagnostics_header_contract
+    tests/unit/test_structured_diagnostics_header_contract.cpp)
+  target_include_directories(test_structured_diagnostics_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  set_tests_properties(test_structured_diagnostics_header_contract PROPERTIES
+    LABELS "unit;task19" TIMEOUT 30)
+
+  hundun_add_test(test_structured_diagnostics
+    tests/unit/test_structured_diagnostics.cpp)
+  target_include_directories(test_structured_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_structured_diagnostics PRIVATE
+    hundun_diagnostics_core)
+  set_tests_properties(test_structured_diagnostics PROPERTIES
+    LABELS "unit;task19" TIMEOUT 30)
+
+  hundun_add_test(test_material_density_transport_header_contract
+    tests/unit/test_material_density_transport_header_contract.cpp)
+  target_include_directories(test_material_density_transport_header_contract
+    PRIVATE "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_material_density_transport_header_contract PRIVATE
+    hundun_flow)
+  set_tests_properties(test_material_density_transport_header_contract PROPERTIES
+    LABELS "unit;task19" TIMEOUT 30)
+
+  hundun_add_test(test_mpi_operation_error
+    tests/unit/test_mpi_operation_error.cpp)
+  target_include_directories(test_mpi_operation_error PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_mpi_operation_error PRIVATE
+    hundun_runtime MPI::MPI_CXX)
+  set_tests_properties(test_mpi_operation_error PROPERTIES
+    LABELS "unit;task19" TIMEOUT 30)
+
   hundun_add_test(test_execution tests/unit/test_execution.cpp)
   target_include_directories(test_execution PRIVATE
     "${PROJECT_SOURCE_DIR}")
@@ -640,6 +697,59 @@ if(HUNDUN_BUILD_TESTS)
       LABELS "mpi;numerical;task18"
       TIMEOUT 120
       PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_material_density_transport
+    tests/mpi/test_material_density_transport.cpp)
+  target_include_directories(test_material_density_transport PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_material_density_transport PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(material_transport_test
+        "test_material_density_transport_${ranks}_rank")
+    add_test(NAME "${material_transport_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_material_density_transport>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${material_transport_test}" PROPERTIES
+      LABELS "mpi;numerical;task19" TIMEOUT 120 PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_material_density_wave
+    tests/mpi/test_material_density_wave.cpp)
+  target_include_directories(test_material_density_wave PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_material_density_wave PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(material_wave_test "test_material_density_wave_${ranks}_rank")
+    add_test(NAME "${material_wave_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_material_density_wave>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${material_wave_test}" PROPERTIES
+      LABELS "mpi;numerical;task19" TIMEOUT 240 PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_material_density_diagnostics
+    tests/mpi/test_material_density_diagnostics.cpp)
+  target_include_directories(test_material_density_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_material_density_diagnostics PRIVATE
+    hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(material_diagnostics_test
+        "test_material_density_diagnostics_${ranks}_rank")
+    add_test(NAME "${material_diagnostics_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_material_density_diagnostics>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${material_diagnostics_test}" PROPERTIES
+      LABELS "mpi;diagnostics;task19" TIMEOUT 120 PROCESSORS "${ranks}")
   endforeach()
 
   add_executable(test_piso_decomposition

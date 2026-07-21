@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/flow/flow_state.hpp"
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "material_density_transport_test_access.hpp"
+#endif
 
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/runtime/error.hpp"
@@ -150,6 +153,7 @@ struct FlowState::Impl final {
   runtime::FieldStorage committed;
   runtime::FieldStorage trial;
   bool attempt_active{};
+  std::uint64_t attempt_identity{};
   bool commit_prepared{};
   AcceptedStepMetadata prepared_metadata{};
 };
@@ -294,8 +298,7 @@ FlowLayerValues read_layer(const StateImplementation &impl,
 template <class StateImplementation>
 void copy_layer(StateImplementation &impl, const runtime::FieldStorage &source,
                 runtime::FieldStorage &destination) {
-  const auto copy_cell = [&](runtime::FieldId field,
-                             std::uint32_t components) {
+  const auto copy_cell = [&](runtime::FieldId field, std::uint32_t components) {
     const auto input = source.template acquire_read<double>(
         impl.access, kStatePhase, kStateActor, field);
     auto output = destination.template acquire_write<double>(
@@ -307,8 +310,7 @@ void copy_layer(StateImplementation &impl, const runtime::FieldStorage &source,
       }
     });
   };
-  const auto copy_face = [&](runtime::FieldId field,
-                             std::uint32_t components) {
+  const auto copy_face = [&](runtime::FieldId field, std::uint32_t components) {
     const auto input = source.template acquire_face_read<double>(
         impl.access, kStatePhase, kStateActor, field);
     auto output = destination.template acquire_face_write<double>(
@@ -375,6 +377,10 @@ bool FlowState::attempt_active() const noexcept {
   return impl_->attempt_active;
 }
 
+std::uint64_t FlowState::attempt_identity() const noexcept {
+  return impl_->attempt_identity;
+}
+
 const runtime::FieldStorage &FlowState::layer(FlowLayer selected) const {
   switch (selected) {
   case FlowLayer::history:
@@ -394,6 +400,13 @@ const FlowFieldIds &FlowState::fields() const noexcept { return impl_->fields; }
 AcceptedStepMetadata FlowState::metadata() const noexcept {
   return impl_->metadata;
 }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void test::MaterialDensityTransportTestAccess::force_attempt_identity_wrap(
+    FlowState &state) noexcept {
+  state.impl_->attempt_identity = std::numeric_limits<std::uint64_t>::max();
+}
+#endif
 
 void FlowState::seed_accepted_layers(const FlowLayerValues &history,
                                      const FlowLayerValues &committed) {
@@ -418,6 +431,10 @@ void FlowState::begin_attempt() {
   if (impl_->attempt_active) {
     throw runtime::Error("FlowState attempt is already active");
   }
+  if (impl_->attempt_identity == std::numeric_limits<std::uint64_t>::max()) {
+    throw runtime::Error("FlowState attempt identity would wrap");
+  }
+  ++impl_->attempt_identity;
   impl_->trial.begin_rebuild();
   copy_layer(*impl_, impl_->committed, impl_->trial);
   impl_->attempt_active = true;
@@ -430,6 +447,7 @@ void FlowState::rollback_attempt() {
   if (!impl_->commit_prepared) {
     impl_->trial.begin_rebuild();
   }
+  copy_layer(*impl_, impl_->committed, impl_->trial);
   impl_->commit_prepared = false;
   impl_->attempt_active = false;
 }

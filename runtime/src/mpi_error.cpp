@@ -3,11 +3,24 @@
 #include "mpi_error.hpp"
 
 #include "hundun/runtime/error.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
 
 #include <array>
 #include <string>
 
-namespace hundun::runtime::detail {
+namespace hundun::runtime {
+
+MpiOperationError::MpiOperationError(const std::string &message)
+    : Error(message) {}
+
+void check_mpi_result(int result, std::string_view operation) {
+  if (result != MPI_SUCCESS) {
+    throw MpiOperationError(std::string(operation) + " failed with MPI error " +
+                            std::to_string(result));
+  }
+}
+
+namespace detail {
 
 bool mpi_is_active() noexcept {
   int initialized = 0;
@@ -59,11 +72,12 @@ void require_mpi_active(std::string_view operation) {
   }
 }
 
-void free_communicator_without_throwing(MPI_Comm& communicator) noexcept {
+void free_communicator_without_throwing(MPI_Comm &communicator) noexcept {
   if (communicator != MPI_COMM_NULL && mpi_is_active()) {
     (void)MPI_Comm_free(&communicator);
   }
   communicator = MPI_COMM_NULL;
 }
 
-}  // namespace hundun::runtime::detail
+} // namespace detail
+} // namespace hundun::runtime

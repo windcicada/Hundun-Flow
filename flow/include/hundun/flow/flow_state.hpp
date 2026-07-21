@@ -14,6 +14,11 @@ namespace hundun::flow {
 namespace detail {
 struct FlowStateSolverAccess;
 }
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+namespace test {
+class MaterialDensityTransportTestAccess;
+}
+#endif
 
 enum class FlowLayer : std::uint8_t { history, committed, trial };
 
@@ -45,6 +50,8 @@ struct FlowLayerValues final {
 
 class PisoCoupler;
 class FixedStepConstantDensityFlow;
+class MaterialDensityTransport;
+class MaterialDensityDiagnosticSource;
 
 class FlowState final {
 public:
@@ -78,12 +85,18 @@ private:
   const runtime::FieldAccessPlan &solver_access_plan() const noexcept;
   runtime::FieldStorage &solver_layer(FlowLayer selected);
   bool attempt_active() const noexcept;
+  std::uint64_t attempt_identity() const noexcept;
   void prepare_commit_attempt(AcceptedStepMetadata accepted);
   void publish_commit_attempt() noexcept;
   std::unique_ptr<Impl> impl_;
 
   friend class PisoCoupler;
   friend class FixedStepConstantDensityFlow;
+  friend class MaterialDensityTransport;
+  friend class MaterialDensityDiagnosticSource;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  friend class test::MaterialDensityTransportTestAccess;
+#endif
   friend struct detail::FlowStateSolverAccess;
 };
 

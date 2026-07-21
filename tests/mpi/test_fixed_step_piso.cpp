@@ -21,12 +21,12 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "linear/src/preconditioners_test_access.hpp"
 #include "runtime/src/mpi_error.hpp"
+#include "tests/support/flow_state_equality.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -215,49 +215,9 @@ public:
   }
 };
 
-std::uint64_t fp64_bits(double value) noexcept {
-  std::uint64_t bits{};
-  static_assert(sizeof(bits) == sizeof(value));
-  std::memcpy(&bits, &value, sizeof(bits));
-  return bits;
-}
-
-bool fp64_vector_bitwise_equal(const std::vector<double> &left,
-                               const std::vector<double> &right) noexcept {
-  if (left.size() != right.size()) {
-    return false;
-  }
-  for (std::size_t index = 0; index < left.size(); ++index) {
-    if (fp64_bits(left[index]) != fp64_bits(right[index])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool flow_layer_values_bitwise_equal(
-    const hundun::flow::FlowLayerValues &left,
-    const hundun::flow::FlowLayerValues &right) noexcept {
-  if (!fp64_vector_bitwise_equal(left.density, right.density) ||
-      !fp64_vector_bitwise_equal(left.velocity, right.velocity) ||
-      !fp64_vector_bitwise_equal(left.mechanical_pressure,
-                                 right.mechanical_pressure) ||
-      !fp64_vector_bitwise_equal(left.face_velocity, right.face_velocity) ||
-      !fp64_vector_bitwise_equal(left.face_mass_flux,
-                                 right.face_mass_flux) ||
-      left.transported_cell_fields.size() !=
-          right.transported_cell_fields.size()) {
-    return false;
-  }
-  for (std::size_t field = 0; field < left.transported_cell_fields.size();
-       ++field) {
-    if (!fp64_vector_bitwise_equal(left.transported_cell_fields[field],
-                                   right.transported_cell_fields[field])) {
-      return false;
-    }
-  }
-  return true;
-}
+using hundun::test::flow_layer_values_bitwise_equal;
+using hundun::test::fp64_bits;
+using hundun::test::fp64_vector_bitwise_equal;
 
 void check_layer_equal(const hundun::flow::FlowLayerValues &left,
                        const hundun::flow::FlowLayerValues &right) {
@@ -265,36 +225,13 @@ void check_layer_equal(const hundun::flow::FlowLayerValues &left,
 }
 
 void check_flow_layer_bitwise_oracle() {
-  hundun::flow::FlowLayerValues baseline;
-  baseline.density = {0.0, 1.0};
-  baseline.velocity = {2.0, 3.0, 4.0};
-  baseline.mechanical_pressure = {5.0};
-  baseline.face_velocity = {6.0, 7.0, 8.0};
-  baseline.face_mass_flux = {9.0};
-  baseline.transported_cell_fields = {{0.0, 10.0}, {11.0}};
-
-  const auto exact_copy = baseline;
-  HUNDUN_CHECK(flow_layer_values_bitwise_equal(baseline, exact_copy));
-
-  auto ordinary_field_mutation = baseline;
-  ordinary_field_mutation.density.front() = -0.0;
   HUNDUN_CHECK(
-      !flow_layer_values_bitwise_equal(baseline, ordinary_field_mutation));
-
-  auto transported_field_mutation = baseline;
-  transported_field_mutation.transported_cell_fields.front().front() = -0.0;
-  HUNDUN_CHECK(
-      !flow_layer_values_bitwise_equal(baseline, transported_field_mutation));
+      hundun::test::flow_state_equality_oracle_is_mutation_sensitive());
 }
 
 void check_metadata_equal(const hundun::flow::AcceptedStepMetadata &left,
                           const hundun::flow::AcceptedStepMetadata &right) {
-  HUNDUN_CHECK(left.step == right.step);
-  HUNDUN_CHECK(fp64_bits(left.time_s) == fp64_bits(right.time_s));
-  HUNDUN_CHECK(fp64_bits(left.dt_s) == fp64_bits(right.dt_s));
-  HUNDUN_CHECK(fp64_bits(left.previous_dt_s) ==
-               fp64_bits(right.previous_dt_s));
-  HUNDUN_CHECK(left.order == right.order);
+  HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(left, right));
 }
 
 void check_solve_report_equal(const hundun::linear::SolveReport &left,
