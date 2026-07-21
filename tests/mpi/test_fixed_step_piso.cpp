@@ -1331,12 +1331,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     check_layer_equal(
         staged_state.snapshot(hundun::flow::FlowLayer::committed),
         committed_before);
-    const auto metadata_after = staged_state.metadata();
-    HUNDUN_CHECK(metadata_after.step == metadata_before.step);
-    HUNDUN_CHECK(metadata_after.time_s == metadata_before.time_s);
-    HUNDUN_CHECK(metadata_after.dt_s == metadata_before.dt_s);
-    HUNDUN_CHECK(metadata_after.previous_dt_s == metadata_before.previous_dt_s);
-    HUNDUN_CHECK(metadata_after.order == metadata_before.order);
+    check_metadata_equal(staged_state.metadata(), metadata_before);
   }
   TestAccess::reset();
   TestAccess::set_provisional_transport_sentinel(true);
