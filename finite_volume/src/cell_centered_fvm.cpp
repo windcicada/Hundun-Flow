@@ -14,6 +14,7 @@
 #include <limits>
 #include <new>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -503,6 +504,119 @@ double boundary_exterior_value(const boundary::BoundaryRegistry &boundaries,
   }
   return evaluate_scalar_boundary(boundaries, quantity, *face.patch, scalar)
       .exterior;
+}
+
+double physical_scalar_diffusive_flux(
+    const FaceStencil &face, FiniteVolumeQuantity quantity,
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::FieldView<const double> &cell_values,
+    const runtime::FieldView<const double> &cell_gradients, double gamma) {
+  if (!is_physical_nonperiodic(face)) {
+    throw Error("scalar physical-boundary contribution requires a physical face");
+  }
+  if (!(gamma >= 0.0) || !std::isfinite(gamma)) {
+    throw Error("scalar diffusion coefficient is invalid");
+  }
+  const auto &descriptor = boundaries.patch(*face.patch);
+  boundary::TransportRule rule = descriptor.density_rule();
+  if (quantity.kind == FiniteVolumeQuantityKind::enthalpy) {
+    rule = descriptor.enthalpy_rule();
+  } else if (quantity.kind == FiniteVolumeQuantityKind::scalar) {
+    rule = descriptor.scalar_rule();
+  }
+  if (rule == boundary::TransportRule::zero_normal_diffusive_flux ||
+      rule == boundary::TransportRule::copy_interior ||
+      rule == boundary::TransportRule::pure_outflow) {
+    return 0.0;
+  }
+  if (rule != boundary::TransportRule::prescribed_value) {
+    throw Error("physical scalar diffusion rule is invalid");
+  }
+  const double q_p = value_at(cell_values, face.owner, 0);
+  const double q_n = boundary_exterior_value(boundaries, quantity, face,
+                                             Real3{}, q_p, 0);
+  const Real3 d = multiply(2.0, subtract(face.face_center, face.owner_center));
+  const double sd = dot(face.owner_area, d);
+  const double factor = dot(face.owner_area, face.owner_area) / sd;
+  const Real3 nonorth = subtract(face.owner_area, multiply(factor, d));
+  const Real3 gradient{value_at(cell_gradients, face.owner, 0),
+                       value_at(cell_gradients, face.owner, 1),
+                       value_at(cell_gradients, face.owner, 2)};
+  if (!std::isfinite(q_p) || !std::isfinite(q_n) || !finite(d) ||
+      !finite(gradient) || !(sd > 0.0) || !std::isfinite(factor)) {
+    throw Error("prescribed scalar diffusion stencil is invalid");
+  }
+  const double flux =
+      gamma * ((q_n - q_p) * factor + dot(gradient, nonorth));
+  if (!std::isfinite(flux)) {
+    throw Error("scalar diffusion contribution is non-finite");
+  }
+  return flux;
+}
+
+std::array<double, 3> physical_viscous_traction(
+    const FaceStencil &face, const boundary::BoundaryRegistry &boundaries,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    double dynamic_viscosity_pa_s) {
+  if (!is_physical_nonperiodic(face)) {
+    throw Error("viscous physical-boundary contribution requires a physical face");
+  }
+  const StructuredIndex p = face.owner;
+  const Real3 d =
+      multiply(2.0, subtract(face.face_center, face.owner_center));
+  const Real3 area = face.owner_area;
+  const Real3 u_p{value_at(velocity, p, 0), value_at(velocity, p, 1),
+                   value_at(velocity, p, 2)};
+  const Real3 u_n = boundaries.evaluate_velocity(*face.patch, u_p, area).exterior;
+  std::array<double, 9> gradient{};
+  for (int value = 0; value < 9; ++value) {
+    gradient[static_cast<std::size_t>(value)] =
+        value_at(velocity_gradients, p, value);
+  }
+  const double d2 = dot(d, d);
+  if (!(dynamic_viscosity_pa_s >= 0.0) ||
+      !std::isfinite(dynamic_viscosity_pa_s) || !finite(d) || !finite(area) ||
+      !finite(u_p) || !finite(u_n) || !(d2 > 0.0) || !std::isfinite(d2)) {
+    throw Error("viscous face stencil is invalid");
+  }
+  const std::array<double, 3> delta{u_n.x - u_p.x, u_n.y - u_p.y,
+                                    u_n.z - u_p.z};
+  const std::array<double, 3> d_values{d.x, d.y, d.z};
+  for (int component = 0; component < 3; ++component) {
+    const std::size_t base = static_cast<std::size_t>(component) * 3U;
+    const double projected = gradient[base] * d.x + gradient[base + 1U] * d.y +
+                             gradient[base + 2U] * d.z;
+    const double correction =
+        (delta[static_cast<std::size_t>(component)] - projected) / d2;
+    for (int direction = 0; direction < 3; ++direction) {
+      gradient[base + static_cast<std::size_t>(direction)] +=
+          correction * d_values[static_cast<std::size_t>(direction)];
+    }
+  }
+  const double divergence = gradient[0] + gradient[4] + gradient[8];
+  const std::array<double, 3> area_values{area.x, area.y, area.z};
+  std::array<double, 3> traction{};
+  for (int component = 0; component < 3; ++component) {
+    for (int direction = 0; direction < 3; ++direction) {
+      double stress = dynamic_viscosity_pa_s *
+                      (gradient[static_cast<std::size_t>(component) * 3U +
+                                static_cast<std::size_t>(direction)] +
+                       gradient[static_cast<std::size_t>(direction) * 3U +
+                                static_cast<std::size_t>(component)]);
+      if (component == direction) {
+        stress -= dynamic_viscosity_pa_s * (2.0 / 3.0) * divergence;
+      }
+      traction[static_cast<std::size_t>(component)] +=
+          stress * area_values[static_cast<std::size_t>(direction)];
+    }
+  }
+  for (double value : traction) {
+    if (!std::isfinite(value)) {
+      throw Error("viscous traction is non-finite");
+    }
+  }
+  return traction;
 }
 
 bool descriptor_matches(const runtime::FieldDescriptor &descriptor) noexcept {
@@ -1555,37 +1669,9 @@ void CellCenteredFvmOperators::accumulate_scalar_diffusive_residual(
     }
     double flux = 0.0;
     if (is_physical_nonperiodic(face)) {
-      const auto &descriptor = boundaries.patch(*face.patch);
-      boundary::TransportRule rule = descriptor.density_rule();
-      if (quantity.kind == FiniteVolumeQuantityKind::enthalpy) {
-        rule = descriptor.enthalpy_rule();
-      } else if (quantity.kind == FiniteVolumeQuantityKind::scalar) {
-        rule = descriptor.scalar_rule();
-      }
-      if (rule == boundary::TransportRule::prescribed_value) {
-        const double q_p = value_at(cell_values, face.owner, 0);
-        const double q_n = boundary_exterior_value(boundaries, quantity, face,
-                                                   Real3{}, q_p, 0);
-        const Real3 d =
-            multiply(2.0, subtract(face.face_center, face.owner_center));
-        const double sd = dot(face.owner_area, d);
-        const double factor = dot(face.owner_area, face.owner_area) / sd;
-        const Real3 nonorth = subtract(face.owner_area, multiply(factor, d));
-        const Real3 gradient{value_at(cell_gradients, face.owner, 0),
-                             value_at(cell_gradients, face.owner, 1),
-                             value_at(cell_gradients, face.owner, 2)};
-        if (!std::isfinite(q_p) || !std::isfinite(q_n) || !finite(d) ||
-            !finite(gradient) || !(sd > 0.0) || !std::isfinite(factor)) {
-          throw Error("prescribed scalar diffusion stencil is invalid");
-        }
-        flux = gamma * ((q_n - q_p) * factor + dot(gradient, nonorth));
-      } else if (rule == boundary::TransportRule::zero_normal_diffusive_flux ||
-                 rule == boundary::TransportRule::copy_interior ||
-                 rule == boundary::TransportRule::pure_outflow) {
-        flux = 0.0;
-      } else {
-        throw Error("physical scalar diffusion rule is invalid");
-      }
+      flux = physical_scalar_diffusive_flux(face, quantity, boundaries,
+                                            cell_values, cell_gradients,
+                                            gamma);
     } else {
       const CanonicalFace canonical = canonical_face(face);
       const Real3 d = canonical.reversed ? multiply(-1.0, face.displacement)
@@ -1696,38 +1782,26 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
     }
   }
   for (const auto &face : impl_->faces) {
-    Real3 d{};
-    Real3 area{};
-    StructuredIndex p{};
-    StructuredIndex n{};
-    bool reversed = false;
-    bool physical = is_physical_nonperiodic(face);
-    Real3 u_p{};
-    Real3 u_n{};
-    std::array<double, 9> gradient{};
+    const bool physical = is_physical_nonperiodic(face);
+    std::array<double, 3> traction{};
     if (physical) {
-      p = face.owner;
-      d = multiply(2.0, subtract(face.face_center, face.owner_center));
-      area = face.owner_area;
-      u_p = Real3{value_at(velocity, p, 0), value_at(velocity, p, 1),
-                  value_at(velocity, p, 2)};
-      u_n = boundaries.evaluate_velocity(*face.patch, u_p, area).exterior;
-      for (int value = 0; value < 9; ++value) {
-        gradient[static_cast<std::size_t>(value)] =
-            value_at(velocity_gradients, p, value);
-      }
+      traction = physical_viscous_traction(
+          face, boundaries, velocity, velocity_gradients,
+          dynamic_viscosity_pa_s);
     } else {
       const CanonicalFace canonical = canonical_face(face);
-      p = canonical.p;
-      n = canonical.n;
-      area = canonical.area;
-      reversed = canonical.reversed;
-      d = reversed ? multiply(-1.0, face.displacement) : face.displacement;
-      u_p = Real3{value_at(velocity, p, 0), value_at(velocity, p, 1),
-                  value_at(velocity, p, 2)};
-      u_n = Real3{value_at(velocity, n, 0), value_at(velocity, n, 1),
-                  value_at(velocity, n, 2)};
-      const Real3 owner_to_face = subtract(face.face_center, face.owner_center);
+      const StructuredIndex p = canonical.p;
+      const StructuredIndex n = canonical.n;
+      const Real3 area = canonical.area;
+      const bool reversed = canonical.reversed;
+      const Real3 d =
+          reversed ? multiply(-1.0, face.displacement) : face.displacement;
+      const Real3 u_p{value_at(velocity, p, 0), value_at(velocity, p, 1),
+                      value_at(velocity, p, 2)};
+      const Real3 u_n{value_at(velocity, n, 0), value_at(velocity, n, 1),
+                      value_at(velocity, n, 2)};
+      const Real3 owner_to_face =
+          subtract(face.face_center, face.owner_center);
       double a = safe_norm(owner_to_face);
       double b = safe_norm(subtract(face.displacement, owner_to_face));
       if (reversed)
@@ -1736,57 +1810,57 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
       if (!(denominator > 0.0) || !std::isfinite(denominator)) {
         throw Error("viscous interpolation distance is invalid");
       }
+      std::array<double, 9> gradient{};
       for (int value = 0; value < 9; ++value) {
         const double gp = value_at(velocity_gradients, p, value);
         const double gn = value_at(velocity_gradients, n, value);
         gradient[static_cast<std::size_t>(value)] =
             (b / denominator) * gp + (a / denominator) * gn;
       }
-    }
-    const double d2 = dot(d, d);
-    if (!finite(d) || !finite(area) || !finite(u_p) || !finite(u_n) ||
-        !(d2 > 0.0) || !std::isfinite(d2)) {
-      throw Error("viscous face stencil is invalid");
-    }
-    const std::array<double, 3> delta{u_n.x - u_p.x, u_n.y - u_p.y,
-                                      u_n.z - u_p.z};
-    const std::array<double, 3> d_values{d.x, d.y, d.z};
-    for (int component = 0; component < 3; ++component) {
-      const std::size_t base = static_cast<std::size_t>(component) * 3U;
-      const double projected = gradient[base] * d.x +
-                               gradient[base + 1U] * d.y +
-                               gradient[base + 2U] * d.z;
-      const double correction =
-          (delta[static_cast<std::size_t>(component)] - projected) / d2;
-      for (int direction = 0; direction < 3; ++direction) {
-        gradient[base + static_cast<std::size_t>(direction)] +=
-            correction * d_values[static_cast<std::size_t>(direction)];
+      const double d2 = dot(d, d);
+      if (!finite(d) || !finite(area) || !finite(u_p) || !finite(u_n) ||
+          !(d2 > 0.0) || !std::isfinite(d2)) {
+        throw Error("viscous face stencil is invalid");
       }
-    }
-    const double divergence = gradient[0] + gradient[4] + gradient[8];
-    const std::array<double, 3> area_values{area.x, area.y, area.z};
-    std::array<double, 3> traction{};
-    for (int component = 0; component < 3; ++component) {
-      for (int direction = 0; direction < 3; ++direction) {
-        double stress = dynamic_viscosity_pa_s *
-                        (gradient[static_cast<std::size_t>(component) * 3U +
-                                  static_cast<std::size_t>(direction)] +
-                         gradient[static_cast<std::size_t>(direction) * 3U +
-                                  static_cast<std::size_t>(component)]);
-        if (component == direction) {
-          stress -= dynamic_viscosity_pa_s * (2.0 / 3.0) * divergence;
+      const std::array<double, 3> delta{u_n.x - u_p.x, u_n.y - u_p.y,
+                                        u_n.z - u_p.z};
+      const std::array<double, 3> d_values{d.x, d.y, d.z};
+      for (int component = 0; component < 3; ++component) {
+        const std::size_t base = static_cast<std::size_t>(component) * 3U;
+        const double projected = gradient[base] * d.x +
+                                 gradient[base + 1U] * d.y +
+                                 gradient[base + 2U] * d.z;
+        const double correction =
+            (delta[static_cast<std::size_t>(component)] - projected) / d2;
+        for (int direction = 0; direction < 3; ++direction) {
+          gradient[base + static_cast<std::size_t>(direction)] +=
+              correction * d_values[static_cast<std::size_t>(direction)];
         }
-        traction[static_cast<std::size_t>(component)] +=
-            stress * area_values[static_cast<std::size_t>(direction)];
       }
-    }
-    if (reversed) {
-      for (double &component : traction)
-        component = -component;
-    }
-    for (double component : traction) {
-      if (!std::isfinite(component)) {
-        throw Error("viscous traction is non-finite");
+      const double divergence = gradient[0] + gradient[4] + gradient[8];
+      const std::array<double, 3> area_values{area.x, area.y, area.z};
+      for (int component = 0; component < 3; ++component) {
+        for (int direction = 0; direction < 3; ++direction) {
+          double stress = dynamic_viscosity_pa_s *
+                          (gradient[static_cast<std::size_t>(component) * 3U +
+                                    static_cast<std::size_t>(direction)] +
+                           gradient[static_cast<std::size_t>(direction) * 3U +
+                                    static_cast<std::size_t>(component)]);
+          if (component == direction) {
+            stress -= dynamic_viscosity_pa_s * (2.0 / 3.0) * divergence;
+          }
+          traction[static_cast<std::size_t>(component)] +=
+              stress * area_values[static_cast<std::size_t>(direction)];
+        }
+      }
+      if (reversed) {
+        for (double &component : traction)
+          component = -component;
+      }
+      for (double component : traction) {
+        if (!std::isfinite(component)) {
+          throw Error("viscous traction is non-finite");
+        }
       }
     }
     if (face.owner_owned.has_value()) {
@@ -1824,6 +1898,153 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
           impl_->secondary[cell * 9U + static_cast<std::size_t>(component)];
     }
   }
+}
+
+std::vector<PhysicalBoundaryMomentumContribution>
+CellCenteredFvmOperators::physical_boundary_momentum_contributions(
+    const boundary::BoundaryRegistry &boundaries,
+    const FaceMassFlux &mass_flux,
+    const runtime::FaceFieldView<const double> &face_velocity,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    double dynamic_viscosity_pa_s) const {
+  OperationGuard operation(require_impl().active);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
+  const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
+  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+      face_velocity.face_count() != impl_->faces.size() ||
+      face_velocity.components() != 3U ||
+      !same(velocity.interior_extent(), impl_->local_extent) ||
+      velocity.components() != 3U ||
+      velocity.ghost_width() < required_ghost ||
+      !same(velocity_gradients.interior_extent(), impl_->local_extent) ||
+      velocity_gradients.components() != 9U ||
+      velocity_gradients.ghost_width() < required_ghost ||
+      !(dynamic_viscosity_pa_s >= 0.0) ||
+      !std::isfinite(dynamic_viscosity_pa_s)) {
+    throw Error("physical momentum contribution layout is invalid");
+  }
+  std::vector<PhysicalBoundaryMomentumContribution> result;
+  std::set<GlobalFaceId> observed;
+  for (const auto &face : impl_->faces) {
+    if (!is_physical_nonperiodic(face))
+      continue;
+    if (!face.owner_owned.has_value() ||
+        !observed.insert(face.global_face).second) {
+      throw Error("physical momentum contribution face is duplicated");
+    }
+    const double mass = mass_flux.state_->view(face.local_face, 0);
+    const auto traction = physical_viscous_traction(
+        face, boundaries, velocity, velocity_gradients,
+        dynamic_viscosity_pa_s);
+    PhysicalBoundaryMomentumContribution contribution;
+    contribution.global_face_id = face.global_face;
+    for (std::size_t component = 0; component < 3U; ++component) {
+      const double face_value =
+          face_velocity(face.local_face, static_cast<int>(component));
+      contribution.convective[component] = mass * face_value;
+      contribution.viscous[component] = -traction[component];
+      if (!std::isfinite(contribution.convective[component]) ||
+          !std::isfinite(contribution.viscous[component])) {
+        throw Error("physical momentum contribution is non-finite");
+      }
+    }
+    result.push_back(contribution);
+  }
+  return result;
+}
+
+std::vector<PhysicalBoundaryPressureContribution>
+CellCenteredFvmOperators::physical_boundary_pressure_contributions(
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::FieldView<const double> &pressure) const {
+  OperationGuard operation(require_impl().active);
+  if (!same(pressure.interior_extent(), impl_->local_extent) ||
+      pressure.components() != 1U) {
+    throw Error("physical pressure contribution layout is invalid");
+  }
+  std::vector<PhysicalBoundaryPressureContribution> result;
+  std::set<GlobalFaceId> observed;
+  for (const auto &face : impl_->faces) {
+    if (!is_physical_nonperiodic(face))
+      continue;
+    if (!face.owner_owned.has_value() ||
+        !observed.insert(face.global_face).second) {
+      throw Error("physical pressure contribution face is duplicated");
+    }
+    const double owner_value = value_at(pressure, face.owner, 0);
+    const double face_value =
+        boundaries.evaluate_pressure(*face.patch, owner_value).face;
+    PhysicalBoundaryPressureContribution contribution;
+    contribution.global_face_id = face.global_face;
+    contribution.pressure = {face_value * face.owner_area.x,
+                             face_value * face.owner_area.y,
+                             face_value * face.owner_area.z};
+    if (!std::isfinite(owner_value) || !std::isfinite(face_value) ||
+        !finite(Real3{contribution.pressure[0], contribution.pressure[1],
+                     contribution.pressure[2]})) {
+      throw Error("physical pressure contribution is non-finite");
+    }
+    result.push_back(contribution);
+  }
+  return result;
+}
+
+std::vector<PhysicalBoundaryTransportContribution>
+CellCenteredFvmOperators::physical_boundary_transport_contributions(
+    FiniteVolumeQuantity quantity,
+    const boundary::BoundaryRegistry &boundaries,
+    const FaceMassFlux &mass_flux,
+    const runtime::FaceFieldView<const double> &face_values,
+    const runtime::FieldView<const double> &cell_values,
+    const runtime::FieldView<const double> &cell_gradients,
+    const runtime::FaceFieldView<const double> &gamma_by_face) const {
+  OperationGuard operation(require_impl().active);
+  validate_quantity(quantity, boundaries, false);
+  if (!mass_flux.state_) {
+    throw Error("face mass flux handle has been moved from");
+  }
+  const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
+  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+      face_values.face_count() != impl_->faces.size() ||
+      face_values.components() != 1U ||
+      !same(cell_values.interior_extent(), impl_->local_extent) ||
+      cell_values.components() != 1U ||
+      cell_values.ghost_width() < required_ghost ||
+      !same(cell_gradients.interior_extent(), impl_->local_extent) ||
+      cell_gradients.components() != 3U ||
+      cell_gradients.ghost_width() < required_ghost ||
+      gamma_by_face.face_count() != impl_->faces.size() ||
+      gamma_by_face.components() != 1U) {
+    throw Error("physical transport contribution layout is invalid");
+  }
+  std::vector<PhysicalBoundaryTransportContribution> result;
+  std::set<GlobalFaceId> observed;
+  for (const auto &face : impl_->faces) {
+    if (!is_physical_nonperiodic(face))
+      continue;
+    if (!face.owner_owned.has_value() ||
+        !observed.insert(face.global_face).second) {
+      throw Error("physical transport contribution face is duplicated");
+    }
+    const double mass = mass_flux.state_->view(face.local_face, 0);
+    const double transported = face_values(face.local_face, 0);
+    const double gamma = gamma_by_face(face.local_face, 0);
+    const double diffusive_flux = physical_scalar_diffusive_flux(
+        face, quantity, boundaries, cell_values, cell_gradients, gamma);
+    PhysicalBoundaryTransportContribution contribution;
+    contribution.global_face_id = face.global_face;
+    contribution.convective = mass * transported;
+    contribution.diffusive = -diffusive_flux;
+    if (!std::isfinite(contribution.convective) ||
+        !std::isfinite(contribution.diffusive)) {
+      throw Error("physical transport contribution is non-finite");
+    }
+    result.push_back(contribution);
+  }
+  return result;
 }
 
 } // namespace hundun::finite_volume

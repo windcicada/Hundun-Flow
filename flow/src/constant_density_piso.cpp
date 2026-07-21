@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <new>
@@ -71,6 +72,17 @@ std::atomic<std::size_t> final_transport_perturb_index{
     std::numeric_limits<std::size_t>::max()};
 std::atomic<double> final_transport_perturb_delta{0.0};
 std::atomic<bool> force_final_conservation_failure{false};
+std::atomic<double> final_mass_defect_perturbation{0.0};
+std::array<std::atomic<bool>, 3> final_momentum_norm_armed{};
+std::array<std::atomic<double>, 3> final_momentum_norm_residual_square{};
+std::array<std::atomic<double>, 3> final_momentum_norm_scale_square{};
+std::atomic<std::size_t> final_transport_norm_index{
+    std::numeric_limits<std::size_t>::max()};
+std::atomic<double> final_transport_norm_residual_square{0.0};
+std::atomic<double> final_transport_norm_scale_square{0.0};
+test::ConservationDiagnostic last_mass_conservation{};
+std::array<test::ConservationDiagnostic, 3> last_momentum_conservation{};
+std::vector<test::ConservationDiagnostic> last_transport_conservation;
 std::atomic<test::MomentumAssemblyMutation> momentum_assembly_mutation{
     test::MomentumAssemblyMutation::none};
 std::atomic<test::TransportAssemblyMutation> transport_assembly_mutation{
@@ -435,6 +447,50 @@ double low_u32(std::uint64_t value) noexcept {
 
 double high_u32(std::uint64_t value) noexcept {
   return static_cast<double>(value >> 32U);
+}
+
+std::uint64_t fp64_bits(double value) noexcept {
+  std::uint64_t bits{};
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+bool valid_solve_control(const linear::SolveControl &control) noexcept {
+  return std::isfinite(control.atol) && control.atol >= 0.0 &&
+         std::isfinite(control.rtol) && control.rtol >= 0.0 &&
+         control.residual_recompute_interval != 0U;
+}
+
+runtime::CollectiveStatus
+agree_solve_control(const runtime::MpiContext &mpi,
+                    const linear::SolveControl &control,
+                    const char *invalid_message,
+                    const char *mismatch_message) {
+  const auto validity =
+      runtime::collective_status(mpi, valid_solve_control(control),
+                                 invalid_message);
+  if (!validity.ok)
+    return validity;
+
+  const std::array<std::uint64_t, 4> local_words{
+      fp64_bits(control.atol), fp64_bits(control.rtol),
+      control.max_iterations, control.residual_recompute_interval};
+  std::array<double, 8> root_halves{};
+  if (mpi.rank() == 0) {
+    for (std::size_t word = 0; word < local_words.size(); ++word) {
+      root_halves[word * 2U] = low_u32(local_words[word]);
+      root_halves[word * 2U + 1U] = high_u32(local_words[word]);
+    }
+  }
+  mpi.allreduce_fp64_in_place(root_halves.data(), root_halves.size(),
+                              runtime::Fp64ReductionOperation::sum);
+  bool matches = true;
+  for (std::size_t word = 0; word < local_words.size(); ++word) {
+    matches = matches && root_halves[word * 2U] == low_u32(local_words[word]) &&
+              root_halves[word * 2U + 1U] == high_u32(local_words[word]);
+  }
+  return runtime::collective_status(mpi, matches, mismatch_message);
 }
 
 template <std::size_t Count>
@@ -1197,6 +1253,7 @@ namespace {
 struct MomentumSpatialResidual final {
   std::vector<double> convection;
   std::vector<double> viscosity;
+  std::vector<finite_volume::PhysicalBoundaryMomentumContribution> boundary;
 };
 
 template <class FlowImplementation>
@@ -1277,6 +1334,8 @@ MomentumSpatialResidual assemble_spatial_residual(
                 residual(index.i, index.j, index.k, component_index);
           }
         }
+        values.boundary = impl.fvm.physical_boundary_momentum_contributions(
+            *impl.boundaries, flux, face_read, velocity, gradient_read, mu);
       });
   return values;
 }
@@ -1297,6 +1356,7 @@ void exchange_accepted_layers(FlowImplementation &impl, StateImpl &state) {
 struct TransportSpatialResidual final {
   std::vector<double> convection;
   std::vector<double> diffusion;
+  std::vector<finite_volume::PhysicalBoundaryTransportContribution> boundary;
 };
 
 template <class FlowImplementation>
@@ -1379,6 +1439,10 @@ TransportSpatialResidual assemble_transport_spatial_residual(
                        impl.topology->global_extent());
           spatial.diffusion[cell] = residual(index.i, index.j, index.k, 0);
         }
+        spatial.boundary =
+            impl.fvm.physical_boundary_transport_contributions(
+                item.quantity, *impl.boundaries, flux, face_values, values,
+                gradient, gamma_values);
       });
   return spatial;
 }
@@ -1523,24 +1587,98 @@ double normalized_l2(double residual_square, double scale_square) noexcept {
              : residual / scale;
 }
 
-double relative_defect(double defect, const double *scales,
-                       std::size_t count) noexcept {
-  double denominator = std::numeric_limits<double>::min();
-  for (std::size_t index = 0; index < count; ++index) {
-    denominator = std::max(denominator, std::abs(scales[index]));
+class CompensatedSum final {
+public:
+  void add(double value) noexcept {
+    const double candidate = sum_ + value;
+    if (std::abs(sum_) >= std::abs(value)) {
+      correction_ += (sum_ - candidate) + value;
+    } else {
+      correction_ += (value - candidate) + sum_;
+    }
+    sum_ = candidate;
   }
-  return std::abs(defect) / denominator;
+
+  double value() const noexcept { return sum_ + correction_; }
+
+private:
+  double sum_{};
+  double correction_{};
+};
+
+struct ConservationParts final {
+  CompensatedSum quantity_nm1;
+  CompensatedSum quantity_n;
+  CompensatedSum quantity_np1;
+  CompensatedSum absolute_quantity_nm1;
+  CompensatedSum absolute_quantity_n;
+  CompensatedSum absolute_quantity_np1;
+  CompensatedSum signed_boundary_flux;
+  CompensatedSum absolute_boundary_flux;
+};
+
+std::array<double, 8>
+reduce_conservation_parts(const runtime::MpiContext &mpi,
+                          const ConservationParts &parts) {
+  std::array<double, 8> values{
+      parts.quantity_nm1.value(), parts.quantity_n.value(),
+      parts.quantity_np1.value(), parts.absolute_quantity_nm1.value(),
+      parts.absolute_quantity_n.value(),
+      parts.absolute_quantity_np1.value(),
+      parts.signed_boundary_flux.value(),
+      parts.absolute_boundary_flux.value()};
+  mpi.allreduce_fp64_in_place(values.data(), values.size(),
+                              runtime::Fp64ReductionOperation::sum);
+  return values;
 }
 
-double remove_certified_sum_roundoff(double value, double absolute_sum,
-                                     std::size_t addition_count) noexcept {
-  if (value == 0.0 || absolute_sum == 0.0)
-    return value;
-  const double operations =
-      static_cast<double>(std::max<std::size_t>(addition_count, 1U));
-  const double bound =
-      8.0 * operations * std::numeric_limits<double>::epsilon() * absolute_sum;
-  return std::abs(value) <= bound ? 0.0 : value;
+struct ConservationDiagnosticValues final {
+  double quantity_nm1{};
+  double quantity_n{};
+  double quantity_np1{};
+  double signed_boundary_flux{};
+  double absolute_boundary_flux{};
+  double boundary_integral{};
+  double history_correction{};
+  double raw_defect{};
+  double relative{};
+};
+
+ConservationDiagnosticValues make_conservation_diagnostic(
+    const std::array<double, 8> &values,
+    const MomentumTimeStencil &stencil,
+    bool enable_cancellation_normalization,
+    double defect_perturbation = 0.0) {
+  const double history_correction =
+      stencil.alpha2 * (values[0] - values[1]) / stencil.alpha0;
+  const double boundary_integral =
+      stencil.dt_s * values[6] / stencil.alpha0;
+  const double absolute_boundary_scale =
+      stencil.dt_s * values[7] / stencil.alpha0;
+  const double raw_defect = values[2] - values[1] + boundary_integral +
+                            history_correction + defect_perturbation;
+  double denominator =
+      std::max({std::abs(values[1]), std::abs(values[2]),
+                absolute_boundary_scale, std::abs(history_correction), 0.0});
+  const double cancellation_scale =
+      std::max({values[4], values[5],
+                stencil.order == MomentumTimeOrder::bdf2 ? values[3] : 0.0});
+  if (enable_cancellation_normalization && cancellation_scale > 0.0 &&
+      denominator <= 64.0 * std::numeric_limits<double>::epsilon() *
+                         cancellation_scale) {
+    denominator = cancellation_scale;
+  }
+  denominator =
+      std::max(denominator, std::numeric_limits<double>::min());
+  return {values[0],
+          values[1],
+          values[2],
+          values[6],
+          values[7],
+          boundary_integral,
+          history_correction,
+          raw_defect,
+          std::abs(raw_defect) / denominator};
 }
 
 template <class FlowImplementation>
@@ -1562,9 +1700,7 @@ runtime::CollectiveStatus assess_final_momentum(
   impl.halo->exchange(trial, fields.mechanical_pressure);
 
   std::array<double, 6> norm_sums{};
-  std::array<double, 24> global_terms{};
-  std::array<double, 15> conservation_terms{};
-  bool local_ok = true;
+  std::array<ConservationParts, 3> conservation;
   synchronized_local_phase(
       *impl.mpi, StepFailureReason::final_momentum_residual, true,
       "Task 18 final momentum residual reconstruction failed", [&] {
@@ -1592,6 +1728,44 @@ runtime::CollectiveStatus assess_final_momentum(
             impl.scratch.storage->template acquire_read<double>(
                 *impl.scratch.access, kScratchPhase, kScratchActor,
                 impl.scratch.pressure_gradient);
+        const auto pressure_boundary =
+            impl.fvm.physical_boundary_pressure_contributions(
+                *impl.boundaries, pressure_trial);
+        if (residual_n.boundary.size() != residual_nm1.boundary.size() ||
+            residual_n.boundary.size() != pressure_boundary.size()) {
+          throw runtime::Error(
+              "Task 18 physical momentum boundary sets differ");
+        }
+        for (std::size_t boundary_index = 0;
+             boundary_index < residual_n.boundary.size(); ++boundary_index) {
+          const auto &current = residual_n.boundary[boundary_index];
+          const auto &previous = residual_nm1.boundary[boundary_index];
+          const auto &pressure = pressure_boundary[boundary_index];
+          if (current.global_face_id != previous.global_face_id ||
+              current.global_face_id != pressure.global_face_id) {
+            throw runtime::Error(
+                "Task 18 physical momentum boundary identities differ");
+          }
+          for (std::size_t component_index = 0; component_index < 3U;
+               ++component_index) {
+            const double convection =
+                stencil.order == MomentumTimeOrder::backward_euler
+                    ? current.convective[component_index]
+                    : 2.0 * current.convective[component_index] -
+                          previous.convective[component_index];
+            const double viscosity =
+                stencil.order == MomentumTimeOrder::backward_euler
+                    ? current.viscous[component_index]
+                    : 2.0 * current.viscous[component_index] -
+                          previous.viscous[component_index];
+            const double pressure_value = pressure.pressure[component_index];
+            conservation[component_index].signed_boundary_flux.add(
+                convection + viscosity + pressure_value);
+            conservation[component_index].absolute_boundary_flux.add(
+                std::abs(convection) + std::abs(viscosity) +
+                std::abs(pressure_value));
+          }
+        }
         const auto owned = impl.topology->owned_global_box();
         for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
              ++cell) {
@@ -1643,74 +1817,96 @@ runtime::CollectiveStatus assess_final_momentum(
             for (std::size_t term = 0; term < terms.size(); ++term) {
               raw += terms[term];
               scale += std::abs(terms[term]);
-              global_terms[component_index * terms.size() + term] +=
-                  terms[term];
             }
             const double quantity_n = rho_ref * volume *
                                       velocity_n(index.i, index.j, index.k,
                                                  static_cast<int>(
                                                      component_index));
+            const double quantity_nm1 =
+                rho_ref * volume *
+                velocity_nm1(index.i, index.j, index.k,
+                             static_cast<int>(component_index));
             const double quantity_trial =
                 rho_ref * volume *
                 velocity_trial(index.i, index.j, index.k,
                                static_cast<int>(component_index));
-            conservation_terms[component_index * 5U] += quantity_n;
-            conservation_terms[component_index * 5U + 1U] += quantity_trial;
-            conservation_terms[component_index * 5U + 4U] +=
-                std::abs(quantity_n) + std::abs(quantity_trial) +
-                stencil.dt_s * scale;
+            conservation[component_index].quantity_nm1.add(quantity_nm1);
+            conservation[component_index].quantity_n.add(quantity_n);
+            conservation[component_index].quantity_np1.add(quantity_trial);
+            conservation[component_index].absolute_quantity_nm1.add(
+                std::abs(quantity_nm1));
+            conservation[component_index].absolute_quantity_n.add(
+                std::abs(quantity_n));
+            conservation[component_index].absolute_quantity_np1.add(
+                std::abs(quantity_trial));
             norm_sums[component_index * 2U] += raw * raw;
             norm_sums[component_index * 2U + 1U] += scale * scale;
-            local_ok = local_ok && std::isfinite(raw) && std::isfinite(scale);
+            if (!std::isfinite(raw) || !std::isfinite(scale) ||
+                !std::isfinite(quantity_nm1) || !std::isfinite(quantity_n) ||
+                !std::isfinite(quantity_trial)) {
+              throw runtime::Error(
+                  "Task 18 final momentum assessment is non-finite");
+            }
           }
         }
       });
-
-  std::array<bool, 3> local_component_ok{};
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   for (std::size_t component_index = 0; component_index < 3U;
        ++component_index) {
-    const double local_normalized =
-        normalized_l2(norm_sums[component_index * 2U],
-                      norm_sums[component_index * 2U + 1U]);
-    local_component_ok[component_index] =
-        std::isfinite(local_normalized) &&
-        local_normalized <= kFinalEquationTolerance;
-    local_ok = local_ok && local_component_ok[component_index];
+    if (final_momentum_norm_armed[component_index].load(
+            std::memory_order_relaxed)) {
+      norm_sums[component_index * 2U] =
+          final_momentum_norm_residual_square[component_index].load(
+              std::memory_order_relaxed);
+      norm_sums[component_index * 2U + 1U] =
+          final_momentum_norm_scale_square[component_index].load(
+              std::memory_order_relaxed);
+    }
   }
+#endif
+  const bool local_norms_finite =
+      std::all_of(norm_sums.begin(), norm_sums.end(), [](double value) {
+        return value >= 0.0 && std::isfinite(value);
+      });
+  const auto local_norm_status = runtime::collective_status(
+      *impl.mpi, local_norms_finite,
+      "Task 18 final momentum local norm is non-finite");
+  if (!local_norm_status.ok)
+    return local_norm_status;
   impl.mpi->allreduce_fp64_in_place(norm_sums.data(), norm_sums.size(),
                                     runtime::Fp64ReductionOperation::sum);
-  impl.mpi->allreduce_fp64_in_place(global_terms.data(), global_terms.size(),
-                                    runtime::Fp64ReductionOperation::sum);
-  impl.mpi->allreduce_fp64_in_place(
-      conservation_terms.data(), conservation_terms.size(),
-      runtime::Fp64ReductionOperation::sum);
+  bool global_ok = true;
   for (std::size_t component_index = 0; component_index < 3U;
        ++component_index) {
     report.final_momentum_normalized_l2[component_index] = normalized_l2(
         norm_sums[component_index * 2U],
         norm_sums[component_index * 2U + 1U]);
-    const double *terms = global_terms.data() + component_index * 8U;
-    const double boundary_outward_flux =
-        terms[3] + terms[4] + terms[5] + terms[6] + terms[7];
-    double *conservation =
-        conservation_terms.data() + component_index * 5U;
-    conservation[2] = stencil.dt_s * boundary_outward_flux;
-    conservation[3] =
-        stencil.dt_s * (std::abs(terms[3]) + std::abs(terms[4]) +
-                        std::abs(terms[5]) + std::abs(terms[6]) +
-                        std::abs(terms[7]));
-    double defect = conservation[1] - conservation[0] + conservation[2];
-    defect = remove_certified_sum_roundoff(
-        defect, conservation[4],
-        impl.topology->global_cell_count() * 3U +
-            8U * static_cast<std::size_t>(impl.mpi->size()));
-    const double scales[]{conservation[0], conservation[1], conservation[3],
-                          0.0};
+    global_ok = global_ok &&
+                std::isfinite(
+                    report.final_momentum_normalized_l2[component_index]) &&
+                report.final_momentum_normalized_l2[component_index] <=
+                    kFinalEquationTolerance;
+    const auto reduced =
+        reduce_conservation_parts(*impl.mpi, conservation[component_index]);
+    const auto diagnostic =
+        make_conservation_diagnostic(reduced, stencil, true);
     report.final_momentum_relative_conservation_defect[component_index] =
-        relative_defect(defect, scales, 4U);
+        diagnostic.relative;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    last_momentum_conservation[component_index] = {
+        diagnostic.quantity_nm1,
+        diagnostic.quantity_n,
+        diagnostic.quantity_np1,
+        diagnostic.signed_boundary_flux,
+        diagnostic.absolute_boundary_flux,
+        diagnostic.boundary_integral,
+        diagnostic.history_correction,
+        diagnostic.raw_defect,
+        diagnostic.relative};
+#endif
   }
   return runtime::collective_status(
-      *impl.mpi, local_ok,
+      *impl.mpi, global_ok,
       "Task 18 final momentum residual exceeds tolerance");
 }
 
@@ -1728,7 +1924,9 @@ runtime::CollectiveStatus assess_final_transport(
       impl.transport.size(), std::numeric_limits<double>::infinity());
   report.final_transport_relative_conservation_defect.assign(
       impl.transport.size(), std::numeric_limits<double>::infinity());
-  bool local_ok = true;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  last_transport_conservation.assign(impl.transport.size(), {});
+#endif
   for (std::size_t transport_index = 0;
        transport_index < impl.transport.size(); ++transport_index) {
     const auto &item = impl.transport[transport_index];
@@ -1740,9 +1938,7 @@ runtime::CollectiveStatus assess_final_transport(
           assemble_transport_spatial_residual(impl, state, history, item);
     }
     double norm_sums[2]{};
-    std::array<double, 7> global_terms{};
-    std::array<double, 5> conservation_terms{};
-    bool local_field_ok = true;
+    ConservationParts conservation;
     synchronized_local_phase(
         *impl.mpi, StepFailureReason::final_transport_residual, true,
         "Task 18 final transport residual reconstruction failed", [&] {
@@ -1752,6 +1948,35 @@ runtime::CollectiveStatus assess_final_transport(
               access, kStatePhase, kStateActor, item.field);
           const auto values_nm1 = history.acquire_read<double>(
               access, kStatePhase, kStateActor, item.field);
+          if (stencil.order == MomentumTimeOrder::bdf2 &&
+              spatial_n.boundary.size() != spatial_nm1.boundary.size()) {
+            throw runtime::Error(
+                "Task 18 physical transport boundary sets differ");
+          }
+          for (std::size_t boundary_index = 0;
+               boundary_index < spatial_n.boundary.size(); ++boundary_index) {
+            const auto &current = spatial_n.boundary[boundary_index];
+            const auto *previous =
+                stencil.order == MomentumTimeOrder::bdf2
+                    ? &spatial_nm1.boundary[boundary_index]
+                    : nullptr;
+            if (previous != nullptr &&
+                current.global_face_id != previous->global_face_id) {
+              throw runtime::Error(
+                  "Task 18 physical transport boundary identities differ");
+            }
+            const double convection =
+                previous == nullptr
+                    ? current.convective
+                    : 2.0 * current.convective - previous->convective;
+            const double diffusion =
+                previous == nullptr
+                    ? current.diffusive
+                    : 2.0 * current.diffusive - previous->diffusive;
+            conservation.signed_boundary_flux.add(convection + diffusion);
+            conservation.absolute_boundary_flux.add(std::abs(convection) +
+                                                     std::abs(diffusion));
+          }
           const auto owned = impl.topology->owned_global_box();
           for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
                ++cell) {
@@ -1784,67 +2009,83 @@ runtime::CollectiveStatus assess_final_transport(
             for (std::size_t term = 0; term < terms.size(); ++term) {
               raw += terms[term];
               scale += std::abs(terms[term]);
-              global_terms[term] += terms[term];
             }
+            const double quantity_nm1 =
+                rho_ref * impl.geometry->cell_volume_m3(cell) *
+                values_nm1(index.i, index.j, index.k, 0);
             const double quantity_n =
                 rho_ref * impl.geometry->cell_volume_m3(cell) *
                 values_n(index.i, index.j, index.k, 0);
             const double quantity_trial =
                 rho_ref * impl.geometry->cell_volume_m3(cell) *
                 values_trial(index.i, index.j, index.k, 0);
-            conservation_terms[0] += quantity_n;
-            conservation_terms[1] += quantity_trial;
-            conservation_terms[4] +=
-                std::abs(quantity_n) + std::abs(quantity_trial) +
-                stencil.dt_s * scale;
+            conservation.quantity_nm1.add(quantity_nm1);
+            conservation.quantity_n.add(quantity_n);
+            conservation.quantity_np1.add(quantity_trial);
+            conservation.absolute_quantity_nm1.add(std::abs(quantity_nm1));
+            conservation.absolute_quantity_n.add(std::abs(quantity_n));
+            conservation.absolute_quantity_np1.add(
+                std::abs(quantity_trial));
             norm_sums[0] += raw * raw;
             norm_sums[1] += scale * scale;
-            local_field_ok = local_field_ok && std::isfinite(raw) &&
-                             std::isfinite(scale);
+            if (!std::isfinite(raw) || !std::isfinite(scale) ||
+                !std::isfinite(quantity_nm1) || !std::isfinite(quantity_n) ||
+                !std::isfinite(quantity_trial)) {
+              throw runtime::Error(
+                  "Task 18 final transport assessment is non-finite");
+            }
           }
         });
-    const double local_normalized = normalized_l2(norm_sums[0], norm_sums[1]);
-    local_field_ok = local_field_ok && std::isfinite(local_normalized) &&
-                     local_normalized <= kFinalEquationTolerance;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (final_transport_norm_index.load(std::memory_order_relaxed) ==
+        transport_index) {
+      norm_sums[0] = final_transport_norm_residual_square.load(
+          std::memory_order_relaxed);
+      norm_sums[1] =
+          final_transport_norm_scale_square.load(std::memory_order_relaxed);
+    }
+#endif
+    const bool local_norms_finite =
+        norm_sums[0] >= 0.0 && std::isfinite(norm_sums[0]) &&
+        norm_sums[1] >= 0.0 && std::isfinite(norm_sums[1]);
+    const auto local_norm_status = runtime::collective_status(
+        *impl.mpi, local_norms_finite,
+        "Task 18 final transport local norm is non-finite");
+    if (!local_norm_status.ok)
+      return local_norm_status;
     impl.mpi->allreduce_fp64_in_place(
         norm_sums, 2U, runtime::Fp64ReductionOperation::sum);
-    impl.mpi->allreduce_fp64_in_place(
-        global_terms.data(), global_terms.size(),
-        runtime::Fp64ReductionOperation::sum);
-    impl.mpi->allreduce_fp64_in_place(
-        conservation_terms.data(), conservation_terms.size(),
-        runtime::Fp64ReductionOperation::sum);
     report.final_transport_normalized_l2[transport_index] =
         normalized_l2(norm_sums[0], norm_sums[1]);
-    const double boundary_outward_flux =
-        global_terms[3] + global_terms[4] + global_terms[5] +
-        global_terms[6];
-    conservation_terms[2] = stencil.dt_s * boundary_outward_flux;
-    conservation_terms[3] =
-        stencil.dt_s * (std::abs(global_terms[3]) +
-                        std::abs(global_terms[4]) +
-                        std::abs(global_terms[5]) +
-                        std::abs(global_terms[6]));
-    double defect =
-        conservation_terms[1] - conservation_terms[0] + conservation_terms[2];
-    defect = remove_certified_sum_roundoff(
-        defect, conservation_terms[4],
-        impl.topology->global_cell_count() * 3U +
-            7U * static_cast<std::size_t>(impl.mpi->size()));
-    const double scales[]{conservation_terms[0], conservation_terms[1],
-                          conservation_terms[3], 0.0};
+    const auto reduced = reduce_conservation_parts(*impl.mpi, conservation);
+    const auto diagnostic =
+        make_conservation_diagnostic(reduced, stencil, true);
     report.final_transport_relative_conservation_defect[transport_index] =
-        relative_defect(defect, scales, 4U);
+        diagnostic.relative;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    last_transport_conservation[transport_index] = {
+        diagnostic.quantity_nm1,
+        diagnostic.quantity_n,
+        diagnostic.quantity_np1,
+        diagnostic.signed_boundary_flux,
+        diagnostic.absolute_boundary_flux,
+        diagnostic.boundary_integral,
+        diagnostic.history_correction,
+        diagnostic.raw_defect,
+        diagnostic.relative};
+#endif
+    const bool global_field_ok =
+        std::isfinite(report.final_transport_normalized_l2[transport_index]) &&
+        report.final_transport_normalized_l2[transport_index] <=
+            kFinalEquationTolerance;
     const auto status = runtime::collective_status(
-        *impl.mpi, local_field_ok,
+        *impl.mpi, global_field_ok,
         "Task 18 final transport residual exceeds tolerance");
     if (!status.ok)
       return status;
-    local_ok = local_ok && local_field_ok;
   }
-  return runtime::collective_status(
-      *impl.mpi, local_ok,
-      "Task 18 final transport residual exceeds tolerance");
+  return runtime::collective_status(*impl.mpi, true,
+                                    "Task 18 final transport residual passed");
 }
 
 template <class FlowImplementation>
@@ -1855,13 +2096,16 @@ runtime::CollectiveStatus assess_final_conservation(
   auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
   auto &committed =
       detail::FlowStateSolverAccess::layer(state, FlowLayer::committed);
+  auto &history =
+      detail::FlowStateSolverAccess::layer(state, FlowLayer::history);
   const auto &access = detail::FlowStateSolverAccess::access(state);
   const auto fields = state.fields();
-  double values[5]{};
+  ConservationParts conservation;
   synchronized_local_phase(
       *impl.mpi, StepFailureReason::final_conservation_defect, true,
       "Task 18 final mass conservation reconstruction failed", [&] {
-        const auto fields = state.fields();
+        const auto density_nm1 = history.acquire_read<double>(
+            access, kStatePhase, kStateActor, fields.density);
         const auto density_n = committed.acquire_read<double>(
             access, kStatePhase, kStateActor, fields.density);
         const auto density_trial = trial.acquire_read<double>(
@@ -1873,16 +2117,19 @@ runtime::CollectiveStatus assess_final_conservation(
               map_cell(impl.topology->global_cell(cell), owned,
                        impl.topology->global_extent());
           const double volume = impl.geometry->cell_volume_m3(cell);
+          const double mass_nm1 =
+              volume * density_nm1(index.i, index.j, index.k, 0);
           const double mass_n =
               volume * density_n(index.i, index.j, index.k, 0);
           const double mass_trial =
               volume * density_trial(index.i, index.j, index.k, 0);
-          values[0] += mass_n;
-          values[1] += mass_trial;
-          values[4] += std::abs(mass_n) + std::abs(mass_trial);
+          conservation.quantity_nm1.add(mass_nm1);
+          conservation.quantity_n.add(mass_n);
+          conservation.quantity_np1.add(mass_trial);
         }
         const auto flux = trial.acquire_face_read<double>(
             access, kStatePhase, kStateActor, fields.face_mass_flux);
+        std::set<mesh::GlobalFaceId> observed;
         for (LocalFaceId face = 0; face < impl.topology->local_face_count();
              ++face) {
           const auto patch = impl.topology->patch_id(face);
@@ -1891,26 +2138,40 @@ runtime::CollectiveStatus assess_final_conservation(
                   boundary::BoundaryKind::periodic) {
             continue;
           }
-          values[2] += stencil.dt_s * flux(face, 0);
-          values[3] += stencil.dt_s * std::abs(flux(face, 0));
-          values[4] += stencil.dt_s * std::abs(flux(face, 0));
+          const LocalCellId owner = impl.topology->owner(face);
+          if (impl.topology->cell_ownership(owner) != EntityOwnership::owned ||
+              !observed.insert(impl.topology->global_face_id(face)).second) {
+            throw runtime::Error(
+                "Task 18 physical mass boundary face is duplicated");
+          }
+          conservation.signed_boundary_flux.add(flux(face, 0));
+          conservation.absolute_boundary_flux.add(std::abs(flux(face, 0)));
         }
       });
-  impl.mpi->allreduce_fp64_in_place(
-      values, 5U, runtime::Fp64ReductionOperation::sum);
-  double mass_defect = values[1] - values[0] + values[2];
+  const auto reduced = reduce_conservation_parts(*impl.mpi, conservation);
+  double perturbation = 0.0;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   if (force_final_conservation_failure.load(std::memory_order_relaxed)) {
-    mass_defect += 1.0e-4;
+    perturbation += 1.0e-4;
   }
+  perturbation +=
+      final_mass_defect_perturbation.load(std::memory_order_relaxed);
 #endif
-  mass_defect = remove_certified_sum_roundoff(
-      mass_defect, values[4],
-      impl.topology->global_cell_count() * 2U +
-          impl.topology->global_face_count() +
-          3U * static_cast<std::size_t>(impl.mpi->size()));
+  const auto diagnostic =
+      make_conservation_diagnostic(reduced, stencil, false, perturbation);
   report.final_mass_relative_conservation_defect =
-      relative_defect(mass_defect, values, 4U);
+      diagnostic.relative;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  last_mass_conservation = {diagnostic.quantity_nm1,
+                            diagnostic.quantity_n,
+                            diagnostic.quantity_np1,
+                            diagnostic.signed_boundary_flux,
+                            diagnostic.absolute_boundary_flux,
+                            diagnostic.boundary_integral,
+                            diagnostic.history_correction,
+                            diagnostic.raw_defect,
+                            diagnostic.relative};
+#endif
   bool local_ok =
       std::isfinite(report.final_mass_relative_conservation_defect) &&
       report.final_mass_relative_conservation_defect <=
@@ -2016,6 +2277,22 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     if (!core_agreement.ok) {
       return fatal_failure(report, StepFailureReason::invalid_input,
                            core_agreement.failing_rank);
+    }
+    const auto momentum_control_agreement = agree_solve_control(
+        *impl_->mpi, momentum_control,
+        "Task 18 momentum solve control is invalid",
+        "Task 18 momentum solve controls are inconsistent");
+    if (!momentum_control_agreement.ok) {
+      return fatal_failure(report, StepFailureReason::invalid_input,
+                           momentum_control_agreement.failing_rank);
+    }
+    const auto pressure_control_agreement = agree_solve_control(
+        *impl_->mpi, pressure_control,
+        "Task 18 pressure solve control is invalid",
+        "Task 18 pressure solve controls are inconsistent");
+    if (!pressure_control_agreement.ok) {
+      return fatal_failure(report, StepFailureReason::invalid_input,
+                           pressure_control_agreement.failing_rank);
     }
     const auto transport_count =
         static_cast<std::uint64_t>(impl_->transport.size());
@@ -2662,6 +2939,20 @@ void test::ConstantDensityPisoTestAccess::reset() noexcept {
   final_transport_perturb_delta.store(0.0, std::memory_order_relaxed);
   ::hundun::flow::force_final_conservation_failure.store(
       false, std::memory_order_relaxed);
+  final_mass_defect_perturbation.store(0.0, std::memory_order_relaxed);
+  for (auto &value : final_momentum_norm_armed)
+    value.store(false, std::memory_order_relaxed);
+  for (auto &value : final_momentum_norm_residual_square)
+    value.store(0.0, std::memory_order_relaxed);
+  for (auto &value : final_momentum_norm_scale_square)
+    value.store(0.0, std::memory_order_relaxed);
+  final_transport_norm_index.store(std::numeric_limits<std::size_t>::max(),
+                                   std::memory_order_relaxed);
+  final_transport_norm_residual_square.store(0.0, std::memory_order_relaxed);
+  final_transport_norm_scale_square.store(0.0, std::memory_order_relaxed);
+  ::hundun::flow::last_mass_conservation = {};
+  ::hundun::flow::last_momentum_conservation.fill({});
+  ::hundun::flow::last_transport_conservation.clear();
   momentum_assembly_mutation.store(test::MomentumAssemblyMutation::none,
                                    std::memory_order_relaxed);
   transport_assembly_mutation.store(test::TransportAssemblyMutation::none,
@@ -2722,6 +3013,33 @@ void test::ConstantDensityPisoTestAccess::force_final_conservation_failure(
     bool enabled) noexcept {
   ::hundun::flow::force_final_conservation_failure.store(
       enabled, std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::set_final_mass_defect_perturbation(
+    double delta) noexcept {
+  final_mass_defect_perturbation.store(delta, std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::set_final_momentum_norm_squares(
+    std::size_t component, double residual_square,
+    double scale_square) noexcept {
+  if (component >= final_momentum_norm_residual_square.size())
+    return;
+  final_momentum_norm_armed[component].store(true, std::memory_order_relaxed);
+  final_momentum_norm_residual_square[component].store(
+      residual_square, std::memory_order_relaxed);
+  final_momentum_norm_scale_square[component].store(
+      scale_square, std::memory_order_relaxed);
+}
+
+void test::ConstantDensityPisoTestAccess::set_final_transport_norm_squares(
+    std::size_t field_index, double residual_square,
+    double scale_square) noexcept {
+  final_transport_norm_index.store(field_index, std::memory_order_relaxed);
+  final_transport_norm_residual_square.store(residual_square,
+                                             std::memory_order_relaxed);
+  final_transport_norm_scale_square.store(scale_square,
+                                          std::memory_order_relaxed);
 }
 
 void test::ConstantDensityPisoTestAccess::set_momentum_assembly_mutation(
@@ -2791,6 +3109,27 @@ int test::ConstantDensityPisoTestAccess::last_pressure_operator_mode()
     noexcept {
   return ::hundun::flow::last_pressure_operator_mode.load(
       std::memory_order_relaxed);
+}
+
+test::ConservationDiagnostic
+test::ConstantDensityPisoTestAccess::last_mass_conservation() noexcept {
+  return ::hundun::flow::last_mass_conservation;
+}
+
+test::ConservationDiagnostic
+test::ConstantDensityPisoTestAccess::last_momentum_conservation(
+    std::size_t component) noexcept {
+  return component < ::hundun::flow::last_momentum_conservation.size()
+             ? ::hundun::flow::last_momentum_conservation[component]
+             : test::ConservationDiagnostic{};
+}
+
+test::ConservationDiagnostic
+test::ConstantDensityPisoTestAccess::last_transport_conservation(
+    std::size_t field_index) noexcept {
+  return field_index < ::hundun::flow::last_transport_conservation.size()
+             ? ::hundun::flow::last_transport_conservation[field_index]
+             : test::ConservationDiagnostic{};
 }
 #endif
 

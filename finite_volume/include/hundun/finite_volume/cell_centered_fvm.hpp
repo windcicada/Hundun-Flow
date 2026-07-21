@@ -10,9 +10,11 @@
 #include "hundun/runtime/field_storage.hpp"
 #include "hundun/runtime/field_view.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace hundun::finite_volume {
 
@@ -44,6 +46,23 @@ runtime::FieldDescriptor face_mass_flux_descriptor();
 runtime::FieldId declare_face_mass_flux(runtime::FieldRegistry &registry);
 void require_face_mass_flux_field(const runtime::FieldRegistry &registry,
                                   runtime::FieldId field);
+
+struct PhysicalBoundaryMomentumContribution final {
+  mesh::GlobalFaceId global_face_id{};
+  std::array<double, 3> convective{};
+  std::array<double, 3> viscous{};
+};
+
+struct PhysicalBoundaryPressureContribution final {
+  mesh::GlobalFaceId global_face_id{};
+  std::array<double, 3> pressure{};
+};
+
+struct PhysicalBoundaryTransportContribution final {
+  mesh::GlobalFaceId global_face_id{};
+  double convective{};
+  double diffusive{};
+};
 
 class FaceMassFlux final {
 public:
@@ -133,6 +152,30 @@ public:
       const runtime::FieldView<const double> &velocity_gradients,
       double dynamic_viscosity_pa_s,
       const runtime::FieldView<double> &raw_momentum_residual) const;
+
+  std::vector<PhysicalBoundaryMomentumContribution>
+  physical_boundary_momentum_contributions(
+      const boundary::BoundaryRegistry &boundaries,
+      const FaceMassFlux &mass_flux,
+      const runtime::FaceFieldView<const double> &face_velocity,
+      const runtime::FieldView<const double> &velocity,
+      const runtime::FieldView<const double> &velocity_gradients,
+      double dynamic_viscosity_pa_s) const;
+
+  std::vector<PhysicalBoundaryPressureContribution>
+  physical_boundary_pressure_contributions(
+      const boundary::BoundaryRegistry &boundaries,
+      const runtime::FieldView<const double> &pressure) const;
+
+  std::vector<PhysicalBoundaryTransportContribution>
+  physical_boundary_transport_contributions(
+      FiniteVolumeQuantity quantity,
+      const boundary::BoundaryRegistry &boundaries,
+      const FaceMassFlux &mass_flux,
+      const runtime::FaceFieldView<const double> &face_values,
+      const runtime::FieldView<const double> &cell_values,
+      const runtime::FieldView<const double> &cell_gradients,
+      const runtime::FaceFieldView<const double> &gamma_by_face) const;
 
 private:
   struct Impl;

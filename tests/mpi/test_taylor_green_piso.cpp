@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include "flow/src/constant_density_piso_test_access.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/execution/execution.hpp"
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -200,12 +202,112 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
   HUNDUN_CHECK_NEAR(static_cast<double>(steps) * dt_s, final_time_s, 1.0e-15);
   double max_continuity = 0.0;
   std::array<double, 3> max_momentum_conservation_defect{};
+  static bool cancellation_contract_checked = false;
   for (int step = 0; step < steps; ++step) {
     const auto order = step == 0
                            ? hundun::flow::MomentumTimeOrder::backward_euler
                            : hundun::flow::MomentumTimeOrder::bdf2;
     const auto stencil = hundun::flow::make_momentum_time_stencil(
         order, dt_s, step == 0 ? 0.0 : dt_s);
+    const bool check_cancellation_contract =
+        !cancellation_contract_checked && cells_xy == 64 && step == 0;
+    double initial_zero_net_scale = 0.0;
+    if (check_cancellation_contract) {
+      using TestAccess =
+          hundun::flow::test::ConstantDensityPisoTestAccess;
+      for (hundun::mesh::LocalCellId cell = 0;
+           cell < topology.owned_cell_count(); ++cell) {
+        initial_zero_net_scale +=
+            std::abs(kRho * geometry.cell_volume_m3(cell) *
+                     initial.velocity[cell * 3U]);
+      }
+      mpi.allreduce_fp64_in_place(
+          &initial_zero_net_scale, 1U,
+          hundun::runtime::Fp64ReductionOperation::sum);
+      HUNDUN_CHECK(std::isfinite(initial_zero_net_scale));
+      HUNDUN_CHECK(initial_zero_net_scale > 0.0);
+
+      TestAccess::reset();
+      constexpr double kInjectedRelativeDefect = 6.0e-11;
+      TestAccess::set_final_mass_defect_perturbation(
+          kInjectedRelativeDefect * 4.0 * kPi * kPi);
+      const auto threshold_report =
+          flow.attempt(state, kRho, kRho * kNu, stencil, {}, {});
+      HUNDUN_CHECK(threshold_report.disposition ==
+                   hundun::flow::StepAttemptDisposition::recoverable_failure);
+      HUNDUN_CHECK(threshold_report.reason ==
+                   hundun::flow::StepFailureReason::
+                       final_conservation_defect);
+      HUNDUN_CHECK(threshold_report.pressure_corrector_count == 2U);
+      HUNDUN_CHECK(
+          threshold_report.final_mass_relative_conservation_defect > 5.0e-11);
+      HUNDUN_CHECK(
+          threshold_report.final_mass_relative_conservation_defect < 1.0e-10);
+      HUNDUN_CHECK(state.metadata().step == 0U);
+
+      TestAccess::reset();
+      constexpr double kZeroNetMutationRatio = 1.0e-10;
+      const double injected_quantity =
+          kZeroNetMutationRatio * initial_zero_net_scale;
+      if (mpi.rank() == 0) {
+        TestAccess::force_final_momentum_perturbation(
+            0U, injected_quantity /
+                    (kRho * geometry.cell_volume_m3(0U)));
+      }
+      for (std::size_t component = 0; component < 3U; ++component) {
+        TestAccess::set_final_momentum_norm_squares(component, 0.0, 1.0);
+      }
+      const auto mutation_report =
+          flow.attempt(state, kRho, kRho * kNu, stencil, {}, {});
+      HUNDUN_CHECK(mutation_report.disposition ==
+                   hundun::flow::StepAttemptDisposition::recoverable_failure);
+      HUNDUN_CHECK(mutation_report.reason ==
+                   hundun::flow::StepFailureReason::
+                       final_conservation_defect);
+      HUNDUN_CHECK(mutation_report.pressure_corrector_count == 2U);
+      const auto mutation_diagnostic =
+          TestAccess::last_momentum_conservation(0U);
+      const double raw_over_cancellation_scale =
+          std::abs(mutation_diagnostic.raw_defect) / initial_zero_net_scale;
+      HUNDUN_CHECK(raw_over_cancellation_scale > 0.5e-10);
+      HUNDUN_CHECK(raw_over_cancellation_scale < 1.5e-10);
+      const double physical_scale =
+          std::max({std::abs(mutation_diagnostic.quantity_n),
+                    std::abs(mutation_diagnostic.quantity_np1),
+                    stencil.dt_s *
+                        mutation_diagnostic.absolute_boundary_flux /
+                        stencil.alpha0,
+                    std::abs(mutation_diagnostic.history_correction)});
+      const double expected_denominator =
+          physical_scale <=
+                  64.0 * std::numeric_limits<double>::epsilon() *
+                      initial_zero_net_scale
+              ? initial_zero_net_scale
+              : std::max(physical_scale,
+                         std::numeric_limits<double>::min());
+      const double expected_mutation_relative =
+          std::abs(mutation_diagnostic.raw_defect) / expected_denominator;
+      HUNDUN_CHECK_NEAR(
+          mutation_report.final_momentum_relative_conservation_defect[0],
+          expected_mutation_relative,
+          512.0 * std::numeric_limits<double>::epsilon());
+      HUNDUN_CHECK(
+          mutation_report.final_momentum_relative_conservation_defect[0] >
+          5.0e-11);
+      HUNDUN_CHECK(state.metadata().step == 0U);
+      if (mpi.rank() == 0) {
+        std::cout << "TASK18_TGV_ZERO_NET_MUTATION raw="
+                  << mutation_diagnostic.raw_defect
+                  << " cq=" << initial_zero_net_scale
+                  << " denominator=" << expected_denominator
+                  << " relative="
+                  << mutation_report
+                         .final_momentum_relative_conservation_defect[0]
+                  << " reason=" << static_cast<int>(mutation_report.reason)
+                  << " rank=" << mutation_report.lowest_failing_rank << '\n';
+      }
+      TestAccess::reset();
+    }
     const auto report = flow.attempt(state, kRho, kRho * kNu, stencil, {}, {});
     if (report.disposition !=
             hundun::flow::StepAttemptDisposition::committed &&
@@ -224,12 +326,59 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
                 << report.final_momentum_relative_conservation_defect[1]
                 << ','
                 << report.final_momentum_relative_conservation_defect[2]
+                << " qx="
+                << hundun::flow::test::ConstantDensityPisoTestAccess::
+                       last_momentum_conservation(0U)
+                       .quantity_n
+                << ','
+                << hundun::flow::test::ConstantDensityPisoTestAccess::
+                       last_momentum_conservation(0U)
+                       .quantity_np1
+                << " rawx="
+                << hundun::flow::test::ConstantDensityPisoTestAccess::
+                       last_momentum_conservation(0U)
+                       .raw_defect
                 << '\n';
     }
     HUNDUN_CHECK(report.disposition ==
                  hundun::flow::StepAttemptDisposition::committed);
     HUNDUN_CHECK(report.pressure_corrector_count == 2U);
     HUNDUN_CHECK(report.final_continuity_normalized_l2 <= 1.0e-10);
+    if (check_cancellation_contract) {
+      const auto committed =
+          state.snapshot(hundun::flow::FlowLayer::committed);
+      double trial_zero_net_scale = 0.0;
+      for (hundun::mesh::LocalCellId cell = 0;
+           cell < topology.owned_cell_count(); ++cell) {
+        trial_zero_net_scale +=
+            std::abs(kRho * geometry.cell_volume_m3(cell) *
+                     committed.velocity[cell * 3U]);
+      }
+      mpi.allreduce_fp64_in_place(
+          &trial_zero_net_scale, 1U,
+          hundun::runtime::Fp64ReductionOperation::sum);
+      const double expected_scale =
+          std::max(initial_zero_net_scale, trial_zero_net_scale);
+      const auto natural_diagnostic =
+          hundun::flow::test::ConstantDensityPisoTestAccess::
+              last_momentum_conservation(0U);
+      const double expected_relative =
+          std::abs(natural_diagnostic.raw_defect) / expected_scale;
+      HUNDUN_CHECK_NEAR(
+          report.final_momentum_relative_conservation_defect[0],
+          expected_relative,
+          512.0 * std::numeric_limits<double>::epsilon());
+      HUNDUN_CHECK(
+          report.final_momentum_relative_conservation_defect[0] <= 5.0e-11);
+      if (mpi.rank() == 0) {
+        std::cout << "TASK18_TGV_ZERO_NET_NATURAL raw="
+                  << natural_diagnostic.raw_defect << " cq=" << expected_scale
+                  << " denominator=" << expected_scale << " relative="
+                  << report.final_momentum_relative_conservation_defect[0]
+                  << '\n';
+      }
+      cancellation_contract_checked = true;
+    }
     max_continuity =
         std::max(max_continuity, report.final_continuity_normalized_l2);
     for (std::size_t component = 0; component < 3U; ++component) {

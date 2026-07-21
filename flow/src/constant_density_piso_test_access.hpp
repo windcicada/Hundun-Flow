@@ -33,6 +33,18 @@ enum class AttemptFailureStage {
   before_commit
 };
 
+struct ConservationDiagnostic final {
+  double quantity_nm1{};
+  double quantity_n{};
+  double quantity_np1{};
+  double signed_boundary_flux{};
+  double absolute_boundary_flux{};
+  double boundary_integral{};
+  double history_correction{};
+  double raw_defect{};
+  double relative_defect{};
+};
+
 class ConstantDensityPisoTestAccess final {
 public:
   static void reset() noexcept;
@@ -44,6 +56,13 @@ public:
   static void force_final_transport_perturbation(std::size_t field_index,
                                                  double delta) noexcept;
   static void force_final_conservation_failure(bool enabled) noexcept;
+  static void set_final_mass_defect_perturbation(double delta) noexcept;
+  static void set_final_momentum_norm_squares(
+      std::size_t component, double residual_square,
+      double scale_square) noexcept;
+  static void set_final_transport_norm_squares(
+      std::size_t field_index, double residual_square,
+      double scale_square) noexcept;
   static void set_momentum_assembly_mutation(
       MomentumAssemblyMutation mutation) noexcept;
   static void set_transport_assembly_mutation(
@@ -58,6 +77,11 @@ public:
   static std::size_t final_transport_calls() noexcept;
   static int last_pressure_constraint_mode() noexcept;
   static int last_pressure_operator_mode() noexcept;
+  static ConservationDiagnostic last_mass_conservation() noexcept;
+  static ConservationDiagnostic
+  last_momentum_conservation(std::size_t component) noexcept;
+  static ConservationDiagnostic
+  last_transport_conservation(std::size_t field_index) noexcept;
 };
 
 } // namespace hundun::flow::test
