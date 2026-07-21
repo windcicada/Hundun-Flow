@@ -105,6 +105,7 @@ std::array<std::atomic<double>, 3> last_momentum_rhs{};
 std::array<std::atomic<double>, 3> last_momentum_diagonal{};
 std::atomic<std::size_t> provisional_transport_call_count{0U};
 std::atomic<std::size_t> final_transport_call_count{0U};
+std::atomic<int> pressure_operator_construction_failure_rank{-1};
 #endif
 
 bool finite(Real3 value) noexcept {
@@ -142,6 +143,15 @@ std::size_t bytes_for(std::size_t count) {
     throw runtime::Error("Task 18 vector byte count overflows");
   }
   return count * sizeof(double);
+}
+
+std::size_t multiplied_count(std::size_t count, std::size_t factor,
+                             const char *subject) {
+  if (factor != 0U &&
+      count > std::numeric_limits<std::size_t>::max() / factor) {
+    throw runtime::Error(std::string(subject) + " count overflows");
+  }
+  return count * factor;
 }
 
 struct StructuredIndex final {
@@ -260,7 +270,7 @@ public:
       : context_(&context), layout_(std::move(layout)),
         diagonal_(layout_.owned_count(), 1.0) {}
 
-  void replace(std::vector<double> diagonal) {
+  void replace(const std::vector<double> &diagonal) {
     if (diagonal.size() != diagonal_.size() ||
         !std::all_of(diagonal.begin(), diagonal.end(), [](double value) {
           return value > 0.0 && std::isfinite(value);
@@ -270,7 +280,7 @@ public:
     if (revision_ == std::numeric_limits<std::uint64_t>::max()) {
       throw runtime::Error("Task 18 momentum revision would wrap");
     }
-    diagonal_ = std::move(diagonal);
+    std::copy(diagonal.begin(), diagonal.end(), diagonal_.begin());
     ++revision_;
   }
 
@@ -366,8 +376,12 @@ void compute_pressure_gradient(const mesh::MeshTopology &topology,
                                const mesh::MeshGeometry &geometry,
                                const runtime::FieldView<const double> &pressure,
                                const runtime::FieldView<double> &gradient,
+                               std::vector<Real3> &sums,
                                PressureBoundaryValue &&boundary_value) {
-  std::vector<Real3> sums(topology.owned_cell_count());
+  if (sums.size() != topology.owned_cell_count()) {
+    throw runtime::Error("Task 18 pressure-gradient workspace is invalid");
+  }
+  std::fill(sums.begin(), sums.end(), Real3{});
   const auto owned = topology.owned_global_box();
   const Int3 global_extent = topology.global_extent();
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
@@ -445,6 +459,16 @@ StepAttemptReport fatal_failure(StepAttemptReport report,
   report.reason = reason;
   report.lowest_failing_rank = rank;
   report.suggested_dt_s = 0.0;
+  return report;
+}
+
+PressureCorrectionReport correction_failure(
+    PressureCorrectionReport report, PressureCorrectionDisposition disposition,
+    StepFailureReason reason, int rank) noexcept {
+  report.disposition = disposition;
+  report.reason = reason;
+  report.lowest_failing_rank = rank;
+  report.accepted = false;
   return report;
 }
 
@@ -582,7 +606,16 @@ struct PisoCoupler::Impl final {
         residual(supplied_execution,
                  bytes_for(supplied_topology.owned_cell_count())),
         candidate_pressure(supplied_execution,
-                           bytes_for(supplied_topology.owned_cell_count())) {}
+                           bytes_for(supplied_topology.owned_cell_count())),
+        pressure_gradient_sums(supplied_topology.owned_cell_count()),
+        velocity_candidate(multiplied_count(
+            supplied_topology.owned_cell_count(), 3U,
+            "Task 18 corrected velocity workspace")),
+        pressure_candidate(supplied_topology.owned_cell_count()),
+        face_velocity_candidate(multiplied_count(
+            supplied_topology.local_face_count(), 3U,
+            "Task 18 corrected face-velocity workspace")),
+        mass_flux_candidate(supplied_topology.local_face_count()) {}
 
   const runtime::StructuredDecomposition *decomposition;
   const mesh::MeshTopology *topology;
@@ -600,6 +633,11 @@ struct PisoCoupler::Impl final {
   execution::Buffer correction;
   execution::Buffer residual;
   execution::Buffer candidate_pressure;
+  std::vector<Real3> pressure_gradient_sums;
+  std::vector<double> velocity_candidate;
+  std::vector<double> pressure_candidate;
+  std::vector<double> face_velocity_candidate;
+  std::vector<double> mass_flux_candidate;
   std::optional<finite_volume::MatrixFreePoissonOperator> pressure_operator;
   std::optional<finite_volume::PoissonConstraint> constraint;
 };
@@ -633,14 +671,15 @@ PisoCoupler::PisoCoupler(std::unique_ptr<Impl> impl) noexcept
 PisoCoupler::~PisoCoupler() noexcept = default;
 PisoCoupler::PisoCoupler(PisoCoupler &&) noexcept = default;
 
-PressureCorrectionReport PisoCoupler::correct(
+PressureCorrectionReport PisoCoupler::correct_throwing(
     FlowState &state, double rho_ref,
     const runtime::FieldView<const double> &actual_momentum_diagonal,
-    const linear::SolveControl &control) const {
+    const linear::SolveControl &control,
+    PressureCorrectionReport &result) const {
   const std::size_t count = impl_->topology->owned_cell_count();
   const Int3 local_extent = impl_->decomposition->local_extent();
   synchronized_local_phase(
-      *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
+      *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure-correction input validation failed", [&] {
         if (!state.attempt_active()) {
           throw runtime::Error("pressure correction requires an active trial");
@@ -665,7 +704,7 @@ PressureCorrectionReport PisoCoupler::correct(
   const auto owned = impl_->topology->owned_global_box();
   const Int3 global_extent = impl_->topology->global_extent();
   synchronized_local_phase(
-      *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
+      *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure-system derivation failed", [&] {
         auto mass = finite_volume::FaceMassFlux::acquire(
             registry, trial, access, kStatePhase, kStateActor,
@@ -749,12 +788,12 @@ PressureCorrectionReport PisoCoupler::correct(
       });
 
   finite_volume::PoissonBoundarySpec boundary_spec;
-  synchronized_local_phase(
-      *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
-      "Task 18 pressure-boundary derivation failed", [&] {
-        boundary_spec =
-            finite_volume::make_poisson_boundary_spec(*impl_->boundaries);
-      });
+  synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input, false,
+                           "Task 18 pressure-boundary derivation failed", [&] {
+                             boundary_spec =
+                                 finite_volume::make_poisson_boundary_spec(
+                                     *impl_->boundaries);
+                           });
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   last_pressure_constraint_mode.store(static_cast<int>(boundary_spec.mode),
                                       std::memory_order_relaxed);
@@ -762,7 +801,7 @@ PressureCorrectionReport PisoCoupler::correct(
   if (!impl_->constraint.has_value()) {
     std::optional<finite_volume::PoissonConstraint> candidate_constraint;
     synchronized_local_phase(
-        *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
+        *impl_->mpi, StepFailureReason::invalid_input, false,
         "Task 18 pressure-constraint construction failed", [&] {
           candidate_constraint.emplace(finite_volume::PoissonConstraint::create(
               *impl_->topology, *impl_->geometry, *impl_->execution,
@@ -771,17 +810,32 @@ PressureCorrectionReport PisoCoupler::correct(
     impl_->constraint.emplace(std::move(*candidate_constraint));
   }
   if (!impl_->pressure_operator.has_value()) {
-    impl_->pressure_operator.emplace(
-        finite_volume::MatrixFreePoissonOperator::create(
-            *impl_->decomposition, *impl_->topology, *impl_->geometry,
-            *impl_->execution,
-            static_cast<const execution::Buffer &>(impl_->gamma)
-                .view(0U, impl_->topology->local_face_count()),
-            boundary_spec));
+    try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      const int injected_rank =
+          pressure_operator_construction_failure_rank.load(
+              std::memory_order_relaxed);
+      if (impl_->mpi->rank() == injected_rank &&
+          impl_->topology->local_face_count() != 0U) {
+        impl_->gamma.view(0U, impl_->topology->local_face_count())[0] =
+            std::numeric_limits<double>::quiet_NaN();
+      }
+#endif
+      impl_->pressure_operator.emplace(
+          finite_volume::MatrixFreePoissonOperator::create(
+              *impl_->decomposition, *impl_->topology, *impl_->geometry,
+              *impl_->execution,
+              static_cast<const execution::Buffer &>(impl_->gamma)
+                  .view(0U, impl_->topology->local_face_count()),
+              boundary_spec));
+    } catch (const finite_volume::PoissonConstructionError &error) {
+      throw SynchronizedAttemptFailure{StepFailureReason::invalid_input,
+                                       error.failing_rank(), false};
+    }
   } else {
     try {
       synchronized_local_phase(
-          *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
+          *impl_->mpi, StepFailureReason::invalid_input, false,
           "Task 18 pressure-operator update failed", [&] {
             impl_->pressure_operator->replace_face_coefficients(
                 static_cast<const execution::Buffer &>(impl_->gamma)
@@ -824,12 +878,11 @@ PressureCorrectionReport PisoCoupler::correct(
   impl_->constraint->project_rhs(*rhs);
   impl_->constraint->normalize_solution(*correction);
   synchronized_local_phase(
-      *impl_->mpi, StepFailureReason::pressure_linear_solve, true,
+      *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure preconditioner update failed", [&] {
         impl_->preconditioner->update(*impl_->pressure_operator,
                                       impl_->pressure_operator->revision());
       });
-  PressureCorrectionReport result;
   result.solve =
       impl_->solver->solve(*impl_->pressure_operator, *impl_->preconditioner,
                            *rhs, *correction, control);
@@ -869,7 +922,9 @@ PressureCorrectionReport PisoCoupler::correct(
     if (result.solve.lowest_failing_rank < 0) {
       result.solve.lowest_failing_rank = acceptance.failing_rank;
     }
-    return result;
+    return correction_failure(
+        std::move(result), PressureCorrectionDisposition::recoverable_failure,
+        StepFailureReason::pressure_linear_solve, acceptance.failing_rank);
   }
 
   synchronized_local_phase(
@@ -899,6 +954,7 @@ PressureCorrectionReport PisoCoupler::correct(
             impl_->scratch.pressure_gradient);
         compute_pressure_gradient(
             *impl_->topology, *impl_->geometry, *pi_prime_read, prime_gradient,
+            impl_->pressure_gradient_sums,
             [&](LocalFaceId face, double owner_value) {
               const auto patch = impl_->topology->patch_id(face);
               if (patch.has_value() &&
@@ -910,19 +966,14 @@ PressureCorrectionReport PisoCoupler::correct(
             });
       });
 
-  std::vector<double> velocity_candidate;
-  std::vector<double> pressure_candidate;
-  std::vector<double> face_velocity_candidate;
-  std::vector<double> mass_flux_candidate;
+  auto &velocity_candidate = impl_->velocity_candidate;
+  auto &pressure_candidate = impl_->pressure_candidate;
+  auto &face_velocity_candidate = impl_->face_velocity_candidate;
+  auto &mass_flux_candidate = impl_->mass_flux_candidate;
   std::optional<execution::VectorView<double>> candidate_pressure;
   synchronized_local_phase(
       *impl_->mpi, StepFailureReason::non_finite_trial, true,
       "Task 18 corrected cell candidate derivation failed", [&] {
-        velocity_candidate.resize(count * 3U);
-        pressure_candidate.resize(count);
-        face_velocity_candidate.resize(impl_->topology->local_face_count() *
-                                       3U);
-        mass_flux_candidate.resize(impl_->topology->local_face_count());
         candidate_pressure.emplace(impl_->candidate_pressure.view(0U, count));
         const auto trial_velocity = trial.acquire_read<double>(
             access, kStatePhase, kStateActor, fields.velocity);
@@ -1100,8 +1151,58 @@ PressureCorrectionReport PisoCoupler::correct(
           }
         }
       });
+  result.disposition = PressureCorrectionDisposition::accepted;
+  result.reason = StepFailureReason::none;
+  result.lowest_failing_rank = -1;
+  result.accepted = true;
   return result;
 }
+
+PressureCorrectionReport PisoCoupler::correct(
+    FlowState &state, double rho_ref,
+    const runtime::FieldView<const double> &actual_momentum_diagonal,
+    const linear::SolveControl &control) const {
+  PressureCorrectionReport result;
+  try {
+    return correct_throwing(state, rho_ref, actual_momentum_diagonal, control,
+                            result);
+  } catch (const SynchronizedAttemptFailure &failure) {
+    return correction_failure(
+        std::move(result),
+        failure.recoverable
+            ? PressureCorrectionDisposition::recoverable_failure
+            : PressureCorrectionDisposition::non_retryable_failure,
+        failure.reason, failure.failing_rank);
+  } catch (const runtime::detail::MpiOperationError &) {
+    return correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::collective_operation, -1);
+  } catch (const runtime::Error &) {
+    return correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::invalid_input, -1);
+  } catch (...) {
+    return correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::invalid_input, -1);
+  }
+}
+
+namespace {
+
+struct MomentumSpatialResidual final {
+  std::vector<double> convection;
+  std::vector<double> viscosity;
+  std::vector<finite_volume::PhysicalBoundaryMomentumContribution> boundary;
+};
+
+struct TransportSpatialResidual final {
+  std::vector<double> convection;
+  std::vector<double> diffusion;
+  std::vector<finite_volume::PhysicalBoundaryTransportContribution> boundary;
+};
+
+} // namespace
 
 struct FixedStepConstantDensityFlow::Impl final {
   Impl(const runtime::StructuredDecomposition &supplied_decomposition,
@@ -1151,6 +1252,29 @@ struct FixedStepConstantDensityFlow::Impl final {
             execution::Buffer(
                 supplied_execution,
                 bytes_for(supplied_topology.owned_cell_count()))} {
+    const std::size_t cell_count = supplied_topology.owned_cell_count();
+    const std::size_t momentum_count = multiplied_count(
+        cell_count, 3U, "Task 18 momentum workspace");
+    pressure_gradient_sums.resize(cell_count);
+    continuity_absolute.resize(cell_count);
+    for (auto &values : diagonal_values)
+      values.resize(cell_count);
+    momentum_n.convection.resize(momentum_count);
+    momentum_n.viscosity.resize(momentum_count);
+    momentum_nm1.convection.resize(momentum_count);
+    momentum_nm1.viscosity.resize(momentum_count);
+    momentum_n.boundary.reserve(supplied_topology.local_face_count());
+    momentum_nm1.boundary.reserve(supplied_topology.local_face_count());
+    pressure_boundary.reserve(supplied_topology.local_face_count());
+    transport_n.resize(transport.size());
+    transport_nm1.resize(transport.size());
+    for (auto *set : {&transport_n, &transport_nm1}) {
+      for (auto &values : *set) {
+        values.convection.resize(cell_count);
+        values.diffusion.resize(cell_count);
+        values.boundary.reserve(supplied_topology.local_face_count());
+      }
+    }
     const auto layout = linear::VectorLayout::from_topology(supplied_topology);
     for (std::size_t component_index = 0; component_index < 3U;
          ++component_index) {
@@ -1178,6 +1302,15 @@ struct FixedStepConstantDensityFlow::Impl final {
   std::array<execution::Buffer, 3> predictor;
   std::array<execution::Buffer, 3> diagonal;
   std::array<std::unique_ptr<DiagonalMomentumOperator>, 3> operators;
+  std::vector<Real3> pressure_gradient_sums;
+  std::vector<double> continuity_absolute;
+  std::array<std::vector<double>, 3> diagonal_values;
+  MomentumSpatialResidual momentum_n;
+  MomentumSpatialResidual momentum_nm1;
+  std::vector<finite_volume::PhysicalBoundaryPressureContribution>
+      pressure_boundary;
+  std::vector<TransportSpatialResidual> transport_n;
+  std::vector<TransportSpatialResidual> transport_nm1;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   std::vector<double> provisional_face_mass_flux;
 #endif
@@ -1257,17 +1390,12 @@ FixedStepConstantDensityFlow::FixedStepConstantDensityFlow(
 
 namespace {
 
-struct MomentumSpatialResidual final {
-  std::vector<double> convection;
-  std::vector<double> viscosity;
-  std::vector<finite_volume::PhysicalBoundaryMomentumContribution> boundary;
-};
-
 template <class FlowImplementation>
-MomentumSpatialResidual assemble_spatial_residual(
+void assemble_spatial_residual(
     FlowImplementation &impl, const runtime::FieldRegistry &registry,
     const runtime::FieldAccessPlan &state_access,
     runtime::FieldStorage &accepted, const FlowFieldIds &fields, double mu,
+    MomentumSpatialResidual &values,
     runtime::FieldStorage *flux_storage = nullptr) {
   synchronized_local_phase(
       *impl.mpi, StepFailureReason::non_finite_trial, true,
@@ -1283,7 +1411,6 @@ MomentumSpatialResidual assemble_spatial_residual(
             velocity, gradient);
       });
   impl.halo->exchange(*impl.scratch.storage, impl.scratch.velocity_gradient);
-  MomentumSpatialResidual values;
   synchronized_local_phase(
       *impl.mpi, StepFailureReason::non_finite_trial, true,
       "Task 18 accepted momentum residual failed", [&] {
@@ -1311,8 +1438,6 @@ MomentumSpatialResidual assemble_spatial_residual(
             impl.scratch.momentum_residual);
         zero_cell(residual);
         impl.fvm.accumulate_convective_residual(flux, face_read, residual);
-        values.convection.resize(impl.topology->owned_cell_count() * 3U);
-        values.viscosity.resize(impl.topology->owned_cell_count() * 3U);
         const auto owned = impl.topology->owned_global_box();
         for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
              ++cell) {
@@ -1341,10 +1466,10 @@ MomentumSpatialResidual assemble_spatial_residual(
                 residual(index.i, index.j, index.k, component_index);
           }
         }
-        values.boundary = impl.fvm.physical_boundary_momentum_contributions(
-            *impl.boundaries, flux, face_read, velocity, gradient_read, mu);
+        impl.fvm.physical_boundary_momentum_contributions(
+            *impl.boundaries, flux, face_read, velocity, gradient_read, mu,
+            values.boundary);
       });
-  return values;
 }
 
 template <class FlowImplementation, class StateImpl>
@@ -1360,17 +1485,12 @@ void exchange_accepted_layers(FlowImplementation &impl, StateImpl &state) {
   }
 }
 
-struct TransportSpatialResidual final {
-  std::vector<double> convection;
-  std::vector<double> diffusion;
-  std::vector<finite_volume::PhysicalBoundaryTransportContribution> boundary;
-};
-
 template <class FlowImplementation>
-TransportSpatialResidual assemble_transport_spatial_residual(
+void assemble_transport_spatial_residual(
     FlowImplementation &impl, FlowState &state,
     runtime::FieldStorage &accepted,
-    const ConstantDensityTransportSpec &item) {
+    const ConstantDensityTransportSpec &item,
+    TransportSpatialResidual &spatial) {
   auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
   const auto &registry = detail::FlowStateSolverAccess::registry(state);
   const auto &access = detail::FlowStateSolverAccess::access(state);
@@ -1387,7 +1507,6 @@ TransportSpatialResidual assemble_transport_spatial_residual(
                                   gradient);
       });
   impl.halo->exchange(*impl.scratch.storage, impl.scratch.scalar_gradient);
-  TransportSpatialResidual spatial;
   synchronized_local_phase(
       *impl.mpi, StepFailureReason::transport_failure, true,
       "Task 18 transport spatial residual failed", [&] {
@@ -1425,8 +1544,6 @@ TransportSpatialResidual assemble_transport_spatial_residual(
             impl.scratch.scalar_residual);
         zero_cell(residual);
         impl.fvm.accumulate_convective_residual(flux, face_values, residual);
-        spatial.convection.resize(impl.topology->owned_cell_count());
-        spatial.diffusion.resize(impl.topology->owned_cell_count());
         const auto owned = impl.topology->owned_global_box();
         for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
              ++cell) {
@@ -1446,12 +1563,10 @@ TransportSpatialResidual assemble_transport_spatial_residual(
                        impl.topology->global_extent());
           spatial.diffusion[cell] = residual(index.i, index.j, index.k, 0);
         }
-        spatial.boundary =
-            impl.fvm.physical_boundary_transport_contributions(
-                item.quantity, *impl.boundaries, flux, face_values, values,
-                gradient, gamma_values);
+        impl.fvm.physical_boundary_transport_contributions(
+            item.quantity, *impl.boundaries, flux, face_values, values,
+            gradient, gamma_values, spatial.boundary);
       });
-  return spatial;
 }
 
 template <class FlowImplementation>
@@ -1466,13 +1581,16 @@ void recompute_transport(FlowImplementation &impl, FlowState &state,
       detail::FlowStateSolverAccess::layer(state, FlowLayer::history);
   auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
   const auto &access = detail::FlowStateSolverAccess::access(state);
-  for (const auto &item : impl.transport) {
-    const auto spatial_n =
-        assemble_transport_spatial_residual(impl, state, committed, item);
-    TransportSpatialResidual spatial_nm1;
+  for (std::size_t transport_index = 0;
+       transport_index < impl.transport.size(); ++transport_index) {
+    const auto &item = impl.transport[transport_index];
+    auto &spatial_n = impl.transport_n[transport_index];
+    auto &spatial_nm1 = impl.transport_nm1[transport_index];
+    assemble_transport_spatial_residual(impl, state, committed, item,
+                                        spatial_n);
     if (stencil.order == MomentumTimeOrder::bdf2) {
-      spatial_nm1 =
-          assemble_transport_spatial_residual(impl, state, history, item);
+      assemble_transport_spatial_residual(impl, state, history, item,
+                                          spatial_nm1);
     }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (final_call &&
@@ -1541,7 +1659,12 @@ std::pair<double, double> continuity_norms(FlowImplementation &impl,
             impl.scratch.mass_residual);
         zero_cell(raw);
         impl.fvm.accumulate_mass_residual(flux, raw);
-        std::vector<double> absolute(impl.topology->owned_cell_count(), 0.0);
+        if (impl.continuity_absolute.size() !=
+            impl.topology->owned_cell_count()) {
+          throw runtime::Error("Task 18 continuity workspace is invalid");
+        }
+        std::fill(impl.continuity_absolute.begin(),
+                  impl.continuity_absolute.end(), 0.0);
         const auto flux_view = trial.acquire_face_read<double>(
             detail::FlowStateSolverAccess::access(state), kStatePhase,
             kStateActor, state.fields().face_mass_flux);
@@ -1550,14 +1673,14 @@ std::pair<double, double> continuity_norms(FlowImplementation &impl,
           const double magnitude = std::abs(flux_view(face, 0));
           const LocalCellId owner = impl.topology->owner(face);
           if (impl.topology->cell_ownership(owner) == EntityOwnership::owned) {
-            absolute[owner] += magnitude;
+            impl.continuity_absolute[owner] += magnitude;
           }
           const auto neighbour = impl.topology->neighbour(face);
           if (!impl.topology->patch_id(face).has_value() &&
               neighbour.has_value() &&
               impl.topology->cell_ownership(*neighbour) ==
                   EntityOwnership::owned) {
-            absolute[*neighbour] += magnitude;
+            impl.continuity_absolute[*neighbour] += magnitude;
           }
         }
         const auto owned = impl.topology->owned_global_box();
@@ -1568,7 +1691,8 @@ std::pair<double, double> continuity_norms(FlowImplementation &impl,
                        impl.topology->global_extent());
           const double value = raw(index.i, index.j, index.k, 0);
           sums[0] += value * value;
-          sums[1] += absolute[cell] * absolute[cell];
+          sums[1] += impl.continuity_absolute[cell] *
+                     impl.continuity_absolute[cell];
         }
         if (!std::isfinite(sums[0]) || !std::isfinite(sums[1])) {
           throw runtime::Error("Task 18 continuity norm is non-finite");
@@ -1746,10 +1870,14 @@ runtime::CollectiveStatus assess_final_momentum(
   const auto &registry = detail::FlowStateSolverAccess::registry(state);
   const auto &access = detail::FlowStateSolverAccess::access(state);
   const auto fields = state.fields();
-  const auto residual_n = assemble_spatial_residual(
-      impl, registry, access, committed, fields, mu);
-  const auto residual_nm1 = assemble_spatial_residual(
-      impl, registry, access, history, fields, mu);
+  auto &residual_n = impl.momentum_n;
+  auto &residual_nm1 = impl.momentum_nm1;
+  assemble_spatial_residual(impl, registry, access, committed, fields, mu,
+                            residual_n);
+  if (stencil.order == MomentumTimeOrder::bdf2) {
+    assemble_spatial_residual(impl, registry, access, history, fields, mu,
+                              residual_nm1);
+  }
   impl.halo->exchange(trial, fields.mechanical_pressure);
 
   std::array<double, 6> norm_sums{};
@@ -1770,6 +1898,7 @@ runtime::CollectiveStatus assess_final_momentum(
                     impl.scratch.pressure_gradient);
         compute_pressure_gradient(
             *impl.topology, *impl.geometry, pressure_trial, pressure_gradient,
+            impl.pressure_gradient_sums,
             [&](LocalFaceId face, double owner_value) {
               const auto patch = impl.topology->patch_id(face);
               if (!patch.has_value())
@@ -1781,20 +1910,24 @@ runtime::CollectiveStatus assess_final_momentum(
             impl.scratch.storage->template acquire_read<double>(
                 *impl.scratch.access, kScratchPhase, kScratchActor,
                 impl.scratch.pressure_gradient);
-        const auto pressure_boundary =
-            impl.fvm.physical_boundary_pressure_contributions(
-                *impl.boundaries, pressure_trial);
-        if (residual_n.boundary.size() != residual_nm1.boundary.size() ||
-            residual_n.boundary.size() != pressure_boundary.size()) {
+        impl.fvm.physical_boundary_pressure_contributions(
+            *impl.boundaries, pressure_trial, impl.pressure_boundary);
+        if ((stencil.order == MomentumTimeOrder::bdf2 &&
+             residual_n.boundary.size() != residual_nm1.boundary.size()) ||
+            residual_n.boundary.size() != impl.pressure_boundary.size()) {
           throw runtime::Error(
               "Task 18 physical momentum boundary sets differ");
         }
         for (std::size_t boundary_index = 0;
              boundary_index < residual_n.boundary.size(); ++boundary_index) {
           const auto &current = residual_n.boundary[boundary_index];
-          const auto &previous = residual_nm1.boundary[boundary_index];
-          const auto &pressure = pressure_boundary[boundary_index];
-          if (current.global_face_id != previous.global_face_id ||
+          const auto *previous =
+              stencil.order == MomentumTimeOrder::bdf2
+                  ? &residual_nm1.boundary[boundary_index]
+                  : nullptr;
+          const auto &pressure = impl.pressure_boundary[boundary_index];
+          if ((previous != nullptr &&
+               current.global_face_id != previous->global_face_id) ||
               current.global_face_id != pressure.global_face_id) {
             throw runtime::Error(
                 "Task 18 physical momentum boundary identities differ");
@@ -1802,15 +1935,15 @@ runtime::CollectiveStatus assess_final_momentum(
           for (std::size_t component_index = 0; component_index < 3U;
                ++component_index) {
             const double convection =
-                stencil.order == MomentumTimeOrder::backward_euler
+                previous == nullptr
                     ? current.convective[component_index]
                     : 2.0 * current.convective[component_index] -
-                          previous.convective[component_index];
+                          previous->convective[component_index];
             const double viscosity =
-                stencil.order == MomentumTimeOrder::backward_euler
+                previous == nullptr
                     ? current.viscous[component_index]
                     : 2.0 * current.viscous[component_index] -
-                          previous.viscous[component_index];
+                          previous->viscous[component_index];
             const double pressure_value = pressure.pressure[component_index];
             const double effective_flux =
                 convection + viscosity + pressure_value;
@@ -1998,12 +2131,13 @@ runtime::CollectiveStatus assess_final_transport(
   for (std::size_t transport_index = 0;
        transport_index < impl.transport.size(); ++transport_index) {
     const auto &item = impl.transport[transport_index];
-    const auto spatial_n =
-        assemble_transport_spatial_residual(impl, state, committed, item);
-    TransportSpatialResidual spatial_nm1;
+    auto &spatial_n = impl.transport_n[transport_index];
+    auto &spatial_nm1 = impl.transport_nm1[transport_index];
+    assemble_transport_spatial_residual(impl, state, committed, item,
+                                        spatial_n);
     if (stencil.order == MomentumTimeOrder::bdf2) {
-      spatial_nm1 =
-          assemble_transport_spatial_residual(impl, state, history, item);
+      assemble_transport_spatial_residual(impl, state, history, item,
+                                          spatial_nm1);
     }
     double norm_sums[2]{};
     ConservationParts conservation;
@@ -2206,7 +2340,6 @@ runtime::CollectiveStatus assess_final_conservation(
         }
         const auto flux = trial.acquire_face_read<double>(
             access, kStatePhase, kStateActor, fields.face_mass_flux);
-        std::set<mesh::GlobalFaceId> observed;
         for (LocalFaceId face = 0; face < impl.topology->local_face_count();
              ++face) {
           const auto patch = impl.topology->patch_id(face);
@@ -2216,10 +2349,9 @@ runtime::CollectiveStatus assess_final_conservation(
             continue;
           }
           const LocalCellId owner = impl.topology->owner(face);
-          if (impl.topology->cell_ownership(owner) != EntityOwnership::owned ||
-              !observed.insert(impl.topology->global_face_id(face)).second) {
+          if (impl.topology->cell_ownership(owner) != EntityOwnership::owned) {
             throw runtime::Error(
-                "Task 18 physical mass boundary face is duplicated");
+                "Task 18 physical mass boundary face is not owner-owned");
           }
           conservation.signed_boundary_flux.add(flux(face, 0));
           conservation.absolute_boundary_flux.add(std::abs(flux(face, 0)));
@@ -2316,14 +2448,23 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
               descriptor.components == 1U && descriptor.ghost_width >= 2;
         }
       }
-      const auto committed = state.snapshot(FlowLayer::committed);
-      const auto history = state.snapshot(FlowLayer::history);
-      local_valid =
-          local_valid &&
-          std::all_of(committed.density.begin(), committed.density.end(),
-                      [&](double value) { return value == rho_ref; }) &&
-          std::all_of(history.density.begin(), history.density.end(),
-                      [&](double value) { return value == rho_ref; });
+      if (local_valid) {
+        const auto &state_access = state.solver_access_plan();
+        const auto committed_density =
+            state.layer(FlowLayer::committed).acquire_read<double>(
+                state_access, kStatePhase, kStateActor, fields.density);
+        const auto history_density =
+            state.layer(FlowLayer::history).acquire_read<double>(
+                state_access, kStatePhase, kStateActor, fields.density);
+        for (int k = 0; local_valid && k < local_extent.z; ++k) {
+          for (int j = 0; local_valid && j < local_extent.y; ++j) {
+            for (int i = 0; local_valid && i < local_extent.x; ++i) {
+              local_valid = committed_density(i, j, k, 0) == rho_ref &&
+                            history_density(i, j, k, 0) == rho_ref;
+            }
+          }
+        }
+      }
     } catch (const runtime::detail::MpiOperationError &) {
       throw;
     } catch (...) {
@@ -2433,8 +2574,10 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     const auto &registry = state.solver_registry();
     const auto &access = state.solver_access_plan();
     const auto fields = state.fields();
-    const auto residual_n = assemble_spatial_residual(*impl_, registry, access,
-                                                      committed, fields, mu);
+    auto &residual_n = impl_->momentum_n;
+    auto &residual_nm1 = impl_->momentum_nm1;
+    assemble_spatial_residual(*impl_, registry, access, committed, fields, mu,
+                              residual_n);
     runtime::FieldStorage *history_flux_storage = nullptr;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (momentum_assembly_mutation.load(std::memory_order_relaxed) ==
@@ -2442,8 +2585,10 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
       history_flux_storage = &trial;
     }
 #endif
-    const auto residual_nm1 = assemble_spatial_residual(
-        *impl_, registry, access, history, fields, mu, history_flux_storage);
+    if (stencil.order == MomentumTimeOrder::bdf2) {
+      assemble_spatial_residual(*impl_, registry, access, history, fields, mu,
+                                residual_nm1, history_flux_storage);
+    }
     std::optional<runtime::FieldView<const double>> velocity_n;
     std::optional<runtime::FieldView<const double>> velocity_nm1;
     std::optional<runtime::FieldView<const double>> pressure_n;
@@ -2472,7 +2617,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
                   impl_->scratch.pressure_gradient);
           compute_pressure_gradient(
               *impl_->topology, *impl_->geometry, *pressure_n,
-              pressure_gradient, [&](LocalFaceId face, double owner_value) {
+              pressure_gradient, impl_->pressure_gradient_sums,
+              [&](LocalFaceId face, double owner_value) {
                 const auto patch = impl_->topology->patch_id(face);
                 if (!patch.has_value())
                   return owner_value;
@@ -2485,7 +2631,7 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     std::optional<runtime::FieldView<const double>> pressure_gradient_read;
     const std::size_t count = impl_->topology->owned_cell_count();
     const auto owned = impl_->topology->owned_global_box();
-    std::array<std::vector<double>, 3> diagonal_values;
+    auto &diagonal_values = impl_->diagonal_values;
     synchronized_local_phase(
         *impl_->mpi, StepFailureReason::momentum_linear_solve, true,
         "Task 18 momentum equation preparation failed", [&] {
@@ -2493,8 +2639,6 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
               impl_->scratch.storage->acquire_read<double>(
                   *impl_->scratch.access, kScratchPhase, kScratchActor,
                   impl_->scratch.pressure_gradient));
-          for (auto &values : diagonal_values)
-            values.resize(count);
           for (std::size_t component_index = 0; component_index < 3U;
                ++component_index) {
             auto rhs = impl_->rhs[component_index].view(0U, count);
@@ -2688,11 +2832,16 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     const auto first = impl_->coupler.correct(
         state, rho_ref, *actual_diagonal_read, pressure_control);
     report.pressure[0] = first.solve;
-    if (!first.accepted) {
+    if (first.disposition != PressureCorrectionDisposition::accepted ||
+        !first.accepted) {
       state.rollback_attempt();
       active = false;
-      return numerical_failure(report, StepFailureReason::pressure_linear_solve,
-                               first.solve.lowest_failing_rank);
+      return first.disposition ==
+                     PressureCorrectionDisposition::recoverable_failure
+                 ? numerical_failure(report, first.reason,
+                                     first.lowest_failing_rank)
+                 : fatal_failure(report, first.reason,
+                                 first.lowest_failing_rank);
     }
     report.pressure_corrector_count = 1U;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -2744,11 +2893,16 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     const auto second = impl_->coupler.correct(
         state, rho_ref, *actual_diagonal_read, pressure_control);
     report.pressure[1] = second.solve;
-    if (!second.accepted) {
+    if (second.disposition != PressureCorrectionDisposition::accepted ||
+        !second.accepted) {
       state.rollback_attempt();
       active = false;
-      return numerical_failure(report, StepFailureReason::pressure_linear_solve,
-                               second.solve.lowest_failing_rank);
+      return second.disposition ==
+                     PressureCorrectionDisposition::recoverable_failure
+                 ? numerical_failure(report, second.reason,
+                                     second.lowest_failing_rank)
+                 : fatal_failure(report, second.reason,
+                                 second.lowest_failing_rank);
     }
     report.pressure_corrector_count = 2U;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -3065,6 +3219,8 @@ void test::ConstantDensityPisoTestAccess::reset() noexcept {
   }
   provisional_transport_call_count.store(0U, std::memory_order_relaxed);
   final_transport_call_count.store(0U, std::memory_order_relaxed);
+  pressure_operator_construction_failure_rank.store(-1,
+                                                    std::memory_order_relaxed);
 }
 
 void test::ConstantDensityPisoTestAccess::force_final_continuity_failure(
@@ -3175,6 +3331,12 @@ void test::ConstantDensityPisoTestAccess::set_attempt_failure_stage(
   attempt_failure_stage.store(stage, std::memory_order_relaxed);
 }
 
+void test::ConstantDensityPisoTestAccess::
+    set_pressure_operator_construction_failure_rank(int rank) noexcept {
+  pressure_operator_construction_failure_rank.store(rank,
+                                                    std::memory_order_relaxed);
+}
+
 void test::ConstantDensityPisoTestAccess::set_provisional_transport_sentinel(
     bool enabled) noexcept {
   provisional_transport_sentinel.store(enabled, std::memory_order_relaxed);
@@ -3248,6 +3410,46 @@ test::ConstantDensityPisoTestAccess::last_transport_conservation(
   return field_index < ::hundun::flow::last_transport_conservation.size()
              ? ::hundun::flow::last_transport_conservation[field_index]
              : test::ConservationDiagnostic{};
+}
+
+test::MeshWorkspaceSnapshot
+test::ConstantDensityPisoTestAccess::mesh_workspace_snapshot(
+    const FixedStepConstantDensityFlow &flow) noexcept {
+  test::MeshWorkspaceSnapshot snapshot;
+  const auto add = [&](const auto &values) {
+    ++snapshot.vector_count;
+    snapshot.total_capacity += values.capacity();
+    const auto pointer = reinterpret_cast<std::uintptr_t>(values.data());
+    snapshot.data_identity ^=
+        pointer + UINT64_C(0x9e3779b97f4a7c15) +
+        (snapshot.data_identity << 6U) + (snapshot.data_identity >> 2U);
+  };
+  const auto &impl = *flow.impl_;
+  add(impl.pressure_gradient_sums);
+  add(impl.continuity_absolute);
+  for (const auto &values : impl.diagonal_values)
+    add(values);
+  add(impl.momentum_n.convection);
+  add(impl.momentum_n.viscosity);
+  add(impl.momentum_n.boundary);
+  add(impl.momentum_nm1.convection);
+  add(impl.momentum_nm1.viscosity);
+  add(impl.momentum_nm1.boundary);
+  add(impl.pressure_boundary);
+  for (const auto *set : {&impl.transport_n, &impl.transport_nm1}) {
+    for (const auto &values : *set) {
+      add(values.convection);
+      add(values.diffusion);
+      add(values.boundary);
+    }
+  }
+  const auto &coupler = *impl.coupler.impl_;
+  add(coupler.pressure_gradient_sums);
+  add(coupler.velocity_candidate);
+  add(coupler.pressure_candidate);
+  add(coupler.face_velocity_candidate);
+  add(coupler.mass_flux_candidate);
+  return snapshot;
 }
 #endif
 

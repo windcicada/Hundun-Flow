@@ -14,6 +14,9 @@ using hundun::finite_volume::FaceMassFlux;
 using hundun::finite_volume::FiniteVolumeQuantity;
 using hundun::finite_volume::FiniteVolumeQuantityKind;
 using hundun::finite_volume::GradientScheme;
+using hundun::finite_volume::PhysicalBoundaryMomentumContribution;
+using hundun::finite_volume::PhysicalBoundaryPressureContribution;
+using hundun::finite_volume::PhysicalBoundaryTransportContribution;
 using hundun::mesh::MeshGeometry;
 using hundun::mesh::MeshTopology;
 using hundun::runtime::ActorId;
@@ -75,6 +78,19 @@ using AccumulateDiffusive = void (CellCenteredFvmOperators::*)(
 using AccumulateViscous = void (CellCenteredFvmOperators::*)(
     const BoundaryRegistry &, const FieldView<const double> &,
     const FieldView<const double> &, double, const FieldView<double> &) const;
+using PhysicalMomentum = void (CellCenteredFvmOperators::*)(
+    const BoundaryRegistry &, const FaceMassFlux &,
+    const FaceFieldView<const double> &, const FieldView<const double> &,
+    const FieldView<const double> &, double,
+    std::vector<PhysicalBoundaryMomentumContribution> &) const;
+using PhysicalPressure = void (CellCenteredFvmOperators::*)(
+    const BoundaryRegistry &, const FieldView<const double> &,
+    std::vector<PhysicalBoundaryPressureContribution> &) const;
+using PhysicalTransport = void (CellCenteredFvmOperators::*)(
+    FiniteVolumeQuantity, const BoundaryRegistry &, const FaceMassFlux &,
+    const FaceFieldView<const double> &, const FieldView<const double> &,
+    const FieldView<const double> &, const FaceFieldView<const double> &,
+    std::vector<PhysicalBoundaryTransportContribution> &) const;
 using FluxDescriptor = hundun::runtime::FieldDescriptor (*)();
 using DeclareFlux = FieldId (*)(FieldRegistry &);
 using RequireFlux = void (*)(const FieldRegistry &, FieldId);
@@ -109,6 +125,18 @@ static_assert(std::is_same_v<decltype(&CellCenteredFvmOperators::
 static_assert(std::is_same_v<
               decltype(&CellCenteredFvmOperators::accumulate_viscous_residual),
               AccumulateViscous>);
+static_assert(std::is_same_v<
+              decltype(&CellCenteredFvmOperators::
+                           physical_boundary_momentum_contributions),
+              PhysicalMomentum>);
+static_assert(std::is_same_v<
+              decltype(&CellCenteredFvmOperators::
+                           physical_boundary_pressure_contributions),
+              PhysicalPressure>);
+static_assert(std::is_same_v<
+              decltype(&CellCenteredFvmOperators::
+                           physical_boundary_transport_contributions),
+              PhysicalTransport>);
 static_assert(
     std::is_same_v<decltype(&hundun::finite_volume::face_mass_flux_descriptor),
                    FluxDescriptor>);

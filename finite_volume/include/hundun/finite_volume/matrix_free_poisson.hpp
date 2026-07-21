@@ -5,12 +5,14 @@
 #include "hundun/linear/linear_system.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
 #include "hundun/mesh/mesh_topology.hpp"
+#include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace hundun::finite_volume {
 
@@ -27,6 +29,18 @@ enum class PoissonSolverFamily : std::uint8_t {
 struct PoissonBoundarySpec final {
   PressureConstraintMode mode{PressureConstraintMode::constant_nullspace};
   std::optional<std::uint32_t> pressure_reference_patch_id{};
+};
+
+// Construction performs a collective preflight.  This public error preserves
+// the lowest rank selected by that preflight without requiring callers to
+// interpret diagnostic text.
+class PoissonConstructionError final : public runtime::Error {
+ public:
+  PoissonConstructionError(int failing_rank, std::string message);
+  int failing_rank() const noexcept;
+
+ private:
+  int failing_rank_;
 };
 
 class MatrixFreePoissonOperator final : public linear::LinearOperator {

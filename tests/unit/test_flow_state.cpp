@@ -4,6 +4,7 @@
 #include "hundun/flow/flow_state.hpp"
 #include "hundun/runtime/field_access_plan.hpp"
 #include "hundun/runtime/field_registry.hpp"
+#include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <type_traits>
@@ -94,6 +95,15 @@ void run_flow_state_red_contract() {
   HUNDUN_CHECK(state.snapshot(hundun::flow::FlowLayer::committed).velocity ==
                committed.velocity);
   HUNDUN_CHECK(state.metadata().step == 4U);
+
+  std::size_t warmed_copy_allocation_attempts = 0U;
+  {
+    hundun::test::allocation_probe::AllocationAttemptGuard guard;
+    state.begin_attempt();
+    state.rollback_attempt();
+    warmed_copy_allocation_attempts = guard.attempts();
+  }
+  HUNDUN_CHECK(warmed_copy_allocation_attempts == 0U);
 
   state.begin_attempt();
   auto trial_velocity = state.trial_layer().acquire_write<double>(

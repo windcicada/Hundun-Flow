@@ -249,6 +249,22 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
       hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
   using TestAccess = hundun::flow::test::ConstantDensityPisoTestAccess;
 
+  auto direct_coupler = hundun::flow::PisoCoupler::create(
+      decomposition, topology, geometry, boundaries, mpi, execution, halo,
+      pressure_solver, pressure_preconditioner);
+  const auto direct_report = direct_coupler.correct(
+      state, rho_ref,
+      state.layer(hundun::flow::FlowLayer::committed)
+          .view<double>(fields.velocity),
+      {});
+  HUNDUN_CHECK(
+      direct_report.disposition ==
+      hundun::flow::PressureCorrectionDisposition::non_retryable_failure);
+  HUNDUN_CHECK(direct_report.reason ==
+               hundun::flow::StepFailureReason::invalid_input);
+  HUNDUN_CHECK(direct_report.lowest_failing_rank == 0);
+  HUNDUN_CHECK(!direct_report.accepted);
+
   auto invalid_quantity_state = hundun::flow::FlowState::create(
       registry, {local, topology.local_face_count()}, fields,
       {0U, 0.0, 0.01, 0.0, hundun::flow::MomentumTimeOrder::backward_euler});
@@ -425,7 +441,67 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     candidate.seed_accepted_layers(initial, initial);
     return candidate;
   };
+  const auto warm_workspace = TestAccess::mesh_workspace_snapshot(flow);
+  auto workspace_success_state = make_zero_state();
+  const auto workspace_success_report = flow.attempt(
+      workspace_success_state, rho_ref, 0.0, stencil, {}, {});
+  HUNDUN_CHECK(workspace_success_report.disposition ==
+               hundun::flow::StepAttemptDisposition::committed);
+  const auto after_success_workspace =
+      TestAccess::mesh_workspace_snapshot(flow);
+  HUNDUN_CHECK(after_success_workspace.vector_count ==
+               warm_workspace.vector_count);
+  HUNDUN_CHECK(after_success_workspace.total_capacity ==
+               warm_workspace.total_capacity);
+  HUNDUN_CHECK(after_success_workspace.data_identity ==
+               warm_workspace.data_identity);
+
+  TestAccess::reset();
+  TestAccess::set_attempt_failure_stage(
+      hundun::flow::test::AttemptFailureStage::after_corrector_2);
+  auto workspace_retry_state = make_zero_state();
+  const auto workspace_retry_report = flow.attempt(
+      workspace_retry_state, rho_ref, 0.0, stencil, {}, {});
+  HUNDUN_CHECK(workspace_retry_report.disposition ==
+               hundun::flow::StepAttemptDisposition::recoverable_failure);
+  const auto after_retry_workspace =
+      TestAccess::mesh_workspace_snapshot(flow);
+  HUNDUN_CHECK(after_retry_workspace.vector_count ==
+               warm_workspace.vector_count);
+  HUNDUN_CHECK(after_retry_workspace.total_capacity ==
+               warm_workspace.total_capacity);
+  HUNDUN_CHECK(after_retry_workspace.data_identity ==
+               warm_workspace.data_identity);
+  TestAccess::reset();
+
   if (mpi.size() > 1) {
+    TestAccess::set_pressure_operator_construction_failure_rank(1);
+    auto construction_failure_state = make_zero_state();
+    const auto construction_failure_before = construction_failure_state.snapshot(
+        hundun::flow::FlowLayer::committed);
+    auto uncached_flow = hundun::flow::FixedStepConstantDensityFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&mx, &my, &mz}, pressure_solver,
+        pressure_preconditioner,
+        {{fields.transported_cell_fields[0],
+          hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+    const auto construction_failure_report = uncached_flow.attempt(
+        construction_failure_state, rho_ref, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(
+        construction_failure_report.disposition ==
+        hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(construction_failure_report.reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(construction_failure_report.lowest_failing_rank == 1);
+    HUNDUN_CHECK(construction_failure_report.pressure_corrector_count == 0U);
+    HUNDUN_CHECK(construction_failure_report.suggested_dt_s == 0.0);
+    HUNDUN_CHECK(construction_failure_state.metadata().step == 0U);
+    check_layer_equal(
+        construction_failure_state.snapshot(
+            hundun::flow::FlowLayer::committed),
+        construction_failure_before);
+    TestAccess::reset();
+
     TestAccess::reset();
     if (mpi.rank() == 0) {
       TestAccess::set_final_momentum_norm_squares(

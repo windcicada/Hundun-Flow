@@ -20,6 +20,10 @@
 
 namespace hundun::flow {
 
+namespace test {
+class ConstantDensityPisoTestAccess;
+}
+
 enum class StepAttemptDisposition : std::uint8_t {
   committed,
   recoverable_failure,
@@ -42,7 +46,23 @@ enum class StepFailureReason : std::uint8_t {
   collective_operation
 };
 
+enum class PressureCorrectionDisposition : std::uint8_t {
+  accepted,
+  recoverable_failure,
+  non_retryable_failure
+};
+
 struct PressureCorrectionReport final {
+  // Successful corrections report {accepted, none, -1, accepted=true}.
+  // Expected numerical solve/residual failures are returned as recoverable
+  // pressure_linear_solve results.  Invalid input, layout, capability, or
+  // construction failures are non-retryable invalid_input results; MPI
+  // operation failures are non-retryable collective_operation results.
+  // lowest_failing_rank is -1 only when no reliable rank evidence exists.
+  PressureCorrectionDisposition disposition{
+      PressureCorrectionDisposition::non_retryable_failure};
+  StepFailureReason reason{StepFailureReason::invalid_input};
+  int lowest_failing_rank{-1};
   linear::SolveReport solve;
   double independent_residual_l2{};
   double rhs_l2{};
@@ -77,6 +97,8 @@ struct ConstantDensityTransportSpec final {
 
 class PisoCoupler final {
 public:
+  // All collaborators are borrowed and must outlive the returned coupler.
+  // Calls on one coupler object must not overlap.
   static PisoCoupler
   create(const runtime::StructuredDecomposition &decomposition,
          const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
@@ -101,11 +123,20 @@ public:
 private:
   struct Impl;
   explicit PisoCoupler(std::unique_ptr<Impl>) noexcept;
+  PressureCorrectionReport correct_throwing(
+      FlowState &state, double rho_ref,
+      const runtime::FieldView<const double> &actual_momentum_diagonal,
+      const linear::SolveControl &control,
+      PressureCorrectionReport &result) const;
   std::unique_ptr<Impl> impl_;
+
+  friend class test::ConstantDensityPisoTestAccess;
 };
 
 class FixedStepConstantDensityFlow final {
 public:
+  // All collaborators are borrowed and must outlive the returned flow.
+  // Calls on one flow object must not overlap.
   static FixedStepConstantDensityFlow
   create(const runtime::StructuredDecomposition &decomposition,
          const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
@@ -136,6 +167,8 @@ private:
   struct Impl;
   explicit FixedStepConstantDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
+
+  friend class test::ConstantDensityPisoTestAccess;
 };
 
 } // namespace hundun::flow

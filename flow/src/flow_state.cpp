@@ -294,8 +294,40 @@ FlowLayerValues read_layer(const StateImplementation &impl,
 template <class StateImplementation>
 void copy_layer(StateImplementation &impl, const runtime::FieldStorage &source,
                 runtime::FieldStorage &destination) {
-  const FlowLayerValues values = read_layer(impl, source);
-  write_layer(impl, destination, values);
+  const auto copy_cell = [&](runtime::FieldId field,
+                             std::uint32_t components) {
+    const auto input = source.template acquire_read<double>(
+        impl.access, kStatePhase, kStateActor, field);
+    auto output = destination.template acquire_write<double>(
+        impl.access, kStatePhase, kStateActor, field);
+    for_each_cell(impl.layout.cell_interior_extent, [&](int i, int j, int k) {
+      for (std::uint32_t component = 0; component < components; ++component) {
+        output(i, j, k, static_cast<int>(component)) =
+            input(i, j, k, static_cast<int>(component));
+      }
+    });
+  };
+  const auto copy_face = [&](runtime::FieldId field,
+                             std::uint32_t components) {
+    const auto input = source.template acquire_face_read<double>(
+        impl.access, kStatePhase, kStateActor, field);
+    auto output = destination.template acquire_face_write<double>(
+        impl.access, kStatePhase, kStateActor, field);
+    for (std::size_t face = 0; face < impl.layout.face_count; ++face) {
+      for (std::uint32_t component = 0; component < components; ++component) {
+        output(face, static_cast<int>(component)) =
+            input(face, static_cast<int>(component));
+      }
+    }
+  };
+  copy_cell(impl.fields.density, 1U);
+  copy_cell(impl.fields.velocity, 3U);
+  copy_cell(impl.fields.mechanical_pressure, 1U);
+  copy_face(impl.fields.face_velocity, 3U);
+  copy_face(impl.fields.face_mass_flux, 1U);
+  for (const runtime::FieldId field : impl.fields.transported_cell_fields) {
+    copy_cell(field, 1U);
+  }
 }
 
 } // namespace

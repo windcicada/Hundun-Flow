@@ -64,6 +64,13 @@ struct PhysicalBoundaryTransportContribution final {
   double diffusive{};
 };
 
+// Physical-boundary contribution buffers contain each unique, owner-owned,
+// nonperiodic physical face in stable topology order.  Area orientation is
+// owner-outward.  Convective values use equation units (momentum: N;
+// transport: quantity flux), pressure uses N, and viscous/diffusive values
+// are equation contributions: the negatives of the physical traction or
+// diffusive flux under the residual convention used by this class.
+
 class FaceMassFlux final {
 public:
   static FaceMassFlux acquire(const runtime::FieldRegistry &registry,
@@ -153,29 +160,31 @@ public:
       double dynamic_viscosity_pa_s,
       const runtime::FieldView<double> &raw_momentum_residual) const;
 
-  std::vector<PhysicalBoundaryMomentumContribution>
-  physical_boundary_momentum_contributions(
+  // `output` is cleared and refilled; callers may retain its capacity for
+  // repeated, non-overlapping calls on this non-concurrent operator object.
+  void physical_boundary_momentum_contributions(
       const boundary::BoundaryRegistry &boundaries,
       const FaceMassFlux &mass_flux,
       const runtime::FaceFieldView<const double> &face_velocity,
       const runtime::FieldView<const double> &velocity,
       const runtime::FieldView<const double> &velocity_gradients,
-      double dynamic_viscosity_pa_s) const;
+      double dynamic_viscosity_pa_s,
+      std::vector<PhysicalBoundaryMomentumContribution> &output) const;
 
-  std::vector<PhysicalBoundaryPressureContribution>
-  physical_boundary_pressure_contributions(
+  void physical_boundary_pressure_contributions(
       const boundary::BoundaryRegistry &boundaries,
-      const runtime::FieldView<const double> &pressure) const;
+      const runtime::FieldView<const double> &pressure,
+      std::vector<PhysicalBoundaryPressureContribution> &output) const;
 
-  std::vector<PhysicalBoundaryTransportContribution>
-  physical_boundary_transport_contributions(
+  void physical_boundary_transport_contributions(
       FiniteVolumeQuantity quantity,
       const boundary::BoundaryRegistry &boundaries,
       const FaceMassFlux &mass_flux,
       const runtime::FaceFieldView<const double> &face_values,
       const runtime::FieldView<const double> &cell_values,
       const runtime::FieldView<const double> &cell_gradients,
-      const runtime::FaceFieldView<const double> &gamma_by_face) const;
+      const runtime::FaceFieldView<const double> &gamma_by_face,
+      std::vector<PhysicalBoundaryTransportContribution> &output) const;
 
 private:
   struct Impl;

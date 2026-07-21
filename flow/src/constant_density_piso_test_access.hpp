@@ -3,8 +3,13 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 
-namespace hundun::flow::test {
+namespace hundun::flow {
+
+class FixedStepConstantDensityFlow;
+
+namespace test {
 
 enum class MomentumAssemblyMutation {
   none,
@@ -46,6 +51,12 @@ struct ConservationDiagnostic final {
   double relative_defect{};
 };
 
+struct MeshWorkspaceSnapshot final {
+  std::size_t vector_count{};
+  std::size_t total_capacity{};
+  std::uintptr_t data_identity{};
+};
+
 class ConstantDensityPisoTestAccess final {
 public:
   static void reset() noexcept;
@@ -75,6 +86,8 @@ public:
   static void set_transport_assembly_mutation(
       TransportAssemblyMutation mutation) noexcept;
   static void set_attempt_failure_stage(AttemptFailureStage stage) noexcept;
+  static void
+  set_pressure_operator_construction_failure_rank(int rank) noexcept;
   static void set_provisional_transport_sentinel(bool enabled) noexcept;
   static void set_final_uniform_x_mass_flux(double value) noexcept;
   static void set_final_uniform_x_mass_flux_override(bool enabled) noexcept;
@@ -89,6 +102,9 @@ public:
   last_momentum_conservation(std::size_t component) noexcept;
   static ConservationDiagnostic
   last_transport_conservation(std::size_t field_index) noexcept;
+  static MeshWorkspaceSnapshot
+  mesh_workspace_snapshot(const FixedStepConstantDensityFlow &flow) noexcept;
 };
 
-} // namespace hundun::flow::test
+} // namespace test
+} // namespace hundun::flow

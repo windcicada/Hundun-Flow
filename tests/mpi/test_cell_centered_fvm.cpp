@@ -1521,6 +1521,8 @@ void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
       registry.declare_field(cell_descriptor("physical_density", 1, 2));
   const FieldId velocity =
       registry.declare_field(cell_descriptor("physical_velocity", 3, 2));
+  const FieldId pressure =
+      registry.declare_field(cell_descriptor("physical_pressure", 1, 2));
   const FieldId flux_id = declare_face_mass_flux(registry);
   const FieldId density_face =
       registry.declare_field(face_descriptor("physical_density_face", 1));
@@ -1541,6 +1543,7 @@ void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
                                                 topology.local_face_count()});
   auto rho = storage.view<double>(density);
   auto u = storage.view<double>(velocity);
+  auto p = storage.view<double>(pressure);
   auto density_gradient_write = storage.view<double>(density_gradient);
   for (int k = 0; k < decomposition.local_extent().z; ++k) {
     for (int j = 0; j < decomposition.local_extent().y; ++j) {
@@ -1552,6 +1555,7 @@ void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
                 static_cast<std::size_t>(decomposition.local_extent().x) +
             static_cast<std::size_t>(i);
         rho(i, j, k, 0) = 1.5 + geometry.cell_center_m(cell).x;
+        p(i, j, k, 0) = 2.0;
         u(i, j, k, 0) = 1.0;
         u(i, j, k, 1) = 0.5;
         u(i, j, k, 2) = -0.25;
@@ -1915,6 +1919,53 @@ void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
   HUNDUN_CHECK(MPI_Allreduce(&local_saw, &global_saw, 1, MPI_INT, MPI_MAX,
                              mpi.comm()) == MPI_SUCCESS);
   HUNDUN_CHECK(global_saw == 1);
+
+  operators.reconstruct_momentum_faces(boundaries, flux, u_read,
+                                       velocity_face_write);
+  std::vector<hundun::finite_volume::PhysicalBoundaryMomentumContribution>
+      momentum_contributions;
+  std::vector<hundun::finite_volume::PhysicalBoundaryPressureContribution>
+      pressure_contributions;
+  std::vector<hundun::finite_volume::PhysicalBoundaryTransportContribution>
+      transport_contributions;
+  momentum_contributions.reserve(topology.local_face_count());
+  pressure_contributions.reserve(topology.local_face_count());
+  transport_contributions.reserve(topology.local_face_count());
+  operators.physical_boundary_momentum_contributions(
+      boundaries, flux,
+      read_storage.acquire_face_read<double>(access, read_phase, actor,
+                                              velocity_face),
+      u_read, gradient_read, mu, momentum_contributions);
+  operators.physical_boundary_pressure_contributions(
+      boundaries, read_storage.view<double>(pressure), pressure_contributions);
+  operators.physical_boundary_transport_contributions(
+      FiniteVolumeQuantity::density(), boundaries, flux,
+      read_storage.acquire_face_read<double>(access, read_phase, actor,
+                                              density_face),
+      rho_read, read_storage.view<double>(density_gradient), gamma_read,
+      transport_contributions);
+  HUNDUN_CHECK(momentum_contributions.size() ==
+               pressure_contributions.size());
+  HUNDUN_CHECK(momentum_contributions.size() ==
+               transport_contributions.size());
+  HUNDUN_CHECK(!momentum_contributions.empty());
+  for (std::size_t index = 0; index < momentum_contributions.size(); ++index) {
+    HUNDUN_CHECK(momentum_contributions[index].global_face_id ==
+                 pressure_contributions[index].global_face_id);
+    HUNDUN_CHECK(momentum_contributions[index].global_face_id ==
+                 transport_contributions[index].global_face_id);
+    for (std::size_t prior = 0; prior < index; ++prior) {
+      HUNDUN_CHECK(momentum_contributions[index].global_face_id !=
+                   momentum_contributions[prior].global_face_id);
+    }
+  }
+  const auto momentum_capacity = momentum_contributions.capacity();
+  operators.physical_boundary_momentum_contributions(
+      boundaries, flux,
+      read_storage.acquire_face_read<double>(access, read_phase, actor,
+                                              velocity_face),
+      u_read, gradient_read, mu, momentum_contributions);
+  HUNDUN_CHECK(momentum_contributions.capacity() == momentum_capacity);
 }
 
 void run_extent_one_periodic_case(const MpiContext &mpi, int ranks) {

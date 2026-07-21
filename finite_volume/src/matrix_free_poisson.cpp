@@ -7,6 +7,7 @@
 #include "hundun/linear/ghosted_vector_halo.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
+#include "mpi_error.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -427,6 +428,14 @@ struct MatrixFreePoissonOperator::Impl final {
   mutable std::atomic<bool> active{false};
 };
 
+PoissonConstructionError::PoissonConstructionError(int failing_rank,
+                                                    std::string message)
+    : runtime::Error(std::move(message)), failing_rank_(failing_rank) {}
+
+int PoissonConstructionError::failing_rank() const noexcept {
+  return failing_rank_;
+}
+
 MatrixFreePoissonOperator MatrixFreePoissonOperator::create(
     const runtime::StructuredDecomposition& decomposition,
     const mesh::MeshTopology& topology, const mesh::MeshGeometry& geometry,
@@ -480,13 +489,37 @@ MatrixFreePoissonOperator MatrixFreePoissonOperator::create(
   const runtime::CollectiveStatus status = runtime::collective_status(
       preflight, local_ok, local_ok ? std::string_view{} : local_message);
   if (!status.ok || !implementation) {
-    throw runtime::Error("matrix-free Poisson collective construction "
-                         "failure: rank=" +
-                         std::to_string(status.failing_rank) + " " +
-                         status.message);
+    throw PoissonConstructionError(
+        status.failing_rank,
+        "matrix-free Poisson collective construction failure: " +
+            status.message);
   }
-  implementation->halo.emplace(linear::GhostedVectorHalo::create(
-      decomposition, topology, execution_context));
+  local_ok = true;
+  local_message = {};
+  try {
+    implementation->halo.emplace(linear::GhostedVectorHalo::create(
+        decomposition, topology, execution_context));
+  } catch (const runtime::detail::MpiOperationError &) {
+    throw;
+  } catch (const runtime::Error &error) {
+    local_ok = false;
+    static_cast<void>(error);
+    local_message = "matrix-free Poisson Halo construction failed";
+  } catch (const std::bad_alloc &) {
+    local_ok = false;
+    local_message = "matrix-free Poisson Halo allocation failed";
+  } catch (const std::length_error &) {
+    local_ok = false;
+    local_message = "matrix-free Poisson Halo allocation size is unsupported";
+  }
+  const runtime::CollectiveStatus halo_status = runtime::collective_status(
+      preflight, local_ok, local_ok ? std::string_view{} : local_message);
+  if (!halo_status.ok || !implementation->halo.has_value()) {
+    throw PoissonConstructionError(
+        halo_status.failing_rank,
+        "matrix-free Poisson collective construction failure: " +
+            halo_status.message);
+  }
   return MatrixFreePoissonOperator(std::move(implementation));
 }
 

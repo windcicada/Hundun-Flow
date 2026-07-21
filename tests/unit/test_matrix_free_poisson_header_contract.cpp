@@ -14,6 +14,7 @@ using hundun::execution::ExecutionEvent;
 using hundun::execution::VectorView;
 using hundun::finite_volume::MatrixFreePoissonOperator;
 using hundun::finite_volume::PoissonBoundarySpec;
+using hundun::finite_volume::PoissonConstructionError;
 using hundun::finite_volume::PoissonConstraint;
 using hundun::finite_volume::PoissonSolverFamily;
 using hundun::finite_volume::PressureConstraintMode;
@@ -54,7 +55,13 @@ static_assert(std::is_enum_v<PoissonSolverFamily>);
 static_assert(std::is_same_v<std::underlying_type_t<PoissonSolverFamily>,
                              std::uint8_t>);
 static_assert(std::is_final_v<PoissonBoundarySpec>);
+static_assert(std::is_final_v<PoissonConstructionError>);
+static_assert(
+    std::is_base_of_v<hundun::runtime::Error, PoissonConstructionError>);
 static_assert(std::is_final_v<MatrixFreePoissonOperator>);
+static_assert(std::is_same_v<decltype(&PoissonConstructionError::failing_rank),
+                             int (PoissonConstructionError::*)()
+                                 const noexcept>);
 static_assert(std::is_final_v<PoissonConstraint>);
 static_assert(std::is_base_of_v<LinearOperator, MatrixFreePoissonOperator>);
 

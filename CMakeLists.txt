@@ -143,7 +143,8 @@ add_library(hundun_finite_volume STATIC
   finite_volume/src/matrix_free_poisson.cpp
   finite_volume/src/poisson_boundary_adapter.cpp)
 target_include_directories(hundun_finite_volume PUBLIC
-  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/finite_volume/include>")
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/finite_volume/include>"
+  PRIVATE "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/src>")
 target_link_libraries(hundun_finite_volume
   PRIVATE hundun_warnings
   PUBLIC
@@ -543,7 +544,9 @@ if(HUNDUN_BUILD_TESTS)
     LABELS "unit;source_policy;task18"
     TIMEOUT 30)
 
-  hundun_add_test(test_flow_state tests/unit/test_flow_state.cpp)
+  hundun_add_test(test_flow_state
+    tests/unit/test_flow_state.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_flow_state PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_flow_state PRIVATE hundun_flow)

@@ -14,7 +14,6 @@
 #include <limits>
 #include <new>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1900,14 +1899,15 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
   }
 }
 
-std::vector<PhysicalBoundaryMomentumContribution>
+void
 CellCenteredFvmOperators::physical_boundary_momentum_contributions(
     const boundary::BoundaryRegistry &boundaries,
     const FaceMassFlux &mass_flux,
     const runtime::FaceFieldView<const double> &face_velocity,
     const runtime::FieldView<const double> &velocity,
     const runtime::FieldView<const double> &velocity_gradients,
-    double dynamic_viscosity_pa_s) const {
+    double dynamic_viscosity_pa_s,
+    std::vector<PhysicalBoundaryMomentumContribution> &output) const {
   OperationGuard operation(require_impl().active);
   if (!mass_flux.state_) {
     throw Error("face mass flux handle has been moved from");
@@ -1926,14 +1926,12 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
       !std::isfinite(dynamic_viscosity_pa_s)) {
     throw Error("physical momentum contribution layout is invalid");
   }
-  std::vector<PhysicalBoundaryMomentumContribution> result;
-  std::set<GlobalFaceId> observed;
+  output.clear();
   for (const auto &face : impl_->faces) {
     if (!is_physical_nonperiodic(face))
       continue;
-    if (!face.owner_owned.has_value() ||
-        !observed.insert(face.global_face).second) {
-      throw Error("physical momentum contribution face is duplicated");
+    if (!face.owner_owned.has_value()) {
+      throw Error("physical momentum contribution face is not owner-owned");
     }
     const double mass = mass_flux.state_->view(face.local_face, 0);
     const auto traction = physical_viscous_traction(
@@ -1951,28 +1949,26 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
         throw Error("physical momentum contribution is non-finite");
       }
     }
-    result.push_back(contribution);
+    output.push_back(contribution);
   }
-  return result;
 }
 
-std::vector<PhysicalBoundaryPressureContribution>
+void
 CellCenteredFvmOperators::physical_boundary_pressure_contributions(
     const boundary::BoundaryRegistry &boundaries,
-    const runtime::FieldView<const double> &pressure) const {
+    const runtime::FieldView<const double> &pressure,
+    std::vector<PhysicalBoundaryPressureContribution> &output) const {
   OperationGuard operation(require_impl().active);
   if (!same(pressure.interior_extent(), impl_->local_extent) ||
       pressure.components() != 1U) {
     throw Error("physical pressure contribution layout is invalid");
   }
-  std::vector<PhysicalBoundaryPressureContribution> result;
-  std::set<GlobalFaceId> observed;
+  output.clear();
   for (const auto &face : impl_->faces) {
     if (!is_physical_nonperiodic(face))
       continue;
-    if (!face.owner_owned.has_value() ||
-        !observed.insert(face.global_face).second) {
-      throw Error("physical pressure contribution face is duplicated");
+    if (!face.owner_owned.has_value()) {
+      throw Error("physical pressure contribution face is not owner-owned");
     }
     const double owner_value = value_at(pressure, face.owner, 0);
     const double face_value =
@@ -1987,12 +1983,11 @@ CellCenteredFvmOperators::physical_boundary_pressure_contributions(
                      contribution.pressure[2]})) {
       throw Error("physical pressure contribution is non-finite");
     }
-    result.push_back(contribution);
+    output.push_back(contribution);
   }
-  return result;
 }
 
-std::vector<PhysicalBoundaryTransportContribution>
+void
 CellCenteredFvmOperators::physical_boundary_transport_contributions(
     FiniteVolumeQuantity quantity,
     const boundary::BoundaryRegistry &boundaries,
@@ -2000,7 +1995,8 @@ CellCenteredFvmOperators::physical_boundary_transport_contributions(
     const runtime::FaceFieldView<const double> &face_values,
     const runtime::FieldView<const double> &cell_values,
     const runtime::FieldView<const double> &cell_gradients,
-    const runtime::FaceFieldView<const double> &gamma_by_face) const {
+    const runtime::FaceFieldView<const double> &gamma_by_face,
+    std::vector<PhysicalBoundaryTransportContribution> &output) const {
   OperationGuard operation(require_impl().active);
   validate_quantity(quantity, boundaries, false);
   if (!mass_flux.state_) {
@@ -2020,14 +2016,12 @@ CellCenteredFvmOperators::physical_boundary_transport_contributions(
       gamma_by_face.components() != 1U) {
     throw Error("physical transport contribution layout is invalid");
   }
-  std::vector<PhysicalBoundaryTransportContribution> result;
-  std::set<GlobalFaceId> observed;
+  output.clear();
   for (const auto &face : impl_->faces) {
     if (!is_physical_nonperiodic(face))
       continue;
-    if (!face.owner_owned.has_value() ||
-        !observed.insert(face.global_face).second) {
-      throw Error("physical transport contribution face is duplicated");
+    if (!face.owner_owned.has_value()) {
+      throw Error("physical transport contribution face is not owner-owned");
     }
     const double mass = mass_flux.state_->view(face.local_face, 0);
     const double transported = face_values(face.local_face, 0);
@@ -2042,9 +2036,8 @@ CellCenteredFvmOperators::physical_boundary_transport_contributions(
         !std::isfinite(contribution.diffusive)) {
       throw Error("physical transport contribution is non-finite");
     }
-    result.push_back(contribution);
+    output.push_back(contribution);
   }
-  return result;
 }
 
 } // namespace hundun::finite_volume
