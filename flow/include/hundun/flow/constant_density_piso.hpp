@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace hundun::flow {
@@ -33,6 +34,9 @@ enum class StepFailureReason : std::uint8_t {
   non_finite_trial,
   boundary_backflow,
   transport_failure,
+  final_momentum_residual,
+  final_transport_residual,
+  final_conservation_defect,
   final_continuity_residual,
   final_pressure_residual,
   collective_operation
@@ -57,6 +61,12 @@ struct StepAttemptReport final {
   std::array<linear::SolveReport, 2> pressure{};
   double final_continuity_normalized_l2{};
   double final_pressure_residual_l2{};
+  std::array<double, 3> final_momentum_normalized_l2{};
+  std::vector<double> final_transport_normalized_l2;
+  double final_mass_relative_conservation_defect{};
+  std::array<double, 3> final_momentum_relative_conservation_defect{};
+  std::vector<double> final_transport_relative_conservation_defect;
+  std::optional<boundary::OutletBackflowEvidence> final_backflow_evidence;
 };
 
 struct ConstantDensityTransportSpec final {

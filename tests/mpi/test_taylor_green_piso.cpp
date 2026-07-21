@@ -105,6 +105,7 @@ struct TrajectoryResult final {
   double velocity_l2_error{};
   double relative_mass_defect{};
   double max_continuity{};
+  std::array<double, 3> max_momentum_conservation_defect{};
   std::uint64_t committed_steps{};
   hundun::flow::MomentumTimeOrder final_order{
       hundun::flow::MomentumTimeOrder::backward_euler};
@@ -198,6 +199,7 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
   HUNDUN_CHECK(steps > 0);
   HUNDUN_CHECK_NEAR(static_cast<double>(steps) * dt_s, final_time_s, 1.0e-15);
   double max_continuity = 0.0;
+  std::array<double, 3> max_momentum_conservation_defect{};
   for (int step = 0; step < steps; ++step) {
     const auto order = step == 0
                            ? hundun::flow::MomentumTimeOrder::backward_euler
@@ -205,12 +207,39 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
     const auto stencil = hundun::flow::make_momentum_time_stencil(
         order, dt_s, step == 0 ? 0.0 : dt_s);
     const auto report = flow.attempt(state, kRho, kRho * kNu, stencil, {}, {});
+    if (report.disposition !=
+            hundun::flow::StepAttemptDisposition::committed &&
+        mpi.rank() == 0) {
+      std::cerr << "TASK18_TGV_GATE_FAILURE step=" << step
+                << " reason=" << static_cast<int>(report.reason)
+                << " momentum_residual="
+                << report.final_momentum_normalized_l2[0] << ','
+                << report.final_momentum_normalized_l2[1] << ','
+                << report.final_momentum_normalized_l2[2]
+                << " mass_defect="
+                << report.final_mass_relative_conservation_defect
+                << " momentum_defect="
+                << report.final_momentum_relative_conservation_defect[0]
+                << ','
+                << report.final_momentum_relative_conservation_defect[1]
+                << ','
+                << report.final_momentum_relative_conservation_defect[2]
+                << '\n';
+    }
     HUNDUN_CHECK(report.disposition ==
                  hundun::flow::StepAttemptDisposition::committed);
     HUNDUN_CHECK(report.pressure_corrector_count == 2U);
     HUNDUN_CHECK(report.final_continuity_normalized_l2 <= 1.0e-10);
     max_continuity =
         std::max(max_continuity, report.final_continuity_normalized_l2);
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(
+          report.final_momentum_relative_conservation_defect[component] <=
+          5.0e-11);
+      max_momentum_conservation_defect[component] = std::max(
+          max_momentum_conservation_defect[component],
+          report.final_momentum_relative_conservation_defect[component]);
+    }
   }
 
   const auto result = state.snapshot(hundun::flow::FlowLayer::committed);
@@ -237,6 +266,7 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
           std::sqrt(sums[0] / sums[1]),
           std::abs(sums[2] - kRho * sums[3]) / (kRho * sums[3]),
           max_continuity,
+          max_momentum_conservation_defect,
           metadata.step,
           metadata.order,
           metadata.dt_s,
@@ -290,7 +320,11 @@ void run_taylor_green(const hundun::runtime::MpiContext &mpi) {
                 << " dt=" << spatial_dt
                 << " velocity_l2=" << spatial[level].velocity_l2_error
                 << " mass_defect=" << spatial[level].relative_mass_defect
-                << " continuity=" << spatial[level].max_continuity << '\n';
+                << " continuity=" << spatial[level].max_continuity
+                << " momentum_defect="
+                << spatial[level].max_momentum_conservation_defect[0] << ','
+                << spatial[level].max_momentum_conservation_defect[1] << ','
+                << spatial[level].max_momentum_conservation_defect[2] << '\n';
     }
     std::cout << "TASK18_TAYLOR_GREEN_SPATIAL_ORDER coarse=" << spatial_order_0
               << " fine=" << spatial_order_1 << '\n';
@@ -300,6 +334,10 @@ void run_taylor_green(const hundun::runtime::MpiContext &mpi) {
                 << " velocity_l2=" << temporal[level].velocity_l2_error
                 << " mass_defect=" << temporal[level].relative_mass_defect
                 << " continuity=" << temporal[level].max_continuity
+                << " momentum_defect="
+                << temporal[level].max_momentum_conservation_defect[0] << ','
+                << temporal[level].max_momentum_conservation_defect[1] << ','
+                << temporal[level].max_momentum_conservation_defect[2]
                 << " commits=" << temporal[level].committed_steps
                 << " order=" << static_cast<int>(temporal[level].final_order)
                 << " final_dt=" << temporal[level].final_dt_s
