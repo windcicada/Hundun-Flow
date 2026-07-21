@@ -214,21 +214,76 @@ public:
   }
 };
 
-void check_layer_equal(const hundun::flow::FlowLayerValues &left,
-                       const hundun::flow::FlowLayerValues &right) {
-  HUNDUN_CHECK(left.density == right.density);
-  HUNDUN_CHECK(left.velocity == right.velocity);
-  HUNDUN_CHECK(left.mechanical_pressure == right.mechanical_pressure);
-  HUNDUN_CHECK(left.face_velocity == right.face_velocity);
-  HUNDUN_CHECK(left.face_mass_flux == right.face_mass_flux);
-  HUNDUN_CHECK(left.transported_cell_fields == right.transported_cell_fields);
-}
-
 std::uint64_t fp64_bits(double value) noexcept {
   std::uint64_t bits{};
   static_assert(sizeof(bits) == sizeof(value));
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
+}
+
+bool fp64_vector_bitwise_equal(const std::vector<double> &left,
+                               const std::vector<double> &right) noexcept {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (fp64_bits(left[index]) != fp64_bits(right[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool flow_layer_values_bitwise_equal(
+    const hundun::flow::FlowLayerValues &left,
+    const hundun::flow::FlowLayerValues &right) noexcept {
+  if (!fp64_vector_bitwise_equal(left.density, right.density) ||
+      !fp64_vector_bitwise_equal(left.velocity, right.velocity) ||
+      !fp64_vector_bitwise_equal(left.mechanical_pressure,
+                                 right.mechanical_pressure) ||
+      !fp64_vector_bitwise_equal(left.face_velocity, right.face_velocity) ||
+      !fp64_vector_bitwise_equal(left.face_mass_flux,
+                                 right.face_mass_flux) ||
+      left.transported_cell_fields.size() !=
+          right.transported_cell_fields.size()) {
+    return false;
+  }
+  for (std::size_t field = 0; field < left.transported_cell_fields.size();
+       ++field) {
+    if (!fp64_vector_bitwise_equal(left.transported_cell_fields[field],
+                                   right.transported_cell_fields[field])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void check_layer_equal(const hundun::flow::FlowLayerValues &left,
+                       const hundun::flow::FlowLayerValues &right) {
+  HUNDUN_CHECK(flow_layer_values_bitwise_equal(left, right));
+}
+
+void check_flow_layer_bitwise_oracle() {
+  hundun::flow::FlowLayerValues baseline;
+  baseline.density = {0.0, 1.0};
+  baseline.velocity = {2.0, 3.0, 4.0};
+  baseline.mechanical_pressure = {5.0};
+  baseline.face_velocity = {6.0, 7.0, 8.0};
+  baseline.face_mass_flux = {9.0};
+  baseline.transported_cell_fields = {{0.0, 10.0}, {11.0}};
+
+  const auto exact_copy = baseline;
+  HUNDUN_CHECK(flow_layer_values_bitwise_equal(baseline, exact_copy));
+
+  auto ordinary_field_mutation = baseline;
+  ordinary_field_mutation.density.front() = -0.0;
+  HUNDUN_CHECK(
+      !flow_layer_values_bitwise_equal(baseline, ordinary_field_mutation));
+
+  auto transported_field_mutation = baseline;
+  transported_field_mutation.transported_cell_fields.front().front() = -0.0;
+  HUNDUN_CHECK(
+      !flow_layer_values_bitwise_equal(baseline, transported_field_mutation));
 }
 
 void check_metadata_equal(const hundun::flow::AcceptedStepMetadata &left,
@@ -2546,6 +2601,7 @@ int main(int argc, char **argv) {
   hundun::runtime::MpiEnvironment environment(argc, argv);
   auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
   return hundun::test::run([&] {
+    check_flow_layer_bitwise_oracle();
     run_zero_flow_transaction(mpi);
     run_open_boundary_composition(mpi);
   });
