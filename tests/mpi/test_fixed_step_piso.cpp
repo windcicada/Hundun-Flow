@@ -618,9 +618,10 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   }
   HUNDUN_CHECK(state.metadata().step == 1U);
   HUNDUN_CHECK(state.metadata().time_s == 0.01);
-  HUNDUN_CHECK(state.snapshot(hundun::flow::FlowLayer::committed)
-                   .transported_cell_fields[0] ==
-               initial.transported_cell_fields[0]);
+  HUNDUN_CHECK(fp64_vector_bitwise_equal(
+      state.snapshot(hundun::flow::FlowLayer::committed)
+          .transported_cell_fields[0],
+      initial.transported_cell_fields[0]));
 
   const auto make_zero_state = [&] {
     auto candidate = hundun::flow::FlowState::create(
@@ -1349,9 +1350,10 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepAttemptDisposition::committed);
   HUNDUN_CHECK(TestAccess::provisional_transport_calls() == 1U);
   HUNDUN_CHECK(TestAccess::final_transport_calls() == 1U);
-  HUNDUN_CHECK(sentinel_state.snapshot(hundun::flow::FlowLayer::committed)
-                   .transported_cell_fields[0] ==
-               initial.transported_cell_fields[0]);
+  HUNDUN_CHECK(fp64_vector_bitwise_equal(
+      sentinel_state.snapshot(hundun::flow::FlowLayer::committed)
+          .transported_cell_fields[0],
+      initial.transported_cell_fields[0]));
 
   TestAccess::reset();
   TestAccess::set_final_uniform_x_mass_flux(0.05);
@@ -1394,14 +1396,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(rollback_state.metadata().step == 0U);
   const auto after_rollback =
       rollback_state.snapshot(hundun::flow::FlowLayer::committed);
-  HUNDUN_CHECK(after_rollback.density == before_rollback.density);
-  HUNDUN_CHECK(after_rollback.velocity == before_rollback.velocity);
-  HUNDUN_CHECK(after_rollback.mechanical_pressure ==
-               before_rollback.mechanical_pressure);
-  HUNDUN_CHECK(after_rollback.face_velocity == before_rollback.face_velocity);
-  HUNDUN_CHECK(after_rollback.face_mass_flux == before_rollback.face_mass_flux);
-  HUNDUN_CHECK(after_rollback.transported_cell_fields ==
-               before_rollback.transported_cell_fields);
+  check_layer_equal(after_rollback, before_rollback);
   HUNDUN_CHECK(TestAccess::provisional_transport_calls() == 1U);
   HUNDUN_CHECK(TestAccess::final_transport_calls() == 1U);
 
@@ -1424,10 +1419,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(pressure_rollback_state.metadata().step == 0U);
   const auto pressure_after =
       pressure_rollback_state.snapshot(hundun::flow::FlowLayer::committed);
-  HUNDUN_CHECK(pressure_after.density == pressure_before.density);
-  HUNDUN_CHECK(pressure_after.velocity == pressure_before.velocity);
-  HUNDUN_CHECK(pressure_after.mechanical_pressure ==
-               pressure_before.mechanical_pressure);
+  check_layer_equal(pressure_after, pressure_before);
 
   const int final_gate_failure_rank = mpi.size() == 1 ? 0 : 1;
   TestAccess::reset();
@@ -1451,9 +1443,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(momentum_gate_report.suggested_dt_s == 0.005);
   const auto momentum_gate_after =
       momentum_gate_state.snapshot(hundun::flow::FlowLayer::committed);
-  HUNDUN_CHECK(momentum_gate_after.velocity == momentum_gate_before.velocity);
-  HUNDUN_CHECK(momentum_gate_after.transported_cell_fields ==
-               momentum_gate_before.transported_cell_fields);
+  check_layer_equal(momentum_gate_after, momentum_gate_before);
   HUNDUN_CHECK(momentum_gate_state.metadata().step == 0U);
 
   TestAccess::reset();
@@ -1477,9 +1467,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(transport_gate_report.suggested_dt_s == 0.005);
   const auto transport_gate_after =
       transport_gate_state.snapshot(hundun::flow::FlowLayer::committed);
-  HUNDUN_CHECK(transport_gate_after.velocity == transport_gate_before.velocity);
-  HUNDUN_CHECK(transport_gate_after.transported_cell_fields ==
-               transport_gate_before.transported_cell_fields);
+  check_layer_equal(transport_gate_after, transport_gate_before);
   HUNDUN_CHECK(transport_gate_state.metadata().step == 0U);
 
   TestAccess::reset();
@@ -1503,10 +1491,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(conservation_gate_report.suggested_dt_s == 0.005);
   const auto conservation_gate_after =
       conservation_gate_state.snapshot(hundun::flow::FlowLayer::committed);
-  HUNDUN_CHECK(conservation_gate_after.velocity ==
-               conservation_gate_before.velocity);
-  HUNDUN_CHECK(conservation_gate_after.transported_cell_fields ==
-               conservation_gate_before.transported_cell_fields);
+  check_layer_equal(conservation_gate_after, conservation_gate_before);
   HUNDUN_CHECK(conservation_gate_state.metadata().step == 0U);
   TestAccess::reset();
 
@@ -1547,9 +1532,9 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(component_failure_report.pressure_corrector_count == 0U);
   HUNDUN_CHECK(component_failure_report.suggested_dt_s == 0.005);
   HUNDUN_CHECK(component_failure_state.metadata().step == 0U);
-  HUNDUN_CHECK(
-      component_failure_state.snapshot(hundun::flow::FlowLayer::committed)
-          .velocity == initial.velocity);
+  check_layer_equal(
+      component_failure_state.snapshot(hundun::flow::FlowLayer::committed),
+      initial);
 
   auto checker_state = hundun::flow::FlowState::create(
       registry, {local, topology.local_face_count()}, fields,
