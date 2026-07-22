@@ -55,6 +55,9 @@ class MaterialDensityTransport;
 class MaterialDensityDiagnosticSource;
 class FixedStepMaterialDensityFlow;
 class MaterialDensityFlowDiagnosticSource;
+class IdealGasClosure;
+class FixedStepIdealGasFlow;
+class IdealGasClosureDiagnosticSource;
 
 class FlowState final {
 public:
@@ -100,6 +103,9 @@ private:
   friend class MaterialDensityDiagnosticSource;
   friend class FixedStepMaterialDensityFlow;
   friend class MaterialDensityFlowDiagnosticSource;
+  friend class IdealGasClosure;
+  friend class FixedStepIdealGasFlow;
+  friend class IdealGasClosureDiagnosticSource;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
   friend class test::MaterialDensityPisoTestAccess;

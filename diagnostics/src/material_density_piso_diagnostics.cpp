@@ -421,6 +421,10 @@ DiagnosticFailure mapped_failure(const flow::MaterialDensityStepAttemptReport &r
   case R::collective_operation:
     return {DiagnosticFailureClass::collective_operation,
             "flow.collective-operation", rank};
+  case R::density_closure_failure:
+    collection_error(DiagnosticFailureClass::capability,
+                     "closure.diagnostics.capability", rank,
+                     "material diagnostics cannot represent closure failure");
   }
   return {DiagnosticFailureClass::invalid_input, "flow.invalid-input", rank};
 }

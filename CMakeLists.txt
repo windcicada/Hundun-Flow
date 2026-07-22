@@ -178,6 +178,8 @@ endif()
 add_library(hundun_flow STATIC
   flow/src/constant_density_piso.cpp
   flow/src/flow_state.cpp
+  flow/src/ideal_gas_closure.cpp
+  flow/src/ideal_gas_piso.cpp
   flow/src/material_density_piso.cpp
   flow/src/material_density_transport.cpp
   flow/src/momentum_predictor.cpp)
@@ -201,6 +203,7 @@ if(HUNDUN_BUILD_TESTS)
 endif()
 
 add_library(hundun_material_diagnostics STATIC
+  diagnostics/src/ideal_gas_closure_diagnostics.cpp
   diagnostics/src/material_density_piso_diagnostics.cpp
   diagnostics/src/material_density_transport_diagnostics.cpp)
 target_include_directories(hundun_material_diagnostics PUBLIC
@@ -507,6 +510,15 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_material_density_piso_header_contract PROPERTIES
     LABELS "unit;task20;task20-fast" TIMEOUT 30)
 
+  hundun_add_test(test_ideal_gas_header_contract
+    tests/unit/test_ideal_gas_header_contract.cpp)
+  target_include_directories(test_ideal_gas_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_ideal_gas_header_contract PRIVATE
+    hundun_material_diagnostics hundun_flow)
+  set_tests_properties(test_ideal_gas_header_contract PROPERTIES
+    LABELS "unit;task21;task21-fast" TIMEOUT 30)
+
   hundun_add_test(test_mpi_operation_error
     tests/unit/test_mpi_operation_error.cpp)
   target_include_directories(test_mpi_operation_error PRIVATE
@@ -566,6 +578,22 @@ if(HUNDUN_BUILD_TESTS)
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task20_source_policy.cmake")
   set_tests_properties(test_task20_source_policy PROPERTIES
     LABELS "unit;source_policy;task20;task20-fast" TIMEOUT 30)
+
+  add_test(NAME test_task21_tests_off_header_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DHUNDUN_MPI_INCLUDE_DIRS=${task19_mpi_include_dirs}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task21_test_access_contract.cmake")
+  set_tests_properties(test_task21_tests_off_header_contract PROPERTIES
+    LABELS "unit;source_policy;task21;task21-fast" TIMEOUT 30)
+  add_test(NAME test_task21_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task21_source_policy.cmake")
+  set_tests_properties(test_task21_source_policy PROPERTIES
+    LABELS "unit;source_policy;task21;task21-fast" TIMEOUT 30)
 
   hundun_add_test(test_execution tests/unit/test_execution.cpp)
   target_include_directories(test_execution PRIVATE
@@ -814,6 +842,27 @@ if(HUNDUN_BUILD_TESTS)
     MPI::MPI_CXX)
   target_compile_definitions(test_material_density_piso_diagnostics PRIVATE
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+  add_executable(test_ideal_gas_closure
+    tests/mpi/test_ideal_gas_closure.cpp)
+  target_include_directories(test_ideal_gas_closure PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_ideal_gas_closure PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  add_executable(test_ideal_gas_piso
+    tests/mpi/test_ideal_gas_piso.cpp)
+  target_include_directories(test_ideal_gas_piso PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_ideal_gas_piso PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  add_executable(test_ideal_gas_diagnostics
+    tests/mpi/test_ideal_gas_diagnostics.cpp)
+  target_include_directories(test_ideal_gas_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_ideal_gas_diagnostics PRIVATE
+    hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  target_compile_definitions(test_ideal_gas_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
   set(task20_vortex_reference
       "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")
   foreach(ranks IN ITEMS 1 2 4)
@@ -828,6 +877,17 @@ if(HUNDUN_BUILD_TESTS)
       set_tests_properties("${task20_test}" PROPERTIES
         LABELS "mpi;numerical;task20;task20-fast"
         TIMEOUT 240 PROCESSORS "${ranks}")
+    endforeach()
+    foreach(target IN ITEMS ideal_gas_closure ideal_gas_piso
+                            ideal_gas_diagnostics)
+      set(task21_test "test_${target}_${ranks}_rank")
+      add_test(NAME "${task21_test}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_${target}>"
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${task21_test}" PROPERTIES
+        LABELS "mpi;numerical;task21;task21-fast"
+        TIMEOUT 300 PROCESSORS "${ranks}")
     endforeach()
     set(task20_vortex_full "test_variable_density_vortex_full_${ranks}_rank")
     if(ranks EQUAL 1)

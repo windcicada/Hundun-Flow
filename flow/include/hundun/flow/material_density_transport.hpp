@@ -33,6 +33,7 @@ class FlowState;
 struct FlowFieldIds;
 class FixedStepMaterialDensityFlow;
 class MaterialDensityStepAttemptReport;
+class FixedStepIdealGasFlow;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class MaterialDensityPisoTestAccess;
@@ -222,13 +223,18 @@ private:
     int lowest_failing_rank{-1};
   };
   StagingResult stage_trial(FlowState &, const MaterialFaceMassFlux &,
-                            const MomentumTimeStencil &) const;
+                            const MomentumTimeStencil &,
+                            double enthalpy_rate_J_per_kg_s = 0.0) const;
+  MaterialDensityTransportReport finalize_trial_with_source(
+      FlowState &, const MaterialFaceMassFlux &,
+      const MomentumTimeStencil &, double enthalpy_rate_J_per_kg_s) const;
   void prepare_task20_attempt() const;
   struct Impl;
   explicit MaterialDensityTransport(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityDiagnosticSource;
   friend class FixedStepMaterialDensityFlow;
+  friend class FixedStepIdealGasFlow;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
 #endif

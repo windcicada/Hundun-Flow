@@ -953,7 +953,8 @@ void MaterialDensityTransport::prepare_task20_attempt() const {
 
 MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
     FlowState &state, const MaterialFaceMassFlux &mass_flux,
-    const MomentumTimeStencil &stencil) const {
+    const MomentumTimeStencil &stencil,
+    double enthalpy_rate_J_per_kg_s) const {
   StagingResult result;
   if (!impl_)
     throw runtime::Error("material transport has been moved from");
@@ -997,7 +998,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
        (mass_flux.impl_->registry != impl_->registry ||
         mass_flux.impl_->topology != impl_->topology)) ||
       (mass_flux.provenance() != MaterialFluxProvenance::predictor &&
-       mass_flux.provenance() != MaterialFluxProvenance::provisional) ||
+       mass_flux.provenance() != MaterialFluxProvenance::provisional &&
+       mass_flux.provenance() != MaterialFluxProvenance::final_corrected) ||
       mass_flux.field_id() != state.fields().face_mass_flux ||
       mass_flux.face_count() != impl_->topology->local_face_count() ||
       !same(state.layer(FlowLayer::trial).interior_extent(),
@@ -1006,6 +1008,7 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
           1U + impl_->specification.scalar_densities.size() ||
       state.fields().transported_cell_fields.front() !=
           impl_->specification.enthalpy_density ||
+      !std::isfinite(enthalpy_rate_J_per_kg_s) ||
       !std::equal(impl_->specification.scalar_densities.begin(),
                   impl_->specification.scalar_densities.end(),
                   state.fields().transported_cell_fields.begin() + 1)) {
@@ -1155,7 +1158,11 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
         const double candidate =
             -(stencil.alpha1 * q_n(index.x, index.y, index.z, 0) +
               stencil.alpha2 * q_h(index.x, index.y, index.z, 0) +
-              stencil.dt_s * spatial / impl_->geometry->cell_volume_m3(cell)) /
+              stencil.dt_s * spatial / impl_->geometry->cell_volume_m3(cell) -
+              (field == 0U ? stencil.dt_s *
+                                  rho_n(index.x, index.y, index.z, 0) *
+                                  enthalpy_rate_J_per_kg_s
+                            : 0.0)) /
             stencil.alpha0;
         if (!std::isfinite(candidate))
           throw runtime::Error("material transport candidate is non-finite");
@@ -1213,6 +1220,14 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
 MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
     const MomentumTimeStencil &stencil) const {
+  return finalize_trial_with_source(state, final_mass_flux, stencil, 0.0);
+}
+
+MaterialDensityTransportReport
+MaterialDensityTransport::finalize_trial_with_source(
+    FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
+    const MomentumTimeStencil &stencil,
+    double enthalpy_rate_J_per_kg_s) const {
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   const MaterialTestControl overrides =
       std::exchange(material_test_control, MaterialTestControl{});
@@ -1293,7 +1308,8 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
           impl_->specification.enthalpy_density ||
       !std::equal(impl_->specification.scalar_densities.begin(),
                   impl_->specification.scalar_densities.end(),
-                  state.fields().transported_cell_fields.begin() + 1))
+                  state.fields().transported_cell_fields.begin() + 1) ||
+      !std::isfinite(enthalpy_rate_J_per_kg_s))
     local = MaterialTransportFailureReason::invalid_input;
   if (local == MaterialTransportFailureReason::none) {
     try {
@@ -1442,7 +1458,11 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
         const double candidate =
             -(stencil.alpha1 * q_n(index.x, index.y, index.z, 0) +
               stencil.alpha2 * q_h(index.x, index.y, index.z, 0) +
-              stencil.dt_s * spatial / impl_->geometry->cell_volume_m3(cell)) /
+              stencil.dt_s * spatial / impl_->geometry->cell_volume_m3(cell) -
+              (field == 0U ? stencil.dt_s *
+                                  rho_n(index.x, index.y, index.z, 0) *
+                                  enthalpy_rate_J_per_kg_s
+                            : 0.0)) /
             stencil.alpha0;
         if (!std::isfinite(candidate))
           throw runtime::Error("material transport candidate is non-finite");
@@ -1559,7 +1579,11 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
           stencil.alpha0 * impl_->candidate_fields[field][owned] +
           stencil.alpha1 * qn(index.x, index.y, index.z, 0) +
           stencil.alpha2 * qh(index.x, index.y, index.z, 0) +
-          stencil.dt_s * spatial / volume;
+          stencil.dt_s * spatial / volume -
+          (field == 0U ? stencil.dt_s *
+                              rho_n(index.x, index.y, index.z, 0) *
+                              enthalpy_rate_J_per_kg_s
+                        : 0.0);
       const double current = qn(index.x, index.y, index.z, 0);
       const double history = qh(index.x, index.y, index.z, 0);
       const double next = impl_->candidate_fields[field][owned];
@@ -1644,16 +1668,26 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     const double raw = next_integral - sums[offset + 2U] +
                        (stencil.alpha2 / stencil.alpha0) *
                            (sums[offset + 3U] - sums[offset + 2U]) +
-                       (stencil.dt_s / stencil.alpha0) * boundary_values[0];
+                       (stencil.dt_s / stencil.alpha0) * boundary_values[0] -
+                       (field == 0U
+                            ? (stencil.dt_s / stencil.alpha0) *
+                                  enthalpy_rate_J_per_kg_s * sums[2]
+                            : 0.0);
     const double boundary_scale =
         stencil.order == MomentumTimeOrder::backward_euler
             ? boundary_values[1]
             : 2.0 * boundary_values[1] + boundary_values[2];
+    const double source_scale =
+        field == 0U
+            ? std::abs((stencil.dt_s / stencil.alpha0) *
+                       enthalpy_rate_J_per_kg_s * sums[2])
+            : 0.0;
     report.transport_relative_conservation_defect_[field] = relative_defect(
         raw, conservation_denominator(
                  sums[offset + 2U], next_integral, sums[offset + 3U],
                  stencil.alpha2 / stencil.alpha0,
-                 (stencil.dt_s / stencil.alpha0) * boundary_scale,
+                 (stencil.dt_s / stencil.alpha0) * boundary_scale +
+                     source_scale,
                  sums[offset + 4U], sums[offset + 6U],
                  stencil.order == MomentumTimeOrder::bdf2 ? sums[offset + 5U]
                                                           : 0.0));

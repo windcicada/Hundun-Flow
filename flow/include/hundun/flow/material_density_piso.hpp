@@ -13,6 +13,10 @@
 
 namespace hundun::flow {
 
+class IdealGasClosure;
+class FixedStepIdealGasFlow;
+class IdealGasStepAttemptReport;
+
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class MaterialDensityPisoTestAccess;
@@ -70,9 +74,12 @@ private:
   std::array<std::uint8_t, 3> final_momentum_residual_available_{};
   bool mass_conservation_available_{};
   std::array<std::uint8_t, 3> momentum_conservation_available_{};
+  bool ideal_origin_{};
   std::uint64_t seal_{};
 
   friend class FixedStepMaterialDensityFlow;
+  friend class FixedStepIdealGasFlow;
+  friend class IdealGasStepAttemptReport;
   friend class MaterialDensityFlowDiagnosticSource;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityPisoTestAccess;
@@ -156,10 +163,32 @@ public:
                     const MaterialDensityStepAttemptReport &) const;
 
 private:
+  static FixedStepMaterialDensityFlow create_for_ideal_gas(
+      const runtime::StructuredDecomposition &,
+      const mesh::MeshTopology &, const mesh::MeshGeometry &,
+      const boundary::BoundaryRegistry &, const runtime::MpiContext &,
+      execution::ExecutionContext &, runtime::HaloExchange &,
+      const linear::LinearSolver &momentum_solver,
+      std::array<linear::Preconditioner *, 3> momentum_preconditioners,
+      const linear::LinearSolver &pressure_solver,
+      linear::Preconditioner &pressure_preconditioner,
+      const runtime::FieldRegistry &, FlowFieldIds,
+      MaterialDensityTransportSpec);
+  MaterialDensityStepAttemptReport attempt_with_ideal_gas(
+      FlowState &, double mu, const MomentumTimeStencil &,
+      const linear::SolveControl &momentum_control,
+      const linear::SolveControl &pressure_control,
+      IdealGasClosure &, double enthalpy_rate_J_per_kg_s) const;
+  MaterialDensityStepAttemptReport attempt_common(
+      FlowState &, double mu, const MomentumTimeStencil &,
+      const linear::SolveControl &momentum_control,
+      const linear::SolveControl &pressure_control,
+      IdealGasClosure *, double enthalpy_rate_J_per_kg_s) const;
   struct Impl;
   explicit FixedStepMaterialDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityFlowDiagnosticSource;
+  friend class FixedStepIdealGasFlow;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityPisoTestAccess;

@@ -46,7 +46,8 @@ enum class StepFailureReason : std::uint8_t {
   final_conservation_defect,
   final_continuity_residual,
   final_pressure_residual,
-  collective_operation
+  collective_operation,
+  density_closure_failure
 };
 
 enum class PressureCorrectionDisposition : std::uint8_t {

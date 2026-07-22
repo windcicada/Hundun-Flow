@@ -2,6 +2,7 @@
 #pragma once
 
 #include "hundun/flow/flow_state.hpp"
+#include "hundun/flow/ideal_gas_closure.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -56,6 +57,59 @@ inline bool accepted_step_metadata_bitwise_equal(
          fp64_bits(left.time_s) == fp64_bits(right.time_s) &&
          fp64_bits(left.dt_s) == fp64_bits(right.dt_s) &&
          fp64_bits(left.previous_dt_s) == fp64_bits(right.previous_dt_s);
+}
+
+struct IdealGasStateSnapshot final {
+  flow::FlowLayerValues history;
+  flow::FlowLayerValues committed;
+  flow::FlowLayerValues trial;
+  flow::AcceptedStepMetadata metadata;
+  flow::IdealGasClosureState closure;
+};
+
+inline bool ideal_gas_closure_state_bitwise_equal(
+    const flow::IdealGasClosureState &left,
+    const flow::IdealGasClosureState &right) noexcept {
+  return left.mode == right.mode && left.revision == right.revision &&
+         fp64_bits(left.thermodynamic_pressure_pa) ==
+             fp64_bits(right.thermodynamic_pressure_pa) &&
+         left.target_mass_kg.has_value() == right.target_mass_kg.has_value() &&
+         (!left.target_mass_kg ||
+          fp64_bits(*left.target_mass_kg) == fp64_bits(*right.target_mass_kg));
+}
+
+inline bool ideal_gas_state_bitwise_equal(
+    const IdealGasStateSnapshot &left,
+    const IdealGasStateSnapshot &right) noexcept {
+  return flow_layer_values_bitwise_equal(left.history, right.history) &&
+         flow_layer_values_bitwise_equal(left.committed, right.committed) &&
+         flow_layer_values_bitwise_equal(left.trial, right.trial) &&
+         accepted_step_metadata_bitwise_equal(left.metadata, right.metadata) &&
+         ideal_gas_closure_state_bitwise_equal(left.closure, right.closure);
+}
+
+inline bool ideal_gas_state_equality_oracle_is_mutation_sensitive() {
+  IdealGasStateSnapshot baseline;
+  baseline.history.density = {1.0};
+  baseline.committed.density = {1.0};
+  baseline.trial.density = {1.0};
+  baseline.committed.transported_cell_fields = {{300000.0}};
+  baseline.closure = {flow::IdealGasPressureMode::closed_dynamic, 101325.0,
+                      1.0, 3U};
+  const auto exact = baseline;
+  auto ordinary = baseline;
+  ordinary.committed.density.front() = 2.0;
+  auto nested = baseline;
+  nested.committed.transported_cell_fields.front().front() = 300001.0;
+  auto pressure = baseline;
+  pressure.closure.thermodynamic_pressure_pa = -101325.0;
+  auto revision = baseline;
+  ++revision.closure.revision;
+  return ideal_gas_state_bitwise_equal(baseline, exact) &&
+         !ideal_gas_state_bitwise_equal(baseline, ordinary) &&
+         !ideal_gas_state_bitwise_equal(baseline, nested) &&
+         !ideal_gas_state_bitwise_equal(baseline, pressure) &&
+         !ideal_gas_state_bitwise_equal(baseline, revision);
 }
 
 inline bool flow_state_equality_oracle_is_mutation_sensitive() {
