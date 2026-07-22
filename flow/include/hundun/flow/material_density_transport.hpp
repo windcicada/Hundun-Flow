@@ -35,6 +35,7 @@ class FixedStepMaterialDensityFlow;
 class MaterialDensityStepAttemptReport;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
+class MaterialDensityPisoTestAccess;
 class MaterialDensityTransportTestAccess;
 }
 #endif
@@ -67,8 +68,21 @@ public:
 
 private:
   struct Impl;
+  struct PreparedState;
+  using PreparedStatePtr =
+      std::unique_ptr<PreparedState, void (*)(PreparedState *)>;
+  static PreparedStatePtr prepare(const mesh::MeshTopology &topology);
+  static void destroy_prepared(PreparedState *) noexcept;
+  static MaterialFaceMassFlux
+  bind_prepared(PreparedState &, const runtime::FieldRegistry &,
+                const runtime::FieldStorage &, const runtime::FieldAccessPlan &,
+                runtime::PhaseId, runtime::ActorId, runtime::FieldId,
+                const mesh::MeshTopology &, MaterialFluxProvenance);
   explicit MaterialFaceMassFlux(std::unique_ptr<Impl>) noexcept;
-  std::unique_ptr<Impl> impl_;
+  MaterialFaceMassFlux(Impl *, PreparedState *) noexcept;
+  std::unique_ptr<Impl> owned_impl_;
+  Impl *impl_{};
+  PreparedState *prepared_{};
   friend class MaterialDensityTransport;
   friend class FixedStepMaterialDensityFlow;
 };
@@ -167,6 +181,7 @@ private:
   friend class MaterialDensityStepAttemptReport;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
+  friend class test::MaterialDensityPisoTestAccess;
 #endif
 };
 

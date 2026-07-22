@@ -810,6 +810,8 @@ if(HUNDUN_BUILD_TESTS)
     MPI::MPI_CXX)
   target_compile_definitions(test_material_density_piso_diagnostics PRIVATE
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+  set(task20_vortex_reference
+      "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")
   foreach(ranks IN ITEMS 1 2 4)
     foreach(target IN ITEMS material_density_piso
                             variable_density_vortex
@@ -824,13 +826,28 @@ if(HUNDUN_BUILD_TESTS)
         TIMEOUT 240 PROCESSORS "${ranks}")
     endforeach()
     set(task20_vortex_full "test_variable_density_vortex_full_${ranks}_rank")
+    if(ranks EQUAL 1)
+      set(task20_vortex_reference_arguments
+          --reference-write "${task20_vortex_reference}")
+    else()
+      set(task20_vortex_reference_arguments
+          --reference-read "${task20_vortex_reference}")
+    endif()
     add_test(NAME "${task20_vortex_full}"
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_variable_density_vortex>"
-              --full ${MPIEXEC_POSTFLAGS})
+              --full ${task20_vortex_reference_arguments}
+              ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${task20_vortex_full}" PROPERTIES
       LABELS "mpi;numerical;task20"
       TIMEOUT 1800 PROCESSORS "${ranks}")
+    if(ranks EQUAL 1)
+      set_tests_properties("${task20_vortex_full}" PROPERTIES
+        FIXTURES_SETUP task20_vortex_reference)
+    else()
+      set_tests_properties("${task20_vortex_full}" PROPERTIES
+        FIXTURES_REQUIRED task20_vortex_reference)
+    endif()
   endforeach()
 
   add_executable(test_material_density_wave

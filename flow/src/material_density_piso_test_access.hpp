@@ -84,7 +84,22 @@ enum class MaterialReportCorruptionForTest : std::uint8_t {
   unavailable_numeric_value,
   material_count_zero,
   material_count_plus_two,
-  material_count_five
+  material_count_five,
+  parent_transport_residual_value,
+  nested_transport_residual_value,
+  parent_transport_conservation_value,
+  nested_transport_conservation_value,
+  nested_density_residual_availability,
+  nested_transport_residual_availability,
+  nested_mass_conservation_availability,
+  nested_transport_conservation_availability,
+  nested_minimum_density_availability,
+  nested_attempt_identity,
+  nested_finalization_identity,
+  nested_shared_field,
+  nested_provenance,
+  nested_residual_outer_size,
+  nested_conservation_outer_size
 };
 
 enum class MaterialTerminalModeForTest : std::uint8_t {
@@ -116,14 +131,6 @@ enum class MaterialTerminalPointForTest : std::uint8_t {
   count
 };
 
-enum class MaterialAllocationPointForTest : std::uint8_t {
-  predictor_stage,
-  provisional_stage,
-  public_finalizer,
-  final_pressure,
-  count
-};
-
 namespace detail {
 
 inline std::atomic<int> material_terminal_point{-1};
@@ -133,13 +140,6 @@ inline std::array<std::atomic<std::uint64_t>,
                   static_cast<std::size_t>(
                       MaterialTerminalPointForTest::count)>
     material_terminal_calls{};
-inline std::atomic<int> material_allocation_point{-1};
-inline std::atomic<int> material_allocation_rank{-1};
-inline std::array<std::atomic<std::uint64_t>,
-                  static_cast<std::size_t>(
-                      MaterialAllocationPointForTest::count)>
-    material_allocation_calls{};
-
 inline MaterialTerminalModeForTest
 reach_material_terminal_point(MaterialTerminalPointForTest point) noexcept {
   material_terminal_calls[static_cast<std::size_t>(point)].fetch_add(
@@ -163,27 +163,8 @@ public:
       const MaterialDensityStepAttemptReport &) noexcept;
   static void corrupt_report(MaterialDensityStepAttemptReport &,
                              MaterialReportCorruptionForTest);
-  static std::uint64_t active_phase_allocation_attempts() noexcept;
   static void set_preflight_allocation_failure_rank(int) noexcept;
   static void reset_preflight_allocation_failure() noexcept;
-  static void set_allocation_fault(MaterialAllocationPointForTest point,
-                                   int failing_rank) noexcept {
-    detail::material_allocation_point.store(static_cast<int>(point),
-                                            std::memory_order_relaxed);
-    detail::material_allocation_rank.store(failing_rank,
-                                           std::memory_order_relaxed);
-  }
-  static void reset_allocation_fault() noexcept {
-    detail::material_allocation_point.store(-1, std::memory_order_relaxed);
-    detail::material_allocation_rank.store(-1, std::memory_order_relaxed);
-    for (auto &calls : detail::material_allocation_calls)
-      calls.store(0U, std::memory_order_relaxed);
-  }
-  static std::uint64_t
-  allocation_point_calls(MaterialAllocationPointForTest point) noexcept {
-    return detail::material_allocation_calls[static_cast<std::size_t>(point)]
-        .load(std::memory_order_relaxed);
-  }
   static void set_terminal_fault(MaterialTerminalPointForTest point,
                                  MaterialTerminalModeForTest mode) noexcept {
     detail::material_terminal_point.store(static_cast<int>(point),
@@ -230,6 +211,7 @@ public:
   static std::uint64_t
   state_diagnostic_identity(const FlowState &) noexcept;
   static bool state_attempt_active(const FlowState &) noexcept;
+  static bool face_flux_path_observation_active() noexcept;
   static void force_flow_attempt_identity(FixedStepMaterialDensityFlow &,
                                           std::uint64_t) noexcept;
   static bool has_diagnostic_report(

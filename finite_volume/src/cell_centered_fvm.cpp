@@ -728,13 +728,35 @@ double reconstruct_mc(const runtime::FieldView<const double> &values,
 struct FaceMassFlux::State final {
   State(runtime::FieldId field_value,
         runtime::FaceFieldView<const double> view_value,
-        TopologySignature signature_value)
+        const TopologySignature &signature_value)
       : field(field_value), view(std::move(view_value)),
-        signature(std::move(signature_value)) {}
+        signature(&signature_value) {}
 
   runtime::FieldId field{};
   runtime::FaceFieldView<const double> view;
+  const TopologySignature *signature;
+};
+
+struct FaceMassFlux::OwnedState final {
+  OwnedState(runtime::FieldId field,
+             runtime::FaceFieldView<const double> view,
+             TopologySignature signature_value)
+      : signature(std::move(signature_value)),
+        state(field, std::move(view), signature) {}
+
   TopologySignature signature;
+  State state;
+};
+
+struct FaceMassFlux::PreparedState final {
+  explicit PreparedState(const mesh::MeshTopology &supplied_topology)
+      : topology(&supplied_topology),
+        signature(make_signature(supplied_topology)) {}
+
+  const mesh::MeshTopology *topology;
+  TopologySignature signature;
+  std::optional<State> state;
+  bool active{};
 };
 
 struct CellCenteredFvmOperators::Impl final {
@@ -865,8 +887,8 @@ FaceMassFlux FaceMassFlux::acquire(const runtime::FieldRegistry &registry,
       throw Error("face mass flux view layout is invalid");
     }
     inject_face_mass_flux_construction_failure();
-    return FaceMassFlux(std::make_unique<State>(field, std::move(view),
-                                                make_signature(topology)));
+    return FaceMassFlux(std::make_unique<OwnedState>(
+        field, std::move(view), make_signature(topology)));
   } catch (const Error &) {
     throw;
   } catch (const std::bad_alloc &) {
@@ -876,11 +898,59 @@ FaceMassFlux FaceMassFlux::acquire(const runtime::FieldRegistry &registry,
   }
 }
 
-FaceMassFlux::FaceMassFlux(std::unique_ptr<State> state) noexcept
-    : field_(state->field), face_count_(state->view.face_count()),
-      state_(std::move(state)) {}
-FaceMassFlux::~FaceMassFlux() noexcept = default;
-FaceMassFlux::FaceMassFlux(FaceMassFlux &&) noexcept = default;
+FaceMassFlux::PreparedStatePtr
+FaceMassFlux::prepare(const mesh::MeshTopology &topology) {
+  return PreparedStatePtr(new PreparedState(topology), &destroy_prepared);
+}
+
+void FaceMassFlux::destroy_prepared(PreparedState *state) noexcept {
+  delete state;
+}
+
+FaceMassFlux FaceMassFlux::bind_prepared(
+    PreparedState &prepared, const runtime::FieldRegistry &registry,
+    const runtime::FieldStorage &storage,
+    const runtime::FieldAccessPlan &access_plan, runtime::PhaseId phase,
+    runtime::ActorId actor, runtime::FieldId field,
+    const mesh::MeshTopology &topology) {
+  require_face_mass_flux_field(registry, field);
+  if (prepared.active)
+    throw Error("prepared face mass flux handle is already active");
+  if (prepared.topology != &topology)
+    throw Error("prepared face mass flux topology is incompatible");
+  if (storage.layout_set().face_count != topology.local_face_count())
+    throw Error("face mass flux storage and topology face counts differ");
+  auto view =
+      storage.acquire_face_read<double>(access_plan, phase, actor, field);
+  if (view.face_count() != topology.local_face_count() ||
+      view.components() != 1U)
+    throw Error("face mass flux view layout is invalid");
+  prepared.state.emplace(field, std::move(view), prepared.signature);
+  prepared.active = true;
+  return FaceMassFlux(&*prepared.state, &prepared);
+}
+
+FaceMassFlux::FaceMassFlux(std::unique_ptr<OwnedState> state) noexcept
+    : field_(state->state.field), face_count_(state->state.view.face_count()),
+      owned_state_(std::move(state)), state_(&owned_state_->state) {}
+FaceMassFlux::FaceMassFlux(State *state, PreparedState *prepared) noexcept
+    : field_(state->field), face_count_(state->view.face_count()), state_(state),
+      prepared_(prepared) {}
+FaceMassFlux::~FaceMassFlux() noexcept {
+  if (prepared_ != nullptr) {
+    prepared_->state.reset();
+    prepared_->active = false;
+  }
+}
+FaceMassFlux::FaceMassFlux(FaceMassFlux &&other) noexcept
+    : field_(other.field_), face_count_(other.face_count_),
+      owned_state_(std::move(other.owned_state_)), state_(other.state_),
+      prepared_(other.prepared_) {
+  if (owned_state_)
+    state_ = &owned_state_->state;
+  other.state_ = nullptr;
+  other.prepared_ = nullptr;
+}
 runtime::FieldId FaceMassFlux::field_id() const noexcept { return field_; }
 std::size_t FaceMassFlux::face_count() const noexcept { return face_count_; }
 
@@ -1261,7 +1331,7 @@ void CellCenteredFvmOperators::reconstruct_transport_faces(
   if (!mass_flux.state_) {
     throw Error("face mass flux handle has been moved from");
   }
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       mass_flux.state_->view.face_count() != impl_->faces.size()) {
     throw Error("face mass flux topology identity does not match the operator");
   }
@@ -1310,7 +1380,7 @@ void CellCenteredFvmOperators::reconstruct_momentum_faces(
   if (!mass_flux.state_) {
     throw Error("face mass flux handle has been moved from");
   }
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       !same(velocity.interior_extent(), impl_->local_extent) ||
       velocity.components() != 3U || velocity.ghost_width() < 2 ||
       face_velocity.face_count() != impl_->faces.size() ||
@@ -1490,7 +1560,7 @@ void CellCenteredFvmOperators::accumulate_mass_residual(
   if (!mass_flux.state_) {
     throw Error("face mass flux handle has been moved from");
   }
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       !same(raw_residual.interior_extent(), impl_->local_extent) ||
       raw_residual.components() != 1U || raw_residual.ghost_width() < 0) {
     throw Error("mass residual field layout is invalid");
@@ -1554,7 +1624,7 @@ void CellCenteredFvmOperators::accumulate_convective_residual(
     throw Error("face mass flux handle has been moved from");
   }
   const std::uint32_t components = transported_face_values.components();
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       transported_face_values.face_count() != impl_->faces.size() ||
       (components != 1U && components != 3U) ||
       !same(raw_residual.interior_extent(), impl_->local_extent) ||
@@ -1913,7 +1983,7 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
     throw Error("face mass flux handle has been moved from");
   }
   const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       face_velocity.face_count() != impl_->faces.size() ||
       face_velocity.components() != 3U ||
       !same(velocity.interior_extent(), impl_->local_extent) ||
@@ -2003,7 +2073,7 @@ CellCenteredFvmOperators::physical_boundary_transport_contributions(
     throw Error("face mass flux handle has been moved from");
   }
   const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
-  if (!same_signature(impl_->signature, mass_flux.state_->signature) ||
+  if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       face_values.face_count() != impl_->faces.size() ||
       face_values.components() != 1U ||
       !same(cell_values.interior_extent(), impl_->local_extent) ||

@@ -248,6 +248,16 @@ struct MaterialFaceMassFlux::Impl final {
   MaterialFluxProvenance provenance;
 };
 
+struct MaterialFaceMassFlux::PreparedState final {
+  explicit PreparedState(
+      finite_volume::FaceMassFlux::PreparedStatePtr handle_state)
+      : handle(std::move(handle_state)) {}
+
+  finite_volume::FaceMassFlux::PreparedStatePtr handle;
+  std::optional<Impl> impl;
+  bool active{};
+};
+
 MaterialFaceMassFlux MaterialFaceMassFlux::acquire(
     const runtime::FieldRegistry &registry,
     const runtime::FieldStorage &storage,
@@ -261,11 +271,56 @@ MaterialFaceMassFlux MaterialFaceMassFlux::acquire(
   return MaterialFaceMassFlux(std::make_unique<Impl>(
       registry, topology, std::move(handle), std::move(view), provenance));
 }
+MaterialFaceMassFlux::PreparedStatePtr
+MaterialFaceMassFlux::prepare(const mesh::MeshTopology &topology) {
+  return PreparedStatePtr(
+      new PreparedState(finite_volume::FaceMassFlux::prepare(topology)),
+      &destroy_prepared);
+}
+void MaterialFaceMassFlux::destroy_prepared(PreparedState *state) noexcept {
+  delete state;
+}
+MaterialFaceMassFlux MaterialFaceMassFlux::bind_prepared(
+    PreparedState &prepared, const runtime::FieldRegistry &registry,
+    const runtime::FieldStorage &storage,
+    const runtime::FieldAccessPlan &access_plan, runtime::PhaseId phase,
+    runtime::ActorId actor, runtime::FieldId field,
+    const mesh::MeshTopology &topology, MaterialFluxProvenance provenance) {
+  if (prepared.active)
+    throw runtime::Error("prepared material face mass flux is already active");
+  auto view =
+      storage.acquire_face_read<double>(access_plan, phase, actor, field);
+  if (view.face_count() != topology.local_face_count() ||
+      view.components() != 1U)
+    throw runtime::Error("material face mass flux view layout is invalid");
+  auto handle = finite_volume::FaceMassFlux::bind_prepared(
+      *prepared.handle, registry, storage, access_plan, phase, actor, field,
+      topology);
+  prepared.impl.emplace(registry, topology, std::move(handle), std::move(view),
+                        provenance);
+  prepared.active = true;
+  return MaterialFaceMassFlux(&*prepared.impl, &prepared);
+}
 MaterialFaceMassFlux::MaterialFaceMassFlux(std::unique_ptr<Impl> impl) noexcept
-    : impl_(std::move(impl)) {}
-MaterialFaceMassFlux::~MaterialFaceMassFlux() noexcept = default;
-MaterialFaceMassFlux::MaterialFaceMassFlux(MaterialFaceMassFlux &&) noexcept =
-    default;
+    : owned_impl_(std::move(impl)), impl_(owned_impl_.get()) {}
+MaterialFaceMassFlux::MaterialFaceMassFlux(Impl *impl,
+                                           PreparedState *prepared) noexcept
+    : impl_(impl), prepared_(prepared) {}
+MaterialFaceMassFlux::~MaterialFaceMassFlux() noexcept {
+  if (prepared_ != nullptr) {
+    prepared_->impl.reset();
+    prepared_->active = false;
+  }
+}
+MaterialFaceMassFlux::MaterialFaceMassFlux(
+    MaterialFaceMassFlux &&other) noexcept
+    : owned_impl_(std::move(other.owned_impl_)), impl_(other.impl_),
+      prepared_(other.prepared_) {
+  if (owned_impl_)
+    impl_ = owned_impl_.get();
+  other.impl_ = nullptr;
+  other.prepared_ = nullptr;
+}
 runtime::FieldId MaterialFaceMassFlux::field_id() const noexcept {
   return impl_ ? impl_->handle.field_id() : runtime::FieldId{};
 }
@@ -1192,7 +1247,7 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     impl_->last_attempt_identity = report.attempt_identity_;
     impl_->last_finalization_identity = report.finalization_identity_;
     impl_->last_report_seal = report.seal_;
-    return report;
+    return std::move(report);
   };
   struct Guard final {
     bool &active;

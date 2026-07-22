@@ -16,6 +16,11 @@
 #include <memory>
 #include <vector>
 
+namespace hundun::flow {
+class FixedStepMaterialDensityFlow;
+class MaterialFaceMassFlux;
+} // namespace hundun::flow
+
 namespace hundun::finite_volume {
 
 enum class GradientScheme : std::uint8_t {
@@ -91,11 +96,27 @@ public:
 
 private:
   struct State;
-  explicit FaceMassFlux(std::unique_ptr<State>) noexcept;
+  struct OwnedState;
+  struct PreparedState;
+  using PreparedStatePtr =
+      std::unique_ptr<PreparedState, void (*)(PreparedState *)>;
+  static PreparedStatePtr prepare(const mesh::MeshTopology &topology);
+  static void destroy_prepared(PreparedState *) noexcept;
+  static FaceMassFlux
+  bind_prepared(PreparedState &, const runtime::FieldRegistry &,
+                const runtime::FieldStorage &, const runtime::FieldAccessPlan &,
+                runtime::PhaseId, runtime::ActorId, runtime::FieldId,
+                const mesh::MeshTopology &);
+  explicit FaceMassFlux(std::unique_ptr<OwnedState>) noexcept;
+  FaceMassFlux(State *, PreparedState *) noexcept;
   runtime::FieldId field_{};
   std::size_t face_count_{};
-  std::unique_ptr<State> state_;
+  std::unique_ptr<OwnedState> owned_state_;
+  State *state_{};
+  PreparedState *prepared_{};
   friend class CellCenteredFvmOperators;
+  friend class flow::FixedStepMaterialDensityFlow;
+  friend class flow::MaterialFaceMassFlux;
 };
 
 class CellCenteredFvmOperators final {

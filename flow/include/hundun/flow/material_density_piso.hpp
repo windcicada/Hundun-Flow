@@ -62,6 +62,8 @@ private:
   runtime::FieldId shared_face_mass_flux_field_{};
   MaterialFluxProvenance flux_provenance_{MaterialFluxProvenance::predictor};
   std::uint64_t attempt_identity_{};
+  std::uint64_t material_attempt_identity_{};
+  std::uint64_t material_finalization_identity_{};
   bool final_continuity_residual_available_{};
   bool final_pressure_residual_available_{};
   double final_pressure_normalized_residual_{};

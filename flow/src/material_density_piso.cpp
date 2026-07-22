@@ -69,8 +69,20 @@ private:
 };
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-std::atomic<std::uint64_t> active_phase_allocation_attempts{};
 std::atomic<int> preflight_allocation_failure_rank{-1};
+std::atomic<bool> face_flux_path_observation_active{};
+
+class FaceFluxPathObservation final {
+public:
+  FaceFluxPathObservation() noexcept {
+    face_flux_path_observation_active.store(true, std::memory_order_relaxed);
+  }
+  ~FaceFluxPathObservation() {
+    face_flux_path_observation_active.store(false, std::memory_order_relaxed);
+  }
+  FaceFluxPathObservation(const FaceFluxPathObservation &) = delete;
+  FaceFluxPathObservation &operator=(const FaceFluxPathObservation &) = delete;
+};
 #endif
 
 struct MomentumConservationTerms final {
@@ -473,19 +485,6 @@ void apply_terminal_test_point(test::MaterialTerminalPointForTest point) {
         "injected material terminal operation failure");
 }
 
-void apply_allocation_test_point(test::MaterialAllocationPointForTest point,
-                                 int rank) {
-  test::detail::material_allocation_calls[static_cast<std::size_t>(point)]
-      .fetch_add(1U, std::memory_order_relaxed);
-  if (test::detail::material_allocation_point.load(
-          std::memory_order_relaxed) == static_cast<int>(point) &&
-      test::detail::material_allocation_rank.load(std::memory_order_relaxed) ==
-          rank) {
-    active_phase_allocation_attempts.fetch_add(1U,
-                                               std::memory_order_relaxed);
-    throw std::bad_alloc();
-  }
-}
 #endif
 
 template <class Function>
@@ -529,6 +528,8 @@ struct FixedStepMaterialDensityFlow::Impl final {
         fields(std::move(fields)), specification(std::move(specification)),
         fvm(finite_volume::CellCenteredFvmOperators::create(topology,
                                                             geometry)),
+        prepared_face_flux(finite_volume::FaceMassFlux::prepare(topology)),
+        prepared_material_flux(MaterialFaceMassFlux::prepare(topology)),
         face_assembler(TimeConsistentFaceVelocity::create(topology, geometry)),
         scratch({decomposition.local_extent(), topology.local_face_count()}),
         rhs{execution::Buffer(execution, bytes_for(topology.owned_cell_count())),
@@ -599,6 +600,8 @@ struct FixedStepMaterialDensityFlow::Impl final {
   FlowFieldIds fields;
   MaterialDensityTransportSpec specification;
   finite_volume::CellCenteredFvmOperators fvm;
+  finite_volume::FaceMassFlux::PreparedStatePtr prepared_face_flux;
+  MaterialFaceMassFlux::PreparedStatePtr prepared_material_flux;
   TimeConsistentFaceVelocity face_assembler;
   MaterialScratch scratch;
   std::array<execution::Buffer, 3> rhs;
@@ -644,11 +647,12 @@ struct MaterialDensityFlowDiagnosticSource::Impl final {
 
 namespace {
 
-template <class Implementation>
+template <class Implementation, class FluxBinder>
 void assemble_spatial(Implementation &impl,
                       const runtime::FieldAccessPlan &access,
                       runtime::FieldStorage &storage, const FlowFieldIds &fields,
-                      double mu, MomentumResidual &output) {
+                      double mu, MomentumResidual &output,
+                      FluxBinder &&bind_flux) {
   synchronized_local_phase(*impl.mpi, StepFailureReason::invalid_input, false,
                            [&] {
     const auto velocity = storage.acquire_read<double>(
@@ -663,15 +667,16 @@ void assemble_spatial(Implementation &impl,
   impl.halo->exchange(*impl.scratch.storage, impl.scratch.velocity_gradient);
   synchronized_local_phase(*impl.mpi, StepFailureReason::invalid_input, false,
                            [&] {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    FaceFluxPathObservation allocation_observation;
+#endif
     const auto velocity = storage.acquire_read<double>(
         access, kStatePhase, kStateActor, fields.velocity);
     const auto gradient_read =
         impl.scratch.storage->template acquire_read<double>(
             *impl.scratch.access, kScratchPhase, kScratchActor,
             impl.scratch.velocity_gradient);
-    const auto flux = finite_volume::FaceMassFlux::acquire(
-        *impl.registry, storage, access, kStatePhase, kStateActor,
-        fields.face_mass_flux, *impl.topology);
+    const auto flux = bind_flux(storage);
     auto face = impl.scratch.storage->template acquire_face_write<double>(
         *impl.scratch.access, kScratchPhase, kScratchActor,
         impl.scratch.momentum_face);
@@ -710,17 +715,16 @@ void assemble_spatial(Implementation &impl,
   });
 }
 
-template <class Implementation>
+template <class Implementation, class FluxBinder>
 void reconstruct_density_faces(Implementation &impl,
                                const runtime::FieldAccessPlan &access,
                                runtime::FieldStorage &storage,
                                const FlowFieldIds &fields,
-                               runtime::FieldId output_field) {
+                               runtime::FieldId output_field,
+                               FluxBinder &&bind_flux) {
   synchronized_local_phase(*impl.mpi, StepFailureReason::invalid_input, false,
                            [&] {
-    const auto flux = finite_volume::FaceMassFlux::acquire(
-        *impl.registry, storage, access, kStatePhase, kStateActor,
-        fields.face_mass_flux, *impl.topology);
+    const auto flux = bind_flux(storage);
     const auto density = storage.acquire_read<double>(
         access, kStatePhase, kStateActor, fields.density);
     auto face_density =
@@ -738,10 +742,11 @@ void reconstruct_density_faces(Implementation &impl,
   });
 }
 
-template <class Implementation>
+template <class Implementation, class FluxBinder>
 void build_density_weighted_flux(Implementation &impl, FlowState &state,
                                  const runtime::FieldAccessPlan &access,
-                                 const FlowFieldIds &fields) {
+                                 const FlowFieldIds &fields,
+                                 FluxBinder &&bind_flux) {
   auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
   synchronized_local_phase(*impl.mpi, StepFailureReason::non_finite_trial, true,
                            [&] {
@@ -761,7 +766,8 @@ void build_density_weighted_flux(Implementation &impl, FlowState &state,
     }
   });
   reconstruct_density_faces(impl, access, trial, fields,
-                            impl.scratch.face_density_trial);
+                            impl.scratch.face_density_trial,
+                            std::forward<FluxBinder>(bind_flux));
   synchronized_local_phase(*impl.mpi, StepFailureReason::non_finite_trial, true,
                            [&] {
     const auto density =
@@ -1033,6 +1039,8 @@ std::uint64_t MaterialDensityStepAttemptReport::compute_seal() const noexcept {
   mix(result, static_cast<std::uint64_t>(shared_face_mass_flux_field_));
   mix(result, static_cast<std::uint64_t>(flux_provenance_));
   mix(result, attempt_identity_);
+  mix(result, material_attempt_identity_);
+  mix(result, material_finalization_identity_);
   mix(result, final_continuity_residual_available_);
   mix(result, final_pressure_residual_available_);
   mix(result, bits(final_pressure_normalized_residual_));
@@ -1072,8 +1080,74 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
         material.transport_conservation_availability().size() != fields ||
         material.transport_relative_conservation_defect().size() != fields ||
         material.reason() != material_failure_reason_ ||
+        material_attempt_identity_ == 0U ||
+        material_finalization_identity_ == 0U ||
+        material.attempt_identity() != material_attempt_identity_ ||
+        material.finalization_identity() != material_finalization_identity_ ||
         material.shared_face_mass_flux_field() !=
-            shared_face_mass_flux_field_)
+            shared_face_mass_flux_field_ ||
+        material.flux_provenance() != flux_provenance_ ||
+        !std::all_of(material.transport_residual_availability().begin(),
+                     material.transport_residual_availability().end(), byte) ||
+        !std::all_of(material.transport_conservation_availability().begin(),
+                     material.transport_conservation_availability().end(),
+                     byte))
+      return false;
+    if (!material.density_residual_available() &&
+        !positive_zero(material.density_normalized_l2()))
+      return false;
+    for (std::size_t field = 0; field < fields; ++field) {
+      const bool residual_available =
+          material.transport_residual_availability()[field] != 0U;
+      if ((residual_available &&
+           bits(flow_.final_transport_normalized_l2[field]) !=
+               bits(material.transport_normalized_l2()[field])) ||
+          (!residual_available &&
+           (!positive_zero(flow_.final_transport_normalized_l2[field]) ||
+            !positive_zero(material.transport_normalized_l2()[field]))))
+        return false;
+      const bool conservation_available =
+          material.transport_conservation_availability()[field] != 0U;
+      if ((conservation_available &&
+           bits(flow_.final_transport_relative_conservation_defect[field]) !=
+               bits(
+                   material.transport_relative_conservation_defect()[field])) ||
+          (!conservation_available &&
+           (!positive_zero(
+                flow_.final_transport_relative_conservation_defect[field]) ||
+            !positive_zero(
+                material.transport_relative_conservation_defect()[field]))))
+        return false;
+    }
+    if (mass_conservation_available_ !=
+            material.mass_conservation_available() ||
+        (mass_conservation_available_ &&
+         bits(flow_.final_mass_relative_conservation_defect) !=
+             bits(material.mass_relative_conservation_defect())) ||
+        (!mass_conservation_available_ &&
+         (!positive_zero(flow_.final_mass_relative_conservation_defect) ||
+          !positive_zero(material.mass_relative_conservation_defect()))))
+      return false;
+    if (!material.minimum_density_available()) {
+      if (!positive_zero(material.minimum_density_kg_per_m3()) ||
+          material.minimum_density_global_cell() != 0U ||
+          material.minimum_density_rank() != -1)
+        return false;
+    } else if (!(material.minimum_density_kg_per_m3() > 0.0) ||
+               !std::isfinite(material.minimum_density_kg_per_m3()) ||
+               material.minimum_density_rank() < 0) {
+      return false;
+    }
+  } else {
+    if (material_attempt_identity_ != 0U ||
+        material_finalization_identity_ != 0U || mass_conservation_available_ ||
+        !positive_zero(flow_.final_mass_relative_conservation_defect) ||
+        std::any_of(flow_.final_transport_normalized_l2.begin(),
+                    flow_.final_transport_normalized_l2.end(),
+                    [&](double value) { return !positive_zero(value); }) ||
+        std::any_of(flow_.final_transport_relative_conservation_defect.begin(),
+                    flow_.final_transport_relative_conservation_defect.end(),
+                    [&](double value) { return !positive_zero(value); }))
       return false;
   }
   if (!final_continuity_residual_available_ &&
@@ -1097,8 +1171,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
       !positive_zero(flow_.final_mass_relative_conservation_defect))
     return false;
 
-  const bool committed =
-      flow_.disposition == StepAttemptDisposition::committed;
+  const bool committed = flow_.disposition == StepAttemptDisposition::committed;
   if (committed) {
     if (flow_.reason != StepFailureReason::none ||
         flow_.lowest_failing_rank != -1 ||
@@ -1110,6 +1183,17 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
         flux_provenance_ != MaterialFluxProvenance::final_corrected ||
         material_report_->flux_provenance() !=
             MaterialFluxProvenance::final_corrected ||
+        !material_report_->density_residual_available() ||
+        !std::all_of(
+            material_report_->transport_residual_availability().begin(),
+            material_report_->transport_residual_availability().end(),
+            [](std::uint8_t value) { return value == 1U; }) ||
+        !material_report_->mass_conservation_available() ||
+        !std::all_of(
+            material_report_->transport_conservation_availability().begin(),
+            material_report_->transport_conservation_availability().end(),
+            [](std::uint8_t value) { return value == 1U; }) ||
+        !material_report_->minimum_density_available() ||
         !final_continuity_residual_available_ ||
         !final_pressure_residual_available_ || !mass_conservation_available_ ||
         !std::all_of(final_momentum_residual_available_.begin(),
@@ -1130,12 +1214,11 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
         flow_.reason == StepFailureReason::invalid_input ||
         flow_.reason == StepFailureReason::collective_operation;
     if (flow_.disposition !=
-            (non_retryable
-                 ? StepAttemptDisposition::non_retryable_failure
-                 : StepAttemptDisposition::recoverable_failure) ||
-        bits(flow_.suggested_dt_s) !=
-            bits(non_retryable ? flow_.attempted_dt_s
-                               : 0.5 * flow_.attempted_dt_s) ||
+            (non_retryable ? StepAttemptDisposition::non_retryable_failure
+                           : StepAttemptDisposition::recoverable_failure) ||
+        bits(flow_.suggested_dt_s) != bits(non_retryable
+                                               ? flow_.attempted_dt_s
+                                               : 0.5 * flow_.attempted_dt_s) ||
         flow_.pressure_corrector_count > 2U)
       return false;
   }
@@ -1148,8 +1231,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
   if (final_pressure_residual_available_ &&
       !final_continuity_residual_available_)
     return false;
-  for (std::size_t component_index = 0; component_index < 3U;
-       ++component_index)
+  for (std::size_t component_index = 0; component_index < 3U; ++component_index)
     if (momentum_conservation_available_[component_index] != 0U &&
         final_momentum_residual_available_[component_index] == 0U)
       return false;
@@ -1167,9 +1249,8 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
     if (map_material_failure(material_failure_reason_) != flow_.reason)
       return false;
   } else if (flow_.reason == StepFailureReason::transport_failure ||
-             (material_report_ &&
-              material_report_->reason() !=
-                  MaterialTransportFailureReason::none)) {
+             (material_report_ && material_report_->reason() !=
+                                      MaterialTransportFailureReason::none)) {
     return false;
   }
   return true;
@@ -1256,19 +1337,28 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     throw runtime::Error("material flow attempt identity would wrap");
   ++impl_->attempt_identity;
 
-  std::optional<MaterialDensityStepAttemptReport> prepared_result;
+  MaterialDensityStepAttemptReport result;
+  result.flow_ = base_flow_report(
+      stencil.dt_s, static_cast<std::size_t>(impl_->material_field_count));
+  result.material_field_count_ = impl_->material_field_count;
+  result.shared_face_mass_flux_field_ = impl_->fields.face_mass_flux;
+  result.flux_provenance_ = MaterialFluxProvenance::predictor;
+  result.attempt_identity_ = impl_->attempt_identity;
+  const auto finish = [&]() {
+    result.seal();
+    impl_->last_state = &state;
+    impl_->last_report_seal = result.seal_;
+    impl_->last_state_identity = state.diagnostic_mutation_identity();
+    return result;
+  };
   bool preparation_ok = true;
   try {
+    impl_->material_transport.prepare_task20_attempt();
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (preflight_allocation_failure_rank.load(std::memory_order_relaxed) ==
         impl_->mpi->rank())
       throw std::bad_alloc();
 #endif
-    impl_->material_transport.prepare_task20_attempt();
-    MaterialDensityStepAttemptReport candidate;
-    prepared_result.emplace(std::move(candidate));
-    prepared_result->flow_ = base_flow_report(
-        stencil.dt_s, static_cast<std::size_t>(impl_->material_field_count));
   } catch (const runtime::MpiOperationError &) {
     throw;
   } catch (...) {
@@ -1277,21 +1367,12 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
   const auto preparation = runtime::collective_status(
       *impl_->mpi, preparation_ok,
       "material flow attempt workspace preparation failed");
-  if (!preparation.ok || !prepared_result)
-    throw runtime::Error("material flow attempt workspace preparation failed");
-  MaterialDensityStepAttemptReport result = std::move(*prepared_result);
-  result.material_field_count_ = impl_->material_field_count;
-  result.shared_face_mass_flux_field_ = impl_->fields.face_mass_flux;
-  result.flux_provenance_ = MaterialFluxProvenance::predictor;
-  result.attempt_identity_ = impl_->attempt_identity;
+  if (!preparation.ok) {
+    set_failure(result.flow_, StepFailureReason::invalid_input,
+                preparation.failing_rank, false);
+    return finish();
+  }
   bool active = false;
-  const auto finish = [&]() {
-    result.seal();
-    impl_->last_state = &state;
-    impl_->last_report_seal = result.seal_;
-    impl_->last_state_identity = state.diagnostic_mutation_identity();
-    return result;
-  };
   const auto fail = [&](StepFailureReason reason, int rank, bool recoverable) {
     if (active) {
       state.rollback_attempt();
@@ -1368,6 +1449,17 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
     const auto &access = detail::FlowStateSolverAccess::access(state);
     const auto &fields = state.fields();
+    const auto bind_face_flux = [&](const runtime::FieldStorage &storage) {
+      return finite_volume::FaceMassFlux::bind_prepared(
+          *impl_->prepared_face_flux, *impl_->registry, storage, access,
+          kStatePhase, kStateActor, fields.face_mass_flux, *impl_->topology);
+    };
+    const auto bind_material_flux = [&](MaterialFluxProvenance provenance) {
+      return MaterialFaceMassFlux::bind_prepared(
+          *impl_->prepared_material_flux, *impl_->registry, trial, access,
+          kStatePhase, kStateActor, fields.face_mass_flux, *impl_->topology,
+          provenance);
+    };
 
     for (FlowLayer layer : {FlowLayer::history, FlowLayer::committed}) {
       auto &storage = detail::FlowStateSolverAccess::layer(state, layer);
@@ -1397,21 +1489,19 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
       }
     });
     MaterialDensityTransport::StagingResult predictor_stage;
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input,
-                             false, [&] {
-      apply_allocation_test_point(
-          test::MaterialAllocationPointForTest::predictor_stage,
-          impl_->mpi->rank());
-    });
-#endif
     {
-      const auto flux = MaterialFaceMassFlux::acquire(
-          *impl_->registry, trial, access, kStatePhase, kStateActor,
-          fields.face_mass_flux, *impl_->topology,
-          MaterialFluxProvenance::predictor);
-      predictor_stage =
-          impl_->material_transport.stage_trial(state, flux, stencil);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
+      std::optional<MaterialFaceMassFlux> predictor_flux;
+      synchronized_local_phase(
+          *impl_->mpi, StepFailureReason::invalid_input, false, [&] {
+            predictor_flux.emplace(
+                bind_material_flux(MaterialFluxProvenance::predictor));
+          });
+      predictor_stage = impl_->material_transport.stage_trial(
+          state, *predictor_flux, stencil);
+      predictor_flux.reset();
     }
     if (predictor_stage.reason != MaterialTransportFailureReason::none) {
       require_reliable_collective_result(
@@ -1422,11 +1512,11 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     }
     impl_->halo->exchange(trial, fields.density);
 
-    assemble_spatial(*impl_, access, committed, fields, mu,
-                     impl_->momentum_n);
+    assemble_spatial(*impl_, access, committed, fields, mu, impl_->momentum_n,
+                     bind_face_flux);
     if (stencil.order == MomentumTimeOrder::bdf2)
-      assemble_spatial(*impl_, access, history, fields, mu,
-                       impl_->momentum_nm1);
+      assemble_spatial(*impl_, access, history, fields, mu, impl_->momentum_nm1,
+                       bind_face_flux);
 
     const auto rho_trial = trial.acquire_read<double>(
         access, kStatePhase, kStateActor, fields.density);
@@ -1596,11 +1686,17 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     impl_->halo->exchange(trial, fields.velocity);
     impl_->halo->exchange(*impl_->scratch.storage,
                           impl_->scratch.actual_diagonal);
-    reconstruct_density_faces(*impl_, access, committed, fields,
-                              impl_->scratch.face_density_n);
-    if (stencil.order == MomentumTimeOrder::bdf2)
-      reconstruct_density_faces(*impl_, access, history, fields,
-                                impl_->scratch.face_density_nm1);
+    {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
+      reconstruct_density_faces(*impl_, access, committed, fields,
+                                impl_->scratch.face_density_n, bind_face_flux);
+      if (stencil.order == MomentumTimeOrder::bdf2)
+        reconstruct_density_faces(*impl_, access, history, fields,
+                                  impl_->scratch.face_density_nm1,
+                                  bind_face_flux);
+    }
     const auto face_density_n =
         impl_->scratch.storage->acquire_face_read<double>(
             *impl_->scratch.access, kScratchPhase, kScratchActor,
@@ -1644,7 +1740,13 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
           if (!std::isfinite(face_velocity(face, component_index)))
             throw runtime::Error("material face velocity is non-finite");
     });
-    build_density_weighted_flux(*impl_, state, access, fields);
+    {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
+      build_density_weighted_flux(*impl_, state, access, fields,
+                                  bind_face_flux);
+    }
     synchronize_partition_faces(*impl_, state, access, fields);
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1665,21 +1767,19 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     synchronize_partition_faces(*impl_, state, access, fields);
 
     MaterialDensityTransport::StagingResult provisional_stage;
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input,
-                             false, [&] {
-      apply_allocation_test_point(
-          test::MaterialAllocationPointForTest::provisional_stage,
-          impl_->mpi->rank());
-    });
-#endif
     {
-      const auto flux = MaterialFaceMassFlux::acquire(
-          *impl_->registry, trial, access, kStatePhase, kStateActor,
-          fields.face_mass_flux, *impl_->topology,
-          MaterialFluxProvenance::provisional);
-      provisional_stage =
-          impl_->material_transport.stage_trial(state, flux, stencil);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
+      std::optional<MaterialFaceMassFlux> provisional_flux;
+      synchronized_local_phase(
+          *impl_->mpi, StepFailureReason::invalid_input, false, [&] {
+            provisional_flux.emplace(
+                bind_material_flux(MaterialFluxProvenance::provisional));
+          });
+      provisional_stage = impl_->material_transport.stage_trial(
+          state, *provisional_flux, stencil);
+      provisional_flux.reset();
     }
     if (provisional_stage.reason != MaterialTransportFailureReason::none) {
       require_reliable_collective_result(
@@ -1707,19 +1807,16 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     result.flow_.pressure_corrector_count = 2U;
     synchronize_partition_faces(*impl_, state, access, fields);
 
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input,
-                             false, [&] {
-      apply_allocation_test_point(
-          test::MaterialAllocationPointForTest::public_finalizer,
-          impl_->mpi->rank());
-    });
-#endif
     {
-      const auto flux = MaterialFaceMassFlux::acquire(
-          *impl_->registry, trial, access, kStatePhase, kStateActor,
-          fields.face_mass_flux, *impl_->topology,
-          MaterialFluxProvenance::final_corrected);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
+      std::optional<MaterialFaceMassFlux> final_material_flux;
+      synchronized_local_phase(
+          *impl_->mpi, StepFailureReason::invalid_input, false, [&] {
+            final_material_flux.emplace(
+                bind_material_flux(MaterialFluxProvenance::final_corrected));
+          });
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
       const auto flux_values = trial.acquire_face_read<double>(
           access, kStatePhase, kStateActor, fields.face_mass_flux);
@@ -1727,8 +1824,13 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
            face < impl_->topology->local_face_count(); ++face)
         impl_->finalizer_flux_input[face] = flux_values(face, 0);
 #endif
-      result.material_report_.emplace(
-          impl_->material_transport.finalize_trial(state, flux, stencil));
+      result.material_report_.emplace(impl_->material_transport.finalize_trial(
+          state, *final_material_flux, stencil));
+      result.material_attempt_identity_ =
+          result.material_report_->attempt_identity();
+      result.material_finalization_identity_ =
+          result.material_report_->finalization_identity();
+      final_material_flux.reset();
     }
     result.flux_provenance_ = MaterialFluxProvenance::final_corrected;
     result.material_failure_reason_ = result.material_report_->reason();
@@ -1754,11 +1856,12 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     synchronized_local_phase(*impl_->mpi,
                              StepFailureReason::final_continuity_residual,
                              true, [&] {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      FaceFluxPathObservation allocation_observation;
+#endif
       const auto rho_final = trial.acquire_read<double>(
           access, kStatePhase, kStateActor, fields.density);
-      const auto final_flux = finite_volume::FaceMassFlux::acquire(
-          *impl_->registry, trial, access, kStatePhase, kStateActor,
-          fields.face_mass_flux, *impl_->topology);
+      const auto final_flux = bind_face_flux(trial);
       auto mass_residual = impl_->scratch.storage->acquire_write<double>(
           *impl_->scratch.access, kScratchPhase, kScratchActor,
           impl_->scratch.mass_residual);
@@ -1824,14 +1927,6 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
       return fail(StepFailureReason::final_continuity_residual,
                   continuity_status.failing_rank, true);
 
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input,
-                             false, [&] {
-      apply_allocation_test_point(
-          test::MaterialAllocationPointForTest::final_pressure,
-          impl_->mpi->rank());
-    });
-#endif
     const auto pressure = impl_->coupler.assess_final_material_density_pressure(
         state, stencil, pressure_control);
     result.flow_.final_pressure_residual_l2 =
@@ -2355,15 +2450,67 @@ void test::MaterialDensityPisoTestAccess::corrupt_report(
   case MaterialReportCorruptionForTest::material_count_five:
     report.material_field_count_ = 5U;
     break;
+  case MaterialReportCorruptionForTest::parent_transport_residual_value:
+    report.flow_.final_transport_normalized_l2.front() =
+        std::nextafter(report.flow_.final_transport_normalized_l2.front(),
+                       std::numeric_limits<double>::infinity());
+    break;
+  case MaterialReportCorruptionForTest::nested_transport_residual_value:
+    report.material_report_->transport_normalized_l2_.front() = std::nextafter(
+        report.material_report_->transport_normalized_l2_.front(),
+        std::numeric_limits<double>::infinity());
+    break;
+  case MaterialReportCorruptionForTest::parent_transport_conservation_value:
+    report.flow_.final_transport_relative_conservation_defect.front() =
+        std::nextafter(
+            report.flow_.final_transport_relative_conservation_defect.front(),
+            std::numeric_limits<double>::infinity());
+    break;
+  case MaterialReportCorruptionForTest::nested_transport_conservation_value:
+    report.material_report_->transport_relative_conservation_defect_.front() =
+        std::nextafter(report.material_report_
+                           ->transport_relative_conservation_defect_.front(),
+                       std::numeric_limits<double>::infinity());
+    break;
+  case MaterialReportCorruptionForTest::nested_density_residual_availability:
+    report.material_report_->density_residual_available_ = false;
+    break;
+  case MaterialReportCorruptionForTest::nested_transport_residual_availability:
+    report.material_report_->transport_residual_available_.front() = 0U;
+    break;
+  case MaterialReportCorruptionForTest::nested_mass_conservation_availability:
+    report.material_report_->mass_conservation_available_ = false;
+    break;
+  case MaterialReportCorruptionForTest::
+      nested_transport_conservation_availability:
+    report.material_report_->transport_conservation_available_.front() = 0U;
+    break;
+  case MaterialReportCorruptionForTest::nested_minimum_density_availability:
+    report.material_report_->minimum_density_available_ = false;
+    break;
+  case MaterialReportCorruptionForTest::nested_attempt_identity:
+    ++report.material_report_->attempt_identity_;
+    break;
+  case MaterialReportCorruptionForTest::nested_finalization_identity:
+    report.material_report_->finalization_identity_ = 0U;
+    break;
+  case MaterialReportCorruptionForTest::nested_shared_field:
+    ++report.material_report_->shared_face_mass_flux_field_;
+    break;
+  case MaterialReportCorruptionForTest::nested_provenance:
+    report.material_report_->flux_provenance_ =
+        MaterialFluxProvenance::predictor;
+    break;
+  case MaterialReportCorruptionForTest::nested_residual_outer_size:
+    report.material_report_->transport_residual_available_.pop_back();
+    break;
+  case MaterialReportCorruptionForTest::nested_conservation_outer_size:
+    report.material_report_->transport_conservation_available_.pop_back();
+    break;
   }
+  if (report.material_report_)
+    report.material_report_->seal();
   report.seal_ = report.compute_seal();
-}
-
-std::uint64_t
-test::MaterialDensityPisoTestAccess::active_phase_allocation_attempts()
-    noexcept {
-  return ::hundun::flow::active_phase_allocation_attempts.load(
-      std::memory_order_relaxed);
 }
 
 void test::MaterialDensityPisoTestAccess::set_preflight_allocation_failure_rank(
@@ -2376,6 +2523,12 @@ void test::MaterialDensityPisoTestAccess::reset_preflight_allocation_failure()
     noexcept {
   ::hundun::flow::preflight_allocation_failure_rank.store(
       -1, std::memory_order_relaxed);
+}
+
+bool test::MaterialDensityPisoTestAccess::face_flux_path_observation_active()
+    noexcept {
+  return ::hundun::flow::face_flux_path_observation_active.load(
+      std::memory_order_relaxed);
 }
 
 test::MaterialPhaseSelectionForTest

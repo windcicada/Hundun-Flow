@@ -21,10 +21,96 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
+
+namespace task20_allocation_oracle {
+
+std::atomic<const hundun::flow::FlowState *> observed_state{};
+std::atomic<std::uint64_t> active_attempt_allocations{};
+
+void record_active_attempt_allocation() noexcept {
+  const auto *state = observed_state.load(std::memory_order_relaxed);
+  if (state != nullptr &&
+      hundun::flow::test::MaterialDensityPisoTestAccess::state_attempt_active(
+          *state) &&
+      hundun::flow::test::MaterialDensityPisoTestAccess::
+          face_flux_path_observation_active())
+    active_attempt_allocations.fetch_add(1U, std::memory_order_relaxed);
+}
+
+void *allocate(std::size_t size) {
+  record_active_attempt_allocation();
+  if (void *result = std::malloc(size == 0U ? 1U : size))
+    return result;
+  throw std::bad_alloc();
+}
+
+void *allocate_aligned(std::size_t size, std::size_t alignment) {
+  record_active_attempt_allocation();
+  void *result = nullptr;
+  if (posix_memalign(&result, alignment, size == 0U ? 1U : size) == 0)
+    return result;
+  throw std::bad_alloc();
+}
+
+class Observation final {
+public:
+  explicit Observation(const hundun::flow::FlowState &state) {
+    active_attempt_allocations.store(0U, std::memory_order_relaxed);
+    observed_state.store(&state, std::memory_order_relaxed);
+  }
+  ~Observation() { observed_state.store(nullptr, std::memory_order_relaxed); }
+  Observation(const Observation &) = delete;
+  Observation &operator=(const Observation &) = delete;
+
+  std::uint64_t count() const noexcept {
+    return active_attempt_allocations.load(std::memory_order_relaxed);
+  }
+};
+
+} // namespace task20_allocation_oracle
+
+void *operator new(std::size_t size) {
+  return task20_allocation_oracle::allocate(size);
+}
+void *operator new[](std::size_t size) {
+  return task20_allocation_oracle::allocate(size);
+}
+void operator delete(void *pointer) noexcept { std::free(pointer); }
+void operator delete[](void *pointer) noexcept { std::free(pointer); }
+void operator delete(void *pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void *pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
+void *operator new(std::size_t size, std::align_val_t alignment) {
+  return task20_allocation_oracle::allocate_aligned(
+      size, static_cast<std::size_t>(alignment));
+}
+void *operator new[](std::size_t size, std::align_val_t alignment) {
+  return task20_allocation_oracle::allocate_aligned(
+      size, static_cast<std::size_t>(alignment));
+}
+void operator delete(void *pointer, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void *pointer, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete(void *pointer, std::size_t, std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void *pointer, std::size_t, std::align_val_t) noexcept {
+  std::free(pointer);
+}
 
 namespace {
 
@@ -412,7 +498,12 @@ int main(int argc, char **argv) {
         hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
 
     auto state = make_state(1.0);
-    const auto report = flow.attempt(state, 0.0, be, {}, {});
+    const auto report = [&] {
+      task20_allocation_oracle::Observation allocation_observation(state);
+      auto result = flow.attempt(state, 0.0, be, {}, {});
+      HUNDUN_CHECK(allocation_observation.count() == 0U);
+      return result;
+    }();
     HUNDUN_CHECK(report.flow().disposition ==
                  hundun::flow::StepAttemptDisposition::committed);
     HUNDUN_CHECK(report.flow().reason == hundun::flow::StepFailureReason::none);
@@ -457,9 +548,6 @@ int main(int argc, char **argv) {
                  64.0 * std::numeric_limits<double>::epsilon());
     HUNDUN_CHECK(
         hundun::flow::test::MaterialDensityPisoTestAccess::
-            active_phase_allocation_attempts() == 0U);
-    HUNDUN_CHECK(
-        hundun::flow::test::MaterialDensityPisoTestAccess::
             report_authenticated(report));
     for (const auto corruption : {
              hundun::flow::test::MaterialReportCorruptionForTest::
@@ -483,73 +571,43 @@ int main(int argc, char **argv) {
              hundun::flow::test::MaterialReportCorruptionForTest::
                  material_count_plus_two,
              hundun::flow::test::MaterialReportCorruptionForTest::
-                 material_count_five}) {
+                 material_count_five,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 parent_transport_residual_value,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_transport_residual_value,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 parent_transport_conservation_value,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_transport_conservation_value,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_density_residual_availability,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_transport_residual_availability,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_mass_conservation_availability,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_transport_conservation_availability,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_minimum_density_availability,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_attempt_identity,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_finalization_identity,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_shared_field,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_provenance,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_residual_outer_size,
+             hundun::flow::test::MaterialReportCorruptionForTest::
+                 nested_conservation_outer_size}) {
       auto mutated = report;
       hundun::flow::test::MaterialDensityPisoTestAccess::corrupt_report(
           mutated, corruption);
       HUNDUN_CHECK(!hundun::flow::test::MaterialDensityPisoTestAccess::
                         report_authenticated(mutated));
     }
-
-    using AllocationPoint =
-        hundun::flow::test::MaterialAllocationPointForTest;
-    constexpr std::array allocation_points{
-        AllocationPoint::predictor_stage,
-        AllocationPoint::provisional_stage,
-        AllocationPoint::public_finalizer,
-        AllocationPoint::final_pressure};
-    const std::array allocation_failure_ranks{0, mpi.size() - 1};
-    for (const auto point : allocation_points) {
-      for (std::size_t rank_index = 0;
-           rank_index < (mpi.size() == 1 ? 1U : 2U); ++rank_index) {
-        const int failing_rank = allocation_failure_ranks[rank_index];
-        hundun::flow::test::MaterialDensityPisoTestAccess::
-            reset_allocation_fault();
-        hundun::flow::test::MaterialDensityPisoTestAccess::
-            set_allocation_fault(point, failing_rank);
-        const auto allocation_count_before =
-            hundun::flow::test::MaterialDensityPisoTestAccess::
-                active_phase_allocation_attempts();
-        hundun::linear::JacobiPreconditioner tx(execution), ty(execution),
-            tz(execution), tp(execution);
-        auto allocation_flow =
-            hundun::flow::FixedStepMaterialDensityFlow::create(
-                decomposition, topology, geometry, boundaries, mpi, execution,
-                halo, momentum_solver, {&tx, &ty, &tz}, pressure_solver, tp,
-                registry, fields, specification);
-        auto allocation_state = make_state(1.0);
-        const auto before = capture(allocation_state);
-        const auto allocation_report =
-            allocation_flow.attempt(allocation_state, 0.0, be, {}, {});
-        HUNDUN_CHECK(allocation_report.flow().disposition ==
-                     hundun::flow::StepAttemptDisposition::
-                         non_retryable_failure);
-        HUNDUN_CHECK(allocation_report.flow().reason ==
-                     hundun::flow::StepFailureReason::invalid_input);
-        HUNDUN_CHECK(allocation_report.flow().lowest_failing_rank ==
-                     failing_rank);
-        HUNDUN_CHECK(
-            hundun::flow::test::MaterialDensityPisoTestAccess::
-                report_authenticated(allocation_report));
-        HUNDUN_CHECK(
-            hundun::flow::test::MaterialDensityPisoTestAccess::
-                allocation_point_calls(point) == 1U);
-        for (std::size_t later = static_cast<std::size_t>(point) + 1U;
-             later < static_cast<std::size_t>(AllocationPoint::count);
-             ++later)
-          HUNDUN_CHECK(
-              hundun::flow::test::MaterialDensityPisoTestAccess::
-                  allocation_point_calls(
-                      static_cast<AllocationPoint>(later)) == 0U);
-        const auto allocation_count_after =
-            hundun::flow::test::MaterialDensityPisoTestAccess::
-                active_phase_allocation_attempts();
-        HUNDUN_CHECK(allocation_count_after - allocation_count_before ==
-                     (mpi.rank() == failing_rank ? 1U : 0U));
-        check_equal(before, allocation_state);
-      }
-    }
-    hundun::flow::test::MaterialDensityPisoTestAccess::reset_allocation_fault();
 
     const auto exercise_terminal_solver = [&](TerminalMomentumSolver::Mode mode,
                                               std::string_view message) {
@@ -1027,19 +1085,51 @@ int main(int argc, char **argv) {
     const auto allocation_before = capture(allocation_state);
     hundun::flow::test::MaterialDensityPisoTestAccess::
         set_preflight_allocation_failure_rank(mpi.size() - 1);
-    bool allocation_rejected = false;
+    const auto identity_before_preflight_failure = negative.attempt_identity();
+    std::optional<hundun::flow::MaterialDensityStepAttemptReport>
+        allocation_report;
     try {
-      static_cast<void>(
+      allocation_report.emplace(
           moved_flow.attempt(allocation_state, 0.0, be, {}, {}));
-    } catch (const hundun::runtime::Error &error) {
-      allocation_rejected =
-          std::string_view(error.what()) ==
-          "material flow attempt workspace preparation failed";
+    } catch (...) {
+      hundun::flow::test::MaterialDensityPisoTestAccess::
+          reset_preflight_allocation_failure();
+      throw;
     }
     hundun::flow::test::MaterialDensityPisoTestAccess::
         reset_preflight_allocation_failure();
-    HUNDUN_CHECK(allocation_rejected);
+    HUNDUN_CHECK(allocation_report->flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(allocation_report->flow().reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(allocation_report->flow().lowest_failing_rank ==
+                 mpi.size() - 1);
+    HUNDUN_CHECK(allocation_report->flow().pressure_corrector_count == 0U);
+    HUNDUN_CHECK(allocation_report->material_field_count() == 1U);
+    HUNDUN_CHECK(!allocation_report->material_report_available());
+    HUNDUN_CHECK(!allocation_report->final_continuity_residual_available());
+    HUNDUN_CHECK(!allocation_report->final_pressure_residual_available());
+    HUNDUN_CHECK(allocation_report->flow().attempted_dt_s == 0.01);
+    HUNDUN_CHECK(allocation_report->flow().suggested_dt_s == 0.01);
+    HUNDUN_CHECK(
+        allocation_report->flow().final_transport_normalized_l2.size() == 1U);
+    HUNDUN_CHECK(allocation_report->flow()
+                     .final_transport_relative_conservation_defect.size() ==
+                 1U);
+    HUNDUN_CHECK(allocation_report->flow().final_transport_normalized_l2[0] ==
+                 0.0);
+    HUNDUN_CHECK(allocation_report->flow()
+                     .final_transport_relative_conservation_defect[0] == 0.0);
+    HUNDUN_CHECK(allocation_report->attempt_identity() ==
+                 identity_before_preflight_failure + 1U);
+    HUNDUN_CHECK(
+        hundun::flow::test::MaterialDensityPisoTestAccess::report_authenticated(
+            *allocation_report));
     check_equal(allocation_before, allocation_state);
+    auto allocation_source =
+        moved_flow.diagnostic_source(allocation_state, *allocation_report);
+    HUNDUN_CHECK(allocation_source.report().attempt_identity() ==
+                 allocation_report->attempt_identity());
 
     const auto bdf2 = hundun::flow::make_momentum_time_stencil(
         hundun::flow::MomentumTimeOrder::bdf2, 0.01, 0.01);
@@ -1047,6 +1137,7 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(second.flow().disposition ==
                  hundun::flow::StepAttemptDisposition::committed);
     HUNDUN_CHECK(state.metadata().step == 2U);
+    expect_all_queries_stale(allocation_source);
 
     {
       hundun::linear::JacobiPreconditioner ax(execution), ay(execution),
