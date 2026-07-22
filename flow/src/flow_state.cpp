@@ -3,6 +3,7 @@
 #include "hundun/flow/flow_state.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "material_density_transport_test_access.hpp"
+#include "material_density_piso_test_access.hpp"
 #endif
 
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
@@ -157,6 +158,7 @@ struct FlowState::Impl final {
   bool rollback_snapshot_valid{};
   bool attempt_active{};
   std::uint64_t attempt_identity{};
+  std::uint64_t diagnostic_mutation_identity{1U};
   bool commit_prepared{};
   AcceptedStepMetadata prepared_metadata{};
 };
@@ -384,6 +386,10 @@ std::uint64_t FlowState::attempt_identity() const noexcept {
   return impl_->attempt_identity;
 }
 
+std::uint64_t FlowState::diagnostic_mutation_identity() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->diagnostic_mutation_identity;
+}
+
 const runtime::FieldStorage &FlowState::layer(FlowLayer selected) const {
   switch (selected) {
   case FlowLayer::history:
@@ -427,6 +433,15 @@ void test::MaterialDensityTransportTestAccess::set_accepted_transport_value(
       state.impl_->fields.transported_cell_fields[field]);
   view(i, j, k, 0) = value;
 }
+void test::MaterialDensityPisoTestAccess::force_state_diagnostic_identity(
+    FlowState &state, std::uint64_t value) noexcept {
+  state.impl_->diagnostic_mutation_identity = value;
+}
+std::uint64_t
+test::MaterialDensityPisoTestAccess::state_diagnostic_identity(
+    const FlowState &state) noexcept {
+  return state.diagnostic_mutation_identity();
+}
 #endif
 
 void FlowState::seed_accepted_layers(const FlowLayerValues &history,
@@ -436,6 +451,11 @@ void FlowState::seed_accepted_layers(const FlowLayerValues &history,
   }
   validate_layer_values(*impl_, history);
   validate_layer_values(*impl_, committed);
+  if (impl_->diagnostic_mutation_identity ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    throw runtime::Error("FlowState diagnostic mutation identity would wrap");
+  }
+  ++impl_->diagnostic_mutation_identity;
   impl_->history.begin_rebuild();
   impl_->committed.begin_rebuild();
   impl_->trial.begin_rebuild();
@@ -455,6 +475,11 @@ void FlowState::begin_attempt() {
   if (impl_->attempt_identity == std::numeric_limits<std::uint64_t>::max()) {
     throw runtime::Error("FlowState attempt identity would wrap");
   }
+  if (impl_->diagnostic_mutation_identity ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    throw runtime::Error("FlowState diagnostic mutation identity would wrap");
+  }
+  ++impl_->diagnostic_mutation_identity;
   ++impl_->attempt_identity;
 
   // Preserve the exact inactive trial bytes in a fourth preallocated buffer.

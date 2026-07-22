@@ -174,6 +174,7 @@ target_link_libraries(hundun_finite_volume
 add_library(hundun_flow STATIC
   flow/src/constant_density_piso.cpp
   flow/src/flow_state.cpp
+  flow/src/material_density_piso.cpp
   flow/src/material_density_transport.cpp
   flow/src/momentum_predictor.cpp)
 target_include_directories(hundun_flow PUBLIC
@@ -196,6 +197,7 @@ if(HUNDUN_BUILD_TESTS)
 endif()
 
 add_library(hundun_material_diagnostics STATIC
+  diagnostics/src/material_density_piso_diagnostics.cpp
   diagnostics/src/material_density_transport_diagnostics.cpp)
 target_include_directories(hundun_material_diagnostics PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
@@ -492,6 +494,15 @@ if(HUNDUN_BUILD_TESTS)
   set_tests_properties(test_material_density_transport_header_contract PROPERTIES
     LABELS "unit;task19" TIMEOUT 30)
 
+  hundun_add_test(test_material_density_piso_header_contract
+    tests/unit/test_material_density_piso_header_contract.cpp)
+  target_include_directories(test_material_density_piso_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_material_density_piso_header_contract PRIVATE
+    hundun_material_diagnostics hundun_flow)
+  set_tests_properties(test_material_density_piso_header_contract PROPERTIES
+    LABELS "unit;task20;task20-fast" TIMEOUT 30)
+
   hundun_add_test(test_mpi_operation_error
     tests/unit/test_mpi_operation_error.cpp)
   target_include_directories(test_mpi_operation_error PRIVATE
@@ -535,6 +546,22 @@ if(HUNDUN_BUILD_TESTS)
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task19_source_policy.cmake")
   set_tests_properties(test_task19_source_policy PROPERTIES
     LABELS "unit;source_policy;task19" TIMEOUT 30)
+
+  add_test(NAME test_task20_tests_off_header_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DHUNDUN_MPI_INCLUDE_DIRS=${task19_mpi_include_dirs}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task20_test_access_contract.cmake")
+  set_tests_properties(test_task20_tests_off_header_contract PROPERTIES
+    LABELS "unit;source_policy;task20;task20-fast" TIMEOUT 30)
+  add_test(NAME test_task20_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task20_source_policy.cmake")
+  set_tests_properties(test_task20_source_policy PROPERTIES
+    LABELS "unit;source_policy;task20;task20-fast" TIMEOUT 30)
 
   hundun_add_test(test_execution tests/unit/test_execution.cpp)
   target_include_directories(test_execution PRIVATE
@@ -760,6 +787,48 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${material_transport_test}" PROPERTIES
       LABELS "mpi;numerical;task19" TIMEOUT 120 PROCESSORS "${ranks}")
+  endforeach()
+
+  add_executable(test_material_density_piso
+    tests/mpi/test_material_density_piso.cpp)
+  target_include_directories(test_material_density_piso PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_material_density_piso PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  add_executable(test_variable_density_vortex
+    tests/mpi/test_variable_density_vortex.cpp)
+  target_include_directories(test_variable_density_vortex PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_variable_density_vortex PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  add_executable(test_material_density_piso_diagnostics
+    tests/mpi/test_material_density_piso_diagnostics.cpp)
+  target_include_directories(test_material_density_piso_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_material_density_piso_diagnostics PRIVATE
+    hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    foreach(target IN ITEMS material_density_piso
+                            variable_density_vortex
+                            material_density_piso_diagnostics)
+      set(task20_test "test_${target}_${ranks}_rank")
+      add_test(NAME "${task20_test}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_${target}>"
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${task20_test}" PROPERTIES
+        LABELS "mpi;numerical;task20;task20-fast"
+        TIMEOUT 240 PROCESSORS "${ranks}")
+    endforeach()
+    set(task20_vortex_full "test_variable_density_vortex_full_${ranks}_rank")
+    add_test(NAME "${task20_vortex_full}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_variable_density_vortex>"
+              --full ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task20_vortex_full}" PROPERTIES
+      LABELS "mpi;numerical;task20"
+      TIMEOUT 1800 PROCESSORS "${ranks}")
   endforeach()
 
   add_executable(test_material_density_wave

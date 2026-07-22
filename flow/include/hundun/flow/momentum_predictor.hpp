@@ -69,6 +69,17 @@ struct MomentumFaceHistory final {
   const runtime::FaceFieldView<const double> *face_velocity_n_minus_1;
 };
 
+struct MaterialMomentumFaceHistory final {
+  const runtime::FieldView<const double> &density_n;
+  const runtime::FieldView<const double> &velocity_n;
+  const runtime::FaceFieldView<const double> &face_density_n;
+  const runtime::FaceFieldView<const double> &face_velocity_n;
+  const runtime::FieldView<const double> *density_n_minus_1;
+  const runtime::FieldView<const double> *velocity_n_minus_1;
+  const runtime::FaceFieldView<const double> *face_density_n_minus_1;
+  const runtime::FaceFieldView<const double> *face_velocity_n_minus_1;
+};
+
 class TimeConsistentFaceVelocity final {
 public:
   static TimeConsistentFaceVelocity create(const mesh::MeshTopology &topology,
@@ -93,6 +104,16 @@ public:
       const runtime::FieldRegistry &registry, runtime::FieldStorage &storage,
       const runtime::FieldAccessPlan &access_plan, runtime::PhaseId phase,
       runtime::ActorId actor, runtime::FieldId face_mass_flux_field) const;
+
+  void assemble_material_density(
+      const boundary::BoundaryRegistry &boundaries,
+      const MomentumTimeStencil &stencil,
+      const runtime::FieldView<const double> &predictor_velocity,
+      const runtime::FieldView<const double> &mechanical_pressure,
+      const runtime::FieldView<const double> &pressure_gradient,
+      const runtime::FieldView<const double> &actual_diagonal,
+      const MaterialMomentumFaceHistory &history,
+      const runtime::FaceFieldView<double> &trial_face_velocity) const;
 
 private:
   struct Impl;

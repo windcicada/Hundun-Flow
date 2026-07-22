@@ -6,6 +6,7 @@
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "material_density_piso_test_access.hpp"
 #include "momentum_predictor_test_access.hpp"
 #endif
 #include "mpi_error.hpp"
@@ -38,6 +39,24 @@ using mesh::LocalFaceId;
 using runtime::Error;
 using runtime::Int3;
 using runtime::Real3;
+
+double material_face_value(
+    double predictor_velocity_interpolation,
+    double predictor_momentum_interpolation, double face_density,
+    double cell_momentum_n, double face_momentum_n,
+    double cell_momentum_n_minus_1, double face_momentum_n_minus_1,
+    double mobility, double dt_s, double alpha1, double alpha2,
+    double pressure_correction) noexcept {
+  static_cast<void>(predictor_velocity_interpolation);
+  const double predictor = predictor_momentum_interpolation / face_density;
+  const double discrepancy_n = face_momentum_n - cell_momentum_n;
+  const double discrepancy_old =
+      face_momentum_n_minus_1 - cell_momentum_n_minus_1;
+  const double time_correction =
+      (mobility / dt_s) *
+      ((-alpha1) * discrepancy_n + (-alpha2) * discrepancy_old);
+  return predictor + pressure_correction + time_correction;
+}
 
 constexpr std::size_t kLocalFailureCapacity = 512U;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -346,6 +365,14 @@ void validate_cell_layout(const runtime::FieldView<const double> &view,
 void validate_face_layout(const runtime::FaceFieldView<const double> &view,
                           std::size_t faces, const char *name) {
   if (view.face_count() != faces || view.components() != 3U) {
+    throw Error(std::string("momentum ") + name + " face layout is invalid");
+  }
+}
+
+void validate_scalar_face_layout(
+    const runtime::FaceFieldView<const double> &view, std::size_t faces,
+    const char *name) {
+  if (view.face_count() != faces || view.components() != 1U) {
     throw Error(std::string("momentum ") + name + " face layout is invalid");
   }
 }
@@ -1015,5 +1042,299 @@ void TimeConsistentFaceVelocity::assemble_constant_density(
     flux_writer(face.local, 0) = impl_->flux_scratch[face.local];
   }
 }
+
+void TimeConsistentFaceVelocity::assemble_material_density(
+    const boundary::BoundaryRegistry &boundaries,
+    const MomentumTimeStencil &stencil,
+    const runtime::FieldView<const double> &predictor_velocity,
+    const runtime::FieldView<const double> &mechanical_pressure,
+    const runtime::FieldView<const double> &pressure_gradient,
+    const runtime::FieldView<const double> &actual_diagonal,
+    const MaterialMomentumFaceHistory &history,
+    const runtime::FaceFieldView<double> &trial_face_velocity) const {
+  if (!impl_)
+    throw Error("momentum face object has been moved from");
+  OperationGuard operation(impl_->active);
+  const auto expected = make_momentum_time_stencil(stencil.order, stencil.dt_s,
+                                                   stencil.previous_dt_s);
+  if (stencil.order != expected.order || stencil.dt_s != expected.dt_s ||
+      stencil.previous_dt_s != expected.previous_dt_s ||
+      stencil.alpha0 != expected.alpha0 || stencil.alpha1 != expected.alpha1 ||
+      stencil.alpha2 != expected.alpha2) {
+    throw Error("momentum time stencil coefficients are inconsistent");
+  }
+
+  const bool bdf2 = stencil.order == MomentumTimeOrder::bdf2;
+  const bool complete_old = history.density_n_minus_1 != nullptr &&
+                            history.velocity_n_minus_1 != nullptr &&
+                            history.face_density_n_minus_1 != nullptr &&
+                            history.face_velocity_n_minus_1 != nullptr;
+  const bool any_old = history.density_n_minus_1 != nullptr ||
+                       history.velocity_n_minus_1 != nullptr ||
+                       history.face_density_n_minus_1 != nullptr ||
+                       history.face_velocity_n_minus_1 != nullptr;
+  if ((bdf2 && !complete_old) || (!bdf2 && any_old)) {
+    throw Error("material momentum history does not match the time order");
+  }
+
+  const int ghost = impl_->needs_ghost ? 1 : 0;
+  validate_cell_layout(predictor_velocity, impl_->local_extent, 3U, ghost,
+                       "predictor velocity");
+  validate_cell_layout(mechanical_pressure, impl_->local_extent, 1U, ghost,
+                       "mechanical pressure");
+  validate_cell_layout(pressure_gradient, impl_->local_extent, 3U, ghost,
+                       "pressure gradient");
+  validate_cell_layout(actual_diagonal, impl_->local_extent, 3U, ghost,
+                       "actual diagonal");
+  validate_cell_layout(history.density_n, impl_->local_extent, 1U, ghost,
+                       "history n density");
+  validate_cell_layout(history.velocity_n, impl_->local_extent, 3U, ghost,
+                       "history n velocity");
+  validate_scalar_face_layout(history.face_density_n, impl_->faces.size(),
+                              "history n density");
+  validate_face_layout(history.face_velocity_n, impl_->faces.size(),
+                       "history n");
+  if (bdf2) {
+    validate_cell_layout(*history.density_n_minus_1, impl_->local_extent, 1U,
+                         ghost, "history n-1 density");
+    validate_cell_layout(*history.velocity_n_minus_1, impl_->local_extent, 3U,
+                         ghost, "history n-1 velocity");
+    validate_scalar_face_layout(*history.face_density_n_minus_1,
+                                impl_->faces.size(), "history n-1 density");
+    validate_face_layout(*history.face_velocity_n_minus_1, impl_->faces.size(),
+                         "history n-1");
+  }
+  if (trial_face_velocity.face_count() != impl_->faces.size() ||
+      trial_face_velocity.components() != 3U) {
+    throw Error("momentum face output layout is invalid");
+  }
+  if (!impl_->faces.empty())
+    static_cast<void>(trial_face_velocity(0U, 0));
+
+  for (int k = 0; k < impl_->local_extent.z; ++k) {
+    for (int j = 0; j < impl_->local_extent.y; ++j) {
+      for (int i = 0; i < impl_->local_extent.x; ++i) {
+        const StructuredIndex cell{i, j, k};
+        const double pressure = value_at(mechanical_pressure, cell, 0);
+        const double density = value_at(history.density_n, cell, 0);
+        if (!std::isfinite(pressure) || !(density > 0.0) ||
+            !std::isfinite(density)) {
+          throw Error("material momentum owned scalar input is invalid");
+        }
+        if (bdf2) {
+          const double old_density =
+              value_at(*history.density_n_minus_1, cell, 0);
+          if (!(old_density > 0.0) || !std::isfinite(old_density)) {
+            throw Error("material momentum old density is invalid");
+          }
+        }
+        for (int direction = 0; direction < 3; ++direction) {
+          const double predictor =
+              value_at(predictor_velocity, cell, direction);
+          const double gradient = value_at(pressure_gradient, cell, direction);
+          const double diagonal = value_at(actual_diagonal, cell, direction);
+          const double velocity = value_at(history.velocity_n, cell, direction);
+          if (!std::isfinite(predictor) || !std::isfinite(gradient) ||
+              !std::isfinite(velocity) || !(diagonal > 0.0) ||
+              !std::isfinite(diagonal)) {
+            throw Error("material momentum owned vector input is invalid");
+          }
+          if (bdf2 &&
+              !std::isfinite(value_at(*history.velocity_n_minus_1, cell,
+                                      direction))) {
+            throw Error("material momentum old velocity is non-finite");
+          }
+        }
+      }
+    }
+  }
+  for (const FaceStencil &face : impl_->faces) {
+    const double density = history.face_density_n(face.local, 0);
+    if (!(density > 0.0) || !std::isfinite(density)) {
+      throw Error("material momentum face density is invalid");
+    }
+    if (bdf2) {
+      const double old_density =
+          (*history.face_density_n_minus_1)(face.local, 0);
+      if (!(old_density > 0.0) || !std::isfinite(old_density)) {
+        throw Error("material momentum old face density is invalid");
+      }
+    }
+    for (int direction = 0; direction < 3; ++direction) {
+      if (!std::isfinite(history.face_velocity_n(face.local, direction)) ||
+          (bdf2 &&
+           !std::isfinite((*history.face_velocity_n_minus_1)(face.local,
+                                                              direction)))) {
+        throw Error("material momentum face velocity history is non-finite");
+      }
+    }
+  }
+
+  for (const FaceStencil &face : impl_->faces) {
+    if (face.local_periodic_partner.has_value() &&
+        face.periodic_pair.has_value() && face.global > *face.periodic_pair) {
+      continue;
+    }
+    if (!face.has_neighbour) {
+      const Real3 interior{
+          value_at(predictor_velocity, face.physical_owner, 0),
+          value_at(predictor_velocity, face.physical_owner, 1),
+          value_at(predictor_velocity, face.physical_owner, 2)};
+      if (!finite(interior) || !face.patch.has_value()) {
+        throw Error("physical material momentum face state is invalid");
+      }
+      const auto values = boundaries.evaluate_velocity(
+          *face.patch, interior, face.physical_owner_area);
+      if (!finite(values.face)) {
+        throw Error("physical material momentum face velocity is non-finite");
+      }
+      impl_->velocity_scratch[face.local * 3U] = values.face.x;
+      impl_->velocity_scratch[face.local * 3U + 1U] = values.face.y;
+      impl_->velocity_scratch[face.local * 3U + 2U] = values.face.z;
+      continue;
+    }
+    if (face.periodic_pair.has_value() &&
+        (!face.patch.has_value() ||
+         boundaries.patch(*face.patch).mass_flux_rule() !=
+             boundary::MassFluxRule::periodic_pair)) {
+      throw Error("periodic material momentum face identity is invalid");
+    }
+
+    const double pi_p = value_at(mechanical_pressure, face.p, 0);
+    const double pi_n = value_at(mechanical_pressure, face.n, 0);
+    if (!std::isfinite(pi_p) || !std::isfinite(pi_n)) {
+      throw Error("material momentum pressure input is non-finite");
+    }
+    Real3 gradient{};
+    for (int direction = 0; direction < 3; ++direction) {
+      const double p = value_at(pressure_gradient, face.p, direction);
+      const double n = value_at(pressure_gradient, face.n, direction);
+      const double value = interpolate(face.weight_p, p, face.weight_n, n);
+      if (!std::isfinite(p) || !std::isfinite(n) || !std::isfinite(value)) {
+        throw Error("material momentum pressure gradient is non-finite");
+      }
+      if (direction == 0)
+        gradient.x = value;
+      if (direction == 1)
+        gradient.y = value;
+      if (direction == 2)
+        gradient.z = value;
+    }
+    const double pressure_defect =
+        (pi_n - pi_p - dot(gradient, face.displacement)) /
+        face.normal_distance;
+    if (!std::isfinite(pressure_defect)) {
+      throw Error("material momentum pressure defect is non-finite");
+    }
+
+    Real3 trial{};
+    for (int direction = 0; direction < 3; ++direction) {
+      const double diagonal_p = value_at(actual_diagonal, face.p, direction);
+      const double diagonal_n = value_at(actual_diagonal, face.n, direction);
+      if (!(diagonal_p > 0.0) || !(diagonal_n > 0.0) ||
+          !std::isfinite(diagonal_p) || !std::isfinite(diagonal_n)) {
+        throw Error("material momentum diagonal is invalid");
+      }
+      const double lambda = face.weight_p * (diagonal_p / face.volume_p) +
+                            face.weight_n * (diagonal_n / face.volume_n);
+      if (!(lambda > 0.0) || !std::isfinite(lambda)) {
+        throw Error("material momentum face diagonal density is invalid");
+      }
+      const double mobility = 1.0 / lambda;
+      const double predictor_momentum_p =
+          value_at(history.density_n, face.p, 0) *
+          value_at(predictor_velocity, face.p, direction);
+      const double predictor_momentum_n =
+          value_at(history.density_n, face.n, 0) *
+          value_at(predictor_velocity, face.n, direction);
+      const double predictor_velocity_interpolation = interpolate(
+          face.weight_p, value_at(predictor_velocity, face.p, direction),
+          face.weight_n, value_at(predictor_velocity, face.n, direction));
+      const double predictor_momentum_interpolation =
+          interpolate(face.weight_p, predictor_momentum_p, face.weight_n,
+                      predictor_momentum_n);
+
+      const double momentum_p = value_at(history.density_n, face.p, 0) *
+                                value_at(history.velocity_n, face.p, direction);
+      const double momentum_n = value_at(history.density_n, face.n, 0) *
+                                value_at(history.velocity_n, face.n, direction);
+      const double cell_momentum =
+          interpolate(face.weight_p, momentum_p, face.weight_n, momentum_n);
+      const double face_momentum = history.face_density_n(face.local, 0) *
+                                   history.face_velocity_n(face.local,
+                                                           direction);
+      double old_cell = 0.0;
+      double old_face = 0.0;
+      if (bdf2) {
+        const double old_p =
+            value_at(*history.density_n_minus_1, face.p, 0) *
+            value_at(*history.velocity_n_minus_1, face.p, direction);
+        const double old_n =
+            value_at(*history.density_n_minus_1, face.n, 0) *
+            value_at(*history.velocity_n_minus_1, face.n, direction);
+        old_cell =
+            interpolate(face.weight_p, old_p, face.weight_n, old_n);
+        old_face =
+            (*history.face_density_n_minus_1)(face.local, 0) *
+            (*history.face_velocity_n_minus_1)(face.local, direction);
+      }
+      const double pressure_correction =
+          -mobility * pressure_defect * component(face.unit_normal, direction);
+      const double value = material_face_value(
+          predictor_velocity_interpolation, predictor_momentum_interpolation,
+          history.face_density_n(face.local, 0), cell_momentum, face_momentum,
+          old_cell, old_face, mobility, stencil.dt_s, stencil.alpha1,
+          stencil.alpha2, pressure_correction);
+      if (!std::isfinite(value)) {
+        throw Error("time-consistent material face velocity is non-finite");
+      }
+      if (direction == 0)
+        trial.x = value;
+      if (direction == 1)
+        trial.y = value;
+      if (direction == 2)
+        trial.z = value;
+    }
+    impl_->velocity_scratch[face.local * 3U] = trial.x;
+    impl_->velocity_scratch[face.local * 3U + 1U] = trial.y;
+    impl_->velocity_scratch[face.local * 3U + 2U] = trial.z;
+  }
+
+  for (const FaceStencil &face : impl_->faces) {
+    if (!face.local_periodic_partner.has_value() ||
+        !face.periodic_pair.has_value() || face.global < *face.periodic_pair) {
+      continue;
+    }
+    const LocalFaceId representative = *face.local_periodic_partner;
+    for (std::size_t direction = 0; direction < 3U; ++direction) {
+      impl_->velocity_scratch[face.local * 3U + direction] =
+          impl_->velocity_scratch[representative * 3U + direction];
+    }
+  }
+
+  for (const FaceStencil &face : impl_->faces) {
+    for (int direction = 0; direction < 3; ++direction) {
+      trial_face_velocity(face.local, direction) =
+          impl_->velocity_scratch[face.local * 3U +
+                                  static_cast<std::size_t>(direction)];
+    }
+  }
+}
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+double test::MaterialDensityPisoTestAccess::material_face_value(
+    double predictor_velocity_interpolation,
+    double predictor_momentum_interpolation, double face_density,
+    double cell_momentum_n, double face_momentum_n,
+    double cell_momentum_n_minus_1, double face_momentum_n_minus_1,
+    double mobility, double dt_s, double alpha1, double alpha2,
+    double pressure_correction) noexcept {
+  return ::hundun::flow::material_face_value(
+      predictor_velocity_interpolation, predictor_momentum_interpolation,
+      face_density, cell_momentum_n, face_momentum_n,
+      cell_momentum_n_minus_1, face_momentum_n_minus_1, mobility, dt_s,
+      alpha1, alpha2, pressure_correction);
+}
+#endif
 
 } // namespace hundun::flow

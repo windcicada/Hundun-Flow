@@ -31,6 +31,8 @@ namespace hundun::flow {
 
 class FlowState;
 struct FlowFieldIds;
+class FixedStepMaterialDensityFlow;
+class MaterialDensityStepAttemptReport;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class MaterialDensityTransportTestAccess;
@@ -68,6 +70,7 @@ private:
   explicit MaterialFaceMassFlux(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityTransport;
+  friend class FixedStepMaterialDensityFlow;
 };
 
 struct MaterialDensityTransportSpec final {
@@ -161,6 +164,7 @@ private:
 
   friend class MaterialDensityTransport;
   friend class MaterialDensityDiagnosticSource;
+  friend class MaterialDensityStepAttemptReport;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
 #endif
@@ -195,10 +199,20 @@ public:
                     const MaterialDensityTransportReport &report) const;
 
 private:
+  struct StagingResult final {
+    MaterialTransportDisposition disposition{
+        MaterialTransportDisposition::non_retryable_failure};
+    MaterialTransportFailureReason reason{
+        MaterialTransportFailureReason::invalid_input};
+    int lowest_failing_rank{-1};
+  };
+  StagingResult stage_trial(FlowState &, const MaterialFaceMassFlux &,
+                            const MomentumTimeStencil &) const;
   struct Impl;
   explicit MaterialDensityTransport(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityDiagnosticSource;
+  friend class FixedStepMaterialDensityFlow;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
 #endif

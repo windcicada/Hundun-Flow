@@ -2,6 +2,8 @@
 
 #include "hundun/flow/constant_density_piso.hpp"
 
+#include "fixed_step_flow_detail.hpp"
+
 #include "hundun/finite_volume/matrix_free_poisson.hpp"
 #include "hundun/finite_volume/poisson_boundary_adapter.hpp"
 #include "hundun/linear/ghosted_vector.hpp"
@@ -31,18 +33,6 @@
 #include <vector>
 
 namespace hundun::flow {
-
-struct detail::FlowStateSolverAccess final {
-  static const runtime::FieldRegistry &registry(const FlowState &state) {
-    return state.solver_registry();
-  }
-  static const runtime::FieldAccessPlan &access(const FlowState &state) {
-    return state.solver_access_plan();
-  }
-  static runtime::FieldStorage &layer(FlowState &state, FlowLayer selected) {
-    return state.solver_layer(selected);
-  }
-};
 
 namespace {
 
@@ -616,7 +606,16 @@ struct PisoCoupler::Impl final {
         face_velocity_candidate(multiplied_count(
             supplied_topology.local_face_count(), 3U,
             "Task 18 corrected face-velocity workspace")),
-        mass_flux_candidate(supplied_topology.local_face_count()) {}
+        mass_flux_candidate(supplied_topology.local_face_count()),
+        material_face_density(supplied_topology.local_face_count()),
+        material_rhs_raw(supplied_topology.owned_cell_count()),
+        material_rhs_solve(supplied_topology.owned_cell_count()),
+        material_correction(supplied_topology.owned_cell_count()),
+        material_diagonal(multiplied_count(
+            supplied_topology.local_cell_count(), 3U,
+            "material pressure diagonal workspace")),
+        material_periodic_gamma(supplied_topology.global_face_count()),
+        material_periodic_count(supplied_topology.global_face_count()) {}
 
   const runtime::StructuredDecomposition *decomposition;
   const mesh::MeshTopology *topology;
@@ -639,6 +638,19 @@ struct PisoCoupler::Impl final {
   std::vector<double> pressure_candidate;
   std::vector<double> face_velocity_candidate;
   std::vector<double> mass_flux_candidate;
+  std::vector<double> material_face_density;
+  std::vector<double> material_rhs_raw;
+  std::vector<double> material_rhs_solve;
+  std::vector<double> material_correction;
+  std::vector<double> material_diagonal;
+  std::vector<double> material_periodic_gamma;
+  std::vector<double> material_periodic_count;
+  const FlowState *material_state{};
+  std::uint64_t material_attempt_identity{};
+  std::uint32_t material_ordinal{};
+  bool material_token_available{};
+  double material_rhs_l2{};
+  linear::SolveControl material_control{};
   std::optional<finite_volume::MatrixFreePoissonOperator> pressure_operator;
   std::optional<finite_volume::PoissonConstraint> constraint;
 };
@@ -672,8 +684,9 @@ PisoCoupler::PisoCoupler(std::unique_ptr<Impl> impl) noexcept
 PisoCoupler::~PisoCoupler() noexcept = default;
 PisoCoupler::PisoCoupler(PisoCoupler &&) noexcept = default;
 
-PressureCorrectionReport PisoCoupler::correct_throwing(
+PressureCorrectionReport PisoCoupler::correct_common_throwing(
     FlowState &state, double rho_ref,
+    const MomentumTimeStencil *material_stencil,
     const runtime::FieldView<const double> &actual_momentum_diagonal,
     const linear::SolveControl &control,
     PressureCorrectionReport &result) const {
@@ -687,8 +700,31 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
         if (!state.attempt_active()) {
           throw runtime::Error("pressure correction requires an active trial");
         }
-        if (!(rho_ref > 0.0) || !std::isfinite(rho_ref)) {
+        if (material_stencil == nullptr &&
+            (!(rho_ref > 0.0) || !std::isfinite(rho_ref))) {
           throw runtime::Error("pressure correction density is invalid");
+        }
+        if (material_stencil != nullptr) {
+          const auto expected = make_momentum_time_stencil(
+              material_stencil->order, material_stencil->dt_s,
+              material_stencil->previous_dt_s);
+          if (expected.alpha0 != material_stencil->alpha0 ||
+              expected.alpha1 != material_stencil->alpha1 ||
+              expected.alpha2 != material_stencil->alpha2) {
+            throw runtime::Error(
+                "material pressure correction stencil is inconsistent");
+          }
+          if (impl_->material_state != &state ||
+              impl_->material_attempt_identity != state.attempt_identity()) {
+            impl_->material_state = &state;
+            impl_->material_attempt_identity = state.attempt_identity();
+            impl_->material_ordinal = 0U;
+            impl_->material_token_available = false;
+          }
+          if (impl_->material_ordinal >= 2U) {
+            throw runtime::Error(
+                "material pressure correction count exceeds two");
+          }
         }
         if (actual_momentum_diagonal.interior_extent().x != local_extent.x ||
             actual_momentum_diagonal.interior_extent().y != local_extent.y ||
@@ -735,6 +771,54 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
         zero_cell(mass_residual);
         impl_->fvm.accumulate_mass_residual(mass, mass_residual);
 
+        if (material_stencil != nullptr) {
+          const auto rho_trial = trial.acquire_read<double>(
+              access, kStatePhase, kStateActor, fields.density);
+          const auto rho_n = state.solver_layer(FlowLayer::committed)
+                                 .acquire_read<double>(
+                                     access, kStatePhase, kStateActor,
+                                     fields.density);
+          const auto rho_nm1 = state.solver_layer(FlowLayer::history)
+                                   .acquire_read<double>(
+                                       access, kStatePhase, kStateActor,
+                                       fields.density);
+          auto face_density =
+              impl_->scratch.storage->acquire_face_write<double>(
+                  *impl_->scratch.access, kScratchPhase, kScratchActor,
+                  impl_->scratch.scalar_face);
+          impl_->fvm.reconstruct_transport_faces(
+              finite_volume::FiniteVolumeQuantity::density(),
+              *impl_->boundaries, mass, rho_trial, face_density);
+          for (LocalFaceId face = 0;
+               face < impl_->topology->local_face_count(); ++face) {
+            const double value = face_density(face, 0);
+            if (!(value > 0.0) || !std::isfinite(value)) {
+              throw runtime::Error(
+                  "material pressure face density is invalid");
+            }
+            impl_->material_face_density[face] = value;
+          }
+          for (LocalCellId cell = 0; cell < count; ++cell) {
+            const StructuredIndex index = map_cell(
+                impl_->topology->global_cell(cell), owned, global_extent);
+            const double temporal =
+                (material_stencil->alpha0 *
+                     at(rho_trial, index, 0) +
+                 material_stencil->alpha1 * at(rho_n, index, 0) +
+                 material_stencil->alpha2 * at(rho_nm1, index, 0)) *
+                impl_->geometry->cell_volume_m3(cell) /
+                material_stencil->dt_s;
+            if (!std::isfinite(temporal)) {
+              throw runtime::Error(
+                  "material pressure temporal residual is non-finite");
+            }
+            mass_residual(index.i, index.j, index.k, 0) += temporal;
+          }
+        } else {
+          std::fill(impl_->material_face_density.begin(),
+                    impl_->material_face_density.end(), rho_ref);
+        }
+
         auto gamma = impl_->gamma.view(0U, impl_->topology->local_face_count());
         for (LocalFaceId face = 0; face < impl_->topology->local_face_count();
              ++face) {
@@ -770,23 +854,28 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
                     "diagonal");
               }
             }
-            const Real3 face_center = impl_->geometry->face_center_m(face);
-            const Real3 owner_center = impl_->geometry->cell_center_m(owner);
-            const Real3 neighbour_center =
-                impl_->geometry->cell_center_m(*neighbour);
-            const double owner_distance =
-                std::sqrt(dot(subtract(face_center, owner_center),
-                              subtract(face_center, owner_center)));
-            const double neighbour_distance =
-                std::sqrt(dot(subtract(neighbour_center, face_center),
-                              subtract(neighbour_center, face_center)));
-            const double total = owner_distance + neighbour_distance;
-            if (!(total > 0.0) || !std::isfinite(total)) {
-              throw runtime::Error(
-                  "pressure correction face weights are invalid");
+            if (material_stencil != nullptr &&
+                impl_->topology->periodic_pair(face).has_value()) {
+              lambda = 0.5 * (owner_rate + neighbour_rate);
+            } else {
+              const Real3 face_center = impl_->geometry->face_center_m(face);
+              const Real3 owner_center = impl_->geometry->cell_center_m(owner);
+              const Real3 neighbour_center =
+                  impl_->geometry->cell_center_m(*neighbour);
+              const double owner_distance =
+                  std::sqrt(dot(subtract(face_center, owner_center),
+                                subtract(face_center, owner_center)));
+              const double neighbour_distance =
+                  std::sqrt(dot(subtract(neighbour_center, face_center),
+                                subtract(neighbour_center, face_center)));
+              const double total = owner_distance + neighbour_distance;
+              if (!(total > 0.0) || !std::isfinite(total)) {
+                throw runtime::Error(
+                    "pressure correction face weights are invalid");
+              }
+              lambda = (neighbour_distance / total) * owner_rate +
+                       (owner_distance / total) * neighbour_rate;
             }
-            lambda = (neighbour_distance / total) * owner_rate +
-                     (owner_distance / total) * neighbour_rate;
           } else {
             for (int component_index = 0; component_index < 3;
                  ++component_index) {
@@ -803,9 +892,62 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
             throw runtime::Error(
                 "pressure correction face mobility is invalid");
           }
-          gamma[face] = rho_ref / lambda;
+          gamma[face] = impl_->material_face_density[face] / lambda;
+        }
+        if (material_stencil != nullptr) {
+          for (LocalFaceId face = 0;
+               face < impl_->topology->local_face_count(); ++face) {
+            const auto pair_global = impl_->topology->periodic_pair(face);
+            if (!pair_global ||
+                impl_->topology->global_face_id(face) < *pair_global)
+              continue;
+            const auto pair = impl_->topology->find_local_face(*pair_global);
+            if (pair)
+              gamma[face] = gamma[*pair];
+          }
         }
       });
+
+  if (material_stencil != nullptr) {
+    std::fill(impl_->material_periodic_gamma.begin(),
+              impl_->material_periodic_gamma.end(), 0.0);
+    std::fill(impl_->material_periodic_count.begin(),
+              impl_->material_periodic_count.end(), 0.0);
+    auto gamma = impl_->gamma.view(0U, impl_->topology->local_face_count());
+    for (LocalFaceId face = 0; face < impl_->topology->local_face_count();
+         ++face) {
+      const auto pair = impl_->topology->periodic_pair(face);
+      const auto global = impl_->topology->global_face_id(face);
+      if (!pair || global > *pair ||
+          impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
+              EntityOwnership::owned)
+        continue;
+      const std::size_t key = static_cast<std::size_t>(global);
+      impl_->material_periodic_gamma[key] += gamma[face];
+      impl_->material_periodic_count[key] += 1.0;
+    }
+    impl_->mpi->allreduce_fp64_in_place(
+        impl_->material_periodic_gamma.data(),
+        impl_->material_periodic_gamma.size(),
+        runtime::Fp64ReductionOperation::sum);
+    impl_->mpi->allreduce_fp64_in_place(
+        impl_->material_periodic_count.data(),
+        impl_->material_periodic_count.size(),
+        runtime::Fp64ReductionOperation::sum);
+    for (LocalFaceId face = 0; face < impl_->topology->local_face_count();
+         ++face) {
+      const auto pair = impl_->topology->periodic_pair(face);
+      if (!pair)
+        continue;
+      const std::size_t key = static_cast<std::size_t>(
+          std::min(impl_->topology->global_face_id(face), *pair));
+      const double count_value = impl_->material_periodic_count[key];
+      if (!(count_value > 0.0) || !std::isfinite(count_value))
+        throw runtime::Error(
+            "material periodic pressure coefficient is unavailable");
+      gamma[face] = impl_->material_periodic_gamma[key] / count_value;
+    }
+  }
 
   finite_volume::PoissonBoundarySpec boundary_spec;
   synchronized_local_phase(*impl_->mpi, StepFailureReason::invalid_input, false,
@@ -896,6 +1038,8 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
           const StructuredIndex index = map_cell(global, owned, global_extent);
           (*rhs)[cell] = -mass_residual(index.i, index.j, index.k, 0) /
                          impl_->geometry->cell_volume_m3(cell);
+          if (material_stencil != nullptr)
+            impl_->material_rhs_raw[cell] = (*rhs)[cell];
           (*correction)[cell] = 0.0;
           if (!std::isfinite((*rhs)[cell])) {
             throw runtime::Error("Task 18 pressure RHS is non-finite");
@@ -903,6 +1047,10 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
         }
       });
   impl_->constraint->project_rhs(*rhs);
+  if (material_stencil != nullptr) {
+    for (std::size_t cell = 0; cell < count; ++cell)
+      impl_->material_rhs_solve[cell] = (*rhs)[cell];
+  }
   impl_->constraint->normalize_solution(*correction);
   synchronized_local_phase(
       *impl_->mpi, StepFailureReason::invalid_input, false,
@@ -1070,7 +1218,8 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
             if (correct_face)
               neighbour_value = 0.0;
           }
-          const double lambda_inverse = gamma_read[face] / rho_ref;
+          const double lambda_inverse =
+              gamma_read[face] / impl_->material_face_density[face];
           double flux_delta = 0.0;
           Real3 velocity_delta{};
           if (correct_face) {
@@ -1131,8 +1280,15 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
       });
   impl_->mpi->allreduce_fp64_in_place(roundoff_scales, 3U,
                                       runtime::Fp64ReductionOperation::maximum);
+  double density_scale = rho_ref;
+  if (material_stencil != nullptr) {
+    density_scale = 0.0;
+    for (const double value : impl_->material_face_density)
+      density_scale = std::max(density_scale, value);
+  }
   const double flux_roundoff = 256.0 * std::numeric_limits<double>::epsilon() *
-                               rho_ref * std::max(1.0, roundoff_scales[1]);
+                               density_scale *
+                               std::max(1.0, roundoff_scales[1]);
   if (roundoff_scales[0] <= flux_roundoff &&
       roundoff_scales[2] <= 256.0 * std::numeric_limits<double>::epsilon()) {
     std::fill(mass_flux_candidate.begin(), mass_flux_candidate.end(), 0.0);
@@ -1187,7 +1343,34 @@ PressureCorrectionReport PisoCoupler::correct_throwing(
   result.reason = StepFailureReason::none;
   result.lowest_failing_rank = -1;
   result.accepted = true;
+  if (material_stencil != nullptr) {
+    ++impl_->material_ordinal;
+    impl_->material_token_available = impl_->material_ordinal == 2U;
+    impl_->material_rhs_l2 = result.rhs_l2;
+    impl_->material_control = control;
+    for (std::size_t cell = 0; cell < count; ++cell) {
+      impl_->material_correction[cell] = (*correction)[cell];
+    }
+    for (LocalCellId cell = 0; cell < impl_->topology->local_cell_count();
+         ++cell) {
+      const StructuredIndex index = map_cell(
+          impl_->topology->global_cell(cell), owned, global_extent);
+      for (int direction = 0; direction < 3; ++direction)
+        impl_->material_diagonal[cell * 3U +
+                                 static_cast<std::size_t>(direction)] =
+            at(actual_momentum_diagonal, index, direction);
+    }
+  }
   return result;
+}
+
+PressureCorrectionReport PisoCoupler::correct_throwing(
+    FlowState &state, double rho_ref,
+    const runtime::FieldView<const double> &actual_momentum_diagonal,
+    const linear::SolveControl &control,
+    PressureCorrectionReport &result) const {
+  return correct_common_throwing(state, rho_ref, nullptr,
+                                 actual_momentum_diagonal, control, result);
 }
 
 PressureCorrectionReport PisoCoupler::correct(
@@ -1218,6 +1401,236 @@ PressureCorrectionReport PisoCoupler::correct(
         std::move(result), PressureCorrectionDisposition::non_retryable_failure,
         StepFailureReason::invalid_input, -1);
   }
+}
+
+PressureCorrectionReport PisoCoupler::correct_material_density(
+    FlowState &state, const MomentumTimeStencil &stencil,
+    const runtime::FieldView<const double> &actual_momentum_diagonal,
+    const linear::SolveControl &control) const {
+  PressureCorrectionReport result;
+  if (!impl_)
+    return correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::invalid_input, -1);
+  try {
+    result = correct_common_throwing(state, 1.0, &stencil,
+                                     actual_momentum_diagonal, control, result);
+  } catch (const SynchronizedAttemptFailure &failure) {
+    result = correction_failure(
+        std::move(result),
+        failure.recoverable
+            ? PressureCorrectionDisposition::recoverable_failure
+            : PressureCorrectionDisposition::non_retryable_failure,
+        failure.reason, failure.failing_rank);
+  } catch (const runtime::detail::MpiOperationError &) {
+    result = correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::collective_operation, -1);
+  } catch (const runtime::Error &) {
+    result = correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::invalid_input, -1);
+  } catch (...) {
+    result = correction_failure(
+        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::invalid_input, -1);
+  }
+  if (!result.accepted)
+    impl_->material_token_available = false;
+  return result;
+}
+
+PisoCoupler::MaterialPressureAssessment
+PisoCoupler::assess_final_material_density_pressure(
+    FlowState &state, const MomentumTimeStencil &stencil,
+    const linear::SolveControl &control) const {
+  MaterialPressureAssessment result;
+  if (!impl_)
+    return result;
+  try {
+    const std::size_t count = impl_->topology->owned_cell_count();
+    synchronized_local_phase(
+        *impl_->mpi, StepFailureReason::invalid_input, false,
+        "material final pressure token validation failed", [&] {
+          const auto expected = make_momentum_time_stencil(
+              stencil.order, stencil.dt_s, stencil.previous_dt_s);
+          if (!state.attempt_active() || impl_->material_state != &state ||
+              impl_->material_attempt_identity != state.attempt_identity() ||
+              impl_->material_ordinal != 2U ||
+              !impl_->material_token_available ||
+              expected.alpha0 != stencil.alpha0 ||
+              expected.alpha1 != stencil.alpha1 ||
+              expected.alpha2 != stencil.alpha2 ||
+              control.atol != impl_->material_control.atol ||
+              control.rtol != impl_->material_control.rtol ||
+              control.max_iterations !=
+                  impl_->material_control.max_iterations ||
+              control.residual_recompute_interval !=
+                  impl_->material_control.residual_recompute_interval) {
+            throw runtime::Error("material final pressure token is stale");
+          }
+        });
+
+    auto &trial = state.solver_layer(FlowLayer::trial);
+    const auto &access = state.solver_access_plan();
+    const auto fields = state.fields();
+    synchronized_local_phase(
+        *impl_->mpi, StepFailureReason::invalid_input, false,
+        "material final pressure coefficient refresh failed", [&] {
+          const auto mass = finite_volume::FaceMassFlux::acquire(
+              state.solver_registry(), trial, access, kStatePhase,
+              kStateActor, fields.face_mass_flux, *impl_->topology);
+          const auto density = trial.acquire_read<double>(
+              access, kStatePhase, kStateActor, fields.density);
+          auto face_density =
+              impl_->scratch.storage->acquire_face_write<double>(
+                  *impl_->scratch.access, kScratchPhase, kScratchActor,
+                  impl_->scratch.scalar_face);
+          impl_->fvm.reconstruct_transport_faces(
+              finite_volume::FiniteVolumeQuantity::density(),
+              *impl_->boundaries, mass, density, face_density);
+          auto gamma = impl_->gamma.view(0U,
+                                         impl_->topology->local_face_count());
+          for (LocalFaceId face = 0;
+               face < impl_->topology->local_face_count(); ++face) {
+            const double density_face = face_density(face, 0);
+            const LocalCellId owner = impl_->topology->owner(face);
+            const double owner_volume =
+                impl_->geometry->cell_volume_m3(owner);
+            const double owner_rate =
+                impl_->material_diagonal[owner * 3U] / owner_volume;
+            double lambda = owner_rate;
+            const auto neighbour = impl_->topology->neighbour(face);
+            if (neighbour.has_value()) {
+              const double neighbour_volume =
+                  impl_->geometry->cell_volume_m3(*neighbour);
+              const double neighbour_rate =
+                  impl_->material_diagonal[*neighbour * 3U] /
+                  neighbour_volume;
+              if (impl_->topology->periodic_pair(face).has_value()) {
+                lambda = 0.5 * (owner_rate + neighbour_rate);
+              } else {
+                const Real3 face_center =
+                    impl_->geometry->face_center_m(face);
+                const Real3 owner_center =
+                    impl_->geometry->cell_center_m(owner);
+                const Real3 neighbour_center =
+                    impl_->geometry->cell_center_m(*neighbour);
+                const double owner_distance =
+                    std::sqrt(dot(subtract(face_center, owner_center),
+                                  subtract(face_center, owner_center)));
+                const double neighbour_distance = std::sqrt(dot(
+                    subtract(neighbour_center, face_center),
+                    subtract(neighbour_center, face_center)));
+                lambda =
+                    (neighbour_distance * owner_rate +
+                     owner_distance * neighbour_rate) /
+                    (owner_distance + neighbour_distance);
+              }
+            }
+            if (!(density_face > 0.0) || !(lambda > 0.0) ||
+                !std::isfinite(density_face) || !std::isfinite(lambda)) {
+              throw runtime::Error(
+                  "material final pressure coefficient is invalid");
+            }
+            gamma[face] = density_face / lambda;
+          }
+        });
+    std::fill(impl_->material_periodic_gamma.begin(),
+              impl_->material_periodic_gamma.end(), 0.0);
+    std::fill(impl_->material_periodic_count.begin(),
+              impl_->material_periodic_count.end(), 0.0);
+    auto final_gamma =
+        impl_->gamma.view(0U, impl_->topology->local_face_count());
+    for (LocalFaceId face = 0; face < impl_->topology->local_face_count();
+         ++face) {
+      const auto pair = impl_->topology->periodic_pair(face);
+      const auto global = impl_->topology->global_face_id(face);
+      if (!pair || global > *pair ||
+          impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
+              EntityOwnership::owned)
+        continue;
+      const std::size_t key = static_cast<std::size_t>(global);
+      impl_->material_periodic_gamma[key] += final_gamma[face];
+      impl_->material_periodic_count[key] += 1.0;
+    }
+    impl_->mpi->allreduce_fp64_in_place(
+        impl_->material_periodic_gamma.data(),
+        impl_->material_periodic_gamma.size(),
+        runtime::Fp64ReductionOperation::sum);
+    impl_->mpi->allreduce_fp64_in_place(
+        impl_->material_periodic_count.data(),
+        impl_->material_periodic_count.size(),
+        runtime::Fp64ReductionOperation::sum);
+    for (LocalFaceId face = 0; face < impl_->topology->local_face_count();
+         ++face) {
+      const auto pair = impl_->topology->periodic_pair(face);
+      if (!pair)
+        continue;
+      const std::size_t key = static_cast<std::size_t>(
+          std::min(impl_->topology->global_face_id(face), *pair));
+      const double count_value = impl_->material_periodic_count[key];
+      if (!(count_value > 0.0) || !std::isfinite(count_value))
+        throw runtime::Error(
+            "material final periodic pressure coefficient is unavailable");
+      final_gamma[face] =
+          impl_->material_periodic_gamma[key] / count_value;
+    }
+    const auto boundary_spec =
+        finite_volume::make_poisson_boundary_spec(*impl_->boundaries);
+    auto final_operator = finite_volume::MatrixFreePoissonOperator::create(
+        *impl_->decomposition, *impl_->topology, *impl_->geometry,
+        *impl_->execution,
+        static_cast<const execution::Buffer &>(impl_->gamma)
+            .view(0U, impl_->topology->local_face_count()),
+        boundary_spec);
+    auto rhs = impl_->rhs.view(0U, count);
+    auto correction = impl_->correction.view(0U, count);
+    auto residual = impl_->residual.view(0U, count);
+    for (std::size_t cell = 0; cell < count; ++cell) {
+      rhs[cell] = impl_->material_rhs_solve[cell];
+      correction[cell] = impl_->material_correction[cell];
+    }
+    final_operator.apply(correction, residual).wait();
+    for (std::size_t cell = 0; cell < count; ++cell)
+      residual[cell] = rhs[cell] - residual[cell];
+    result.independent_residual_l2 = global_l2(*impl_->mpi, residual);
+    result.rhs_l2 = impl_->material_rhs_l2;
+    const double threshold =
+        std::max(control.atol, control.rtol * result.rhs_l2);
+    result.normalized_residual =
+        threshold > 0.0
+            ? result.independent_residual_l2 / threshold
+            : (result.independent_residual_l2 == 0.0
+                   ? 0.0
+                   : std::numeric_limits<double>::infinity());
+    result.residual_available = true;
+    result.accepted = std::isfinite(result.independent_residual_l2) &&
+                      result.independent_residual_l2 <= threshold;
+    result.disposition =
+        result.accepted ? PressureCorrectionDisposition::accepted
+                        : PressureCorrectionDisposition::recoverable_failure;
+    result.reason = result.accepted ? StepFailureReason::none
+                                    : StepFailureReason::final_pressure_residual;
+    result.lowest_failing_rank = result.accepted ? -1 : impl_->mpi->rank();
+  } catch (const SynchronizedAttemptFailure &failure) {
+    result.disposition =
+        failure.recoverable
+            ? PressureCorrectionDisposition::recoverable_failure
+            : PressureCorrectionDisposition::non_retryable_failure;
+    result.reason = failure.reason;
+    result.lowest_failing_rank = failure.failing_rank;
+  } catch (const runtime::detail::MpiOperationError &) {
+    result.disposition = PressureCorrectionDisposition::non_retryable_failure;
+    result.reason = StepFailureReason::collective_operation;
+    result.lowest_failing_rank = -1;
+  } catch (...) {
+    result.disposition = PressureCorrectionDisposition::non_retryable_failure;
+    result.reason = StepFailureReason::invalid_input;
+    result.lowest_failing_rank = -1;
+  }
+  impl_->material_token_available = false;
+  return result;
 }
 
 namespace {

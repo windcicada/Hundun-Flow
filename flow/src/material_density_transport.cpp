@@ -846,6 +846,236 @@ MaterialDensityTransport::~MaterialDensityTransport() noexcept = default;
 MaterialDensityTransport::MaterialDensityTransport(
     MaterialDensityTransport &&) noexcept = default;
 
+MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
+    FlowState &state, const MaterialFaceMassFlux &mass_flux,
+    const MomentumTimeStencil &stencil) const {
+  StagingResult result;
+  if (!impl_)
+    throw runtime::Error("material transport has been moved from");
+  if (impl_->active)
+    throw runtime::Error("material transport call overlaps another call");
+  struct Guard final {
+    bool &active;
+    ~Guard() { active = false; }
+  } guard{impl_->active};
+  impl_->active = true;
+
+  MaterialTransportFailureReason local = MaterialTransportFailureReason::none;
+  if (!state.attempt_active() || &state.solver_registry() != impl_->registry ||
+      state.fields().density != impl_->fields.density ||
+      state.fields().face_mass_flux != impl_->fields.face_mass_flux ||
+      !mass_flux.impl_ ||
+      (mass_flux.impl_ &&
+       (mass_flux.impl_->registry != impl_->registry ||
+        mass_flux.impl_->topology != impl_->topology)) ||
+      (mass_flux.provenance() != MaterialFluxProvenance::predictor &&
+       mass_flux.provenance() != MaterialFluxProvenance::provisional) ||
+      mass_flux.field_id() != state.fields().face_mass_flux ||
+      mass_flux.face_count() != impl_->topology->local_face_count() ||
+      !same(state.layer(FlowLayer::trial).interior_extent(),
+            impl_->local_extent) ||
+      state.fields().transported_cell_fields.size() !=
+          1U + impl_->specification.scalar_densities.size() ||
+      state.fields().transported_cell_fields.front() !=
+          impl_->specification.enthalpy_density ||
+      !std::equal(impl_->specification.scalar_densities.begin(),
+                  impl_->specification.scalar_densities.end(),
+                  state.fields().transported_cell_fields.begin() + 1)) {
+    local = MaterialTransportFailureReason::invalid_input;
+  }
+  if (local == MaterialTransportFailureReason::none) {
+    try {
+      if (mass_flux.face_count() != 0U)
+        static_cast<void>(mass_flux.impl_->view(0U, 0));
+      const auto expected = make_momentum_time_stencil(
+          stencil.order, stencil.dt_s, stencil.previous_dt_s);
+      if (expected.alpha0 != stencil.alpha0 ||
+          expected.alpha1 != stencil.alpha1 ||
+          expected.alpha2 != stencil.alpha2) {
+        local = MaterialTransportFailureReason::invalid_input;
+      }
+    } catch (const runtime::Error &) {
+      local = MaterialTransportFailureReason::invalid_input;
+    }
+  }
+  auto failure = synchronize_failure(*impl_->mpi, local);
+  if (failure.reason != MaterialTransportFailureReason::none) {
+    result.disposition = MaterialTransportDisposition::non_retryable_failure;
+    result.reason = failure.reason;
+    result.lowest_failing_rank = failure.rank;
+    return result;
+  }
+
+  const auto fields = transport_fields(*impl_);
+  const auto rho_n =
+      state.layer(FlowLayer::committed)
+          .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
+                                state.fields().density);
+  const auto rho_h =
+      state.layer(FlowLayer::history)
+          .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
+                                state.fields().density);
+  bool finite_state = true;
+  bool positive_density = true;
+  for_each_owned_cell(
+      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+        const double current = rho_n(index.x, index.y, index.z, 0);
+        const double history = rho_h(index.x, index.y, index.z, 0);
+        finite_state =
+            finite_state && std::isfinite(current) && std::isfinite(history);
+        positive_density = positive_density && current > 0.0 && history > 0.0;
+      });
+  for (const auto field : fields) {
+    const auto current =
+        state.layer(FlowLayer::committed)
+            .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
+                                  field);
+    const auto history =
+        state.layer(FlowLayer::history)
+            .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
+                                  field);
+    for_each_owned_cell(
+        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+          finite_state = finite_state &&
+                         std::isfinite(current(index.x, index.y, index.z, 0)) &&
+                         std::isfinite(history(index.x, index.y, index.z, 0));
+        });
+  }
+  local = !finite_state
+              ? MaterialTransportFailureReason::non_finite_state
+              : (!positive_density
+                     ? MaterialTransportFailureReason::non_positive_density
+                     : MaterialTransportFailureReason::none);
+  failure = synchronize_failure(*impl_->mpi, local);
+  if (failure.reason != MaterialTransportFailureReason::none) {
+    result.disposition = MaterialTransportDisposition::recoverable_failure;
+    result.reason = failure.reason;
+    result.lowest_failing_rank = failure.rank;
+    return result;
+  }
+
+  auto mass_residual = impl_->scratch_storage->acquire_write<double>(
+      *impl_->scratch_access, kScratchPhase, kScratchActor,
+      impl_->scratch_mass_residual);
+  for_each_owned_cell(*impl_->topology,
+                      [&](mesh::LocalCellId, runtime::Int3 index) {
+                        mass_residual(index.x, index.y, index.z, 0) = 0.0;
+                      });
+
+  std::vector<double> candidate_density;
+  std::vector<std::vector<double>> candidates(fields.size());
+  local = MaterialTransportFailureReason::none;
+  try {
+    impl_->operators.accumulate_mass_residual(mass_flux.impl_->handle,
+                                              mass_residual);
+    candidate_density.reserve(impl_->topology->owned_cell_count());
+    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
+                                              runtime::Int3 index) {
+      const double volume = impl_->geometry->cell_volume_m3(cell);
+      const double candidate =
+          -(stencil.alpha1 * rho_n(index.x, index.y, index.z, 0) +
+            stencil.alpha2 * rho_h(index.x, index.y, index.z, 0) +
+            stencil.dt_s * mass_residual(index.x, index.y, index.z, 0) /
+                volume) /
+          stencil.alpha0;
+      if (!std::isfinite(candidate))
+        throw runtime::Error("material density candidate is non-finite");
+      if (!(candidate > 0.0))
+        throw std::domain_error("material density candidate is non-positive");
+      candidate_density.push_back(candidate);
+    });
+  } catch (const std::domain_error &) {
+    local = MaterialTransportFailureReason::non_positive_density;
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (const std::exception &) {
+    local = MaterialTransportFailureReason::non_finite_state;
+  }
+  failure = synchronize_failure(*impl_->mpi, local);
+  if (failure.reason != MaterialTransportFailureReason::none) {
+    result.disposition = MaterialTransportDisposition::recoverable_failure;
+    result.reason = failure.reason;
+    result.lowest_failing_rank = failure.rank;
+    return result;
+  }
+
+  for (std::size_t field = 0; field < fields.size(); ++field) {
+    local = MaterialTransportFailureReason::none;
+    bool synchronized = false;
+    try {
+      const auto residual = compute_transport_residual(
+          *impl_, mass_flux.impl_->handle, state, fields[field], field);
+      const auto q_n = state.layer(FlowLayer::committed)
+                           .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                 kMaterialActor, fields[field]);
+      const auto q_h = state.layer(FlowLayer::history)
+                           .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                 kMaterialActor, fields[field]);
+      auto &candidate_values = candidates[field];
+      candidate_values.reserve(impl_->topology->owned_cell_count());
+      std::size_t owned = 0U;
+      for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
+                                                runtime::Int3 index) {
+        const double spatial =
+            stencil.order == MomentumTimeOrder::backward_euler
+                ? residual.current[owned]
+                : 2.0 * residual.current[owned] - residual.history[owned];
+        const double candidate =
+            -(stencil.alpha1 * q_n(index.x, index.y, index.z, 0) +
+              stencil.alpha2 * q_h(index.x, index.y, index.z, 0) +
+              stencil.dt_s * spatial / impl_->geometry->cell_volume_m3(cell)) /
+            stencil.alpha0;
+        if (!std::isfinite(candidate))
+          throw runtime::Error("material transport candidate is non-finite");
+        candidate_values.push_back(candidate);
+        ++owned;
+      });
+    } catch (const TransportComputationFailure &error) {
+      failure = error.failure();
+      synchronized = true;
+    } catch (const runtime::MpiOperationError &) {
+      throw;
+    } catch (const std::exception &) {
+      local = MaterialTransportFailureReason::non_finite_state;
+    }
+    if (!synchronized)
+      failure = synchronize_failure(*impl_->mpi, local);
+    if (failure.reason != MaterialTransportFailureReason::none) {
+      result.disposition = MaterialTransportDisposition::recoverable_failure;
+      result.reason = failure.reason;
+      result.lowest_failing_rank = failure.rank;
+      return result;
+    }
+  }
+
+  auto trial_rho = state.trial_layer().acquire_write<double>(
+      impl_->access, kMaterialPhase, kMaterialActor, state.fields().density);
+  std::size_t owned = 0U;
+  for_each_owned_cell(
+      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+        trial_rho(index.x, index.y, index.z, 0) = candidate_density[owned++];
+      });
+  for (std::size_t field = 0; field < fields.size(); ++field) {
+    auto trial = state.trial_layer().acquire_write<double>(
+        impl_->access, kMaterialPhase, kMaterialActor, fields[field]);
+    owned = 0U;
+    for_each_owned_cell(
+        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+          trial(index.x, index.y, index.z, 0) = candidates[field][owned++];
+        });
+  }
+  auto trial_flux = state.trial_layer().acquire_face_write<double>(
+      impl_->access, kMaterialPhase, kMaterialActor,
+      state.fields().face_mass_flux);
+  for (std::size_t face = 0; face < impl_->topology->local_face_count(); ++face)
+    trial_flux(face, 0) = mass_flux.impl_->view(face, 0);
+
+  result.disposition = MaterialTransportDisposition::finalized;
+  result.reason = MaterialTransportFailureReason::none;
+  result.lowest_failing_rank = -1;
+  return result;
+}
+
 MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
     const MomentumTimeStencil &stencil) const {

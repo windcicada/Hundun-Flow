@@ -122,7 +122,23 @@ public:
           const runtime::FieldView<const double> &actual_momentum_diagonal,
           const linear::SolveControl &control) const;
 
+  PressureCorrectionReport correct_material_density(
+      FlowState &state, const MomentumTimeStencil &stencil,
+      const runtime::FieldView<const double> &actual_momentum_diagonal,
+      const linear::SolveControl &control) const;
+
 private:
+  struct MaterialPressureAssessment final {
+    PressureCorrectionDisposition disposition{
+        PressureCorrectionDisposition::non_retryable_failure};
+    StepFailureReason reason{StepFailureReason::invalid_input};
+    int lowest_failing_rank{-1};
+    double independent_residual_l2{};
+    double rhs_l2{};
+    double normalized_residual{};
+    bool residual_available{};
+    bool accepted{};
+  };
   struct Impl;
   explicit PisoCoupler(std::unique_ptr<Impl>) noexcept;
   PressureCorrectionReport correct_throwing(
@@ -130,7 +146,18 @@ private:
       const runtime::FieldView<const double> &actual_momentum_diagonal,
       const linear::SolveControl &control,
       PressureCorrectionReport &result) const;
+  PressureCorrectionReport correct_common_throwing(
+      FlowState &state, double rho_ref,
+      const MomentumTimeStencil *material_stencil,
+      const runtime::FieldView<const double> &actual_momentum_diagonal,
+      const linear::SolveControl &control,
+      PressureCorrectionReport &result) const;
+  MaterialPressureAssessment assess_final_material_density_pressure(
+      FlowState &state, const MomentumTimeStencil &stencil,
+      const linear::SolveControl &control) const;
   std::unique_ptr<Impl> impl_;
+
+  friend class FixedStepMaterialDensityFlow;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::ConstantDensityPisoTestAccess;
