@@ -1513,9 +1513,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
   require_injected_failure(
       sink_request,
       [&] {
-        DiagnosticAccess::override_reported_transport_total_count(
-            static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U,
-            injection_rank);
+        DiagnosticAccess::inject_transport_total_count_overflow(injection_rank);
       },
       diagnostics::DiagnosticFailureClass::invalid_input,
       "material.diagnostics.transport-total-count", injection_rank,
@@ -1544,25 +1542,19 @@ void run(const hundun::runtime::MpiContext &mpi) {
         std::nullopt, 0U);
   }
 
-  if (mpi.size() > 1) {
-    std::vector<std::uint64_t> cumulative_counts(
-        static_cast<std::size_t>(mpi.size()), 0U);
-    cumulative_counts[0] =
-        static_cast<std::uint64_t>(std::numeric_limits<int>::max());
-    cumulative_counts[1] = 1U;
-    require_injected_failure(
-        collective,
-        [&] {
-          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
-              override_reported_sample_wire_bytes(cumulative_counts.data(),
-                                                  cumulative_counts.size());
-        },
-        diagnostics::DiagnosticFailureClass::layout,
-        "material.diagnostics.sample-wire-size", 1,
-        diagnostics::test::MaterialDiagnosticRawCollectivePoint::
-            sample_size_exchange,
-        22U);
-  }
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_sample_wire_prefix_overflow();
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.sample-wire-size", mpi.size() > 1 ? 1 : 0,
+      mpi.size() > 1 ? diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+                           sample_size_exchange
+                     : diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+                           preparation_local_sample_wire_and_size_counts,
+      mpi.size() > 1 ? 22U : 21U);
 
   using AllocationPoint = diagnostics::test::MaterialDiagnosticAllocationPoint;
   using RawPoint = diagnostics::test::MaterialDiagnosticRawCollectivePoint;

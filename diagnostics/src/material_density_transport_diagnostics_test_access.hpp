@@ -64,16 +64,14 @@ public:
                                  std::uint64_t global_id,
                                  int rank = -1) noexcept;
   static void override_owned_global_box(runtime::Box3, int rank = -1) noexcept;
-  static void override_reported_transport_total_count(std::uint64_t,
-                                                      int rank = -1) noexcept;
+  static void inject_transport_total_count_overflow(int rank = -1) noexcept;
   static void inject_provider_failure(int rank = -1) noexcept;
   static void inject_record_failure(int rank = -1) noexcept;
   static void inject_request_size_overflow(int rank = -1) noexcept;
   static void inject_sample_wire_overflow(int rank = -1) noexcept;
+  static void inject_sample_wire_prefix_overflow() noexcept;
   static void inject_allocation_failure(MaterialDiagnosticAllocationPoint,
                                         int rank = -1) noexcept;
-  static void override_reported_sample_wire_bytes(const std::uint64_t *counts,
-                                                  std::size_t count);
   static void inject_provider_key_value_difference(int rank = -1) noexcept;
   static void override_request_wire_bytes(const unsigned char *, std::size_t,
                                           int rank = -1);

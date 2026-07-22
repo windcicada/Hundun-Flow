@@ -137,6 +137,17 @@ void require_exact_state(const ExactFlowState &expected,
       expected.metadata, state.metadata()));
 }
 
+bool provenance_matches(
+    const hundun::flow::MaterialDensityTransportReport &report,
+    double expected_value, hundun::mesh::GlobalCellId expected_global_cell,
+    int expected_rank) {
+  return report.minimum_density_available() &&
+         hundun::test::fp64_bits(report.minimum_density_kg_per_m3()) ==
+             hundun::test::fp64_bits(expected_value) &&
+         report.minimum_density_global_cell() == expected_global_cell &&
+         report.minimum_density_rank() == expected_rank;
+}
+
 void run(const hundun::runtime::MpiContext &mpi) {
   using TestAccess = hundun::flow::test::MaterialDensityTransportTestAccess;
   using ScaleInput = hundun::flow::test::MaterialConservationScaleInput;
@@ -353,6 +364,63 @@ void run(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(value == 0.0);
   state.rollback_attempt();
   require_exact_state(success_before, state);
+
+  auto provenance_state = initial;
+  provenance_state.density.assign(topology.owned_cell_count(), 2.0);
+  constexpr double tied_minimum = 0.5;
+  if (mpi.size() == 1) {
+    provenance_state.density.front() = tied_minimum;
+    provenance_state.density.back() = tied_minimum;
+  } else if (mpi.rank() == 0) {
+    provenance_state.density.back() = tied_minimum;
+  } else if (mpi.rank() == 1) {
+    provenance_state.density.front() = tied_minimum;
+  }
+  state.seed_accepted_layers(provenance_state, provenance_state);
+  const auto provenance_before = capture_exact_state(state);
+  state.begin_attempt();
+  auto provenance_flux = hundun::flow::MaterialFaceMassFlux::acquire(
+      registry, supplied_flux, flux_access, phase, actor, fields.face_mass_flux,
+      topology, hundun::flow::MaterialFluxProvenance::final_corrected);
+  const auto provenance_report =
+      transport.finalize_trial(state, provenance_flux, stencil);
+  HUNDUN_CHECK(provenance_report.disposition() ==
+               hundun::flow::MaterialTransportDisposition::finalized);
+  HUNDUN_CHECK(provenance_report.reason() ==
+               hundun::flow::MaterialTransportFailureReason::none);
+  const auto expected_minimum_id = static_cast<hundun::mesh::GlobalCellId>(
+      mpi.size() == 1 ? 0 : extent.x / mpi.size());
+  const int expected_minimum_rank = mpi.size() == 1 ? 0 : 1;
+  HUNDUN_CHECK(provenance_matches(provenance_report, tied_minimum,
+                                  expected_minimum_id, expected_minimum_rank));
+  const auto rank_first_id = static_cast<hundun::mesh::GlobalCellId>(
+      ((extent.z - 1) * extent.y + (extent.y - 1)) * extent.x +
+      (extent.x / mpi.size() - 1));
+  HUNDUN_CHECK(
+      !provenance_matches(provenance_report, tied_minimum, rank_first_id, 0));
+  HUNDUN_CHECK(provenance_report.density_residual_available());
+  HUNDUN_CHECK(provenance_report.density_normalized_l2() <= 1.0e-10);
+  HUNDUN_CHECK(provenance_report.mass_conservation_available());
+  HUNDUN_CHECK(provenance_report.mass_relative_conservation_defect() <=
+               5.0e-11);
+  HUNDUN_CHECK(
+      std::all_of(provenance_report.transport_residual_availability().begin(),
+                  provenance_report.transport_residual_availability().end(),
+                  [](std::uint8_t available) { return available != 0U; }));
+  HUNDUN_CHECK(std::all_of(
+      provenance_report.transport_conservation_availability().begin(),
+      provenance_report.transport_conservation_availability().end(),
+      [](std::uint8_t available) { return available != 0U; }));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      provenance_before.history,
+      state.snapshot(hundun::flow::FlowLayer::history)));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      provenance_before.committed,
+      state.snapshot(hundun::flow::FlowLayer::committed)));
+  HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+      provenance_before.metadata, state.metadata()));
+  state.rollback_attempt();
+  require_exact_state(provenance_before, state);
 
   auto structural_over_numerical = initial;
   if (mpi.rank() == 0)

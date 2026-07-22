@@ -1274,16 +1274,22 @@ MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
                                           MPI_DOUBLE, MPI_MIN,
                                           impl_->mpi->comm()),
                             "MPI_Allreduce(material minimum density)");
-  int minimum_rank =
-      local_min == global_min ? impl_->mpi->rank() : impl_->mpi->size();
+  std::uint64_t minimum_id = local_min == global_min
+                                 ? local_min_id
+                                 : std::numeric_limits<std::uint64_t>::max();
+  runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &minimum_id, 1,
+                                          MPI_UINT64_T, MPI_MIN,
+                                          impl_->mpi->comm()),
+                            "MPI_Allreduce(material minimum cell)");
+  int minimum_rank = local_min == global_min && local_min_id == minimum_id
+                         ? impl_->mpi->rank()
+                         : impl_->mpi->size();
   runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &minimum_rank, 1,
                                           MPI_INT, MPI_MIN, impl_->mpi->comm()),
                             "MPI_Allreduce(material minimum rank)");
-  std::uint64_t minimum_id =
-      impl_->mpi->rank() == minimum_rank ? local_min_id : 0U;
-  runtime::check_mpi_result(
-      MPI_Bcast(&minimum_id, 1, MPI_UINT64_T, minimum_rank, impl_->mpi->comm()),
-      "MPI_Bcast(material minimum cell)");
+  if (minimum_id >= impl_->topology->global_cell_count() || minimum_rank < 0 ||
+      minimum_rank >= impl_->mpi->size())
+    throw runtime::Error("material minimum density provenance is invalid");
   report.minimum_density_kg_per_m3_ = global_min;
   report.minimum_density_rank_ = minimum_rank;
   report.minimum_density_global_cell_ = minimum_id;

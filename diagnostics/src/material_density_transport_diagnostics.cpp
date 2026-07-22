@@ -69,15 +69,14 @@ test::MaterialDiagnosticWorkCounts diagnostic_work_counts;
 struct MaterialDiagnosticTestControl final {
   std::optional<std::pair<std::size_t, std::uint64_t>> global_id_override;
   std::optional<runtime::Box3> owned_box_override;
-  std::optional<std::uint64_t> reported_transport_total_count;
+  bool transport_total_count_overflow{};
   bool provider_failure{};
   bool record_failure{};
   bool request_size_overflow{};
   bool sample_wire_overflow{};
+  bool sample_wire_prefix_overflow{};
   bool provider_key_value_difference{};
   std::optional<AggregationPreparationPoint> allocation_failure;
-  std::array<std::uint64_t, 4> reported_sample_wire_bytes{};
-  std::size_t reported_sample_wire_byte_count{};
   std::optional<std::vector<unsigned char>> request_wire_override;
   std::optional<std::vector<unsigned char>> sample_wire_override;
   int rank{-1};
@@ -1208,8 +1207,9 @@ collect_global_observation(const runtime::MpiContext &mpi,
         std::uint64_t reported_count =
             static_cast<std::uint64_t>(global.transported_totals.size());
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-        if (control.reported_transport_total_count)
-          reported_count = *control.reported_transport_total_count;
+        if (control.transport_total_count_overflow)
+          reported_count =
+              static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U;
 #endif
         const int count_failure_rank = first_failing_rank(
             mpi,
@@ -1287,15 +1287,15 @@ collect_global_observation(const runtime::MpiContext &mpi,
   if (control.sample_wire_overflow)
     local_bytes =
         static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U;
-  if (control.reported_sample_wire_byte_count != 0U) {
-    if (control.reported_sample_wire_byte_count !=
-        static_cast<std::size_t>(mpi.size()))
-      collection_error(DiagnosticFailureClass::invalid_input,
-                       "material.diagnostics.test-byte-count-size", 0,
-                       "material diagnostic byte-count override is invalid");
+  if (control.sample_wire_prefix_overflow) {
+    if (mpi.size() == 1)
+      collection_error(DiagnosticFailureClass::layout,
+                       "material.diagnostics.sample-wire-size", 0,
+                       "material diagnostic sample exchange is too large");
     local_bytes =
-        control
-            .reported_sample_wire_bytes[static_cast<std::size_t>(mpi.rank())];
+        mpi.rank() == 0
+            ? static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+            : (mpi.rank() == 1 ? 1U : 0U);
   }
 #endif
   runtime::check_mpi_result(MPI_Allgather(&local_bytes, 1, MPI_UINT64_T,
@@ -1406,9 +1406,8 @@ void test::MaterialDensityTransportDiagnosticsTestAccess::
   diagnostic_test_control.rank = rank;
 }
 void test::MaterialDensityTransportDiagnosticsTestAccess::
-    override_reported_transport_total_count(std::uint64_t count,
-                                            int rank) noexcept {
-  diagnostic_test_control.reported_transport_total_count = count;
+    inject_transport_total_count_overflow(int rank) noexcept {
+  diagnostic_test_control.transport_total_count_overflow = true;
   diagnostic_test_control.rank = rank;
 }
 void test::MaterialDensityTransportDiagnosticsTestAccess::
@@ -1439,14 +1438,8 @@ void test::MaterialDensityTransportDiagnosticsTestAccess::
   diagnostic_test_control.rank = rank;
 }
 void test::MaterialDensityTransportDiagnosticsTestAccess::
-    override_reported_sample_wire_bytes(const std::uint64_t *counts,
-                                        std::size_t count) {
-  if (count > diagnostic_test_control.reported_sample_wire_bytes.size())
-    throw std::invalid_argument(
-        "material diagnostic reported byte-count override is too large");
-  std::copy_n(counts, count,
-              diagnostic_test_control.reported_sample_wire_bytes.begin());
-  diagnostic_test_control.reported_sample_wire_byte_count = count;
+    inject_sample_wire_prefix_overflow() noexcept {
+  diagnostic_test_control.sample_wire_prefix_overflow = true;
   diagnostic_test_control.rank = -1;
 }
 void test::MaterialDensityTransportDiagnosticsTestAccess::
