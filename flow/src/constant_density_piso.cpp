@@ -587,6 +587,8 @@ struct PisoCoupler::Impl final {
         preconditioner(&supplied_preconditioner),
         fvm(finite_volume::CellCenteredFvmOperators::create(supplied_topology,
                                                             supplied_geometry)),
+        prepared_face_flux(
+            finite_volume::FaceMassFlux::prepare(supplied_topology)),
         scratch({supplied_decomposition.local_extent(),
                  supplied_topology.local_face_count()}),
         gamma(supplied_execution,
@@ -628,6 +630,7 @@ struct PisoCoupler::Impl final {
   const linear::LinearSolver *solver;
   linear::Preconditioner *preconditioner;
   finite_volume::CellCenteredFvmOperators fvm;
+  finite_volume::FaceMassFlux::PreparedStatePtr prepared_face_flux;
   ScratchFields scratch;
   execution::Buffer gamma;
   execution::Buffer rhs;
@@ -782,9 +785,19 @@ PressureCorrectionReport PisoCoupler::correct_common_throwing(
   synchronized_local_phase(
       *impl_->mpi, StepFailureReason::invalid_input, false,
       "Task 18 pressure-system derivation failed", [&] {
-        auto mass = finite_volume::FaceMassFlux::acquire(
-            registry, trial, access, kStatePhase, kStateActor,
-            fields.face_mass_flux, *impl_->topology);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+        test::detail::FaceFluxPathObservation allocation_observation(
+            material_stencil != nullptr);
+#endif
+        auto mass = material_stencil != nullptr
+                        ? finite_volume::FaceMassFlux::bind_prepared(
+                              *impl_->prepared_face_flux, registry, trial,
+                              access, kStatePhase, kStateActor,
+                              fields.face_mass_flux, *impl_->topology)
+                        : finite_volume::FaceMassFlux::acquire(
+                              registry, trial, access, kStatePhase,
+                              kStateActor, fields.face_mass_flux,
+                              *impl_->topology);
         auto mass_residual = impl_->scratch.storage->acquire_write<double>(
             *impl_->scratch.access, kScratchPhase, kScratchActor,
             impl_->scratch.mass_residual);
@@ -1527,9 +1540,13 @@ PisoCoupler::assess_final_material_density_pressure(
     synchronized_local_phase(
         *impl_->mpi, StepFailureReason::invalid_input, false,
         "material final pressure coefficient refresh failed", [&] {
-          const auto mass = finite_volume::FaceMassFlux::acquire(
-              state.solver_registry(), trial, access, kStatePhase,
-              kStateActor, fields.face_mass_flux, *impl_->topology);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+          test::detail::FaceFluxPathObservation allocation_observation;
+#endif
+          const auto mass = finite_volume::FaceMassFlux::bind_prepared(
+              *impl_->prepared_face_flux, state.solver_registry(), trial,
+              access, kStatePhase, kStateActor, fields.face_mass_flux,
+              *impl_->topology);
           const auto density = trial.acquire_read<double>(
               access, kStatePhase, kStateActor, fields.density);
           auto face_density =

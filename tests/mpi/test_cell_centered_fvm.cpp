@@ -2379,6 +2379,96 @@ void run_failure_contracts(const MpiContext &mpi, int ranks) {
   FaceMassFlux moved_flux(std::move(other_flux));
   HUNDUN_CHECK(moved_flux.field_id() == flux_id);
   HUNDUN_CHECK(moved_flux.face_count() == other_topology.local_face_count());
+
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+  FieldStorage prepared_storage(
+      registry, FieldLayoutSet{decomposition.local_extent(),
+                               topology.local_face_count()});
+  {
+    auto prepared_flux_write = prepared_storage.acquire_face_write<double>(
+        access, phase, actor, flux_id);
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face)
+      prepared_flux_write(face, 0) = 0.0;
+  }
+  const FieldStorage &prepared_read_storage = prepared_storage;
+  auto prepared =
+      hundun::finite_volume::test::PreparedFaceMassFluxForTest::create(
+          topology);
+  const auto bind_prepared = [&] {
+    return prepared.bind(registry, prepared_read_storage, access, phase, actor,
+                         flux_id, topology);
+  };
+  {
+    auto first = bind_prepared();
+    expect_error([&] { static_cast<void>(bind_prepared()); });
+    FaceMassFlux moved(std::move(first));
+    expect_error(
+        [&] { operators.accumulate_mass_residual(first, residual_write); });
+    expect_error([&] { static_cast<void>(bind_prepared()); });
+    HUNDUN_CHECK(moved.field_id() == flux_id);
+    HUNDUN_CHECK(moved.face_count() == topology.local_face_count());
+  }
+  for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
+    const int i = static_cast<int>(
+        cell % static_cast<std::size_t>(decomposition.local_extent().x));
+    const std::size_t yz =
+        cell / static_cast<std::size_t>(decomposition.local_extent().x);
+    const int j = static_cast<int>(
+        yz % static_cast<std::size_t>(decomposition.local_extent().y));
+    const int k = static_cast<int>(
+        yz / static_cast<std::size_t>(decomposition.local_extent().y));
+    residual_write(i, j, k, 0) = 0.0;
+  }
+  {
+    allocation_probe::AllocationAttemptGuard allocation_guard;
+    auto second = bind_prepared();
+    operators.accumulate_mass_residual(second, residual_write);
+    HUNDUN_CHECK(allocation_guard.attempts() == 0U);
+  }
+  {
+    auto third = bind_prepared();
+    HUNDUN_CHECK(third.face_count() == topology.local_face_count());
+  }
+  expect_error([&] {
+    static_cast<void>(prepared.bind(
+        registry, wrong_face_layout_read, access, phase, actor, flux_id,
+        topology));
+  });
+  expect_error([&] {
+    static_cast<void>(prepared.bind(registry, prepared_read_storage, access,
+                                    phase, actor, transported, topology));
+  });
+  expect_error([&] {
+    static_cast<void>(prepared.bind(registry, other_read_storage, access,
+                                    phase, actor, flux_id, other_topology));
+  });
+  FieldStorage prepared_stale_storage(
+      registry, FieldLayoutSet{decomposition.local_extent(),
+                               topology.local_face_count()});
+  {
+    auto stale_write = prepared_stale_storage.acquire_face_write<double>(
+        access, phase, actor, flux_id);
+    for (std::size_t face = 0; face < topology.local_face_count(); ++face)
+      stale_write(face, 0) = 0.0;
+  }
+  const FieldStorage &prepared_stale_read = prepared_stale_storage;
+  {
+    auto stale_prepared = prepared.bind(
+        registry, prepared_stale_read, access, phase, actor, flux_id,
+        topology);
+    prepared_stale_storage.begin_rebuild();
+    expect_error([&] {
+      operators.accumulate_mass_residual(stale_prepared, residual_write);
+    });
+  }
+  auto moved_prepared = std::move(prepared);
+  expect_error([&] { static_cast<void>(bind_prepared()); });
+  {
+    auto final = moved_prepared.bind(registry, prepared_read_storage, access,
+                                     phase, actor, flux_id, topology);
+    HUNDUN_CHECK(final.field_id() == flux_id);
+  }
+#endif
 }
 
 } // namespace

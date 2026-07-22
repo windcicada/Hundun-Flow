@@ -38,6 +38,7 @@ endif()
 foreach(test_name IN ITEMS
     MaterialDensityPisoTestAccess
     MaterialDensityPisoDiagnosticsTestAccess
+    PreparedFaceMassFluxForTest
     vortex_source)
   string(FIND "${preprocessed}" "${test_name}" position)
   if(NOT position EQUAL -1)

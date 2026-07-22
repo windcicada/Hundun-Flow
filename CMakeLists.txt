@@ -170,6 +170,10 @@ target_link_libraries(hundun_finite_volume
     hundun_runtime
     hundun_execution
     hundun_options)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_finite_volume PUBLIC
+    HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_flow STATIC
   flow/src/constant_density_piso.cpp

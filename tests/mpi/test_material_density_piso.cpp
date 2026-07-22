@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "flow/src/material_density_piso_test_access.hpp"
+#include "flow/src/material_density_transport_test_access.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/execution/execution.hpp"
@@ -187,6 +188,12 @@ struct ExactState final {
   hundun::flow::FlowLayerValues trial;
   hundun::flow::AcceptedStepMetadata metadata;
 };
+
+std::uint64_t bits(double value) noexcept {
+  std::uint64_t result{};
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
 
 class TerminalMomentumSolver final : public hundun::linear::LinearSolver {
 public:
@@ -861,6 +868,133 @@ int main(int argc, char **argv) {
       HUNDUN_CHECK(TestAccess::report_authenticated(terminal_report));
       check_equal(before, terminal_state);
       TestAccess::reset_terminal_fault();
+    }
+
+    {
+      using TransportAccess =
+          hundun::flow::test::MaterialDensityTransportTestAccess;
+      enum class LateGate { transport_residual, mass, transport_conservation };
+      for (const auto gate : {LateGate::transport_residual, LateGate::mass,
+                              LateGate::transport_conservation}) {
+        hundun::linear::JacobiPreconditioner lx(execution), ly(execution),
+            lz(execution), lp(execution);
+        auto late_flow = hundun::flow::FixedStepMaterialDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi, execution,
+            halo, momentum_solver, {&lx, &ly, &lz}, pressure_solver, lp,
+            registry, fields, specification);
+        auto late_state = make_state(1.0);
+        const auto before = capture(late_state);
+        const int failing_rank = mpi.size() - 1;
+        const double injected =
+            gate == LateGate::transport_residual ? 2.0e-9 : 1.0e-9;
+        TransportAccess::reset();
+        if (gate == LateGate::transport_residual)
+          TransportAccess::set_transport_residual(0U, injected, failing_rank);
+        else if (gate == LateGate::mass)
+          TransportAccess::set_mass_conservation_defect(injected,
+                                                        failing_rank);
+        else
+          TransportAccess::set_transport_conservation_defect(
+              0U, injected, failing_rank);
+        std::optional<hundun::flow::MaterialDensityStepAttemptReport>
+            late_report;
+        try {
+          late_report.emplace(
+              late_flow.attempt(late_state, 0.0, be, {}, {}));
+        } catch (...) {
+          TransportAccess::reset();
+          throw;
+        }
+        TransportAccess::reset();
+        const auto expected_reason =
+            gate == LateGate::transport_residual
+                ? hundun::flow::StepFailureReason::final_transport_residual
+                : hundun::flow::StepFailureReason::final_conservation_defect;
+        HUNDUN_CHECK(late_report->flow().disposition ==
+                     hundun::flow::StepAttemptDisposition::
+                         recoverable_failure);
+        HUNDUN_CHECK(late_report->flow().reason == expected_reason);
+        HUNDUN_CHECK(late_report->flow().lowest_failing_rank == failing_rank);
+        HUNDUN_CHECK(late_report->flow().pressure_corrector_count == 2U);
+        HUNDUN_CHECK(late_report->material_report_available());
+        const auto &nested = late_report->material_report();
+        HUNDUN_CHECK(nested.disposition() ==
+                     hundun::flow::MaterialTransportDisposition::
+                         recoverable_failure);
+        HUNDUN_CHECK(
+            nested.reason() ==
+            (gate == LateGate::transport_residual
+                 ? hundun::flow::MaterialTransportFailureReason::
+                       final_transport_residual
+                 : hundun::flow::MaterialTransportFailureReason::
+                       final_conservation_defect));
+        HUNDUN_CHECK(nested.lowest_failing_rank() == failing_rank);
+        HUNDUN_CHECK(nested.flux_provenance() ==
+                     hundun::flow::MaterialFluxProvenance::final_corrected);
+        HUNDUN_CHECK(late_report->flux_provenance() ==
+                     hundun::flow::MaterialFluxProvenance::final_corrected);
+        HUNDUN_CHECK(
+            late_report->flow().final_transport_normalized_l2.size() ==
+            nested.transport_normalized_l2().size());
+        HUNDUN_CHECK(late_report->flow()
+                             .final_transport_relative_conservation_defect
+                             .size() ==
+                     nested.transport_relative_conservation_defect().size());
+        for (std::size_t field = 0;
+             field < nested.transport_normalized_l2().size(); ++field) {
+          HUNDUN_CHECK(
+              nested.transport_residual_availability()[field] == 1U);
+          HUNDUN_CHECK(
+              nested.transport_conservation_availability()[field] == 1U);
+          HUNDUN_CHECK(bits(late_report->flow()
+                                .final_transport_normalized_l2[field]) ==
+                       bits(nested.transport_normalized_l2()[field]));
+          HUNDUN_CHECK(
+              bits(late_report->flow()
+                       .final_transport_relative_conservation_defect[field]) ==
+              bits(nested.transport_relative_conservation_defect()[field]));
+        }
+        HUNDUN_CHECK(late_report->mass_conservation_available() ==
+                     nested.mass_conservation_available());
+        HUNDUN_CHECK(late_report->mass_conservation_available());
+        HUNDUN_CHECK(
+            bits(late_report->flow()
+                     .final_mass_relative_conservation_defect) ==
+            bits(nested.mass_relative_conservation_defect()));
+        if (mpi.rank() == failing_rank) {
+          if (gate == LateGate::transport_residual)
+            HUNDUN_CHECK(bits(nested.transport_normalized_l2()[0]) ==
+                         bits(injected));
+          else if (gate == LateGate::mass)
+            HUNDUN_CHECK(bits(nested.mass_relative_conservation_defect()) ==
+                         bits(injected));
+          else
+            HUNDUN_CHECK(
+                bits(nested.transport_relative_conservation_defect()[0]) ==
+                bits(injected));
+        }
+        HUNDUN_CHECK(
+            hundun::flow::test::MaterialDensityPisoTestAccess::
+                report_authenticated(*late_report));
+        check_equal(before, late_state);
+        auto late_source =
+            late_flow.diagnostic_source(late_state, *late_report);
+        HUNDUN_CHECK(late_source.report().attempt_identity() ==
+                     late_report->attempt_identity());
+        const auto invalidation =
+            late_flow.attempt(late_state, -1.0, be, {}, {});
+        HUNDUN_CHECK(invalidation.flow().reason ==
+                     hundun::flow::StepFailureReason::invalid_input);
+        bool stale = false;
+        try {
+          static_cast<void>(late_source.report());
+        } catch (const hundun::runtime::Error &error) {
+          stale = std::string_view(error.what()) ==
+                  "material flow diagnostic source is stale";
+        }
+        HUNDUN_CHECK(stale);
+        check_equal(before, late_state);
+      }
     }
 
     auto source = flow.diagnostic_source(state, report);

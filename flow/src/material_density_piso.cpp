@@ -70,19 +70,7 @@ private:
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 std::atomic<int> preflight_allocation_failure_rank{-1};
-std::atomic<bool> face_flux_path_observation_active{};
-
-class FaceFluxPathObservation final {
-public:
-  FaceFluxPathObservation() noexcept {
-    face_flux_path_observation_active.store(true, std::memory_order_relaxed);
-  }
-  ~FaceFluxPathObservation() {
-    face_flux_path_observation_active.store(false, std::memory_order_relaxed);
-  }
-  FaceFluxPathObservation(const FaceFluxPathObservation &) = delete;
-  FaceFluxPathObservation &operator=(const FaceFluxPathObservation &) = delete;
-};
+using FaceFluxPathObservation = test::detail::FaceFluxPathObservation;
 #endif
 
 struct MomentumConservationTerms final {
@@ -1834,14 +1822,6 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     }
     result.flux_provenance_ = MaterialFluxProvenance::final_corrected;
     result.material_failure_reason_ = result.material_report_->reason();
-    if (result.material_report_->disposition() !=
-        MaterialTransportDisposition::finalized) {
-      require_reliable_collective_result(
-          map_material_failure(result.material_report_->reason()),
-          result.material_report_->lowest_failing_rank());
-      return material_failure(result.material_report_->reason(),
-                              result.material_report_->lowest_failing_rank());
-    }
     result.flow_.final_transport_normalized_l2 =
         result.material_report_->transport_normalized_l2();
     result.flow_.final_transport_relative_conservation_defect =
@@ -1850,6 +1830,14 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
         result.material_report_->mass_relative_conservation_defect();
     result.mass_conservation_available_ =
         result.material_report_->mass_conservation_available();
+    if (result.material_report_->disposition() !=
+        MaterialTransportDisposition::finalized) {
+      require_reliable_collective_result(
+          map_material_failure(result.material_report_->reason()),
+          result.material_report_->lowest_failing_rank());
+      return material_failure(result.material_report_->reason(),
+                              result.material_report_->lowest_failing_rank());
+    }
 
     impl_->halo->exchange(trial, fields.density);
     double continuity_sums[2]{};
@@ -2527,8 +2515,8 @@ void test::MaterialDensityPisoTestAccess::reset_preflight_allocation_failure()
 
 bool test::MaterialDensityPisoTestAccess::face_flux_path_observation_active()
     noexcept {
-  return ::hundun::flow::face_flux_path_observation_active.load(
-      std::memory_order_relaxed);
+  return test::detail::face_flux_path_observation_depth.load(
+             std::memory_order_relaxed) != 0U;
 }
 
 test::MaterialPhaseSelectionForTest

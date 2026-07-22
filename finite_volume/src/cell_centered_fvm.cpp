@@ -907,6 +907,36 @@ void FaceMassFlux::destroy_prepared(PreparedState *state) noexcept {
   delete state;
 }
 
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+test::PreparedFaceMassFluxForTest
+test::PreparedFaceMassFluxForTest::create(
+    const mesh::MeshTopology &topology) {
+  return PreparedFaceMassFluxForTest(FaceMassFlux::prepare(topology));
+}
+
+test::PreparedFaceMassFluxForTest::PreparedFaceMassFluxForTest(
+    FaceMassFlux::PreparedStatePtr state) noexcept
+    : state_(std::move(state)) {}
+
+test::PreparedFaceMassFluxForTest::~PreparedFaceMassFluxForTest() noexcept =
+    default;
+test::PreparedFaceMassFluxForTest::PreparedFaceMassFluxForTest(
+    PreparedFaceMassFluxForTest &&) noexcept = default;
+
+FaceMassFlux test::PreparedFaceMassFluxForTest::bind(
+    const runtime::FieldRegistry &registry,
+    const runtime::FieldStorage &storage,
+    const runtime::FieldAccessPlan &access_plan, runtime::PhaseId phase,
+    runtime::ActorId actor, runtime::FieldId field,
+    const mesh::MeshTopology &topology) {
+  if (!state_)
+    throw runtime::Error(
+        "prepared face mass flux test handle has been moved from");
+  return FaceMassFlux::bind_prepared(*state_, registry, storage, access_plan,
+                                     phase, actor, field, topology);
+}
+#endif
+
 FaceMassFlux FaceMassFlux::bind_prepared(
     PreparedState &prepared, const runtime::FieldRegistry &registry,
     const runtime::FieldStorage &storage,

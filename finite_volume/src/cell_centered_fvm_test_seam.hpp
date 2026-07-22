@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/mesh/mesh_topology.hpp"
 
 namespace hundun::finite_volume::test {
@@ -37,5 +38,33 @@ void force_next_least_squares_singular();
 
 void fail_next_face_mass_flux_construction(
     FaceMassFluxConstructionFailureForTest failure);
+
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+class PreparedFaceMassFluxForTest final {
+public:
+  static PreparedFaceMassFluxForTest create(
+      const mesh::MeshTopology &topology);
+
+  ~PreparedFaceMassFluxForTest() noexcept;
+  PreparedFaceMassFluxForTest(PreparedFaceMassFluxForTest &&) noexcept;
+  PreparedFaceMassFluxForTest &
+  operator=(PreparedFaceMassFluxForTest &&) = delete;
+  PreparedFaceMassFluxForTest(const PreparedFaceMassFluxForTest &) = delete;
+  PreparedFaceMassFluxForTest &
+  operator=(const PreparedFaceMassFluxForTest &) = delete;
+
+  FaceMassFlux bind(const runtime::FieldRegistry &registry,
+                    const runtime::FieldStorage &storage,
+                    const runtime::FieldAccessPlan &access_plan,
+                    runtime::PhaseId phase, runtime::ActorId actor,
+                    runtime::FieldId field,
+                    const mesh::MeshTopology &topology);
+
+private:
+  explicit PreparedFaceMassFluxForTest(
+      FaceMassFlux::PreparedStatePtr state) noexcept;
+  FaceMassFlux::PreparedStatePtr state_;
+};
+#endif
 
 } // namespace hundun::finite_volume::test

@@ -19,7 +19,13 @@
 namespace hundun::flow {
 class FixedStepMaterialDensityFlow;
 class MaterialFaceMassFlux;
+class PisoCoupler;
 } // namespace hundun::flow
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+namespace hundun::finite_volume::test {
+class PreparedFaceMassFluxForTest;
+}
+#endif
 
 namespace hundun::finite_volume {
 
@@ -117,6 +123,10 @@ private:
   friend class CellCenteredFvmOperators;
   friend class flow::FixedStepMaterialDensityFlow;
   friend class flow::MaterialFaceMassFlux;
+  friend class flow::PisoCoupler;
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+  friend class test::PreparedFaceMassFluxForTest;
+#endif
 };
 
 class CellCenteredFvmOperators final {

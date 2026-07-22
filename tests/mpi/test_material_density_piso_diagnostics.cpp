@@ -5,6 +5,7 @@
 #include "hundun/diagnostics/material_density_piso_diagnostics.hpp"
 #include "diagnostics/src/material_density_piso_diagnostics_test_access.hpp"
 #include "flow/src/material_density_piso_test_access.hpp"
+#include "flow/src/material_density_transport_test_access.hpp"
 #include "hundun/execution/execution.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/flow/material_density_piso.hpp"
@@ -886,6 +887,96 @@ int main(int argc, char **argv) {
         HUNDUN_CHECK(rejected && sink.calls == 1U);
       }
       check_equal(diagnostic_state, state);
+    }
+
+    {
+      using TransportAccess =
+          hundun::flow::test::MaterialDensityTransportTestAccess;
+      hundun::linear::JacobiPreconditioner lx(execution), ly(execution),
+          lz(execution), lp(execution);
+      auto late_flow = hundun::flow::FixedStepMaterialDensityFlow::create(
+          decomposition, topology, geometry, boundaries, mpi, execution, halo,
+          momentum_solver, {&lx, &ly, &lz}, pressure_solver, lp, registry,
+          fields, specification);
+      auto late_state = make_state(1.0);
+      const auto late_before = capture(late_state);
+      TransportAccess::reset();
+      TransportAccess::set_transport_residual(0U, 2.0e-9);
+      std::optional<hundun::flow::MaterialDensityStepAttemptReport> late_report;
+      try {
+        late_report.emplace(
+            late_flow.attempt(late_state, 0.0, stencil, {}, {}));
+      } catch (...) {
+        TransportAccess::reset();
+        throw;
+      }
+      TransportAccess::reset();
+      HUNDUN_CHECK(late_report->flow().reason ==
+                   hundun::flow::StepFailureReason::final_transport_residual);
+      HUNDUN_CHECK(late_report->flow().pressure_corrector_count == 2U);
+      HUNDUN_CHECK(late_report->material_report_available());
+      HUNDUN_CHECK(late_report->material_report().flux_provenance() ==
+                   hundun::flow::MaterialFluxProvenance::final_corrected);
+      HUNDUN_CHECK(bits(late_report->flow().final_transport_normalized_l2[0]) ==
+                   bits(late_report->material_report()
+                            .transport_normalized_l2()[0]));
+      HUNDUN_CHECK(
+          hundun::flow::test::MaterialDensityPisoTestAccess::
+              report_authenticated(*late_report));
+      check_equal(late_before, late_state);
+
+      auto late_source =
+          late_flow.diagnostic_source(late_state, *late_report);
+      hundun::diagnostics::DiagnosticRequest late_request{
+          hundun::diagnostics::DiagnosticLevel::summary,
+          hundun::diagnostics::DiagnosticScope::local,
+          {mpi.rank(), late_source.committed_step(),
+           late_source.committed_time_s(), "material-density.attempt-result"},
+          {}, 0U};
+      Sink late_first;
+      Sink late_second;
+      hundun::diagnostics::collect_diagnostics(late_source, late_request,
+                                               late_first);
+      hundun::diagnostics::collect_diagnostics(late_source, late_request,
+                                               late_second);
+      HUNDUN_CHECK(late_first.records[0].status ==
+                   hundun::diagnostics::DiagnosticStatus::failed);
+      HUNDUN_CHECK(late_first.records[0].failure.classification ==
+                   hundun::diagnostics::DiagnosticFailureClass::
+                       non_convergence);
+      HUNDUN_CHECK(late_first.records[0].failure.code ==
+                   "flow.final-transport-residual");
+      const auto residual = std::find_if(
+          late_first.records[0].metrics.begin(),
+          late_first.records[0].metrics.end(), [](const auto &metric) {
+            return metric.id ==
+                   "transport.s00000000000000000000.residual";
+          });
+      HUNDUN_CHECK(residual != late_first.records[0].metrics.end());
+      HUNDUN_CHECK(residual->value.status ==
+                   hundun::diagnostics::DiagnosticValueStatus::finite);
+      HUNDUN_CHECK(residual->value.bits == bits(2.0e-9));
+      HUNDUN_CHECK(hundun::diagnostics::to_canonical_json(
+                       late_first.records[0]) ==
+                   hundun::diagnostics::to_canonical_json(
+                       late_second.records[0]));
+      auto late_counter_request = late_request;
+      late_counter_request.level =
+          hundun::diagnostics::DiagnosticLevel::counters;
+      Sink late_counters_first;
+      Sink late_counters_second;
+      hundun::diagnostics::collect_diagnostics(
+          late_source, late_counter_request, late_counters_first);
+      hundun::diagnostics::collect_diagnostics(
+          late_source, late_counter_request, late_counters_second);
+      HUNDUN_CHECK(hundun::diagnostics::to_canonical_json(
+                       late_counters_first.records[0]) ==
+                   hundun::diagnostics::to_canonical_json(
+                       late_counters_second.records[0]));
+      HUNDUN_CHECK(
+          hundun::flow::test::MaterialDensityPisoTestAccess::
+              report_authenticated(late_source.report()));
+      check_equal(late_before, late_state);
     }
 
     auto failed_state = make_state(-1.0);

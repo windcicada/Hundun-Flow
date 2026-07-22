@@ -140,6 +140,28 @@ inline std::array<std::atomic<std::uint64_t>,
                   static_cast<std::size_t>(
                       MaterialTerminalPointForTest::count)>
     material_terminal_calls{};
+inline std::atomic<std::uint32_t> face_flux_path_observation_depth{};
+
+class FaceFluxPathObservation final {
+public:
+  explicit FaceFluxPathObservation(bool enabled = true) noexcept
+      : enabled_(enabled) {
+    if (enabled_)
+      face_flux_path_observation_depth.fetch_add(1U,
+                                                  std::memory_order_relaxed);
+  }
+  ~FaceFluxPathObservation() noexcept {
+    if (enabled_)
+      face_flux_path_observation_depth.fetch_sub(1U,
+                                                  std::memory_order_relaxed);
+  }
+  FaceFluxPathObservation(const FaceFluxPathObservation &) = delete;
+  FaceFluxPathObservation &operator=(const FaceFluxPathObservation &) = delete;
+
+private:
+  bool enabled_{};
+};
+
 inline MaterialTerminalModeForTest
 reach_material_terminal_point(MaterialTerminalPointForTest point) noexcept {
   material_terminal_calls[static_cast<std::size_t>(point)].fetch_add(
