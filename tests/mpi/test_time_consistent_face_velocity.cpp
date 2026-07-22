@@ -4,6 +4,7 @@
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/flow/momentum_predictor.hpp"
+#include "flow/src/material_density_piso_test_access.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
 #include "hundun/mesh/mesh_topology.hpp"
 #include "hundun/runtime/exchange_plan.hpp"
@@ -46,6 +47,7 @@ using hundun::config::SimulationType;
 using hundun::finite_volume::declare_face_mass_flux;
 using hundun::flow::make_momentum_time_stencil;
 using hundun::flow::MomentumFaceHistory;
+using hundun::flow::MaterialMomentumFaceHistory;
 using hundun::flow::MomentumTimeOrder;
 using hundun::flow::TimeConsistentFaceVelocity;
 using hundun::mesh::AnalyticWarpedBoxMapping;
@@ -184,8 +186,12 @@ struct Fields final {
   FieldId diagonal{};
   FieldId velocity_n{};
   FieldId velocity_nm1{};
+  FieldId density_n{};
+  FieldId density_nm1{};
   FieldId face_n{};
   FieldId face_nm1{};
+  FieldId face_density_n{};
+  FieldId face_density_nm1{};
   FieldId trial_face{};
   FieldId mass_flux{};
 };
@@ -199,8 +205,14 @@ Fields declare_fields(FieldRegistry &registry) {
   ids.diagonal = registry.declare_field(cell_descriptor("momentum_aP", 3U));
   ids.velocity_n = registry.declare_field(cell_descriptor("u_n", 3U));
   ids.velocity_nm1 = registry.declare_field(cell_descriptor("u_nm1", 3U));
+  ids.density_n = registry.declare_field(cell_descriptor("rho_n", 1U));
+  ids.density_nm1 = registry.declare_field(cell_descriptor("rho_nm1", 1U));
   ids.face_n = registry.declare_field(face_descriptor("u_face_n", 3U));
   ids.face_nm1 = registry.declare_field(face_descriptor("u_face_nm1", 3U));
+  ids.face_density_n =
+      registry.declare_field(face_descriptor("rho_face_n", 1U));
+  ids.face_density_nm1 =
+      registry.declare_field(face_descriptor("rho_face_nm1", 1U));
   ids.trial_face = registry.declare_field(face_descriptor("u_face_trial", 3U));
   ids.mass_flux = declare_face_mass_flux(registry);
   registry.freeze();
@@ -213,6 +225,10 @@ FieldAccessPlan make_access_plan(const FieldRegistry &registry,
   plan.declare_access(kInitPhase, kInitActor, ids.face_n,
                       AccessMode::read_write);
   plan.declare_access(kInitPhase, kInitActor, ids.face_nm1,
+                      AccessMode::read_write);
+  plan.declare_access(kInitPhase, kInitActor, ids.face_density_n,
+                      AccessMode::read_write);
+  plan.declare_access(kInitPhase, kInitActor, ids.face_density_nm1,
                       AccessMode::read_write);
   plan.declare_access(kAssemblePhase, kAssembleActor, ids.trial_face,
                       AccessMode::write);
@@ -440,7 +456,8 @@ void exchange_cells(const StructuredDecomposition &decomposition,
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
   for (FieldId field : {ids.predictor, ids.pressure, ids.pressure_gradient,
-                        ids.diagonal, ids.velocity_n, ids.velocity_nm1}) {
+                        ids.diagonal, ids.velocity_n, ids.velocity_nm1,
+                        ids.density_n, ids.density_nm1}) {
     halo.exchange(storage, field);
   }
 }
@@ -1269,6 +1286,215 @@ void run_timestep_shrink_case(const MpiContext &mpi, int ranks) {
   HUNDUN_CHECK(bdf_half[1] > 0.8 * bdf_full[1]);
 }
 
+void run_material_density_case(const MpiContext &mpi, int ranks) {
+  constexpr Int3 extent{4, 4, 4};
+  auto decomposition = StructuredDecomposition::create(
+      mpi, extent, std::array<bool, 3>{true, true, true},
+      DecompositionOptions{process_grid_for(ranks, extent)});
+  MeshTopology topology(decomposition);
+  MeshGeometry geometry(
+      topology, UniformBoxMapping(Real3{0.0, 0.0, 0.0}, Real3{1.0, 1.0, 1.0}));
+  BoundaryRegistry boundaries =
+      BoundaryRegistry::create(periodic_case(1.0), topology);
+  auto interpolation = TimeConsistentFaceVelocity::create(topology, geometry);
+  FieldRegistry registry;
+  const Fields ids = declare_fields(registry);
+  FieldStorage storage(registry, FieldLayoutSet{decomposition.local_extent(),
+                                                topology.local_face_count()});
+  const FieldAccessPlan access = make_access_plan(registry, ids);
+  auto predictor = storage.view<double>(ids.predictor);
+  auto pressure = storage.view<double>(ids.pressure);
+  auto gradient = storage.view<double>(ids.pressure_gradient);
+  auto diagonal = storage.view<double>(ids.diagonal);
+  auto velocity_n = storage.view<double>(ids.velocity_n);
+  auto velocity_nm1 = storage.view<double>(ids.velocity_nm1);
+  auto density_n = storage.view<double>(ids.density_n);
+  auto density_nm1 = storage.view<double>(ids.density_nm1);
+  const auto box = topology.owned_global_box();
+  for (int k = 0; k < decomposition.local_extent().z; ++k)
+    for (int j = 0; j < decomposition.local_extent().y; ++j)
+      for (int i = 0; i < decomposition.local_extent().x; ++i) {
+        const Int3 global{box.begin.x + i, box.begin.y + j, box.begin.z + k};
+        const LocalCellId cell =
+            (static_cast<std::size_t>(k) *
+                 static_cast<std::size_t>(decomposition.local_extent().y) +
+             static_cast<std::size_t>(j)) *
+                static_cast<std::size_t>(decomposition.local_extent().x) +
+            static_cast<std::size_t>(i);
+        const Real3 centre = geometry.cell_center_m(cell);
+        density_n(i, j, k, 0) = 1.0 + 0.2 * centre.x + 0.1 * centre.y;
+        density_nm1(i, j, k, 0) = 0.8 + 0.1 * centre.y + 0.05 * centre.z;
+        pressure(i, j, k, 0) =
+            0.5 * centre.x - 0.25 * centre.y + 0.125 * centre.z;
+        gradient(i, j, k, 0) = 0.5;
+        gradient(i, j, k, 1) = -0.25;
+        gradient(i, j, k, 2) = 0.125;
+        const double volume = geometry.cell_volume_m3(cell);
+        for (int component = 0; component < 3; ++component) {
+          predictor(i, j, k, component) =
+              0.3 * (component + 1) + 0.02 * global.x - 0.01 * global.y;
+          velocity_n(i, j, k, component) =
+              -0.2 * (component + 1) + 0.01 * global.y;
+          velocity_nm1(i, j, k, component) =
+              0.15 * (component + 1) - 0.01 * global.z;
+          diagonal(i, j, k, component) =
+              volume * (3.0 + 0.25 * component + 0.05 * global.x);
+        }
+      }
+  auto face_n = storage.acquire_face_write<double>(access, kInitPhase,
+                                                   kInitActor, ids.face_n);
+  auto face_nm1 = storage.acquire_face_write<double>(
+      access, kInitPhase, kInitActor, ids.face_nm1);
+  auto face_density_n = storage.acquire_face_write<double>(
+      access, kInitPhase, kInitActor, ids.face_density_n);
+  auto face_density_nm1 = storage.acquire_face_write<double>(
+      access, kInitPhase, kInitActor, ids.face_density_nm1);
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+    const double id = static_cast<double>(topology.global_face_id(face) % 7U);
+    face_density_n(face, 0) = 1.1 + 0.01 * id;
+    face_density_nm1(face, 0) = 0.9 + 0.015 * id;
+    for (int component = 0; component < 3; ++component) {
+      face_n(face, component) = 0.1 * (component + 1) + 0.005 * id;
+      face_nm1(face, component) = -0.05 * (component + 1) + 0.003 * id;
+    }
+  }
+  exchange_cells(decomposition, storage, ids);
+  const FieldStorage &read = storage;
+  const auto predictor_read = read.view<double>(ids.predictor);
+  const auto pressure_read = read.view<double>(ids.pressure);
+  const auto gradient_read = read.view<double>(ids.pressure_gradient);
+  const auto diagonal_read = read.view<double>(ids.diagonal);
+  const auto velocity_n_read = read.view<double>(ids.velocity_n);
+  const auto velocity_nm1_read = read.view<double>(ids.velocity_nm1);
+  const auto density_n_read = read.view<double>(ids.density_n);
+  const auto density_nm1_read = read.view<double>(ids.density_nm1);
+  const auto face_n_read = storage.acquire_face_read<double>(
+      access, kInitPhase, kInitActor, ids.face_n);
+  const auto face_nm1_read = storage.acquire_face_read<double>(
+      access, kInitPhase, kInitActor, ids.face_nm1);
+  const auto face_density_n_read = storage.acquire_face_read<double>(
+      access, kInitPhase, kInitActor, ids.face_density_n);
+  const auto face_density_nm1_read = storage.acquire_face_read<double>(
+      access, kInitPhase, kInitActor, ids.face_density_nm1);
+  auto trial = storage.acquire_face_write<double>(
+      access, kAssemblePhase, kAssembleActor, ids.trial_face);
+
+  const auto verify = [&](const auto &stencil,
+                          const MaterialMomentumFaceHistory &history) {
+    interpolation.assemble_material_density(
+        boundaries, stencil, predictor_read, pressure_read, gradient_read,
+        diagonal_read, history, trial);
+    const double tolerance =
+        512.0 * std::numeric_limits<double>::epsilon() * 32.0;
+    for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
+      if (topology.periodic_pair(face).has_value() &&
+          topology.global_face_id(face) > *topology.periodic_pair(face))
+        continue;
+      const auto oracle = oracle_face(topology, geometry, face);
+      for (int component = 0; component < 3; ++component) {
+        const double diagonal_face =
+            oracle.weight_p *
+                (value(diagonal_read, oracle.p, component) / oracle.volume_p) +
+            oracle.weight_n *
+                (value(diagonal_read, oracle.n, component) / oracle.volume_n);
+        const double mobility = 1.0 / diagonal_face;
+        const double predictor_momentum = interpolate(
+            oracle.weight_p,
+            value(density_n_read, oracle.p, 0) *
+                value(predictor_read, oracle.p, component),
+            oracle.weight_n,
+            value(density_n_read, oracle.n, 0) *
+                value(predictor_read, oracle.n, component));
+        const double cell_momentum = interpolate(
+            oracle.weight_p,
+            value(density_n_read, oracle.p, 0) *
+                value(velocity_n_read, oracle.p, component),
+            oracle.weight_n,
+            value(density_n_read, oracle.n, 0) *
+                value(velocity_n_read, oracle.n, component));
+        const double old_cell =
+            stencil.order == MomentumTimeOrder::bdf2
+                ? interpolate(
+                      oracle.weight_p,
+                      value(density_nm1_read, oracle.p, 0) *
+                          value(velocity_nm1_read, oracle.p, component),
+                      oracle.weight_n,
+                      value(density_nm1_read, oracle.n, 0) *
+                          value(velocity_nm1_read, oracle.n, component))
+                : 0.0;
+        Real3 gradient_face{};
+        gradient_face.x = interpolate(
+            oracle.weight_p, value(gradient_read, oracle.p, 0),
+            oracle.weight_n, value(gradient_read, oracle.n, 0));
+        gradient_face.y = interpolate(
+            oracle.weight_p, value(gradient_read, oracle.p, 1),
+            oracle.weight_n, value(gradient_read, oracle.n, 1));
+        gradient_face.z = interpolate(
+            oracle.weight_p, value(gradient_read, oracle.p, 2),
+            oracle.weight_n, value(gradient_read, oracle.n, 2));
+        const double defect =
+            (value(pressure_read, oracle.n, 0) -
+             value(pressure_read, oracle.p, 0) -
+             dot(gradient_face, oracle.displacement)) /
+            oracle.normal_distance;
+        const double normal = component == 0   ? oracle.unit_normal.x
+                              : component == 1 ? oracle.unit_normal.y
+                                               : oracle.unit_normal.z;
+        const double expected =
+            hundun::flow::test::MaterialDensityPisoTestAccess::
+                material_face_value(
+                    interpolate(oracle.weight_p,
+                                value(predictor_read, oracle.p, component),
+                                oracle.weight_n,
+                                value(predictor_read, oracle.n, component)),
+                    predictor_momentum, face_density_n_read(face, 0),
+                    cell_momentum,
+                    face_density_n_read(face, 0) * face_n_read(face, component),
+                    old_cell,
+                    stencil.order == MomentumTimeOrder::bdf2
+                        ? face_density_nm1_read(face, 0) *
+                              face_nm1_read(face, component)
+                        : 0.0,
+                    mobility, stencil.dt_s, stencil.alpha1, stencil.alpha2,
+                    -mobility * defect * normal);
+        HUNDUN_CHECK_NEAR(trial(face, component), expected, tolerance);
+      }
+    }
+  };
+
+  const auto be = make_momentum_time_stencil(
+      MomentumTimeOrder::backward_euler, 0.25, 0.0);
+  verify(be, {density_n_read, velocity_n_read, face_density_n_read, face_n_read,
+              nullptr, nullptr, nullptr, nullptr});
+  const auto bdf2 =
+      make_momentum_time_stencil(MomentumTimeOrder::bdf2, 0.125, 0.25);
+  verify(bdf2,
+         {density_n_read, velocity_n_read, face_density_n_read, face_n_read,
+          &density_nm1_read, &velocity_nm1_read, &face_density_nm1_read,
+          &face_nm1_read});
+
+  std::vector<double> unchanged(topology.local_face_count() * 3U);
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face)
+    for (int component = 0; component < 3; ++component)
+      unchanged[face * 3U + static_cast<std::size_t>(component)] =
+          trial(face, component);
+  density_n(0, 0, 0, 0) = std::numeric_limits<double>::quiet_NaN();
+  exchange_cells(decomposition, storage, ids);
+  expect_error([&] {
+    interpolation.assemble_material_density(
+        boundaries, be, predictor_read, pressure_read, gradient_read,
+        diagonal_read,
+        {density_n_read, velocity_n_read, face_density_n_read, face_n_read,
+         nullptr, nullptr, nullptr, nullptr},
+        trial);
+  });
+  for (LocalFaceId face = 0; face < topology.local_face_count(); ++face)
+    for (int component = 0; component < 3; ++component)
+      HUNDUN_CHECK(bits(trial(face, component)) ==
+                   bits(unchanged[face * 3U +
+                                  static_cast<std::size_t>(component)]));
+}
+
 void run_physical_case(const MpiContext &mpi, int ranks) {
   constexpr Int3 extent{4, 4, 4};
   constexpr double rho_ref = 1.5;
@@ -1364,6 +1590,7 @@ int main(int argc, char **argv) {
     run_periodic_case(mpi, ranks, Int3{1, 4, 4}, false);
     run_affine_exactness_case(mpi, ranks);
     run_timestep_shrink_case(mpi, ranks);
+    run_material_density_case(mpi, ranks);
     run_physical_case(mpi, ranks);
   });
 }

@@ -50,6 +50,7 @@ public:
 private:
   MaterialDensityStepAttemptReport() = default;
   std::uint64_t compute_seal() const noexcept;
+  bool semantic_valid() const noexcept;
   void seal() noexcept;
   bool authenticated() const noexcept;
 

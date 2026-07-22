@@ -442,6 +442,11 @@ test::MaterialDensityPisoTestAccess::state_diagnostic_identity(
     const FlowState &state) noexcept {
   return state.diagnostic_mutation_identity();
 }
+
+bool test::MaterialDensityPisoTestAccess::state_attempt_active(
+    const FlowState &state) noexcept {
+  return state.attempt_active();
+}
 #endif
 
 void FlowState::seed_accepted_layers(const FlowLayerValues &history,

@@ -12,6 +12,7 @@
 #include "mpi_error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "constant_density_piso_test_access.hpp"
+#include "material_density_piso_test_access.hpp"
 #endif
 
 #include <algorithm>
@@ -652,6 +653,8 @@ struct PisoCoupler::Impl final {
   double material_rhs_l2{};
   linear::SolveControl material_control{};
   std::optional<finite_volume::MatrixFreePoissonOperator> pressure_operator;
+  std::optional<finite_volume::MatrixFreePoissonOperator>
+      material_final_operator;
   std::optional<finite_volume::PoissonConstraint> constraint;
 };
 
@@ -683,6 +686,23 @@ PisoCoupler::PisoCoupler(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 PisoCoupler::~PisoCoupler() noexcept = default;
 PisoCoupler::PisoCoupler(PisoCoupler &&) noexcept = default;
+
+void PisoCoupler::prepare_material_density_assessment() {
+  if (!impl_)
+    throw runtime::Error("material PISO coupler has been moved from");
+  if (impl_->material_final_operator)
+    return;
+  auto gamma = impl_->gamma.view(0U, impl_->topology->local_face_count());
+  for (std::size_t face = 0; face < impl_->topology->local_face_count(); ++face)
+    gamma[face] = 1.0;
+  impl_->material_final_operator.emplace(
+      finite_volume::MatrixFreePoissonOperator::create(
+          *impl_->decomposition, *impl_->topology, *impl_->geometry,
+          *impl_->execution,
+          static_cast<const execution::Buffer &>(impl_->gamma).view(
+              0U, impl_->topology->local_face_count()),
+          finite_volume::make_poisson_boundary_spec(*impl_->boundaries)));
+}
 
 PressureCorrectionReport PisoCoupler::correct_common_throwing(
     FlowState &state, double rho_ref,
@@ -1061,6 +1081,18 @@ PressureCorrectionReport PisoCoupler::correct_common_throwing(
   result.solve =
       impl_->solver->solve(*impl_->pressure_operator, *impl_->preconditioner,
                            *rhs, *correction, control);
+  if (material_stencil != nullptr &&
+      result.solve.reason == linear::SolveTerminationReason::collective_failure) {
+    const int failing_rank = result.solve.lowest_failing_rank;
+    if (failing_rank < 0) {
+      throw runtime::MpiOperationError(
+          "material-density flow collective failure has no reliable rank");
+    }
+    return correction_failure(
+        std::move(result),
+        PressureCorrectionDisposition::non_retryable_failure,
+        StepFailureReason::collective_operation, failing_rank);
+  }
   impl_->constraint->normalize_solution(*correction);
   std::optional<execution::VectorView<double>> residual;
   synchronized_local_phase(
@@ -1423,9 +1455,7 @@ PressureCorrectionReport PisoCoupler::correct_material_density(
             : PressureCorrectionDisposition::non_retryable_failure,
         failure.reason, failure.failing_rank);
   } catch (const runtime::detail::MpiOperationError &) {
-    result = correction_failure(
-        std::move(result), PressureCorrectionDisposition::non_retryable_failure,
-        StepFailureReason::collective_operation, -1);
+    throw;
   } catch (const runtime::Error &) {
     result = correction_failure(
         std::move(result), PressureCorrectionDisposition::non_retryable_failure,
@@ -1447,6 +1477,26 @@ PisoCoupler::assess_final_material_density_pressure(
   MaterialPressureAssessment result;
   if (!impl_)
     return result;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  const auto terminal_result = [&](test::MaterialTerminalPointForTest point) {
+    const auto mode = test::detail::reach_material_terminal_point(point);
+    if (mode == test::MaterialTerminalModeForTest::thrown_operation)
+      throw runtime::MpiOperationError(
+          "injected material terminal operation failure");
+    if (mode != test::MaterialTerminalModeForTest::returned_rankless &&
+        mode != test::MaterialTerminalModeForTest::returned_reliable)
+      return false;
+    result.disposition = PressureCorrectionDisposition::non_retryable_failure;
+    result.reason = StepFailureReason::collective_operation;
+    result.lowest_failing_rank =
+        mode == test::MaterialTerminalModeForTest::returned_reliable ? 0 : -1;
+    return true;
+  };
+  if (terminal_result(test::MaterialTerminalPointForTest::final_pressure_entry)) {
+    impl_->material_token_available = false;
+    return result;
+  }
+#endif
   try {
     const std::size_t count = impl_->topology->owned_cell_count();
     synchronized_local_phase(
@@ -1554,10 +1604,24 @@ PisoCoupler::assess_final_material_density_pressure(
       impl_->material_periodic_gamma[key] += final_gamma[face];
       impl_->material_periodic_count[key] += 1.0;
     }
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (terminal_result(
+            test::MaterialTerminalPointForTest::final_pressure_gamma_sum)) {
+      impl_->material_token_available = false;
+      return result;
+    }
+#endif
     impl_->mpi->allreduce_fp64_in_place(
         impl_->material_periodic_gamma.data(),
         impl_->material_periodic_gamma.size(),
         runtime::Fp64ReductionOperation::sum);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (terminal_result(
+            test::MaterialTerminalPointForTest::final_pressure_gamma_count)) {
+      impl_->material_token_available = false;
+      return result;
+    }
+#endif
     impl_->mpi->allreduce_fp64_in_place(
         impl_->material_periodic_count.data(),
         impl_->material_periodic_count.size(),
@@ -1576,14 +1640,21 @@ PisoCoupler::assess_final_material_density_pressure(
       final_gamma[face] =
           impl_->material_periodic_gamma[key] / count_value;
     }
-    const auto boundary_spec =
-        finite_volume::make_poisson_boundary_spec(*impl_->boundaries);
-    auto final_operator = finite_volume::MatrixFreePoissonOperator::create(
-        *impl_->decomposition, *impl_->topology, *impl_->geometry,
-        *impl_->execution,
-        static_cast<const execution::Buffer &>(impl_->gamma)
-            .view(0U, impl_->topology->local_face_count()),
-        boundary_spec);
+    synchronized_local_phase(
+        *impl_->mpi, StepFailureReason::invalid_input, false,
+        "material final pressure operator is unavailable", [&] {
+          if (!impl_->material_final_operator)
+            throw runtime::Error(
+                "material final pressure operator was not prepared");
+        });
+    const auto replacement =
+        impl_->material_final_operator->collectively_replace_face_coefficients(
+            static_cast<const execution::Buffer &>(impl_->gamma).view(
+                0U, impl_->topology->local_face_count()),
+            *impl_->mpi);
+    if (!replacement.accepted)
+      throw SynchronizedAttemptFailure{StepFailureReason::invalid_input,
+                                       replacement.lowest_failing_rank, false};
     auto rhs = impl_->rhs.view(0U, count);
     auto correction = impl_->correction.view(0U, count);
     auto residual = impl_->residual.view(0U, count);
@@ -1591,9 +1662,16 @@ PisoCoupler::assess_final_material_density_pressure(
       rhs[cell] = impl_->material_rhs_solve[cell];
       correction[cell] = impl_->material_correction[cell];
     }
-    final_operator.apply(correction, residual).wait();
+    impl_->material_final_operator->apply(correction, residual).wait();
     for (std::size_t cell = 0; cell < count; ++cell)
       residual[cell] = rhs[cell] - residual[cell];
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (terminal_result(test::MaterialTerminalPointForTest::
+                            final_pressure_residual_reduction)) {
+      impl_->material_token_available = false;
+      return result;
+    }
+#endif
     result.independent_residual_l2 = global_l2(*impl_->mpi, residual);
     result.rhs_l2 = impl_->material_rhs_l2;
     const double threshold =
@@ -1612,7 +1690,14 @@ PisoCoupler::assess_final_material_density_pressure(
                         : PressureCorrectionDisposition::recoverable_failure;
     result.reason = result.accepted ? StepFailureReason::none
                                     : StepFailureReason::final_pressure_residual;
-    result.lowest_failing_rank = result.accepted ? -1 : impl_->mpi->rank();
+    if (result.accepted) {
+      result.lowest_failing_rank = -1;
+    } else {
+      const auto status = runtime::collective_status(
+          *impl_->mpi, false,
+          "material final pressure residual exceeds tolerance");
+      result.lowest_failing_rank = status.failing_rank;
+    }
   } catch (const SynchronizedAttemptFailure &failure) {
     result.disposition =
         failure.recoverable
@@ -1621,9 +1706,7 @@ PisoCoupler::assess_final_material_density_pressure(
     result.reason = failure.reason;
     result.lowest_failing_rank = failure.failing_rank;
   } catch (const runtime::detail::MpiOperationError &) {
-    result.disposition = PressureCorrectionDisposition::non_retryable_failure;
-    result.reason = StepFailureReason::collective_operation;
-    result.lowest_failing_rank = -1;
+    throw;
   } catch (...) {
     result.disposition = PressureCorrectionDisposition::non_retryable_failure;
     result.reason = StepFailureReason::invalid_input;
@@ -3911,6 +3994,27 @@ test::ConstantDensityPisoTestAccess::pressure_operator_snapshot(
     snapshot.revision = candidate->revision();
   }
   return snapshot;
+}
+
+test::MaterialPressureEvidenceForTest
+test::MaterialDensityPisoTestAccess::material_pressure_evidence(
+    const PisoCoupler &coupler) {
+  test::MaterialPressureEvidenceForTest result;
+  if (!coupler.impl_)
+    return result;
+  result.rhs_raw = coupler.impl_->material_rhs_raw;
+  result.rhs_solve = coupler.impl_->material_rhs_solve;
+  result.correction = coupler.impl_->material_correction;
+  result.final_face_density = coupler.impl_->material_face_density;
+  result.rhs_l2 = coupler.impl_->material_rhs_l2;
+  result.corrector_ordinal = coupler.impl_->material_ordinal;
+  result.token_available = coupler.impl_->material_token_available;
+  result.final_operator_available =
+      coupler.impl_->material_final_operator.has_value();
+  if (result.final_operator_available)
+    result.final_operator_revision =
+        coupler.impl_->material_final_operator->revision();
+  return result;
 }
 #endif
 

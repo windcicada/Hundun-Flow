@@ -208,6 +208,7 @@ private:
   };
   StagingResult stage_trial(FlowState &, const MaterialFaceMassFlux &,
                             const MomentumTimeStencil &) const;
+  void prepare_task20_attempt() const;
   struct Impl;
   explicit MaterialDensityTransport(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;

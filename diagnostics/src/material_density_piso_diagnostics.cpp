@@ -6,11 +6,15 @@
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+#include "material_density_piso_diagnostics_test_access.hpp"
+#endif
 
 #include <mpi.h>
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -34,6 +38,15 @@ constexpr DiagnosticCapabilityFlags kCapabilities =
     static_cast<DiagnosticCapabilityFlags>(
         DiagnosticCapability::bounded_state_sample) |
     static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::collective);
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+test::MaterialDensityPisoDiagnosticFault injected_fault{
+    test::MaterialDensityPisoDiagnosticFault::none};
+
+bool fault(test::MaterialDensityPisoDiagnosticFault value) noexcept {
+  return injected_fault == value;
+}
+#endif
 
 [[noreturn]] void collection_error(DiagnosticFailureClass classification,
                                    std::string code, int rank,
@@ -72,6 +85,27 @@ struct Observation final {
   DiagnosticFingerprintParts fingerprint{};
   std::uint64_t eligible{};
   std::vector<DiagnosticSample> samples;
+};
+
+class AgreementWriter final {
+public:
+  void u8(std::uint8_t value) { bytes_.push_back(value); }
+  void u32(std::uint32_t value) {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+  void u64(std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+  void text(std::string_view value) {
+    u64(static_cast<std::uint64_t>(value.size()));
+    bytes_.insert(bytes_.end(), value.begin(), value.end());
+  }
+  std::vector<unsigned char> finish() && { return std::move(bytes_); }
+
+private:
+  std::vector<unsigned char> bytes_;
 };
 
 bool selected(const DiagnosticRequest &request, std::string_view id) {
@@ -566,6 +600,263 @@ int lowest_rank(const runtime::MpiContext &mpi, bool failure,
   return lowest == mpi.size() ? -1 : lowest;
 }
 
+std::vector<unsigned char> request_agreement_key(
+    const DiagnosticRequest &request) {
+  AgreementWriter writer;
+  writer.u8(static_cast<std::uint8_t>(request.level));
+  writer.u8(static_cast<std::uint8_t>(request.scope));
+  writer.u64(request.frame.step);
+  writer.u64(bits(request.frame.time_s));
+  writer.text(request.frame.phase);
+  writer.u64(static_cast<std::uint64_t>(request.selected_fields.size()));
+  for (const auto field : request.selected_fields)
+    writer.text(field);
+  writer.u64(static_cast<std::uint64_t>(request.sample_budget));
+  return std::move(writer).finish();
+}
+
+std::vector<unsigned char> provider_agreement_key(
+    const flow::MaterialDensityFlowDiagnosticSource &source) {
+  AgreementWriter writer;
+  const auto descriptor = describe_diagnostics(source);
+  writer.u32(descriptor.schema_version);
+  writer.u32(static_cast<std::uint32_t>(descriptor.module_kind));
+  writer.text(descriptor.module_id);
+  writer.text(descriptor.instance_id);
+  writer.u32(descriptor.capabilities);
+  writer.text(source.global_cell_layout_fingerprint());
+  writer.text(source.global_face_layout_fingerprint());
+  const auto extent = source.global_cell_extent();
+  writer.u32(static_cast<std::uint32_t>(extent.x));
+  writer.u32(static_cast<std::uint32_t>(extent.y));
+  writer.u32(static_cast<std::uint32_t>(extent.z));
+  writer.u64(static_cast<std::uint64_t>(source.fingerprint_field_count()));
+  for (std::size_t field = 0; field < source.fingerprint_field_count(); ++field) {
+    writer.text(source.fingerprint_field_id(field));
+    writer.text(source.field_unit(field));
+    writer.u8(static_cast<std::uint8_t>(source.field_entity(field)));
+    writer.u64(static_cast<std::uint64_t>(source.field_component_count(field)));
+  }
+
+  const auto &parent = source.report();
+  const auto &report = parent.flow();
+  writer.u8(static_cast<std::uint8_t>(report.disposition));
+  writer.u8(static_cast<std::uint8_t>(report.reason));
+  writer.u32(static_cast<std::uint32_t>(report.lowest_failing_rank));
+  writer.u64(report.pressure_corrector_count);
+  writer.u64(bits(report.attempted_dt_s));
+  writer.u64(bits(report.suggested_dt_s));
+  const auto append_solve = [&](const linear::SolveReport &solve) {
+    writer.u8(static_cast<std::uint8_t>(solve.reason));
+    writer.u64(solve.iterations);
+    writer.u64(bits(solve.initial_residual));
+    writer.u64(bits(solve.recursive_residual));
+    writer.u64(bits(solve.final_residual));
+    writer.u64(solve.matvec_count);
+    writer.u64(solve.preconditioner_apply_count);
+    writer.u64(solve.global_reduction_count);
+    writer.u32(static_cast<std::uint32_t>(solve.lowest_failing_rank));
+  };
+  for (const auto &solve : report.momentum.components)
+    append_solve(solve);
+  for (const auto &solve : report.pressure)
+    append_solve(solve);
+  writer.u64(bits(report.final_continuity_normalized_l2));
+  writer.u64(bits(report.final_pressure_residual_l2));
+  for (const auto value : report.final_momentum_normalized_l2)
+    writer.u64(bits(value));
+  writer.u64(static_cast<std::uint64_t>(
+      report.final_transport_normalized_l2.size()));
+  for (const auto value : report.final_transport_normalized_l2)
+    writer.u64(bits(value));
+  writer.u64(bits(report.final_mass_relative_conservation_defect));
+  for (const auto value : report.final_momentum_relative_conservation_defect)
+    writer.u64(bits(value));
+  writer.u64(static_cast<std::uint64_t>(
+      report.final_transport_relative_conservation_defect.size()));
+  for (const auto value : report.final_transport_relative_conservation_defect)
+    writer.u64(bits(value));
+
+  writer.u8(parent.material_report_available() ? 1U : 0U);
+  writer.u8(static_cast<std::uint8_t>(parent.material_failure_reason()));
+  writer.u64(parent.material_field_count());
+  writer.u32(parent.shared_face_mass_flux_field());
+  writer.u8(static_cast<std::uint8_t>(parent.flux_provenance()));
+  writer.u64(parent.attempt_identity());
+  writer.u8(parent.final_continuity_residual_available() ? 1U : 0U);
+  writer.u8(parent.final_pressure_residual_available() ? 1U : 0U);
+  writer.u64(bits(parent.final_pressure_normalized_residual()));
+  for (const auto available : parent.final_momentum_residual_availability())
+    writer.u8(available);
+  writer.u8(parent.mass_conservation_available() ? 1U : 0U);
+  for (const auto available : parent.momentum_conservation_availability())
+    writer.u8(available);
+  if (parent.material_report_available()) {
+    const auto &material = parent.material_report();
+    writer.u8(static_cast<std::uint8_t>(material.disposition()));
+    writer.u8(static_cast<std::uint8_t>(material.reason()));
+    writer.u32(static_cast<std::uint32_t>(material.lowest_failing_rank()));
+    writer.u8(static_cast<std::uint8_t>(material.flux_provenance()));
+    writer.u64(material.attempt_identity());
+    writer.u64(material.finalization_identity());
+    writer.u32(material.shared_face_mass_flux_field());
+    writer.u8(material.density_residual_available() ? 1U : 0U);
+    writer.u64(bits(material.density_normalized_l2()));
+    writer.u64(static_cast<std::uint64_t>(
+        material.transport_residual_availability().size()));
+    for (const auto available : material.transport_residual_availability())
+      writer.u8(available);
+    writer.u64(static_cast<std::uint64_t>(
+        material.transport_normalized_l2().size()));
+    for (const auto value : material.transport_normalized_l2())
+      writer.u64(bits(value));
+    writer.u8(material.mass_conservation_available() ? 1U : 0U);
+    writer.u64(bits(material.mass_relative_conservation_defect()));
+    writer.u64(static_cast<std::uint64_t>(
+        material.transport_conservation_availability().size()));
+    for (const auto available : material.transport_conservation_availability())
+      writer.u8(available);
+    writer.u64(static_cast<std::uint64_t>(
+        material.transport_relative_conservation_defect().size()));
+    for (const auto value : material.transport_relative_conservation_defect())
+      writer.u64(bits(value));
+  }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (fault(test::MaterialDensityPisoDiagnosticFault::provider_agreement))
+    writer.u8(0xffU);
+#endif
+  return std::move(writer).finish();
+}
+
+void require_byte_agreement(const runtime::MpiContext &mpi,
+                            const std::vector<unsigned char> &local,
+                            DiagnosticFailureClass classification,
+                            std::string code, std::string_view label) {
+  std::uint64_t reference_size =
+      mpi.rank() == 0 ? static_cast<std::uint64_t>(local.size()) : 0U;
+  runtime::check_mpi_result(
+      MPI_Bcast(&reference_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      "MPI_Bcast(flow diagnostic agreement size)");
+  bool preparation_failed =
+      reference_size > static_cast<std::uint64_t>(
+                           std::numeric_limits<int>::max());
+  std::vector<unsigned char> reference;
+  try {
+    if (!preparation_failed)
+      reference.resize(static_cast<std::size_t>(reference_size));
+  } catch (...) {
+    preparation_failed = true;
+  }
+  const int preparation_rank = lowest_rank(
+      mpi, preparation_failed,
+      "MPI_Allreduce(flow diagnostic agreement preparation)");
+  if (preparation_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.agreement-preparation",
+                     preparation_rank,
+                     "collective material flow diagnostic agreement preparation failed");
+  if (mpi.rank() == 0)
+    std::copy(local.begin(), local.end(), reference.begin());
+  runtime::check_mpi_result(
+      MPI_Bcast(reference.data(), static_cast<int>(reference.size()), MPI_BYTE,
+                0, mpi.comm()),
+      "MPI_Bcast(flow diagnostic agreement bytes)");
+  const int mismatch = lowest_rank(
+      mpi, local != reference, "MPI_Allreduce(flow diagnostic agreement)");
+  if (mismatch >= 0)
+    collection_error(classification, std::move(code), mismatch,
+                     std::string(label) + " differ across ranks");
+}
+
+std::size_t global_face_count(
+    const flow::MaterialDensityFlowDiagnosticSource &source) {
+  constexpr std::string_view prefix = "face.f64.global.";
+  const auto fingerprint = source.global_face_layout_fingerprint();
+  if (fingerprint.substr(0U, prefix.size()) != prefix)
+    throw runtime::Error("material flow global face layout is invalid");
+  std::size_t result{};
+  const auto tail = fingerprint.substr(prefix.size());
+  const auto parsed = std::from_chars(tail.data(), tail.data() + tail.size(),
+                                      result);
+  if (parsed.ec != std::errc{} || parsed.ptr != tail.data() + tail.size())
+    throw runtime::Error("material flow global face count is invalid");
+  return result;
+}
+
+void require_exact_cover(
+    const flow::MaterialDensityFlowDiagnosticSource &source,
+    const runtime::MpiContext &mpi) {
+  bool preparation_failed = false;
+  std::vector<int> cells;
+  std::vector<int> faces;
+  try {
+    const auto extent = source.global_cell_extent();
+    if (extent.x <= 0 || extent.y <= 0 || extent.z <= 0)
+      throw runtime::Error("material flow global cell extent is invalid");
+    const std::uint64_t cell_count =
+        static_cast<std::uint64_t>(extent.x) *
+        static_cast<std::uint64_t>(extent.y) *
+        static_cast<std::uint64_t>(extent.z);
+    const auto face_count = global_face_count(source);
+    if (cell_count > static_cast<std::uint64_t>(
+                         std::numeric_limits<int>::max()) ||
+        face_count > static_cast<std::size_t>(
+                         std::numeric_limits<int>::max()))
+      throw runtime::Error("material flow diagnostic exact cover is too large");
+    cells.assign(static_cast<std::size_t>(cell_count), 0);
+    faces.assign(face_count, 0);
+    for (std::size_t item = 0; item < source.owned_cell_count(); ++item) {
+      const auto global = source.field_global_id(3U, item);
+      if (global >= cells.size() || ++cells[global] != 1)
+        throw runtime::Error("material flow owned cell cover is invalid");
+    }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(test::MaterialDensityPisoDiagnosticFault::cell_exact_cover))
+      throw runtime::Error("injected material cell cover failure");
+#endif
+    for (std::size_t item = 0; item < source.canonical_owned_face_count();
+         ++item) {
+      const auto global = source.field_global_id(0U, item);
+      if (global >= faces.size() || ++faces[global] != 1)
+        throw runtime::Error("material flow owned face cover is invalid");
+    }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(test::MaterialDensityPisoDiagnosticFault::face_exact_cover))
+      throw runtime::Error("injected material face cover failure");
+#endif
+  } catch (...) {
+    preparation_failed = true;
+  }
+  const int preparation_rank = lowest_rank(
+      mpi, preparation_failed,
+      "MPI_Allreduce(flow diagnostic cover preparation)");
+  if (preparation_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.exact-cover", preparation_rank,
+                     "material flow diagnostic exact cover is invalid");
+  runtime::check_mpi_result(
+      MPI_Allreduce(MPI_IN_PLACE, cells.data(), static_cast<int>(cells.size()),
+                    MPI_INT, MPI_SUM, mpi.comm()),
+      "MPI_Allreduce(flow diagnostic cell cover)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(MPI_IN_PLACE, faces.data(), static_cast<int>(faces.size()),
+                    MPI_INT, MPI_SUM, mpi.comm()),
+      "MPI_Allreduce(flow diagnostic face cover)");
+  const bool invalid =
+      !std::all_of(cells.begin(), cells.end(), [](int value) {
+        return value == 1;
+      }) ||
+      !std::all_of(faces.begin(), faces.end(), [](int value) {
+        return value == 1;
+      });
+  const int invalid_rank = lowest_rank(
+      mpi, invalid, "MPI_Allreduce(flow diagnostic cover validation)");
+  if (invalid_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.exact-cover", invalid_rank,
+                     "material flow diagnostic ownership cover is incomplete");
+}
+
 void collective_preflight(
     const flow::MaterialDensityFlowDiagnosticSource &source,
     const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
@@ -603,32 +894,31 @@ void collective_preflight(
                                    : "flow.diagnostics.frame",
                      rank, "collective material flow diagnostic preflight failed");
   }
-  std::uint64_t selection_hash = UINT64_C(1469598103934665603);
-  for (const auto field : request.selected_fields) {
-    for (const char character : field) {
-      const auto value = static_cast<unsigned char>(character);
-      selection_hash ^= value;
-      selection_hash *= UINT64_C(1099511628211);
-    }
-    selection_hash ^= 0xffU;
-    selection_hash *= UINT64_C(1099511628211);
+  std::vector<unsigned char> request_key;
+  std::vector<unsigned char> provider_key;
+  bool preparation_failed = false;
+  try {
+    request_key = request_agreement_key(request);
+    provider_key = provider_agreement_key(source);
+  } catch (...) {
+    preparation_failed = true;
   }
-  std::array<std::uint64_t, 6> key{
-      static_cast<std::uint64_t>(request.level), request.frame.step,
-      bits(request.frame.time_s), request.sample_budget,
-      static_cast<std::uint64_t>(request.selected_fields.size()),
-      selection_hash};
-  auto root = key;
-  runtime::check_mpi_result(
-      MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_UINT64_T, 0,
-                mpi.comm()),
-      "MPI_Bcast(flow diagnostic request key)");
-  const int mismatch = lowest_rank(
-      mpi, key != root, "MPI_Allreduce(flow diagnostic request agreement)");
-  if (mismatch >= 0)
-    collection_error(DiagnosticFailureClass::invalid_request,
-                     "flow.diagnostics.frame", mismatch,
-                     "collective material flow diagnostic requests differ");
+  const int preparation_rank = lowest_rank(
+      mpi, preparation_failed,
+      "MPI_Allreduce(flow diagnostic preflight preparation)");
+  if (preparation_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.agreement-preparation",
+                     preparation_rank,
+                     "collective material flow diagnostic key preparation failed");
+  require_byte_agreement(mpi, request_key,
+                         DiagnosticFailureClass::invalid_request,
+                         "flow.diagnostics.frame",
+                         "collective material flow diagnostic requests");
+  require_byte_agreement(mpi, provider_key, DiagnosticFailureClass::layout,
+                         "flow.diagnostics.provider-agreement",
+                         "collective material flow diagnostic providers");
+  require_exact_cover(source, mpi);
 }
 
 Observation aggregate(const runtime::MpiContext &mpi, Observation local,
@@ -675,47 +965,136 @@ Observation aggregate(const runtime::MpiContext &mpi, Observation local,
     const std::array<std::string_view, 5> ids{
         "face_mass_flux", "face_velocity", "pi", "rho", "velocity"};
     std::vector<Wire> send;
-    send.reserve(local.samples.size());
-    for (const auto &sample : local.samples) {
-      const auto it = std::find(ids.begin(), ids.end(), sample.field_id);
-      send.push_back({sample.global_id, sample.value.bits,
-                      static_cast<std::uint32_t>(it - ids.begin()),
-                      sample.component,
-                      static_cast<std::uint32_t>(sample.value.status)});
+    std::vector<int> counts;
+    bool send_preparation_failed = false;
+    int send_bytes{};
+    try {
+      send.reserve(local.samples.size());
+      for (const auto &sample : local.samples) {
+        const auto it = std::find(ids.begin(), ids.end(), sample.field_id);
+        if (it == ids.end())
+          throw runtime::Error("material flow diagnostic sample field is invalid");
+        const auto field = static_cast<std::size_t>(it - ids.begin());
+        const std::size_t components =
+            field == 0U || field == 2U || field == 3U ? 1U : 3U;
+        double represented{};
+        std::memcpy(&represented, &sample.value.bits, sizeof(represented));
+        if (sample.component >= components ||
+            describe_fp64(represented).status != sample.value.status)
+          throw runtime::Error(
+              "material flow diagnostic sample representation is invalid");
+        send.push_back({sample.global_id, sample.value.bits,
+                        static_cast<std::uint32_t>(field), sample.component,
+                        static_cast<std::uint32_t>(sample.value.status)});
+      }
+      const std::size_t bytes_size = send.size() * sizeof(Wire);
+      if (bytes_size >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw runtime::Error(
+            "material flow diagnostic sample wire is too large");
+      send_bytes = static_cast<int>(bytes_size);
+      counts.resize(static_cast<std::size_t>(mpi.size()));
+    } catch (...) {
+      send_preparation_failed = true;
     }
-    const std::size_t bytes_size = send.size() * sizeof(Wire);
-    if (bytes_size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    send_preparation_failed =
+        send_preparation_failed ||
+        fault(test::MaterialDensityPisoDiagnosticFault::sample_send_preparation);
+#endif
+    const int send_preparation_rank = lowest_rank(
+        mpi, send_preparation_failed,
+        "MPI_Allreduce(flow diagnostic sample preparation)");
+    if (send_preparation_rank >= 0)
       collection_error(DiagnosticFailureClass::layout,
-                       "flow.diagnostics.layout", -1,
-                       "material flow diagnostic sample wire is too large");
-    int send_bytes = static_cast<int>(bytes_size);
-    std::vector<int> counts(static_cast<std::size_t>(mpi.size()));
+                       "flow.diagnostics.sample-preparation",
+                       send_preparation_rank,
+                       "material flow diagnostic sample preparation failed");
     runtime::check_mpi_result(MPI_Allgather(&send_bytes, 1, MPI_INT,
                                             counts.data(), 1, MPI_INT,
                                             mpi.comm()),
                               "MPI_Allgather(flow diagnostic sample sizes)");
-    std::vector<int> offsets(counts.size());
+    std::vector<int> offsets;
+    std::vector<unsigned char> received;
+    std::vector<Wire> merged;
+    bool receive_preparation_failed = false;
     int total{};
-    for (std::size_t rank = 0; rank < counts.size(); ++rank) {
-      offsets[rank] = total;
-      if (counts[rank] > std::numeric_limits<int>::max() - total)
-        collection_error(DiagnosticFailureClass::layout,
-                         "flow.diagnostics.layout", -1,
-                         "material flow diagnostic sample exchange wraps");
-      total += counts[rank];
+    try {
+      offsets.resize(counts.size());
+      for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+        offsets[rank] = total;
+        if (counts[rank] < 0 ||
+            counts[rank] % static_cast<int>(sizeof(Wire)) != 0 ||
+            counts[rank] > std::numeric_limits<int>::max() - total)
+          throw runtime::Error(
+              "material flow diagnostic sample exchange wraps");
+        total += counts[rank];
+      }
+      if (total % static_cast<int>(sizeof(Wire)) != 0)
+        throw runtime::Error(
+            "material flow diagnostic sample wire is misaligned");
+      received.resize(static_cast<std::size_t>(total));
+      merged.resize(received.size() / sizeof(Wire));
+    } catch (...) {
+      receive_preparation_failed = true;
     }
-    std::vector<unsigned char> received(static_cast<std::size_t>(total));
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    receive_preparation_failed = receive_preparation_failed ||
+        fault(test::MaterialDensityPisoDiagnosticFault::sample_receive_preparation);
+#endif
+    const int receive_preparation_rank = lowest_rank(
+        mpi, receive_preparation_failed,
+        "MPI_Allreduce(flow diagnostic sample receive preparation)");
+    if (receive_preparation_rank >= 0)
+      collection_error(
+          DiagnosticFailureClass::layout,
+          "flow.diagnostics.sample-preparation", receive_preparation_rank,
+          "material flow diagnostic sample receive preparation failed");
     runtime::check_mpi_result(
         MPI_Allgatherv(send.data(), send_bytes, MPI_BYTE, received.data(),
                        counts.data(), offsets.data(), MPI_BYTE, mpi.comm()),
         "MPI_Allgatherv(flow diagnostic samples)");
-    std::vector<Wire> merged(received.size() / sizeof(Wire));
     if (!received.empty())
       std::memcpy(merged.data(), received.data(), received.size());
+    bool wire_invalid = false;
+    for (const auto &item : merged) {
+      const std::size_t components = item.field == 0U || item.field == 2U ||
+                                             item.field == 3U
+                                         ? 1U
+                                         : 3U;
+      double represented{};
+      std::memcpy(&represented, &item.value_bits, sizeof(represented));
+      if (item.field >= ids.size() || item.component >= components ||
+          item.status >
+              static_cast<std::uint32_t>(DiagnosticValueStatus::signaling_nan) ||
+          describe_fp64(represented).status !=
+              static_cast<DiagnosticValueStatus>(item.status)) {
+        wire_invalid = true;
+        break;
+      }
+    }
+    const int wire_rank = lowest_rank(
+        mpi, wire_invalid, "MPI_Allreduce(flow diagnostic sample validation)");
+    if (wire_rank >= 0)
+      collection_error(DiagnosticFailureClass::layout,
+                       "flow.diagnostics.sample-wire", wire_rank,
+                       "material flow diagnostic sample wire is invalid");
     std::sort(merged.begin(), merged.end(), [](const Wire &a, const Wire &b) {
       return std::tie(a.field, a.global, a.component) <
              std::tie(b.field, b.global, b.component);
     });
+    const bool duplicate = std::adjacent_find(
+                               merged.begin(), merged.end(),
+                               [](const Wire &a, const Wire &b) {
+                                 return std::tie(a.field, a.global, a.component) ==
+                                        std::tie(b.field, b.global, b.component);
+                               }) != merged.end();
+    const int duplicate_rank = lowest_rank(
+        mpi, duplicate, "MPI_Allreduce(flow diagnostic sample uniqueness)");
+    if (duplicate_rank >= 0)
+      collection_error(DiagnosticFailureClass::layout,
+                       "flow.diagnostics.sample-wire", duplicate_rank,
+                       "material flow diagnostic samples are duplicated");
     local.samples.clear();
     const std::size_t retained = std::min(merged.size(), sample_budget);
     local.samples.reserve(retained);
@@ -793,14 +1172,48 @@ void collect_diagnostics(
     collection_error(DiagnosticFailureClass::layout,
                      "flow.diagnostics.layout", provider_rank,
                      "collective material flow diagnostic provider failed");
-  auto global =
-      aggregate(mpi, std::move(local), request.level, request.sample_budget);
-  auto record = build_record(source, request, global,
-                             DiagnosticScope::collective);
-  validate(record, describe_diagnostics(source), request);
+  std::optional<Observation> global;
+  bool aggregation_failed = false;
+  try {
+    global.emplace(
+        aggregate(mpi, std::move(local), request.level, request.sample_budget));
+  } catch (const DiagnosticCollectionError &) {
+    throw;
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    aggregation_failed = true;
+  }
+  const int aggregation_rank = lowest_rank(
+      mpi, aggregation_failed,
+      "MPI_Allreduce(flow diagnostic aggregation completion)");
+  if (aggregation_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.aggregation", aggregation_rank,
+                     "collective material flow diagnostic aggregation failed");
+
+  std::optional<DiagnosticRecord> prepared_record;
+  bool record_failed = false;
+  try {
+    prepared_record.emplace(build_record(source, request, *global,
+                                         DiagnosticScope::collective));
+    validate(*prepared_record, describe_diagnostics(source), request);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(test::MaterialDensityPisoDiagnosticFault::record_validation))
+      throw runtime::Error("injected material diagnostic record failure");
+#endif
+  } catch (...) {
+    record_failed = true;
+  }
+  const int record_rank = lowest_rank(
+      mpi, record_failed, "MPI_Allreduce(flow diagnostic record validation)");
+  if (record_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "flow.diagnostics.record", record_rank,
+                     "collective material flow diagnostic record is invalid");
   bool sink_failed = false;
   try {
-    sink.submit(record);
+    sink.submit(*prepared_record);
   } catch (...) {
     sink_failed = true;
   }
@@ -811,5 +1224,16 @@ void collect_diagnostics(
                      "diagnostics.sink.submit", sink_rank,
                      "collective diagnostic sink submission failed");
 }
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+void test::MaterialDensityPisoDiagnosticTestAccess::set_fault(
+    MaterialDensityPisoDiagnosticFault value) noexcept {
+  injected_fault = value;
+}
+
+void test::MaterialDensityPisoDiagnosticTestAccess::reset() noexcept {
+  injected_fault = MaterialDensityPisoDiagnosticFault::none;
+}
+#endif
 
 } // namespace hundun::diagnostics

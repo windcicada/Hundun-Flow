@@ -20,10 +20,13 @@
 #include "tests/support/test_main.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <vector>
 
 namespace {
 constexpr double pi = 3.141592653589793238462643383279502884;
@@ -83,6 +86,12 @@ double density(double x, double y) {
 double density_cell_average(double x, double y, double spacing) {
   const double factor = std::sin(0.5 * spacing) / (0.5 * spacing);
   return 1.0 + 0.1 * factor * factor * std::sin(x) * std::sin(y);
+}
+
+std::uint64_t bits(double value) {
+  std::uint64_t result{};
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
 }
 } // namespace
 
@@ -352,8 +361,110 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(report.final_pressure_normalized_residual() <= 1.0);
     for (double residual : report.flow().final_momentum_normalized_l2)
       HUNDUN_CHECK(residual <= 1.0e-9);
+    HUNDUN_CHECK(report.material_report().disposition() ==
+                 hundun::flow::MaterialTransportDisposition::finalized);
+    HUNDUN_CHECK(report.flux_provenance() ==
+                 hundun::flow::MaterialFluxProvenance::final_corrected);
+    HUNDUN_CHECK(report.shared_face_mass_flux_field() ==
+                 fields.face_mass_flux);
+    HUNDUN_CHECK(report.material_report().density_normalized_l2() <= 1.0e-10);
+    for (const auto residual :
+         report.material_report().transport_normalized_l2())
+      HUNDUN_CHECK(residual <= 1.0e-9);
+    HUNDUN_CHECK(report.flow().final_mass_relative_conservation_defect <=
+                 5.0e-12);
+    HUNDUN_CHECK(
+        report.material_report().mass_relative_conservation_defect() <=
+        5.0e-12);
+    for (const auto defect :
+         report.flow().final_momentum_relative_conservation_defect)
+      HUNDUN_CHECK(defect <= 5.0e-11);
     HUNDUN_CHECK(report.material_report().minimum_density_kg_per_m3() > 0.0);
     const auto committed = state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto &finalizer_input =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            finalizer_flux_evidence(flow);
+    HUNDUN_CHECK(finalizer_input.size() == committed.face_mass_flux.size());
+    for (std::size_t face_index = 0; face_index < finalizer_input.size();
+         ++face_index)
+      HUNDUN_CHECK(bits(finalizer_input[face_index]) ==
+                   bits(committed.face_mass_flux[face_index]));
+
+    const std::size_t global_cells = static_cast<std::size_t>(n) *
+                                     static_cast<std::size_t>(n) * 4U;
+    std::vector<double> cell_cover(global_cells, 0.0);
+    std::vector<double> global_fields(global_cells * 5U, 0.0);
+    for (hundun::mesh::LocalCellId cell_id = 0;
+         cell_id < topology.owned_cell_count(); ++cell_id) {
+      const auto global =
+          static_cast<std::size_t>(topology.global_cell_id(cell_id));
+      HUNDUN_CHECK(global < global_cells);
+      cell_cover[global] = 1.0;
+      global_fields[global * 5U] = committed.density[cell_id];
+      global_fields[global * 5U + 1U] =
+          committed.density[cell_id] * committed.velocity[cell_id * 3U];
+      global_fields[global * 5U + 2U] =
+          committed.density[cell_id] * committed.velocity[cell_id * 3U + 1U];
+      global_fields[global * 5U + 3U] =
+          committed.density[cell_id] * committed.velocity[cell_id * 3U + 2U];
+      global_fields[global * 5U + 4U] =
+          committed.mechanical_pressure[cell_id];
+    }
+    mpi.allreduce_fp64_in_place(cell_cover.data(), cell_cover.size(),
+                                hundun::runtime::Fp64ReductionOperation::sum);
+    mpi.allreduce_fp64_in_place(global_fields.data(), global_fields.size(),
+                                hundun::runtime::Fp64ReductionOperation::sum);
+    HUNDUN_CHECK(std::all_of(cell_cover.begin(), cell_cover.end(),
+                            [](double value) { return value == 1.0; }));
+    double local_max_difference{};
+    double local_infinity_norm{};
+    for (hundun::mesh::LocalCellId cell_id = 0;
+         cell_id < topology.owned_cell_count(); ++cell_id) {
+      const auto global =
+          static_cast<std::size_t>(topology.global_cell_id(cell_id));
+      const std::array<double, 5> values{
+          committed.density[cell_id],
+          committed.density[cell_id] * committed.velocity[cell_id * 3U],
+          committed.density[cell_id] * committed.velocity[cell_id * 3U + 1U],
+          committed.density[cell_id] * committed.velocity[cell_id * 3U + 2U],
+          committed.mechanical_pressure[cell_id]};
+      for (std::size_t component = 0; component < values.size(); ++component) {
+        local_max_difference = std::max(
+            local_max_difference,
+            std::abs(values[component] -
+                     global_fields[global * values.size() + component]));
+        local_infinity_norm =
+            std::max(local_infinity_norm, std::abs(values[component]));
+      }
+    }
+    double decomposition_values[2]{local_max_difference,
+                                   local_infinity_norm};
+    mpi.allreduce_fp64_in_place(
+        decomposition_values, 2U,
+        hundun::runtime::Fp64ReductionOperation::maximum);
+    HUNDUN_CHECK(decomposition_values[0] <=
+                 5.0e-12 * std::max(1.0, decomposition_values[1]));
+
+    std::vector<double> face_cover(topology.global_face_count(), 0.0);
+    std::vector<double> global_face_flux(topology.global_face_count(), 0.0);
+    for (hundun::mesh::LocalFaceId face_id = 0;
+         face_id < topology.local_face_count(); ++face_id) {
+      if (topology.cell_ownership(topology.owner(face_id)) !=
+          hundun::mesh::EntityOwnership::owned)
+        continue;
+      const auto global =
+          static_cast<std::size_t>(topology.global_face_id(face_id));
+      HUNDUN_CHECK(global < face_cover.size());
+      face_cover[global] = 1.0;
+      global_face_flux[global] = committed.face_mass_flux[face_id];
+    }
+    mpi.allreduce_fp64_in_place(face_cover.data(), face_cover.size(),
+                                hundun::runtime::Fp64ReductionOperation::sum);
+    mpi.allreduce_fp64_in_place(
+        global_face_flux.data(), global_face_flux.size(),
+        hundun::runtime::Fp64ReductionOperation::sum);
+    HUNDUN_CHECK(std::all_of(face_cover.begin(), face_cover.end(),
+                            [](double value) { return value == 1.0; }));
     std::array<double, 12> sums{};
     for (hundun::mesh::LocalCellId cell_id = 0;
          cell_id < topology.owned_cell_count(); ++cell_id) {

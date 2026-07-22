@@ -23,6 +23,7 @@ namespace hundun::flow {
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class ConstantDensityPisoTestAccess;
+class MaterialDensityPisoTestAccess;
 }
 #endif
 
@@ -155,12 +156,14 @@ private:
   MaterialPressureAssessment assess_final_material_density_pressure(
       FlowState &state, const MomentumTimeStencil &stencil,
       const linear::SolveControl &control) const;
+  void prepare_material_density_assessment();
   std::unique_ptr<Impl> impl_;
 
   friend class FixedStepMaterialDensityFlow;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::ConstantDensityPisoTestAccess;
+  friend class test::MaterialDensityPisoTestAccess;
 #endif
 };
 

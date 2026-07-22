@@ -808,6 +808,8 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_material_density_piso_diagnostics PRIVATE
     hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
     MPI::MPI_CXX)
+  target_compile_definitions(test_material_density_piso_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     foreach(target IN ITEMS material_density_piso
                             variable_density_vortex
