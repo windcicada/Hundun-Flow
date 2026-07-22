@@ -12,6 +12,11 @@
 
 namespace hundun::flow {
 
+namespace detail {
+struct DensityClosureAdapter;
+struct DensityClosureDiagnosticAccess;
+} // namespace detail
+
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class IdealGasClosureTestAccess;
@@ -33,7 +38,7 @@ public:
   std::uint64_t attempt_identity() const noexcept;
 
 private:
-  IdealGasStepAttemptReport() = default;
+  IdealGasStepAttemptReport();
   MaterialDensityStepAttemptReport flow_;
   std::optional<IdealGasClosureReport> closure_report_;
   std::uint64_t attempt_identity_{};
@@ -85,7 +90,6 @@ public:
   double committed_time_s() const;
   std::size_t owned_cell_count() const;
   double cell_volume_m3(std::size_t) const;
-  double gas_constant_J_per_kg_K() const;
   IdealGasClosureState closure_state() const;
   const IdealGasStepAttemptReport &report() const;
 
@@ -96,6 +100,7 @@ private:
   double committed_cell_value(runtime::FieldId, std::size_t) const;
   std::unique_ptr<Impl> impl_;
   friend class FixedStepIdealGasFlow;
+  friend struct detail::DensityClosureDiagnosticAccess;
 };
 
 class FixedStepIdealGasFlow final {
@@ -135,6 +140,7 @@ private:
   explicit FixedStepIdealGasFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class IdealGasClosureDiagnosticSource;
+  friend struct detail::DensityClosureAdapter;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif

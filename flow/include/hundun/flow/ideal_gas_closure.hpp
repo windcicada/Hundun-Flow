@@ -17,6 +17,10 @@ class BoundaryRegistry;
 
 namespace hundun::flow {
 
+namespace detail {
+struct DensityClosureAdapter;
+}
+
 class FixedStepMaterialDensityFlow;
 class FixedStepIdealGasFlow;
 class IdealGasClosureDiagnosticSource;
@@ -150,6 +154,7 @@ private:
   friend class FixedStepIdealGasFlow;
   friend class IdealGasStepAttemptReport;
   friend class IdealGasClosureDiagnosticSource;
+  friend struct detail::DensityClosureAdapter;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif
@@ -192,6 +197,7 @@ private:
   friend class FixedStepIdealGasFlow;
   friend class IdealGasStepAttemptReport;
   friend class IdealGasClosureDiagnosticSource;
+  friend struct detail::DensityClosureAdapter;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif

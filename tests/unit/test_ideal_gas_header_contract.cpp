@@ -18,7 +18,18 @@ using ClosureSource = hundun::flow::IdealGasClosureDiagnosticSource;
 using Flow = hundun::flow::FixedStepIdealGasFlow;
 using StepReport = hundun::flow::IdealGasStepAttemptReport;
 
+template <class T, class = void>
+struct has_unapproved_gas_constant_query : std::false_type {};
+template <class T>
+struct has_unapproved_gas_constant_query<
+    T,
+    std::void_t<decltype(std::declval<const T &>().gas_constant_J_per_kg_K())>>
+    : std::true_type {};
+
 static_assert(std::is_final_v<hundun::flow::IdealGasClosureSpec>);
+static_assert(
+    !has_unapproved_gas_constant_query<ClosureSource>::value,
+    "the frozen diagnostic source API has no public gas-constant query");
 static_assert(std::is_final_v<hundun::flow::IdealGasClosureState>);
 static_assert(std::is_nothrow_destructible_v<Closure>);
 static_assert(std::is_nothrow_move_constructible_v<Closure>);

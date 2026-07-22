@@ -2,6 +2,8 @@
 
 #include "hundun/flow/ideal_gas_piso.hpp"
 
+#include "density_closure_detail.hpp"
+#include "fixed_step_flow_detail.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -20,6 +22,8 @@ namespace hundun::flow {
 namespace {
 
 constexpr std::uint64_t kIdealStepSeed = 0x696465616c737465ULL;
+constexpr runtime::PhaseId kStatePhase = 1800U;
+constexpr runtime::ActorId kStateActor = 1800U;
 
 void mix(std::uint64_t &hash, std::uint64_t value) noexcept {
   hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
@@ -31,6 +35,64 @@ void require_index(std::size_t index, std::size_t size, const char *message) {
 }
 
 } // namespace
+
+detail::DensityClosureHooks
+detail::DensityClosureAdapter::bind(IdealGasClosure &closure,
+                                    runtime::FieldId enthalpy_density,
+                                    double enthalpy_rate_J_per_kg_s) {
+  DensityClosureHooks hooks;
+  hooks.object = &closure;
+  hooks.enthalpy_density = enthalpy_density;
+  hooks.enthalpy_rate_J_per_kg_s = enthalpy_rate_J_per_kg_s;
+  hooks.begin = &DensityClosureAdapter::begin;
+  hooks.evaluate = &DensityClosureAdapter::evaluate;
+  hooks.prepare = &DensityClosureAdapter::prepare;
+  hooks.publish = &DensityClosureAdapter::publish;
+  hooks.rollback = &DensityClosureAdapter::rollback;
+  return hooks;
+}
+
+void detail::DensityClosureAdapter::begin(void *object, const FlowState &state,
+                                          std::uint64_t identity) {
+  static_cast<IdealGasClosure *>(object)->begin_attempt(state, identity);
+}
+
+detail::DensityClosureEvaluation
+detail::DensityClosureAdapter::evaluate(void *object, FlowState &state,
+                                        DensityClosureStage stage) {
+  const auto concrete_stage = stage == DensityClosureStage::predictor
+                                  ? IdealGasClosureStage::predictor
+                              : stage == DensityClosureStage::provisional
+                                  ? IdealGasClosureStage::provisional
+                                  : IdealGasClosureStage::final;
+  const auto &report =
+      static_cast<IdealGasClosure *>(object)->evaluate(state, concrete_stage);
+  return {report.disposition() == IdealGasClosureDisposition::closed,
+          report.disposition() ==
+              IdealGasClosureDisposition::recoverable_failure,
+          report.lowest_failing_rank()};
+}
+
+void detail::DensityClosureAdapter::prepare(void *object) {
+  static_cast<IdealGasClosure *>(object)->prepare_commit();
+}
+void detail::DensityClosureAdapter::publish(void *object) noexcept {
+  static_cast<IdealGasClosure *>(object)->publish_commit();
+}
+void detail::DensityClosureAdapter::rollback(void *object) noexcept {
+  static_cast<IdealGasClosure *>(object)->rollback();
+}
+double detail::DensityClosureAdapter::gas_constant_J_per_kg_K(
+    const IdealGasClosure &closure) noexcept {
+  return closure.gas_constant_J_per_kg_K();
+}
+double detail::DensityClosureAdapter::cp_J_per_kg_K(
+    const IdealGasClosure &closure) noexcept {
+  return closure.cp_J_per_kg_K();
+}
+
+IdealGasStepAttemptReport::IdealGasStepAttemptReport()
+    : flow_(detail::DensityClosureBridge::make_report()) {}
 
 const MaterialDensityStepAttemptReport &
 IdealGasStepAttemptReport::flow() const noexcept {
@@ -50,14 +112,15 @@ std::uint64_t IdealGasStepAttemptReport::attempt_identity() const noexcept {
 std::uint64_t IdealGasStepAttemptReport::compute_seal() const noexcept {
   std::uint64_t hash = kIdealStepSeed;
   mix(hash, attempt_identity_);
-  mix(hash, flow_.compute_seal());
+  mix(hash, detail::DensityClosureBridge::report_seal(flow_));
   mix(hash, closure_report_.has_value() ? 1U : 0U);
   if (closure_report_)
     mix(hash, closure_report_->compute_seal());
   return hash;
 }
 bool IdealGasStepAttemptReport::semantic_valid() const noexcept {
-  if (!flow_.authenticated() || attempt_identity_ == 0U ||
+  if (!detail::DensityClosureBridge::report_authenticated(flow_) ||
+      attempt_identity_ == 0U ||
       attempt_identity_ != flow_.attempt_identity() ||
       (closure_report_ &&
        (!closure_report_->authenticated() ||
@@ -78,14 +141,15 @@ bool IdealGasStepAttemptReport::semantic_valid() const noexcept {
          closure_report_->disposition() == IdealGasClosureDisposition::closed;
 }
 void IdealGasStepAttemptReport::seal() noexcept {
-  seal_ = flow_.authenticated() &&
+  seal_ = detail::DensityClosureBridge::report_authenticated(flow_) &&
                   (!closure_report_ || closure_report_->authenticated()) &&
                   attempt_identity_ == flow_.attempt_identity()
               ? compute_seal()
               : 0U;
 }
 bool IdealGasStepAttemptReport::authenticated() const noexcept {
-  return seal_ != 0U && seal_ == compute_seal() && flow_.authenticated() &&
+  return seal_ != 0U && seal_ == compute_seal() &&
+         detail::DensityClosureBridge::report_authenticated(flow_) &&
          (!closure_report_ || closure_report_->authenticated()) &&
          attempt_identity_ == flow_.attempt_identity() && semantic_valid();
 }
@@ -148,9 +212,10 @@ FixedStepIdealGasFlow::FixedStepIdealGasFlow(
     FixedStepIdealGasFlow &&other) noexcept
     : impl_(std::move(other.impl_)) {
   if (impl_) {
-    ++impl_->source_generation;
-    if (impl_->source_generation == 0U)
-      impl_->source_generation = 1U;
+    if (impl_->source_generation == std::numeric_limits<std::uint64_t>::max())
+      impl_->source_generation = 0U;
+    else
+      ++impl_->source_generation;
   }
 }
 
@@ -173,7 +238,7 @@ FixedStepIdealGasFlow FixedStepIdealGasFlow::create(
       "ideal-gas closure collaborators do not match flow");
   if (!match.ok)
     throw runtime::Error("ideal-gas closure collaborators do not match flow");
-  auto material = FixedStepMaterialDensityFlow::create_for_ideal_gas(
+  auto material = detail::DensityClosureBridge::create_open_capable(
       decomposition, topology, geometry, boundaries, mpi, execution_context,
       cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
       pressure_preconditioner, registry, fields, specification);
@@ -191,13 +256,17 @@ IdealGasStepAttemptReport FixedStepIdealGasFlow::attempt(
   impl_->last_state = nullptr;
   impl_->last_state_identity = 0U;
   impl_->last_report_seal = 0U;
+  if (impl_->source_generation == 0U ||
+      impl_->source_generation == std::numeric_limits<std::uint64_t>::max())
+    throw runtime::Error("ideal-gas diagnostic source generation would wrap");
   ++impl_->source_generation;
-  if (impl_->source_generation == 0U)
-    impl_->source_generation = 1U;
   IdealGasStepAttemptReport result;
-  result.flow_ = impl_->material.attempt_with_ideal_gas(
-      state, mu, stencil, momentum_control, pressure_control, impl_->closure,
+  const auto closure_hooks = detail::DensityClosureAdapter::bind(
+      impl_->closure, impl_->fields.transported_cell_fields.front(),
       impl_->enthalpy_rate_J_per_kg_s);
+  result.flow_ = detail::DensityClosureBridge::attempt(
+      impl_->material, state, mu, stencil, momentum_control, pressure_control,
+      closure_hooks);
   result.attempt_identity_ = result.flow_.attempt_identity();
   try {
     const auto &latest = impl_->closure.latest_report();
@@ -312,13 +381,23 @@ std::uint64_t IdealGasClosureDiagnosticSource::fingerprint_field_global_id(
 double
 IdealGasClosureDiagnosticSource::committed_cell_value(runtime::FieldId field,
                                                       std::size_t item) const {
-  const auto values = impl_->state->snapshot(FlowLayer::committed);
-  require_index(item, values.density.size(),
-                "ideal-gas diagnostic cell is out of bounds");
+  const auto values =
+      detail::DensityClosureDiagnosticAccess::acquire_committed(*this);
+  const auto extent = values.density.interior_extent();
+  const std::size_t count = static_cast<std::size_t>(extent.x) *
+                            static_cast<std::size_t>(extent.y) *
+                            static_cast<std::size_t>(extent.z);
+  require_index(item, count, "ideal-gas diagnostic cell is out of bounds");
+  const auto plane =
+      static_cast<std::size_t>(extent.x) * static_cast<std::size_t>(extent.y);
+  const int k = static_cast<int>(item / plane);
+  const auto within = item % plane;
+  const int j = static_cast<int>(within / static_cast<std::size_t>(extent.x));
+  const int i = static_cast<int>(within % static_cast<std::size_t>(extent.x));
   if (field == impl_->flow->fields.density)
-    return values.density[item];
+    return values.density(i, j, k, 0);
   if (field == impl_->flow->fields.transported_cell_fields.front())
-    return values.transported_cell_fields.front()[item];
+    return values.enthalpy_density(i, j, k, 0);
   throw runtime::Error("ideal-gas diagnostic field is invalid");
 }
 
@@ -432,10 +511,6 @@ double IdealGasClosureDiagnosticSource::cell_volume_m3(std::size_t cell) const {
                 "ideal-gas diagnostic volume is out of bounds");
   return impl_->flow->geometry->cell_volume_m3(cell);
 }
-double IdealGasClosureDiagnosticSource::gas_constant_J_per_kg_K() const {
-  validate();
-  return impl_->flow->closure.gas_constant_J_per_kg_K();
-}
 IdealGasClosureState IdealGasClosureDiagnosticSource::closure_state() const {
   validate();
   return impl_->flow->closure.state();
@@ -444,6 +519,42 @@ const IdealGasStepAttemptReport &
 IdealGasClosureDiagnosticSource::report() const {
   validate();
   return impl_->report;
+}
+
+detail::DensityClosureReadSession
+detail::DensityClosureDiagnosticAccess::acquire_committed(
+    const IdealGasClosureDiagnosticSource &source) {
+  source.validate();
+  const auto &state = *source.impl_->state;
+  const auto &access = FlowStateSolverAccess::access(state);
+  const auto &storage = FlowStateSolverAccess::layer(
+      const_cast<FlowState &>(state), FlowLayer::committed);
+  return {storage.acquire_read<double>(access, kStatePhase, kStateActor,
+                                       source.impl_->flow->fields.density),
+          storage.acquire_read<double>(
+              access, kStatePhase, kStateActor,
+              source.impl_->flow->fields.transported_cell_fields.front()),
+          source.impl_->flow->topology->owned_global_box(),
+          source.impl_->flow->topology->global_extent()};
+}
+
+double detail::DensityClosureDiagnosticAccess::gas_constant_J_per_kg_K(
+    const IdealGasClosureDiagnosticSource &source) {
+  source.validate();
+  return DensityClosureAdapter::gas_constant_J_per_kg_K(
+      source.impl_->flow->closure);
+}
+
+double detail::DensityClosureDiagnosticAccess::cp_J_per_kg_K(
+    const IdealGasClosureDiagnosticSource &source) {
+  source.validate();
+  return DensityClosureAdapter::cp_J_per_kg_K(source.impl_->flow->closure);
+}
+
+const runtime::MpiContext &detail::DensityClosureDiagnosticAccess::mpi(
+    const IdealGasClosureDiagnosticSource &source) {
+  source.validate();
+  return *source.impl_->flow->mpi;
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -460,6 +571,16 @@ bool test::IdealGasClosureTestAccess::report_authenticated(
 bool test::IdealGasClosureTestAccess::report_authenticated(
     const IdealGasStepAttemptReport &report) noexcept {
   return report.authenticated();
+}
+bool test::IdealGasClosureTestAccess::post_eos_evidence_authenticated(
+    const MaterialDensityStepAttemptReport &report) noexcept {
+  return detail::DensityClosureBridge::post_eos_evidence_authenticated(report);
+}
+void test::IdealGasClosureTestAccess::exhaust_source_generation(
+    FixedStepIdealGasFlow &flow) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->source_generation = std::numeric_limits<std::uint64_t>::max();
 }
 #endif
 

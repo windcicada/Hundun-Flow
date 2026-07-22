@@ -1781,6 +1781,311 @@ MaterialDensityTransport::finalize_trial_with_source(
   return finish_report();
 }
 
+MaterialDensityTransportReport
+MaterialDensityTransport::assess_trial_after_closure(
+    FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
+    const MomentumTimeStencil &stencil,
+    double enthalpy_rate_J_per_kg_s) const {
+  if (!impl_ || impl_->active || !state.attempt_active() ||
+      final_mass_flux.provenance() !=
+          MaterialFluxProvenance::final_corrected ||
+      final_mass_flux.field_id() != state.fields().face_mass_flux ||
+      final_mass_flux.face_count() != impl_->topology->local_face_count() ||
+      !std::isfinite(enthalpy_rate_J_per_kg_s))
+    throw runtime::Error("post-closure material assessment is invalid");
+  if (impl_->finalization_identity == std::numeric_limits<std::uint64_t>::max())
+    throw runtime::Error("material finalization identity would wrap");
+  struct Guard final {
+    bool &active;
+    ~Guard() { active = false; }
+  } guard{impl_->active};
+  impl_->active = true;
+
+  const auto &fields = transport_fields(*impl_);
+  MaterialDensityTransportReport report;
+  report.stencil_ = stencil;
+  report.flux_provenance_ = final_mass_flux.provenance();
+  report.shared_face_mass_flux_field_ = final_mass_flux.field_id();
+  report.attempt_identity_ = state.attempt_identity();
+  report.finalization_identity_ = ++impl_->finalization_identity;
+  report.transport_residual_available_.assign(fields.size(), 0U);
+  report.transport_normalized_l2_.assign(fields.size(), 0.0);
+  report.transport_conservation_available_.assign(fields.size(), 0U);
+  report.transport_relative_conservation_defect_.assign(fields.size(), 0.0);
+  const auto finish = [&]() {
+    report.seal();
+    return std::move(report);
+  };
+
+  const auto rho_n = state.layer(FlowLayer::committed)
+                         .acquire_read<double>(impl_->access, kMaterialPhase,
+                                               kMaterialActor,
+                                               state.fields().density);
+  const auto rho_h = state.layer(FlowLayer::history)
+                         .acquire_read<double>(impl_->access, kMaterialPhase,
+                                               kMaterialActor,
+                                               state.fields().density);
+  const auto rho_next = state.layer(FlowLayer::trial)
+                            .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                  kMaterialActor,
+                                                  state.fields().density);
+  auto mass_residual = impl_->scratch_storage->acquire_write<double>(
+      *impl_->scratch_access, kScratchPhase, kScratchActor,
+      impl_->scratch_mass_residual);
+  for_each_owned_cell(*impl_->topology,
+                      [&](mesh::LocalCellId, runtime::Int3 index) {
+                        mass_residual(index.x, index.y, index.z, 0) = 0.0;
+                      });
+  MaterialTransportFailureReason local = MaterialTransportFailureReason::none;
+  try {
+    impl_->operators.accumulate_mass_residual(final_mass_flux.impl_->handle,
+                                              mass_residual);
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    local = MaterialTransportFailureReason::non_finite_state;
+  }
+  auto failure = synchronize_failure(*impl_->mpi, local);
+  if (failure.reason != MaterialTransportFailureReason::none) {
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish();
+  }
+
+  constexpr std::size_t mass_terms = 9U;
+  constexpr std::size_t field_terms = 7U;
+  auto &local_sums = impl_->local_sums;
+  auto &sums = impl_->reduced_sums;
+  std::fill(local_sums.begin(), local_sums.end(), CompensatedSum{});
+  double local_min = std::numeric_limits<double>::infinity();
+  mesh::GlobalCellId local_min_id{};
+  for_each_owned_cell(
+      *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+        const double volume = impl_->geometry->cell_volume_m3(cell);
+        const double rn = rho_n(index.x, index.y, index.z, 0);
+        const double rh = rho_h(index.x, index.y, index.z, 0);
+        const double next = rho_next(index.x, index.y, index.z, 0);
+        const double equation =
+            stencil.alpha0 * next + stencil.alpha1 * rn +
+            stencil.alpha2 * rh +
+            stencil.dt_s * mass_residual(index.x, index.y, index.z, 0) /
+                volume;
+        local_sums[0].add(equation * equation);
+        local_sums[1].add(next * next);
+        local_sums[2].add(volume * rn);
+        local_sums[3].add(volume * rh);
+        local_sums[4].add(volume * next);
+        local_sums[6].add(std::abs(volume * rn));
+        local_sums[7].add(std::abs(volume * rh));
+        local_sums[8].add(std::abs(volume * next));
+        if (next < local_min ||
+            (next == local_min &&
+             impl_->topology->global_cell_id(cell) < local_min_id)) {
+          local_min = next;
+          local_min_id = impl_->topology->global_cell_id(cell);
+        }
+      });
+  CompensatedSum boundary_mass;
+  CompensatedSum boundary_mass_abs;
+  for (mesh::LocalFaceId face = 0; face < impl_->topology->local_face_count();
+       ++face) {
+    const auto patch = impl_->topology->patch_id(face);
+    if (!patch ||
+        impl_->boundaries->patch(*patch).kind() ==
+            boundary::BoundaryKind::periodic ||
+        impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
+            mesh::EntityOwnership::owned)
+      continue;
+    const double value = final_mass_flux.impl_->view(face, 0);
+    boundary_mass.add(value);
+    boundary_mass_abs.add(std::abs(value));
+  }
+  local_sums[5].add(boundary_mass.value());
+
+  for (std::size_t field = 0; field < fields.size(); ++field) {
+    const auto qn = state.layer(FlowLayer::committed)
+                        .acquire_read<double>(impl_->access, kMaterialPhase,
+                                              kMaterialActor, fields[field]);
+    const auto qh = state.layer(FlowLayer::history)
+                        .acquire_read<double>(impl_->access, kMaterialPhase,
+                                              kMaterialActor, fields[field]);
+    const auto next = state.layer(FlowLayer::trial)
+                          .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                kMaterialActor, fields[field]);
+    std::size_t owned = 0U;
+    const std::size_t offset = mass_terms + field_terms * field;
+    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
+                                              runtime::Int3 index) {
+      const double volume = impl_->geometry->cell_volume_m3(cell);
+      const double spatial = stencil.order == MomentumTimeOrder::backward_euler
+                                 ? impl_->residual_current[field][owned]
+                                 : 2.0 * impl_->residual_current[field][owned] -
+                                       impl_->residual_history[field][owned];
+      const double qnext = next(index.x, index.y, index.z, 0);
+      const double equation =
+          stencil.alpha0 * qnext +
+          stencil.alpha1 * qn(index.x, index.y, index.z, 0) +
+          stencil.alpha2 * qh(index.x, index.y, index.z, 0) +
+          stencil.dt_s * spatial / volume -
+          (field == 0U ? stencil.dt_s *
+                             rho_n(index.x, index.y, index.z, 0) *
+                             enthalpy_rate_J_per_kg_s
+                       : 0.0);
+      local_sums[offset].add(equation * equation);
+      local_sums[offset + 1U].add(qnext * qnext);
+      local_sums[offset + 2U].add(volume * qn(index.x, index.y, index.z, 0));
+      local_sums[offset + 3U].add(volume * qh(index.x, index.y, index.z, 0));
+      local_sums[offset + 4U].add(
+          std::abs(volume * qn(index.x, index.y, index.z, 0)));
+      local_sums[offset + 5U].add(
+          std::abs(volume * qh(index.x, index.y, index.z, 0)));
+      local_sums[offset + 6U].add(std::abs(volume * qnext));
+      impl_->candidate_fields[field][owned++] = qnext;
+    });
+  }
+  std::transform(local_sums.begin(), local_sums.end(), sums.begin(),
+                 [](const CompensatedSum &sum) { return sum.value(); });
+  double boundary_mass_abs_value = boundary_mass_abs.value();
+  local = std::all_of(sums.begin(), sums.end(),
+                      [](double value) { return std::isfinite(value); }) &&
+                  std::isfinite(boundary_mass_abs_value) && local_min > 0.0 &&
+                  std::isfinite(local_min)
+              ? MaterialTransportFailureReason::none
+              : (!std::isfinite(local_min)
+                     ? MaterialTransportFailureReason::non_finite_state
+                     : MaterialTransportFailureReason::non_positive_density);
+  failure = synchronize_failure(*impl_->mpi, local);
+  if (failure.reason != MaterialTransportFailureReason::none) {
+    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
+    report.reason_ = failure.reason;
+    report.lowest_failing_rank_ = failure.rank;
+    return finish();
+  }
+  impl_->mpi->allreduce_fp64_in_place(sums.data(), sums.size(),
+                                      runtime::Fp64ReductionOperation::sum);
+  impl_->mpi->allreduce_fp64_in_place(&boundary_mass_abs_value, 1U,
+                                      runtime::Fp64ReductionOperation::sum);
+  report.density_normalized_l2_ = std::sqrt(
+      sums[0] / std::max(sums[1], std::numeric_limits<double>::min()));
+  report.density_residual_available_ = true;
+  report.mass_relative_conservation_defect_ = relative_defect(
+      sums[4] - sums[2] +
+          (stencil.alpha2 / stencil.alpha0) * (sums[3] - sums[2]) +
+          (stencil.dt_s / stencil.alpha0) * sums[5],
+      conservation_denominator(
+          sums[2], sums[4], sums[3], stencil.alpha2 / stencil.alpha0,
+          (stencil.dt_s / stencil.alpha0) * boundary_mass_abs_value, sums[6],
+          sums[8], stencil.order == MomentumTimeOrder::bdf2 ? sums[7] : 0.0));
+  report.mass_conservation_available_ = true;
+
+  for (std::size_t field = 0; field < fields.size(); ++field) {
+    const std::size_t offset = mass_terms + field_terms * field;
+    report.transport_normalized_l2_[field] =
+        std::sqrt(sums[offset] /
+                  std::max(sums[offset + 1U],
+                           std::numeric_limits<double>::min()));
+    report.transport_residual_available_[field] = 1U;
+    CompensatedSum next_sum;
+    std::size_t owned = 0U;
+    for_each_owned_cell(*impl_->topology,
+                        [&](mesh::LocalCellId cell, runtime::Int3) {
+                          next_sum.add(impl_->geometry->cell_volume_m3(cell) *
+                                       impl_->candidate_fields[field][owned++]);
+                        });
+    double next_integral = next_sum.value();
+    impl_->mpi->allreduce_fp64_in_place(&next_integral, 1U,
+                                        runtime::Fp64ReductionOperation::sum);
+    double boundary[3]{
+        stencil.order == MomentumTimeOrder::backward_euler
+            ? impl_->residual_boundary_current[field]
+            : 2.0 * impl_->residual_boundary_current[field] -
+                  impl_->residual_boundary_history[field],
+        impl_->residual_boundary_abs_current[field],
+        impl_->residual_boundary_abs_history[field]};
+    impl_->mpi->allreduce_fp64_in_place(boundary, 3U,
+                                        runtime::Fp64ReductionOperation::sum);
+    const double raw =
+        next_integral - sums[offset + 2U] +
+        (stencil.alpha2 / stencil.alpha0) *
+            (sums[offset + 3U] - sums[offset + 2U]) +
+        (stencil.dt_s / stencil.alpha0) * boundary[0] -
+        (field == 0U ? (stencil.dt_s / stencil.alpha0) *
+                           enthalpy_rate_J_per_kg_s * sums[2]
+                     : 0.0);
+    const double boundary_scale =
+        stencil.order == MomentumTimeOrder::backward_euler
+            ? boundary[1]
+            : 2.0 * boundary[1] + boundary[2];
+    const double source_scale =
+        field == 0U
+            ? std::abs((stencil.dt_s / stencil.alpha0) *
+                       enthalpy_rate_J_per_kg_s * sums[2])
+            : 0.0;
+    report.transport_relative_conservation_defect_[field] = relative_defect(
+        raw, conservation_denominator(
+                 sums[offset + 2U], next_integral, sums[offset + 3U],
+                 stencil.alpha2 / stencil.alpha0,
+                 (stencil.dt_s / stencil.alpha0) * boundary_scale +
+                     source_scale,
+                 sums[offset + 4U], sums[offset + 6U],
+                 stencil.order == MomentumTimeOrder::bdf2 ? sums[offset + 5U]
+                                                          : 0.0));
+    report.transport_conservation_available_[field] = 1U;
+  }
+
+  double global_min = local_min;
+  runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &global_min, 1,
+                                          MPI_DOUBLE, MPI_MIN,
+                                          impl_->mpi->comm()),
+                            "MPI_Allreduce(post-closure minimum density)");
+  std::uint64_t minimum_id = local_min == global_min
+                                 ? local_min_id
+                                 : std::numeric_limits<std::uint64_t>::max();
+  runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &minimum_id, 1,
+                                          MPI_UINT64_T, MPI_MIN,
+                                          impl_->mpi->comm()),
+                            "MPI_Allreduce(post-closure minimum cell)");
+  int minimum_rank = local_min == global_min && local_min_id == minimum_id
+                         ? impl_->mpi->rank()
+                         : impl_->mpi->size();
+  runtime::check_mpi_result(MPI_Allreduce(MPI_IN_PLACE, &minimum_rank, 1,
+                                          MPI_INT, MPI_MIN,
+                                          impl_->mpi->comm()),
+                            "MPI_Allreduce(post-closure minimum rank)");
+  report.minimum_density_available_ = true;
+  report.minimum_density_kg_per_m3_ = global_min;
+  report.minimum_density_global_cell_ = minimum_id;
+  report.minimum_density_rank_ = minimum_rank;
+
+  local = MaterialTransportFailureReason::none;
+  if (!std::isfinite(report.density_normalized_l2_) ||
+      report.density_normalized_l2_ > 1.0e-10)
+    local = MaterialTransportFailureReason::final_density_residual;
+  else if (std::any_of(report.transport_normalized_l2_.begin(),
+                       report.transport_normalized_l2_.end(),
+                       [](double value) {
+                         return !std::isfinite(value) || value > 1.0e-9;
+                       }))
+    local = MaterialTransportFailureReason::final_transport_residual;
+  else if (!std::isfinite(report.mass_relative_conservation_defect_) ||
+           report.mass_relative_conservation_defect_ > 5.0e-11 ||
+           std::any_of(
+               report.transport_relative_conservation_defect_.begin(),
+               report.transport_relative_conservation_defect_.end(),
+               [](double value) {
+                 return !std::isfinite(value) || value > 5.0e-11;
+               }))
+    local = MaterialTransportFailureReason::final_conservation_defect;
+  failure = synchronize_failure(*impl_->mpi, local);
+  report.disposition_ = failure.reason == MaterialTransportFailureReason::none
+                            ? MaterialTransportDisposition::finalized
+                            : MaterialTransportDisposition::recoverable_failure;
+  report.reason_ = failure.reason;
+  report.lowest_failing_rank_ = failure.rank;
+  return finish();
+}
+
 struct MaterialDensityDiagnosticSource::Impl final {
   Impl(const MaterialDensityTransport::Impl &supplied_transport,
        const FlowState &supplied_state,

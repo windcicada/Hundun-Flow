@@ -2,8 +2,13 @@
 
 #include "hundun/diagnostics/ideal_gas_closure_diagnostics.hpp"
 
+#include "density_closure_detail.hpp"
+
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+#include "ideal_gas_closure_diagnostics_test_access.hpp"
+#endif
 
 #include <mpi.h>
 
@@ -33,6 +38,18 @@ constexpr DiagnosticCapabilityFlags kCapabilities =
 
 constexpr std::array<std::string_view, 5> kSampleIds{"enthalpy", "p0", "rho",
                                                      "rho_h", "temperature"};
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+test::IdealGasClosureDiagnosticFault injected_fault{
+    test::IdealGasClosureDiagnosticFault::none};
+int injected_fault_rank{-1};
+test::IdealGasClosureDiagnosticWork diagnostic_work{};
+
+bool fault(test::IdealGasClosureDiagnosticFault value, int rank) noexcept {
+  return injected_fault == value &&
+         (injected_fault_rank < 0 || injected_fault_rank == rank);
+}
+#endif
 
 std::uint64_t bits(double value) noexcept {
   std::uint64_t result{};
@@ -67,6 +84,14 @@ void require_request(const flow::IdealGasClosureDiagnosticSource &source,
                      DiagnosticScope expected) {
   try {
     validate(request);
+  } catch (const DiagnosticCollectionError &error) {
+    if (error.code() ==
+        std::string_view("diagnostics.request.selected-fields"))
+      fail(DiagnosticFailureClass::invalid_request,
+           "closure.diagnostics.selected-field", -1,
+           "ideal-gas selected fields are not canonical");
+    fail(DiagnosticFailureClass::invalid_request, "closure.diagnostics.frame",
+         -1, "ideal-gas diagnostic request is invalid");
   } catch (...) {
     fail(DiagnosticFailureClass::invalid_request, "closure.diagnostics.frame",
          -1, "ideal-gas diagnostic request is invalid");
@@ -128,7 +153,11 @@ provider_key(const flow::IdealGasClosureDiagnosticSource &source) {
   append_text(bytes, source.global_cell_layout_fingerprint());
   append_u64(bytes, source.committed_step());
   append_u64(bytes, bits(source.committed_time_s()));
-  append_u64(bytes, bits(source.gas_constant_J_per_kg_K()));
+  append_u64(
+      bytes,
+      bits(
+          flow::detail::DensityClosureDiagnosticAccess::gas_constant_J_per_kg_K(
+              source)));
   const auto closure = source.closure_state();
   bytes.push_back(static_cast<unsigned char>(closure.mode));
   append_u64(bytes, bits(closure.thermodynamic_pressure_pa));
@@ -138,8 +167,88 @@ provider_key(const flow::IdealGasClosureDiagnosticSource &source) {
     append_u64(bytes, bits(*closure.target_mass_kg));
   const auto &outer = source.report();
   append_u64(bytes, outer.attempt_identity());
-  bytes.push_back(static_cast<unsigned char>(outer.flow().flow().disposition));
-  bytes.push_back(static_cast<unsigned char>(outer.flow().flow().reason));
+  const auto &parent = outer.flow();
+  const auto &flow_report = parent.flow();
+  bytes.push_back(static_cast<unsigned char>(flow_report.disposition));
+  bytes.push_back(static_cast<unsigned char>(flow_report.reason));
+  append_u64(bytes,
+             static_cast<std::uint64_t>(flow_report.lowest_failing_rank + 1));
+  append_u64(bytes, flow_report.pressure_corrector_count);
+  append_u64(bytes, bits(flow_report.attempted_dt_s));
+  append_u64(bytes, bits(flow_report.suggested_dt_s));
+  const auto append_solve = [&](const linear::SolveReport &solve) {
+    bytes.push_back(static_cast<unsigned char>(solve.reason));
+    append_u64(bytes, solve.iterations);
+    append_u64(bytes, bits(solve.initial_residual));
+    append_u64(bytes, bits(solve.recursive_residual));
+    append_u64(bytes, bits(solve.final_residual));
+    append_u64(bytes, solve.matvec_count);
+    append_u64(bytes, solve.preconditioner_apply_count);
+    append_u64(bytes, solve.global_reduction_count);
+    append_u64(bytes,
+               static_cast<std::uint64_t>(solve.lowest_failing_rank + 1));
+  };
+  for (const auto &solve : flow_report.momentum.components)
+    append_solve(solve);
+  for (const auto &solve : flow_report.pressure)
+    append_solve(solve);
+  for (const double value :
+       {flow_report.final_continuity_normalized_l2,
+        flow_report.final_pressure_residual_l2,
+        flow_report.final_mass_relative_conservation_defect})
+    append_u64(bytes, bits(value));
+  for (const double value : flow_report.final_momentum_normalized_l2)
+    append_u64(bytes, bits(value));
+  for (const double value : flow_report.final_transport_normalized_l2)
+    append_u64(bytes, bits(value));
+  for (const double value :
+       flow_report.final_momentum_relative_conservation_defect)
+    append_u64(bytes, bits(value));
+  for (const double value :
+       flow_report.final_transport_relative_conservation_defect)
+    append_u64(bytes, bits(value));
+  bytes.push_back(flow_report.final_backflow_evidence.has_value() ? 1U : 0U);
+  append_u64(bytes, parent.material_field_count());
+  append_u64(bytes, parent.shared_face_mass_flux_field());
+  bytes.push_back(static_cast<unsigned char>(parent.flux_provenance()));
+  bytes.push_back(static_cast<unsigned char>(parent.material_failure_reason()));
+  bytes.push_back(parent.final_continuity_residual_available() ? 1U : 0U);
+  bytes.push_back(parent.final_pressure_residual_available() ? 1U : 0U);
+  append_u64(bytes, bits(parent.final_pressure_normalized_residual()));
+  for (const auto value : parent.final_momentum_residual_availability())
+    bytes.push_back(value);
+  bytes.push_back(parent.mass_conservation_available() ? 1U : 0U);
+  for (const auto value : parent.momentum_conservation_availability())
+    bytes.push_back(value);
+  bytes.push_back(parent.material_report_available() ? 1U : 0U);
+  if (parent.material_report_available()) {
+    const auto &material = parent.material_report();
+    bytes.push_back(static_cast<unsigned char>(material.disposition()));
+    bytes.push_back(static_cast<unsigned char>(material.reason()));
+    append_u64(bytes,
+               static_cast<std::uint64_t>(material.lowest_failing_rank() + 1));
+    append_u64(bytes, material.attempt_identity());
+    append_u64(bytes, material.finalization_identity());
+    append_u64(bytes, material.shared_face_mass_flux_field());
+    bytes.push_back(static_cast<unsigned char>(material.flux_provenance()));
+    bytes.push_back(material.density_residual_available() ? 1U : 0U);
+    append_u64(bytes, bits(material.density_normalized_l2()));
+    bytes.push_back(material.mass_conservation_available() ? 1U : 0U);
+    append_u64(bytes, bits(material.mass_relative_conservation_defect()));
+    for (const auto value : material.transport_residual_availability())
+      bytes.push_back(value);
+    for (const double value : material.transport_normalized_l2())
+      append_u64(bytes, bits(value));
+    for (const auto value : material.transport_conservation_availability())
+      bytes.push_back(value);
+    for (const double value : material.transport_relative_conservation_defect())
+      append_u64(bytes, bits(value));
+    bytes.push_back(material.minimum_density_available() ? 1U : 0U);
+    append_u64(bytes, bits(material.minimum_density_kg_per_m3()));
+    append_u64(bytes, material.minimum_density_global_cell());
+    append_u64(bytes,
+               static_cast<std::uint64_t>(material.minimum_density_rank() + 1));
+  }
   bytes.push_back(outer.closure_report_available() ? 1U : 0U);
   if (outer.closure_report_available()) {
     const auto &report = outer.closure_report();
@@ -154,7 +263,25 @@ provider_key(const flow::IdealGasClosureDiagnosticSource &source) {
     if (report.candidate_pressure_available())
       append_u64(bytes, bits(report.candidate_pressure_pa()));
     bytes.push_back(report.final_metrics_available() ? 1U : 0U);
+    if (report.final_metrics_available()) {
+      for (const double value :
+           {report.actual_mass_kg(), report.temperature_min_K(),
+            report.temperature_max_K(), report.enthalpy_min_J_per_kg(),
+            report.enthalpy_max_J_per_kg(), report.density_min_kg_per_m3(),
+            report.density_max_kg_per_m3(), report.rho_remap_normalized_l2(),
+            report.rho_h_remap_normalized_l2(),
+            report.rho_remap_relative_conservation_defect(),
+            report.rho_h_remap_relative_conservation_defect(),
+            report.enthalpy_temperature_max_relative_error(),
+            report.eos_max_relative_error()})
+        append_u64(bytes, bits(value));
+    }
   }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (fault(test::IdealGasClosureDiagnosticFault::provider_agreement,
+            source.relative_rank()))
+    bytes.push_back(0xffU);
+#endif
   return bytes;
 }
 
@@ -193,6 +320,98 @@ void require_byte_agreement(const runtime::MpiContext &mpi,
     fail(classification, code, mismatch, message);
 }
 
+void require_source_communicator(
+    const flow::IdealGasClosureDiagnosticSource &source,
+    const runtime::MpiContext &mpi) {
+  const auto &bound = flow::detail::DensityClosureDiagnosticAccess::mpi(source);
+  int comparison = MPI_UNEQUAL;
+  runtime::check_mpi_result(
+      MPI_Comm_compare(bound.comm(), mpi.comm(), &comparison),
+      "MPI_Comm_compare(ideal-gas diagnostics)");
+  if (comparison != MPI_IDENT || bound.rank() != mpi.rank() ||
+      bound.size() != mpi.size())
+    fail(DiagnosticFailureClass::invalid_input,
+         "closure.diagnostics.communicator", mpi.rank(),
+         "ideal-gas diagnostic communicator does not match the source");
+}
+
+void require_exact_cell_cover(
+    const flow::IdealGasClosureDiagnosticSource &source,
+    const runtime::MpiContext &mpi) {
+  const auto session =
+      flow::detail::DensityClosureDiagnosticAccess::acquire_committed(source);
+  struct Wire final {
+    std::int64_t begin[3];
+    std::int64_t end[3];
+    std::int64_t global[3];
+    std::uint64_t count;
+  };
+  const auto box = session.owned_box;
+  const auto global = session.global_extent;
+  Wire local{{box.begin.x, box.begin.y, box.begin.z},
+             {box.end.x, box.end.y, box.end.z},
+             {global.x, global.y, global.z},
+             source.owned_cell_count()};
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (fault(test::IdealGasClosureDiagnosticFault::ownership_layout,
+            mpi.rank()))
+    ++local.count;
+#endif
+  std::vector<Wire> all(static_cast<std::size_t>(mpi.size()));
+  runtime::check_mpi_result(
+      MPI_Allgather(&local, static_cast<int>(sizeof(Wire)), MPI_BYTE,
+                    all.data(), static_cast<int>(sizeof(Wire)), MPI_BYTE,
+                    mpi.comm()),
+      "MPI_Allgather(ideal-gas diagnostic ownership)");
+  std::uint64_t covered{};
+  for (std::size_t left = 0; left < all.size(); ++left) {
+    std::uint64_t volume = 1U;
+    for (std::size_t axis = 0; axis < 3U; ++axis) {
+      if (all[left].global[axis] != local.global[axis] ||
+          all[left].global[axis] <= 0 || all[left].begin[axis] < 0 ||
+          all[left].end[axis] <= all[left].begin[axis] ||
+          all[left].end[axis] > all[left].global[axis])
+        fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+             static_cast<int>(left),
+             "ideal-gas diagnostic ownership is invalid");
+      const auto width = static_cast<std::uint64_t>(all[left].end[axis] -
+                                                    all[left].begin[axis]);
+      if (volume > std::numeric_limits<std::uint64_t>::max() / width)
+        fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+             static_cast<int>(left),
+             "ideal-gas diagnostic ownership overflows");
+      volume *= width;
+    }
+    if (volume != all[left].count ||
+        covered > std::numeric_limits<std::uint64_t>::max() - volume)
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+           static_cast<int>(left),
+           "ideal-gas diagnostic ownership count is invalid");
+    covered += volume;
+    for (std::size_t right = 0; right < left; ++right) {
+      bool overlap = true;
+      for (std::size_t axis = 0; axis < 3U; ++axis)
+        overlap = overlap && all[left].begin[axis] < all[right].end[axis] &&
+                  all[right].begin[axis] < all[left].end[axis];
+      if (overlap)
+        fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+             static_cast<int>(left),
+             "ideal-gas diagnostic ownership overlaps");
+    }
+  }
+  std::uint64_t global_count = 1U;
+  for (const auto extent : local.global) {
+    const auto width = static_cast<std::uint64_t>(extent);
+    if (global_count > std::numeric_limits<std::uint64_t>::max() / width)
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+           mpi.rank(), "ideal-gas diagnostic global count overflows");
+    global_count *= width;
+  }
+  if (covered != global_count)
+    fail(DiagnosticFailureClass::layout, "closure.diagnostics.ownership",
+         mpi.rank(), "ideal-gas diagnostic ownership does not exactly cover");
+}
+
 struct CommittedObservation final {
   double mass{};
   double energy{};
@@ -204,37 +423,82 @@ struct CommittedObservation final {
   double t_max{-std::numeric_limits<double>::infinity()};
   double eos_max{};
   DiagnosticFingerprintParts fingerprint{};
+  std::vector<double> rho;
+  std::vector<double> rho_h;
 };
 
 CommittedObservation
-observe(const flow::IdealGasClosureDiagnosticSource &source) {
+observe(const flow::IdealGasClosureDiagnosticSource &source,
+        DiagnosticLevel level) {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  ++diagnostic_work.observations;
+  if (fault(test::IdealGasClosureDiagnosticFault::provider_agreement,
+            source.relative_rank()))
+    throw runtime::Error("injected ideal-gas diagnostic provider failure");
+#endif
   CommittedObservation result;
   DiagnosticFingerprintAccumulator fingerprint;
-  for (std::size_t field = 0; field < source.fingerprint_field_count(); ++field)
-    for (std::size_t item = 0;
-         item < source.fingerprint_field_item_count(field); ++item) {
-      const double value = source.fingerprint_field_value(field, item);
-      fingerprint.add(source.fingerprint_field_id(field),
-                      source.fingerprint_field_global_id(field, item), 0U,
-                      describe_fp64(value));
-    }
   const auto closure = source.closure_state();
   const double p0 = closure.thermodynamic_pressure_pa;
-  const double gas_constant = source.gas_constant_J_per_kg_K();
-  for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell) {
-    const double rho = source.sample_field_value(2U, cell);
-    const double rho_h = source.sample_field_value(3U, cell);
-    const double h = source.sample_field_value(0U, cell);
-    const double temperature = source.sample_field_value(4U, cell);
+  const double gas_constant =
+      flow::detail::DensityClosureDiagnosticAccess::gas_constant_J_per_kg_K(
+          source);
+  const double cp =
+      flow::detail::DensityClosureDiagnosticAccess::cp_J_per_kg_K(source);
+  const auto session =
+      flow::detail::DensityClosureDiagnosticAccess::acquire_committed(source);
+  const auto extent = session.density.interior_extent();
+  const std::size_t count = source.owned_cell_count();
+  if (source.relative_rank() == 0) {
+    fingerprint.add("p0", 0U, 0U, describe_fp64(p0));
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    ++diagnostic_work.fingerprint_items;
+#endif
+  }
+  if (level == DiagnosticLevel::bounded_state_sample) {
+    result.rho.resize(count);
+    result.rho_h.resize(count);
+  }
+  for (std::size_t cell = 0; cell < count; ++cell) {
+    const auto plane =
+        static_cast<std::size_t>(extent.x) * static_cast<std::size_t>(extent.y);
+    const int k = static_cast<int>(cell / plane);
+    const auto within = cell % plane;
+    const int j = static_cast<int>(within / static_cast<std::size_t>(extent.x));
+    const int i = static_cast<int>(within % static_cast<std::size_t>(extent.x));
+    const double rho = session.density(i, j, k, 0);
+    const double rho_h = session.enthalpy_density(i, j, k, 0);
+    const auto global_id = source.fingerprint_field_global_id(1U, cell);
+    fingerprint.add("rho", global_id, 0U, describe_fp64(rho));
+    fingerprint.add("rho_h", global_id, 0U, describe_fp64(rho_h));
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    diagnostic_work.fingerprint_items += 2U;
+#endif
+    if (level == DiagnosticLevel::bounded_state_sample) {
+      result.rho[cell] = rho;
+      result.rho_h[cell] = rho_h;
+    }
+    if (level != DiagnosticLevel::summary &&
+        level != DiagnosticLevel::invariants)
+      continue;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    ++diagnostic_work.summary_items;
+#endif
+    const double h = rho_h / rho;
+    const double temperature = h / cp;
     const double volume = source.cell_volume_m3(cell);
-    result.mass += volume * rho;
-    result.energy += volume * rho_h;
+    if (level == DiagnosticLevel::summary) {
+      result.mass += volume * rho;
+      result.energy += volume * rho_h;
+    }
     result.rho_min = std::min(result.rho_min, rho);
-    result.rho_max = std::max(result.rho_max, rho);
     result.h_min = std::min(result.h_min, h);
-    result.h_max = std::max(result.h_max, h);
     result.t_min = std::min(result.t_min, temperature);
-    result.t_max = std::max(result.t_max, temperature);
+    if (level == DiagnosticLevel::summary) {
+      result.rho_max = std::max(result.rho_max, rho);
+      result.h_max = std::max(result.h_max, h);
+      result.t_max = std::max(result.t_max, temperature);
+    }
     result.eos_max =
         std::max(result.eos_max,
                  relative_product_error(rho, gas_constant, temperature, p0));
@@ -321,6 +585,22 @@ DiagnosticMetric unavailable_metric(std::string id, DiagnosticMetricKind kind,
   return {std::move(id), kind, std::move(unit), {}};
 }
 
+DiagnosticInvariant make_invariant(std::string id, std::string unit,
+                                   double observed, double limit,
+                                   InvariantRelation relation) {
+  DiagnosticInvariant item{std::move(id),
+                           std::move(unit),
+                           describe_fp64(observed),
+                           relation == InvariantRelation::positive ||
+                                   relation == InvariantRelation::finite
+                               ? DiagnosticFp64{}
+                               : describe_fp64(limit),
+                           relation,
+                           false};
+  item.passed = evaluate_invariant(item);
+  return item;
+}
+
 DiagnosticRecord
 build_record(const flow::IdealGasClosureDiagnosticSource &source,
              const DiagnosticRequest &request,
@@ -348,6 +628,25 @@ build_record(const flow::IdealGasClosureDiagnosticSource &source,
       failure_rank = outer.flow().flow().lowest_failing_rank;
   }
   record.failure = mapped_failure(outer, record.status, failure_rank);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (fault(test::IdealGasClosureDiagnosticFault::status_warning,
+            source.relative_rank())) {
+    record.status = DiagnosticStatus::warning;
+    record.failure = {};
+  } else if (fault(test::IdealGasClosureDiagnosticFault::status_failed,
+                   source.relative_rank())) {
+    record.status = DiagnosticStatus::failed;
+    record.failure = {DiagnosticFailureClass::non_convergence,
+                      "closure.injected-failure",
+                      scope == DiagnosticScope::collective ? 0 : -1};
+  } else if (fault(test::IdealGasClosureDiagnosticFault::status_unavailable,
+                   source.relative_rank())) {
+    record.status = DiagnosticStatus::unavailable;
+    record.failure = {DiagnosticFailureClass::unavailable,
+                      "closure.injected-unavailable",
+                      scope == DiagnosticScope::collective ? 0 : -1};
+  }
+#endif
   const auto closure = source.closure_state();
   const auto layout = scope == DiagnosticScope::collective
                           ? source.global_cell_layout_fingerprint()
@@ -434,11 +733,8 @@ build_record(const flow::IdealGasClosureDiagnosticSource &source,
   } else if (request.level == DiagnosticLevel::invariants) {
     auto add = [&](std::string id, std::string unit, double value, double limit,
                    InvariantRelation relation) {
-      DiagnosticInvariant item{
-          std::move(id),        std::move(unit), describe_fp64(value),
-          describe_fp64(limit), relation,        false};
-      item.passed = evaluate_invariant(item);
-      record.invariants.push_back(std::move(item));
+      record.invariants.push_back(make_invariant(std::move(id), std::move(unit),
+                                                 value, limit, relation));
     };
     add("closure.committed-eos", "1", observation.eos_max, 1.0e-12,
         InvariantRelation::less_equal);
@@ -469,14 +765,37 @@ build_record(const flow::IdealGasClosureDiagnosticSource &source,
       const auto field = static_cast<std::size_t>(
           std::find(kSampleIds.begin(), kSampleIds.end(), id) -
           kSampleIds.begin());
-      record.eligible_sample_count += source.sample_field_item_count(field);
+      const auto eligible = source.sample_field_item_count(field);
+      if (eligible > std::numeric_limits<std::uint64_t>::max() -
+                         record.eligible_sample_count)
+        fail(DiagnosticFailureClass::layout,
+             "closure.diagnostics.sample-preparation", source.relative_rank(),
+             "ideal-gas eligible sample count overflows");
+      record.eligible_sample_count += eligible;
       for (std::size_t item = 0; item < source.sample_field_item_count(field) &&
                                  record.samples.size() < request.sample_budget;
-           ++item)
+           ++item) {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+        ++diagnostic_work.sample_items;
+#endif
+        double value = closure.thermodynamic_pressure_pa;
+        if (field != 1U) {
+          const double rho = observation.rho[item];
+          const double rho_h = observation.rho_h[item];
+          const double enthalpy = rho_h / rho;
+          value = field == 0U   ? enthalpy
+                  : field == 2U ? rho
+                  : field == 3U
+                      ? rho_h
+                      : enthalpy /
+                            flow::detail::DensityClosureDiagnosticAccess::
+                                cp_J_per_kg_K(source);
+        }
         record.samples.push_back(
             {std::string(id), source.sample_field_global_id(field, item), 0U,
              std::string(source.sample_field_unit(field)),
-             describe_fp64(source.sample_field_value(field, item))});
+             describe_fp64(value)});
+      }
     }
     std::sort(record.samples.begin(), record.samples.end(),
               [](const auto &a, const auto &b) {
@@ -494,6 +813,11 @@ build_record(const flow::IdealGasClosureDiagnosticSource &source,
 void submit(DiagnosticRecord record,
             const flow::IdealGasClosureDiagnosticSource &source,
             const DiagnosticRequest &request, DiagnosticSink &sink) {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (fault(test::IdealGasClosureDiagnosticFault::record_validation,
+            source.relative_rank()))
+    record.schema_version = 0U;
+#endif
   try {
     validate(record, describe_diagnostics(source), request);
   } catch (...) {
@@ -530,6 +854,16 @@ void aggregate_samples(DiagnosticRecord &record,
                      static_cast<std::uint32_t>(found - kSampleIds.begin()),
                      static_cast<std::uint8_t>(sample.value.status)});
   }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (!local.empty() &&
+      fault(test::IdealGasClosureDiagnosticFault::sample_wire, mpi.rank()))
+    local.push_back(local.front());
+#endif
+  if (local.size() >
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) / sizeof(Wire))
+    fail(DiagnosticFailureClass::layout,
+         "closure.diagnostics.sample-preparation", mpi.rank(),
+         "ideal-gas diagnostic sample payload is too large");
   const int local_bytes = static_cast<int>(local.size() * sizeof(Wire));
   std::vector<int> counts(static_cast<std::size_t>(mpi.size()));
   runtime::check_mpi_result(MPI_Allgather(&local_bytes, 1, MPI_INT,
@@ -567,12 +901,28 @@ void aggregate_samples(DiagnosticRecord &record,
                                   left.global_id == right.global_id;
                          }) != merged.end())
     fail(DiagnosticFailureClass::layout, "closure.diagnostics.sample-wire",
-         mpi.rank(), "ideal-gas diagnostic samples are duplicated");
-  std::uint64_t eligible = record.eligible_sample_count;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+         injected_fault == test::IdealGasClosureDiagnosticFault::sample_wire
+             ? (injected_fault_rank < 0 ? 0 : injected_fault_rank)
+             : mpi.rank(),
+#else
+         mpi.rank(),
+#endif
+         "ideal-gas diagnostic samples are duplicated");
+  std::vector<std::uint64_t> eligible_by_rank(
+      static_cast<std::size_t>(mpi.size()));
   runtime::check_mpi_result(
-      MPI_Allreduce(MPI_IN_PLACE, &eligible, 1, MPI_UINT64_T, MPI_SUM,
-                    mpi.comm()),
-      "MPI_Allreduce(ideal-gas diagnostic eligible samples)");
+      MPI_Allgather(&record.eligible_sample_count, 1, MPI_UINT64_T,
+                    eligible_by_rank.data(), 1, MPI_UINT64_T, mpi.comm()),
+      "MPI_Allgather(ideal-gas diagnostic eligible samples)");
+  std::uint64_t eligible{};
+  for (const auto value : eligible_by_rank) {
+    if (value > std::numeric_limits<std::uint64_t>::max() - eligible)
+      fail(DiagnosticFailureClass::layout,
+           "closure.diagnostics.sample-preparation", mpi.rank(),
+           "ideal-gas eligible sample count overflows");
+    eligible += value;
+  }
   record.eligible_sample_count = eligible;
   if (merged.size() > record.sample_budget)
     merged.resize(record.sample_budget);
@@ -605,8 +955,13 @@ void submit_collective(const DiagnosticRecord &record,
                        const DiagnosticRequest &request,
                        const runtime::MpiContext &mpi, DiagnosticSink &sink) {
   bool invalid = false;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  invalid = fault(test::IdealGasClosureDiagnosticFault::record_validation,
+                  mpi.rank());
+#endif
   try {
-    validate(record, describe_diagnostics(source), request);
+    if (!invalid)
+      validate(record, describe_diagnostics(source), request);
   } catch (...) {
     invalid = true;
   }
@@ -654,9 +1009,9 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          DiagnosticSink &sink) {
   try {
     require_request(source, request, DiagnosticScope::local);
-    submit(
-        build_record(source, request, observe(source), DiagnosticScope::local),
-        source, request, sink);
+    submit(build_record(source, request, observe(source, request.level),
+                        DiagnosticScope::local),
+           source, request, sink);
   } catch (const DiagnosticCollectionError &) {
     throw;
   } catch (const runtime::Error &) {
@@ -669,7 +1024,8 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
 void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          const runtime::MpiContext &mpi,
                          const DiagnosticRequest &request,
-                         DiagnosticSink &sink) {
+                         DiagnosticSink &sink) try {
+  require_source_communicator(source, mpi);
   bool stale = false;
   bool request_invalid = false;
   bool selected_invalid = false;
@@ -709,10 +1065,11 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          DiagnosticFailureClass::invalid_input,
                          "closure.diagnostics.provider-agreement",
                          "ideal-gas diagnostic providers disagree");
+  require_exact_cell_cover(source, mpi);
   bool provider_failed = false;
   std::optional<CommittedObservation> observation;
   try {
-    observation.emplace(observe(source));
+    observation.emplace(observe(source, request.level));
   } catch (...) {
     provider_failed = true;
   }
@@ -725,17 +1082,30 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
     fail(DiagnosticFailureClass::invalid_input,
          "closure.diagnostics.provider-agreement", failed_rank,
          "ideal-gas diagnostic providers disagree");
-  double sums[2]{observation->mass, observation->energy};
-  runtime::check_mpi_result(
-      MPI_Allreduce(MPI_IN_PLACE, sums, 2, MPI_DOUBLE, MPI_SUM, mpi.comm()),
-      "MPI_Allreduce(ideal-gas diagnostic sums)");
-  double maxima[7]{-observation->rho_min, observation->rho_max,
-                   -observation->h_min,   observation->h_max,
-                   -observation->t_min,   observation->t_max,
-                   observation->eos_max};
-  runtime::check_mpi_result(
-      MPI_Allreduce(MPI_IN_PLACE, maxima, 7, MPI_DOUBLE, MPI_MAX, mpi.comm()),
-      "MPI_Allreduce(ideal-gas diagnostic extrema)");
+  if (request.level == DiagnosticLevel::summary ||
+      request.level == DiagnosticLevel::invariants) {
+    double sums[2]{observation->mass, observation->energy};
+    if (request.level == DiagnosticLevel::summary)
+      runtime::check_mpi_result(
+          MPI_Allreduce(MPI_IN_PLACE, sums, 2, MPI_DOUBLE, MPI_SUM, mpi.comm()),
+          "MPI_Allreduce(ideal-gas diagnostic sums)");
+    double maxima[7]{-observation->rho_min, observation->rho_max,
+                     -observation->h_min,   observation->h_max,
+                     -observation->t_min,   observation->t_max,
+                     observation->eos_max};
+    runtime::check_mpi_result(
+        MPI_Allreduce(MPI_IN_PLACE, maxima, 7, MPI_DOUBLE, MPI_MAX, mpi.comm()),
+        "MPI_Allreduce(ideal-gas diagnostic extrema)");
+    observation->mass = sums[0];
+    observation->energy = sums[1];
+    observation->rho_min = -maxima[0];
+    observation->rho_max = maxima[1];
+    observation->h_min = -maxima[2];
+    observation->h_max = maxima[3];
+    observation->t_min = -maxima[4];
+    observation->t_max = maxima[5];
+    observation->eos_max = maxima[6];
+  }
   std::uint64_t fingerprint_xor = observation->fingerprint.xor64;
   std::uint64_t fingerprint_sum = observation->fingerprint.sum64;
   runtime::check_mpi_result(
@@ -746,20 +1116,48 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
       MPI_Allreduce(MPI_IN_PLACE, &fingerprint_sum, 1, MPI_UINT64_T, MPI_SUM,
                     mpi.comm()),
       "MPI_Allreduce(ideal-gas diagnostic fingerprint sum)");
-  observation->mass = sums[0];
-  observation->energy = sums[1];
-  observation->rho_min = -maxima[0];
-  observation->rho_max = maxima[1];
-  observation->h_min = -maxima[2];
-  observation->h_max = maxima[3];
-  observation->t_min = -maxima[4];
-  observation->t_max = maxima[5];
-  observation->eos_max = maxima[6];
   observation->fingerprint = {fingerprint_xor, fingerprint_sum};
   auto record =
       build_record(source, request, *observation, DiagnosticScope::collective);
   aggregate_samples(record, mpi);
   submit_collective(record, source, request, mpi, sink);
+} catch (const DiagnosticCollectionError &) {
+  throw;
+} catch (const runtime::MpiOperationError &) {
+  fail(DiagnosticFailureClass::collective_operation,
+       "closure.diagnostics.collective-operation", -1,
+       "ideal-gas diagnostic collective operation failed");
+} catch (const runtime::Error &) {
+  fail(DiagnosticFailureClass::invalid_input,
+       "closure.diagnostics.stale-source", -1,
+       "ideal-gas diagnostic source is stale");
 }
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+void test::IdealGasClosureDiagnosticTestAccess::set_fault(
+    IdealGasClosureDiagnosticFault value, int rank) noexcept {
+  injected_fault = value;
+  injected_fault_rank = rank;
+}
+
+void test::IdealGasClosureDiagnosticTestAccess::reset() noexcept {
+  injected_fault = IdealGasClosureDiagnosticFault::none;
+  injected_fault_rank = -1;
+  diagnostic_work = {};
+}
+
+test::IdealGasClosureDiagnosticWork
+test::IdealGasClosureDiagnosticTestAccess::work() noexcept {
+  return diagnostic_work;
+}
+
+DiagnosticInvariant
+test::IdealGasClosureDiagnosticTestAccess::positive_invariant(std::string id,
+                                                              std::string unit,
+                                                              double observed) {
+  return make_invariant(std::move(id), std::move(unit), observed, 0.0,
+                        InvariantRelation::positive);
+}
+#endif
 
 } // namespace hundun::diagnostics

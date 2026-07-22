@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/flow/material_density_piso.hpp"
-#include "hundun/flow/ideal_gas_closure.hpp"
 
+#include "density_closure_detail.hpp"
 #include "fixed_step_flow_detail.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/runtime/collective_status.hpp"
@@ -1050,7 +1050,11 @@ std::uint64_t MaterialDensityStepAttemptReport::compute_seal() const noexcept {
   for (const auto value : momentum_conservation_available_) {
     mix(result, value);
   }
-  mix(result, ideal_origin_ ? 1U : 0U);
+  mix(result, closure_origin_ ? 1U : 0U);
+  mix(result, post_closure_evidence_available_ ? 1U : 0U);
+  mix(result, post_closure_report_.has_value() ? 1U : 0U);
+  if (post_closure_report_)
+    mix(result, post_closure_report_->compute_seal());
   return result;
 }
 
@@ -1102,7 +1106,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
     for (std::size_t field = 0; field < fields; ++field) {
       const bool residual_available =
           material.transport_residual_availability()[field] != 0U;
-      if ((!ideal_origin_ && residual_available &&
+      if ((!closure_origin_ && residual_available &&
            bits(flow_.final_transport_normalized_l2[field]) !=
                bits(material.transport_normalized_l2()[field])) ||
           (!residual_available &&
@@ -1111,7 +1115,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
         return false;
       const bool conservation_available =
           material.transport_conservation_availability()[field] != 0U;
-      if ((!ideal_origin_ && conservation_available &&
+      if ((!closure_origin_ && conservation_available &&
            bits(flow_.final_transport_relative_conservation_defect[field]) !=
                bits(
                    material.transport_relative_conservation_defect()[field])) ||
@@ -1124,7 +1128,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
     }
     if (mass_conservation_available_ !=
             material.mass_conservation_available() ||
-        (!ideal_origin_ && mass_conservation_available_ &&
+        (!closure_origin_ && mass_conservation_available_ &&
          bits(flow_.final_mass_relative_conservation_defect) !=
              bits(material.mass_relative_conservation_defect())) ||
         (!mass_conservation_available_ &&
@@ -1256,9 +1260,48 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
                                       MaterialTransportFailureReason::none)) {
     return false;
   }
-  if (!ideal_origin_ &&
+  if (!closure_origin_ &&
       flow_.reason == StepFailureReason::density_closure_failure)
     return false;
+  if (closure_origin_) {
+    if (post_closure_evidence_available_ !=
+            post_closure_report_.has_value() ||
+        (committed && !post_closure_evidence_available_))
+      return false;
+    if (post_closure_report_) {
+      const auto &post = *post_closure_report_;
+      if (!post.authenticated() ||
+          post.flux_provenance() != MaterialFluxProvenance::final_corrected ||
+          post.transport_residual_availability().size() != fields ||
+          post.transport_conservation_availability().size() != fields ||
+          post.transport_normalized_l2().size() != fields ||
+          post.transport_relative_conservation_defect().size() != fields ||
+          bits(flow_.final_mass_relative_conservation_defect) !=
+              bits(post.mass_relative_conservation_defect()) ||
+          mass_conservation_available_ != post.mass_conservation_available())
+        return false;
+      for (std::size_t field = 0; field < fields; ++field)
+        if (bits(flow_.final_transport_normalized_l2[field]) !=
+                bits(post.transport_normalized_l2()[field]) ||
+            bits(flow_.final_transport_relative_conservation_defect[field]) !=
+                bits(post.transport_relative_conservation_defect()[field]))
+          return false;
+      if (committed &&
+          (post.disposition() != MaterialTransportDisposition::finalized ||
+           post.reason() != MaterialTransportFailureReason::none ||
+           !post.density_residual_available() ||
+           !post.mass_conservation_available() ||
+           !std::all_of(post.transport_residual_availability().begin(),
+                        post.transport_residual_availability().end(),
+                        [](std::uint8_t value) { return value == 1U; }) ||
+           !std::all_of(post.transport_conservation_availability().begin(),
+                        post.transport_conservation_availability().end(),
+                        [](std::uint8_t value) { return value == 1U; })))
+        return false;
+    }
+  } else if (post_closure_evidence_available_ || post_closure_report_) {
+    return false;
+  }
   return true;
 }
 
@@ -1317,8 +1360,7 @@ FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create(
       std::move(specification)));
 }
 
-FixedStepMaterialDensityFlow
-FixedStepMaterialDensityFlow::create_for_ideal_gas(
+FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create_open_capable(
     const runtime::StructuredDecomposition &decomposition,
     const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
     const boundary::BoundaryRegistry &boundaries,
@@ -1334,14 +1376,14 @@ FixedStepMaterialDensityFlow::create_for_ideal_gas(
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
   if (geometry.mapping_kind() != mesh::MappingKind::uniform_box)
-    throw runtime::Error("ideal-gas flow supports uniform geometry only");
+    throw runtime::Error("closure flow supports uniform geometry only");
   if (!cell_halo.is_compatible_with(decomposition) ||
       cell_halo.ghost_width() != 2)
-    throw runtime::Error("ideal-gas flow requires a compatible width-two Halo");
+    throw runtime::Error("closure flow requires a compatible width-two Halo");
   if (std::any_of(momentum_preconditioners.begin(),
                   momentum_preconditioners.end(),
                   [](const auto *value) { return value == nullptr; }))
-    throw runtime::Error("ideal-gas momentum preconditioner is null");
+    throw runtime::Error("closure momentum preconditioner is null");
   auto coupler = PisoCoupler::create(
       decomposition, topology, geometry, boundaries, mpi, execution_context,
       cell_halo, pressure_solver, pressure_preconditioner);
@@ -1354,6 +1396,26 @@ FixedStepMaterialDensityFlow::create_for_ideal_gas(
       cell_halo, momentum_solver, momentum_preconditioners,
       std::move(coupler), std::move(transport), registry, std::move(fields),
       std::move(specification)));
+}
+
+FixedStepMaterialDensityFlow detail::DensityClosureBridge::create_open_capable(
+    const runtime::StructuredDecomposition &decomposition,
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::MpiContext &mpi,
+    execution::ExecutionContext &execution_context,
+    runtime::HaloExchange &cell_halo,
+    const linear::LinearSolver &momentum_solver,
+    std::array<linear::Preconditioner *, 3> momentum_preconditioners,
+    const linear::LinearSolver &pressure_solver,
+    linear::Preconditioner &pressure_preconditioner,
+    const runtime::FieldRegistry &registry, FlowFieldIds fields,
+    MaterialDensityTransportSpec specification) {
+  return FixedStepMaterialDensityFlow::create_open_capable(
+      decomposition, topology, geometry, boundaries, mpi, execution_context,
+      cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
+      pressure_preconditioner, registry, std::move(fields),
+      std::move(specification));
 }
 
 FixedStepMaterialDensityFlow::~FixedStepMaterialDensityFlow() noexcept =
@@ -1374,25 +1436,25 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     const linear::SolveControl &momentum_control,
     const linear::SolveControl &pressure_control) const {
   return attempt_common(state, mu, stencil, momentum_control,
-                        pressure_control, nullptr, 0.0);
+                        pressure_control, nullptr);
 }
 
 MaterialDensityStepAttemptReport
-FixedStepMaterialDensityFlow::attempt_with_ideal_gas(
+detail::DensityClosureBridge::attempt(
+    const FixedStepMaterialDensityFlow &flow,
     FlowState &state, double mu, const MomentumTimeStencil &stencil,
     const linear::SolveControl &momentum_control,
-    const linear::SolveControl &pressure_control, IdealGasClosure &closure,
-    double enthalpy_rate_J_per_kg_s) const {
-  return attempt_common(state, mu, stencil, momentum_control,
-                        pressure_control, &closure,
-                        enthalpy_rate_J_per_kg_s);
+    const linear::SolveControl &pressure_control,
+    const DensityClosureHooks &hooks) {
+  return flow.attempt_common(state, mu, stencil, momentum_control,
+                             pressure_control, &hooks);
 }
 
 MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     FlowState &state, double mu, const MomentumTimeStencil &stencil,
     const linear::SolveControl &momentum_control,
-    const linear::SolveControl &pressure_control, IdealGasClosure *closure,
-    double enthalpy_rate_J_per_kg_s) const {
+    const linear::SolveControl &pressure_control,
+    const detail::DensityClosureHooks *closure) const {
   if (!impl_)
     throw runtime::Error("material flow object has been moved from");
   impl_->last_state = nullptr;
@@ -1409,7 +1471,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
   result.shared_face_mass_flux_field_ = impl_->fields.face_mass_flux;
   result.flux_provenance_ = MaterialFluxProvenance::predictor;
   result.attempt_identity_ = impl_->attempt_identity;
-  result.ideal_origin_ = closure != nullptr;
+  result.closure_origin_ = closure != nullptr;
   const auto finish = [&]() {
     result.seal();
     impl_->last_state = &state;
@@ -1441,7 +1503,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
   bool active = false;
   const auto fail = [&](StepFailureReason reason, int rank, bool recoverable) {
     if (closure != nullptr)
-      closure->rollback();
+      closure->rollback(closure->object);
     if (active) {
       state.rollback_attempt();
       active = false;
@@ -1497,8 +1559,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
               std::isfinite(pressure_control.rtol) &&
               pressure_control.rtol >= 0.0 &&
               pressure_control.residual_recompute_interval != 0U &&
-              std::isfinite(enthalpy_rate_J_per_kg_s) &&
-              (closure != nullptr || enthalpy_rate_J_per_kg_s == 0.0);
+              (closure == nullptr ||
+               std::isfinite(closure->enthalpy_rate_J_per_kg_s));
     } catch (const runtime::MpiOperationError &) {
       throw;
     } catch (...) {
@@ -1513,7 +1575,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     state.begin_attempt();
     active = true;
     if (closure != nullptr)
-      closure->begin_attempt(state, result.attempt_identity_);
+      closure->begin(closure->object, state, result.attempt_identity_);
     auto &history =
         detail::FlowStateSolverAccess::layer(state, FlowLayer::history);
     auto &committed =
@@ -1572,7 +1634,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                 bind_material_flux(MaterialFluxProvenance::predictor));
           });
       predictor_stage = impl_->material_transport.stage_trial(
-          state, *predictor_flux, stencil, enthalpy_rate_J_per_kg_s);
+          state, *predictor_flux, stencil,
+          closure == nullptr ? 0.0 : closure->enthalpy_rate_J_per_kg_s);
       predictor_flux.reset();
     }
     if (predictor_stage.reason != MaterialTransportFailureReason::none) {
@@ -1583,17 +1646,17 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                               predictor_stage.lowest_failing_rank);
     }
     if (closure != nullptr) {
-      const auto &closure_result =
-          closure->evaluate(state, IdealGasClosureStage::predictor);
-      if (closure_result.disposition() != IdealGasClosureDisposition::closed)
+      const auto closure_result = closure->evaluate(
+          closure->object, state, detail::DensityClosureStage::predictor);
+      if (!closure_result.accepted)
         return fail(StepFailureReason::density_closure_failure,
-                    closure_result.lowest_failing_rank(),
-                    closure_result.disposition() ==
-                        IdealGasClosureDisposition::recoverable_failure);
+                    closure_result.lowest_failing_rank,
+                    closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
-      impl_->halo->exchange(trial, impl_->specification.enthalpy_density);
+      impl_->halo->exchange(trial, closure->enthalpy_density);
+    } else {
+      impl_->halo->exchange(trial, fields.density);
     }
-    impl_->halo->exchange(trial, fields.density);
 
     assemble_spatial(*impl_, access, committed, fields, mu, impl_->momentum_n,
                      bind_face_flux);
@@ -1861,7 +1924,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                 bind_material_flux(MaterialFluxProvenance::provisional));
           });
       provisional_stage = impl_->material_transport.stage_trial(
-          state, *provisional_flux, stencil, enthalpy_rate_J_per_kg_s);
+          state, *provisional_flux, stencil,
+          closure == nullptr ? 0.0 : closure->enthalpy_rate_J_per_kg_s);
       provisional_flux.reset();
     }
     if (provisional_stage.reason != MaterialTransportFailureReason::none) {
@@ -1872,17 +1936,17 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                               provisional_stage.lowest_failing_rank);
     }
     if (closure != nullptr) {
-      const auto &closure_result =
-          closure->evaluate(state, IdealGasClosureStage::provisional);
-      if (closure_result.disposition() != IdealGasClosureDisposition::closed)
+      const auto closure_result = closure->evaluate(
+          closure->object, state, detail::DensityClosureStage::provisional);
+      if (!closure_result.accepted)
         return fail(StepFailureReason::density_closure_failure,
-                    closure_result.lowest_failing_rank(),
-                    closure_result.disposition() ==
-                        IdealGasClosureDisposition::recoverable_failure);
+                    closure_result.lowest_failing_rank,
+                    closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
-      impl_->halo->exchange(trial, impl_->specification.enthalpy_density);
+      impl_->halo->exchange(trial, closure->enthalpy_density);
+    } else {
+      impl_->halo->exchange(trial, fields.density);
     }
-    impl_->halo->exchange(trial, fields.density);
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     apply_terminal_test_point(
@@ -1924,7 +1988,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                     state, *final_material_flux, stencil)
               : impl_->material_transport.finalize_trial_with_source(
                     state, *final_material_flux, stencil,
-                    enthalpy_rate_J_per_kg_s));
+                    closure->enthalpy_rate_J_per_kg_s));
       result.material_attempt_identity_ =
           result.material_report_->attempt_identity();
       result.material_finalization_identity_ =
@@ -1951,15 +2015,44 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     }
 
     if (closure != nullptr) {
-      const auto &closure_result =
-          closure->evaluate(state, IdealGasClosureStage::final);
-      if (closure_result.disposition() != IdealGasClosureDisposition::closed)
+      const auto closure_result = closure->evaluate(
+          closure->object, state, detail::DensityClosureStage::final);
+      if (!closure_result.accepted)
         return fail(StepFailureReason::density_closure_failure,
-                    closure_result.lowest_failing_rank(),
-                    closure_result.disposition() ==
-                        IdealGasClosureDisposition::recoverable_failure);
+                    closure_result.lowest_failing_rank,
+                    closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
-      impl_->halo->exchange(trial, impl_->specification.enthalpy_density);
+      impl_->halo->exchange(trial, closure->enthalpy_density);
+
+      std::optional<MaterialFaceMassFlux> post_closure_flux;
+      synchronized_local_phase(
+          *impl_->mpi, StepFailureReason::invalid_input, false, [&] {
+            post_closure_flux.emplace(
+                bind_material_flux(MaterialFluxProvenance::final_corrected));
+          });
+      result.post_closure_report_.emplace(
+          impl_->material_transport.assess_trial_after_closure(
+              state, *post_closure_flux, stencil,
+              closure->enthalpy_rate_J_per_kg_s));
+      result.post_closure_evidence_available_ = true;
+      post_closure_flux.reset();
+      result.flow_.final_transport_normalized_l2 =
+          result.post_closure_report_->transport_normalized_l2();
+      result.flow_.final_transport_relative_conservation_defect =
+          result.post_closure_report_->transport_relative_conservation_defect();
+      result.flow_.final_mass_relative_conservation_defect =
+          result.post_closure_report_->mass_relative_conservation_defect();
+      result.mass_conservation_available_ =
+          result.post_closure_report_->mass_conservation_available();
+      if (result.post_closure_report_->disposition() !=
+          MaterialTransportDisposition::finalized) {
+        const auto reason = result.post_closure_report_->reason();
+        require_reliable_collective_result(
+            map_material_failure(reason),
+            result.post_closure_report_->lowest_failing_rank());
+        return fail(map_material_failure(reason),
+                    result.post_closure_report_->lowest_failing_rank(), true);
+      }
     }
 
     if (closure != nullptr && impl_->boundaries->open_domain()) {
@@ -1978,7 +2071,6 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       }
     }
 
-    impl_->halo->exchange(trial, fields.density);
     double continuity_sums[2]{};
     synchronized_local_phase(*impl_->mpi,
                              StepFailureReason::final_continuity_residual,
@@ -2015,15 +2107,22 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
         const auto index = map_cell(impl_->topology->global_cell(cell), owned,
                                     impl_->topology->global_extent());
         const double volume = impl_->geometry->cell_volume_m3(cell);
+        const double rho_final_value = at(rho_final, index, 0);
+        const double rho_n_value = at(rho_n, index, 0);
+        const double rho_nm1_value = at(rho_nm1, index, 0);
         const double temporal =
-            (stencil.alpha0 * at(rho_final, index, 0) +
-             stencil.alpha1 * at(rho_n, index, 0) +
-             stencil.alpha2 * at(rho_nm1, index, 0)) *
+            (stencil.alpha0 * rho_final_value +
+             stencil.alpha1 * rho_n_value +
+             stencil.alpha2 * rho_nm1_value) *
             volume / stencil.dt_s;
         const double raw = temporal + at(mass_residual, index, 0);
         continuity_sums[0] += raw * raw;
         const double scale =
-            std::abs(temporal) + impl_->continuity_absolute[cell];
+            (std::abs(stencil.alpha0 * rho_final_value) +
+             std::abs(stencil.alpha1 * rho_n_value) +
+             std::abs(stencil.alpha2 * rho_nm1_value)) *
+                volume / stencil.dt_s +
+            impl_->continuity_absolute[cell];
         continuity_sums[1] += scale * scale;
       }
     });
@@ -2286,10 +2385,10 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                                   old.dt_s,
                                   stencil.order});
     if (closure != nullptr)
-      closure->prepare_commit();
+      closure->prepare(closure->object);
     state.publish_commit_attempt();
     if (closure != nullptr)
-      closure->publish_commit();
+      closure->publish(closure->object);
     active = false;
     result.flow_.disposition = StepAttemptDisposition::committed;
     result.flow_.reason = StepFailureReason::none;
@@ -2302,7 +2401,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     if (active)
       state.rollback_attempt();
     if (closure != nullptr)
-      closure->rollback();
+      closure->rollback(closure->object);
     impl_->last_state = nullptr;
     impl_->last_report_seal = 0U;
     throw;
@@ -2315,6 +2414,26 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
         *impl_->mpi, {true, StepFailureReason::invalid_input, false});
     return fail(selected.reason, selected.failing_rank, selected.recoverable);
   }
+}
+
+bool detail::DensityClosureBridge::report_authenticated(
+    const MaterialDensityStepAttemptReport &report) noexcept {
+  return report.authenticated();
+}
+
+std::uint64_t detail::DensityClosureBridge::report_seal(
+    const MaterialDensityStepAttemptReport &report) noexcept {
+  return report.seal_;
+}
+
+MaterialDensityStepAttemptReport detail::DensityClosureBridge::make_report() {
+  return MaterialDensityStepAttemptReport{};
+}
+
+bool detail::DensityClosureBridge::post_eos_evidence_authenticated(
+    const MaterialDensityStepAttemptReport &report) noexcept {
+  return report.authenticated() && report.post_closure_evidence_available_ &&
+         report.post_closure_report_.has_value();
 }
 
 MaterialDensityFlowDiagnosticSource

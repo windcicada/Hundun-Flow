@@ -5,6 +5,9 @@
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "ideal_gas_closure_test_access.hpp"
+#endif
 
 #include <mpi.h>
 
@@ -12,6 +15,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -122,7 +126,11 @@ struct PreflightWire final {
   std::uint64_t gas_constant{};
   std::uint64_t configured_pressure{};
   std::uint64_t global_cells[3]{};
+  std::uint64_t attempt_identity{};
   std::uint64_t local_cells[3]{};
+  std::int64_t owned_begin[3]{};
+  std::int64_t owned_end[3]{};
+  std::uint64_t local_faces{};
 };
 
 void agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
@@ -133,10 +141,55 @@ void agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
                     all.data(), static_cast<int>(sizeof(local)), MPI_BYTE,
                     mpi.comm()),
       operation);
+  constexpr std::size_t common_bytes = offsetof(PreflightWire, local_cells);
   if (std::any_of(all.begin() + 1, all.end(), [&](const auto &candidate) {
-        return std::memcmp(&candidate, &all.front(), sizeof(local)) != 0;
+        return std::memcmp(&candidate, &all.front(), common_bytes) != 0;
       }))
     throw runtime::Error("ideal-gas closure rank preflight disagrees");
+  const auto &common = all.front();
+  if (common.global_cells[0] == 0U || common.global_cells[1] == 0U ||
+      common.global_cells[2] == 0U)
+    throw runtime::Error("ideal-gas closure global extent is invalid");
+  std::uint64_t covered = 0U;
+  for (std::size_t left = 0; left < all.size(); ++left) {
+    const auto &candidate = all[left];
+    std::uint64_t volume = 1U;
+    for (std::size_t axis = 0; axis < 3U; ++axis) {
+      if (candidate.owned_begin[axis] < 0 ||
+          candidate.owned_end[axis] <= candidate.owned_begin[axis] ||
+          static_cast<std::uint64_t>(candidate.owned_end[axis]) >
+              common.global_cells[axis] ||
+          static_cast<std::uint64_t>(candidate.owned_end[axis] -
+                                     candidate.owned_begin[axis]) !=
+              candidate.local_cells[axis] ||
+          candidate.local_cells[axis] == 0U ||
+          volume > std::numeric_limits<std::uint64_t>::max() /
+                       candidate.local_cells[axis])
+        throw runtime::Error("ideal-gas closure ownership is invalid");
+      volume *= candidate.local_cells[axis];
+    }
+    if (candidate.local_faces == 0U ||
+        covered > std::numeric_limits<std::uint64_t>::max() - volume)
+      throw runtime::Error("ideal-gas closure local topology is invalid");
+    covered += volume;
+    for (std::size_t right = 0; right < left; ++right) {
+      bool overlaps = true;
+      for (std::size_t axis = 0; axis < 3U; ++axis)
+        overlaps = overlaps &&
+                   candidate.owned_begin[axis] < all[right].owned_end[axis] &&
+                   all[right].owned_begin[axis] < candidate.owned_end[axis];
+      if (overlaps)
+        throw runtime::Error("ideal-gas closure ownership overlaps");
+    }
+  }
+  std::uint64_t global_volume = 1U;
+  for (const auto extent : common.global_cells) {
+    if (global_volume > std::numeric_limits<std::uint64_t>::max() / extent)
+      throw runtime::Error("ideal-gas closure global extent overflows");
+    global_volume *= extent;
+  }
+  if (covered != global_volume)
+    throw runtime::Error("ideal-gas closure ownership does not exactly cover");
 }
 
 std::size_t cell_count(runtime::Int3 extent) {
@@ -173,6 +226,18 @@ IdealGasClosureFailureReason first_state_failure(double rho, double q,
   if (!(rho > 0.0))
     return IdealGasClosureFailureReason::non_positive_density;
   return IdealGasClosureFailureReason::none;
+}
+
+IdealGasClosureFailureReason
+lower_failure(IdealGasClosureFailureReason left,
+              IdealGasClosureFailureReason right) noexcept {
+  if (left == IdealGasClosureFailureReason::none)
+    return right;
+  if (right == IdealGasClosureFailureReason::none)
+    return left;
+  return static_cast<std::uint8_t>(left) < static_cast<std::uint8_t>(right)
+             ? left
+             : right;
 }
 
 } // namespace
@@ -374,9 +439,10 @@ IdealGasClosure::~IdealGasClosure() noexcept = default;
 IdealGasClosure::IdealGasClosure(IdealGasClosure &&other) noexcept
     : impl_(std::move(other.impl_)) {
   if (impl_) {
-    ++impl_->source_generation;
-    if (impl_->source_generation == 0U)
-      impl_->source_generation = 1U;
+    if (impl_->source_generation == std::numeric_limits<std::uint64_t>::max())
+      impl_->source_generation = 0U;
+    else
+      ++impl_->source_generation;
   }
 }
 
@@ -397,6 +463,7 @@ IdealGasClosure IdealGasClosure::create(
                         : IdealGasPressureMode::closed_dynamic;
   const auto local_extent = state.layer(FlowLayer::committed).interior_extent();
   const auto global = topology.global_extent();
+  const auto owned = topology.owned_global_box();
   const PreflightWire wire{static_cast<std::uint64_t>(mode),
                            spec.enthalpy_density,
                            fields.density,
@@ -407,9 +474,13 @@ IdealGasClosure IdealGasClosure::create(
                            {static_cast<std::uint64_t>(global.x),
                             static_cast<std::uint64_t>(global.y),
                             static_cast<std::uint64_t>(global.z)},
+                           0U,
                            {static_cast<std::uint64_t>(local_extent.x),
                             static_cast<std::uint64_t>(local_extent.y),
-                            static_cast<std::uint64_t>(local_extent.z)}};
+                            static_cast<std::uint64_t>(local_extent.z)},
+                           {owned.begin.x, owned.begin.y, owned.begin.z},
+                           {owned.end.x, owned.end.y, owned.end.z},
+                           topology.local_face_count()};
   agree_preflight(mpi, wire,
                   "MPI_Allgather(ideal-gas closure create preflight)");
 
@@ -601,6 +672,7 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
     throw runtime::Error("ideal-gas closure attempt is invalid");
   const auto local_extent = state.layer(FlowLayer::committed).interior_extent();
   const auto global = impl_->topology->global_extent();
+  const auto owned = impl_->topology->owned_global_box();
   const PreflightWire wire{
       static_cast<std::uint64_t>(impl_->committed.mode),
       impl_->spec.enthalpy_density,
@@ -612,9 +684,13 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
       {static_cast<std::uint64_t>(global.x),
        static_cast<std::uint64_t>(global.y),
        static_cast<std::uint64_t>(global.z)},
+      identity,
       {static_cast<std::uint64_t>(local_extent.x),
        static_cast<std::uint64_t>(local_extent.y),
-       static_cast<std::uint64_t>(local_extent.z)}};
+       static_cast<std::uint64_t>(local_extent.z)},
+      {owned.begin.x, owned.begin.y, owned.begin.z},
+      {owned.end.x, owned.end.y, owned.end.z},
+      impl_->topology->local_face_count()};
   agree_preflight(*impl_->mpi, wire,
                   "MPI_Allgather(ideal-gas closure attempt preflight)");
   impl_->active = true;
@@ -661,11 +737,10 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
     for_each_cell(extent, [&](int i, int j, int k, std::size_t offset) {
       rho_tilde[offset] = rho_read(i, j, k, 0);
       q_tilde[offset] = q_read(i, j, k, 0);
-      if (local != IdealGasClosureFailureReason::none)
-        return;
-      local = first_state_failure(rho_tilde[offset], q_tilde[offset],
-                                  impl_->spec.cp_J_per_kg_K);
-      if (local != IdealGasClosureFailureReason::none)
+      const auto cell_failure = first_state_failure(
+          rho_tilde[offset], q_tilde[offset], impl_->spec.cp_J_per_kg_K);
+      local = lower_failure(local, cell_failure);
+      if (cell_failure != IdealGasClosureFailureReason::none)
         return;
       h[offset] = q_tilde[offset] / rho_tilde[offset];
       temperature[offset] = h[offset] / impl_->spec.cp_J_per_kg_K;
@@ -701,6 +776,8 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
   }
   if (local == IdealGasClosureFailureReason::none) {
     for (std::size_t cell = 0; cell < count; ++cell) {
+      IdealGasClosureFailureReason cell_failure =
+          IdealGasClosureFailureReason::none;
       try {
         rho_eos[cell] = checked_ratio(
             pressure,
@@ -715,13 +792,12 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
           throw runtime::Error("ideal-gas candidate rho-h is invalid");
         q_eos[cell] = static_cast<double>(product);
       } catch (...) {
-        local = IdealGasClosureFailureReason::non_finite_density;
-        break;
+        cell_failure = IdealGasClosureFailureReason::non_finite_density;
       }
-      if (!(rho_eos[cell] > 0.0)) {
-        local = IdealGasClosureFailureReason::non_positive_density;
-        break;
-      }
+      if (cell_failure == IdealGasClosureFailureReason::none &&
+          !(rho_eos[cell] > 0.0))
+        cell_failure = IdealGasClosureFailureReason::non_positive_density;
+      local = lower_failure(local, cell_failure);
     }
   }
   std::array<CompensatedSum, 10> local_sums{};
@@ -954,5 +1030,17 @@ double IdealGasClosure::cp_J_per_kg_K() const noexcept {
 double IdealGasClosure::gas_constant_J_per_kg_K() const noexcept {
   return impl_ ? impl_->spec.gas_constant_J_per_kg_K : 0.0;
 }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+bool test::IdealGasClosureTestAccess::
+    same_rank_reason_precedence_is_enum_order() noexcept {
+  return lower_failure(IdealGasClosureFailureReason::non_positive_density,
+                       IdealGasClosureFailureReason::non_finite_enthalpy) ==
+             IdealGasClosureFailureReason::non_finite_enthalpy &&
+         lower_failure(IdealGasClosureFailureReason::non_positive_enthalpy,
+                       IdealGasClosureFailureReason::non_finite_density) ==
+             IdealGasClosureFailureReason::non_positive_enthalpy;
+}
+#endif
 
 } // namespace hundun::flow

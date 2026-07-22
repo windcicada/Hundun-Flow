@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include "flow/src/ideal_gas_closure_test_access.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
@@ -54,6 +55,8 @@ hundun::config::FlowCaseConfig open_case() {
   config.boundaries[0].temperature_K = 300.0;
   config.boundaries[0].enthalpy_J_per_kg = 300000.0;
   config.boundaries[0].density_kg_per_m3 = 101325.0 / (287.05 * 300.0);
+  config.boundaries[0].scalar_values =
+      std::vector<hundun::config::InletScalarValue>{};
   config.boundaries[1].type = hundun::config::BoundaryType::pressure_outlet;
   config.boundaries[1].pressure_perturbation_pa = 0.0;
   for (std::size_t patch = 2U; patch < config.boundaries.size(); ++patch)
@@ -91,7 +94,9 @@ hundun::runtime::FieldDescriptor face(const char *name, const char *unit,
 }
 
 void run(const hundun::runtime::MpiContext &mpi) {
-  constexpr hundun::runtime::Int3 extent{8, 4, 4};
+  // Deliberately uneven on 2/4 ranks: rank-local layout identity is allowed
+  // to differ while the global box still has one exact owner per cell.
+  constexpr hundun::runtime::Int3 extent{17, 4, 4};
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
       mpi, extent, {true, true, true},
       hundun::runtime::DecompositionOptions{grid(mpi.size())});
@@ -205,6 +210,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(!open_closure_state.target_mass_kg.has_value());
   HUNDUN_CHECK(open_closure_state.thermodynamic_pressure_pa == pressure);
   HUNDUN_CHECK(open_closure_state.revision == 0U);
+  HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                   same_rank_reason_precedence_is_enum_order());
 }
 
 } // namespace

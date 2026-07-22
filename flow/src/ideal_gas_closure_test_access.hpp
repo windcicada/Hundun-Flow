@@ -15,6 +15,10 @@ public:
                                         double rate_J_per_kg_s);
   static bool report_authenticated(const IdealGasClosureReport &) noexcept;
   static bool report_authenticated(const IdealGasStepAttemptReport &) noexcept;
+  static bool post_eos_evidence_authenticated(
+      const MaterialDensityStepAttemptReport &) noexcept;
+  static bool same_rank_reason_precedence_is_enum_order() noexcept;
+  static void exhaust_source_generation(FixedStepIdealGasFlow &);
 };
 
 } // namespace hundun::flow::test

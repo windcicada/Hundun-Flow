@@ -27,6 +27,11 @@
 
 namespace {
 
+#ifndef HUNDUN_TASK21_DIAGNOSTIC_MATRIX
+#define HUNDUN_TASK21_DIAGNOSTIC_MATRIX(source, mpi, state, report)           \
+  static_cast<void>(source)
+#endif
+
 hundun::runtime::Int3 grid(int ranks) { return {ranks, 1, 1}; }
 
 hundun::config::FlowCaseConfig periodic_case() {
@@ -48,6 +53,24 @@ hundun::config::FlowCaseConfig periodic_case() {
     config.boundaries[patch].patch = names[patch];
     config.boundaries[patch].type = hundun::config::BoundaryType::periodic;
   }
+  return config;
+}
+
+hundun::config::FlowCaseConfig open_case() {
+  auto config = periodic_case();
+  config.boundaries[0].type = hundun::config::BoundaryType::velocity_inlet;
+  config.boundaries[0].velocity_m_per_s = {1.0, 0.0, 0.0};
+  config.boundaries[0].thermal_authority =
+      hundun::config::InletThermalAuthority::temperature;
+  config.boundaries[0].temperature_K = 300.0;
+  config.boundaries[0].enthalpy_J_per_kg = 300000.0;
+  config.boundaries[0].density_kg_per_m3 = 101325.0 / (287.05 * 300.0);
+  config.boundaries[0].scalar_values =
+      std::vector<hundun::config::InletScalarValue>{};
+  config.boundaries[1].type = hundun::config::BoundaryType::pressure_outlet;
+  config.boundaries[1].pressure_perturbation_pa = 0.0;
+  for (std::size_t patch = 2U; patch < config.boundaries.size(); ++patch)
+    config.boundaries[patch].type = hundun::config::BoundaryType::symmetry;
   return config;
 }
 
@@ -80,17 +103,18 @@ hundun::runtime::FieldDescriptor face(const char *name, const char *unit,
           hundun::runtime::OutputPolicy::never};
 }
 
-void run(const hundun::runtime::MpiContext &mpi) {
+void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
+         bool exhaust_generation) {
   constexpr hundun::runtime::Int3 extent{8, 4, 4};
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
-      mpi, extent, {true, true, true},
+      mpi, extent, {!open_domain, !open_domain, !open_domain},
       hundun::runtime::DecompositionOptions{grid(mpi.size())});
   hundun::mesh::MeshTopology topology(decomposition);
   hundun::mesh::MeshGeometry geometry(
       topology,
       hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
-  auto boundaries =
-      hundun::boundary::BoundaryRegistry::create(periodic_case(), topology);
+  auto boundaries = hundun::boundary::BoundaryRegistry::create(
+      open_domain ? open_case() : periodic_case(), topology);
 
   hundun::runtime::FieldRegistry registry;
   hundun::flow::FlowFieldIds fields;
@@ -119,9 +143,22 @@ void run(const hundun::runtime::MpiContext &mpi) {
   hundun::flow::FlowLayerValues initial;
   initial.density.assign(topology.owned_cell_count(), density);
   initial.velocity.assign(topology.owned_cell_count() * 3U, 0.0);
+  if (open_domain)
+    for (std::size_t cell_index = 0; cell_index < topology.owned_cell_count();
+         ++cell_index)
+      initial.velocity[cell_index * 3U] = 1.0;
   initial.mechanical_pressure.assign(topology.owned_cell_count(), 0.0);
   initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
   initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
+  if (open_domain) {
+    for (hundun::mesh::LocalFaceId face = 0;
+         face < topology.local_face_count(); ++face) {
+      const auto area = geometry.face_area_vector_m2(
+          face, hundun::mesh::FaceSide::owner);
+      initial.face_velocity[face * 3U] = 1.0;
+      initial.face_mass_flux[face] = density * area.x;
+    }
+  }
   initial.transported_cell_fields = {std::vector<double>(
       topology.owned_cell_count(), density * cp * initial_temperature)};
   state.seed_accepted_layers(initial, initial);
@@ -146,7 +183,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       pressure_preconditioner, registry, fields, material_spec,
       std::move(closure));
   hundun::flow::test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
-      flow, cp * 5.0 / dt);
+      flow, open_domain ? 0.0 : cp * 5.0 / dt);
 
   HUNDUN_CHECK(
       hundun::test::ideal_gas_state_equality_oracle_is_mutation_sensitive());
@@ -173,6 +210,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(
       hundun::flow::test::IdealGasClosureTestAccess::report_authenticated(
           report));
+  HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                   post_eos_evidence_authenticated(report.flow()));
   HUNDUN_CHECK(state.metadata().step == 1U);
   auto closure_source = flow.closure_diagnostic_source(state, report);
   HUNDUN_CHECK(closure_source.fingerprint_field_count() == 3U);
@@ -187,15 +226,19 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(closure_source.sample_field_count() == 5U);
   HUNDUN_CHECK(closure_source.sample_field_id(4U) ==
                std::string_view("temperature"));
-  HUNDUN_CHECK_NEAR(closure_source.sample_field_value(4U, 0U), 305.0,
-                    5.0e-12 * 305.0);
+  const double first_temperature = open_domain ? 300.0 : 305.0;
+  HUNDUN_CHECK_NEAR(closure_source.sample_field_value(4U, 0U),
+                    first_temperature, 5.0e-12 * first_temperature);
+  HUNDUN_TASK21_DIAGNOSTIC_MATRIX(closure_source, mpi, state, report);
   auto material_source = flow.flow_diagnostic_source(state, report);
   HUNDUN_CHECK(material_source.report().attempt_identity() ==
                report.attempt_identity());
   const auto closure_state = flow.closure_state();
   HUNDUN_CHECK(closure_state.revision == 1U);
   HUNDUN_CHECK_NEAR(closure_state.thermodynamic_pressure_pa,
-                    pressure * 305.0 / 300.0, 1.0e-12 * pressure);
+                    open_domain ? pressure : pressure * 305.0 / 300.0,
+                    1.0e-12 * pressure);
+  HUNDUN_CHECK(closure_state.target_mass_kg.has_value() != open_domain);
   const auto committed = state.snapshot(hundun::flow::FlowLayer::committed);
   HUNDUN_CHECK(std::all_of(
       committed.density.begin(), committed.density.end(), [&](double value) {
@@ -205,7 +248,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
        ++cell_index) {
     const double h = committed.transported_cell_fields.front()[cell_index] /
                      committed.density[cell_index];
-    HUNDUN_CHECK_NEAR(h / cp, 305.0, 5.0e-12 * 305.0);
+    HUNDUN_CHECK_NEAR(h / cp, first_temperature, 5.0e-12 * first_temperature);
   }
 
   const auto bdf2 = hundun::flow::make_momentum_time_stencil(
@@ -217,7 +260,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(second.closure_report().collective_count() == 14U);
   HUNDUN_CHECK(flow.closure_state().revision == 2U);
   HUNDUN_CHECK_NEAR(flow.closure_state().thermodynamic_pressure_pa,
-                    pressure * 310.0 / 300.0, 1.0e-12 * pressure);
+                    open_domain ? pressure : pressure * 310.0 / 300.0,
+                    1.0e-12 * pressure);
   bool stale_rejected = false;
   try {
     static_cast<void>(closure_source.committed_step());
@@ -226,15 +270,52 @@ void run(const hundun::runtime::MpiContext &mpi) {
                      "ideal-gas closure diagnostic source is stale";
   }
   HUNDUN_CHECK(stale_rejected);
+  if (exhaust_generation) {
+    const hundun::test::IdealGasStateSnapshot before_failure{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    hundun::flow::test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
+        flow, -cp * 1000.0 / dt);
+    const auto failed = flow.attempt(state, 0.0, bdf2, {}, {});
+    HUNDUN_CHECK(failed.flow().flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(failed.flow().flow().reason ==
+                 hundun::flow::StepFailureReason::density_closure_failure);
+    HUNDUN_CHECK(failed.closure_report_available());
+    HUNDUN_CHECK(failed.closure_report().stage() ==
+                 hundun::flow::IdealGasClosureStage::predictor);
+    const hundun::test::IdealGasStateSnapshot after_failure{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(before_failure,
+                                                             after_failure));
+    hundun::flow::test::IdealGasClosureTestAccess::exhaust_source_generation(
+        flow);
+    bool exhausted_rejected = false;
+    try {
+      static_cast<void>(flow.attempt(state, 0.0, bdf2, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      exhausted_rejected = true;
+    }
+    HUNDUN_CHECK(exhausted_rejected);
+  }
 }
 
 } // namespace
 
+#ifndef HUNDUN_TASK21_IDEAL_GAS_FIXTURE_ONLY
 int main(int argc, char **argv) {
   hundun::runtime::MpiEnvironment environment(argc, argv);
   return hundun::test::run([&] {
     auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
-    run(mpi);
+    const bool open_domain =
+        argc > 1 && std::string_view(argv[1]) == "--open-plug";
+    run(mpi, open_domain, argc == 1);
   });
 }
+#endif

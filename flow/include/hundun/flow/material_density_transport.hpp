@@ -38,7 +38,7 @@ class FixedStepIdealGasFlow;
 namespace test {
 class MaterialDensityPisoTestAccess;
 class MaterialDensityTransportTestAccess;
-}
+} // namespace test
 #endif
 
 enum class MaterialFluxProvenance : std::uint8_t {
@@ -225,9 +225,14 @@ private:
   StagingResult stage_trial(FlowState &, const MaterialFaceMassFlux &,
                             const MomentumTimeStencil &,
                             double enthalpy_rate_J_per_kg_s = 0.0) const;
-  MaterialDensityTransportReport finalize_trial_with_source(
-      FlowState &, const MaterialFaceMassFlux &,
-      const MomentumTimeStencil &, double enthalpy_rate_J_per_kg_s) const;
+  MaterialDensityTransportReport
+  finalize_trial_with_source(FlowState &, const MaterialFaceMassFlux &,
+                             const MomentumTimeStencil &,
+                             double enthalpy_rate_J_per_kg_s) const;
+  MaterialDensityTransportReport
+  assess_trial_after_closure(FlowState &, const MaterialFaceMassFlux &,
+                             const MomentumTimeStencil &,
+                             double enthalpy_rate_J_per_kg_s) const;
   void prepare_task20_attempt() const;
   struct Impl;
   explicit MaterialDensityTransport(std::unique_ptr<Impl>) noexcept;

@@ -208,6 +208,8 @@ add_library(hundun_material_diagnostics STATIC
   diagnostics/src/material_density_transport_diagnostics.cpp)
 target_include_directories(hundun_material_diagnostics PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_include_directories(hundun_material_diagnostics PRIVATE
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/src>")
 target_link_libraries(hundun_material_diagnostics
   PRIVATE hundun_warnings
   PUBLIC
@@ -888,6 +890,21 @@ if(HUNDUN_BUILD_TESTS)
       set_tests_properties("${task21_test}" PROPERTIES
         LABELS "mpi;numerical;task21;task21-fast"
         TIMEOUT 300 PROCESSORS "${ranks}")
+    endforeach()
+    foreach(case_name IN ITEMS closed_heating open_plug)
+      if(case_name STREQUAL "open_plug")
+        set(task21_case_argument --open-plug)
+      else()
+        set(task21_case_argument --closed-heating)
+      endif()
+      set(task21_full "test_ideal_gas_${case_name}_full_${ranks}_rank")
+      add_test(NAME "${task21_full}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ideal_gas_piso>"
+                "${task21_case_argument}" ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${task21_full}" PROPERTIES
+        LABELS "mpi;numerical;acceptance;task21"
+        TIMEOUT 1800 PROCESSORS "${ranks}")
     endforeach()
     set(task20_vortex_full "test_variable_density_vortex_full_${ranks}_rank")
     if(ranks EQUAL 1)
