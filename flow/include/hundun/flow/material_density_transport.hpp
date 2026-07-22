@@ -220,6 +220,8 @@ public:
   std::string_view field_unit(std::size_t index) const;
   std::string_view owned_cell_layout_fingerprint() const;
   std::string_view global_cell_layout_fingerprint() const;
+  runtime::Int3 global_cell_extent() const;
+  runtime::Box3 owned_global_box() const;
   std::size_t owned_cell_count() const;
   mesh::GlobalCellId global_cell_id(std::size_t local_cell) const;
   double cell_volume_m3(std::size_t local_cell) const;

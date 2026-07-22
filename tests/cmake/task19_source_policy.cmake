@@ -53,3 +53,26 @@ foreach(forbidden IN ITEMS "Task20" "Stage3" "Python.h" "Py_")
     message(FATAL_ERROR "Task 19 product source contains ${forbidden}")
   endif()
 endforeach()
+
+foreach(native_wire IN ITEMS
+    "struct SampleWire" "sizeof(SampleWire)" "std::memcpy"
+    "reinterpret_cast<const unsigned char" "global_max_id"
+    "material diagnostic ownership IDs")
+  string(FIND "${adapter_text}" "${native_wire}" position)
+  if(NOT position EQUAL -1)
+    message(FATAL_ERROR
+            "Task 19 adapter retains forbidden native/full-ID path ${native_wire}")
+  endif()
+endforeach()
+
+foreach(required_portable_path IN ITEMS
+    "kRequestWireSchemaV1" "kSampleWireSchemaV1"
+    "decode_request_wire" "decode_sample_wire"
+    "MPI_Allgather(material diagnostic ownership boxes)"
+    "material.diagnostics.transport-total-count")
+  string(FIND "${adapter_text}" "${required_portable_path}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+            "Task 19 adapter misses portable path ${required_portable_path}")
+  endif()
+endforeach()

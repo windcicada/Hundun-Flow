@@ -1436,6 +1436,14 @@ MaterialDensityDiagnosticSource::global_cell_layout_fingerprint() const {
   HUNDUN_VALIDATE_MATERIAL_SOURCE();
   return impl_->transport->global_layout_fingerprint;
 }
+runtime::Int3 MaterialDensityDiagnosticSource::global_cell_extent() const {
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
+  return impl_->transport->topology->global_extent();
+}
+runtime::Box3 MaterialDensityDiagnosticSource::owned_global_box() const {
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
+  return impl_->transport->topology->owned_global_box();
+}
 std::size_t MaterialDensityDiagnosticSource::owned_cell_count() const {
   HUNDUN_VALIDATE_MATERIAL_SOURCE();
   return impl_->transport->topology->owned_cell_count();

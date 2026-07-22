@@ -467,6 +467,118 @@ bool provider_key_matches(
   }
 }
 
+std::vector<unsigned char> exact_request_wire_oracle() {
+  return {0x01, 0x00, 0x00, 0x00, // schema v1
+          0x03, 0x01,             // bounded sample, collective
+          0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // step
+          0x00,                                           // finite
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // -0.0 bits
+          0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 'p',  0x01,
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 'r',  'h',  'o',  '_',  'h',
+          0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+}
+
+std::vector<unsigned char> exact_sample_wire_oracle() {
+  return {0x01, 0x00, 0x00, 0x00, // schema v1
+          0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 'r',  'h',  'o',  '_',  'h',  0x08,
+          0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x44, 0x33, 0x22, 0x11,
+          0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 'k',  'g',  '/',
+          'm',  '3',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f};
+}
+
+void require_portable_wire_oracles() {
+  using Access =
+      hundun::diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess;
+  using namespace hundun::diagnostics;
+  DiagnosticRequest request;
+  request.level = DiagnosticLevel::bounded_state_sample;
+  request.scope = DiagnosticScope::collective;
+  request.frame = {7, UINT64_C(0x0102030405060708), -0.0, "p"};
+  request.selected_fields = {"rho_h"};
+  request.sample_budget = 2U;
+  const auto request_bytes = Access::request_wire_bytes(request);
+  HUNDUN_CHECK(request_bytes == exact_request_wire_oracle());
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_bytes));
+  HUNDUN_CHECK(Access::request_wire_round_trip(request_bytes) == request_bytes);
+
+  auto request_step_mutant = request_bytes;
+  request_step_mutant[9] ^= 0x40U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_step_mutant));
+  HUNDUN_CHECK(request_step_mutant != request_bytes);
+  auto request_time_mutant = request_bytes;
+  request_time_mutant[22] ^= 0x80U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_time_mutant));
+  HUNDUN_CHECK(request_time_mutant != request_bytes);
+  auto request_budget_mutant = request_bytes;
+  request_budget_mutant[53] = 3U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_budget_mutant));
+  HUNDUN_CHECK(request_budget_mutant != request_bytes);
+
+  auto malformed_request = request_bytes;
+  malformed_request[0] = 2U;
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request[14] =
+      static_cast<unsigned char>(DiagnosticValueStatus::unavailable);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request.resize(27U);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request.push_back(0U);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request[23] = 129U;
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+
+  const DiagnosticSample sample{"rho_h", UINT64_C(0x0102030405060708),
+                                UINT32_C(0x11223344), "kg/m3",
+                                describe_fp64(1.0)};
+  const auto sample_bytes = Access::sample_wire_bytes(sample);
+  HUNDUN_CHECK(sample_bytes == exact_sample_wire_oracle());
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_bytes));
+  const auto decoded = Access::decode_single_sample_wire(sample_bytes);
+  HUNDUN_CHECK(exact_samples_equal({sample}, {decoded}));
+  HUNDUN_CHECK(Access::sample_wire_bytes(decoded) == sample_bytes);
+  auto sample_global_mutant = sample_bytes;
+  sample_global_mutant[27] ^= 0x40U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_global_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_global_mutant).global_id !=
+      sample.global_id);
+  auto sample_component_mutant = sample_bytes;
+  sample_component_mutant[35] ^= 0x40U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_component_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_component_mutant).component !=
+      sample.component);
+  auto sample_fp64_mutant = sample_bytes;
+  sample_fp64_mutant[53] ^= 0x01U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_fp64_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_fp64_mutant).value.bits !=
+      sample.value.bits);
+
+  auto malformed_sample = sample_bytes;
+  malformed_sample[0] = 2U;
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample[50] =
+      static_cast<unsigned char>(DiagnosticValueStatus::unavailable);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample.resize(18U);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample.push_back(0U);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample[12] = 129U;
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+}
+
 std::vector<std::uint64_t>
 owned_global_ids_for_rank(hundun::runtime::Int3 extent, int ranks, int rank) {
   const int quotient = extent.x / ranks;
@@ -486,8 +598,116 @@ owned_global_ids_for_rank(hundun::runtime::Int3 extent, int ranks, int rank) {
   return result;
 }
 
+void require_larger_extent_ownership_proof(
+    const hundun::runtime::MpiContext &mpi) {
+  using namespace hundun;
+  constexpr runtime::Int3 extent{16, 4, 4};
+  auto decomposition = runtime::StructuredDecomposition::create(
+      mpi, extent, {true, true, true},
+      runtime::DecompositionOptions{process_grid(mpi.size())});
+  mesh::MeshTopology topology(decomposition);
+  mesh::MeshGeometry geometry(
+      topology, mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  auto boundaries =
+      boundary::BoundaryRegistry::create(periodic_case(), topology);
+  runtime::FieldRegistry registry;
+  flow::FlowFieldIds fields;
+  fields.density = registry.declare_field(cell("rho", "kg/m3"));
+  fields.velocity = registry.declare_field(cell("velocity", "1", 3U, false));
+  fields.mechanical_pressure =
+      registry.declare_field(cell("pi", "Pa", 1U, false));
+  fields.face_velocity = registry.declare_field(face("u_face", 3U));
+  fields.face_mass_flux = finite_volume::declare_face_mass_flux(registry);
+  const auto rho_h = registry.declare_field(cell("rho_h", "J/m3"));
+  const auto rho_phi = registry.declare_field(cell("rho_phi", "kg/m3"));
+  const auto rho_beta = registry.declare_field(cell("rho_beta", "kg/m3"));
+  fields.transported_cell_fields = {rho_h, rho_phi, rho_beta};
+  registry.freeze();
+  const auto box = decomposition.owned_box();
+  const runtime::Int3 local{box.end.x - box.begin.x, box.end.y - box.begin.y,
+                            box.end.z - box.begin.z};
+  auto state = flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+  flow::FlowLayerValues initial;
+  initial.density.assign(topology.owned_cell_count(), 1.0);
+  initial.velocity.assign(topology.owned_cell_count() * 3U, 0.0);
+  initial.mechanical_pressure.assign(topology.owned_cell_count(), 0.0);
+  initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
+  initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
+  initial.transported_cell_fields = {
+      std::vector<double>(topology.owned_cell_count(), 3.0),
+      std::vector<double>(topology.owned_cell_count(), 0.4),
+      std::vector<double>(topology.owned_cell_count(), 0.7)};
+  state.seed_accepted_layers(initial, initial);
+  runtime::FieldStorage flux_storage(
+      registry, runtime::FieldLayoutSet{local, topology.local_face_count()});
+  constexpr runtime::PhaseId phase = 1940U;
+  constexpr runtime::ActorId actor = 1940U;
+  runtime::FieldAccessPlan access(registry);
+  access.declare_access(phase, actor, fields.face_mass_flux,
+                        runtime::AccessMode::read_write);
+  access.freeze();
+  auto flux_write = flux_storage.acquire_face_write<double>(
+      access, phase, actor, fields.face_mass_flux);
+  for (std::size_t face_id = 0; face_id < topology.local_face_count();
+       ++face_id)
+    flux_write(face_id, 0) = 0.0;
+  auto halo = runtime::HaloExchange::create(
+      decomposition, runtime::ExchangePlan::create(decomposition, local, 2));
+  flow::MaterialDensityTransportSpec spec;
+  spec.enthalpy_density = rho_h;
+  spec.scalar_densities = {rho_phi, rho_beta};
+  spec.scalar_diffusivities_kg_per_m_s = {0.0, 0.0};
+  auto transport = flow::MaterialDensityTransport::create(
+      registry, decomposition, topology, geometry, boundaries, mpi, halo,
+      fields, spec);
+  state.begin_attempt();
+  auto flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto report = transport.finalize_trial(
+      state, flux,
+      flow::make_momentum_time_stencil(flow::MomentumTimeOrder::backward_euler,
+                                       0.01, 0.0));
+  HUNDUN_CHECK(report.disposition() ==
+               flow::MaterialTransportDisposition::finalized);
+  auto source = transport.diagnostic_source(state, report);
+  diagnostics::DiagnosticRequest request;
+  request.level = diagnostics::DiagnosticLevel::bounded_state_sample;
+  request.scope = diagnostics::DiagnosticScope::collective;
+  request.frame = {mpi.rank(), 0U, 0.0, "material.finalized-trial"};
+  request.sample_budget = 2U;
+  CaptureSink sink;
+  diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+  diagnostics::collect_diagnostics(source, mpi, request, sink);
+  const auto work = diagnostics::test::
+      MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+  HUNDUN_CHECK(work.raw_collectives == 27U);
+  const auto ids = diagnostics::diagnostic_fingerprint_field_ids(source);
+  std::vector<std::uint64_t> global_ids;
+  const auto cell_count =
+      static_cast<std::uint64_t>(extent.x * extent.y * extent.z);
+  global_ids.reserve(static_cast<std::size_t>(cell_count));
+  for (std::uint64_t id = 0; id < cell_count; ++id)
+    global_ids.push_back(id);
+  require_expected_samples(sink.value,
+                           expected_samples(ids, global_ids, false, 2U));
+  diagnostics::DiagnosticFingerprintAccumulator expected_fingerprint;
+  constexpr std::array<double, 4> values{1.0, 3.0, 0.4, 0.7};
+  for (std::size_t field = 0; field < ids.size(); ++field) {
+    for (const auto global : global_ids)
+      expected_fingerprint.add(ids[field], global, 0U,
+                               diagnostics::describe_fp64(values[field]));
+  }
+  HUNDUN_CHECK(sink.value.state_fingerprint.hex ==
+               expected_fingerprint.finish().hex);
+  state.rollback_attempt();
+}
+
 void run(const hundun::runtime::MpiContext &mpi) {
   using namespace hundun;
+  require_portable_wire_oracles();
   constexpr runtime::Int3 extent{8, 4, 4};
   auto decomposition = runtime::StructuredDecomposition::create(
       mpi, extent, {true, true, true},
@@ -679,6 +899,14 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(source.owned_cell_layout_fingerprint() == expected_owned_layout);
   HUNDUN_CHECK(source.global_cell_layout_fingerprint() ==
                expected_global_layout);
+  const auto source_extent = source.global_cell_extent();
+  HUNDUN_CHECK(source_extent.x == extent.x && source_extent.y == extent.y &&
+               source_extent.z == extent.z);
+  const auto source_box = source.owned_global_box();
+  HUNDUN_CHECK(
+      source_box.begin.x == box.begin.x && source_box.begin.y == box.begin.y &&
+      source_box.begin.z == box.begin.z && source_box.end.x == box.end.x &&
+      source_box.end.y == box.end.y && source_box.end.z == box.end.z);
   const auto provider_key = diagnostics::test::
       MaterialDensityTransportDiagnosticsTestAccess::provider_key_bytes(source);
   HUNDUN_CHECK(provider_key_matches(provider_key, source, ids,
@@ -705,6 +933,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       state.snapshot(flow::FlowLayer::committed);
   const auto state_before = state.snapshot(flow::FlowLayer::trial);
   const auto metadata_before = state.metadata();
+  require_larger_extent_ownership_proof(mpi);
   const auto counters_before = mpi.fp64_reduction_counters();
   std::string fingerprint;
   for (const auto level :
@@ -849,6 +1078,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       HUNDUN_CHECK(sampled_work.summary_accumulations == 0U);
       HUNDUN_CHECK(sampled_work.volume_reads == 0U);
       HUNDUN_CHECK(sampled_work.sample_candidates > 0U);
+      HUNDUN_CHECK(sampled_work.raw_collectives == 27U);
       if (collective_fingerprint.empty())
         collective_fingerprint = sampled_sink.value.state_fingerprint.hex;
       HUNDUN_CHECK(sampled_sink.value.state_fingerprint.hex ==
@@ -1148,6 +1378,28 @@ void run(const hundun::runtime::MpiContext &mpi) {
       },
       diagnostics::DiagnosticFailureClass::layout,
       "material.diagnostics.duplicate-owned-sample", 0);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            override_global_id(
+                0U, std::numeric_limits<std::uint64_t>::max() - 1U, 0);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.duplicate-owned-sample", 0, std::nullopt, 16U);
+  if (mpi.size() > 1) {
+    require_injected_failure(
+        collective,
+        [&] {
+          auto overlapping = box;
+          --overlapping.begin.x;
+          --overlapping.end.x;
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              override_owned_global_box(overlapping, 1);
+        },
+        diagnostics::DiagnosticFailureClass::layout,
+        "material.diagnostics.duplicate-owned-sample", 1, std::nullopt, 18U);
+  }
   const int injection_rank = mpi.size() > 1 ? 1 : 0;
   require_injected_failure(
       collective,
@@ -1173,6 +1425,101 @@ void run(const hundun::runtime::MpiContext &mpi) {
       },
       diagnostics::DiagnosticFailureClass::invalid_request,
       "material.diagnostics.request-size", injection_rank);
+
+  using DiagnosticAccess =
+      diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess;
+  const auto request_wire = DiagnosticAccess::request_wire_bytes(collective);
+  if (mpi.size() > 1) {
+    const std::array<std::pair<std::size_t, unsigned char>, 3> changes{
+        std::pair<std::size_t, unsigned char>{9U, 1U},
+        std::pair<std::size_t, unsigned char>{22U, 0x80U},
+        std::pair<std::size_t, unsigned char>{request_wire.size() - 8U, 1U}};
+    for (const auto &[byte, mask] : changes) {
+      auto changed = request_wire;
+      changed[byte] ^= mask;
+      HUNDUN_CHECK(DiagnosticAccess::request_wire_is_valid(changed));
+      require_injected_failure(
+          collective,
+          [&] {
+            DiagnosticAccess::override_request_wire_bytes(
+                changed.data(), changed.size(), injection_rank);
+          },
+          diagnostics::DiagnosticFailureClass::invalid_request,
+          "material.diagnostics.request-agreement", injection_rank);
+    }
+  }
+  std::vector<std::vector<unsigned char>> malformed_requests;
+  auto malformed_request = request_wire;
+  malformed_request[0] = 2U;
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request[14] = static_cast<unsigned char>(
+      diagnostics::DiagnosticValueStatus::unavailable);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request.resize(27U);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request.push_back(0U);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request[23] = 129U;
+  malformed_requests.push_back(malformed_request);
+  for (const auto &malformed : malformed_requests) {
+    HUNDUN_CHECK(!DiagnosticAccess::request_wire_is_valid(malformed));
+    require_injected_failure(
+        collective,
+        [&] {
+          DiagnosticAccess::override_request_wire_bytes(
+              malformed.data(), malformed.size(), injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.request-serialization", injection_rank);
+  }
+
+  const diagnostics::DiagnosticSample wire_sample{
+      "rho_h", source.global_cell_id(0U), 0U, "J/m3",
+      diagnostics::describe_fp64(3.0)};
+  const auto sample_wire = DiagnosticAccess::sample_wire_bytes(wire_sample);
+  std::vector<std::vector<unsigned char>> malformed_samples;
+  auto malformed_sample = sample_wire;
+  malformed_sample[0] = 2U;
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample[malformed_sample.size() - 9U] = static_cast<unsigned char>(
+      diagnostics::DiagnosticValueStatus::unavailable);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample.resize(18U);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample.push_back(0U);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample[12] = 129U;
+  malformed_samples.push_back(malformed_sample);
+  for (const auto &malformed : malformed_samples) {
+    HUNDUN_CHECK(!DiagnosticAccess::sample_wire_is_valid(malformed));
+    require_injected_failure(
+        collective,
+        [&] {
+          DiagnosticAccess::override_sample_wire_bytes(
+              malformed.data(), malformed.size(), injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::layout,
+        "material.diagnostics.sample-wire-malformed", injection_rank);
+  }
+
+  require_injected_failure(
+      sink_request,
+      [&] {
+        DiagnosticAccess::override_reported_transport_total_count(
+            static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U,
+            injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::invalid_input,
+      "material.diagnostics.transport-total-count", injection_rank,
+      diagnostics::test::MaterialDiagnosticRawCollectivePoint::other, 17U);
   require_injected_failure(
       collective,
       [&] {
@@ -1183,7 +1530,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       "material.diagnostics.sample-wire-size", injection_rank,
       diagnostics::test::MaterialDiagnosticRawCollectivePoint::
           sample_size_exchange,
-      26U);
+      22U);
 
   if (mpi.size() > 1) {
     require_injected_failure(
@@ -1214,7 +1561,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
         "material.diagnostics.sample-wire-size", 1,
         diagnostics::test::MaterialDiagnosticRawCollectivePoint::
             sample_size_exchange,
-        26U);
+        22U);
   }
 
   using AllocationPoint = diagnostics::test::MaterialDiagnosticAllocationPoint;
@@ -1251,28 +1598,22 @@ void run(const hundun::runtime::MpiContext &mpi) {
       AllocationFailureCase{AllocationPoint::transport_totals,
                             RawPoint::preparation_transport_totals, 16U, true,
                             true},
-      AllocationFailureCase{AllocationPoint::owned_id_local,
-                            RawPoint::preparation_owned_id_local, 17U, false,
-                            false},
-      AllocationFailureCase{AllocationPoint::ownership_counts,
-                            RawPoint::preparation_ownership_counts, 19U, false,
-                            true},
-      AllocationFailureCase{AllocationPoint::ownership_gather,
-                            RawPoint::preparation_ownership_gather, 21U, false,
-                            true},
+      AllocationFailureCase{AllocationPoint::ownership_box_proof,
+                            RawPoint::preparation_ownership_box_proof, 17U,
+                            false, true},
       AllocationFailureCase{AllocationPoint::eligible_counts,
-                            RawPoint::preparation_eligible_counts, 23U, false,
+                            RawPoint::preparation_eligible_counts, 19U, false,
                             false},
       AllocationFailureCase{
           AllocationPoint::local_sample_wire_and_size_counts,
-          RawPoint::preparation_local_sample_wire_and_size_counts, 25U, false,
+          RawPoint::preparation_local_sample_wire_and_size_counts, 21U, false,
           true},
       AllocationFailureCase{AllocationPoint::sample_exchange_buffers,
-                            RawPoint::preparation_sample_exchange_buffers, 27U,
+                            RawPoint::preparation_sample_exchange_buffers, 23U,
                             false, true},
       AllocationFailureCase{AllocationPoint::decoded_and_retained_samples,
                             RawPoint::preparation_decoded_and_retained_samples,
-                            29U, false, true}};
+                            25U, false, true}};
   for (const auto &failure : allocation_failures) {
     if (mpi.size() > 1 && !failure.required_distributed)
       continue;

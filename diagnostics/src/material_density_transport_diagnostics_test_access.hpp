@@ -5,6 +5,9 @@
 #error "material-density diagnostics test access is test-build only"
 #endif
 
+#include "hundun/diagnostics/structured_diagnostics.hpp"
+#include "hundun/runtime/types.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -18,9 +21,7 @@ namespace hundun::diagnostics::test {
 enum class MaterialDiagnosticAllocationPoint : std::uint8_t {
   summary_gather,
   transport_totals,
-  owned_id_local,
-  ownership_counts,
-  ownership_gather,
+  ownership_box_proof,
   eligible_counts,
   local_sample_wire_and_size_counts,
   sample_exchange_buffers,
@@ -34,9 +35,7 @@ enum class MaterialDiagnosticRawCollectivePoint : std::uint8_t {
   other,
   preparation_summary_gather,
   preparation_transport_totals,
-  preparation_owned_id_local,
-  preparation_ownership_counts,
-  preparation_ownership_gather,
+  preparation_ownership_box_proof,
   preparation_eligible_counts,
   preparation_local_sample_wire_and_size_counts,
   preparation_sample_exchange_buffers,
@@ -64,6 +63,9 @@ public:
   static void override_global_id(std::size_t local_cell,
                                  std::uint64_t global_id,
                                  int rank = -1) noexcept;
+  static void override_owned_global_box(runtime::Box3, int rank = -1) noexcept;
+  static void override_reported_transport_total_count(std::uint64_t,
+                                                      int rank = -1) noexcept;
   static void inject_provider_failure(int rank = -1) noexcept;
   static void inject_record_failure(int rank = -1) noexcept;
   static void inject_request_size_overflow(int rank = -1) noexcept;
@@ -73,6 +75,20 @@ public:
   static void override_reported_sample_wire_bytes(const std::uint64_t *counts,
                                                   std::size_t count);
   static void inject_provider_key_value_difference(int rank = -1) noexcept;
+  static void override_request_wire_bytes(const unsigned char *, std::size_t,
+                                          int rank = -1);
+  static void override_sample_wire_bytes(const unsigned char *, std::size_t,
+                                         int rank = -1);
+  static std::vector<unsigned char>
+  request_wire_bytes(const DiagnosticRequest &);
+  static bool
+  request_wire_is_valid(const std::vector<unsigned char> &) noexcept;
+  static std::vector<unsigned char>
+  request_wire_round_trip(const std::vector<unsigned char> &);
+  static std::vector<unsigned char> sample_wire_bytes(const DiagnosticSample &);
+  static bool sample_wire_is_valid(const std::vector<unsigned char> &) noexcept;
+  static DiagnosticSample
+  decode_single_sample_wire(const std::vector<unsigned char> &);
   static std::vector<unsigned char>
   provider_key_bytes(const flow::MaterialDensityDiagnosticSource &);
 };

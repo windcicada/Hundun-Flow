@@ -30,6 +30,18 @@ static_assert(
                      const hundun::flow::MaterialDensityDiagnosticSource &>()
                      .global_cell_layout_fingerprint()),
         std::string_view>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<
+                     const hundun::flow::MaterialDensityDiagnosticSource &>()
+                     .global_cell_extent()),
+        hundun::runtime::Int3>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<
+                     const hundun::flow::MaterialDensityDiagnosticSource &>()
+                     .owned_global_box()),
+        hundun::runtime::Box3>);
 
 int main() {
   const hundun::flow::MaterialDensityTransportSpec spec{};

@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <new>
 #include <optional>
@@ -41,9 +40,7 @@ constexpr DiagnosticCapabilityFlags kCapabilities =
 enum class AggregationPreparationPoint : std::uint8_t {
   summary_gather,
   transport_totals,
-  owned_id_local,
-  ownership_counts,
-  ownership_gather,
+  ownership_box_proof,
   eligible_counts,
   local_sample_wire_and_size_counts,
   sample_exchange_buffers,
@@ -57,9 +54,7 @@ enum class RawCollectivePoint : std::uint8_t {
   other,
   preparation_summary_gather,
   preparation_transport_totals,
-  preparation_owned_id_local,
-  preparation_ownership_counts,
-  preparation_ownership_gather,
+  preparation_ownership_box_proof,
   preparation_eligible_counts,
   preparation_local_sample_wire_and_size_counts,
   preparation_sample_exchange_buffers,
@@ -73,6 +68,8 @@ enum class RawCollectivePoint : std::uint8_t {
 test::MaterialDiagnosticWorkCounts diagnostic_work_counts;
 struct MaterialDiagnosticTestControl final {
   std::optional<std::pair<std::size_t, std::uint64_t>> global_id_override;
+  std::optional<runtime::Box3> owned_box_override;
+  std::optional<std::uint64_t> reported_transport_total_count;
   bool provider_failure{};
   bool record_failure{};
   bool request_size_overflow{};
@@ -81,6 +78,8 @@ struct MaterialDiagnosticTestControl final {
   std::optional<AggregationPreparationPoint> allocation_failure;
   std::array<std::uint64_t, 4> reported_sample_wire_bytes{};
   std::size_t reported_sample_wire_byte_count{};
+  std::optional<std::vector<unsigned char>> request_wire_override;
+  std::optional<std::vector<unsigned char>> sample_wire_override;
   int rank{-1};
 };
 MaterialDiagnosticTestControl diagnostic_test_control;
@@ -471,12 +470,8 @@ preparation_trace(AggregationPreparationPoint point) noexcept {
     return RawCollectivePoint::preparation_summary_gather;
   case AggregationPreparationPoint::transport_totals:
     return RawCollectivePoint::preparation_transport_totals;
-  case AggregationPreparationPoint::owned_id_local:
-    return RawCollectivePoint::preparation_owned_id_local;
-  case AggregationPreparationPoint::ownership_counts:
-    return RawCollectivePoint::preparation_ownership_counts;
-  case AggregationPreparationPoint::ownership_gather:
-    return RawCollectivePoint::preparation_ownership_gather;
+  case AggregationPreparationPoint::ownership_box_proof:
+    return RawCollectivePoint::preparation_ownership_box_proof;
   case AggregationPreparationPoint::eligible_counts:
     return RawCollectivePoint::preparation_eligible_counts;
   case AggregationPreparationPoint::local_sample_wire_and_size_counts:
@@ -571,36 +566,12 @@ std::string broadcast_failure_code(const runtime::MpiContext &mpi, int root,
   return std::string(bytes.data(), static_cast<std::size_t>(size));
 }
 
-std::vector<unsigned char> request_key(const DiagnosticRequest &request) {
-  std::vector<unsigned char> result;
-  auto append = [&](const void *data, std::size_t size) {
-    const auto *bytes = static_cast<const unsigned char *>(data);
-    result.insert(result.end(), bytes, bytes + size);
-  };
-  const auto level = static_cast<std::uint8_t>(request.level);
-  const auto scope = static_cast<std::uint8_t>(request.scope);
-  append(&level, sizeof(level));
-  append(&scope, sizeof(scope));
-  append(&request.frame.step, sizeof(request.frame.step));
-  const auto time = describe_fp64(request.frame.time_s).bits;
-  append(&time, sizeof(time));
-  const auto append_text = [&](std::string_view text) {
-    const auto size = static_cast<std::uint64_t>(text.size());
-    append(&size, sizeof(size));
-    append(text.data(), text.size());
-  };
-  append_text(request.frame.phase);
-  const auto fields =
-      static_cast<std::uint64_t>(request.selected_fields.size());
-  append(&fields, sizeof(fields));
-  for (const auto field : request.selected_fields)
-    append_text(field);
-  const auto budget = static_cast<std::uint64_t>(request.sample_budget);
-  append(&budget, sizeof(budget));
-  return result;
-}
+class WireError final : public std::runtime_error {
+public:
+  explicit WireError(const char *message) : std::runtime_error(message) {}
+};
 
-class ProviderKeyBuilder final {
+class ByteWriter final {
 public:
   void append_u8(std::uint8_t value) { bytes_.push_back(value); }
 
@@ -621,8 +592,7 @@ public:
 
   void append_text(std::string_view value) {
     append_u64(static_cast<std::uint64_t>(value.size()));
-    const auto *first = reinterpret_cast<const unsigned char *>(value.data());
-    bytes_.insert(bytes_.end(), first, first + value.size());
+    bytes_.insert(bytes_.end(), value.begin(), value.end());
   }
 
   std::vector<unsigned char> finish() && { return std::move(bytes_); }
@@ -631,6 +601,229 @@ private:
   std::vector<unsigned char> bytes_;
 };
 
+class ByteReader final {
+public:
+  explicit ByteReader(const std::vector<unsigned char> &bytes) noexcept
+      : bytes_(&bytes) {}
+
+  std::uint8_t read_u8() { return read_integer<std::uint8_t>(); }
+  std::uint16_t read_u16() { return read_integer<std::uint16_t>(); }
+  std::uint32_t read_u32() { return read_integer<std::uint32_t>(); }
+  std::uint64_t read_u64() { return read_integer<std::uint64_t>(); }
+
+  std::string read_text(std::size_t maximum) {
+    const auto encoded_size = read_u64();
+    if (encoded_size > static_cast<std::uint64_t>(maximum) ||
+        encoded_size > static_cast<std::uint64_t>(remaining()))
+      throw WireError("diagnostic wire text length is invalid");
+    const auto size = static_cast<std::size_t>(encoded_size);
+    const auto first = bytes_->begin() + static_cast<std::ptrdiff_t>(offset_);
+    offset_ += size;
+    return std::string(first, first + static_cast<std::ptrdiff_t>(size));
+  }
+
+  std::size_t remaining() const noexcept { return bytes_->size() - offset_; }
+  void require_end() const {
+    if (remaining() != 0U)
+      throw WireError("diagnostic wire has trailing bytes");
+  }
+
+private:
+  template <class Integer> Integer read_integer() {
+    if (sizeof(Integer) > remaining())
+      throw WireError("diagnostic wire integer is truncated");
+    std::uint64_t value{};
+    for (std::size_t byte = 0; byte < sizeof(Integer); ++byte)
+      value |= static_cast<std::uint64_t>((*bytes_)[offset_ + byte])
+               << (8U * byte);
+    offset_ += sizeof(Integer);
+    return static_cast<Integer>(value);
+  }
+
+  const std::vector<unsigned char> *bytes_{};
+  std::size_t offset_{};
+};
+
+constexpr std::uint32_t kRequestWireSchemaV1 = 1U;
+constexpr std::uint32_t kSampleWireSchemaV1 = 1U;
+
+bool valid_wire_id(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 128U)
+    return false;
+  return std::all_of(value.begin(), value.end(), [](char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') || character == '_' ||
+           character == '.' || character == '-';
+  });
+}
+
+bool valid_wire_unit(std::string_view unit) noexcept {
+  constexpr std::array<std::string_view, 19> units{
+      "1",    "s",     "m",      "m2",     "m3",   "m/s", "m2/s",
+      "kg",   "kg/m3", "kg/s",   "kg*m/s", "Pa",   "J",   "J/m3",
+      "J/kg", "K",     "degree", "byte",   "count"};
+  return std::find(units.begin(), units.end(), unit) != units.end();
+}
+
+DiagnosticValueStatus value_status_for_bits(std::uint64_t bits) noexcept {
+  const std::uint64_t exponent = (bits >> 52U) & UINT64_C(0x7ff);
+  const std::uint64_t fraction = bits & UINT64_C(0x000fffffffffffff);
+  if (exponent != UINT64_C(0x7ff))
+    return DiagnosticValueStatus::finite;
+  if (fraction == 0U)
+    return (bits >> 63U) == 0U ? DiagnosticValueStatus::positive_infinity
+                               : DiagnosticValueStatus::negative_infinity;
+  return (fraction & UINT64_C(0x0008000000000000)) != 0U
+             ? DiagnosticValueStatus::quiet_nan
+             : DiagnosticValueStatus::signaling_nan;
+}
+
+void append_fp64(ByteWriter &writer, DiagnosticFp64 value) {
+  writer.append_u8(static_cast<std::uint8_t>(value.status));
+  writer.append_u64(value.bits);
+}
+
+DiagnosticFp64 read_fp64(ByteReader &reader, bool allow_non_finite) {
+  const auto status_value = reader.read_u8();
+  if (status_value >
+      static_cast<std::uint8_t>(DiagnosticValueStatus::signaling_nan))
+    throw WireError("diagnostic wire FP64 status is invalid");
+  const auto status = static_cast<DiagnosticValueStatus>(status_value);
+  const auto bits = reader.read_u64();
+  if (value_status_for_bits(bits) != status ||
+      (!allow_non_finite && status != DiagnosticValueStatus::finite))
+    throw WireError("diagnostic wire FP64 representation is inconsistent");
+  return {status, bits};
+}
+
+struct DecodedRequestWire final {
+  DiagnosticLevel level{};
+  DiagnosticScope scope{};
+  std::uint64_t step{};
+  DiagnosticFp64 time;
+  std::string phase;
+  std::vector<std::string> selected_fields;
+  std::uint64_t sample_budget{};
+};
+
+std::vector<unsigned char>
+encode_request_wire(const DecodedRequestWire &request) {
+  ByteWriter writer;
+  writer.append_u32(kRequestWireSchemaV1);
+  writer.append_u8(static_cast<std::uint8_t>(request.level));
+  writer.append_u8(static_cast<std::uint8_t>(request.scope));
+  writer.append_u64(request.step);
+  append_fp64(writer, request.time);
+  writer.append_text(request.phase);
+  writer.append_u64(static_cast<std::uint64_t>(request.selected_fields.size()));
+  for (const auto &field : request.selected_fields)
+    writer.append_text(field);
+  writer.append_u64(request.sample_budget);
+  return std::move(writer).finish();
+}
+
+std::vector<unsigned char> request_key(const DiagnosticRequest &request) {
+  DecodedRequestWire wire;
+  wire.level = request.level;
+  wire.scope = request.scope;
+  wire.step = request.frame.step;
+  wire.time = describe_fp64(request.frame.time_s);
+  wire.phase = request.frame.phase;
+  wire.selected_fields.reserve(request.selected_fields.size());
+  for (const auto field : request.selected_fields)
+    wire.selected_fields.emplace_back(field);
+  wire.sample_budget = static_cast<std::uint64_t>(request.sample_budget);
+  return encode_request_wire(wire);
+}
+
+DecodedRequestWire
+decode_request_wire(const std::vector<unsigned char> &bytes) {
+  ByteReader reader(bytes);
+  if (reader.read_u32() != kRequestWireSchemaV1)
+    throw WireError("diagnostic request wire schema is invalid");
+  const auto level = reader.read_u8();
+  const auto scope = reader.read_u8();
+  if (level >
+          static_cast<std::uint8_t>(DiagnosticLevel::bounded_state_sample) ||
+      scope > static_cast<std::uint8_t>(DiagnosticScope::collective))
+    throw WireError("diagnostic request wire enum is invalid");
+  DecodedRequestWire result;
+  result.level = static_cast<DiagnosticLevel>(level);
+  result.scope = static_cast<DiagnosticScope>(scope);
+  result.step = reader.read_u64();
+  result.time = read_fp64(reader, false);
+  if ((result.time.bits >> 63U) != 0U &&
+      result.time.bits != UINT64_C(0x8000000000000000))
+    throw WireError("diagnostic request wire time is negative");
+  result.phase = reader.read_text(128U);
+  if (!valid_wire_id(result.phase))
+    throw WireError("diagnostic request wire phase is invalid");
+  const auto field_count = reader.read_u64();
+  if (field_count > static_cast<std::uint64_t>(reader.remaining() / 9U))
+    throw WireError("diagnostic request wire field count is invalid");
+  result.selected_fields.reserve(static_cast<std::size_t>(field_count));
+  for (std::uint64_t field = 0; field < field_count; ++field) {
+    auto value = reader.read_text(128U);
+    if (!valid_wire_id(value))
+      throw WireError("diagnostic request wire field is invalid");
+    if (!result.selected_fields.empty() &&
+        !(result.selected_fields.back() < value))
+      throw WireError("diagnostic request wire fields are not canonical");
+    result.selected_fields.push_back(std::move(value));
+  }
+  result.sample_budget = reader.read_u64();
+  if (result.sample_budget > static_cast<std::uint64_t>(kMaximumStateSamplesV1))
+    throw WireError("diagnostic request wire budget is invalid");
+  if ((result.level == DiagnosticLevel::bounded_state_sample &&
+       result.sample_budget == 0U) ||
+      (result.level != DiagnosticLevel::bounded_state_sample &&
+       (result.sample_budget != 0U || !result.selected_fields.empty())))
+    throw WireError("diagnostic request wire selection is invalid");
+  reader.require_end();
+  return result;
+}
+
+std::vector<unsigned char>
+encode_sample_wire(const std::vector<DiagnosticSample> &samples) {
+  ByteWriter writer;
+  writer.append_u32(kSampleWireSchemaV1);
+  writer.append_u64(static_cast<std::uint64_t>(samples.size()));
+  for (const auto &sample : samples) {
+    writer.append_text(sample.field_id);
+    writer.append_u64(sample.global_id);
+    writer.append_u32(sample.component);
+    writer.append_text(sample.unit);
+    append_fp64(writer, sample.value);
+  }
+  return std::move(writer).finish();
+}
+
+std::vector<DiagnosticSample>
+decode_sample_wire(const std::vector<unsigned char> &bytes) {
+  ByteReader reader(bytes);
+  if (reader.read_u32() != kSampleWireSchemaV1)
+    throw WireError("diagnostic sample wire schema is invalid");
+  const auto count = reader.read_u64();
+  if (count > static_cast<std::uint64_t>(kMaximumStateSamplesV1) ||
+      count > static_cast<std::uint64_t>(reader.remaining() / 30U))
+    throw WireError("diagnostic sample wire count is invalid");
+  std::vector<DiagnosticSample> result;
+  result.reserve(static_cast<std::size_t>(count));
+  for (std::uint64_t item = 0; item < count; ++item) {
+    auto field = reader.read_text(128U);
+    const auto global = reader.read_u64();
+    const auto component = reader.read_u32();
+    auto unit = reader.read_text(7U);
+    const auto value = read_fp64(reader, true);
+    if (!valid_wire_id(field) || !valid_wire_unit(unit))
+      throw WireError("diagnostic sample wire text is invalid");
+    result.push_back(
+        {std::move(field), global, component, std::move(unit), value});
+  }
+  reader.require_end();
+  return result;
+}
+
 std::vector<unsigned char>
 provider_key(const flow::MaterialDensityDiagnosticSource &source,
              const MaterialDiagnosticTestControl &control) {
@@ -638,7 +831,7 @@ provider_key(const flow::MaterialDensityDiagnosticSource &source,
   const auto descriptor = describe_diagnostics(source);
   const auto field_ids = diagnostic_fingerprint_field_ids(source);
   const auto &report = source.report();
-  ProviderKeyBuilder builder;
+  ByteWriter builder;
   builder.append_u32(provider_key_schema);
   builder.append_u32(descriptor.schema_version);
   builder.append_u16(static_cast<std::uint16_t>(descriptor.module_kind));
@@ -737,9 +930,9 @@ void require_request_agreement(const runtime::MpiContext &mpi,
                                const MaterialDiagnosticTestControl &control) {
   constexpr std::size_t limit =
       static_cast<std::size_t>(std::numeric_limits<int>::max());
-  std::size_t serialized_size = 2U + sizeof(request.frame.step) +
-                                sizeof(std::uint64_t) +
-                                2U * sizeof(std::uint64_t);
+  std::size_t serialized_size =
+      sizeof(std::uint32_t) + 2U * sizeof(std::uint8_t) +
+      sizeof(std::uint64_t) + sizeof(std::uint8_t) + 3U * sizeof(std::uint64_t);
   const auto add_text_size = [&](std::string_view value) {
     if (serialized_size > limit - sizeof(std::uint64_t) ||
         value.size() > limit - sizeof(std::uint64_t) - serialized_size)
@@ -767,6 +960,11 @@ void require_request_agreement(const runtime::MpiContext &mpi,
   bool key_failed = false;
   try {
     key = request_key(request);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (control.request_wire_override)
+      key = *control.request_wire_override;
+#endif
+    static_cast<void>(decode_request_wire(key));
   } catch (...) {
     key_failed = true;
   }
@@ -818,13 +1016,146 @@ void require_request_agreement(const runtime::MpiContext &mpi,
                      "collective diagnostic requests differ");
 }
 
-struct SampleWire final {
-  std::array<char, 129> field{};
-  std::uint64_t global{};
-  std::uint32_t component{};
-  std::uint64_t bits{};
-  std::array<char, 8> unit{};
-};
+bool checked_product(std::uint64_t left, std::uint64_t right,
+                     std::uint64_t &result) noexcept {
+  if (right != 0U && left > std::numeric_limits<std::uint64_t>::max() / right)
+    return false;
+  result = left * right;
+  return true;
+}
+
+bool checked_box_volume(runtime::Box3 box, std::uint64_t &result) noexcept {
+  if (box.begin.x < 0 || box.begin.y < 0 || box.begin.z < 0 ||
+      box.end.x <= box.begin.x || box.end.y <= box.begin.y ||
+      box.end.z <= box.begin.z)
+    return false;
+  std::uint64_t xy{};
+  return checked_product(static_cast<std::uint64_t>(box.end.x - box.begin.x),
+                         static_cast<std::uint64_t>(box.end.y - box.begin.y),
+                         xy) &&
+         checked_product(
+             xy, static_cast<std::uint64_t>(box.end.z - box.begin.z), result);
+}
+
+bool boxes_overlap(runtime::Box3 left, runtime::Box3 right) noexcept {
+  return left.begin.x < right.end.x && right.begin.x < left.end.x &&
+         left.begin.y < right.end.y && right.begin.y < left.end.y &&
+         left.begin.z < right.end.z && right.begin.z < left.end.z;
+}
+
+void require_complete_ownership(
+    const runtime::MpiContext &mpi,
+    const flow::MaterialDensityDiagnosticSource &source,
+    const MaterialDiagnosticTestControl &control) {
+  const auto extent = source.global_cell_extent();
+  auto box = source.owned_global_box();
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (control.owned_box_override)
+    box = *control.owned_box_override;
+#endif
+  std::uint64_t box_volume{};
+  const bool extent_valid = extent.x > 0 && extent.y > 0 && extent.z > 0;
+  const bool box_valid =
+      extent_valid && checked_box_volume(box, box_volume) &&
+      box.end.x <= extent.x && box.end.y <= extent.y && box.end.z <= extent.z &&
+      box_volume == static_cast<std::uint64_t>(source.owned_cell_count());
+  bool ids_valid = true;
+  for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell) {
+    auto observed = source.global_cell_id(cell);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (control.global_id_override && control.global_id_override->first == cell)
+      observed = control.global_id_override->second;
+#endif
+    if (observed != source.global_cell_id(cell)) {
+      ids_valid = false;
+      break;
+    }
+  }
+  const int local_failure_rank = first_failing_rank(
+      mpi, !box_valid || !ids_valid,
+      "MPI_Allreduce(material diagnostic local ownership proof)");
+  if (local_failure_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "material.diagnostics.duplicate-owned-sample",
+                     local_failure_rank,
+                     "material diagnostic ownership proof failed");
+
+  std::array<std::uint64_t, 7> local{static_cast<std::uint64_t>(box.begin.x),
+                                     static_cast<std::uint64_t>(box.begin.y),
+                                     static_cast<std::uint64_t>(box.begin.z),
+                                     static_cast<std::uint64_t>(box.end.x),
+                                     static_cast<std::uint64_t>(box.end.y),
+                                     static_cast<std::uint64_t>(box.end.z),
+                                     box_volume};
+  std::vector<std::uint64_t> gathered;
+  std::vector<runtime::Box3> boxes;
+  prepare_aggregation(
+      mpi, AggregationPreparationPoint::ownership_box_proof, control, [&] {
+        gathered.resize(static_cast<std::size_t>(mpi.size()) * local.size());
+        boxes.resize(static_cast<std::size_t>(mpi.size()));
+      });
+  runtime::check_mpi_result(
+      MPI_Allgather(local.data(), static_cast<int>(local.size()), MPI_UINT64_T,
+                    gathered.data(), static_cast<int>(local.size()),
+                    MPI_UINT64_T, mpi.comm()),
+      "MPI_Allgather(material diagnostic ownership boxes)");
+  record_raw_collective();
+
+  std::uint64_t covered{};
+  int invalid_rank = -1;
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    const auto offset = static_cast<std::size_t>(rank) * local.size();
+    bool representable = true;
+    for (std::size_t coordinate = 0; coordinate < 6U; ++coordinate)
+      representable = representable && gathered[offset + coordinate] <=
+                                           static_cast<std::uint64_t>(
+                                               std::numeric_limits<int>::max());
+    if (!representable) {
+      invalid_rank = rank;
+      break;
+    }
+    auto &candidate = boxes[static_cast<std::size_t>(rank)];
+    candidate = {{static_cast<int>(gathered[offset]),
+                  static_cast<int>(gathered[offset + 1U]),
+                  static_cast<int>(gathered[offset + 2U])},
+                 {static_cast<int>(gathered[offset + 3U]),
+                  static_cast<int>(gathered[offset + 4U]),
+                  static_cast<int>(gathered[offset + 5U])}};
+    std::uint64_t candidate_volume{};
+    if (!checked_box_volume(candidate, candidate_volume) ||
+        candidate.end.x > extent.x || candidate.end.y > extent.y ||
+        candidate.end.z > extent.z ||
+        candidate_volume != gathered[offset + 6U] ||
+        gathered[offset + 6U] >
+            std::numeric_limits<std::uint64_t>::max() - covered) {
+      invalid_rank = rank;
+      break;
+    }
+    for (int earlier = 0; earlier < rank; ++earlier) {
+      if (boxes_overlap(boxes[static_cast<std::size_t>(earlier)], candidate)) {
+        invalid_rank = rank;
+        break;
+      }
+    }
+    if (invalid_rank >= 0)
+      break;
+    covered += gathered[offset + 6U];
+  }
+  std::uint64_t xy{};
+  std::uint64_t global_volume{};
+  const bool global_volume_valid =
+      extent_valid &&
+      checked_product(static_cast<std::uint64_t>(extent.x),
+                      static_cast<std::uint64_t>(extent.y), xy) &&
+      checked_product(xy, static_cast<std::uint64_t>(extent.z), global_volume);
+  if (invalid_rank < 0 && (!global_volume_valid || covered != global_volume))
+    invalid_rank = 0;
+  if (invalid_rank >= 0)
+    collection_error(
+        DiagnosticFailureClass::layout,
+        "material.diagnostics.duplicate-owned-sample", invalid_rank,
+        "material diagnostic ownership boxes do not cover the layout");
+}
 
 LocalObservation
 collect_global_observation(const runtime::MpiContext &mpi,
@@ -874,11 +1205,27 @@ collect_global_observation(const runtime::MpiContext &mpi,
             global.transported_totals.resize(local.transported_totals.size());
           });
       if (!global.transported_totals.empty()) {
+        std::uint64_t reported_count =
+            static_cast<std::uint64_t>(global.transported_totals.size());
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+        if (control.reported_transport_total_count)
+          reported_count = *control.reported_transport_total_count;
+#endif
+        const int count_failure_rank = first_failing_rank(
+            mpi,
+            reported_count >
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+            "MPI_Allreduce(material diagnostic transport total count)");
+        if (count_failure_rank >= 0)
+          collection_error(
+              DiagnosticFailureClass::invalid_input,
+              "material.diagnostics.transport-total-count", count_failure_rank,
+              "material diagnostic transport total count is too large");
         runtime::check_mpi_result(
             MPI_Allreduce(local.transported_totals.data(),
                           global.transported_totals.data(),
-                          static_cast<int>(global.transported_totals.size()),
-                          MPI_DOUBLE, MPI_SUM, mpi.comm()),
+                          static_cast<int>(reported_count), MPI_DOUBLE, MPI_SUM,
+                          mpi.comm()),
             "MPI_Allreduce(material diagnostic transport totals)");
         record_raw_collective();
       }
@@ -903,87 +1250,7 @@ collect_global_observation(const runtime::MpiContext &mpi,
   if (request.level != DiagnosticLevel::bounded_state_sample)
     return global;
 
-  std::uint64_t local_max_id{};
-  for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell)
-    local_max_id = std::max(local_max_id, source.global_cell_id(cell));
-  std::uint64_t global_max_id{};
-  runtime::check_mpi_result(
-      MPI_Allreduce(&local_max_id, &global_max_id, 1, MPI_UINT64_T, MPI_MAX,
-                    mpi.comm()),
-      "MPI_Allreduce(material diagnostic maximum global ID)");
-  record_raw_collective();
-  constexpr std::uint64_t chunk_width = 256U;
-  for (std::uint64_t begin = 0U;;) {
-    const bool final_chunk = global_max_id - begin < chunk_width;
-    const std::uint64_t end = final_chunk ? global_max_id : begin + chunk_width;
-    std::vector<std::uint64_t> local_ids;
-    prepare_aggregation(
-        mpi, AggregationPreparationPoint::owned_id_local, control, [&] {
-          local_ids.reserve(static_cast<std::size_t>(end - begin) +
-                            (final_chunk ? 1U : 0U));
-          for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell) {
-            auto id = source.global_cell_id(cell);
-#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-            if (control.global_id_override &&
-                control.global_id_override->first == cell)
-              id = control.global_id_override->second;
-#endif
-            if (id >= begin && (final_chunk ? id <= end : id < end))
-              local_ids.push_back(id);
-          }
-          std::sort(local_ids.begin(), local_ids.end());
-        });
-    const bool local_duplicate =
-        std::adjacent_find(local_ids.begin(), local_ids.end()) !=
-        local_ids.end();
-    const int duplicate_rank = first_failing_rank(
-        mpi, local_duplicate,
-        "MPI_Allreduce(material diagnostic local ownership uniqueness)");
-    if (duplicate_rank >= 0)
-      collection_error(DiagnosticFailureClass::layout,
-                       "material.diagnostics.duplicate-owned-sample",
-                       duplicate_rank,
-                       "duplicate owned material diagnostic tuple");
-    const int local_count = static_cast<int>(local_ids.size());
-    std::vector<int> counts;
-    prepare_aggregation(
-        mpi, AggregationPreparationPoint::ownership_counts, control,
-        [&] { counts.resize(static_cast<std::size_t>(mpi.size())); });
-    runtime::check_mpi_result(
-        MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT,
-                      mpi.comm()),
-        "MPI_Allgather(material diagnostic ownership counts)");
-    record_raw_collective();
-    std::vector<int> displacements;
-    std::vector<std::uint64_t> all_ids;
-    prepare_aggregation(
-        mpi, AggregationPreparationPoint::ownership_gather, control, [&] {
-          displacements.resize(counts.size());
-          int total{};
-          for (std::size_t rank = 0; rank < counts.size(); ++rank) {
-            if (counts[rank] < 0 ||
-                total > std::numeric_limits<int>::max() - counts[rank])
-              throw std::bad_alloc{};
-            displacements[rank] = total;
-            total += counts[rank];
-          }
-          all_ids.resize(static_cast<std::size_t>(total));
-        });
-    runtime::check_mpi_result(
-        MPI_Allgatherv(local_ids.data(), local_count, MPI_UINT64_T,
-                       all_ids.data(), counts.data(), displacements.data(),
-                       MPI_UINT64_T, mpi.comm()),
-        "MPI_Allgatherv(material diagnostic ownership IDs)");
-    record_raw_collective();
-    std::sort(all_ids.begin(), all_ids.end());
-    if (std::adjacent_find(all_ids.begin(), all_ids.end()) != all_ids.end())
-      collection_error(DiagnosticFailureClass::layout,
-                       "material.diagnostics.duplicate-owned-sample", 0,
-                       "duplicate owned material diagnostic tuple");
-    if (final_chunk)
-      break;
-    begin = end;
-  }
+  require_complete_ownership(mpi, source, control);
 
   std::vector<std::uint64_t> eligible;
   prepare_aggregation(
@@ -1002,24 +1269,18 @@ collect_global_observation(const runtime::MpiContext &mpi,
                        "global material sample count overflows");
     global.eligible_count += count;
   }
-  std::vector<SampleWire> wire;
+  std::vector<unsigned char> wire;
   std::vector<std::uint64_t> byte_counts;
   std::uint64_t local_bytes{};
   prepare_aggregation(
       mpi, AggregationPreparationPoint::local_sample_wire_and_size_counts,
       control, [&] {
-        wire.resize(local.samples.size());
-        for (std::size_t i = 0; i < local.samples.size(); ++i) {
-          std::copy(local.samples[i].field_id.begin(),
-                    local.samples[i].field_id.end(), wire[i].field.begin());
-          std::copy(local.samples[i].unit.begin(), local.samples[i].unit.end(),
-                    wire[i].unit.begin());
-          wire[i].global = local.samples[i].global_id;
-          wire[i].component = local.samples[i].component;
-          wire[i].bits = local.samples[i].value.bits;
-        }
-        local_bytes =
-            static_cast<std::uint64_t>(wire.size() * sizeof(SampleWire));
+        wire = encode_sample_wire(local.samples);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+        if (control.sample_wire_override)
+          wire = *control.sample_wire_override;
+#endif
+        local_bytes = static_cast<std::uint64_t>(wire.size());
         byte_counts.resize(static_cast<std::size_t>(mpi.size()));
       });
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
@@ -1076,41 +1337,46 @@ collect_global_observation(const runtime::MpiContext &mpi,
                      MPI_BYTE, mpi.comm()),
       "MPI_Allgatherv(material diagnostic samples)");
   record_raw_collective();
-  if (total_bytes % sizeof(SampleWire) != 0U)
-    collection_error(DiagnosticFailureClass::layout,
-                     "material.diagnostics.sample-wire-size", 0,
-                     "material diagnostic sample exchange is malformed");
-  std::vector<SampleWire> all;
+  std::vector<DiagnosticSample> all;
   bool duplicate = false;
+  int malformed_rank = -1;
   prepare_aggregation(
       mpi, AggregationPreparationPoint::decoded_and_retained_samples, control,
       [&] {
-        const auto total_items = total_bytes / sizeof(SampleWire);
-        all.resize(total_items);
-        if (total_bytes != 0U)
-          std::memcpy(all.data(), all_bytes.data(), total_bytes);
-        std::sort(all.begin(), all.end(),
-                  [](const auto &left, const auto &right) {
-                    return std::tie(left.field, left.global, left.component) <
-                           std::tie(right.field, right.global, right.component);
-                  });
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+          const auto begin = all_bytes.begin() + displacements[rank];
+          const auto end = begin + counts[rank];
+          std::vector<unsigned char> segment(begin, end);
+          try {
+            auto decoded = decode_sample_wire(segment);
+            all.insert(all.end(), std::make_move_iterator(decoded.begin()),
+                       std::make_move_iterator(decoded.end()));
+          } catch (const WireError &) {
+            malformed_rank = static_cast<int>(rank);
+            return;
+          }
+        }
+        std::sort(
+            all.begin(), all.end(), [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
         for (std::size_t i = 1; i < all.size(); ++i) {
-          if (std::tie(all[i - 1U].field, all[i - 1U].global,
+          if (std::tie(all[i - 1U].field_id, all[i - 1U].global_id,
                        all[i - 1U].component) ==
-              std::tie(all[i].field, all[i].global, all[i].component))
+              std::tie(all[i].field_id, all[i].global_id, all[i].component))
             duplicate = true;
         }
         const std::size_t retain = std::min(request.sample_budget, all.size());
         global.samples.reserve(retain);
-        for (std::size_t i = 0; i < retain; ++i) {
-          const std::string field(all[i].field.data());
-          const std::string unit(all[i].unit.data());
-          double value{};
-          std::memcpy(&value, &all[i].bits, sizeof(value));
-          global.samples.push_back({field, all[i].global, all[i].component,
-                                    unit, describe_fp64(value)});
-        }
+        for (std::size_t i = 0; i < retain; ++i)
+          global.samples.push_back(std::move(all[i]));
       });
+  if (malformed_rank >= 0)
+    collection_error(DiagnosticFailureClass::layout,
+                     "material.diagnostics.sample-wire-malformed",
+                     malformed_rank,
+                     "material diagnostic sample segment is malformed");
   if (duplicate)
     collection_error(DiagnosticFailureClass::layout,
                      "material.diagnostics.duplicate-owned-sample", 0,
@@ -1132,6 +1398,17 @@ test::MaterialDensityTransportDiagnosticsTestAccess::work_counts() noexcept {
 void test::MaterialDensityTransportDiagnosticsTestAccess::override_global_id(
     std::size_t local_cell, std::uint64_t global_id, int rank) noexcept {
   diagnostic_test_control.global_id_override = {{local_cell, global_id}};
+  diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    override_owned_global_box(runtime::Box3 box, int rank) noexcept {
+  diagnostic_test_control.owned_box_override = box;
+  diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    override_reported_transport_total_count(std::uint64_t count,
+                                            int rank) noexcept {
+  diagnostic_test_control.reported_transport_total_count = count;
   diagnostic_test_control.rank = rank;
 }
 void test::MaterialDensityTransportDiagnosticsTestAccess::
@@ -1176,6 +1453,61 @@ void test::MaterialDensityTransportDiagnosticsTestAccess::
     inject_provider_key_value_difference(int rank) noexcept {
   diagnostic_test_control.provider_key_value_difference = true;
   diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    override_request_wire_bytes(const unsigned char *bytes, std::size_t size,
+                                int rank) {
+  diagnostic_test_control.request_wire_override =
+      std::vector<unsigned char>(bytes, bytes + size);
+  diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    override_sample_wire_bytes(const unsigned char *bytes, std::size_t size,
+                               int rank) {
+  diagnostic_test_control.sample_wire_override =
+      std::vector<unsigned char>(bytes, bytes + size);
+  diagnostic_test_control.rank = rank;
+}
+std::vector<unsigned char>
+test::MaterialDensityTransportDiagnosticsTestAccess::request_wire_bytes(
+    const DiagnosticRequest &request) {
+  return request_key(request);
+}
+bool test::MaterialDensityTransportDiagnosticsTestAccess::request_wire_is_valid(
+    const std::vector<unsigned char> &bytes) noexcept {
+  try {
+    static_cast<void>(decode_request_wire(bytes));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+std::vector<unsigned char>
+test::MaterialDensityTransportDiagnosticsTestAccess::request_wire_round_trip(
+    const std::vector<unsigned char> &bytes) {
+  return encode_request_wire(decode_request_wire(bytes));
+}
+std::vector<unsigned char>
+test::MaterialDensityTransportDiagnosticsTestAccess::sample_wire_bytes(
+    const DiagnosticSample &sample) {
+  return encode_sample_wire({sample});
+}
+bool test::MaterialDensityTransportDiagnosticsTestAccess::sample_wire_is_valid(
+    const std::vector<unsigned char> &bytes) noexcept {
+  try {
+    static_cast<void>(decode_sample_wire(bytes));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+DiagnosticSample
+test::MaterialDensityTransportDiagnosticsTestAccess::decode_single_sample_wire(
+    const std::vector<unsigned char> &bytes) {
+  auto decoded = decode_sample_wire(bytes);
+  if (decoded.size() != 1U)
+    throw std::invalid_argument("sample wire does not contain one sample");
+  return std::move(decoded.front());
 }
 std::vector<unsigned char>
 test::MaterialDensityTransportDiagnosticsTestAccess::provider_key_bytes(
