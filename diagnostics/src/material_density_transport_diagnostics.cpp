@@ -47,7 +47,9 @@ enum class AggregationPreparationPoint : std::uint8_t {
   eligible_counts,
   local_sample_wire_and_size_counts,
   sample_exchange_buffers,
-  decoded_and_retained_samples
+  decoded_and_retained_samples,
+  provider_key,
+  provider_reference
 };
 
 enum class RawCollectivePoint : std::uint8_t {
@@ -62,7 +64,9 @@ enum class RawCollectivePoint : std::uint8_t {
   preparation_local_sample_wire_and_size_counts,
   preparation_sample_exchange_buffers,
   preparation_decoded_and_retained_samples,
-  sample_size_exchange
+  sample_size_exchange,
+  preparation_provider_key,
+  preparation_provider_reference
 };
 
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
@@ -73,6 +77,7 @@ struct MaterialDiagnosticTestControl final {
   bool record_failure{};
   bool request_size_overflow{};
   bool sample_wire_overflow{};
+  bool provider_key_value_difference{};
   std::optional<AggregationPreparationPoint> allocation_failure;
   std::array<std::uint64_t, 4> reported_sample_wire_bytes{};
   std::size_t reported_sample_wire_byte_count{};
@@ -480,6 +485,10 @@ preparation_trace(AggregationPreparationPoint point) noexcept {
     return RawCollectivePoint::preparation_sample_exchange_buffers;
   case AggregationPreparationPoint::decoded_and_retained_samples:
     return RawCollectivePoint::preparation_decoded_and_retained_samples;
+  case AggregationPreparationPoint::provider_key:
+    return RawCollectivePoint::preparation_provider_key;
+  case AggregationPreparationPoint::provider_reference:
+    return RawCollectivePoint::preparation_provider_reference;
   }
   return RawCollectivePoint::other;
 }
@@ -510,6 +519,35 @@ void prepare_aggregation(const runtime::MpiContext &mpi,
     collection_error(DiagnosticFailureClass::invalid_input,
                      "material.diagnostics.aggregation-preparation", rank,
                      "material diagnostic aggregation preparation failed");
+}
+
+template <class Function>
+void prepare_provider_agreement(const runtime::MpiContext &mpi,
+                                AggregationPreparationPoint point,
+                                const MaterialDiagnosticTestControl &control,
+                                Function &&prepare) {
+  bool failed = false;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (control.allocation_failure && *control.allocation_failure == point)
+      throw std::bad_alloc{};
+#else
+    static_cast<void>(control);
+#endif
+    prepare();
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    failed = true;
+  }
+  const int rank = first_failing_rank(
+      mpi, failed, "MPI_Allreduce(material diagnostic provider preparation)",
+      preparation_trace(point));
+  if (rank >= 0)
+    collection_error(
+        DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.provider-agreement-preparation", rank,
+        "material diagnostic provider agreement preparation failed");
 }
 
 std::string broadcast_failure_code(const runtime::MpiContext &mpi, int root,
@@ -560,6 +598,138 @@ std::vector<unsigned char> request_key(const DiagnosticRequest &request) {
   const auto budget = static_cast<std::uint64_t>(request.sample_budget);
   append(&budget, sizeof(budget));
   return result;
+}
+
+class ProviderKeyBuilder final {
+public:
+  void append_u8(std::uint8_t value) { bytes_.push_back(value); }
+
+  void append_u16(std::uint16_t value) {
+    for (unsigned shift = 0U; shift < 16U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+
+  void append_u32(std::uint32_t value) {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+
+  void append_u64(std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+
+  void append_text(std::string_view value) {
+    append_u64(static_cast<std::uint64_t>(value.size()));
+    const auto *first = reinterpret_cast<const unsigned char *>(value.data());
+    bytes_.insert(bytes_.end(), first, first + value.size());
+  }
+
+  std::vector<unsigned char> finish() && { return std::move(bytes_); }
+
+private:
+  std::vector<unsigned char> bytes_;
+};
+
+std::vector<unsigned char>
+provider_key(const flow::MaterialDensityDiagnosticSource &source,
+             const MaterialDiagnosticTestControl &control) {
+  constexpr std::uint32_t provider_key_schema = 1U;
+  const auto descriptor = describe_diagnostics(source);
+  const auto field_ids = diagnostic_fingerprint_field_ids(source);
+  const auto &report = source.report();
+  ProviderKeyBuilder builder;
+  builder.append_u32(provider_key_schema);
+  builder.append_u32(descriptor.schema_version);
+  builder.append_u16(static_cast<std::uint16_t>(descriptor.module_kind));
+  builder.append_text(descriptor.module_id);
+  builder.append_text(descriptor.instance_id);
+  builder.append_u32(descriptor.capabilities);
+  builder.append_u64(static_cast<std::uint64_t>(field_ids.size()));
+  for (std::size_t field = 0; field < field_ids.size(); ++field) {
+    builder.append_text(field_ids[field]);
+    builder.append_text(source.field_unit(field));
+  }
+  builder.append_text(source.global_cell_layout_fingerprint());
+  builder.append_u8(static_cast<std::uint8_t>(report.disposition()));
+  builder.append_u8(static_cast<std::uint8_t>(report.reason()));
+  builder.append_u32(static_cast<std::uint32_t>(report.lowest_failing_rank()));
+  builder.append_u64(report.attempt_identity());
+  builder.append_u64(report.finalization_identity());
+  builder.append_u8(static_cast<std::uint8_t>(report.flux_provenance()));
+  builder.append_u8(report.density_residual_available() ? 1U : 0U);
+  builder.append_u64(describe_fp64(report.density_normalized_l2()).bits);
+  builder.append_u8(report.mass_conservation_available() ? 1U : 0U);
+  builder.append_u64(
+      describe_fp64(report.mass_relative_conservation_defect()).bits);
+  builder.append_u64(static_cast<std::uint64_t>(
+      report.transport_residual_availability().size()));
+  for (const auto available : report.transport_residual_availability())
+    builder.append_u8(available);
+  builder.append_u64(
+      static_cast<std::uint64_t>(report.transport_normalized_l2().size()));
+  for (std::size_t field = 0; field < report.transport_normalized_l2().size();
+       ++field) {
+    auto bits = describe_fp64(report.transport_normalized_l2()[field]).bits;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (field == 0U && control.provider_key_value_difference)
+      bits ^= UINT64_C(1);
+#else
+    static_cast<void>(control);
+#endif
+    builder.append_u64(bits);
+  }
+  builder.append_u64(static_cast<std::uint64_t>(
+      report.transport_conservation_availability().size()));
+  for (const auto available : report.transport_conservation_availability())
+    builder.append_u8(available);
+  builder.append_u64(static_cast<std::uint64_t>(
+      report.transport_relative_conservation_defect().size()));
+  for (const auto value : report.transport_relative_conservation_defect())
+    builder.append_u64(describe_fp64(value).bits);
+  return std::move(builder).finish();
+}
+
+void require_provider_agreement(
+    const runtime::MpiContext &mpi,
+    const flow::MaterialDensityDiagnosticSource &source,
+    const MaterialDiagnosticTestControl &control) {
+  std::vector<unsigned char> key;
+  prepare_provider_agreement(mpi, AggregationPreparationPoint::provider_key,
+                             control,
+                             [&] { key = provider_key(source, control); });
+
+  std::uint64_t reference_size =
+      mpi.rank() == 0 ? static_cast<std::uint64_t>(key.size()) : 0U;
+  runtime::check_mpi_result(
+      MPI_Bcast(&reference_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      "MPI_Bcast(material diagnostic provider key size)");
+  record_raw_collective();
+  if (reference_size >
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+    collection_error(DiagnosticFailureClass::invalid_input,
+                     "material.diagnostics.provider-agreement-preparation", 0,
+                     "material diagnostic provider agreement key is too large");
+
+  std::vector<unsigned char> reference;
+  prepare_provider_agreement(
+      mpi, AggregationPreparationPoint::provider_reference, control, [&] {
+        reference.resize(static_cast<std::size_t>(reference_size));
+        if (mpi.rank() == 0)
+          std::copy(key.begin(), key.end(), reference.begin());
+      });
+  runtime::check_mpi_result(MPI_Bcast(reference.data(),
+                                      static_cast<int>(reference.size()),
+                                      MPI_BYTE, 0, mpi.comm()),
+                            "MPI_Bcast(material diagnostic provider key)");
+  record_raw_collective();
+  const int lowest = first_failing_rank(
+      mpi, key != reference,
+      "MPI_Allreduce(material diagnostic provider agreement)");
+  if (lowest >= 0)
+    collection_error(DiagnosticFailureClass::collective_operation,
+                     "material.diagnostics.provider-agreement", lowest,
+                     "collective diagnostic providers differ");
 }
 
 void require_request_agreement(const runtime::MpiContext &mpi,
@@ -1002,6 +1172,16 @@ void test::MaterialDensityTransportDiagnosticsTestAccess::
   diagnostic_test_control.reported_sample_wire_byte_count = count;
   diagnostic_test_control.rank = -1;
 }
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    inject_provider_key_value_difference(int rank) noexcept {
+  diagnostic_test_control.provider_key_value_difference = true;
+  diagnostic_test_control.rank = rank;
+}
+std::vector<unsigned char>
+test::MaterialDensityTransportDiagnosticsTestAccess::provider_key_bytes(
+    const flow::MaterialDensityDiagnosticSource &source) {
+  return provider_key(source, {});
+}
 #endif
 
 DiagnosticDescriptor
@@ -1127,6 +1307,7 @@ void collect_diagnostics(const flow::MaterialDensityDiagnosticSource &source,
                      "material diagnostic preflight failed");
   }
   require_request_agreement(mpi, request, control);
+  require_provider_agreement(mpi, source, control);
 
   LocalObservation local;
   bool provider_failed = false;

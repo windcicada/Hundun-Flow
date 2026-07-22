@@ -216,11 +216,11 @@ std::string global_layout(hundun::runtime::Int3 extent) {
          std::to_string(extent.y) + "." + std::to_string(extent.z);
 }
 
-void require_identities(
-    const hundun::diagnostics::DiagnosticRecord &record,
-    const std::vector<std::string_view> &field_ids,
-    std::string_view expected_layout,
-    const hundun::flow::MaterialDensityTransportReport &report) {
+void require_identities(const hundun::diagnostics::DiagnosticRecord &record,
+                        const std::vector<std::string_view> &field_ids,
+                        std::string_view expected_layout,
+                        std::uint64_t expected_attempt_identity,
+                        std::uint64_t expected_finalization_identity) {
   const std::size_t expected_count = field_ids.size() + 3U;
   HUNDUN_CHECK(record.identities.size() == expected_count);
   for (std::size_t field = 0; field < field_ids.size(); ++field) {
@@ -236,7 +236,7 @@ void require_identities(
   const auto &attempt = record.identities[field_ids.size()];
   HUNDUN_CHECK(attempt.subject_id == "flow_state.attempt");
   HUNDUN_CHECK(!attempt.layout_fingerprint.has_value());
-  HUNDUN_CHECK(attempt.revision == report.attempt_identity());
+  HUNDUN_CHECK(attempt.revision == expected_attempt_identity);
   HUNDUN_CHECK(!attempt.generation.has_value());
   HUNDUN_CHECK(!attempt.allocation_identity.has_value());
   const auto &layout = record.identities[field_ids.size() + 1U];
@@ -249,9 +249,222 @@ void require_identities(
   const auto &finalization = record.identities[field_ids.size() + 2U];
   HUNDUN_CHECK(finalization.subject_id == "material.finalization");
   HUNDUN_CHECK(!finalization.layout_fingerprint.has_value());
-  HUNDUN_CHECK(finalization.revision == report.finalization_identity());
+  HUNDUN_CHECK(finalization.revision == expected_finalization_identity);
   HUNDUN_CHECK(!finalization.generation.has_value());
   HUNDUN_CHECK(!finalization.allocation_identity.has_value());
+}
+
+bool identities_equal(
+    const std::vector<hundun::diagnostics::DiagnosticIdentitySummary> &left,
+    const std::vector<hundun::diagnostics::DiagnosticIdentitySummary> &right) {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (left[index].subject_id != right[index].subject_id ||
+        left[index].layout_fingerprint != right[index].layout_fingerprint ||
+        left[index].revision != right[index].revision ||
+        left[index].generation != right[index].generation ||
+        left[index].allocation_identity != right[index].allocation_identity)
+      return false;
+  }
+  return true;
+}
+
+std::vector<unsigned char>
+identity_bytes(const std::vector<hundun::diagnostics::DiagnosticIdentitySummary>
+                   &identities) {
+  std::vector<unsigned char> bytes;
+  const auto append_u8 = [&](std::uint8_t value) { bytes.push_back(value); };
+  const auto append_u64 = [&](std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes.push_back(static_cast<unsigned char>(value >> shift));
+  };
+  const auto append_text = [&](std::string_view value) {
+    append_u64(static_cast<std::uint64_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+  };
+  const auto append_optional_text = [&](const std::optional<std::string> &v) {
+    append_u8(v ? 1U : 0U);
+    if (v)
+      append_text(*v);
+  };
+  const auto append_optional_u64 = [&](const std::optional<std::uint64_t> &v) {
+    append_u8(v ? 1U : 0U);
+    if (v)
+      append_u64(*v);
+  };
+  append_u64(static_cast<std::uint64_t>(identities.size()));
+  for (const auto &identity : identities) {
+    append_text(identity.subject_id);
+    append_optional_text(identity.layout_fingerprint);
+    append_optional_u64(identity.revision);
+    append_optional_u64(identity.generation);
+    append_optional_u64(identity.allocation_identity);
+  }
+  return bytes;
+}
+
+void require_collective_identities_equal(
+    const hundun::diagnostics::DiagnosticRecord &record,
+    const hundun::runtime::MpiContext &mpi) {
+  const auto exact_copy = record.identities;
+  HUNDUN_CHECK(identities_equal(record.identities, exact_copy));
+  auto ordinary_mutant = exact_copy;
+  ordinary_mutant.front().subject_id += ".mutant";
+  HUNDUN_CHECK(!identities_equal(record.identities, ordinary_mutant));
+  auto nested_mutant = exact_copy;
+  HUNDUN_CHECK(nested_mutant.front().layout_fingerprint.has_value());
+  *nested_mutant.front().layout_fingerprint += ".mutant";
+  HUNDUN_CHECK(!identities_equal(record.identities, nested_mutant));
+
+  const auto local = identity_bytes(record.identities);
+  HUNDUN_CHECK(local.size() <=
+               static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  const int local_size = static_cast<int>(local.size());
+  std::vector<int> sizes(static_cast<std::size_t>(mpi.size()));
+  HUNDUN_CHECK(MPI_Allgather(&local_size, 1, MPI_INT, sizes.data(), 1, MPI_INT,
+                             mpi.comm()) == MPI_SUCCESS);
+  for (const auto size : sizes)
+    HUNDUN_CHECK(size == local_size);
+  std::vector<unsigned char> all(local.size() *
+                                 static_cast<std::size_t>(mpi.size()));
+  HUNDUN_CHECK(MPI_Allgather(local.data(), local_size, MPI_BYTE, all.data(),
+                             local_size, MPI_BYTE, mpi.comm()) == MPI_SUCCESS);
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    const auto begin =
+        all.begin() + static_cast<std::ptrdiff_t>(rank) * local_size;
+    HUNDUN_CHECK(std::equal(local.begin(), local.end(), begin));
+  }
+}
+
+class ProviderKeyReader final {
+public:
+  explicit ProviderKeyReader(const std::vector<unsigned char> &bytes)
+      : bytes_(&bytes) {}
+
+  std::uint8_t read_u8() { return read_integer<std::uint8_t>(); }
+  std::uint16_t read_u16() { return read_integer<std::uint16_t>(); }
+  std::uint32_t read_u32() { return read_integer<std::uint32_t>(); }
+  std::uint64_t read_u64() { return read_integer<std::uint64_t>(); }
+
+  std::string read_text() {
+    const auto size = read_u64();
+    if (size > static_cast<std::uint64_t>(bytes_->size() - offset_))
+      throw std::runtime_error("provider key text is truncated");
+    const auto count = static_cast<std::size_t>(size);
+    const auto first = bytes_->begin() + static_cast<std::ptrdiff_t>(offset_);
+    offset_ += count;
+    return std::string(first, first + static_cast<std::ptrdiff_t>(count));
+  }
+
+  bool finished() const noexcept { return offset_ == bytes_->size(); }
+
+private:
+  template <class Integer> Integer read_integer() {
+    if (sizeof(Integer) > bytes_->size() - offset_)
+      throw std::runtime_error("provider key integer is truncated");
+    std::uint64_t value{};
+    for (std::size_t byte = 0; byte < sizeof(Integer); ++byte)
+      value |= static_cast<std::uint64_t>((*bytes_)[offset_ + byte])
+               << (8U * byte);
+    offset_ += sizeof(Integer);
+    return static_cast<Integer>(value);
+  }
+
+  const std::vector<unsigned char> *bytes_{};
+  std::size_t offset_{};
+};
+
+bool provider_key_matches(
+    const std::vector<unsigned char> &bytes,
+    const hundun::flow::MaterialDensityDiagnosticSource &source,
+    const std::vector<std::string_view> &field_ids,
+    std::string_view expected_global_layout,
+    const hundun::flow::MaterialDensityTransportReport &report) {
+  using namespace hundun;
+  try {
+    ProviderKeyReader reader(bytes);
+    if (reader.read_u32() != 1U ||
+        reader.read_u32() != diagnostics::kDiagnosticRecordSchemaV1 ||
+        reader.read_u16() !=
+            static_cast<std::uint16_t>(
+                diagnostics::DiagnosticModuleKind::density_transport) ||
+        reader.read_text() != "hundun.flow.material_density_transport" ||
+        reader.read_text() != "primary")
+      return false;
+    const auto expected_capabilities =
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::summary) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::invariants) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::counters) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::bounded_state_sample) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::collective);
+    if (reader.read_u32() != expected_capabilities ||
+        reader.read_u64() != static_cast<std::uint64_t>(field_ids.size()))
+      return false;
+    for (std::size_t field = 0; field < field_ids.size(); ++field) {
+      if (reader.read_text() != field_ids[field] ||
+          reader.read_text() != source.field_unit(field))
+        return false;
+    }
+    if (reader.read_text() != expected_global_layout ||
+        reader.read_u8() != static_cast<std::uint8_t>(report.disposition()) ||
+        reader.read_u8() != static_cast<std::uint8_t>(report.reason()) ||
+        reader.read_u32() !=
+            static_cast<std::uint32_t>(report.lowest_failing_rank()) ||
+        reader.read_u64() != report.attempt_identity() ||
+        reader.read_u64() != report.finalization_identity() ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.flux_provenance()) ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.density_residual_available()) ||
+        reader.read_u64() !=
+            diagnostics::describe_fp64(report.density_normalized_l2()).bits ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.mass_conservation_available()) ||
+        reader.read_u64() != diagnostics::describe_fp64(
+                                 report.mass_relative_conservation_defect())
+                                 .bits)
+      return false;
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_residual_availability().size()))
+      return false;
+    for (const auto available : report.transport_residual_availability()) {
+      if (reader.read_u8() != available)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(report.transport_normalized_l2().size()))
+      return false;
+    for (const auto value : report.transport_normalized_l2()) {
+      if (reader.read_u64() != diagnostics::describe_fp64(value).bits)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_conservation_availability().size()))
+      return false;
+    for (const auto available : report.transport_conservation_availability()) {
+      if (reader.read_u8() != available)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_relative_conservation_defect().size()))
+      return false;
+    for (const auto value : report.transport_relative_conservation_defect()) {
+      if (reader.read_u64() != diagnostics::describe_fp64(value).bits)
+        return false;
+    }
+    return reader.finished();
+  } catch (const std::exception &) {
+    return false;
+  }
 }
 
 std::vector<std::uint64_t>
@@ -341,6 +554,107 @@ void run(const hundun::runtime::MpiContext &mpi) {
       fields, spec);
   const auto stencil = flow::make_momentum_time_stencil(
       flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
+
+  if (mpi.size() > 1) {
+    auto disagreement_state = flow::FlowState::create(
+        registry, {local, topology.local_face_count()}, fields,
+        {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+    disagreement_state.seed_accepted_layers(initial, initial);
+    auto disagreement_transport = flow::MaterialDensityTransport::create(
+        registry, decomposition, topology, geometry, boundaries, mpi, halo,
+        fields, spec);
+    if (mpi.rank() == 1) {
+      disagreement_state.begin_attempt();
+      disagreement_state.rollback_attempt();
+    }
+    disagreement_state.begin_attempt();
+    auto disagreement_flux = flow::MaterialFaceMassFlux::acquire(
+        registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+        topology, flow::MaterialFluxProvenance::final_corrected);
+    const auto disagreement_report = disagreement_transport.finalize_trial(
+        disagreement_state, disagreement_flux, stencil);
+    HUNDUN_CHECK(disagreement_report.disposition() ==
+                 flow::MaterialTransportDisposition::finalized);
+    HUNDUN_CHECK(disagreement_report.attempt_identity() ==
+                 (mpi.rank() == 1 ? 2U : 1U));
+    HUNDUN_CHECK(disagreement_report.finalization_identity() == 1U);
+    auto disagreement_source = disagreement_transport.diagnostic_source(
+        disagreement_state, disagreement_report);
+
+    runtime::FieldAccessPlan disagreement_read_access(registry);
+    constexpr runtime::PhaseId disagreement_read_phase = 1920U;
+    constexpr runtime::ActorId disagreement_read_actor = 1920U;
+    disagreement_read_access.declare_access(
+        disagreement_read_phase, disagreement_read_actor, fields.density,
+        runtime::AccessMode::read);
+    disagreement_read_access.freeze();
+    auto disagreement_density =
+        disagreement_state.trial_layer().acquire_read<double>(
+            disagreement_read_access, disagreement_read_phase,
+            disagreement_read_actor, fields.density);
+    const double disagreement_density_before = disagreement_density(0, 0, 0, 0);
+    const auto disagreement_history_before =
+        disagreement_state.snapshot(flow::FlowLayer::history);
+    const auto disagreement_committed_before =
+        disagreement_state.snapshot(flow::FlowLayer::committed);
+    const auto disagreement_trial_before =
+        disagreement_state.snapshot(flow::FlowLayer::trial);
+    const auto disagreement_metadata_before = disagreement_state.metadata();
+    const auto disagreement_counters_before = mpi.fp64_reduction_counters();
+    const auto disagreement_attempt_before =
+        disagreement_report.attempt_identity();
+    const auto disagreement_finalization_before =
+        disagreement_report.finalization_identity();
+
+    diagnostics::DiagnosticRequest disagreement_request;
+    disagreement_request.level = diagnostics::DiagnosticLevel::counters;
+    disagreement_request.scope = diagnostics::DiagnosticScope::collective;
+    disagreement_request.frame = {mpi.rank(), 0U, -0.0,
+                                  "material.finalized-trial"};
+    CaptureSink disagreement_sink;
+    bool provider_rejected = false;
+    diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+    try {
+      diagnostics::collect_diagnostics(disagreement_source, mpi,
+                                       disagreement_request, disagreement_sink);
+    } catch (const diagnostics::DiagnosticCollectionError &error) {
+      provider_rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   diagnostics::DiagnosticFailureClass::collective_operation);
+      HUNDUN_CHECK(error.code() == "material.diagnostics.provider-agreement");
+      HUNDUN_CHECK(error.lowest_failing_rank() == 1);
+    }
+    HUNDUN_CHECK(provider_rejected);
+    HUNDUN_CHECK(disagreement_sink.calls == 0U);
+    const auto disagreement_work = diagnostics::test::
+        MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+    HUNDUN_CHECK(disagreement_work.field_reads == 0U);
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_history_before,
+        disagreement_state.snapshot(flow::FlowLayer::history)));
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_committed_before,
+        disagreement_state.snapshot(flow::FlowLayer::committed)));
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_trial_before,
+        disagreement_state.snapshot(flow::FlowLayer::trial)));
+    HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(
+        disagreement_metadata_before, disagreement_state.metadata()));
+    HUNDUN_CHECK(disagreement_report.attempt_identity() ==
+                 disagreement_attempt_before);
+    HUNDUN_CHECK(disagreement_report.finalization_identity() ==
+                 disagreement_finalization_before);
+    HUNDUN_CHECK(disagreement_source.report().attempt_identity() ==
+                 disagreement_attempt_before);
+    HUNDUN_CHECK(disagreement_source.report().finalization_identity() ==
+                 disagreement_finalization_before);
+    HUNDUN_CHECK(disagreement_density(0, 0, 0, 0) ==
+                 disagreement_density_before);
+    HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+                 disagreement_counters_before.collective_calls);
+    disagreement_state.rollback_attempt();
+  }
+
   state.begin_attempt();
   auto flux = flow::MaterialFaceMassFlux::acquire(
       registry, flux_storage, access, phase, actor, fields.face_mass_flux,
@@ -365,6 +679,15 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(source.owned_cell_layout_fingerprint() == expected_owned_layout);
   HUNDUN_CHECK(source.global_cell_layout_fingerprint() ==
                expected_global_layout);
+  const auto provider_key = diagnostics::test::
+      MaterialDensityTransportDiagnosticsTestAccess::provider_key_bytes(source);
+  HUNDUN_CHECK(provider_key_matches(provider_key, source, ids,
+                                    expected_global_layout, report));
+  auto provider_key_mutant = provider_key;
+  HUNDUN_CHECK(!provider_key_mutant.empty());
+  provider_key_mutant.front() ^= 1U;
+  HUNDUN_CHECK(!provider_key_matches(provider_key_mutant, source, ids,
+                                     expected_global_layout, report));
   std::vector<std::uint64_t> local_global_ids;
   local_global_ids.reserve(topology.owned_cell_count());
   for (std::size_t cell_id = 0; cell_id < topology.owned_cell_count();
@@ -402,7 +725,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
         MaterialDensityTransportDiagnosticsTestAccess::work_counts();
     HUNDUN_CHECK(sink.calls == 1U);
     HUNDUN_CHECK(sink.value.status == diagnostics::DiagnosticStatus::ok);
-    require_identities(sink.value, ids, expected_owned_layout, report);
+    require_identities(sink.value, ids, expected_owned_layout, 1U, 1U);
     HUNDUN_CHECK(sink.value.metrics.empty() ==
                  (level != diagnostics::DiagnosticLevel::summary));
     HUNDUN_CHECK(sink.value.invariants.empty() ==
@@ -449,7 +772,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       const auto expected =
           expected_samples(ids, local_global_ids, narrowed, budget);
       require_expected_samples(sink.value, expected);
-      require_identities(sink.value, ids, expected_owned_layout, report);
+      require_identities(sink.value, ids, expected_owned_layout, 1U, 1U);
       if (budget == 1U && !narrowed) {
         auto tuple_mutant = expected.samples;
         tuple_mutant.front().global_id += 1U;
@@ -495,8 +818,9 @@ void run(const hundun::runtime::MpiContext &mpi) {
   diagnostics::collect_diagnostics(source, mpi, collective, collective_sink);
   HUNDUN_CHECK(collective_sink.calls == 1U);
   HUNDUN_CHECK(collective_sink.value.samples.size() == 2U);
-  require_identities(collective_sink.value, ids, expected_global_layout,
-                     report);
+  require_identities(collective_sink.value, ids, expected_global_layout, 1U,
+                     1U);
+  require_collective_identities_equal(collective_sink.value, mpi);
   for (const auto &sample : collective_sink.value.samples)
     HUNDUN_CHECK(sample.field_id == "rho_h");
   HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
@@ -519,8 +843,9 @@ void run(const hundun::runtime::MpiContext &mpi) {
       const auto expected =
           expected_samples(ids, all_global_ids, narrowed, budget);
       require_expected_samples(sampled_sink.value, expected);
-      require_identities(sampled_sink.value, ids, expected_global_layout,
-                         report);
+      require_identities(sampled_sink.value, ids, expected_global_layout, 1U,
+                         1U);
+      require_collective_identities_equal(sampled_sink.value, mpi);
       HUNDUN_CHECK(sampled_work.summary_accumulations == 0U);
       HUNDUN_CHECK(sampled_work.volume_reads == 0U);
       HUNDUN_CHECK(sampled_work.sample_candidates > 0U);
@@ -619,7 +944,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
     const auto work = diagnostics::test::
         MaterialDensityTransportDiagnosticsTestAccess::work_counts();
     HUNDUN_CHECK(work.sample_candidates == 0U);
-    require_identities(level_sink.value, ids, expected_global_layout, report);
+    require_identities(level_sink.value, ids, expected_global_layout, 1U, 1U);
+    require_collective_identities_equal(level_sink.value, mpi);
     if (level == diagnostics::DiagnosticLevel::counters) {
       HUNDUN_CHECK(work.summary_accumulations == 0U);
       HUNDUN_CHECK(work.volume_reads == 0U);
@@ -750,7 +1076,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
           int expected_rank,
           std::optional<diagnostics::test::MaterialDiagnosticRawCollectivePoint>
               expected_last = std::nullopt,
-          std::optional<std::uint64_t> expected_collectives = std::nullopt) {
+          std::optional<std::uint64_t> expected_collectives = std::nullopt,
+          std::optional<std::uint64_t> expected_field_reads = std::nullopt) {
         const auto history_before = state.snapshot(flow::FlowLayer::history);
         const auto committed_before =
             state.snapshot(flow::FlowLayer::committed);
@@ -783,6 +1110,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
           HUNDUN_CHECK(work.last_raw_collective == *expected_last);
         if (expected_collectives)
           HUNDUN_CHECK(work.raw_collectives == *expected_collectives);
+        if (expected_field_reads)
+          HUNDUN_CHECK(work.field_reads == *expected_field_reads);
         HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
             history_before, state.snapshot(flow::FlowLayer::history)));
         HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
@@ -854,7 +1183,19 @@ void run(const hundun::runtime::MpiContext &mpi) {
       "material.diagnostics.sample-wire-size", injection_rank,
       diagnostics::test::MaterialDiagnosticRawCollectivePoint::
           sample_size_exchange,
-      21U);
+      26U);
+
+  if (mpi.size() > 1) {
+    require_injected_failure(
+        collective,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_provider_key_value_difference(1);
+        },
+        diagnostics::DiagnosticFailureClass::collective_operation,
+        "material.diagnostics.provider-agreement", 1, std::nullopt,
+        std::nullopt, 0U);
+  }
 
   if (mpi.size() > 1) {
     std::vector<std::uint64_t> cumulative_counts(
@@ -873,7 +1214,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
         "material.diagnostics.sample-wire-size", 1,
         diagnostics::test::MaterialDiagnosticRawCollectivePoint::
             sample_size_exchange,
-        21U);
+        26U);
   }
 
   using AllocationPoint = diagnostics::test::MaterialDiagnosticAllocationPoint;
@@ -885,35 +1226,53 @@ void run(const hundun::runtime::MpiContext &mpi) {
     bool summary_request;
     bool required_distributed;
   };
+  const std::array provider_allocation_failures{
+      AllocationFailureCase{AllocationPoint::provider_key,
+                            RawPoint::preparation_provider_key, 8U, false,
+                            true},
+      AllocationFailureCase{AllocationPoint::provider_reference,
+                            RawPoint::preparation_provider_reference, 10U,
+                            false, true}};
+  for (const auto &failure : provider_allocation_failures) {
+    require_injected_failure(
+        collective,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_allocation_failure(failure.point, injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.provider-agreement-preparation", injection_rank,
+        failure.raw_point, failure.raw_collectives, 0U);
+  }
   const std::array allocation_failures{
       AllocationFailureCase{AllocationPoint::summary_gather,
-                            RawPoint::preparation_summary_gather, 9U, true,
+                            RawPoint::preparation_summary_gather, 14U, true,
                             true},
       AllocationFailureCase{AllocationPoint::transport_totals,
-                            RawPoint::preparation_transport_totals, 11U, true,
+                            RawPoint::preparation_transport_totals, 16U, true,
                             true},
       AllocationFailureCase{AllocationPoint::owned_id_local,
-                            RawPoint::preparation_owned_id_local, 12U, false,
+                            RawPoint::preparation_owned_id_local, 17U, false,
                             false},
       AllocationFailureCase{AllocationPoint::ownership_counts,
-                            RawPoint::preparation_ownership_counts, 14U, false,
+                            RawPoint::preparation_ownership_counts, 19U, false,
                             true},
       AllocationFailureCase{AllocationPoint::ownership_gather,
-                            RawPoint::preparation_ownership_gather, 16U, false,
+                            RawPoint::preparation_ownership_gather, 21U, false,
                             true},
       AllocationFailureCase{AllocationPoint::eligible_counts,
-                            RawPoint::preparation_eligible_counts, 18U, false,
+                            RawPoint::preparation_eligible_counts, 23U, false,
                             false},
       AllocationFailureCase{
           AllocationPoint::local_sample_wire_and_size_counts,
-          RawPoint::preparation_local_sample_wire_and_size_counts, 20U, false,
+          RawPoint::preparation_local_sample_wire_and_size_counts, 25U, false,
           true},
       AllocationFailureCase{AllocationPoint::sample_exchange_buffers,
-                            RawPoint::preparation_sample_exchange_buffers, 22U,
+                            RawPoint::preparation_sample_exchange_buffers, 27U,
                             false, true},
       AllocationFailureCase{AllocationPoint::decoded_and_retained_samples,
                             RawPoint::preparation_decoded_and_retained_samples,
-                            24U, false, true}};
+                            29U, false, true}};
   for (const auto &failure : allocation_failures) {
     if (mpi.size() > 1 && !failure.required_distributed)
       continue;

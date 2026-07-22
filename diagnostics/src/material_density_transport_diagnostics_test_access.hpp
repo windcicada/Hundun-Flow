@@ -7,6 +7,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
+
+namespace hundun::flow {
+class MaterialDensityDiagnosticSource;
+}
 
 namespace hundun::diagnostics::test {
 
@@ -19,7 +24,9 @@ enum class MaterialDiagnosticAllocationPoint : std::uint8_t {
   eligible_counts,
   local_sample_wire_and_size_counts,
   sample_exchange_buffers,
-  decoded_and_retained_samples
+  decoded_and_retained_samples,
+  provider_key,
+  provider_reference
 };
 
 enum class MaterialDiagnosticRawCollectivePoint : std::uint8_t {
@@ -34,7 +41,9 @@ enum class MaterialDiagnosticRawCollectivePoint : std::uint8_t {
   preparation_local_sample_wire_and_size_counts,
   preparation_sample_exchange_buffers,
   preparation_decoded_and_retained_samples,
-  sample_size_exchange
+  sample_size_exchange,
+  preparation_provider_key,
+  preparation_provider_reference
 };
 
 struct MaterialDiagnosticWorkCounts final {
@@ -63,6 +72,9 @@ public:
                                         int rank = -1) noexcept;
   static void override_reported_sample_wire_bytes(const std::uint64_t *counts,
                                                   std::size_t count);
+  static void inject_provider_key_value_difference(int rank = -1) noexcept;
+  static std::vector<unsigned char>
+  provider_key_bytes(const flow::MaterialDensityDiagnosticSource &);
 };
 
 } // namespace hundun::diagnostics::test
