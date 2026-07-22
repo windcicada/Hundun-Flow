@@ -38,6 +38,11 @@ endif()
 foreach(test_name IN ITEMS
     MaterialDensityPisoTestAccess
     MaterialDensityPisoDiagnosticsTestAccess
+    MaterialDensityPisoDiagnosticTestAccess
+    MaterialDensityPisoSampleWireItem
+    sample_wire_malformed
+    encode_sample_wire
+    decode_sample_wire
     PreparedFaceMassFluxForTest
     vortex_source)
   string(FIND "${preprocessed}" "${test_name}" position)

@@ -93,6 +93,13 @@ public:
   std::vector<hundun::diagnostics::DiagnosticRecord> records;
 };
 
+class DiagnosticFaultReset final {
+public:
+  ~DiagnosticFaultReset() noexcept {
+    hundun::diagnostics::test::MaterialDensityPisoDiagnosticTestAccess::reset();
+  }
+};
+
 struct ExactState final {
   hundun::flow::FlowLayerValues history;
   hundun::flow::FlowLayerValues committed;
@@ -146,6 +153,92 @@ int main(int argc, char **argv) {
   return hundun::test::run([&] {
     auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
+    using DiagnosticAccess = hundun::diagnostics::test::
+        MaterialDensityPisoDiagnosticTestAccess;
+    using SampleWireItem =
+        hundun::diagnostics::test::MaterialDensityPisoSampleWireItem;
+    using ValueStatus = hundun::diagnostics::DiagnosticValueStatus;
+    const std::vector<SampleWireItem> wire_items{
+        {3U, UINT64_C(0x0102030405060708), 0U,
+         UINT64_C(0x3ff0000000000000), ValueStatus::finite},
+        {1U, UINT64_C(9), 2U, UINT64_C(0x7ff8000000000001),
+         ValueStatus::quiet_nan}};
+    const std::vector<unsigned char> expected_wire{
+        0x01U, 0x00U, 0x00U, 0x00U,
+        0x02U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x03U, 0x00U, 0x00U, 0x00U,
+        0x08U, 0x07U, 0x06U, 0x05U, 0x04U, 0x03U, 0x02U, 0x01U,
+        0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0xf0U, 0x3fU,
+        0x00U,
+        0x01U, 0x00U, 0x00U, 0x00U,
+        0x09U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x02U, 0x00U, 0x00U, 0x00U,
+        0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0xf8U, 0x7fU,
+        0x03U};
+    const auto encoded_wire = DiagnosticAccess::encode_sample_wire(wire_items);
+    HUNDUN_CHECK(encoded_wire == expected_wire);
+    const auto decoded_wire = DiagnosticAccess::decode_sample_wire(encoded_wire);
+    HUNDUN_CHECK(decoded_wire.size() == wire_items.size());
+    for (std::size_t item = 0; item < wire_items.size(); ++item) {
+      HUNDUN_CHECK(decoded_wire[item].field == wire_items[item].field);
+      HUNDUN_CHECK(decoded_wire[item].global_id == wire_items[item].global_id);
+      HUNDUN_CHECK(decoded_wire[item].component == wire_items[item].component);
+      HUNDUN_CHECK(decoded_wire[item].value_bits == wire_items[item].value_bits);
+      HUNDUN_CHECK(decoded_wire[item].status == wire_items[item].status);
+    }
+    const auto empty_wire = DiagnosticAccess::encode_sample_wire({});
+    const std::vector<unsigned char> expected_empty_wire{
+        0x01U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+    HUNDUN_CHECK(empty_wire == expected_empty_wire);
+    HUNDUN_CHECK(DiagnosticAccess::decode_sample_wire(empty_wire).empty());
+
+    const auto expect_wire_rejected = [](std::vector<unsigned char> bytes) {
+      bool rejected = false;
+      try {
+        static_cast<void>(DiagnosticAccess::decode_sample_wire(bytes));
+      } catch (const std::exception &) {
+        rejected = true;
+      }
+      HUNDUN_CHECK(rejected);
+    };
+    auto truncated_wire = expected_wire;
+    truncated_wire.pop_back();
+    expect_wire_rejected(std::move(truncated_wire));
+    auto trailing_wire = expected_wire;
+    trailing_wire.push_back(0U);
+    expect_wire_rejected(std::move(trailing_wire));
+    auto invalid_schema_wire = expected_wire;
+    invalid_schema_wire[0] = 2U;
+    expect_wire_rejected(std::move(invalid_schema_wire));
+    auto impossible_count_wire = expected_empty_wire;
+    std::fill(impossible_count_wire.begin() + 4, impossible_count_wire.end(),
+              0xffU);
+    expect_wire_rejected(std::move(impossible_count_wire));
+    auto invalid_field_wire = expected_wire;
+    invalid_field_wire[12] = 5U;
+    expect_wire_rejected(std::move(invalid_field_wire));
+    auto invalid_component_wire = expected_wire;
+    invalid_component_wire[24] = 1U;
+    expect_wire_rejected(std::move(invalid_component_wire));
+    auto invalid_status_wire = expected_wire;
+    invalid_status_wire[36] =
+        static_cast<unsigned char>(ValueStatus::unavailable);
+    expect_wire_rejected(std::move(invalid_status_wire));
+    auto inconsistent_status_wire = expected_wire;
+    inconsistent_status_wire[35] = 0x7fU;
+    expect_wire_rejected(std::move(inconsistent_status_wire));
+
+    auto changed_items = wire_items;
+    changed_items[0].value_bits = UINT64_C(0x4000000000000000);
+    const auto changed_wire = DiagnosticAccess::encode_sample_wire(changed_items);
+    HUNDUN_CHECK(changed_wire != encoded_wire);
+    const auto changed_decoded =
+        DiagnosticAccess::decode_sample_wire(changed_wire);
+    HUNDUN_CHECK(changed_decoded.size() == changed_items.size());
+    HUNDUN_CHECK(changed_decoded[0].value_bits == changed_items[0].value_bits);
+
     constexpr hundun::runtime::Int3 extent{8, 4, 4};
     auto decomposition = hundun::runtime::StructuredDecomposition::create(
         mpi, extent, {true, true, true},
@@ -758,10 +851,28 @@ int main(int argc, char **argv) {
           MaterialDensityPisoDiagnosticFault;
       using Access = hundun::diagnostics::test::
           MaterialDensityPisoDiagnosticTestAccess;
+      const auto capture_local_json =
+          [&](hundun::diagnostics::DiagnosticLevel level) {
+        Sink local_sink;
+        hundun::diagnostics::collect_diagnostics(
+            source,
+            request(level, hundun::diagnostics::DiagnosticScope::local),
+            local_sink);
+        HUNDUN_CHECK(local_sink.calls == 1U);
+        return hundun::diagnostics::to_canonical_json(local_sink.records[0]);
+      };
+      const auto summary_before =
+          capture_local_json(hundun::diagnostics::DiagnosticLevel::summary);
+      const auto counters_before =
+          capture_local_json(hundun::diagnostics::DiagnosticLevel::counters);
+      const auto attempt_before = source.report().attempt_identity();
+      const auto step_before = source.committed_step();
+      const auto time_before = bits(source.committed_time_s());
       const auto expect_fault = [&](int failing_rank, Fault fault,
                                     hundun::diagnostics::DiagnosticLevel level,
                                     std::string_view code) {
         Access::reset();
+        DiagnosticFaultReset reset_on_exit;
         if (mpi.rank() == failing_rank)
           Access::set_fault(fault);
         Sink sink;
@@ -773,12 +884,23 @@ int main(int argc, char **argv) {
                       hundun::diagnostics::DiagnosticScope::collective),
               sink);
         } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
-          rejected = error.code() == code &&
+          rejected = error.classification() ==
+                         hundun::diagnostics::DiagnosticFailureClass::layout &&
+                     error.code() == code &&
                      error.lowest_failing_rank() == failing_rank;
         }
         Access::reset();
         HUNDUN_CHECK(rejected && sink.calls == 0U);
         check_equal(diagnostic_state, state);
+        HUNDUN_CHECK(source.report().attempt_identity() == attempt_before);
+        HUNDUN_CHECK(source.committed_step() == step_before);
+        HUNDUN_CHECK(bits(source.committed_time_s()) == time_before);
+        HUNDUN_CHECK(capture_local_json(
+                         hundun::diagnostics::DiagnosticLevel::summary) ==
+                     summary_before);
+        HUNDUN_CHECK(capture_local_json(
+                         hundun::diagnostics::DiagnosticLevel::counters) ==
+                     counters_before);
       };
       std::array failing_ranks{0, mpi.size() - 1};
       for (std::size_t rank_index = 0;
@@ -808,6 +930,10 @@ int main(int argc, char **argv) {
             failing_rank, Fault::sample_receive_preparation,
             hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
             "flow.diagnostics.sample-preparation");
+        expect_fault(
+            failing_rank, Fault::sample_wire_malformed,
+            hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
+            "flow.diagnostics.sample-wire");
         expect_fault(failing_rank, Fault::record_validation,
                      hundun::diagnostics::DiagnosticLevel::summary,
                      "flow.diagnostics.record");

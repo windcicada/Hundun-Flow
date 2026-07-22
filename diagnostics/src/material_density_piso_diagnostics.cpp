@@ -108,6 +108,156 @@ private:
   std::vector<unsigned char> bytes_;
 };
 
+constexpr std::uint32_t kSampleWireSchemaV1 = 1U;
+constexpr std::size_t kSampleWireHeaderBytes = 12U;
+constexpr std::size_t kSampleWireItemBytes = 25U;
+static_assert(sizeof(std::uint8_t) == 1U);
+static_assert(sizeof(std::uint32_t) == 4U);
+static_assert(sizeof(std::uint64_t) == 8U);
+constexpr std::array<std::string_view, 5> kSampleFieldIds{
+    "face_mass_flux", "face_velocity", "pi", "rho", "velocity"};
+constexpr std::array<std::uint32_t, 5> kSampleFieldComponents{1U, 3U, 1U,
+                                                              1U, 3U};
+constexpr std::array<std::string_view, 5> kSampleFieldUnits{
+    "kg/s", "m/s", "Pa", "kg/m3", "m/s"};
+
+struct SampleWireItem final {
+  std::uint32_t field{};
+  std::uint64_t global_id{};
+  std::uint32_t component{};
+  std::uint64_t value_bits{};
+  DiagnosticValueStatus status{DiagnosticValueStatus::finite};
+};
+
+DiagnosticValueStatus status_for_bits(std::uint64_t value) noexcept {
+  const auto exponent = (value >> 52U) & UINT64_C(0x7ff);
+  const auto fraction = value & UINT64_C(0x000fffffffffffff);
+  if (exponent != UINT64_C(0x7ff))
+    return DiagnosticValueStatus::finite;
+  if (fraction == 0U)
+    return (value >> 63U) == 0U
+               ? DiagnosticValueStatus::positive_infinity
+               : DiagnosticValueStatus::negative_infinity;
+  return (fraction & UINT64_C(0x0008000000000000)) != 0U
+             ? DiagnosticValueStatus::quiet_nan
+             : DiagnosticValueStatus::signaling_nan;
+}
+
+void validate_sample_wire_item(const SampleWireItem &item) {
+  if (item.field >= kSampleFieldIds.size() ||
+      item.component >= kSampleFieldComponents[item.field] ||
+      static_cast<std::uint8_t>(item.status) >
+          static_cast<std::uint8_t>(DiagnosticValueStatus::signaling_nan) ||
+      status_for_bits(item.value_bits) != item.status)
+    throw runtime::Error(
+        "material flow diagnostic sample representation is invalid");
+}
+
+class SampleWireWriter final {
+public:
+  explicit SampleWireWriter(std::size_t capacity) { bytes_.reserve(capacity); }
+
+  void u8(std::uint8_t value) { bytes_.push_back(value); }
+  void u32(std::uint32_t value) {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+  void u64(std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes_.push_back(static_cast<unsigned char>(value >> shift));
+  }
+  std::vector<unsigned char> finish() && { return std::move(bytes_); }
+
+private:
+  std::vector<unsigned char> bytes_;
+};
+
+class SampleWireReader final {
+public:
+  SampleWireReader(const unsigned char *data, std::size_t size) noexcept
+      : data_(data), size_(size) {}
+
+  std::uint8_t u8() { return integer<std::uint8_t>(); }
+  std::uint32_t u32() { return integer<std::uint32_t>(); }
+  std::uint64_t u64() { return integer<std::uint64_t>(); }
+  std::size_t remaining() const noexcept { return size_ - offset_; }
+  void require_end() const {
+    if (remaining() != 0U)
+      throw runtime::Error(
+          "material flow diagnostic sample wire has trailing bytes");
+  }
+
+private:
+  template <class Integer> Integer integer() {
+    if (sizeof(Integer) > remaining())
+      throw runtime::Error(
+          "material flow diagnostic sample wire is truncated");
+    std::uint64_t value{};
+    for (std::size_t byte = 0; byte < sizeof(Integer); ++byte)
+      value |= static_cast<std::uint64_t>(data_[offset_ + byte])
+               << (8U * byte);
+    offset_ += sizeof(Integer);
+    return static_cast<Integer>(value);
+  }
+
+  const unsigned char *data_{};
+  std::size_t size_{};
+  std::size_t offset_{};
+};
+
+std::vector<unsigned char>
+encode_sample_payload(const std::vector<SampleWireItem> &items) {
+  if (items.size() > kMaximumStateSamplesV1)
+    throw runtime::Error(
+        "material flow diagnostic sample wire count is invalid");
+  const std::size_t encoded_size =
+      kSampleWireHeaderBytes + items.size() * kSampleWireItemBytes;
+  SampleWireWriter writer(encoded_size);
+  writer.u32(kSampleWireSchemaV1);
+  writer.u64(static_cast<std::uint64_t>(items.size()));
+  for (const auto &item : items) {
+    validate_sample_wire_item(item);
+    writer.u32(item.field);
+    writer.u64(item.global_id);
+    writer.u32(item.component);
+    writer.u64(item.value_bits);
+    writer.u8(static_cast<std::uint8_t>(item.status));
+  }
+  return std::move(writer).finish();
+}
+
+void decode_sample_payload(const unsigned char *data, std::size_t size,
+                           std::vector<SampleWireItem> &output) {
+  const std::size_t original_size = output.size();
+  try {
+    SampleWireReader reader(data, size);
+    if (reader.u32() != kSampleWireSchemaV1)
+      throw runtime::Error(
+          "material flow diagnostic sample wire schema is invalid");
+    const auto count = reader.u64();
+    if (count > static_cast<std::uint64_t>(kMaximumStateSamplesV1) ||
+        count > static_cast<std::uint64_t>(reader.remaining() /
+                                           kSampleWireItemBytes) ||
+        count > static_cast<std::uint64_t>(output.capacity() - output.size()))
+      throw runtime::Error(
+          "material flow diagnostic sample wire count is invalid");
+    for (std::uint64_t index = 0; index < count; ++index) {
+      SampleWireItem item;
+      item.field = reader.u32();
+      item.global_id = reader.u64();
+      item.component = reader.u32();
+      item.value_bits = reader.u64();
+      item.status = static_cast<DiagnosticValueStatus>(reader.u8());
+      validate_sample_wire_item(item);
+      output.push_back(item);
+    }
+    reader.require_end();
+  } catch (...) {
+    output.resize(original_size);
+    throw;
+  }
+}
+
 bool selected(const DiagnosticRequest &request, std::string_view id) {
   return request.selected_fields.empty() ||
          std::binary_search(request.selected_fields.begin(),
@@ -955,44 +1105,29 @@ Observation aggregate(const runtime::MpiContext &mpi, Observation local,
     // Local prefixes are sufficient for the global prefix once merged: an
     // item beyond a rank's local budget already has that many smaller local
     // items ahead of it.
-    struct Wire final {
-      std::uint64_t global{};
-      std::uint64_t value_bits{};
-      std::uint32_t field{};
-      std::uint32_t component{};
-      std::uint32_t status{};
-    };
-    const std::array<std::string_view, 5> ids{
-        "face_mass_flux", "face_velocity", "pi", "rho", "velocity"};
-    std::vector<Wire> send;
+    std::vector<unsigned char> send;
     std::vector<int> counts;
     bool send_preparation_failed = false;
     int send_bytes{};
     try {
-      send.reserve(local.samples.size());
+      std::vector<SampleWireItem> items;
+      items.reserve(local.samples.size());
       for (const auto &sample : local.samples) {
-        const auto it = std::find(ids.begin(), ids.end(), sample.field_id);
-        if (it == ids.end())
+        const auto it = std::find(kSampleFieldIds.begin(), kSampleFieldIds.end(),
+                                  sample.field_id);
+        if (it == kSampleFieldIds.end())
           throw runtime::Error("material flow diagnostic sample field is invalid");
-        const auto field = static_cast<std::size_t>(it - ids.begin());
-        const std::size_t components =
-            field == 0U || field == 2U || field == 3U ? 1U : 3U;
-        double represented{};
-        std::memcpy(&represented, &sample.value.bits, sizeof(represented));
-        if (sample.component >= components ||
-            describe_fp64(represented).status != sample.value.status)
-          throw runtime::Error(
-              "material flow diagnostic sample representation is invalid");
-        send.push_back({sample.global_id, sample.value.bits,
-                        static_cast<std::uint32_t>(field), sample.component,
-                        static_cast<std::uint32_t>(sample.value.status)});
+        items.push_back(
+            {static_cast<std::uint32_t>(it - kSampleFieldIds.begin()),
+             sample.global_id, sample.component, sample.value.bits,
+             sample.value.status});
       }
-      const std::size_t bytes_size = send.size() * sizeof(Wire);
-      if (bytes_size >
+      send = encode_sample_payload(items);
+      if (send.size() >
           static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw runtime::Error(
             "material flow diagnostic sample wire is too large");
-      send_bytes = static_cast<int>(bytes_size);
+      send_bytes = static_cast<int>(send.size());
       counts.resize(static_cast<std::size_t>(mpi.size()));
     } catch (...) {
       send_preparation_failed = true;
@@ -1010,31 +1145,45 @@ Observation aggregate(const runtime::MpiContext &mpi, Observation local,
                        "flow.diagnostics.sample-preparation",
                        send_preparation_rank,
                        "material flow diagnostic sample preparation failed");
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(test::MaterialDensityPisoDiagnosticFault::sample_wire_malformed))
+      send.front() ^= 0x80U;
+#endif
     runtime::check_mpi_result(MPI_Allgather(&send_bytes, 1, MPI_INT,
                                             counts.data(), 1, MPI_INT,
                                             mpi.comm()),
                               "MPI_Allgather(flow diagnostic sample sizes)");
     std::vector<int> offsets;
     std::vector<unsigned char> received;
-    std::vector<Wire> merged;
+    std::vector<SampleWireItem> merged;
     bool receive_preparation_failed = false;
     int total{};
     try {
       offsets.resize(counts.size());
+      std::size_t maximum_items{};
       for (std::size_t rank = 0; rank < counts.size(); ++rank) {
         offsets[rank] = total;
         if (counts[rank] < 0 ||
-            counts[rank] % static_cast<int>(sizeof(Wire)) != 0 ||
             counts[rank] > std::numeric_limits<int>::max() - total)
           throw runtime::Error(
               "material flow diagnostic sample exchange wraps");
+        const auto payload_size = static_cast<std::size_t>(counts[rank]);
+        const std::size_t possible_items =
+            payload_size < kSampleWireHeaderBytes
+                ? 0U
+                : std::min(kMaximumStateSamplesV1,
+                           (payload_size - kSampleWireHeaderBytes) /
+                               kSampleWireItemBytes);
+        if (possible_items >
+            std::numeric_limits<std::size_t>::max() - maximum_items)
+          throw runtime::Error(
+              "material flow diagnostic sample capacity wraps");
+        maximum_items += possible_items;
         total += counts[rank];
       }
-      if (total % static_cast<int>(sizeof(Wire)) != 0)
-        throw runtime::Error(
-            "material flow diagnostic sample wire is misaligned");
       received.resize(static_cast<std::size_t>(total));
-      merged.resize(received.size() / sizeof(Wire));
+      merged.reserve(maximum_items);
+      local.samples.reserve(sample_budget);
     } catch (...) {
       receive_preparation_failed = true;
     }
@@ -1054,40 +1203,40 @@ Observation aggregate(const runtime::MpiContext &mpi, Observation local,
         MPI_Allgatherv(send.data(), send_bytes, MPI_BYTE, received.data(),
                        counts.data(), offsets.data(), MPI_BYTE, mpi.comm()),
         "MPI_Allgatherv(flow diagnostic samples)");
-    if (!received.empty())
-      std::memcpy(merged.data(), received.data(), received.size());
-    bool wire_invalid = false;
-    for (const auto &item : merged) {
-      const std::size_t components = item.field == 0U || item.field == 2U ||
-                                             item.field == 3U
-                                         ? 1U
-                                         : 3U;
-      double represented{};
-      std::memcpy(&represented, &item.value_bits, sizeof(represented));
-      if (item.field >= ids.size() || item.component >= components ||
-          item.status >
-              static_cast<std::uint32_t>(DiagnosticValueStatus::signaling_nan) ||
-          describe_fp64(represented).status !=
-              static_cast<DiagnosticValueStatus>(item.status)) {
-        wire_invalid = true;
+    int wire_source = mpi.size();
+    for (int rank = 0; rank < mpi.size(); ++rank) {
+      const auto rank_index = static_cast<std::size_t>(rank);
+      try {
+        decode_sample_payload(
+            received.data() + static_cast<std::size_t>(offsets[rank_index]),
+            static_cast<std::size_t>(counts[rank_index]), merged);
+      } catch (...) {
+        wire_source = rank;
         break;
       }
     }
-    const int wire_rank = lowest_rank(
-        mpi, wire_invalid, "MPI_Allreduce(flow diagnostic sample validation)");
-    if (wire_rank >= 0)
+    int agreed_wire_source = mpi.size();
+    runtime::check_mpi_result(
+        MPI_Allreduce(&wire_source, &agreed_wire_source, 1, MPI_INT, MPI_MIN,
+                      mpi.comm()),
+        "MPI_Allreduce(flow diagnostic sample validation)");
+    if (agreed_wire_source < mpi.size())
       collection_error(DiagnosticFailureClass::layout,
-                       "flow.diagnostics.sample-wire", wire_rank,
+                       "flow.diagnostics.sample-wire", agreed_wire_source,
                        "material flow diagnostic sample wire is invalid");
-    std::sort(merged.begin(), merged.end(), [](const Wire &a, const Wire &b) {
-      return std::tie(a.field, a.global, a.component) <
-             std::tie(b.field, b.global, b.component);
+    std::sort(merged.begin(), merged.end(),
+              [](const SampleWireItem &a, const SampleWireItem &b) {
+      return std::tie(a.field, a.global_id, a.component) <
+             std::tie(b.field, b.global_id, b.component);
     });
     const bool duplicate = std::adjacent_find(
                                merged.begin(), merged.end(),
-                               [](const Wire &a, const Wire &b) {
-                                 return std::tie(a.field, a.global, a.component) ==
-                                        std::tie(b.field, b.global, b.component);
+                               [](const SampleWireItem &a,
+                                  const SampleWireItem &b) {
+                                 return std::tie(a.field, a.global_id,
+                                                 a.component) ==
+                                        std::tie(b.field, b.global_id,
+                                                 b.component);
                                }) != merged.end();
     const int duplicate_rank = lowest_rank(
         mpi, duplicate, "MPI_Allreduce(flow diagnostic sample uniqueness)");
@@ -1101,12 +1250,9 @@ Observation aggregate(const runtime::MpiContext &mpi, Observation local,
     for (std::size_t index = 0; index < retained; ++index) {
       const auto &item = merged[index];
       local.samples.push_back(
-          {std::string(ids[item.field]), item.global, item.component,
-           item.field == 0U   ? "kg/s"
-           : item.field == 2U ? "Pa"
-           : item.field == 3U ? "kg/m3"
-                              : "m/s",
-           {static_cast<DiagnosticValueStatus>(item.status), item.value_bits}});
+          {std::string(kSampleFieldIds[item.field]), item.global_id,
+           item.component, std::string(kSampleFieldUnits[item.field]),
+           {item.status, item.value_bits}});
     }
   }
   return local;
@@ -1233,6 +1379,31 @@ void test::MaterialDensityPisoDiagnosticTestAccess::set_fault(
 
 void test::MaterialDensityPisoDiagnosticTestAccess::reset() noexcept {
   injected_fault = MaterialDensityPisoDiagnosticFault::none;
+}
+
+std::vector<unsigned char>
+test::MaterialDensityPisoDiagnosticTestAccess::encode_sample_wire(
+    const std::vector<MaterialDensityPisoSampleWireItem> &items) {
+  std::vector<SampleWireItem> encoded_items;
+  encoded_items.reserve(items.size());
+  for (const auto &item : items)
+    encoded_items.push_back({item.field, item.global_id, item.component,
+                             item.value_bits, item.status});
+  return encode_sample_payload(encoded_items);
+}
+
+std::vector<test::MaterialDensityPisoSampleWireItem>
+test::MaterialDensityPisoDiagnosticTestAccess::decode_sample_wire(
+    const std::vector<unsigned char> &bytes) {
+  std::vector<SampleWireItem> decoded_items;
+  decoded_items.reserve(kMaximumStateSamplesV1);
+  decode_sample_payload(bytes.data(), bytes.size(), decoded_items);
+  std::vector<MaterialDensityPisoSampleWireItem> result;
+  result.reserve(decoded_items.size());
+  for (const auto &item : decoded_items)
+    result.push_back({item.field, item.global_id, item.component,
+                      item.value_bits, item.status});
+  return result;
 }
 #endif
 
