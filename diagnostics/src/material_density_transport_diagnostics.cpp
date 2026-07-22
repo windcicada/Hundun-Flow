@@ -17,7 +17,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -36,6 +38,33 @@ constexpr DiagnosticCapabilityFlags kCapabilities =
         DiagnosticCapability::bounded_state_sample) |
     static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::collective);
 
+enum class AggregationPreparationPoint : std::uint8_t {
+  summary_gather,
+  transport_totals,
+  owned_id_local,
+  ownership_counts,
+  ownership_gather,
+  eligible_counts,
+  local_sample_wire_and_size_counts,
+  sample_exchange_buffers,
+  decoded_and_retained_samples
+};
+
+enum class RawCollectivePoint : std::uint8_t {
+  none,
+  other,
+  preparation_summary_gather,
+  preparation_transport_totals,
+  preparation_owned_id_local,
+  preparation_ownership_counts,
+  preparation_ownership_gather,
+  preparation_eligible_counts,
+  preparation_local_sample_wire_and_size_counts,
+  preparation_sample_exchange_buffers,
+  preparation_decoded_and_retained_samples,
+  sample_size_exchange
+};
+
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
 test::MaterialDiagnosticWorkCounts diagnostic_work_counts;
 struct MaterialDiagnosticTestControl final {
@@ -44,6 +73,9 @@ struct MaterialDiagnosticTestControl final {
   bool record_failure{};
   bool request_size_overflow{};
   bool sample_wire_overflow{};
+  std::optional<AggregationPreparationPoint> allocation_failure;
+  std::array<std::uint64_t, 4> reported_sample_wire_bytes{};
+  std::size_t reported_sample_wire_byte_count{};
   int rank{-1};
 };
 MaterialDiagnosticTestControl diagnostic_test_control;
@@ -59,6 +91,17 @@ MaterialDiagnosticTestControl take_test_control(int rank) noexcept {
 struct MaterialDiagnosticTestControl final {};
 MaterialDiagnosticTestControl take_test_control(int) noexcept { return {}; }
 #endif
+
+void record_raw_collective(
+    RawCollectivePoint point = RawCollectivePoint::other) noexcept {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  ++diagnostic_work_counts.raw_collectives;
+  diagnostic_work_counts.last_raw_collective =
+      static_cast<test::MaterialDiagnosticRawCollectivePoint>(point);
+#else
+  static_cast<void>(point);
+#endif
+}
 
 [[noreturn]] void collection_error(DiagnosticFailureClass classification,
                                    std::string code, int rank,
@@ -256,9 +299,22 @@ build_record(const flow::MaterialDensityDiagnosticSource &source,
       ok ? DiagnosticFailure{}
          : DiagnosticFailure{failure_class(report.reason()),
                              failure_code(report.reason()), failure_rank};
+  const std::string layout_fingerprint(
+      scope == DiagnosticScope::local
+          ? source.owned_cell_layout_fingerprint()
+          : source.global_cell_layout_fingerprint());
+  const auto field_ids = diagnostic_fingerprint_field_ids(source);
+  record.identities.reserve(field_ids.size() + 3U);
+  for (const auto field_id : field_ids) {
+    record.identities.push_back({"field." + std::string(field_id),
+                                 layout_fingerprint, std::nullopt, std::nullopt,
+                                 std::nullopt});
+  }
   record.identities.push_back({"flow_state.attempt", std::nullopt,
                                report.attempt_identity(), std::nullopt,
                                std::nullopt});
+  record.identities.push_back({"layout.cells", layout_fingerprint, std::nullopt,
+                               std::nullopt, std::nullopt});
   record.identities.push_back({"material.finalization", std::nullopt,
                                report.finalization_identity(), std::nullopt,
                                std::nullopt});
@@ -392,14 +448,68 @@ void submit_local(Function &&build, DiagnosticSink &sink) {
 }
 
 int first_failing_rank(const runtime::MpiContext &mpi, bool failed,
-                       std::string_view operation) {
+                       std::string_view operation,
+                       RawCollectivePoint point = RawCollectivePoint::other) {
   int local = failed ? mpi.rank() : mpi.size();
   int lowest = mpi.size();
   runtime::check_mpi_result(
       MPI_Allreduce(&local, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
       operation);
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+  record_raw_collective(point);
   return lowest == mpi.size() ? -1 : lowest;
+}
+
+RawCollectivePoint
+preparation_trace(AggregationPreparationPoint point) noexcept {
+  switch (point) {
+  case AggregationPreparationPoint::summary_gather:
+    return RawCollectivePoint::preparation_summary_gather;
+  case AggregationPreparationPoint::transport_totals:
+    return RawCollectivePoint::preparation_transport_totals;
+  case AggregationPreparationPoint::owned_id_local:
+    return RawCollectivePoint::preparation_owned_id_local;
+  case AggregationPreparationPoint::ownership_counts:
+    return RawCollectivePoint::preparation_ownership_counts;
+  case AggregationPreparationPoint::ownership_gather:
+    return RawCollectivePoint::preparation_ownership_gather;
+  case AggregationPreparationPoint::eligible_counts:
+    return RawCollectivePoint::preparation_eligible_counts;
+  case AggregationPreparationPoint::local_sample_wire_and_size_counts:
+    return RawCollectivePoint::preparation_local_sample_wire_and_size_counts;
+  case AggregationPreparationPoint::sample_exchange_buffers:
+    return RawCollectivePoint::preparation_sample_exchange_buffers;
+  case AggregationPreparationPoint::decoded_and_retained_samples:
+    return RawCollectivePoint::preparation_decoded_and_retained_samples;
+  }
+  return RawCollectivePoint::other;
+}
+
+template <class Function>
+void prepare_aggregation(const runtime::MpiContext &mpi,
+                         AggregationPreparationPoint point,
+                         const MaterialDiagnosticTestControl &control,
+                         Function &&prepare) {
+  bool failed = false;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (control.allocation_failure && *control.allocation_failure == point)
+      throw std::bad_alloc{};
+#else
+    static_cast<void>(control);
+#endif
+    prepare();
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    failed = true;
+  }
+  const int rank = first_failing_rank(
+      mpi, failed, "MPI_Allreduce(material diagnostic aggregation preparation)",
+      preparation_trace(point));
+  if (rank >= 0)
+    collection_error(DiagnosticFailureClass::invalid_input,
+                     "material.diagnostics.aggregation-preparation", rank,
+                     "material diagnostic aggregation preparation failed");
 }
 
 std::string broadcast_failure_code(const runtime::MpiContext &mpi, int root,
@@ -408,6 +518,7 @@ std::string broadcast_failure_code(const runtime::MpiContext &mpi, int root,
       mpi.rank() == root ? static_cast<std::uint64_t>(local_code.size()) : 0U;
   runtime::check_mpi_result(MPI_Bcast(&size, 1, MPI_UINT64_T, root, mpi.comm()),
                             "MPI_Bcast(material diagnostic failure code size)");
+  record_raw_collective();
   if (size > 256U)
     collection_error(DiagnosticFailureClass::invalid_input,
                      "material.diagnostics.failure-code-size", root,
@@ -418,6 +529,7 @@ std::string broadcast_failure_code(const runtime::MpiContext &mpi, int root,
   runtime::check_mpi_result(MPI_Bcast(bytes.data(), static_cast<int>(size),
                                       MPI_CHAR, root, mpi.comm()),
                             "MPI_Bcast(material diagnostic failure code)");
+  record_raw_collective();
   return std::string(bytes.data(), static_cast<std::size_t>(size));
 }
 
@@ -500,6 +612,7 @@ void require_request_agreement(const runtime::MpiContext &mpi,
   runtime::check_mpi_result(
       MPI_Bcast(&reference_size, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(material diagnostic request size)");
+  record_raw_collective();
   if (reference_size >
       static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
     collection_error(DiagnosticFailureClass::invalid_request,
@@ -526,6 +639,7 @@ void require_request_agreement(const runtime::MpiContext &mpi,
                                       static_cast<int>(reference.size()),
                                       MPI_BYTE, 0, mpi.comm()),
                             "MPI_Bcast(material diagnostic request)");
+  record_raw_collective();
   const int lowest = first_failing_rank(
       mpi, key != reference, "MPI_Allreduce(material request agreement)");
   if (lowest >= 0)
@@ -548,7 +662,6 @@ collect_global_observation(const runtime::MpiContext &mpi,
                            const DiagnosticRequest &request,
                            LocalObservation local,
                            const MaterialDiagnosticTestControl &control) {
-  static_cast<void>(control);
   LocalObservation global;
   if (request.level == DiagnosticLevel::summary ||
       request.level == DiagnosticLevel::invariants) {
@@ -556,14 +669,17 @@ collect_global_observation(const runtime::MpiContext &mpi,
         request.level == DiagnosticLevel::summary ? 3U : 2U;
     std::array<double, 3> scalars{local.density_min, local.density_max,
                                   local.total_mass};
-    std::vector<double> gathered(static_cast<std::size_t>(mpi.size()) *
-                                 scalar_count);
+    std::vector<double> gathered;
+    prepare_aggregation(
+        mpi, AggregationPreparationPoint::summary_gather, control, [&] {
+          gathered.resize(static_cast<std::size_t>(mpi.size()) * scalar_count);
+        });
     runtime::check_mpi_result(
         MPI_Allgather(scalars.data(), static_cast<int>(scalar_count),
                       MPI_DOUBLE, gathered.data(),
                       static_cast<int>(scalar_count), MPI_DOUBLE, mpi.comm()),
         "MPI_Allgather(material diagnostic summaries)");
-    HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+    record_raw_collective();
     global.density_min = gathered[0];
     global.density_max = gathered[1];
     global.total_mass = 0.0;
@@ -583,7 +699,10 @@ collect_global_observation(const runtime::MpiContext &mpi,
         global.total_mass += gathered[offset + 2U];
     }
     if (request.level == DiagnosticLevel::summary) {
-      global.transported_totals.resize(local.transported_totals.size());
+      prepare_aggregation(
+          mpi, AggregationPreparationPoint::transport_totals, control, [&] {
+            global.transported_totals.resize(local.transported_totals.size());
+          });
       if (!global.transported_totals.empty()) {
         runtime::check_mpi_result(
             MPI_Allreduce(local.transported_totals.data(),
@@ -591,7 +710,7 @@ collect_global_observation(const runtime::MpiContext &mpi,
                           static_cast<int>(global.transported_totals.size()),
                           MPI_DOUBLE, MPI_SUM, mpi.comm()),
             "MPI_Allreduce(material diagnostic transport totals)");
-        HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+        record_raw_collective();
       }
     }
   }
@@ -603,12 +722,12 @@ collect_global_observation(const runtime::MpiContext &mpi,
       MPI_Allreduce(&local_parts[0], &global_xor, 1, MPI_UINT64_T, MPI_BXOR,
                     mpi.comm()),
       "MPI_Allreduce(material diagnostic fingerprint xor)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+  record_raw_collective();
   runtime::check_mpi_result(
       MPI_Allreduce(&local_parts[1], &global_sum, 1, MPI_UINT64_T, MPI_SUM,
                     mpi.comm()),
       "MPI_Allreduce(material diagnostic fingerprint sum)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+  record_raw_collective();
   global.fingerprint = {global_xor, global_sum};
 
   if (request.level != DiagnosticLevel::bounded_state_sample)
@@ -622,25 +741,28 @@ collect_global_observation(const runtime::MpiContext &mpi,
       MPI_Allreduce(&local_max_id, &global_max_id, 1, MPI_UINT64_T, MPI_MAX,
                     mpi.comm()),
       "MPI_Allreduce(material diagnostic maximum global ID)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+  record_raw_collective();
   constexpr std::uint64_t chunk_width = 256U;
   for (std::uint64_t begin = 0U;;) {
     const bool final_chunk = global_max_id - begin < chunk_width;
     const std::uint64_t end = final_chunk ? global_max_id : begin + chunk_width;
     std::vector<std::uint64_t> local_ids;
-    local_ids.reserve(static_cast<std::size_t>(end - begin) +
-                      (final_chunk ? 1U : 0U));
-    for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell) {
-      auto id = source.global_cell_id(cell);
+    prepare_aggregation(
+        mpi, AggregationPreparationPoint::owned_id_local, control, [&] {
+          local_ids.reserve(static_cast<std::size_t>(end - begin) +
+                            (final_chunk ? 1U : 0U));
+          for (std::size_t cell = 0; cell < source.owned_cell_count(); ++cell) {
+            auto id = source.global_cell_id(cell);
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-      if (control.global_id_override &&
-          control.global_id_override->first == cell)
-        id = control.global_id_override->second;
+            if (control.global_id_override &&
+                control.global_id_override->first == cell)
+              id = control.global_id_override->second;
 #endif
-      if (id >= begin && (final_chunk ? id <= end : id < end))
-        local_ids.push_back(id);
-    }
-    std::sort(local_ids.begin(), local_ids.end());
+            if (id >= begin && (final_chunk ? id <= end : id < end))
+              local_ids.push_back(id);
+          }
+          std::sort(local_ids.begin(), local_ids.end());
+        });
     const bool local_duplicate =
         std::adjacent_find(local_ids.begin(), local_ids.end()) !=
         local_ids.end();
@@ -653,25 +775,36 @@ collect_global_observation(const runtime::MpiContext &mpi,
                        duplicate_rank,
                        "duplicate owned material diagnostic tuple");
     const int local_count = static_cast<int>(local_ids.size());
-    std::vector<int> counts(static_cast<std::size_t>(mpi.size()));
+    std::vector<int> counts;
+    prepare_aggregation(
+        mpi, AggregationPreparationPoint::ownership_counts, control,
+        [&] { counts.resize(static_cast<std::size_t>(mpi.size())); });
     runtime::check_mpi_result(
         MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT,
                       mpi.comm()),
         "MPI_Allgather(material diagnostic ownership counts)");
-    HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
-    std::vector<int> displacements(counts.size());
-    int total{};
-    for (std::size_t rank = 0; rank < counts.size(); ++rank) {
-      displacements[rank] = total;
-      total += counts[rank];
-    }
-    std::vector<std::uint64_t> all_ids(static_cast<std::size_t>(total));
+    record_raw_collective();
+    std::vector<int> displacements;
+    std::vector<std::uint64_t> all_ids;
+    prepare_aggregation(
+        mpi, AggregationPreparationPoint::ownership_gather, control, [&] {
+          displacements.resize(counts.size());
+          int total{};
+          for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            if (counts[rank] < 0 ||
+                total > std::numeric_limits<int>::max() - counts[rank])
+              throw std::bad_alloc{};
+            displacements[rank] = total;
+            total += counts[rank];
+          }
+          all_ids.resize(static_cast<std::size_t>(total));
+        });
     runtime::check_mpi_result(
         MPI_Allgatherv(local_ids.data(), local_count, MPI_UINT64_T,
                        all_ids.data(), counts.data(), displacements.data(),
                        MPI_UINT64_T, mpi.comm()),
         "MPI_Allgatherv(material diagnostic ownership IDs)");
-    HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+    record_raw_collective();
     std::sort(all_ids.begin(), all_ids.end());
     if (std::adjacent_find(all_ids.begin(), all_ids.end()) != all_ids.end())
       collection_error(DiagnosticFailureClass::layout,
@@ -682,12 +815,15 @@ collect_global_observation(const runtime::MpiContext &mpi,
     begin = end;
   }
 
-  std::vector<std::uint64_t> eligible(static_cast<std::size_t>(mpi.size()));
+  std::vector<std::uint64_t> eligible;
+  prepare_aggregation(
+      mpi, AggregationPreparationPoint::eligible_counts, control,
+      [&] { eligible.resize(static_cast<std::size_t>(mpi.size())); });
   runtime::check_mpi_result(
       MPI_Allgather(&local.eligible_count, 1, MPI_UINT64_T, eligible.data(), 1,
                     MPI_UINT64_T, mpi.comm()),
       "MPI_Allgather(material diagnostic eligible counts)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
+  record_raw_collective();
   for (const auto count : eligible) {
     if (count >
         std::numeric_limits<std::uint64_t>::max() - global.eligible_count)
@@ -696,31 +832,46 @@ collect_global_observation(const runtime::MpiContext &mpi,
                        "global material sample count overflows");
     global.eligible_count += count;
   }
-  std::vector<SampleWire> wire(local.samples.size());
-  for (std::size_t i = 0; i < local.samples.size(); ++i) {
-    std::copy(local.samples[i].field_id.begin(),
-              local.samples[i].field_id.end(), wire[i].field.begin());
-    std::copy(local.samples[i].unit.begin(), local.samples[i].unit.end(),
-              wire[i].unit.begin());
-    wire[i].global = local.samples[i].global_id;
-    wire[i].component = local.samples[i].component;
-    wire[i].bits = local.samples[i].value.bits;
-  }
-  std::uint64_t local_bytes =
-      static_cast<std::uint64_t>(wire.size() * sizeof(SampleWire));
+  std::vector<SampleWire> wire;
+  std::vector<std::uint64_t> byte_counts;
+  std::uint64_t local_bytes{};
+  prepare_aggregation(
+      mpi, AggregationPreparationPoint::local_sample_wire_and_size_counts,
+      control, [&] {
+        wire.resize(local.samples.size());
+        for (std::size_t i = 0; i < local.samples.size(); ++i) {
+          std::copy(local.samples[i].field_id.begin(),
+                    local.samples[i].field_id.end(), wire[i].field.begin());
+          std::copy(local.samples[i].unit.begin(), local.samples[i].unit.end(),
+                    wire[i].unit.begin());
+          wire[i].global = local.samples[i].global_id;
+          wire[i].component = local.samples[i].component;
+          wire[i].bits = local.samples[i].value.bits;
+        }
+        local_bytes =
+            static_cast<std::uint64_t>(wire.size() * sizeof(SampleWire));
+        byte_counts.resize(static_cast<std::size_t>(mpi.size()));
+      });
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
   if (control.sample_wire_overflow)
     local_bytes =
         static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U;
+  if (control.reported_sample_wire_byte_count != 0U) {
+    if (control.reported_sample_wire_byte_count !=
+        static_cast<std::size_t>(mpi.size()))
+      collection_error(DiagnosticFailureClass::invalid_input,
+                       "material.diagnostics.test-byte-count-size", 0,
+                       "material diagnostic byte-count override is invalid");
+    local_bytes =
+        control
+            .reported_sample_wire_bytes[static_cast<std::size_t>(mpi.rank())];
+  }
 #endif
-  std::vector<std::uint64_t> byte_counts(static_cast<std::size_t>(mpi.size()));
   runtime::check_mpi_result(MPI_Allgather(&local_bytes, 1, MPI_UINT64_T,
                                           byte_counts.data(), 1, MPI_UINT64_T,
                                           mpi.comm()),
                             "MPI_Allgather(material diagnostic sample sizes)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
-  std::vector<int> counts(byte_counts.size());
-  std::vector<int> displacements(byte_counts.size());
+  record_raw_collective(RawCollectivePoint::sample_size_exchange);
   std::size_t total_bytes = 0U;
   for (std::size_t rank = 0; rank < byte_counts.size(); ++rank) {
     if (byte_counts[rank] >
@@ -729,45 +880,71 @@ collect_global_observation(const runtime::MpiContext &mpi,
             static_cast<std::size_t>(std::numeric_limits<int>::max()) -
                 static_cast<std::size_t>(byte_counts[rank]))
       collection_error(DiagnosticFailureClass::layout,
-                       "material.diagnostics.sample-wire-size", 0,
+                       "material.diagnostics.sample-wire-size",
+                       static_cast<int>(rank),
                        "material diagnostic sample exchange is too large");
-    counts[rank] = static_cast<int>(byte_counts[rank]);
-    displacements[rank] = static_cast<int>(total_bytes);
     total_bytes += static_cast<std::size_t>(byte_counts[rank]);
   }
-  std::vector<unsigned char> all_bytes(total_bytes);
+  std::vector<int> counts;
+  std::vector<int> displacements;
+  std::vector<unsigned char> all_bytes;
+  prepare_aggregation(
+      mpi, AggregationPreparationPoint::sample_exchange_buffers, control, [&] {
+        counts.resize(byte_counts.size());
+        displacements.resize(byte_counts.size());
+        std::size_t displacement{};
+        for (std::size_t rank = 0; rank < byte_counts.size(); ++rank) {
+          counts[rank] = static_cast<int>(byte_counts[rank]);
+          displacements[rank] = static_cast<int>(displacement);
+          displacement += static_cast<std::size_t>(byte_counts[rank]);
+        }
+        all_bytes.resize(total_bytes);
+      });
   runtime::check_mpi_result(
       MPI_Allgatherv(wire.data(), static_cast<int>(local_bytes), MPI_BYTE,
                      all_bytes.data(), counts.data(), displacements.data(),
                      MPI_BYTE, mpi.comm()),
       "MPI_Allgatherv(material diagnostic samples)");
-  HUNDUN_DIAGNOSTIC_WORK(raw_collectives);
-  const auto total_items = total_bytes / sizeof(SampleWire);
-  std::vector<SampleWire> all(total_items);
-  if (total_bytes != 0U)
-    std::memcpy(all.data(), all_bytes.data(), total_bytes);
-  std::sort(all.begin(), all.end(), [](const auto &left, const auto &right) {
-    return std::tie(left.field, left.global, left.component) <
-           std::tie(right.field, right.global, right.component);
-  });
-  for (std::size_t i = 1; i < all.size(); ++i) {
-    if (std::tie(all[i - 1U].field, all[i - 1U].global,
-                 all[i - 1U].component) ==
-        std::tie(all[i].field, all[i].global, all[i].component))
-      collection_error(DiagnosticFailureClass::layout,
-                       "material.diagnostics.duplicate-owned-sample", 0,
-                       "duplicate owned material diagnostic tuple");
-  }
-  const std::size_t retain = std::min(request.sample_budget, all.size());
-  global.samples.reserve(retain);
-  for (std::size_t i = 0; i < retain; ++i) {
-    const std::string field(all[i].field.data());
-    const std::string unit(all[i].unit.data());
-    double value{};
-    std::memcpy(&value, &all[i].bits, sizeof(value));
-    global.samples.push_back(
-        {field, all[i].global, all[i].component, unit, describe_fp64(value)});
-  }
+  record_raw_collective();
+  if (total_bytes % sizeof(SampleWire) != 0U)
+    collection_error(DiagnosticFailureClass::layout,
+                     "material.diagnostics.sample-wire-size", 0,
+                     "material diagnostic sample exchange is malformed");
+  std::vector<SampleWire> all;
+  bool duplicate = false;
+  prepare_aggregation(
+      mpi, AggregationPreparationPoint::decoded_and_retained_samples, control,
+      [&] {
+        const auto total_items = total_bytes / sizeof(SampleWire);
+        all.resize(total_items);
+        if (total_bytes != 0U)
+          std::memcpy(all.data(), all_bytes.data(), total_bytes);
+        std::sort(all.begin(), all.end(),
+                  [](const auto &left, const auto &right) {
+                    return std::tie(left.field, left.global, left.component) <
+                           std::tie(right.field, right.global, right.component);
+                  });
+        for (std::size_t i = 1; i < all.size(); ++i) {
+          if (std::tie(all[i - 1U].field, all[i - 1U].global,
+                       all[i - 1U].component) ==
+              std::tie(all[i].field, all[i].global, all[i].component))
+            duplicate = true;
+        }
+        const std::size_t retain = std::min(request.sample_budget, all.size());
+        global.samples.reserve(retain);
+        for (std::size_t i = 0; i < retain; ++i) {
+          const std::string field(all[i].field.data());
+          const std::string unit(all[i].unit.data());
+          double value{};
+          std::memcpy(&value, &all[i].bits, sizeof(value));
+          global.samples.push_back({field, all[i].global, all[i].component,
+                                    unit, describe_fp64(value)});
+        }
+      });
+  if (duplicate)
+    collection_error(DiagnosticFailureClass::layout,
+                     "material.diagnostics.duplicate-owned-sample", 0,
+                     "duplicate owned material diagnostic tuple");
   return global;
 }
 
@@ -806,6 +983,24 @@ void test::MaterialDensityTransportDiagnosticsTestAccess::
     inject_sample_wire_overflow(int rank) noexcept {
   diagnostic_test_control.sample_wire_overflow = true;
   diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    inject_allocation_failure(MaterialDiagnosticAllocationPoint point,
+                              int rank) noexcept {
+  diagnostic_test_control.allocation_failure =
+      static_cast<AggregationPreparationPoint>(point);
+  diagnostic_test_control.rank = rank;
+}
+void test::MaterialDensityTransportDiagnosticsTestAccess::
+    override_reported_sample_wire_bytes(const std::uint64_t *counts,
+                                        std::size_t count) {
+  if (count > diagnostic_test_control.reported_sample_wire_bytes.size())
+    throw std::invalid_argument(
+        "material diagnostic reported byte-count override is too large");
+  std::copy_n(counts, count,
+              diagnostic_test_control.reported_sample_wire_bytes.begin());
+  diagnostic_test_control.reported_sample_wire_byte_count = count;
+  diagnostic_test_control.rank = -1;
 }
 #endif
 
@@ -925,6 +1120,7 @@ void collect_diagnostics(const flow::MaterialDensityDiagnosticSource &source,
     runtime::check_mpi_result(
         MPI_Bcast(&class_value, 1, MPI_INT, preflight_rank, mpi.comm()),
         "MPI_Bcast(material diagnostic preflight class)");
+    record_raw_collective();
     code = broadcast_failure_code(mpi, preflight_rank, std::move(code));
     collection_error(static_cast<DiagnosticFailureClass>(class_value),
                      std::move(code), preflight_rank,
@@ -955,6 +1151,7 @@ void collect_diagnostics(const flow::MaterialDensityDiagnosticSource &source,
     runtime::check_mpi_result(
         MPI_Bcast(&class_value, 1, MPI_INT, provider_rank, mpi.comm()),
         "MPI_Bcast(material diagnostic provider class)");
+    record_raw_collective();
     provider_code =
         broadcast_failure_code(mpi, provider_rank, std::move(provider_code));
     collection_error(static_cast<DiagnosticFailureClass>(class_value),
@@ -997,6 +1194,7 @@ void collect_diagnostics(const flow::MaterialDensityDiagnosticSource &source,
     runtime::check_mpi_result(
         MPI_Bcast(&class_value, 1, MPI_INT, validation_rank, mpi.comm()),
         "MPI_Bcast(material diagnostic record class)");
+    record_raw_collective();
     validation_code = broadcast_failure_code(mpi, validation_rank,
                                              std::move(validation_code));
     collection_error(static_cast<DiagnosticFailureClass>(class_value),

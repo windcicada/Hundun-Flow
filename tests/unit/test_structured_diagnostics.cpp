@@ -9,8 +9,11 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -93,6 +96,300 @@ hundun::diagnostics::DiagnosticDescriptor full_descriptor() {
   return {1, DiagnosticModuleKind::density_transport,
           "hundun.flow.material_density_transport", "primary",
           all_capabilities()};
+}
+
+struct DiagnosticFixture final {
+  hundun::diagnostics::DiagnosticDescriptor descriptor;
+  hundun::diagnostics::DiagnosticRequest request;
+  hundun::diagnostics::DiagnosticRecord record;
+};
+
+DiagnosticFixture make_fixture(hundun::diagnostics::DiagnosticStatus status,
+                               hundun::diagnostics::DiagnosticLevel level,
+                               hundun::diagnostics::DiagnosticScope scope) {
+  using namespace hundun::diagnostics;
+  DiagnosticFixture fixture;
+  fixture.descriptor = full_descriptor();
+  fixture.request.level = level;
+  fixture.request.scope = scope;
+  fixture.request.frame = {0, 9U, -0.0, "material.finalized-trial"};
+  fixture.record.module_kind = DiagnosticModuleKind::density_transport;
+  fixture.record.module_id = "hundun.flow.material_density_transport";
+  fixture.record.instance_id = "primary";
+  fixture.record.level = level;
+  fixture.record.scope = scope;
+  fixture.record.rank = 0;
+  fixture.record.step = 9U;
+  fixture.record.time_s = describe_fp64(-0.0);
+  fixture.record.phase = "material.finalized-trial";
+  fixture.record.status = status;
+  if (status == DiagnosticStatus::failed) {
+    fixture.record.failure = {DiagnosticFailureClass::conservation,
+                              "material.conservation",
+                              scope == DiagnosticScope::collective ? 0 : -1};
+  } else if (status == DiagnosticStatus::unavailable) {
+    fixture.record.failure = {DiagnosticFailureClass::unavailable,
+                              "material.unavailable",
+                              scope == DiagnosticScope::collective ? 0 : -1};
+  }
+  fixture.record.identities = {
+      {"field.rho", std::string("cell.f64.c1.g2plus.owned.0.0.0.1.1.1"),
+       std::nullopt, std::nullopt, std::nullopt},
+      {"layout.cells", std::string("cell.f64.c1.g2plus.owned.0.0.0.1.1.1"), 7U,
+       std::nullopt, std::nullopt}};
+  fixture.record.state_fingerprint = {std::string(kStateFingerprintAlgorithmV1),
+                                      "00000000000000000000000000000000"};
+  if (level == DiagnosticLevel::summary) {
+    fixture.record.metrics = {
+        {"density.maximum", DiagnosticMetricKind::state_summary, "kg/m3",
+         describe_fp64(1.2)},
+        {"density.minimum", DiagnosticMetricKind::state_summary, "kg/m3",
+         describe_fp64(0.8)}};
+  } else if (level == DiagnosticLevel::invariants) {
+    fixture.record.invariants = {{"density.finite",
+                                  "kg/m3",
+                                  describe_fp64(0.8),
+                                  {},
+                                  InvariantRelation::finite,
+                                  true},
+                                 {"density.positive",
+                                  "kg/m3",
+                                  describe_fp64(0.8),
+                                  {},
+                                  InvariantRelation::positive,
+                                  true}};
+  } else if (level == DiagnosticLevel::counters) {
+    fixture.record.counters = {{"owned.cells", "count", 1U},
+                               {"transport.fields", "count", 2U}};
+  } else {
+    fixture.request.sample_budget = 2U;
+    fixture.record.sample_budget = 2U;
+    fixture.record.eligible_sample_count = 3U;
+    fixture.record.samples_truncated = true;
+    fixture.record.samples = {{"rho", 0U, 0U, "kg/m3", describe_fp64(1.0)},
+                              {"rho_h", 0U, 0U, "J/m3", describe_fp64(3.0)}};
+  }
+  return fixture;
+}
+
+template <class Mutation>
+void expect_fixture_mutation_rejected(const DiagnosticFixture &baseline,
+                                      Mutation &&mutation) {
+  static std::size_t mutation_index = 0U;
+  const auto current_mutation = mutation_index++;
+  auto changed = baseline;
+  mutation(changed);
+  CountingSink sink;
+  bool rejected = false;
+  try {
+    hundun::diagnostics::validate(changed.record, changed.descriptor,
+                                  changed.request);
+    sink.submit(changed.record);
+  } catch (const hundun::diagnostics::DiagnosticCollectionError &) {
+    rejected = true;
+  }
+  if (!rejected) {
+    std::string difference;
+    const auto note = [&](bool condition, std::string_view label) {
+      if (condition) {
+        if (!difference.empty())
+          difference += ',';
+        difference += label;
+      }
+    };
+    note(changed.descriptor.schema_version !=
+             baseline.descriptor.schema_version,
+         "descriptor.schema");
+    note(changed.descriptor.module_kind != baseline.descriptor.module_kind,
+         "descriptor.kind");
+    note(changed.descriptor.module_id != baseline.descriptor.module_id,
+         "descriptor.module");
+    note(changed.descriptor.instance_id != baseline.descriptor.instance_id,
+         "descriptor.instance");
+    note(changed.descriptor.capabilities != baseline.descriptor.capabilities,
+         "descriptor.capabilities");
+    note(changed.request.level != baseline.request.level, "request.level");
+    note(changed.request.scope != baseline.request.scope, "request.scope");
+    note(changed.request.frame.rank != baseline.request.frame.rank,
+         "request.rank");
+    note(changed.request.frame.step != baseline.request.frame.step,
+         "request.step");
+    note(changed.request.frame.phase != baseline.request.frame.phase,
+         "request.phase");
+    note(changed.request.sample_budget != baseline.request.sample_budget,
+         "request.budget");
+    note(changed.request.selected_fields != baseline.request.selected_fields,
+         "request.selection");
+    note(changed.record.schema_version != baseline.record.schema_version,
+         "record.schema");
+    note(changed.record.module_kind != baseline.record.module_kind,
+         "record.kind");
+    note(changed.record.module_id != baseline.record.module_id,
+         "record.module");
+    note(changed.record.instance_id != baseline.record.instance_id,
+         "record.instance");
+    note(changed.record.level != baseline.record.level, "record.level");
+    note(changed.record.scope != baseline.record.scope, "record.scope");
+    note(changed.record.rank != baseline.record.rank, "record.rank");
+    note(changed.record.step != baseline.record.step, "record.step");
+    note(changed.record.time_s.status != baseline.record.time_s.status ||
+             changed.record.time_s.bits != baseline.record.time_s.bits,
+         "record.time");
+    note(changed.record.phase != baseline.record.phase, "record.phase");
+    note(changed.record.status != baseline.record.status, "record.status");
+    note(changed.record.failure.classification !=
+             baseline.record.failure.classification,
+         "failure.class");
+    note(changed.record.failure.code != baseline.record.failure.code,
+         "failure.code");
+    note(changed.record.failure.lowest_failing_rank !=
+             baseline.record.failure.lowest_failing_rank,
+         "failure.rank");
+    note(changed.record.invariants.size() != baseline.record.invariants.size(),
+         "invariants.size");
+    note(changed.record.metrics.size() != baseline.record.metrics.size(),
+         "metrics.size");
+    note(changed.record.counters.size() != baseline.record.counters.size(),
+         "counters.size");
+    note(changed.record.identities.size() != baseline.record.identities.size(),
+         "identities.size");
+    note(changed.record.samples.size() != baseline.record.samples.size(),
+         "samples.size");
+    note(changed.record.sample_budget != baseline.record.sample_budget,
+         "record.budget");
+    note(changed.record.eligible_sample_count !=
+             baseline.record.eligible_sample_count,
+         "record.eligible");
+    note(changed.record.samples_truncated != baseline.record.samples_truncated,
+         "record.truncated");
+    if (!changed.record.invariants.empty() &&
+        !baseline.record.invariants.empty()) {
+      const auto &left = changed.record.invariants.front();
+      const auto &right = baseline.record.invariants.front();
+      note(left.id != right.id, "invariant.id");
+      note(left.observed.status != right.observed.status ||
+               left.observed.bits != right.observed.bits,
+           "invariant.observed");
+      note(left.limit.status != right.limit.status ||
+               left.limit.bits != right.limit.bits,
+           "invariant.limit");
+      note(left.relation != right.relation, "invariant.relation");
+      note(left.passed != right.passed, "invariant.passed");
+    }
+    throw std::runtime_error(
+        "diagnostic fixture mutation unexpectedly accepted: level=" +
+        std::to_string(static_cast<int>(changed.record.level)) +
+        " scope=" + std::to_string(static_cast<int>(changed.record.scope)) +
+        " status=" + std::to_string(static_cast<int>(changed.record.status)) +
+        " sink_calls=" + std::to_string(sink.calls) + " mutation=" +
+        std::to_string(current_mutation) + " difference=" + difference);
+  }
+  HUNDUN_CHECK(sink.calls == 0U);
+}
+
+struct RecordStructuralSnapshot final {
+  std::vector<std::uintptr_t> pointers;
+  std::vector<std::size_t> sizes;
+  std::vector<std::size_t> capacities;
+  std::vector<std::string> strings;
+  std::vector<std::uint64_t> words;
+};
+
+RecordStructuralSnapshot
+snapshot_record(const hundun::diagnostics::DiagnosticRecord &record) {
+  using namespace hundun::diagnostics;
+  RecordStructuralSnapshot snapshot;
+  const auto add_string = [&](const std::string &value) {
+    snapshot.pointers.push_back(reinterpret_cast<std::uintptr_t>(value.data()));
+    snapshot.sizes.push_back(value.size());
+    snapshot.capacities.push_back(value.capacity());
+    snapshot.strings.push_back(value);
+  };
+  const auto add_vector = [&](const auto &values) {
+    snapshot.pointers.push_back(
+        reinterpret_cast<std::uintptr_t>(values.data()));
+    snapshot.sizes.push_back(values.size());
+    snapshot.capacities.push_back(values.capacity());
+  };
+  const auto add_optional_u64 = [&](const std::optional<std::uint64_t> &value) {
+    snapshot.words.push_back(value.has_value() ? 1U : 0U);
+    snapshot.words.push_back(value.value_or(0U));
+  };
+  const auto add_fp64 = [&](DiagnosticFp64 value) {
+    snapshot.words.push_back(static_cast<std::uint64_t>(value.status));
+    snapshot.words.push_back(value.bits);
+  };
+
+  snapshot.words = {
+      record.schema_version,
+      static_cast<std::uint64_t>(record.module_kind),
+      static_cast<std::uint64_t>(record.level),
+      static_cast<std::uint64_t>(record.scope),
+      static_cast<std::uint64_t>(static_cast<std::int64_t>(record.rank)),
+      record.step,
+      static_cast<std::uint64_t>(record.status),
+      static_cast<std::uint64_t>(record.failure.classification),
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(record.failure.lowest_failing_rank)),
+      static_cast<std::uint64_t>(record.sample_budget),
+      record.eligible_sample_count,
+      record.samples_truncated ? 1U : 0U};
+  add_fp64(record.time_s);
+  add_string(record.module_id);
+  add_string(record.instance_id);
+  add_string(record.phase);
+  add_string(record.failure.code);
+  add_string(record.state_fingerprint.algorithm);
+  add_string(record.state_fingerprint.hex);
+
+  add_vector(record.invariants);
+  for (const auto &value : record.invariants) {
+    add_string(value.id);
+    add_string(value.unit);
+    add_fp64(value.observed);
+    add_fp64(value.limit);
+    snapshot.words.push_back(static_cast<std::uint64_t>(value.relation));
+    snapshot.words.push_back(value.passed ? 1U : 0U);
+  }
+  add_vector(record.metrics);
+  for (const auto &value : record.metrics) {
+    add_string(value.id);
+    snapshot.words.push_back(static_cast<std::uint64_t>(value.kind));
+    add_string(value.unit);
+    add_fp64(value.value);
+  }
+  add_vector(record.counters);
+  for (const auto &value : record.counters) {
+    add_string(value.id);
+    add_string(value.unit);
+    snapshot.words.push_back(value.value);
+  }
+  add_vector(record.identities);
+  for (const auto &value : record.identities) {
+    add_string(value.subject_id);
+    snapshot.words.push_back(value.layout_fingerprint.has_value() ? 1U : 0U);
+    if (value.layout_fingerprint)
+      add_string(*value.layout_fingerprint);
+    add_optional_u64(value.revision);
+    add_optional_u64(value.generation);
+    add_optional_u64(value.allocation_identity);
+  }
+  add_vector(record.samples);
+  for (const auto &value : record.samples) {
+    add_string(value.field_id);
+    snapshot.words.push_back(value.global_id);
+    snapshot.words.push_back(value.component);
+    add_string(value.unit);
+    add_fp64(value.value);
+  }
+  return snapshot;
+}
+
+bool same_snapshot(const RecordStructuralSnapshot &left,
+                   const RecordStructuralSnapshot &right) {
+  return left.pointers == right.pointers && left.sizes == right.sizes &&
+         left.capacities == right.capacities && left.strings == right.strings &&
+         left.words == right.words;
 }
 
 void test_fp64() {
@@ -315,16 +612,6 @@ void test_fingerprint() {
 
 void test_all_status_level_shapes() {
   using namespace hundun::diagnostics;
-  const DiagnosticCapabilityFlags all =
-      static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::summary) |
-      static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::invariants) |
-      static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::counters) |
-      static_cast<DiagnosticCapabilityFlags>(
-          DiagnosticCapability::bounded_state_sample) |
-      static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::collective);
-  const DiagnosticDescriptor descriptor{
-      1, DiagnosticModuleKind::density_transport,
-      "hundun.flow.material_density_transport", "primary", all};
   constexpr DiagnosticStatus statuses[]{
       DiagnosticStatus::ok, DiagnosticStatus::warning, DiagnosticStatus::failed,
       DiagnosticStatus::unavailable};
@@ -336,58 +623,365 @@ void test_all_status_level_shapes() {
   for (const auto scope : scopes) {
     for (const auto status : statuses) {
       for (const auto level : levels) {
-        DiagnosticRequest request;
-        request.level = level;
-        request.scope = scope;
-        request.frame = {0, 9U, -0.0, "material.finalized-trial"};
-        if (level == DiagnosticLevel::bounded_state_sample)
-          request.sample_budget = 1U;
-        DiagnosticRecord record;
-        record.module_kind = DiagnosticModuleKind::density_transport;
-        record.module_id = "hundun.flow.material_density_transport";
-        record.instance_id = "primary";
-        record.level = level;
-        record.scope = scope;
-        record.rank = 0;
-        record.step = 9U;
-        record.time_s = describe_fp64(-0.0);
-        record.phase = "material.finalized-trial";
-        record.status = status;
-        if (status == DiagnosticStatus::failed) {
-          record.failure = {DiagnosticFailureClass::conservation,
-                            "material.conservation",
-                            scope == DiagnosticScope::collective ? 0 : -1};
-        } else if (status == DiagnosticStatus::unavailable) {
-          record.failure = {DiagnosticFailureClass::unavailable,
-                            "material.unavailable",
-                            scope == DiagnosticScope::collective ? 0 : -1};
+        const auto fixture = make_fixture(status, level, scope);
+        validate(fixture.record, fixture.descriptor, fixture.request);
+        const auto before = snapshot_record(fixture.record);
+        const auto first = to_canonical_json(fixture.record);
+        const auto second = to_canonical_json(fixture.record);
+        HUNDUN_CHECK(first == second);
+        HUNDUN_CHECK(same_snapshot(before, snapshot_record(fixture.record)));
+
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.descriptor.schema_version = 2U;
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.descriptor.module_kind = DiagnosticModuleKind::runtime;
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.descriptor.module_id = "hundun.flow.other";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.descriptor.instance_id = "secondary";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.descriptor.capabilities = UINT32_C(1) << 31U;
+        });
+        expect_fixture_mutation_rejected(fixture, [level](auto &changed) {
+          changed.descriptor.capabilities &=
+              ~static_cast<DiagnosticCapabilityFlags>(
+                  level == DiagnosticLevel::summary
+                      ? DiagnosticCapability::summary
+                  : level == DiagnosticLevel::invariants
+                      ? DiagnosticCapability::invariants
+                  : level == DiagnosticLevel::counters
+                      ? DiagnosticCapability::counters
+                      : DiagnosticCapability::bounded_state_sample);
+        });
+        if (scope == DiagnosticScope::collective) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.descriptor.capabilities &=
+                ~static_cast<DiagnosticCapabilityFlags>(
+                    DiagnosticCapability::collective);
+          });
         }
-        record.state_fingerprint = {std::string(kStateFingerprintAlgorithmV1),
-                                    "00000000000000000000000000000000"};
+        expect_fixture_mutation_rejected(
+            fixture, [](auto &changed) { changed.record.schema_version = 2U; });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.module_kind = DiagnosticModuleKind::runtime;
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.module_id = "hundun.flow.other";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.instance_id = "secondary";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.level = static_cast<DiagnosticLevel>(255);
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.request.level = static_cast<DiagnosticLevel>(255);
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.scope = changed.record.scope == DiagnosticScope::local
+                                     ? DiagnosticScope::collective
+                                     : DiagnosticScope::local;
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.request.scope =
+              changed.request.scope == DiagnosticScope::local
+                  ? DiagnosticScope::collective
+                  : DiagnosticScope::local;
+        });
+        expect_fixture_mutation_rejected(
+            fixture, [](auto &changed) { ++changed.record.rank; });
+        expect_fixture_mutation_rejected(
+            fixture, [](auto &changed) { ++changed.request.frame.rank; });
+        expect_fixture_mutation_rejected(
+            fixture, [](auto &changed) { ++changed.record.step; });
+        expect_fixture_mutation_rejected(
+            fixture, [](auto &changed) { ++changed.request.frame.step; });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.time_s = describe_fp64(+0.0);
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.request.frame.time_s = +0.0;
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.phase = "material.other";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.request.frame.phase = "material.other";
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.status = static_cast<DiagnosticStatus>(255);
+        });
+
         if (level == DiagnosticLevel::summary) {
-          record.metrics.push_back({"density.minimum",
-                                    DiagnosticMetricKind::state_summary,
-                                    "kg/m3", describe_fp64(1.0)});
+          expect_fixture_mutation_rejected(
+              fixture, [](auto &changed) { changed.record.metrics.clear(); });
         } else if (level == DiagnosticLevel::invariants) {
-          DiagnosticInvariant invariant{
-              "density.available",      "1",
-              describe_fp64(0.0),       describe_fp64(1.0),
-              InvariantRelation::equal, false};
-          if (status != DiagnosticStatus::unavailable) {
-            invariant.observed = describe_fp64(1.0);
-            invariant.passed = true;
-          }
-          record.invariants.push_back(invariant);
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.invariants.clear();
+          });
         } else if (level == DiagnosticLevel::counters) {
-          record.counters.push_back({"owned.cells", "count", 1U});
+          expect_fixture_mutation_rejected(
+              fixture, [](auto &changed) { changed.record.counters.clear(); });
         } else {
-          record.sample_budget = 1U;
-          record.eligible_sample_count = 1U;
-          record.samples.push_back(
-              {"rho", 0U, 0U, "kg/m3", describe_fp64(1.0)});
+          expect_fixture_mutation_rejected(
+              fixture, [](auto &changed) { changed.record.samples.clear(); });
         }
-        validate(record, descriptor, request);
-        HUNDUN_CHECK(!to_canonical_json(record).empty());
+        if (level != DiagnosticLevel::invariants) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.invariants.push_back({"forbidden.invariant",
+                                                 "1",
+                                                 describe_fp64(1.0),
+                                                 {},
+                                                 InvariantRelation::finite,
+                                                 true});
+          });
+        }
+        if (level != DiagnosticLevel::summary) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.metrics.push_back(
+                {"forbidden.metric", DiagnosticMetricKind::state_summary, "1",
+                 describe_fp64(1.0)});
+          });
+        }
+        if (level != DiagnosticLevel::counters) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.counters.push_back(
+                {"forbidden.counter", "count", 1U});
+          });
+        }
+        if (level != DiagnosticLevel::bounded_state_sample) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.samples.push_back(
+                {"rho", 0U, 0U, "kg/m3", describe_fp64(1.0)});
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.request.selected_fields = {"rho"};
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.request.sample_budget = 1U;
+          });
+        } else {
+          expect_fixture_mutation_rejected(
+              fixture, [](auto &changed) { ++changed.record.sample_budget; });
+          expect_fixture_mutation_rejected(
+              fixture, [](auto &changed) { ++changed.request.sample_budget; });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.eligible_sample_count = 1U;
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.samples_truncated = false;
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.samples.front().value = {};
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            std::reverse(changed.record.samples.begin(),
+                         changed.record.samples.end());
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.request.selected_fields = {"rho_h"};
+          });
+        }
+
+        if (status == DiagnosticStatus::ok ||
+            status == DiagnosticStatus::warning) {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.failure.classification =
+                DiagnosticFailureClass::conservation;
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.failure.code = "material.bad";
+          });
+        } else {
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.failure.classification =
+                DiagnosticFailureClass::none;
+          });
+          expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+            changed.record.failure.code = "none";
+          });
+        }
+        expect_fixture_mutation_rejected(
+            fixture, [scope, status](auto &changed) {
+              const bool normal = status == DiagnosticStatus::ok ||
+                                  status == DiagnosticStatus::warning;
+              changed.record.failure.lowest_failing_rank =
+                  scope == DiagnosticScope::local ? 0 : (normal ? 0 : -1);
+            });
+      }
+    }
+  }
+}
+
+void test_snapshot_helper_mutation_oracle() {
+  using namespace hundun::diagnostics;
+  auto ordinary = make_fixture(DiagnosticStatus::ok, DiagnosticLevel::summary,
+                               DiagnosticScope::local)
+                      .record;
+  const auto ordinary_before = snapshot_record(ordinary);
+  ordinary.module_id.front() = 'x';
+  HUNDUN_CHECK(!same_snapshot(ordinary_before, snapshot_record(ordinary)));
+
+  auto nested =
+      make_fixture(DiagnosticStatus::ok, DiagnosticLevel::bounded_state_sample,
+                   DiagnosticScope::local)
+          .record;
+  const auto nested_before = snapshot_record(nested);
+  nested.samples.back().value.bits ^= 1U;
+  HUNDUN_CHECK(!same_snapshot(nested_before, snapshot_record(nested)));
+}
+
+void test_all_vector_order_contracts() {
+  using namespace hundun::diagnostics;
+  const auto status = DiagnosticStatus::ok;
+  const auto scope = DiagnosticScope::local;
+  for (const auto level :
+       {DiagnosticLevel::summary, DiagnosticLevel::invariants,
+        DiagnosticLevel::counters, DiagnosticLevel::bounded_state_sample}) {
+    const auto fixture = make_fixture(status, level, scope);
+    validate(fixture.record, fixture.descriptor, fixture.request);
+    if (level == DiagnosticLevel::summary) {
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        std::reverse(changed.record.metrics.begin(),
+                     changed.record.metrics.end());
+      });
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        changed.record.metrics.back() = changed.record.metrics.front();
+      });
+    } else if (level == DiagnosticLevel::invariants) {
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        std::reverse(changed.record.invariants.begin(),
+                     changed.record.invariants.end());
+      });
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        changed.record.invariants.back() = changed.record.invariants.front();
+      });
+    } else if (level == DiagnosticLevel::counters) {
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        std::reverse(changed.record.counters.begin(),
+                     changed.record.counters.end());
+      });
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        changed.record.counters.back() = changed.record.counters.front();
+      });
+    } else {
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        std::reverse(changed.record.samples.begin(),
+                     changed.record.samples.end());
+      });
+      expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+        changed.record.samples.back() = changed.record.samples.front();
+      });
+    }
+    expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+      std::reverse(changed.record.identities.begin(),
+                   changed.record.identities.end());
+    });
+    expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+      changed.record.identities.back() = changed.record.identities.front();
+    });
+  }
+}
+
+hundun::diagnostics::DiagnosticInvariant
+relation_fixture(hundun::diagnostics::InvariantRelation relation) {
+  using namespace hundun::diagnostics;
+  switch (relation) {
+  case InvariantRelation::less_equal:
+    return {"relation.primary", "1",      describe_fp64(1.0),
+            describe_fp64(2.0), relation, true};
+  case InvariantRelation::greater_equal:
+    return {"relation.primary", "1",      describe_fp64(2.0),
+            describe_fp64(1.0), relation, true};
+  case InvariantRelation::equal:
+    return {"relation.primary",  "1",      describe_fp64(+0.0),
+            describe_fp64(-0.0), relation, true};
+  case InvariantRelation::finite:
+  case InvariantRelation::positive:
+    return {"relation.primary", "1", describe_fp64(1.0), {}, relation, true};
+  }
+  throw std::runtime_error("unreachable invariant relation fixture");
+}
+
+void test_invariant_relation_status_scope_matrix() {
+  using namespace hundun::diagnostics;
+  constexpr DiagnosticStatus statuses[]{
+      DiagnosticStatus::ok, DiagnosticStatus::warning, DiagnosticStatus::failed,
+      DiagnosticStatus::unavailable};
+  constexpr DiagnosticScope scopes[]{DiagnosticScope::local,
+                                     DiagnosticScope::collective};
+  constexpr InvariantRelation relations[]{
+      InvariantRelation::less_equal, InvariantRelation::greater_equal,
+      InvariantRelation::equal, InvariantRelation::finite,
+      InvariantRelation::positive};
+  constexpr std::uint64_t nonfinite_bits[]{
+      UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000),
+      UINT64_C(0x7ff8000000000000), UINT64_C(0x7ff0000000001234),
+      UINT64_C(0x7ff8000000005678)};
+
+  for (const auto status : statuses) {
+    for (const auto scope : scopes) {
+      for (const auto relation : relations) {
+        auto fixture = make_fixture(status, DiagnosticLevel::invariants, scope);
+        fixture.record.invariants = {relation_fixture(relation),
+                                     {"relation.secondary",
+                                      "1",
+                                      describe_fp64(1.0),
+                                      {},
+                                      InvariantRelation::finite,
+                                      true}};
+        validate(fixture.record, fixture.descriptor, fixture.request);
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.invariants.front().observed = {
+              DiagnosticValueStatus::finite, UINT64_C(0x7ff0000000000000)};
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.invariants.front().observed = {};
+        });
+        for (const auto bits : nonfinite_bits) {
+          expect_fixture_mutation_rejected(fixture, [bits](auto &changed) {
+            changed.record.invariants.front().observed =
+                describe_fp64(from_bits(bits));
+          });
+        }
+        expect_fixture_mutation_rejected(fixture, [relation](auto &changed) {
+          changed.record.invariants.front().limit =
+              relation == InvariantRelation::finite ||
+                      relation == InvariantRelation::positive
+                  ? describe_fp64(1.0)
+                  : DiagnosticFp64{};
+        });
+        for (const auto bits : nonfinite_bits) {
+          expect_fixture_mutation_rejected(fixture, [bits](auto &changed) {
+            changed.record.invariants.front().limit =
+                describe_fp64(from_bits(bits));
+          });
+        }
+        expect_fixture_mutation_rejected(fixture, [relation](auto &changed) {
+          auto &invariant = changed.record.invariants.front();
+          switch (relation) {
+          case InvariantRelation::less_equal:
+            invariant.relation = InvariantRelation::greater_equal;
+            break;
+          case InvariantRelation::greater_equal:
+            invariant.relation = InvariantRelation::less_equal;
+            break;
+          case InvariantRelation::equal:
+            invariant.relation = InvariantRelation::positive;
+            break;
+          case InvariantRelation::finite:
+          case InvariantRelation::positive:
+            invariant.relation = InvariantRelation::less_equal;
+            break;
+          }
+        });
+        expect_fixture_mutation_rejected(fixture, [](auto &changed) {
+          changed.record.invariants.front().passed = false;
+        });
       }
     }
   }
@@ -630,6 +1224,9 @@ int main() {
     test_validation_and_json();
     test_fingerprint();
     test_all_status_level_shapes();
+    test_snapshot_helper_mutation_oracle();
+    test_all_vector_order_contracts();
+    test_invariant_relation_status_scope_matrix();
     test_descriptor_request_record_negative_matrix();
   });
 }

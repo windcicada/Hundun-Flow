@@ -218,6 +218,8 @@ public:
   std::size_t fingerprint_field_count() const;
   std::string_view fingerprint_field_id(std::size_t index) const;
   std::string_view field_unit(std::size_t index) const;
+  std::string_view owned_cell_layout_fingerprint() const;
+  std::string_view global_cell_layout_fingerprint() const;
   std::size_t owned_cell_count() const;
   mesh::GlobalCellId global_cell_id(std::size_t local_cell) const;
   double cell_volume_m3(std::size_t local_cell) const;

@@ -23,9 +23,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -138,6 +143,136 @@ find_counter(const hundun::diagnostics::DiagnosticRecord &record,
   return *found;
 }
 
+struct ExpectedSampleSet final {
+  std::uint64_t eligible_count{};
+  bool truncated{};
+  std::vector<hundun::diagnostics::DiagnosticSample> samples;
+};
+
+ExpectedSampleSet
+expected_samples(const std::vector<std::string_view> &field_ids,
+                 const std::vector<std::uint64_t> &global_ids, bool narrowed,
+                 std::size_t budget) {
+  using namespace hundun::diagnostics;
+  constexpr std::array<double, 4> values{1.0, 3.0, 0.4, 0.7};
+  ExpectedSampleSet result;
+  for (std::size_t field = 0; field < field_ids.size(); ++field) {
+    if (narrowed && field_ids[field] != "rho_h")
+      continue;
+    const std::string_view unit =
+        field == 0U ? "kg/m3" : (field == 1U ? "J/m3" : "kg/m3");
+    for (const auto global : global_ids) {
+      result.samples.push_back({std::string(field_ids[field]), global, 0U,
+                                std::string(unit),
+                                describe_fp64(values[field])});
+    }
+  }
+  std::sort(result.samples.begin(), result.samples.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+  result.eligible_count = static_cast<std::uint64_t>(result.samples.size());
+  if (result.samples.size() > budget)
+    result.samples.resize(budget);
+  result.truncated = result.eligible_count > result.samples.size();
+  return result;
+}
+
+bool exact_samples_equal(
+    const std::vector<hundun::diagnostics::DiagnosticSample> &left,
+    const std::vector<hundun::diagnostics::DiagnosticSample> &right) {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (left[index].field_id != right[index].field_id ||
+        left[index].global_id != right[index].global_id ||
+        left[index].component != right[index].component ||
+        left[index].unit != right[index].unit ||
+        left[index].value.status != right[index].value.status ||
+        left[index].value.bits != right[index].value.bits)
+      return false;
+  }
+  return true;
+}
+
+void require_expected_samples(
+    const hundun::diagnostics::DiagnosticRecord &record,
+    const ExpectedSampleSet &expected) {
+  HUNDUN_CHECK(record.eligible_sample_count == expected.eligible_count);
+  HUNDUN_CHECK(record.samples_truncated == expected.truncated);
+  HUNDUN_CHECK(exact_samples_equal(record.samples, expected.samples));
+}
+
+std::string owned_layout(const hundun::runtime::Box3 &box) {
+  return "cell.f64.c1.g2plus.owned." + std::to_string(box.begin.x) + "." +
+         std::to_string(box.begin.y) + "." + std::to_string(box.begin.z) + "." +
+         std::to_string(box.end.x) + "." + std::to_string(box.end.y) + "." +
+         std::to_string(box.end.z);
+}
+
+std::string global_layout(hundun::runtime::Int3 extent) {
+  return "cell.f64.c1.g2plus.global." + std::to_string(extent.x) + "." +
+         std::to_string(extent.y) + "." + std::to_string(extent.z);
+}
+
+void require_identities(
+    const hundun::diagnostics::DiagnosticRecord &record,
+    const std::vector<std::string_view> &field_ids,
+    std::string_view expected_layout,
+    const hundun::flow::MaterialDensityTransportReport &report) {
+  const std::size_t expected_count = field_ids.size() + 3U;
+  HUNDUN_CHECK(record.identities.size() == expected_count);
+  for (std::size_t field = 0; field < field_ids.size(); ++field) {
+    const auto &identity = record.identities[field];
+    HUNDUN_CHECK(identity.subject_id ==
+                 std::string("field.") + std::string(field_ids[field]));
+    HUNDUN_CHECK(identity.layout_fingerprint.has_value());
+    HUNDUN_CHECK(*identity.layout_fingerprint == expected_layout);
+    HUNDUN_CHECK(!identity.revision.has_value());
+    HUNDUN_CHECK(!identity.generation.has_value());
+    HUNDUN_CHECK(!identity.allocation_identity.has_value());
+  }
+  const auto &attempt = record.identities[field_ids.size()];
+  HUNDUN_CHECK(attempt.subject_id == "flow_state.attempt");
+  HUNDUN_CHECK(!attempt.layout_fingerprint.has_value());
+  HUNDUN_CHECK(attempt.revision == report.attempt_identity());
+  HUNDUN_CHECK(!attempt.generation.has_value());
+  HUNDUN_CHECK(!attempt.allocation_identity.has_value());
+  const auto &layout = record.identities[field_ids.size() + 1U];
+  HUNDUN_CHECK(layout.subject_id == "layout.cells");
+  HUNDUN_CHECK(layout.layout_fingerprint.has_value());
+  HUNDUN_CHECK(*layout.layout_fingerprint == expected_layout);
+  HUNDUN_CHECK(!layout.revision.has_value());
+  HUNDUN_CHECK(!layout.generation.has_value());
+  HUNDUN_CHECK(!layout.allocation_identity.has_value());
+  const auto &finalization = record.identities[field_ids.size() + 2U];
+  HUNDUN_CHECK(finalization.subject_id == "material.finalization");
+  HUNDUN_CHECK(!finalization.layout_fingerprint.has_value());
+  HUNDUN_CHECK(finalization.revision == report.finalization_identity());
+  HUNDUN_CHECK(!finalization.generation.has_value());
+  HUNDUN_CHECK(!finalization.allocation_identity.has_value());
+}
+
+std::vector<std::uint64_t>
+owned_global_ids_for_rank(hundun::runtime::Int3 extent, int ranks, int rank) {
+  const int quotient = extent.x / ranks;
+  const int remainder = extent.x % ranks;
+  const int begin = rank * quotient + std::min(rank, remainder);
+  const int width = quotient + (rank < remainder ? 1 : 0);
+  std::vector<std::uint64_t> result;
+  result.reserve(static_cast<std::size_t>(width * extent.y * extent.z));
+  for (int k = 0; k < extent.z; ++k) {
+    for (int j = 0; j < extent.y; ++j) {
+      for (int i = begin; i < begin + width; ++i) {
+        result.push_back(
+            static_cast<std::uint64_t>((k * extent.y + j) * extent.x + i));
+      }
+    }
+  }
+  return result;
+}
+
 void run(const hundun::runtime::MpiContext &mpi) {
   using namespace hundun;
   constexpr runtime::Int3 extent{8, 4, 4};
@@ -225,6 +360,23 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(ids[1] == "rho_h");
   HUNDUN_CHECK(ids[2] == "rho_phi.s00000000000000000000");
   HUNDUN_CHECK(ids[3] == "rho_phi.s00000000000000000001");
+  const std::string expected_owned_layout = owned_layout(box);
+  const std::string expected_global_layout = global_layout(extent);
+  HUNDUN_CHECK(source.owned_cell_layout_fingerprint() == expected_owned_layout);
+  HUNDUN_CHECK(source.global_cell_layout_fingerprint() ==
+               expected_global_layout);
+  std::vector<std::uint64_t> local_global_ids;
+  local_global_ids.reserve(topology.owned_cell_count());
+  for (std::size_t cell_id = 0; cell_id < topology.owned_cell_count();
+       ++cell_id)
+    local_global_ids.push_back(topology.global_cell_id(cell_id));
+  std::vector<std::uint64_t> all_global_ids;
+  all_global_ids.reserve(
+      static_cast<std::size_t>(extent.x * extent.y * extent.z));
+  for (std::uint64_t global_id = 0U;
+       global_id < static_cast<std::uint64_t>(extent.x * extent.y * extent.z);
+       ++global_id)
+    all_global_ids.push_back(global_id);
   const auto history_state_before = state.snapshot(flow::FlowLayer::history);
   const auto committed_state_before =
       state.snapshot(flow::FlowLayer::committed);
@@ -250,6 +402,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
         MaterialDensityTransportDiagnosticsTestAccess::work_counts();
     HUNDUN_CHECK(sink.calls == 1U);
     HUNDUN_CHECK(sink.value.status == diagnostics::DiagnosticStatus::ok);
+    require_identities(sink.value, ids, expected_owned_layout, report);
     HUNDUN_CHECK(sink.value.metrics.empty() ==
                  (level != diagnostics::DiagnosticLevel::summary));
     HUNDUN_CHECK(sink.value.invariants.empty() ==
@@ -281,6 +434,49 @@ void run(const hundun::runtime::MpiContext &mpi) {
     }
     diagnostics::validate(sink.value, descriptor, request);
   }
+
+  for (const std::size_t budget : {1U, 256U}) {
+    for (const bool narrowed : {false, true}) {
+      diagnostics::DiagnosticRequest request;
+      request.level = diagnostics::DiagnosticLevel::bounded_state_sample;
+      request.scope = diagnostics::DiagnosticScope::local;
+      request.frame = {mpi.rank(), 0U, -0.0, "material.finalized-trial"};
+      request.sample_budget = budget;
+      if (narrowed)
+        request.selected_fields = {"rho_h"};
+      CaptureSink sink;
+      diagnostics::collect_diagnostics(source, request, sink);
+      const auto expected =
+          expected_samples(ids, local_global_ids, narrowed, budget);
+      require_expected_samples(sink.value, expected);
+      require_identities(sink.value, ids, expected_owned_layout, report);
+      if (budget == 1U && !narrowed) {
+        auto tuple_mutant = expected.samples;
+        tuple_mutant.front().global_id += 1U;
+        HUNDUN_CHECK(!exact_samples_equal(expected.samples, tuple_mutant));
+
+        std::vector<diagnostics::DiagnosticSample> per_field_budget_mutant;
+        const auto all_local_samples = expected_samples(
+            ids, local_global_ids, false, ids.size() * local_global_ids.size());
+        for (const auto field : ids) {
+          const auto first = std::find_if(
+              all_local_samples.samples.begin(),
+              all_local_samples.samples.end(),
+              [&](const auto &sample) { return sample.field_id == field; });
+          HUNDUN_CHECK(first != all_local_samples.samples.end());
+          per_field_budget_mutant.push_back(*first);
+        }
+        std::sort(
+            per_field_budget_mutant.begin(), per_field_budget_mutant.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+        HUNDUN_CHECK(
+            !exact_samples_equal(expected.samples, per_field_budget_mutant));
+      }
+    }
+  }
   HUNDUN_CHECK(
       runtime::Fp64ReductionCounters{counters_before}.collective_calls ==
       mpi.fp64_reduction_counters().collective_calls);
@@ -299,6 +495,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
   diagnostics::collect_diagnostics(source, mpi, collective, collective_sink);
   HUNDUN_CHECK(collective_sink.calls == 1U);
   HUNDUN_CHECK(collective_sink.value.samples.size() == 2U);
+  require_identities(collective_sink.value, ids, expected_global_layout,
+                     report);
   for (const auto &sample : collective_sink.value.samples)
     HUNDUN_CHECK(sample.field_id == "rho_h");
   HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
@@ -318,13 +516,11 @@ void run(const hundun::runtime::MpiContext &mpi) {
       diagnostics::collect_diagnostics(source, mpi, sampled, sampled_sink);
       const auto sampled_work = diagnostics::test::
           MaterialDensityTransportDiagnosticsTestAccess::work_counts();
-      const std::uint64_t eligible =
-          static_cast<std::uint64_t>(extent.x * extent.y * extent.z) *
-          (narrowed ? 1U : ids.size());
-      HUNDUN_CHECK(sampled_sink.value.eligible_sample_count == eligible);
-      HUNDUN_CHECK(sampled_sink.value.samples.size() ==
-                   std::min<std::uint64_t>(budget, eligible));
-      HUNDUN_CHECK(sampled_sink.value.samples_truncated == (eligible > budget));
+      const auto expected =
+          expected_samples(ids, all_global_ids, narrowed, budget);
+      require_expected_samples(sampled_sink.value, expected);
+      require_identities(sampled_sink.value, ids, expected_global_layout,
+                         report);
       HUNDUN_CHECK(sampled_work.summary_accumulations == 0U);
       HUNDUN_CHECK(sampled_work.volume_reads == 0U);
       HUNDUN_CHECK(sampled_work.sample_candidates > 0U);
@@ -339,6 +535,25 @@ void run(const hundun::runtime::MpiContext &mpi) {
         diagnostics::collect_diagnostics(source, mpi, sampled, repeated_sink);
         HUNDUN_CHECK(diagnostics::to_canonical_json(repeated_sink.value) ==
                      repeated_collective_json);
+      }
+      if (budget == 1U && !narrowed && mpi.size() > 1) {
+        std::vector<diagnostics::DiagnosticSample> per_rank_budget_mutant;
+        for (int rank = 0; rank < mpi.size(); ++rank) {
+          const auto rank_expected = expected_samples(
+              ids, owned_global_ids_for_rank(extent, mpi.size(), rank), false,
+              budget);
+          per_rank_budget_mutant.insert(per_rank_budget_mutant.end(),
+                                        rank_expected.samples.begin(),
+                                        rank_expected.samples.end());
+        }
+        std::sort(
+            per_rank_budget_mutant.begin(), per_rank_budget_mutant.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+        HUNDUN_CHECK(
+            !exact_samples_equal(expected.samples, per_rank_budget_mutant));
       }
     }
   }
@@ -404,6 +619,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
     const auto work = diagnostics::test::
         MaterialDensityTransportDiagnosticsTestAccess::work_counts();
     HUNDUN_CHECK(work.sample_candidates == 0U);
+    require_identities(level_sink.value, ids, expected_global_layout, report);
     if (level == diagnostics::DiagnosticLevel::counters) {
       HUNDUN_CHECK(work.summary_accumulations == 0U);
       HUNDUN_CHECK(work.volume_reads == 0U);
@@ -517,27 +733,77 @@ void run(const hundun::runtime::MpiContext &mpi) {
   }
   HUNDUN_CHECK(sink_rejected);
 
-  auto require_injected_failure = [&](auto arm,
-                                      diagnostics::DiagnosticFailureClass klass,
-                                      std::string_view code,
-                                      int expected_rank) {
-    diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
-    arm();
-    CaptureSink injected_sink;
-    bool injected_rejected = false;
-    try {
-      diagnostics::collect_diagnostics(source, mpi, collective, injected_sink);
-    } catch (const diagnostics::DiagnosticCollectionError &error) {
-      injected_rejected = true;
-      HUNDUN_CHECK(error.classification() == klass);
-      HUNDUN_CHECK(error.code() == code);
-      HUNDUN_CHECK(error.lowest_failing_rank() == expected_rank);
-    }
-    HUNDUN_CHECK(injected_rejected);
-    HUNDUN_CHECK(injected_sink.calls == 0U);
-  };
+  runtime::FieldAccessPlan checked_read_access(registry);
+  constexpr runtime::PhaseId checked_read_phase = 1919U;
+  constexpr runtime::ActorId checked_read_actor = 1919U;
+  checked_read_access.declare_access(checked_read_phase, checked_read_actor,
+                                     fields.density, runtime::AccessMode::read);
+  checked_read_access.freeze();
+  auto checked_density = state.trial_layer().acquire_read<double>(
+      checked_read_access, checked_read_phase, checked_read_actor,
+      fields.density);
+  const double checked_density_before = checked_density(0, 0, 0, 0);
+
+  auto require_injected_failure =
+      [&](const diagnostics::DiagnosticRequest &request, auto arm,
+          diagnostics::DiagnosticFailureClass klass, std::string_view code,
+          int expected_rank,
+          std::optional<diagnostics::test::MaterialDiagnosticRawCollectivePoint>
+              expected_last = std::nullopt,
+          std::optional<std::uint64_t> expected_collectives = std::nullopt) {
+        const auto history_before = state.snapshot(flow::FlowLayer::history);
+        const auto committed_before =
+            state.snapshot(flow::FlowLayer::committed);
+        const auto trial_before = state.snapshot(flow::FlowLayer::trial);
+        const auto metadata_before_each = state.metadata();
+        const auto counters_before_each = mpi.fp64_reduction_counters();
+        const auto attempt_before = report.attempt_identity();
+        const auto finalization_before = report.finalization_identity();
+        const auto source_attempt_before = source.report().attempt_identity();
+        const auto source_finalization_before =
+            source.report().finalization_identity();
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            reset();
+        arm();
+        CaptureSink injected_sink;
+        bool injected_rejected = false;
+        try {
+          diagnostics::collect_diagnostics(source, mpi, request, injected_sink);
+        } catch (const diagnostics::DiagnosticCollectionError &error) {
+          injected_rejected = true;
+          HUNDUN_CHECK(error.classification() == klass);
+          HUNDUN_CHECK(error.code() == code);
+          HUNDUN_CHECK(error.lowest_failing_rank() == expected_rank);
+        }
+        HUNDUN_CHECK(injected_rejected);
+        HUNDUN_CHECK(injected_sink.calls == 0U);
+        const auto work = diagnostics::test::
+            MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+        if (expected_last)
+          HUNDUN_CHECK(work.last_raw_collective == *expected_last);
+        if (expected_collectives)
+          HUNDUN_CHECK(work.raw_collectives == *expected_collectives);
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            history_before, state.snapshot(flow::FlowLayer::history)));
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            committed_before, state.snapshot(flow::FlowLayer::committed)));
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            trial_before, state.snapshot(flow::FlowLayer::trial)));
+        HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(
+            metadata_before_each, state.metadata()));
+        HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+                     counters_before_each.collective_calls);
+        HUNDUN_CHECK(report.attempt_identity() == attempt_before);
+        HUNDUN_CHECK(report.finalization_identity() == finalization_before);
+        HUNDUN_CHECK(source.report().attempt_identity() ==
+                     source_attempt_before);
+        HUNDUN_CHECK(source.report().finalization_identity() ==
+                     source_finalization_before);
+        HUNDUN_CHECK(checked_density(0, 0, 0, 0) == checked_density_before);
+      };
   const auto first_global_id = source.global_cell_id(0U);
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             override_global_id(1U, first_global_id, 0);
@@ -546,6 +812,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       "material.diagnostics.duplicate-owned-sample", 0);
   const auto outside_global_id = source.global_cell_id(9U);
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             override_global_id(10U, outside_global_id, 0);
@@ -554,6 +821,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       "material.diagnostics.duplicate-owned-sample", 0);
   const int injection_rank = mpi.size() > 1 ? 1 : 0;
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             inject_provider_failure(injection_rank);
@@ -561,6 +829,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       diagnostics::DiagnosticFailureClass::layout,
       "material.diagnostics.injected-provider", injection_rank);
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             inject_record_failure(injection_rank);
@@ -568,6 +837,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
       diagnostics::DiagnosticFailureClass::layout,
       "material.diagnostics.injected-record", injection_rank);
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             inject_request_size_overflow(injection_rank);
@@ -575,12 +845,89 @@ void run(const hundun::runtime::MpiContext &mpi) {
       diagnostics::DiagnosticFailureClass::invalid_request,
       "material.diagnostics.request-size", injection_rank);
   require_injected_failure(
+      collective,
       [&] {
         diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
             inject_sample_wire_overflow(injection_rank);
       },
       diagnostics::DiagnosticFailureClass::layout,
-      "material.diagnostics.sample-wire-size", 0);
+      "material.diagnostics.sample-wire-size", injection_rank,
+      diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+          sample_size_exchange,
+      21U);
+
+  if (mpi.size() > 1) {
+    std::vector<std::uint64_t> cumulative_counts(
+        static_cast<std::size_t>(mpi.size()), 0U);
+    cumulative_counts[0] =
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+    cumulative_counts[1] = 1U;
+    require_injected_failure(
+        collective,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              override_reported_sample_wire_bytes(cumulative_counts.data(),
+                                                  cumulative_counts.size());
+        },
+        diagnostics::DiagnosticFailureClass::layout,
+        "material.diagnostics.sample-wire-size", 1,
+        diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+            sample_size_exchange,
+        21U);
+  }
+
+  using AllocationPoint = diagnostics::test::MaterialDiagnosticAllocationPoint;
+  using RawPoint = diagnostics::test::MaterialDiagnosticRawCollectivePoint;
+  struct AllocationFailureCase final {
+    AllocationPoint point;
+    RawPoint raw_point;
+    std::uint64_t raw_collectives;
+    bool summary_request;
+    bool required_distributed;
+  };
+  const std::array allocation_failures{
+      AllocationFailureCase{AllocationPoint::summary_gather,
+                            RawPoint::preparation_summary_gather, 9U, true,
+                            true},
+      AllocationFailureCase{AllocationPoint::transport_totals,
+                            RawPoint::preparation_transport_totals, 11U, true,
+                            true},
+      AllocationFailureCase{AllocationPoint::owned_id_local,
+                            RawPoint::preparation_owned_id_local, 12U, false,
+                            false},
+      AllocationFailureCase{AllocationPoint::ownership_counts,
+                            RawPoint::preparation_ownership_counts, 14U, false,
+                            true},
+      AllocationFailureCase{AllocationPoint::ownership_gather,
+                            RawPoint::preparation_ownership_gather, 16U, false,
+                            true},
+      AllocationFailureCase{AllocationPoint::eligible_counts,
+                            RawPoint::preparation_eligible_counts, 18U, false,
+                            false},
+      AllocationFailureCase{
+          AllocationPoint::local_sample_wire_and_size_counts,
+          RawPoint::preparation_local_sample_wire_and_size_counts, 20U, false,
+          true},
+      AllocationFailureCase{AllocationPoint::sample_exchange_buffers,
+                            RawPoint::preparation_sample_exchange_buffers, 22U,
+                            false, true},
+      AllocationFailureCase{AllocationPoint::decoded_and_retained_samples,
+                            RawPoint::preparation_decoded_and_retained_samples,
+                            24U, false, true}};
+  for (const auto &failure : allocation_failures) {
+    if (mpi.size() > 1 && !failure.required_distributed)
+      continue;
+    const auto &request = failure.summary_request ? sink_request : collective;
+    require_injected_failure(
+        request,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_allocation_failure(failure.point, injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.aggregation-preparation", injection_rank,
+        failure.raw_point, failure.raw_collectives);
+  }
 
   for (const auto scope : {diagnostics::DiagnosticScope::local,
                            diagnostics::DiagnosticScope::collective}) {

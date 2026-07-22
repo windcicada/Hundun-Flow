@@ -124,6 +124,23 @@ std::string scalar_field_id(std::size_t index) {
   return output.str();
 }
 
+std::string global_cell_layout_fingerprint(runtime::Int3 extent) {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "cell.f64.c1.g2plus.global." << extent.x << '.' << extent.y << '.'
+         << extent.z;
+  return output.str();
+}
+
+std::string owned_cell_layout_fingerprint(runtime::Box3 box) {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "cell.f64.c1.g2plus.owned." << box.begin.x << '.' << box.begin.y
+         << '.' << box.begin.z << '.' << box.end.x << '.' << box.end.y << '.'
+         << box.end.z;
+  return output.str();
+}
+
 struct SynchronizedFailure final {
   MaterialTransportFailureReason reason{MaterialTransportFailureReason::none};
   int rank{-1};
@@ -401,6 +418,9 @@ struct MaterialDensityTransport::Impl final {
     const auto box = supplied_topology.owned_global_box();
     local_extent = {box.end.x - box.begin.x, box.end.y - box.begin.y,
                     box.end.z - box.begin.z};
+    global_layout_fingerprint =
+        global_cell_layout_fingerprint(supplied_topology.global_extent());
+    owned_layout_fingerprint = owned_cell_layout_fingerprint(box);
     scratch_intensive_n =
         scratch_registry.declare_field(scratch_cell("material_q_n", 1U, 2));
     scratch_intensive_h = scratch_registry.declare_field(
@@ -480,6 +500,8 @@ struct MaterialDensityTransport::Impl final {
   runtime::FieldId scratch_residual_n{};
   runtime::FieldId scratch_residual_h{};
   std::vector<std::string> fingerprint_ids;
+  std::string global_layout_fingerprint;
+  std::string owned_layout_fingerprint;
   mutable std::uint64_t finalization_identity{};
   mutable const FlowState *last_state{};
   mutable std::uint64_t last_attempt_identity{};
@@ -1403,6 +1425,16 @@ MaterialDensityDiagnosticSource::field_unit(std::size_t index) const {
   if (index >= impl_->transport->fingerprint_ids.size())
     throw runtime::Error("material diagnostic field index is invalid");
   return index == 0U ? "kg/m3" : (index == 1U ? "J/m3" : "kg/m3");
+}
+std::string_view
+MaterialDensityDiagnosticSource::owned_cell_layout_fingerprint() const {
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
+  return impl_->transport->owned_layout_fingerprint;
+}
+std::string_view
+MaterialDensityDiagnosticSource::global_cell_layout_fingerprint() const {
+  HUNDUN_VALIDATE_MATERIAL_SOURCE();
+  return impl_->transport->global_layout_fingerprint;
 }
 std::size_t MaterialDensityDiagnosticSource::owned_cell_count() const {
   HUNDUN_VALIDATE_MATERIAL_SOURCE();

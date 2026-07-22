@@ -10,6 +10,33 @@
 
 namespace hundun::diagnostics::test {
 
+enum class MaterialDiagnosticAllocationPoint : std::uint8_t {
+  summary_gather,
+  transport_totals,
+  owned_id_local,
+  ownership_counts,
+  ownership_gather,
+  eligible_counts,
+  local_sample_wire_and_size_counts,
+  sample_exchange_buffers,
+  decoded_and_retained_samples
+};
+
+enum class MaterialDiagnosticRawCollectivePoint : std::uint8_t {
+  none,
+  other,
+  preparation_summary_gather,
+  preparation_transport_totals,
+  preparation_owned_id_local,
+  preparation_ownership_counts,
+  preparation_ownership_gather,
+  preparation_eligible_counts,
+  preparation_local_sample_wire_and_size_counts,
+  preparation_sample_exchange_buffers,
+  preparation_decoded_and_retained_samples,
+  sample_size_exchange
+};
+
 struct MaterialDiagnosticWorkCounts final {
   std::uint64_t field_reads{};
   std::uint64_t volume_reads{};
@@ -17,6 +44,8 @@ struct MaterialDiagnosticWorkCounts final {
   std::uint64_t sample_candidates{};
   std::uint64_t fingerprint_items{};
   std::uint64_t raw_collectives{};
+  MaterialDiagnosticRawCollectivePoint last_raw_collective{
+      MaterialDiagnosticRawCollectivePoint::none};
 };
 
 class MaterialDensityTransportDiagnosticsTestAccess final {
@@ -30,6 +59,10 @@ public:
   static void inject_record_failure(int rank = -1) noexcept;
   static void inject_request_size_overflow(int rank = -1) noexcept;
   static void inject_sample_wire_overflow(int rank = -1) noexcept;
+  static void inject_allocation_failure(MaterialDiagnosticAllocationPoint,
+                                        int rank = -1) noexcept;
+  static void override_reported_sample_wire_bytes(const std::uint64_t *counts,
+                                                  std::size_t count);
 };
 
 } // namespace hundun::diagnostics::test
