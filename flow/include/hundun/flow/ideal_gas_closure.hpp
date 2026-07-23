@@ -183,6 +183,16 @@ public:
 private:
   struct Impl;
   explicit IdealGasClosure(std::unique_ptr<Impl>) noexcept;
+  static IdealGasClosure
+  create_internal(const mesh::MeshTopology &, const mesh::MeshGeometry &,
+                  const boundary::BoundaryRegistry &,
+                  const runtime::MpiContext &, const runtime::FieldRegistry &,
+                  const FlowFieldIds &, const FlowState &, IdealGasClosureSpec
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+                  ,
+                  int, int
+#endif
+  );
   void begin_attempt(const FlowState &, std::uint64_t);
   const IdealGasClosureReport &evaluate(FlowState &, IdealGasClosureStage);
   int prepare_commit();
@@ -202,8 +212,8 @@ private:
   void set_candidate_precedence_fault_for_test(int rank);
   void set_stage_failure_for_test(IdealGasClosureStage,
                                   IdealGasClosureFailureReason, int rank);
-  void set_metric_gate_failure_for_test(int rank);
-  void set_post_assessment_corruption_for_test(int rank);
+  void set_metric_gate_failure_for_test(std::uint8_t kind, int rank);
+  void set_post_assessment_fault_for_test(std::uint8_t kind, int rank);
   void before_post_assessment_for_test(FlowState &);
   void record_halo_for_test(std::uint8_t stage, runtime::FieldId density,
                             runtime::FieldId enthalpy_density);

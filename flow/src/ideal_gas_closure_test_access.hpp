@@ -6,42 +6,33 @@
 #endif
 
 #include "hundun/flow/ideal_gas_piso.hpp"
+#include "hundun/runtime/error.hpp"
 
 #include <vector>
 
 namespace hundun::flow::test {
 
 enum class IdealGasPostEvidenceMutation : std::uint8_t {
-  attempt_identity,
-  shared_field,
-  provenance,
-  stencil,
-  finalization_zero,
-  finalization_not_later,
-  residual_outer_size,
-  residual_element,
-  disposition,
-  reason,
-  lowest_failing_rank,
-  density_availability,
-  density_value,
-  residual_availability,
-  conservation_outer_size,
-  conservation_element,
-  conservation_availability,
-  mass_availability,
-  mass_value,
-  minimum_density_availability,
-  minimum_density_value,
-  pre_residual_element,
-  pre_conservation_element,
-  pre_mass_value,
-  count
+  post_report_begin = 0,
+  post_authority_begin = 29,
+  post_coherent_begin = 58,
+  pre_report_begin = 87,
+  pre_authority_begin = 116,
+  pre_coherent_begin = 145,
+  outer_begin = 174,
+  count = 194
 };
 
 enum class IdealGasPrepareFault : std::uint8_t {
   state_prepare,
   closure_prepare
+};
+
+enum class IdealGasPostAssessmentFault : std::uint8_t {
+  non_finite_state,
+  non_positive_density,
+  final_transport_residual,
+  final_conservation_defect
 };
 
 enum class IdealGasOuterFailurePoint : std::uint8_t {
@@ -54,8 +45,20 @@ enum class IdealGasCreateFault : std::uint8_t {
   ownership_gap,
   ownership_overlap,
   ownership_swap,
+  local_preparation,
+  inlet_cp,
+  inlet_gas_constant,
+  inlet_pressure,
   sum_reduction,
   maximum_reduction
+};
+
+enum class IdealGasMetricGateFault : std::uint8_t {
+  eos,
+  rho_remap,
+  rho_h_remap,
+  mass,
+  enthalpy
 };
 
 struct IdealGasHaloTraceEntry final {
@@ -76,8 +79,13 @@ public:
       const MaterialDensityStepAttemptReport &) noexcept;
   static bool same_rank_reason_precedence_is_enum_order() noexcept;
   static bool post_store_rank_marker_is_collision_free(int ranks) noexcept;
-  static void set_create_fault(IdealGasCreateFault, int rank) noexcept;
-  static void reset_create_fault() noexcept;
+  static bool final_gate_rank_marker_is_collision_free(int ranks) noexcept;
+  static IdealGasClosure
+  create(const mesh::MeshTopology &, const mesh::MeshGeometry &,
+         const boundary::BoundaryRegistry &, const runtime::MpiContext &,
+         const runtime::FieldRegistry &, const FlowFieldIds &,
+         const FlowState &, IdealGasClosureSpec, IdealGasCreateFault, int rank);
+  static int preflight_failure_rank(const runtime::Error &) noexcept;
   static void begin_attempt(IdealGasClosure &, FlowState &,
                             std::uint64_t identity);
   static IdealGasClosureReport evaluate(IdealGasClosure &, FlowState &,
@@ -85,7 +93,8 @@ public:
   static void rollback(IdealGasClosure &) noexcept;
   static void set_stage_failure(IdealGasClosure &, IdealGasClosureStage,
                                 IdealGasClosureFailureReason, int rank);
-  static void set_metric_gate_failure(IdealGasClosure &, int rank);
+  static void set_metric_gate_failure(IdealGasClosure &,
+                                      IdealGasMetricGateFault, int rank);
   static void set_post_store_corruption(IdealGasClosure &, int rank,
                                         bool enthalpy_density);
   static void exhaust_source_generation(FixedStepIdealGasFlow &);
@@ -104,8 +113,8 @@ public:
   static void set_prepare_fault(FixedStepIdealGasFlow &, IdealGasPrepareFault,
                                 int rank);
   static void set_post_store_mpi_fault(FixedStepIdealGasFlow &, int rank);
-  static void set_post_assessment_corruption(FixedStepIdealGasFlow &,
-                                             int rank);
+  static void set_post_assessment_fault(FixedStepIdealGasFlow &,
+                                        IdealGasPostAssessmentFault, int rank);
   static void set_attempt_layout_fault(FixedStepIdealGasFlow &, int rank);
   static void set_outlet_backflow_fault(FixedStepIdealGasFlow &);
   static bool post_evidence_mutation_rejected(

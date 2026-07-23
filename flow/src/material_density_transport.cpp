@@ -601,6 +601,10 @@ struct MaterialDensityTransport::Impl final {
   mutable std::uint64_t last_finalization_identity{};
   mutable std::uint64_t last_report_seal{};
   mutable bool active{};
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  mutable int post_assessment_fault_kind{-1};
+  mutable int post_assessment_fault_rank{-1};
+#endif
 };
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -936,6 +940,16 @@ MaterialDensityTransport::MaterialDensityTransport(
 MaterialDensityTransport::~MaterialDensityTransport() noexcept = default;
 MaterialDensityTransport::MaterialDensityTransport(
     MaterialDensityTransport &&) noexcept = default;
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void MaterialDensityTransport::set_post_assessment_fault_for_test(
+    std::uint8_t kind, int rank) {
+  if (!impl_ || kind > 1U || rank < 0 || rank >= impl_->mpi->size())
+    throw runtime::Error("material post-assessment fault is invalid");
+  impl_->post_assessment_fault_kind = static_cast<int>(kind);
+  impl_->post_assessment_fault_rank = rank;
+}
+#endif
 
 void MaterialDensityTransport::prepare_task20_attempt() const {
   if (!impl_)
@@ -1800,6 +1814,12 @@ MaterialDensityTransport::assess_trial_after_closure(
     ~Guard() { active = false; }
   } guard{impl_->active};
   impl_->active = true;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  const int post_assessment_fault_kind =
+      std::exchange(impl_->post_assessment_fault_kind, -1);
+  const int post_assessment_fault_rank =
+      std::exchange(impl_->post_assessment_fault_rank, -1);
+#endif
 
   const auto &fields = transport_fields(*impl_);
   MaterialDensityTransportReport report;
@@ -2057,6 +2077,15 @@ MaterialDensityTransport::assess_trial_after_closure(
   report.minimum_density_kg_per_m3_ = global_min;
   report.minimum_density_global_cell_ = minimum_id;
   report.minimum_density_rank_ = minimum_rank;
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (post_assessment_fault_rank == impl_->mpi->rank()) {
+    if (post_assessment_fault_kind == 0)
+      report.transport_normalized_l2_.front() = 2.0e-9;
+    else if (post_assessment_fault_kind == 1)
+      report.mass_relative_conservation_defect_ = 1.0e-9;
+  }
+#endif
 
   local = MaterialTransportFailureReason::none;
   if (!std::isfinite(report.density_normalized_l2_) ||

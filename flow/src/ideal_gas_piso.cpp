@@ -642,7 +642,8 @@ bool test::IdealGasClosureTestAccess::report_authenticated(
 }
 bool test::IdealGasClosureTestAccess::post_eos_evidence_authenticated(
     const MaterialDensityStepAttemptReport &report) noexcept {
-  return detail::DensityClosureBridge::post_eos_evidence_authenticated(report);
+  return ::hundun::flow::detail::DensityClosureBridge::
+      post_eos_evidence_authenticated(report);
 }
 void test::IdealGasClosureTestAccess::exhaust_source_generation(
     FixedStepIdealGasFlow &flow) {
@@ -654,8 +655,8 @@ void test::IdealGasClosureTestAccess::force_finalization_identity_wrap(
     FixedStepIdealGasFlow &flow) {
   if (!flow.impl_)
     throw runtime::Error("ideal-gas test flow has been moved from");
-  detail::DensityClosureBridge::force_finalization_identity_wrap(
-      flow.impl_->material);
+  ::hundun::flow::detail::DensityClosureBridge::
+      force_finalization_identity_wrap(flow.impl_->material);
 }
 std::vector<test::IdealGasHaloTraceEntry>
 test::IdealGasClosureTestAccess::halo_trace(
@@ -715,11 +716,20 @@ void test::IdealGasClosureTestAccess::set_post_store_mpi_fault(
     throw runtime::Error("ideal-gas test flow has been moved from");
   flow.impl_->closure.set_post_store_mpi_fault_for_test(rank);
 }
-void test::IdealGasClosureTestAccess::set_post_assessment_corruption(
-    FixedStepIdealGasFlow &flow, int rank) {
+void test::IdealGasClosureTestAccess::set_post_assessment_fault(
+    FixedStepIdealGasFlow &flow, IdealGasPostAssessmentFault fault, int rank) {
   if (!flow.impl_)
     throw runtime::Error("ideal-gas test flow has been moved from");
-  flow.impl_->closure.set_post_assessment_corruption_for_test(rank);
+  if (fault == IdealGasPostAssessmentFault::non_finite_state ||
+      fault == IdealGasPostAssessmentFault::non_positive_density) {
+    flow.impl_->closure.set_post_assessment_fault_for_test(
+        static_cast<std::uint8_t>(fault), rank);
+    return;
+  }
+  ::hundun::flow::detail::DensityClosureBridge::set_post_assessment_fault(
+      flow.impl_->material,
+      fault == IdealGasPostAssessmentFault::final_transport_residual ? 0U : 1U,
+      rank);
 }
 void test::IdealGasClosureTestAccess::set_attempt_layout_fault(
     FixedStepIdealGasFlow &flow, int rank) {
@@ -736,8 +746,9 @@ void test::IdealGasClosureTestAccess::set_outlet_backflow_fault(
 bool test::IdealGasClosureTestAccess::post_evidence_mutation_rejected(
     const IdealGasStepAttemptReport &report,
     IdealGasPostEvidenceMutation mutation) {
-  return detail::DensityClosureBridge::post_evidence_mutation_rejected(
-      report.flow_, static_cast<std::uint8_t>(mutation));
+  return ::hundun::flow::detail::DensityClosureBridge::
+      post_evidence_mutation_rejected(report.flow_,
+                                      static_cast<std::uint8_t>(mutation));
 }
 #endif
 

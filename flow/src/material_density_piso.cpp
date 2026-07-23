@@ -1064,6 +1064,7 @@ std::uint64_t MaterialDensityStepAttemptReport::compute_seal() const noexcept {
   mix(result, pre_closure_authority_.has_value() ? 1U : 0U);
   if (pre_closure_authority_)
     mix(result, pre_closure_authority_->compute_seal());
+  mix(result, pre_closure_report_seal_authority_);
   mix(result, post_closure_evidence_available_ ? 1U : 0U);
   mix(result, post_closure_report_.has_value() ? 1U : 0U);
   if (post_closure_report_)
@@ -1071,6 +1072,7 @@ std::uint64_t MaterialDensityStepAttemptReport::compute_seal() const noexcept {
   mix(result, post_closure_authority_.has_value() ? 1U : 0U);
   if (post_closure_authority_)
     mix(result, post_closure_authority_->compute_seal());
+  mix(result, post_closure_report_seal_authority_);
   return result;
 }
 
@@ -1334,10 +1336,17 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
   if (closure_origin_) {
     if (material_report_.has_value() != pre_closure_authority_.has_value() ||
         (material_report_ &&
-         !same_transport_report(*material_report_,
-                                *pre_closure_authority_)) ||
+         !same_transport_report(*material_report_, *pre_closure_authority_)) ||
+        (material_report_ && (pre_closure_report_seal_authority_ == 0U ||
+                              material_report_->compute_seal() !=
+                                  pre_closure_report_seal_authority_)) ||
+        (!material_report_ && pre_closure_report_seal_authority_ != 0U) ||
         post_closure_report_.has_value() !=
-            post_closure_authority_.has_value())
+            post_closure_authority_.has_value() ||
+        (post_closure_report_ && (post_closure_report_seal_authority_ == 0U ||
+                                  post_closure_report_->compute_seal() !=
+                                      post_closure_report_seal_authority_)) ||
+        (!post_closure_report_ && post_closure_report_seal_authority_ != 0U))
       return false;
     if (post_closure_evidence_available_ !=
             post_closure_report_.has_value() ||
@@ -1386,8 +1395,11 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
                         [](std::uint8_t value) { return value == 1U; })))
         return false;
     }
-  } else if (pre_closure_authority_ || post_closure_evidence_available_ ||
-             post_closure_report_ || post_closure_authority_) {
+  } else if (pre_closure_authority_ ||
+             pre_closure_report_seal_authority_ != 0U ||
+             post_closure_evidence_available_ || post_closure_report_ ||
+             post_closure_authority_ ||
+             post_closure_report_seal_authority_ != 0U) {
     return false;
   }
   return true;
@@ -2117,6 +2129,9 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
           result.material_report_->finalization_identity();
       if (closure != nullptr)
         result.pre_closure_authority_ = result.material_report_;
+      if (closure != nullptr)
+        result.pre_closure_report_seal_authority_ =
+            result.material_report_->compute_seal();
       final_material_flux.reset();
     }
     result.flux_provenance_ = MaterialFluxProvenance::final_corrected;
@@ -2173,6 +2188,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       result.post_closure_report_->seal();
       result.post_closure_evidence_available_ = true;
       result.post_closure_authority_ = result.post_closure_report_;
+      result.post_closure_report_seal_authority_ =
+          result.post_closure_report_->compute_seal();
       post_closure_flux.reset();
       result.flow_.final_transport_normalized_l2 =
           result.post_closure_report_->transport_normalized_l2();
@@ -2595,6 +2612,13 @@ void detail::DensityClosureBridge::force_finalization_identity_wrap(
     throw runtime::Error("material flow object has been moved from");
   test::MaterialDensityTransportTestAccess::force_finalization_identity_wrap(
       flow.impl_->material_transport);
+}
+
+void detail::DensityClosureBridge::set_post_assessment_fault(
+    FixedStepMaterialDensityFlow &flow, std::uint8_t kind, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("material post-assessment fault is invalid");
+  flow.impl_->material_transport.set_post_assessment_fault_for_test(kind, rank);
 }
 #endif
 

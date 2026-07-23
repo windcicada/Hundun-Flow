@@ -14,9 +14,11 @@ namespace hundun::diagnostics::test {
 
 enum class IdealGasClosureDiagnosticFault : std::uint8_t {
   none,
+  stale_source,
   capability,
   provider_agreement,
   ownership_layout,
+  global_extent,
   sample_wire,
   record_validation,
   request_preparation,
@@ -48,6 +50,11 @@ public:
   work(const flow::IdealGasClosureDiagnosticSource &) noexcept;
   static DiagnosticInvariant
   positive_invariant(std::string id, std::string unit, double observed);
+  static void
+  submit_record_contract(const flow::IdealGasClosureDiagnosticSource &,
+                         const DiagnosticRequest &,
+                         const DiagnosticRecord &expected,
+                         const DiagnosticRecord &candidate, DiagnosticSink &);
 };
 
 } // namespace hundun::diagnostics::test

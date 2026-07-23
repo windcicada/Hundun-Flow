@@ -424,7 +424,9 @@ void require_success_payload_values(
 }
 
 void require_canonical_oracle_is_mutation_sensitive(
-    const diagnostics::DiagnosticRecord &record) {
+    const diagnostics::DiagnosticRecord &record,
+    const hundun::flow::IdealGasClosureDiagnosticSource &source,
+    const diagnostics::DiagnosticRequest &request) {
   const auto baseline = diagnostics::to_canonical_json(record);
   const auto prove = [&](auto mutation) {
     auto changed = record;
@@ -436,12 +438,44 @@ void require_canonical_oracle_is_mutation_sensitive(
       distinguished = true;
     }
     HUNDUN_CHECK(distinguished);
+    RecordingSink sink;
+    bool contract_rejected = false;
+    try {
+      Access::submit_record_contract(source, request, record, changed, sink);
+    } catch (const diagnostics::DiagnosticCollectionError &error) {
+      contract_rejected =
+          error.classification() ==
+              diagnostics::DiagnosticFailureClass::invalid_input &&
+          error.code() == std::string_view("closure.diagnostics.record") &&
+          error.lowest_failing_rank() == -1;
+    }
+    HUNDUN_CHECK(contract_rejected);
+    HUNDUN_CHECK(sink.calls == 0U && sink.records.empty());
   };
   prove([](auto &changed) { ++changed.schema_version; });
+  prove([](auto &changed) {
+    changed.module_kind = diagnostics::DiagnosticModuleKind::runtime;
+  });
   prove([](auto &changed) { changed.module_id += ".mutated"; });
   prove([](auto &changed) { changed.instance_id += ".mutated"; });
+  prove([](auto &changed) {
+    changed.level = changed.level == diagnostics::DiagnosticLevel::summary
+                        ? diagnostics::DiagnosticLevel::invariants
+                        : diagnostics::DiagnosticLevel::summary;
+  });
+  prove([](auto &changed) {
+    changed.scope = changed.scope == diagnostics::DiagnosticScope::local
+                        ? diagnostics::DiagnosticScope::collective
+                        : diagnostics::DiagnosticScope::local;
+  });
   prove([](auto &changed) { ++changed.rank; });
   prove([](auto &changed) { ++changed.step; });
+  prove([](auto &changed) {
+    changed.time_s.status =
+        changed.time_s.status == diagnostics::DiagnosticValueStatus::finite
+            ? diagnostics::DiagnosticValueStatus::unavailable
+            : diagnostics::DiagnosticValueStatus::finite;
+  });
   prove([](auto &changed) { changed.time_s.bits ^= 1U; });
   prove([](auto &changed) { changed.phase += ".mutated"; });
   prove([](auto &changed) {
@@ -453,24 +487,123 @@ void require_canonical_oracle_is_mutation_sensitive(
   });
   prove([](auto &changed) { changed.failure.code += ".mutated"; });
   prove([](auto &changed) { ++changed.failure.lowest_failing_rank; });
-  for (std::size_t index = 0; index < record.identities.size(); ++index)
+  prove(
+      [](auto &changed) { changed.state_fingerprint.algorithm += ".mutated"; });
+  prove([](auto &changed) { changed.state_fingerprint.hex += "0"; });
+  prove([](auto &changed) { ++changed.sample_budget; });
+  prove([](auto &changed) { ++changed.eligible_sample_count; });
+  prove([](auto &changed) {
+    changed.samples_truncated = !changed.samples_truncated;
+  });
+  for (std::size_t index = 0; index < record.identities.size(); ++index) {
+    prove([&](auto &changed) {
+      changed.identities[index].subject_id += ".mutated";
+    });
+    prove([&](auto &changed) {
+      auto &identity = changed.identities[index];
+      if (identity.layout_fingerprint)
+        identity.layout_fingerprint.reset();
+      else
+        identity.layout_fingerprint = "mutated-layout";
+    });
+    if (record.identities[index].layout_fingerprint)
+      prove([&](auto &changed) {
+        changed.identities[index].layout_fingerprint->append(".mutated");
+      });
     prove([&](auto &changed) {
       auto &identity = changed.identities[index];
       if (identity.revision)
-        ++*identity.revision;
+        identity.revision.reset();
       else
-        identity.layout_fingerprint->append(".mutated");
+        identity.revision = 1U;
     });
-  for (std::size_t index = 0; index < record.metrics.size(); ++index)
-    prove([&](auto &changed) { changed.metrics[index].value.bits ^= 1U; });
-  for (std::size_t index = 0; index < record.invariants.size(); ++index)
+    if (record.identities[index].revision)
+      prove([&](auto &changed) { ++*changed.identities[index].revision; });
     prove([&](auto &changed) {
-      changed.invariants[index].observed.bits ^= 1U;
+      auto &identity = changed.identities[index];
+      if (identity.generation)
+        identity.generation.reset();
+      else
+        identity.generation = 1U;
     });
-  for (std::size_t index = 0; index < record.counters.size(); ++index)
+    if (record.identities[index].generation)
+      prove([&](auto &changed) { ++*changed.identities[index].generation; });
+    prove([&](auto &changed) {
+      auto &identity = changed.identities[index];
+      if (identity.allocation_identity)
+        identity.allocation_identity.reset();
+      else
+        identity.allocation_identity = 1U;
+    });
+    if (record.identities[index].allocation_identity)
+      prove([&](auto &changed) {
+        ++*changed.identities[index].allocation_identity;
+      });
+  }
+  for (std::size_t index = 0; index < record.metrics.size(); ++index) {
+    prove([&](auto &changed) { changed.metrics[index].id += ".mutated"; });
+    prove([&](auto &changed) {
+      auto &kind = changed.metrics[index].kind;
+      kind = kind == diagnostics::DiagnosticMetricKind::state_summary
+                 ? diagnostics::DiagnosticMetricKind::residual
+                 : diagnostics::DiagnosticMetricKind::state_summary;
+    });
+    prove([&](auto &changed) { changed.metrics[index].unit += ".mutated"; });
+    prove([&](auto &changed) {
+      auto &status = changed.metrics[index].value.status;
+      status = status == diagnostics::DiagnosticValueStatus::finite
+                   ? diagnostics::DiagnosticValueStatus::unavailable
+                   : diagnostics::DiagnosticValueStatus::finite;
+    });
+    prove([&](auto &changed) { changed.metrics[index].value.bits ^= 1U; });
+  }
+  for (std::size_t index = 0; index < record.invariants.size(); ++index) {
+    prove([&](auto &changed) { changed.invariants[index].id += ".mutated"; });
+    prove([&](auto &changed) { changed.invariants[index].unit += ".mutated"; });
+    prove([&](auto &changed) {
+      auto &relation = changed.invariants[index].relation;
+      relation = relation == diagnostics::InvariantRelation::less_equal
+                     ? diagnostics::InvariantRelation::greater_equal
+                     : diagnostics::InvariantRelation::less_equal;
+    });
+    prove([&](auto &changed) {
+      auto &status = changed.invariants[index].observed.status;
+      status = status == diagnostics::DiagnosticValueStatus::finite
+                   ? diagnostics::DiagnosticValueStatus::unavailable
+                   : diagnostics::DiagnosticValueStatus::finite;
+    });
+    prove(
+        [&](auto &changed) { changed.invariants[index].observed.bits ^= 1U; });
+    prove([&](auto &changed) {
+      auto &status = changed.invariants[index].limit.status;
+      status = status == diagnostics::DiagnosticValueStatus::finite
+                   ? diagnostics::DiagnosticValueStatus::unavailable
+                   : diagnostics::DiagnosticValueStatus::finite;
+    });
+    prove([&](auto &changed) { changed.invariants[index].limit.bits ^= 1U; });
+    prove([&](auto &changed) {
+      changed.invariants[index].passed = !changed.invariants[index].passed;
+    });
+  }
+  for (std::size_t index = 0; index < record.counters.size(); ++index) {
+    prove([&](auto &changed) { changed.counters[index].id += ".mutated"; });
+    prove([&](auto &changed) { changed.counters[index].unit += ".mutated"; });
     prove([&](auto &changed) { ++changed.counters[index].value; });
-  for (std::size_t index = 0; index < record.samples.size(); ++index)
+  }
+  for (std::size_t index = 0; index < record.samples.size(); ++index) {
+    prove(
+        [&](auto &changed) { changed.samples[index].field_id += ".mutated"; });
+    prove([&](auto &changed) { ++changed.samples[index].global_id; });
+    prove([&](auto &changed) { ++changed.samples[index].component; });
+    prove([&](auto &changed) { changed.samples[index].unit += ".mutated"; });
+    prove([&](auto &changed) {
+      auto &status = changed.samples[index].value.status;
+      status = status == diagnostics::DiagnosticValueStatus::finite
+                   ? diagnostics::DiagnosticValueStatus::unavailable
+                   : diagnostics::DiagnosticValueStatus::finite;
+    });
     prove([&](auto &changed) { changed.samples[index].value.bits ^= 1U; });
+  }
 }
 
 void require_work(
@@ -512,7 +645,11 @@ void require_error(Operation &&operation,
     caught = true;
     HUNDUN_CHECK(error.classification() == classification);
     HUNDUN_CHECK(error.code() == code);
-    HUNDUN_CHECK(error.lowest_failing_rank() == rank);
+    if (error.lowest_failing_rank() != rank)
+      throw std::runtime_error("diagnostic rank mismatch for " +
+                               std::string(code) + ": expected " +
+                               std::to_string(rank) + ", observed " +
+                               std::to_string(error.lowest_failing_rank()));
   }
   HUNDUN_CHECK(caught);
   HUNDUN_CHECK(sink.calls == expected_calls);
@@ -567,7 +704,7 @@ void run_task21_diagnostic_matrix(
                             request);
       const auto canonical = diagnostics::to_canonical_json(record);
       HUNDUN_CHECK(!canonical.empty());
-      require_canonical_oracle_is_mutation_sensitive(record);
+      require_canonical_oracle_is_mutation_sensitive(record, source, request);
       require_work(level, 7U, scope, source);
       require_pure(before, state, source, mpi);
 
@@ -706,184 +843,241 @@ void run_task21_diagnostic_matrix(
         "closure.diagnostics.record", -1, sink);
     Access::reset(source);
   }
+  for (const auto &[fault, classification, code, level] :
+       {std::tuple{Fault::stale_source,
+                   diagnostics::DiagnosticFailureClass::invalid_input,
+                   std::string_view("closure.diagnostics.stale-source"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::capability,
+                   diagnostics::DiagnosticFailureClass::capability,
+                   std::string_view("closure.diagnostics.capability"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::provider_agreement,
+                   diagnostics::DiagnosticFailureClass::invalid_input,
+                   std::string_view("closure.diagnostics.provider-agreement"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::ownership_layout,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.layout"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::request_preparation,
+                   diagnostics::DiagnosticFailureClass::invalid_request,
+                   std::string_view("closure.diagnostics.request-agreement"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::sample_preparation,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.sample-preparation"),
+                   diagnostics::DiagnosticLevel::bounded_state_sample},
+        std::tuple{Fault::sample_wire,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.sample-wire"),
+                   diagnostics::DiagnosticLevel::bounded_state_sample},
+        std::tuple{Fault::aggregation,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.aggregation"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::record_validation,
+                   diagnostics::DiagnosticFailureClass::invalid_input,
+                   std::string_view("closure.diagnostics.record"),
+                   diagnostics::DiagnosticLevel::summary}}) {
+    Access::set_fault(source, fault, mpi.rank());
+    const auto request =
+        request_for(source, level, diagnostics::DiagnosticScope::local, 7U);
+    RecordingSink failed;
+    require_error([&] { collect(source, mpi, request, failed); },
+                  classification, code, -1, failed);
+    RecordingSink successor;
+    collect(source, mpi, request, successor);
+    HUNDUN_CHECK(successor.calls == 1U && successor.records.size() == 1U);
+    Access::reset(source);
+  }
   {
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                diagnostics::DiagnosticScope::local);
     RecordingSink sink;
     sink.throw_on_submit = true;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::sink_failure,
-        "diagnostics.sink.submit", -1, sink, 1U);
+    require_error([&] { collect(source, mpi, request, sink); },
+                  diagnostics::DiagnosticFailureClass::sink_failure,
+                  "diagnostics.sink.submit", -1, sink, 1U);
   }
 
-  const int target = mpi.size() > 1 ? 1 : 0;
-  {
-    auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
-                               diagnostics::DiagnosticScope::collective);
-    if (mpi.rank() == target)
-      ++request.frame.step;
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_request,
-        "closure.diagnostics.frame", target, sink);
-  }
-  {
-    auto request = request_for(
-        source, diagnostics::DiagnosticLevel::bounded_state_sample,
-        diagnostics::DiagnosticScope::collective, 0U);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_request,
-        "closure.diagnostics.frame", 0, sink);
-  }
-  {
-    auto request = request_for(
-        source, diagnostics::DiagnosticLevel::bounded_state_sample,
-        diagnostics::DiagnosticScope::collective, 7U);
-    if (mpi.rank() == target)
-      request.selected_fields = {"unknown"};
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_request,
-        "closure.diagnostics.selected-field", target, sink);
-  }
-  if (mpi.size() > 1) {
-    auto request = request_for(
-        source, diagnostics::DiagnosticLevel::bounded_state_sample,
-        diagnostics::DiagnosticScope::collective, 7U);
-    if (mpi.rank() == target)
-      request.selected_fields = {"rho"};
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_request,
-        "closure.diagnostics.request-agreement", target, sink);
-  }
-  {
-    Access::set_fault(source, Fault::provider_agreement, target);
-    auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
-                               diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_input,
-        "closure.diagnostics.provider-agreement", target, sink);
-    Access::reset(source);
-  }
-  for (const auto &[fault, classification, code] :
-       {std::tuple{Fault::capability,
-                   diagnostics::DiagnosticFailureClass::capability,
-                   std::string_view("closure.diagnostics.capability")},
-        std::tuple{Fault::request_preparation,
-                   diagnostics::DiagnosticFailureClass::invalid_request,
-                   std::string_view("closure.diagnostics.request-agreement")},
-        std::tuple{Fault::aggregation,
-                   diagnostics::DiagnosticFailureClass::layout,
-                   std::string_view("closure.diagnostics.aggregation")},
-        std::tuple{Fault::sample_preparation,
-                   diagnostics::DiagnosticFailureClass::layout,
-                   std::string_view("closure.diagnostics.sample-preparation")}}) {
-    Access::set_fault(source, fault, target);
-    auto request = request_for(
-        source,
-        fault == Fault::sample_preparation
-            ? diagnostics::DiagnosticLevel::bounded_state_sample
-            : diagnostics::DiagnosticLevel::summary,
-        diagnostics::DiagnosticScope::collective, 7U);
-    RecordingSink sink;
-    require_error([&] { collect(source, mpi, request, sink); }, classification,
-                  code, target, sink);
-    Access::reset(source);
-  }
-  {
-    Access::set_fault(source, Fault::raw_mpi, target);
-    const auto request = request_for(
-        source, diagnostics::DiagnosticLevel::summary,
-        diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    bool typed = false;
-    try {
-      collect(source, mpi, request, sink);
-    } catch (const hundun::runtime::MpiOperationError &error) {
-      typed = std::string_view(error.what()).find("MPI_Task21") !=
-              std::string_view::npos;
+  for (const int target : {0, mpi.size() - 1}) {
+    {
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      if (mpi.rank() == target)
+        ++request.frame.step;
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_request,
+                    "closure.diagnostics.frame", target, sink);
     }
-    HUNDUN_CHECK(typed && sink.calls == 0U);
-    Access::reset(source);
-  }
-  {
-    Access::set_fault(source, Fault::oversized_agreement, target);
-    const auto request = request_for(
-        source, diagnostics::DiagnosticLevel::summary,
-        diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::layout,
-        "closure.diagnostics.aggregation", 0, sink);
-    Access::reset(source);
-  }
-  {
-    auto duplicate =
-        hundun::runtime::MpiContext::duplicate(mpi.comm());
-    const auto request = request_for(
-        source, diagnostics::DiagnosticLevel::summary,
-        diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    const auto &supplied = mpi.rank() == target ? duplicate : mpi;
-    require_error(
-        [&] { diagnostics::collect_diagnostics(source, supplied, request, sink); },
-        diagnostics::DiagnosticFailureClass::layout,
-        "closure.diagnostics.layout", target, sink);
-  }
-  {
-    Access::set_fault(source, Fault::ownership_layout, target);
-    auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
-                               diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::layout,
-        "closure.diagnostics.layout", target, sink);
-    Access::reset(source);
-  }
-  {
-    Access::set_fault(source, Fault::sample_wire, target);
-    auto request = request_for(
-        source, diagnostics::DiagnosticLevel::bounded_state_sample,
-        diagnostics::DiagnosticScope::collective, 7U);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::layout,
-        "closure.diagnostics.sample-wire", target, sink);
-    Access::reset(source);
-  }
-  {
-    Access::set_fault(source, Fault::record_validation, target);
-    auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
-                               diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::invalid_input,
-        "closure.diagnostics.record", target, sink);
-    Access::reset(source);
-  }
-  {
-    auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
-                               diagnostics::DiagnosticScope::collective);
-    RecordingSink sink;
-    sink.throw_on_submit = mpi.rank() == target;
-    require_error(
-        [&] { collect(source, mpi, request, sink); },
-        diagnostics::DiagnosticFailureClass::sink_failure,
-        "diagnostics.sink.submit", target, sink, 1U,
-        mpi.rank() == target ? 0U : 1U);
+    {
+      auto request = request_for(
+          source, diagnostics::DiagnosticLevel::bounded_state_sample,
+          diagnostics::DiagnosticScope::collective, 0U);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_request,
+                    "closure.diagnostics.frame", 0, sink);
+    }
+    {
+      auto request = request_for(
+          source, diagnostics::DiagnosticLevel::bounded_state_sample,
+          diagnostics::DiagnosticScope::collective, 7U);
+      if (mpi.rank() == target)
+        request.selected_fields = {"unknown"};
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_request,
+                    "closure.diagnostics.selected-field", target, sink);
+    }
+    if (mpi.size() > 1) {
+      auto request = request_for(
+          source, diagnostics::DiagnosticLevel::bounded_state_sample,
+          diagnostics::DiagnosticScope::collective, 7U);
+      if (mpi.rank() == target)
+        request.selected_fields = {"rho"};
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_request,
+                    "closure.diagnostics.request-agreement",
+                    target == 0 ? 1 : target, sink);
+    }
+    {
+      Access::set_fault(source, Fault::provider_agreement, target);
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_input,
+                    "closure.diagnostics.provider-agreement", target, sink);
+      Access::reset(source);
+    }
+    for (const auto &[fault, classification, code] :
+         {std::tuple{Fault::stale_source,
+                     diagnostics::DiagnosticFailureClass::invalid_input,
+                     std::string_view("closure.diagnostics.stale-source")},
+          std::tuple{Fault::capability,
+                     diagnostics::DiagnosticFailureClass::capability,
+                     std::string_view("closure.diagnostics.capability")},
+          std::tuple{Fault::request_preparation,
+                     diagnostics::DiagnosticFailureClass::invalid_request,
+                     std::string_view("closure.diagnostics.request-agreement")},
+          std::tuple{Fault::aggregation,
+                     diagnostics::DiagnosticFailureClass::layout,
+                     std::string_view("closure.diagnostics.aggregation")},
+          std::tuple{
+              Fault::sample_preparation,
+              diagnostics::DiagnosticFailureClass::layout,
+              std::string_view("closure.diagnostics.sample-preparation")}}) {
+      Access::set_fault(source, fault, target);
+      auto request =
+          request_for(source,
+                      fault == Fault::sample_preparation
+                          ? diagnostics::DiagnosticLevel::bounded_state_sample
+                          : diagnostics::DiagnosticLevel::summary,
+                      diagnostics::DiagnosticScope::collective, 7U);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    classification, code, target, sink);
+      Access::reset(source);
+    }
+    {
+      Access::set_fault(source, Fault::raw_mpi, target);
+      const auto request =
+          request_for(source, diagnostics::DiagnosticLevel::summary,
+                      diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      bool typed = false;
+      try {
+        collect(source, mpi, request, sink);
+      } catch (const hundun::runtime::MpiOperationError &error) {
+        typed = std::string_view(error.what()).find("MPI_Task21") !=
+                std::string_view::npos;
+      }
+      HUNDUN_CHECK(typed && sink.calls == 0U);
+      Access::reset(source);
+    }
+    {
+      Access::set_fault(source, Fault::oversized_agreement, target);
+      const auto request =
+          request_for(source, diagnostics::DiagnosticLevel::summary,
+                      diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::layout,
+                    "closure.diagnostics.aggregation", 0, sink);
+      Access::reset(source);
+    }
+    {
+      auto duplicate = hundun::runtime::MpiContext::duplicate(mpi.comm());
+      const auto request =
+          request_for(source, diagnostics::DiagnosticLevel::summary,
+                      diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      const auto &supplied = mpi.rank() == target ? duplicate : mpi;
+      require_error(
+          [&] {
+            diagnostics::collect_diagnostics(source, supplied, request, sink);
+          },
+          diagnostics::DiagnosticFailureClass::layout,
+          "closure.diagnostics.layout", target, sink);
+    }
+    {
+      Access::set_fault(source, Fault::ownership_layout, target);
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::layout,
+                    "closure.diagnostics.layout", target, sink);
+      Access::reset(source);
+    }
+    {
+      Access::set_fault(source, Fault::global_extent, target);
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::layout,
+                    "closure.diagnostics.layout",
+                    target == 0 && mpi.size() > 1 ? 1 : target, sink);
+      Access::reset(source);
+    }
+    {
+      Access::set_fault(source, Fault::sample_wire, target);
+      auto request = request_for(
+          source, diagnostics::DiagnosticLevel::bounded_state_sample,
+          diagnostics::DiagnosticScope::collective, 7U);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::layout,
+                    "closure.diagnostics.sample-wire", target, sink);
+      Access::reset(source);
+    }
+    {
+      Access::set_fault(source, Fault::record_validation, target);
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::invalid_input,
+                    "closure.diagnostics.record", target, sink);
+      Access::reset(source);
+    }
+    {
+      auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
+                                 diagnostics::DiagnosticScope::collective);
+      RecordingSink sink;
+      sink.throw_on_submit = mpi.rank() == target;
+      require_error([&] { collect(source, mpi, request, sink); },
+                    diagnostics::DiagnosticFailureClass::sink_failure,
+                    "diagnostics.sink.submit", target, sink, 1U,
+                    mpi.rank() == target ? 0U : 1U);
+    }
+    if (mpi.size() == 1)
+      break;
   }
   require_pure(before, state, source, mpi);
 }

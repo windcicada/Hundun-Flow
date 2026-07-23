@@ -47,10 +47,11 @@ auto &test_state(const flow::IdealGasClosureDiagnosticSource &source) {
 bool fault(const flow::IdealGasClosureDiagnosticSource &source,
            test::IdealGasClosureDiagnosticFault value, int rank) noexcept {
   auto &state = test_state(source);
+  const bool reached =
+      state.fault == static_cast<std::uint8_t>(value) && !state.consumed;
   const bool selected =
-      state.fault == static_cast<std::uint8_t>(value) && !state.consumed &&
-      (state.fault_rank < 0 || state.fault_rank == rank);
-  if (selected)
+      reached && (state.fault_rank < 0 || state.fault_rank == rank);
+  if (reached)
     state.consumed = true;
   return selected;
 }
@@ -394,6 +395,9 @@ void require_exact_cell_cover(
   if (fault(source, test::IdealGasClosureDiagnosticFault::ownership_layout,
             mpi.rank()))
     ++local.count;
+  if (fault(source, test::IdealGasClosureDiagnosticFault::global_extent,
+            mpi.rank()))
+    ++local.global[0];
 #endif
   runtime::check_mpi_result(
       MPI_Allgather(&local, static_cast<int>(sizeof(Wire)), MPI_BYTE,
@@ -401,10 +405,11 @@ void require_exact_cell_cover(
                     mpi.comm()),
       "MPI_Allgather(ideal-gas diagnostic ownership)");
   std::uint64_t covered{};
+  const auto &canonical_global = all.front().global;
   for (std::size_t left = 0; left < all.size(); ++left) {
     std::uint64_t volume = 1U;
     for (std::size_t axis = 0; axis < 3U; ++axis) {
-      if (all[left].global[axis] != local.global[axis] ||
+      if (all[left].global[axis] != canonical_global[axis] ||
           all[left].global[axis] <= 0 || all[left].begin[axis] < 0 ||
           all[left].end[axis] <= all[left].begin[axis] ||
           all[left].end[axis] > all[left].global[axis])
@@ -437,16 +442,16 @@ void require_exact_cell_cover(
     }
   }
   std::uint64_t global_count = 1U;
-  for (const auto extent : local.global) {
+  for (const auto extent : canonical_global) {
     const auto width = static_cast<std::uint64_t>(extent);
     if (global_count > std::numeric_limits<std::uint64_t>::max() / width)
-      fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout",
-           mpi.rank(), "ideal-gas diagnostic global count overflows");
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout", 0,
+           "ideal-gas diagnostic global count overflows");
     global_count *= width;
   }
   if (covered != global_count)
-    fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout",
-         mpi.rank(), "ideal-gas diagnostic ownership does not exactly cover");
+    fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout", 0,
+         "ideal-gas diagnostic ownership does not exactly cover");
 }
 
 struct CommittedObservation final {
@@ -835,9 +840,20 @@ build_record(const flow::IdealGasClosureDiagnosticSource &source,
   return record;
 }
 
+void require_exact_record_contract(
+    const DiagnosticRecord &record, const DiagnosticRecord &expected,
+    const flow::IdealGasClosureDiagnosticSource &source,
+    const DiagnosticRequest &request) {
+  validate(record, describe_diagnostics(source), request);
+  validate(expected, describe_diagnostics(source), request);
+  if (to_canonical_json(record) != to_canonical_json(expected))
+    throw runtime::Error("ideal-gas diagnostic record contract differs");
+}
+
 void submit(DiagnosticRecord record,
             const flow::IdealGasClosureDiagnosticSource &source,
             const DiagnosticRequest &request, DiagnosticSink &sink) {
+  const auto expected = record;
 #ifndef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
   (void)source;
 #endif
@@ -847,7 +863,7 @@ void submit(DiagnosticRecord record,
     record.schema_version = 0U;
 #endif
   try {
-    validate(record, describe_diagnostics(source), request);
+    require_exact_record_contract(record, expected, source, request);
   } catch (...) {
     fail(DiagnosticFailureClass::invalid_input, "closure.diagnostics.record",
          -1, "ideal-gas diagnostic record is invalid");
@@ -1092,14 +1108,15 @@ void submit_collective(const DiagnosticRecord &record,
                        const flow::IdealGasClosureDiagnosticSource &source,
                        const DiagnosticRequest &request,
                        const runtime::MpiContext &mpi, DiagnosticSink &sink) {
+  auto candidate = record;
   bool invalid = false;
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-  invalid = fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
-                  mpi.rank());
+  if (fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
+            mpi.rank()))
+    candidate.schema_version = 0U;
 #endif
   try {
-    if (!invalid)
-      validate(record, describe_diagnostics(source), request);
+    require_exact_record_contract(candidate, record, source, request);
   } catch (...) {
     invalid = true;
   }
@@ -1147,11 +1164,46 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          DiagnosticSink &sink) {
   try {
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(source, test::IdealGasClosureDiagnosticFault::stale_source,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::invalid_input,
+           "closure.diagnostics.stale-source", -1,
+           "ideal-gas diagnostic source is stale");
     if (fault(source, test::IdealGasClosureDiagnosticFault::capability,
               source.relative_rank()))
-      fail(DiagnosticFailureClass::capability,
-           "closure.diagnostics.capability", -1,
-           "ideal-gas diagnostic capability is unavailable");
+      fail(DiagnosticFailureClass::capability, "closure.diagnostics.capability",
+           -1, "ideal-gas diagnostic capability is unavailable");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::provider_agreement,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::invalid_input,
+           "closure.diagnostics.provider-agreement", -1,
+           "ideal-gas diagnostic provider is inconsistent");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::ownership_layout,
+              source.relative_rank()) ||
+        fault(source, test::IdealGasClosureDiagnosticFault::global_extent,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout", -1,
+           "ideal-gas diagnostic layout is inconsistent");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::request_preparation,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::invalid_request,
+           "closure.diagnostics.request-agreement", -1,
+           "ideal-gas diagnostic request preparation failed");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::sample_preparation,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::layout,
+           "closure.diagnostics.sample-preparation", -1,
+           "ideal-gas diagnostic sample preparation failed");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::sample_wire,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.sample-wire",
+           -1, "ideal-gas diagnostic sample wire is malformed");
+    if (fault(source, test::IdealGasClosureDiagnosticFault::aggregation,
+              source.relative_rank()) ||
+        fault(source, test::IdealGasClosureDiagnosticFault::oversized_agreement,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::layout, "closure.diagnostics.aggregation",
+           -1, "ideal-gas diagnostic aggregation failed");
 #endif
     require_request(source, request, DiagnosticScope::local);
     submit(build_record(source, request, observe(source, request),
@@ -1175,6 +1227,15 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
   auto &work = test_state(source);
   ++work.collective_calls;
   int injected_rank = lowest_rank(
+      mpi,
+      fault(source, test::IdealGasClosureDiagnosticFault::stale_source,
+            mpi.rank()),
+      "MPI_Allreduce(ideal-gas diagnostic stale-source injection)");
+  if (injected_rank >= 0)
+    fail(DiagnosticFailureClass::invalid_input,
+         "closure.diagnostics.stale-source", injected_rank,
+         "ideal-gas diagnostic source is stale");
+  injected_rank = lowest_rank(
       mpi,
       fault(source, test::IdealGasClosureDiagnosticFault::request_preparation,
             mpi.rank()),
@@ -1434,6 +1495,19 @@ test::IdealGasClosureDiagnosticTestAccess::positive_invariant(std::string id,
                                                               double observed) {
   return make_invariant(std::move(id), std::move(unit), observed, 0.0,
                         InvariantRelation::positive);
+}
+
+void test::IdealGasClosureDiagnosticTestAccess::submit_record_contract(
+    const flow::IdealGasClosureDiagnosticSource &source,
+    const DiagnosticRequest &request, const DiagnosticRecord &expected,
+    const DiagnosticRecord &candidate, DiagnosticSink &sink) {
+  try {
+    require_exact_record_contract(candidate, expected, source, request);
+  } catch (...) {
+    fail(DiagnosticFailureClass::invalid_input, "closure.diagnostics.record",
+         -1, "ideal-gas diagnostic record is invalid");
+  }
+  sink.submit(candidate);
 }
 #endif
 

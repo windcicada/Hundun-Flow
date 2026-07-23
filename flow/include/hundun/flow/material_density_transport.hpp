@@ -237,12 +237,16 @@ private:
   assess_trial_after_closure(FlowState &, const MaterialFaceMassFlux &,
                              const MomentumTimeStencil &,
                              double enthalpy_rate_J_per_kg_s) const;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  void set_post_assessment_fault_for_test(std::uint8_t kind, int rank);
+#endif
   void prepare_task20_attempt() const;
   struct Impl;
   explicit MaterialDensityTransport(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityDiagnosticSource;
   friend class FixedStepMaterialDensityFlow;
+  friend struct detail::DensityClosureBridge;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
 #endif

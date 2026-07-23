@@ -88,118 +88,243 @@ struct DensityClosureBridge final {
       const MaterialDensityStepAttemptReport &) noexcept;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   static void force_finalization_identity_wrap(FixedStepMaterialDensityFlow &);
+  static void set_post_assessment_fault(FixedStepMaterialDensityFlow &,
+                                        std::uint8_t kind, int rank);
 #endif
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   static bool post_evidence_mutation_rejected(
       const MaterialDensityStepAttemptReport &report, std::uint8_t mutation) {
     auto copy = report;
-    auto &post = *copy.post_closure_report_;
-    switch (mutation) {
-    case 0U:
-      ++post.attempt_identity_;
-      break;
-    case 1U:
-      ++post.shared_face_mass_flux_field_;
-      break;
-    case 2U:
-      post.flux_provenance_ = MaterialFluxProvenance::predictor;
-      break;
-    case 3U:
-      post.stencil_.dt_s = std::nextafter(
-          post.stencil_.dt_s, std::numeric_limits<double>::infinity());
-      break;
-    case 4U:
-      post.finalization_identity_ = 0U;
-      break;
-    case 5U:
-      post.finalization_identity_ = copy.material_finalization_identity_;
-      break;
-    case 6U:
-      post.transport_residual_available_.pop_back();
-      break;
-    case 7U:
-      post.transport_normalized_l2_.front() = std::nextafter(
-          post.transport_normalized_l2_.front(),
-          std::numeric_limits<double>::infinity());
-      break;
-    case 8U:
-      post.disposition_ =
-          post.disposition_ == MaterialTransportDisposition::finalized
-              ? MaterialTransportDisposition::recoverable_failure
-              : MaterialTransportDisposition::finalized;
-      break;
-    case 9U:
-      post.reason_ = MaterialTransportFailureReason::final_density_residual;
-      break;
-    case 10U:
-      ++post.lowest_failing_rank_;
-      break;
-    case 11U:
-      post.density_residual_available_ =
-          !post.density_residual_available_;
-      break;
-    case 12U:
-      post.density_normalized_l2_ = std::nextafter(
-          post.density_normalized_l2_, std::numeric_limits<double>::infinity());
-      break;
-    case 13U:
-      post.transport_residual_available_.front() ^= 1U;
-      break;
-    case 14U:
-      post.transport_conservation_available_.pop_back();
-      break;
-    case 15U:
-      post.transport_relative_conservation_defect_.front() = std::nextafter(
-          post.transport_relative_conservation_defect_.front(),
-          std::numeric_limits<double>::infinity());
-      break;
-    case 16U:
-      post.transport_conservation_available_.front() ^= 1U;
-      break;
-    case 17U:
-      post.mass_conservation_available_ = !post.mass_conservation_available_;
-      break;
-    case 18U:
-      post.mass_relative_conservation_defect_ = std::nextafter(
-          post.mass_relative_conservation_defect_,
-          std::numeric_limits<double>::infinity());
-      break;
-    case 19U:
-      post.minimum_density_available_ = !post.minimum_density_available_;
-      break;
-    case 20U:
-      post.minimum_density_kg_per_m3_ = std::nextafter(
-          post.minimum_density_kg_per_m3_,
-          std::numeric_limits<double>::infinity());
-      break;
-    case 21U: {
-      auto &pre = *copy.material_report_;
-      pre.transport_normalized_l2_.front() = std::nextafter(
-          pre.transport_normalized_l2_.front(),
-          std::numeric_limits<double>::infinity());
-      pre.seal();
-      break;
-    }
-    case 22U: {
-      auto &pre = *copy.material_report_;
-      pre.transport_relative_conservation_defect_.front() = std::nextafter(
-          pre.transport_relative_conservation_defect_.front(),
-          std::numeric_limits<double>::infinity());
-      pre.seal();
-      break;
-    }
-    case 23U: {
-      auto &pre = *copy.material_report_;
-      pre.mass_relative_conservation_defect_ = std::nextafter(
-          pre.mass_relative_conservation_defect_,
-          std::numeric_limits<double>::infinity());
-      pre.seal();
-      break;
-    }
-    default:
+    constexpr std::uint8_t report_field_count = 29U;
+    constexpr std::uint8_t post_authority_begin = report_field_count;
+    constexpr std::uint8_t post_coherent_begin = 2U * report_field_count;
+    constexpr std::uint8_t pre_report_begin = 3U * report_field_count;
+    constexpr std::uint8_t pre_authority_begin = 4U * report_field_count;
+    constexpr std::uint8_t pre_coherent_begin = 5U * report_field_count;
+    constexpr std::uint8_t outer_begin = 6U * report_field_count;
+    constexpr std::uint8_t outer_count = 20U;
+    if (!copy.material_report_ || !copy.pre_closure_authority_ ||
+        !copy.post_closure_report_ || !copy.post_closure_authority_ ||
+        mutation >= outer_begin + outer_count)
       return false;
+
+    const auto next = [](double value) noexcept {
+      return std::nextafter(value, std::numeric_limits<double>::infinity());
+    };
+    const auto change_size = [](auto &values) {
+      if (values.empty())
+        values.push_back({});
+      else
+        values.pop_back();
+    };
+    const auto mutate_report = [&](MaterialDensityTransportReport &target,
+                                   std::uint8_t field) {
+      switch (field) {
+      case 0U:
+        target.disposition_ =
+            target.disposition_ == MaterialTransportDisposition::finalized
+                ? MaterialTransportDisposition::recoverable_failure
+                : MaterialTransportDisposition::finalized;
+        break;
+      case 1U:
+        target.reason_ = target.reason_ == MaterialTransportFailureReason::none
+                             ? MaterialTransportFailureReason::invalid_input
+                             : MaterialTransportFailureReason::none;
+        break;
+      case 2U:
+        ++target.lowest_failing_rank_;
+        break;
+      case 3U:
+        target.stencil_.order =
+            target.stencil_.order == MomentumTimeOrder::backward_euler
+                ? MomentumTimeOrder::bdf2
+                : MomentumTimeOrder::backward_euler;
+        break;
+      case 4U:
+        target.stencil_.dt_s = next(target.stencil_.dt_s);
+        break;
+      case 5U:
+        target.stencil_.previous_dt_s = next(target.stencil_.previous_dt_s);
+        break;
+      case 6U:
+        target.stencil_.alpha0 = next(target.stencil_.alpha0);
+        break;
+      case 7U:
+        target.stencil_.alpha1 = next(target.stencil_.alpha1);
+        break;
+      case 8U:
+        target.stencil_.alpha2 = next(target.stencil_.alpha2);
+        break;
+      case 9U:
+        target.flux_provenance_ =
+            target.flux_provenance_ == MaterialFluxProvenance::final_corrected
+                ? MaterialFluxProvenance::predictor
+                : MaterialFluxProvenance::final_corrected;
+        break;
+      case 10U:
+        ++target.attempt_identity_;
+        break;
+      case 11U:
+        ++target.finalization_identity_;
+        break;
+      case 12U:
+        ++target.shared_face_mass_flux_field_;
+        break;
+      case 13U:
+        target.density_residual_available_ =
+            !target.density_residual_available_;
+        break;
+      case 14U:
+        target.density_normalized_l2_ = next(target.density_normalized_l2_);
+        break;
+      case 15U:
+        change_size(target.transport_residual_available_);
+        break;
+      case 16U:
+        target.transport_residual_available_.front() ^= 1U;
+        break;
+      case 17U:
+        change_size(target.transport_normalized_l2_);
+        break;
+      case 18U:
+        target.transport_normalized_l2_.front() =
+            next(target.transport_normalized_l2_.front());
+        break;
+      case 19U:
+        target.mass_conservation_available_ =
+            !target.mass_conservation_available_;
+        break;
+      case 20U:
+        target.mass_relative_conservation_defect_ =
+            next(target.mass_relative_conservation_defect_);
+        break;
+      case 21U:
+        change_size(target.transport_conservation_available_);
+        break;
+      case 22U:
+        target.transport_conservation_available_.front() ^= 1U;
+        break;
+      case 23U:
+        change_size(target.transport_relative_conservation_defect_);
+        break;
+      case 24U:
+        target.transport_relative_conservation_defect_.front() =
+            next(target.transport_relative_conservation_defect_.front());
+        break;
+      case 25U:
+        target.minimum_density_available_ = !target.minimum_density_available_;
+        break;
+      case 26U:
+        target.minimum_density_kg_per_m3_ =
+            next(target.minimum_density_kg_per_m3_);
+        break;
+      case 27U:
+        ++target.minimum_density_global_cell_;
+        break;
+      case 28U:
+        ++target.minimum_density_rank_;
+        break;
+      }
+      target.seal();
+    };
+
+    if (mutation < report_field_count) {
+      mutate_report(*copy.post_closure_report_, mutation);
+    } else if (mutation < post_coherent_begin) {
+      mutate_report(*copy.post_closure_authority_,
+                    static_cast<std::uint8_t>(mutation - post_authority_begin));
+    } else if (mutation < pre_report_begin) {
+      const auto field =
+          static_cast<std::uint8_t>(mutation - post_coherent_begin);
+      mutate_report(*copy.post_closure_report_, field);
+      mutate_report(*copy.post_closure_authority_, field);
+    } else if (mutation < pre_authority_begin) {
+      mutate_report(*copy.material_report_,
+                    static_cast<std::uint8_t>(mutation - pre_report_begin));
+    } else if (mutation < pre_coherent_begin) {
+      mutate_report(*copy.pre_closure_authority_,
+                    static_cast<std::uint8_t>(mutation - pre_authority_begin));
+    } else if (mutation < outer_begin) {
+      const auto field =
+          static_cast<std::uint8_t>(mutation - pre_coherent_begin);
+      mutate_report(*copy.material_report_, field);
+      mutate_report(*copy.pre_closure_authority_, field);
+    } else {
+      const auto field = static_cast<std::uint8_t>(mutation - outer_begin);
+      switch (field) {
+      case 0U:
+        copy.material_failure_reason_ =
+            copy.material_failure_reason_ ==
+                    MaterialTransportFailureReason::none
+                ? MaterialTransportFailureReason::invalid_input
+                : MaterialTransportFailureReason::none;
+        break;
+      case 1U:
+        ++copy.material_field_count_;
+        break;
+      case 2U:
+        ++copy.shared_face_mass_flux_field_;
+        break;
+      case 3U:
+        copy.flux_provenance_ =
+            copy.flux_provenance_ == MaterialFluxProvenance::final_corrected
+                ? MaterialFluxProvenance::predictor
+                : MaterialFluxProvenance::final_corrected;
+        break;
+      case 4U:
+        ++copy.attempt_identity_;
+        break;
+      case 5U:
+        ++copy.material_attempt_identity_;
+        break;
+      case 6U:
+        ++copy.material_finalization_identity_;
+        break;
+      case 7U:
+        change_size(copy.flow_.final_transport_normalized_l2);
+        break;
+      case 8U:
+        copy.flow_.final_transport_normalized_l2.front() =
+            next(copy.flow_.final_transport_normalized_l2.front());
+        break;
+      case 9U:
+        change_size(copy.flow_.final_transport_relative_conservation_defect);
+        break;
+      case 10U:
+        copy.flow_.final_transport_relative_conservation_defect.front() = next(
+            copy.flow_.final_transport_relative_conservation_defect.front());
+        break;
+      case 11U:
+        copy.mass_conservation_available_ = !copy.mass_conservation_available_;
+        break;
+      case 12U:
+        copy.flow_.final_mass_relative_conservation_defect =
+            next(copy.flow_.final_mass_relative_conservation_defect);
+        break;
+      case 13U:
+        copy.closure_origin_ = !copy.closure_origin_;
+        break;
+      case 14U:
+        copy.pre_closure_authority_.reset();
+        break;
+      case 15U:
+        ++copy.pre_closure_report_seal_authority_;
+        break;
+      case 16U:
+        copy.post_closure_evidence_available_ =
+            !copy.post_closure_evidence_available_;
+        break;
+      case 17U:
+        copy.post_closure_report_.reset();
+        break;
+      case 18U:
+        copy.post_closure_authority_.reset();
+        break;
+      case 19U:
+        ++copy.post_closure_report_seal_authority_;
+        break;
+      }
     }
-    post.seal();
     copy.seal_ = copy.compute_seal();
     return !report_authenticated(copy);
   }

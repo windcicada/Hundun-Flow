@@ -508,13 +508,15 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
   for (std::uint8_t mutation = 0U;
        mutation < static_cast<std::uint8_t>(
                       hundun::flow::test::IdealGasPostEvidenceMutation::count);
-       ++mutation)
-    HUNDUN_CHECK(
-        hundun::flow::test::IdealGasClosureTestAccess::
+       ++mutation) {
+    if (!hundun::flow::test::IdealGasClosureTestAccess::
             post_evidence_mutation_rejected(
                 report,
                 static_cast<hundun::flow::test::IdealGasPostEvidenceMutation>(
-                    mutation)));
+                    mutation)))
+      throw std::runtime_error("post-EOS success mutation was accepted: " +
+                               std::to_string(mutation));
+  }
   HUNDUN_CHECK(state.metadata().step == 1U);
   auto closure_source = flow.closure_diagnostic_source(state, report);
   HUNDUN_CHECK(closure_source.fingerprint_field_count() == 3U);
@@ -1122,57 +1124,71 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
           before_post_store, after_post_store));
     }
 
+    using PostAssessmentFault = hundun::flow::test::IdealGasPostAssessmentFault;
     for (const int fault_rank : {0, mpi.size() - 1}) {
-      const hundun::test::IdealGasStateSnapshot before_post_assessment{
-          state.snapshot(hundun::flow::FlowLayer::history),
-          state.snapshot(hundun::flow::FlowLayer::committed),
-          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-          flow.closure_state()};
-      hundun::flow::test::IdealGasClosureTestAccess::
-          set_post_assessment_corruption(flow, fault_rank);
-      const auto post_assessment_failed =
-          flow.attempt(state, 0.0, bdf2, {}, {});
-      HUNDUN_CHECK(post_assessment_failed.flow().flow().disposition ==
-                   hundun::flow::StepAttemptDisposition::recoverable_failure);
-      HUNDUN_CHECK(post_assessment_failed.flow().flow().reason ==
-                   hundun::flow::StepFailureReason::transport_failure);
-      HUNDUN_CHECK(post_assessment_failed.flow().flow().lowest_failing_rank ==
-                   fault_rank);
-      HUNDUN_CHECK(post_assessment_failed.flow().material_failure_reason() ==
-                   hundun::flow::MaterialTransportFailureReason::none);
-      HUNDUN_CHECK(post_assessment_failed.closure_report_available());
-      HUNDUN_CHECK(post_assessment_failed.closure_report().disposition() ==
-                   hundun::flow::IdealGasClosureDisposition::closed);
-      HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
-                       report_authenticated(post_assessment_failed));
-      HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
-                       post_eos_evidence_authenticated(
-                           post_assessment_failed.flow()));
-      require_halo_trace(
-          flow, fields,
-          {hundun::flow::IdealGasClosureStage::predictor,
-           hundun::flow::IdealGasClosureStage::provisional,
-           hundun::flow::IdealGasClosureStage::final});
-      for (std::uint8_t mutation = 0U;
-           mutation < static_cast<std::uint8_t>(
-                          hundun::flow::test::
-                              IdealGasPostEvidenceMutation::count);
-           ++mutation)
-        if (!hundun::flow::test::IdealGasClosureTestAccess::
-                 post_evidence_mutation_rejected(
-                     post_assessment_failed,
-                     static_cast<hundun::flow::test::
-                                     IdealGasPostEvidenceMutation>(mutation)))
-          throw std::runtime_error(
-              "post-EOS failure mutation was accepted: " +
-              std::to_string(mutation));
-      const hundun::test::IdealGasStateSnapshot after_post_assessment{
-          state.snapshot(hundun::flow::FlowLayer::history),
-          state.snapshot(hundun::flow::FlowLayer::committed),
-          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-          flow.closure_state()};
-      HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
-          before_post_assessment, after_post_assessment));
+      for (const auto &[fault, expected_reason] :
+           {std::pair{PostAssessmentFault::non_finite_state,
+                      hundun::flow::StepFailureReason::transport_failure},
+            std::pair{PostAssessmentFault::non_positive_density,
+                      hundun::flow::StepFailureReason::transport_failure},
+            std::pair{
+                PostAssessmentFault::final_transport_residual,
+                hundun::flow::StepFailureReason::final_transport_residual},
+            std::pair{
+                PostAssessmentFault::final_conservation_defect,
+                hundun::flow::StepFailureReason::final_conservation_defect}}) {
+        const hundun::test::IdealGasStateSnapshot before_post_assessment{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        hundun::flow::test::IdealGasClosureTestAccess::
+            set_post_assessment_fault(flow, fault, fault_rank);
+        const auto post_assessment_failed =
+            flow.attempt(state, 0.0, bdf2, {}, {});
+        HUNDUN_CHECK(post_assessment_failed.flow().flow().disposition ==
+                     hundun::flow::StepAttemptDisposition::recoverable_failure);
+        HUNDUN_CHECK(post_assessment_failed.flow().flow().reason ==
+                     expected_reason);
+        HUNDUN_CHECK(post_assessment_failed.flow().flow().lowest_failing_rank ==
+                     fault_rank);
+        HUNDUN_CHECK(post_assessment_failed.flow().material_failure_reason() ==
+                     hundun::flow::MaterialTransportFailureReason::none);
+        HUNDUN_CHECK(post_assessment_failed.closure_report_available());
+        HUNDUN_CHECK(post_assessment_failed.closure_report().disposition() ==
+                     hundun::flow::IdealGasClosureDisposition::closed);
+        HUNDUN_CHECK(
+            hundun::flow::test::IdealGasClosureTestAccess::report_authenticated(
+                post_assessment_failed));
+        HUNDUN_CHECK(
+            hundun::flow::test::IdealGasClosureTestAccess::
+                post_eos_evidence_authenticated(post_assessment_failed.flow()));
+        require_halo_trace(flow, fields,
+                           {hundun::flow::IdealGasClosureStage::predictor,
+                            hundun::flow::IdealGasClosureStage::provisional,
+                            hundun::flow::IdealGasClosureStage::final});
+        for (std::uint8_t mutation = 0U;
+             mutation <
+             static_cast<std::uint8_t>(
+                 hundun::flow::test::IdealGasPostEvidenceMutation::count);
+             ++mutation)
+          if (!hundun::flow::test::IdealGasClosureTestAccess::
+                  post_evidence_mutation_rejected(
+                      post_assessment_failed,
+                      static_cast<
+                          hundun::flow::test::IdealGasPostEvidenceMutation>(
+                          mutation)))
+            throw std::runtime_error(
+                "post-EOS failure mutation was accepted: " +
+                std::to_string(mutation));
+        const hundun::test::IdealGasStateSnapshot after_post_assessment{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+            before_post_assessment, after_post_assessment));
+      }
       if (mpi.size() == 1)
         break;
     }
