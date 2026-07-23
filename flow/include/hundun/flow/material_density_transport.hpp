@@ -181,6 +181,7 @@ private:
 
   friend class MaterialDensityTransport;
   friend class MaterialDensityDiagnosticSource;
+  friend class FixedStepMaterialDensityFlow;
   friend class MaterialDensityStepAttemptReport;
   friend struct detail::DensityClosureBridge;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS

@@ -10,6 +10,10 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include <array>
+#include <vector>
+#endif
 
 namespace hundun::boundary {
 class BoundaryRegistry;
@@ -198,10 +202,17 @@ private:
   void set_candidate_precedence_fault_for_test(int rank);
   void set_stage_failure_for_test(IdealGasClosureStage,
                                   IdealGasClosureFailureReason, int rank);
+  void set_metric_gate_failure_for_test(int rank);
+  void set_post_assessment_corruption_for_test(int rank);
+  void before_post_assessment_for_test(FlowState &);
+  void record_halo_for_test(std::uint8_t stage, runtime::FieldId density,
+                            runtime::FieldId enthalpy_density);
+  std::vector<std::array<std::uint64_t, 3>> halo_trace_for_test() const;
   void set_outer_failure_for_test(std::uint8_t point, int rank);
   int outer_failure_for_test(std::uint8_t point);
   void set_prepare_fault_for_test(bool state_prepare, int rank);
   void set_post_store_mpi_fault_for_test(int rank);
+  void set_attempt_layout_fault_for_test(int rank);
   void set_outlet_backflow_fault_for_test();
 #endif
   std::unique_ptr<Impl> impl_;

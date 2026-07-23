@@ -10,6 +10,7 @@
 #include "hundun/runtime/field_registry.hpp"
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "tests/support/test_main.hpp"
 
@@ -24,6 +25,24 @@
 namespace {
 
 hundun::runtime::Int3 grid(int ranks) { return {ranks, 1, 1}; }
+
+void require_fp64_delta(
+    const hundun::runtime::Fp64ReductionCounters &before,
+    const hundun::runtime::Fp64ReductionCounters &after,
+    std::uint64_t calls, std::uint64_t scalars, std::uint64_t bytes) {
+  HUNDUN_CHECK(after.collective_calls - before.collective_calls == calls);
+  HUNDUN_CHECK(after.reduced_scalars - before.reduced_scalars == scalars);
+  HUNDUN_CHECK(after.logical_payload_bytes - before.logical_payload_bytes ==
+               bytes);
+}
+
+void require_candidate_oracle(
+    const hundun::flow::IdealGasClosureReport &report) {
+  HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                   candidate_pressure_mutation_rejected(report, true));
+  HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                   candidate_pressure_mutation_rejected(report, false));
+}
 
 hundun::config::FlowCaseConfig periodic_case() {
   hundun::config::FlowCaseConfig config{};
@@ -105,6 +124,14 @@ void run(const hundun::runtime::MpiContext &mpi) {
   hundun::mesh::MeshGeometry geometry(
       topology,
       hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  auto alternate_decomposition =
+      hundun::runtime::StructuredDecomposition::create(
+          mpi, {18, 4, 4}, {true, true, true},
+          hundun::runtime::DecompositionOptions{grid(mpi.size())});
+  hundun::mesh::MeshTopology alternate_topology(alternate_decomposition);
+  hundun::mesh::MeshGeometry alternate_geometry(
+      alternate_topology,
+      hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
   auto boundaries =
       hundun::boundary::BoundaryRegistry::create(periodic_case(), topology);
 
@@ -172,6 +199,29 @@ void run(const hundun::runtime::MpiContext &mpi) {
           std::numeric_limits<double>::infinity();
     expect_create_rejected(invalid_pressure);
 
+    auto invalid_enthalpy = hundun::flow::IdealGasClosureSpec{
+        rho_h, cp, gas_constant, pressure};
+    if (mpi.rank() == target)
+      invalid_enthalpy.enthalpy_density = fields.density;
+    expect_create_rejected(invalid_enthalpy);
+
+    for (const bool geometry_mismatch : {false, true}) {
+      const auto &candidate_topology =
+          !geometry_mismatch && mpi.rank() == target ? alternate_topology
+                                                     : topology;
+      const auto &candidate_geometry =
+          mpi.rank() == target ? alternate_geometry : geometry;
+      bool collaborator_rejected = false;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::create(
+            candidate_topology, candidate_geometry, boundaries, mpi, registry,
+            fields, state, {rho_h, cp, gas_constant, pressure}));
+      } catch (const hundun::runtime::Error &) {
+        collaborator_rejected = true;
+      }
+      HUNDUN_CHECK(collaborator_rejected);
+    }
+
     const std::size_t face_count =
         topology.local_face_count() + (mpi.rank() == target ? 1U : 0U);
     auto wrong_layout_state = hundun::flow::FlowState::create(
@@ -191,6 +241,168 @@ void run(const hundun::runtime::MpiContext &mpi) {
       layout_rejected = true;
     }
     HUNDUN_CHECK(layout_rejected);
+
+    auto wrong_cell_extent = decomposition.local_extent();
+    if (mpi.rank() == target)
+      ++wrong_cell_extent.x;
+    const auto wrong_cell_count =
+        static_cast<std::size_t>(wrong_cell_extent.x) *
+        static_cast<std::size_t>(wrong_cell_extent.y) *
+        static_cast<std::size_t>(wrong_cell_extent.z);
+    auto wrong_cell_state = hundun::flow::FlowState::create(
+        registry, {wrong_cell_extent, topology.local_face_count()}, fields,
+        {0U, 0.0, 1.0e-3, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    auto wrong_cell_initial = initial;
+    wrong_cell_initial.density.resize(wrong_cell_count, density);
+    wrong_cell_initial.velocity.resize(wrong_cell_count * 3U, 0.0);
+    wrong_cell_initial.mechanical_pressure.resize(wrong_cell_count, 0.0);
+    wrong_cell_initial.transported_cell_fields[0].resize(
+        wrong_cell_count, density * cp * temperature);
+    wrong_cell_state.seed_accepted_layers(wrong_cell_initial,
+                                          wrong_cell_initial);
+    bool cell_layout_rejected = false;
+    try {
+      static_cast<void>(hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields,
+          wrong_cell_state, {rho_h, cp, gas_constant, pressure}));
+    } catch (const hundun::runtime::Error &) {
+      cell_layout_rejected = true;
+    }
+    HUNDUN_CHECK(cell_layout_rejected);
+    if (mpi.size() == 1)
+      break;
+  }
+
+  using CreateFault = hundun::flow::test::IdealGasCreateFault;
+  using TestAccess = hundun::flow::test::IdealGasClosureTestAccess;
+  for (const int target : {0, mpi.size() - 1}) {
+    for (const auto fault : {CreateFault::mode_disagreement,
+                             CreateFault::ownership_gap,
+                             CreateFault::ownership_overlap,
+                             CreateFault::ownership_swap}) {
+      TestAccess::set_create_fault(fault, target);
+      expect_create_rejected({rho_h, cp, gas_constant, pressure});
+      TestAccess::reset_create_fault();
+    }
+    for (const auto fault : {CreateFault::sum_reduction,
+                             CreateFault::maximum_reduction}) {
+      TestAccess::set_create_fault(fault, target);
+      bool typed = false;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::create(
+            topology, geometry, boundaries, mpi, registry, fields, state,
+            {rho_h, cp, gas_constant, pressure}));
+      } catch (const hundun::runtime::MpiOperationError &error) {
+        typed = std::string_view(error.what()).find(
+                    fault == CreateFault::sum_reduction
+                        ? "ideal-gas create sum reduction"
+                        : "ideal-gas create maximum reduction") !=
+                std::string_view::npos;
+      }
+      TestAccess::reset_create_fault();
+      HUNDUN_CHECK(typed);
+    }
+    if (mpi.size() == 1)
+      break;
+  }
+
+  expect_create_rejected(
+      {fields.density, cp, gas_constant, pressure});
+  expect_create_rejected(
+      {std::numeric_limits<hundun::runtime::FieldId>::max(), cp,
+       gas_constant, pressure});
+  {
+    for (const int target : {0, mpi.size() - 1}) {
+      auto candidate_fields = fields;
+      if (mpi.rank() == target)
+        candidate_fields.transported_cell_fields = {fields.density};
+      bool rejected = false;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::create(
+            topology, geometry, boundaries, mpi, registry, candidate_fields,
+            state, {rho_h, cp, gas_constant, pressure}));
+      } catch (const hundun::runtime::Error &) {
+        rejected = true;
+      }
+      HUNDUN_CHECK(rejected);
+      if (mpi.size() == 1)
+        break;
+    }
+  }
+  {
+    hundun::runtime::FieldRegistry wrong_registry;
+    static_cast<void>(wrong_registry.declare_field(
+        cell("rho", "kg/m3", 1U, true)));
+    static_cast<void>(wrong_registry.declare_field(
+        cell("velocity", "m/s", 3U, false)));
+    static_cast<void>(wrong_registry.declare_field(
+        cell("pi", "Pa", 1U, false)));
+    static_cast<void>(wrong_registry.declare_field(
+        face("face_velocity", "m/s", 3U)));
+    static_cast<void>(
+        hundun::finite_volume::declare_face_mass_flux(wrong_registry));
+    static_cast<void>(wrong_registry.declare_field(
+        cell("rho_h", "J/m3", 1U, true)));
+    wrong_registry.freeze();
+    for (const int target : {0, mpi.size() - 1}) {
+      const auto &candidate_registry =
+          mpi.rank() == target ? wrong_registry : registry;
+      bool rejected = false;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::create(
+            topology, geometry, boundaries, mpi, candidate_registry, fields,
+            state, {rho_h, cp, gas_constant, pressure}));
+      } catch (const hundun::runtime::Error &) {
+        rejected = true;
+      }
+      HUNDUN_CHECK(rejected);
+      if (mpi.size() == 1)
+        break;
+    }
+  }
+  {
+    state.begin_attempt();
+    expect_create_rejected({rho_h, cp, gas_constant, pressure});
+    state.rollback_attempt();
+  }
+  const auto expect_state_rejected =
+      [&](hundun::flow::FlowLayerValues history,
+          hundun::flow::FlowLayerValues committed) {
+        auto candidate = hundun::flow::FlowState::create(
+            registry,
+            {decomposition.local_extent(), topology.local_face_count()},
+            fields,
+            {0U, 0.0, 1.0e-3, 0.0,
+             hundun::flow::MomentumTimeOrder::backward_euler});
+        bool rejected = false;
+        try {
+          candidate.seed_accepted_layers(history, committed);
+          static_cast<void>(hundun::flow::IdealGasClosure::create(
+              topology, geometry, boundaries, mpi, registry, fields,
+              candidate, {rho_h, cp, gas_constant, pressure}));
+        } catch (const hundun::runtime::Error &) {
+          rejected = true;
+        }
+        HUNDUN_CHECK(rejected);
+      };
+  for (const int target : {0, mpi.size() - 1}) {
+    // FlowState itself rejects non-finite/non-positive seed values locally.
+    // The closure matrix starts from finite states so all ranks reach the
+    // same create preflight before the EOS/history contradiction is agreed.
+    for (std::uint8_t mutation = 4U; mutation < 7U; ++mutation) {
+      auto history = initial;
+      auto committed = initial;
+      if (mpi.rank() == target) {
+        if (mutation == 4U)
+          committed.transported_cell_fields[0][0] *= 1.01;
+        else if (mutation == 5U)
+          history.transported_cell_fields[0][0] *= 1.01;
+        else
+          history.density[0] *= 1.01;
+      }
+      expect_state_rejected(std::move(history), std::move(committed));
+    }
     if (mpi.size() == 1)
       break;
   }
@@ -212,6 +424,210 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK_NEAR(closure_state.thermodynamic_pressure_pa, pressure,
                     1.0e-12 * pressure);
   HUNDUN_CHECK_NEAR(*closure_state.target_mass_kg, density, 5.0e-12 * density);
+  HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                   post_store_rank_marker_is_collision_free(mpi.size()));
+
+  bool inactive_rejected = false;
+  try {
+    hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                                 1U);
+  } catch (const hundun::runtime::Error &) {
+    inactive_rejected = true;
+  }
+  HUNDUN_CHECK(inactive_rejected);
+  state.begin_attempt();
+  bool zero_identity_rejected = false;
+  try {
+    hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                                 0U);
+  } catch (const hundun::runtime::Error &) {
+    zero_identity_rejected = true;
+  }
+  HUNDUN_CHECK(zero_identity_rejected);
+  state.rollback_attempt();
+  if (mpi.size() > 1)
+    for (const int target : {0, mpi.size() - 1}) {
+      state.begin_attempt();
+      bool identity_rejected = false;
+      try {
+        hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(
+            closure, state, mpi.rank() == target ? 8U : 7U);
+      } catch (const hundun::runtime::Error &) {
+        identity_rejected = true;
+      }
+      HUNDUN_CHECK(identity_rejected);
+      state.rollback_attempt();
+    }
+  state.begin_attempt();
+  hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                               9U);
+  bool overlap_rejected = false;
+  try {
+    hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                                 10U);
+  } catch (const hundun::runtime::Error &) {
+    overlap_rejected = true;
+  }
+  HUNDUN_CHECK(overlap_rejected);
+  hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+  state.rollback_attempt();
+
+  // Isolate the closure from the surrounding PISO arithmetic so the public
+  // MpiContext counters prove each frozen P/C1/F prefix directly.
+  state.begin_attempt();
+  const auto success_before = mpi.fp64_reduction_counters();
+  hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                               1U);
+  const auto predictor =
+      hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+          closure, state, hundun::flow::IdealGasClosureStage::predictor);
+  require_fp64_delta(success_before, mpi.fp64_reduction_counters(), 3U, 19U,
+                     152U);
+  HUNDUN_CHECK(predictor.collective_count() == 5U);
+  HUNDUN_CHECK(predictor.candidate_pressure_available());
+  HUNDUN_CHECK_NEAR(predictor.candidate_pressure_pa(), pressure,
+                    1.0e-12 * pressure);
+  require_candidate_oracle(predictor);
+  const auto provisional =
+      hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+          closure, state, hundun::flow::IdealGasClosureStage::provisional);
+  require_fp64_delta(success_before, mpi.fp64_reduction_counters(), 6U, 38U,
+                     304U);
+  HUNDUN_CHECK(provisional.collective_count() == 9U);
+  HUNDUN_CHECK(provisional.candidate_pressure_available());
+  HUNDUN_CHECK_NEAR(provisional.candidate_pressure_pa(), pressure,
+                    1.0e-12 * pressure);
+  require_candidate_oracle(provisional);
+  const auto final = hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+      closure, state, hundun::flow::IdealGasClosureStage::final);
+  require_fp64_delta(success_before, mpi.fp64_reduction_counters(), 10U, 59U,
+                     472U);
+  HUNDUN_CHECK(final.collective_count() == 14U);
+  HUNDUN_CHECK(final.candidate_pressure_available());
+  HUNDUN_CHECK_NEAR(final.candidate_pressure_pa(), pressure,
+                    1.0e-12 * pressure);
+  require_candidate_oracle(final);
+  HUNDUN_CHECK(final.disposition() ==
+               hundun::flow::IdealGasClosureDisposition::closed);
+  hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+  state.rollback_attempt();
+
+  const auto expect_derived_failure =
+      [&](hundun::flow::IdealGasClosureStage failed_stage,
+          std::uint64_t calls, std::uint64_t scalars, std::uint64_t bytes,
+          std::uint64_t collectives, int target) {
+        state.begin_attempt();
+        hundun::flow::test::IdealGasClosureTestAccess::set_stage_failure(
+            closure, failed_stage,
+            hundun::flow::IdealGasClosureFailureReason::non_finite_temperature,
+            target);
+        const auto counters = mpi.fp64_reduction_counters();
+        hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(
+            closure, state, 2U);
+        hundun::flow::IdealGasClosureReport failed =
+            hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+                closure, state,
+                hundun::flow::IdealGasClosureStage::predictor);
+        if (failed_stage != hundun::flow::IdealGasClosureStage::predictor)
+          failed = hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+              closure, state,
+              hundun::flow::IdealGasClosureStage::provisional);
+        if (failed_stage == hundun::flow::IdealGasClosureStage::final)
+          failed = hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+              closure, state, hundun::flow::IdealGasClosureStage::final);
+        require_fp64_delta(counters, mpi.fp64_reduction_counters(), calls,
+                           scalars, bytes);
+        HUNDUN_CHECK(failed.collective_count() == collectives);
+        HUNDUN_CHECK(failed.reason() ==
+                     hundun::flow::IdealGasClosureFailureReason::
+                         non_finite_temperature);
+        HUNDUN_CHECK(failed.lowest_failing_rank() == target);
+        if (failed_stage == hundun::flow::IdealGasClosureStage::predictor) {
+          HUNDUN_CHECK(!failed.candidate_pressure_available());
+          bool candidate_rejected = false;
+          try {
+            static_cast<void>(failed.candidate_pressure_pa());
+          } catch (const hundun::runtime::Error &) {
+            candidate_rejected = true;
+          }
+          HUNDUN_CHECK(candidate_rejected);
+        } else {
+          HUNDUN_CHECK(failed.candidate_pressure_available());
+          HUNDUN_CHECK_NEAR(failed.candidate_pressure_pa(), pressure,
+                            1.0e-12 * pressure);
+        }
+        require_candidate_oracle(failed);
+        hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+        state.rollback_attempt();
+      };
+  for (const int target : {0, mpi.size() - 1}) {
+    expect_derived_failure(hundun::flow::IdealGasClosureStage::predictor, 1U,
+                           1U, 8U, 3U, target);
+    expect_derived_failure(hundun::flow::IdealGasClosureStage::provisional,
+                           4U, 20U, 160U, 7U, target);
+    expect_derived_failure(hundun::flow::IdealGasClosureStage::final, 7U, 39U,
+                           312U, 11U, target);
+    if (mpi.size() == 1)
+      break;
+  }
+
+  state.begin_attempt();
+  const auto metric_before = mpi.fp64_reduction_counters();
+  hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
+                                                               3U);
+  static_cast<void>(hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+      closure, state, hundun::flow::IdealGasClosureStage::predictor));
+  static_cast<void>(hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+      closure, state, hundun::flow::IdealGasClosureStage::provisional));
+  hundun::flow::test::IdealGasClosureTestAccess::set_metric_gate_failure(
+      closure, mpi.size() - 1);
+  const auto metric_failed =
+      hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+          closure, state, hundun::flow::IdealGasClosureStage::final);
+  require_fp64_delta(metric_before, mpi.fp64_reduction_counters(), 9U, 57U,
+                     456U);
+  HUNDUN_CHECK(metric_failed.collective_count() == 13U);
+  HUNDUN_CHECK(metric_failed.reason() ==
+               hundun::flow::IdealGasClosureFailureReason::eos_residual);
+  HUNDUN_CHECK(metric_failed.lowest_failing_rank() == 0);
+  HUNDUN_CHECK(metric_failed.candidate_pressure_available());
+  HUNDUN_CHECK_NEAR(metric_failed.candidate_pressure_pa(), pressure,
+                    1.0e-12 * pressure);
+  require_candidate_oracle(metric_failed);
+  hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+  state.rollback_attempt();
+
+  for (const int target : {0, mpi.size() - 1}) {
+    for (const bool enthalpy_density : {false, true}) {
+      state.begin_attempt();
+      const auto post_before = mpi.fp64_reduction_counters();
+      hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(
+          closure, state, 4U);
+      static_cast<void>(hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+          closure, state, hundun::flow::IdealGasClosureStage::predictor));
+      static_cast<void>(hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+          closure, state, hundun::flow::IdealGasClosureStage::provisional));
+      hundun::flow::test::IdealGasClosureTestAccess::set_post_store_corruption(
+          closure, target, enthalpy_density);
+      const auto post_failed =
+          hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+              closure, state, hundun::flow::IdealGasClosureStage::final);
+      require_fp64_delta(post_before, mpi.fp64_reduction_counters(), 10U, 59U,
+                         472U);
+      HUNDUN_CHECK(post_failed.collective_count() == 14U);
+      HUNDUN_CHECK(post_failed.reason() ==
+                   hundun::flow::IdealGasClosureFailureReason::eos_residual);
+      HUNDUN_CHECK(post_failed.lowest_failing_rank() == target);
+      HUNDUN_CHECK(post_failed.candidate_pressure_available());
+      HUNDUN_CHECK_NEAR(post_failed.candidate_pressure_pa(), pressure,
+                        1.0e-12 * pressure);
+      require_candidate_oracle(post_failed);
+      hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+      state.rollback_attempt();
+    }
+    if (mpi.size() == 1)
+      break;
+  }
 
   auto moved = std::move(closure);
   bool moved_from_rejected = false;
@@ -251,6 +667,21 @@ void run(const hundun::runtime::MpiContext &mpi) {
   open_initial.transported_cell_fields = {std::vector<double>(
       open_topology.owned_cell_count(), density * cp * temperature)};
   open_state.seed_accepted_layers(open_initial, open_initial);
+  const auto expect_open_spec_rejected =
+      [&](hundun::flow::IdealGasClosureSpec spec) {
+        bool rejected = false;
+        try {
+          static_cast<void>(hundun::flow::IdealGasClosure::create(
+              open_topology, open_geometry, open_boundaries, mpi, registry,
+              fields, open_state, spec));
+        } catch (const hundun::runtime::Error &) {
+          rejected = true;
+        }
+        HUNDUN_CHECK(rejected);
+      };
+  expect_open_spec_rejected({rho_h, cp * 1.01, gas_constant, pressure});
+  expect_open_spec_rejected({rho_h, cp, gas_constant * 1.01, pressure});
+  expect_open_spec_rejected({rho_h, cp, gas_constant, pressure * 1.01});
   const auto open_before = mpi.fp64_reduction_counters();
   auto open_closure = hundun::flow::IdealGasClosure::create(
       open_topology, open_geometry, open_boundaries, mpi, registry, fields,

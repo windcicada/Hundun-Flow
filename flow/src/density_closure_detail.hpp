@@ -2,6 +2,7 @@
 #pragma once
 
 #include "hundun/flow/material_density_piso.hpp"
+#include "hundun/runtime/error.hpp"
 #include "hundun/runtime/field_view.hpp"
 
 #include <cmath>
@@ -14,6 +15,18 @@ class IdealGasClosure;
 class IdealGasClosureDiagnosticSource;
 
 namespace detail {
+
+class DensityClosurePreflightFailure final : public runtime::Error {
+public:
+  explicit DensityClosurePreflightFailure(int failing_rank)
+      : runtime::Error("density closure local preflight failed"),
+        failing_rank_(failing_rank) {}
+
+  int failing_rank() const noexcept { return failing_rank_; }
+
+private:
+  int failing_rank_;
+};
 
 enum class DensityClosureStage : std::uint8_t { predictor, provisional, final };
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -38,6 +51,9 @@ struct DensityClosureHooks final {
                                        DensityClosureStage){};
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   int (*outer_failure)(void *, DensityClosureOuterPoint){};
+  void (*after_halo)(void *, DensityClosureStage, runtime::FieldId,
+                     runtime::FieldId){};
+  void (*before_post_assessment)(void *, FlowState &){};
 #endif
   void (*before_outlet)(void *, FlowState &){};
   int (*before_prepare)(void *, FlowState &, AcceptedStepMetadata){};
@@ -71,6 +87,9 @@ struct DensityClosureBridge final {
   static bool post_eos_evidence_authenticated(
       const MaterialDensityStepAttemptReport &) noexcept;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  static void force_finalization_identity_wrap(FixedStepMaterialDensityFlow &);
+#endif
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   static bool post_evidence_mutation_rejected(
       const MaterialDensityStepAttemptReport &report, std::uint8_t mutation) {
     auto copy = report;
@@ -103,6 +122,80 @@ struct DensityClosureBridge final {
           post.transport_normalized_l2_.front(),
           std::numeric_limits<double>::infinity());
       break;
+    case 8U:
+      post.disposition_ =
+          post.disposition_ == MaterialTransportDisposition::finalized
+              ? MaterialTransportDisposition::recoverable_failure
+              : MaterialTransportDisposition::finalized;
+      break;
+    case 9U:
+      post.reason_ = MaterialTransportFailureReason::final_density_residual;
+      break;
+    case 10U:
+      ++post.lowest_failing_rank_;
+      break;
+    case 11U:
+      post.density_residual_available_ =
+          !post.density_residual_available_;
+      break;
+    case 12U:
+      post.density_normalized_l2_ = std::nextafter(
+          post.density_normalized_l2_, std::numeric_limits<double>::infinity());
+      break;
+    case 13U:
+      post.transport_residual_available_.front() ^= 1U;
+      break;
+    case 14U:
+      post.transport_conservation_available_.pop_back();
+      break;
+    case 15U:
+      post.transport_relative_conservation_defect_.front() = std::nextafter(
+          post.transport_relative_conservation_defect_.front(),
+          std::numeric_limits<double>::infinity());
+      break;
+    case 16U:
+      post.transport_conservation_available_.front() ^= 1U;
+      break;
+    case 17U:
+      post.mass_conservation_available_ = !post.mass_conservation_available_;
+      break;
+    case 18U:
+      post.mass_relative_conservation_defect_ = std::nextafter(
+          post.mass_relative_conservation_defect_,
+          std::numeric_limits<double>::infinity());
+      break;
+    case 19U:
+      post.minimum_density_available_ = !post.minimum_density_available_;
+      break;
+    case 20U:
+      post.minimum_density_kg_per_m3_ = std::nextafter(
+          post.minimum_density_kg_per_m3_,
+          std::numeric_limits<double>::infinity());
+      break;
+    case 21U: {
+      auto &pre = *copy.material_report_;
+      pre.transport_normalized_l2_.front() = std::nextafter(
+          pre.transport_normalized_l2_.front(),
+          std::numeric_limits<double>::infinity());
+      pre.seal();
+      break;
+    }
+    case 22U: {
+      auto &pre = *copy.material_report_;
+      pre.transport_relative_conservation_defect_.front() = std::nextafter(
+          pre.transport_relative_conservation_defect_.front(),
+          std::numeric_limits<double>::infinity());
+      pre.seal();
+      break;
+    }
+    case 23U: {
+      auto &pre = *copy.material_report_;
+      pre.mass_relative_conservation_defect_ = std::nextafter(
+          pre.mass_relative_conservation_defect_,
+          std::numeric_limits<double>::infinity());
+      pre.seal();
+      break;
+    }
     default:
       return false;
     }
@@ -121,6 +214,9 @@ struct DensityClosureAdapter final {
                                            DensityClosureStage);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   static int outer_failure(void *, DensityClosureOuterPoint);
+  static void after_halo(void *, DensityClosureStage, runtime::FieldId,
+                         runtime::FieldId);
+  static void before_post_assessment(void *, FlowState &);
 #endif
   static void before_outlet(void *, FlowState &);
   static int before_prepare(void *, FlowState &, AcceptedStepMetadata);

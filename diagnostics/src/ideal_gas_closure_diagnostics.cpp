@@ -299,14 +299,21 @@ int lowest_rank(const runtime::MpiContext &mpi, bool failure,
 void require_byte_agreement(const runtime::MpiContext &mpi,
                             const std::vector<unsigned char> &local,
                             DiagnosticFailureClass classification,
-                            const char *code, const char *message) {
+                            const char *code, const char *message,
+                            bool force_oversized = false) {
   std::uint64_t size =
-      mpi.rank() == 0 ? static_cast<std::uint64_t>(local.size()) : 0U;
+      mpi.rank() == 0
+          ? (force_oversized
+                 ? static_cast<std::uint64_t>(
+                       std::numeric_limits<int>::max()) +
+                       1U
+                 : static_cast<std::uint64_t>(local.size()))
+          : 0U;
   runtime::check_mpi_result(MPI_Bcast(&size, 1, MPI_UINT64_T, 0, mpi.comm()),
                             "MPI_Bcast(ideal-gas diagnostic agreement size)");
   if (size > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
     fail(DiagnosticFailureClass::layout, "closure.diagnostics.aggregation",
-         mpi.rank(), "ideal-gas diagnostic agreement is too large");
+         0, "ideal-gas diagnostic agreement is too large");
   std::vector<unsigned char> reference;
   bool allocation_failed = false;
   try {
@@ -321,7 +328,7 @@ void require_byte_agreement(const runtime::MpiContext &mpi,
     fail(classification, code, allocation_rank,
          "ideal-gas diagnostic agreement preparation failed");
   if (mpi.rank() == 0)
-    reference = local;
+    std::copy(local.begin(), local.end(), reference.begin());
   runtime::check_mpi_result(MPI_Bcast(reference.data(),
                                       static_cast<int>(reference.size()),
                                       MPI_BYTE, 0, mpi.comm()),
@@ -1139,6 +1146,13 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          const DiagnosticRequest &request,
                          DiagnosticSink &sink) {
   try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(source, test::IdealGasClosureDiagnosticFault::capability,
+              source.relative_rank()))
+      fail(DiagnosticFailureClass::capability,
+           "closure.diagnostics.capability", -1,
+           "ideal-gas diagnostic capability is unavailable");
+#endif
     require_request(source, request, DiagnosticScope::local);
     submit(build_record(source, request, observe(source, request),
                         DiagnosticScope::local),
@@ -1169,6 +1183,14 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
     fail(DiagnosticFailureClass::invalid_request,
          "closure.diagnostics.request-agreement", injected_rank,
          "ideal-gas diagnostic request preparation failed");
+  injected_rank = lowest_rank(
+      mpi, fault(source, test::IdealGasClosureDiagnosticFault::capability,
+                 mpi.rank()),
+      "MPI_Allreduce(ideal-gas diagnostic capability)");
+  if (injected_rank >= 0)
+    fail(DiagnosticFailureClass::capability,
+         "closure.diagnostics.capability", injected_rank,
+         "ideal-gas diagnostic capability is unavailable");
   injected_rank = lowest_rank(
       mpi, fault(source, test::IdealGasClosureDiagnosticFault::raw_mpi,
                  mpi.rank()),
@@ -1222,10 +1244,21 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
     fail(DiagnosticFailureClass::invalid_request,
          "closure.diagnostics.request-agreement", failed_rank,
          "ideal-gas diagnostic request preparation failed");
+  bool force_oversized = false;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  force_oversized =
+      lowest_rank(mpi,
+                  fault(source,
+                        test::IdealGasClosureDiagnosticFault::oversized_agreement,
+                        mpi.rank()),
+                  "MPI_Allreduce(ideal-gas diagnostic oversized agreement)") >=
+      0;
+#endif
   require_byte_agreement(mpi, *prepared_request,
                          DiagnosticFailureClass::invalid_request,
                          "closure.diagnostics.request-agreement",
-                         "ideal-gas diagnostic requests disagree");
+                         "ideal-gas diagnostic requests disagree",
+                         force_oversized);
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
   injected_rank = lowest_rank(
       mpi,

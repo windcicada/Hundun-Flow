@@ -76,8 +76,10 @@ private:
   bool mass_conservation_available_{};
   std::array<std::uint8_t, 3> momentum_conservation_available_{};
   bool closure_origin_{};
+  std::optional<MaterialDensityTransportReport> pre_closure_authority_;
   bool post_closure_evidence_available_{};
   std::optional<MaterialDensityTransportReport> post_closure_report_;
+  std::optional<MaterialDensityTransportReport> post_closure_authority_;
   std::uint64_t seal_{};
 
   friend class FixedStepMaterialDensityFlow;

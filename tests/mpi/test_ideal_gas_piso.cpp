@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "flow/src/ideal_gas_closure_test_access.hpp"
+#include "flow/src/material_density_piso_test_access.hpp"
+#include "flow/src/material_density_transport_test_access.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/config/resolved_case.hpp"
 #include "hundun/execution/execution.hpp"
@@ -26,6 +28,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -45,6 +48,76 @@ namespace {
 #endif
 
 hundun::runtime::Int3 grid(int ranks) { return {ranks, 1, 1}; }
+
+void require_complete_final_gates(
+    const hundun::flow::IdealGasStepAttemptReport &report) {
+  const auto &material = report.flow();
+  const auto &flow = material.flow();
+  const auto &closure = report.closure_report();
+  HUNDUN_CHECK(flow.disposition ==
+               hundun::flow::StepAttemptDisposition::committed);
+  HUNDUN_CHECK(flow.pressure_corrector_count == 2U);
+  HUNDUN_CHECK(material.final_continuity_residual_available());
+  HUNDUN_CHECK(flow.final_continuity_normalized_l2 <= 1.0e-10);
+  HUNDUN_CHECK(material.final_pressure_residual_available());
+  HUNDUN_CHECK(material.final_pressure_normalized_residual() <= 1.0);
+  HUNDUN_CHECK(std::all_of(
+      material.final_momentum_residual_availability().begin(),
+      material.final_momentum_residual_availability().end(),
+      [](std::uint8_t available) { return available == 1U; }));
+  for (const double residual : flow.final_momentum_normalized_l2)
+    HUNDUN_CHECK(residual <= 1.0e-9);
+  for (const double residual : flow.final_transport_normalized_l2)
+    HUNDUN_CHECK(residual <= 1.0e-9);
+  HUNDUN_CHECK(material.mass_conservation_available());
+  HUNDUN_CHECK(flow.final_mass_relative_conservation_defect <= 5.0e-11);
+  HUNDUN_CHECK(std::all_of(
+      material.momentum_conservation_availability().begin(),
+      material.momentum_conservation_availability().end(),
+      [](std::uint8_t available) { return available == 1U; }));
+  for (const double defect : flow.final_momentum_relative_conservation_defect)
+    HUNDUN_CHECK(defect <= 5.0e-11);
+  for (const double defect :
+       flow.final_transport_relative_conservation_defect)
+    HUNDUN_CHECK(defect <= 5.0e-11);
+  HUNDUN_CHECK(closure.final_metrics_available());
+  HUNDUN_CHECK(closure.rho_remap_normalized_l2() <= 1.0e-10);
+  HUNDUN_CHECK(closure.rho_h_remap_normalized_l2() <= 1.0e-9);
+  HUNDUN_CHECK(closure.rho_remap_relative_conservation_defect() <= 5.0e-11);
+  HUNDUN_CHECK(closure.rho_h_remap_relative_conservation_defect() <=
+               5.0e-11);
+  HUNDUN_CHECK(closure.enthalpy_temperature_max_relative_error() <= 1.0e-12);
+  HUNDUN_CHECK(closure.eos_max_relative_error() <= 1.0e-12);
+}
+
+void require_halo_trace(
+    const hundun::flow::FixedStepIdealGasFlow &flow,
+    const hundun::flow::FlowFieldIds &fields,
+    std::initializer_list<hundun::flow::IdealGasClosureStage> stages) {
+  const auto trace =
+      hundun::flow::test::IdealGasClosureTestAccess::halo_trace(flow);
+  HUNDUN_CHECK(trace.size() == stages.size());
+  std::size_t index = 0U;
+  for (const auto stage : stages) {
+    HUNDUN_CHECK(trace[index].stage == stage);
+    HUNDUN_CHECK(trace[index].density == fields.density);
+    HUNDUN_CHECK(trace[index].enthalpy_density ==
+                 fields.transported_cell_fields.front());
+    ++index;
+  }
+}
+
+double global_extensive_total(const std::vector<double> &values,
+                              const hundun::mesh::MeshGeometry &geometry,
+                              const hundun::runtime::MpiContext &mpi) {
+  double local = 0.0;
+  for (std::size_t cell = 0; cell < values.size(); ++cell)
+    local += values[cell] * geometry.cell_volume_m3(cell);
+  double total = 0.0;
+  HUNDUN_CHECK(MPI_Allreduce(&local, &total, 1, MPI_DOUBLE, MPI_SUM,
+                             mpi.comm()) == MPI_SUCCESS);
+  return total;
+}
 
 struct DecompositionReference final {
   std::uint64_t components{};
@@ -336,6 +409,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
     initial.transported_cell_fields.push_back(std::vector<double>(
         topology.owned_cell_count(), density * 0.25));
   state.seed_accepted_layers(initial, initial);
+  const double initial_enthalpy_integral = global_extensive_total(
+      initial.transported_cell_fields.front(), geometry, mpi);
 
   auto closure = hundun::flow::IdealGasClosure::create(
       topology, geometry, boundaries, mpi, registry, fields, state,
@@ -355,6 +430,34 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
     material_spec.scalar_densities = {rho_phi};
     material_spec.scalar_diffusivities_kg_per_m_s = {0.0};
   }
+  hundun::mesh::MeshTopology alternate_topology(decomposition);
+  hundun::mesh::MeshGeometry alternate_geometry(
+      alternate_topology,
+      hundun::mesh::UniformBoxMapping(
+          {0.0, 0.0, 0.0},
+          open_domain ? hundun::runtime::Real3{1.0, 0.25, 0.25}
+                      : hundun::runtime::Real3{1.0, 1.0, 1.0}));
+  auto alternate_boundaries = hundun::boundary::BoundaryRegistry::create(
+      open_domain ? open_case(full_case) : periodic_case(), topology);
+  const auto expect_collaborator_rejected =
+      [&](const hundun::mesh::MeshTopology &candidate_topology,
+          const hundun::mesh::MeshGeometry &candidate_geometry,
+          const hundun::boundary::BoundaryRegistry &candidate_boundaries) {
+        bool rejected = false;
+        try {
+          static_cast<void>(hundun::flow::FixedStepIdealGasFlow::create(
+              decomposition, candidate_topology, candidate_geometry,
+              candidate_boundaries, mpi, execution, halo, momentum_solver,
+              {&mx, &my, &mz}, pressure_solver, pressure_preconditioner,
+              registry, fields, material_spec, std::move(closure)));
+        } catch (const hundun::runtime::Error &) {
+          rejected = true;
+        }
+        HUNDUN_CHECK(rejected);
+      };
+  expect_collaborator_rejected(topology, alternate_geometry, boundaries);
+  expect_collaborator_rejected(alternate_topology, geometry, boundaries);
+  expect_collaborator_rejected(topology, geometry, alternate_boundaries);
   auto flow = hundun::flow::FixedStepIdealGasFlow::create(
       decomposition, topology, geometry, boundaries, mpi, execution, halo,
       momentum_solver, {&mx, &my, &mz}, pressure_solver,
@@ -381,16 +484,31 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                hundun::flow::IdealGasClosureStage::final);
   HUNDUN_CHECK(closure_report.evaluation_count() == 3U);
   HUNDUN_CHECK(closure_report.collective_count() == 14U);
+  HUNDUN_CHECK(closure_report.candidate_pressure_available());
+  if (open_domain) {
+    const double candidate = closure_report.candidate_pressure_pa();
+    HUNDUN_CHECK(std::memcmp(&candidate, &pressure, sizeof(double)) == 0);
+  } else
+    HUNDUN_CHECK_NEAR(closure_report.candidate_pressure_pa(),
+                      pressure * 305.0 / 300.0, 1.0e-12 * pressure);
   HUNDUN_CHECK(closure_report.final_metrics_available());
+  require_halo_trace(flow, fields,
+                     {hundun::flow::IdealGasClosureStage::predictor,
+                      hundun::flow::IdealGasClosureStage::provisional,
+                      hundun::flow::IdealGasClosureStage::final});
   HUNDUN_CHECK(closure_report.rho_remap_normalized_l2() <= 1.0e-10);
   HUNDUN_CHECK(closure_report.rho_h_remap_normalized_l2() <= 1.0e-9);
   HUNDUN_CHECK(closure_report.eos_max_relative_error() <= 1.0e-12);
+  require_complete_final_gates(report);
   HUNDUN_CHECK(
       hundun::flow::test::IdealGasClosureTestAccess::report_authenticated(
           report));
   HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
                    post_eos_evidence_authenticated(report.flow()));
-  for (std::uint8_t mutation = 0U; mutation < 8U; ++mutation)
+  for (std::uint8_t mutation = 0U;
+       mutation < static_cast<std::uint8_t>(
+                      hundun::flow::test::IdealGasPostEvidenceMutation::count);
+       ++mutation)
     HUNDUN_CHECK(
         hundun::flow::test::IdealGasClosureTestAccess::
             post_evidence_mutation_rejected(
@@ -435,24 +553,75 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                      committed.density[cell_index];
     HUNDUN_CHECK_NEAR(h / cp, first_temperature, 5.0e-12 * first_temperature);
   }
+  if (!open_domain) {
+    const double expected =
+        *flow.closure_state().target_mass_kg * cp * 5.0;
+    const double observed = global_extensive_total(
+                                committed.transported_cell_fields.front(),
+                                geometry, mpi) -
+                            initial_enthalpy_integral;
+    HUNDUN_CHECK(std::abs(observed - expected) /
+                     std::max(std::abs(expected),
+                              std::numeric_limits<double>::min()) <=
+                 5.0e-11);
+    // The mutation-sensitive source oracle must reject a balance that omits
+    // the configured source altogether.
+    HUNDUN_CHECK(std::abs(observed) /
+                     std::max(std::abs(expected),
+                              std::numeric_limits<double>::min()) >
+                 5.0e-11);
+  }
 
   const auto bdf2 = hundun::flow::make_momentum_time_stencil(
       hundun::flow::MomentumTimeOrder::bdf2, dt, dt);
   const auto second = flow.attempt(state, 0.0, bdf2, {}, {});
   HUNDUN_CHECK(second.flow().flow().disposition ==
                hundun::flow::StepAttemptDisposition::committed);
+  require_complete_final_gates(second);
   HUNDUN_CHECK(second.closure_report().evaluation_count() == 3U);
   HUNDUN_CHECK(second.closure_report().collective_count() == 14U);
+  require_halo_trace(flow, fields,
+                     {hundun::flow::IdealGasClosureStage::predictor,
+                      hundun::flow::IdealGasClosureStage::provisional,
+                      hundun::flow::IdealGasClosureStage::final});
+  HUNDUN_CHECK(second.closure_report().candidate_pressure_available());
+  if (open_domain) {
+    const double candidate = second.closure_report().candidate_pressure_pa();
+    HUNDUN_CHECK(std::memcmp(&candidate, &pressure, sizeof(double)) == 0);
+  } else {
+    HUNDUN_CHECK_NEAR(second.closure_report().candidate_pressure_pa(),
+                      pressure * 310.0 / 300.0, 1.0e-12 * pressure);
+  }
   HUNDUN_CHECK(flow.closure_state().revision == 2U);
   HUNDUN_CHECK_NEAR(flow.closure_state().thermodynamic_pressure_pa,
                     open_domain ? pressure : pressure * 310.0 / 300.0,
                     1.0e-12 * pressure);
+  if (!open_domain) {
+    const auto second_committed =
+        state.snapshot(hundun::flow::FlowLayer::committed);
+    const double expected =
+        *flow.closure_state().target_mass_kg * cp * 10.0;
+    const double observed = global_extensive_total(
+                                second_committed
+                                    .transported_cell_fields.front(),
+                                geometry, mpi) -
+                            initial_enthalpy_integral;
+    HUNDUN_CHECK(std::abs(observed - expected) /
+                     std::max(std::abs(expected),
+                              std::numeric_limits<double>::min()) <=
+                 5.0e-11);
+    HUNDUN_CHECK(std::abs(observed) /
+                     std::max(std::abs(expected),
+                              std::numeric_limits<double>::min()) >
+                 5.0e-11);
+  }
   if (open_domain && full_case) {
     for (int step = 2; step < 4; ++step) {
       const auto continued = flow.attempt(state, 0.0, bdf2, {}, {});
       HUNDUN_CHECK(continued.flow().flow().disposition ==
                    hundun::flow::StepAttemptDisposition::committed);
       HUNDUN_CHECK(continued.flow().flow().pressure_corrector_count == 2U);
+      require_complete_final_gates(continued);
       HUNDUN_CHECK(continued.closure_report().evaluation_count() == 3U);
       HUNDUN_CHECK(continued.closure_report().collective_count() == 14U);
       HUNDUN_CHECK(continued.flow().shared_face_mass_flux_field() ==
@@ -521,6 +690,56 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                             boundary[12U + quantity]) <= tolerance);
     }
 
+    using OpenTransportAccess =
+        hundun::flow::test::MaterialDensityTransportTestAccess;
+    for (const int fault_rank : {0, mpi.size() - 1}) {
+      for (const bool conservation : {false, true}) {
+        const hundun::test::IdealGasStateSnapshot before_scalar_gate{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        OpenTransportAccess::reset();
+        if (conservation)
+          OpenTransportAccess::set_transport_conservation_defect(
+              1U, 1.0e-9, fault_rank);
+        else
+          OpenTransportAccess::set_transport_residual(1U, 2.0e-9,
+                                                      fault_rank);
+        const auto scalar_gate_failed =
+            flow.attempt(state, 0.0, bdf2, {}, {});
+        OpenTransportAccess::reset();
+        HUNDUN_CHECK(scalar_gate_failed.flow().flow().disposition ==
+                     hundun::flow::StepAttemptDisposition::recoverable_failure);
+        HUNDUN_CHECK(
+            scalar_gate_failed.flow().flow().reason ==
+            (conservation
+                 ? hundun::flow::StepFailureReason::final_conservation_defect
+                 : hundun::flow::StepFailureReason::final_transport_residual));
+        HUNDUN_CHECK(scalar_gate_failed.flow().flow().lowest_failing_rank ==
+                     fault_rank);
+        HUNDUN_CHECK(scalar_gate_failed.closure_report_available());
+        HUNDUN_CHECK(scalar_gate_failed.closure_report().stage() ==
+                     hundun::flow::IdealGasClosureStage::provisional);
+        HUNDUN_CHECK(
+            hundun::flow::test::IdealGasClosureTestAccess::report_authenticated(
+                scalar_gate_failed));
+        require_halo_trace(
+            flow, fields,
+            {hundun::flow::IdealGasClosureStage::predictor,
+             hundun::flow::IdealGasClosureStage::provisional});
+        const hundun::test::IdealGasStateSnapshot after_scalar_gate{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+            before_scalar_gate, after_scalar_gate));
+      }
+      if (mpi.size() == 1)
+        break;
+    }
+
     const hundun::test::IdealGasStateSnapshot before_backflow{
         state.snapshot(hundun::flow::FlowLayer::history),
         state.snapshot(hundun::flow::FlowLayer::committed),
@@ -537,6 +756,10 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
     HUNDUN_CHECK(backflow.closure_report_available());
     HUNDUN_CHECK(backflow.closure_report().stage() ==
                  hundun::flow::IdealGasClosureStage::final);
+    require_halo_trace(flow, fields,
+                       {hundun::flow::IdealGasClosureStage::predictor,
+                        hundun::flow::IdealGasClosureStage::provisional,
+                        hundun::flow::IdealGasClosureStage::final});
     HUNDUN_TASK21_DIAGNOSTIC_STATUS(
         flow.closure_diagnostic_source(state, backflow), mpi,
         hundun::diagnostics::DiagnosticStatus::warning,
@@ -601,6 +824,108 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
     HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
         before_precedence, after_precedence));
 
+#ifdef HUNDUN_TASK21_DIAGNOSTICS_EXHAUSTIVE
+    struct ClosureStatusCase final {
+      hundun::flow::IdealGasClosureFailureReason reason;
+      hundun::diagnostics::DiagnosticFailureClass classification;
+      std::string_view code;
+    };
+    const std::array closure_status_cases{
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::invalid_input,
+            hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+            "closure.invalid-input"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_finite_enthalpy,
+            hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+            "closure.enthalpy-non-finite"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_positive_enthalpy,
+            hundun::diagnostics::DiagnosticFailureClass::non_positive_state,
+            "closure.enthalpy-non-positive"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::
+                non_finite_temperature,
+            hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+            "closure.temperature-non-finite"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::
+                non_positive_temperature,
+            hundun::diagnostics::DiagnosticFailureClass::non_positive_state,
+            "closure.temperature-non-positive"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::denominator_breakdown,
+            hundun::diagnostics::DiagnosticFailureClass::numerical_breakdown,
+            "closure.denominator-breakdown"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_finite_pressure,
+            hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+            "closure.pressure-non-finite"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_positive_pressure,
+            hundun::diagnostics::DiagnosticFailureClass::non_positive_state,
+            "closure.pressure-non-positive"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_finite_density,
+            hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+            "closure.density-non-finite"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::non_positive_density,
+            hundun::diagnostics::DiagnosticFailureClass::non_positive_state,
+            "closure.density-non-positive"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::eos_residual,
+            hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+            "closure.eos-residual"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::remap_residual,
+            hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+            "closure.remap-residual"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::mass_conservation,
+            hundun::diagnostics::DiagnosticFailureClass::conservation,
+            "closure.mass-conservation"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::enthalpy_conservation,
+            hundun::diagnostics::DiagnosticFailureClass::conservation,
+            "closure.enthalpy-conservation"},
+        ClosureStatusCase{
+            hundun::flow::IdealGasClosureFailureReason::collective_operation,
+            hundun::diagnostics::DiagnosticFailureClass::collective_operation,
+            "closure.collective-operation"}};
+    for (const int target : {0, mpi.size() - 1}) {
+      for (const auto &status_case : closure_status_cases) {
+        const hundun::test::IdealGasStateSnapshot before_status{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        hundun::flow::test::IdealGasClosureTestAccess::set_stage_failure(
+            flow, hundun::flow::IdealGasClosureStage::predictor,
+            status_case.reason, target);
+        const auto status_report = flow.attempt(state, 0.0, bdf2, {}, {});
+        HUNDUN_CHECK(status_report.closure_report_available());
+        HUNDUN_CHECK(status_report.closure_report().reason() ==
+                     status_case.reason);
+        HUNDUN_CHECK(status_report.closure_report().lowest_failing_rank() ==
+                     target);
+        HUNDUN_TASK21_DIAGNOSTIC_STATUS(
+            flow.closure_diagnostic_source(state, status_report), mpi,
+            hundun::diagnostics::DiagnosticStatus::failed,
+            status_case.classification, status_case.code, target);
+        const hundun::test::IdealGasStateSnapshot after_status{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+            before_status, after_status));
+      }
+      if (mpi.size() == 1)
+        break;
+    }
+#endif
+
     {
       const hundun::test::IdealGasStateSnapshot before{
           state.snapshot(hundun::flow::FlowLayer::history),
@@ -658,6 +983,20 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                    evaluations);
       HUNDUN_CHECK(outer_failed.closure_report().collective_count() ==
                    collectives);
+      HUNDUN_CHECK(
+          outer_failed.closure_report().candidate_pressure_available());
+      HUNDUN_CHECK_NEAR(
+          outer_failed.closure_report().candidate_pressure_pa(),
+          pressure * 315.0 / 300.0, 1.0e-12 * pressure);
+      if (stage == hundun::flow::IdealGasClosureStage::predictor)
+        require_halo_trace(
+            flow, fields,
+            {hundun::flow::IdealGasClosureStage::predictor});
+      else
+        require_halo_trace(
+            flow, fields,
+            {hundun::flow::IdealGasClosureStage::predictor,
+             hundun::flow::IdealGasClosureStage::provisional});
       HUNDUN_TASK21_DIAGNOSTIC_STATUS(
           flow.closure_diagnostic_source(state, outer_failed), mpi,
           hundun::diagnostics::DiagnosticStatus::warning,
@@ -703,6 +1042,26 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                        expected_evaluations);
           HUNDUN_CHECK(failed_stage.closure_report().collective_count() ==
                        expected_collectives);
+          if (stage == hundun::flow::IdealGasClosureStage::predictor) {
+            HUNDUN_CHECK(!failed_stage.closure_report()
+                              .candidate_pressure_available());
+            require_halo_trace(flow, fields, {});
+          } else {
+            HUNDUN_CHECK(failed_stage.closure_report()
+                             .candidate_pressure_available());
+            HUNDUN_CHECK_NEAR(
+                failed_stage.closure_report().candidate_pressure_pa(),
+                pressure * 315.0 / 300.0, 1.0e-12 * pressure);
+            if (stage == hundun::flow::IdealGasClosureStage::provisional)
+              require_halo_trace(
+                  flow, fields,
+                  {hundun::flow::IdealGasClosureStage::predictor});
+            else
+              require_halo_trace(
+                  flow, fields,
+                  {hundun::flow::IdealGasClosureStage::predictor,
+                   hundun::flow::IdealGasClosureStage::provisional});
+          }
           HUNDUN_TASK21_DIAGNOSTIC_STATUS(
               flow.closure_diagnostic_source(state, failed_stage), mpi,
               hundun::diagnostics::DiagnosticStatus::failed,
@@ -716,6 +1075,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
           HUNDUN_CHECK(
               hundun::test::ideal_gas_state_bitwise_equal(before, after));
         };
+    expect_stage_failure(hundun::flow::IdealGasClosureStage::predictor, 1U,
+                         3U);
     expect_stage_failure(hundun::flow::IdealGasClosureStage::provisional, 2U,
                          7U);
     expect_stage_failure(hundun::flow::IdealGasClosureStage::final, 3U, 11U);
@@ -743,6 +1104,10 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                    hundun::flow::IdealGasClosureFailureReason::eos_residual);
       HUNDUN_CHECK(post_store_failed.closure_report().lowest_failing_rank() ==
                    mpi.size() - 1);
+      require_halo_trace(
+          flow, fields,
+          {hundun::flow::IdealGasClosureStage::predictor,
+           hundun::flow::IdealGasClosureStage::provisional});
       HUNDUN_TASK21_DIAGNOSTIC_STATUS(
           flow.closure_diagnostic_source(state, post_store_failed), mpi,
           hundun::diagnostics::DiagnosticStatus::failed,
@@ -755,6 +1120,169 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
           flow.closure_state()};
       HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
           before_post_store, after_post_store));
+    }
+
+    for (const int fault_rank : {0, mpi.size() - 1}) {
+      const hundun::test::IdealGasStateSnapshot before_post_assessment{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      hundun::flow::test::IdealGasClosureTestAccess::
+          set_post_assessment_corruption(flow, fault_rank);
+      const auto post_assessment_failed =
+          flow.attempt(state, 0.0, bdf2, {}, {});
+      HUNDUN_CHECK(post_assessment_failed.flow().flow().disposition ==
+                   hundun::flow::StepAttemptDisposition::recoverable_failure);
+      HUNDUN_CHECK(post_assessment_failed.flow().flow().reason ==
+                   hundun::flow::StepFailureReason::transport_failure);
+      HUNDUN_CHECK(post_assessment_failed.flow().flow().lowest_failing_rank ==
+                   fault_rank);
+      HUNDUN_CHECK(post_assessment_failed.flow().material_failure_reason() ==
+                   hundun::flow::MaterialTransportFailureReason::none);
+      HUNDUN_CHECK(post_assessment_failed.closure_report_available());
+      HUNDUN_CHECK(post_assessment_failed.closure_report().disposition() ==
+                   hundun::flow::IdealGasClosureDisposition::closed);
+      HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                       report_authenticated(post_assessment_failed));
+      HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
+                       post_eos_evidence_authenticated(
+                           post_assessment_failed.flow()));
+      require_halo_trace(
+          flow, fields,
+          {hundun::flow::IdealGasClosureStage::predictor,
+           hundun::flow::IdealGasClosureStage::provisional,
+           hundun::flow::IdealGasClosureStage::final});
+      for (std::uint8_t mutation = 0U;
+           mutation < static_cast<std::uint8_t>(
+                          hundun::flow::test::
+                              IdealGasPostEvidenceMutation::count);
+           ++mutation)
+        if (!hundun::flow::test::IdealGasClosureTestAccess::
+                 post_evidence_mutation_rejected(
+                     post_assessment_failed,
+                     static_cast<hundun::flow::test::
+                                     IdealGasPostEvidenceMutation>(mutation)))
+          throw std::runtime_error(
+              "post-EOS failure mutation was accepted: " +
+              std::to_string(mutation));
+      const hundun::test::IdealGasStateSnapshot after_post_assessment{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+          before_post_assessment, after_post_assessment));
+      if (mpi.size() == 1)
+        break;
+    }
+
+    using TerminalMode =
+        hundun::flow::test::MaterialTerminalModeForTest;
+    using TerminalPoint =
+        hundun::flow::test::MaterialTerminalPointForTest;
+    using MaterialAccess =
+        hundun::flow::test::MaterialDensityPisoTestAccess;
+    constexpr std::array final_terminal_points{
+        TerminalPoint::final_continuity_reduction,
+        TerminalPoint::final_continuity_status,
+        TerminalPoint::final_pressure_entry,
+        TerminalPoint::final_pressure_gamma_sum,
+        TerminalPoint::final_pressure_gamma_count,
+        TerminalPoint::final_pressure_residual_reduction,
+        TerminalPoint::final_momentum_residual_reduction,
+        TerminalPoint::final_momentum_conservation_reduction,
+        TerminalPoint::final_momentum_status,
+        TerminalPoint::final_conservation_status};
+    for (const auto point : final_terminal_points) {
+      const hundun::test::IdealGasStateSnapshot before_terminal{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      MaterialAccess::reset_terminal_fault();
+      MaterialAccess::set_terminal_fault(point,
+                                         TerminalMode::returned_rankless);
+      bool typed = false;
+      try {
+        static_cast<void>(flow.attempt(state, 0.0, bdf2, {}, {}));
+      } catch (const hundun::runtime::MpiOperationError &error) {
+        typed = std::string_view(error.what()) ==
+                "material-density flow collective failure has no reliable "
+                "rank";
+      }
+      const auto terminal_calls = MaterialAccess::terminal_point_calls(point);
+      MaterialAccess::reset_terminal_fault();
+      HUNDUN_CHECK(typed);
+      require_halo_trace(
+          flow, fields,
+          {hundun::flow::IdealGasClosureStage::predictor,
+           hundun::flow::IdealGasClosureStage::provisional,
+           hundun::flow::IdealGasClosureStage::final});
+      const hundun::test::IdealGasStateSnapshot after_terminal{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+          before_terminal, after_terminal));
+      HUNDUN_CHECK(terminal_calls == 1U);
+    }
+
+    using TransportAccess =
+        hundun::flow::test::MaterialDensityTransportTestAccess;
+    enum class FinalTransportFault { enthalpy_residual, mass, enthalpy_balance };
+    for (const int fault_rank : {0, mpi.size() - 1}) {
+      for (const auto fault : {FinalTransportFault::enthalpy_residual,
+                               FinalTransportFault::mass,
+                               FinalTransportFault::enthalpy_balance}) {
+        const hundun::test::IdealGasStateSnapshot before_gate{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        TransportAccess::reset();
+        if (fault == FinalTransportFault::enthalpy_residual)
+          TransportAccess::set_transport_residual(0U, 2.0e-9, fault_rank);
+        else if (fault == FinalTransportFault::mass)
+          TransportAccess::set_mass_conservation_defect(1.0e-9, fault_rank);
+        else
+          TransportAccess::set_transport_conservation_defect(0U, 1.0e-9,
+                                                              fault_rank);
+        const auto gate_failed = flow.attempt(state, 0.0, bdf2, {}, {});
+        TransportAccess::reset();
+        HUNDUN_CHECK(gate_failed.flow().flow().disposition ==
+                     hundun::flow::StepAttemptDisposition::recoverable_failure);
+        HUNDUN_CHECK(gate_failed.flow().flow().reason ==
+                     (fault == FinalTransportFault::enthalpy_residual
+                          ? hundun::flow::StepFailureReason::
+                                final_transport_residual
+                          : hundun::flow::StepFailureReason::
+                                final_conservation_defect));
+        HUNDUN_CHECK(gate_failed.flow().flow().lowest_failing_rank ==
+                     fault_rank);
+        HUNDUN_CHECK(gate_failed.closure_report_available());
+        HUNDUN_CHECK(gate_failed.closure_report().stage() ==
+                     hundun::flow::IdealGasClosureStage::provisional);
+        HUNDUN_CHECK(gate_failed.closure_report().disposition() ==
+                     hundun::flow::IdealGasClosureDisposition::closed);
+        HUNDUN_CHECK(
+            hundun::flow::test::IdealGasClosureTestAccess::report_authenticated(
+                gate_failed));
+        require_halo_trace(
+            flow, fields,
+            {hundun::flow::IdealGasClosureStage::predictor,
+             hundun::flow::IdealGasClosureStage::provisional});
+        const hundun::test::IdealGasStateSnapshot after_gate{
+            state.snapshot(hundun::flow::FlowLayer::history),
+            state.snapshot(hundun::flow::FlowLayer::committed),
+            state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+            flow.closure_state()};
+        HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(before_gate,
+                                                                 after_gate));
+      }
+      if (mpi.size() == 1)
+        break;
     }
 
     for (const auto prepare_fault :
@@ -784,29 +1312,56 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
           before_prepare, after_prepare));
     }
 
-    const hundun::test::IdealGasStateSnapshot before_mpi_failure{
-        state.snapshot(hundun::flow::FlowLayer::history),
-        state.snapshot(hundun::flow::FlowLayer::committed),
-        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-        flow.closure_state()};
-    hundun::flow::test::IdealGasClosureTestAccess::set_post_store_mpi_fault(
-        flow, mpi.size() - 1);
-    bool typed_mpi_failure = false;
-    try {
-      static_cast<void>(flow.attempt(state, 0.0, bdf2, {}, {}));
-    } catch (const hundun::runtime::MpiOperationError &error) {
-      typed_mpi_failure =
-          std::string_view(error.what()).find("post-store reduction") !=
-          std::string_view::npos;
+    for (const int fault_rank : {0, mpi.size() - 1}) {
+      const hundun::test::IdealGasStateSnapshot before_layout{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      hundun::flow::test::IdealGasClosureTestAccess::set_attempt_layout_fault(
+          flow, fault_rank);
+      const auto layout_failed = flow.attempt(state, 0.0, bdf2, {}, {});
+      HUNDUN_CHECK(layout_failed.flow().flow().disposition ==
+                   hundun::flow::StepAttemptDisposition::non_retryable_failure);
+      HUNDUN_CHECK(layout_failed.flow().flow().reason ==
+                   hundun::flow::StepFailureReason::invalid_input);
+      HUNDUN_CHECK(layout_failed.flow().flow().lowest_failing_rank ==
+                   fault_rank);
+      HUNDUN_CHECK(!layout_failed.closure_report_available());
+      const hundun::test::IdealGasStateSnapshot after_layout{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(before_layout,
+                                                               after_layout));
     }
-    HUNDUN_CHECK(typed_mpi_failure);
-    const hundun::test::IdealGasStateSnapshot after_mpi_failure{
-        state.snapshot(hundun::flow::FlowLayer::history),
-        state.snapshot(hundun::flow::FlowLayer::committed),
-        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-        flow.closure_state()};
-    HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
-        before_mpi_failure, after_mpi_failure));
+
+    for (const int fault_rank : {0, mpi.size() - 1}) {
+      const hundun::test::IdealGasStateSnapshot before_mpi_failure{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      hundun::flow::test::IdealGasClosureTestAccess::set_post_store_mpi_fault(
+          flow, fault_rank);
+      bool typed_mpi_failure = false;
+      try {
+        static_cast<void>(flow.attempt(state, 0.0, bdf2, {}, {}));
+      } catch (const hundun::runtime::MpiOperationError &error) {
+        typed_mpi_failure =
+            std::string_view(error.what()).find("post-store reduction") !=
+            std::string_view::npos;
+      }
+      HUNDUN_CHECK(typed_mpi_failure);
+      const hundun::test::IdealGasStateSnapshot after_mpi_failure{
+          state.snapshot(hundun::flow::FlowLayer::history),
+          state.snapshot(hundun::flow::FlowLayer::committed),
+          state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+          flow.closure_state()};
+      HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+          before_mpi_failure, after_mpi_failure));
+    }
 
     const hundun::test::IdealGasStateSnapshot before_failure{
         state.snapshot(hundun::flow::FlowLayer::history),
@@ -830,6 +1385,55 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
         flow.closure_state()};
     HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(before_failure,
                                                              after_failure));
+    hundun::flow::test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
+        flow, cp * 5.0 / dt);
+
+    const hundun::test::IdealGasStateSnapshot before_finalization_wrap{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    hundun::flow::test::IdealGasClosureTestAccess::
+        force_finalization_identity_wrap(flow);
+    const auto finalization_wrap = flow.attempt(state, 0.0, bdf2, {}, {});
+    HUNDUN_CHECK(finalization_wrap.flow().flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(finalization_wrap.flow().flow().reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(finalization_wrap.flow().flow().lowest_failing_rank == 0);
+    HUNDUN_CHECK(finalization_wrap.closure_report_available());
+    HUNDUN_CHECK(finalization_wrap.closure_report().stage() ==
+                 hundun::flow::IdealGasClosureStage::provisional);
+    const hundun::test::IdealGasStateSnapshot after_finalization_wrap{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+        before_finalization_wrap, after_finalization_wrap));
+
+    const hundun::test::IdealGasStateSnapshot before_attempt_wrap{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    hundun::flow::test::MaterialDensityTransportTestAccess::
+        force_attempt_identity_wrap(state);
+    const auto attempt_wrap = flow.attempt(state, 0.0, bdf2, {}, {});
+    HUNDUN_CHECK(attempt_wrap.flow().flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(attempt_wrap.flow().flow().reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(attempt_wrap.flow().flow().lowest_failing_rank == 0);
+    HUNDUN_CHECK(!attempt_wrap.closure_report_available());
+    const hundun::test::IdealGasStateSnapshot after_attempt_wrap{
+        state.snapshot(hundun::flow::FlowLayer::history),
+        state.snapshot(hundun::flow::FlowLayer::committed),
+        state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
+        flow.closure_state()};
+    HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+        before_attempt_wrap, after_attempt_wrap));
+
     hundun::flow::test::IdealGasClosureTestAccess::exhaust_source_generation(
         flow);
     bool exhausted_rejected = false;

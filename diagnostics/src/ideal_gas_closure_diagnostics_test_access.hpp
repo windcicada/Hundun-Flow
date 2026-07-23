@@ -14,6 +14,7 @@ namespace hundun::diagnostics::test {
 
 enum class IdealGasClosureDiagnosticFault : std::uint8_t {
   none,
+  capability,
   provider_agreement,
   ownership_layout,
   sample_wire,
@@ -21,6 +22,7 @@ enum class IdealGasClosureDiagnosticFault : std::uint8_t {
   request_preparation,
   sample_preparation,
   aggregation,
+  oversized_agreement,
   raw_mpi
 };
 

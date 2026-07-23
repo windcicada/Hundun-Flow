@@ -11,6 +11,7 @@
 #include <mpi.h>
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "material_density_piso_test_access.hpp"
+#include "material_density_transport_test_access.hpp"
 #endif
 
 #include <algorithm>
@@ -1060,10 +1061,16 @@ std::uint64_t MaterialDensityStepAttemptReport::compute_seal() const noexcept {
     mix(result, value);
   }
   mix(result, closure_origin_ ? 1U : 0U);
+  mix(result, pre_closure_authority_.has_value() ? 1U : 0U);
+  if (pre_closure_authority_)
+    mix(result, pre_closure_authority_->compute_seal());
   mix(result, post_closure_evidence_available_ ? 1U : 0U);
   mix(result, post_closure_report_.has_value() ? 1U : 0U);
   if (post_closure_report_)
     mix(result, post_closure_report_->compute_seal());
+  mix(result, post_closure_authority_.has_value() ? 1U : 0U);
+  if (post_closure_authority_)
+    mix(result, post_closure_authority_->compute_seal());
   return result;
 }
 
@@ -1077,6 +1084,48 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
   };
   const auto byte = [](std::uint8_t value) noexcept { return value <= 1U; };
   const std::size_t fields = static_cast<std::size_t>(material_field_count_);
+  const auto same_transport_report = [&](
+                                         const MaterialDensityTransportReport &a,
+                                         const MaterialDensityTransportReport &b) {
+    const auto same_double = [](double left, double right) noexcept {
+      return bits(left) == bits(right);
+    };
+    const auto same_doubles = [&](const std::vector<double> &left,
+                                  const std::vector<double> &right) {
+      return left.size() == right.size() &&
+             std::equal(left.begin(), left.end(), right.begin(), same_double);
+    };
+    return a.authenticated() && b.authenticated() &&
+           a.disposition() == b.disposition() && a.reason() == b.reason() &&
+           a.lowest_failing_rank() == b.lowest_failing_rank() &&
+           same_stencil(a.stencil(), b.stencil()) &&
+           a.flux_provenance() == b.flux_provenance() &&
+           a.attempt_identity() == b.attempt_identity() &&
+           a.finalization_identity() == b.finalization_identity() &&
+           a.shared_face_mass_flux_field() ==
+               b.shared_face_mass_flux_field() &&
+           a.density_residual_available() ==
+               b.density_residual_available() &&
+           same_double(a.density_normalized_l2(), b.density_normalized_l2()) &&
+           a.transport_residual_availability() ==
+               b.transport_residual_availability() &&
+           same_doubles(a.transport_normalized_l2(),
+                        b.transport_normalized_l2()) &&
+           a.mass_conservation_available() ==
+               b.mass_conservation_available() &&
+           same_double(a.mass_relative_conservation_defect(),
+                       b.mass_relative_conservation_defect()) &&
+           a.transport_conservation_availability() ==
+               b.transport_conservation_availability() &&
+           same_doubles(a.transport_relative_conservation_defect(),
+                        b.transport_relative_conservation_defect()) &&
+           a.minimum_density_available() == b.minimum_density_available() &&
+           same_double(a.minimum_density_kg_per_m3(),
+                       b.minimum_density_kg_per_m3()) &&
+           a.minimum_density_global_cell() ==
+               b.minimum_density_global_cell() &&
+           a.minimum_density_rank() == b.minimum_density_rank();
+  };
   if (static_cast<std::uint8_t>(flow_.reason) >
           static_cast<std::uint8_t>(
               StepFailureReason::density_closure_failure) ||
@@ -1135,12 +1184,13 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
                 material.transport_relative_conservation_defect()[field]))))
         return false;
     }
-    if (mass_conservation_available_ !=
-            material.mass_conservation_available() ||
+    if ((!closure_origin_ &&
+         mass_conservation_available_ !=
+             material.mass_conservation_available()) ||
         (!closure_origin_ && mass_conservation_available_ &&
          bits(flow_.final_mass_relative_conservation_defect) !=
              bits(material.mass_relative_conservation_defect())) ||
-        (!mass_conservation_available_ &&
+        (!closure_origin_ && !mass_conservation_available_ &&
          (!positive_zero(flow_.final_mass_relative_conservation_defect) ||
           !positive_zero(material.mass_relative_conservation_defect()))))
       return false;
@@ -1255,16 +1305,25 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
   if (flow_.reason == StepFailureReason::collective_operation &&
       flow_.lowest_failing_rank < 0)
     return false;
+  const bool post_failure_authority =
+      closure_origin_ && post_closure_report_ &&
+      post_closure_report_->disposition() !=
+          MaterialTransportDisposition::finalized &&
+      map_material_failure(post_closure_report_->reason()) == flow_.reason &&
+      post_closure_report_->lowest_failing_rank() ==
+          flow_.lowest_failing_rank;
   if (flow_.reason == StepFailureReason::transport_failure &&
       material_failure_reason_ !=
           MaterialTransportFailureReason::non_finite_state &&
       material_failure_reason_ !=
-          MaterialTransportFailureReason::non_positive_density)
+          MaterialTransportFailureReason::non_positive_density &&
+      !post_failure_authority)
     return false;
   if (material_failure_reason_ != MaterialTransportFailureReason::none) {
     if (map_material_failure(material_failure_reason_) != flow_.reason)
       return false;
-  } else if (flow_.reason == StepFailureReason::transport_failure ||
+  } else if ((flow_.reason == StepFailureReason::transport_failure &&
+              !post_failure_authority) ||
              (material_report_ && material_report_->reason() !=
                                       MaterialTransportFailureReason::none)) {
     return false;
@@ -1273,6 +1332,13 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
       flow_.reason == StepFailureReason::density_closure_failure)
     return false;
   if (closure_origin_) {
+    if (material_report_.has_value() != pre_closure_authority_.has_value() ||
+        (material_report_ &&
+         !same_transport_report(*material_report_,
+                                *pre_closure_authority_)) ||
+        post_closure_report_.has_value() !=
+            post_closure_authority_.has_value())
+      return false;
     if (post_closure_evidence_available_ !=
             post_closure_report_.has_value() ||
         (committed && !post_closure_evidence_available_))
@@ -1280,6 +1346,7 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
     if (post_closure_report_) {
       const auto &post = *post_closure_report_;
       if (!post.authenticated() ||
+          !same_transport_report(post, *post_closure_authority_) ||
           post.attempt_identity() != attempt_identity_ ||
           post.shared_face_mass_flux_field() !=
               shared_face_mass_flux_field_ ||
@@ -1295,6 +1362,10 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
           bits(flow_.final_mass_relative_conservation_defect) !=
               bits(post.mass_relative_conservation_defect()) ||
           mass_conservation_available_ != post.mass_conservation_available())
+        return false;
+      if (post.disposition() != MaterialTransportDisposition::finalized &&
+          (flow_.reason != map_material_failure(post.reason()) ||
+           flow_.lowest_failing_rank != post.lowest_failing_rank()))
         return false;
       for (std::size_t field = 0; field < fields; ++field)
         if (bits(flow_.final_transport_normalized_l2[field]) !=
@@ -1315,7 +1386,8 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
                         [](std::uint8_t value) { return value == 1U; })))
         return false;
     }
-  } else if (post_closure_evidence_available_ || post_closure_report_) {
+  } else if (pre_closure_authority_ || post_closure_evidence_available_ ||
+             post_closure_report_ || post_closure_authority_) {
     return false;
   }
   return true;
@@ -1670,6 +1742,12 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                     closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
       impl_->halo->exchange(trial, closure->enthalpy_density);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (closure->after_halo != nullptr)
+        closure->after_halo(closure->object,
+                            detail::DensityClosureStage::predictor,
+                            fields.density, closure->enthalpy_density);
+#endif
     } else {
       impl_->halo->exchange(trial, fields.density);
     }
@@ -1968,6 +2046,12 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                     closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
       impl_->halo->exchange(trial, closure->enthalpy_density);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (closure->after_halo != nullptr)
+        closure->after_halo(closure->object,
+                            detail::DensityClosureStage::provisional,
+                            fields.density, closure->enthalpy_density);
+#endif
     } else {
       impl_->halo->exchange(trial, fields.density);
     }
@@ -2020,10 +2104,19 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
               : impl_->material_transport.finalize_trial_with_source(
                     state, *final_material_flux, stencil,
                     closure->enthalpy_rate_J_per_kg_s));
+      if (closure != nullptr) {
+        // Ideal-origin nested evidence belongs to the facade attempt even
+        // when earlier input rejections made FlowState's private sequence
+        // differ from the facade sequence.
+        result.material_report_->attempt_identity_ = result.attempt_identity_;
+        result.material_report_->seal();
+      }
       result.material_attempt_identity_ =
           result.material_report_->attempt_identity();
       result.material_finalization_identity_ =
           result.material_report_->finalization_identity();
+      if (closure != nullptr)
+        result.pre_closure_authority_ = result.material_report_;
       final_material_flux.reset();
     }
     result.flux_provenance_ = MaterialFluxProvenance::final_corrected;
@@ -2054,6 +2147,17 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                     closure_result.recoverable);
       impl_->halo->exchange(trial, fields.density);
       impl_->halo->exchange(trial, closure->enthalpy_density);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (closure->after_halo != nullptr)
+        closure->after_halo(closure->object,
+                            detail::DensityClosureStage::final,
+                            fields.density, closure->enthalpy_density);
+#endif
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (closure->before_post_assessment != nullptr)
+        closure->before_post_assessment(closure->object, state);
+#endif
 
       std::optional<MaterialFaceMassFlux> post_closure_flux;
       synchronized_local_phase(
@@ -2065,7 +2169,10 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
           impl_->material_transport.assess_trial_after_closure(
               state, *post_closure_flux, stencil,
               closure->enthalpy_rate_J_per_kg_s));
+      result.post_closure_report_->attempt_identity_ = result.attempt_identity_;
+      result.post_closure_report_->seal();
       result.post_closure_evidence_available_ = true;
+      result.post_closure_authority_ = result.post_closure_report_;
       post_closure_flux.reset();
       result.flow_.final_transport_normalized_l2 =
           result.post_closure_report_->transport_normalized_l2();
@@ -2439,6 +2546,9 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     return finish();
   } catch (const SynchronizedMaterialFailure &failure) {
     return fail(failure.reason, failure.failing_rank, failure.recoverable);
+  } catch (const detail::DensityClosurePreflightFailure &failure) {
+    return fail(StepFailureReason::invalid_input, failure.failing_rank(),
+                false);
   } catch (const runtime::MpiOperationError &) {
     if (active)
       state.rollback_attempt();
@@ -2477,6 +2587,16 @@ bool detail::DensityClosureBridge::post_eos_evidence_authenticated(
   return report.authenticated() && report.post_closure_evidence_available_ &&
          report.post_closure_report_.has_value();
 }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void detail::DensityClosureBridge::force_finalization_identity_wrap(
+    FixedStepMaterialDensityFlow &flow) {
+  if (!flow.impl_)
+    throw runtime::Error("material flow object has been moved from");
+  test::MaterialDensityTransportTestAccess::force_finalization_identity_wrap(
+      flow.impl_->material_transport);
+}
+#endif
 
 
 MaterialDensityFlowDiagnosticSource
