@@ -13,6 +13,7 @@ namespace hundun::flow {
 
 namespace detail {
 struct FlowStateSolverAccess;
+struct AdaptiveTimeControlAccess;
 }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
@@ -110,6 +111,7 @@ private:
   friend class test::MaterialDensityPisoTestAccess;
 #endif
   friend struct detail::FlowStateSolverAccess;
+  friend struct detail::AdaptiveTimeControlAccess;
 };
 
 } // namespace hundun::flow

@@ -176,6 +176,7 @@ if(HUNDUN_BUILD_TESTS)
 endif()
 
 add_library(hundun_flow STATIC
+  flow/src/adaptive_time_control.cpp
   flow/src/constant_density_piso.cpp
   flow/src/flow_state.cpp
   flow/src/ideal_gas_closure.cpp
@@ -205,7 +206,8 @@ endif()
 add_library(hundun_material_diagnostics STATIC
   diagnostics/src/ideal_gas_closure_diagnostics.cpp
   diagnostics/src/material_density_piso_diagnostics.cpp
-  diagnostics/src/material_density_transport_diagnostics.cpp)
+  diagnostics/src/material_density_transport_diagnostics.cpp
+  diagnostics/src/time_control_diagnostics.cpp)
 target_include_directories(hundun_material_diagnostics PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
 target_include_directories(hundun_material_diagnostics PRIVATE
@@ -731,6 +733,49 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_flow_state PRIVATE hundun_flow)
   set_tests_properties(test_flow_state PROPERTIES TIMEOUT 30)
+
+  hundun_add_test(test_adaptive_time_control_header_contract
+    tests/unit/test_adaptive_time_control_header_contract.cpp)
+  target_include_directories(test_adaptive_time_control_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_adaptive_time_control_header_contract PRIVATE
+    hundun_flow)
+  set_tests_properties(test_adaptive_time_control_header_contract PROPERTIES
+    LABELS "unit;task22;task22-fast" TIMEOUT 30)
+
+  hundun_add_test(test_adaptive_time_control
+    tests/unit/test_adaptive_time_control.cpp)
+  target_include_directories(test_adaptive_time_control PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_adaptive_time_control PRIVATE hundun_flow)
+  set_tests_properties(test_adaptive_time_control PROPERTIES
+    LABELS "unit;task22;task22-fast" TIMEOUT 30)
+
+  add_executable(test_adaptive_time_control_mpi
+    tests/mpi/test_adaptive_time_control.cpp)
+  target_include_directories(test_adaptive_time_control_mpi PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_adaptive_time_control_mpi PRIVATE
+    hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(task22_controller_test
+        "test_adaptive_time_control_${ranks}_rank")
+    add_test(NAME "${task22_controller_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_adaptive_time_control_mpi>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task22_controller_test}" PROPERTIES
+      LABELS "mpi;numerical;task22;task22-fast"
+      TIMEOUT 240 PROCESSORS "${ranks}")
+  endforeach()
+  add_test(NAME test_task22_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_source_policy.cmake")
+  set_tests_properties(test_task22_source_policy PROPERTIES
+    LABELS "unit;source_policy;task22" TIMEOUT 30)
 
   hundun_add_test(test_momentum_predictor
     tests/unit/test_momentum_predictor.cpp)

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+if(NOT DEFINED HUNDUN_SOURCE_ROOT)
+  message(FATAL_ERROR "HUNDUN_SOURCE_ROOT is required")
+endif()
+file(READ "${HUNDUN_SOURCE_ROOT}/CMakeLists.txt" cmake_text)
+file(READ "${HUNDUN_SOURCE_ROOT}/flow/src/adaptive_time_control.cpp" flow_text)
+file(READ "${HUNDUN_SOURCE_ROOT}/diagnostics/src/time_control_diagnostics.cpp"
+     diagnostics_text)
+if(cmake_text MATCHES "target_link_libraries\\(hundun_flow[^\\)]*hundun_diagnostics")
+  message(FATAL_ERROR "hundun_flow must not link diagnostics")
+endif()
+if(flow_text MATCHES "hundun/diagnostics|time_control_diagnostics")
+  message(FATAL_ERROR "flow time control must not depend on diagnostics")
+endif()
+if(diagnostics_text MATCHES "_test_access\\.hpp|acquire_write|trial_layer")
+  message(FATAL_ERROR "time-control diagnostics uses mutable/test access")
+endif()
+foreach(forbidden IN ITEMS "Python" "checkpoint" "COMPLETED"
+                           "adaptive_time_control_test_support")
+  if(flow_text MATCHES "${forbidden}" OR diagnostics_text MATCHES "${forbidden}")
+    message(FATAL_ERROR "Task22 product contains forbidden term ${forbidden}")
+  endif()
+endforeach()

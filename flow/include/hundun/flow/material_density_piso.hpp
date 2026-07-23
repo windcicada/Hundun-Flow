@@ -16,6 +16,7 @@ namespace hundun::flow {
 namespace detail {
 struct DensityClosureBridge;
 struct DensityClosureHooks;
+struct AdaptiveTimeControlAccess;
 } // namespace detail
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -85,6 +86,7 @@ private:
   std::uint64_t seal_{};
 
   friend class FixedStepMaterialDensityFlow;
+  friend class TimeAdvanceReport;
   friend struct detail::DensityClosureBridge;
   friend class MaterialDensityFlowDiagnosticSource;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -191,6 +193,7 @@ private:
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityFlowDiagnosticSource;
   friend struct detail::DensityClosureBridge;
+  friend struct detail::AdaptiveTimeControlAccess;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityPisoTestAccess;

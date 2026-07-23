@@ -2,6 +2,7 @@
 
 #include "hundun/flow/material_density_piso.hpp"
 
+#include "adaptive_time_control_detail.hpp"
 #include "density_closure_detail.hpp"
 #include "fixed_step_flow_detail.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
@@ -569,6 +570,16 @@ struct FixedStepMaterialDensityFlow::Impl final {
         partition_face_values(
             multiply_count(topology.global_face_count(), 4U)),
         partition_face_counts(topology.global_face_count()) {
+    std::vector<double> coefficients;
+    coefficients.reserve(1U + this->specification.scalar_diffusivities_kg_per_m_s.size());
+    coefficients.push_back(
+        this->specification.enthalpy_diffusivity_kg_per_m_s);
+    coefficients.insert(
+        coefficients.end(),
+        this->specification.scalar_diffusivities_kg_per_m_s.begin(),
+        this->specification.scalar_diffusivities_kg_per_m_s.end());
+    transport_authority =
+        detail::make_transport_diffusivity_authority(coefficients);
     const std::size_t cells = topology.owned_cell_count();
     const std::size_t momentum_values = multiply_count(cells, 3U);
     for (auto &values : diagonal_values)
@@ -624,6 +635,7 @@ struct FixedStepMaterialDensityFlow::Impl final {
   const runtime::FieldRegistry *registry;
   FlowFieldIds fields;
   MaterialDensityTransportSpec specification;
+  detail::TransportDiffusivityAuthority transport_authority;
   finite_volume::CellCenteredFvmOperators fvm;
   finite_volume::FaceMassFlux::PreparedStatePtr prepared_face_flux;
   MaterialFaceMassFlux::PreparedStatePtr prepared_material_flux;
@@ -658,6 +670,13 @@ struct FixedStepMaterialDensityFlow::Impl final {
   std::vector<double> finalizer_flux_input;
 #endif
 };
+
+const detail::TransportDiffusivityAuthority &
+detail::AdaptiveTimeControlAccess::authority(
+    const FixedStepMaterialDensityFlow &flow) noexcept {
+  static const TransportDiffusivityAuthority empty{};
+  return flow.impl_ ? flow.impl_->transport_authority : empty;
+}
 
 struct MaterialDensityFlowDiagnosticSource::Impl final {
   const FixedStepMaterialDensityFlow::Impl *flow{};

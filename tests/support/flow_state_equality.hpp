@@ -2,6 +2,7 @@
 #pragma once
 
 #include "hundun/flow/flow_state.hpp"
+#include "hundun/flow/adaptive_time_control.hpp"
 #include "hundun/flow/ideal_gas_closure.hpp"
 
 #include <cstdint>
@@ -128,6 +129,47 @@ inline bool flow_state_equality_oracle_is_mutation_sensitive() {
   return flow_layer_values_bitwise_equal(baseline, exact) &&
          !flow_layer_values_bitwise_equal(baseline, ordinary) &&
          !flow_layer_values_bitwise_equal(baseline, nested);
+}
+
+inline bool time_control_state_bitwise_equal(
+    const flow::TimeControlState &left,
+    const flow::TimeControlState &right) noexcept {
+  return left.schema_version == right.schema_version &&
+         left.accepted_step == right.accepted_step &&
+         fp64_bits(left.proposed_next_dt_s) ==
+             fp64_bits(right.proposed_next_dt_s) &&
+         fp64_bits(left.last_accepted_dt_s) ==
+             fp64_bits(right.last_accepted_dt_s) &&
+         left.last_accepted_order == right.last_accepted_order &&
+         left.history_ready == right.history_ready &&
+         left.last_all_linear_solves_within_half_limit ==
+             right.last_all_linear_solves_within_half_limit &&
+         fp64_bits(left.last_convective_rate_per_s) ==
+             fp64_bits(right.last_convective_rate_per_s) &&
+         fp64_bits(left.last_diffusive_rate_per_s) ==
+             fp64_bits(right.last_diffusive_rate_per_s) &&
+         left.last_stability_metrics_available ==
+             right.last_stability_metrics_available &&
+         left.last_retry_count == right.last_retry_count &&
+         left.revision == right.revision &&
+         left.state_seal == right.state_seal;
+}
+
+inline bool time_control_state_equality_oracle_is_mutation_sensitive() {
+  flow::TimeControlState baseline;
+  baseline.proposed_next_dt_s = 0.1;
+  baseline.last_accepted_dt_s = 0.05;
+  baseline.last_convective_rate_per_s = 2.0;
+  baseline.last_diffusive_rate_per_s = 3.0;
+  baseline.state_seal = 4U;
+  const auto exact = baseline;
+  auto ordinary = baseline;
+  ordinary.proposed_next_dt_s = -0.1;
+  auto nested = baseline;
+  nested.last_diffusive_rate_per_s = -3.0;
+  return time_control_state_bitwise_equal(baseline, exact) &&
+         !time_control_state_bitwise_equal(baseline, ordinary) &&
+         !time_control_state_bitwise_equal(baseline, nested);
 }
 
 } // namespace hundun::test

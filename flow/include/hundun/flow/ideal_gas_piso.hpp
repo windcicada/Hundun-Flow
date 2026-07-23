@@ -15,6 +15,7 @@ namespace hundun::flow {
 namespace detail {
 struct DensityClosureAdapter;
 struct DensityClosureDiagnosticAccess;
+struct AdaptiveTimeControlAccess;
 } // namespace detail
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -48,6 +49,7 @@ private:
   void seal() noexcept;
   bool authenticated() const noexcept;
   friend class FixedStepIdealGasFlow;
+  friend class TimeAdvanceReport;
   friend class IdealGasClosureDiagnosticSource;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
@@ -147,6 +149,7 @@ private:
   std::unique_ptr<Impl> impl_;
   friend class IdealGasClosureDiagnosticSource;
   friend struct detail::DensityClosureAdapter;
+  friend struct detail::AdaptiveTimeControlAccess;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif

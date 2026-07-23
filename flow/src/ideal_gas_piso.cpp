@@ -2,6 +2,7 @@
 
 #include "hundun/flow/ideal_gas_piso.hpp"
 
+#include "adaptive_time_control_detail.hpp"
 #include "density_closure_detail.hpp"
 #include "fixed_step_flow_detail.hpp"
 #include "hundun/runtime/collective_status.hpp"
@@ -267,6 +268,14 @@ struct FixedStepIdealGasFlow::Impl final {
   std::string owned_cell_fingerprint;
   std::string global_cell_fingerprint;
 };
+
+const detail::TransportDiffusivityAuthority &
+detail::AdaptiveTimeControlAccess::authority(
+    const FixedStepIdealGasFlow &flow) noexcept {
+  static const TransportDiffusivityAuthority empty{};
+  return flow.impl_ ? AdaptiveTimeControlAccess::authority(flow.impl_->material)
+                    : empty;
+}
 
 struct IdealGasClosureDiagnosticSource::Impl final {
   const FixedStepIdealGasFlow::Impl *flow{};

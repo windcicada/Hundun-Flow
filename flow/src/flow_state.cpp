@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/flow/flow_state.hpp"
+#include "adaptive_time_control_detail.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "material_density_transport_test_access.hpp"
 #include "material_density_piso_test_access.hpp"
@@ -408,6 +409,41 @@ const FlowFieldIds &FlowState::fields() const noexcept { return impl_->fields; }
 
 AcceptedStepMetadata FlowState::metadata() const noexcept {
   return impl_->metadata;
+}
+
+const FlowState *
+detail::AdaptiveTimeControlAccess::state_identity(const FlowState &state) noexcept {
+  return &state;
+}
+
+std::uint64_t detail::AdaptiveTimeControlAccess::diagnostic_identity(
+    const FlowState &state) noexcept {
+  return state.diagnostic_mutation_identity();
+}
+
+std::vector<double>
+detail::AdaptiveTimeControlAccess::committed_density(const FlowState &state) {
+  const auto extent = state.impl_->layout.cell_interior_extent;
+  std::vector<double> result;
+  result.reserve(cell_count(extent));
+  auto view = state.impl_->committed.acquire_read<double>(
+      state.impl_->access, kStatePhase, kStateActor, state.impl_->fields.density);
+  for_each_cell(extent, [&](int i, int j, int k) {
+    result.push_back(view(i, j, k, 0));
+  });
+  return result;
+}
+
+std::vector<double>
+detail::AdaptiveTimeControlAccess::committed_face_mass_flux(
+    const FlowState &state) {
+  auto view = state.impl_->committed.acquire_face_read<double>(
+      state.impl_->access, kStatePhase, kStateActor,
+      state.impl_->fields.face_mass_flux);
+  std::vector<double> result(view.face_count());
+  for (std::size_t face = 0; face < view.face_count(); ++face)
+    result[face] = view(face, 0);
+  return result;
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS

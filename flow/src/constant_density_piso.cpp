@@ -2,6 +2,7 @@
 
 #include "hundun/flow/constant_density_piso.hpp"
 
+#include "adaptive_time_control_detail.hpp"
 #include "fixed_step_flow_detail.hpp"
 
 #include "hundun/finite_volume/matrix_free_poisson.hpp"
@@ -1797,6 +1798,12 @@ struct FixedStepConstantDensityFlow::Impl final {
             execution::Buffer(
                 supplied_execution,
                 bytes_for(supplied_topology.owned_cell_count()))} {
+    std::vector<double> coefficients;
+    coefficients.reserve(transport.size());
+    for (const auto &item : transport)
+      coefficients.push_back(item.diffusivity_kg_per_m_s);
+    transport_authority =
+        detail::make_transport_diffusivity_authority(coefficients);
     const std::size_t cell_count = supplied_topology.owned_cell_count();
     const std::size_t momentum_count = multiplied_count(
         cell_count, 3U, "Task 18 momentum workspace");
@@ -1839,6 +1846,7 @@ struct FixedStepConstantDensityFlow::Impl final {
   std::array<linear::Preconditioner *, 3> momentum_preconditioners;
   PisoCoupler coupler;
   std::vector<ConstantDensityTransportSpec> transport;
+  detail::TransportDiffusivityAuthority transport_authority;
   bool transport_specs_valid{};
   finite_volume::CellCenteredFvmOperators fvm;
   TimeConsistentFaceVelocity face_assembler;
@@ -1932,6 +1940,13 @@ FixedStepConstantDensityFlow::~FixedStepConstantDensityFlow() noexcept =
     default;
 FixedStepConstantDensityFlow::FixedStepConstantDensityFlow(
     FixedStepConstantDensityFlow &&) noexcept = default;
+
+const detail::TransportDiffusivityAuthority &
+detail::AdaptiveTimeControlAccess::authority(
+    const FixedStepConstantDensityFlow &flow) noexcept {
+  static const TransportDiffusivityAuthority empty{};
+  return flow.impl_ ? flow.impl_->transport_authority : empty;
+}
 
 namespace {
 

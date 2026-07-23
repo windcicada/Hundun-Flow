@@ -20,6 +20,10 @@
 
 namespace hundun::flow {
 
+namespace detail {
+struct AdaptiveTimeControlAccess;
+}
+
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class ConstantDensityPisoTestAccess;
@@ -159,7 +163,6 @@ private:
       const linear::SolveControl &control) const;
   void prepare_material_density_assessment();
   std::unique_ptr<Impl> impl_;
-
   friend class FixedStepMaterialDensityFlow;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -202,6 +205,7 @@ private:
   struct Impl;
   explicit FixedStepConstantDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
+  friend struct detail::AdaptiveTimeControlAccess;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::ConstantDensityPisoTestAccess;

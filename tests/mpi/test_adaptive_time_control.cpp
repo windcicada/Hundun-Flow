@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include "hundun/boundary/basic_boundary.hpp"
+#include "hundun/diagnostics/time_control_diagnostics.hpp"
+#include "hundun/execution/execution.hpp"
+#include "hundun/finite_volume/cell_centered_fvm.hpp"
+#include "hundun/flow/adaptive_time_control.hpp"
+#include "hundun/linear/conjugate_gradient.hpp"
+#include "hundun/linear/preconditioners.hpp"
+#include "hundun/mesh/mesh_geometry.hpp"
+#include "hundun/mesh/mesh_topology.hpp"
+#include "hundun/runtime/exchange_plan.hpp"
+#include "hundun/runtime/field_registry.hpp"
+#include "hundun/runtime/halo_exchange.hpp"
+#include "hundun/runtime/mpi_context.hpp"
+#include "hundun/runtime/mpi_environment.hpp"
+#include "hundun/runtime/structured_decomposition.hpp"
+#include "tests/support/flow_state_equality.hpp"
+#include "tests/support/test_main.hpp"
+
+#include <array>
+#include <cmath>
+
+namespace {
+
+struct RecordingSink final : hundun::diagnostics::DiagnosticSink {
+  void submit(const hundun::diagnostics::DiagnosticRecord &value) override {
+    record = value;
+    ++calls;
+  }
+  hundun::diagnostics::DiagnosticRecord record;
+  int calls{};
+};
+
+hundun::runtime::Int3 grid(int ranks) {
+  if (ranks == 1)
+    return {1, 1, 1};
+  if (ranks == 2)
+    return {2, 1, 1};
+  if (ranks == 4)
+    return {2, 2, 1};
+  throw hundun::runtime::Error("unsupported Task22 rank count");
+}
+
+hundun::runtime::FieldDescriptor cell(const char *name,
+                                      std::uint32_t components) {
+  return {name, "1", "task22", hundun::runtime::FunctionSpace::cell_average,
+          hundun::runtime::ScalarType::float64, components, 2, false,
+          hundun::runtime::RestartPolicy::persistent,
+          hundun::runtime::OutputPolicy::never};
+}
+hundun::runtime::FieldDescriptor face(const char *name,
+                                      std::uint32_t components) {
+  return {name, "1", "task22", hundun::runtime::FunctionSpace::face_value,
+          hundun::runtime::ScalarType::float64, components, 0, false,
+          hundun::runtime::RestartPolicy::persistent,
+          hundun::runtime::OutputPolicy::never};
+}
+
+hundun::config::FlowCaseConfig periodic_case() {
+  hundun::config::FlowCaseConfig config{};
+  config.schema_version = 2;
+  config.simulation_type =
+      hundun::config::SimulationType::variable_density_flow;
+  config.density_model = hundun::config::DensityModel::constant;
+  config.physics.rho_ref_kg_per_m3 = 1.0;
+  config.physics.inlet_consistency_rtol = 1.0e-12;
+  config.scalars.push_back({"alpha", 0.0});
+  constexpr std::array<hundun::config::PatchName, 6> names{
+      hundun::config::PatchName::x_min, hundun::config::PatchName::x_max,
+      hundun::config::PatchName::y_min, hundun::config::PatchName::y_max,
+      hundun::config::PatchName::z_min, hundun::config::PatchName::z_max};
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    config.boundaries[i].patch = names[i];
+    config.boundaries[i].type = hundun::config::BoundaryType::periodic;
+  }
+  return config;
+}
+
+void run(const hundun::runtime::MpiContext &mpi) {
+  constexpr hundun::runtime::Int3 extent{8, 6, 4};
+  auto decomposition = hundun::runtime::StructuredDecomposition::create(
+      mpi, extent, {true, true, true},
+      hundun::runtime::DecompositionOptions{grid(mpi.size())});
+  const hundun::mesh::MeshTopology topology(decomposition);
+  const hundun::mesh::MeshGeometry geometry(
+      topology,
+      hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  auto boundaries =
+      hundun::boundary::BoundaryRegistry::create(periodic_case(), topology);
+
+  hundun::runtime::FieldRegistry registry;
+  hundun::flow::FlowFieldIds fields;
+  fields.density = registry.declare_field(cell("rho", 1U));
+  fields.velocity = registry.declare_field(cell("u", 3U));
+  fields.mechanical_pressure = registry.declare_field(cell("pi", 1U));
+  fields.face_velocity = registry.declare_field(face("uf", 3U));
+  fields.face_mass_flux =
+      hundun::finite_volume::declare_face_mass_flux(registry);
+  fields.transported_cell_fields.push_back(
+      registry.declare_field(cell("alpha", 1U)));
+  registry.freeze();
+
+  const auto box = decomposition.owned_box();
+  const hundun::runtime::Int3 local{box.end.x - box.begin.x,
+                                    box.end.y - box.begin.y,
+                                    box.end.z - box.begin.z};
+  auto state = hundun::flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0,
+       hundun::flow::MomentumTimeOrder::backward_euler});
+  const auto cells = topology.owned_cell_count();
+  hundun::flow::FlowLayerValues initial;
+  initial.density.assign(cells, 1.0);
+  initial.velocity.assign(cells * 3U, 0.0);
+  initial.mechanical_pressure.assign(cells, 0.0);
+  initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
+  initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
+  initial.transported_cell_fields = {std::vector<double>(cells, 1.0)};
+  state.seed_accepted_layers(initial, initial);
+
+  auto halo = hundun::runtime::HaloExchange::create(
+      decomposition,
+      hundun::runtime::ExchangePlan::create(decomposition, local, 2));
+  hundun::execution::CpuReferenceContext execution;
+  hundun::linear::ConjugateGradientSolver momentum_solver(execution, mpi);
+  hundun::linear::ConjugateGradientSolver pressure_solver(execution, mpi);
+  hundun::linear::JacobiPreconditioner mx(execution), my(execution),
+      mz(execution), pressure_preconditioner(execution);
+  auto facade = hundun::flow::FixedStepConstantDensityFlow::create(
+      decomposition, topology, geometry, boundaries, mpi, execution, halo,
+      momentum_solver, {&mx, &my, &mz}, pressure_solver,
+      pressure_preconditioner,
+      {{fields.transported_cell_fields.front(),
+        hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+  const hundun::config::FlowTimeConfig time{
+      hundun::config::TimeMode::adaptive, 2, 0.01, 0.00125, 0.02,
+      0.5, 0.25, 1.25, 0.5, 8};
+  auto controller = hundun::flow::Bdf2RetryController::create(
+      time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+      state);
+  HUNDUN_CHECK(controller.state().accepted_step == 0U);
+  const auto before = state.snapshot(hundun::flow::FlowLayer::committed);
+  auto report = controller.advance(state, facade, 1.0, 0.0, {}, {});
+  HUNDUN_CHECK(report.disposition() ==
+               hundun::flow::TimeAdvanceDisposition::committed);
+  HUNDUN_CHECK(report.attempt_count() == 1U);
+  HUNDUN_CHECK(report.attempt(0).order ==
+               hundun::flow::MomentumTimeOrder::backward_euler);
+  HUNDUN_CHECK(report.accepted_dt_s() == 0.01);
+  HUNDUN_CHECK(report.stability_metrics_available());
+  HUNDUN_CHECK(report.convective_rate_per_s() == 0.0);
+  HUNDUN_CHECK(report.diffusive_rate_per_s() == 0.0);
+  HUNDUN_CHECK(controller.state().accepted_step == 1U);
+  HUNDUN_CHECK(state.metadata().step == 1U);
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      before, state.snapshot(hundun::flow::FlowLayer::committed)));
+
+  auto restored = hundun::flow::Bdf2RetryController::restore(
+      time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+      state, controller.state());
+  HUNDUN_CHECK(restored.state().state_seal == controller.state().state_seal);
+  auto second = restored.advance(state, facade, 1.0, 0.0, {}, {});
+  HUNDUN_CHECK(second.disposition() ==
+               hundun::flow::TimeAdvanceDisposition::committed);
+  HUNDUN_CHECK(second.attempt(0).order ==
+               hundun::flow::MomentumTimeOrder::bdf2);
+  HUNDUN_CHECK(state.metadata().step == 2U);
+
+  auto source = restored.diagnostic_source(state, second);
+  RecordingSink local_sink;
+  hundun::diagnostics::DiagnosticRequest local_request{
+      hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
+      hundun::diagnostics::DiagnosticScope::local,
+      {mpi.rank(), state.metadata().step, state.metadata().time_s,
+       "time-control.advance-result"},
+      {}, 256U};
+  hundun::diagnostics::collect_diagnostics(source, local_request, local_sink);
+  HUNDUN_CHECK(local_sink.calls == 1);
+  HUNDUN_CHECK(local_sink.record.samples.size() == 9U);
+  HUNDUN_CHECK(local_sink.record.eligible_sample_count == 9U);
+  HUNDUN_CHECK(local_sink.record.samples.front().component == 0U);
+  HUNDUN_CHECK(local_sink.record.samples[1].component == 1U);
+
+  RecordingSink collective_sink;
+  auto collective_request = local_request;
+  collective_request.level = hundun::diagnostics::DiagnosticLevel::summary;
+  collective_request.scope =
+      hundun::diagnostics::DiagnosticScope::collective;
+  collective_request.sample_budget = 0U;
+  hundun::diagnostics::collect_diagnostics(
+      source, mpi, collective_request, collective_sink);
+  HUNDUN_CHECK(collective_sink.calls == 1);
+  HUNDUN_CHECK(collective_sink.record.status ==
+               hundun::diagnostics::DiagnosticStatus::ok);
+  HUNDUN_CHECK(collective_sink.record.metrics.size() == 5U);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  hundun::runtime::MpiEnvironment environment(argc, argv);
+  auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
+  return hundun::test::run([&] { run(mpi); });
+}
