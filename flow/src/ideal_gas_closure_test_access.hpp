@@ -46,6 +46,7 @@ enum class IdealGasCreateFault : std::uint8_t {
   ownership_overlap,
   ownership_swap,
   local_preparation,
+  construction_allocation,
   inlet_cp,
   inlet_gas_constant,
   inlet_pressure,

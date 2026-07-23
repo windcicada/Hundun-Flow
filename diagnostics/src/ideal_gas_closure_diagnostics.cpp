@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -853,17 +854,20 @@ void require_exact_record_contract(
 void submit(DiagnosticRecord record,
             const flow::IdealGasClosureDiagnosticSource &source,
             const DiagnosticRequest &request, DiagnosticSink &sink) {
-  const auto expected = record;
-#ifndef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-  (void)source;
-#endif
-#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-  if (fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
-            source.relative_rank()))
-    record.schema_version = 0U;
-#endif
   try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(source,
+              test::IdealGasClosureDiagnosticFault::record_preparation,
+              source.relative_rank()))
+      throw std::bad_alloc();
+    const auto expected = record;
+    if (fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
+              source.relative_rank()))
+      record.schema_version = 0U;
     require_exact_record_contract(record, expected, source, request);
+#else
+    validate(record, describe_diagnostics(source), request);
+#endif
   } catch (...) {
     fail(DiagnosticFailureClass::invalid_input, "closure.diagnostics.record",
          -1, "ideal-gas diagnostic record is invalid");
@@ -1108,15 +1112,22 @@ void submit_collective(const DiagnosticRecord &record,
                        const flow::IdealGasClosureDiagnosticSource &source,
                        const DiagnosticRequest &request,
                        const runtime::MpiContext &mpi, DiagnosticSink &sink) {
-  auto candidate = record;
+  std::optional<DiagnosticRecord> candidate;
   bool invalid = false;
-#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
-  if (fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
-            mpi.rank()))
-    candidate.schema_version = 0U;
-#endif
   try {
-    require_exact_record_contract(candidate, record, source, request);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(source,
+              test::IdealGasClosureDiagnosticFault::record_preparation,
+              mpi.rank()))
+      throw std::bad_alloc();
+#endif
+    candidate.emplace(record);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (fault(source, test::IdealGasClosureDiagnosticFault::record_validation,
+              mpi.rank()))
+      candidate->schema_version = 0U;
+#endif
+    require_exact_record_contract(*candidate, record, source, request);
   } catch (...) {
     invalid = true;
   }
@@ -1211,10 +1222,15 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
            source, request, sink);
   } catch (const DiagnosticCollectionError &) {
     throw;
+  } catch (const runtime::MpiOperationError &) {
+    throw;
   } catch (const runtime::Error &) {
     fail(DiagnosticFailureClass::invalid_input,
          "closure.diagnostics.stale-source", -1,
          "ideal-gas diagnostic source is stale");
+  } catch (...) {
+    fail(DiagnosticFailureClass::invalid_input, "closure.diagnostics.record",
+         -1, "ideal-gas diagnostic record preparation failed");
   }
 }
 
@@ -1469,6 +1485,9 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
   fail(DiagnosticFailureClass::invalid_input,
        "closure.diagnostics.stale-source", -1,
        "ideal-gas diagnostic source is stale");
+} catch (...) {
+  fail(DiagnosticFailureClass::invalid_input, "closure.diagnostics.record", -1,
+       "ideal-gas diagnostic record preparation failed");
 }
 
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS

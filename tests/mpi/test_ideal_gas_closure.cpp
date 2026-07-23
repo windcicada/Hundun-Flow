@@ -281,7 +281,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
     for (const auto fault :
          {CreateFault::mode_disagreement, CreateFault::ownership_gap,
           CreateFault::ownership_overlap, CreateFault::ownership_swap,
-          CreateFault::local_preparation}) {
+          CreateFault::local_preparation,
+          CreateFault::construction_allocation}) {
       bool rejected = false;
       try {
         static_cast<void>(TestAccess::create(

@@ -11,6 +11,38 @@ hundun::flow::IdealGasClosureDiagnosticSource
 hundun::flow::FlowState *task21_diagnostic_outer_state = nullptr;
 const hundun::runtime::MpiContext *task21_diagnostic_outer_mpi = nullptr;
 
+class NestedDiagnosticFixtureGuard final {
+public:
+  NestedDiagnosticFixtureGuard(
+      hundun::flow::IdealGasClosureDiagnosticSource &source,
+      hundun::flow::FlowState &state,
+      const hundun::runtime::MpiContext &mpi) noexcept
+      : prior_nested_(task21_diagnostic_nested_fixture),
+        prior_source_(task21_diagnostic_outer_source),
+        prior_state_(task21_diagnostic_outer_state),
+        prior_mpi_(task21_diagnostic_outer_mpi) {
+    task21_diagnostic_outer_source = &source;
+    task21_diagnostic_outer_state = &state;
+    task21_diagnostic_outer_mpi = &mpi;
+    task21_diagnostic_nested_fixture = true;
+  }
+  ~NestedDiagnosticFixtureGuard() noexcept {
+    task21_diagnostic_nested_fixture = prior_nested_;
+    task21_diagnostic_outer_source = prior_source_;
+    task21_diagnostic_outer_state = prior_state_;
+    task21_diagnostic_outer_mpi = prior_mpi_;
+  }
+  NestedDiagnosticFixtureGuard(const NestedDiagnosticFixtureGuard &) = delete;
+  NestedDiagnosticFixtureGuard &
+  operator=(const NestedDiagnosticFixtureGuard &) = delete;
+
+private:
+  bool prior_nested_{};
+  hundun::flow::IdealGasClosureDiagnosticSource *prior_source_{};
+  hundun::flow::FlowState *prior_state_{};
+  const hundun::runtime::MpiContext *prior_mpi_{};
+};
+
 void run_task21_diagnostic_matrix(
     hundun::flow::IdealGasClosureDiagnosticSource &,
     const hundun::runtime::MpiContext &, hundun::flow::FlowState &,
@@ -1042,6 +1074,10 @@ void run_task21_diagnostic_matrix(
         std::tuple{Fault::record_validation,
                    diagnostics::DiagnosticFailureClass::invalid_input,
                    std::string_view("closure.diagnostics.record"),
+                   diagnostics::DiagnosticLevel::summary},
+        std::tuple{Fault::record_preparation,
+                   diagnostics::DiagnosticFailureClass::invalid_input,
+                   std::string_view("closure.diagnostics.record"),
                    diagnostics::DiagnosticLevel::summary}}) {
     Access::set_fault(source, fault, mpi.rank());
     const auto request =
@@ -1218,8 +1254,9 @@ void run_task21_diagnostic_matrix(
                     "closure.diagnostics.sample-wire", target, sink);
       Access::reset(source);
     }
-    {
-      Access::set_fault(source, Fault::record_validation, target);
+    for (const auto fault :
+         {Fault::record_validation, Fault::record_preparation}) {
+      Access::set_fault(source, fault, target);
       auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                  diagnostics::DiagnosticScope::collective);
       RecordingSink sink;
@@ -1243,18 +1280,24 @@ void run_task21_diagnostic_matrix(
   }
   require_pure(before, state, source, mpi);
 
-  task21_diagnostic_outer_source = &source;
-  task21_diagnostic_outer_state = &state;
-  task21_diagnostic_outer_mpi = &mpi;
-  task21_diagnostic_nested_fixture = true;
   {
+    NestedDiagnosticFixtureGuard nested(source, state, mpi);
     auto duplicate = hundun::runtime::MpiContext::duplicate(mpi.comm());
     run(duplicate, false, false, false);
   }
-  task21_diagnostic_nested_fixture = false;
-  task21_diagnostic_outer_source = nullptr;
-  task21_diagnostic_outer_state = nullptr;
-  task21_diagnostic_outer_mpi = nullptr;
+  HUNDUN_CHECK(!task21_diagnostic_nested_fixture);
+  HUNDUN_CHECK(task21_diagnostic_outer_source == nullptr);
+  HUNDUN_CHECK(task21_diagnostic_outer_state == nullptr);
+  HUNDUN_CHECK(task21_diagnostic_outer_mpi == nullptr);
+  try {
+    NestedDiagnosticFixtureGuard exceptional(source, state, mpi);
+    throw std::runtime_error("fixture restoration oracle");
+  } catch (const std::runtime_error &) {
+  }
+  HUNDUN_CHECK(!task21_diagnostic_nested_fixture);
+  HUNDUN_CHECK(task21_diagnostic_outer_source == nullptr);
+  HUNDUN_CHECK(task21_diagnostic_outer_state == nullptr);
+  HUNDUN_CHECK(task21_diagnostic_outer_mpi == nullptr);
   require_pure(before, state, source, mpi);
 
   Access::reset(source);

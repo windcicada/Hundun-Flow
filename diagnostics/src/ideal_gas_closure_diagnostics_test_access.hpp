@@ -21,6 +21,7 @@ enum class IdealGasClosureDiagnosticFault : std::uint8_t {
   global_extent,
   sample_wire,
   record_validation,
+  record_preparation,
   request_preparation,
   sample_preparation,
   aggregation,

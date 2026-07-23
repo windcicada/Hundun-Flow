@@ -593,6 +593,7 @@ struct MaterialDensityTransport::Impl final {
   std::vector<CompensatedSum> local_sums;
   std::vector<double> reduced_sums;
   std::optional<MaterialDensityTransportReport> prepared_task20_report;
+  std::optional<MaterialDensityTransportReport> prepared_post_closure_report;
   std::string global_layout_fingerprint;
   std::string owned_layout_fingerprint;
   mutable std::uint64_t finalization_identity{};
@@ -963,6 +964,12 @@ void MaterialDensityTransport::prepare_task20_attempt() const {
   prepared.transport_conservation_available_.assign(count, 0U);
   prepared.transport_relative_conservation_defect_.assign(count, 0.0);
   impl_->prepared_task20_report.emplace(std::move(prepared));
+  MaterialDensityTransportReport post;
+  post.transport_residual_available_.assign(count, 0U);
+  post.transport_normalized_l2_.assign(count, 0.0);
+  post.transport_conservation_available_.assign(count, 0U);
+  post.transport_relative_conservation_defect_.assign(count, 0.0);
+  impl_->prepared_post_closure_report.emplace(std::move(post));
 }
 
 MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
@@ -1823,15 +1830,20 @@ MaterialDensityTransport::assess_trial_after_closure(
 
   const auto &fields = transport_fields(*impl_);
   MaterialDensityTransportReport report;
+  if (impl_->prepared_post_closure_report) {
+    report = std::move(*impl_->prepared_post_closure_report);
+    impl_->prepared_post_closure_report.reset();
+  } else {
+    report.transport_residual_available_.assign(fields.size(), 0U);
+    report.transport_normalized_l2_.assign(fields.size(), 0.0);
+    report.transport_conservation_available_.assign(fields.size(), 0U);
+    report.transport_relative_conservation_defect_.assign(fields.size(), 0.0);
+  }
   report.stencil_ = stencil;
   report.flux_provenance_ = final_mass_flux.provenance();
   report.shared_face_mass_flux_field_ = final_mass_flux.field_id();
   report.attempt_identity_ = state.attempt_identity();
   report.finalization_identity_ = ++impl_->finalization_identity;
-  report.transport_residual_available_.assign(fields.size(), 0U);
-  report.transport_normalized_l2_.assign(fields.size(), 0.0);
-  report.transport_conservation_available_.assign(fields.size(), 0U);
-  report.transport_relative_conservation_defect_.assign(fields.size(), 0.0);
   const auto finish = [&]() {
     report.seal();
     return std::move(report);

@@ -1572,6 +1572,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
   result.flux_provenance_ = MaterialFluxProvenance::predictor;
   result.attempt_identity_ = impl_->attempt_identity;
   result.closure_origin_ = closure != nullptr;
+  std::optional<MaterialDensityTransportReport> prepared_pre_authority;
+  std::optional<MaterialDensityTransportReport> prepared_post_authority;
   const auto finish = [&]() {
     result.seal();
     impl_->last_state = &state;
@@ -1582,6 +1584,22 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
   bool preparation_ok = true;
   try {
     impl_->material_transport.prepare_task20_attempt();
+    if (closure != nullptr) {
+      const auto prepare_authority = [&](auto &slot) {
+        MaterialDensityTransportReport prepared;
+        prepared.transport_residual_available_.assign(
+            impl_->material_field_count, 0U);
+        prepared.transport_normalized_l2_.assign(impl_->material_field_count,
+                                                  0.0);
+        prepared.transport_conservation_available_.assign(
+            impl_->material_field_count, 0U);
+        prepared.transport_relative_conservation_defect_.assign(
+            impl_->material_field_count, 0.0);
+        slot.emplace(std::move(prepared));
+      };
+      prepare_authority(prepared_pre_authority);
+      prepare_authority(prepared_post_authority);
+    }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (preflight_allocation_failure_rank.load(std::memory_order_relaxed) ==
         impl_->mpi->rank())
@@ -2128,7 +2146,9 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       result.material_finalization_identity_ =
           result.material_report_->finalization_identity();
       if (closure != nullptr)
-        result.pre_closure_authority_ = result.material_report_;
+        result.pre_closure_authority_ = std::move(prepared_pre_authority);
+      if (closure != nullptr)
+        *result.pre_closure_authority_ = *result.material_report_;
       if (closure != nullptr)
         result.pre_closure_report_seal_authority_ =
             result.material_report_->compute_seal();
@@ -2187,7 +2207,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       result.post_closure_report_->attempt_identity_ = result.attempt_identity_;
       result.post_closure_report_->seal();
       result.post_closure_evidence_available_ = true;
-      result.post_closure_authority_ = result.post_closure_report_;
+      result.post_closure_authority_ = std::move(prepared_post_authority);
+      *result.post_closure_authority_ = *result.post_closure_report_;
       result.post_closure_report_seal_authority_ =
           result.post_closure_report_->compute_seal();
       post_closure_flux.reset();
