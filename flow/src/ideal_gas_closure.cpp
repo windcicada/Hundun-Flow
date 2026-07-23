@@ -512,6 +512,7 @@ struct IdealGasClosure::Impl final {
   std::array<std::vector<double>, 6> cell_workspace;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   int facade_create_fault_rank{-1};
+  int material_factory_create_fault_rank{-1};
   int controlled_allocation_rank{-1};
   bool allocation_observation_active{};
   int attempt_preparation_fault_kind{-1};
@@ -1534,13 +1535,16 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
     }
   }
 
-  // Both checked write capabilities were acquired and validated before the
-  // ordinary failure agreement.  No storage changes until all frozen metric
-  // reductions and the final gate have succeeded.
-  for_each_cell(extent, [&](int i, int j, int k, std::size_t offset) {
-    (*rho_write)(i, j, k, 0) = rho_eos[offset];
-    (*q_write)(i, j, k, 0) = q_eos[offset];
-  });
+  // Both checked write capabilities and the exact field/count/layout contract
+  // were validated before the ordinary agreement. Publication after the
+  // metric gate is deliberately a private no-allocation/no-fail operation;
+  // no checked or kernel view is retained across a collective.
+  static_assert(noexcept(trial.publish_validated_cell_interior_double(
+      impl_->fields.density, rho_eos.data(), rho_eos.size())));
+  trial.publish_validated_cell_interior_double(
+      impl_->fields.density, rho_eos.data(), rho_eos.size());
+  trial.publish_validated_cell_interior_double(
+      impl_->spec.enthalpy_density, q_eos.data(), q_eos.size());
 
   if (stage == IdealGasClosureStage::final) {
     report.final_metrics_available_ = true;
@@ -1915,12 +1919,28 @@ void test::IdealGasClosureTestAccess::set_facade_create_fault(
   closure.impl_->facade_create_fault_rank = rank;
 }
 
+void test::IdealGasClosureTestAccess::set_material_factory_create_fault(
+    IdealGasClosure &closure, int rank) {
+  if (!closure.impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  closure.impl_->material_factory_create_fault_rank = rank;
+}
+
 bool test::IdealGasClosureTestAccess::consume_facade_create_fault(
     IdealGasClosure &closure, int rank) noexcept {
   if (!closure.impl_ || closure.impl_->facade_create_fault_rank != rank)
     return false;
   closure.impl_->facade_create_fault_rank = -1;
   return true;
+}
+
+int test::IdealGasClosureTestAccess::consume_material_factory_create_fault(
+    IdealGasClosure &closure) noexcept {
+  if (!closure.impl_)
+    return -1;
+  const int rank = closure.impl_->material_factory_create_fault_rank;
+  closure.impl_->material_factory_create_fault_rank = -1;
+  return rank;
 }
 
 void test::IdealGasClosureTestAccess::begin_allocation_observation(
@@ -1967,8 +1987,6 @@ void test::IdealGasClosureTestAccess::consume_attempt_preparation_fault(
   switch (fault) {
   case IdealGasAttemptPreparationFault::pre_authority_preparation:
   case IdealGasAttemptPreparationFault::post_authority_preparation:
-  case IdealGasAttemptPreparationFault::pre_authority_publication:
-  case IdealGasAttemptPreparationFault::post_authority_publication:
     closure.impl_->attempt_preparation_fault_kind = -1;
     closure.impl_->attempt_preparation_fault_rank = -1;
     throw std::bad_alloc();

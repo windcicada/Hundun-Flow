@@ -1493,7 +1493,12 @@ FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create_open_capable(
     const linear::LinearSolver &pressure_solver,
     linear::Preconditioner &pressure_preconditioner,
     const runtime::FieldRegistry &registry, FlowFieldIds fields,
-    MaterialDensityTransportSpec specification) {
+    MaterialDensityTransportSpec specification
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    ,
+    int material_factory_construction_fault_rank
+#endif
+) {
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
   if (geometry.mapping_kind() != mesh::MappingKind::uniform_box)
@@ -1512,6 +1517,10 @@ FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create_open_capable(
   auto transport = MaterialDensityTransport::create(
       registry, decomposition, topology, geometry, boundaries, mpi, cell_halo,
       fields, specification);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (material_factory_construction_fault_rank == mpi.rank())
+    throw std::bad_alloc();
+#endif
   return FixedStepMaterialDensityFlow(std::make_unique<Impl>(
       decomposition, topology, geometry, boundaries, mpi, execution_context,
       cell_halo, momentum_solver, momentum_preconditioners,
@@ -1531,12 +1540,22 @@ FixedStepMaterialDensityFlow detail::DensityClosureBridge::create_open_capable(
     const linear::LinearSolver &pressure_solver,
     linear::Preconditioner &pressure_preconditioner,
     const runtime::FieldRegistry &registry, FlowFieldIds fields,
-    MaterialDensityTransportSpec specification) {
+    MaterialDensityTransportSpec specification
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    ,
+    int material_factory_construction_fault_rank
+#endif
+) {
   return FixedStepMaterialDensityFlow::create_open_capable(
       decomposition, topology, geometry, boundaries, mpi, execution_context,
       cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
       pressure_preconditioner, registry, std::move(fields),
-      std::move(specification));
+      std::move(specification)
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      ,
+      material_factory_construction_fault_rank
+#endif
+  );
 }
 
 FixedStepMaterialDensityFlow::~FixedStepMaterialDensityFlow() noexcept =

@@ -504,6 +504,72 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
   auto closure = hundun::flow::IdealGasClosure::create(
       topology, geometry, boundaries, mpi, registry, fields, state,
       {rho_h, cp, gas_constant, pressure});
+
+  // The closure evaluates without Halo exchange here, so this directly
+  // verifies the post-gate publication boundary: only owned interior rho and
+  // rho_h may change. Ghosts and unrelated fields must retain their exact
+  // bit patterns.
+  state.begin_attempt();
+  {
+    auto &trial = state.trial_layer();
+    auto rho = trial.view<double>(fields.density);
+    auto q = trial.view<double>(rho_h);
+    auto pi = trial.view<double>(fields.mechanical_pressure);
+    const auto local = decomposition.local_extent();
+    for (int k = -2; k < local.z + 2; ++k)
+      for (int j = -2; j < local.y + 2; ++j)
+        for (int i = -2; i < local.x + 2; ++i) {
+          const bool interior = i >= 0 && i < local.x && j >= 0 &&
+                                j < local.y && k >= 0 && k < local.z;
+          if (!interior) {
+            rho(i, j, k, 0) = -101.0;
+            q(i, j, k, 0) = -202.0;
+          }
+          pi(i, j, k, 0) = interior ? 303.0 : -303.0;
+        }
+    q(0, 0, 0, 0) *= 1.01;
+    const auto rho_before = state.snapshot(hundun::flow::FlowLayer::trial);
+    hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(
+        closure, state, 9001U);
+    const auto publication =
+        hundun::flow::test::IdealGasClosureTestAccess::evaluate(
+            closure, state, hundun::flow::IdealGasClosureStage::predictor);
+    HUNDUN_CHECK(publication.disposition() ==
+                 hundun::flow::IdealGasClosureDisposition::closed);
+    bool interior_changed = false;
+    for (int k = 0; k < local.z; ++k)
+      for (int j = 0; j < local.y; ++j)
+        for (int i = 0; i < local.x; ++i) {
+          const auto offset =
+              (static_cast<std::size_t>(k) *
+                   static_cast<std::size_t>(local.y) +
+               static_cast<std::size_t>(j)) *
+                  static_cast<std::size_t>(local.x) +
+              static_cast<std::size_t>(i);
+          interior_changed =
+              interior_changed ||
+              std::memcmp(&rho(i, j, k, 0),
+                          &rho_before.density[offset],
+                          sizeof(double)) != 0;
+          HUNDUN_CHECK(std::memcmp(&pi(i, j, k, 0),
+                                   &rho_before.mechanical_pressure[offset],
+                                   sizeof(double)) == 0);
+        }
+    HUNDUN_CHECK(interior_changed);
+    for (int k = -2; k < local.z + 2; ++k)
+      for (int j = -2; j < local.y + 2; ++j)
+        for (int i = -2; i < local.x + 2; ++i) {
+          const bool interior = i >= 0 && i < local.x && j >= 0 &&
+                                j < local.y && k >= 0 && k < local.z;
+          if (interior)
+            continue;
+          HUNDUN_CHECK(rho(i, j, k, 0) == -101.0);
+          HUNDUN_CHECK(q(i, j, k, 0) == -202.0);
+          HUNDUN_CHECK(pi(i, j, k, 0) == -303.0);
+        }
+    hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
+  }
+  state.rollback_attempt();
   auto halo = hundun::runtime::HaloExchange::create(
       decomposition, hundun::runtime::ExchangePlan::create(
                          decomposition, decomposition.local_extent(), 2));
@@ -548,22 +614,54 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
   expect_collaborator_rejected(alternate_topology, geometry, boundaries);
   expect_collaborator_rejected(topology, geometry, alternate_boundaries);
   for (const int fault_rank : {0, mpi.size() - 1}) {
-    auto fault_closure = hundun::flow::IdealGasClosure::create(
-        topology, geometry, boundaries, mpi, registry, fields, state,
-        {rho_h, cp, gas_constant, pressure});
-    hundun::flow::test::IdealGasClosureTestAccess::set_facade_create_fault(
-        fault_closure, fault_rank);
-    bool rejected = false;
-    try {
-      static_cast<void>(hundun::flow::FixedStepIdealGasFlow::create(
+    for (const bool nested_material_factory : {true, false}) {
+      auto fault_closure = hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields, state,
+          {rho_h, cp, gas_constant, pressure});
+      if (nested_material_factory)
+        hundun::flow::test::IdealGasClosureTestAccess::
+            set_material_factory_create_fault(fault_closure, fault_rank);
+      else
+        hundun::flow::test::IdealGasClosureTestAccess::set_facade_create_fault(
+            fault_closure, fault_rank);
+      bool rejected = false;
+      try {
+        static_cast<void>(hundun::flow::FixedStepIdealGasFlow::create(
+            decomposition, topology, geometry, boundaries, mpi, execution,
+            halo, momentum_solver, {&mx, &my, &mz}, pressure_solver,
+            pressure_preconditioner, registry, fields, material_spec,
+            std::move(fault_closure)));
+      } catch (const hundun::runtime::Error &error) {
+        rejected =
+            std::string(error.what()) ==
+            "ideal-gas flow facade construction failed on rank " +
+                std::to_string(fault_rank);
+      }
+      HUNDUN_CHECK(rejected);
+
+      auto successor_state = hundun::flow::FlowState::create(
+          registry,
+          {decomposition.local_extent(), topology.local_face_count()}, fields,
+          {0U, 0.0, dt, 0.0,
+           hundun::flow::MomentumTimeOrder::backward_euler});
+      successor_state.seed_accepted_layers(initial, initial);
+      auto successor_closure = hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields,
+          successor_state,
+          {rho_h, cp, gas_constant, pressure});
+      auto successor = hundun::flow::FixedStepIdealGasFlow::create(
           decomposition, topology, geometry, boundaries, mpi, execution, halo,
           momentum_solver, {&mx, &my, &mz}, pressure_solver,
           pressure_preconditioner, registry, fields, material_spec,
-          std::move(fault_closure)));
-    } catch (const hundun::runtime::Error &) {
-      rejected = true;
+          std::move(successor_closure));
+      const auto successor_report = successor.attempt(
+          successor_state, 0.0,
+          hundun::flow::make_momentum_time_stencil(
+              hundun::flow::MomentumTimeOrder::backward_euler, dt, 0.0),
+          {}, {});
+      HUNDUN_CHECK(successor_report.flow().flow().disposition ==
+                   hundun::flow::StepAttemptDisposition::committed);
     }
-    HUNDUN_CHECK(rejected);
     if (mpi.size() == 1)
       break;
   }
@@ -572,33 +670,65 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
       momentum_solver, {&mx, &my, &mz}, pressure_solver,
       pressure_preconditioner, registry, fields, material_spec,
       std::move(closure));
-  hundun::flow::test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
-      flow, open_domain ? 0.0 : cp * 5.0 / dt);
-
   HUNDUN_CHECK(
       hundun::test::ideal_gas_state_equality_oracle_is_mutation_sensitive());
   const auto stencil = hundun::flow::make_momentum_time_stencil(
       hundun::flow::MomentumTimeOrder::backward_euler, dt, 0.0);
-  const hundun::test::IdealGasStateSnapshot before_allocation_probe{
-      state.snapshot(hundun::flow::FlowLayer::history),
-      state.snapshot(hundun::flow::FlowLayer::committed),
-      state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-      flow.closure_state()};
-  hundun::flow::test::IdealGasClosureTestAccess::set_controlled_allocation(
-      flow, mpi.size() - 1);
-  task21_allocation_oracle::Observation mutation_observation(flow);
-  const auto allocation_probe = flow.attempt(state, 0.0, stencil, {}, {});
-  HUNDUN_CHECK((mutation_observation.count() > 0U) ==
-               (mpi.rank() == mpi.size() - 1));
-  HUNDUN_CHECK(allocation_probe.flow().flow().disposition !=
-               hundun::flow::StepAttemptDisposition::committed);
-  const hundun::test::IdealGasStateSnapshot after_allocation_probe{
-      state.snapshot(hundun::flow::FlowLayer::history),
-      state.snapshot(hundun::flow::FlowLayer::committed),
-      state.snapshot(hundun::flow::FlowLayer::trial), state.metadata(),
-      flow.closure_state()};
-  HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
-      before_allocation_probe, after_allocation_probe));
+  for (const int allocation_rank : {0, mpi.size() - 1}) {
+    auto allocation_state = hundun::flow::FlowState::create(
+        registry, {decomposition.local_extent(), topology.local_face_count()},
+        fields,
+        {0U, 0.0, dt, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    allocation_state.seed_accepted_layers(initial, initial);
+    auto allocation_closure = hundun::flow::IdealGasClosure::create(
+        topology, geometry, boundaries, mpi, registry, fields,
+        allocation_state, {rho_h, cp, gas_constant, pressure});
+    auto allocation_flow = hundun::flow::FixedStepIdealGasFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&mx, &my, &mz}, pressure_solver,
+        pressure_preconditioner, registry, fields, material_spec,
+        std::move(allocation_closure));
+    const hundun::test::IdealGasStateSnapshot before_allocation_probe{
+        allocation_state.snapshot(hundun::flow::FlowLayer::history),
+        allocation_state.snapshot(hundun::flow::FlowLayer::committed),
+        allocation_state.snapshot(hundun::flow::FlowLayer::trial),
+        allocation_state.metadata(), allocation_flow.closure_state()};
+    hundun::flow::test::IdealGasClosureTestAccess::set_controlled_allocation(
+        allocation_flow, allocation_rank);
+    task21_allocation_oracle::Observation mutation_observation(allocation_flow);
+    const auto allocation_probe =
+        allocation_flow.attempt(allocation_state, 0.0, stencil, {}, {});
+    HUNDUN_CHECK((mutation_observation.count() > 0U) ==
+                 (mpi.rank() == allocation_rank));
+    HUNDUN_CHECK(allocation_probe.flow().flow().disposition !=
+                 hundun::flow::StepAttemptDisposition::committed);
+    HUNDUN_CHECK(allocation_probe.flow().flow().reason ==
+                 hundun::flow::StepFailureReason::density_closure_failure);
+    HUNDUN_CHECK(allocation_probe.flow().flow().lowest_failing_rank ==
+                 allocation_rank);
+    HUNDUN_CHECK(allocation_probe.closure_report_available());
+    HUNDUN_CHECK(allocation_probe.closure_report().reason() ==
+                 hundun::flow::IdealGasClosureFailureReason::invalid_input);
+    const hundun::test::IdealGasStateSnapshot after_allocation_probe{
+        allocation_state.snapshot(hundun::flow::FlowLayer::history),
+        allocation_state.snapshot(hundun::flow::FlowLayer::committed),
+        allocation_state.snapshot(hundun::flow::FlowLayer::trial),
+        allocation_state.metadata(), allocation_flow.closure_state()};
+    HUNDUN_CHECK(hundun::test::ideal_gas_state_bitwise_equal(
+        before_allocation_probe, after_allocation_probe));
+    task21_allocation_oracle::Observation successor_observation(
+        allocation_flow);
+    const auto allocation_successor = allocation_flow.attempt(
+        allocation_state, 0.0, stencil, {}, {});
+    HUNDUN_CHECK(successor_observation.count() == 0U);
+    HUNDUN_CHECK(allocation_successor.flow().flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::committed);
+    if (mpi.size() == 1)
+      break;
+  }
+  hundun::flow::test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
+      flow, open_domain ? 0.0 : cp * 5.0 / dt);
   task21_allocation_oracle::Observation clean_observation(flow);
   const auto report = flow.attempt(state, 0.0, stencil, {}, {});
   HUNDUN_CHECK(clean_observation.count() == 0U);
@@ -1529,9 +1659,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
         PreparationFault::post_next_integrals,
         PreparationFault::post_report_finalization,
         PreparationFault::pre_authority_preparation,
-        PreparationFault::post_authority_preparation,
-        PreparationFault::pre_authority_publication,
-        PreparationFault::post_authority_publication};
+        PreparationFault::post_authority_preparation};
     for (const int fault_rank : {0, mpi.size() - 1}) {
       for (const auto fault : preparation_faults) {
         const hundun::test::IdealGasStateSnapshot before_preparation_fault{

@@ -68,9 +68,7 @@ enum class IdealGasAttemptPreparationFault : std::uint8_t {
   post_next_integrals,
   post_report_finalization,
   pre_authority_preparation,
-  post_authority_preparation,
-  pre_authority_publication,
-  post_authority_publication
+  post_authority_preparation
 };
 
 enum class IdealGasMetricGateFault : std::uint8_t {
@@ -109,7 +107,10 @@ public:
   static IdealGasClosureFailureReason
   create_validation_failure_reason(const runtime::Error &) noexcept;
   static void set_facade_create_fault(IdealGasClosure &, int rank);
+  static void set_material_factory_create_fault(IdealGasClosure &, int rank);
   static bool consume_facade_create_fault(IdealGasClosure &, int rank) noexcept;
+  static int
+  consume_material_factory_create_fault(IdealGasClosure &) noexcept;
   static void begin_attempt(IdealGasClosure &, FlowState &,
                             std::uint64_t identity);
   static IdealGasClosureReport evaluate(IdealGasClosure &, FlowState &,

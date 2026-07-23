@@ -175,7 +175,12 @@ private:
       runtime::HaloExchange &, const linear::LinearSolver &,
       std::array<linear::Preconditioner *, 3>, const linear::LinearSolver &,
       linear::Preconditioner &, const runtime::FieldRegistry &, FlowFieldIds,
-      MaterialDensityTransportSpec);
+      MaterialDensityTransportSpec
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      ,
+      int material_factory_construction_fault_rank
+#endif
+  );
   MaterialDensityStepAttemptReport
   attempt_common(FlowState &, double mu, const MomentumTimeStencil &,
                  const linear::SolveControl &momentum_control,

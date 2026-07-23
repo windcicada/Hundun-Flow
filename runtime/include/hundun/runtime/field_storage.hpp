@@ -13,6 +13,10 @@
 #include "hundun/runtime/field_view.hpp"
 #include "hundun/runtime/types.hpp"
 
+namespace hundun::flow {
+class IdealGasClosure;
+}
+
 namespace hundun::runtime {
 
 class HaloExchange;
@@ -91,6 +95,7 @@ class FieldStorage final {
  private:
   friend class HaloExchange;
   friend struct detail::FieldEpochTestAccess;
+  friend class ::hundun::flow::IdealGasClosure;
 
   struct Entry {
     FunctionSpace space{};
@@ -108,6 +113,9 @@ class FieldStorage final {
   Entry &entry(FieldId id);
   const Entry &entry(FieldId id) const;
   std::size_t field_count() const noexcept;
+  void publish_validated_cell_interior_double(
+      FieldId id, const double *candidate,
+      std::size_t candidate_count) noexcept;
 
   enum class ConstructionMode { legacy_cell_only, cell_and_face };
   FieldStorage(const FieldRegistry &, FieldLayoutSet,

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -382,6 +383,43 @@ const FieldStorage::Entry &FieldStorage::entry(FieldId id) const {
 
 std::size_t FieldStorage::field_count() const noexcept {
   return entries_ ? entries_->size() : 0U;
+}
+
+void FieldStorage::publish_validated_cell_interior_double(
+    FieldId id, const double *candidate,
+    std::size_t candidate_count) noexcept {
+  const auto index = static_cast<std::size_t>(id);
+  const auto nx = static_cast<std::size_t>(interior_extent_.x);
+  const auto ny = static_cast<std::size_t>(interior_extent_.y);
+  const auto nz = static_cast<std::size_t>(interior_extent_.z);
+  const auto expected_count = nx * ny * nz;
+  if (!entries_ || index >= entries_->size() || candidate == nullptr ||
+      candidate_count != expected_count) {
+    std::terminate();
+  }
+
+  Entry &field = (*entries_)[index];
+  if (field.space != FunctionSpace::cell_average ||
+      field.scalar_type != ScalarType::float64 || field.components != 1U ||
+      field.ghost_width < 0) {
+    std::terminate();
+  }
+
+  auto *data = reinterpret_cast<double *>(
+      field.bytes.data() + field.data_offset);
+  const auto ghost = static_cast<std::size_t>(field.ghost_width);
+  std::size_t source = 0U;
+  for (std::size_t k = 0U; k < nz; ++k) {
+    for (std::size_t j = 0U; j < ny; ++j) {
+      for (std::size_t i = 0U; i < nx; ++i) {
+        const auto destination =
+            (k + ghost) * field.z_stride +
+            (j + ghost) * field.y_stride +
+            (i + ghost) * field.x_stride;
+        data[destination] = candidate[source++];
+      }
+    }
+  }
 }
 
 std::uint64_t detail::FieldEpochTestAccess::generation(

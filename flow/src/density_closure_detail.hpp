@@ -75,7 +75,12 @@ struct DensityClosureBridge final {
       runtime::HaloExchange &, const linear::LinearSolver &,
       std::array<linear::Preconditioner *, 3>, const linear::LinearSolver &,
       linear::Preconditioner &, const runtime::FieldRegistry &, FlowFieldIds,
-      MaterialDensityTransportSpec);
+      MaterialDensityTransportSpec
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      ,
+      int material_factory_construction_fault_rank
+#endif
+  );
 
   static MaterialDensityStepAttemptReport
   attempt(const FixedStepMaterialDensityFlow &, FlowState &, double,

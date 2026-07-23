@@ -317,10 +317,20 @@ FixedStepIdealGasFlow FixedStepIdealGasFlow::create(
   std::unique_ptr<Impl> prepared;
   bool construction_ok = true;
   try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    const int material_factory_construction_fault_rank =
+        test::IdealGasClosureTestAccess::
+            consume_material_factory_create_fault(closure);
+#endif
     auto material = detail::DensityClosureBridge::create_open_capable(
         decomposition, topology, geometry, boundaries, mpi, execution_context,
         cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
-        pressure_preconditioner, registry, fields, specification);
+        pressure_preconditioner, registry, fields, specification
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+        ,
+        material_factory_construction_fault_rank
+#endif
+    );
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (test::IdealGasClosureTestAccess::consume_facade_create_fault(
             closure, mpi.rank())) {
