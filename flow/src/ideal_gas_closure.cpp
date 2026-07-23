@@ -217,125 +217,83 @@ bool wires_overlap(const PreflightWire &left,
 }
 
 int agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
+                    std::vector<PreflightWire> &preflight_workspace,
+                    std::uint64_t &preflight_wire_exchange_count,
                     const char *operation) {
-  // A heap-backed Allgather receive buffer can fail on one rank while peers
-  // have already entered the collective.  Stream the fixed wire to rank zero
-  // instead, then publish one fixed terminal result.  The reserved tag is
-  // below MPI's mandatory minimum MPI_TAG_UB and is isolated from Halo tags.
-  constexpr int tag = 31741;
-  int *tag_upper_bound = nullptr;
-  int attribute_present = 0;
+  if (preflight_workspace.size() != static_cast<std::size_t>(mpi.size()))
+    throw runtime::Error("ideal-gas closure preflight workspace is invalid");
+  static_assert(sizeof(PreflightWire) <=
+                static_cast<std::size_t>(std::numeric_limits<int>::max()));
   runtime::check_mpi_result(
-      MPI_Comm_get_attr(mpi.comm(), MPI_TAG_UB, &tag_upper_bound,
-                        &attribute_present),
-      "MPI_Comm_get_attr(ideal-gas closure preflight tag)");
-  if (attribute_present == 0 || tag_upper_bound == nullptr ||
-      *tag_upper_bound < tag)
-    throw runtime::Error("ideal-gas closure preflight tag is unavailable");
+      MPI_Allgather(&local, static_cast<int>(sizeof(local)), MPI_BYTE,
+                    preflight_workspace.data(),
+                    static_cast<int>(sizeof(PreflightWire)), MPI_BYTE,
+                    mpi.comm()),
+      operation);
+  ++preflight_wire_exchange_count;
 
   PreflightResult result;
   constexpr std::size_t common_bytes = offsetof(PreflightWire, local_cells);
-  const auto receive = [&](int rank, PreflightWire &wire) {
-    if (rank == 0) {
-      wire = local;
-      return;
-    }
-    runtime::check_mpi_result(
-        MPI_Recv(&wire, static_cast<int>(sizeof(wire)), MPI_BYTE, rank, tag,
-                 mpi.comm(), MPI_STATUS_IGNORE),
-        operation);
-  };
-  const auto send = [&] {
-    runtime::check_mpi_result(
-        MPI_Send(&local, static_cast<int>(sizeof(local)), MPI_BYTE, 0, tag,
-                 mpi.comm()),
-        operation);
-  };
-
-  if (mpi.rank() == 0) {
-    std::uint64_t global_volume = 1U;
-    bool contract_valid =
-        local.mode <=
-            static_cast<std::uint64_t>(IdealGasPressureMode::open_fixed) &&
-        local.global_cells[0] != 0U && local.global_cells[1] != 0U &&
-        local.global_cells[2] != 0U;
-    for (const auto extent : local.global_cells) {
-      if (extent == 0U ||
-          global_volume >
-              std::numeric_limits<std::uint64_t>::max() / extent) {
-        contract_valid = false;
-        break;
-      }
-      global_volume *= extent;
-    }
-    std::uint64_t covered = 0U;
-    for (int rank = 0; rank < mpi.size(); ++rank) {
-      PreflightWire candidate;
-      receive(rank, candidate);
-      if (candidate.local_layout_valid == 0U && result.rank < 0) {
-        result.code = PreflightResultCode::invalid_layout;
-        result.rank = rank;
-      }
-      if (std::memcmp(&candidate, &local, common_bytes) != 0)
-        contract_valid = false;
-      std::uint64_t volume{};
-      if (!checked_wire_volume(candidate, local, volume) ||
-          candidate.local_faces == 0U ||
-          covered > std::numeric_limits<std::uint64_t>::max() - volume) {
-        contract_valid = false;
-      } else {
-        const auto global_cell_id = [&](std::int64_t i, std::int64_t j,
-                                        std::int64_t k) noexcept {
-          return ((static_cast<std::uint64_t>(k) * local.global_cells[1] +
-                   static_cast<std::uint64_t>(j)) *
-                      local.global_cells[0] +
-                  static_cast<std::uint64_t>(i));
-        };
-        if (candidate.first_owned_global_id !=
-                global_cell_id(candidate.owned_begin[0],
-                               candidate.owned_begin[1],
-                               candidate.owned_begin[2]) ||
-            candidate.last_owned_global_id !=
-                global_cell_id(candidate.owned_end[0] - 1,
-                               candidate.owned_end[1] - 1,
-                               candidate.owned_end[2] - 1))
-          contract_valid = false;
-        covered += volume;
-      }
-    }
-    if (covered != global_volume)
+  const auto &common = preflight_workspace.front();
+  std::uint64_t global_volume = 1U;
+  bool contract_valid =
+      common.mode <=
+          static_cast<std::uint64_t>(IdealGasPressureMode::open_fixed) &&
+      common.global_cells[0] != 0U && common.global_cells[1] != 0U &&
+      common.global_cells[2] != 0U;
+  for (const auto extent : common.global_cells) {
+    if (extent == 0U ||
+        global_volume > std::numeric_limits<std::uint64_t>::max() / extent) {
       contract_valid = false;
-
-    // Repeat the fixed stream per left rank so pairwise overlap validation
-    // remains exact without retaining an O(rank-count) container.
-    for (int left_rank = 0; left_rank < mpi.size(); ++left_rank) {
-      PreflightWire left;
-      for (int pass = 0; pass < 2; ++pass) {
-        for (int rank = 0; rank < mpi.size(); ++rank) {
-          PreflightWire candidate;
-          receive(rank, candidate);
-          if (pass == 0 && rank == left_rank)
-            left = candidate;
-          if (pass == 1 && rank < left_rank &&
-              wires_overlap(left, candidate))
-            contract_valid = false;
-        }
-      }
+      break;
     }
-    if (result.code == PreflightResultCode::ok && !contract_valid)
-      result.code = PreflightResultCode::invalid_contract;
-  } else {
-    send();
-    for (int left_rank = 0; left_rank < mpi.size(); ++left_rank) {
-      static_cast<void>(left_rank);
-      send();
-      send();
+    global_volume *= extent;
+  }
+  std::uint64_t covered = 0U;
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    const auto &candidate =
+        preflight_workspace[static_cast<std::size_t>(rank)];
+    if (candidate.local_layout_valid == 0U && result.rank < 0) {
+      result.code = PreflightResultCode::invalid_layout;
+      result.rank = rank;
+    }
+    if (std::memcmp(&candidate, &common, common_bytes) != 0)
+      contract_valid = false;
+    std::uint64_t volume{};
+    if (!checked_wire_volume(candidate, common, volume) ||
+        candidate.local_faces == 0U ||
+        covered > std::numeric_limits<std::uint64_t>::max() - volume) {
+      contract_valid = false;
+    } else {
+      const auto global_cell_id = [&](std::int64_t i, std::int64_t j,
+                                      std::int64_t k) noexcept {
+        return ((static_cast<std::uint64_t>(k) * common.global_cells[1] +
+                 static_cast<std::uint64_t>(j)) *
+                    common.global_cells[0] +
+                static_cast<std::uint64_t>(i));
+      };
+      if (candidate.first_owned_global_id !=
+              global_cell_id(candidate.owned_begin[0],
+                             candidate.owned_begin[1],
+                             candidate.owned_begin[2]) ||
+          candidate.last_owned_global_id !=
+              global_cell_id(candidate.owned_end[0] - 1,
+                             candidate.owned_end[1] - 1,
+                             candidate.owned_end[2] - 1))
+        contract_valid = false;
+      covered += volume;
     }
   }
-  runtime::check_mpi_result(
-      MPI_Bcast(&result, static_cast<int>(sizeof(result)), MPI_BYTE, 0,
-                mpi.comm()),
-      operation);
+  if (covered != global_volume)
+    contract_valid = false;
+  for (int left_rank = 0; left_rank < mpi.size(); ++left_rank)
+    for (int right_rank = 0; right_rank < left_rank; ++right_rank)
+      if (wires_overlap(
+              preflight_workspace[static_cast<std::size_t>(left_rank)],
+              preflight_workspace[static_cast<std::size_t>(right_rank)]))
+        contract_valid = false;
+  if (result.code == PreflightResultCode::ok && !contract_valid)
+    result.code = PreflightResultCode::invalid_contract;
   if (result.code == PreflightResultCode::invalid_layout)
     return result.rank;
   if (result.code != PreflightResultCode::ok)
@@ -510,6 +468,8 @@ struct IdealGasClosure::Impl final {
   std::uint64_t attempt_identity{};
   std::uint64_t source_generation{1U};
   std::array<std::vector<double>, 6> cell_workspace;
+  std::vector<PreflightWire> preflight_workspace;
+  std::uint64_t preflight_wire_exchange_count{};
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   int facade_create_fault_rank{-1};
   int material_factory_create_fault_rank{-1};
@@ -833,8 +793,34 @@ IdealGasClosure IdealGasClosure::create_internal(
     std::swap(wire.first_owned_global_id, wire.last_owned_global_id);
   }
 #endif
+  std::vector<PreflightWire> preflight_workspace;
+  bool preflight_workspace_ready = true;
+  try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (create_fault(
+            create_fault_kind, create_fault_rank,
+            test::IdealGasCreateFault::preflight_workspace_allocation,
+            mpi.rank()))
+      throw std::bad_alloc();
+#endif
+    preflight_workspace.resize(static_cast<std::size_t>(mpi.size()));
+  } catch (...) {
+    preflight_workspace_ready = false;
+  }
+  const int local_workspace_failure =
+      preflight_workspace_ready ? mpi.size() : mpi.rank();
+  int workspace_failure = mpi.size();
+  runtime::check_mpi_result(
+      MPI_Allreduce(&local_workspace_failure, &workspace_failure, 1, MPI_INT,
+                    MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(ideal-gas closure preflight workspace allocation)");
+  if (workspace_failure != mpi.size())
+    throw detail::DensityClosurePreflightFailure(workspace_failure);
+
+  std::uint64_t preflight_wire_exchange_count = 0U;
   const int preparation_failure = agree_preflight(
-      mpi, wire, "MPI_Allgather(ideal-gas closure create preflight)");
+      mpi, wire, preflight_workspace, preflight_wire_exchange_count,
+      "MPI_Allgather(ideal-gas closure create preflight)");
   if (preparation_failure >= 0)
     throw detail::DensityClosurePreflightFailure(preparation_failure);
 
@@ -902,6 +888,8 @@ IdealGasClosure IdealGasClosure::create_internal(
     impl->registry = &registry;
     impl->fields = fields;
     impl->spec = spec;
+    impl->preflight_workspace = std::move(preflight_workspace);
+    impl->preflight_wire_exchange_count = preflight_wire_exchange_count;
     for (auto &workspace : impl->cell_workspace)
       workspace.assign(owned_cell_count, 0.0);
     if (valid) {
@@ -1132,7 +1120,8 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
 #endif
   wire.local_layout_valid = layout_valid ? 1U : 0U;
   const int layout_failure = agree_preflight(
-      *impl_->mpi, wire,
+      *impl_->mpi, wire, impl_->preflight_workspace,
+      impl_->preflight_wire_exchange_count,
       "MPI_Allgather(ideal-gas closure attempt preflight)");
   if (layout_failure >= 0)
     throw detail::DensityClosurePreflightFailure(layout_failure);
@@ -1869,6 +1858,12 @@ int test::IdealGasClosureTestAccess::preflight_failure_rank(
   const auto *validation =
       dynamic_cast<const DensityClosureCreateValidationFailure *>(&error);
   return validation == nullptr ? -1 : validation->failing_rank();
+}
+
+std::uint64_t
+test::IdealGasClosureTestAccess::preflight_wire_exchange_count(
+    const IdealGasClosure &closure) noexcept {
+  return closure.impl_ ? closure.impl_->preflight_wire_exchange_count : 0U;
 }
 
 IdealGasClosureFailureReason

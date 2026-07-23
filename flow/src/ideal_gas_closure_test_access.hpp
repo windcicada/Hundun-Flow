@@ -46,6 +46,7 @@ enum class IdealGasCreateFault : std::uint8_t {
   ownership_overlap,
   ownership_swap,
   local_preparation,
+  preflight_workspace_allocation,
   construction_allocation,
   inlet_cp,
   inlet_gas_constant,
@@ -104,6 +105,8 @@ public:
          const runtime::FieldRegistry &, const FlowFieldIds &,
          const FlowState &, IdealGasClosureSpec, IdealGasCreateFault, int rank);
   static int preflight_failure_rank(const runtime::Error &) noexcept;
+  static std::uint64_t
+  preflight_wire_exchange_count(const IdealGasClosure &) noexcept;
   static IdealGasClosureFailureReason
   create_validation_failure_reason(const runtime::Error &) noexcept;
   static void set_facade_create_fault(IdealGasClosure &, int rank);

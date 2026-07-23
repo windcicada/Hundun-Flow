@@ -278,6 +278,28 @@ void run(const hundun::runtime::MpiContext &mpi) {
   using CreateFault = hundun::flow::test::IdealGasCreateFault;
   using TestAccess = hundun::flow::test::IdealGasClosureTestAccess;
   for (const int target : {0, mpi.size() - 1}) {
+    {
+      bool returned = false;
+      bool rejected = false;
+      int failing_rank = -1;
+      try {
+        const auto failed = TestAccess::create(
+            topology, geometry, boundaries, mpi, registry, fields, state,
+            {rho_h, cp, gas_constant, pressure},
+            CreateFault::preflight_workspace_allocation, target);
+        static_cast<void>(failed);
+        returned = true;
+      } catch (const hundun::runtime::Error &error) {
+        rejected = true;
+        failing_rank = TestAccess::preflight_failure_rank(error);
+      }
+      HUNDUN_CHECK(rejected && !returned && failing_rank == target);
+      const auto successor = hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields, state,
+          {rho_h, cp, gas_constant, pressure});
+      HUNDUN_CHECK(successor.state().revision == 0U);
+      HUNDUN_CHECK(TestAccess::preflight_wire_exchange_count(successor) == 1U);
+    }
     for (const auto fault :
          {CreateFault::mode_disagreement, CreateFault::ownership_gap,
           CreateFault::ownership_overlap, CreateFault::ownership_swap,
@@ -689,6 +711,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
   auto closure = hundun::flow::IdealGasClosure::create(
       topology, geometry, boundaries, mpi, registry, fields, state,
       {rho_h, cp, gas_constant, pressure});
+  HUNDUN_CHECK(TestAccess::preflight_wire_exchange_count(closure) == 1U);
   const auto after = mpi.fp64_reduction_counters();
   HUNDUN_CHECK(after.collective_calls - before.collective_calls == 2U);
   HUNDUN_CHECK(after.reduced_scalars - before.reduced_scalars == 14U);
@@ -754,8 +777,12 @@ void run(const hundun::runtime::MpiContext &mpi) {
   // MpiContext counters prove each frozen P/C1/F prefix directly.
   state.begin_attempt();
   const auto success_before = mpi.fp64_reduction_counters();
+  const auto wire_exchanges_before =
+      TestAccess::preflight_wire_exchange_count(closure);
   hundun::flow::test::IdealGasClosureTestAccess::begin_attempt(closure, state,
                                                                1U);
+  HUNDUN_CHECK(TestAccess::preflight_wire_exchange_count(closure) ==
+               wire_exchanges_before + 1U);
   const auto predictor =
       hundun::flow::test::IdealGasClosureTestAccess::evaluate(
           closure, state, hundun::flow::IdealGasClosureStage::predictor);

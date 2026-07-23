@@ -50,6 +50,32 @@ foreach(forbidden IN ITEMS
     message(FATAL_ERROR "Task 21 Repair R2 closure authority guard found ${forbidden}")
   endif()
 endforeach()
+foreach(forbidden IN ITEMS
+    "MPI_Send(" "MPI_Recv(" "MPI_TAG_UB"
+    "MPI_Comm_get_attr(ideal-gas closure preflight tag)"
+    "constexpr int tag = 31741")
+  string(FIND "${closure_text}" "${forbidden}" position)
+  if(NOT position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 21 bounded preflight exchange guard found ${forbidden}")
+  endif()
+endforeach()
+foreach(required IN ITEMS
+    "MPI_Allgather(" "preflight_workspace"
+    "preflight_wire_exchange_count")
+  string(FIND "${closure_text}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 21 bounded preflight exchange guard misses ${required}")
+  endif()
+endforeach()
+string(REGEX MATCHALL "MPI_Allgather\\(&local" preflight_exchanges
+  "${closure_text}")
+list(LENGTH preflight_exchanges preflight_exchange_count)
+if(NOT preflight_exchange_count EQUAL 1)
+  message(FATAL_ERROR
+    "Task 21 preflight must have exactly one bounded wire-exchange implementation")
+endif()
 string(FIND "${piso_text}" "const_cast<FlowState &>(state)" position)
 if(NOT position EQUAL -1)
   message(FATAL_ERROR "Task 21 diagnostics must use const FlowState acquisition")
