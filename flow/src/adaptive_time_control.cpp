@@ -46,6 +46,9 @@ std::atomic<std::uint64_t> post_return_iteration_value{
 std::atomic<std::size_t> time_control_raw_count{};
 std::atomic<std::size_t> time_control_raw_fault_ordinal{};
 std::atomic<int> time_control_raw_fault_rank{-1};
+std::atomic<std::size_t> time_control_raw_local_origins{};
+test::TimeControlAttemptObserver attempt_observer{};
+void *attempt_observer_context{};
 std::atomic<bool> trusted_tail_active{};
 std::atomic<std::uint64_t> trusted_tail_allocation_attempts{};
 std::atomic<std::uint64_t> trusted_tail_controller_collectives{};
@@ -131,7 +134,8 @@ void record_controller_traversal() noexcept {
 #endif
 }
 
-void checked_time_control_mpi(int result, std::string_view operation) {
+void checked_time_control_mpi(const runtime::MpiContext &mpi, int result,
+                              std::string_view operation) {
   runtime::check_mpi_result(result, operation);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   if (trusted_tail_active.load(std::memory_order_relaxed))
@@ -139,9 +143,23 @@ void checked_time_control_mpi(int result, std::string_view operation) {
                                                   std::memory_order_relaxed);
   const auto ordinal =
       time_control_raw_count.fetch_add(1U, std::memory_order_relaxed) + 1U;
-  if (time_control_raw_fault_ordinal.load(std::memory_order_relaxed) ==
+  if (time_control_raw_fault_ordinal.load(std::memory_order_relaxed) !=
       ordinal)
+    return;
+  const bool local_origin =
+      time_control_raw_fault_rank.load(std::memory_order_relaxed) ==
+      mpi.rank();
+  if (local_origin)
+    time_control_raw_local_origins.fetch_add(1U, std::memory_order_relaxed);
+  int any_origin = local_origin ? 1 : 0;
+  runtime::check_mpi_result(
+      MPI_Allreduce(MPI_IN_PLACE, &any_origin, 1, MPI_INT, MPI_MAX,
+                    mpi.comm()),
+      "MPI_Allreduce(time-control raw test origin)");
+  if (any_origin != 0)
     runtime::check_mpi_result(MPI_ERR_OTHER, operation);
+#else
+  static_cast<void>(mpi);
 #endif
 }
 
@@ -178,6 +196,7 @@ bool fixed_frame_agrees(const runtime::MpiContext &mpi,
     return false;
   std::uint64_t root_size = static_cast<std::uint64_t>(local.size);
   checked_time_control_mpi(
+      mpi,
       MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
   const bool root_size_valid =
       root_size <= AgreementFrame::capacity &&
@@ -191,6 +210,7 @@ bool fixed_frame_agrees(const runtime::MpiContext &mpi,
   if (mpi.rank() == 0)
     std::copy_n(local.words.begin(), local.size, root.begin());
   checked_time_control_mpi(
+      mpi,
       MPI_Bcast(root.data(), static_cast<int>(root_size), MPI_UINT64_T, 0,
                 mpi.comm()),
       operation);
@@ -369,6 +389,16 @@ bool preflight_fault_here(test::TimeControlPreflightFault fault,
                           int rank) noexcept {
   return rank == time_control_fault_rank.load(std::memory_order_relaxed) &&
          preflight_fault.load(std::memory_order_relaxed) == fault;
+}
+
+void notify_attempt_observer(const MomentumTimeStencil &stencil,
+                             const FlowState &state) {
+  if (attempt_observer == nullptr)
+    return;
+  if (trusted_tail_active.load(std::memory_order_relaxed))
+    trusted_tail_callbacks_or_sinks.fetch_add(1U,
+                                              std::memory_order_relaxed);
+  attempt_observer(attempt_observer_context, stencil, state);
 }
 
 template <class Facade>
@@ -824,6 +854,7 @@ std::uint64_t allocate_controller_identity(const runtime::MpiContext &mpi,
   }
   collective_factory_check(mpi, local_ok, prefix);
   checked_time_control_mpi(
+      mpi,
       MPI_Bcast(&identity, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(time-control controller identity)");
   if (identity == 0U ||
@@ -1339,6 +1370,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
                                 time_control_fault_rank.load(
                                     std::memory_order_relaxed),
                                 impl.mpi->rank());
+    notify_attempt_observer(stencil, state);
  #endif
     Report attempt = invoke(stencil);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1710,6 +1742,9 @@ void test::AdaptiveTimeControlTestAccess::reset_faults() noexcept {
   time_control_raw_count.store(0U, std::memory_order_relaxed);
   time_control_raw_fault_ordinal.store(0U, std::memory_order_relaxed);
   time_control_raw_fault_rank.store(-1, std::memory_order_relaxed);
+  time_control_raw_local_origins.store(0U, std::memory_order_relaxed);
+  attempt_observer = nullptr;
+  attempt_observer_context = nullptr;
   scheduled_recoverable_failures.store(0U, std::memory_order_relaxed);
   scheduled_recoverable_reason.store(StepFailureReason::none,
                                      std::memory_order_relaxed);
@@ -1739,11 +1774,37 @@ void test::AdaptiveTimeControlTestAccess::set_raw_fault(
   time_control_raw_count.store(0U, std::memory_order_relaxed);
   time_control_raw_fault_ordinal.store(ordinal, std::memory_order_relaxed);
   time_control_raw_fault_rank.store(rank, std::memory_order_relaxed);
+  time_control_raw_local_origins.store(0U, std::memory_order_relaxed);
 }
 
 std::size_t
 test::AdaptiveTimeControlTestAccess::raw_operation_count() noexcept {
   return time_control_raw_count.load(std::memory_order_relaxed);
+}
+test::TimeControlRawFaultObservation
+test::AdaptiveTimeControlTestAccess::raw_fault_observation() noexcept {
+  return {
+      time_control_raw_count.load(std::memory_order_relaxed),
+      time_control_raw_local_origins.load(std::memory_order_relaxed),
+      time_control_raw_fault_ordinal.load(std::memory_order_relaxed),
+      time_control_raw_fault_rank.load(std::memory_order_relaxed)};
+}
+void test::AdaptiveTimeControlTestAccess::set_attempt_observer(
+    test::TimeControlAttemptObserver observer, void *context) noexcept {
+  attempt_observer = observer;
+  attempt_observer_context = context;
+}
+void test::AdaptiveTimeControlTestAccess::
+    exercise_trusted_tail_attempt_observer(
+        const FlowState &state, const MomentumTimeStencil &stencil) {
+  trusted_tail_active.store(true, std::memory_order_relaxed);
+  try {
+    notify_attempt_observer(stencil, state);
+  } catch (...) {
+    trusted_tail_active.store(false, std::memory_order_relaxed);
+    throw;
+  }
+  trusted_tail_active.store(false, std::memory_order_relaxed);
 }
 void test::AdaptiveTimeControlTestAccess::set_active(
     Bdf2RetryController &controller, bool active) noexcept {
@@ -1754,9 +1815,12 @@ std::array<double, 2> test::AdaptiveTimeControlTestAccess::stability_rates(
     Bdf2RetryController &controller, const FlowState &state,
     double density_constant, bool variable_density, double gamma) {
   AdaptivePreparation prepared;
-  prepared.density = detail::AdaptiveTimeControlAccess::committed_density(state);
+  prepared.density =
+      ::hundun::flow::detail::AdaptiveTimeControlAccess::committed_density(
+          state);
   prepared.flux =
-      detail::AdaptiveTimeControlAccess::committed_face_mass_flux(state);
+      ::hundun::flow::detail::AdaptiveTimeControlAccess::
+          committed_face_mass_flux(state);
   prepared.flux_sum.resize(controller.impl_->topology->owned_cell_count());
   prepared.geometry_sum.resize(controller.impl_->topology->owned_cell_count());
   const auto result = ::hundun::flow::stability_rates(

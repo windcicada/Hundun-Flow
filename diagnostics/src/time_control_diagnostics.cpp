@@ -49,6 +49,7 @@ std::size_t diagnostic_raw_count{};
 std::size_t diagnostic_submission_count{};
 std::size_t diagnostic_raw_fault_ordinal{};
 int diagnostic_raw_fault_rank{-1};
+std::size_t diagnostic_raw_local_origins{};
 std::size_t request_mutation_offset{std::numeric_limits<std::size_t>::max()};
 int request_mutation_rank{-1};
 std::size_t provider_mutation_offset{std::numeric_limits<std::size_t>::max()};
@@ -69,13 +70,25 @@ bool fault_here(FaultPoint point, int rank) noexcept {
 bool fault_here(FaultPoint, int) noexcept { return false; }
 #endif
 
-void checked_mpi(int result, std::string_view operation) {
+void checked_mpi(const runtime::MpiContext &mpi, int result,
+                 std::string_view operation) {
   runtime::check_mpi_result(result, operation);
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
   ++diagnostic_raw_count;
-  if (diagnostic_raw_fault_ordinal != 0U &&
-      diagnostic_raw_count == diagnostic_raw_fault_ordinal)
+  if (diagnostic_raw_count != diagnostic_raw_fault_ordinal)
+    return;
+  const bool local_origin = diagnostic_raw_fault_rank == mpi.rank();
+  if (local_origin)
+    ++diagnostic_raw_local_origins;
+  int any_origin = local_origin ? 1 : 0;
+  runtime::check_mpi_result(
+      MPI_Allreduce(MPI_IN_PLACE, &any_origin, 1, MPI_INT, MPI_MAX,
+                    mpi.comm()),
+      "MPI_Allreduce(time-control diagnostic raw test origin)");
+  if (any_origin != 0)
     runtime::check_mpi_result(MPI_ERR_OTHER, operation);
+#else
+  static_cast<void>(mpi);
 #endif
 }
 
@@ -475,6 +488,7 @@ bool exact_projection_agrees(const runtime::MpiContext &mpi,
   FixedBytes<kProjectionCapacity> root;
   std::uint64_t root_size = static_cast<std::uint64_t>(local.size());
   checked_mpi(
+      mpi,
       MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
   if (root_size > kProjectionCapacity ||
       root_size >
@@ -484,6 +498,7 @@ bool exact_projection_agrees(const runtime::MpiContext &mpi,
   if (mpi.rank() == 0 && root.size() == local.size())
     std::copy_n(local.data(), local.size(), root.data());
   checked_mpi(
+      mpi,
       MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_BYTE, 0,
                 mpi.comm()),
       operation);
@@ -818,16 +833,19 @@ CollectivePayload collective_payload(
     const PreparedCollectivePayload &prepared) {
   auto parts = prepared.fingerprint;
   checked_mpi(
+      mpi,
       MPI_Allreduce(MPI_IN_PLACE, &parts.xor64, 1, MPI_UINT64_T, MPI_BXOR,
                     mpi.comm()),
       "MPI_Allreduce(time-control fingerprint xor)");
   checked_mpi(
+      mpi,
       MPI_Allreduce(MPI_IN_PLACE, &parts.sum64, 1, MPI_UINT64_T, MPI_SUM,
                     mpi.comm()),
       "MPI_Allreduce(time-control fingerprint sum)");
 
   std::uint64_t eligible = prepared.eligible_count;
   checked_mpi(
+      mpi,
       MPI_Allreduce(MPI_IN_PLACE, &eligible, 1, MPI_UINT64_T, MPI_SUM,
                     mpi.comm()),
       "MPI_Allreduce(time-control eligible samples)");
@@ -837,6 +855,7 @@ CollectivePayload collective_payload(
   FixedBytes<kWireCapacity> wire = prepared.wire;
   std::uint64_t wire_size = static_cast<std::uint64_t>(wire.size());
   checked_mpi(
+      mpi,
       MPI_Bcast(&wire_size, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(time-control sample wire size)");
   if (wire_size > kWireCapacity ||
@@ -846,6 +865,7 @@ CollectivePayload collective_payload(
   if (mpi.rank() != 0)
     wire.set_size(static_cast<std::size_t>(wire_size));
   checked_mpi(
+      mpi,
       MPI_Bcast(wire.data(), static_cast<int>(wire.size()), MPI_BYTE, 0,
                 mpi.comm()),
       "MPI_Bcast(time-control sample wire)");
@@ -1258,6 +1278,7 @@ void test::TimeControlDiagnosticsTestAccess::reset() noexcept {
   diagnostic_submission_count = 0U;
   diagnostic_raw_fault_ordinal = 0U;
   diagnostic_raw_fault_rank = -1;
+  diagnostic_raw_local_origins = 0U;
   request_mutation_offset = std::numeric_limits<std::size_t>::max();
   request_mutation_rank = -1;
   provider_mutation_offset = std::numeric_limits<std::size_t>::max();
@@ -1271,6 +1292,7 @@ void test::TimeControlDiagnosticsTestAccess::set_raw_fault(
     std::size_t ordinal, int rank) noexcept {
   diagnostic_raw_fault_ordinal = ordinal;
   diagnostic_raw_fault_rank = rank;
+  diagnostic_raw_local_origins = 0U;
 }
 void test::TimeControlDiagnosticsTestAccess::set_request_projection_mutation(
     std::size_t offset, int rank) noexcept {
@@ -1303,6 +1325,11 @@ std::size_t test::TimeControlDiagnosticsTestAccess::phase_count() noexcept {
 std::size_t
 test::TimeControlDiagnosticsTestAccess::raw_operation_count() noexcept {
   return diagnostic_raw_count;
+}
+test::TimeControlRawFaultObservation
+test::TimeControlDiagnosticsTestAccess::raw_fault_observation() noexcept {
+  return {diagnostic_raw_count, diagnostic_raw_local_origins,
+          diagnostic_raw_fault_ordinal, diagnostic_raw_fault_rank};
 }
 std::size_t
 test::TimeControlDiagnosticsTestAccess::submission_count() noexcept {

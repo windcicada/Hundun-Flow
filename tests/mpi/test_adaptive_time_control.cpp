@@ -32,6 +32,7 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -54,6 +55,92 @@ void require_zero_trusted_tail_events() {
   HUNDUN_CHECK(observed.controller_collectives == 0U);
   HUNDUN_CHECK(observed.field_state_traversals == 0U);
   HUNDUN_CHECK(observed.callbacks_or_sinks == 0U);
+}
+
+std::uint64_t fp64_bits(double value) noexcept {
+  std::uint64_t result{};
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
+
+hundun::flow::MomentumTimeStencil independent_stencil(
+    hundun::flow::MomentumTimeOrder order, double dt,
+    double previous_dt) {
+  if (order == hundun::flow::MomentumTimeOrder::backward_euler)
+    return {order, dt, 0.0, 1.0, -1.0, 0.0};
+  const double ratio = dt / previous_dt;
+  return {order, dt, previous_dt, (1.0 + 2.0 * ratio) / (1.0 + ratio),
+          -(1.0 + ratio), ratio * ratio / (1.0 + ratio)};
+}
+
+void require_stencil_bitwise_equal(
+    const hundun::flow::MomentumTimeStencil &actual,
+    const hundun::flow::MomentumTimeStencil &expected) {
+  HUNDUN_CHECK(actual.order == expected.order);
+  HUNDUN_CHECK(fp64_bits(actual.dt_s) == fp64_bits(expected.dt_s));
+  HUNDUN_CHECK(fp64_bits(actual.previous_dt_s) ==
+               fp64_bits(expected.previous_dt_s));
+  HUNDUN_CHECK(fp64_bits(actual.alpha0) == fp64_bits(expected.alpha0));
+  HUNDUN_CHECK(fp64_bits(actual.alpha1) == fp64_bits(expected.alpha1));
+  HUNDUN_CHECK(fp64_bits(actual.alpha2) == fp64_bits(expected.alpha2));
+}
+
+struct AttemptBoundaryEvidence final {
+  hundun::flow::Bdf2RetryController *controller{};
+  std::array<hundun::flow::MomentumTimeStencil, 9> stencils{};
+  std::array<hundun::test::AdaptiveFlowStateSnapshot, 9> states{};
+  std::size_t count{};
+
+  static void observe(void *context,
+                      const hundun::flow::MomentumTimeStencil &stencil,
+                      const hundun::flow::FlowState &state) {
+    auto &self = *static_cast<AttemptBoundaryEvidence *>(context);
+    HUNDUN_CHECK(self.count < self.stencils.size());
+    self.stencils[self.count] = stencil;
+    self.states[self.count] = hundun::test::capture_adaptive_flow_state(
+        state, self.controller->state());
+    ++self.count;
+  }
+};
+
+void require_authentic_diagnostic(
+    const hundun::runtime::MpiContext &mpi,
+    const hundun::flow::Bdf2RetryController &controller,
+    const hundun::flow::FlowState &state,
+    const hundun::flow::TimeAdvanceReport &report,
+    hundun::diagnostics::DiagnosticStatus expected_status,
+    hundun::diagnostics::DiagnosticFailureClass expected_classification,
+    std::string_view expected_code, int expected_collective_rank) {
+  auto source = controller.diagnostic_source(state, report);
+  for (const auto scope :
+       {hundun::diagnostics::DiagnosticScope::local,
+        hundun::diagnostics::DiagnosticScope::collective}) {
+    OneRecordSink sink;
+    const hundun::diagnostics::DiagnosticRequest request{
+        hundun::diagnostics::DiagnosticLevel::summary, scope,
+        {mpi.rank(), state.metadata().step, state.metadata().time_s,
+         "time-control.advance-result"},
+        {}, 0U};
+    if (scope == hundun::diagnostics::DiagnosticScope::local)
+      hundun::diagnostics::collect_diagnostics(source, request, sink);
+    else
+      hundun::diagnostics::collect_diagnostics(source, mpi, request, sink);
+    HUNDUN_CHECK(sink.calls == 1);
+    HUNDUN_CHECK(sink.record.status == expected_status);
+    HUNDUN_CHECK(sink.record.failure.classification ==
+                 expected_classification);
+    HUNDUN_CHECK(sink.record.failure.code == expected_code);
+    const int expected_rank =
+        scope == hundun::diagnostics::DiagnosticScope::collective
+            ? expected_collective_rank
+            : -1;
+    if (sink.record.failure.lowest_failing_rank != expected_rank)
+      throw std::runtime_error(
+          std::string("authentic diagnostic rank mismatch for ") +
+          std::string(expected_code) + ": observed " +
+          std::to_string(sink.record.failure.lowest_failing_rank) +
+          ", expected " + std::to_string(expected_rank));
+  }
 }
 
 hundun::runtime::Int3 grid(int ranks) {
@@ -137,6 +224,28 @@ public:
 private:
   int lowest_failing_rank_{};
   mutable std::size_t calls_{};
+};
+
+class AlwaysFailureSolver final : public hundun::linear::LinearSolver {
+public:
+  explicit AlwaysFailureSolver(int lowest_failing_rank)
+      : lowest_failing_rank_(lowest_failing_rank) {}
+
+  hundun::linear::SolveReport
+  solve(const hundun::linear::LinearOperator &,
+        hundun::linear::Preconditioner &,
+        hundun::execution::VectorView<const double>,
+        hundun::execution::VectorView<double>,
+        const hundun::linear::SolveControl &) const override {
+    hundun::linear::SolveReport report;
+    report.reason =
+        hundun::linear::SolveTerminationReason::maximum_iterations;
+    report.lowest_failing_rank = lowest_failing_rank_;
+    return report;
+  }
+
+private:
+  int lowest_failing_rank_{};
 };
 
 void run_fast(const hundun::runtime::MpiContext &mpi) {
@@ -283,10 +392,12 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(rejected);
     HUNDUN_CHECK(state.metadata().step == 0U);
   }
-  for (std::size_t ordinal : {std::size_t{1}, std::size_t{2}}) {
+  for (std::size_t ordinal = 1U; ordinal <= 7U; ++ordinal) {
     using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
+    const int origin_rank =
+        mpi.size() == 4 && ordinal % 2U != 0U ? 2 : mismatch_rank;
     TimeAccess::reset_faults();
-    TimeAccess::set_raw_fault(ordinal, mismatch_rank);
+    TimeAccess::set_raw_fault(ordinal, origin_rank);
     bool typed = false;
     try {
       static_cast<void>(hundun::flow::Bdf2RetryController::create(
@@ -296,12 +407,34 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       typed = true;
     }
     HUNDUN_CHECK(typed);
-    HUNDUN_CHECK(TimeAccess::raw_operation_count() == ordinal);
+    const auto observed = TimeAccess::raw_fault_observation();
+    HUNDUN_CHECK(observed.raw_operations == ordinal);
+    HUNDUN_CHECK(observed.fault_ordinal == ordinal);
+    HUNDUN_CHECK(observed.requested_rank == origin_rank);
+    HUNDUN_CHECK(observed.local_origins ==
+                 (mpi.rank() == origin_rank ? 1U : 0U));
+    std::uint64_t origin_count = observed.local_origins;
+    HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, &origin_count, 1, MPI_UINT64_T,
+                               MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+    HUNDUN_CHECK(origin_count == 1U);
+    HUNDUN_CHECK(state.metadata().step == 0U);
   }
   hundun::flow::test::AdaptiveTimeControlTestAccess::reset_faults();
   auto controller = hundun::flow::Bdf2RetryController::create(
       time, hundun::config::DensityModel::constant, topology, geometry, mpi,
       state);
+  {
+    const auto rejected =
+        controller.advance(state, facade, 1.0, -1.0, {}, {});
+    HUNDUN_CHECK(
+        hundun::flow::test::AdaptiveTimeControlTestAccess::
+            preflight_category(rejected) == 1U);
+    require_authentic_diagnostic(
+        mpi, controller, state, rejected,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+        "time-control.preflight.config", 0);
+  }
   {
     using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
     const auto before = state.metadata();
@@ -329,6 +462,11 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(rejected.attempt_count() == 0U);
     HUNDUN_CHECK(rejected.lowest_failing_rank() == 0);
     HUNDUN_CHECK(state.metadata().step == metadata_before.step);
+    require_authentic_diagnostic(
+        mpi, wrong_model, state, rejected,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+        "time-control.preflight.identity", 0);
   }
   {
     constexpr std::array<int, 4> control_fields{0, 1, 2, 3};
@@ -373,11 +511,19 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     struct Case {
       Fault fault;
       std::uint8_t category;
+      hundun::diagnostics::DiagnosticFailureClass classification;
+      const char *code;
     };
     constexpr std::array<Case, 3> cases{{
-        {Fault::layout, 3U},
-        {Fault::capability, 4U},
-        {Fault::preparation, 7U},
+        {Fault::layout, 3U,
+         hundun::diagnostics::DiagnosticFailureClass::layout,
+         "time-control.preflight.layout"},
+        {Fault::capability, 4U,
+         hundun::diagnostics::DiagnosticFailureClass::capability,
+         "time-control.preflight.capability"},
+        {Fault::preparation, 7U,
+         hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+         "time-control.preflight.preparation"},
     }};
     for (const auto &candidate : cases) {
       TimeAccess::reset_faults();
@@ -394,6 +540,10 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
           metadata_before, state.metadata()));
       HUNDUN_CHECK(controller.state().accepted_step == 0U);
+      require_authentic_diagnostic(
+          mpi, controller, state, rejected,
+          hundun::diagnostics::DiagnosticStatus::failed,
+          candidate.classification, candidate.code, mismatch_rank);
     }
     TimeAccess::reset_faults();
     const hundun::config::FlowTimeConfig fixed_time{
@@ -462,18 +612,41 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(sink.calls == 1);
     HUNDUN_CHECK(sink.record.failure.code ==
                  "time-control.preflight.report");
+    require_authentic_diagnostic(
+        mpi, malformed_controller, malformed_state, malformed,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+        "time-control.preflight.report", mismatch_rank);
     TimeAccess::reset_faults();
   }
   {
     using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
-    constexpr std::array<hundun::flow::StepFailureReason, 6> reasons{
-        hundun::flow::StepFailureReason::non_finite_trial,
-        hundun::flow::StepFailureReason::final_momentum_residual,
-        hundun::flow::StepFailureReason::final_transport_residual,
-        hundun::flow::StepFailureReason::final_conservation_defect,
-        hundun::flow::StepFailureReason::final_continuity_residual,
-        hundun::flow::StepFailureReason::final_pressure_residual};
-    for (const auto reason : reasons) {
+    struct ReasonCase final {
+      hundun::flow::StepFailureReason reason;
+      hundun::diagnostics::DiagnosticFailureClass classification;
+      const char *code;
+    };
+    constexpr std::array<ReasonCase, 6> reasons{{
+        {hundun::flow::StepFailureReason::non_finite_trial,
+         hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+         "time-control.non-finite-trial"},
+        {hundun::flow::StepFailureReason::final_momentum_residual,
+         hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+         "time-control.final-momentum-residual"},
+        {hundun::flow::StepFailureReason::final_transport_residual,
+         hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+         "time-control.final-transport-residual"},
+        {hundun::flow::StepFailureReason::final_conservation_defect,
+         hundun::diagnostics::DiagnosticFailureClass::conservation,
+         "time-control.final-conservation-defect"},
+        {hundun::flow::StepFailureReason::final_continuity_residual,
+         hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+         "time-control.final-continuity-residual"},
+        {hundun::flow::StepFailureReason::final_pressure_residual,
+         hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+         "time-control.final-pressure-residual"},
+    }};
+    for (const auto &reason_case : reasons) {
       auto scheduled_state = hundun::flow::FlowState::create(
           registry, {local, topology.local_face_count()}, fields,
           {0U, 0.0, 0.01, 0.0,
@@ -483,14 +656,14 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
           hundun::flow::Bdf2RetryController::create(
               time, hundun::config::DensityModel::constant, topology,
               geometry, mpi, scheduled_state);
-      TimeAccess::set_recoverable_failure_reason(reason);
+      TimeAccess::set_recoverable_failure_reason(reason_case.reason);
       TimeAccess::set_recoverable_failures(1U, mismatch_rank);
       const auto scheduled = scheduled_controller.advance(
           scheduled_state, facade, 1.0, 0.0, {}, {});
       HUNDUN_CHECK(scheduled.disposition() ==
                    hundun::flow::TimeAdvanceDisposition::committed);
       HUNDUN_CHECK(scheduled.attempt_count() == 2U);
-      HUNDUN_CHECK(scheduled.attempt(0).reason == reason);
+      HUNDUN_CHECK(scheduled.attempt(0).reason == reason_case.reason);
       HUNDUN_CHECK(
           scheduled.attempt(0).disposition ==
           hundun::flow::StepAttemptDisposition::recoverable_failure);
@@ -498,6 +671,37 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
           scheduled.attempt(1).disposition ==
           hundun::flow::StepAttemptDisposition::committed);
       HUNDUN_CHECK(scheduled_state.metadata().step == 1U);
+      TimeAccess::reset_faults();
+
+      auto terminal_state = hundun::flow::FlowState::create(
+          registry, {local, topology.local_face_count()}, fields,
+          {0U, 0.0, 0.01, 0.0,
+           hundun::flow::MomentumTimeOrder::backward_euler});
+      terminal_state.seed_accepted_layers(initial, initial);
+      auto terminal_controller =
+          hundun::flow::Bdf2RetryController::create(
+              time, hundun::config::DensityModel::constant, topology,
+              geometry, mpi, terminal_state);
+      TimeAccess::set_recoverable_failure_reason(reason_case.reason);
+      TimeAccess::set_recoverable_failures(9U, mismatch_rank);
+      const auto terminal = terminal_controller.advance(
+          terminal_state, facade, 1.0, 0.0, {}, {});
+      HUNDUN_CHECK(
+          terminal.disposition() ==
+          hundun::flow::TimeAdvanceDisposition::minimum_dt_failure);
+      HUNDUN_CHECK(terminal.reason() == reason_case.reason);
+      const bool globally_observed =
+          reason_case.reason ==
+              hundun::flow::StepFailureReason::non_finite_trial ||
+          reason_case.reason ==
+              hundun::flow::StepFailureReason::final_momentum_residual ||
+          reason_case.reason ==
+              hundun::flow::StepFailureReason::final_transport_residual;
+      require_authentic_diagnostic(
+          mpi, terminal_controller, terminal_state, terminal,
+          hundun::diagnostics::DiagnosticStatus::failed,
+          reason_case.classification, reason_case.code,
+          globally_observed ? 0 : mismatch_rank);
       TimeAccess::reset_faults();
     }
   }
@@ -552,6 +756,60 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
         true, hundun::flow::StepFailureReason::momentum_linear_solve);
     run_linear_failure(
         false, hundun::flow::StepFailureReason::pressure_linear_solve);
+    const auto run_terminal_linear_failure =
+        [&](bool momentum_failure,
+            hundun::flow::StepFailureReason expected_reason,
+            const char *expected_code) {
+          AlwaysFailureSolver always_fails(mismatch_rank);
+          hundun::linear::JacobiPreconditioner fx(execution), fy(execution),
+              fz(execution), fp(execution);
+          const auto &selected_momentum =
+              momentum_failure
+                  ? static_cast<const hundun::linear::LinearSolver &>(
+                        always_fails)
+                  : static_cast<const hundun::linear::LinearSolver &>(
+                        momentum_solver);
+          const auto &selected_pressure =
+              momentum_failure
+                  ? static_cast<const hundun::linear::LinearSolver &>(
+                        pressure_solver)
+                  : static_cast<const hundun::linear::LinearSolver &>(
+                        always_fails);
+          auto terminal_flow =
+              hundun::flow::FixedStepConstantDensityFlow::create(
+                  decomposition, topology, geometry, boundaries, mpi,
+                  execution, halo, selected_momentum, {&fx, &fy, &fz},
+                  selected_pressure, fp,
+                  {{fields.transported_cell_fields.front(),
+                    hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+                    0.0}});
+          auto terminal_state = hundun::flow::FlowState::create(
+              registry, {local, topology.local_face_count()}, fields,
+              {0U, 0.0, 0.01, 0.0,
+               hundun::flow::MomentumTimeOrder::backward_euler});
+          terminal_state.seed_accepted_layers(initial, initial);
+          auto terminal_controller =
+              hundun::flow::Bdf2RetryController::create(
+                  time, hundun::config::DensityModel::constant, topology,
+                  geometry, mpi, terminal_state);
+          const auto result = terminal_controller.advance(
+              terminal_state, terminal_flow, 1.0, 0.0, {}, {});
+          HUNDUN_CHECK(
+              result.disposition() ==
+              hundun::flow::TimeAdvanceDisposition::minimum_dt_failure);
+          HUNDUN_CHECK(result.reason() == expected_reason);
+          require_authentic_diagnostic(
+              mpi, terminal_controller, terminal_state, result,
+              hundun::diagnostics::DiagnosticStatus::failed,
+              hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+              expected_code, mismatch_rank);
+        };
+    run_terminal_linear_failure(
+        true, hundun::flow::StepFailureReason::momentum_linear_solve,
+        "time-control.momentum-linear-solve");
+    run_terminal_linear_failure(
+        false, hundun::flow::StepFailureReason::pressure_linear_solve,
+        "time-control.pressure-linear-solve");
   }
   {
     auto signed_initial = initial;
@@ -731,6 +989,11 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       HUNDUN_CHECK(
           hundun::flow::test::AdaptiveTimeControlTestAccess::
               preflight_category(invalid_report) == 5U);
+      require_authentic_diagnostic(
+          mpi, invalid_controller, invalid_state, invalid_report,
+          hundun::diagnostics::DiagnosticStatus::failed,
+          hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+          "time-control.preflight.state", 0);
     }
   }
   {
@@ -853,6 +1116,11 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       HUNDUN_CHECK(limited.attempt(index).disposition ==
                    hundun::flow::StepAttemptDisposition::recoverable_failure);
     HUNDUN_CHECK(limit_state.metadata().step == 0U);
+    require_authentic_diagnostic(
+        mpi, limit_controller, limit_state, limited,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+        "time-control.non-finite-trial", 0);
     const auto workspace_after =
         hundun::flow::test::ConstantDensityPisoTestAccess::
             mesh_workspace_snapshot(facade);
@@ -915,6 +1183,11 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(minimum.attempt_count() == 2U);
     HUNDUN_CHECK(minimum.attempt(1).attempted_dt_s == 0.005);
     HUNDUN_CHECK(minimum.limited_by_min_dt());
+    require_authentic_diagnostic(
+        mpi, minimum_controller, minimum_state, minimum,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
+        "time-control.non-finite-trial", 0);
     TimeAccess::reset_faults();
 
     const hundun::config::FlowTimeConfig simultaneous_time{
@@ -1182,11 +1455,8 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   if (mpi.size() > 1) {
     auto rank_distinct = restored.state();
     if (mpi.rank() == 1)
-      rank_distinct.proposed_next_dt_s =
-          std::nextafter(rank_distinct.proposed_next_dt_s,
-                         rank_distinct.proposed_next_dt_s < time.max_dt_s
-                             ? time.max_dt_s
-                             : time.min_dt_s);
+      rank_distinct.last_retry_count =
+          rank_distinct.last_retry_count == 0U ? 1U : 0U;
     rank_distinct.state_seal = TimeAccess::seal(
         time, hundun::config::DensityModel::constant, rank_distinct);
     bool rejected = false;
@@ -1197,17 +1467,44 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     } catch (const hundun::runtime::Error &error) {
       rejected = true;
       HUNDUN_CHECK(std::string_view(error.what()).find(
-                       "time-control.restore.state") !=
+                       "time-control.restore.agreement") !=
+                   std::string_view::npos);
+      HUNDUN_CHECK(std::string_view(error.what()).find("rank 1") !=
                    std::string_view::npos);
     }
     HUNDUN_CHECK(rejected);
   }
+  const auto second_step_start =
+      hundun::test::capture_adaptive_flow_state(state, restored.state());
+  AttemptBoundaryEvidence second_evidence{&restored};
+  TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                   &second_evidence);
   auto second = restored.advance(state, facade, 1.0, 0.0, {}, {});
   HUNDUN_CHECK(second.disposition() ==
                hundun::flow::TimeAdvanceDisposition::committed);
   HUNDUN_CHECK(second.attempt(0).order ==
                hundun::flow::MomentumTimeOrder::bdf2);
+  HUNDUN_CHECK(second_evidence.count == 1U);
+  HUNDUN_CHECK(
+      fp64_bits(second.attempt(0).attempted_dt_s /
+                second_step_start.metadata.dt_s) ==
+      fp64_bits(1.25));
+  require_stencil_bitwise_equal(
+      second_evidence.stencils[0],
+      independent_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                          second.attempt(0).attempted_dt_s,
+                          second_step_start.metadata.dt_s));
+  require_authentic_diagnostic(
+      mpi, restored, state, second,
+      hundun::diagnostics::DiagnosticStatus::ok,
+      hundun::diagnostics::DiagnosticFailureClass::none, "none", -1);
+  TimeAccess::set_attempt_observer(nullptr, nullptr);
   HUNDUN_CHECK(state.metadata().step == 2U);
+  const auto fallback_step_start =
+      hundun::test::capture_adaptive_flow_state(state, restored.state());
+  AttemptBoundaryEvidence fallback_evidence{&restored};
+  TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                   &fallback_evidence);
   TimeAccess::set_recoverable_failure_reason(
       hundun::flow::StepFailureReason::non_finite_trial);
   TimeAccess::set_recoverable_failures(2U, 0);
@@ -1222,19 +1519,145 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::MomentumTimeOrder::bdf2);
   HUNDUN_CHECK(fallback.attempt(2).order ==
                hundun::flow::MomentumTimeOrder::backward_euler);
+  HUNDUN_CHECK(fallback_evidence.count == fallback.attempt_count());
+  for (std::size_t index = 0; index < fallback_evidence.count; ++index) {
+    require_stencil_bitwise_equal(
+        fallback_evidence.stencils[index],
+        independent_stencil(
+            fallback.attempt(index).order,
+            fallback.attempt(index).attempted_dt_s,
+            fallback_step_start.metadata.dt_s));
+    auto normalized = fallback_evidence.states[index];
+    normalized.trial_generation = fallback_step_start.trial_generation;
+    normalized.attempt_identity = fallback_step_start.attempt_identity;
+    normalized.diagnostic_identity = fallback_step_start.diagnostic_identity;
+    HUNDUN_CHECK(hundun::test::adaptive_flow_state_bitwise_equal(
+        normalized, fallback_step_start));
+    HUNDUN_CHECK(
+        fallback_evidence.states[index].trial_generation ==
+        fallback_step_start.trial_generation + index);
+    HUNDUN_CHECK(fallback_evidence.states[index].attempt_identity ==
+                 fallback_step_start.attempt_identity + index);
+    HUNDUN_CHECK(fallback_evidence.states[index].diagnostic_identity ==
+                 fallback_step_start.diagnostic_identity + index);
+  }
   HUNDUN_CHECK(state.metadata().step == 3U);
+  TimeAccess::set_attempt_observer(nullptr, nullptr);
   TimeAccess::reset_faults();
+  const auto retry_be_export = restored.state();
+  const auto retry_be_before_restore =
+      hundun::test::capture_adaptive_flow_state(state, retry_be_export);
+  auto retry_be_restored = hundun::flow::Bdf2RetryController::restore(
+      time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+      state, retry_be_export);
+  const auto retry_be_after_restore =
+      hundun::test::capture_adaptive_flow_state(state,
+                                                retry_be_restored.state());
+  HUNDUN_CHECK(hundun::test::adaptive_flow_state_bitwise_equal(
+      retry_be_before_restore, retry_be_after_restore));
+  HUNDUN_CHECK(hundun::test::time_control_state_bitwise_equal(
+      retry_be_export, retry_be_restored.state()));
+  AttemptBoundaryEvidence recovered_evidence{&retry_be_restored};
+  TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                   &recovered_evidence);
   const auto recovered =
-      restored.advance(state, facade, 1.0, 0.0, {}, {});
+      retry_be_restored.advance(state, facade, 1.0, 0.0, {}, {});
   HUNDUN_CHECK(recovered.disposition() ==
                hundun::flow::TimeAdvanceDisposition::committed);
   HUNDUN_CHECK(recovered.attempt(0).order ==
                hundun::flow::MomentumTimeOrder::bdf2);
+  HUNDUN_CHECK(recovered_evidence.count == 1U);
+  require_stencil_bitwise_equal(
+      recovered_evidence.stencils[0],
+      independent_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                          recovered.attempt(0).attempted_dt_s,
+                          retry_be_before_restore.metadata.dt_s));
   HUNDUN_CHECK(state.metadata().step == 4U);
+  TimeAccess::set_attempt_observer(nullptr, nullptr);
+  TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                   &recovered_evidence);
+  TimeAccess::exercise_trusted_tail_attempt_observer(
+      state, recovered_evidence.stencils[0]);
+  HUNDUN_CHECK(
+      TimeAccess::trusted_tail_observation().callbacks_or_sinks == 1U);
+  TimeAccess::set_attempt_observer(nullptr, nullptr);
+
+  {
+    const hundun::config::FlowTimeConfig ratio_time{
+        hundun::config::TimeMode::fixed, 5, 0.01, 0.00001, 0.02,
+        0.5, 0.25, 1.25, 0.5, 8};
+    auto ratio_state = hundun::flow::FlowState::create(
+        registry, {local, topology.local_face_count()}, fields,
+        {0U, 0.0, 0.01, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    ratio_state.seed_accepted_layers(initial, initial);
+    auto ratio_controller = hundun::flow::Bdf2RetryController::create(
+        ratio_time, hundun::config::DensityModel::constant, topology,
+        geometry, mpi, ratio_state);
+    TimeAccess::reset_faults();
+    TimeAccess::set_recoverable_failures(1U, 0);
+    const auto reduced_start = ratio_controller.advance(
+        ratio_state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(reduced_start.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    HUNDUN_CHECK(fp64_bits(ratio_state.metadata().dt_s) ==
+                 fp64_bits(0.005));
+    TimeAccess::reset_faults();
+
+    AttemptBoundaryEvidence ratio_two{&ratio_controller};
+    TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                     &ratio_two);
+    const auto doubled =
+        ratio_controller.advance(ratio_state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(doubled.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    HUNDUN_CHECK(ratio_two.count == 1U);
+    HUNDUN_CHECK(fp64_bits(doubled.attempt(0).attempted_dt_s / 0.005) ==
+                 fp64_bits(2.0));
+    require_stencil_bitwise_equal(
+        ratio_two.stencils[0],
+        independent_stencil(hundun::flow::MomentumTimeOrder::bdf2, 0.01,
+                            0.005));
+
+    AttemptBoundaryEvidence ratio_one{&ratio_controller};
+    TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                     &ratio_one);
+    const auto equal =
+        ratio_controller.advance(ratio_state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(equal.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    HUNDUN_CHECK(ratio_one.count == 1U);
+    HUNDUN_CHECK(fp64_bits(equal.attempt(0).attempted_dt_s /
+                          ratio_state.metadata().previous_dt_s) ==
+                 fp64_bits(1.0));
+    require_stencil_bitwise_equal(
+        ratio_one.stencils[0],
+        independent_stencil(hundun::flow::MomentumTimeOrder::bdf2, 0.01,
+                            0.01));
+
+    AttemptBoundaryEvidence ratio_half{&ratio_controller};
+    TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                     &ratio_half);
+    TimeAccess::set_recoverable_failures(1U, 0);
+    const auto halved =
+        ratio_controller.advance(ratio_state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(halved.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    HUNDUN_CHECK(ratio_half.count == 2U);
+    HUNDUN_CHECK(fp64_bits(halved.attempt(1).attempted_dt_s /
+                          equal.accepted_dt_s()) ==
+                 fp64_bits(0.5));
+    require_stencil_bitwise_equal(
+        ratio_half.stencils[1],
+        independent_stencil(hundun::flow::MomentumTimeOrder::bdf2, 0.005,
+                            0.01));
+    TimeAccess::set_attempt_observer(nullptr, nullptr);
+    TimeAccess::reset_faults();
+  }
 
   auto other_controller = hundun::flow::Bdf2RetryController::restore(
       time, hundun::config::DensityModel::constant, topology, geometry, mpi,
-      state, restored.state());
+      state, retry_be_restored.state());
   bool cross_controller_rejected = false;
   try {
     static_cast<void>(other_controller.diagnostic_source(state, second));
@@ -1251,13 +1674,13 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       facade.attempt(state, 1.0, 0.0, out_of_band_stencil, {}, {});
   HUNDUN_CHECK(out_of_band.disposition ==
                hundun::flow::StepAttemptDisposition::committed);
-  const auto controller_before_rejection = restored.state();
+  const auto controller_before_rejection = retry_be_restored.state();
   const auto rejected_after_out_of_band =
-      restored.advance(state, facade, 1.0, 0.0, {}, {});
+      retry_be_restored.advance(state, facade, 1.0, 0.0, {}, {});
   HUNDUN_CHECK(rejected_after_out_of_band.disposition() ==
                hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
   HUNDUN_CHECK(rejected_after_out_of_band.attempt_count() == 0U);
-  HUNDUN_CHECK(restored.state().state_seal ==
+  HUNDUN_CHECK(retry_be_restored.state().state_seal ==
                controller_before_rejection.state_seal);
   {
     auto bound_to_other = hundun::flow::Bdf2RetryController::create(
@@ -1447,6 +1870,11 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
       HUNDUN_CHECK(mismatch_report.attempt_count() == 0U);
       HUNDUN_CHECK(mismatch_report.lowest_failing_rank() == 1);
       HUNDUN_CHECK(TimeAccess::preflight_category(mismatch_report) == 6U);
+      require_authentic_diagnostic(
+          mpi, mismatch_controller, mismatch_state, mismatch_report,
+          hundun::diagnostics::DiagnosticStatus::failed,
+          hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+          "time-control.preflight.transport-authority", 1);
     }
   }
   {
@@ -1539,9 +1967,18 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     auto terminal_controller = hundun::flow::Bdf2RetryController::create(
         terminal_time, hundun::config::DensityModel::material, topology,
         geometry, mpi, state);
+    const auto material_cache_before =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            facade_cache_snapshot(material_flow);
+    HUNDUN_CHECK(material_cache_before.data_identity != 0U);
+    HUNDUN_CHECK(material_cache_before.total_capacity != 0U);
+    HUNDUN_CHECK(material_cache_before.revision != 0U);
+    HUNDUN_CHECK(!material_cache_before.delegated);
     const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state(), {}, 0U, 0U, 0U,
+        state, terminal_controller.state(), {},
+        material_cache_before.data_identity,
+        material_cache_before.total_capacity, material_cache_before.revision,
         {terminal_reductions_before.collective_calls,
          terminal_reductions_before.reduced_scalars,
          terminal_reductions_before.logical_payload_bytes, 0U});
@@ -1551,9 +1988,27 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(terminal.disposition() ==
                  hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
     HUNDUN_CHECK(terminal.attempt_count() == 9U);
+    HUNDUN_CHECK(terminal.reason() ==
+                 hundun::flow::StepFailureReason::final_continuity_residual);
+    require_authentic_diagnostic(
+        mpi, terminal_controller, state, terminal,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+        "time-control.final-continuity-residual", 0);
     const auto terminal_reductions_after = mpi.fp64_reduction_counters();
+    const auto material_cache_after =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            facade_cache_snapshot(material_flow);
+    HUNDUN_CHECK(material_cache_after.data_identity ==
+                 material_cache_before.data_identity);
+    HUNDUN_CHECK(material_cache_after.total_capacity ==
+                 material_cache_before.total_capacity);
+    HUNDUN_CHECK(material_cache_after.revision ==
+                 material_cache_before.revision);
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state(), {}, 0U, 0U, 0U,
+        state, terminal_controller.state(), {},
+        material_cache_after.data_identity,
+        material_cache_after.total_capacity, material_cache_after.revision,
         {terminal_reductions_after.collective_calls,
          terminal_reductions_after.reduced_scalars,
          terminal_reductions_after.logical_payload_bytes, 0U});
@@ -1603,16 +2058,55 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(controller.state().last_retry_count == 1U);
     TimeAccess::reset_faults();
   }
+  {
+    using MaterialAccess =
+        hundun::flow::test::MaterialDensityPisoTestAccess;
+    hundun::linear::JacobiPreconditioner collective_mx(execution),
+        collective_my(execution), collective_mz(execution),
+        collective_pressure(execution);
+    auto collective_material_flow =
+        hundun::flow::FixedStepMaterialDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi, execution,
+            halo, momentum_solver,
+            {&collective_mx, &collective_my, &collective_mz},
+            pressure_solver, collective_pressure, registry, fields,
+            material_spec);
+    auto state = make_state();
+    auto controller = hundun::flow::Bdf2RetryController::create(
+        time, hundun::config::DensityModel::material, topology, geometry, mpi,
+        state);
+    MaterialAccess::reset_terminal_fault();
+    MaterialAccess::set_terminal_fault(
+        hundun::flow::test::MaterialTerminalPointForTest::
+            final_pressure_entry,
+        hundun::flow::test::MaterialTerminalModeForTest::returned_reliable);
+    const auto report = controller.advance(
+        state, collective_material_flow, 0.0, {}, {});
+    MaterialAccess::reset_terminal_fault();
+    HUNDUN_CHECK(
+        report.disposition() ==
+        hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
+    HUNDUN_CHECK(report.reason() ==
+                 hundun::flow::StepFailureReason::collective_operation);
+    require_authentic_diagnostic(
+        mpi, controller, state, report,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::collective_operation,
+        "time-control.collective-operation", 0);
+  }
 
   {
     auto terminal_state = make_state();
+    hundun::linear::JacobiPreconditioner terminal_mx(execution),
+        terminal_my(execution), terminal_mz(execution),
+        terminal_pressure(execution);
     auto terminal_closure = hundun::flow::IdealGasClosure::create(
         topology, geometry, boundaries, mpi, registry, fields, terminal_state,
         {rho_h, 1000.0, 287.0, 86100.0});
     auto terminal_flow = hundun::flow::FixedStepIdealGasFlow::create(
         decomposition, topology, geometry, boundaries, mpi, execution, halo,
-        momentum_solver, {&mx, &my, &mz}, pressure_solver,
-        pressure_preconditioner, registry, fields, material_spec,
+        momentum_solver, {&terminal_mx, &terminal_my, &terminal_mz},
+        pressure_solver, terminal_pressure, registry, fields, material_spec,
         std::move(terminal_closure));
     const hundun::config::FlowTimeConfig terminal_time{
         hundun::config::TimeMode::fixed, 1, 0.01, 0.00001, 0.02,
@@ -1620,10 +2114,18 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     auto terminal_controller = hundun::flow::Bdf2RetryController::create(
         terminal_time, hundun::config::DensityModel::ideal_gas, topology,
         geometry, mpi, terminal_state);
+    const auto ideal_cache_before =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            facade_cache_snapshot(terminal_flow);
+    HUNDUN_CHECK(ideal_cache_before.data_identity != 0U);
+    HUNDUN_CHECK(ideal_cache_before.total_capacity != 0U);
+    HUNDUN_CHECK(ideal_cache_before.revision != 0U);
+    HUNDUN_CHECK(ideal_cache_before.delegated);
     const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state(), 0U, 0U, 0U,
+        terminal_flow.closure_state(), ideal_cache_before.data_identity,
+        ideal_cache_before.total_capacity, ideal_cache_before.revision,
         {terminal_reductions_before.collective_calls,
          terminal_reductions_before.reduced_scalars,
          terminal_reductions_before.logical_payload_bytes, 0U});
@@ -1633,16 +2135,54 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(terminal.disposition() ==
                  hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
     HUNDUN_CHECK(terminal.attempt_count() == 9U);
+    HUNDUN_CHECK(terminal.reason() ==
+                 hundun::flow::StepFailureReason::density_closure_failure);
+    require_authentic_diagnostic(
+        mpi, terminal_controller, terminal_state, terminal,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::numerical_breakdown,
+        "time-control.density-closure-failure", 0);
     const auto terminal_reductions_after = mpi.fp64_reduction_counters();
+    const auto ideal_cache_after =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            facade_cache_snapshot(terminal_flow);
+    HUNDUN_CHECK(ideal_cache_after.data_identity ==
+                 ideal_cache_before.data_identity);
+    HUNDUN_CHECK(ideal_cache_after.total_capacity ==
+                 ideal_cache_before.total_capacity);
+    HUNDUN_CHECK(ideal_cache_after.revision ==
+                 ideal_cache_before.revision);
+    HUNDUN_CHECK(ideal_cache_after.delegated);
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state(), 0U, 0U, 0U,
+        terminal_flow.closure_state(), ideal_cache_after.data_identity,
+        ideal_cache_after.total_capacity, ideal_cache_after.revision,
         {terminal_reductions_after.collective_calls,
          terminal_reductions_after.reduced_scalars,
          terminal_reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
         terminal_before, terminal_after, terminal.attempt_count(),
         {9U, 9U, 72U, 0U}));
+    TimeAccess::reset_faults();
+
+    auto transport_controller = hundun::flow::Bdf2RetryController::create(
+        terminal_time, hundun::config::DensityModel::ideal_gas, topology,
+        geometry, mpi, terminal_state);
+    TimeAccess::set_recoverable_failure_reason(
+        hundun::flow::StepFailureReason::transport_failure);
+    TimeAccess::set_recoverable_failures(9U, failure_rank);
+    const auto transport_terminal = transport_controller.advance(
+        terminal_state, terminal_flow, 0.0, {}, {});
+    HUNDUN_CHECK(
+        transport_terminal.disposition() ==
+        hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
+    HUNDUN_CHECK(transport_terminal.reason() ==
+                 hundun::flow::StepFailureReason::transport_failure);
+    require_authentic_diagnostic(
+        mpi, transport_controller, terminal_state, transport_terminal,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::numerical_breakdown,
+        "time-control.transport-failure", failure_rank);
     TimeAccess::reset_faults();
   }
 
@@ -1850,6 +2390,33 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
                  hundun::flow::IdealGasPressureMode::open_fixed);
     HUNDUN_CHECK(open_closure_state.thermodynamic_pressure_pa == 101325.0);
     HUNDUN_CHECK(!open_closure_state.target_mass_kg.has_value());
+    TimeAccess::reset_faults();
+
+    auto terminal_open_controller =
+        hundun::flow::Bdf2RetryController::restore(
+            open_time, hundun::config::DensityModel::ideal_gas, open_topology,
+            open_geometry, mpi, open_state, open_controller.state());
+    TimeAccess::set_recoverable_failure_reason(
+        hundun::flow::StepFailureReason::boundary_backflow);
+    TimeAccess::set_recoverable_failures(9U, 0);
+    const auto terminal_open = terminal_open_controller.advance(
+        open_state, open_flow, 0.0, {}, {});
+    HUNDUN_CHECK(
+        terminal_open.disposition() ==
+        hundun::flow::TimeAdvanceDisposition::minimum_dt_failure);
+    HUNDUN_CHECK(terminal_open.reason() ==
+                 hundun::flow::StepFailureReason::boundary_backflow);
+    const int outlet_coordinates[3]{grid(mpi.size()).x - 1, 0, 0};
+    int outlet_rank = -1;
+    hundun::runtime::check_mpi_result(
+        MPI_Cart_rank(open_decomposition.comm(), outlet_coordinates,
+                      &outlet_rank),
+        "MPI_Cart_rank(Task22 outlet authority)");
+    require_authentic_diagnostic(
+        mpi, terminal_open_controller, open_state, terminal_open,
+        hundun::diagnostics::DiagnosticStatus::failed,
+        hundun::diagnostics::DiagnosticFailureClass::boundary,
+        "time-control.boundary-backflow", outlet_rank);
     TimeAccess::reset_faults();
   }
 }

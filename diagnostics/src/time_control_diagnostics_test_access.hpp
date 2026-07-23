@@ -16,6 +16,13 @@ enum class TimeAdvanceDisposition : std::uint8_t;
 
 namespace hundun::diagnostics::test {
 
+struct TimeControlRawFaultObservation final {
+  std::size_t raw_operations{};
+  std::size_t local_origins{};
+  std::size_t fault_ordinal{};
+  int requested_rank{-1};
+};
+
 enum class TimeControlDiagnosticFault : std::uint8_t {
   none,
   phase1_layout,
@@ -89,6 +96,7 @@ public:
                                  TimeControlLocalMutation);
   static std::size_t phase_count() noexcept;
   static std::size_t raw_operation_count() noexcept;
+  static TimeControlRawFaultObservation raw_fault_observation() noexcept;
   static std::size_t submission_count() noexcept;
   static void set_state_counters(flow::TimeControlDiagnosticSource &,
                                  std::uint64_t accepted_step,

@@ -30,6 +30,16 @@ struct TimeControlTrustedTailObservation final {
   std::uint64_t callbacks_or_sinks{};
 };
 
+struct TimeControlRawFaultObservation final {
+  std::size_t raw_operations{};
+  std::size_t local_origins{};
+  std::size_t fault_ordinal{};
+  int requested_rank{-1};
+};
+
+using TimeControlAttemptObserver =
+    void (*)(void *, const MomentumTimeStencil &, const FlowState &);
+
 class AdaptiveTimeControlTestAccess final {
 public:
   static TimeAdvanceReport report() noexcept {
@@ -66,6 +76,11 @@ public:
   trusted_tail_observation() noexcept;
   static void set_raw_fault(std::size_t ordinal, int rank) noexcept;
   static std::size_t raw_operation_count() noexcept;
+  static TimeControlRawFaultObservation raw_fault_observation() noexcept;
+  static void set_attempt_observer(TimeControlAttemptObserver,
+                                   void *) noexcept;
+  static void exercise_trusted_tail_attempt_observer(
+      const FlowState &, const MomentumTimeStencil &);
   static void set_active(Bdf2RetryController &, bool) noexcept;
   static std::array<double, 2>
   stability_rates(Bdf2RetryController &, const FlowState &,

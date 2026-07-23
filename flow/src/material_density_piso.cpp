@@ -3136,6 +3136,46 @@ test::MaterialDensityPisoTestAccess::material_pressure_evidence(
   return material_pressure_evidence(flow.impl_->coupler);
 }
 
+test::FacadeCacheSnapshot
+test::MaterialDensityPisoTestAccess::facade_cache_snapshot(
+    const FixedStepMaterialDensityFlow &flow) noexcept {
+  test::FacadeCacheSnapshot result;
+  if (!flow.impl_)
+    return result;
+  const auto &impl = *flow.impl_;
+  result.data_identity =
+      reinterpret_cast<std::uintptr_t>(impl.pressure_gradient_sums.data());
+  result.revision = impl.source_generation;
+  const auto add = [&](const auto &values) {
+    result.total_capacity += values.capacity();
+  };
+  for (const auto &values : impl.diagonal_values)
+    add(values);
+  add(impl.pressure_gradient_sums);
+  add(impl.continuity_absolute);
+  add(impl.partition_face_values);
+  add(impl.partition_face_counts);
+  add(impl.momentum_n.convection);
+  add(impl.momentum_n.viscosity);
+  add(impl.momentum_n.boundary);
+  add(impl.momentum_nm1.convection);
+  add(impl.momentum_nm1.viscosity);
+  add(impl.momentum_nm1.boundary);
+  add(impl.pressure_boundary);
+  add(impl.canonical_faces);
+  return result;
+}
+
+void test::material_facade_cache_values_for_ideal(
+    const FixedStepMaterialDensityFlow &flow, std::uintptr_t &identity,
+    std::size_t &capacity, std::uint64_t &revision) noexcept {
+  const auto snapshot =
+      test::MaterialDensityPisoTestAccess::facade_cache_snapshot(flow);
+  identity = snapshot.data_identity;
+  capacity = snapshot.total_capacity;
+  revision = snapshot.revision;
+}
+
 const std::vector<double> &
 test::MaterialDensityPisoTestAccess::finalizer_flux_evidence(
     const FixedStepMaterialDensityFlow &flow) {

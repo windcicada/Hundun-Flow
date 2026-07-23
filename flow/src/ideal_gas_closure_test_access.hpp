@@ -8,6 +8,8 @@
 #include "hundun/flow/ideal_gas_piso.hpp"
 #include "hundun/runtime/error.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace hundun::flow::test {
@@ -86,6 +88,17 @@ struct IdealGasHaloTraceEntry final {
   runtime::FieldId enthalpy_density{};
 };
 
+struct IdealGasFacadeCacheSnapshot final {
+  std::uintptr_t data_identity{};
+  std::size_t total_capacity{};
+  std::uint64_t revision{};
+  bool delegated{};
+};
+
+void material_facade_cache_values_for_ideal(
+    const FixedStepMaterialDensityFlow &, std::uintptr_t &, std::size_t &,
+    std::uint64_t &) noexcept;
+
 class IdealGasClosureTestAccess final {
 public:
   static void set_uniform_enthalpy_rate(FixedStepIdealGasFlow &,
@@ -129,6 +142,8 @@ public:
   static void force_finalization_identity_wrap(FixedStepIdealGasFlow &);
   static std::vector<IdealGasHaloTraceEntry>
   halo_trace(const FixedStepIdealGasFlow &);
+  static IdealGasFacadeCacheSnapshot
+  facade_cache_snapshot(const FixedStepIdealGasFlow &) noexcept;
   static std::uint64_t
   source_generation(const IdealGasClosureDiagnosticSource &);
   static void set_post_store_corruption(FixedStepIdealGasFlow &, int rank,

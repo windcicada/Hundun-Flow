@@ -750,6 +750,18 @@ test::IdealGasClosureTestAccess::halo_trace(
          static_cast<runtime::FieldId>(entry[2])});
   return result;
 }
+test::IdealGasFacadeCacheSnapshot
+test::IdealGasClosureTestAccess::facade_cache_snapshot(
+    const FixedStepIdealGasFlow &flow) noexcept {
+  if (!flow.impl_)
+    return {};
+  test::IdealGasFacadeCacheSnapshot result;
+  test::material_facade_cache_values_for_ideal(
+      flow.impl_->material, result.data_identity, result.total_capacity,
+      result.revision);
+  result.delegated = true;
+  return result;
+}
 std::uint64_t test::IdealGasClosureTestAccess::source_generation(
     const IdealGasClosureDiagnosticSource &source) {
   source.validate();

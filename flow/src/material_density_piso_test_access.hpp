@@ -75,6 +75,17 @@ struct MaterialPressureEvidenceForTest final {
   std::uint64_t final_operator_revision{};
 };
 
+struct FacadeCacheSnapshot final {
+  std::uintptr_t data_identity{};
+  std::size_t total_capacity{};
+  std::uint64_t revision{};
+  bool delegated{};
+};
+
+void material_facade_cache_values_for_ideal(
+    const FixedStepMaterialDensityFlow &, std::uintptr_t &, std::size_t &,
+    std::uint64_t &) noexcept;
+
 enum class MaterialReportCorruptionForTest : std::uint8_t {
   success_corrector_count,
   success_provenance,
@@ -221,6 +232,8 @@ public:
                                                  int lowest_failing_rank);
   static MaterialPressureEvidenceForTest
   material_pressure_evidence(const FixedStepMaterialDensityFlow &);
+  static FacadeCacheSnapshot
+  facade_cache_snapshot(const FixedStepMaterialDensityFlow &) noexcept;
   static MaterialPressureEvidenceForTest
   material_pressure_evidence(const PisoCoupler &);
   static const std::vector<double> &

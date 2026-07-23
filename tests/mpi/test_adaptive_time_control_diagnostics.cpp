@@ -582,8 +582,10 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   }
 
   for (std::size_t ordinal = 1U; ordinal <= 9U; ++ordinal) {
+    const int origin_rank =
+        mpi.size() == 4 && ordinal % 2U == 0U ? 2 : injection_rank;
     DiagnosticAccess::reset();
-    DiagnosticAccess::set_raw_fault(ordinal, injection_rank);
+    DiagnosticAccess::set_raw_fault(ordinal, origin_rank);
     RecordingSink sink;
     bool typed = false;
     try {
@@ -594,6 +596,17 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     }
     HUNDUN_CHECK(typed);
     HUNDUN_CHECK(sink.calls == 0);
+    const auto observed = DiagnosticAccess::raw_fault_observation();
+    HUNDUN_CHECK(observed.raw_operations == ordinal);
+    HUNDUN_CHECK(observed.fault_ordinal == ordinal);
+    HUNDUN_CHECK(observed.requested_rank == origin_rank);
+    HUNDUN_CHECK(observed.local_origins ==
+                 (mpi.rank() == origin_rank ? 1U : 0U));
+    std::uint64_t origin_count = observed.local_origins;
+    HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, &origin_count, 1, MPI_UINT64_T,
+                               MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+    HUNDUN_CHECK(origin_count == 1U);
+    HUNDUN_CHECK(DiagnosticAccess::submission_count() == 0U);
   }
   DiagnosticAccess::reset();
 }
@@ -912,6 +925,56 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(sink.calls == 0);
     HUNDUN_CHECK(after.collective_calls == before.collective_calls);
     HUNDUN_CHECK(after.reduced_scalars == before.reduced_scalars);
+  }
+
+  if (mpi.size() > 1) {
+    const int malformed_rank = mpi.size() == 4 ? 2 : 1;
+    for (const auto mutation :
+         {hundun::diagnostics::test::TimeControlLocalMutation::local_box,
+          hundun::diagnostics::test::TimeControlLocalMutation::
+              canonical_owned_faces,
+          hundun::diagnostics::test::TimeControlLocalMutation::local_faces,
+          hundun::diagnostics::test::TimeControlLocalMutation::
+              local_cell_layout,
+          hundun::diagnostics::test::TimeControlLocalMutation::
+              global_cell_layout,
+          hundun::diagnostics::test::TimeControlLocalMutation::
+              local_face_layout,
+          hundun::diagnostics::test::TimeControlLocalMutation::
+              global_face_layout}) {
+      DiagnosticAccess::reset();
+      auto malformed = make_historical_source(mpi);
+      if (mpi.rank() == malformed_rank)
+        DiagnosticAccess::set_local_mutation(malformed.source, mutation);
+      const hundun::diagnostics::DiagnosticRequest request{
+          hundun::diagnostics::DiagnosticLevel::summary,
+          hundun::diagnostics::DiagnosticScope::collective,
+          {mpi.rank(), malformed.step, malformed.time_s,
+           "time-control.advance-result"},
+          {}, 0U};
+      const auto before = mpi.fp64_reduction_counters();
+      RecordingSink sink;
+      bool rejected = false;
+      try {
+        hundun::diagnostics::collect_diagnostics(malformed.source, mpi,
+                                                 request, sink);
+      } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+        rejected = true;
+        HUNDUN_CHECK(error.classification() ==
+                     hundun::diagnostics::DiagnosticFailureClass::layout);
+        HUNDUN_CHECK(error.code() ==
+                     "time-control.diagnostics.local-layout");
+        HUNDUN_CHECK(error.lowest_failing_rank() == malformed_rank);
+      }
+      const auto after = mpi.fp64_reduction_counters();
+      HUNDUN_CHECK(rejected);
+      HUNDUN_CHECK(sink.calls == 0);
+      HUNDUN_CHECK(DiagnosticAccess::submission_count() == 0U);
+      HUNDUN_CHECK(after.collective_calls == before.collective_calls);
+      HUNDUN_CHECK(after.reduced_scalars == before.reduced_scalars);
+      HUNDUN_CHECK(after.logical_payload_bytes ==
+                   before.logical_payload_bytes);
+    }
   }
 
   for (int field = 0; field < 4; ++field) {
