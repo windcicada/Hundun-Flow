@@ -405,7 +405,7 @@ execution::ExecutionEvent JacobiPreconditioner::apply(
 
 #ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
 test::JacobiStorageSnapshot test::PreconditionerTestAccess::jacobi_storage(
-    const JacobiPreconditioner& preconditioner) noexcept {
+    const JacobiPreconditioner& preconditioner) {
   test::JacobiStorageSnapshot snapshot;
   if (!preconditioner.state_) {
     return snapshot;
@@ -416,10 +416,21 @@ test::JacobiStorageSnapshot test::PreconditionerTestAccess::jacobi_storage(
   if (state.inverse_diagonal.has_value()) {
     snapshot.allocation_identities[0] =
         state.inverse_diagonal->allocation_identity();
+    snapshot.byte_sizes[0] = state.inverse_diagonal->byte_size();
+    const auto count = state.domain.owned_count();
+    const auto inverse = static_cast<const execution::Buffer&>(
+                             *state.inverse_diagonal)
+                             .view(0U, count);
+    snapshot.cached_inverse.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      snapshot.cached_inverse.push_back(inverse[index]);
+    }
   }
   if (state.staging_inverse_diagonal.has_value()) {
     snapshot.allocation_identities[1] =
         state.staging_inverse_diagonal->allocation_identity();
+    snapshot.byte_sizes[1] =
+        state.staging_inverse_diagonal->byte_size();
   }
   return snapshot;
 }

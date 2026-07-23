@@ -5,12 +5,16 @@
 #include "hundun/linear/preconditioners.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace hundun::linear::test {
 
 struct JacobiStorageSnapshot final {
   std::array<execution::AllocationIdentity, 2> allocation_identities{};
+  std::array<std::size_t, 2> byte_sizes{};
+  std::vector<double> cached_inverse;
   std::uint64_t revision{};
   bool cache_valid{};
 };
@@ -18,7 +22,7 @@ struct JacobiStorageSnapshot final {
 class PreconditionerTestAccess final {
  public:
   static JacobiStorageSnapshot
-  jacobi_storage(const JacobiPreconditioner& preconditioner) noexcept;
+  jacobi_storage(const JacobiPreconditioner& preconditioner);
 };
 
 }  // namespace hundun::linear::test

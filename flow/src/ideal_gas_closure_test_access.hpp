@@ -8,6 +8,7 @@
 #include "hundun/flow/ideal_gas_piso.hpp"
 #include "hundun/runtime/error.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -89,15 +90,21 @@ struct IdealGasHaloTraceEntry final {
 };
 
 struct IdealGasFacadeCacheSnapshot final {
-  std::uintptr_t data_identity{};
-  std::size_t total_capacity{};
-  std::uint64_t revision{};
+  struct Workspace final {
+    std::uintptr_t identity{};
+    std::size_t capacity{};
+  };
+  struct MomentumOperator final {
+    std::uintptr_t identity{};
+    std::uint64_t revision{};
+    std::vector<double> diagonal;
+  };
+
+  std::vector<Workspace> workspaces;
+  std::array<MomentumOperator, 3> operators{};
+  std::size_t operator_count{};
   bool delegated{};
 };
-
-void material_facade_cache_values_for_ideal(
-    const FixedStepMaterialDensityFlow &, std::uintptr_t &, std::size_t &,
-    std::uint64_t &) noexcept;
 
 class IdealGasClosureTestAccess final {
 public:
@@ -143,7 +150,9 @@ public:
   static std::vector<IdealGasHaloTraceEntry>
   halo_trace(const FixedStepIdealGasFlow &);
   static IdealGasFacadeCacheSnapshot
-  facade_cache_snapshot(const FixedStepIdealGasFlow &) noexcept;
+  facade_cache_snapshot(const FixedStepIdealGasFlow &);
+  static IdealGasFacadeCacheSnapshot
+  delegated_material_cache_snapshot(const FixedStepIdealGasFlow &);
   static std::uint64_t
   source_generation(const IdealGasClosureDiagnosticSource &);
   static void set_post_store_corruption(FixedStepIdealGasFlow &, int rank,

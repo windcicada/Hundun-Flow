@@ -4023,6 +4023,62 @@ test::ConstantDensityPisoTestAccess::mesh_workspace_snapshot(
   return snapshot;
 }
 
+test::ConstantFacadeCacheSnapshot
+test::ConstantDensityPisoTestAccess::facade_cache_snapshot(
+    const FixedStepConstantDensityFlow &flow) {
+  test::ConstantFacadeCacheSnapshot snapshot;
+  if (!flow.impl_)
+    return snapshot;
+  const auto add = [&](const auto &values) {
+    snapshot.workspaces.push_back(
+        {reinterpret_cast<std::uintptr_t>(values.data()), values.capacity()});
+  };
+  const auto &impl = *flow.impl_;
+  add(impl.pressure_gradient_sums);
+  add(impl.continuity_absolute);
+  for (const auto &values : impl.diagonal_values)
+    add(values);
+  add(impl.momentum_n.convection);
+  add(impl.momentum_n.viscosity);
+  add(impl.momentum_n.boundary);
+  add(impl.momentum_nm1.convection);
+  add(impl.momentum_nm1.viscosity);
+  add(impl.momentum_nm1.boundary);
+  add(impl.pressure_boundary);
+  for (const auto *set : {&impl.transport_n, &impl.transport_nm1}) {
+    for (const auto &values : *set) {
+      add(values.convection);
+      add(values.diffusion);
+      add(values.boundary);
+    }
+  }
+  const auto &coupler = *impl.coupler.impl_;
+  add(coupler.pressure_gradient_sums);
+  add(coupler.velocity_candidate);
+  add(coupler.pressure_candidate);
+  add(coupler.face_velocity_candidate);
+  add(coupler.mass_flux_candidate);
+  for (std::size_t component = 0; component < impl.operators.size();
+       ++component) {
+    if (!impl.operators[component])
+      continue;
+    auto &entry = snapshot.operators[snapshot.operator_count++];
+    entry = {
+        reinterpret_cast<std::uintptr_t>(impl.operators[component].get()),
+        impl.operators[component]->revision(), {}};
+    const auto count =
+        impl.operators[component]->range_layout().owned_count();
+    execution::Buffer diagonal(*impl.execution, bytes_for(count));
+    impl.operators[component]->diagonal(diagonal.view(0U, count)).wait();
+    const auto values =
+        static_cast<const execution::Buffer &>(diagonal).view(0U, count);
+    entry.diagonal.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+      entry.diagonal.push_back(values[index]);
+  }
+  return snapshot;
+}
+
 test::PressureOperatorSnapshot
 test::ConstantDensityPisoTestAccess::pressure_operator_snapshot(
     const FixedStepConstantDensityFlow &flow) noexcept {

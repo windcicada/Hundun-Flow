@@ -850,6 +850,7 @@ if(HUNDUN_BUILD_TESTS)
             "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
             "-DHUNDUN_MPI_INCLUDE_DIRS=${task22_mpi_include_dirs}"
             "-DHUNDUN_TESTS_OFF_FLOW=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_flow.a"
+            "-DHUNDUN_TESTS_OFF_LINEAR=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_linear.a"
             "-DHUNDUN_TESTS_OFF_DIAGNOSTICS=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_material_diagnostics.a"
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_test_access_contract.cmake")
   set_tests_properties(test_task22_tests_off_header_contract PROPERTIES

@@ -3138,16 +3138,14 @@ test::MaterialDensityPisoTestAccess::material_pressure_evidence(
 
 test::FacadeCacheSnapshot
 test::MaterialDensityPisoTestAccess::facade_cache_snapshot(
-    const FixedStepMaterialDensityFlow &flow) noexcept {
+    const FixedStepMaterialDensityFlow &flow) {
   test::FacadeCacheSnapshot result;
   if (!flow.impl_)
     return result;
   const auto &impl = *flow.impl_;
-  result.data_identity =
-      reinterpret_cast<std::uintptr_t>(impl.pressure_gradient_sums.data());
-  result.revision = impl.source_generation;
   const auto add = [&](const auto &values) {
-    result.total_capacity += values.capacity();
+    result.workspaces.push_back(
+        {reinterpret_cast<std::uintptr_t>(values.data()), values.capacity()});
   };
   for (const auto &values : impl.diagonal_values)
     add(values);
@@ -3163,17 +3161,30 @@ test::MaterialDensityPisoTestAccess::facade_cache_snapshot(
   add(impl.momentum_nm1.boundary);
   add(impl.pressure_boundary);
   add(impl.canonical_faces);
+  for (std::size_t direction = 0; direction < impl.operators.size();
+       ++direction) {
+    if (!impl.operators[direction])
+      continue;
+    auto &entry = result.operators[result.operator_count++];
+    entry = {
+        reinterpret_cast<std::uintptr_t>(impl.operators[direction].get()),
+        impl.operators[direction]->revision(), {}};
+    const auto count =
+        impl.operators[direction]->range_layout().owned_count();
+    execution::Buffer diagonal(*impl.execution, bytes_for(count));
+    impl.operators[direction]->diagonal(diagonal.view(0U, count)).wait();
+    const auto values =
+        static_cast<const execution::Buffer &>(diagonal).view(0U, count);
+    entry.diagonal.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+      entry.diagonal.push_back(values[index]);
+  }
   return result;
 }
 
-void test::material_facade_cache_values_for_ideal(
-    const FixedStepMaterialDensityFlow &flow, std::uintptr_t &identity,
-    std::size_t &capacity, std::uint64_t &revision) noexcept {
-  const auto snapshot =
-      test::MaterialDensityPisoTestAccess::facade_cache_snapshot(flow);
-  identity = snapshot.data_identity;
-  capacity = snapshot.total_capacity;
-  revision = snapshot.revision;
+test::FacadeCacheSnapshot test::material_facade_cache_values_for_ideal(
+    const FixedStepMaterialDensityFlow &flow) {
+  return test::MaterialDensityPisoTestAccess::facade_cache_snapshot(flow);
 }
 
 const std::vector<double> &

@@ -76,15 +76,24 @@ struct MaterialPressureEvidenceForTest final {
 };
 
 struct FacadeCacheSnapshot final {
-  std::uintptr_t data_identity{};
-  std::size_t total_capacity{};
-  std::uint64_t revision{};
+  struct Workspace final {
+    std::uintptr_t identity{};
+    std::size_t capacity{};
+  };
+  struct MomentumOperator final {
+    std::uintptr_t identity{};
+    std::uint64_t revision{};
+    std::vector<double> diagonal;
+  };
+
+  std::vector<Workspace> workspaces;
+  std::array<MomentumOperator, 3> operators{};
+  std::size_t operator_count{};
   bool delegated{};
 };
 
-void material_facade_cache_values_for_ideal(
-    const FixedStepMaterialDensityFlow &, std::uintptr_t &, std::size_t &,
-    std::uint64_t &) noexcept;
+FacadeCacheSnapshot material_facade_cache_values_for_ideal(
+    const FixedStepMaterialDensityFlow &);
 
 enum class MaterialReportCorruptionForTest : std::uint8_t {
   success_corrector_count,
@@ -233,7 +242,7 @@ public:
   static MaterialPressureEvidenceForTest
   material_pressure_evidence(const FixedStepMaterialDensityFlow &);
   static FacadeCacheSnapshot
-  facade_cache_snapshot(const FixedStepMaterialDensityFlow &) noexcept;
+  facade_cache_snapshot(const FixedStepMaterialDensityFlow &);
   static MaterialPressureEvidenceForTest
   material_pressure_evidence(const PisoCoupler &);
   static const std::vector<double> &

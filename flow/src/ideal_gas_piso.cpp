@@ -10,6 +10,7 @@
 #include "hundun/runtime/mpi_operation_error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "ideal_gas_closure_test_access.hpp"
+#include "material_density_piso_test_access.hpp"
 #endif
 
 #include <algorithm>
@@ -752,14 +753,39 @@ test::IdealGasClosureTestAccess::halo_trace(
 }
 test::IdealGasFacadeCacheSnapshot
 test::IdealGasClosureTestAccess::facade_cache_snapshot(
-    const FixedStepIdealGasFlow &flow) noexcept {
+    const FixedStepIdealGasFlow &flow) {
   if (!flow.impl_)
     return {};
+  const auto material =
+      test::material_facade_cache_values_for_ideal(flow.impl_->material);
   test::IdealGasFacadeCacheSnapshot result;
-  test::material_facade_cache_values_for_ideal(
-      flow.impl_->material, result.data_identity, result.total_capacity,
-      result.revision);
+  result.workspaces.reserve(material.workspaces.size());
+  for (const auto &workspace : material.workspaces)
+    result.workspaces.push_back({workspace.identity, workspace.capacity});
+  result.operator_count = material.operator_count;
+  for (std::size_t index = 0; index < result.operator_count; ++index)
+    result.operators[index] = {material.operators[index].identity,
+                               material.operators[index].revision,
+                               material.operators[index].diagonal};
   result.delegated = true;
+  return result;
+}
+test::IdealGasFacadeCacheSnapshot
+test::IdealGasClosureTestAccess::delegated_material_cache_snapshot(
+    const FixedStepIdealGasFlow &flow) {
+  if (!flow.impl_)
+    return {};
+  const auto material =
+      test::material_facade_cache_values_for_ideal(flow.impl_->material);
+  test::IdealGasFacadeCacheSnapshot result;
+  result.workspaces.reserve(material.workspaces.size());
+  for (const auto &workspace : material.workspaces)
+    result.workspaces.push_back({workspace.identity, workspace.capacity});
+  result.operator_count = material.operator_count;
+  for (std::size_t index = 0; index < result.operator_count; ++index)
+    result.operators[index] = {material.operators[index].identity,
+                               material.operators[index].revision,
+                               material.operators[index].diagonal};
   return result;
 }
 std::uint64_t test::IdealGasClosureTestAccess::source_generation(

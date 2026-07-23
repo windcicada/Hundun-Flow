@@ -20,6 +20,7 @@
 #include "flow/src/constant_density_piso_test_access.hpp"
 #include "flow/src/ideal_gas_closure_test_access.hpp"
 #include "flow/src/material_density_piso_test_access.hpp"
+#include "linear/src/preconditioners_test_access.hpp"
 #include "tests/support/flow_state_equality.hpp"
 #include "tests/support/adaptive_time_control_test_support.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
@@ -33,6 +34,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -83,6 +85,245 @@ void require_stencil_bitwise_equal(
   HUNDUN_CHECK(fp64_bits(actual.alpha0) == fp64_bits(expected.alpha0));
   HUNDUN_CHECK(fp64_bits(actual.alpha1) == fp64_bits(expected.alpha1));
   HUNDUN_CHECK(fp64_bits(actual.alpha2) == fp64_bits(expected.alpha2));
+}
+
+template <class Snapshot>
+bool facade_cache_exact(const Snapshot &left, const Snapshot &right) noexcept {
+  if (left.operator_count != right.operator_count ||
+      left.delegated != right.delegated ||
+      left.workspaces.size() != right.workspaces.size())
+    return false;
+  for (std::size_t index = 0; index < left.workspaces.size(); ++index) {
+    if (left.workspaces[index].identity != right.workspaces[index].identity ||
+        left.workspaces[index].capacity != right.workspaces[index].capacity)
+      return false;
+  }
+  for (std::size_t index = 0; index < left.operator_count; ++index) {
+    if (left.operators[index].identity != right.operators[index].identity ||
+        left.operators[index].revision != right.operators[index].revision ||
+        left.operators[index].diagonal.size() !=
+            right.operators[index].diagonal.size())
+      return false;
+    for (std::size_t value = 0;
+         value < left.operators[index].diagonal.size(); ++value) {
+      if (fp64_bits(left.operators[index].diagonal[value]) !=
+          fp64_bits(right.operators[index].diagonal[value]))
+        return false;
+    }
+  }
+  return true;
+}
+
+template <class Snapshot>
+bool facade_cache_allocation_exact(const Snapshot &left,
+                                   const Snapshot &right) noexcept {
+  if (left.operator_count != right.operator_count ||
+      left.delegated != right.delegated ||
+      left.workspaces.size() != right.workspaces.size())
+    return false;
+  for (std::size_t index = 0; index < left.workspaces.size(); ++index) {
+    if (left.workspaces[index].identity != right.workspaces[index].identity ||
+        left.workspaces[index].capacity != right.workspaces[index].capacity)
+      return false;
+  }
+  for (std::size_t index = 0; index < left.operator_count; ++index) {
+    if (left.operators[index].identity != right.operators[index].identity)
+      return false;
+  }
+  return true;
+}
+
+template <class Left, class Right>
+bool facade_cache_delegation_exact(const Left &delegated,
+                                   const Right &owned) noexcept {
+  if (!delegated.delegated || owned.delegated ||
+      delegated.operator_count != owned.operator_count ||
+      delegated.workspaces.size() != owned.workspaces.size())
+    return false;
+  for (std::size_t index = 0; index < delegated.workspaces.size(); ++index) {
+    if (delegated.workspaces[index].identity !=
+            owned.workspaces[index].identity ||
+        delegated.workspaces[index].capacity !=
+            owned.workspaces[index].capacity)
+      return false;
+  }
+  for (std::size_t index = 0; index < delegated.operator_count; ++index) {
+    if (delegated.operators[index].identity !=
+            owned.operators[index].identity ||
+        delegated.operators[index].revision !=
+            owned.operators[index].revision ||
+        delegated.operators[index].diagonal.size() !=
+            owned.operators[index].diagonal.size())
+      return false;
+    for (std::size_t value = 0;
+         value < delegated.operators[index].diagonal.size(); ++value) {
+      if (fp64_bits(delegated.operators[index].diagonal[value]) !=
+          fp64_bits(owned.operators[index].diagonal[value]))
+        return false;
+    }
+  }
+  return true;
+}
+
+template <class Snapshot>
+void require_facade_cache_inventory(const Snapshot &snapshot,
+                                    bool delegated) {
+  HUNDUN_CHECK(snapshot.delegated == delegated);
+  HUNDUN_CHECK(!snapshot.workspaces.empty());
+  HUNDUN_CHECK(snapshot.operator_count == 3U);
+  for (std::size_t index = 0; index < snapshot.operator_count; ++index) {
+    HUNDUN_CHECK(snapshot.operators[index].identity != 0U);
+    HUNDUN_CHECK(snapshot.operators[index].revision != 0U);
+  }
+}
+
+template <class Snapshot>
+void require_facade_cache_mutation_sensitive(const Snapshot &snapshot) {
+  HUNDUN_CHECK(facade_cache_exact(snapshot, snapshot));
+  {
+    auto changed = snapshot;
+    ++changed.workspaces.front().identity;
+    HUNDUN_CHECK(!facade_cache_exact(snapshot, changed));
+  }
+  {
+    auto changed = snapshot;
+    ++changed.workspaces.front().capacity;
+    HUNDUN_CHECK(!facade_cache_exact(snapshot, changed));
+  }
+  {
+    auto changed = snapshot;
+    ++changed.operators.front().revision;
+    HUNDUN_CHECK(!facade_cache_exact(snapshot, changed));
+  }
+  {
+    auto changed = snapshot;
+    ++changed.operators.front().identity;
+    HUNDUN_CHECK(!facade_cache_exact(snapshot, changed));
+  }
+  {
+    auto changed = snapshot;
+    HUNDUN_CHECK(!changed.operators.front().diagonal.empty());
+    changed.operators.front().diagonal.front() =
+        std::nextafter(changed.operators.front().diagonal.front(),
+                       std::numeric_limits<double>::infinity());
+    HUNDUN_CHECK(!facade_cache_exact(snapshot, changed));
+  }
+}
+
+struct JacobiCacheAuthority final {
+  std::array<hundun::linear::test::JacobiStorageSnapshot, 3> storage{};
+};
+
+JacobiCacheAuthority capture_jacobi_cache(
+    std::array<const hundun::linear::JacobiPreconditioner *, 3>
+        preconditioners) {
+  JacobiCacheAuthority result;
+  for (std::size_t component = 0; component < preconditioners.size();
+       ++component) {
+    result.storage[component] =
+        hundun::linear::test::PreconditionerTestAccess::jacobi_storage(
+            *preconditioners[component]);
+  }
+  return result;
+}
+
+bool jacobi_allocation_exact(const JacobiCacheAuthority &left,
+                             const JacobiCacheAuthority &right) noexcept {
+  for (std::size_t component = 0; component < left.storage.size();
+       ++component) {
+    std::array<std::pair<hundun::execution::AllocationIdentity, std::size_t>,
+               2>
+        left_buffers{}, right_buffers{};
+    for (std::size_t slot = 0; slot < left_buffers.size(); ++slot) {
+      left_buffers[slot] = {
+          left.storage[component].allocation_identities[slot],
+          left.storage[component].byte_sizes[slot]};
+      right_buffers[slot] = {
+          right.storage[component].allocation_identities[slot],
+          right.storage[component].byte_sizes[slot]};
+    }
+    std::sort(left_buffers.begin(), left_buffers.end());
+    std::sort(right_buffers.begin(), right_buffers.end());
+    if (left_buffers != right_buffers)
+      return false;
+  }
+  return true;
+}
+
+bool jacobi_authority_exact(const JacobiCacheAuthority &left,
+                            const JacobiCacheAuthority &right) noexcept {
+  if (!jacobi_allocation_exact(left, right))
+    return false;
+  for (std::size_t component = 0; component < left.storage.size();
+       ++component) {
+    if (left.storage[component].revision !=
+            right.storage[component].revision ||
+        left.storage[component].cache_valid !=
+            right.storage[component].cache_valid ||
+        left.storage[component].cached_inverse.size() !=
+            right.storage[component].cached_inverse.size())
+      return false;
+    for (std::size_t index = 0;
+         index < left.storage[component].cached_inverse.size(); ++index) {
+      if (fp64_bits(left.storage[component].cached_inverse[index]) !=
+          fp64_bits(right.storage[component].cached_inverse[index]))
+        return false;
+    }
+  }
+  return true;
+}
+
+template <class Snapshot>
+void require_jacobi_operator_coherence(
+    const JacobiCacheAuthority &jacobi, const Snapshot &facade) {
+  HUNDUN_CHECK(facade.operator_count == jacobi.storage.size());
+  for (std::size_t component = 0; component < facade.operator_count;
+       ++component) {
+    HUNDUN_CHECK(jacobi.storage[component].cache_valid);
+    HUNDUN_CHECK(jacobi.storage[component].revision ==
+                 facade.operators[component].revision);
+    HUNDUN_CHECK(jacobi.storage[component].allocation_identities[0] != 0U);
+    HUNDUN_CHECK(jacobi.storage[component].allocation_identities[1] != 0U);
+    HUNDUN_CHECK(jacobi.storage[component].byte_sizes[0] != 0U);
+    HUNDUN_CHECK(jacobi.storage[component].byte_sizes[1] != 0U);
+    HUNDUN_CHECK(jacobi.storage[component].cached_inverse.size() ==
+                 facade.operators[component].diagonal.size());
+    for (std::size_t index = 0;
+         index < jacobi.storage[component].cached_inverse.size(); ++index) {
+      const double expected =
+          1.0 / facade.operators[component].diagonal[index];
+      HUNDUN_CHECK(
+          fp64_bits(jacobi.storage[component].cached_inverse[index]) ==
+          fp64_bits(expected));
+    }
+  }
+}
+
+void require_jacobi_mutation_sensitive(const JacobiCacheAuthority &authority) {
+  HUNDUN_CHECK(jacobi_authority_exact(authority, authority));
+  {
+    auto changed = authority;
+    ++changed.storage.front().allocation_identities.front();
+    HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
+  }
+  {
+    auto changed = authority;
+    ++changed.storage.front().byte_sizes.front();
+    HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
+  }
+  {
+    auto changed = authority;
+    ++changed.storage.front().revision;
+    HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
+  }
+  {
+    auto changed = authority;
+    HUNDUN_CHECK(!changed.storage.front().cached_inverse.empty());
+    changed.storage.front().cached_inverse.front() =
+        std::nextafter(changed.storage.front().cached_inverse.front(),
+                       std::numeric_limits<double>::infinity());
+    HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
+  }
 }
 
 struct AttemptBoundaryEvidence final {
@@ -312,6 +553,52 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   const hundun::config::FlowTimeConfig time{
       hundun::config::TimeMode::adaptive, 2, 0.01, 0.00125, 0.02,
       0.5, 0.25, 1.25, 0.5, 8};
+  {
+    auto cold_state = hundun::flow::FlowState::create(
+        registry, {local, topology.local_face_count()}, fields,
+        {0U, 0.0, 0.01, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    cold_state.seed_accepted_layers(initial, initial);
+    hundun::linear::JacobiPreconditioner cold_mx(execution),
+        cold_my(execution), cold_mz(execution),
+        cold_pressure(execution);
+    auto cold_facade = hundun::flow::FixedStepConstantDensityFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&cold_mx, &cold_my, &cold_mz}, pressure_solver,
+        cold_pressure,
+        {{fields.transported_cell_fields.front(),
+          hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+    using ConstantAccess =
+        hundun::flow::test::ConstantDensityPisoTestAccess;
+    ConstantAccess::reset();
+    const auto cold_cache_before =
+        ConstantAccess::facade_cache_snapshot(cold_facade);
+    ConstantAccess::set_attempt_failure_stage(
+        hundun::flow::test::AttemptFailureStage::after_begin);
+    const auto cold_report = cold_facade.attempt(
+        cold_state, 1.0, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    ConstantAccess::reset();
+    HUNDUN_CHECK(cold_report.disposition ==
+                 hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(cold_report.reason ==
+                 hundun::flow::StepFailureReason::non_finite_trial);
+    const auto cold_cache = ConstantAccess::facade_cache_snapshot(cold_facade);
+    const auto cold_jacobi =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    HUNDUN_CHECK(cold_cache.operator_count == 3U);
+    HUNDUN_CHECK(facade_cache_exact(cold_cache_before, cold_cache));
+    for (const auto &storage : cold_jacobi.storage) {
+      HUNDUN_CHECK(!storage.cache_valid);
+      HUNDUN_CHECK(storage.allocation_identities[0] == 0U);
+      HUNDUN_CHECK(storage.allocation_identities[1] == 0U);
+      HUNDUN_CHECK(storage.byte_sizes[0] == 0U);
+      HUNDUN_CHECK(storage.byte_sizes[1] == 0U);
+      HUNDUN_CHECK(storage.cached_inverse.empty());
+    }
+  }
   const int mismatch_rank = mpi.size() == 1 ? 0 : 1;
   const auto expect_factory_failure =
       [&](const hundun::config::FlowTimeConfig &candidate,
@@ -1092,20 +1379,24 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     auto retained_trial_view =
         limit_state.trial_layer().acquire_write<double>(
             retained_view_plan, 2201U, 1U, fields.velocity);
-    const auto workspace_before =
+    const auto constant_cache_before =
         hundun::flow::test::ConstantDensityPisoTestAccess::
-            mesh_workspace_snapshot(facade);
-    const auto pressure_before =
-        hundun::flow::test::ConstantDensityPisoTestAccess::
-            pressure_operator_snapshot(facade);
+            facade_cache_snapshot(facade);
+    const auto constant_jacobi_before =
+        capture_jacobi_cache({&mx, &my, &mz});
+    require_facade_cache_inventory(constant_cache_before, false);
+    require_facade_cache_mutation_sensitive(constant_cache_before);
+    require_jacobi_operator_coherence(constant_jacobi_before,
+                                      constant_cache_before);
+    require_jacobi_mutation_sensitive(constant_jacobi_before);
     const auto reductions_before = mpi.fp64_reduction_counters();
     const auto exact_before = hundun::test::capture_adaptive_flow_state(
-        limit_state, limit_controller.state(), {},
-        workspace_before.data_identity, workspace_before.total_capacity,
-        pressure_before.revision,
+        limit_state, limit_controller.state(), {}, 0U, 0U, 0U,
         {reductions_before.collective_calls,
          reductions_before.reduced_scalars,
          reductions_before.logical_payload_bytes, 0U});
+    TimeAccess::set_recoverable_failure_reason(
+        hundun::flow::StepFailureReason::final_continuity_residual);
     TimeAccess::set_recoverable_failures(9U, 0);
     const auto limited =
         limit_controller.advance(limit_state, facade, 1.0, 0.0, {}, {});
@@ -1115,29 +1406,38 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     for (std::size_t index = 0; index < limited.attempt_count(); ++index)
       HUNDUN_CHECK(limited.attempt(index).disposition ==
                    hundun::flow::StepAttemptDisposition::recoverable_failure);
+    HUNDUN_CHECK(limited.reason() ==
+                 hundun::flow::StepFailureReason::final_continuity_residual);
     HUNDUN_CHECK(limit_state.metadata().step == 0U);
     require_authentic_diagnostic(
         mpi, limit_controller, limit_state, limited,
         hundun::diagnostics::DiagnosticStatus::failed,
-        hundun::diagnostics::DiagnosticFailureClass::non_finite_state,
-        "time-control.non-finite-trial", 0);
-    const auto workspace_after =
+        hundun::diagnostics::DiagnosticFailureClass::non_convergence,
+        "time-control.final-continuity-residual", 0);
+    const auto constant_cache_after =
         hundun::flow::test::ConstantDensityPisoTestAccess::
-            mesh_workspace_snapshot(facade);
-    const auto pressure_after =
-        hundun::flow::test::ConstantDensityPisoTestAccess::
-            pressure_operator_snapshot(facade);
+            facade_cache_snapshot(facade);
+    const auto constant_jacobi_after =
+        capture_jacobi_cache({&mx, &my, &mz});
+    HUNDUN_CHECK(facade_cache_allocation_exact(constant_cache_before,
+                                               constant_cache_after));
+    HUNDUN_CHECK(jacobi_allocation_exact(constant_jacobi_before,
+                                         constant_jacobi_after));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(constant_cache_after.operators[component].revision >
+                   constant_cache_before.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(constant_jacobi_after,
+                                      constant_cache_after);
     const auto reductions_after = mpi.fp64_reduction_counters();
     const auto exact_after = hundun::test::capture_adaptive_flow_state(
-        limit_state, limit_controller.state(), {},
-        workspace_after.data_identity, workspace_after.total_capacity,
-        pressure_after.revision,
+        limit_state, limit_controller.state(), {}, 0U, 0U, 0U,
         {reductions_after.collective_calls,
          reductions_after.reduced_scalars,
          reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
         exact_before, exact_after, limited.attempt_count(),
-        {45U, 333U, 2664U, 0U}));
+        {1332U, 2052U, 16416U, 0U}));
     bool retained_view_stale = false;
     try {
       static_cast<void>(retained_trial_view(0, 0, 0, 0));
@@ -1153,6 +1453,21 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(fixed_success.attempt_count() == 1U);
     HUNDUN_CHECK(fixed_success.attempt(0).attempted_dt_s == 0.01);
     HUNDUN_CHECK(limit_controller.state().proposed_next_dt_s == 0.01);
+    const auto constant_cache_success =
+        hundun::flow::test::ConstantDensityPisoTestAccess::
+            facade_cache_snapshot(facade);
+    const auto constant_jacobi_success =
+        capture_jacobi_cache({&mx, &my, &mz});
+    HUNDUN_CHECK(facade_cache_allocation_exact(constant_cache_after,
+                                               constant_cache_success));
+    HUNDUN_CHECK(jacobi_allocation_exact(constant_jacobi_after,
+                                         constant_jacobi_success));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(constant_cache_success.operators[component].revision >
+                   constant_cache_after.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(constant_jacobi_success,
+                                      constant_cache_success);
     const std::array<std::uint64_t, 2> no_stability_reduction{0U, 0U};
     HUNDUN_CHECK(TimeAccess::stability_reduction_observation() ==
                  no_stability_reduction);
@@ -1547,21 +1862,67 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   const auto retry_be_export = restored.state();
   const auto retry_be_before_restore =
       hundun::test::capture_adaptive_flow_state(state, retry_be_export);
+  const auto retry_be_history =
+      state.snapshot(hundun::flow::FlowLayer::history);
+  const auto retry_be_committed =
+      state.snapshot(hundun::flow::FlowLayer::committed);
+  const auto retry_be_trial = state.snapshot(hundun::flow::FlowLayer::trial);
+  const auto retry_be_metadata = state.metadata();
+  auto retry_be_restored_state = hundun::flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      retry_be_metadata);
+  retry_be_restored_state.seed_accepted_layers(retry_be_history,
+                                               retry_be_committed);
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::history),
+      retry_be_history));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::committed),
+      retry_be_committed));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::trial),
+      retry_be_trial));
+  HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+      retry_be_restored_state.metadata(), retry_be_metadata));
+  hundun::linear::JacobiPreconditioner restored_mx(execution),
+      restored_my(execution), restored_mz(execution),
+      restored_pressure(execution);
+  auto retry_be_restored_facade =
+      hundun::flow::FixedStepConstantDensityFlow::create(
+          decomposition, topology, geometry, boundaries, mpi, execution, halo,
+          momentum_solver, {&restored_mx, &restored_my, &restored_mz},
+          pressure_solver, restored_pressure,
+          {{fields.transported_cell_fields.front(),
+            hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
   auto retry_be_restored = hundun::flow::Bdf2RetryController::restore(
       time, hundun::config::DensityModel::constant, topology, geometry, mpi,
-      state, retry_be_export);
-  const auto retry_be_after_restore =
-      hundun::test::capture_adaptive_flow_state(state,
-                                                retry_be_restored.state());
-  HUNDUN_CHECK(hundun::test::adaptive_flow_state_bitwise_equal(
-      retry_be_before_restore, retry_be_after_restore));
+      retry_be_restored_state, retry_be_export);
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::history),
+      retry_be_before_restore.history));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::committed),
+      retry_be_before_restore.committed));
+  HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+      retry_be_restored_state.snapshot(hundun::flow::FlowLayer::trial),
+      retry_be_before_restore.trial));
+  HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+      retry_be_restored_state.metadata(), retry_be_before_restore.metadata));
   HUNDUN_CHECK(hundun::test::time_control_state_bitwise_equal(
       retry_be_export, retry_be_restored.state()));
+  AttemptBoundaryEvidence uninterrupted_evidence{&restored};
+  TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
+                                   &uninterrupted_evidence);
+  const auto uninterrupted =
+      restored.advance(state, facade, 1.0, 0.0, {}, {});
+  HUNDUN_CHECK(uninterrupted.disposition() ==
+               hundun::flow::TimeAdvanceDisposition::committed);
+  HUNDUN_CHECK(uninterrupted_evidence.count == 1U);
   AttemptBoundaryEvidence recovered_evidence{&retry_be_restored};
   TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
                                    &recovered_evidence);
-  const auto recovered =
-      retry_be_restored.advance(state, facade, 1.0, 0.0, {}, {});
+  const auto recovered = retry_be_restored.advance(
+      retry_be_restored_state, retry_be_restored_facade, 1.0, 0.0, {}, {});
   HUNDUN_CHECK(recovered.disposition() ==
                hundun::flow::TimeAdvanceDisposition::committed);
   HUNDUN_CHECK(recovered.attempt(0).order ==
@@ -1572,12 +1933,38 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       independent_stencil(hundun::flow::MomentumTimeOrder::bdf2,
                           recovered.attempt(0).attempted_dt_s,
                           retry_be_before_restore.metadata.dt_s));
+  HUNDUN_CHECK(fp64_bits(uninterrupted.attempt(0).attempted_dt_s) ==
+               fp64_bits(recovered.attempt(0).attempted_dt_s));
+  HUNDUN_CHECK(uninterrupted.attempt(0).order ==
+               recovered.attempt(0).order);
+  require_stencil_bitwise_equal(uninterrupted_evidence.stencils[0],
+                                recovered_evidence.stencils[0]);
+  require_stencil_bitwise_equal(
+      uninterrupted_evidence.stencils[0],
+      independent_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                          uninterrupted.attempt(0).attempted_dt_s,
+                          retry_be_before_restore.metadata.dt_s));
+  HUNDUN_CHECK(fp64_bits(uninterrupted.proposed_next_dt_s()) ==
+               fp64_bits(recovered.proposed_next_dt_s()));
+  HUNDUN_CHECK(fp64_bits(restored.state().proposed_next_dt_s) ==
+               fp64_bits(retry_be_restored.state().proposed_next_dt_s));
+  HUNDUN_CHECK(restored.state().last_accepted_order ==
+               retry_be_restored.state().last_accepted_order);
+  HUNDUN_CHECK(restored.state().history_ready ==
+               retry_be_restored.state().history_ready);
+  HUNDUN_CHECK(restored.state().last_retry_count ==
+               retry_be_restored.state().last_retry_count);
+  HUNDUN_CHECK(hundun::test::time_control_state_bitwise_equal(
+      restored.state(), retry_be_restored.state()));
+  HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+      state.metadata(), retry_be_restored_state.metadata()));
   HUNDUN_CHECK(state.metadata().step == 4U);
+  HUNDUN_CHECK(retry_be_restored_state.metadata().step == 4U);
   TimeAccess::set_attempt_observer(nullptr, nullptr);
   TimeAccess::set_attempt_observer(&AttemptBoundaryEvidence::observe,
-                                   &recovered_evidence);
+                                   &uninterrupted_evidence);
   TimeAccess::exercise_trusted_tail_attempt_observer(
-      state, recovered_evidence.stencils[0]);
+      state, uninterrupted_evidence.stencils[0]);
   HUNDUN_CHECK(
       TimeAccess::trusted_tail_observation().callbacks_or_sinks == 1U);
   TimeAccess::set_attempt_observer(nullptr, nullptr);
@@ -1970,15 +2357,16 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     const auto material_cache_before =
         hundun::flow::test::MaterialDensityPisoTestAccess::
             facade_cache_snapshot(material_flow);
-    HUNDUN_CHECK(material_cache_before.data_identity != 0U);
-    HUNDUN_CHECK(material_cache_before.total_capacity != 0U);
-    HUNDUN_CHECK(material_cache_before.revision != 0U);
-    HUNDUN_CHECK(!material_cache_before.delegated);
+    const auto material_jacobi_before =
+        capture_jacobi_cache({&mx, &my, &mz});
+    require_facade_cache_inventory(material_cache_before, false);
+    require_facade_cache_mutation_sensitive(material_cache_before);
+    require_jacobi_operator_coherence(material_jacobi_before,
+                                      material_cache_before);
+    require_jacobi_mutation_sensitive(material_jacobi_before);
     const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state(), {},
-        material_cache_before.data_identity,
-        material_cache_before.total_capacity, material_cache_before.revision,
+        state, terminal_controller.state(), {}, 0U, 0U, 0U,
         {terminal_reductions_before.collective_calls,
          terminal_reductions_before.reduced_scalars,
          terminal_reductions_before.logical_payload_bytes, 0U});
@@ -1999,16 +2387,20 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     const auto material_cache_after =
         hundun::flow::test::MaterialDensityPisoTestAccess::
             facade_cache_snapshot(material_flow);
-    HUNDUN_CHECK(material_cache_after.data_identity ==
-                 material_cache_before.data_identity);
-    HUNDUN_CHECK(material_cache_after.total_capacity ==
-                 material_cache_before.total_capacity);
-    HUNDUN_CHECK(material_cache_after.revision ==
-                 material_cache_before.revision);
+    const auto material_jacobi_after =
+        capture_jacobi_cache({&mx, &my, &mz});
+    HUNDUN_CHECK(facade_cache_allocation_exact(material_cache_before,
+                                               material_cache_after));
+    HUNDUN_CHECK(
+        jacobi_allocation_exact(material_jacobi_before, material_jacobi_after));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(material_cache_after.operators[component].revision >
+                   material_cache_before.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(material_jacobi_after,
+                                      material_cache_after);
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state(), {},
-        material_cache_after.data_identity,
-        material_cache_after.total_capacity, material_cache_after.revision,
+        state, terminal_controller.state(), {}, 0U, 0U, 0U,
         {terminal_reductions_after.collective_calls,
          terminal_reductions_after.reduced_scalars,
          terminal_reductions_after.logical_payload_bytes, 0U});
@@ -2038,6 +2430,21 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(material_final.flux_provenance() ==
                  hundun::flow::MaterialFluxProvenance::final_corrected);
     HUNDUN_CHECK(material_final.material_field_count() == 3U);
+    const auto material_cache_success =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            facade_cache_snapshot(material_flow);
+    const auto material_jacobi_success =
+        capture_jacobi_cache({&mx, &my, &mz});
+    HUNDUN_CHECK(facade_cache_allocation_exact(material_cache_after,
+                                               material_cache_success));
+    HUNDUN_CHECK(
+        jacobi_allocation_exact(material_jacobi_after, material_jacobi_success));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(material_cache_success.operators[component].revision >
+                   material_cache_after.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(material_jacobi_success,
+                                      material_cache_success);
     TimeAccess::reset_faults();
   }
   {
@@ -2111,24 +2518,40 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     const hundun::config::FlowTimeConfig terminal_time{
         hundun::config::TimeMode::fixed, 1, 0.01, 0.00001, 0.02,
         0.5, 0.25, 1.25, 0.5, 8};
-    auto terminal_controller = hundun::flow::Bdf2RetryController::create(
+    auto prewarm_controller = hundun::flow::Bdf2RetryController::create(
         terminal_time, hundun::config::DensityModel::ideal_gas, topology,
         geometry, mpi, terminal_state);
+    const auto prewarm = prewarm_controller.advance(
+        terminal_state, terminal_flow, 0.0, {}, {});
+    HUNDUN_CHECK(prewarm.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    const auto prewarm_export = prewarm_controller.state();
+    auto terminal_controller = hundun::flow::Bdf2RetryController::restore(
+        terminal_time, hundun::config::DensityModel::ideal_gas, topology,
+        geometry, mpi, terminal_state, prewarm_export);
     const auto ideal_cache_before =
         hundun::flow::test::IdealGasClosureTestAccess::
             facade_cache_snapshot(terminal_flow);
-    HUNDUN_CHECK(ideal_cache_before.data_identity != 0U);
-    HUNDUN_CHECK(ideal_cache_before.total_capacity != 0U);
-    HUNDUN_CHECK(ideal_cache_before.revision != 0U);
-    HUNDUN_CHECK(ideal_cache_before.delegated);
+    const auto ideal_owned_before =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            delegated_material_cache_snapshot(terminal_flow);
+    const auto ideal_jacobi_before =
+        capture_jacobi_cache({&terminal_mx, &terminal_my, &terminal_mz});
+    require_facade_cache_inventory(ideal_cache_before, true);
+    require_facade_cache_mutation_sensitive(ideal_cache_before);
+    HUNDUN_CHECK(
+        facade_cache_delegation_exact(ideal_cache_before, ideal_owned_before));
+    require_jacobi_operator_coherence(ideal_jacobi_before, ideal_cache_before);
+    require_jacobi_mutation_sensitive(ideal_jacobi_before);
     const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state(), ideal_cache_before.data_identity,
-        ideal_cache_before.total_capacity, ideal_cache_before.revision,
+        terminal_flow.closure_state(), 0U, 0U, 0U,
         {terminal_reductions_before.collective_calls,
          terminal_reductions_before.reduced_scalars,
          terminal_reductions_before.logical_payload_bytes, 0U});
+    TimeAccess::set_recoverable_failure_reason(
+        hundun::flow::StepFailureReason::final_conservation_defect);
     TimeAccess::set_recoverable_failures(9U, 0);
     const auto terminal = terminal_controller.advance(
         terminal_state, terminal_flow, 0.0, {}, {});
@@ -2136,38 +2559,46 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
                  hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
     HUNDUN_CHECK(terminal.attempt_count() == 9U);
     HUNDUN_CHECK(terminal.reason() ==
-                 hundun::flow::StepFailureReason::density_closure_failure);
+                 hundun::flow::StepFailureReason::final_conservation_defect);
     require_authentic_diagnostic(
         mpi, terminal_controller, terminal_state, terminal,
         hundun::diagnostics::DiagnosticStatus::failed,
-        hundun::diagnostics::DiagnosticFailureClass::numerical_breakdown,
-        "time-control.density-closure-failure", 0);
+        hundun::diagnostics::DiagnosticFailureClass::conservation,
+        "time-control.final-conservation-defect", 0);
     const auto terminal_reductions_after = mpi.fp64_reduction_counters();
     const auto ideal_cache_after =
         hundun::flow::test::IdealGasClosureTestAccess::
             facade_cache_snapshot(terminal_flow);
-    HUNDUN_CHECK(ideal_cache_after.data_identity ==
-                 ideal_cache_before.data_identity);
-    HUNDUN_CHECK(ideal_cache_after.total_capacity ==
-                 ideal_cache_before.total_capacity);
-    HUNDUN_CHECK(ideal_cache_after.revision ==
-                 ideal_cache_before.revision);
-    HUNDUN_CHECK(ideal_cache_after.delegated);
+    const auto ideal_owned_after =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            delegated_material_cache_snapshot(terminal_flow);
+    const auto ideal_jacobi_after =
+        capture_jacobi_cache({&terminal_mx, &terminal_my, &terminal_mz});
+    HUNDUN_CHECK(
+        facade_cache_allocation_exact(ideal_cache_before, ideal_cache_after));
+    HUNDUN_CHECK(
+        facade_cache_delegation_exact(ideal_cache_after, ideal_owned_after));
+    HUNDUN_CHECK(
+        jacobi_allocation_exact(ideal_jacobi_before, ideal_jacobi_after));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(ideal_cache_after.operators[component].revision >
+                   ideal_cache_before.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(ideal_jacobi_after, ideal_cache_after);
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state(), ideal_cache_after.data_identity,
-        ideal_cache_after.total_capacity, ideal_cache_after.revision,
+        terminal_flow.closure_state(), 0U, 0U, 0U,
         {terminal_reductions_after.collective_calls,
          terminal_reductions_after.reduced_scalars,
          terminal_reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
         terminal_before, terminal_after, terminal.attempt_count(),
-        {9U, 9U, 72U, 0U}));
+        {1602U, 82350U, 658800U, 0U}));
     TimeAccess::reset_faults();
 
-    auto transport_controller = hundun::flow::Bdf2RetryController::create(
+    auto transport_controller = hundun::flow::Bdf2RetryController::restore(
         terminal_time, hundun::config::DensityModel::ideal_gas, topology,
-        geometry, mpi, terminal_state);
+        geometry, mpi, terminal_state, prewarm_export);
     TimeAccess::set_recoverable_failure_reason(
         hundun::flow::StepFailureReason::transport_failure);
     TimeAccess::set_recoverable_failures(9U, failure_rank);
@@ -2184,6 +2615,30 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
         hundun::diagnostics::DiagnosticFailureClass::numerical_breakdown,
         "time-control.transport-failure", failure_rank);
     TimeAccess::reset_faults();
+    const auto ideal_success = transport_controller.advance(
+        terminal_state, terminal_flow, 0.0, {}, {});
+    HUNDUN_CHECK(ideal_success.disposition() ==
+                 hundun::flow::TimeAdvanceDisposition::committed);
+    const auto ideal_cache_success =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            facade_cache_snapshot(terminal_flow);
+    const auto ideal_owned_success =
+        hundun::flow::test::IdealGasClosureTestAccess::
+            delegated_material_cache_snapshot(terminal_flow);
+    const auto ideal_jacobi_success =
+        capture_jacobi_cache({&terminal_mx, &terminal_my, &terminal_mz});
+    HUNDUN_CHECK(
+        facade_cache_allocation_exact(ideal_cache_after, ideal_cache_success));
+    HUNDUN_CHECK(facade_cache_delegation_exact(ideal_cache_success,
+                                               ideal_owned_success));
+    HUNDUN_CHECK(
+        jacobi_allocation_exact(ideal_jacobi_after, ideal_jacobi_success));
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(ideal_cache_success.operators[component].revision >
+                   ideal_cache_after.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(ideal_jacobi_success,
+                                      ideal_cache_success);
   }
 
   auto ideal_state = make_state();

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace hundun::flow {
 
@@ -63,6 +64,24 @@ struct PressureOperatorSnapshot final {
   bool present{};
 };
 
+struct ConstantWorkspaceCacheEntry final {
+  std::uintptr_t identity{};
+  std::size_t capacity{};
+};
+
+struct ConstantMomentumOperatorCacheEntry final {
+  std::uintptr_t identity{};
+  std::uint64_t revision{};
+  std::vector<double> diagonal;
+};
+
+struct ConstantFacadeCacheSnapshot final {
+  std::vector<ConstantWorkspaceCacheEntry> workspaces;
+  std::array<ConstantMomentumOperatorCacheEntry, 3> operators{};
+  std::size_t operator_count{};
+  bool delegated{};
+};
+
 class ConstantDensityPisoTestAccess final {
 public:
   static void reset() noexcept;
@@ -111,6 +130,8 @@ public:
   last_transport_conservation(std::size_t field_index) noexcept;
   static MeshWorkspaceSnapshot
   mesh_workspace_snapshot(const FixedStepConstantDensityFlow &flow) noexcept;
+  static ConstantFacadeCacheSnapshot
+  facade_cache_snapshot(const FixedStepConstantDensityFlow &flow);
   static PressureOperatorSnapshot pressure_operator_snapshot(
       const FixedStepConstantDensityFlow &flow) noexcept;
 };
