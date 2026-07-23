@@ -755,20 +755,47 @@ if(HUNDUN_BUILD_TESTS)
     tests/mpi/test_adaptive_time_control.cpp)
   target_include_directories(test_adaptive_time_control_mpi PRIVATE
     "${PROJECT_SOURCE_DIR}")
+  target_compile_definitions(test_adaptive_time_control_mpi PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS)
   target_link_libraries(test_adaptive_time_control_mpi PRIVATE
     hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
     MPI::MPI_CXX)
   foreach(ranks IN ITEMS 1 2 4)
-    set(task22_controller_test
-        "test_adaptive_time_control_${ranks}_rank")
-    add_test(NAME "${task22_controller_test}"
-      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
-              ${MPIEXEC_PREFLAGS}
-              "$<TARGET_FILE:test_adaptive_time_control_mpi>"
-              ${MPIEXEC_POSTFLAGS})
-    set_tests_properties("${task22_controller_test}" PROPERTIES
-      LABELS "mpi;numerical;task22;task22-fast"
-      TIMEOUT 240 PROCESSORS "${ranks}")
+    foreach(mode IN ITEMS fast acceptance)
+      set(task22_controller_test
+          "test_adaptive_time_control_${ranks}_rank_${mode}")
+      add_test(NAME "${task22_controller_test}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS}
+                "$<TARGET_FILE:test_adaptive_time_control_mpi>" "${mode}"
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${task22_controller_test}" PROPERTIES
+        LABELS "mpi;numerical;task22;task22-${mode}"
+        TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+    endforeach()
+  endforeach()
+  add_executable(test_adaptive_time_control_diagnostics_mpi
+    tests/mpi/test_adaptive_time_control_diagnostics.cpp)
+  target_include_directories(test_adaptive_time_control_diagnostics_mpi PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_compile_definitions(test_adaptive_time_control_diagnostics_mpi PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS)
+  target_link_libraries(test_adaptive_time_control_diagnostics_mpi PRIVATE
+    hundun_material_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    foreach(mode IN ITEMS fast acceptance)
+      set(task22_diagnostics_test
+          "test_adaptive_time_control_diagnostics_${ranks}_rank_${mode}")
+      add_test(NAME "${task22_diagnostics_test}"
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+                ${MPIEXEC_PREFLAGS}
+                "$<TARGET_FILE:test_adaptive_time_control_diagnostics_mpi>"
+                "${mode}" ${MPIEXEC_POSTFLAGS})
+      set_tests_properties("${task22_diagnostics_test}" PROPERTIES
+        LABELS "mpi;diagnostics;task22;task22-${mode}"
+        TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+    endforeach()
   endforeach()
   add_test(NAME test_task22_source_policy
     COMMAND "${CMAKE_COMMAND}"
@@ -776,6 +803,19 @@ if(HUNDUN_BUILD_TESTS)
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_source_policy.cmake")
   set_tests_properties(test_task22_source_policy PROPERTIES
     LABELS "unit;source_policy;task22" TIMEOUT 30)
+  string(REPLACE ";" "|" task22_mpi_include_dirs
+         "${MPI_CXX_INCLUDE_DIRS}")
+  add_test(NAME test_task22_tests_off_header_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DHUNDUN_MPI_INCLUDE_DIRS=${task22_mpi_include_dirs}"
+            "-DHUNDUN_TESTS_OFF_FLOW=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_flow.a"
+            "-DHUNDUN_TESTS_OFF_DIAGNOSTICS=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_material_diagnostics.a"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_test_access_contract.cmake")
+  set_tests_properties(test_task22_tests_off_header_contract PROPERTIES
+    LABELS "unit;source_policy;task22" TIMEOUT 60)
 
   hundun_add_test(test_momentum_predictor
     tests/unit/test_momentum_predictor.cpp)

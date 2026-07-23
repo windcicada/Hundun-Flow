@@ -6,16 +6,65 @@
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+#include "time_control_diagnostics_test_access.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace hundun::diagnostics {
 namespace {
+
+enum class FaultPoint : std::uint8_t {
+  none,
+  phase1_layout,
+  phase2_request,
+  phase3_provider,
+  phase4_payload,
+  phase4_wire,
+  phase5_record,
+  phase6_sink
+};
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+test::TimeControlDiagnosticFault diagnostic_fault{
+    test::TimeControlDiagnosticFault::none};
+int diagnostic_fault_rank{-1};
+std::size_t diagnostic_phase_count{};
+std::size_t diagnostic_raw_count{};
+std::size_t diagnostic_submission_count{};
+std::size_t diagnostic_raw_fault_ordinal{};
+std::size_t request_mutation_offset{std::numeric_limits<std::size_t>::max()};
+int request_mutation_rank{-1};
+std::size_t provider_mutation_offset{std::numeric_limits<std::size_t>::max()};
+int provider_mutation_rank{-1};
+
+bool fault_here(FaultPoint point, int rank) noexcept {
+  return static_cast<std::uint8_t>(diagnostic_fault) ==
+             static_cast<std::uint8_t>(point) &&
+         diagnostic_fault_rank == rank;
+}
+#else
+bool fault_here(FaultPoint, int) noexcept { return false; }
+#endif
+
+void checked_mpi(int result, std::string_view operation) {
+  runtime::check_mpi_result(result, operation);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  ++diagnostic_raw_count;
+  if (diagnostic_raw_fault_ordinal != 0U &&
+      diagnostic_raw_count == diagnostic_raw_fault_ordinal)
+    runtime::check_mpi_result(MPI_ERR_OTHER, operation);
+#endif
+}
 
 constexpr DiagnosticCapabilityFlags kCapabilities =
     static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::summary) |
@@ -66,6 +115,39 @@ DiagnosticFailure failure_for(const flow::detail::TimeControlDiagnosticSnapshot 
     return {};
   DiagnosticFailure result;
   result.lowest_failing_rank = collective ? s.lowest_failing_rank : -1;
+  if (s.attempt_count == 0U) {
+    switch (s.preflight_category) {
+    case 1U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.config", result.lowest_failing_rank};
+    case 2U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.identity", result.lowest_failing_rank};
+    case 3U:
+      return {DiagnosticFailureClass::layout,
+              "time-control.preflight.layout", result.lowest_failing_rank};
+    case 4U:
+      return {DiagnosticFailureClass::capability,
+              "time-control.preflight.capability", result.lowest_failing_rank};
+    case 5U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.state", result.lowest_failing_rank};
+    case 6U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.transport-authority",
+              result.lowest_failing_rank};
+    case 7U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.preparation",
+              result.lowest_failing_rank};
+    case 8U:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.preflight.report", result.lowest_failing_rank};
+    default:
+      return {DiagnosticFailureClass::invalid_input,
+              "time-control.invalid-input", result.lowest_failing_rank};
+    }
+  }
   switch (s.reason) {
   case flow::StepFailureReason::momentum_linear_solve:
     result = {DiagnosticFailureClass::non_convergence,
@@ -163,77 +245,163 @@ bool selected(const DiagnosticRequest &request, std::string_view field) {
                             request.selected_fields.end(), field);
 }
 
-void hash_bytes(std::uint64_t &hash, const void *data, std::size_t size) {
-  const auto *bytes = static_cast<const unsigned char *>(data);
-  for (std::size_t i = 0; i < size; ++i)
-    hash = (hash ^ bytes[i]) * 1099511628211ULL;
-}
-template <class T> void hash_value(std::uint64_t &hash, const T &value) {
-  hash_bytes(hash, &value, sizeof(value));
-}
-void hash_string(std::uint64_t &hash, std::string_view value) {
-  const std::uint64_t size = value.size();
-  hash_value(hash, size);
-  hash_bytes(hash, value.data(), value.size());
-}
-bool collective_key_agrees(const runtime::MpiContext &mpi, std::uint64_t key,
-                           std::string_view operation) {
-  auto root = key;
-  runtime::check_mpi_result(MPI_Bcast(&root, 1, MPI_UINT64_T, 0, mpi.comm()),
-                            operation);
-  return root == key;
-}
-std::uint64_t request_key(const DiagnosticRequest &request) {
-  std::uint64_t hash = 14695981039346656037ULL;
-  hash_value(hash, request.level);
-  hash_value(hash, request.scope);
-  hash_value(hash, request.frame.step);
-  hash_value(hash, request.frame.time_s);
-  hash_string(hash, request.frame.phase);
-  hash_value(hash, request.sample_budget);
+struct CanonicalWriter final {
+  std::vector<unsigned char> bytes;
+
+  void u8(std::uint8_t value) { bytes.push_back(value); }
+  void u32(std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32U; shift += 8U)
+      u8(static_cast<std::uint8_t>(value >> shift));
+  }
+  void u64(std::uint64_t value) {
+    for (unsigned shift = 0; shift < 64U; shift += 8U)
+      u8(static_cast<std::uint8_t>(value >> shift));
+  }
+  void fp64(double value) {
+    std::uint64_t value_bits{};
+    std::memcpy(&value_bits, &value, sizeof(value_bits));
+    u64(value_bits);
+  }
+  void boolean(bool value) { u8(value ? 1U : 0U); }
+  void string(std::string_view value) {
+    u64(static_cast<std::uint64_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+  }
+};
+
+std::vector<unsigned char>
+request_projection(const DiagnosticRequest &request) {
+  CanonicalWriter out;
+  out.u8(static_cast<std::uint8_t>(request.level));
+  out.u8(static_cast<std::uint8_t>(request.scope));
+  out.u64(request.frame.step);
+  out.fp64(request.frame.time_s);
+  out.string(request.frame.phase);
+  out.u64(static_cast<std::uint64_t>(request.selected_fields.size()));
   for (auto field : request.selected_fields)
-    hash_string(hash, field);
-  return hash;
+    out.string(field);
+  out.u64(static_cast<std::uint64_t>(request.sample_budget));
+  return std::move(out.bytes);
 }
-std::uint64_t provider_key(
-    const flow::detail::TimeControlDiagnosticSnapshot &source) {
-  std::uint64_t hash = 14695981039346656037ULL;
-  hash_value(hash, source.state.state_seal);
-  hash_value(hash, source.disposition);
-  hash_value(hash, source.reason);
-  hash_value(hash, source.lowest_failing_rank);
-  hash_value(hash, source.attempt_count);
+
+void write_state(CanonicalWriter &out, const flow::TimeControlState &state) {
+  out.u32(state.schema_version);
+  out.u64(state.accepted_step);
+  out.fp64(state.proposed_next_dt_s);
+  out.fp64(state.last_accepted_dt_s);
+  out.u8(static_cast<std::uint8_t>(state.last_accepted_order));
+  out.boolean(state.history_ready);
+  out.boolean(state.last_all_linear_solves_within_half_limit);
+  out.fp64(state.last_convective_rate_per_s);
+  out.fp64(state.last_diffusive_rate_per_s);
+  out.boolean(state.last_stability_metrics_available);
+  out.u32(state.last_retry_count);
+  out.u64(state.revision);
+  out.u64(state.state_seal);
+}
+
+void write_metadata(CanonicalWriter &out,
+                    const flow::AcceptedStepMetadata &metadata) {
+  out.u64(metadata.step);
+  out.fp64(metadata.time_s);
+  out.fp64(metadata.dt_s);
+  out.fp64(metadata.previous_dt_s);
+  out.u8(static_cast<std::uint8_t>(metadata.order));
+}
+
+std::vector<unsigned char> provider_projection(
+    const flow::detail::TimeControlDiagnosticSnapshot &source,
+    const DiagnosticRequest &request) {
+  CanonicalWriter out;
+  out.u32(kDiagnosticRecordSchemaV1);
+  out.u32(static_cast<std::uint32_t>(DiagnosticModuleKind::time_control));
+  out.string("hundun.flow.bdf2-retry-controller");
+  out.string("primary");
+  out.u32(kCapabilities);
+  out.string("time-control.advance-result");
+  const auto request_bytes = request_projection(request);
+  out.u64(static_cast<std::uint64_t>(request_bytes.size()));
+  out.bytes.insert(out.bytes.end(), request_bytes.begin(), request_bytes.end());
+  out.u32(static_cast<std::uint32_t>(source.global_extent.x));
+  out.u32(static_cast<std::uint32_t>(source.global_extent.y));
+  out.u32(static_cast<std::uint32_t>(source.global_extent.z));
+  out.string(source.global_cell_layout);
+  out.u64(source.global_faces);
+  out.string(source.global_face_layout);
+  write_state(out, source.state);
+  out.u8(static_cast<std::uint8_t>(source.disposition));
+  out.u8(static_cast<std::uint8_t>(source.reason));
+  out.u32(static_cast<std::uint32_t>(source.lowest_failing_rank));
+  out.u8(source.preflight_category);
+  out.u64(static_cast<std::uint64_t>(source.attempt_count));
   for (std::size_t i = 0; i < source.attempt_count; ++i) {
     const auto &attempt = source.attempts[i];
-    hash_value(hash, attempt.attempted_dt_s);
-    hash_value(hash, attempt.order);
-    hash_value(hash, attempt.disposition);
-    hash_value(hash, attempt.reason);
-    hash_value(hash, attempt.lowest_failing_rank);
-    const std::uint8_t work =
-        attempt.all_linear_solves_within_half_limit ? 1U : 0U;
-    hash_value(hash, work);
+    out.fp64(attempt.attempted_dt_s);
+    out.u8(static_cast<std::uint8_t>(attempt.order));
+    out.u8(static_cast<std::uint8_t>(attempt.disposition));
+    out.u8(static_cast<std::uint8_t>(attempt.reason));
+    out.u32(static_cast<std::uint32_t>(attempt.lowest_failing_rank));
+    out.boolean(attempt.all_linear_solves_within_half_limit);
   }
-  hash_value(hash, source.controller_identity);
-  hash_value(hash, source.report_identity);
-  hash_value(hash, source.flow_state_identity);
-  hash_value(hash, source.observed_step);
-  hash_value(hash, source.observed_time_s);
-  hash_value(hash, source.observed_metadata.step);
-  hash_value(hash, source.observed_metadata.time_s);
-  hash_value(hash, source.observed_metadata.dt_s);
-  hash_value(hash, source.observed_metadata.previous_dt_s);
-  hash_value(hash, source.observed_metadata.order);
-  hash_value(hash, source.global_extent);
-  hash_value(hash, source.global_faces);
-  hash_string(hash, source.global_cell_layout);
-  hash_string(hash, source.global_face_layout);
-  return hash;
+  out.fp64(source.accepted_dt_s);
+  out.fp64(source.proposed_next_dt_s);
+  out.fp64(source.convective_rate_per_s);
+  out.fp64(source.diffusive_rate_per_s);
+  out.boolean(source.stability_metrics_available);
+  out.boolean(source.limited_by_min_dt);
+  out.u8(static_cast<std::uint8_t>(source.config.mode));
+  out.u64(static_cast<std::uint64_t>(source.config.steps));
+  out.fp64(source.config.initial_dt_s);
+  out.fp64(source.config.min_dt_s);
+  out.fp64(source.config.max_dt_s);
+  out.fp64(source.config.cfl_target);
+  out.fp64(source.config.diffusion_number_target);
+  out.fp64(source.config.growth_factor);
+  out.fp64(source.config.retry_factor);
+  out.u64(static_cast<std::uint64_t>(source.config.max_retries));
+  out.u8(static_cast<std::uint8_t>(source.model));
+  out.u64(source.controller_identity);
+  out.u64(source.report_identity);
+  out.u64(source.flow_state_identity);
+  out.u64(source.observed_step);
+  out.fp64(source.observed_time_s);
+  write_metadata(out, source.observed_metadata);
+  return std::move(out.bytes);
 }
+
+bool exact_projection_agrees(const runtime::MpiContext &mpi,
+                             const std::vector<unsigned char> &local,
+                             std::string_view operation) {
+  std::uint64_t root_size = static_cast<std::uint64_t>(local.size());
+  checked_mpi(
+      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
+  if (root_size >
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+    throw std::length_error("time-control projection is too large");
+  std::vector<unsigned char> root(static_cast<std::size_t>(root_size));
+  if (mpi.rank() == 0 && root.size() == local.size())
+    root = local;
+  checked_mpi(
+      MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_BYTE, 0,
+                mpi.comm()),
+      operation);
+  bool equal = root.size() == local.size();
+  const auto common = std::min(root.size(), local.size());
+  for (std::size_t i = 0; i < common; ++i)
+    equal = (root[i] == local[i]) && equal;
+  return equal;
+}
+
+struct CollectivePayload final {
+  DiagnosticStateFingerprint fingerprint;
+  std::uint64_t eligible_count{};
+  std::vector<DiagnosticSample> samples;
+};
 
 DiagnosticRecord
 build_record(const flow::detail::TimeControlDiagnosticSnapshot &s,
-             const DiagnosticRequest &request) {
+             const DiagnosticRequest &request,
+             const CollectivePayload *collective_payload = nullptr) {
   DiagnosticRecord record;
   record.module_kind = DiagnosticModuleKind::time_control;
   record.module_id = "hundun.flow.bdf2-retry-controller";
@@ -291,14 +459,55 @@ build_record(const flow::detail::TimeControlDiagnosticSnapshot &s,
       DiagnosticInvariant result{std::move(id), std::move(unit),
                                  describe_fp64(observed), describe_fp64(limit),
                                  relation, false};
+      if (relation == InvariantRelation::finite ||
+          relation == InvariantRelation::positive)
+        result.limit = {};
       result.passed = evaluate_invariant(result);
       return result;
     };
     const bool state_valid =
         flow::detail::TimeControlStateCodec::semantically_valid(
             s.config, s.model, s.observed_metadata, s.state);
+    bool adaptive_limit = s.config.mode == config::TimeMode::fixed ||
+                          s.attempt_count == 0U ||
+                          !s.stability_metrics_available ||
+                          s.limited_by_min_dt;
+    if (!adaptive_limit && s.attempt_count != 0U) {
+      const double attempted =
+          s.attempts[s.attempt_count - 1U].attempted_dt_s;
+      const double cfl = attempted * s.convective_rate_per_s;
+      const double diffusion = attempted * s.diffusive_rate_per_s;
+      adaptive_limit =
+          std::isfinite(cfl) && std::isfinite(diffusion) &&
+          cfl <= s.config.cfl_target &&
+          diffusion <= s.config.diffusion_number_target;
+    }
+    bool order_history =
+        s.state.history_ready == (s.state.accepted_step != 0U) &&
+        s.state.accepted_step == s.observed_metadata.step &&
+        s.state.last_accepted_order == s.observed_metadata.order;
+    if (s.state.accepted_step == 0U)
+      order_history =
+          order_history &&
+          s.observed_metadata.order ==
+              flow::MomentumTimeOrder::backward_euler;
+    else if (s.state.accepted_step == 1U)
+      order_history =
+          order_history &&
+          s.observed_metadata.order ==
+              flow::MomentumTimeOrder::backward_euler;
+    else {
+      const double ratio =
+          s.observed_metadata.dt_s / s.observed_metadata.previous_dt_s;
+      const auto expected =
+          std::isfinite(ratio) && ratio >= 0.5 && ratio <= 2.0
+              ? flow::MomentumTimeOrder::bdf2
+              : flow::MomentumTimeOrder::backward_euler;
+      order_history = order_history && s.observed_metadata.order == expected;
+    }
     record.invariants = {
-        invariant("time-control.adaptive-limit-or-minimum", "1", 1.0, 1.0,
+        invariant("time-control.adaptive-limit-or-minimum", "1",
+                  adaptive_limit ? 1.0 : 0.0, 1.0,
                   InvariantRelation::equal),
         invariant("time-control.attempt-count-bounded", "count",
                   static_cast<double>(s.attempt_count), 9.0,
@@ -313,10 +522,9 @@ build_record(const flow::detail::TimeControlDiagnosticSnapshot &s,
                   InvariantRelation::less_equal),
         invariant("time-control.next-dt-positive", "s", s.proposed_next_dt_s,
                   0.0, InvariantRelation::positive),
-        invariant("time-control.order-history-consistent", "1", 1.0, 1.0,
+        invariant("time-control.order-history-consistent", "1",
+                  order_history ? 1.0 : 0.0, 1.0,
                   InvariantRelation::equal)};
-    record.invariants[5].limit = {};
-    record.invariants[5].passed = evaluate_invariant(record.invariants[5]);
   } else if (request.level == DiagnosticLevel::counters) {
     record.counters = {
         {"time-control.accepted-step", "count", s.state.accepted_step},
@@ -330,23 +538,35 @@ build_record(const flow::detail::TimeControlDiagnosticSnapshot &s,
 
   DiagnosticFingerprintAccumulator fingerprint;
   const auto authority = tuples(s);
-  for (const auto &tuple : authority)
-    fingerprint.add(tuple.field, 0U, tuple.component,
-                    describe_fp64(tuple.value));
-  record.state_fingerprint = fingerprint.finish();
+  if (collective_payload == nullptr) {
+    if (s.relative_rank == 0) {
+      for (const auto &tuple : authority)
+        fingerprint.add(tuple.field, 0U, tuple.component,
+                        describe_fp64(tuple.value));
+    }
+    record.state_fingerprint = fingerprint.finish();
+  } else {
+    record.state_fingerprint = collective_payload->fingerprint;
+  }
   if (request.level == DiagnosticLevel::bounded_state_sample) {
     record.sample_budget = request.sample_budget;
-    record.eligible_sample_count =
-        static_cast<std::uint64_t>(std::count_if(
-            authority.begin(), authority.end(),
-            [&](const auto &tuple) { return selected(request, tuple.field); }));
-    for (const auto &tuple : authority) {
-      if (!selected(request, tuple.field) ||
-          record.samples.size() >= request.sample_budget)
-        continue;
-      record.samples.push_back({std::string(tuple.field), 0U, tuple.component,
-                                std::string(tuple.unit),
-                                describe_fp64(tuple.value)});
+    if (collective_payload != nullptr) {
+      record.eligible_sample_count = collective_payload->eligible_count;
+      record.samples = collective_payload->samples;
+    } else if (s.relative_rank == 0) {
+      record.eligible_sample_count =
+          static_cast<std::uint64_t>(std::count_if(
+              authority.begin(), authority.end(), [&](const auto &tuple) {
+                return selected(request, tuple.field);
+              }));
+      for (const auto &tuple : authority) {
+        if (!selected(request, tuple.field) ||
+            record.samples.size() >= request.sample_budget)
+          continue;
+        record.samples.push_back(
+            {std::string(tuple.field), 0U, tuple.component,
+             std::string(tuple.unit), describe_fp64(tuple.value)});
+      }
     }
     record.samples_truncated =
         record.samples.size() < record.eligible_sample_count;
@@ -370,6 +590,191 @@ void validate_request(const flow::detail::TimeControlDiagnosticSnapshot &s,
         DiagnosticFailureClass::invalid_request,
         "time-control.diagnostics.selected-field", -1,
         "time-control selected fields are invalid");
+}
+
+void require_phase(const runtime::MpiContext &mpi, bool local_ok,
+                   DiagnosticFailureClass classification,
+                   std::string_view code, std::string_view message) {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  ++diagnostic_phase_count;
+#endif
+  const auto status = runtime::collective_status(mpi, local_ok, code);
+  if (!status.ok)
+    throw DiagnosticCollectionError(classification, std::string(code),
+                                    status.failing_rank,
+                                    std::string(message));
+}
+
+std::uint32_t field_index(std::string_view field) {
+  const auto found = std::find(kFields.begin(), kFields.end(), field);
+  if (found == kFields.end())
+    throw std::runtime_error("unknown time-control sample field");
+  return static_cast<std::uint32_t>(found - kFields.begin());
+}
+
+std::uint32_t unit_code(std::string_view unit) {
+  if (unit == "count")
+    return 0U;
+  if (unit == "s")
+    return 1U;
+  if (unit == "1")
+    return 2U;
+  throw std::runtime_error("unknown time-control sample unit");
+}
+
+std::string_view field_unit(std::uint32_t field) {
+  if (field == 0U || field == 3U || field == 6U)
+    return "count";
+  if (field == 2U || field == 5U)
+    return "s";
+  return "1";
+}
+
+std::vector<unsigned char> sample_wire(
+    const flow::detail::TimeControlDiagnosticSnapshot &snapshot,
+    const DiagnosticRequest &request) {
+  CanonicalWriter wire;
+  wire.u32(1U);
+  const auto authority = tuples(snapshot);
+  std::vector<const Tuple *> retained;
+  if (snapshot.relative_rank == 0) {
+    for (const auto &tuple : authority) {
+      if (selected(request, tuple.field) &&
+          retained.size() < request.sample_budget)
+        retained.push_back(&tuple);
+    }
+  }
+  wire.u64(static_cast<std::uint64_t>(retained.size()));
+  for (const auto *tuple : retained) {
+    wire.u32(field_index(tuple->field));
+    wire.u64(0U);
+    wire.u32(tuple->component);
+    wire.u32(unit_code(tuple->unit));
+    std::uint64_t value_bits{};
+    std::memcpy(&value_bits, &tuple->value, sizeof(value_bits));
+    wire.u64(value_bits);
+  }
+  return std::move(wire.bytes);
+}
+
+std::uint32_t read_u32(const std::vector<unsigned char> &bytes,
+                       std::size_t &offset) {
+  if (offset > bytes.size() || bytes.size() - offset < 4U)
+    throw std::runtime_error("short time-control sample wire");
+  std::uint32_t result{};
+  for (unsigned i = 0; i < 4U; ++i)
+    result |= static_cast<std::uint32_t>(bytes[offset++]) << (8U * i);
+  return result;
+}
+
+std::uint64_t read_u64(const std::vector<unsigned char> &bytes,
+                       std::size_t &offset) {
+  if (offset > bytes.size() || bytes.size() - offset < 8U)
+    throw std::runtime_error("short time-control sample wire");
+  std::uint64_t result{};
+  for (unsigned i = 0; i < 8U; ++i)
+    result |= static_cast<std::uint64_t>(bytes[offset++]) << (8U * i);
+  return result;
+}
+
+CollectivePayload collective_payload(
+    const flow::detail::TimeControlDiagnosticSnapshot &snapshot,
+    const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
+  DiagnosticFingerprintAccumulator local_fingerprint;
+  const auto authority = tuples(snapshot);
+  if (mpi.rank() == 0) {
+    for (const auto &tuple : authority)
+      local_fingerprint.add(tuple.field, 0U, tuple.component,
+                            describe_fp64(tuple.value));
+  }
+  auto parts = local_fingerprint.parts();
+  checked_mpi(
+      MPI_Allreduce(MPI_IN_PLACE, &parts.xor64, 1, MPI_UINT64_T, MPI_BXOR,
+                    mpi.comm()),
+      "MPI_Allreduce(time-control fingerprint xor)");
+  checked_mpi(
+      MPI_Allreduce(MPI_IN_PLACE, &parts.sum64, 1, MPI_UINT64_T, MPI_SUM,
+                    mpi.comm()),
+      "MPI_Allreduce(time-control fingerprint sum)");
+
+  std::uint64_t eligible{};
+  if (mpi.rank() == 0 && request.level == DiagnosticLevel::bounded_state_sample)
+    eligible = static_cast<std::uint64_t>(std::count_if(
+        authority.begin(), authority.end(),
+        [&](const auto &tuple) { return selected(request, tuple.field); }));
+  checked_mpi(
+      MPI_Allreduce(MPI_IN_PLACE, &eligible, 1, MPI_UINT64_T, MPI_SUM,
+                    mpi.comm()),
+      "MPI_Allreduce(time-control eligible samples)");
+
+  std::vector<unsigned char> wire;
+  if (request.level == DiagnosticLevel::bounded_state_sample &&
+      mpi.rank() == 0)
+    wire = sample_wire(snapshot, request);
+  std::uint64_t wire_size = static_cast<std::uint64_t>(wire.size());
+  checked_mpi(
+      MPI_Bcast(&wire_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      "MPI_Bcast(time-control sample wire size)");
+  if (wire_size >
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+    throw std::length_error("time-control sample wire is too large");
+  if (mpi.rank() != 0)
+    wire.resize(static_cast<std::size_t>(wire_size));
+  checked_mpi(
+      MPI_Bcast(wire.data(), static_cast<int>(wire.size()), MPI_BYTE, 0,
+                mpi.comm()),
+      "MPI_Bcast(time-control sample wire)");
+
+  CollectivePayload result;
+  DiagnosticFingerprintAccumulator combined;
+  combined.combine(parts);
+  result.fingerprint = combined.finish();
+  result.eligible_count = eligible;
+  if (request.level != DiagnosticLevel::bounded_state_sample) {
+    if (!wire.empty() || eligible != 0U)
+      throw std::runtime_error("unexpected non-sample wire");
+    return result;
+  }
+
+  std::size_t offset{};
+  if (read_u32(wire, offset) != 1U)
+    throw std::runtime_error("unsupported time-control sample wire");
+  const auto count = read_u64(wire, offset);
+  if (count > request.sample_budget || count > eligible)
+    throw std::runtime_error("invalid time-control sample count");
+  std::string previous;
+  std::uint32_t previous_component{};
+  bool first = true;
+  for (std::uint64_t index = 0; index < count; ++index) {
+    const auto field = read_u32(wire, offset);
+    const auto global_id = read_u64(wire, offset);
+    const auto component = read_u32(wire, offset);
+    const auto unit = read_u32(wire, offset);
+    const auto value_bits = read_u64(wire, offset);
+    if (field >= kFields.size() || global_id != 0U ||
+        !selected(request, kFields[field]))
+      throw std::runtime_error("invalid time-control sample tuple");
+    if (unit != unit_code(field_unit(field)))
+      throw std::runtime_error("invalid time-control sample unit");
+    if ((field == 0U || field == 6U) ? component > 1U : component != 0U)
+      throw std::runtime_error("invalid time-control sample component");
+    const std::string field_name(kFields[field]);
+    if (!first &&
+        (field_name < previous ||
+         (field_name == previous && component <= previous_component)))
+      throw std::runtime_error("noncanonical time-control sample tuple");
+    double value{};
+    std::memcpy(&value, &value_bits, sizeof(value));
+    result.samples.push_back(
+        {field_name, 0U, component, std::string(field_unit(field)),
+         describe_fp64(value)});
+    previous = field_name;
+    previous_component = component;
+    first = false;
+  }
+  if (offset != wire.size())
+    throw std::runtime_error("trailing time-control sample wire bytes");
+  return result;
 }
 
 } // namespace
@@ -426,79 +831,175 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
                          const runtime::MpiContext &mpi,
                          const DiagnosticRequest &request,
                          DiagnosticSink &sink) {
-  const auto &snapshot = detail::TimeControlAdapter::snapshot(source);
-  const auto layout_status =
-      runtime::collective_status(mpi, layout_valid(snapshot),
-                                 "time-control.diagnostics.local-layout");
-  if (!layout_status.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::layout,
-        "time-control.diagnostics.local-layout", layout_status.failing_rank,
-        "time-control collective diagnostic layout is invalid");
-  bool request_ok = true;
+  const flow::detail::TimeControlDiagnosticSnapshot *snapshot{};
+  bool phase_ok = true;
   try {
-    validate_request(snapshot, request, DiagnosticScope::collective);
+    snapshot = &detail::TimeControlAdapter::snapshot(source);
+    phase_ok = layout_valid(*snapshot) &&
+               !fault_here(FaultPoint::phase1_layout, mpi.rank());
+  } catch (const runtime::MpiOperationError &) {
+    throw;
   } catch (...) {
-    request_ok = false;
+    phase_ok = false;
   }
-  const auto request_status = runtime::collective_status(
-      mpi, request_ok, "time-control.diagnostics.frame");
-  if (!request_status.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::invalid_request,
-        "time-control.diagnostics.frame", request_status.failing_rank,
-        "time-control collective diagnostic frame is invalid");
-  const auto request_agreement = runtime::collective_status(
-      mpi,
-      collective_key_agrees(mpi, request_key(request),
-                            "MPI_Bcast(time-control diagnostic request)"),
-      "time-control.diagnostics.request-agreement");
-  if (!request_agreement.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::invalid_request,
-        "time-control.diagnostics.request-agreement",
-        request_agreement.failing_rank,
-        "time-control collective diagnostic requests disagree");
-  const auto provider_agreement = runtime::collective_status(
-      mpi,
-      collective_key_agrees(mpi, provider_key(snapshot),
-                            "MPI_Bcast(time-control diagnostic provider)"),
-      "time-control.diagnostics.provider-agreement");
-  if (!provider_agreement.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::invalid_input,
-        "time-control.diagnostics.provider-agreement",
-        provider_agreement.failing_rank,
-        "time-control collective diagnostic providers disagree");
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::layout,
+                "time-control.diagnostics.local-layout",
+                "time-control collective diagnostic layout is invalid");
 
-  auto record = build_record(snapshot, request);
-  bool record_ok = true;
+  std::vector<unsigned char> request_bytes;
+  phase_ok = true;
   try {
-    validate(record, describe_time_control_diagnostics(), request);
+    validate_request(*snapshot, request, DiagnosticScope::collective);
+    validate(describe_time_control_diagnostics());
+    validate(request, describe_time_control_diagnostics());
+    request_bytes = request_projection(request);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (mpi.rank() == request_mutation_rank && !request_bytes.empty() &&
+        request_mutation_offset < request_bytes.size())
+      request_bytes[request_mutation_offset] ^= 1U;
+#endif
+    if (fault_here(FaultPoint::phase2_request, mpi.rank()))
+      throw std::runtime_error("injected request preparation failure");
+  } catch (const runtime::MpiOperationError &) {
+    throw;
   } catch (...) {
-    record_ok = false;
+    phase_ok = false;
   }
-  const auto record_status = runtime::collective_status(
-      mpi, record_ok, "time-control.diagnostics.record");
-  if (!record_status.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::invalid_input,
-        "time-control.diagnostics.record", record_status.failing_rank,
-        "time-control collective diagnostic record is invalid");
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::invalid_request,
+                "time-control.diagnostics.request-preparation",
+                "time-control diagnostic request preparation failed");
+  const bool request_agrees = exact_projection_agrees(
+      mpi, request_bytes, "MPI_Bcast(time-control diagnostic request)");
+  require_phase(mpi, request_agrees,
+                DiagnosticFailureClass::invalid_request,
+                "time-control.diagnostics.request-agreement",
+                "time-control collective diagnostic requests disagree");
+
+  std::vector<unsigned char> provider_bytes;
+  phase_ok = true;
+  try {
+    provider_bytes = provider_projection(*snapshot, request);
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (mpi.rank() == provider_mutation_rank && !provider_bytes.empty() &&
+        provider_mutation_offset < provider_bytes.size())
+      provider_bytes[provider_mutation_offset] ^= 1U;
+#endif
+    if (fault_here(FaultPoint::phase3_provider, mpi.rank()))
+      throw std::runtime_error("injected provider preparation failure");
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    phase_ok = false;
+  }
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::invalid_input,
+                "time-control.diagnostics.provider-agreement",
+                "time-control diagnostic provider preparation failed");
+  const bool provider_agrees = exact_projection_agrees(
+      mpi, provider_bytes, "MPI_Bcast(time-control diagnostic provider)");
+  require_phase(mpi, provider_agrees, DiagnosticFailureClass::invalid_input,
+                "time-control.diagnostics.provider-agreement",
+                "time-control collective diagnostic providers disagree");
+
+  CollectivePayload payload;
+  phase_ok = true;
+  try {
+    if (fault_here(FaultPoint::phase4_payload, mpi.rank()))
+      throw std::runtime_error("injected payload preparation failure");
+  } catch (...) {
+    phase_ok = false;
+  }
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::layout,
+                "time-control.diagnostics.sample-preparation",
+                "time-control sample preparation failed");
+  try {
+    payload = collective_payload(*snapshot, mpi, request);
+    if (fault_here(FaultPoint::phase4_wire, mpi.rank()))
+      throw std::runtime_error("injected sample wire failure");
+    phase_ok = true;
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    phase_ok = false;
+  }
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::layout,
+                "time-control.diagnostics.sample-wire",
+                "time-control sample wire is invalid");
+
+  DiagnosticRecord record;
+  phase_ok = true;
+  try {
+    record = build_record(*snapshot, request, &payload);
+    validate(record, describe_time_control_diagnostics(), request);
+    if (fault_here(FaultPoint::phase5_record, mpi.rank()))
+      throw std::runtime_error("injected record validation failure");
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    phase_ok = false;
+  }
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::invalid_input,
+                "time-control.diagnostics.record",
+                "time-control collective diagnostic record is invalid");
 
   bool sink_ok = true;
   try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    ++diagnostic_submission_count;
+#endif
+    if (fault_here(FaultPoint::phase6_sink, mpi.rank()))
+      throw std::runtime_error("injected sink failure");
     sink.submit(record);
   } catch (...) {
     sink_ok = false;
   }
-  const auto sink_status =
-      runtime::collective_status(mpi, sink_ok, "diagnostics.sink.submit");
-  if (!sink_status.ok)
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::sink_failure, "diagnostics.sink.submit",
-        sink_status.failing_rank,
-        "time-control collective diagnostic sink rejected record");
+  require_phase(mpi, sink_ok, DiagnosticFailureClass::sink_failure,
+                "diagnostics.sink.submit",
+                "time-control collective diagnostic sink rejected record");
 }
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+void test::TimeControlDiagnosticsTestAccess::reset() noexcept {
+  diagnostic_fault = test::TimeControlDiagnosticFault::none;
+  diagnostic_fault_rank = -1;
+  diagnostic_phase_count = 0U;
+  diagnostic_raw_count = 0U;
+  diagnostic_submission_count = 0U;
+  diagnostic_raw_fault_ordinal = 0U;
+  request_mutation_offset = std::numeric_limits<std::size_t>::max();
+  request_mutation_rank = -1;
+  provider_mutation_offset = std::numeric_limits<std::size_t>::max();
+  provider_mutation_rank = -1;
+}
+void test::TimeControlDiagnosticsTestAccess::set_raw_fault(
+    std::size_t ordinal) noexcept {
+  diagnostic_raw_fault_ordinal = ordinal;
+}
+void test::TimeControlDiagnosticsTestAccess::set_request_projection_mutation(
+    std::size_t offset, int rank) noexcept {
+  request_mutation_offset = offset;
+  request_mutation_rank = rank;
+}
+void test::TimeControlDiagnosticsTestAccess::set_provider_projection_mutation(
+    std::size_t offset, int rank) noexcept {
+  provider_mutation_offset = offset;
+  provider_mutation_rank = rank;
+}
+void test::TimeControlDiagnosticsTestAccess::set_fault(
+    test::TimeControlDiagnosticFault fault, int rank) noexcept {
+  diagnostic_fault = fault;
+  diagnostic_fault_rank = rank;
+}
+std::size_t test::TimeControlDiagnosticsTestAccess::phase_count() noexcept {
+  return diagnostic_phase_count;
+}
+std::size_t
+test::TimeControlDiagnosticsTestAccess::raw_operation_count() noexcept {
+  return diagnostic_raw_count;
+}
+std::size_t
+test::TimeControlDiagnosticsTestAccess::submission_count() noexcept {
+  return diagnostic_submission_count;
+}
+#endif
 
 } // namespace hundun::diagnostics

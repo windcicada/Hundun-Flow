@@ -1948,6 +1948,14 @@ detail::AdaptiveTimeControlAccess::authority(
   return flow.impl_ ? flow.impl_->transport_authority : empty;
 }
 
+detail::FacadeAssemblyIdentity detail::AdaptiveTimeControlAccess::assembly(
+    const FixedStepConstantDensityFlow &flow) noexcept {
+  if (!flow.impl_)
+    return {};
+  return {true, &flow, flow.impl_->topology, flow.impl_->geometry,
+          flow.impl_->mpi};
+}
+
 namespace {
 
 template <class FlowImplementation>

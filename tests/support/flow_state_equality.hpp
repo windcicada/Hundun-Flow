@@ -157,19 +157,121 @@ inline bool time_control_state_bitwise_equal(
 
 inline bool time_control_state_equality_oracle_is_mutation_sensitive() {
   flow::TimeControlState baseline;
+  baseline.accepted_step = 2U;
   baseline.proposed_next_dt_s = 0.1;
   baseline.last_accepted_dt_s = 0.05;
+  baseline.last_accepted_order = flow::MomentumTimeOrder::bdf2;
+  baseline.history_ready = true;
+  baseline.last_all_linear_solves_within_half_limit = true;
   baseline.last_convective_rate_per_s = 2.0;
   baseline.last_diffusive_rate_per_s = 3.0;
+  baseline.last_stability_metrics_available = true;
+  baseline.last_retry_count = 2U;
+  baseline.revision = 2U;
   baseline.state_seal = 4U;
   const auto exact = baseline;
-  auto ordinary = baseline;
-  ordinary.proposed_next_dt_s = -0.1;
-  auto nested = baseline;
-  nested.last_diffusive_rate_per_s = -3.0;
+  const auto changed = [&](auto mutate) {
+    auto candidate = baseline;
+    mutate(candidate);
+    return !time_control_state_bitwise_equal(baseline, candidate);
+  };
   return time_control_state_bitwise_equal(baseline, exact) &&
-         !time_control_state_bitwise_equal(baseline, ordinary) &&
-         !time_control_state_bitwise_equal(baseline, nested);
+         changed([](auto &s) { s.proposed_next_dt_s = -0.1; }) &&
+         changed([](auto &s) { s.last_accepted_dt_s = -0.05; }) &&
+         changed([](auto &s) {
+           s.last_accepted_order = flow::MomentumTimeOrder::backward_euler;
+         }) &&
+         changed([](auto &s) { s.history_ready = false; }) &&
+         changed([](auto &s) {
+           s.last_all_linear_solves_within_half_limit = false;
+         }) &&
+         changed([](auto &s) { s.last_convective_rate_per_s = -2.0; }) &&
+         changed([](auto &s) { s.last_diffusive_rate_per_s = -3.0; }) &&
+         changed([](auto &s) {
+           s.last_stability_metrics_available = false;
+         }) &&
+         changed([](auto &s) { ++s.last_retry_count; }) &&
+         changed([](auto &s) { ++s.revision; }) &&
+         changed([](auto &s) { ++s.state_seal; });
+}
+
+struct AdaptiveFlowStateSnapshot final {
+  flow::FlowLayerValues history;
+  flow::FlowLayerValues committed;
+  flow::FlowLayerValues trial;
+  flow::AcceptedStepMetadata metadata;
+  flow::TimeControlState controller;
+  flow::IdealGasClosureState closure;
+  std::uint64_t committed_allocation_identity{};
+  std::uint64_t history_allocation_identity{};
+  std::uint64_t trial_allocation_identity{};
+  std::uint64_t committed_generation{};
+  std::uint64_t history_generation{};
+  std::uint64_t trial_generation{};
+  std::uint64_t attempt_identity{};
+  std::uint64_t diagnostic_identity{};
+};
+
+inline bool adaptive_flow_state_bitwise_equal(
+    const AdaptiveFlowStateSnapshot &left,
+    const AdaptiveFlowStateSnapshot &right) noexcept {
+  return flow_layer_values_bitwise_equal(left.history, right.history) &&
+         flow_layer_values_bitwise_equal(left.committed, right.committed) &&
+         flow_layer_values_bitwise_equal(left.trial, right.trial) &&
+         accepted_step_metadata_bitwise_equal(left.metadata, right.metadata) &&
+         time_control_state_bitwise_equal(left.controller, right.controller) &&
+         ideal_gas_closure_state_bitwise_equal(left.closure, right.closure) &&
+         left.committed_allocation_identity ==
+             right.committed_allocation_identity &&
+         left.history_allocation_identity == right.history_allocation_identity &&
+         left.trial_allocation_identity == right.trial_allocation_identity &&
+         left.committed_generation == right.committed_generation &&
+         left.history_generation == right.history_generation &&
+         left.trial_generation == right.trial_generation &&
+         left.attempt_identity == right.attempt_identity &&
+         left.diagnostic_identity == right.diagnostic_identity;
+}
+
+inline bool adaptive_flow_state_equality_oracle_is_mutation_sensitive() {
+  AdaptiveFlowStateSnapshot baseline;
+  baseline.history.density = {1.0};
+  baseline.committed.density = {1.0};
+  baseline.trial.density = {1.0};
+  baseline.committed.transported_cell_fields = {{2.0}, {3.0}};
+  baseline.controller.proposed_next_dt_s = 0.1;
+  baseline.controller.last_accepted_dt_s = 0.05;
+  baseline.controller.state_seal = 1U;
+  baseline.closure = {flow::IdealGasPressureMode::closed_dynamic, 101325.0,
+                      1.0, 2U};
+  baseline.committed_allocation_identity = 10U;
+  baseline.history_allocation_identity = 11U;
+  baseline.trial_allocation_identity = 12U;
+  baseline.committed_generation = 20U;
+  baseline.history_generation = 21U;
+  baseline.trial_generation = 22U;
+  baseline.attempt_identity = 30U;
+  baseline.diagnostic_identity = 31U;
+  const auto exact = baseline;
+  const auto changed = [&](auto mutate) {
+    auto candidate = baseline;
+    mutate(candidate);
+    return !adaptive_flow_state_bitwise_equal(baseline, candidate);
+  };
+  return adaptive_flow_state_bitwise_equal(baseline, exact) &&
+         changed([](auto &s) { s.committed.density[0] = -1.0; }) &&
+         changed([](auto &s) {
+           s.committed.transported_cell_fields[1][0] = -3.0;
+         }) &&
+         changed([](auto &s) { s.controller.proposed_next_dt_s = -0.1; }) &&
+         changed([](auto &s) { ++s.controller.state_seal; }) &&
+         changed([](auto &s) {
+           s.closure.thermodynamic_pressure_pa = 101326.0;
+         }) &&
+         changed([](auto &s) { ++s.closure.revision; }) &&
+         changed([](auto &s) { ++s.committed_allocation_identity; }) &&
+         changed([](auto &s) { ++s.trial_generation; }) &&
+         changed([](auto &s) { ++s.attempt_identity; }) &&
+         changed([](auto &s) { ++s.diagnostic_identity; });
 }
 
 } // namespace hundun::test

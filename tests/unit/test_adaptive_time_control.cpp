@@ -60,6 +60,8 @@ std::uint64_t independent_seal(
 void run() {
   HUNDUN_CHECK(
       hundun::test::time_control_state_equality_oracle_is_mutation_sensitive());
+  HUNDUN_CHECK(
+      hundun::test::adaptive_flow_state_equality_oracle_is_mutation_sensitive());
   hundun::config::FlowTimeConfig config{
       hundun::config::TimeMode::adaptive, 10, 0.1, 0.0125, 0.2,
       0.5, 0.25, 1.25, 0.5, 8};
@@ -102,6 +104,21 @@ void run() {
   }
   HUNDUN_CHECK(rejected);
   HUNDUN_CHECK(moved.attempt_count() == 0U);
+
+  auto bad_config = config;
+  bad_config.mode = static_cast<hundun::config::TimeMode>(255);
+  HUNDUN_CHECK(
+      !hundun::flow::test::AdaptiveTimeControlTestAccess::valid_config(
+          bad_config));
+  auto bad_model = static_cast<hundun::config::DensityModel>(255);
+  HUNDUN_CHECK(
+      !hundun::flow::test::AdaptiveTimeControlTestAccess::valid_model(
+          bad_model));
+  hundun::linear::SolveControl bad_control{};
+  bad_control.residual_recompute_interval = 0U;
+  HUNDUN_CHECK(
+      !hundun::flow::test::AdaptiveTimeControlTestAccess::valid_control(
+          bad_control));
 }
 
 } // namespace

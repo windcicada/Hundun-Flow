@@ -277,6 +277,14 @@ detail::AdaptiveTimeControlAccess::authority(
                     : empty;
 }
 
+detail::FacadeAssemblyIdentity detail::AdaptiveTimeControlAccess::assembly(
+    const FixedStepIdealGasFlow &flow) noexcept {
+  if (!flow.impl_)
+    return {};
+  return {true, &flow, flow.impl_->topology, flow.impl_->geometry,
+          flow.impl_->mpi};
+}
+
 struct IdealGasClosureDiagnosticSource::Impl final {
   const FixedStepIdealGasFlow::Impl *flow{};
   const FlowState *state{};

@@ -103,6 +103,12 @@ private:
   explicit TimeAdvanceReport(ConstantReportTag) noexcept;
   explicit TimeAdvanceReport(MaterialReportTag) noexcept;
   explicit TimeAdvanceReport(IdealGasReportTag) noexcept;
+  static bool report_authenticated(
+      const StepAttemptReport &) noexcept;
+  static bool report_authenticated(
+      const MaterialDensityStepAttemptReport &) noexcept;
+  static bool report_authenticated(
+      const IdealGasStepAttemptReport &) noexcept;
   void reset_moved_from() noexcept;
 
   std::array<TimeAttemptSummary, 9> attempts_{};
@@ -121,6 +127,10 @@ private:
   bool limited_by_min_dt_{};
   std::uint64_t controller_identity_{};
   std::uint64_t report_identity_{};
+  std::uint64_t observed_flow_state_identity_{};
+  std::uint64_t observed_step_{};
+  double observed_time_s_{};
+  AcceptedStepMetadata observed_metadata_{};
   PreflightCategory preflight_category_{PreflightCategory::none};
   friend class Bdf2RetryController;
   friend struct detail::AdaptiveTimeControlEngine;

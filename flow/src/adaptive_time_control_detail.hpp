@@ -10,10 +10,22 @@
 
 namespace hundun::flow::detail {
 
+bool time_control_config_valid(const config::FlowTimeConfig &) noexcept;
+bool density_model_valid(config::DensityModel) noexcept;
+bool solve_control_valid(const linear::SolveControl &) noexcept;
+
 struct TransportDiffusivityAuthority final {
   std::uint64_t count{};
   std::uint64_t ordered_fingerprint{14695981039346656037ULL};
   double maximum{};
+};
+
+struct FacadeAssemblyIdentity final {
+  bool live{};
+  const void *facade{};
+  const mesh::MeshTopology *topology{};
+  const mesh::MeshGeometry *geometry{};
+  const runtime::MpiContext *mpi{};
 };
 
 TransportDiffusivityAuthority
@@ -35,6 +47,12 @@ std::string render_owned_faces(std::size_t);
 std::string render_global_faces(std::uint64_t);
 
 struct AdaptiveTimeControlAccess final {
+  static FacadeAssemblyIdentity
+  assembly(const FixedStepConstantDensityFlow &) noexcept;
+  static FacadeAssemblyIdentity
+  assembly(const FixedStepMaterialDensityFlow &) noexcept;
+  static FacadeAssemblyIdentity
+  assembly(const FixedStepIdealGasFlow &) noexcept;
   static const TransportDiffusivityAuthority &
   authority(const FixedStepConstantDensityFlow &) noexcept;
   static const TransportDiffusivityAuthority &
@@ -60,6 +78,7 @@ struct TimeControlDiagnosticSnapshot final {
   double diffusive_rate_per_s{};
   bool stability_metrics_available{};
   bool limited_by_min_dt{};
+  std::uint8_t preflight_category{};
   config::FlowTimeConfig config{};
   config::DensityModel model{};
   std::uint64_t controller_identity{};
