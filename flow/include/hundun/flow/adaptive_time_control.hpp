@@ -210,6 +210,9 @@ private:
   std::unique_ptr<Impl> impl_;
   TimeControlState observer_state_{};
   friend struct detail::AdaptiveTimeControlEngine;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  friend class test::AdaptiveTimeControlTestAccess;
+#endif
 };
 
 } // namespace hundun::flow

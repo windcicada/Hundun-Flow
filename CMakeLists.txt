@@ -752,7 +752,8 @@ if(HUNDUN_BUILD_TESTS)
     LABELS "unit;task22;task22-fast" TIMEOUT 30)
 
   add_executable(test_adaptive_time_control_mpi
-    tests/mpi/test_adaptive_time_control.cpp)
+    tests/mpi/test_adaptive_time_control.cpp
+    tests/support/allocation_attempt_guard.cpp)
   target_include_directories(test_adaptive_time_control_mpi PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_compile_definitions(test_adaptive_time_control_mpi PRIVATE

@@ -43,7 +43,24 @@ enum class TimeControlWireMutation : std::uint8_t {
   component,
   unit,
   value,
-  duplicate
+  duplicate,
+  missing_limb,
+  swapped_limbs,
+  tuple_order
+};
+
+enum class TimeControlProviderMutation : std::uint8_t {
+  none,
+  state_seal,
+  summary,
+  config,
+  model,
+  frame,
+  identities,
+  global_cell_authority,
+  global_cell_layout,
+  global_face_authority,
+  global_face_layout
 };
 
 enum class TimeControlLocalMutation : std::uint8_t {
@@ -60,11 +77,13 @@ class TimeControlDiagnosticsTestAccess final {
 public:
   static void reset() noexcept;
   static void set_fault(TimeControlDiagnosticFault, int rank) noexcept;
-  static void set_raw_fault(std::size_t ordinal) noexcept;
+  static void set_raw_fault(std::size_t ordinal, int rank) noexcept;
   static void set_request_projection_mutation(std::size_t offset,
                                               int rank) noexcept;
   static void set_provider_projection_mutation(std::size_t offset,
                                                int rank) noexcept;
+  static void set_provider_mutation(TimeControlProviderMutation,
+                                    int rank) noexcept;
   static void set_wire_mutation(TimeControlWireMutation, int rank) noexcept;
   static void set_local_mutation(flow::TimeControlDiagnosticSource &,
                                  TimeControlLocalMutation);

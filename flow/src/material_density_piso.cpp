@@ -3161,6 +3161,26 @@ void test::MaterialDensityPisoTestAccess::enable_vortex_source(
   if (flow.impl_)
     flow.impl_->vortex_source_enabled = enabled;
 }
+void test::MaterialDensityPisoTestAccess::mutate_transport_authority(
+    FixedStepMaterialDensityFlow &flow,
+    test::MaterialTransportAuthorityMutation mutation) noexcept {
+  if (!flow.impl_)
+    return;
+  switch (mutation) {
+  case test::MaterialTransportAuthorityMutation::omitted:
+    if (flow.impl_->transport_authority.count != 0U)
+      --flow.impl_->transport_authority.count;
+    flow.impl_->transport_authority.ordered_fingerprint ^= 0x11U;
+    break;
+  case test::MaterialTransportAuthorityMutation::reordered:
+    flow.impl_->transport_authority.ordered_fingerprint ^= 0x22U;
+    break;
+  case test::MaterialTransportAuthorityMutation::
+      same_maximum_different_sequence:
+    flow.impl_->transport_authority.ordered_fingerprint ^= 0x44U;
+    break;
+  }
+}
 #endif
 
 } // namespace hundun::flow

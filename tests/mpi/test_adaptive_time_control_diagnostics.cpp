@@ -438,31 +438,49 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
 
   struct FaultCase final {
     Fault fault;
+    hundun::diagnostics::DiagnosticFailureClass classification;
     const char *code;
   };
   constexpr std::array<FaultCase, 13> faults{{
-      {Fault::phase1_layout, "time-control.diagnostics.local-layout"},
+      {Fault::phase1_layout,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
+       "time-control.diagnostics.local-layout"},
       {Fault::phase2_request,
+       hundun::diagnostics::DiagnosticFailureClass::invalid_input,
        "time-control.diagnostics.request-preparation"},
       {Fault::projection_root_size,
+       hundun::diagnostics::DiagnosticFailureClass::invalid_input,
        "time-control.diagnostics.request-preparation"},
       {Fault::projection_payload,
+       hundun::diagnostics::DiagnosticFailureClass::invalid_input,
        "time-control.diagnostics.request-preparation"},
       {Fault::phase3_provider,
+       hundun::diagnostics::DiagnosticFailureClass::invalid_input,
        "time-control.diagnostics.provider-agreement"},
       {Fault::phase4_payload,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
        "time-control.diagnostics.sample-preparation"},
       {Fault::fingerprint_aggregation,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
        "time-control.diagnostics.aggregation"},
       {Fault::eligible_aggregation,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
        "time-control.diagnostics.aggregation"},
       {Fault::wire_root_size,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
        "time-control.diagnostics.sample-preparation"},
       {Fault::wire_payload,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
        "time-control.diagnostics.sample-preparation"},
-      {Fault::phase4_wire, "time-control.diagnostics.sample-wire"},
-      {Fault::phase5_record, "time-control.diagnostics.record"},
-      {Fault::phase6_sink, "diagnostics.sink.submit"},
+      {Fault::phase4_wire,
+       hundun::diagnostics::DiagnosticFailureClass::layout,
+       "time-control.diagnostics.sample-wire"},
+      {Fault::phase5_record,
+       hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+       "time-control.diagnostics.record"},
+      {Fault::phase6_sink,
+       hundun::diagnostics::DiagnosticFailureClass::sink_failure,
+       "diagnostics.sink.submit"},
   }};
   const int injection_rank = mpi.size() == 1 ? 0 : 1;
   for (const auto &fault : faults) {
@@ -475,6 +493,7 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
                                                sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(error.classification() == fault.classification);
       HUNDUN_CHECK(error.code() == fault.code);
       HUNDUN_CHECK(error.lowest_failing_rank() == injection_rank);
     }
@@ -495,6 +514,9 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
             source, mpi, collective_request, sink);
       } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
         rejected = true;
+        HUNDUN_CHECK(
+            error.classification() ==
+            hundun::diagnostics::DiagnosticFailureClass::invalid_request);
         HUNDUN_CHECK(error.code() ==
                      "time-control.diagnostics.request-agreement");
         HUNDUN_CHECK(error.lowest_failing_rank() == mismatch_rank);
@@ -513,6 +535,43 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
             source, mpi, collective_request, sink);
       } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
         rejected = true;
+        HUNDUN_CHECK(
+            error.classification() ==
+            hundun::diagnostics::DiagnosticFailureClass::invalid_input);
+        HUNDUN_CHECK(error.code() ==
+                     "time-control.diagnostics.provider-agreement");
+        HUNDUN_CHECK(error.lowest_failing_rank() == mismatch_rank);
+      }
+      HUNDUN_CHECK(rejected);
+      HUNDUN_CHECK(sink.calls == 0);
+    }
+    for (const auto mutation :
+         {hundun::diagnostics::test::TimeControlProviderMutation::state_seal,
+          hundun::diagnostics::test::TimeControlProviderMutation::summary,
+          hundun::diagnostics::test::TimeControlProviderMutation::config,
+          hundun::diagnostics::test::TimeControlProviderMutation::model,
+          hundun::diagnostics::test::TimeControlProviderMutation::frame,
+          hundun::diagnostics::test::TimeControlProviderMutation::identities,
+          hundun::diagnostics::test::TimeControlProviderMutation::
+              global_cell_authority,
+          hundun::diagnostics::test::TimeControlProviderMutation::
+              global_cell_layout,
+          hundun::diagnostics::test::TimeControlProviderMutation::
+              global_face_authority,
+          hundun::diagnostics::test::TimeControlProviderMutation::
+              global_face_layout}) {
+      DiagnosticAccess::reset();
+      DiagnosticAccess::set_provider_mutation(mutation, mismatch_rank);
+      RecordingSink sink;
+      bool rejected = false;
+      try {
+        hundun::diagnostics::collect_diagnostics(
+            source, mpi, collective_request, sink);
+      } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+        rejected = true;
+        HUNDUN_CHECK(
+            error.classification() ==
+            hundun::diagnostics::DiagnosticFailureClass::invalid_input);
         HUNDUN_CHECK(error.code() ==
                      "time-control.diagnostics.provider-agreement");
         HUNDUN_CHECK(error.lowest_failing_rank() == mismatch_rank);
@@ -524,7 +583,7 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
 
   for (std::size_t ordinal = 1U; ordinal <= 9U; ++ordinal) {
     DiagnosticAccess::reset();
-    DiagnosticAccess::set_raw_fault(ordinal);
+    DiagnosticAccess::set_raw_fault(ordinal, injection_rank);
     RecordingSink sink;
     bool typed = false;
     try {
@@ -580,6 +639,7 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
   const auto canonical =
       hundun::diagnostics::to_canonical_json(rank_neutral_record);
   const auto local_hash = stable_text_hash(canonical);
+  HUNDUN_CHECK(local_hash == 406274725881973949ULL);
   std::uint64_t minimum_hash{};
   std::uint64_t maximum_hash{};
   HUNDUN_CHECK(MPI_Allreduce(&local_hash, &minimum_hash, 1, MPI_UINT64_T,
@@ -744,11 +804,37 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
       hundun::diagnostics::collect_diagnostics(source, request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::invalid_request);
       HUNDUN_CHECK(error.code() ==
                    "time-control.diagnostics.selected-field");
     }
     HUNDUN_CHECK(rejected);
     HUNDUN_CHECK(sink.calls == 0);
+  }
+
+  {
+    const hundun::diagnostics::DiagnosticRequest request{
+        hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
+        hundun::diagnostics::DiagnosticScope::collective, frame,
+        {"time-control.next-dt", "time-control.next-dt"}, 1U};
+    RecordingSink sink;
+    bool rejected = false;
+    try {
+      hundun::diagnostics::collect_diagnostics(source, mpi, request, sink);
+    } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+      rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::invalid_request);
+      HUNDUN_CHECK(error.code() ==
+                   "time-control.diagnostics.selected-field");
+      HUNDUN_CHECK(error.lowest_failing_rank() == 0);
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(sink.calls == 0);
+
   }
 
   {
@@ -761,6 +847,9 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
       hundun::diagnostics::collect_diagnostics(source, request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::capability);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.capability");
     }
     HUNDUN_CHECK(rejected);
@@ -776,6 +865,9 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
       hundun::diagnostics::collect_diagnostics(source, request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::capability);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.capability");
       HUNDUN_CHECK(error.lowest_failing_rank() == -1);
     }
@@ -810,6 +902,8 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
                                                sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   hundun::diagnostics::DiagnosticFailureClass::layout);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.local-layout");
       HUNDUN_CHECK(error.lowest_failing_rank() == -1);
     }
@@ -841,11 +935,33 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
       hundun::diagnostics::collect_diagnostics(source, request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::invalid_request);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.frame");
       HUNDUN_CHECK(error.lowest_failing_rank() == -1);
     }
     HUNDUN_CHECK(rejected);
     HUNDUN_CHECK(sink.calls == 0);
+
+    const hundun::diagnostics::DiagnosticRequest collective_bad_request{
+        hundun::diagnostics::DiagnosticLevel::summary,
+        hundun::diagnostics::DiagnosticScope::collective, bad_frame, {}, 0U};
+    RecordingSink collective_bad_sink;
+    rejected = false;
+    try {
+      hundun::diagnostics::collect_diagnostics(
+          source, mpi, collective_bad_request, collective_bad_sink);
+    } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+      rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::invalid_request);
+      HUNDUN_CHECK(error.code() == "time-control.diagnostics.frame");
+      HUNDUN_CHECK(error.lowest_failing_rank() == 0);
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(collective_bad_sink.calls == 0);
   }
 
   {
@@ -858,6 +974,9 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
       hundun::diagnostics::collect_diagnostics(source, request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::sink_failure);
       HUNDUN_CHECK(error.code() == "diagnostics.sink.submit");
       HUNDUN_CHECK(error.lowest_failing_rank() == -1);
     }
@@ -881,6 +1000,9 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
                                                sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::invalid_input);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.stale-source");
       HUNDUN_CHECK(error.lowest_failing_rank() == -1);
     }
@@ -892,12 +1014,13 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
   }
 
   const int injection_rank = mpi.size() == 1 ? 0 : 1;
-  constexpr std::array<WireMutation, 9> mutations{
+  constexpr std::array<WireMutation, 12> mutations{
       WireMutation::short_payload, WireMutation::trailing_payload,
       WireMutation::count,         WireMutation::field,
       WireMutation::global_id,     WireMutation::component,
       WireMutation::unit,          WireMutation::value,
-      WireMutation::duplicate};
+      WireMutation::duplicate,      WireMutation::missing_limb,
+      WireMutation::swapped_limbs,  WireMutation::tuple_order};
   for (const auto mutation : mutations) {
     DiagnosticAccess::reset();
     DiagnosticAccess::set_wire_mutation(mutation, injection_rank);
@@ -908,6 +1031,8 @@ void run_acceptance_only(const hundun::runtime::MpiContext &mpi) {
                                                collective_request, sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
       rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   hundun::diagnostics::DiagnosticFailureClass::layout);
       HUNDUN_CHECK(error.code() == "time-control.diagnostics.sample-wire");
       HUNDUN_CHECK(error.lowest_failing_rank() == injection_rank);
     }

@@ -14,10 +14,12 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <type_traits>
 #include <utility>
@@ -36,10 +38,21 @@ std::atomic<test::TimeControlPostReturnMutation> post_return_mutation{
 std::atomic<test::TimeControlPreflightFault> preflight_fault{
     test::TimeControlPreflightFault::none};
 std::atomic<int> time_control_fault_rank{-1};
-std::atomic<std::uint64_t> post_commit_observations{};
 std::atomic<std::uint32_t> scheduled_recoverable_failures{};
 std::atomic<StepFailureReason> scheduled_recoverable_reason{
     StepFailureReason::none};
+std::atomic<std::uint64_t> post_return_iteration_value{
+    std::numeric_limits<std::uint64_t>::max()};
+std::atomic<std::size_t> time_control_raw_count{};
+std::atomic<std::size_t> time_control_raw_fault_ordinal{};
+std::atomic<int> time_control_raw_fault_rank{-1};
+std::atomic<bool> trusted_tail_active{};
+std::atomic<std::uint64_t> trusted_tail_allocation_attempts{};
+std::atomic<std::uint64_t> trusted_tail_controller_collectives{};
+std::atomic<std::uint64_t> trusted_tail_field_state_traversals{};
+std::atomic<std::uint64_t> trusted_tail_callbacks_or_sinks{};
+std::atomic<std::uint64_t> stability_reduction_calls{};
+std::atomic<std::uint64_t> stability_reduced_scalars{};
 #endif
 
 std::uint64_t bits(double value) noexcept {
@@ -99,34 +112,91 @@ bool valid_order(MomentumTimeOrder order) noexcept {
          order == MomentumTimeOrder::bdf2;
 }
 
-struct AgreementFrame final {
-  std::vector<std::uint64_t> words;
+runtime::CollectiveStatus
+controller_collective_status(const runtime::MpiContext &mpi, bool local_ok,
+                             std::string_view operation) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (trusted_tail_active.load(std::memory_order_relaxed))
+    trusted_tail_controller_collectives.fetch_add(1U,
+                                                  std::memory_order_relaxed);
+#endif
+  return runtime::collective_status(mpi, local_ok, operation);
+}
 
-  void add(std::uint64_t value) { words.push_back(value); }
-  void add(std::uint32_t value) { words.push_back(value); }
-  void add(bool value) { words.push_back(value ? 1U : 0U); }
-  void add(double value) { words.push_back(bits(value)); }
+void record_controller_traversal() noexcept {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (trusted_tail_active.load(std::memory_order_relaxed))
+    trusted_tail_field_state_traversals.fetch_add(
+        1U, std::memory_order_relaxed);
+#endif
+}
+
+void checked_time_control_mpi(int result, std::string_view operation) {
+  runtime::check_mpi_result(result, operation);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (trusted_tail_active.load(std::memory_order_relaxed))
+    trusted_tail_controller_collectives.fetch_add(1U,
+                                                  std::memory_order_relaxed);
+  const auto ordinal =
+      time_control_raw_count.fetch_add(1U, std::memory_order_relaxed) + 1U;
+  if (time_control_raw_fault_ordinal.load(std::memory_order_relaxed) ==
+      ordinal)
+    runtime::check_mpi_result(MPI_ERR_OTHER, operation);
+#endif
+}
+
+struct AgreementFrame final {
+  static constexpr std::size_t capacity = 64U;
+  std::array<std::uint64_t, capacity> words{};
+  std::size_t size{};
+  bool valid{true};
+
+  void add(std::uint64_t value) noexcept {
+    if (size == capacity) {
+      valid = false;
+      return;
+    }
+    words[size++] = value;
+  }
+  void add(std::uint32_t value) noexcept { add(std::uint64_t{value}); }
+  void add(bool value) noexcept { add(value ? std::uint64_t{1} : 0U); }
+  void add(double value) noexcept { add(bits(value)); }
 };
+
+static_assert(AgreementFrame::capacity <=
+              static_cast<std::size_t>(std::numeric_limits<int>::max()));
+static_assert(21U <= AgreementFrame::capacity,
+              "largest frozen Task 22 agreement frame must fit inline");
 
 bool fixed_frame_agrees(const runtime::MpiContext &mpi,
                         const AgreementFrame &local,
                         std::string_view operation) {
-  std::uint64_t root_size = static_cast<std::uint64_t>(local.words.size());
-  runtime::check_mpi_result(
+  const auto prepared = controller_collective_status(
+      mpi, local.valid && local.size <= AgreementFrame::capacity,
+      "time-control.agreement.preparation");
+  if (!prepared.ok)
+    return false;
+  std::uint64_t root_size = static_cast<std::uint64_t>(local.size);
+  checked_time_control_mpi(
       MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
-  if (root_size >
-      static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw runtime::Error("time-control agreement frame is too large");
-  }
-  std::vector<std::uint64_t> root(static_cast<std::size_t>(root_size));
-  if (mpi.rank() == 0 && root.size() == local.words.size())
-    root = local.words;
-  runtime::check_mpi_result(
-      MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_UINT64_T, 0,
+  const bool root_size_valid =
+      root_size <= AgreementFrame::capacity &&
+      root_size <=
+          static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+  const auto root_prepared = controller_collective_status(
+      mpi, root_size_valid, "time-control.agreement.root-size");
+  if (!root_prepared.ok)
+    return false;
+  std::array<std::uint64_t, AgreementFrame::capacity> root{};
+  if (mpi.rank() == 0)
+    std::copy_n(local.words.begin(), local.size, root.begin());
+  checked_time_control_mpi(
+      MPI_Bcast(root.data(), static_cast<int>(root_size), MPI_UINT64_T, 0,
                 mpi.comm()),
       operation);
-  bool equal = root.size() == local.words.size();
-  const auto common = std::min(root.size(), local.words.size());
+  bool equal = static_cast<std::size_t>(root_size) == local.size;
+  const auto common =
+      std::min(static_cast<std::size_t>(root_size), local.size);
   for (std::size_t i = 0; i < common; ++i)
     equal = (root[i] == local.words[i]) && equal;
   return equal;
@@ -274,21 +344,23 @@ void apply_post_return_mutation(Report &report, int rank) noexcept {
     return;
   case test::TimeControlPostReturnMutation::momentum_x_iterations:
     base.momentum.components[0].iterations =
-        std::numeric_limits<std::size_t>::max();
+        post_return_iteration_value.load(std::memory_order_relaxed);
     return;
   case test::TimeControlPostReturnMutation::momentum_y_iterations:
     base.momentum.components[1].iterations =
-        std::numeric_limits<std::size_t>::max();
+        post_return_iteration_value.load(std::memory_order_relaxed);
     return;
   case test::TimeControlPostReturnMutation::momentum_z_iterations:
     base.momentum.components[2].iterations =
-        std::numeric_limits<std::size_t>::max();
+        post_return_iteration_value.load(std::memory_order_relaxed);
     return;
   case test::TimeControlPostReturnMutation::pressure_one_iterations:
-    base.pressure[0].iterations = std::numeric_limits<std::size_t>::max();
+    base.pressure[0].iterations =
+        post_return_iteration_value.load(std::memory_order_relaxed);
     return;
   case test::TimeControlPostReturnMutation::pressure_two_iterations:
-    base.pressure[1].iterations = std::numeric_limits<std::size_t>::max();
+    base.pressure[1].iterations =
+        post_return_iteration_value.load(std::memory_order_relaxed);
     return;
   }
 }
@@ -459,6 +531,14 @@ std::string ranked_message(std::string_view prefix, int rank) {
 
 } // namespace
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+extern "C" void hundun_task22_record_allocation_attempt() noexcept {
+  if (trusted_tail_active.load(std::memory_order_relaxed))
+    trusted_tail_allocation_attempts.fetch_add(1U,
+                                               std::memory_order_relaxed);
+}
+#endif
+
 bool detail::time_control_config_valid(
     const config::FlowTimeConfig &config) noexcept {
   return valid_config(config);
@@ -500,7 +580,6 @@ std::uint64_t detail::TimeControlStateCodec::seal(
   for (char ch : std::string_view(kSealDomain))
     byte(hash, static_cast<std::uint8_t>(ch));
   little_endian(hash, static_cast<std::uint32_t>(config.mode));
-  little_endian(hash, static_cast<std::uint32_t>(config.steps));
   fp64(hash, config.initial_dt_s);
   fp64(hash, config.min_dt_s);
   fp64(hash, config.max_dt_s);
@@ -727,7 +806,7 @@ TimeControlState fresh_state(const config::FlowTimeConfig &config,
 
 void collective_factory_check(const runtime::MpiContext &mpi, bool local_ok,
                               std::string_view prefix) {
-  const auto status = runtime::collective_status(mpi, local_ok, prefix);
+  const auto status = controller_collective_status(mpi, local_ok, prefix);
   if (!status.ok)
     throw runtime::Error(ranked_message(prefix, status.failing_rank));
 }
@@ -744,7 +823,7 @@ std::uint64_t allocate_controller_identity(const runtime::MpiContext &mpi,
         identity != std::numeric_limits<std::uint64_t>::max();
   }
   collective_factory_check(mpi, local_ok, prefix);
-  runtime::check_mpi_result(
+  checked_time_control_mpi(
       MPI_Bcast(&identity, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(time-control controller identity)");
   if (identity == 0U ||
@@ -758,22 +837,31 @@ struct Stability final {
   double diffusion{};
 };
 
+struct AdaptivePreparation final {
+  std::vector<double> density;
+  std::vector<double> flux;
+  std::vector<double> flux_sum;
+  std::vector<double> geometry_sum;
+};
+
 template <class ControllerImpl>
 Stability stability_rates(const ControllerImpl &impl,
-                          const std::vector<double> &density,
-                          const std::vector<double> &flux,
+                          AdaptivePreparation &prepared,
                           double density_constant, bool variable_density,
                           double gamma) {
+  record_controller_traversal();
   const auto cells = impl.topology->owned_cell_count();
-  if (density.size() != cells ||
-      flux.size() != impl.topology->local_face_count())
+  if (prepared.density.size() != cells ||
+      prepared.flux.size() != impl.topology->local_face_count() ||
+      prepared.flux_sum.size() != cells ||
+      prepared.geometry_sum.size() != cells)
     throw runtime::Error("time-control stability layout is invalid");
-  std::vector<double> flux_sum(cells);
-  std::vector<double> geometry_sum(cells);
+  std::fill(prepared.flux_sum.begin(), prepared.flux_sum.end(), 0.0);
+  std::fill(prepared.geometry_sum.begin(), prepared.geometry_sum.end(), 0.0);
   for (mesh::LocalFaceId face = 0; face < impl.topology->local_face_count();
        ++face) {
     const auto owner = impl.topology->owner(face);
-    const double mass_flux = flux[face];
+    const double mass_flux = prepared.flux[face];
     const auto area = impl.geometry->face_area_m2(face);
     const auto displacement = impl.geometry->face_displacement_m(face);
     const auto area_vector =
@@ -792,12 +880,13 @@ Stability stability_rates(const ControllerImpl &impl,
     if (!std::isfinite(factor) || factor <= 0.0)
       throw runtime::Error("time-control committed face state is invalid");
     const auto accumulate = [&](std::size_t cell) {
-      const double next_flux = flux_sum[cell] + std::abs(mass_flux);
-      const double next_geometry = geometry_sum[cell] + factor;
+      const double next_flux =
+          prepared.flux_sum[cell] + std::abs(mass_flux);
+      const double next_geometry = prepared.geometry_sum[cell] + factor;
       if (!std::isfinite(next_flux) || !std::isfinite(next_geometry))
         throw runtime::Error("time-control stability accumulation overflow");
-      flux_sum[cell] = next_flux;
-      geometry_sum[cell] = next_geometry;
+      prepared.flux_sum[cell] = next_flux;
+      prepared.geometry_sum[cell] = next_geometry;
     };
     if (owner < cells) {
       accumulate(owner);
@@ -809,20 +898,21 @@ Stability stability_rates(const ControllerImpl &impl,
   }
   Stability result;
   for (std::size_t cell = 0; cell < cells; ++cell) {
-    const double rho = variable_density ? density[cell] : density_constant;
+    const double rho =
+        variable_density ? prepared.density[cell] : density_constant;
     const double volume = impl.geometry->cell_volume_m3(cell);
     if (!std::isfinite(rho) || rho <= 0.0 || !std::isfinite(volume) ||
         volume <= 0.0)
       throw runtime::Error("time-control committed cell state is invalid");
     const double rho_volume = rho * volume;
     const double denominator = 2.0 * rho_volume;
-    const double diffusion_numerator = gamma * geometry_sum[cell];
+    const double diffusion_numerator = gamma * prepared.geometry_sum[cell];
     if (!std::isfinite(rho_volume) || rho_volume <= 0.0 ||
         !std::isfinite(denominator) || denominator <= 0.0 ||
         !std::isfinite(diffusion_numerator) ||
         diffusion_numerator < 0.0)
       throw runtime::Error("time-control stability arithmetic overflow");
-    const double convection = flux_sum[cell] / denominator;
+    const double convection = prepared.flux_sum[cell] / denominator;
     const double diffusion = diffusion_numerator / denominator;
     if (!std::isfinite(convection) || convection < 0.0 ||
         !std::isfinite(diffusion) || diffusion < 0.0)
@@ -854,6 +944,13 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
                               const linear::SolveControl &pressure,
                               TimeAdvanceReport report, Invoke &&invoke) {
   auto &impl = *controller.impl_;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  trusted_tail_active.store(false, std::memory_order_relaxed);
+  trusted_tail_allocation_attempts.store(0U, std::memory_order_relaxed);
+  trusted_tail_controller_collectives.store(0U, std::memory_order_relaxed);
+  trusted_tail_field_state_traversals.store(0U, std::memory_order_relaxed);
+  trusted_tail_callbacks_or_sinks.store(0U, std::memory_order_relaxed);
+#endif
   struct ActiveGuard final {
     bool &active;
     ~ActiveGuard() { active = false; }
@@ -865,6 +962,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
           : impl.report_identity + 1U;
   report.proposed_next_dt_s_ = controller.observer_state_.proposed_next_dt_s;
   const auto complete = [&]() noexcept {
+    record_controller_traversal();
     const auto metadata = impl.state->metadata();
     report.observed_flow_state_identity_ =
         detail::AdaptiveTimeControlAccess::diagnostic_identity(*impl.state);
@@ -873,6 +971,15 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     report.observed_metadata_ = metadata;
     impl.report_identity = report.report_identity_;
   };
+  const auto complete_prepared =
+      [&](AcceptedStepMetadata metadata,
+          std::uint64_t diagnostic_identity) noexcept {
+        report.observed_flow_state_identity_ = diagnostic_identity;
+        report.observed_step_ = metadata.step;
+        report.observed_time_s_ = metadata.time_s;
+        report.observed_metadata_ = metadata;
+        impl.report_identity = report.report_identity_;
+      };
 
   bool local_ok = valid_config(impl.config) &&
                   valid_density_model(impl.model) &&
@@ -883,8 +990,8 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     local_ok = local_ok && std::isfinite(density_constant) &&
                density_constant > 0.0;
   auto status =
-      runtime::collective_status(*impl.mpi, local_ok,
-                                 "time-control.preflight.config");
+      controller_collective_status(*impl.mpi, local_ok,
+                                   "time-control.preflight.config");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
     report.preflight_category_ = TimeAdvanceReport::PreflightCategory::config;
@@ -901,7 +1008,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
               (facade_identity.topology == impl.topology &&
                facade_identity.geometry == impl.geometry &&
                facade_identity.mpi == impl.mpi));
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, local_ok, "time-control.preflight.identity");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -920,7 +1027,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
       !preflight_fault_here(test::TimeControlPreflightFault::layout,
                             impl.mpi->rank());
 #endif
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, local_ok, "time-control.preflight.layout");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -938,7 +1045,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
       !preflight_fault_here(test::TimeControlPreflightFault::capability,
                             impl.mpi->rank());
 #endif
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, local_ok, "time-control.preflight.capability");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -956,7 +1063,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
   append_control(advance_frame, pressure);
   const bool config_agrees = fixed_frame_agrees(
       *impl.mpi, advance_frame, "MPI_Bcast(time-control advance config)");
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, config_agrees, "time-control.preflight.config");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -973,7 +1080,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
                  metadata_before.step &&
              controller.observer_state_.revision ==
                  controller.observer_state_.accepted_step;
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, local_ok, "time-control.preflight.state");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -984,7 +1091,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
   const bool state_agrees = fixed_frame_agrees(
       *impl.mpi, state_frame(controller.observer_state_, metadata_before),
       "MPI_Bcast(time-control current state)");
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, state_agrees, "time-control.preflight.state");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -1004,7 +1111,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
   const auto &authority = detail::AdaptiveTimeControlAccess::authority(facade);
   const bool authority_ok =
       std::isfinite(authority.maximum) && authority.maximum >= 0.0;
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, authority_ok,
       "time-control.preflight.transport-authority");
   if (!status.ok) {
@@ -1023,7 +1130,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     authority_frame.add(density_constant);
   const bool authority_agrees = fixed_frame_agrees(
       *impl.mpi, authority_frame, "MPI_Bcast(time-control transport)");
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, authority_agrees,
       "time-control.preflight.transport-authority");
   if (!status.ok) {
@@ -1034,8 +1141,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     return report;
   }
 
-  std::vector<double> prepared_density;
-  std::vector<double> prepared_flux;
+  AdaptivePreparation preparation;
   bool preparation_ok = true;
   bool capability_ok = true;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1047,17 +1153,19 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     try {
       if (!preparation_ok)
         throw std::bad_alloc();
-      prepared_density =
+      preparation.density =
           detail::AdaptiveTimeControlAccess::committed_density(state);
-      prepared_flux =
+      preparation.flux =
           detail::AdaptiveTimeControlAccess::committed_face_mass_flux(state);
+      preparation.flux_sum.resize(impl.topology->owned_cell_count());
+      preparation.geometry_sum.resize(impl.topology->owned_cell_count());
     } catch (const std::bad_alloc &) {
       preparation_ok = false;
     } catch (...) {
       capability_ok = false;
     }
   }
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, capability_ok, "time-control.preflight.capability");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -1066,7 +1174,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     complete();
     return report;
   }
-  status = runtime::collective_status(
+  status = controller_collective_status(
       *impl.mpi, preparation_ok, "time-control.preflight.preparation");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
@@ -1080,13 +1188,13 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
   if (impl.config.mode == config::TimeMode::adaptive) {
     bool rates_ok = true;
     try {
-      rates = stability_rates(impl, prepared_density, prepared_flux,
-                              density_constant, variable_density,
+      rates = stability_rates(impl, preparation, density_constant,
+                              variable_density,
                               std::max(mu, authority.maximum));
     } catch (...) {
       rates_ok = false;
     }
-    status = runtime::collective_status(
+    status = controller_collective_status(
         *impl.mpi, rates_ok, "time-control.preflight.state");
     if (!status.ok) {
       report.lowest_failing_rank_ = status.failing_rank;
@@ -1095,13 +1203,17 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
       return report;
     }
     double pair[]{rates.convection, rates.diffusion};
+    #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    stability_reduction_calls.fetch_add(1U, std::memory_order_relaxed);
+    stability_reduced_scalars.fetch_add(2U, std::memory_order_relaxed);
+    #endif
     impl.mpi->allreduce_fp64_in_place(
         pair, 2U, runtime::Fp64ReductionOperation::maximum);
     rates = {pair[0], pair[1]};
     const bool reduced_rates_ok =
         std::isfinite(rates.convection) && rates.convection >= 0.0 &&
         std::isfinite(rates.diffusion) && rates.diffusion >= 0.0;
-    status = runtime::collective_status(
+    status = controller_collective_status(
         *impl.mpi, reduced_rates_ok, "time-control.preflight.state");
     if (!status.ok) {
       report.lowest_failing_rank_ = status.failing_rank;
@@ -1156,7 +1268,7 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
 
   std::uint32_t retry_count{};
   while (true) {
-    const auto metadata = state.metadata();
+    const auto metadata = metadata_before;
     const double ratio = metadata.step == 0U ? 0.0 : dt / metadata.dt_s;
     const auto order =
         metadata.step != 0U && ratio >= 0.5 && ratio <= 2.0
@@ -1179,7 +1291,42 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     proposal_ok =
         expected_proposal_is_finite(impl.config, proposal_probe, fast_proposal) &&
         proposal_ok;
-    status = runtime::collective_status(
+    const AcceptedStepMetadata accepted_metadata{
+        metadata.step + 1U, metadata.time_s + dt, dt, metadata.dt_s, order};
+    const auto current_diagnostic_identity =
+        detail::AdaptiveTimeControlAccess::diagnostic_identity(state);
+    proposal_ok =
+        proposal_ok && std::isfinite(accepted_metadata.time_s) &&
+        accepted_metadata.time_s > metadata.time_s &&
+        current_diagnostic_identity !=
+            std::numeric_limits<std::uint64_t>::max();
+    TimeControlState slow_state = controller.observer_state_;
+    slow_state.accepted_step = accepted_metadata.step;
+    slow_state.last_accepted_dt_s = dt;
+    slow_state.last_accepted_order = order;
+    slow_state.history_ready = true;
+    slow_state.last_all_linear_solves_within_half_limit = false;
+    slow_state.last_convective_rate_per_s =
+        impl.config.mode == config::TimeMode::adaptive ? rates.convection
+                                                      : 0.0;
+    slow_state.last_diffusive_rate_per_s =
+        impl.config.mode == config::TimeMode::adaptive ? rates.diffusion
+                                                      : 0.0;
+    slow_state.last_stability_metrics_available =
+        impl.config.mode == config::TimeMode::adaptive;
+    slow_state.last_retry_count = retry_count;
+    slow_state.revision = controller.observer_state_.revision + 1U;
+    slow_state.proposed_next_dt_s = slow_proposal;
+    slow_state.state_seal =
+        detail::TimeControlStateCodec::seal(impl.config, impl.model,
+                                            slow_state);
+    TimeControlState fast_state = slow_state;
+    fast_state.last_all_linear_solves_within_half_limit = true;
+    fast_state.proposed_next_dt_s = fast_proposal;
+    fast_state.state_seal =
+        detail::TimeControlStateCodec::seal(impl.config, impl.model,
+                                            fast_state);
+    status = controller_collective_status(
         *impl.mpi, proposal_ok, "time-control.preflight.state");
     if (!status.ok) {
       report.lowest_failing_rank_ = status.failing_rank;
@@ -1195,6 +1342,11 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
  #endif
     Report attempt = invoke(stencil);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (base_report(attempt).disposition ==
+        StepAttemptDisposition::committed)
+      trusted_tail_active.store(true, std::memory_order_relaxed);
+#endif
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     consume_scheduled_attempt();
     apply_post_return_mutation(attempt, impl.mpi->rank());
 #endif
@@ -1208,43 +1360,25 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
          disposition == StepAttemptDisposition::committed && work_gate};
 
     if (disposition == StepAttemptDisposition::committed) {
-      TimeControlState next = controller.observer_state_;
-      next.accepted_step = state.metadata().step;
-      next.last_accepted_dt_s = dt;
-      next.last_accepted_order = order;
-      next.history_ready = true;
-      next.last_all_linear_solves_within_half_limit = work_gate;
-      next.last_convective_rate_per_s =
-          impl.config.mode == config::TimeMode::adaptive ? rates.convection
-                                                        : 0.0;
-      next.last_diffusive_rate_per_s =
-          impl.config.mode == config::TimeMode::adaptive ? rates.diffusion
-                                                        : 0.0;
-      next.last_stability_metrics_available =
-          impl.config.mode == config::TimeMode::adaptive;
-      next.last_retry_count = retry_count;
-      ++next.revision;
-      next.proposed_next_dt_s = work_gate ? fast_proposal : slow_proposal;
-      next.state_seal =
-          detail::TimeControlStateCodec::seal(impl.config, impl.model, next);
       store_final(report, std::move(attempt));
-      controller.observer_state_ = next;
+      controller.observer_state_ = work_gate ? fast_state : slow_state;
       report.disposition_ = TimeAdvanceDisposition::committed;
       report.reason_ = StepFailureReason::none;
       report.lowest_failing_rank_ = -1;
       report.accepted_dt_s_ = dt;
-      report.proposed_next_dt_s_ = next.proposed_next_dt_s;
-      complete();
+      report.proposed_next_dt_s_ =
+          controller.observer_state_.proposed_next_dt_s;
+      complete_prepared(accepted_metadata, current_diagnostic_identity + 1U);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      trusted_tail_active.store(false, std::memory_order_relaxed);
+#endif
       return report;
     }
 
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    post_commit_observations.fetch_add(1U, std::memory_order_relaxed);
-#endif
     const bool normalized =
         TimeAdvanceReport::report_authenticated(attempt) &&
         report_semantically_valid(base, dt);
-    status = runtime::collective_status(
+    status = controller_collective_status(
         *impl.mpi, normalized, "time-control.preflight.report");
     report.reason_ = reason;
     report.lowest_failing_rank_ = failing_rank;
@@ -1299,6 +1433,9 @@ Bdf2RetryController Bdf2RetryController::create(
                            "time-control.create.identity");
   local_ok = geometry.compatible(topology);
   collective_factory_check(mpi, local_ok, "time-control.create.layout");
+  collective_factory_check(
+      mpi, detail::AdaptiveTimeControlAccess::state_live(state),
+      "time-control.create.state");
   auto observer = fresh_state(config, model);
   local_ok = detail::TimeControlStateCodec::semantically_valid(
       config, model, state.metadata(), observer);
@@ -1318,7 +1455,15 @@ Bdf2RetryController Bdf2RetryController::create(
   collective_factory_check(mpi, agreement, "time-control.create.agreement");
   const auto identity =
       allocate_controller_identity(mpi, "time-control.create.identity");
-  auto impl = std::make_unique<Impl>();
+  std::unique_ptr<Impl> impl;
+  bool construction_ok = true;
+  try {
+    impl = std::make_unique<Impl>();
+  } catch (const std::bad_alloc &) {
+    construction_ok = false;
+  }
+  collective_factory_check(mpi, construction_ok,
+                           "time-control.create.state");
   impl->config = config;
   impl->model = model;
   impl->topology = &topology;
@@ -1341,6 +1486,9 @@ Bdf2RetryController Bdf2RetryController::restore(
   collective_factory_check(mpi, geometry.compatible(topology),
                            "time-control.restore.layout");
   collective_factory_check(
+      mpi, detail::AdaptiveTimeControlAccess::state_live(state),
+      "time-control.restore.state");
+  collective_factory_check(
       mpi, detail::TimeControlStateCodec::semantically_valid(
                config, model, state.metadata(), observer),
       "time-control.restore.state");
@@ -1359,7 +1507,15 @@ Bdf2RetryController Bdf2RetryController::restore(
   collective_factory_check(mpi, agreement, "time-control.restore.agreement");
   const auto identity =
       allocate_controller_identity(mpi, "time-control.restore.identity");
-  auto impl = std::make_unique<Impl>();
+  std::unique_ptr<Impl> impl;
+  bool construction_ok = true;
+  try {
+    impl = std::make_unique<Impl>();
+  } catch (const std::bad_alloc &) {
+    construction_ok = false;
+  }
+  collective_factory_check(mpi, construction_ok,
+                           "time-control.restore.state");
   impl->config = config;
   impl->model = model;
   impl->topology = &topology;
@@ -1388,6 +1544,10 @@ TimeAdvanceReport Bdf2RetryController::advance(
     const linear::SolveControl &pressure) {
   if (!impl_ || impl_->active)
     throw runtime::Error("time-control controller is moved-from or active");
+  if (!detail::AdaptiveTimeControlAccess::state_live(*impl_->state) ||
+      !detail::AdaptiveTimeControlAccess::state_live(state) ||
+      !detail::AdaptiveTimeControlAccess::assembly(facade).live)
+    throw runtime::Error("time-control bound object is moved-from");
   impl_->active = true;
   TimeAdvanceReport result(TimeAdvanceReport::ConstantReportTag{});
   return detail::AdaptiveTimeControlEngine::run<
@@ -1404,6 +1564,10 @@ TimeAdvanceReport Bdf2RetryController::advance(
     const linear::SolveControl &pressure) {
   if (!impl_ || impl_->active)
     throw runtime::Error("time-control controller is moved-from or active");
+  if (!detail::AdaptiveTimeControlAccess::state_live(*impl_->state) ||
+      !detail::AdaptiveTimeControlAccess::state_live(state) ||
+      !detail::AdaptiveTimeControlAccess::assembly(facade).live)
+    throw runtime::Error("time-control bound object is moved-from");
   impl_->active = true;
   TimeAdvanceReport result(TimeAdvanceReport::MaterialReportTag{});
   return detail::AdaptiveTimeControlEngine::run<
@@ -1420,6 +1584,10 @@ TimeAdvanceReport Bdf2RetryController::advance(
     const linear::SolveControl &pressure) {
   if (!impl_ || impl_->active)
     throw runtime::Error("time-control controller is moved-from or active");
+  if (!detail::AdaptiveTimeControlAccess::state_live(*impl_->state) ||
+      !detail::AdaptiveTimeControlAccess::state_live(state) ||
+      !detail::AdaptiveTimeControlAccess::assembly(facade).live)
+    throw runtime::Error("time-control bound object is moved-from");
   impl_->active = true;
   TimeAdvanceReport result(TimeAdvanceReport::IdealGasReportTag{});
   return detail::AdaptiveTimeControlEngine::run<
@@ -1435,6 +1603,9 @@ TimeControlDiagnosticSource Bdf2RetryController::diagnostic_source(
     const FlowState &state, const TimeAdvanceReport &report) const {
   if (!impl_)
     throw runtime::Error("time-control diagnostic source is stale");
+  if (!detail::AdaptiveTimeControlAccess::state_live(*impl_->state) ||
+      !detail::AdaptiveTimeControlAccess::state_live(state))
+    throw runtime::Error("time-control diagnostic state is moved-from");
   const auto metadata = state.metadata();
   if (&state != impl_->state || report.controller_identity_ != impl_->identity ||
       report.report_identity_ == 0U ||
@@ -1518,16 +1689,33 @@ void test::AdaptiveTimeControlTestAccess::set_recoverable_failure_reason(
   scheduled_recoverable_reason.store(reason, std::memory_order_relaxed);
 }
 
+void test::AdaptiveTimeControlTestAccess::set_post_return_iteration_value(
+    std::uint64_t value) noexcept {
+  post_return_iteration_value.store(value, std::memory_order_relaxed);
+}
+
 void test::AdaptiveTimeControlTestAccess::reset_faults() noexcept {
   post_return_mutation.store(test::TimeControlPostReturnMutation::none,
                              std::memory_order_relaxed);
   preflight_fault.store(test::TimeControlPreflightFault::none,
                         std::memory_order_relaxed);
   time_control_fault_rank.store(-1, std::memory_order_relaxed);
-  post_commit_observations.store(0U, std::memory_order_relaxed);
+  trusted_tail_active.store(false, std::memory_order_relaxed);
+  trusted_tail_allocation_attempts.store(0U, std::memory_order_relaxed);
+  trusted_tail_controller_collectives.store(0U, std::memory_order_relaxed);
+  trusted_tail_field_state_traversals.store(0U, std::memory_order_relaxed);
+  trusted_tail_callbacks_or_sinks.store(0U, std::memory_order_relaxed);
+  stability_reduction_calls.store(0U, std::memory_order_relaxed);
+  stability_reduced_scalars.store(0U, std::memory_order_relaxed);
+  time_control_raw_count.store(0U, std::memory_order_relaxed);
+  time_control_raw_fault_ordinal.store(0U, std::memory_order_relaxed);
+  time_control_raw_fault_rank.store(-1, std::memory_order_relaxed);
   scheduled_recoverable_failures.store(0U, std::memory_order_relaxed);
   scheduled_recoverable_reason.store(StepFailureReason::none,
                                      std::memory_order_relaxed);
+  post_return_iteration_value.store(
+      std::numeric_limits<std::uint64_t>::max(),
+      std::memory_order_relaxed);
   test::ConstantDensityPisoTestAccess::reset();
   test::MaterialDensityTransportTestAccess::reset();
 }
@@ -1537,9 +1725,49 @@ std::uint8_t test::AdaptiveTimeControlTestAccess::preflight_category(
   return static_cast<std::uint8_t>(report.preflight_category_);
 }
 
-std::uint64_t
-test::AdaptiveTimeControlTestAccess::post_commit_observation_count() noexcept {
-  return post_commit_observations.load(std::memory_order_relaxed);
+test::TimeControlTrustedTailObservation
+test::AdaptiveTimeControlTestAccess::trusted_tail_observation() noexcept {
+  return {
+      trusted_tail_allocation_attempts.load(std::memory_order_relaxed),
+      trusted_tail_controller_collectives.load(std::memory_order_relaxed),
+      trusted_tail_field_state_traversals.load(std::memory_order_relaxed),
+      trusted_tail_callbacks_or_sinks.load(std::memory_order_relaxed)};
+}
+
+void test::AdaptiveTimeControlTestAccess::set_raw_fault(
+    std::size_t ordinal, int rank) noexcept {
+  time_control_raw_count.store(0U, std::memory_order_relaxed);
+  time_control_raw_fault_ordinal.store(ordinal, std::memory_order_relaxed);
+  time_control_raw_fault_rank.store(rank, std::memory_order_relaxed);
+}
+
+std::size_t
+test::AdaptiveTimeControlTestAccess::raw_operation_count() noexcept {
+  return time_control_raw_count.load(std::memory_order_relaxed);
+}
+void test::AdaptiveTimeControlTestAccess::set_active(
+    Bdf2RetryController &controller, bool active) noexcept {
+  if (controller.impl_)
+    controller.impl_->active = active;
+}
+std::array<double, 2> test::AdaptiveTimeControlTestAccess::stability_rates(
+    Bdf2RetryController &controller, const FlowState &state,
+    double density_constant, bool variable_density, double gamma) {
+  AdaptivePreparation prepared;
+  prepared.density = detail::AdaptiveTimeControlAccess::committed_density(state);
+  prepared.flux =
+      detail::AdaptiveTimeControlAccess::committed_face_mass_flux(state);
+  prepared.flux_sum.resize(controller.impl_->topology->owned_cell_count());
+  prepared.geometry_sum.resize(controller.impl_->topology->owned_cell_count());
+  const auto result = ::hundun::flow::stability_rates(
+      *controller.impl_, prepared, density_constant, variable_density, gamma);
+  return {result.convection, result.diffusion};
+}
+std::array<std::uint64_t, 2>
+test::AdaptiveTimeControlTestAccess::stability_reduction_observation()
+    noexcept {
+  return {stability_reduction_calls.load(std::memory_order_relaxed),
+          stability_reduced_scalars.load(std::memory_order_relaxed)};
 }
 #endif
 

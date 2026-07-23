@@ -11,6 +11,7 @@
 #include <string_view>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -35,7 +36,6 @@ std::uint64_t independent_seal(
   for (char value : std::string_view("hundun-time-control-state-seal-v1"))
     add_byte(hash, static_cast<std::uint8_t>(value));
   add_le(hash, static_cast<std::uint32_t>(config.mode));
-  add_le(hash, static_cast<std::uint32_t>(config.steps));
   add_double(hash, config.initial_dt_s);
   add_double(hash, config.min_dt_s);
   add_double(hash, config.max_dt_s);
@@ -82,6 +82,7 @@ void run() {
   state.revision = state.accepted_step;
   const auto expected = independent_seal(
       config, hundun::config::DensityModel::material, state);
+  HUNDUN_CHECK(expected == 6963059103000454808ULL);
   HUNDUN_CHECK(hundun::flow::test::AdaptiveTimeControlTestAccess::seal(
                    config, hundun::config::DensityModel::material, state) ==
                expected);
@@ -99,8 +100,14 @@ void run() {
   };
   HUNDUN_CHECK(config_changes_seal(
       [](auto &value) { value.mode = hundun::config::TimeMode::fixed; }));
-  HUNDUN_CHECK(
-      config_changes_seal([](auto &value) { ++value.steps; }));
+  {
+    auto different_horizon = config;
+    ++different_horizon.steps;
+    HUNDUN_CHECK(
+        hundun::flow::test::AdaptiveTimeControlTestAccess::seal(
+            different_horizon, hundun::config::DensityModel::material,
+            state) == expected);
+  }
   HUNDUN_CHECK(config_changes_seal(
       [](auto &value) { value.initial_dt_s = 0.11; }));
   HUNDUN_CHECK(
@@ -169,6 +176,41 @@ void run() {
   HUNDUN_CHECK(be.alpha0 == 1.0);
   HUNDUN_CHECK(be.alpha1 == -1.0);
   HUNDUN_CHECK(be.alpha2 == 0.0);
+
+  const auto rejects_stencil = [](auto order, double current,
+                                  double previous) {
+    try {
+      static_cast<void>(hundun::flow::make_momentum_time_stencil(
+          order, current, previous));
+    } catch (const hundun::runtime::Error &) {
+      return true;
+    }
+    return false;
+  };
+  const auto infinity = std::numeric_limits<double>::infinity();
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  HUNDUN_CHECK(rejects_stencil(
+      hundun::flow::MomentumTimeOrder::backward_euler, 0.0, 0.0));
+  HUNDUN_CHECK(rejects_stencil(
+      hundun::flow::MomentumTimeOrder::backward_euler, -0.01, 0.0));
+  HUNDUN_CHECK(rejects_stencil(
+      hundun::flow::MomentumTimeOrder::backward_euler, infinity, 0.0));
+  HUNDUN_CHECK(rejects_stencil(
+      hundun::flow::MomentumTimeOrder::backward_euler, nan, 0.0));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.01, 0.0));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.01, -0.01));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.01, infinity));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.01, nan));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.049, 0.1));
+  HUNDUN_CHECK(rejects_stencil(hundun::flow::MomentumTimeOrder::bdf2,
+                               0.201, 0.1));
+  HUNDUN_CHECK(rejects_stencil(
+      static_cast<hundun::flow::MomentumTimeOrder>(255), 0.01, 0.01));
 }
 
 } // namespace

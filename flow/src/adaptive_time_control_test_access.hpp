@@ -23,6 +23,13 @@ enum class TimeControlPreflightFault : std::uint8_t {
   preparation
 };
 
+struct TimeControlTrustedTailObservation final {
+  std::uint64_t allocation_attempts{};
+  std::uint64_t controller_collectives{};
+  std::uint64_t field_state_traversals{};
+  std::uint64_t callbacks_or_sinks{};
+};
+
 class AdaptiveTimeControlTestAccess final {
 public:
   static TimeAdvanceReport report() noexcept {
@@ -50,10 +57,22 @@ public:
                                        int rank) noexcept;
   static void
   set_recoverable_failure_reason(StepFailureReason reason) noexcept;
+  static void
+  set_post_return_iteration_value(std::uint64_t value) noexcept;
   static void reset_faults() noexcept;
   static std::uint8_t
   preflight_category(const TimeAdvanceReport &) noexcept;
-  static std::uint64_t post_commit_observation_count() noexcept;
+  static TimeControlTrustedTailObservation
+  trusted_tail_observation() noexcept;
+  static void set_raw_fault(std::size_t ordinal, int rank) noexcept;
+  static std::size_t raw_operation_count() noexcept;
+  static void set_active(Bdf2RetryController &, bool) noexcept;
+  static std::array<double, 2>
+  stability_rates(Bdf2RetryController &, const FlowState &,
+                  double density_constant, bool variable_density,
+                  double gamma);
+  static std::array<std::uint64_t, 2>
+  stability_reduction_observation() noexcept;
 };
 
 } // namespace hundun::flow::test

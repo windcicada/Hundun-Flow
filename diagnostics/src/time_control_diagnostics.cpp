@@ -48,10 +48,14 @@ std::size_t diagnostic_phase_count{};
 std::size_t diagnostic_raw_count{};
 std::size_t diagnostic_submission_count{};
 std::size_t diagnostic_raw_fault_ordinal{};
+int diagnostic_raw_fault_rank{-1};
 std::size_t request_mutation_offset{std::numeric_limits<std::size_t>::max()};
 int request_mutation_rank{-1};
 std::size_t provider_mutation_offset{std::numeric_limits<std::size_t>::max()};
 int provider_mutation_rank{-1};
+test::TimeControlProviderMutation provider_semantic_mutation{
+    test::TimeControlProviderMutation::none};
+int provider_semantic_mutation_rank{-1};
 test::TimeControlWireMutation wire_mutation{
     test::TimeControlWireMutation::none};
 int wire_mutation_rank{-1};
@@ -124,7 +128,7 @@ DiagnosticFailure failure_for(const flow::detail::TimeControlDiagnosticSnapshot 
     return {};
   DiagnosticFailure result;
   result.lowest_failing_rank = collective ? s.lowest_failing_rank : -1;
-  if (s.attempt_count == 0U) {
+  if (s.preflight_category != 0U) {
     switch (s.preflight_category) {
     case 1U:
       return {DiagnosticFailureClass::invalid_input,
@@ -363,7 +367,49 @@ void write_metadata(CanonicalWriter &out,
 
 FixedBytes<kProjectionCapacity> provider_projection(
     const flow::detail::TimeControlDiagnosticSnapshot &source,
-    const DiagnosticRequest &request) {
+    const DiagnosticRequest &request, int rank) {
+  static_cast<void>(rank);
+  auto projected = source;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  if (rank == provider_semantic_mutation_rank) {
+    switch (provider_semantic_mutation) {
+    case test::TimeControlProviderMutation::state_seal:
+      ++projected.state.state_seal;
+      break;
+    case test::TimeControlProviderMutation::summary:
+      projected.accepted_dt_s =
+          std::nextafter(projected.accepted_dt_s,
+                         std::numeric_limits<double>::infinity());
+      break;
+    case test::TimeControlProviderMutation::config:
+      ++projected.config.max_retries;
+      break;
+    case test::TimeControlProviderMutation::model:
+      projected.model = config::DensityModel::material;
+      break;
+    case test::TimeControlProviderMutation::frame:
+      ++projected.observed_step;
+      break;
+    case test::TimeControlProviderMutation::identities:
+      ++projected.controller_identity;
+      break;
+    case test::TimeControlProviderMutation::global_cell_authority:
+      ++projected.global_extent.x;
+      break;
+    case test::TimeControlProviderMutation::global_cell_layout:
+      projected.global_cell_layout.push_back('!');
+      break;
+    case test::TimeControlProviderMutation::global_face_authority:
+      ++projected.global_faces;
+      break;
+    case test::TimeControlProviderMutation::global_face_layout:
+      projected.global_face_layout.push_back('!');
+      break;
+    default:
+      break;
+    }
+  }
+#endif
   CanonicalWriter out;
   out.u32(kDiagnosticRecordSchemaV1);
   out.u32(static_cast<std::uint32_t>(DiagnosticModuleKind::time_control));
@@ -374,20 +420,20 @@ FixedBytes<kProjectionCapacity> provider_projection(
   const auto request_bytes = request_projection(request);
   out.u64(static_cast<std::uint64_t>(request_bytes.size()));
   out.bytes.append(request_bytes.data(), request_bytes.size());
-  out.u32(static_cast<std::uint32_t>(source.global_extent.x));
-  out.u32(static_cast<std::uint32_t>(source.global_extent.y));
-  out.u32(static_cast<std::uint32_t>(source.global_extent.z));
-  out.string(source.global_cell_layout);
-  out.u64(source.global_faces);
-  out.string(source.global_face_layout);
-  write_state(out, source.state);
-  out.u8(static_cast<std::uint8_t>(source.disposition));
-  out.u8(static_cast<std::uint8_t>(source.reason));
-  out.u32(static_cast<std::uint32_t>(source.lowest_failing_rank));
-  out.u8(source.preflight_category);
-  out.u64(static_cast<std::uint64_t>(source.attempt_count));
-  for (std::size_t i = 0; i < source.attempt_count; ++i) {
-    const auto &attempt = source.attempts[i];
+  out.u32(static_cast<std::uint32_t>(projected.global_extent.x));
+  out.u32(static_cast<std::uint32_t>(projected.global_extent.y));
+  out.u32(static_cast<std::uint32_t>(projected.global_extent.z));
+  out.string(projected.global_cell_layout);
+  out.u64(projected.global_faces);
+  out.string(projected.global_face_layout);
+  write_state(out, projected.state);
+  out.u8(static_cast<std::uint8_t>(projected.disposition));
+  out.u8(static_cast<std::uint8_t>(projected.reason));
+  out.u32(static_cast<std::uint32_t>(projected.lowest_failing_rank));
+  out.u8(projected.preflight_category);
+  out.u64(static_cast<std::uint64_t>(projected.attempt_count));
+  for (std::size_t i = 0; i < projected.attempt_count; ++i) {
+    const auto &attempt = projected.attempts[i];
     out.fp64(attempt.attempted_dt_s);
     out.u8(static_cast<std::uint8_t>(attempt.order));
     out.u8(static_cast<std::uint8_t>(attempt.disposition));
@@ -395,29 +441,29 @@ FixedBytes<kProjectionCapacity> provider_projection(
     out.u32(static_cast<std::uint32_t>(attempt.lowest_failing_rank));
     out.boolean(attempt.all_linear_solves_within_half_limit);
   }
-  out.fp64(source.accepted_dt_s);
-  out.fp64(source.proposed_next_dt_s);
-  out.fp64(source.convective_rate_per_s);
-  out.fp64(source.diffusive_rate_per_s);
-  out.boolean(source.stability_metrics_available);
-  out.boolean(source.limited_by_min_dt);
-  out.u8(static_cast<std::uint8_t>(source.config.mode));
-  out.u64(static_cast<std::uint64_t>(source.config.steps));
-  out.fp64(source.config.initial_dt_s);
-  out.fp64(source.config.min_dt_s);
-  out.fp64(source.config.max_dt_s);
-  out.fp64(source.config.cfl_target);
-  out.fp64(source.config.diffusion_number_target);
-  out.fp64(source.config.growth_factor);
-  out.fp64(source.config.retry_factor);
-  out.u64(static_cast<std::uint64_t>(source.config.max_retries));
-  out.u8(static_cast<std::uint8_t>(source.model));
-  out.u64(source.controller_identity);
-  out.u64(source.report_identity);
-  out.u64(source.flow_state_identity);
-  out.u64(source.observed_step);
-  out.fp64(source.observed_time_s);
-  write_metadata(out, source.observed_metadata);
+  out.fp64(projected.accepted_dt_s);
+  out.fp64(projected.proposed_next_dt_s);
+  out.fp64(projected.convective_rate_per_s);
+  out.fp64(projected.diffusive_rate_per_s);
+  out.boolean(projected.stability_metrics_available);
+  out.boolean(projected.limited_by_min_dt);
+  out.u8(static_cast<std::uint8_t>(projected.config.mode));
+  out.u64(static_cast<std::uint64_t>(projected.config.steps));
+  out.fp64(projected.config.initial_dt_s);
+  out.fp64(projected.config.min_dt_s);
+  out.fp64(projected.config.max_dt_s);
+  out.fp64(projected.config.cfl_target);
+  out.fp64(projected.config.diffusion_number_target);
+  out.fp64(projected.config.growth_factor);
+  out.fp64(projected.config.retry_factor);
+  out.u64(static_cast<std::uint64_t>(projected.config.max_retries));
+  out.u8(static_cast<std::uint8_t>(projected.model));
+  out.u64(projected.controller_identity);
+  out.u64(projected.report_identity);
+  out.u64(projected.flow_state_identity);
+  out.u64(projected.observed_step);
+  out.fp64(projected.observed_time_s);
+  write_metadata(out, projected.observed_metadata);
   return out.bytes;
 }
 
@@ -853,6 +899,31 @@ CollectivePayload collective_payload(
           std::copy_n(wire.data() + 12U, 28U, wire.data() + 40U);
           offset = wire.size();
           break;
+        case test::TimeControlWireMutation::missing_limb:
+          // Remove the accepted-step high limb while retaining a
+          // syntactically complete wire for the remaining tuples.
+          std::copy(wire.data() + 68U, wire.data() + wire.size(),
+                    wire.data() + 40U);
+          wire.set_size(wire.size() - 28U);
+          wire[4U] = static_cast<std::uint8_t>(wire[4U] - 1U);
+          offset = wire.size();
+          break;
+        case test::TimeControlWireMutation::swapped_limbs: {
+          std::array<std::uint8_t, 28> first{};
+          std::copy_n(wire.data() + 12U, first.size(), first.data());
+          std::copy_n(wire.data() + 40U, first.size(), wire.data() + 12U);
+          std::copy(first.begin(), first.end(), wire.data() + 40U);
+          offset = wire.size();
+          break;
+        }
+        case test::TimeControlWireMutation::tuple_order: {
+          std::array<std::uint8_t, 28> second{};
+          std::copy_n(wire.data() + 40U, second.size(), second.data());
+          std::copy_n(wire.data() + 68U, second.size(), wire.data() + 40U);
+          std::copy(second.begin(), second.end(), wire.data() + 68U);
+          offset = wire.size();
+          break;
+        }
         default:
           offset = wire.size();
           break;
@@ -966,8 +1037,30 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
         "time-control.diagnostics.capability", -1,
         "time-control diagnostic capability is unsupported");
   validate_request(snapshot, request, DiagnosticScope::local);
-  auto record = build_record(snapshot, request);
-  validate(record, describe_time_control_diagnostics(), request);
+  try {
+    validate(describe_time_control_diagnostics());
+    validate(request, describe_time_control_diagnostics());
+    static_cast<void>(request_projection(request));
+  } catch (const DiagnosticCollectionError &) {
+    throw;
+  } catch (...) {
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::invalid_input,
+        "time-control.diagnostics.request-preparation", -1,
+        "time-control diagnostic request preparation failed");
+  }
+  DiagnosticRecord record;
+  try {
+    record = build_record(snapshot, request);
+    validate(record, describe_time_control_diagnostics(), request);
+  } catch (const DiagnosticCollectionError &) {
+    throw;
+  } catch (...) {
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::invalid_input,
+        "time-control.diagnostics.record", -1,
+        "time-control diagnostic record is invalid");
+  }
   try {
     sink.submit(record);
   } catch (...) {
@@ -1002,10 +1095,34 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
                 "time-control.diagnostics.capability",
                 "time-control diagnostic capability is unsupported");
 
-  FixedBytes<kProjectionCapacity> request_bytes;
-  phase_ok = true;
+  enum class RequestFailure : std::uint8_t {
+    none,
+    frame,
+    selected_field,
+    preparation
+  };
+  RequestFailure request_failure = RequestFailure::none;
   try {
     validate_request(*snapshot, request, DiagnosticScope::collective);
+  } catch (const DiagnosticCollectionError &error) {
+    request_failure =
+        error.code() == "time-control.diagnostics.selected-field"
+            ? RequestFailure::selected_field
+            : RequestFailure::frame;
+  } catch (...) {
+    request_failure = RequestFailure::preparation;
+  }
+  require_phase(mpi, request_failure != RequestFailure::frame,
+                DiagnosticFailureClass::invalid_request,
+                "time-control.diagnostics.frame",
+                "time-control diagnostic frame mismatch");
+  require_phase(mpi, request_failure != RequestFailure::selected_field,
+                DiagnosticFailureClass::invalid_request,
+                "time-control.diagnostics.selected-field",
+                "time-control selected fields are invalid");
+
+  FixedBytes<kProjectionCapacity> request_bytes;
+  try {
     validate(describe_time_control_diagnostics());
     validate(request, describe_time_control_diagnostics());
     request_bytes = request_projection(request);
@@ -1022,9 +1139,10 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
   } catch (const runtime::MpiOperationError &) {
     throw;
   } catch (...) {
-    phase_ok = false;
+    request_failure = RequestFailure::preparation;
   }
-  require_phase(mpi, phase_ok, DiagnosticFailureClass::invalid_request,
+  require_phase(mpi, request_failure != RequestFailure::preparation,
+                DiagnosticFailureClass::invalid_input,
                 "time-control.diagnostics.request-preparation",
                 "time-control diagnostic request preparation failed");
   const bool request_agrees = exact_projection_agrees(
@@ -1037,7 +1155,7 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
   FixedBytes<kProjectionCapacity> provider_bytes;
   phase_ok = true;
   try {
-    provider_bytes = provider_projection(*snapshot, request);
+    provider_bytes = provider_projection(*snapshot, request, mpi.rank());
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
     if (mpi.rank() == provider_mutation_rank && !provider_bytes.empty() &&
         provider_mutation_offset < provider_bytes.size())
@@ -1139,16 +1257,20 @@ void test::TimeControlDiagnosticsTestAccess::reset() noexcept {
   diagnostic_raw_count = 0U;
   diagnostic_submission_count = 0U;
   diagnostic_raw_fault_ordinal = 0U;
+  diagnostic_raw_fault_rank = -1;
   request_mutation_offset = std::numeric_limits<std::size_t>::max();
   request_mutation_rank = -1;
   provider_mutation_offset = std::numeric_limits<std::size_t>::max();
   provider_mutation_rank = -1;
+  provider_semantic_mutation = test::TimeControlProviderMutation::none;
+  provider_semantic_mutation_rank = -1;
   wire_mutation = test::TimeControlWireMutation::none;
   wire_mutation_rank = -1;
 }
 void test::TimeControlDiagnosticsTestAccess::set_raw_fault(
-    std::size_t ordinal) noexcept {
+    std::size_t ordinal, int rank) noexcept {
   diagnostic_raw_fault_ordinal = ordinal;
+  diagnostic_raw_fault_rank = rank;
 }
 void test::TimeControlDiagnosticsTestAccess::set_request_projection_mutation(
     std::size_t offset, int rank) noexcept {
@@ -1159,6 +1281,11 @@ void test::TimeControlDiagnosticsTestAccess::set_provider_projection_mutation(
     std::size_t offset, int rank) noexcept {
   provider_mutation_offset = offset;
   provider_mutation_rank = rank;
+}
+void test::TimeControlDiagnosticsTestAccess::set_provider_mutation(
+    test::TimeControlProviderMutation mutation, int rank) noexcept {
+  provider_semantic_mutation = mutation;
+  provider_semantic_mutation_rank = rank;
 }
 void test::TimeControlDiagnosticsTestAccess::set_wire_mutation(
     test::TimeControlWireMutation mutation, int rank) noexcept {

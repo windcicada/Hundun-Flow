@@ -55,20 +55,30 @@ inline AdaptiveFlowStateSnapshot capture_adaptive_flow_state(
 
 inline bool adaptive_flow_state_failed_attempt_preserved(
     const AdaptiveFlowStateSnapshot &before,
-    const AdaptiveFlowStateSnapshot &after) noexcept {
+    const AdaptiveFlowStateSnapshot &after,
+    std::uint64_t attempted_work_count,
+    std::array<std::uint64_t, 4> expected_operation_delta) noexcept {
   auto normalized = after;
   normalized.trial_generation = before.trial_generation;
   normalized.attempt_identity = before.attempt_identity;
   normalized.diagnostic_identity = before.diagnostic_identity;
   normalized.operation_counters = before.operation_counters;
+  std::array<std::uint64_t, 4> observed_operation_delta{};
+  for (std::size_t index = 0; index < observed_operation_delta.size();
+       ++index) {
+    if (after.operation_counters[index] < before.operation_counters[index])
+      return false;
+    observed_operation_delta[index] =
+        after.operation_counters[index] - before.operation_counters[index];
+  }
   return adaptive_flow_state_bitwise_equal(before, normalized) &&
-         after.trial_generation >= before.trial_generation &&
-         after.attempt_identity >= before.attempt_identity &&
-         after.diagnostic_identity >= before.diagnostic_identity &&
-         after.operation_counters[0] >= before.operation_counters[0] &&
-         after.operation_counters[1] >= before.operation_counters[1] &&
-         after.operation_counters[2] >= before.operation_counters[2] &&
-         after.operation_counters[3] >= before.operation_counters[3];
+         after.trial_generation ==
+             before.trial_generation + attempted_work_count &&
+         after.attempt_identity ==
+             before.attempt_identity + attempted_work_count &&
+         after.diagnostic_identity ==
+             before.diagnostic_identity + attempted_work_count &&
+         observed_operation_delta == expected_operation_delta;
 }
 
 } // namespace hundun::test

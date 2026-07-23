@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/boundary/basic_boundary.hpp"
+#include "hundun/diagnostics/time_control_diagnostics.hpp"
 #include "hundun/execution/execution.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/flow/adaptive_time_control.hpp"
@@ -13,6 +14,7 @@
 #include "hundun/runtime/halo_exchange.hpp"
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "flow/src/adaptive_time_control_test_access.hpp"
 #include "flow/src/constant_density_piso_test_access.hpp"
@@ -20,15 +22,39 @@
 #include "flow/src/material_density_piso_test_access.hpp"
 #include "tests/support/flow_state_equality.hpp"
 #include "tests/support/adaptive_time_control_test_support.hpp"
+#include "tests/support/allocation_attempt_guard.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <string>
 
 namespace {
+
+class OneRecordSink final : public hundun::diagnostics::DiagnosticSink {
+public:
+  void submit(const hundun::diagnostics::DiagnosticRecord &value) override {
+    record = value;
+    ++calls;
+  }
+
+  hundun::diagnostics::DiagnosticRecord record;
+  int calls{};
+};
+
+void require_zero_trusted_tail_events() {
+  const auto observed =
+      hundun::flow::test::AdaptiveTimeControlTestAccess::
+          trusted_tail_observation();
+  HUNDUN_CHECK(observed.allocation_attempts == 0U);
+  HUNDUN_CHECK(observed.controller_collectives == 0U);
+  HUNDUN_CHECK(observed.field_state_traversals == 0U);
+  HUNDUN_CHECK(observed.callbacks_or_sinks == 0U);
+}
 
 hundun::runtime::Int3 grid(int ranks) {
   if (ranks == 1)
@@ -239,9 +265,59 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       model = static_cast<hundun::config::DensityModel>(255);
     expect_factory_failure(time, model, "time-control.create.identity");
   }
+  {
+    bool rejected = false;
+    try {
+      hundun::test::allocation_probe::FailNextAllocationGuard fail(
+          mpi.rank() == mismatch_rank);
+      static_cast<void>(hundun::flow::Bdf2RetryController::create(
+          time, hundun::config::DensityModel::constant, topology, geometry,
+          mpi, state));
+    } catch (const hundun::runtime::Error &error) {
+      rejected = true;
+      HUNDUN_CHECK(std::string(error.what()).find(
+                       "time-control.create.state") != std::string::npos);
+      HUNDUN_CHECK(std::string(error.what()).find(
+                       std::to_string(mismatch_rank)) != std::string::npos);
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(state.metadata().step == 0U);
+  }
+  for (std::size_t ordinal : {std::size_t{1}, std::size_t{2}}) {
+    using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
+    TimeAccess::reset_faults();
+    TimeAccess::set_raw_fault(ordinal, mismatch_rank);
+    bool typed = false;
+    try {
+      static_cast<void>(hundun::flow::Bdf2RetryController::create(
+          time, hundun::config::DensityModel::constant, topology, geometry,
+          mpi, state));
+    } catch (const hundun::runtime::MpiOperationError &) {
+      typed = true;
+    }
+    HUNDUN_CHECK(typed);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == ordinal);
+  }
+  hundun::flow::test::AdaptiveTimeControlTestAccess::reset_faults();
   auto controller = hundun::flow::Bdf2RetryController::create(
       time, hundun::config::DensityModel::constant, topology, geometry, mpi,
       state);
+  {
+    using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
+    const auto before = state.metadata();
+    hundun::test::allocation_probe::FailNextAllocationGuard fail(
+        mpi.rank() == mismatch_rank);
+    const auto rejected =
+        controller.advance(state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(
+        rejected.disposition() ==
+        hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
+    HUNDUN_CHECK(rejected.attempt_count() == 0U);
+    HUNDUN_CHECK(TimeAccess::preflight_category(rejected) == 7U);
+    HUNDUN_CHECK(rejected.lowest_failing_rank() == mismatch_rank);
+    HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+        before, state.metadata()));
+  }
   {
     auto wrong_model = hundun::flow::Bdf2RetryController::create(
         time, hundun::config::DensityModel::material, topology, geometry, mpi,
@@ -372,6 +448,20 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
         before,
         malformed_state.snapshot(hundun::flow::FlowLayer::committed)));
+    auto source =
+        malformed_controller.diagnostic_source(malformed_state, malformed);
+    OneRecordSink sink;
+    hundun::diagnostics::collect_diagnostics(
+        source,
+        {hundun::diagnostics::DiagnosticLevel::summary,
+         hundun::diagnostics::DiagnosticScope::local,
+         {mpi.rank(), malformed_state.metadata().step,
+          malformed_state.metadata().time_s, "time-control.advance-result"},
+         {}, 0U},
+        sink);
+    HUNDUN_CHECK(sink.calls == 1);
+    HUNDUN_CHECK(sink.record.failure.code ==
+                 "time-control.preflight.report");
     TimeAccess::reset_faults();
   }
   {
@@ -515,26 +605,133 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(signed_report.convective_rate_per_s() == expected[0]);
     HUNDUN_CHECK(signed_report.diffusive_rate_per_s() == expected[1]);
 
-    auto invalid_state = hundun::flow::FlowState::create(
-        registry, {local, topology.local_face_count()}, fields,
-        {0U, 0.0, 0.01, 0.0,
-         hundun::flow::MomentumTimeOrder::backward_euler});
-    invalid_state.seed_accepted_layers(initial, initial);
-    hundun::flow::test::MaterialDensityPisoTestAccess::
-        set_accepted_face_mass_flux(
-            invalid_state, 0U,
-            std::numeric_limits<double>::quiet_NaN());
-    auto invalid_controller = hundun::flow::Bdf2RetryController::create(
-        time, hundun::config::DensityModel::constant, topology, geometry, mpi,
-        invalid_state);
-    const auto invalid_report =
-        invalid_controller.advance(invalid_state, facade, 1.0, 0.0, {}, {});
-    HUNDUN_CHECK(invalid_report.disposition() ==
-                 hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
-    HUNDUN_CHECK(invalid_report.attempt_count() == 0U);
-    HUNDUN_CHECK(
-        hundun::flow::test::AdaptiveTimeControlTestAccess::preflight_category(
-            invalid_report) == 5U);
+    const auto run_directional_stability =
+        [&](const hundun::mesh::MeshGeometry &case_geometry,
+            hundun::flow::FixedStepConstantDensityFlow *case_facade,
+            std::size_t enabled_directions) {
+          auto directional_initial = initial;
+          for (std::size_t face_id = 0;
+               face_id < directional_initial.face_mass_flux.size();
+               ++face_id) {
+            const auto area_vector = case_geometry.face_area_vector_m2(
+                face_id, hundun::mesh::FaceSide::owner);
+            const std::array<double, 3> magnitudes{
+                std::abs(area_vector.x), std::abs(area_vector.y),
+                std::abs(area_vector.z)};
+            const auto dominant = static_cast<std::size_t>(
+                std::max_element(magnitudes.begin(), magnitudes.end()) -
+                magnitudes.begin());
+            directional_initial.face_mass_flux[face_id] =
+                dominant < enabled_directions
+                    ? ((face_id % 2U == 0U) ? 1.0e-12 : -1.0e-12) *
+                          static_cast<double>(dominant + 1U)
+                    : 0.0;
+          }
+          auto directional_state = hundun::flow::FlowState::create(
+              registry, {local, topology.local_face_count()}, fields,
+              {0U, 0.0, 0.01, 0.0,
+               hundun::flow::MomentumTimeOrder::backward_euler});
+          directional_state.seed_accepted_layers(directional_initial,
+                                                 directional_initial);
+          std::vector<double> directional_flux(
+              topology.owned_cell_count());
+          std::vector<double> directional_geometry(
+              topology.owned_cell_count());
+          for (hundun::mesh::LocalFaceId face_id = 0;
+               face_id < topology.local_face_count(); ++face_id) {
+            const auto area = case_geometry.face_area_m2(face_id);
+            const auto displacement =
+                case_geometry.face_displacement_m(face_id);
+            const auto area_vector = case_geometry.face_area_vector_m2(
+                face_id, hundun::mesh::FaceSide::owner);
+            const auto factor =
+                area * area /
+                std::abs(area_vector.x * displacement.x +
+                         area_vector.y * displacement.y +
+                         area_vector.z * displacement.z);
+            const auto add = [&](std::size_t cell_id) {
+              directional_flux[cell_id] +=
+                  std::abs(directional_initial.face_mass_flux[face_id]);
+              directional_geometry[cell_id] += factor;
+            };
+            const auto owner = topology.owner(face_id);
+            if (owner < topology.owned_cell_count())
+              add(owner);
+            const auto neighbour = topology.neighbour(face_id);
+            if (neighbour && *neighbour < topology.owned_cell_count())
+              add(*neighbour);
+          }
+          double directional_expected[2]{};
+          for (std::size_t cell_id = 0;
+               cell_id < topology.owned_cell_count(); ++cell_id) {
+            const auto denominator =
+                4.0 * case_geometry.cell_volume_m3(cell_id);
+            directional_expected[0] =
+                std::max(directional_expected[0],
+                         directional_flux[cell_id] / denominator);
+            directional_expected[1] =
+                std::max(directional_expected[1],
+                         0.1 * directional_geometry[cell_id] / denominator);
+          }
+          if (case_facade != nullptr)
+            HUNDUN_CHECK(MPI_Allreduce(
+                             MPI_IN_PLACE, directional_expected, 2,
+                             MPI_DOUBLE, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+          auto directional_controller =
+              hundun::flow::Bdf2RetryController::create(
+                  time, hundun::config::DensityModel::constant, topology,
+                  case_geometry, mpi, directional_state);
+          if (case_facade != nullptr) {
+            const auto directional_report = directional_controller.advance(
+                directional_state, *case_facade, 2.0, 0.1, {}, {});
+            HUNDUN_CHECK(directional_report.stability_metrics_available());
+            HUNDUN_CHECK(directional_report.convective_rate_per_s() ==
+                         directional_expected[0]);
+            HUNDUN_CHECK(directional_report.diffusive_rate_per_s() ==
+                         directional_expected[1]);
+          } else {
+            const auto rates = hundun::flow::test::
+                AdaptiveTimeControlTestAccess::stability_rates(
+                    directional_controller, directional_state, 2.0, false,
+                    0.1);
+            HUNDUN_CHECK(rates[0] == directional_expected[0]);
+            HUNDUN_CHECK(rates[1] == directional_expected[1]);
+          }
+        };
+    run_directional_stability(geometry, &facade, 1U);
+    run_directional_stability(geometry, &facade, 2U);
+    run_directional_stability(geometry, &facade, 3U);
+
+    const hundun::mesh::MeshGeometry warped_geometry(
+        topology, hundun::mesh::AnalyticWarpedBoxMapping(
+                      {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
+                      {0.01, -0.008, 0.006}));
+    run_directional_stability(warped_geometry, nullptr, 3U);
+
+    for (const double invalid_flux :
+         {std::numeric_limits<double>::quiet_NaN(),
+          std::numeric_limits<double>::infinity(),
+          -std::numeric_limits<double>::infinity()}) {
+      auto invalid_state = hundun::flow::FlowState::create(
+          registry, {local, topology.local_face_count()}, fields,
+          {0U, 0.0, 0.01, 0.0,
+           hundun::flow::MomentumTimeOrder::backward_euler});
+      invalid_state.seed_accepted_layers(initial, initial);
+      hundun::flow::test::MaterialDensityPisoTestAccess::
+          set_accepted_face_mass_flux(invalid_state, 0U, invalid_flux);
+      auto invalid_controller = hundun::flow::Bdf2RetryController::create(
+          time, hundun::config::DensityModel::constant, topology, geometry,
+          mpi, invalid_state);
+      const auto invalid_report = invalid_controller.advance(
+          invalid_state, facade, 1.0, 0.0, {}, {});
+      HUNDUN_CHECK(
+          invalid_report.disposition() ==
+          hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
+      HUNDUN_CHECK(invalid_report.attempt_count() == 0U);
+      HUNDUN_CHECK(
+          hundun::flow::test::AdaptiveTimeControlTestAccess::
+              preflight_category(invalid_report) == 5U);
+    }
   }
   {
     using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
@@ -543,26 +740,51 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
         Mutation::momentum_x_iterations, Mutation::momentum_y_iterations,
         Mutation::momentum_z_iterations, Mutation::pressure_one_iterations,
         Mutation::pressure_two_iterations};
+    struct GateCase final {
+      std::uint64_t limit;
+      std::uint64_t iterations;
+      bool expected;
+    };
+    constexpr std::array<GateCase, 8> gate_cases{{
+        {1U, 0U, true},
+        {1U, 1U, false},
+        {2U, 1U, true},
+        {2U, 2U, false},
+        {3U, 1U, true},
+        {3U, 2U, false},
+        {std::numeric_limits<std::uint64_t>::max(),
+         std::numeric_limits<std::uint64_t>::max() / 2U, true},
+        {std::numeric_limits<std::uint64_t>::max(),
+         std::numeric_limits<std::uint64_t>::max() / 2U + 1U, false},
+    }};
     for (const auto mutation : mutations) {
-      auto gate_state = hundun::flow::FlowState::create(
-          registry, {local, topology.local_face_count()}, fields,
-          {0U, 0.0, 0.01, 0.0,
-           hundun::flow::MomentumTimeOrder::backward_euler});
-      gate_state.seed_accepted_layers(initial, initial);
-      auto gate_controller = hundun::flow::Bdf2RetryController::create(
-          time, hundun::config::DensityModel::constant, topology, geometry,
-          mpi, gate_state);
-      TimeAccess::set_post_return_mutation(mutation, mpi.rank());
-      const auto report =
-          gate_controller.advance(gate_state, facade, 1.0, 0.0, {}, {});
-      HUNDUN_CHECK(report.disposition() ==
-                   hundun::flow::TimeAdvanceDisposition::committed);
-      HUNDUN_CHECK(
-          !report.attempt(0).all_linear_solves_within_half_limit);
-      HUNDUN_CHECK(
-          !gate_controller.state().last_all_linear_solves_within_half_limit);
-      HUNDUN_CHECK(gate_controller.state().proposed_next_dt_s == 0.01);
-      TimeAccess::reset_faults();
+      for (const auto gate : gate_cases) {
+        auto gate_state = hundun::flow::FlowState::create(
+            registry, {local, topology.local_face_count()}, fields,
+            {0U, 0.0, 0.01, 0.0,
+             hundun::flow::MomentumTimeOrder::backward_euler});
+        gate_state.seed_accepted_layers(initial, initial);
+        auto gate_controller = hundun::flow::Bdf2RetryController::create(
+            time, hundun::config::DensityModel::constant, topology, geometry,
+            mpi, gate_state);
+        hundun::linear::SolveControl control;
+        control.max_iterations = gate.limit;
+        TimeAccess::set_post_return_mutation(mutation, mpi.rank());
+        TimeAccess::set_post_return_iteration_value(gate.iterations);
+        const auto report = gate_controller.advance(
+            gate_state, facade, 1.0, 0.0, control, control);
+        HUNDUN_CHECK(report.disposition() ==
+                     hundun::flow::TimeAdvanceDisposition::committed);
+        HUNDUN_CHECK(
+            report.attempt(0).all_linear_solves_within_half_limit ==
+            gate.expected);
+        HUNDUN_CHECK(
+            gate_controller.state()
+                .last_all_linear_solves_within_half_limit == gate.expected);
+        HUNDUN_CHECK(gate_controller.state().proposed_next_dt_s ==
+                     (gate.expected ? 0.0125 : 0.01));
+        TimeAccess::reset_faults();
+      }
     }
   }
   {
@@ -599,6 +821,14 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     auto limit_controller = hundun::flow::Bdf2RetryController::create(
         limit_time, hundun::config::DensityModel::constant, topology,
         geometry, mpi, limit_state);
+    hundun::runtime::FieldAccessPlan retained_view_plan(registry);
+    retained_view_plan.declare_access(
+        2201U, 1U, fields.velocity,
+        hundun::runtime::AccessMode::read_write);
+    retained_view_plan.freeze();
+    auto retained_trial_view =
+        limit_state.trial_layer().acquire_write<double>(
+            retained_view_plan, 2201U, 1U, fields.velocity);
     const auto workspace_before =
         hundun::flow::test::ConstantDensityPisoTestAccess::
             mesh_workspace_snapshot(facade);
@@ -638,7 +868,15 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
          reductions_after.reduced_scalars,
          reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
-        exact_before, exact_after));
+        exact_before, exact_after, limited.attempt_count(),
+        {45U, 333U, 2664U, 0U}));
+    bool retained_view_stale = false;
+    try {
+      static_cast<void>(retained_trial_view(0, 0, 0, 0));
+    } catch (const hundun::runtime::Error &) {
+      retained_view_stale = true;
+    }
+    HUNDUN_CHECK(retained_view_stale);
     TimeAccess::reset_faults();
     const auto fixed_success =
         limit_controller.advance(limit_state, facade, 1.0, 0.0, {}, {});
@@ -647,6 +885,16 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(fixed_success.attempt_count() == 1U);
     HUNDUN_CHECK(fixed_success.attempt(0).attempted_dt_s == 0.01);
     HUNDUN_CHECK(limit_controller.state().proposed_next_dt_s == 0.01);
+    const std::array<std::uint64_t, 2> no_stability_reduction{0U, 0U};
+    HUNDUN_CHECK(TimeAccess::stability_reduction_observation() ==
+                 no_stability_reduction);
+    retained_view_stale = false;
+    try {
+      static_cast<void>(retained_trial_view(0, 0, 0, 0));
+    } catch (const hundun::runtime::Error &) {
+      retained_view_stale = true;
+    }
+    HUNDUN_CHECK(retained_view_stale);
 
     const hundun::config::FlowTimeConfig minimum_time{
         hundun::config::TimeMode::adaptive, 1, 0.01, 0.005, 0.02,
@@ -669,38 +917,110 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(minimum.limited_by_min_dt());
     TimeAccess::reset_faults();
 
-    auto terminal_state = hundun::flow::FlowState::create(
+    const hundun::config::FlowTimeConfig simultaneous_time{
+        hundun::config::TimeMode::fixed, 1, 0.01,
+        std::ldexp(0.01, -8), 0.02,
+        0.5, 0.25, 1.25, 0.5, 8};
+    auto simultaneous_state = hundun::flow::FlowState::create(
         registry, {local, topology.local_face_count()}, fields,
         {0U, 0.0, 0.01, 0.0,
          hundun::flow::MomentumTimeOrder::backward_euler});
-    terminal_state.seed_accepted_layers(initial, initial);
+    simultaneous_state.seed_accepted_layers(initial, initial);
+    auto simultaneous_controller =
+        hundun::flow::Bdf2RetryController::create(
+            simultaneous_time, hundun::config::DensityModel::constant,
+            topology, geometry, mpi, simultaneous_state);
+    TimeAccess::set_recoverable_failures(9U, 0);
+    const auto simultaneous = simultaneous_controller.advance(
+        simultaneous_state, facade, 1.0, 0.0, {}, {});
+    HUNDUN_CHECK(
+        simultaneous.disposition() ==
+        hundun::flow::TimeAdvanceDisposition::minimum_dt_failure);
+    HUNDUN_CHECK(simultaneous.attempt_count() == 9U);
+    for (std::size_t index = 0U; index < 9U; ++index) {
+      HUNDUN_CHECK(simultaneous.attempt(index).attempted_dt_s ==
+                   std::ldexp(0.01, -static_cast<int>(index)));
+      HUNDUN_CHECK(
+          simultaneous.attempt(index).order ==
+          hundun::flow::MomentumTimeOrder::backward_euler);
+      HUNDUN_CHECK(
+          !simultaneous.attempt(index)
+               .all_linear_solves_within_half_limit);
+    }
+    HUNDUN_CHECK(simultaneous.limited_by_min_dt());
+    TimeAccess::reset_faults();
+
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
-    hundun::flow::test::MaterialDensityPisoTestAccess::force_state_metadata(
-        terminal_state,
-        {maximum, 1.0, 0.01, 0.01,
-         hundun::flow::MomentumTimeOrder::bdf2});
-    hundun::flow::TimeControlState terminal_control;
-    terminal_control.accepted_step = maximum;
-    terminal_control.proposed_next_dt_s = 0.01;
-    terminal_control.last_accepted_dt_s = 0.01;
-    terminal_control.last_accepted_order =
-        hundun::flow::MomentumTimeOrder::bdf2;
-    terminal_control.history_ready = true;
-    terminal_control.last_stability_metrics_available = true;
-    terminal_control.revision = maximum;
-    terminal_control.state_seal = TimeAccess::seal(
-        time, hundun::config::DensityModel::constant, terminal_control);
-    auto terminal_controller = hundun::flow::Bdf2RetryController::restore(
-        time, hundun::config::DensityModel::constant, topology, geometry, mpi,
-        terminal_state, terminal_control);
-    const auto overflow = terminal_controller.advance(
-        terminal_state, facade, 1.0, 0.0, {}, {});
-    HUNDUN_CHECK(overflow.disposition() ==
-                 hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
-    HUNDUN_CHECK(overflow.attempt_count() == 0U);
-    HUNDUN_CHECK(overflow.lowest_failing_rank() == 0);
-    HUNDUN_CHECK(TimeAccess::preflight_category(overflow) == 5U);
-    HUNDUN_CHECK(terminal_controller.state().accepted_step == maximum);
+    for (const auto accepted_step :
+         {std::uint64_t{1} << 53U, (std::uint64_t{1} << 53U) + 1U,
+          maximum}) {
+      auto terminal_state = hundun::flow::FlowState::create(
+          registry, {local, topology.local_face_count()}, fields,
+          {0U, 0.0, 0.01, 0.0,
+           hundun::flow::MomentumTimeOrder::backward_euler});
+      terminal_state.seed_accepted_layers(initial, initial);
+      hundun::flow::test::MaterialDensityPisoTestAccess::force_state_metadata(
+          terminal_state,
+          {accepted_step, 1.0, 0.01, 0.01,
+           hundun::flow::MomentumTimeOrder::bdf2});
+      hundun::flow::TimeControlState terminal_control;
+      terminal_control.accepted_step = accepted_step;
+      terminal_control.proposed_next_dt_s = 0.01;
+      terminal_control.last_accepted_dt_s = 0.01;
+      terminal_control.last_accepted_order =
+          hundun::flow::MomentumTimeOrder::bdf2;
+      terminal_control.history_ready = true;
+      terminal_control.last_stability_metrics_available = true;
+      terminal_control.revision = accepted_step;
+      terminal_control.state_seal = TimeAccess::seal(
+          time, hundun::config::DensityModel::constant, terminal_control);
+      auto different_horizon = time;
+      different_horizon.steps += 17;
+      auto terminal_controller = hundun::flow::Bdf2RetryController::restore(
+          different_horizon, hundun::config::DensityModel::constant, topology,
+          geometry, mpi, terminal_state, terminal_control);
+      const auto terminal_report = terminal_controller.advance(
+          terminal_state, facade, 1.0,
+          accepted_step == maximum ? 0.0 : -1.0, {}, {});
+      HUNDUN_CHECK(
+          terminal_report.disposition() ==
+          hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
+      HUNDUN_CHECK(terminal_report.attempt_count() == 0U);
+      HUNDUN_CHECK(terminal_report.lowest_failing_rank() == 0);
+      HUNDUN_CHECK(TimeAccess::preflight_category(terminal_report) ==
+                   (accepted_step == maximum ? 5U : 1U));
+      HUNDUN_CHECK(terminal_controller.state().accepted_step ==
+                   accepted_step);
+
+      auto source = terminal_controller.diagnostic_source(terminal_state,
+                                                          terminal_report);
+      OneRecordSink sink;
+      hundun::diagnostics::collect_diagnostics(
+          source, mpi,
+          {hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
+           hundun::diagnostics::DiagnosticScope::collective,
+           {mpi.rank(), accepted_step, 1.0,
+            "time-control.advance-result"},
+           {}, 256U},
+          sink);
+      HUNDUN_CHECK(sink.calls == 1);
+      HUNDUN_CHECK(sink.record.samples.size() == 9U);
+      const auto limb = [&](std::size_t index) {
+        double value{};
+        const auto value_bits = sink.record.samples[index].value.bits;
+        std::memcpy(&value, &value_bits, sizeof(value));
+        return static_cast<std::uint64_t>(value);
+      };
+      const auto accepted_reconstructed =
+          limb(0U) | (limb(1U) << 32U);
+      const auto revision_reconstructed =
+          limb(7U) | (limb(8U) << 32U);
+      HUNDUN_CHECK(accepted_reconstructed == accepted_step);
+      HUNDUN_CHECK(revision_reconstructed == accepted_step);
+      if (accepted_step == maximum)
+        HUNDUN_CHECK(sink.record.failure.code ==
+                     "time-control.preflight.state");
+    }
   }
   const auto before = state.snapshot(hundun::flow::FlowLayer::committed);
   using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
@@ -719,7 +1039,7 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(report.diffusive_rate_per_s() == 0.0);
   HUNDUN_CHECK(controller.state().accepted_step == 1U);
   HUNDUN_CHECK(state.metadata().step == 1U);
-  HUNDUN_CHECK(TimeAccess::post_commit_observation_count() == 0U);
+  require_zero_trusted_tail_events();
   TimeAccess::reset_faults();
   HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
       before, state.snapshot(hundun::flow::FlowLayer::committed)));
@@ -742,6 +1062,146 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(hundun::test::adaptive_flow_state_bitwise_equal(
       restore_before, restore_after));
   HUNDUN_CHECK(restored.state().state_seal == controller.state().state_seal);
+
+  const std::array<std::function<void(hundun::flow::TimeControlState &)>, 13>
+      unsealed_state_mutations{{
+          [](auto &value) { ++value.schema_version; },
+          [](auto &value) { ++value.accepted_step; },
+          [](auto &value) {
+            value.proposed_next_dt_s =
+                std::nextafter(value.proposed_next_dt_s,
+                               std::numeric_limits<double>::infinity());
+          },
+          [](auto &value) {
+            value.last_accepted_dt_s =
+                std::nextafter(value.last_accepted_dt_s,
+                               std::numeric_limits<double>::infinity());
+          },
+          [](auto &value) {
+            value.last_accepted_order =
+                value.last_accepted_order ==
+                        hundun::flow::MomentumTimeOrder::bdf2
+                    ? hundun::flow::MomentumTimeOrder::backward_euler
+                    : hundun::flow::MomentumTimeOrder::bdf2;
+          },
+          [](auto &value) { value.history_ready = !value.history_ready; },
+          [](auto &value) {
+            value.last_all_linear_solves_within_half_limit =
+                !value.last_all_linear_solves_within_half_limit;
+          },
+          [](auto &value) {
+            value.last_convective_rate_per_s =
+                std::nextafter(value.last_convective_rate_per_s, 1.0);
+          },
+          [](auto &value) {
+            value.last_diffusive_rate_per_s =
+                std::nextafter(value.last_diffusive_rate_per_s, 1.0);
+          },
+          [](auto &value) {
+            value.last_stability_metrics_available =
+                !value.last_stability_metrics_available;
+          },
+          [](auto &value) { ++value.last_retry_count; },
+          [](auto &value) { ++value.revision; },
+          [](auto &value) { ++value.state_seal; },
+      }};
+  for (const auto &mutate : unsealed_state_mutations) {
+    auto candidate = restored.state();
+    mutate(candidate);
+    bool rejected = false;
+    try {
+      static_cast<void>(hundun::flow::Bdf2RetryController::restore(
+          time, hundun::config::DensityModel::constant, topology, geometry,
+          mpi, state, candidate));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+  }
+
+  const std::array<
+      std::function<void(hundun::config::FlowTimeConfig &)>, 9>
+      sealed_config_mutations{{
+          [](auto &value) {
+            value.mode = value.mode == hundun::config::TimeMode::adaptive
+                             ? hundun::config::TimeMode::fixed
+                             : hundun::config::TimeMode::adaptive;
+          },
+          [](auto &value) {
+            value.initial_dt_s =
+                std::nextafter(value.initial_dt_s, value.max_dt_s);
+          },
+          [](auto &value) {
+            value.min_dt_s = std::nextafter(value.min_dt_s, 0.0);
+          },
+          [](auto &value) {
+            value.max_dt_s =
+                std::nextafter(value.max_dt_s,
+                               std::numeric_limits<double>::infinity());
+          },
+          [](auto &value) {
+            value.cfl_target =
+                std::nextafter(value.cfl_target, 1.0);
+          },
+          [](auto &value) {
+            value.diffusion_number_target =
+                std::nextafter(value.diffusion_number_target, 1.0);
+          },
+          [](auto &value) {
+            value.growth_factor =
+                std::nextafter(value.growth_factor, 2.0);
+          },
+          [](auto &value) {
+            value.retry_factor =
+                std::nextafter(value.retry_factor, 0.0);
+          },
+          [](auto &value) { --value.max_retries; },
+      }};
+  for (const auto &mutate : sealed_config_mutations) {
+    auto candidate = time;
+    mutate(candidate);
+    bool rejected = false;
+    try {
+      static_cast<void>(hundun::flow::Bdf2RetryController::restore(
+          candidate, hundun::config::DensityModel::constant, topology,
+          geometry, mpi, state, restored.state()));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+  }
+  {
+    auto different_horizon = time;
+    ++different_horizon.steps;
+    auto horizon_restore = hundun::flow::Bdf2RetryController::restore(
+        different_horizon, hundun::config::DensityModel::constant, topology,
+        geometry, mpi, state, restored.state());
+    HUNDUN_CHECK(horizon_restore.state().state_seal ==
+                 restored.state().state_seal);
+  }
+  if (mpi.size() > 1) {
+    auto rank_distinct = restored.state();
+    if (mpi.rank() == 1)
+      rank_distinct.proposed_next_dt_s =
+          std::nextafter(rank_distinct.proposed_next_dt_s,
+                         rank_distinct.proposed_next_dt_s < time.max_dt_s
+                             ? time.max_dt_s
+                             : time.min_dt_s);
+    rank_distinct.state_seal = TimeAccess::seal(
+        time, hundun::config::DensityModel::constant, rank_distinct);
+    bool rejected = false;
+    try {
+      static_cast<void>(hundun::flow::Bdf2RetryController::restore(
+          time, hundun::config::DensityModel::constant, topology, geometry,
+          mpi, state, rank_distinct));
+    } catch (const hundun::runtime::Error &error) {
+      rejected = true;
+      HUNDUN_CHECK(std::string_view(error.what()).find(
+                       "time-control.restore.state") !=
+                   std::string_view::npos);
+    }
+    HUNDUN_CHECK(rejected);
+  }
   auto second = restored.advance(state, facade, 1.0, 0.0, {}, {});
   HUNDUN_CHECK(second.disposition() ==
                hundun::flow::TimeAdvanceDisposition::committed);
@@ -799,6 +1259,82 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(rejected_after_out_of_band.attempt_count() == 0U);
   HUNDUN_CHECK(restored.state().state_seal ==
                controller_before_rejection.state_seal);
+  {
+    auto bound_to_other = hundun::flow::Bdf2RetryController::create(
+        time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+        other_state);
+    auto moved_to = std::move(other_state);
+    TimeAccess::reset_faults();
+    bool rejected = false;
+    try {
+      static_cast<void>(
+          bound_to_other.advance(moved_to, facade, 1.0, 0.0, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == 0U);
+
+    TimeAccess::reset_faults();
+    rejected = false;
+    try {
+      static_cast<void>(
+          controller.advance(other_state, facade, 1.0, 0.0, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == 0U);
+  }
+
+  {
+    TimeAccess::reset_faults();
+    TimeAccess::set_active(controller, true);
+    const auto state_before_overlap =
+        state.snapshot(hundun::flow::FlowLayer::committed);
+    const auto control_before_overlap = controller.state();
+    bool rejected = false;
+    try {
+      static_cast<void>(
+          controller.advance(state, facade, 1.0, 0.0, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == 0U);
+    HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+        state_before_overlap,
+        state.snapshot(hundun::flow::FlowLayer::committed)));
+    HUNDUN_CHECK(hundun::test::time_control_state_bitwise_equal(
+        control_before_overlap, controller.state()));
+    TimeAccess::set_active(controller, false);
+  }
+
+  {
+    auto live_controller = std::move(controller);
+    TimeAccess::reset_faults();
+    bool rejected = false;
+    try {
+      static_cast<void>(
+          controller.advance(state, facade, 1.0, 0.0, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == 0U);
+
+    auto live_facade = std::move(facade);
+    TimeAccess::reset_faults();
+    rejected = false;
+    try {
+      static_cast<void>(
+          live_controller.advance(state, facade, 1.0, 0.0, {}, {}));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+    HUNDUN_CHECK(TimeAccess::raw_operation_count() == 0U);
+  }
 }
 
 void run_acceptance(const hundun::runtime::MpiContext &mpi) {
@@ -812,7 +1348,7 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
       topology,
       hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
   auto config = periodic_case();
-  config.scalars.clear();
+  config.scalars.push_back({"beta", 0.0});
   auto boundaries =
       hundun::boundary::BoundaryRegistry::create(config, topology);
 
@@ -827,7 +1363,11 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
       hundun::finite_volume::declare_face_mass_flux(registry);
   const auto rho_h =
       registry.declare_field(conservative_cell("rho_h", "J/m3"));
-  fields.transported_cell_fields = {rho_h};
+  const auto rho_alpha =
+      registry.declare_field(conservative_cell("rho_alpha", "kg/m3"));
+  const auto rho_beta =
+      registry.declare_field(conservative_cell("rho_beta", "kg/m3"));
+  fields.transported_cell_fields = {rho_h, rho_alpha, rho_beta};
   registry.freeze();
 
   const auto box = decomposition.owned_box();
@@ -846,7 +1386,9 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
     initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
     initial.transported_cell_fields = {
-        std::vector<double>(topology.owned_cell_count(), 300000.0)};
+        std::vector<double>(topology.owned_cell_count(), 300000.0),
+        std::vector<double>(topology.owned_cell_count(), 0.5),
+        std::vector<double>(topology.owned_cell_count(), 0.25)};
     state.seed_accepted_layers(initial, initial);
     return state;
   };
@@ -862,6 +1404,8 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
   hundun::flow::MaterialDensityTransportSpec material_spec;
   material_spec.enthalpy_density = rho_h;
   material_spec.enthalpy_diffusivity_kg_per_m_s = 0.0;
+  material_spec.scalar_densities = {rho_alpha, rho_beta};
+  material_spec.scalar_diffusivities_kg_per_m_s = {0.2, 0.4};
   auto material_flow = hundun::flow::FixedStepMaterialDensityFlow::create(
       decomposition, topology, geometry, boundaries, mpi, execution, halo,
       momentum_solver, {&mx, &my, &mz}, pressure_solver,
@@ -872,6 +1416,121 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
   using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
   using PostMutation = hundun::flow::test::TimeControlPostReturnMutation;
   const int failure_rank = mpi.size() == 1 ? 0 : 1;
+  if (mpi.size() > 1) {
+    using AuthorityMutation =
+        hundun::flow::test::MaterialTransportAuthorityMutation;
+    for (const auto mutation :
+         {AuthorityMutation::omitted, AuthorityMutation::reordered,
+          AuthorityMutation::same_maximum_different_sequence}) {
+      hundun::linear::JacobiPreconditioner mismatch_mx(execution),
+          mismatch_my(execution), mismatch_mz(execution),
+          mismatch_pressure(execution);
+      auto mismatch_flow =
+          hundun::flow::FixedStepMaterialDensityFlow::create(
+              decomposition, topology, geometry, boundaries, mpi, execution,
+              halo, momentum_solver,
+              {&mismatch_mx, &mismatch_my, &mismatch_mz}, pressure_solver,
+              mismatch_pressure, registry, fields, material_spec);
+      if (mpi.rank() == 1)
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            mutate_transport_authority(mismatch_flow, mutation);
+      auto mismatch_state = make_state();
+      auto mismatch_controller =
+          hundun::flow::Bdf2RetryController::create(
+              time, hundun::config::DensityModel::material, topology,
+              geometry, mpi, mismatch_state);
+      const auto mismatch_report = mismatch_controller.advance(
+          mismatch_state, mismatch_flow, 0.0, {}, {});
+      HUNDUN_CHECK(
+          mismatch_report.disposition() ==
+          hundun::flow::TimeAdvanceDisposition::non_retryable_failure);
+      HUNDUN_CHECK(mismatch_report.attempt_count() == 0U);
+      HUNDUN_CHECK(mismatch_report.lowest_failing_rank() == 1);
+      HUNDUN_CHECK(TimeAccess::preflight_category(mismatch_report) == 6U);
+    }
+  }
+  {
+    TimeAccess::reset_faults();
+    hundun::flow::FlowLayerValues variable_initial;
+    const auto cell_count = topology.owned_cell_count();
+    variable_initial.density.resize(cell_count);
+    for (std::size_t cell_id = 0; cell_id < cell_count; ++cell_id)
+      variable_initial.density[cell_id] =
+          1.0 + 0.05 * static_cast<double>((cell_id % 7U) + 1U);
+    variable_initial.velocity.assign(cell_count * 3U, 0.0);
+    variable_initial.mechanical_pressure.assign(cell_count, 0.0);
+    variable_initial.face_velocity.assign(topology.local_face_count() * 3U,
+                                          0.0);
+    variable_initial.face_mass_flux.resize(topology.local_face_count());
+    for (std::size_t face_id = 0;
+         face_id < variable_initial.face_mass_flux.size(); ++face_id)
+      variable_initial.face_mass_flux[face_id] =
+          face_id % 2U == 0U ? 1.0e-12 : -1.0e-12;
+    variable_initial.transported_cell_fields = {
+        std::vector<double>(cell_count, 300000.0),
+        std::vector<double>(cell_count, 0.5),
+        std::vector<double>(cell_count, 0.25)};
+    auto variable_state = hundun::flow::FlowState::create(
+        registry, {local, topology.local_face_count()}, fields,
+        {0U, 0.0, 0.01, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    variable_state.seed_accepted_layers(variable_initial, variable_initial);
+    std::vector<double> flux_sum(cell_count);
+    std::vector<double> geometry_sum(cell_count);
+    for (hundun::mesh::LocalFaceId face_id = 0;
+         face_id < topology.local_face_count(); ++face_id) {
+      const auto area = geometry.face_area_m2(face_id);
+      const auto displacement = geometry.face_displacement_m(face_id);
+      const auto area_vector = geometry.face_area_vector_m2(
+          face_id, hundun::mesh::FaceSide::owner);
+      const auto factor =
+          area * area /
+          std::abs(area_vector.x * displacement.x +
+                   area_vector.y * displacement.y +
+                   area_vector.z * displacement.z);
+      const auto add = [&](std::size_t cell_id) {
+        flux_sum[cell_id] +=
+            std::abs(variable_initial.face_mass_flux[face_id]);
+        geometry_sum[cell_id] += factor;
+      };
+      const auto owner = topology.owner(face_id);
+      if (owner < cell_count)
+        add(owner);
+      const auto neighbour = topology.neighbour(face_id);
+      if (neighbour && *neighbour < cell_count)
+        add(*neighbour);
+    }
+    double expected[2]{};
+    for (std::size_t cell_id = 0; cell_id < cell_count; ++cell_id) {
+      const auto denominator =
+          2.0 * variable_initial.density[cell_id] *
+          geometry.cell_volume_m3(cell_id);
+      expected[0] =
+          std::max(expected[0], flux_sum[cell_id] / denominator);
+      expected[1] =
+          std::max(expected[1], 0.4 * geometry_sum[cell_id] / denominator);
+    }
+    const auto reductions_before = mpi.fp64_reduction_counters();
+    HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, expected, 2, MPI_DOUBLE, MPI_MAX,
+                               mpi.comm()) == MPI_SUCCESS);
+    auto variable_controller = hundun::flow::Bdf2RetryController::create(
+        time, hundun::config::DensityModel::material, topology, geometry, mpi,
+        variable_state);
+    const auto variable_report = variable_controller.advance(
+        variable_state, material_flow, 0.0, {}, {});
+    const auto reductions_after = mpi.fp64_reduction_counters();
+    HUNDUN_CHECK(variable_report.stability_metrics_available());
+    HUNDUN_CHECK(variable_report.convective_rate_per_s() == expected[0]);
+    HUNDUN_CHECK(variable_report.diffusive_rate_per_s() == expected[1]);
+    HUNDUN_CHECK(reductions_after.collective_calls >
+                 reductions_before.collective_calls);
+    HUNDUN_CHECK(reductions_after.reduced_scalars >=
+                 reductions_before.reduced_scalars + 2U);
+    const auto stability_reduction =
+        TimeAccess::stability_reduction_observation();
+    HUNDUN_CHECK(stability_reduction[0] == 1U);
+    HUNDUN_CHECK(stability_reduction[1] == 2U);
+  }
   {
     auto state = make_state();
     const hundun::config::FlowTimeConfig terminal_time{
@@ -880,18 +1539,27 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     auto terminal_controller = hundun::flow::Bdf2RetryController::create(
         terminal_time, hundun::config::DensityModel::material, topology,
         geometry, mpi, state);
+    const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state());
+        state, terminal_controller.state(), {}, 0U, 0U, 0U,
+        {terminal_reductions_before.collective_calls,
+         terminal_reductions_before.reduced_scalars,
+         terminal_reductions_before.logical_payload_bytes, 0U});
     TimeAccess::set_recoverable_failures(9U, 0);
     const auto terminal = terminal_controller.advance(
         state, material_flow, 0.0, {}, {});
     HUNDUN_CHECK(terminal.disposition() ==
                  hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
     HUNDUN_CHECK(terminal.attempt_count() == 9U);
+    const auto terminal_reductions_after = mpi.fp64_reduction_counters();
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
-        state, terminal_controller.state());
+        state, terminal_controller.state(), {}, 0U, 0U, 0U,
+        {terminal_reductions_after.collective_calls,
+         terminal_reductions_after.reduced_scalars,
+         terminal_reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
-        terminal_before, terminal_after));
+        terminal_before, terminal_after, terminal.attempt_count(),
+        {1440U, 81432U, 651456U, 0U}));
     TimeAccess::reset_faults();
 
     auto controller = hundun::flow::Bdf2RetryController::create(
@@ -905,7 +1573,7 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
                  hundun::flow::TimeAdvanceDisposition::committed);
     HUNDUN_CHECK(controller.state().accepted_step == 1U);
     HUNDUN_CHECK(state.metadata().step == 1U);
-    HUNDUN_CHECK(TimeAccess::post_commit_observation_count() == 0U);
+    require_zero_trusted_tail_events();
     HUNDUN_CHECK(std::holds_alternative<
                  hundun::flow::MaterialDensityStepAttemptReport>(
         report.final_attempt()));
@@ -914,7 +1582,7 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
             report.final_attempt());
     HUNDUN_CHECK(material_final.flux_provenance() ==
                  hundun::flow::MaterialFluxProvenance::final_corrected);
-    HUNDUN_CHECK(material_final.material_field_count() == 1U);
+    HUNDUN_CHECK(material_final.material_field_count() == 3U);
     TimeAccess::reset_faults();
   }
   {
@@ -952,20 +1620,29 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
     auto terminal_controller = hundun::flow::Bdf2RetryController::create(
         terminal_time, hundun::config::DensityModel::ideal_gas, topology,
         geometry, mpi, terminal_state);
+    const auto terminal_reductions_before = mpi.fp64_reduction_counters();
     const auto terminal_before = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state());
+        terminal_flow.closure_state(), 0U, 0U, 0U,
+        {terminal_reductions_before.collective_calls,
+         terminal_reductions_before.reduced_scalars,
+         terminal_reductions_before.logical_payload_bytes, 0U});
     TimeAccess::set_recoverable_failures(9U, 0);
     const auto terminal = terminal_controller.advance(
         terminal_state, terminal_flow, 0.0, {}, {});
     HUNDUN_CHECK(terminal.disposition() ==
                  hundun::flow::TimeAdvanceDisposition::retry_limit_reached);
     HUNDUN_CHECK(terminal.attempt_count() == 9U);
+    const auto terminal_reductions_after = mpi.fp64_reduction_counters();
     const auto terminal_after = hundun::test::capture_adaptive_flow_state(
         terminal_state, terminal_controller.state(),
-        terminal_flow.closure_state());
+        terminal_flow.closure_state(), 0U, 0U, 0U,
+        {terminal_reductions_after.collective_calls,
+         terminal_reductions_after.reduced_scalars,
+         terminal_reductions_after.logical_payload_bytes, 0U});
     HUNDUN_CHECK(hundun::test::adaptive_flow_state_failed_attempt_preserved(
-        terminal_before, terminal_after));
+        terminal_before, terminal_after, terminal.attempt_count(),
+        {9U, 9U, 72U, 0U}));
     TimeAccess::reset_faults();
   }
 
@@ -988,7 +1665,7 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
                  hundun::flow::TimeAdvanceDisposition::committed);
     HUNDUN_CHECK(controller.state().accepted_step == 1U);
     HUNDUN_CHECK(ideal_state.metadata().step == 1U);
-    HUNDUN_CHECK(TimeAccess::post_commit_observation_count() == 0U);
+    require_zero_trusted_tail_events();
     HUNDUN_CHECK(std::holds_alternative<
                  hundun::flow::IdealGasStepAttemptReport>(
         report.final_attempt()));

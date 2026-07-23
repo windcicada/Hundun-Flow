@@ -64,18 +64,20 @@ endif()
 foreach(archive IN ITEMS
     "${HUNDUN_TESTS_OFF_FLOW}"
     "${HUNDUN_TESTS_OFF_DIAGNOSTICS}")
-  if(archive AND EXISTS "${archive}")
-    execute_process(
-      COMMAND nm -C "${archive}"
-      RESULT_VARIABLE nm_result
-      OUTPUT_VARIABLE symbols
-      ERROR_VARIABLE nm_error)
-    if(NOT nm_result EQUAL 0)
-      message(FATAL_ERROR "nm failed for ${archive}: ${nm_error}")
-    endif()
-    if(symbols MATCHES
-       "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|diagnostic_fault|set_raw_fault|set_fault|set_recoverable_failure_reason|wire_mutation|set_local_mutation|set_outcome")
-      message(FATAL_ERROR "Task22 test-only symbol leaked into ${archive}")
-    endif()
+  if(NOT archive OR NOT EXISTS "${archive}")
+    message(FATAL_ERROR
+      "required Task22 tests-off archive is missing: ${archive}")
+  endif()
+  execute_process(
+    COMMAND nm -C "${archive}"
+    RESULT_VARIABLE nm_result
+    OUTPUT_VARIABLE symbols
+    ERROR_VARIABLE nm_error)
+  if(NOT nm_result EQUAL 0)
+    message(FATAL_ERROR "nm failed for ${archive}: ${nm_error}")
+  endif()
+  if(symbols MATCHES
+     "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|diagnostic_fault|set_raw_fault|set_fault|set_recoverable_failure_reason|wire_mutation|set_local_mutation|set_outcome")
+    message(FATAL_ERROR "Task22 test-only symbol leaked into ${archive}")
   endif()
 endforeach()

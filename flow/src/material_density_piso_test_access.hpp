@@ -111,6 +111,12 @@ enum class MaterialTerminalModeForTest : std::uint8_t {
   returned_reliable
 };
 
+enum class MaterialTransportAuthorityMutation : std::uint8_t {
+  omitted,
+  reordered,
+  same_maximum_different_sequence
+};
+
 enum class MaterialTerminalPointForTest : std::uint8_t {
   predictor_stage,
   momentum_x,
@@ -249,6 +255,9 @@ public:
       const FixedStepMaterialDensityFlow &) noexcept;
   static void enable_vortex_source(FixedStepMaterialDensityFlow &,
                                    bool) noexcept;
+  static void mutate_transport_authority(
+      FixedStepMaterialDensityFlow &,
+      MaterialTransportAuthorityMutation) noexcept;
   static double material_face_value(
       double predictor_velocity_interpolation,
       double predictor_momentum_interpolation, double face_density,
