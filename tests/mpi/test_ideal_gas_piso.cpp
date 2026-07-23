@@ -536,7 +536,9 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
             closure, state, hundun::flow::IdealGasClosureStage::predictor);
     HUNDUN_CHECK(publication.disposition() ==
                  hundun::flow::IdealGasClosureDisposition::closed);
-    bool interior_changed = false;
+    const double candidate_pressure = publication.candidate_pressure_pa();
+    bool rho_interior_changed = false;
+    bool rho_h_interior_changed = false;
     for (int k = 0; k < local.z; ++k)
       for (int j = 0; j < local.y; ++j)
         for (int i = 0; i < local.x; ++i) {
@@ -546,16 +548,35 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                static_cast<std::size_t>(j)) *
                   static_cast<std::size_t>(local.x) +
               static_cast<std::size_t>(i);
-          interior_changed =
-              interior_changed ||
-              std::memcmp(&rho(i, j, k, 0),
-                          &rho_before.density[offset],
-                          sizeof(double)) != 0;
-          HUNDUN_CHECK(std::memcmp(&pi(i, j, k, 0),
-                                   &rho_before.mechanical_pressure[offset],
-                                   sizeof(double)) == 0);
+          const double rho_tilde = rho_before.density[offset];
+          const double q_tilde =
+              rho_before.transported_cell_fields.front()[offset];
+          const double enthalpy = q_tilde / rho_tilde;
+          const double temperature = enthalpy / cp;
+          const double expected_rho = static_cast<double>(
+              static_cast<long double>(candidate_pressure) /
+              (static_cast<long double>(gas_constant) * temperature));
+          const double expected_rho_h = static_cast<double>(
+              static_cast<long double>(expected_rho) * enthalpy);
+          HUNDUN_CHECK(hundun::test::fp64_bits(rho(i, j, k, 0)) ==
+                       hundun::test::fp64_bits(expected_rho));
+          HUNDUN_CHECK(hundun::test::fp64_bits(q(i, j, k, 0)) ==
+                       hundun::test::fp64_bits(expected_rho_h));
+          rho_interior_changed =
+              rho_interior_changed ||
+              hundun::test::fp64_bits(rho(i, j, k, 0)) !=
+                  hundun::test::fp64_bits(rho_tilde);
+          rho_h_interior_changed =
+              rho_h_interior_changed ||
+              hundun::test::fp64_bits(q(i, j, k, 0)) !=
+                  hundun::test::fp64_bits(q_tilde);
+          HUNDUN_CHECK(
+              hundun::test::fp64_bits(pi(i, j, k, 0)) ==
+              hundun::test::fp64_bits(
+                  rho_before.mechanical_pressure[offset]));
         }
-    HUNDUN_CHECK(interior_changed);
+    HUNDUN_CHECK(rho_interior_changed);
+    HUNDUN_CHECK(rho_h_interior_changed);
     for (int k = -2; k < local.z + 2; ++k)
       for (int j = -2; j < local.y + 2; ++j)
         for (int i = -2; i < local.x + 2; ++i) {
@@ -563,9 +584,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
                                 j < local.y && k >= 0 && k < local.z;
           if (interior)
             continue;
-          HUNDUN_CHECK(rho(i, j, k, 0) == -101.0);
-          HUNDUN_CHECK(q(i, j, k, 0) == -202.0);
-          HUNDUN_CHECK(pi(i, j, k, 0) == -303.0);
+          HUNDUN_CHECK(hundun::test::fp64_bits(rho(i, j, k, 0)) ==
+                       hundun::test::fp64_bits(-101.0));
+          HUNDUN_CHECK(hundun::test::fp64_bits(q(i, j, k, 0)) ==
+                       hundun::test::fp64_bits(-202.0));
+          HUNDUN_CHECK(hundun::test::fp64_bits(pi(i, j, k, 0)) ==
+                       hundun::test::fp64_bits(-303.0));
         }
     hundun::flow::test::IdealGasClosureTestAccess::rollback(closure);
   }
