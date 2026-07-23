@@ -78,7 +78,7 @@ foreach(archive IN ITEMS
     message(FATAL_ERROR "nm failed for ${archive}: ${nm_error}")
   endif()
   if(symbols MATCHES
-     "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|PreconditionerTestAccess|jacobi_storage|diagnostic_fault|set_raw_fault|raw_fault_observation|set_fault|set_recoverable_failure_reason|wire_mutation|set_local_mutation|set_outcome|set_attempt_observer|exercise_trusted_tail_attempt_observer|facade_cache_snapshot|delegated_material_cache_snapshot|material_facade_cache_values_for_ideal")
+     "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|PreconditionerTestAccess|jacobi_storage|arm_fail_next_cold_update_before_publication|reset_cold_update_fault|diagnostic_fault|set_raw_fault|raw_fault_observation|set_fault|set_recoverable_failure_reason|wire_mutation|set_local_mutation|set_outcome|set_attempt_observer|exercise_trusted_tail_attempt_observer|facade_cache_snapshot|delegated_material_cache_snapshot|material_facade_cache_values_for_ideal")
     message(FATAL_ERROR "Task22 test-only symbol leaked into ${archive}")
   endif()
 endforeach()

@@ -303,6 +303,12 @@ void require_jacobi_mutation_sensitive(const JacobiCacheAuthority &authority) {
   HUNDUN_CHECK(jacobi_authority_exact(authority, authority));
   {
     auto changed = authority;
+    changed.storage.front().cache_valid =
+        !changed.storage.front().cache_valid;
+    HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
+  }
+  {
+    auto changed = authority;
     ++changed.storage.front().allocation_identities.front();
     HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
   }
@@ -318,13 +324,45 @@ void require_jacobi_mutation_sensitive(const JacobiCacheAuthority &authority) {
   }
   {
     auto changed = authority;
-    HUNDUN_CHECK(!changed.storage.front().cached_inverse.empty());
-    changed.storage.front().cached_inverse.front() =
-        std::nextafter(changed.storage.front().cached_inverse.front(),
-                       std::numeric_limits<double>::infinity());
+    if (changed.storage.front().cached_inverse.empty()) {
+      changed.storage.front().cached_inverse.push_back(1.0);
+    } else {
+      changed.storage.front().cached_inverse.front() =
+          std::nextafter(changed.storage.front().cached_inverse.front(),
+                         std::numeric_limits<double>::infinity());
+    }
     HUNDUN_CHECK(!jacobi_authority_exact(authority, changed));
   }
 }
+
+void require_cold_jacobi_unpublished(
+    const JacobiCacheAuthority &authority) {
+  for (const auto &storage : authority.storage) {
+    HUNDUN_CHECK(!storage.cache_valid);
+    HUNDUN_CHECK(storage.revision == 0U);
+    HUNDUN_CHECK(storage.allocation_identities[0] == 0U);
+    HUNDUN_CHECK(storage.allocation_identities[1] == 0U);
+    HUNDUN_CHECK(storage.byte_sizes[0] == 0U);
+    HUNDUN_CHECK(storage.byte_sizes[1] == 0U);
+    HUNDUN_CHECK(storage.cached_inverse.empty());
+  }
+}
+
+class JacobiColdFaultReset final {
+ public:
+  JacobiColdFaultReset() noexcept {
+    hundun::linear::test::PreconditionerTestAccess::
+        reset_cold_update_fault();
+  }
+
+  ~JacobiColdFaultReset() noexcept {
+    hundun::linear::test::PreconditionerTestAccess::
+        reset_cold_update_fault();
+  }
+
+  JacobiColdFaultReset(const JacobiColdFaultReset &) = delete;
+  JacobiColdFaultReset &operator=(const JacobiColdFaultReset &) = delete;
+};
 
 struct AttemptBoundaryEvidence final {
   hundun::flow::Bdf2RetryController *controller{};
@@ -573,31 +611,51 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
     ConstantAccess::reset();
     const auto cold_cache_before =
         ConstantAccess::facade_cache_snapshot(cold_facade);
-    ConstantAccess::set_attempt_failure_stage(
-        hundun::flow::test::AttemptFailureStage::after_begin);
+    const auto cold_jacobi_before =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    require_cold_jacobi_unpublished(cold_jacobi_before);
+    require_jacobi_mutation_sensitive(cold_jacobi_before);
+    JacobiColdFaultReset cold_fault_reset;
+    hundun::linear::test::PreconditionerTestAccess::
+        arm_fail_next_cold_update_before_publication();
     const auto cold_report = cold_facade.attempt(
         cold_state, 1.0, 0.0,
         independent_stencil(
             hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
         {}, {});
-    ConstantAccess::reset();
+    hundun::linear::test::PreconditionerTestAccess::
+        reset_cold_update_fault();
     HUNDUN_CHECK(cold_report.disposition ==
                  hundun::flow::StepAttemptDisposition::recoverable_failure);
     HUNDUN_CHECK(cold_report.reason ==
-                 hundun::flow::StepFailureReason::non_finite_trial);
+                 hundun::flow::StepFailureReason::momentum_linear_solve);
+    HUNDUN_CHECK(cold_report.lowest_failing_rank == 0);
     const auto cold_cache = ConstantAccess::facade_cache_snapshot(cold_facade);
     const auto cold_jacobi =
         capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
     HUNDUN_CHECK(cold_cache.operator_count == 3U);
-    HUNDUN_CHECK(facade_cache_exact(cold_cache_before, cold_cache));
-    for (const auto &storage : cold_jacobi.storage) {
-      HUNDUN_CHECK(!storage.cache_valid);
-      HUNDUN_CHECK(storage.allocation_identities[0] == 0U);
-      HUNDUN_CHECK(storage.allocation_identities[1] == 0U);
-      HUNDUN_CHECK(storage.byte_sizes[0] == 0U);
-      HUNDUN_CHECK(storage.byte_sizes[1] == 0U);
-      HUNDUN_CHECK(storage.cached_inverse.empty());
+    HUNDUN_CHECK(cold_cache.operators[0].revision >
+                 cold_cache_before.operators[0].revision);
+    require_cold_jacobi_unpublished(cold_jacobi);
+    require_jacobi_mutation_sensitive(cold_jacobi);
+    const auto cold_retry = cold_facade.attempt(
+        cold_state, 1.0, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    HUNDUN_CHECK(cold_retry.disposition ==
+                 hundun::flow::StepAttemptDisposition::committed);
+    const auto cold_cache_published =
+        ConstantAccess::facade_cache_snapshot(cold_facade);
+    const auto cold_jacobi_published =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(cold_cache_published.operators[component].revision >
+                   cold_cache.operators[component].revision);
     }
+    require_jacobi_operator_coherence(cold_jacobi_published,
+                                      cold_cache_published);
+    require_jacobi_mutation_sensitive(cold_jacobi_published);
   }
   const int mismatch_rank = mpi.size() == 1 ? 0 : 1;
   const auto expect_factory_failure =
@@ -2226,6 +2284,138 @@ void run_acceptance(const hundun::runtime::MpiContext &mpi) {
   using TimeAccess = hundun::flow::test::AdaptiveTimeControlTestAccess;
   using PostMutation = hundun::flow::test::TimeControlPostReturnMutation;
   const int failure_rank = mpi.size() == 1 ? 0 : 1;
+  {
+    using MaterialAccess =
+        hundun::flow::test::MaterialDensityPisoTestAccess;
+    auto cold_state = make_state();
+    hundun::linear::JacobiPreconditioner cold_mx(execution),
+        cold_my(execution), cold_mz(execution), cold_pressure(execution);
+    auto cold_flow = hundun::flow::FixedStepMaterialDensityFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&cold_mx, &cold_my, &cold_mz}, pressure_solver,
+        cold_pressure, registry, fields, material_spec);
+    const auto cold_cache_before =
+        MaterialAccess::facade_cache_snapshot(cold_flow);
+    const auto cold_jacobi_before =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    require_cold_jacobi_unpublished(cold_jacobi_before);
+    require_jacobi_mutation_sensitive(cold_jacobi_before);
+    JacobiColdFaultReset cold_fault_reset;
+    hundun::linear::test::PreconditionerTestAccess::
+        arm_fail_next_cold_update_before_publication();
+    const auto cold_report = cold_flow.attempt(
+        cold_state, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    hundun::linear::test::PreconditionerTestAccess::
+        reset_cold_update_fault();
+    HUNDUN_CHECK(
+        cold_report.flow().disposition ==
+        hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(cold_report.flow().reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(cold_report.flow().lowest_failing_rank == 0);
+    const auto cold_cache = MaterialAccess::facade_cache_snapshot(cold_flow);
+    const auto cold_jacobi =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    HUNDUN_CHECK(cold_cache.operators[0].revision >
+                 cold_cache_before.operators[0].revision);
+    require_cold_jacobi_unpublished(cold_jacobi);
+    require_jacobi_mutation_sensitive(cold_jacobi);
+
+    const auto clean_report = cold_flow.attempt(
+        cold_state, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    HUNDUN_CHECK(clean_report.flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::committed);
+    const auto published_cache =
+        MaterialAccess::facade_cache_snapshot(cold_flow);
+    const auto published_jacobi =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(published_cache.operators[component].revision >
+                   cold_cache.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(published_jacobi, published_cache);
+    require_jacobi_mutation_sensitive(published_jacobi);
+  }
+  {
+    using IdealAccess =
+        hundun::flow::test::IdealGasClosureTestAccess;
+    auto cold_state = make_state();
+    hundun::linear::JacobiPreconditioner cold_mx(execution),
+        cold_my(execution), cold_mz(execution), cold_pressure(execution);
+    auto cold_closure = hundun::flow::IdealGasClosure::create(
+        topology, geometry, boundaries, mpi, registry, fields, cold_state,
+        {rho_h, 1000.0, 287.0, 86100.0});
+    auto cold_flow = hundun::flow::FixedStepIdealGasFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&cold_mx, &cold_my, &cold_mz}, pressure_solver,
+        cold_pressure, registry, fields, material_spec,
+        std::move(cold_closure));
+    const auto cold_cache_before =
+        IdealAccess::facade_cache_snapshot(cold_flow);
+    const auto cold_owned_before =
+        IdealAccess::delegated_material_cache_snapshot(cold_flow);
+    HUNDUN_CHECK(
+        facade_cache_delegation_exact(cold_cache_before, cold_owned_before));
+    const auto cold_jacobi_before =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    require_cold_jacobi_unpublished(cold_jacobi_before);
+    require_jacobi_mutation_sensitive(cold_jacobi_before);
+    JacobiColdFaultReset cold_fault_reset;
+    hundun::linear::test::PreconditionerTestAccess::
+        arm_fail_next_cold_update_before_publication();
+    const auto cold_report = cold_flow.attempt(
+        cold_state, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    hundun::linear::test::PreconditionerTestAccess::
+        reset_cold_update_fault();
+    const auto &cold_flow_report = cold_report.flow().flow();
+    HUNDUN_CHECK(
+        cold_flow_report.disposition ==
+        hundun::flow::StepAttemptDisposition::non_retryable_failure);
+    HUNDUN_CHECK(cold_flow_report.reason ==
+                 hundun::flow::StepFailureReason::invalid_input);
+    HUNDUN_CHECK(cold_flow_report.lowest_failing_rank == 0);
+    const auto cold_cache = IdealAccess::facade_cache_snapshot(cold_flow);
+    const auto cold_owned =
+        IdealAccess::delegated_material_cache_snapshot(cold_flow);
+    HUNDUN_CHECK(facade_cache_delegation_exact(cold_cache, cold_owned));
+    HUNDUN_CHECK(cold_cache.operators[0].revision >
+                 cold_cache_before.operators[0].revision);
+    const auto cold_jacobi =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    require_cold_jacobi_unpublished(cold_jacobi);
+    require_jacobi_mutation_sensitive(cold_jacobi);
+
+    const auto clean_report = cold_flow.attempt(
+        cold_state, 0.0,
+        independent_stencil(
+            hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+        {}, {});
+    HUNDUN_CHECK(clean_report.flow().flow().disposition ==
+                 hundun::flow::StepAttemptDisposition::committed);
+    const auto published_cache =
+        IdealAccess::facade_cache_snapshot(cold_flow);
+    const auto published_owned =
+        IdealAccess::delegated_material_cache_snapshot(cold_flow);
+    HUNDUN_CHECK(
+        facade_cache_delegation_exact(published_cache, published_owned));
+    const auto published_jacobi =
+        capture_jacobi_cache({&cold_mx, &cold_my, &cold_mz});
+    for (std::size_t component = 0; component < 3U; ++component) {
+      HUNDUN_CHECK(published_cache.operators[component].revision >
+                   cold_cache.operators[component].revision);
+    }
+    require_jacobi_operator_coherence(published_jacobi, published_cache);
+    require_jacobi_mutation_sensitive(published_jacobi);
+  }
   if (mpi.size() > 1) {
     using AuthorityMutation =
         hundun::flow::test::MaterialTransportAuthorityMutation;

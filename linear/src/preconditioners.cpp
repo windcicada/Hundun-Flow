@@ -4,6 +4,8 @@
 
 #ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
 #include "preconditioners_test_access.hpp"
+
+#include <atomic>
 #endif
 
 #include "hundun/runtime/error.hpp"
@@ -19,6 +21,10 @@
 
 namespace hundun::linear {
 namespace {
+
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+std::atomic<bool> fail_next_cold_update_before_publication{false};
+#endif
 
 struct CacheCandidate final {
   const LinearOperator* linear_operator{};
@@ -363,6 +369,13 @@ void JacobiPreconditioner::update(
   replacement->staging_inverse_diagonal.emplace(*state_->context, byte_size);
   fill_inverse_diagonal(linear_operator, *replacement->inverse_diagonal,
                         count);
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+  if (fail_next_cold_update_before_publication.exchange(
+          false, std::memory_order_relaxed)) {
+    throw runtime::Error(
+        "injected Jacobi cold update failure before publication");
+  }
+#endif
   replacement->cache_valid = true;
   state_.swap(replacement);
 }
@@ -433,6 +446,17 @@ test::JacobiStorageSnapshot test::PreconditionerTestAccess::jacobi_storage(
         state.staging_inverse_diagonal->byte_size();
   }
   return snapshot;
+}
+
+void test::PreconditionerTestAccess::
+    arm_fail_next_cold_update_before_publication() noexcept {
+  fail_next_cold_update_before_publication.store(
+      true, std::memory_order_relaxed);
+}
+
+void test::PreconditionerTestAccess::reset_cold_update_fault() noexcept {
+  fail_next_cold_update_before_publication.store(
+      false, std::memory_order_relaxed);
 }
 #endif
 

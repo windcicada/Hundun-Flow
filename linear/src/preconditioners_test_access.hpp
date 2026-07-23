@@ -23,6 +23,8 @@ class PreconditionerTestAccess final {
  public:
   static JacobiStorageSnapshot
   jacobi_storage(const JacobiPreconditioner& preconditioner);
+  static void arm_fail_next_cold_update_before_publication() noexcept;
+  static void reset_cold_update_fault() noexcept;
 };
 
 }  // namespace hundun::linear::test
