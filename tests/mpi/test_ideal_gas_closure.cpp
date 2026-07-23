@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -139,6 +140,60 @@ void run(const hundun::runtime::MpiContext &mpi) {
   initial.transported_cell_fields = {std::vector<double>(
       topology.owned_cell_count(), density * cp * temperature)};
   state.seed_accepted_layers(initial, initial);
+
+  const auto expect_create_rejected = [&](hundun::flow::IdealGasClosureSpec spec) {
+    bool rejected = false;
+    try {
+      static_cast<void>(hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields, state, spec));
+    } catch (const hundun::runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+  };
+  for (const int target : {0, mpi.size() - 1}) {
+    auto invalid_cp = hundun::flow::IdealGasClosureSpec{
+        rho_h, cp, gas_constant, pressure};
+    if (mpi.rank() == target)
+      invalid_cp.cp_J_per_kg_K = 0.0;
+    expect_create_rejected(invalid_cp);
+
+    auto invalid_r = hundun::flow::IdealGasClosureSpec{
+        rho_h, cp, gas_constant, pressure};
+    if (mpi.rank() == target)
+      invalid_r.gas_constant_J_per_kg_K =
+          std::numeric_limits<double>::quiet_NaN();
+    expect_create_rejected(invalid_r);
+
+    auto invalid_pressure = hundun::flow::IdealGasClosureSpec{
+        rho_h, cp, gas_constant, pressure};
+    if (mpi.rank() == target)
+      invalid_pressure.configured_thermodynamic_pressure_pa =
+          std::numeric_limits<double>::infinity();
+    expect_create_rejected(invalid_pressure);
+
+    const std::size_t face_count =
+        topology.local_face_count() + (mpi.rank() == target ? 1U : 0U);
+    auto wrong_layout_state = hundun::flow::FlowState::create(
+        registry, {decomposition.local_extent(), face_count}, fields,
+        {0U, 0.0, 1.0e-3, 0.0,
+         hundun::flow::MomentumTimeOrder::backward_euler});
+    auto wrong_initial = initial;
+    wrong_initial.face_velocity.resize(face_count * 3U, 0.0);
+    wrong_initial.face_mass_flux.resize(face_count, 0.0);
+    wrong_layout_state.seed_accepted_layers(wrong_initial, wrong_initial);
+    bool layout_rejected = false;
+    try {
+      static_cast<void>(hundun::flow::IdealGasClosure::create(
+          topology, geometry, boundaries, mpi, registry, fields,
+          wrong_layout_state, {rho_h, cp, gas_constant, pressure}));
+    } catch (const hundun::runtime::Error &) {
+      layout_rejected = true;
+    }
+    HUNDUN_CHECK(layout_rejected);
+    if (mpi.size() == 1)
+      break;
+  }
 
   const auto before = mpi.fp64_reduction_counters();
   auto closure = hundun::flow::IdealGasClosure::create(

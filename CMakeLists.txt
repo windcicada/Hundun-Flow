@@ -867,6 +867,12 @@ if(HUNDUN_BUILD_TESTS)
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
   set(task20_vortex_reference
       "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")
+  set(task21_closed_reference
+      "${CMAKE_CURRENT_BINARY_DIR}/task21-ideal-gas-closed-reference.v1.bin")
+  set(task21_open_reference
+      "${CMAKE_CURRENT_BINARY_DIR}/task21-ideal-gas-open-reference.v1.bin")
+  set(task21_diagnostic_reference
+      "${CMAKE_CURRENT_BINARY_DIR}/task21-ideal-gas-diagnostic-reference.v1.bin")
   foreach(ranks IN ITEMS 1 2 4)
     foreach(target IN ITEMS material_density_piso
                             variable_density_vortex
@@ -898,14 +904,60 @@ if(HUNDUN_BUILD_TESTS)
         set(task21_case_argument --closed-heating)
       endif()
       set(task21_full "test_ideal_gas_${case_name}_full_${ranks}_rank")
+      if(case_name STREQUAL "open_plug")
+        set(task21_reference "${task21_open_reference}")
+        set(task21_reference_fixture task21_ideal_gas_open_reference)
+      else()
+        set(task21_reference "${task21_closed_reference}")
+        set(task21_reference_fixture task21_ideal_gas_closed_reference)
+      endif()
+      if(ranks EQUAL 1)
+        set(task21_reference_arguments
+            --reference-write "${task21_reference}")
+      else()
+        set(task21_reference_arguments
+            --reference-read "${task21_reference}")
+      endif()
       add_test(NAME "${task21_full}"
         COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
                 ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ideal_gas_piso>"
-                "${task21_case_argument}" ${MPIEXEC_POSTFLAGS})
+                "${task21_case_argument}" ${task21_reference_arguments}
+                ${MPIEXEC_POSTFLAGS})
       set_tests_properties("${task21_full}" PROPERTIES
         LABELS "mpi;numerical;acceptance;task21"
         TIMEOUT 1800 PROCESSORS "${ranks}")
+      if(ranks EQUAL 1)
+        set_tests_properties("${task21_full}" PROPERTIES
+          FIXTURES_SETUP "${task21_reference_fixture}")
+      else()
+        set_tests_properties("${task21_full}" PROPERTIES
+          FIXTURES_REQUIRED "${task21_reference_fixture}")
+      endif()
     endforeach()
+    set(task21_diagnostic_decomposition
+        "test_ideal_gas_diagnostics_decomposition_${ranks}_rank")
+    if(ranks EQUAL 1)
+      set(task21_diagnostic_reference_arguments
+          --reference-write "${task21_diagnostic_reference}")
+    else()
+      set(task21_diagnostic_reference_arguments
+          --reference-read "${task21_diagnostic_reference}")
+    endif()
+    add_test(NAME "${task21_diagnostic_decomposition}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ideal_gas_diagnostics>"
+              ${task21_diagnostic_reference_arguments}
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task21_diagnostic_decomposition}" PROPERTIES
+      LABELS "mpi;numerical;acceptance;task21"
+      TIMEOUT 300 PROCESSORS "${ranks}")
+    if(ranks EQUAL 1)
+      set_tests_properties("${task21_diagnostic_decomposition}" PROPERTIES
+        FIXTURES_SETUP task21_ideal_gas_diagnostic_reference)
+    else()
+      set_tests_properties("${task21_diagnostic_decomposition}" PROPERTIES
+        FIXTURES_REQUIRED task21_ideal_gas_diagnostic_reference)
+    endif()
     set(task20_vortex_full "test_variable_density_vortex_full_${ranks}_rank")
     if(ranks EQUAL 1)
       set(task20_vortex_reference_arguments

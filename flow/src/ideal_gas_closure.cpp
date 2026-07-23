@@ -3,6 +3,7 @@
 #include "hundun/flow/ideal_gas_closure.hpp"
 
 #include "hundun/boundary/basic_boundary.hpp"
+#include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -211,6 +212,14 @@ IdealGasClosureFailureReason first_state_failure(double rho, double q,
                                                  double cp) noexcept {
   if (!std::isfinite(q))
     return IdealGasClosureFailureReason::non_finite_enthalpy;
+  if (!std::isfinite(rho))
+    return IdealGasClosureFailureReason::non_finite_density;
+  if (!(rho > 0.0))
+    return IdealGasClosureFailureReason::non_positive_density;
+  // q and rho are now finite and rho is strictly positive.  Classifying q
+  // before dividing makes the invalid candidate path free of FP exceptions.
+  if (!(q > 0.0))
+    return IdealGasClosureFailureReason::non_positive_enthalpy;
   const double h = q / rho;
   if (!std::isfinite(h))
     return IdealGasClosureFailureReason::non_finite_enthalpy;
@@ -221,11 +230,13 @@ IdealGasClosureFailureReason first_state_failure(double rho, double q,
     return IdealGasClosureFailureReason::non_finite_temperature;
   if (!(temperature > 0.0))
     return IdealGasClosureFailureReason::non_positive_temperature;
-  if (!std::isfinite(rho))
-    return IdealGasClosureFailureReason::non_finite_density;
-  if (!(rho > 0.0))
-    return IdealGasClosureFailureReason::non_positive_density;
   return IdealGasClosureFailureReason::none;
+}
+
+bool same_layout(runtime::FieldLayoutSet left,
+                 runtime::FieldLayoutSet right) noexcept {
+  return same(left.cell_interior_extent, right.cell_interior_extent) &&
+         left.face_count == right.face_count;
 }
 
 IdealGasClosureFailureReason
@@ -259,6 +270,21 @@ struct IdealGasClosure::Impl final {
   bool latest_available{};
   std::uint64_t attempt_identity{};
   std::uint64_t source_generation{1U};
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  int post_store_fault_rank{-1};
+  bool post_store_fault_enthalpy{};
+  int candidate_precedence_fault_rank{-1};
+  IdealGasClosureStage stage_failure_stage{IdealGasClosureStage::none};
+  IdealGasClosureFailureReason stage_failure_reason{
+      IdealGasClosureFailureReason::none};
+  int stage_failure_rank{-1};
+  std::uint8_t outer_failure_point{std::numeric_limits<std::uint8_t>::max()};
+  int outer_failure_rank{-1};
+  int state_prepare_fault_rank{-1};
+  int closure_prepare_fault_rank{-1};
+  int post_store_mpi_fault_rank{-1};
+  bool outlet_backflow_fault{};
+#endif
 };
 
 IdealGasClosureDisposition IdealGasClosureReport::disposition() const noexcept {
@@ -461,7 +487,11 @@ IdealGasClosure IdealGasClosure::create(
   const auto mode = boundaries.open_domain()
                         ? IdealGasPressureMode::open_fixed
                         : IdealGasPressureMode::closed_dynamic;
-  const auto local_extent = state.layer(FlowLayer::committed).interior_extent();
+  const auto committed_layout =
+      state.layer(FlowLayer::committed).layout_set();
+  const auto history_layout = state.layer(FlowLayer::history).layout_set();
+  const auto trial_layout = state.layer(FlowLayer::trial).layout_set();
+  const auto local_extent = committed_layout.cell_interior_extent;
   const auto global = topology.global_extent();
   const auto owned = topology.owned_global_box();
   const PreflightWire wire{static_cast<std::uint64_t>(mode),
@@ -480,7 +510,7 @@ IdealGasClosure IdealGasClosure::create(
                             static_cast<std::uint64_t>(local_extent.z)},
                            {owned.begin.x, owned.begin.y, owned.begin.z},
                            {owned.end.x, owned.end.y, owned.end.z},
-                           topology.local_face_count()};
+                           committed_layout.face_count};
   agree_preflight(mpi, wire,
                   "MPI_Allgather(ideal-gas closure create preflight)");
 
@@ -498,6 +528,9 @@ IdealGasClosure IdealGasClosure::create(
       std::isfinite(spec.gas_constant_J_per_kg_K) &&
       spec.configured_thermodynamic_pressure_pa > 0.0 &&
       std::isfinite(spec.configured_thermodynamic_pressure_pa) &&
+      same_layout(committed_layout, history_layout) &&
+      same_layout(committed_layout, trial_layout) &&
+      committed_layout.face_count == topology.local_face_count() &&
       same(local_extent, {topology.owned_global_box().end.x -
                               topology.owned_global_box().begin.x,
                           topology.owned_global_box().end.y -
@@ -670,7 +703,15 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
     throw runtime::Error("ideal-gas closure call overlaps another call");
   if (!state.attempt_active() || identity == 0U)
     throw runtime::Error("ideal-gas closure attempt is invalid");
-  const auto local_extent = state.layer(FlowLayer::committed).interior_extent();
+  const auto committed_layout =
+      state.layer(FlowLayer::committed).layout_set();
+  const auto history_layout = state.layer(FlowLayer::history).layout_set();
+  const auto trial_layout = state.layer(FlowLayer::trial).layout_set();
+  if (!same_layout(committed_layout, history_layout) ||
+      !same_layout(committed_layout, trial_layout) ||
+      committed_layout.face_count != impl_->topology->local_face_count())
+    throw runtime::Error("ideal-gas closure state layout is invalid");
+  const auto local_extent = committed_layout.cell_interior_extent;
   const auto global = impl_->topology->global_extent();
   const auto owned = impl_->topology->owned_global_box();
   const PreflightWire wire{
@@ -690,7 +731,7 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
        static_cast<std::uint64_t>(local_extent.z)},
       {owned.begin.x, owned.begin.y, owned.begin.z},
       {owned.end.x, owned.end.y, owned.end.z},
-      impl_->topology->local_face_count()};
+      committed_layout.face_count};
   agree_preflight(*impl_->mpi, wire,
                   "MPI_Allgather(ideal-gas closure attempt preflight)");
   impl_->active = true;
@@ -729,6 +770,22 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
       temperature(count), rho_eos(count), q_eos(count);
   CompensatedSum denominator;
   IdealGasClosureFailureReason local = IdealGasClosureFailureReason::none;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (stage == IdealGasClosureStage::predictor &&
+      impl_->candidate_precedence_fault_rank == impl_->mpi->rank()) {
+    {
+      auto rho_fault = trial.acquire_write<double>(
+          access, kStatePhase, kStateActor, impl_->fields.density);
+      auto q_fault = trial.acquire_write<double>(
+          access, kStatePhase, kStateActor, impl_->spec.enthalpy_density);
+      rho_fault(0, 0, 0, 0) = 0.0;
+      q_fault(0, 0, 0, 0) = 1.0;
+      rho_fault(1, 0, 0, 0) = 1.0;
+      q_fault(1, 0, 0, 0) = std::numeric_limits<double>::quiet_NaN();
+    }
+    impl_->candidate_precedence_fault_rank = -1;
+  }
+#endif
   {
     const auto rho_read = trial.acquire_read<double>(
         access, kStatePhase, kStateActor, impl_->fields.density);
@@ -800,6 +857,15 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
       local = lower_failure(local, cell_failure);
     }
   }
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (stage == impl_->stage_failure_stage) {
+    if (impl_->stage_failure_rank == impl_->mpi->rank())
+      local = lower_failure(local, impl_->stage_failure_reason);
+    impl_->stage_failure_stage = IdealGasClosureStage::none;
+    impl_->stage_failure_reason = IdealGasClosureFailureReason::none;
+    impl_->stage_failure_rank = -1;
+  }
+#endif
   std::array<CompensatedSum, 10> local_sums{};
   std::array<double, 8> maxima{};
   std::fill_n(maxima.begin(), 3U, -std::numeric_limits<double>::infinity());
@@ -929,29 +995,72 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
     }
   }
 
-  auto rho_write = trial.acquire_write<double>(access, kStatePhase, kStateActor,
-                                               impl_->fields.density);
-  auto q_write = trial.acquire_write<double>(access, kStatePhase, kStateActor,
-                                             impl_->spec.enthalpy_density);
-  for_each_cell(extent, [&](int i, int j, int k, std::size_t offset) {
-    rho_write(i, j, k, 0) = rho_eos[offset];
-    q_write(i, j, k, 0) = q_eos[offset];
-  });
+  {
+    auto rho_write = trial.acquire_write<double>(
+        access, kStatePhase, kStateActor, impl_->fields.density);
+    auto q_write = trial.acquire_write<double>(
+        access, kStatePhase, kStateActor, impl_->spec.enthalpy_density);
+    for_each_cell(extent, [&](int i, int j, int k, std::size_t offset) {
+      rho_write(i, j, k, 0) = rho_eos[offset];
+      q_write(i, j, k, 0) = q_eos[offset];
+    });
+  }
   if (stage == IdealGasClosureStage::final) {
     report.final_metrics_available_ = true;
-    std::array<double, 2> independent{};
-    for (std::size_t cell = 0; cell < count; ++cell) {
-      const double stored_h = q_eos[cell] / rho_eos[cell];
-      const double stored_t = stored_h / impl_->spec.cp_J_per_kg_K;
-      independent[0] = std::max(
-          independent[0],
-          relative_error(stored_h, impl_->spec.cp_J_per_kg_K * stored_t));
-      independent[1] =
-          std::max(independent[1],
-                   relative_product_error(rho_eos[cell],
-                                          impl_->spec.gas_constant_J_per_kg_K,
-                                          stored_t, pressure));
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (impl_->post_store_fault_rank == impl_->mpi->rank()) {
+      const auto field = impl_->post_store_fault_enthalpy
+                             ? impl_->spec.enthalpy_density
+                             : impl_->fields.density;
+      auto corrupt = trial.acquire_write<double>(access, kStatePhase,
+                                                 kStateActor, field);
+      if (impl_->post_store_fault_enthalpy)
+        corrupt(0, 0, 0, 0) *= 1.01;
+      else
+        corrupt(0, 0, 0, 0) = 0.0;
+      impl_->post_store_fault_rank = -1;
     }
+#endif
+    std::array<double, 3> independent{};
+    {
+      const auto stored_rho = trial.acquire_read<double>(
+          access, kStatePhase, kStateActor, impl_->fields.density);
+      const auto stored_q = trial.acquire_read<double>(
+          access, kStatePhase, kStateActor, impl_->spec.enthalpy_density);
+      for_each_cell(extent, [&](int i, int j, int k, std::size_t) {
+        const double rho = stored_rho(i, j, k, 0);
+        const double q = stored_q(i, j, k, 0);
+        const auto failure = first_state_failure(
+            rho, q, impl_->spec.cp_J_per_kg_K);
+        if (failure != IdealGasClosureFailureReason::none) {
+          independent[0] = std::max(independent[0], 1.0);
+          independent[1] = std::max(independent[1], 1.0);
+          return;
+        }
+        const double stored_h = q / rho;
+        const double stored_t = stored_h / impl_->spec.cp_J_per_kg_K;
+        independent[0] = std::max(
+            independent[0],
+            relative_error(stored_h, impl_->spec.cp_J_per_kg_K * stored_t));
+        independent[1] = std::max(
+            independent[1], relative_product_error(
+                                rho, impl_->spec.gas_constant_J_per_kg_K,
+                                stored_t, pressure));
+      });
+    }
+    const bool local_post_store_failure =
+        !(independent[0] <= 1.0e-12 && independent[1] <= 1.0e-12);
+    independent[2] = local_post_store_failure
+                         ? -static_cast<double>(impl_->mpi->rank() + 1)
+                         : -std::numeric_limits<double>::infinity();
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (impl_->post_store_mpi_fault_rank >= 0) {
+      impl_->post_store_mpi_fault_rank = -1;
+      runtime::check_mpi_result(
+          MPI_ERR_OTHER,
+          "MPI_Allreduce(ideal-gas post-store reduction test fault)");
+    }
+#endif
     impl_->mpi->allreduce_fp64_in_place(
         independent.data(), independent.size(),
         runtime::Fp64ReductionOperation::maximum);
@@ -960,7 +1069,8 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
     report.eos_max_relative_error_ = independent[1];
     if (independent[0] > 1.0e-12 || independent[1] > 1.0e-12) {
       report.reason_ = IdealGasClosureFailureReason::eos_residual;
-      report.lowest_failing_rank_ = 0;
+      report.lowest_failing_rank_ =
+          static_cast<int>(-independent[2]) - 1;
       report.seal();
       return report;
     }
@@ -972,17 +1082,42 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
   return report;
 }
 
-void IdealGasClosure::prepare_commit() {
+int IdealGasClosure::prepare_commit() {
   if (!impl_ || !impl_->active || !impl_->latest.authenticated() ||
       impl_->latest.disposition() != IdealGasClosureDisposition::closed ||
       impl_->latest.stage() != IdealGasClosureStage::final ||
       !impl_->latest.final_metrics_available())
     throw runtime::Error("ideal-gas closure commit preparation is invalid");
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (impl_->closure_prepare_fault_rank >= 0) {
+    const int target = impl_->closure_prepare_fault_rank;
+    impl_->closure_prepare_fault_rank = -1;
+    bool prepared = true;
+    try {
+      impl_->prepared = impl_->trial;
+      if (target == impl_->mpi->rank())
+        impl_->prepared.revision = std::numeric_limits<std::uint64_t>::max();
+      if (impl_->prepared.revision ==
+          std::numeric_limits<std::uint64_t>::max())
+        throw runtime::Error("ideal-gas closure revision would wrap");
+      ++impl_->prepared.revision;
+      impl_->prepared_valid = true;
+    } catch (...) {
+      prepared = false;
+    }
+    const auto status = runtime::collective_status(
+        *impl_->mpi, prepared, "ideal-gas closure commit preparation failed");
+    if (!status.ok)
+      return status.failing_rank;
+    return -1;
+  }
+#endif
   impl_->prepared = impl_->trial;
   if (impl_->prepared.revision == std::numeric_limits<std::uint64_t>::max())
     throw runtime::Error("ideal-gas closure revision would wrap");
   ++impl_->prepared.revision;
   impl_->prepared_valid = true;
+  return -1;
 }
 
 void IdealGasClosure::publish_commit() noexcept {
@@ -1000,6 +1135,55 @@ void IdealGasClosure::rollback() noexcept {
   impl_->prepared = impl_->committed;
   impl_->active = false;
   impl_->prepared_valid = false;
+}
+
+void IdealGasClosure::before_outlet(FlowState &state) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (!impl_ || !impl_->outlet_backflow_fault)
+    return;
+  impl_->outlet_backflow_fault = false;
+  const auto outlet = impl_->boundaries->pressure_outlet_patch_id();
+  if (!outlet)
+    return;
+  const auto &faces = impl_->topology->patch(*outlet).local_faces();
+  if (faces.empty())
+    return;
+  auto &trial = state.solver_layer(FlowLayer::trial);
+  auto flux = trial.acquire_face_write<double>(
+      state.solver_access_plan(), kStatePhase, kStateActor,
+      impl_->fields.face_mass_flux);
+  flux(faces.front(), 0) = -std::max(1.0, std::abs(flux(faces.front(), 0)));
+#else
+  static_cast<void>(state);
+#endif
+}
+
+int IdealGasClosure::before_prepare(FlowState &state,
+                                    AcceptedStepMetadata accepted) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (impl_ && impl_->state_prepare_fault_rank >= 0) {
+    const int target = impl_->state_prepare_fault_rank;
+    impl_->state_prepare_fault_rank = -1;
+    bool prepared = true;
+    if (target == impl_->mpi->rank()) {
+      try {
+        state.prepare_commit_attempt(accepted);
+      } catch (...) {
+        prepared = false;
+      }
+      // A successful target preparation is deliberately rejected so the
+      // collective rollback path must undo a genuinely prepared state.
+      prepared = false;
+    }
+    const auto status = runtime::collective_status(
+        *impl_->mpi, prepared, "FlowState commit preparation test fault");
+    return status.ok ? -1 : status.failing_rank;
+  }
+#else
+  static_cast<void>(state);
+  static_cast<void>(accepted);
+#endif
+  return -1;
 }
 
 const IdealGasClosureReport &IdealGasClosure::latest_report() const {
@@ -1040,6 +1224,58 @@ bool test::IdealGasClosureTestAccess::
          lower_failure(IdealGasClosureFailureReason::non_positive_enthalpy,
                        IdealGasClosureFailureReason::non_finite_density) ==
              IdealGasClosureFailureReason::non_positive_enthalpy;
+}
+
+void IdealGasClosure::set_post_store_corruption_for_test(
+    int rank, bool enthalpy_density) {
+  if (!impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  impl_->post_store_fault_rank = rank;
+  impl_->post_store_fault_enthalpy = enthalpy_density;
+}
+void IdealGasClosure::set_candidate_precedence_fault_for_test(int rank) {
+  if (!impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  impl_->candidate_precedence_fault_rank = rank;
+}
+void IdealGasClosure::set_stage_failure_for_test(
+    IdealGasClosureStage stage, IdealGasClosureFailureReason reason, int rank) {
+  if (!impl_ || stage == IdealGasClosureStage::none ||
+      reason == IdealGasClosureFailureReason::none)
+    throw runtime::Error("ideal-gas closure stage fault is invalid");
+  impl_->stage_failure_stage = stage;
+  impl_->stage_failure_reason = reason;
+  impl_->stage_failure_rank = rank;
+}
+void IdealGasClosure::set_outer_failure_for_test(std::uint8_t point, int rank) {
+  if (!impl_ || point > 1U || rank < 0 || rank >= impl_->mpi->size())
+    throw runtime::Error("ideal-gas outer failure test control is invalid");
+  impl_->outer_failure_point = point;
+  impl_->outer_failure_rank = rank;
+}
+int IdealGasClosure::outer_failure_for_test(std::uint8_t point) {
+  if (!impl_ || impl_->outer_failure_point != point)
+    return -1;
+  const int rank = impl_->outer_failure_rank;
+  impl_->outer_failure_point = std::numeric_limits<std::uint8_t>::max();
+  impl_->outer_failure_rank = -1;
+  return rank;
+}
+void IdealGasClosure::set_prepare_fault_for_test(bool state_prepare, int rank) {
+  if (!impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  (state_prepare ? impl_->state_prepare_fault_rank
+                 : impl_->closure_prepare_fault_rank) = rank;
+}
+void IdealGasClosure::set_post_store_mpi_fault_for_test(int rank) {
+  if (!impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  impl_->post_store_mpi_fault_rank = rank;
+}
+void IdealGasClosure::set_outlet_backflow_fault_for_test() {
+  if (!impl_)
+    throw runtime::Error("ideal-gas closure has been moved from");
+  impl_->outlet_backflow_fault = true;
 }
 #endif
 

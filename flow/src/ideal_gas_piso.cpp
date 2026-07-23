@@ -46,6 +46,11 @@ detail::DensityClosureAdapter::bind(IdealGasClosure &closure,
   hooks.enthalpy_rate_J_per_kg_s = enthalpy_rate_J_per_kg_s;
   hooks.begin = &DensityClosureAdapter::begin;
   hooks.evaluate = &DensityClosureAdapter::evaluate;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  hooks.outer_failure = &DensityClosureAdapter::outer_failure;
+#endif
+  hooks.before_outlet = &DensityClosureAdapter::before_outlet;
+  hooks.before_prepare = &DensityClosureAdapter::before_prepare;
   hooks.prepare = &DensityClosureAdapter::prepare;
   hooks.publish = &DensityClosureAdapter::publish;
   hooks.rollback = &DensityClosureAdapter::rollback;
@@ -73,8 +78,26 @@ detail::DensityClosureAdapter::evaluate(void *object, FlowState &state,
           report.lowest_failing_rank()};
 }
 
-void detail::DensityClosureAdapter::prepare(void *object) {
-  static_cast<IdealGasClosure *>(object)->prepare_commit();
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+int detail::DensityClosureAdapter::outer_failure(
+    void *object, DensityClosureOuterPoint point) {
+  return static_cast<IdealGasClosure *>(object)
+      ->outer_failure_for_test(static_cast<std::uint8_t>(point));
+}
+#endif
+
+void detail::DensityClosureAdapter::before_outlet(void *object,
+                                                  FlowState &state) {
+  static_cast<IdealGasClosure *>(object)->before_outlet(state);
+}
+int detail::DensityClosureAdapter::before_prepare(
+    void *object, FlowState &state, AcceptedStepMetadata accepted) {
+  return static_cast<IdealGasClosure *>(object)->before_prepare(state,
+                                                                accepted);
+}
+
+int detail::DensityClosureAdapter::prepare(void *object) {
+  return static_cast<IdealGasClosure *>(object)->prepare_commit();
 }
 void detail::DensityClosureAdapter::publish(void *object) noexcept {
   static_cast<IdealGasClosure *>(object)->publish_commit();
@@ -202,6 +225,9 @@ struct IdealGasClosureDiagnosticSource::Impl final {
   std::uint64_t source_generation{};
   std::uint64_t state_identity{};
   std::uint64_t report_seal{};
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  mutable detail::DensityClosureDiagnosticTestState diagnostic_test_state;
+#endif
 };
 
 FixedStepIdealGasFlow::FixedStepIdealGasFlow(
@@ -304,9 +330,10 @@ FixedStepIdealGasFlow::closure_diagnostic_source(
     const FlowState &state, const IdealGasStepAttemptReport &report) const {
   if (!impl_)
     throw runtime::Error("ideal-gas flow object has been moved from");
-  const auto state_identity = state.diagnostic_mutation_identity();
+  const auto state_identity = diagnostic_state_identity(state);
   if (!report.authenticated() || impl_->last_state != &state ||
-      state.attempt_active() || state_identity == 0U ||
+      !diagnostic_state_matches(state, state_identity) ||
+      state_identity == 0U ||
       impl_->last_state_identity != state_identity ||
       impl_->last_report_seal != report.seal_)
     throw runtime::Error("ideal-gas closure diagnostic source is stale");
@@ -332,10 +359,23 @@ IdealGasClosureDiagnosticSource::IdealGasClosureDiagnosticSource(
 void IdealGasClosureDiagnosticSource::validate() const {
   if (!impl_ || !impl_->flow || !impl_->state ||
       impl_->source_generation != impl_->flow->source_generation ||
-      impl_->state_identity != impl_->state->diagnostic_mutation_identity() ||
+      !FixedStepIdealGasFlow::diagnostic_state_matches(*impl_->state,
+                                                       impl_->state_identity) ||
       impl_->report_seal != impl_->report.seal_ ||
-      !impl_->report.authenticated() || impl_->state->attempt_active())
+      !impl_->report.authenticated())
     throw runtime::Error("ideal-gas closure diagnostic source is stale");
+}
+
+std::uint64_t FixedStepIdealGasFlow::diagnostic_state_identity(
+    const FlowState &state) noexcept {
+  return state.diagnostic_mutation_identity();
+}
+
+bool FixedStepIdealGasFlow::diagnostic_state_matches(
+    const FlowState &state, std::uint64_t identity) noexcept {
+  return identity != 0U &&
+         state.diagnostic_mutation_identity() == identity &&
+         !state.attempt_active();
 }
 
 std::size_t IdealGasClosureDiagnosticSource::fingerprint_field_count() const {
@@ -527,8 +567,7 @@ detail::DensityClosureDiagnosticAccess::acquire_committed(
   source.validate();
   const auto &state = *source.impl_->state;
   const auto &access = FlowStateSolverAccess::access(state);
-  const auto &storage = FlowStateSolverAccess::layer(
-      const_cast<FlowState &>(state), FlowLayer::committed);
+  const auto &storage = state.layer(FlowLayer::committed);
   return {storage.acquire_read<double>(access, kStatePhase, kStateActor,
                                        source.impl_->flow->fields.density),
           storage.acquire_read<double>(
@@ -558,6 +597,15 @@ const runtime::MpiContext &detail::DensityClosureDiagnosticAccess::mpi(
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+detail::DensityClosureDiagnosticTestState &
+detail::DensityClosureDiagnosticAccess::test_state(
+    const IdealGasClosureDiagnosticSource &source) {
+  source.validate();
+  return source.impl_->diagnostic_test_state;
+}
+#endif
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 void test::IdealGasClosureTestAccess::set_uniform_enthalpy_rate(
     FixedStepIdealGasFlow &flow, double rate) {
   if (!flow.impl_ || !std::isfinite(rate))
@@ -581,6 +629,58 @@ void test::IdealGasClosureTestAccess::exhaust_source_generation(
   if (!flow.impl_)
     throw runtime::Error("ideal-gas test flow has been moved from");
   flow.impl_->source_generation = std::numeric_limits<std::uint64_t>::max();
+}
+void test::IdealGasClosureTestAccess::set_post_store_corruption(
+    FixedStepIdealGasFlow &flow, int rank, bool enthalpy_density) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_post_store_corruption_for_test(rank,
+                                                        enthalpy_density);
+}
+void test::IdealGasClosureTestAccess::set_candidate_precedence_fault(
+    FixedStepIdealGasFlow &flow, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_candidate_precedence_fault_for_test(rank);
+}
+void test::IdealGasClosureTestAccess::set_stage_failure(
+    FixedStepIdealGasFlow &flow, IdealGasClosureStage stage,
+    IdealGasClosureFailureReason reason, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_stage_failure_for_test(stage, reason, rank);
+}
+void test::IdealGasClosureTestAccess::set_outer_failure(
+    FixedStepIdealGasFlow &flow, IdealGasOuterFailurePoint point, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_outer_failure_for_test(
+      static_cast<std::uint8_t>(point), rank);
+}
+void test::IdealGasClosureTestAccess::set_prepare_fault(
+    FixedStepIdealGasFlow &flow, IdealGasPrepareFault fault, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_prepare_fault_for_test(
+      fault == IdealGasPrepareFault::state_prepare, rank);
+}
+void test::IdealGasClosureTestAccess::set_post_store_mpi_fault(
+    FixedStepIdealGasFlow &flow, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_post_store_mpi_fault_for_test(rank);
+}
+void test::IdealGasClosureTestAccess::set_outlet_backflow_fault(
+    FixedStepIdealGasFlow &flow) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  flow.impl_->closure.set_outlet_backflow_fault_for_test();
+}
+bool test::IdealGasClosureTestAccess::post_evidence_mutation_rejected(
+    const IdealGasStepAttemptReport &report,
+    IdealGasPostEvidenceMutation mutation) {
+  return detail::DensityClosureBridge::post_evidence_mutation_rejected(
+      report.flow_, static_cast<std::uint8_t>(mutation));
 }
 #endif
 

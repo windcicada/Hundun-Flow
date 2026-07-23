@@ -181,9 +181,11 @@ private:
   explicit IdealGasClosure(std::unique_ptr<Impl>) noexcept;
   void begin_attempt(const FlowState &, std::uint64_t);
   const IdealGasClosureReport &evaluate(FlowState &, IdealGasClosureStage);
-  void prepare_commit();
+  int prepare_commit();
   void publish_commit() noexcept;
   void rollback() noexcept;
+  void before_outlet(FlowState &);
+  int before_prepare(FlowState &, AcceptedStepMetadata);
   const IdealGasClosureReport &latest_report() const;
   bool matches(const mesh::MeshTopology &, const mesh::MeshGeometry &,
                const boundary::BoundaryRegistry &, const runtime::MpiContext &,
@@ -191,6 +193,17 @@ private:
                const FlowFieldIds &) const noexcept;
   double cp_J_per_kg_K() const noexcept;
   double gas_constant_J_per_kg_K() const noexcept;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  void set_post_store_corruption_for_test(int rank, bool enthalpy_density);
+  void set_candidate_precedence_fault_for_test(int rank);
+  void set_stage_failure_for_test(IdealGasClosureStage,
+                                  IdealGasClosureFailureReason, int rank);
+  void set_outer_failure_for_test(std::uint8_t point, int rank);
+  int outer_failure_for_test(std::uint8_t point);
+  void set_prepare_fault_for_test(bool state_prepare, int rank);
+  void set_post_store_mpi_fault_for_test(int rank);
+  void set_outlet_backflow_fault_for_test();
+#endif
   std::unique_ptr<Impl> impl_;
 
   friend class FixedStepMaterialDensityFlow;

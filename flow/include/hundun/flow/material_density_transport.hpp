@@ -33,7 +33,9 @@ class FlowState;
 struct FlowFieldIds;
 class FixedStepMaterialDensityFlow;
 class MaterialDensityStepAttemptReport;
-class FixedStepIdealGasFlow;
+namespace detail {
+struct DensityClosureBridge;
+} // namespace detail
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
 class MaterialDensityPisoTestAccess;
@@ -180,6 +182,7 @@ private:
   friend class MaterialDensityTransport;
   friend class MaterialDensityDiagnosticSource;
   friend class MaterialDensityStepAttemptReport;
+  friend struct detail::DensityClosureBridge;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
   friend class test::MaterialDensityPisoTestAccess;
@@ -239,7 +242,6 @@ private:
   std::unique_ptr<Impl> impl_;
   friend class MaterialDensityDiagnosticSource;
   friend class FixedStepMaterialDensityFlow;
-  friend class FixedStepIdealGasFlow;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::MaterialDensityTransportTestAccess;
 #endif

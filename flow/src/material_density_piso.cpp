@@ -49,6 +49,15 @@ bool same(runtime::Int3 left, runtime::Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
 }
 
+bool same_stencil(const MomentumTimeStencil &left,
+                  const MomentumTimeStencil &right) noexcept {
+  return left.order == right.order && bits(left.dt_s) == bits(right.dt_s) &&
+         bits(left.previous_dt_s) == bits(right.previous_dt_s) &&
+         bits(left.alpha0) == bits(right.alpha0) &&
+         bits(left.alpha1) == bits(right.alpha1) &&
+         bits(left.alpha2) == bits(right.alpha2);
+}
+
 bool solve_success(linear::SolveTerminationReason reason) noexcept {
   return reason == linear::SolveTerminationReason::converged ||
          reason == linear::SolveTerminationReason::zero_right_hand_side;
@@ -1271,7 +1280,14 @@ bool MaterialDensityStepAttemptReport::semantic_valid() const noexcept {
     if (post_closure_report_) {
       const auto &post = *post_closure_report_;
       if (!post.authenticated() ||
+          post.attempt_identity() != attempt_identity_ ||
+          post.shared_face_mass_flux_field() !=
+              shared_face_mass_flux_field_ ||
           post.flux_provenance() != MaterialFluxProvenance::final_corrected ||
+          !material_report_ ||
+          !same_stencil(post.stencil(), material_report_->stencil()) ||
+          post.finalization_identity() == 0U ||
+          post.finalization_identity() <= material_finalization_identity_ ||
           post.transport_residual_availability().size() != fields ||
           post.transport_conservation_availability().size() != fields ||
           post.transport_normalized_l2().size() != fields ||
@@ -1781,6 +1797,14 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
               static_cast<int>(
                   test::MaterialTerminalPointForTest::momentum_x) +
               static_cast<int>(direction)));
+      if (closure != nullptr && direction == 0U &&
+          closure->outer_failure != nullptr) {
+        const int rank = closure->outer_failure(
+            closure->object,
+            detail::DensityClosureOuterPoint::momentum_after_predictor);
+        if (rank >= 0)
+          return fail(StepFailureReason::invalid_input, rank, false);
+      }
 #endif
       result.flow_.momentum.components[direction] =
           impl_->momentum_solver->solve(
@@ -1951,6 +1975,13 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     apply_terminal_test_point(
         test::MaterialTerminalPointForTest::pressure_corrector_two);
+    if (closure != nullptr && closure->outer_failure != nullptr) {
+      const int rank = closure->outer_failure(
+          closure->object,
+          detail::DensityClosureOuterPoint::pressure_after_first_corrector);
+      if (rank >= 0)
+        return fail(StepFailureReason::invalid_input, rank, false);
+    }
 #endif
     const auto second = impl_->coupler.correct_material_density(
         state, stencil, actual_diagonal, pressure_control);
@@ -2056,6 +2087,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     }
 
     if (closure != nullptr && impl_->boundaries->open_domain()) {
+      closure->before_outlet(closure->object, state);
       const auto final_flux = trial.acquire_face_read<double>(
           access, kStatePhase, kStateActor, fields.face_mass_flux);
       const auto assessment =
@@ -2379,13 +2411,23 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
                   conservation_status.failing_rank, true);
 
     const auto old = state.metadata();
-    state.prepare_commit_attempt({old.step + 1U,
-                                  old.time_s + stencil.dt_s,
-                                  stencil.dt_s,
-                                  old.dt_s,
-                                  stencil.order});
-    if (closure != nullptr)
-      closure->prepare(closure->object);
+    const AcceptedStepMetadata accepted{old.step + 1U,
+                                        old.time_s + stencil.dt_s,
+                                        stencil.dt_s,
+                                        old.dt_s,
+                                        stencil.order};
+    if (closure != nullptr) {
+      const int preparation_rank =
+          closure->before_prepare(closure->object, state, accepted);
+      if (preparation_rank >= 0)
+        return fail(StepFailureReason::invalid_input, preparation_rank, false);
+    }
+    state.prepare_commit_attempt(accepted);
+    if (closure != nullptr) {
+      const int preparation_rank = closure->prepare(closure->object);
+      if (preparation_rank >= 0)
+        return fail(StepFailureReason::invalid_input, preparation_rank, false);
+    }
     state.publish_commit_attempt();
     if (closure != nullptr)
       closure->publish(closure->object);
@@ -2435,6 +2477,7 @@ bool detail::DensityClosureBridge::post_eos_evidence_authenticated(
   return report.authenticated() && report.post_closure_evidence_available_ &&
          report.post_closure_report_.has_value();
 }
+
 
 MaterialDensityFlowDiagnosticSource
 FixedStepMaterialDensityFlow::diagnostic_source(

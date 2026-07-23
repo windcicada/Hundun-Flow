@@ -138,6 +138,9 @@ public:
 private:
   struct Impl;
   explicit FixedStepIdealGasFlow(std::unique_ptr<Impl>) noexcept;
+  static std::uint64_t diagnostic_state_identity(const FlowState &) noexcept;
+  static bool diagnostic_state_matches(const FlowState &,
+                                       std::uint64_t) noexcept;
   std::unique_ptr<Impl> impl_;
   friend class IdealGasClosureDiagnosticSource;
   friend struct detail::DensityClosureAdapter;

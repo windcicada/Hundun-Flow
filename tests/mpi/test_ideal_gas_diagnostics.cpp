@@ -2,17 +2,26 @@
 
 #include "hundun/diagnostics/ideal_gas_closure_diagnostics.hpp"
 #include "diagnostics/src/ideal_gas_closure_diagnostics_test_access.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
 
 namespace {
 void run_task21_diagnostic_matrix(
     const hundun::flow::IdealGasClosureDiagnosticSource &,
     const hundun::runtime::MpiContext &, const hundun::flow::FlowState &,
     const hundun::flow::IdealGasStepAttemptReport &);
+void run_task21_status_matrix(
+    const hundun::flow::IdealGasClosureDiagnosticSource &,
+    const hundun::runtime::MpiContext &,
+    hundun::diagnostics::DiagnosticStatus,
+    hundun::diagnostics::DiagnosticFailureClass, std::string_view, int);
 }
 
 #define HUNDUN_TASK21_IDEAL_GAS_FIXTURE_ONLY 1
 #define HUNDUN_TASK21_DIAGNOSTIC_MATRIX(source, mpi, state, report)           \
   run_task21_diagnostic_matrix(source, mpi, state, report)
+#define HUNDUN_TASK21_DIAGNOSTIC_STATUS(source, mpi, status, classification,  \
+                                        code, rank)                           \
+  run_task21_status_matrix(source, mpi, status, classification, code, rank)
 #include "tests/mpi/test_ideal_gas_piso.cpp"
 
 #include <array>
@@ -27,6 +36,9 @@ namespace {
 namespace diagnostics = hundun::diagnostics;
 using Access = diagnostics::test::IdealGasClosureDiagnosticTestAccess;
 using Fault = diagnostics::test::IdealGasClosureDiagnosticFault;
+
+std::string diagnostic_reference_mode;
+std::filesystem::path diagnostic_reference_path;
 
 class RecordingSink final : public diagnostics::DiagnosticSink {
 public:
@@ -44,8 +56,45 @@ public:
 
 class FaultReset final {
 public:
-  ~FaultReset() noexcept { Access::reset(); }
+  explicit FaultReset(
+      const hundun::flow::IdealGasClosureDiagnosticSource &source) noexcept
+      : source_(&source) {}
+  ~FaultReset() noexcept { Access::reset(*source_); }
+
+private:
+  const hundun::flow::IdealGasClosureDiagnosticSource *source_;
 };
+
+void write_diagnostic_reference(const std::string &canonical) {
+  std::ofstream output(diagnostic_reference_path,
+                       std::ios::binary | std::ios::trunc);
+  if (!output)
+    throw std::runtime_error("cannot create ideal-gas diagnostic reference");
+  constexpr std::uint64_t magic = UINT64_C(0x48554e4449444941);
+  const auto size = static_cast<std::uint64_t>(canonical.size());
+  output.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+  output.write(reinterpret_cast<const char *>(&size), sizeof(size));
+  output.write(canonical.data(), static_cast<std::streamsize>(canonical.size()));
+  if (!output)
+    throw std::runtime_error("cannot write ideal-gas diagnostic reference");
+}
+
+std::string read_diagnostic_reference() {
+  std::ifstream input(diagnostic_reference_path, std::ios::binary);
+  if (!input)
+    throw std::runtime_error("ideal-gas diagnostic reference is missing");
+  std::uint64_t magic{}, size{};
+  input.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+  input.read(reinterpret_cast<char *>(&size), sizeof(size));
+  if (magic != UINT64_C(0x48554e4449444941) ||
+      size > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
+    throw std::runtime_error("ideal-gas diagnostic reference header differs");
+  std::string canonical(static_cast<std::size_t>(size), '\0');
+  input.read(canonical.data(), static_cast<std::streamsize>(size));
+  if (!input || input.peek() != std::ifstream::traits_type::eof())
+    throw std::runtime_error("ideal-gas diagnostic reference is malformed");
+  return canonical;
+}
 
 struct ExactState final {
   hundun::flow::FlowLayerValues history;
@@ -178,21 +227,28 @@ void require_payload(const diagnostics::DiagnosticRecord &record) {
 
 void require_work(
     diagnostics::DiagnosticLevel level, std::size_t budget,
+    diagnostics::DiagnosticScope scope,
     const hundun::flow::IdealGasClosureDiagnosticSource &source) {
-  const auto work = Access::work();
+  const auto work = Access::work(source);
   const auto cells = source.owned_cell_count();
   HUNDUN_CHECK(work.observations == 1U);
   HUNDUN_CHECK(work.fingerprint_items ==
                2U * cells + (source.relative_rank() == 0 ? 1U : 0U));
   HUNDUN_CHECK(work.summary_items ==
-               (level == diagnostics::DiagnosticLevel::summary ||
-                        level == diagnostics::DiagnosticLevel::invariants
-                    ? cells
-                    : 0U));
-  HUNDUN_CHECK(work.sample_items ==
+               (level == diagnostics::DiagnosticLevel::summary ? cells : 0U));
+  HUNDUN_CHECK(work.invariant_items ==
+               (level == diagnostics::DiagnosticLevel::invariants ? cells
+                                                                  : 0U));
+  HUNDUN_CHECK(work.sample_items == work.retained_sample_items);
+  HUNDUN_CHECK(work.sample_items <= budget);
+  HUNDUN_CHECK(work.full_field_copy_attempts == 0U);
+  HUNDUN_CHECK(work.allocation_events ==
                (level == diagnostics::DiagnosticLevel::bounded_state_sample
-                    ? std::min(budget, cells)
+                    ? 1U
                     : 0U));
+  HUNDUN_CHECK(scope == diagnostics::DiagnosticScope::local
+                   ? work.collective_calls == 0U
+                   : work.collective_calls == 1U);
 }
 
 template <class Operation>
@@ -220,7 +276,7 @@ void run_task21_diagnostic_matrix(
     const hundun::runtime::MpiContext &mpi,
     const hundun::flow::FlowState &state,
     const hundun::flow::IdealGasStepAttemptReport &report) {
-  FaultReset reset;
+  FaultReset reset(source);
   const auto before = capture(state, source);
   HUNDUN_CHECK(hundun::flow::test::IdealGasClosureTestAccess::
                    report_authenticated(report));
@@ -231,7 +287,7 @@ void run_task21_diagnostic_matrix(
     for (std::uint8_t encoded = 0U; encoded < 4U; ++encoded) {
       const auto level = static_cast<diagnostics::DiagnosticLevel>(encoded);
       const auto request = request_for(source, level, scope);
-      Access::reset();
+      Access::reset(source);
       RecordingSink first;
       collect(source, mpi, request, first);
       HUNDUN_CHECK(first.calls == 1U && first.records.size() == 1U);
@@ -262,24 +318,24 @@ void run_task21_diagnostic_matrix(
                             request);
       const auto canonical = diagnostics::to_canonical_json(record);
       HUNDUN_CHECK(!canonical.empty());
-      require_work(level, 7U, source);
+      require_work(level, 7U, scope, source);
       require_pure(before, state, source);
 
-      Access::reset();
+      Access::reset(source);
       RecordingSink repeated;
       collect(source, mpi, request, repeated);
       HUNDUN_CHECK(repeated.calls == 1U && repeated.records.size() == 1U);
       HUNDUN_CHECK(diagnostics::to_canonical_json(repeated.records.front()) ==
                    canonical);
-      require_work(level, 7U, source);
+      require_work(level, 7U, scope, source);
       require_pure(before, state, source);
     }
 
-    for (const std::size_t budget : {1U, 7U}) {
+    for (const std::size_t budget : {1U, 7U, 256U}) {
       auto sampled = request_for(
           source, diagnostics::DiagnosticLevel::bounded_state_sample, scope,
           budget, {"rho", "temperature"});
-      Access::reset();
+      Access::reset(source);
       RecordingSink sink;
       collect(source, mpi, sampled, sink);
       HUNDUN_CHECK(sink.calls == 1U && sink.records.size() == 1U);
@@ -289,42 +345,60 @@ void run_task21_diagnostic_matrix(
         HUNDUN_CHECK(sample.field_id == "rho" ||
                      sample.field_id == "temperature");
       require_work(diagnostics::DiagnosticLevel::bounded_state_sample, budget,
-                   source);
+                   scope, source);
       require_pure(before, state, source);
     }
 
-    for (const auto &[fault, status, classification, code] :
-         {std::tuple{Fault::status_warning, diagnostics::DiagnosticStatus::warning,
-                     diagnostics::DiagnosticFailureClass::none,
-                     std::string_view("none")},
-          std::tuple{Fault::status_failed, diagnostics::DiagnosticStatus::failed,
-                     diagnostics::DiagnosticFailureClass::non_convergence,
-                     std::string_view("closure.injected-failure")},
-          std::tuple{Fault::status_unavailable,
-                     diagnostics::DiagnosticStatus::unavailable,
-                     diagnostics::DiagnosticFailureClass::unavailable,
-                     std::string_view("closure.injected-unavailable")}}) {
-      Access::set_fault(fault);
+    {
+      const auto p0_only = request_for(
+          source, diagnostics::DiagnosticLevel::bounded_state_sample, scope,
+          1U, {"p0"});
+      Access::reset(source);
       RecordingSink sink;
-      const auto request =
-          request_for(source, diagnostics::DiagnosticLevel::summary, scope);
-      collect(source, mpi, request, sink);
+      collect(source, mpi, p0_only, sink);
       HUNDUN_CHECK(sink.calls == 1U && sink.records.size() == 1U);
-      HUNDUN_CHECK(sink.records.front().status == status);
-      HUNDUN_CHECK(sink.records.front().failure.classification ==
-                   classification);
-      HUNDUN_CHECK(sink.records.front().failure.code == code);
-      HUNDUN_CHECK(sink.records.front().failure.lowest_failing_rank ==
-                   (scope == diagnostics::DiagnosticScope::collective &&
-                            status != diagnostics::DiagnosticStatus::warning
-                        ? 0
-                        : -1));
-      diagnostics::validate(sink.records.front(),
-                            diagnostics::describe_diagnostics(source), request);
-      HUNDUN_CHECK(!diagnostics::to_canonical_json(sink.records.front()).empty());
+      const auto &record = sink.records.front();
+      const std::size_t expected =
+          scope == diagnostics::DiagnosticScope::collective || mpi.rank() == 0
+              ? 1U
+              : 0U;
+      HUNDUN_CHECK(record.eligible_sample_count == expected);
+      HUNDUN_CHECK(record.samples.size() == expected);
+      if (expected != 0U) {
+        HUNDUN_CHECK(record.samples.front().field_id == "p0");
+        HUNDUN_CHECK(record.samples.front().global_id == 0U);
+        HUNDUN_CHECK(record.samples.front().value.bits ==
+                     diagnostics::describe_fp64(
+                         source.closure_state().thermodynamic_pressure_pa)
+                         .bits);
+      }
+      require_work(diagnostics::DiagnosticLevel::bounded_state_sample, 1U,
+                   scope, source);
       require_pure(before, state, source);
-      Access::reset();
     }
+
+  }
+
+  if (!diagnostic_reference_mode.empty()) {
+    const auto request = request_for(
+        source, diagnostics::DiagnosticLevel::bounded_state_sample,
+        diagnostics::DiagnosticScope::collective, 256U);
+    Access::reset(source);
+    RecordingSink sink;
+    collect(source, mpi, request, sink);
+    HUNDUN_CHECK(sink.calls == 1U && sink.records.size() == 1U);
+    auto reference_record = sink.records.front();
+    reference_record.rank = 0;
+    const auto canonical = diagnostics::to_canonical_json(reference_record);
+    if (diagnostic_reference_mode == "--reference-write") {
+      HUNDUN_CHECK(mpi.size() == 1);
+      if (mpi.rank() == 0)
+        write_diagnostic_reference(canonical);
+    } else {
+      HUNDUN_CHECK(diagnostic_reference_mode == "--reference-read");
+      HUNDUN_CHECK(read_diagnostic_reference() == canonical);
+    }
+    require_pure(before, state, source);
   }
 
   {
@@ -348,6 +422,8 @@ void run_task21_diagnostic_matrix(
         "closure.diagnostics.frame", -1, sink);
   }
   for (auto fields : {std::vector<std::string_view>{"unknown"},
+                      std::vector<std::string_view>{"RHO"},
+                      std::vector<std::string_view>{"rho", "rho"},
                       std::vector<std::string_view>{"temperature", "rho"}}) {
     auto request = request_for(
         source, diagnostics::DiagnosticLevel::bounded_state_sample,
@@ -359,7 +435,7 @@ void run_task21_diagnostic_matrix(
         "closure.diagnostics.selected-field", -1, sink);
   }
   {
-    Access::set_fault(Fault::record_validation, mpi.rank());
+    Access::set_fault(source, Fault::record_validation, mpi.rank());
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                diagnostics::DiagnosticScope::local);
     RecordingSink sink;
@@ -367,7 +443,7 @@ void run_task21_diagnostic_matrix(
         [&] { collect(source, mpi, request, sink); },
         diagnostics::DiagnosticFailureClass::invalid_input,
         "closure.diagnostics.record", -1, sink);
-    Access::reset();
+    Access::reset(source);
   }
   {
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
@@ -427,7 +503,7 @@ void run_task21_diagnostic_matrix(
         "closure.diagnostics.request-agreement", target, sink);
   }
   {
-    Access::set_fault(Fault::provider_agreement, target);
+    Access::set_fault(source, Fault::provider_agreement, target);
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                diagnostics::DiagnosticScope::collective);
     RecordingSink sink;
@@ -435,21 +511,72 @@ void run_task21_diagnostic_matrix(
         [&] { collect(source, mpi, request, sink); },
         diagnostics::DiagnosticFailureClass::invalid_input,
         "closure.diagnostics.provider-agreement", target, sink);
-    Access::reset();
+    Access::reset(source);
+  }
+  for (const auto &[fault, classification, code] :
+       {std::tuple{Fault::request_preparation,
+                   diagnostics::DiagnosticFailureClass::invalid_request,
+                   std::string_view("closure.diagnostics.request-agreement")},
+        std::tuple{Fault::aggregation,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.aggregation")},
+        std::tuple{Fault::sample_preparation,
+                   diagnostics::DiagnosticFailureClass::layout,
+                   std::string_view("closure.diagnostics.sample-preparation")}}) {
+    Access::set_fault(source, fault, target);
+    auto request = request_for(
+        source,
+        fault == Fault::sample_preparation
+            ? diagnostics::DiagnosticLevel::bounded_state_sample
+            : diagnostics::DiagnosticLevel::summary,
+        diagnostics::DiagnosticScope::collective, 7U);
+    RecordingSink sink;
+    require_error([&] { collect(source, mpi, request, sink); }, classification,
+                  code, target, sink);
+    Access::reset(source);
   }
   {
-    Access::set_fault(Fault::ownership_layout, target);
+    Access::set_fault(source, Fault::raw_mpi, target);
+    const auto request = request_for(
+        source, diagnostics::DiagnosticLevel::summary,
+        diagnostics::DiagnosticScope::collective);
+    RecordingSink sink;
+    bool typed = false;
+    try {
+      collect(source, mpi, request, sink);
+    } catch (const hundun::runtime::MpiOperationError &error) {
+      typed = std::string_view(error.what()).find("MPI_Task21") !=
+              std::string_view::npos;
+    }
+    HUNDUN_CHECK(typed && sink.calls == 0U);
+    Access::reset(source);
+  }
+  {
+    auto duplicate =
+        hundun::runtime::MpiContext::duplicate(mpi.comm());
+    const auto request = request_for(
+        source, diagnostics::DiagnosticLevel::summary,
+        diagnostics::DiagnosticScope::collective);
+    RecordingSink sink;
+    const auto &supplied = mpi.rank() == target ? duplicate : mpi;
+    require_error(
+        [&] { diagnostics::collect_diagnostics(source, supplied, request, sink); },
+        diagnostics::DiagnosticFailureClass::layout,
+        "closure.diagnostics.layout", target, sink);
+  }
+  {
+    Access::set_fault(source, Fault::ownership_layout, target);
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                diagnostics::DiagnosticScope::collective);
     RecordingSink sink;
     require_error(
         [&] { collect(source, mpi, request, sink); },
         diagnostics::DiagnosticFailureClass::layout,
-        "closure.diagnostics.ownership", target, sink);
-    Access::reset();
+        "closure.diagnostics.layout", target, sink);
+    Access::reset(source);
   }
   {
-    Access::set_fault(Fault::sample_wire, target);
+    Access::set_fault(source, Fault::sample_wire, target);
     auto request = request_for(
         source, diagnostics::DiagnosticLevel::bounded_state_sample,
         diagnostics::DiagnosticScope::collective, 7U);
@@ -458,10 +585,10 @@ void run_task21_diagnostic_matrix(
         [&] { collect(source, mpi, request, sink); },
         diagnostics::DiagnosticFailureClass::layout,
         "closure.diagnostics.sample-wire", target, sink);
-    Access::reset();
+    Access::reset(source);
   }
   {
-    Access::set_fault(Fault::record_validation, target);
+    Access::set_fault(source, Fault::record_validation, target);
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
                                diagnostics::DiagnosticScope::collective);
     RecordingSink sink;
@@ -469,7 +596,7 @@ void run_task21_diagnostic_matrix(
         [&] { collect(source, mpi, request, sink); },
         diagnostics::DiagnosticFailureClass::invalid_input,
         "closure.diagnostics.record", target, sink);
-    Access::reset();
+    Access::reset(source);
   }
   {
     auto request = request_for(source, diagnostics::DiagnosticLevel::summary,
@@ -485,11 +612,84 @@ void run_task21_diagnostic_matrix(
   require_pure(before, state, source);
 }
 
+void run_task21_status_matrix(
+    const hundun::flow::IdealGasClosureDiagnosticSource &source,
+    const hundun::runtime::MpiContext &mpi,
+    diagnostics::DiagnosticStatus expected_status,
+    diagnostics::DiagnosticFailureClass expected_class,
+    std::string_view expected_code, int expected_rank) {
+  for (const auto scope : {diagnostics::DiagnosticScope::local,
+                           diagnostics::DiagnosticScope::collective}) {
+    for (std::uint8_t encoded = 0U; encoded < 4U; ++encoded) {
+      const auto level = static_cast<diagnostics::DiagnosticLevel>(encoded);
+      const auto request = request_for(source, level, scope, 1U);
+      RecordingSink sink;
+      collect(source, mpi, request, sink);
+      HUNDUN_CHECK(sink.calls == 1U && sink.records.size() == 1U);
+      const auto &record = sink.records.front();
+      HUNDUN_CHECK(record.status == expected_status);
+      HUNDUN_CHECK(record.failure.classification == expected_class);
+      HUNDUN_CHECK(record.failure.code == expected_code);
+      HUNDUN_CHECK(record.failure.lowest_failing_rank ==
+                   (scope == diagnostics::DiagnosticScope::local
+                        ? -1
+                        : expected_status == diagnostics::DiagnosticStatus::warning
+                              ? -1
+                              : expected_rank));
+      require_payload(record);
+      if (level == diagnostics::DiagnosticLevel::summary) {
+        const auto candidate = std::find_if(
+            record.metrics.begin(), record.metrics.end(), [](const auto &item) {
+              return item.id == "closure.candidate-pressure";
+            });
+        HUNDUN_CHECK(candidate != record.metrics.end());
+        if (source.report().closure_report_available() &&
+            source.report().closure_report().candidate_pressure_available()) {
+          HUNDUN_CHECK(candidate->value.bits ==
+                       diagnostics::describe_fp64(
+                           source.report()
+                               .closure_report()
+                               .candidate_pressure_pa())
+                           .bits);
+        } else {
+          HUNDUN_CHECK(candidate->value.status ==
+                       diagnostics::DiagnosticValueStatus::unavailable);
+        }
+      } else if (level == diagnostics::DiagnosticLevel::counters) {
+        HUNDUN_CHECK(record.counters.size() == 3U);
+        const auto *closure_report =
+            source.report().closure_report_available()
+                ? &source.report().closure_report()
+                : nullptr;
+        HUNDUN_CHECK(record.counters[0].value ==
+                     (closure_report == nullptr
+                          ? 0U
+                          : closure_report->collective_count()));
+        HUNDUN_CHECK(record.counters[1].value ==
+                     (closure_report == nullptr
+                          ? 0U
+                          : closure_report->evaluation_count()));
+        HUNDUN_CHECK(record.counters[2].value ==
+                     source.closure_state().revision);
+      }
+      diagnostics::validate(record, diagnostics::describe_diagnostics(source),
+                            request);
+    }
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   hundun::runtime::MpiEnvironment environment(argc, argv);
   return hundun::test::run([&] {
+    HUNDUN_CHECK(argc == 1 || argc == 3);
+    if (argc == 3) {
+      diagnostic_reference_mode = argv[1];
+      diagnostic_reference_path = argv[2];
+      HUNDUN_CHECK(diagnostic_reference_mode == "--reference-write" ||
+                   diagnostic_reference_mode == "--reference-read");
+    }
     auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
     const auto descriptor =
@@ -507,6 +707,6 @@ int main(int argc, char **argv) {
                  diagnostics::DiagnosticValueStatus::unavailable);
     HUNDUN_CHECK(positive.limit.bits == 0U);
     HUNDUN_CHECK(positive.passed);
-    run(mpi, false, false);
+    run(mpi, false, false, false);
   });
 }
