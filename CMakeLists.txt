@@ -843,18 +843,38 @@ if(HUNDUN_BUILD_TESTS)
     LABELS "unit;source_policy;task22" TIMEOUT 30)
   string(REPLACE ";" "|" task22_mpi_include_dirs
          "${MPI_CXX_INCLUDE_DIRS}")
+  set(task22_tests_off_binary_dir
+      "${CMAKE_BINARY_DIR}/task22-tests-off")
+  set(task22_tests_off_archive_dir
+      "${task22_tests_off_binary_dir}/archives")
+  add_test(NAME test_task22_tests_off_setup
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DHUNDUN_OUTER_BINARY_DIR=${CMAKE_BINARY_DIR}"
+            "-DHUNDUN_NESTED_BINARY_DIR=${task22_tests_off_binary_dir}"
+            "-DHUNDUN_ARCHIVE_DIR=${task22_tests_off_archive_dir}"
+            "-DHUNDUN_NESTED_CONFIG=Release"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_tests_off_setup.cmake")
+  set_tests_properties(test_task22_tests_off_setup PROPERTIES
+    FIXTURES_SETUP task22_tests_off_archives
+    LABELS "unit;source_policy;task22"
+    RUN_SERIAL TRUE
+    TIMEOUT 600)
   add_test(NAME test_task22_tests_off_header_contract
     COMMAND "${CMAKE_COMMAND}"
             "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
             "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
             "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
             "-DHUNDUN_MPI_INCLUDE_DIRS=${task22_mpi_include_dirs}"
-            "-DHUNDUN_TESTS_OFF_FLOW=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_flow.a"
-            "-DHUNDUN_TESTS_OFF_LINEAR=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_linear.a"
-            "-DHUNDUN_TESTS_OFF_DIAGNOSTICS=${PROJECT_SOURCE_DIR}/build/tests-off-release/libhundun_material_diagnostics.a"
+            "-DHUNDUN_TESTS_OFF_FLOW=${task22_tests_off_archive_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_flow${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            "-DHUNDUN_TESTS_OFF_LINEAR=${task22_tests_off_archive_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_linear${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            "-DHUNDUN_TESTS_OFF_DIAGNOSTICS=${task22_tests_off_archive_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_material_diagnostics${CMAKE_STATIC_LIBRARY_SUFFIX}"
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_test_access_contract.cmake")
   set_tests_properties(test_task22_tests_off_header_contract PROPERTIES
-    LABELS "unit;source_policy;task22" TIMEOUT 60)
+    FIXTURES_REQUIRED task22_tests_off_archives
+    LABELS "unit;source_policy;task22"
+    RUN_SERIAL TRUE
+    TIMEOUT 60)
 
   hundun_add_test(test_momentum_predictor
     tests/unit/test_momentum_predictor.cpp)
