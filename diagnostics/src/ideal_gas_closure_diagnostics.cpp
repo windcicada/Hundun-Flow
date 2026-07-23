@@ -1222,6 +1222,19 @@ void collect_diagnostics(const flow::IdealGasClosureDiagnosticSource &source,
                          const runtime::MpiContext &mpi,
                          const DiagnosticRequest &request,
                          DiagnosticSink &sink) try {
+  bool source_preparation_failed = false;
+  try {
+    static_cast<void>(source.relative_rank());
+  } catch (...) {
+    source_preparation_failed = true;
+  }
+  const int source_preparation_rank = lowest_rank(
+      mpi, source_preparation_failed,
+      "MPI_Allreduce(ideal-gas diagnostic source preparation)");
+  if (source_preparation_rank >= 0)
+    fail(DiagnosticFailureClass::invalid_input,
+         "closure.diagnostics.stale-source", source_preparation_rank,
+         "ideal-gas diagnostic source is stale");
   require_source_communicator(source, mpi);
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
   auto &work = test_state(source);

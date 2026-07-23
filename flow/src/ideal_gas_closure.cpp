@@ -117,6 +117,21 @@ struct FailureSelection final {
   int rank{-1};
 };
 
+class DensityClosureCreateValidationFailure final : public runtime::Error {
+public:
+  DensityClosureCreateValidationFailure(IdealGasClosureFailureReason reason,
+                                        int rank)
+      : runtime::Error("ideal-gas closure initial state is invalid"),
+        reason_(reason), rank_(rank) {}
+
+  IdealGasClosureFailureReason reason() const noexcept { return reason_; }
+  int failing_rank() const noexcept { return rank_; }
+
+private:
+  IdealGasClosureFailureReason reason_;
+  int rank_;
+};
+
 FailureSelection agree_failure(const runtime::MpiContext &mpi,
                                IdealGasClosureFailureReason local) {
   const int candidate =
@@ -846,7 +861,8 @@ IdealGasClosure IdealGasClosure::create_internal(
       agree_failure(mpi, valid ? IdealGasClosureFailureReason::none
                                : IdealGasClosureFailureReason::invalid_input);
   if (validation.reason != IdealGasClosureFailureReason::none)
-    throw runtime::Error("ideal-gas closure initial state is invalid");
+    throw DensityClosureCreateValidationFailure(validation.reason,
+                                                validation.rank);
 
   std::array<double, 4> sums{};
   std::transform(local_sums.begin(), local_sums.end(), sums.begin(),
@@ -1659,7 +1675,11 @@ int test::IdealGasClosureTestAccess::preflight_failure_rank(
     const runtime::Error &error) noexcept {
   const auto *failure =
       dynamic_cast<const detail::DensityClosurePreflightFailure *>(&error);
-  return failure == nullptr ? -1 : failure->failing_rank();
+  if (failure != nullptr)
+    return failure->failing_rank();
+  const auto *validation =
+      dynamic_cast<const DensityClosureCreateValidationFailure *>(&error);
+  return validation == nullptr ? -1 : validation->failing_rank();
 }
 
 void test::IdealGasClosureTestAccess::begin_attempt(

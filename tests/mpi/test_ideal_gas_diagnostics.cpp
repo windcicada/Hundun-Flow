@@ -6,7 +6,7 @@
 
 namespace {
 void run_task21_diagnostic_matrix(
-    const hundun::flow::IdealGasClosureDiagnosticSource &,
+    hundun::flow::IdealGasClosureDiagnosticSource &,
     const hundun::runtime::MpiContext &, const hundun::flow::FlowState &,
     const hundun::flow::IdealGasStepAttemptReport &);
 void run_task21_status_matrix(
@@ -60,7 +60,11 @@ public:
   explicit FaultReset(
       const hundun::flow::IdealGasClosureDiagnosticSource &source) noexcept
       : source_(&source) {}
-  ~FaultReset() noexcept { Access::reset(*source_); }
+  ~FaultReset() noexcept {
+    if (source_ != nullptr)
+      Access::reset(*source_);
+  }
+  void release() noexcept { source_ = nullptr; }
 
 private:
   const hundun::flow::IdealGasClosureDiagnosticSource *source_;
@@ -657,7 +661,7 @@ void require_error(Operation &&operation,
 }
 
 void run_task21_diagnostic_matrix(
-    const hundun::flow::IdealGasClosureDiagnosticSource &source,
+    hundun::flow::IdealGasClosureDiagnosticSource &source,
     const hundun::runtime::MpiContext &mpi,
     const hundun::flow::FlowState &state,
     const hundun::flow::IdealGasStepAttemptReport &report) {
@@ -1016,13 +1020,12 @@ void run_task21_diagnostic_matrix(
           request_for(source, diagnostics::DiagnosticLevel::summary,
                       diagnostics::DiagnosticScope::collective);
       RecordingSink sink;
-      const auto &supplied = mpi.rank() == target ? duplicate : mpi;
       require_error(
           [&] {
-            diagnostics::collect_diagnostics(source, supplied, request, sink);
+            diagnostics::collect_diagnostics(source, duplicate, request, sink);
           },
           diagnostics::DiagnosticFailureClass::layout,
-          "closure.diagnostics.layout", target, sink);
+          "closure.diagnostics.layout", 0, sink);
     }
     {
       Access::set_fault(source, Fault::ownership_layout, target);
@@ -1080,6 +1083,34 @@ void run_task21_diagnostic_matrix(
       break;
   }
   require_pure(before, state, source, mpi);
+
+  Access::reset(source);
+  reset.release();
+  std::vector<hundun::flow::IdealGasClosureDiagnosticSource> successors;
+  successors.reserve(mpi.size() == 1 ? 2U : 3U);
+  successors.emplace_back(std::move(source));
+  for (const int target : {0, mpi.size() - 1}) {
+    successors.emplace_back(std::move(successors.back()));
+    auto &moved_from = successors[successors.size() - 2U];
+    auto &successor = successors.back();
+    const auto request =
+        request_for(successor, diagnostics::DiagnosticLevel::summary,
+                    diagnostics::DiagnosticScope::collective);
+    const auto physical_before = capture(state, successor, mpi);
+    const auto &candidate = mpi.rank() == target ? moved_from : successor;
+    RecordingSink failed;
+    require_error([&] { collect(candidate, mpi, request, failed); },
+                  diagnostics::DiagnosticFailureClass::invalid_input,
+                  "closure.diagnostics.stale-source", target, failed);
+    require_pure(physical_before, state, successor, mpi);
+
+    RecordingSink recovered;
+    collect(successor, mpi, request, recovered);
+    HUNDUN_CHECK(recovered.calls == 1U && recovered.records.size() == 1U);
+    require_pure(physical_before, state, successor, mpi);
+    if (mpi.size() == 1)
+      break;
+  }
 }
 
 void run_task21_status_matrix(

@@ -12,6 +12,7 @@
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
+#include "tests/support/flow_state_equality.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <array>
@@ -471,6 +472,78 @@ void run(const hundun::runtime::MpiContext &mpi) {
             successor_state, {rho_h, cp, gas_constant, pressure});
         HUNDUN_CHECK(successor.state().revision == 0U);
       };
+  const auto expect_derived_value_rejected =
+      [&](int target, double candidate_cp, double invalid_rho,
+          double invalid_rho_h, bool history_layer) {
+        auto candidate = make_candidate_state();
+        const double base_rho_h = density * candidate_cp * temperature;
+        const auto write_layer = [&](double target_rho,
+                                     double target_rho_h) {
+          candidate.begin_attempt();
+          auto rho_values =
+              candidate.trial_layer().view<double>(fields.density);
+          auto rho_h_values = candidate.trial_layer().view<double>(rho_h);
+          const auto extent = decomposition.local_extent();
+          for (int k = 0; k < extent.z; ++k)
+            for (int j = 0; j < extent.y; ++j)
+              for (int i = 0; i < extent.x; ++i) {
+                rho_values(i, j, k, 0) = density;
+                rho_h_values(i, j, k, 0) = base_rho_h;
+              }
+          if (mpi.rank() == target) {
+            rho_values(0, 0, 0, 0) = target_rho;
+            rho_h_values(0, 0, 0, 0) = target_rho_h;
+          }
+        };
+        write_layer(density, base_rho_h);
+        commit_trial(candidate, 1U);
+        write_layer(density, base_rho_h);
+        commit_trial(candidate, 2U);
+        if (history_layer) {
+          write_layer(invalid_rho, invalid_rho_h);
+          commit_trial(candidate, 3U);
+          write_layer(density, base_rho_h);
+          commit_trial(candidate, 4U);
+        } else {
+          write_layer(invalid_rho, invalid_rho_h);
+          commit_trial(candidate, 3U);
+        }
+
+        const auto history_before =
+            candidate.snapshot(hundun::flow::FlowLayer::history);
+        const auto committed_before =
+            candidate.snapshot(hundun::flow::FlowLayer::committed);
+        const auto trial_before =
+            candidate.snapshot(hundun::flow::FlowLayer::trial);
+        const auto metadata_before = candidate.metadata();
+        bool rejected = false;
+        int failing_rank = -1;
+        try {
+          static_cast<void>(hundun::flow::IdealGasClosure::create(
+              topology, geometry, boundaries, mpi, registry, fields, candidate,
+              {rho_h, candidate_cp, gas_constant, pressure}));
+        } catch (const hundun::runtime::Error &error) {
+          rejected = true;
+          failing_rank = TestAccess::preflight_failure_rank(error);
+        }
+        HUNDUN_CHECK(rejected && failing_rank == target);
+        HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+            history_before,
+            candidate.snapshot(hundun::flow::FlowLayer::history)));
+        HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+            committed_before,
+            candidate.snapshot(hundun::flow::FlowLayer::committed)));
+        HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+            trial_before, candidate.snapshot(hundun::flow::FlowLayer::trial)));
+        HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+            metadata_before, candidate.metadata()));
+
+        auto successor_state = make_candidate_state();
+        const auto successor = hundun::flow::IdealGasClosure::create(
+            topology, geometry, boundaries, mpi, registry, fields,
+            successor_state, {rho_h, cp, gas_constant, pressure});
+        HUNDUN_CHECK(successor.state().revision == 0U);
+      };
   for (const int target : {0, mpi.size() - 1}) {
     for (const bool history_layer : {false, true}) {
       for (const auto &[field, value] :
@@ -481,6 +554,16 @@ void run(const hundun::runtime::MpiContext &mpi) {
             std::pair{rho_h, std::numeric_limits<double>::denorm_min()},
             std::pair{rho_h, std::numeric_limits<double>::max()}})
         expect_layer_value_rejected(target, field, value, history_layer);
+      for (const auto &[candidate_cp, invalid_rho, invalid_rho_h] :
+           {std::tuple{cp, std::numeric_limits<double>::denorm_min(),
+                       std::numeric_limits<double>::max()},
+            std::tuple{cp, std::numeric_limits<double>::max(),
+                       std::numeric_limits<double>::denorm_min()},
+            std::tuple{0.5, 1.0, std::numeric_limits<double>::max()},
+            std::tuple{2.0, 1.0,
+                       std::numeric_limits<double>::denorm_min()}})
+        expect_derived_value_rejected(target, candidate_cp, invalid_rho,
+                                      invalid_rho_h, history_layer);
     }
 
     {
