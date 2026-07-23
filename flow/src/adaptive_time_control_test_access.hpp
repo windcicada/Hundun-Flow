@@ -5,6 +5,24 @@
 
 namespace hundun::flow::test {
 
+enum class TimeControlPostReturnMutation : std::uint8_t {
+  none,
+  attempted_dt,
+  reason,
+  momentum_x_iterations,
+  momentum_y_iterations,
+  momentum_z_iterations,
+  pressure_one_iterations,
+  pressure_two_iterations
+};
+
+enum class TimeControlPreflightFault : std::uint8_t {
+  none,
+  layout,
+  capability,
+  preparation
+};
+
 class AdaptiveTimeControlTestAccess final {
 public:
   static TimeAdvanceReport report() noexcept {
@@ -24,6 +42,18 @@ public:
   static bool valid_control(const linear::SolveControl &control) noexcept {
     return detail::solve_control_valid(control);
   }
+  static void set_post_return_mutation(TimeControlPostReturnMutation,
+                                       int rank) noexcept;
+  static void set_preflight_fault(TimeControlPreflightFault,
+                                  int rank) noexcept;
+  static void set_recoverable_failures(std::uint32_t count,
+                                       int rank) noexcept;
+  static void
+  set_recoverable_failure_reason(StepFailureReason reason) noexcept;
+  static void reset_faults() noexcept;
+  static std::uint8_t
+  preflight_category(const TimeAdvanceReport &) noexcept;
+  static std::uint64_t post_commit_observation_count() noexcept;
 };
 
 } // namespace hundun::flow::test

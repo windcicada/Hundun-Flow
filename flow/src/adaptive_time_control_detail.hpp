@@ -60,6 +60,9 @@ struct AdaptiveTimeControlAccess final {
   static const TransportDiffusivityAuthority &
   authority(const FixedStepIdealGasFlow &) noexcept;
   static const FlowState *state_identity(const FlowState &) noexcept;
+  static bool state_live(const FlowState &) noexcept;
+  static bool state_layout_matches(const FlowState &,
+                                   const mesh::MeshTopology &) noexcept;
   static std::uint64_t diagnostic_identity(const FlowState &) noexcept;
   static std::vector<double> committed_density(const FlowState &);
   static std::vector<double> committed_face_mass_flux(const FlowState &);

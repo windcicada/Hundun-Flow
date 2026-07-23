@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstring>
 #include <string_view>
+#include <array>
+#include <cmath>
 
 namespace {
 
@@ -33,6 +35,7 @@ std::uint64_t independent_seal(
   for (char value : std::string_view("hundun-time-control-state-seal-v1"))
     add_byte(hash, static_cast<std::uint8_t>(value));
   add_le(hash, static_cast<std::uint32_t>(config.mode));
+  add_le(hash, static_cast<std::uint32_t>(config.steps));
   add_double(hash, config.initial_dt_s);
   add_double(hash, config.min_dt_s);
   add_double(hash, config.max_dt_s);
@@ -87,6 +90,36 @@ void run() {
   HUNDUN_CHECK(hundun::flow::test::AdaptiveTimeControlTestAccess::seal(
                    config, hundun::config::DensityModel::material, changed) !=
                expected);
+  const auto config_changes_seal = [&](auto mutate) {
+    auto candidate = config;
+    mutate(candidate);
+    return hundun::flow::test::AdaptiveTimeControlTestAccess::seal(
+               candidate, hundun::config::DensityModel::material, state) !=
+           expected;
+  };
+  HUNDUN_CHECK(config_changes_seal(
+      [](auto &value) { value.mode = hundun::config::TimeMode::fixed; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { ++value.steps; }));
+  HUNDUN_CHECK(config_changes_seal(
+      [](auto &value) { value.initial_dt_s = 0.11; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { value.min_dt_s = 0.01; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { value.max_dt_s = 0.19; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { value.cfl_target = 0.4; }));
+  HUNDUN_CHECK(config_changes_seal(
+      [](auto &value) { value.diffusion_number_target = 0.2; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { value.growth_factor = 1.2; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { value.retry_factor = 0.4; }));
+  HUNDUN_CHECK(
+      config_changes_seal([](auto &value) { --value.max_retries; }));
+  HUNDUN_CHECK(hundun::flow::test::AdaptiveTimeControlTestAccess::seal(
+                   config, hundun::config::DensityModel::ideal_gas, state) !=
+               expected);
 
   auto report =
       hundun::flow::test::AdaptiveTimeControlTestAccess::report();
@@ -119,6 +152,23 @@ void run() {
   HUNDUN_CHECK(
       !hundun::flow::test::AdaptiveTimeControlTestAccess::valid_control(
           bad_control));
+
+  for (const double ratio : std::array<double, 4>{0.5, 1.0, 1.25, 2.0}) {
+    const double previous = 0.08;
+    const double current = ratio * previous;
+    const auto stencil = hundun::flow::make_momentum_time_stencil(
+        hundun::flow::MomentumTimeOrder::bdf2, current, previous);
+    HUNDUN_CHECK(stencil.order == hundun::flow::MomentumTimeOrder::bdf2);
+    HUNDUN_CHECK(stencil.alpha0 == (1.0 + 2.0 * ratio) / (1.0 + ratio));
+    HUNDUN_CHECK(stencil.alpha1 == -(1.0 + ratio));
+    HUNDUN_CHECK(stencil.alpha2 ==
+                 (ratio * ratio) / (1.0 + ratio));
+  }
+  const auto be = hundun::flow::make_momentum_time_stencil(
+      hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
+  HUNDUN_CHECK(be.alpha0 == 1.0);
+  HUNDUN_CHECK(be.alpha1 == -1.0);
+  HUNDUN_CHECK(be.alpha2 == 0.0);
 }
 
 } // namespace

@@ -9,6 +9,11 @@ file(READ "${HUNDUN_SOURCE_ROOT}/flow/src/adaptive_time_control_detail.hpp"
      detail_text)
 file(READ "${HUNDUN_SOURCE_ROOT}/diagnostics/src/time_control_diagnostics.cpp"
      diagnostics_text)
+file(READ "${HUNDUN_SOURCE_ROOT}/tests/mpi/test_adaptive_time_control.cpp"
+     controller_test_text)
+file(READ
+     "${HUNDUN_SOURCE_ROOT}/tests/mpi/test_adaptive_time_control_diagnostics.cpp"
+     diagnostics_test_text)
 
 if(cmake_text MATCHES
    "target_link_libraries\\(hundun_flow[^\\)]*hundun_diagnostics")
@@ -33,6 +38,8 @@ endif()
 foreach(required IN ITEMS
     "add_executable(test_adaptive_time_control_mpi"
     "add_executable(test_adaptive_time_control_diagnostics_mpi"
+    "test_adaptive_time_control_selector_"
+    "test_adaptive_time_control_diagnostics_selector_"
     "test_task22_tests_off_header_contract"
     "HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS")
   string(FIND "${cmake_text}" "${required}" position)
@@ -57,6 +64,8 @@ endforeach()
 foreach(required IN ITEMS
     "request_projection("
     "provider_projection("
+    "struct PreparedCollectivePayload final"
+    "prepare_collective_payload("
     "std::array<Tuple, 9>"
     "render_owned_cells(")
   string(FIND "${flow_text}${detail_text}${diagnostics_text}" "${required}"
@@ -64,6 +73,18 @@ foreach(required IN ITEMS
   if(position EQUAL -1)
     message(FATAL_ERROR "Task22 product authority missing: ${required}")
   endif()
+endforeach()
+foreach(test_var IN ITEMS controller_test_text diagnostics_test_text)
+  foreach(required IN ITEMS
+      "argc != 2"
+      "mode == \"fast\""
+      "mode == \"acceptance\""
+      "return 2")
+    string(FIND "${${test_var}}" "${required}" position)
+    if(position EQUAL -1)
+      message(FATAL_ERROR "Task22 strict mode parser missing: ${required}")
+    endif()
+  endforeach()
 endforeach()
 foreach(forbidden IN ITEMS
     "Python.h" "pybind" "manifest.v2" "COMPLETED"

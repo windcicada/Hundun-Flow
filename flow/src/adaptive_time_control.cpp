@@ -6,6 +6,12 @@
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "adaptive_time_control_test_access.hpp"
+#include "constant_density_piso_test_access.hpp"
+#include "ideal_gas_closure_test_access.hpp"
+#include "material_density_transport_test_access.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -23,6 +29,18 @@ namespace {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr char kSealDomain[] = "hundun-time-control-state-seal-v1";
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+std::atomic<test::TimeControlPostReturnMutation> post_return_mutation{
+    test::TimeControlPostReturnMutation::none};
+std::atomic<test::TimeControlPreflightFault> preflight_fault{
+    test::TimeControlPreflightFault::none};
+std::atomic<int> time_control_fault_rank{-1};
+std::atomic<std::uint64_t> post_commit_observations{};
+std::atomic<std::uint32_t> scheduled_recoverable_failures{};
+std::atomic<StepFailureReason> scheduled_recoverable_reason{
+    StepFailureReason::none};
+#endif
 
 std::uint64_t bits(double value) noexcept {
   std::uint64_t result{};
@@ -238,6 +256,142 @@ StepAttemptReport const &base_report(const IdealGasStepAttemptReport &report) {
   return report.flow().flow();
 }
 
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+template <class Report>
+void apply_post_return_mutation(Report &report, int rank) noexcept {
+  if (rank != time_control_fault_rank.load(std::memory_order_relaxed))
+    return;
+  auto &base = const_cast<StepAttemptReport &>(base_report(report));
+  switch (post_return_mutation.load(std::memory_order_relaxed)) {
+  case test::TimeControlPostReturnMutation::none:
+    return;
+  case test::TimeControlPostReturnMutation::attempted_dt:
+    base.attempted_dt_s = std::nextafter(
+        base.attempted_dt_s, std::numeric_limits<double>::infinity());
+    return;
+  case test::TimeControlPostReturnMutation::reason:
+    base.reason = StepFailureReason::invalid_input;
+    return;
+  case test::TimeControlPostReturnMutation::momentum_x_iterations:
+    base.momentum.components[0].iterations =
+        std::numeric_limits<std::size_t>::max();
+    return;
+  case test::TimeControlPostReturnMutation::momentum_y_iterations:
+    base.momentum.components[1].iterations =
+        std::numeric_limits<std::size_t>::max();
+    return;
+  case test::TimeControlPostReturnMutation::momentum_z_iterations:
+    base.momentum.components[2].iterations =
+        std::numeric_limits<std::size_t>::max();
+    return;
+  case test::TimeControlPostReturnMutation::pressure_one_iterations:
+    base.pressure[0].iterations = std::numeric_limits<std::size_t>::max();
+    return;
+  case test::TimeControlPostReturnMutation::pressure_two_iterations:
+    base.pressure[1].iterations = std::numeric_limits<std::size_t>::max();
+    return;
+  }
+}
+
+bool preflight_fault_here(test::TimeControlPreflightFault fault,
+                          int rank) noexcept {
+  return rank == time_control_fault_rank.load(std::memory_order_relaxed) &&
+         preflight_fault.load(std::memory_order_relaxed) == fault;
+}
+
+template <class Facade>
+void configure_scheduled_attempt(Facade &facade, int rank,
+                                 int local_rank) noexcept {
+  test::ConstantDensityPisoTestAccess::reset();
+  test::MaterialDensityTransportTestAccess::reset();
+  const auto remaining =
+      scheduled_recoverable_failures.load(std::memory_order_relaxed);
+  if (remaining == 0U)
+    return;
+  const auto reason =
+      scheduled_recoverable_reason.load(std::memory_order_relaxed);
+  if constexpr (std::is_same_v<Facade, FixedStepIdealGasFlow>) {
+    switch (reason) {
+    case StepFailureReason::boundary_backflow:
+      test::IdealGasClosureTestAccess::set_outlet_backflow_fault(facade);
+      break;
+    case StepFailureReason::transport_failure:
+      test::IdealGasClosureTestAccess::set_post_assessment_fault(
+          facade, test::IdealGasPostAssessmentFault::non_finite_state, rank);
+      break;
+    case StepFailureReason::final_transport_residual:
+      test::IdealGasClosureTestAccess::set_post_assessment_fault(
+          facade, test::IdealGasPostAssessmentFault::final_transport_residual,
+          rank);
+      break;
+    case StepFailureReason::final_conservation_defect:
+      test::IdealGasClosureTestAccess::set_post_assessment_fault(
+          facade,
+          test::IdealGasPostAssessmentFault::final_conservation_defect, rank);
+      break;
+    case StepFailureReason::none:
+    case StepFailureReason::density_closure_failure:
+      test::IdealGasClosureTestAccess::set_controlled_allocation(facade, rank);
+      break;
+    default:
+      break;
+    }
+  } else if constexpr (std::is_same_v<Facade,
+                                      FixedStepMaterialDensityFlow>) {
+    if (reason == StepFailureReason::final_transport_residual)
+      test::MaterialDensityTransportTestAccess::set_transport_residual(
+          0U, 1.0, rank);
+    else if (reason == StepFailureReason::none ||
+             reason == StepFailureReason::final_continuity_residual)
+      test::MaterialDensityTransportTestAccess::set_density_residual(1.0,
+                                                                    rank);
+  } else {
+    switch (reason) {
+    case StepFailureReason::final_momentum_residual:
+      if (local_rank == rank)
+        test::ConstantDensityPisoTestAccess::
+            force_final_momentum_perturbation(0U, 1.0e-4);
+      break;
+    case StepFailureReason::final_transport_residual:
+      if (local_rank == rank)
+        test::ConstantDensityPisoTestAccess::
+            force_final_transport_perturbation(0U, 1.0e-4);
+      break;
+    case StepFailureReason::final_conservation_defect:
+      test::ConstantDensityPisoTestAccess::force_final_conservation_failure(
+          local_rank == rank);
+      break;
+    case StepFailureReason::final_continuity_residual:
+      test::ConstantDensityPisoTestAccess::force_final_continuity_failure(
+          local_rank == rank);
+      break;
+    case StepFailureReason::final_pressure_residual:
+      test::ConstantDensityPisoTestAccess::force_final_pressure_failure(
+          local_rank == rank);
+      break;
+    case StepFailureReason::none:
+    case StepFailureReason::non_finite_trial:
+      test::ConstantDensityPisoTestAccess::set_attempt_failure_stage(
+          test::AttemptFailureStage::after_begin);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+void consume_scheduled_attempt() noexcept {
+  auto remaining =
+      scheduled_recoverable_failures.load(std::memory_order_relaxed);
+  while (remaining != 0U &&
+         !scheduled_recoverable_failures.compare_exchange_weak(
+             remaining, remaining - 1U, std::memory_order_relaxed)) {
+  }
+  test::ConstantDensityPisoTestAccess::reset();
+  test::MaterialDensityTransportTestAccess::reset();
+}
+#endif
+
 bool recoverable_reason(StepFailureReason reason) noexcept {
   switch (reason) {
   case StepFailureReason::momentum_linear_solve:
@@ -346,6 +500,7 @@ std::uint64_t detail::TimeControlStateCodec::seal(
   for (char ch : std::string_view(kSealDomain))
     byte(hash, static_cast<std::uint8_t>(ch));
   little_endian(hash, static_cast<std::uint32_t>(config.mode));
+  little_endian(hash, static_cast<std::uint32_t>(config.steps));
   fp64(hash, config.initial_dt_s);
   fp64(hash, config.min_dt_s);
   fp64(hash, config.max_dt_s);
@@ -605,11 +760,10 @@ struct Stability final {
 
 template <class ControllerImpl>
 Stability stability_rates(const ControllerImpl &impl,
-                          const FlowState &state, double density_constant,
-                          bool variable_density, double gamma) {
-  const auto density = detail::AdaptiveTimeControlAccess::committed_density(state);
-  const auto flux =
-      detail::AdaptiveTimeControlAccess::committed_face_mass_flux(state);
+                          const std::vector<double> &density,
+                          const std::vector<double> &flux,
+                          double density_constant, bool variable_density,
+                          double gamma) {
   const auto cells = impl.topology->owned_cell_count();
   if (density.size() != cells ||
       flux.size() != impl.topology->local_face_count())
@@ -743,15 +897,53 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
   local_ok = overload_model == impl.model &&
              detail::AdaptiveTimeControlAccess::state_identity(state) ==
                  impl.state &&
-             facade_identity.live && facade_identity.topology == impl.topology &&
-             facade_identity.geometry == impl.geometry &&
-             facade_identity.mpi == impl.mpi;
+             (!facade_identity.live ||
+              (facade_identity.topology == impl.topology &&
+               facade_identity.geometry == impl.geometry &&
+               facade_identity.mpi == impl.mpi));
   status = runtime::collective_status(
       *impl.mpi, local_ok, "time-control.preflight.identity");
   if (!status.ok) {
     report.lowest_failing_rank_ = status.failing_rank;
     report.preflight_category_ =
         TimeAdvanceReport::PreflightCategory::identity;
+    complete();
+    return report;
+  }
+
+  local_ok = impl.geometry->compatible(*impl.topology) &&
+             detail::AdaptiveTimeControlAccess::state_layout_matches(
+                 state, *impl.topology);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  local_ok =
+      local_ok &&
+      !preflight_fault_here(test::TimeControlPreflightFault::layout,
+                            impl.mpi->rank());
+#endif
+  status = runtime::collective_status(
+      *impl.mpi, local_ok, "time-control.preflight.layout");
+  if (!status.ok) {
+    report.lowest_failing_rank_ = status.failing_rank;
+    report.preflight_category_ =
+        TimeAdvanceReport::PreflightCategory::layout;
+    complete();
+    return report;
+  }
+
+  local_ok = facade_identity.live &&
+             detail::AdaptiveTimeControlAccess::state_live(state);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  local_ok =
+      local_ok &&
+      !preflight_fault_here(test::TimeControlPreflightFault::capability,
+                            impl.mpi->rank());
+#endif
+  status = runtime::collective_status(
+      *impl.mpi, local_ok, "time-control.preflight.capability");
+  if (!status.ok) {
+    report.lowest_failing_rank_ = status.failing_rank;
+    report.preflight_category_ =
+        TimeAdvanceReport::PreflightCategory::capability;
     complete();
     return report;
   }
@@ -842,11 +1034,54 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
     return report;
   }
 
+  std::vector<double> prepared_density;
+  std::vector<double> prepared_flux;
+  bool preparation_ok = true;
+  bool capability_ok = true;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  preparation_ok =
+      !preflight_fault_here(test::TimeControlPreflightFault::preparation,
+                            impl.mpi->rank());
+#endif
+  if (impl.config.mode == config::TimeMode::adaptive) {
+    try {
+      if (!preparation_ok)
+        throw std::bad_alloc();
+      prepared_density =
+          detail::AdaptiveTimeControlAccess::committed_density(state);
+      prepared_flux =
+          detail::AdaptiveTimeControlAccess::committed_face_mass_flux(state);
+    } catch (const std::bad_alloc &) {
+      preparation_ok = false;
+    } catch (...) {
+      capability_ok = false;
+    }
+  }
+  status = runtime::collective_status(
+      *impl.mpi, capability_ok, "time-control.preflight.capability");
+  if (!status.ok) {
+    report.lowest_failing_rank_ = status.failing_rank;
+    report.preflight_category_ =
+        TimeAdvanceReport::PreflightCategory::capability;
+    complete();
+    return report;
+  }
+  status = runtime::collective_status(
+      *impl.mpi, preparation_ok, "time-control.preflight.preparation");
+  if (!status.ok) {
+    report.lowest_failing_rank_ = status.failing_rank;
+    report.preflight_category_ =
+        TimeAdvanceReport::PreflightCategory::preparation;
+    complete();
+    return report;
+  }
+
   Stability rates{};
   if (impl.config.mode == config::TimeMode::adaptive) {
     bool rates_ok = true;
     try {
-      rates = stability_rates(impl, state, density_constant, variable_density,
+      rates = stability_rates(impl, prepared_density, prepared_flux,
+                              density_constant, variable_density,
                               std::max(mu, authority.maximum));
     } catch (...) {
       rates_ok = false;
@@ -952,29 +1187,25 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
       complete();
       return report;
     }
+ #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    configure_scheduled_attempt(facade,
+                                time_control_fault_rank.load(
+                                    std::memory_order_relaxed),
+                                impl.mpi->rank());
+ #endif
     Report attempt = invoke(stencil);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    consume_scheduled_attempt();
+    apply_post_return_mutation(attempt, impl.mpi->rank());
+#endif
     const auto &base = base_report(attempt);
     const auto disposition = base.disposition;
     const auto reason = base.reason;
     const auto failing_rank = base.lowest_failing_rank;
     const bool work_gate = half_work_gate(base, momentum, pressure);
-    const bool normalized =
-        TimeAdvanceReport::report_authenticated(attempt) &&
-        report_semantically_valid(base, dt);
     report.attempts_[report.attempt_count_++] =
         {dt, order, disposition, reason, failing_rank,
          disposition == StepAttemptDisposition::committed && work_gate};
-    report.reason_ = reason;
-    report.lowest_failing_rank_ = failing_rank;
-    store_final(report, std::move(attempt));
-
-    if (!normalized) {
-      report.disposition_ = TimeAdvanceDisposition::non_retryable_failure;
-      report.reason_ = StepFailureReason::invalid_input;
-      report.preflight_category_ = TimeAdvanceReport::PreflightCategory::report;
-      complete();
-      return report;
-    }
 
     if (disposition == StepAttemptDisposition::committed) {
       TimeControlState next = controller.observer_state_;
@@ -996,12 +1227,33 @@ static TimeAdvanceReport run(Bdf2RetryController &controller, FlowState &state,
       next.proposed_next_dt_s = work_gate ? fast_proposal : slow_proposal;
       next.state_seal =
           detail::TimeControlStateCodec::seal(impl.config, impl.model, next);
+      store_final(report, std::move(attempt));
       controller.observer_state_ = next;
       report.disposition_ = TimeAdvanceDisposition::committed;
       report.reason_ = StepFailureReason::none;
       report.lowest_failing_rank_ = -1;
       report.accepted_dt_s_ = dt;
       report.proposed_next_dt_s_ = next.proposed_next_dt_s;
+      complete();
+      return report;
+    }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    post_commit_observations.fetch_add(1U, std::memory_order_relaxed);
+#endif
+    const bool normalized =
+        TimeAdvanceReport::report_authenticated(attempt) &&
+        report_semantically_valid(base, dt);
+    status = runtime::collective_status(
+        *impl.mpi, normalized, "time-control.preflight.report");
+    report.reason_ = reason;
+    report.lowest_failing_rank_ = failing_rank;
+    store_final(report, std::move(attempt));
+    if (!status.ok) {
+      report.disposition_ = TimeAdvanceDisposition::non_retryable_failure;
+      report.reason_ = StepFailureReason::invalid_input;
+      report.lowest_failing_rank_ = status.failing_rank;
+      report.preflight_category_ = TimeAdvanceReport::PreflightCategory::report;
       complete();
       return report;
     }
@@ -1241,6 +1493,55 @@ TimeControlDiagnosticSource Bdf2RetryController::diagnostic_source(
       detail::render_global_faces(snapshot.global_faces);
   return TimeControlDiagnosticSource(std::move(source));
 }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void test::AdaptiveTimeControlTestAccess::set_post_return_mutation(
+    test::TimeControlPostReturnMutation mutation, int rank) noexcept {
+  post_return_mutation.store(mutation, std::memory_order_relaxed);
+  time_control_fault_rank.store(rank, std::memory_order_relaxed);
+}
+
+void test::AdaptiveTimeControlTestAccess::set_preflight_fault(
+    test::TimeControlPreflightFault fault, int rank) noexcept {
+  preflight_fault.store(fault, std::memory_order_relaxed);
+  time_control_fault_rank.store(rank, std::memory_order_relaxed);
+}
+
+void test::AdaptiveTimeControlTestAccess::set_recoverable_failures(
+    std::uint32_t count, int rank) noexcept {
+  scheduled_recoverable_failures.store(count, std::memory_order_relaxed);
+  time_control_fault_rank.store(rank, std::memory_order_relaxed);
+}
+
+void test::AdaptiveTimeControlTestAccess::set_recoverable_failure_reason(
+    StepFailureReason reason) noexcept {
+  scheduled_recoverable_reason.store(reason, std::memory_order_relaxed);
+}
+
+void test::AdaptiveTimeControlTestAccess::reset_faults() noexcept {
+  post_return_mutation.store(test::TimeControlPostReturnMutation::none,
+                             std::memory_order_relaxed);
+  preflight_fault.store(test::TimeControlPreflightFault::none,
+                        std::memory_order_relaxed);
+  time_control_fault_rank.store(-1, std::memory_order_relaxed);
+  post_commit_observations.store(0U, std::memory_order_relaxed);
+  scheduled_recoverable_failures.store(0U, std::memory_order_relaxed);
+  scheduled_recoverable_reason.store(StepFailureReason::none,
+                                     std::memory_order_relaxed);
+  test::ConstantDensityPisoTestAccess::reset();
+  test::MaterialDensityTransportTestAccess::reset();
+}
+
+std::uint8_t test::AdaptiveTimeControlTestAccess::preflight_category(
+    const TimeAdvanceReport &report) noexcept {
+  return static_cast<std::uint8_t>(report.preflight_category_);
+}
+
+std::uint64_t
+test::AdaptiveTimeControlTestAccess::post_commit_observation_count() noexcept {
+  return post_commit_observations.load(std::memory_order_relaxed);
+}
+#endif
 
 static_assert(
     std::is_nothrow_move_constructible_v<TimeAdvanceReport>);

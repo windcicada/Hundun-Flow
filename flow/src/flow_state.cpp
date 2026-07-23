@@ -416,6 +416,25 @@ detail::AdaptiveTimeControlAccess::state_identity(const FlowState &state) noexce
   return &state;
 }
 
+bool detail::AdaptiveTimeControlAccess::state_live(
+    const FlowState &state) noexcept {
+  return static_cast<bool>(state.impl_);
+}
+
+bool detail::AdaptiveTimeControlAccess::state_layout_matches(
+    const FlowState &state, const mesh::MeshTopology &topology) noexcept {
+  if (!state.impl_)
+    return false;
+  const auto box = topology.owned_global_box();
+  const runtime::Int3 expected{box.end.x - box.begin.x,
+                              box.end.y - box.begin.y,
+                              box.end.z - box.begin.z};
+  const auto actual = state.impl_->layout.cell_interior_extent;
+  return actual.x == expected.x && actual.y == expected.y &&
+         actual.z == expected.z &&
+         state.impl_->layout.face_count == topology.local_face_count();
+}
+
 std::uint64_t detail::AdaptiveTimeControlAccess::diagnostic_identity(
     const FlowState &state) noexcept {
   return state.diagnostic_mutation_identity();
@@ -482,6 +501,45 @@ test::MaterialDensityPisoTestAccess::state_diagnostic_identity(
 bool test::MaterialDensityPisoTestAccess::state_attempt_active(
     const FlowState &state) noexcept {
   return state.attempt_active();
+}
+std::uint64_t test::MaterialDensityPisoTestAccess::state_attempt_identity(
+    const FlowState &state) noexcept {
+  return state.attempt_identity();
+}
+std::uint64_t test::MaterialDensityPisoTestAccess::state_allocation_identity(
+    const FlowState &state, FlowLayer selected) {
+  const runtime::FieldStorage *storage{};
+  switch (selected) {
+  case FlowLayer::history:
+    storage = &state.impl_->history;
+    break;
+  case FlowLayer::committed:
+    storage = &state.impl_->committed;
+    break;
+  case FlowLayer::trial:
+    storage = &state.impl_->trial;
+    break;
+  }
+  if (storage == nullptr)
+    throw runtime::Error("flow-state test layer is invalid");
+  const auto view = storage->acquire_read<double>(
+      state.impl_->access, kStatePhase, kStateActor,
+      state.impl_->fields.density);
+  return static_cast<std::uint64_t>(
+      reinterpret_cast<std::uintptr_t>(&view(0, 0, 0, 0)));
+}
+void test::MaterialDensityPisoTestAccess::set_accepted_face_mass_flux(
+    FlowState &state, std::size_t face, double value) {
+  auto view = state.impl_->committed.acquire_face_write<double>(
+      state.impl_->access, kStatePhase, kStateActor,
+      state.impl_->fields.face_mass_flux);
+  if (face >= view.face_count())
+    throw runtime::Error("flow-state test face is out of range");
+  view(face, 0) = value;
+}
+void test::MaterialDensityPisoTestAccess::force_state_metadata(
+    FlowState &state, AcceptedStepMetadata metadata) noexcept {
+  state.impl_->metadata = metadata;
 }
 #endif
 

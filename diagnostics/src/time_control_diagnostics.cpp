@@ -27,8 +27,14 @@ enum class FaultPoint : std::uint8_t {
   none,
   phase1_layout,
   phase2_request,
+  projection_root_size,
+  projection_payload,
   phase3_provider,
   phase4_payload,
+  fingerprint_aggregation,
+  eligible_aggregation,
+  wire_root_size,
+  wire_payload,
   phase4_wire,
   phase5_record,
   phase6_sink
@@ -46,6 +52,9 @@ std::size_t request_mutation_offset{std::numeric_limits<std::size_t>::max()};
 int request_mutation_rank{-1};
 std::size_t provider_mutation_offset{std::numeric_limits<std::size_t>::max()};
 int provider_mutation_rank{-1};
+test::TimeControlWireMutation wire_mutation{
+    test::TimeControlWireMutation::none};
+int wire_mutation_rank{-1};
 
 bool fault_here(FaultPoint point, int rank) noexcept {
   return static_cast<std::uint8_t>(diagnostic_fault) ==
@@ -245,10 +254,52 @@ bool selected(const DiagnosticRequest &request, std::string_view field) {
                             request.selected_fields.end(), field);
 }
 
-struct CanonicalWriter final {
-  std::vector<unsigned char> bytes;
+bool supported_level(DiagnosticLevel level) noexcept {
+  return level == DiagnosticLevel::summary ||
+         level == DiagnosticLevel::invariants ||
+         level == DiagnosticLevel::counters ||
+         level == DiagnosticLevel::bounded_state_sample;
+}
 
-  void u8(std::uint8_t value) { bytes.push_back(value); }
+constexpr std::size_t kProjectionCapacity = 4096U;
+constexpr std::size_t kWireCapacity = 512U;
+
+template <std::size_t Capacity> struct FixedBytes final {
+  std::array<unsigned char, Capacity> storage{};
+  std::size_t length{};
+
+  std::size_t size() const noexcept { return length; }
+  bool empty() const noexcept { return length == 0U; }
+  unsigned char *data() noexcept { return storage.data(); }
+  const unsigned char *data() const noexcept { return storage.data(); }
+  unsigned char &operator[](std::size_t index) noexcept {
+    return storage[index];
+  }
+  const unsigned char &operator[](std::size_t index) const noexcept {
+    return storage[index];
+  }
+  void push(unsigned char value) {
+    if (length == Capacity)
+      throw std::length_error("time-control canonical buffer is too large");
+    storage[length++] = value;
+  }
+  void append(const unsigned char *source, std::size_t count) {
+    if (count > Capacity - length)
+      throw std::length_error("time-control canonical buffer is too large");
+    std::copy_n(source, count, storage.data() + length);
+    length += count;
+  }
+  void set_size(std::size_t count) {
+    if (count > Capacity)
+      throw std::length_error("time-control canonical buffer is too large");
+    length = count;
+  }
+};
+
+struct CanonicalWriter final {
+  FixedBytes<kProjectionCapacity> bytes;
+
+  void u8(std::uint8_t value) { bytes.push(value); }
   void u32(std::uint32_t value) {
     for (unsigned shift = 0; shift < 32U; shift += 8U)
       u8(static_cast<std::uint8_t>(value >> shift));
@@ -265,11 +316,12 @@ struct CanonicalWriter final {
   void boolean(bool value) { u8(value ? 1U : 0U); }
   void string(std::string_view value) {
     u64(static_cast<std::uint64_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
+    bytes.append(reinterpret_cast<const unsigned char *>(value.data()),
+                 value.size());
   }
 };
 
-std::vector<unsigned char>
+FixedBytes<kProjectionCapacity>
 request_projection(const DiagnosticRequest &request) {
   CanonicalWriter out;
   out.u8(static_cast<std::uint8_t>(request.level));
@@ -281,7 +333,7 @@ request_projection(const DiagnosticRequest &request) {
   for (auto field : request.selected_fields)
     out.string(field);
   out.u64(static_cast<std::uint64_t>(request.sample_budget));
-  return std::move(out.bytes);
+  return out.bytes;
 }
 
 void write_state(CanonicalWriter &out, const flow::TimeControlState &state) {
@@ -309,7 +361,7 @@ void write_metadata(CanonicalWriter &out,
   out.u8(static_cast<std::uint8_t>(metadata.order));
 }
 
-std::vector<unsigned char> provider_projection(
+FixedBytes<kProjectionCapacity> provider_projection(
     const flow::detail::TimeControlDiagnosticSnapshot &source,
     const DiagnosticRequest &request) {
   CanonicalWriter out;
@@ -321,7 +373,7 @@ std::vector<unsigned char> provider_projection(
   out.string("time-control.advance-result");
   const auto request_bytes = request_projection(request);
   out.u64(static_cast<std::uint64_t>(request_bytes.size()));
-  out.bytes.insert(out.bytes.end(), request_bytes.begin(), request_bytes.end());
+  out.bytes.append(request_bytes.data(), request_bytes.size());
   out.u32(static_cast<std::uint32_t>(source.global_extent.x));
   out.u32(static_cast<std::uint32_t>(source.global_extent.y));
   out.u32(static_cast<std::uint32_t>(source.global_extent.z));
@@ -366,21 +418,25 @@ std::vector<unsigned char> provider_projection(
   out.u64(source.observed_step);
   out.fp64(source.observed_time_s);
   write_metadata(out, source.observed_metadata);
-  return std::move(out.bytes);
+  return out.bytes;
 }
 
 bool exact_projection_agrees(const runtime::MpiContext &mpi,
-                             const std::vector<unsigned char> &local,
+                             const FixedBytes<kProjectionCapacity> &local,
                              std::string_view operation) {
+  // Every rank owns the maximum receive capacity before the first raw
+  // operation. Only the logical length is learned from rank zero.
+  FixedBytes<kProjectionCapacity> root;
   std::uint64_t root_size = static_cast<std::uint64_t>(local.size());
   checked_mpi(
       MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
-  if (root_size >
-      static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+  if (root_size > kProjectionCapacity ||
+      root_size >
+          static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
     throw std::length_error("time-control projection is too large");
-  std::vector<unsigned char> root(static_cast<std::size_t>(root_size));
+  root.set_size(static_cast<std::size_t>(root_size));
   if (mpi.rank() == 0 && root.size() == local.size())
-    root = local;
+    std::copy_n(local.data(), local.size(), root.data());
   checked_mpi(
       MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_BYTE, 0,
                 mpi.comm()),
@@ -397,6 +453,15 @@ struct CollectivePayload final {
   std::uint64_t eligible_count{};
   std::vector<DiagnosticSample> samples;
 };
+
+struct PreparedCollectivePayload final {
+  std::array<Tuple, 9> authority{};
+  DiagnosticFingerprintParts fingerprint;
+  std::uint64_t eligible_count{};
+  FixedBytes<kWireCapacity> wire;
+};
+
+struct WireValidationError final {};
 
 DiagnosticRecord
 build_record(const flow::detail::TimeControlDiagnosticSnapshot &s,
@@ -630,22 +695,23 @@ std::string_view field_unit(std::uint32_t field) {
   return "1";
 }
 
-std::vector<unsigned char> sample_wire(
-    const flow::detail::TimeControlDiagnosticSnapshot &snapshot,
+FixedBytes<kWireCapacity> sample_wire(
+    const std::array<Tuple, 9> &authority, bool authority_rank,
     const DiagnosticRequest &request) {
   CanonicalWriter wire;
   wire.u32(1U);
-  const auto authority = tuples(snapshot);
-  std::vector<const Tuple *> retained;
-  if (snapshot.relative_rank == 0) {
+  std::array<const Tuple *, 9> retained{};
+  std::size_t retained_count{};
+  if (authority_rank) {
     for (const auto &tuple : authority) {
       if (selected(request, tuple.field) &&
-          retained.size() < request.sample_budget)
-        retained.push_back(&tuple);
+          retained_count < request.sample_budget)
+        retained[retained_count++] = &tuple;
     }
   }
-  wire.u64(static_cast<std::uint64_t>(retained.size()));
-  for (const auto *tuple : retained) {
+  wire.u64(static_cast<std::uint64_t>(retained_count));
+  for (std::size_t index = 0; index < retained_count; ++index) {
+    const auto *tuple = retained[index];
     wire.u32(field_index(tuple->field));
     wire.u64(0U);
     wire.u32(tuple->component);
@@ -654,10 +720,12 @@ std::vector<unsigned char> sample_wire(
     std::memcpy(&value_bits, &tuple->value, sizeof(value_bits));
     wire.u64(value_bits);
   }
-  return std::move(wire.bytes);
+  FixedBytes<kWireCapacity> result;
+  result.append(wire.bytes.data(), wire.bytes.size());
+  return result;
 }
 
-std::uint32_t read_u32(const std::vector<unsigned char> &bytes,
+std::uint32_t read_u32(const FixedBytes<kWireCapacity> &bytes,
                        std::size_t &offset) {
   if (offset > bytes.size() || bytes.size() - offset < 4U)
     throw std::runtime_error("short time-control sample wire");
@@ -667,7 +735,7 @@ std::uint32_t read_u32(const std::vector<unsigned char> &bytes,
   return result;
 }
 
-std::uint64_t read_u64(const std::vector<unsigned char> &bytes,
+std::uint64_t read_u64(const FixedBytes<kWireCapacity> &bytes,
                        std::size_t &offset) {
   if (offset > bytes.size() || bytes.size() - offset < 8U)
     throw std::runtime_error("short time-control sample wire");
@@ -677,17 +745,32 @@ std::uint64_t read_u64(const std::vector<unsigned char> &bytes,
   return result;
 }
 
-CollectivePayload collective_payload(
+PreparedCollectivePayload prepare_collective_payload(
     const flow::detail::TimeControlDiagnosticSnapshot &snapshot,
-    const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
+    int rank, const DiagnosticRequest &request) {
+  PreparedCollectivePayload prepared;
   DiagnosticFingerprintAccumulator local_fingerprint;
-  const auto authority = tuples(snapshot);
-  if (mpi.rank() == 0) {
-    for (const auto &tuple : authority)
+  prepared.authority = tuples(snapshot);
+  if (rank == 0) {
+    for (const auto &tuple : prepared.authority)
       local_fingerprint.add(tuple.field, 0U, tuple.component,
                             describe_fp64(tuple.value));
   }
-  auto parts = local_fingerprint.parts();
+  prepared.fingerprint = local_fingerprint.parts();
+  if (rank == 0 &&
+      request.level == DiagnosticLevel::bounded_state_sample) {
+    prepared.eligible_count = static_cast<std::uint64_t>(std::count_if(
+        prepared.authority.begin(), prepared.authority.end(),
+        [&](const auto &tuple) { return selected(request, tuple.field); }));
+    prepared.wire = sample_wire(prepared.authority, true, request);
+  }
+  return prepared;
+}
+
+CollectivePayload collective_payload(
+    const runtime::MpiContext &mpi, const DiagnosticRequest &request,
+    const PreparedCollectivePayload &prepared) {
+  auto parts = prepared.fingerprint;
   checked_mpi(
       MPI_Allreduce(MPI_IN_PLACE, &parts.xor64, 1, MPI_UINT64_T, MPI_BXOR,
                     mpi.comm()),
@@ -697,38 +780,38 @@ CollectivePayload collective_payload(
                     mpi.comm()),
       "MPI_Allreduce(time-control fingerprint sum)");
 
-  std::uint64_t eligible{};
-  if (mpi.rank() == 0 && request.level == DiagnosticLevel::bounded_state_sample)
-    eligible = static_cast<std::uint64_t>(std::count_if(
-        authority.begin(), authority.end(),
-        [&](const auto &tuple) { return selected(request, tuple.field); }));
+  std::uint64_t eligible = prepared.eligible_count;
   checked_mpi(
       MPI_Allreduce(MPI_IN_PLACE, &eligible, 1, MPI_UINT64_T, MPI_SUM,
                     mpi.comm()),
       "MPI_Allreduce(time-control eligible samples)");
 
-  std::vector<unsigned char> wire;
-  if (request.level == DiagnosticLevel::bounded_state_sample &&
-      mpi.rank() == 0)
-    wire = sample_wire(snapshot, request);
+  // The inline receive capacity was constructed during synchronized
+  // preparation on every rank; raw operations only update its logical size.
+  FixedBytes<kWireCapacity> wire = prepared.wire;
   std::uint64_t wire_size = static_cast<std::uint64_t>(wire.size());
   checked_mpi(
       MPI_Bcast(&wire_size, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(time-control sample wire size)");
-  if (wire_size >
-      static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+  if (wire_size > kWireCapacity ||
+      wire_size >
+          static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
     throw std::length_error("time-control sample wire is too large");
   if (mpi.rank() != 0)
-    wire.resize(static_cast<std::size_t>(wire_size));
+    wire.set_size(static_cast<std::size_t>(wire_size));
   checked_mpi(
       MPI_Bcast(wire.data(), static_cast<int>(wire.size()), MPI_BYTE, 0,
                 mpi.comm()),
       "MPI_Bcast(time-control sample wire)");
 
   CollectivePayload result;
-  DiagnosticFingerprintAccumulator combined;
-  combined.combine(parts);
-  result.fingerprint = combined.finish();
+  try {
+    DiagnosticFingerprintAccumulator combined;
+    combined.combine(parts);
+    result.fingerprint = combined.finish();
+  } catch (...) {
+    throw;
+  }
   result.eligible_count = eligible;
   if (request.level != DiagnosticLevel::bounded_state_sample) {
     if (!wire.empty() || eligible != 0U)
@@ -736,44 +819,105 @@ CollectivePayload collective_payload(
     return result;
   }
 
-  std::size_t offset{};
-  if (read_u32(wire, offset) != 1U)
-    throw std::runtime_error("unsupported time-control sample wire");
-  const auto count = read_u64(wire, offset);
-  if (count > request.sample_budget || count > eligible)
-    throw std::runtime_error("invalid time-control sample count");
-  std::string previous;
-  std::uint32_t previous_component{};
-  bool first = true;
-  for (std::uint64_t index = 0; index < count; ++index) {
-    const auto field = read_u32(wire, offset);
-    const auto global_id = read_u64(wire, offset);
-    const auto component = read_u32(wire, offset);
-    const auto unit = read_u32(wire, offset);
-    const auto value_bits = read_u64(wire, offset);
-    if (field >= kFields.size() || global_id != 0U ||
-        !selected(request, kFields[field]))
-      throw std::runtime_error("invalid time-control sample tuple");
-    if (unit != unit_code(field_unit(field)))
-      throw std::runtime_error("invalid time-control sample unit");
-    if ((field == 0U || field == 6U) ? component > 1U : component != 0U)
-      throw std::runtime_error("invalid time-control sample component");
-    const std::string field_name(kFields[field]);
-    if (!first &&
-        (field_name < previous ||
-         (field_name == previous && component <= previous_component)))
-      throw std::runtime_error("noncanonical time-control sample tuple");
-    double value{};
-    std::memcpy(&value, &value_bits, sizeof(value));
-    result.samples.push_back(
-        {field_name, 0U, component, std::string(field_unit(field)),
-         describe_fp64(value)});
-    previous = field_name;
-    previous_component = component;
-    first = false;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (mpi.rank() == wire_mutation_rank) {
+      const auto mutation = wire_mutation;
+      if (mutation == test::TimeControlWireMutation::short_payload &&
+          !wire.empty())
+        wire.set_size(wire.size() - 1U);
+      else if (mutation == test::TimeControlWireMutation::trailing_payload)
+        wire.push(0U);
+      else if (wire.size() >= 68U) {
+        std::size_t offset = 0U;
+        switch (mutation) {
+        case test::TimeControlWireMutation::count:
+          offset = 4U;
+          break;
+        case test::TimeControlWireMutation::field:
+          offset = 12U;
+          break;
+        case test::TimeControlWireMutation::global_id:
+          offset = 16U;
+          break;
+        case test::TimeControlWireMutation::component:
+          offset = 24U;
+          break;
+        case test::TimeControlWireMutation::unit:
+          offset = 28U;
+          break;
+        case test::TimeControlWireMutation::value:
+          offset = 32U;
+          break;
+        case test::TimeControlWireMutation::duplicate:
+          std::copy_n(wire.data() + 12U, 28U, wire.data() + 40U);
+          offset = wire.size();
+          break;
+        default:
+          offset = wire.size();
+          break;
+        }
+        if (offset < wire.size())
+          wire[offset] ^= 0xffU;
+      }
+    }
+#endif
+    std::size_t offset{};
+    if (read_u32(wire, offset) != 1U)
+      throw std::runtime_error("unsupported time-control sample wire");
+    const auto count = read_u64(wire, offset);
+    std::array<const Tuple *, 9> expected{};
+    std::size_t expected_count{};
+    for (const auto &tuple : prepared.authority) {
+      if (selected(request, tuple.field) &&
+          expected_count < request.sample_budget)
+        expected[expected_count++] = &tuple;
+    }
+    if (count != expected_count || count > eligible)
+      throw std::runtime_error("invalid time-control sample count");
+    std::string previous;
+    std::uint32_t previous_component{};
+    bool first = true;
+    for (std::uint64_t index = 0; index < count; ++index) {
+      const auto field = read_u32(wire, offset);
+      const auto global_id = read_u64(wire, offset);
+      const auto component = read_u32(wire, offset);
+      const auto unit = read_u32(wire, offset);
+      const auto value_bits = read_u64(wire, offset);
+      const auto *expected_tuple = expected[static_cast<std::size_t>(index)];
+      std::uint64_t expected_value_bits{};
+      std::memcpy(&expected_value_bits, &expected_tuple->value,
+                  sizeof(expected_value_bits));
+      if (field >= kFields.size() || global_id != 0U ||
+          !selected(request, kFields[field]) ||
+          kFields[field] != expected_tuple->field ||
+          component != expected_tuple->component ||
+          unit != unit_code(expected_tuple->unit) ||
+          value_bits != expected_value_bits)
+        throw std::runtime_error("invalid time-control sample tuple");
+      if (unit != unit_code(field_unit(field)))
+        throw std::runtime_error("invalid time-control sample unit");
+      if ((field == 0U || field == 6U) ? component > 1U : component != 0U)
+        throw std::runtime_error("invalid time-control sample component");
+      const std::string field_name(kFields[field]);
+      if (!first &&
+          (field_name < previous ||
+           (field_name == previous && component <= previous_component)))
+        throw std::runtime_error("noncanonical time-control sample tuple");
+      double value{};
+      std::memcpy(&value, &value_bits, sizeof(value));
+      result.samples.push_back(
+          {field_name, 0U, component, std::string(field_unit(field)),
+           describe_fp64(value)});
+      previous = field_name;
+      previous_component = component;
+      first = false;
+    }
+    if (offset != wire.size())
+      throw std::runtime_error("trailing time-control sample wire bytes");
+  } catch (...) {
+    throw WireValidationError{};
   }
-  if (offset != wire.size())
-    throw std::runtime_error("trailing time-control sample wire bytes");
   return result;
 }
 
@@ -815,6 +959,12 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
         DiagnosticFailureClass::layout,
         "time-control.diagnostics.local-layout", -1,
         "time-control diagnostic layout is invalid");
+  if (!supported_level(request.level) ||
+      request.scope != DiagnosticScope::local)
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::capability,
+        "time-control.diagnostics.capability", -1,
+        "time-control diagnostic capability is unsupported");
   validate_request(snapshot, request, DiagnosticScope::local);
   auto record = build_record(snapshot, request);
   validate(record, describe_time_control_diagnostics(), request);
@@ -846,7 +996,13 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
                 "time-control.diagnostics.local-layout",
                 "time-control collective diagnostic layout is invalid");
 
-  std::vector<unsigned char> request_bytes;
+  phase_ok = supported_level(request.level) &&
+             request.scope == DiagnosticScope::collective;
+  require_phase(mpi, phase_ok, DiagnosticFailureClass::capability,
+                "time-control.diagnostics.capability",
+                "time-control diagnostic capability is unsupported");
+
+  FixedBytes<kProjectionCapacity> request_bytes;
   phase_ok = true;
   try {
     validate_request(*snapshot, request, DiagnosticScope::collective);
@@ -860,6 +1016,9 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
 #endif
     if (fault_here(FaultPoint::phase2_request, mpi.rank()))
       throw std::runtime_error("injected request preparation failure");
+    if (fault_here(FaultPoint::projection_root_size, mpi.rank()) ||
+        fault_here(FaultPoint::projection_payload, mpi.rank()))
+      throw std::runtime_error("injected projection preparation failure");
   } catch (const runtime::MpiOperationError &) {
     throw;
   } catch (...) {
@@ -875,7 +1034,7 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
                 "time-control.diagnostics.request-agreement",
                 "time-control collective diagnostic requests disagree");
 
-  std::vector<unsigned char> provider_bytes;
+  FixedBytes<kProjectionCapacity> provider_bytes;
   phase_ok = true;
   try {
     provider_bytes = provider_projection(*snapshot, request);
@@ -901,20 +1060,30 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
                 "time-control collective diagnostic providers disagree");
 
   CollectivePayload payload;
+  PreparedCollectivePayload prepared_payload;
   phase_ok = true;
   try {
+    prepared_payload =
+        prepare_collective_payload(*snapshot, mpi.rank(), request);
     if (fault_here(FaultPoint::phase4_payload, mpi.rank()))
       throw std::runtime_error("injected payload preparation failure");
+    if (fault_here(FaultPoint::wire_root_size, mpi.rank()) ||
+        fault_here(FaultPoint::wire_payload, mpi.rank()))
+      throw std::runtime_error("injected wire preparation failure");
   } catch (...) {
     phase_ok = false;
   }
   require_phase(mpi, phase_ok, DiagnosticFailureClass::layout,
                 "time-control.diagnostics.sample-preparation",
                 "time-control sample preparation failed");
+  bool wire_ok = true;
   try {
-    payload = collective_payload(*snapshot, mpi, request);
-    if (fault_here(FaultPoint::phase4_wire, mpi.rank()))
-      throw std::runtime_error("injected sample wire failure");
+    payload = collective_payload(mpi, request, prepared_payload);
+    phase_ok =
+        !fault_here(FaultPoint::fingerprint_aggregation, mpi.rank()) &&
+        !fault_here(FaultPoint::eligible_aggregation, mpi.rank());
+  } catch (const WireValidationError &) {
+    wire_ok = false;
     phase_ok = true;
   } catch (const runtime::MpiOperationError &) {
     throw;
@@ -922,6 +1091,11 @@ void collect_diagnostics(const flow::TimeControlDiagnosticSource &source,
     phase_ok = false;
   }
   require_phase(mpi, phase_ok, DiagnosticFailureClass::layout,
+                "time-control.diagnostics.aggregation",
+                "time-control diagnostic aggregation failed");
+
+  wire_ok = wire_ok && !fault_here(FaultPoint::phase4_wire, mpi.rank());
+  require_phase(mpi, wire_ok, DiagnosticFailureClass::layout,
                 "time-control.diagnostics.sample-wire",
                 "time-control sample wire is invalid");
 
@@ -969,6 +1143,8 @@ void test::TimeControlDiagnosticsTestAccess::reset() noexcept {
   request_mutation_rank = -1;
   provider_mutation_offset = std::numeric_limits<std::size_t>::max();
   provider_mutation_rank = -1;
+  wire_mutation = test::TimeControlWireMutation::none;
+  wire_mutation_rank = -1;
 }
 void test::TimeControlDiagnosticsTestAccess::set_raw_fault(
     std::size_t ordinal) noexcept {
@@ -983,6 +1159,11 @@ void test::TimeControlDiagnosticsTestAccess::set_provider_projection_mutation(
     std::size_t offset, int rank) noexcept {
   provider_mutation_offset = offset;
   provider_mutation_rank = rank;
+}
+void test::TimeControlDiagnosticsTestAccess::set_wire_mutation(
+    test::TimeControlWireMutation mutation, int rank) noexcept {
+  wire_mutation = mutation;
+  wire_mutation_rank = rank;
 }
 void test::TimeControlDiagnosticsTestAccess::set_fault(
     test::TimeControlDiagnosticFault fault, int rank) noexcept {
@@ -999,6 +1180,59 @@ test::TimeControlDiagnosticsTestAccess::raw_operation_count() noexcept {
 std::size_t
 test::TimeControlDiagnosticsTestAccess::submission_count() noexcept {
   return diagnostic_submission_count;
+}
+void test::TimeControlDiagnosticsTestAccess::set_state_counters(
+    flow::TimeControlDiagnosticSource &source, std::uint64_t accepted_step,
+    std::uint64_t revision) noexcept {
+  if (!source.impl_)
+    return;
+  source.impl_->snapshot.state.accepted_step = accepted_step;
+  source.impl_->snapshot.state.revision = revision;
+}
+void test::TimeControlDiagnosticsTestAccess::set_outcome(
+    flow::TimeControlDiagnosticSource &source,
+    flow::TimeAdvanceDisposition disposition, flow::StepFailureReason reason,
+    int lowest_failing_rank, std::uint8_t preflight_category,
+    std::size_t attempt_count) noexcept {
+  if (!source.impl_)
+    return;
+  auto &snapshot = source.impl_->snapshot;
+  snapshot.disposition = disposition;
+  snapshot.reason = reason;
+  snapshot.lowest_failing_rank = lowest_failing_rank;
+  snapshot.preflight_category = preflight_category;
+  snapshot.attempt_count =
+      std::min(attempt_count, snapshot.attempts.size());
+}
+void test::TimeControlDiagnosticsTestAccess::set_local_mutation(
+    flow::TimeControlDiagnosticSource &source,
+    test::TimeControlLocalMutation mutation) {
+  if (!source.impl_)
+    return;
+  auto &snapshot = source.impl_->snapshot;
+  switch (mutation) {
+  case test::TimeControlLocalMutation::local_box:
+    snapshot.local_box.begin.x = -1;
+    break;
+  case test::TimeControlLocalMutation::canonical_owned_faces:
+    snapshot.canonical_owned_faces = snapshot.local_faces + 1U;
+    break;
+  case test::TimeControlLocalMutation::local_faces:
+    snapshot.local_faces = 0U;
+    break;
+  case test::TimeControlLocalMutation::local_cell_layout:
+    snapshot.local_cell_layout += ".mutated";
+    break;
+  case test::TimeControlLocalMutation::global_cell_layout:
+    snapshot.global_cell_layout += ".mutated";
+    break;
+  case test::TimeControlLocalMutation::local_face_layout:
+    snapshot.local_face_layout += ".mutated";
+    break;
+  case test::TimeControlLocalMutation::global_face_layout:
+    snapshot.global_face_layout += ".mutated";
+    break;
+  }
 }
 #endif
 

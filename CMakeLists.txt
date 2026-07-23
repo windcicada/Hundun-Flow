@@ -774,6 +774,24 @@ if(HUNDUN_BUILD_TESTS)
         TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
     endforeach()
   endforeach()
+  foreach(selector_case IN ITEMS missing unknown extra)
+    if(selector_case STREQUAL "missing")
+      set(selector_args)
+    elseif(selector_case STREQUAL "unknown")
+      set(selector_args "not-a-task22-mode")
+    else()
+      set(selector_args "fast" "unexpected-extra-argument")
+    endif()
+    add_test(NAME "test_adaptive_time_control_selector_${selector_case}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_adaptive_time_control_mpi>"
+              ${selector_args} ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      "test_adaptive_time_control_selector_${selector_case}" PROPERTIES
+      LABELS "mpi;contract;task22;task22-fast"
+      TIMEOUT 30 PROCESSORS 1 RUN_SERIAL TRUE WILL_FAIL TRUE)
+  endforeach()
   add_executable(test_adaptive_time_control_diagnostics_mpi
     tests/mpi/test_adaptive_time_control_diagnostics.cpp)
   target_include_directories(test_adaptive_time_control_diagnostics_mpi PRIVATE
@@ -796,6 +814,25 @@ if(HUNDUN_BUILD_TESTS)
         LABELS "mpi;diagnostics;task22;task22-${mode}"
         TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
     endforeach()
+  endforeach()
+  foreach(selector_case IN ITEMS missing unknown extra)
+    if(selector_case STREQUAL "missing")
+      set(selector_args)
+    elseif(selector_case STREQUAL "unknown")
+      set(selector_args "not-a-task22-mode")
+    else()
+      set(selector_args "acceptance" "unexpected-extra-argument")
+    endif()
+    add_test(
+      NAME "test_adaptive_time_control_diagnostics_selector_${selector_case}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_adaptive_time_control_diagnostics_mpi>"
+              ${selector_args} ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      "test_adaptive_time_control_diagnostics_selector_${selector_case}"
+      PROPERTIES LABELS "mpi;contract;diagnostics;task22;task22-fast"
+      TIMEOUT 30 PROCESSORS 1 RUN_SERIAL TRUE WILL_FAIL TRUE)
   endforeach()
   add_test(NAME test_task22_source_policy
     COMMAND "${CMAKE_COMMAND}"

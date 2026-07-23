@@ -5,6 +5,7 @@
 #include "hundun/flow/adaptive_time_control.hpp"
 #include "hundun/flow/ideal_gas_closure.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -176,6 +177,8 @@ inline bool time_control_state_equality_oracle_is_mutation_sensitive() {
     return !time_control_state_bitwise_equal(baseline, candidate);
   };
   return time_control_state_bitwise_equal(baseline, exact) &&
+         changed([](auto &s) { ++s.schema_version; }) &&
+         changed([](auto &s) { ++s.accepted_step; }) &&
          changed([](auto &s) { s.proposed_next_dt_s = -0.1; }) &&
          changed([](auto &s) { s.last_accepted_dt_s = -0.05; }) &&
          changed([](auto &s) {
@@ -210,6 +213,10 @@ struct AdaptiveFlowStateSnapshot final {
   std::uint64_t trial_generation{};
   std::uint64_t attempt_identity{};
   std::uint64_t diagnostic_identity{};
+  std::uint64_t accepted_cache_identity{};
+  std::size_t accepted_cache_capacity{};
+  std::uint64_t accepted_cache_revision{};
+  std::array<std::uint64_t, 4> operation_counters{};
 };
 
 inline bool adaptive_flow_state_bitwise_equal(
@@ -229,17 +236,39 @@ inline bool adaptive_flow_state_bitwise_equal(
          left.history_generation == right.history_generation &&
          left.trial_generation == right.trial_generation &&
          left.attempt_identity == right.attempt_identity &&
-         left.diagnostic_identity == right.diagnostic_identity;
+         left.diagnostic_identity == right.diagnostic_identity &&
+         left.accepted_cache_identity == right.accepted_cache_identity &&
+         left.accepted_cache_capacity == right.accepted_cache_capacity &&
+         left.accepted_cache_revision == right.accepted_cache_revision &&
+         left.operation_counters == right.operation_counters;
 }
 
 inline bool adaptive_flow_state_equality_oracle_is_mutation_sensitive() {
   AdaptiveFlowStateSnapshot baseline;
-  baseline.history.density = {1.0};
-  baseline.committed.density = {1.0};
-  baseline.trial.density = {1.0};
-  baseline.committed.transported_cell_fields = {{2.0}, {3.0}};
+  const auto populate_layer = [](flow::FlowLayerValues &layer) {
+    layer.density = {1.0};
+    layer.velocity = {2.0, 3.0, 4.0};
+    layer.mechanical_pressure = {5.0};
+    layer.face_velocity = {6.0, 7.0, 8.0};
+    layer.face_mass_flux = {9.0};
+    layer.transported_cell_fields = {{10.0}, {11.0}};
+  };
+  populate_layer(baseline.history);
+  populate_layer(baseline.committed);
+  populate_layer(baseline.trial);
+  baseline.metadata = {2U, 0.1, 0.05, 0.05,
+                       flow::MomentumTimeOrder::bdf2};
   baseline.controller.proposed_next_dt_s = 0.1;
   baseline.controller.last_accepted_dt_s = 0.05;
+  baseline.controller.accepted_step = 2U;
+  baseline.controller.last_accepted_order = flow::MomentumTimeOrder::bdf2;
+  baseline.controller.history_ready = true;
+  baseline.controller.last_all_linear_solves_within_half_limit = true;
+  baseline.controller.last_convective_rate_per_s = 2.0;
+  baseline.controller.last_diffusive_rate_per_s = 3.0;
+  baseline.controller.last_stability_metrics_available = true;
+  baseline.controller.last_retry_count = 2U;
+  baseline.controller.revision = 2U;
   baseline.controller.state_seal = 1U;
   baseline.closure = {flow::IdealGasPressureMode::closed_dynamic, 101325.0,
                       1.0, 2U};
@@ -251,6 +280,10 @@ inline bool adaptive_flow_state_equality_oracle_is_mutation_sensitive() {
   baseline.trial_generation = 22U;
   baseline.attempt_identity = 30U;
   baseline.diagnostic_identity = 31U;
+  baseline.accepted_cache_identity = 40U;
+  baseline.accepted_cache_capacity = 41U;
+  baseline.accepted_cache_revision = 42U;
+  baseline.operation_counters = {50U, 51U, 52U, 53U};
   const auto exact = baseline;
   const auto changed = [&](auto mutate) {
     auto candidate = baseline;
@@ -258,20 +291,105 @@ inline bool adaptive_flow_state_equality_oracle_is_mutation_sensitive() {
     return !adaptive_flow_state_bitwise_equal(baseline, candidate);
   };
   return adaptive_flow_state_bitwise_equal(baseline, exact) &&
+         changed([](auto &s) { s.history.density[0] = -1.0; }) &&
+         changed([](auto &s) { s.history.velocity[0] = -2.0; }) &&
+         changed([](auto &s) {
+           s.history.mechanical_pressure[0] = -5.0;
+         }) &&
+         changed([](auto &s) { s.history.face_velocity[0] = -6.0; }) &&
+         changed([](auto &s) { s.history.face_mass_flux[0] = -9.0; }) &&
          changed([](auto &s) { s.committed.density[0] = -1.0; }) &&
+         changed([](auto &s) { s.committed.velocity[0] = -2.0; }) &&
+         changed([](auto &s) {
+           s.committed.mechanical_pressure[0] = -5.0;
+         }) &&
+         changed([](auto &s) { s.committed.face_velocity[0] = -6.0; }) &&
+         changed([](auto &s) {
+           s.committed.face_mass_flux[0] = -9.0;
+         }) &&
+         changed([](auto &s) { s.trial.density[0] = -1.0; }) &&
+         changed([](auto &s) { s.trial.velocity[0] = -2.0; }) &&
+         changed([](auto &s) {
+           s.trial.mechanical_pressure[0] = -5.0;
+         }) &&
+         changed([](auto &s) { s.trial.face_velocity[0] = -6.0; }) &&
+         changed([](auto &s) { s.trial.face_mass_flux[0] = -9.0; }) &&
+         changed([](auto &s) {
+           s.history.transported_cell_fields[1][0] = -3.0;
+         }) &&
          changed([](auto &s) {
            s.committed.transported_cell_fields[1][0] = -3.0;
          }) &&
+         changed([](auto &s) {
+           s.trial.transported_cell_fields[1][0] = -3.0;
+         }) &&
+         changed([](auto &s) {
+           s.committed.transported_cell_fields[0].push_back(12.0);
+         }) &&
+         changed([](auto &s) {
+           s.history.transported_cell_fields.push_back({4.0});
+         }) &&
+         changed([](auto &s) {
+           s.committed.transported_cell_fields.push_back({4.0});
+         }) &&
+         changed([](auto &s) {
+           s.trial.transported_cell_fields.push_back({4.0});
+         }) &&
+         changed([](auto &s) { ++s.metadata.step; }) &&
+         changed([](auto &s) { s.metadata.time_s = 1.0; }) &&
+         changed([](auto &s) { s.metadata.dt_s = 0.025; }) &&
+         changed([](auto &s) { s.metadata.previous_dt_s = 0.025; }) &&
+         changed([](auto &s) {
+           s.metadata.order = flow::MomentumTimeOrder::backward_euler;
+         }) &&
+         changed([](auto &s) { ++s.controller.schema_version; }) &&
+         changed([](auto &s) { ++s.controller.accepted_step; }) &&
          changed([](auto &s) { s.controller.proposed_next_dt_s = -0.1; }) &&
+         changed([](auto &s) { s.controller.last_accepted_dt_s = -0.05; }) &&
+         changed([](auto &s) {
+           s.controller.last_accepted_order =
+               flow::MomentumTimeOrder::backward_euler;
+         }) &&
+         changed([](auto &s) { s.controller.history_ready = false; }) &&
+         changed([](auto &s) {
+           s.controller.last_all_linear_solves_within_half_limit = false;
+         }) &&
+         changed([](auto &s) {
+           s.controller.last_convective_rate_per_s = 1.0;
+         }) &&
+         changed([](auto &s) {
+           s.controller.last_diffusive_rate_per_s = 1.0;
+         }) &&
+         changed([](auto &s) {
+           s.controller.last_stability_metrics_available = false;
+         }) &&
+         changed([](auto &s) { ++s.controller.last_retry_count; }) &&
+         changed([](auto &s) { ++s.controller.revision; }) &&
          changed([](auto &s) { ++s.controller.state_seal; }) &&
+         changed([](auto &s) {
+           s.closure.mode = flow::IdealGasPressureMode::open_fixed;
+         }) &&
          changed([](auto &s) {
            s.closure.thermodynamic_pressure_pa = 101326.0;
          }) &&
+         changed([](auto &s) { s.closure.target_mass_kg.reset(); }) &&
+         changed([](auto &s) { s.closure.target_mass_kg = 2.0; }) &&
          changed([](auto &s) { ++s.closure.revision; }) &&
          changed([](auto &s) { ++s.committed_allocation_identity; }) &&
+         changed([](auto &s) { ++s.history_allocation_identity; }) &&
+         changed([](auto &s) { ++s.trial_allocation_identity; }) &&
+         changed([](auto &s) { ++s.committed_generation; }) &&
+         changed([](auto &s) { ++s.history_generation; }) &&
          changed([](auto &s) { ++s.trial_generation; }) &&
          changed([](auto &s) { ++s.attempt_identity; }) &&
-         changed([](auto &s) { ++s.diagnostic_identity; });
+         changed([](auto &s) { ++s.diagnostic_identity; }) &&
+         changed([](auto &s) { ++s.accepted_cache_identity; }) &&
+         changed([](auto &s) { ++s.accepted_cache_capacity; }) &&
+         changed([](auto &s) { ++s.accepted_cache_revision; }) &&
+         changed([](auto &s) { ++s.operation_counters[0]; }) &&
+         changed([](auto &s) { ++s.operation_counters[1]; }) &&
+         changed([](auto &s) { ++s.operation_counters[2]; }) &&
+         changed([](auto &s) { ++s.operation_counters[3]; });
 }
 
 } // namespace hundun::test

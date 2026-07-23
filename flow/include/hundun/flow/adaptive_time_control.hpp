@@ -13,6 +13,11 @@
 namespace hundun::diagnostics::detail {
 struct TimeControlAdapter;
 }
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+namespace hundun::diagnostics::test {
+class TimeControlDiagnosticsTestAccess;
+}
+#endif
 
 namespace hundun::flow {
 
@@ -138,6 +143,9 @@ private:
   friend class test::AdaptiveTimeControlTestAccess;
 #endif
   friend struct ::hundun::diagnostics::detail::TimeControlAdapter;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  friend class ::hundun::diagnostics::test::TimeControlDiagnosticsTestAccess;
+#endif
 };
 
 class TimeControlDiagnosticSource final {
@@ -156,6 +164,9 @@ private:
   std::unique_ptr<Impl> impl_;
   friend class Bdf2RetryController;
   friend struct ::hundun::diagnostics::detail::TimeControlAdapter;
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+  friend class ::hundun::diagnostics::test::TimeControlDiagnosticsTestAccess;
+#endif
 };
 
 class Bdf2RetryController final {

@@ -17,6 +17,8 @@ class FlowState;
 class FixedStepMaterialDensityFlow;
 class MaterialDensityStepAttemptReport;
 class PisoCoupler;
+enum class FlowLayer : std::uint8_t;
+struct AcceptedStepMetadata;
 }
 namespace hundun::runtime {
 class MpiContext;
@@ -233,6 +235,13 @@ public:
   static std::uint64_t
   state_diagnostic_identity(const FlowState &) noexcept;
   static bool state_attempt_active(const FlowState &) noexcept;
+  static std::uint64_t state_attempt_identity(const FlowState &) noexcept;
+  static std::uint64_t state_allocation_identity(const FlowState &,
+                                                 FlowLayer);
+  static void set_accepted_face_mass_flux(FlowState &, std::size_t face,
+                                          double value);
+  static void force_state_metadata(FlowState &,
+                                   AcceptedStepMetadata) noexcept;
   static bool face_flux_path_observation_active() noexcept;
   static void force_flow_attempt_identity(FixedStepMaterialDensityFlow &,
                                           std::uint64_t) noexcept;

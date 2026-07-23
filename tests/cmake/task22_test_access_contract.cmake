@@ -42,6 +42,10 @@ foreach(test_name IN ITEMS
     AdaptiveTimeControlTestAccess
     TimeControlDiagnosticsTestAccess
     TimeControlDiagnosticFault
+    TimeControlWireMutation
+    TimeControlLocalMutation
+    set_recoverable_failure_reason
+    set_outcome
     set_raw_fault
     set_fault)
   string(FIND "${preprocessed}" "${test_name}" position)
@@ -70,7 +74,7 @@ foreach(archive IN ITEMS
       message(FATAL_ERROR "nm failed for ${archive}: ${nm_error}")
     endif()
     if(symbols MATCHES
-       "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|diagnostic_fault|set_raw_fault|set_fault")
+       "AdaptiveTimeControlTestAccess|TimeControlDiagnosticsTestAccess|diagnostic_fault|set_raw_fault|set_fault|set_recoverable_failure_reason|wire_mutation|set_local_mutation|set_outcome")
       message(FATAL_ERROR "Task22 test-only symbol leaked into ${archive}")
     endif()
   endif()
