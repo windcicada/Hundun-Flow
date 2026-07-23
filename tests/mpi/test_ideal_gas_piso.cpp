@@ -38,8 +38,12 @@
 namespace {
 
 #ifndef HUNDUN_TASK21_DIAGNOSTIC_MATRIX
-#define HUNDUN_TASK21_DIAGNOSTIC_MATRIX(source, mpi, state, report)           \
+#define HUNDUN_TASK21_DIAGNOSTIC_MATRIX(source, mpi, state, report, flow,     \
+                                         stencil)                             \
   static_cast<void>(source)
+#endif
+#ifndef HUNDUN_TASK21_DIAGNOSTIC_EARLY_RETURN
+#define HUNDUN_TASK21_DIAGNOSTIC_EARLY_RETURN() false
 #endif
 #ifndef HUNDUN_TASK21_DIAGNOSTIC_STATUS
 #define HUNDUN_TASK21_DIAGNOSTIC_STATUS(source, mpi, status, classification,  \
@@ -534,7 +538,10 @@ void run(const hundun::runtime::MpiContext &mpi, bool open_domain,
   const double first_temperature = open_domain ? 300.0 : 305.0;
   HUNDUN_CHECK_NEAR(closure_source.sample_field_value(4U, 0U),
                     first_temperature, 5.0e-12 * first_temperature);
-  HUNDUN_TASK21_DIAGNOSTIC_MATRIX(closure_source, mpi, state, report);
+  HUNDUN_TASK21_DIAGNOSTIC_MATRIX(closure_source, mpi, state, report, flow,
+                                  stencil);
+  if (HUNDUN_TASK21_DIAGNOSTIC_EARLY_RETURN())
+    return;
   auto material_source = flow.flow_diagnostic_source(state, report);
   HUNDUN_CHECK(material_source.report().attempt_identity() ==
                report.attempt_identity());

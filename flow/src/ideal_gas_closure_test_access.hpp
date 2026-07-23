@@ -86,6 +86,8 @@ public:
          const runtime::FieldRegistry &, const FlowFieldIds &,
          const FlowState &, IdealGasClosureSpec, IdealGasCreateFault, int rank);
   static int preflight_failure_rank(const runtime::Error &) noexcept;
+  static IdealGasClosureFailureReason
+  create_validation_failure_reason(const runtime::Error &) noexcept;
   static void begin_attempt(IdealGasClosure &, FlowState &,
                             std::uint64_t identity);
   static IdealGasClosureReport evaluate(IdealGasClosure &, FlowState &,

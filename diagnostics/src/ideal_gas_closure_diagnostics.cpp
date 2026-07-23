@@ -352,7 +352,7 @@ void require_source_communicator(
   const bool mismatch = comparison != MPI_IDENT || bound.rank() != mpi.rank() ||
                         bound.size() != mpi.size();
   const int rank = lowest_rank(
-      bound, mismatch,
+      mpi, mismatch,
       "MPI_Allreduce(ideal-gas diagnostic communicator validation)");
   if (rank >= 0)
     fail(DiagnosticFailureClass::layout, "closure.diagnostics.layout", rank,

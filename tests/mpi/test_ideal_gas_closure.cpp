@@ -474,7 +474,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
       };
   const auto expect_derived_value_rejected =
       [&](int target, double candidate_cp, double invalid_rho,
-          double invalid_rho_h, bool history_layer) {
+          double invalid_rho_h, bool history_layer,
+          hundun::flow::IdealGasClosureFailureReason expected_reason) {
         auto candidate = make_candidate_state();
         const double base_rho_h = density * candidate_cp * temperature;
         const auto write_layer = [&](double target_rho,
@@ -518,6 +519,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
         const auto metadata_before = candidate.metadata();
         bool rejected = false;
         int failing_rank = -1;
+        auto failure_reason =
+            hundun::flow::IdealGasClosureFailureReason::none;
         try {
           static_cast<void>(hundun::flow::IdealGasClosure::create(
               topology, geometry, boundaries, mpi, registry, fields, candidate,
@@ -525,8 +528,11 @@ void run(const hundun::runtime::MpiContext &mpi) {
         } catch (const hundun::runtime::Error &error) {
           rejected = true;
           failing_rank = TestAccess::preflight_failure_rank(error);
+          failure_reason =
+              TestAccess::create_validation_failure_reason(error);
         }
-        HUNDUN_CHECK(rejected && failing_rank == target);
+        HUNDUN_CHECK(rejected && failing_rank == target &&
+                     failure_reason == expected_reason);
         HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
             history_before,
             candidate.snapshot(hundun::flow::FlowLayer::history)));
@@ -554,16 +560,80 @@ void run(const hundun::runtime::MpiContext &mpi) {
             std::pair{rho_h, std::numeric_limits<double>::denorm_min()},
             std::pair{rho_h, std::numeric_limits<double>::max()}})
         expect_layer_value_rejected(target, field, value, history_layer);
-      for (const auto &[candidate_cp, invalid_rho, invalid_rho_h] :
-           {std::tuple{cp, std::numeric_limits<double>::denorm_min(),
-                       std::numeric_limits<double>::max()},
-            std::tuple{cp, std::numeric_limits<double>::max(),
-                       std::numeric_limits<double>::denorm_min()},
-            std::tuple{0.5, 1.0, std::numeric_limits<double>::max()},
-            std::tuple{2.0, 1.0,
-                       std::numeric_limits<double>::denorm_min()}})
+      for (const auto &[candidate_cp, invalid_rho, invalid_rho_h,
+                        expected_reason] :
+           {std::tuple{
+                cp, std::numeric_limits<double>::denorm_min(),
+                std::numeric_limits<double>::max(),
+                hundun::flow::IdealGasClosureFailureReason::
+                    non_finite_enthalpy},
+            std::tuple{
+                cp, std::numeric_limits<double>::max(),
+                std::numeric_limits<double>::denorm_min(),
+                hundun::flow::IdealGasClosureFailureReason::
+                    non_positive_enthalpy},
+            std::tuple{
+                0.5, 1.0, std::numeric_limits<double>::max(),
+                hundun::flow::IdealGasClosureFailureReason::
+                    non_finite_temperature},
+            std::tuple{
+                2.0, 1.0, std::numeric_limits<double>::denorm_min(),
+                hundun::flow::IdealGasClosureFailureReason::
+                    non_positive_temperature}})
         expect_derived_value_rejected(target, candidate_cp, invalid_rho,
-                                      invalid_rho_h, history_layer);
+                                      invalid_rho_h, history_layer,
+                                      expected_reason);
+
+      auto later_eos = make_candidate_state();
+      later_eos.begin_attempt();
+      if (mpi.rank() == target) {
+        auto rho_values =
+            later_eos.trial_layer().view<double>(fields.density);
+        auto rho_h_values = later_eos.trial_layer().view<double>(rho_h);
+        rho_values(0, 0, 0, 0) = 1.0;
+        rho_h_values(0, 0, 0, 0) = cp * temperature;
+      }
+      commit_trial(later_eos, 1U);
+      const auto later_eos_history =
+          later_eos.snapshot(hundun::flow::FlowLayer::history);
+      const auto later_eos_committed =
+          later_eos.snapshot(hundun::flow::FlowLayer::committed);
+      const auto later_eos_trial =
+          later_eos.snapshot(hundun::flow::FlowLayer::trial);
+      const auto later_eos_metadata = later_eos.metadata();
+      bool later_eos_rejected = false;
+      auto later_eos_reason =
+          hundun::flow::IdealGasClosureFailureReason::none;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::create(
+            topology, geometry, boundaries, mpi, registry, fields, later_eos,
+            {rho_h, cp, gas_constant, pressure}));
+      } catch (const hundun::runtime::Error &error) {
+        later_eos_rejected = true;
+        later_eos_reason =
+            TestAccess::create_validation_failure_reason(error);
+      }
+      HUNDUN_CHECK(later_eos_rejected);
+      HUNDUN_CHECK(later_eos_reason ==
+                   hundun::flow::IdealGasClosureFailureReason::none);
+      HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+          later_eos_history,
+          later_eos.snapshot(hundun::flow::FlowLayer::history)));
+      HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+          later_eos_committed,
+          later_eos.snapshot(hundun::flow::FlowLayer::committed)));
+      HUNDUN_CHECK(hundun::test::flow_layer_values_bitwise_equal(
+          later_eos_trial,
+          later_eos.snapshot(hundun::flow::FlowLayer::trial)));
+      HUNDUN_CHECK(hundun::test::accepted_step_metadata_bitwise_equal(
+          later_eos_metadata, later_eos.metadata()));
+      auto later_eos_successor_state = make_candidate_state();
+      const auto later_eos_successor =
+          hundun::flow::IdealGasClosure::create(
+              topology, geometry, boundaries, mpi, registry, fields,
+              later_eos_successor_state,
+              {rho_h, cp, gas_constant, pressure});
+      HUNDUN_CHECK(later_eos_successor.state().revision == 0U);
     }
 
     {

@@ -745,6 +745,8 @@ IdealGasClosure IdealGasClosure::create_internal(
     throw detail::DensityClosurePreflightFailure(preparation_failure);
 
   bool valid = preparation_valid;
+  IdealGasClosureFailureReason local_validation_failure =
+      IdealGasClosureFailureReason::none;
   FlowLayerValues committed;
   FlowLayerValues history;
   std::array<CompensatedSum, 4> local_sums{};
@@ -803,10 +805,19 @@ IdealGasClosure IdealGasClosure::create_internal(
         const auto history_failure =
             first_state_failure(rho_history, q_history, spec.cp_J_per_kg_K);
         if (current_failure != IdealGasClosureFailureReason::none ||
-            history_failure != IdealGasClosureFailureReason::none ||
-            !(volume > 0.0) || !std::isfinite(volume)) {
+            history_failure != IdealGasClosureFailureReason::none) {
+          local_validation_failure =
+              lower_failure(local_validation_failure,
+                            lower_failure(current_failure, history_failure));
           valid = false;
-          break;
+          continue;
+        }
+        if (!(volume > 0.0) || !std::isfinite(volume)) {
+          local_validation_failure = lower_failure(
+              local_validation_failure,
+              IdealGasClosureFailureReason::invalid_input);
+          valid = false;
+          continue;
         }
         const double temperature = (q / rho) / spec.cp_J_per_kg_K;
         const double temperature_history =
@@ -856,10 +867,12 @@ IdealGasClosure IdealGasClosure::create_internal(
     }
   } catch (...) {
     valid = false;
+    local_validation_failure = IdealGasClosureFailureReason::invalid_input;
   }
-  const auto validation =
-      agree_failure(mpi, valid ? IdealGasClosureFailureReason::none
-                               : IdealGasClosureFailureReason::invalid_input);
+  if (!valid &&
+      local_validation_failure == IdealGasClosureFailureReason::none)
+    local_validation_failure = IdealGasClosureFailureReason::invalid_input;
+  const auto validation = agree_failure(mpi, local_validation_failure);
   if (validation.reason != IdealGasClosureFailureReason::none)
     throw DensityClosureCreateValidationFailure(validation.reason,
                                                 validation.rank);
@@ -1680,6 +1693,15 @@ int test::IdealGasClosureTestAccess::preflight_failure_rank(
   const auto *validation =
       dynamic_cast<const DensityClosureCreateValidationFailure *>(&error);
   return validation == nullptr ? -1 : validation->failing_rank();
+}
+
+IdealGasClosureFailureReason
+test::IdealGasClosureTestAccess::create_validation_failure_reason(
+    const runtime::Error &error) noexcept {
+  const auto *validation =
+      dynamic_cast<const DensityClosureCreateValidationFailure *>(&error);
+  return validation == nullptr ? IdealGasClosureFailureReason::none
+                               : validation->reason();
 }
 
 void test::IdealGasClosureTestAccess::begin_attempt(
