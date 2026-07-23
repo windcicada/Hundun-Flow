@@ -50,6 +50,9 @@ struct DensityClosureHooks final {
   DensityClosureEvaluation (*evaluate)(void *, FlowState &,
                                        DensityClosureStage){};
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  void (*prepare_attempt)(void *){};
+  void (*begin_allocation_observation)(void *) noexcept {};
+  void (*end_allocation_observation)(void *) noexcept {};
   int (*outer_failure)(void *, DensityClosureOuterPoint){};
   void (*after_halo)(void *, DensityClosureStage, runtime::FieldId,
                      runtime::FieldId){};
@@ -338,6 +341,9 @@ struct DensityClosureAdapter final {
   static DensityClosureEvaluation evaluate(void *, FlowState &,
                                            DensityClosureStage);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  static void prepare_attempt(void *);
+  static void begin_allocation_observation(void *) noexcept;
+  static void end_allocation_observation(void *) noexcept;
   static int outer_failure(void *, DensityClosureOuterPoint);
   static void after_halo(void *, DensityClosureStage, runtime::FieldId,
                          runtime::FieldId);

@@ -6,6 +6,7 @@
 #include "fixed_step_flow_detail.hpp"
 #include "hundun/runtime/collective_status.hpp"
 #include "hundun/runtime/error.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "ideal_gas_closure_test_access.hpp"
 #endif
@@ -47,6 +48,11 @@ detail::DensityClosureAdapter::bind(IdealGasClosure &closure,
   hooks.begin = &DensityClosureAdapter::begin;
   hooks.evaluate = &DensityClosureAdapter::evaluate;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  hooks.prepare_attempt = &DensityClosureAdapter::prepare_attempt;
+  hooks.begin_allocation_observation =
+      &DensityClosureAdapter::begin_allocation_observation;
+  hooks.end_allocation_observation =
+      &DensityClosureAdapter::end_allocation_observation;
   hooks.outer_failure = &DensityClosureAdapter::outer_failure;
   hooks.after_halo = &DensityClosureAdapter::after_halo;
   hooks.before_post_assessment =
@@ -68,6 +74,16 @@ void detail::DensityClosureAdapter::begin(void *object, const FlowState &state,
 detail::DensityClosureEvaluation
 detail::DensityClosureAdapter::evaluate(void *object, FlowState &state,
                                         DensityClosureStage stage) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  auto &closure = *static_cast<IdealGasClosure *>(object);
+  test::IdealGasClosureTestAccess::begin_allocation_observation(closure);
+  struct ObservationGuard final {
+    IdealGasClosure &closure;
+    ~ObservationGuard() {
+      test::IdealGasClosureTestAccess::end_allocation_observation(closure);
+    }
+  } guard{closure};
+#endif
   const auto concrete_stage = stage == DensityClosureStage::predictor
                                   ? IdealGasClosureStage::predictor
                               : stage == DensityClosureStage::provisional
@@ -82,6 +98,20 @@ detail::DensityClosureAdapter::evaluate(void *object, FlowState &state,
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void detail::DensityClosureAdapter::prepare_attempt(void *object) {
+  auto &closure = *static_cast<IdealGasClosure *>(object);
+  test::IdealGasClosureTestAccess::consume_attempt_preparation_fault(closure);
+}
+void detail::DensityClosureAdapter::begin_allocation_observation(
+    void *object) noexcept {
+  test::IdealGasClosureTestAccess::begin_allocation_observation(
+      *static_cast<IdealGasClosure *>(object));
+}
+void detail::DensityClosureAdapter::end_allocation_observation(
+    void *object) noexcept {
+  test::IdealGasClosureTestAccess::end_allocation_observation(
+      *static_cast<IdealGasClosure *>(object));
+}
 int detail::DensityClosureAdapter::outer_failure(
     void *object, DensityClosureOuterPoint point) {
   return static_cast<IdealGasClosure *>(object)
@@ -284,13 +314,35 @@ FixedStepIdealGasFlow FixedStepIdealGasFlow::create(
       "ideal-gas closure collaborators do not match flow");
   if (!match.ok)
     throw runtime::Error("ideal-gas closure collaborators do not match flow");
-  auto material = detail::DensityClosureBridge::create_open_capable(
-      decomposition, topology, geometry, boundaries, mpi, execution_context,
-      cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
-      pressure_preconditioner, registry, fields, specification);
-  return FixedStepIdealGasFlow(std::make_unique<Impl>(
-      decomposition, topology, geometry, boundaries, mpi, registry,
-      std::move(fields), std::move(material), std::move(closure)));
+  std::unique_ptr<Impl> prepared;
+  bool construction_ok = true;
+  try {
+    auto material = detail::DensityClosureBridge::create_open_capable(
+        decomposition, topology, geometry, boundaries, mpi, execution_context,
+        cell_halo, momentum_solver, momentum_preconditioners, pressure_solver,
+        pressure_preconditioner, registry, fields, specification);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (test::IdealGasClosureTestAccess::consume_facade_create_fault(
+            closure, mpi.rank())) {
+      throw std::bad_alloc();
+    }
+#endif
+    prepared = std::make_unique<Impl>(
+        decomposition, topology, geometry, boundaries, mpi, registry,
+        std::move(fields), std::move(material), std::move(closure));
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    construction_ok = false;
+  }
+  const auto construction = runtime::collective_status(
+      mpi, construction_ok, "ideal-gas flow facade construction failed");
+  if (!construction.ok)
+    throw runtime::Error("ideal-gas flow facade construction failed on rank " +
+                         std::to_string(construction.failing_rank));
+  if (!prepared)
+    throw runtime::Error("ideal-gas flow facade construction produced no value");
+  return FixedStepIdealGasFlow(std::move(prepared));
 }
 
 IdealGasStepAttemptReport FixedStepIdealGasFlow::attempt(
@@ -742,6 +794,35 @@ void test::IdealGasClosureTestAccess::set_outlet_backflow_fault(
   if (!flow.impl_)
     throw runtime::Error("ideal-gas test flow has been moved from");
   flow.impl_->closure.set_outlet_backflow_fault_for_test();
+}
+void test::IdealGasClosureTestAccess::set_attempt_preparation_fault(
+    FixedStepIdealGasFlow &flow, IdealGasAttemptPreparationFault fault,
+    int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  const auto code = static_cast<std::uint8_t>(fault);
+  if (fault >= IdealGasAttemptPreparationFault::post_density_views &&
+      fault <= IdealGasAttemptPreparationFault::post_report_finalization) {
+    ::hundun::flow::detail::DensityClosureBridge::set_post_assessment_fault(
+        flow.impl_->material,
+        static_cast<std::uint8_t>(
+            code - static_cast<std::uint8_t>(
+                       IdealGasAttemptPreparationFault::post_density_views) +
+            2U),
+        rank);
+    return;
+  }
+  set_attempt_preparation_fault(flow.impl_->closure, fault, rank);
+}
+void test::IdealGasClosureTestAccess::set_controlled_allocation(
+    FixedStepIdealGasFlow &flow, int rank) {
+  if (!flow.impl_)
+    throw runtime::Error("ideal-gas test flow has been moved from");
+  set_controlled_allocation(flow.impl_->closure, rank);
+}
+bool test::IdealGasClosureTestAccess::allocation_observation_active(
+    const FixedStepIdealGasFlow &flow) noexcept {
+  return flow.impl_ && allocation_observation_active(flow.impl_->closure);
 }
 bool test::IdealGasClosureTestAccess::post_evidence_mutation_rejected(
     const IdealGasStepAttemptReport &report,

@@ -82,6 +82,27 @@ private:
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 std::atomic<int> preflight_allocation_failure_rank{-1};
 using FaceFluxPathObservation = test::detail::FaceFluxPathObservation;
+
+class ClosureAllocationObservation final {
+public:
+  explicit ClosureAllocationObservation(
+      const detail::DensityClosureHooks *closure) noexcept
+      : closure_(closure) {
+    if (closure_ != nullptr &&
+        closure_->begin_allocation_observation != nullptr)
+      closure_->begin_allocation_observation(closure_->object);
+  }
+  ~ClosureAllocationObservation() {
+    if (closure_ != nullptr && closure_->end_allocation_observation != nullptr)
+      closure_->end_allocation_observation(closure_->object);
+  }
+  ClosureAllocationObservation(const ClosureAllocationObservation &) = delete;
+  ClosureAllocationObservation &
+  operator=(const ClosureAllocationObservation &) = delete;
+
+private:
+  const detail::DensityClosureHooks *closure_{};
+};
 #endif
 
 struct MomentumConservationTerms final {
@@ -1599,6 +1620,10 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       };
       prepare_authority(prepared_pre_authority);
       prepare_authority(prepared_post_authority);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (closure->prepare_attempt != nullptr)
+        closure->prepare_attempt(closure->object);
+#endif
     }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (preflight_allocation_failure_rank.load(std::memory_order_relaxed) ==
@@ -2145,13 +2170,15 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
           result.material_report_->attempt_identity();
       result.material_finalization_identity_ =
           result.material_report_->finalization_identity();
-      if (closure != nullptr)
+      if (closure != nullptr) {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+        ClosureAllocationObservation observation(closure);
+#endif
         result.pre_closure_authority_ = std::move(prepared_pre_authority);
-      if (closure != nullptr)
         *result.pre_closure_authority_ = *result.material_report_;
-      if (closure != nullptr)
         result.pre_closure_report_seal_authority_ =
             result.material_report_->compute_seal();
+      }
       final_material_flux.reset();
     }
     result.flux_provenance_ = MaterialFluxProvenance::final_corrected;
@@ -2200,6 +2227,9 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
             post_closure_flux.emplace(
                 bind_material_flux(MaterialFluxProvenance::final_corrected));
           });
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      ClosureAllocationObservation observation(closure);
+#endif
       result.post_closure_report_.emplace(
           impl_->material_transport.assess_trial_after_closure(
               state, *post_closure_flux, stencil,

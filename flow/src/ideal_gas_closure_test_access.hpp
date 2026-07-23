@@ -54,6 +54,25 @@ enum class IdealGasCreateFault : std::uint8_t {
   maximum_reduction
 };
 
+enum class IdealGasAttemptPreparationFault : std::uint8_t {
+  predictor_local,
+  predictor_write_capability,
+  provisional_local,
+  provisional_write_capability,
+  final_local,
+  final_write_capability,
+  final_readback,
+  post_density_views,
+  post_geometry,
+  post_transport_views,
+  post_next_integrals,
+  post_report_finalization,
+  pre_authority_preparation,
+  post_authority_preparation,
+  pre_authority_publication,
+  post_authority_publication
+};
+
 enum class IdealGasMetricGateFault : std::uint8_t {
   eos,
   rho_remap,
@@ -89,6 +108,8 @@ public:
   static int preflight_failure_rank(const runtime::Error &) noexcept;
   static IdealGasClosureFailureReason
   create_validation_failure_reason(const runtime::Error &) noexcept;
+  static void set_facade_create_fault(IdealGasClosure &, int rank);
+  static bool consume_facade_create_fault(IdealGasClosure &, int rank) noexcept;
   static void begin_attempt(IdealGasClosure &, FlowState &,
                             std::uint64_t identity);
   static IdealGasClosureReport evaluate(IdealGasClosure &, FlowState &,
@@ -120,6 +141,19 @@ public:
                                         IdealGasPostAssessmentFault, int rank);
   static void set_attempt_layout_fault(FixedStepIdealGasFlow &, int rank);
   static void set_outlet_backflow_fault(FixedStepIdealGasFlow &);
+  static void set_attempt_preparation_fault(
+      FixedStepIdealGasFlow &, IdealGasAttemptPreparationFault, int rank);
+  static void set_attempt_preparation_fault(
+      IdealGasClosure &, IdealGasAttemptPreparationFault, int rank);
+  static void set_controlled_allocation(FixedStepIdealGasFlow &, int rank);
+  static void set_controlled_allocation(IdealGasClosure &, int rank);
+  static bool
+  allocation_observation_active(const FixedStepIdealGasFlow &) noexcept;
+  static bool
+  allocation_observation_active(const IdealGasClosure &) noexcept;
+  static void begin_allocation_observation(IdealGasClosure &) noexcept;
+  static void end_allocation_observation(IdealGasClosure &) noexcept;
+  static void consume_attempt_preparation_fault(IdealGasClosure &);
   static bool post_evidence_mutation_rejected(
       const IdealGasStepAttemptReport &, IdealGasPostEvidenceMutation);
 };

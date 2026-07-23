@@ -592,6 +592,8 @@ struct MaterialDensityTransport::Impl final {
       boundary_history;
   std::vector<CompensatedSum> local_sums;
   std::vector<double> reduced_sums;
+  std::vector<double> post_next_integrals;
+  std::vector<std::array<double, 3>> post_boundary_terms;
   std::optional<MaterialDensityTransportReport> prepared_task20_report;
   std::optional<MaterialDensityTransportReport> prepared_post_closure_report;
   std::string global_layout_fingerprint;
@@ -945,7 +947,7 @@ MaterialDensityTransport::MaterialDensityTransport(
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 void MaterialDensityTransport::set_post_assessment_fault_for_test(
     std::uint8_t kind, int rank) {
-  if (!impl_ || kind > 1U || rank < 0 || rank >= impl_->mpi->size())
+  if (!impl_ || kind > 6U || rank < 0 || rank >= impl_->mpi->size())
     throw runtime::Error("material post-assessment fault is invalid");
   impl_->post_assessment_fault_kind = static_cast<int>(kind);
   impl_->post_assessment_fault_rank = rank;
@@ -970,6 +972,8 @@ void MaterialDensityTransport::prepare_task20_attempt() const {
   post.transport_conservation_available_.assign(count, 0U);
   post.transport_relative_conservation_defect_.assign(count, 0.0);
   impl_->prepared_post_closure_report.emplace(std::move(post));
+  impl_->post_next_integrals.assign(count, 0.0);
+  impl_->post_boundary_terms.assign(count, std::array<double, 3>{});
 }
 
 MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
@@ -1829,16 +1833,13 @@ MaterialDensityTransport::assess_trial_after_closure(
 #endif
 
   const auto &fields = transport_fields(*impl_);
-  MaterialDensityTransportReport report;
-  if (impl_->prepared_post_closure_report) {
-    report = std::move(*impl_->prepared_post_closure_report);
-    impl_->prepared_post_closure_report.reset();
-  } else {
-    report.transport_residual_available_.assign(fields.size(), 0U);
-    report.transport_normalized_l2_.assign(fields.size(), 0.0);
-    report.transport_conservation_available_.assign(fields.size(), 0U);
-    report.transport_relative_conservation_defect_.assign(fields.size(), 0.0);
-  }
+  if (!impl_->prepared_post_closure_report ||
+      impl_->post_next_integrals.size() != fields.size() ||
+      impl_->post_boundary_terms.size() != fields.size())
+    throw runtime::Error("post-closure material workspace is unavailable");
+  MaterialDensityTransportReport report =
+      std::move(*impl_->prepared_post_closure_report);
+  impl_->prepared_post_closure_report.reset();
   report.stencil_ = stencil;
   report.flux_provenance_ = final_mass_flux.provenance();
   report.shared_face_mass_flux_field_ = final_mass_flux.field_id();
@@ -1849,145 +1850,191 @@ MaterialDensityTransport::assess_trial_after_closure(
     return std::move(report);
   };
 
-  const auto rho_n = state.layer(FlowLayer::committed)
-                         .acquire_read<double>(impl_->access, kMaterialPhase,
-                                               kMaterialActor,
-                                               state.fields().density);
-  const auto rho_h = state.layer(FlowLayer::history)
-                         .acquire_read<double>(impl_->access, kMaterialPhase,
-                                               kMaterialActor,
-                                               state.fields().density);
-  const auto rho_next = state.layer(FlowLayer::trial)
-                            .acquire_read<double>(impl_->access, kMaterialPhase,
-                                                  kMaterialActor,
-                                                  state.fields().density);
-  auto mass_residual = impl_->scratch_storage->acquire_write<double>(
-      *impl_->scratch_access, kScratchPhase, kScratchActor,
-      impl_->scratch_mass_residual);
-  for_each_owned_cell(*impl_->topology,
-                      [&](mesh::LocalCellId, runtime::Int3 index) {
-                        mass_residual(index.x, index.y, index.z, 0) = 0.0;
-                      });
-  MaterialTransportFailureReason local = MaterialTransportFailureReason::none;
-  try {
-    impl_->operators.accumulate_mass_residual(final_mass_flux.impl_->handle,
-                                              mass_residual);
-  } catch (const runtime::MpiOperationError &) {
-    throw;
-  } catch (...) {
-    local = MaterialTransportFailureReason::non_finite_state;
-  }
-  auto failure = synchronize_failure(*impl_->mpi, local);
-  if (failure.reason != MaterialTransportFailureReason::none) {
-    report.disposition_ = MaterialTransportDisposition::recoverable_failure;
-    report.reason_ = failure.reason;
-    report.lowest_failing_rank_ = failure.rank;
-    return finish();
-  }
-
   constexpr std::size_t mass_terms = 9U;
   constexpr std::size_t field_terms = 7U;
   auto &local_sums = impl_->local_sums;
   auto &sums = impl_->reduced_sums;
   std::fill(local_sums.begin(), local_sums.end(), CompensatedSum{});
+  std::fill(impl_->post_next_integrals.begin(),
+            impl_->post_next_integrals.end(), 0.0);
+  std::fill(impl_->post_boundary_terms.begin(),
+            impl_->post_boundary_terms.end(), std::array<double, 3>{});
   double local_min = std::numeric_limits<double>::infinity();
   mesh::GlobalCellId local_min_id{};
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
-        const double volume = impl_->geometry->cell_volume_m3(cell);
-        const double rn = rho_n(index.x, index.y, index.z, 0);
-        const double rh = rho_h(index.x, index.y, index.z, 0);
-        const double next = rho_next(index.x, index.y, index.z, 0);
-        const double equation =
-            stencil.alpha0 * next + stencil.alpha1 * rn +
-            stencil.alpha2 * rh +
-            stencil.dt_s * mass_residual(index.x, index.y, index.z, 0) /
-                volume;
-        local_sums[0].add(equation * equation);
-        local_sums[1].add(next * next);
-        local_sums[2].add(volume * rn);
-        local_sums[3].add(volume * rh);
-        local_sums[4].add(volume * next);
-        local_sums[6].add(std::abs(volume * rn));
-        local_sums[7].add(std::abs(volume * rh));
-        local_sums[8].add(std::abs(volume * next));
-        if (next < local_min ||
-            (next == local_min &&
-             impl_->topology->global_cell_id(cell) < local_min_id)) {
-          local_min = next;
-          local_min_id = impl_->topology->global_cell_id(cell);
-        }
-      });
-  CompensatedSum boundary_mass;
-  CompensatedSum boundary_mass_abs;
-  for (mesh::LocalFaceId face = 0; face < impl_->topology->local_face_count();
-       ++face) {
-    const auto patch = impl_->topology->patch_id(face);
-    if (!patch ||
-        impl_->boundaries->patch(*patch).kind() ==
-            boundary::BoundaryKind::periodic ||
-        impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
-            mesh::EntityOwnership::owned)
-      continue;
-    const double value = final_mass_flux.impl_->view(face, 0);
-    boundary_mass.add(value);
-    boundary_mass_abs.add(std::abs(value));
-  }
-  local_sums[5].add(boundary_mass.value());
+  double boundary_mass_abs_value{};
+  MaterialTransportFailureReason local = MaterialTransportFailureReason::none;
+  try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (post_assessment_fault_rank == impl_->mpi->rank() &&
+        post_assessment_fault_kind == 2)
+      throw runtime::Error("injected post-closure density-view failure");
+#endif
+    const auto rho_n = state.layer(FlowLayer::committed)
+                           .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                 kMaterialActor,
+                                                 state.fields().density);
+    const auto rho_h = state.layer(FlowLayer::history)
+                           .acquire_read<double>(impl_->access, kMaterialPhase,
+                                                 kMaterialActor,
+                                                 state.fields().density);
+    const auto rho_next = state.layer(FlowLayer::trial)
+                              .acquire_read<double>(
+                                  impl_->access, kMaterialPhase, kMaterialActor,
+                                  state.fields().density);
+    auto mass_residual = impl_->scratch_storage->acquire_write<double>(
+        *impl_->scratch_access, kScratchPhase, kScratchActor,
+        impl_->scratch_mass_residual);
+    for_each_owned_cell(*impl_->topology,
+                        [&](mesh::LocalCellId, runtime::Int3 index) {
+                          mass_residual(index.x, index.y, index.z, 0) = 0.0;
+                        });
+    impl_->operators.accumulate_mass_residual(final_mass_flux.impl_->handle,
+                                              mass_residual);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (post_assessment_fault_rank == impl_->mpi->rank() &&
+        post_assessment_fault_kind == 3)
+      throw runtime::Error("injected post-closure geometry failure");
+#endif
+    for_each_owned_cell(
+        *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+          const double volume = impl_->geometry->cell_volume_m3(cell);
+          const double rn = rho_n(index.x, index.y, index.z, 0);
+          const double rh = rho_h(index.x, index.y, index.z, 0);
+          const double next = rho_next(index.x, index.y, index.z, 0);
+          const double equation =
+              stencil.alpha0 * next + stencil.alpha1 * rn +
+              stencil.alpha2 * rh +
+              stencil.dt_s * mass_residual(index.x, index.y, index.z, 0) /
+                  volume;
+          local_sums[0].add(equation * equation);
+          local_sums[1].add(next * next);
+          local_sums[2].add(volume * rn);
+          local_sums[3].add(volume * rh);
+          local_sums[4].add(volume * next);
+          local_sums[6].add(std::abs(volume * rn));
+          local_sums[7].add(std::abs(volume * rh));
+          local_sums[8].add(std::abs(volume * next));
+          if (next < local_min ||
+              (next == local_min &&
+               impl_->topology->global_cell_id(cell) < local_min_id)) {
+            local_min = next;
+            local_min_id = impl_->topology->global_cell_id(cell);
+          }
+        });
+    CompensatedSum boundary_mass;
+    CompensatedSum boundary_mass_abs;
+    for (mesh::LocalFaceId face = 0;
+         face < impl_->topology->local_face_count(); ++face) {
+      const auto patch = impl_->topology->patch_id(face);
+      if (!patch ||
+          impl_->boundaries->patch(*patch).kind() ==
+              boundary::BoundaryKind::periodic ||
+          impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
+              mesh::EntityOwnership::owned)
+        continue;
+      const double value = final_mass_flux.impl_->view(face, 0);
+      boundary_mass.add(value);
+      boundary_mass_abs.add(std::abs(value));
+    }
+    local_sums[5].add(boundary_mass.value());
+    boundary_mass_abs_value = boundary_mass_abs.value();
 
-  for (std::size_t field = 0; field < fields.size(); ++field) {
-    const auto qn = state.layer(FlowLayer::committed)
-                        .acquire_read<double>(impl_->access, kMaterialPhase,
-                                              kMaterialActor, fields[field]);
-    const auto qh = state.layer(FlowLayer::history)
-                        .acquire_read<double>(impl_->access, kMaterialPhase,
-                                              kMaterialActor, fields[field]);
-    const auto next = state.layer(FlowLayer::trial)
-                          .acquire_read<double>(impl_->access, kMaterialPhase,
-                                                kMaterialActor, fields[field]);
-    std::size_t owned = 0U;
-    const std::size_t offset = mass_terms + field_terms * field;
-    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                              runtime::Int3 index) {
-      const double volume = impl_->geometry->cell_volume_m3(cell);
-      const double spatial = stencil.order == MomentumTimeOrder::backward_euler
-                                 ? impl_->residual_current[field][owned]
-                                 : 2.0 * impl_->residual_current[field][owned] -
-                                       impl_->residual_history[field][owned];
-      const double qnext = next(index.x, index.y, index.z, 0);
-      const double equation =
-          stencil.alpha0 * qnext +
-          stencil.alpha1 * qn(index.x, index.y, index.z, 0) +
-          stencil.alpha2 * qh(index.x, index.y, index.z, 0) +
-          stencil.dt_s * spatial / volume -
-          (field == 0U ? stencil.dt_s *
-                             rho_n(index.x, index.y, index.z, 0) *
-                             enthalpy_rate_J_per_kg_s
-                       : 0.0);
-      local_sums[offset].add(equation * equation);
-      local_sums[offset + 1U].add(qnext * qnext);
-      local_sums[offset + 2U].add(volume * qn(index.x, index.y, index.z, 0));
-      local_sums[offset + 3U].add(volume * qh(index.x, index.y, index.z, 0));
-      local_sums[offset + 4U].add(
-          std::abs(volume * qn(index.x, index.y, index.z, 0)));
-      local_sums[offset + 5U].add(
-          std::abs(volume * qh(index.x, index.y, index.z, 0)));
-      local_sums[offset + 6U].add(std::abs(volume * qnext));
-      impl_->candidate_fields[field][owned++] = qnext;
-    });
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (post_assessment_fault_rank == impl_->mpi->rank() &&
+        post_assessment_fault_kind == 4)
+      throw runtime::Error("injected post-closure transport-view failure");
+#endif
+    for (std::size_t field = 0; field < fields.size(); ++field) {
+      const auto qn = state.layer(FlowLayer::committed)
+                          .acquire_read<double>(
+                              impl_->access, kMaterialPhase, kMaterialActor,
+                              fields[field]);
+      const auto qh = state.layer(FlowLayer::history)
+                          .acquire_read<double>(
+                              impl_->access, kMaterialPhase, kMaterialActor,
+                              fields[field]);
+      const auto next = state.layer(FlowLayer::trial)
+                            .acquire_read<double>(
+                                impl_->access, kMaterialPhase, kMaterialActor,
+                                fields[field]);
+      CompensatedSum next_integral;
+      std::size_t owned = 0U;
+      const std::size_t offset = mass_terms + field_terms * field;
+      for_each_owned_cell(
+          *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+            const double volume = impl_->geometry->cell_volume_m3(cell);
+            const double spatial =
+                stencil.order == MomentumTimeOrder::backward_euler
+                    ? impl_->residual_current[field][owned]
+                    : 2.0 * impl_->residual_current[field][owned] -
+                          impl_->residual_history[field][owned];
+            const double qnext = next(index.x, index.y, index.z, 0);
+            const double equation =
+                stencil.alpha0 * qnext +
+                stencil.alpha1 * qn(index.x, index.y, index.z, 0) +
+                stencil.alpha2 * qh(index.x, index.y, index.z, 0) +
+                stencil.dt_s * spatial / volume -
+                (field == 0U
+                     ? stencil.dt_s *
+                           rho_n(index.x, index.y, index.z, 0) *
+                           enthalpy_rate_J_per_kg_s
+                     : 0.0);
+            local_sums[offset].add(equation * equation);
+            local_sums[offset + 1U].add(qnext * qnext);
+            local_sums[offset + 2U].add(
+                volume * qn(index.x, index.y, index.z, 0));
+            local_sums[offset + 3U].add(
+                volume * qh(index.x, index.y, index.z, 0));
+            local_sums[offset + 4U].add(
+                std::abs(volume * qn(index.x, index.y, index.z, 0)));
+            local_sums[offset + 5U].add(
+                std::abs(volume * qh(index.x, index.y, index.z, 0)));
+            local_sums[offset + 6U].add(std::abs(volume * qnext));
+            next_integral.add(volume * qnext);
+            impl_->candidate_fields[field][owned++] = qnext;
+          });
+      impl_->post_next_integrals[field] = next_integral.value();
+      impl_->post_boundary_terms[field] = {
+          stencil.order == MomentumTimeOrder::backward_euler
+              ? impl_->residual_boundary_current[field]
+              : 2.0 * impl_->residual_boundary_current[field] -
+                    impl_->residual_boundary_history[field],
+          impl_->residual_boundary_abs_current[field],
+          impl_->residual_boundary_abs_history[field]};
+    }
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (post_assessment_fault_rank == impl_->mpi->rank() &&
+        post_assessment_fault_kind == 5)
+      throw runtime::Error("injected post-closure integral failure");
+#endif
+    std::transform(local_sums.begin(), local_sums.end(), sums.begin(),
+                   [](const CompensatedSum &sum) { return sum.value(); });
+    local =
+        std::all_of(sums.begin(), sums.end(),
+                    [](double value) { return std::isfinite(value); }) &&
+                std::all_of(impl_->post_next_integrals.begin(),
+                            impl_->post_next_integrals.end(),
+                            [](double value) { return std::isfinite(value); }) &&
+                std::isfinite(boundary_mass_abs_value) && local_min > 0.0 &&
+                std::isfinite(local_min)
+            ? MaterialTransportFailureReason::none
+            : (!std::isfinite(local_min)
+                   ? MaterialTransportFailureReason::non_finite_state
+                   : MaterialTransportFailureReason::non_positive_density);
+  } catch (const runtime::MpiOperationError &) {
+    throw;
+  } catch (...) {
+    local = MaterialTransportFailureReason::non_finite_state;
+    std::fill(sums.begin(), sums.end(), 0.0);
+    std::fill(impl_->post_next_integrals.begin(),
+              impl_->post_next_integrals.end(), 0.0);
+    std::fill(impl_->post_boundary_terms.begin(),
+              impl_->post_boundary_terms.end(), std::array<double, 3>{});
+    local_min = 0.0;
+    local_min_id = 0U;
+    boundary_mass_abs_value = 0.0;
   }
-  std::transform(local_sums.begin(), local_sums.end(), sums.begin(),
-                 [](const CompensatedSum &sum) { return sum.value(); });
-  double boundary_mass_abs_value = boundary_mass_abs.value();
-  local = std::all_of(sums.begin(), sums.end(),
-                      [](double value) { return std::isfinite(value); }) &&
-                  std::isfinite(boundary_mass_abs_value) && local_min > 0.0 &&
-                  std::isfinite(local_min)
-              ? MaterialTransportFailureReason::none
-              : (!std::isfinite(local_min)
-                     ? MaterialTransportFailureReason::non_finite_state
-                     : MaterialTransportFailureReason::non_positive_density);
-  failure = synchronize_failure(*impl_->mpi, local);
+  auto failure = synchronize_failure(*impl_->mpi, local);
   if (failure.reason != MaterialTransportFailureReason::none) {
     report.disposition_ = MaterialTransportDisposition::recoverable_failure;
     report.reason_ = failure.reason;
@@ -2018,24 +2065,11 @@ MaterialDensityTransport::assess_trial_after_closure(
                   std::max(sums[offset + 1U],
                            std::numeric_limits<double>::min()));
     report.transport_residual_available_[field] = 1U;
-    CompensatedSum next_sum;
-    std::size_t owned = 0U;
-    for_each_owned_cell(*impl_->topology,
-                        [&](mesh::LocalCellId cell, runtime::Int3) {
-                          next_sum.add(impl_->geometry->cell_volume_m3(cell) *
-                                       impl_->candidate_fields[field][owned++]);
-                        });
-    double next_integral = next_sum.value();
+    double next_integral = impl_->post_next_integrals[field];
     impl_->mpi->allreduce_fp64_in_place(&next_integral, 1U,
                                         runtime::Fp64ReductionOperation::sum);
-    double boundary[3]{
-        stencil.order == MomentumTimeOrder::backward_euler
-            ? impl_->residual_boundary_current[field]
-            : 2.0 * impl_->residual_boundary_current[field] -
-                  impl_->residual_boundary_history[field],
-        impl_->residual_boundary_abs_current[field],
-        impl_->residual_boundary_abs_history[field]};
-    impl_->mpi->allreduce_fp64_in_place(boundary, 3U,
+    auto boundary = impl_->post_boundary_terms[field];
+    impl_->mpi->allreduce_fp64_in_place(boundary.data(), boundary.size(),
                                         runtime::Fp64ReductionOperation::sum);
     const double raw =
         next_integral - sums[offset + 2U] +
@@ -2100,23 +2134,31 @@ MaterialDensityTransport::assess_trial_after_closure(
 #endif
 
   local = MaterialTransportFailureReason::none;
-  if (!std::isfinite(report.density_normalized_l2_) ||
-      report.density_normalized_l2_ > 1.0e-10)
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (post_assessment_fault_rank == impl_->mpi->rank() &&
+      post_assessment_fault_kind == 6)
+    local = MaterialTransportFailureReason::non_finite_state;
+#endif
+  if (local == MaterialTransportFailureReason::none &&
+      (!std::isfinite(report.density_normalized_l2_) ||
+       report.density_normalized_l2_ > 1.0e-10))
     local = MaterialTransportFailureReason::final_density_residual;
-  else if (std::any_of(report.transport_normalized_l2_.begin(),
+  else if (local == MaterialTransportFailureReason::none &&
+           std::any_of(report.transport_normalized_l2_.begin(),
                        report.transport_normalized_l2_.end(),
                        [](double value) {
                          return !std::isfinite(value) || value > 1.0e-9;
                        }))
     local = MaterialTransportFailureReason::final_transport_residual;
-  else if (!std::isfinite(report.mass_relative_conservation_defect_) ||
-           report.mass_relative_conservation_defect_ > 5.0e-11 ||
-           std::any_of(
-               report.transport_relative_conservation_defect_.begin(),
-               report.transport_relative_conservation_defect_.end(),
-               [](double value) {
-                 return !std::isfinite(value) || value > 5.0e-11;
-               }))
+  else if (local == MaterialTransportFailureReason::none &&
+           (!std::isfinite(report.mass_relative_conservation_defect_) ||
+            report.mass_relative_conservation_defect_ > 5.0e-11 ||
+            std::any_of(
+                report.transport_relative_conservation_defect_.begin(),
+                report.transport_relative_conservation_defect_.end(),
+                [](double value) {
+                  return !std::isfinite(value) || value > 5.0e-11;
+                })))
     local = MaterialTransportFailureReason::final_conservation_defect;
   failure = synchronize_failure(*impl_->mpi, local);
   report.disposition_ = failure.reason == MaterialTransportFailureReason::none
