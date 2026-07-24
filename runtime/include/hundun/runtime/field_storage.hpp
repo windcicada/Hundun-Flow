@@ -15,6 +15,9 @@
 
 namespace hundun::flow {
 class IdealGasClosure;
+namespace detail {
+struct FlowStateCheckpointAccess;
+}
 }
 
 namespace hundun::runtime {
@@ -67,6 +70,8 @@ class FieldStorage final {
   void begin_rebuild();
   void begin_repartition();
   void begin_restart_v2_read_transaction();
+  static void begin_restart_v2_read_transactions(
+      FieldStorage *const *storages, std::size_t count);
 
   template <class T>
   FieldView<T> view(FieldId id);
@@ -96,6 +101,7 @@ class FieldStorage final {
   friend class HaloExchange;
   friend struct detail::FieldEpochTestAccess;
   friend class ::hundun::flow::IdealGasClosure;
+  friend struct ::hundun::flow::detail::FlowStateCheckpointAccess;
 
   struct Entry {
     FunctionSpace space{};
@@ -113,6 +119,8 @@ class FieldStorage final {
   Entry &entry(FieldId id);
   const Entry &entry(FieldId id) const;
   std::size_t field_count() const noexcept;
+  static bool restart_v2_read_transactions_ready(
+      FieldStorage *const *storages, std::size_t count) noexcept;
   void publish_validated_cell_interior_double(
       FieldId id, const double *candidate,
       std::size_t candidate_count) noexcept;

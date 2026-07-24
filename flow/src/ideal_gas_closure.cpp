@@ -699,6 +699,46 @@ IdealGasClosure IdealGasClosure::create(
   );
 }
 
+IdealGasClosure IdealGasClosure::restore(
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::MpiContext &mpi, const runtime::FieldRegistry &registry,
+    const FlowFieldIds &fields, const FlowState &state,
+    IdealGasClosureSpec spec, IdealGasClosureState restored) {
+  auto result =
+      create(topology, geometry, boundaries, mpi, registry, fields, state, spec);
+  const auto created = result.state();
+  bool valid = restored.mode == created.mode &&
+               restored.revision !=
+                   std::numeric_limits<std::uint64_t>::max() &&
+               restored.thermodynamic_pressure_pa > 0.0 &&
+               std::isfinite(restored.thermodynamic_pressure_pa);
+  if (restored.mode == IdealGasPressureMode::open_fixed) {
+    valid = valid && !restored.target_mass_kg &&
+            fp_bits(restored.thermodynamic_pressure_pa) ==
+                fp_bits(spec.configured_thermodynamic_pressure_pa);
+  } else {
+    valid = valid && restored.target_mass_kg &&
+            *restored.target_mass_kg > 0.0 &&
+            std::isfinite(*restored.target_mass_kg) &&
+            created.target_mass_kg &&
+            relative_error(*created.target_mass_kg,
+                           *restored.target_mass_kg) <= 5.0e-12 &&
+            relative_error(created.thermodynamic_pressure_pa,
+                           restored.thermodynamic_pressure_pa) <= 1.0e-12;
+  }
+  const auto status = runtime::collective_status(
+      mpi, valid, "ideal-gas closure restore validation");
+  if (!status.ok)
+    throw runtime::Error(status.message);
+  result.impl_->committed = restored;
+  result.impl_->trial = restored;
+  result.impl_->prepared = restored;
+  result.impl_->active = false;
+  result.impl_->prepared_valid = false;
+  return result;
+}
+
 IdealGasClosure IdealGasClosure::create_internal(
     const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
     const boundary::BoundaryRegistry &boundaries,

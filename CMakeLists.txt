@@ -82,6 +82,7 @@ target_link_libraries(hundun_cli
   PUBLIC hundun_options)
 
 add_library(hundun_runtime STATIC
+  runtime/src/checkpoint_v2_protocol.cpp
   runtime/src/mpi_error.cpp
   runtime/src/mpi_environment.cpp
   runtime/src/mpi_context.cpp
@@ -176,6 +177,7 @@ if(HUNDUN_BUILD_TESTS)
 endif()
 
 add_library(hundun_flow STATIC
+  flow/src/checkpoint_v2.cpp
   flow/src/adaptive_time_control.cpp
   flow/src/constant_density_piso.cpp
   flow/src/flow_state.cpp
@@ -224,6 +226,22 @@ if(HUNDUN_BUILD_TESTS)
   target_compile_definitions(hundun_material_diagnostics PRIVATE
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
 endif()
+
+add_library(hundun_checkpoint_diagnostics STATIC
+  diagnostics/src/checkpoint_v2_diagnostics.cpp)
+target_include_directories(hundun_checkpoint_diagnostics PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_include_directories(hundun_checkpoint_diagnostics PRIVATE
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/flow/src>"
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/runtime/src>")
+target_link_libraries(hundun_checkpoint_diagnostics
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_diagnostics_core
+    hundun_flow
+    hundun_runtime
+    hundun_options
+    MPI::MPI_CXX)
 
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
@@ -452,6 +470,45 @@ if(HUNDUN_BUILD_TESTS)
   target_include_directories(test_field_storage PRIVATE
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
+
+  hundun_add_test(test_checkpoint_v2_protocol
+    tests/unit/test_checkpoint_v2_protocol.cpp)
+  target_include_directories(test_checkpoint_v2_protocol PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/runtime/src")
+  target_link_libraries(test_checkpoint_v2_protocol PRIVATE hundun_runtime)
+  set_tests_properties(test_checkpoint_v2_protocol PROPERTIES
+    LABELS "unit;task23;task23-fast" TIMEOUT 30)
+
+  hundun_add_test(test_checkpoint_v2_epoch
+    tests/unit/test_checkpoint_v2_epoch.cpp)
+  target_include_directories(test_checkpoint_v2_epoch PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_checkpoint_v2_epoch PRIVATE hundun_runtime)
+  set_tests_properties(test_checkpoint_v2_epoch PROPERTIES
+    LABELS "unit;task23;task23-fast" TIMEOUT 30)
+
+  hundun_add_test(test_checkpoint_v2_header_contract
+    tests/unit/test_checkpoint_v2_header_contract.cpp)
+  target_include_directories(test_checkpoint_v2_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/flow/src")
+  target_link_libraries(test_checkpoint_v2_header_contract PRIVATE
+    hundun_checkpoint_diagnostics hundun_flow)
+  set_tests_properties(test_checkpoint_v2_header_contract PROPERTIES
+    LABELS "unit;contract;task23;task23-fast" TIMEOUT 30)
+  add_test(NAME test_task23_source_policy
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task23_source_policy.cmake")
+  set_tests_properties(test_task23_source_policy PROPERTIES
+    LABELS "unit;source_policy;task23;task23-fast" TIMEOUT 30)
+  add_test(NAME test_task23_test_access_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task23_test_access_contract.cmake")
+  set_tests_properties(test_task23_test_access_contract PROPERTIES
+    LABELS "unit;source_policy;task23;task23-fast" TIMEOUT 30)
 
   hundun_add_test(test_field_access tests/unit/test_field_access.cpp)
   target_include_directories(test_field_access PRIVATE
@@ -1019,6 +1076,43 @@ if(HUNDUN_BUILD_TESTS)
     MPI::MPI_CXX)
   target_compile_definitions(test_ideal_gas_diagnostics PRIVATE
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+  add_executable(test_checkpoint_v2
+    tests/mpi/test_checkpoint_v2.cpp)
+  target_include_directories(test_checkpoint_v2 PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/flow/src"
+    "${PROJECT_SOURCE_DIR}/runtime/src")
+  target_link_libraries(test_checkpoint_v2 PRIVATE
+    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(task23_checkpoint_test "test_checkpoint_v2_${ranks}_rank")
+    add_test(NAME "${task23_checkpoint_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_checkpoint_v2>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task23_checkpoint_test}" PROPERTIES
+      LABELS "mpi;numerical;task23;task23-fast"
+      TIMEOUT 180 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+  endforeach()
+  add_executable(test_checkpoint_v2_diagnostics
+    tests/mpi/test_checkpoint_v2_diagnostics.cpp)
+  target_include_directories(test_checkpoint_v2_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_checkpoint_v2_diagnostics PRIVATE
+    hundun_checkpoint_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
+  foreach(ranks IN ITEMS 1 2 4)
+    set(task23_diagnostics_test
+        "test_checkpoint_v2_diagnostics_${ranks}_rank")
+    add_test(NAME "${task23_diagnostics_test}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_checkpoint_v2_diagnostics>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task23_diagnostics_test}" PROPERTIES
+      LABELS "mpi;diagnostics;task23;task23-fast"
+      TIMEOUT 120 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+  endforeach()
   set(task20_vortex_reference
       "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")
   set(task21_closed_reference

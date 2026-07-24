@@ -171,6 +171,12 @@ public:
          const boundary::BoundaryRegistry &, const runtime::MpiContext &,
          const runtime::FieldRegistry &, const FlowFieldIds &,
          const FlowState &initialized_state, IdealGasClosureSpec);
+  static IdealGasClosure
+  restore(const mesh::MeshTopology &, const mesh::MeshGeometry &,
+          const boundary::BoundaryRegistry &, const runtime::MpiContext &,
+          const runtime::FieldRegistry &, const FlowFieldIds &,
+          const FlowState &restored_state, IdealGasClosureSpec,
+          IdealGasClosureState);
 
   ~IdealGasClosure() noexcept;
   IdealGasClosure(IdealGasClosure &&) noexcept;

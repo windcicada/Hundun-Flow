@@ -14,9 +14,11 @@ namespace hundun::flow {
 namespace detail {
 struct FlowStateSolverAccess;
 struct AdaptiveTimeControlAccess;
+struct FlowStateCheckpointAccess;
 }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace test {
+class CheckpointV2TestAccess;
 class MaterialDensityTransportTestAccess;
 class MaterialDensityPisoTestAccess;
 }
@@ -107,11 +109,13 @@ private:
   friend class IdealGasClosure;
   friend class FixedStepIdealGasFlow;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  friend class test::CheckpointV2TestAccess;
   friend class test::MaterialDensityTransportTestAccess;
   friend class test::MaterialDensityPisoTestAccess;
 #endif
   friend struct detail::FlowStateSolverAccess;
   friend struct detail::AdaptiveTimeControlAccess;
+  friend struct detail::FlowStateCheckpointAccess;
 };
 
 } // namespace hundun::flow

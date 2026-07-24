@@ -362,7 +362,37 @@ void FieldStorage::begin_rebuild() { advance_epoch(epoch_); }
 void FieldStorage::begin_repartition() { advance_epoch(epoch_); }
 
 void FieldStorage::begin_restart_v2_read_transaction() {
-  advance_epoch(epoch_);
+  FieldStorage *storage = this;
+  begin_restart_v2_read_transactions(&storage, 1U);
+}
+
+bool FieldStorage::restart_v2_read_transactions_ready(
+    FieldStorage *const *storages, std::size_t count) noexcept {
+  if (count == 0U || storages == nullptr)
+    return false;
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto *storage = storages[index];
+    if (storage == nullptr || !storage->epoch_ || !storage->entries_ ||
+        !storage->epoch_->alive.load(std::memory_order_acquire) ||
+        storage->epoch_->generation.load(std::memory_order_acquire) ==
+            std::numeric_limits<std::uint64_t>::max())
+      return false;
+    for (std::size_t prior = 0; prior < index; ++prior)
+      if (storages[prior] == storage)
+        return false;
+  }
+  return true;
+}
+
+void FieldStorage::begin_restart_v2_read_transactions(
+    FieldStorage *const *storages, std::size_t count) {
+  if (!restart_v2_read_transactions_ready(storages, count))
+    throw Error("restart v2 transaction storage batch is invalid");
+  for (std::size_t index = 0; index < count; ++index) {
+    auto &generation = storages[index]->epoch_->generation;
+    generation.store(generation.load(std::memory_order_relaxed) + 1U,
+                     std::memory_order_release);
+  }
 }
 
 FieldStorage::Entry &FieldStorage::entry(FieldId id) {

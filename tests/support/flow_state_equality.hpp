@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace hundun::test {
@@ -196,6 +197,57 @@ inline bool time_control_state_equality_oracle_is_mutation_sensitive() {
          changed([](auto &s) { ++s.last_retry_count; }) &&
          changed([](auto &s) { ++s.revision; }) &&
          changed([](auto &s) { ++s.state_seal; });
+}
+
+struct CheckpointV2StateSnapshot final {
+  flow::FlowLayerValues history;
+  flow::FlowLayerValues committed;
+  flow::FlowLayerValues trial;
+  flow::AcceptedStepMetadata metadata;
+  flow::TimeControlState controller;
+  std::optional<flow::IdealGasClosureState> closure;
+};
+
+inline bool checkpoint_v2_state_bitwise_equal(
+    const CheckpointV2StateSnapshot &left,
+    const CheckpointV2StateSnapshot &right) noexcept {
+  return flow_layer_values_bitwise_equal(left.history, right.history) &&
+         flow_layer_values_bitwise_equal(left.committed, right.committed) &&
+         flow_layer_values_bitwise_equal(left.trial, right.trial) &&
+         accepted_step_metadata_bitwise_equal(left.metadata, right.metadata) &&
+         time_control_state_bitwise_equal(left.controller, right.controller) &&
+         left.closure.has_value() == right.closure.has_value() &&
+         (!left.closure ||
+          ideal_gas_closure_state_bitwise_equal(*left.closure,
+                                                *right.closure));
+}
+
+inline bool checkpoint_v2_state_equality_oracle_is_mutation_sensitive() {
+  CheckpointV2StateSnapshot baseline;
+  baseline.history.density = {1.0};
+  baseline.committed.density = {2.0};
+  baseline.trial.density = {2.0};
+  baseline.committed.transported_cell_fields = {{3.0}, {4.0}};
+  baseline.controller.proposed_next_dt_s = 0.1;
+  baseline.closure = flow::IdealGasClosureState{
+      flow::IdealGasPressureMode::closed_dynamic, 101325.0, 1.0, 3U};
+  const auto exact = baseline;
+  auto ordinary = baseline;
+  ordinary.committed.density.front() = -2.0;
+  auto nested = baseline;
+  nested.committed.transported_cell_fields.front().front() = -3.0;
+  auto metadata = baseline;
+  metadata.metadata.time_s = -0.0;
+  auto controller = baseline;
+  controller.controller.proposed_next_dt_s = -0.1;
+  auto closure = baseline;
+  ++closure.closure->revision;
+  return checkpoint_v2_state_bitwise_equal(baseline, exact) &&
+         !checkpoint_v2_state_bitwise_equal(baseline, ordinary) &&
+         !checkpoint_v2_state_bitwise_equal(baseline, nested) &&
+         !checkpoint_v2_state_bitwise_equal(baseline, metadata) &&
+         !checkpoint_v2_state_bitwise_equal(baseline, controller) &&
+         !checkpoint_v2_state_bitwise_equal(baseline, closure);
 }
 
 struct AdaptiveFlowStateSnapshot final {

@@ -2,6 +2,7 @@
 
 #include "hundun/flow/flow_state.hpp"
 #include "adaptive_time_control_detail.hpp"
+#include "checkpoint_v2_detail.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "material_density_transport_test_access.hpp"
 #include "material_density_piso_test_access.hpp"
@@ -13,6 +14,7 @@
 #include "hundun/runtime/field_registry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -130,39 +132,22 @@ void for_each_cell(runtime::Int3 extent, Function &&function) {
 
 } // namespace
 
-struct FlowState::Impl final {
-  Impl(const runtime::FieldRegistry &supplied_registry,
-       runtime::FieldLayoutSet supplied_layout, FlowFieldIds supplied_fields,
-       AcceptedStepMetadata supplied_metadata)
-      : registry(&supplied_registry), layout(supplied_layout),
-        fields(std::move(supplied_fields)), metadata(supplied_metadata),
-        access(supplied_registry), history(supplied_registry, supplied_layout),
-        committed(supplied_registry, supplied_layout),
-        trial(supplied_registry, supplied_layout),
-        rollback_snapshot(supplied_registry, supplied_layout) {
-    for (const auto field : ordered_fields(fields)) {
-      access.declare_access(kStatePhase, kStateActor, field,
-                            runtime::AccessMode::read_write);
-    }
-    access.freeze();
+FlowState::Impl::Impl(const runtime::FieldRegistry &supplied_registry,
+                      runtime::FieldLayoutSet supplied_layout,
+                      FlowFieldIds supplied_fields,
+                      AcceptedStepMetadata supplied_metadata)
+    : registry(&supplied_registry), layout(supplied_layout),
+      fields(std::move(supplied_fields)), metadata(supplied_metadata),
+      access(supplied_registry), history(supplied_registry, supplied_layout),
+      committed(supplied_registry, supplied_layout),
+      trial(supplied_registry, supplied_layout),
+      rollback_snapshot(supplied_registry, supplied_layout) {
+  for (const auto field : ordered_fields(fields)) {
+    access.declare_access(kStatePhase, kStateActor, field,
+                          runtime::AccessMode::read_write);
   }
-
-  const runtime::FieldRegistry *registry;
-  runtime::FieldLayoutSet layout;
-  FlowFieldIds fields;
-  AcceptedStepMetadata metadata;
-  runtime::FieldAccessPlan access;
-  runtime::FieldStorage history;
-  runtime::FieldStorage committed;
-  runtime::FieldStorage trial;
-  runtime::FieldStorage rollback_snapshot;
-  bool rollback_snapshot_valid{};
-  bool attempt_active{};
-  std::uint64_t attempt_identity{};
-  std::uint64_t diagnostic_mutation_identity{1U};
-  bool commit_prepared{};
-  AcceptedStepMetadata prepared_metadata{};
-};
+  access.freeze();
+}
 
 static_assert(std::is_nothrow_move_constructible_v<runtime::FieldStorage>);
 static_assert(std::is_nothrow_move_assignable_v<runtime::FieldStorage>);
@@ -565,6 +550,75 @@ void FlowState::seed_accepted_layers(const FlowLayerValues &history,
 
 FlowLayerValues FlowState::snapshot(FlowLayer selected) const {
   return read_layer(*impl_, layer(selected));
+}
+
+bool detail::FlowStateCheckpointAccess::live(
+    const FlowState &state) noexcept {
+  return static_cast<bool>(state.impl_);
+}
+const runtime::FieldRegistry &
+detail::FlowStateCheckpointAccess::registry(const FlowState &state) {
+  if (!state.impl_)
+    throw runtime::Error("Checkpoint v2 FlowState has been moved from");
+  return *state.impl_->registry;
+}
+runtime::FieldLayoutSet
+detail::FlowStateCheckpointAccess::layout(const FlowState &state) {
+  if (!state.impl_)
+    throw runtime::Error("Checkpoint v2 FlowState has been moved from");
+  return state.impl_->layout;
+}
+bool detail::FlowStateCheckpointAccess::attempt_active(
+    const FlowState &state) noexcept {
+  return state.impl_ && state.impl_->attempt_active;
+}
+bool detail::FlowStateCheckpointAccess::diagnostic_identity_can_advance(
+    const FlowState &state) noexcept {
+  return state.impl_ &&
+         state.impl_->diagnostic_mutation_identity !=
+             std::numeric_limits<std::uint64_t>::max();
+}
+bool detail::FlowStateCheckpointAccess::read_transaction_ready(
+    FlowState &state) noexcept {
+  if (!diagnostic_identity_can_advance(state))
+    return false;
+  std::array<runtime::FieldStorage *, 4> storages{
+      &state.impl_->history, &state.impl_->committed, &state.impl_->trial,
+      &state.impl_->rollback_snapshot};
+  return runtime::FieldStorage::restart_v2_read_transactions_ready(
+      storages.data(), storages.size());
+}
+void detail::FlowStateCheckpointAccess::enter_read_transaction(
+    FlowState &state) {
+  if (!diagnostic_identity_can_advance(state))
+    throw runtime::Error("Checkpoint v2 diagnostic identity would wrap");
+  std::array<runtime::FieldStorage *, 4> storages{
+      &state.impl_->history, &state.impl_->committed, &state.impl_->trial,
+      &state.impl_->rollback_snapshot};
+  runtime::FieldStorage::begin_restart_v2_read_transactions(storages.data(),
+                                                            storages.size());
+  ++state.impl_->diagnostic_mutation_identity;
+}
+std::uint64_t detail::FlowStateCheckpointAccess::diagnostic_identity(
+    const FlowState &state) noexcept {
+  return state.impl_ ? state.impl_->diagnostic_mutation_identity : 0U;
+}
+FlowState detail::FlowStateCheckpointAccess::prepare_replacement(
+    const FlowState &state, const FlowLayerValues &history,
+    const FlowLayerValues &committed, AcceptedStepMetadata metadata) {
+  if (!state.impl_)
+    throw runtime::Error("Checkpoint v2 FlowState has been moved from");
+  FlowState replacement = FlowState::create(
+      *state.impl_->registry, state.impl_->layout, state.impl_->fields,
+      metadata);
+  replacement.seed_accepted_layers(history, committed);
+  return replacement;
+}
+void detail::FlowStateCheckpointAccess::publish_replacement(
+    FlowState &state, FlowState &&replacement) noexcept {
+  const auto identity = state.impl_->diagnostic_mutation_identity;
+  replacement.impl_->diagnostic_mutation_identity = identity;
+  state.impl_ = std::move(replacement.impl_);
 }
 
 void FlowState::begin_attempt() {
