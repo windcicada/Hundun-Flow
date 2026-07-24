@@ -170,6 +170,27 @@ foreach(consumer_name IN ITEMS exact_size expected_size expected_manifest_size)
   endif()
 endforeach()
 
+# R9 preflight-authority self-oracle: report checks in comments or outside the
+# protected rejection branch must not satisfy the branch-local contract.
+set(task23_preflight_authority_shadow_fixture
+  "require_destination_report_authority(outside);\nrequire_exact_product_report(outside);\nif (rejected_before_transaction) {\n  // require_destination_report_authority(comment);\n  /* require_exact_product_report(comment); */\n  deep_snapshot_equal();\n} else {\n  later_failure();\n}\n")
+task23_strip_cpp_comments(task23_preflight_authority_shadow_fixture
+  task23_preflight_authority_shadow_fixture_clean)
+task23_extract_bounded(task23_preflight_authority_shadow_fixture_clean
+  "if (rejected_before_transaction)" "else"
+  task23_preflight_authority_shadow_branch
+  "preflight-authority shadow branch")
+foreach(shadow_call IN ITEMS
+    "require_destination_report_authority("
+    "require_exact_product_report(")
+  string(FIND "${task23_preflight_authority_shadow_branch}" "${shadow_call}"
+    task23_preflight_shadow_position)
+  if(NOT task23_preflight_shadow_position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R9 preflight-authority shadow self-oracle failed")
+  endif()
+endforeach()
+
 task23_strip_cpp_comments(checkpoint_test checkpoint_test_clean)
 task23_strip_cpp_comments(protocol_test protocol_test_clean)
 task23_strip_cpp_comments(checkpoint_product checkpoint_product_clean)
@@ -248,6 +269,63 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
     task23_require_text(destination_authority_section "${required}"
       "destination report authority helper")
   endforeach()
+  task23_extract_bounded(checkpoint_test_clean
+    "ExpectedProductReport expected_read_preflight_failure_report("
+    "ExpectedProductReport expected_constructible_fingerprint_failure_report("
+    preflight_expected_section
+    "read preflight expected-report formula")
+  foreach(required IN ITEMS
+      "values.operation = hundun::flow::CheckpointV2Operation::read"
+      "values.disposition = hundun::flow::CheckpointV2Disposition::failed"
+      "values.reason = hundun::flow::CheckpointV2FailureReason::invalid_input"
+      "values.phase = hundun::flow::CheckpointV2Phase::preflight"
+      "values.rank = mpi.rank()"
+      "values.lowest_failing_rank = 0"
+      "values.step = before.metadata.step"
+      "values.time_s = before.metadata.time_s"
+      "values.local_logical_bytes = 0U"
+      "values.local_actual_bytes = 0U"
+      "values.global_logical_bytes = 0U"
+      "values.global_actual_bytes = 0U"
+      "values.local_crc64 = 0U"
+      "values.manifest_crc64 = 0U"
+      "values.file_count = 0U"
+      "values.crc_check_count = 0U"
+      "values.collective_count = 7U"
+      "values.rank_crc = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.manifest_crc = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.exact_size_eof = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.fingerprint = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.partition = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.transaction_entry = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.publication = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "values.rollback = hundun::flow::CheckpointV2CheckStatus::not_checked"
+      "independent_report_fingerprint(values)")
+    task23_require_compact_text(preflight_expected_section "${required}"
+      "read preflight expected-report formula")
+  endforeach()
+  task23_extract_bounded(checkpoint_test_clean
+    "if (rejected_before_transaction)"
+    "else"
+    preflight_rejection_branch
+    "read preflight rejection branch")
+  foreach(required IN ITEMS
+      "require_destination_report_authority(mpi, before, rejected.report())"
+      "mutation_index == 0U"
+      "expected_read_preflight_failure_report(mpi, before)"
+      "require_exact_product_report("
+      "checkpoint_v2_deep_snapshot_equal(before, after)")
+    task23_require_text(preflight_rejection_branch "${required}"
+      "read preflight rejection branch")
+  endforeach()
+  task23_require_compact_order(preflight_rejection_branch
+    "require_destination_report_authority(mpi, before, rejected.report())"
+    "checkpoint_v2_deep_snapshot_equal(before, after)"
+    "read preflight authority before deep-state assertion")
+  task23_require_compact_order(preflight_rejection_branch
+    "require_exact_product_report("
+    "checkpoint_v2_deep_snapshot_equal(before, after)"
+    "read preflight exact report before deep-state assertion")
   foreach(required IN ITEMS
       "17U, 1.25"
       "changed_fields, destination_metadata"

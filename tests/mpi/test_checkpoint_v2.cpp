@@ -992,6 +992,38 @@ void require_destination_report_authority(
                independent_report_fingerprint(observed_report_values(report)));
 }
 
+ExpectedProductReport expected_read_preflight_failure_report(
+    const hundun::runtime::MpiContext &mpi,
+    const hundun::flow::test::CheckpointV2DeepSnapshot &before) {
+  hundun::flow::detail::CheckpointV2ReportValues values;
+  values.operation = hundun::flow::CheckpointV2Operation::read;
+  values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+  values.reason = hundun::flow::CheckpointV2FailureReason::invalid_input;
+  values.phase = hundun::flow::CheckpointV2Phase::preflight;
+  values.rank = mpi.rank();
+  values.lowest_failing_rank = 0;
+  values.step = before.metadata.step;
+  values.time_s = before.metadata.time_s;
+  values.local_logical_bytes = 0U;
+  values.local_actual_bytes = 0U;
+  values.global_logical_bytes = 0U;
+  values.global_actual_bytes = 0U;
+  values.local_crc64 = 0U;
+  values.manifest_crc64 = 0U;
+  values.file_count = 0U;
+  values.crc_check_count = 0U;
+  values.collective_count = 7U;
+  values.rank_crc = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.manifest_crc = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.exact_size_eof = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.fingerprint = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.partition = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.transaction_entry = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.publication = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.rollback = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  return {values, independent_report_fingerprint(values)};
+}
+
 ExpectedProductReport expected_constructible_fingerprint_failure_report(
     const hundun::runtime::MpiContext &mpi,
     const std::filesystem::path &checkpoint_directory,
@@ -2152,13 +2184,19 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
             hundun::flow::CheckpointV2Phase::preflight ||
         rejected.report().phase() ==
             hundun::flow::CheckpointV2Phase::transaction_entry;
-    if (rejected_before_transaction)
+    if (rejected_before_transaction) {
+      require_destination_report_authority(mpi, before, rejected.report());
+      if (mutation_index == 0U)
+        require_exact_product_report(
+            rejected.report(),
+            expected_read_preflight_failure_report(mpi, before));
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_deep_snapshot_equal(before, after));
-    else
+    } else {
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, after));
+    }
   }
   const auto global_crc = independent_crc64(independent_global);
   require_authenticated_mutation_matrix(
