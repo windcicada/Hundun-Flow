@@ -33,6 +33,10 @@ constexpr std::size_t kMaximumStringBytes = 4096U;
 #ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
 test::ExactReadFault exact_read_fault{test::ExactReadFault::none};
 std::uint32_t exact_read_fault_calls_before{};
+test::PreparationPoint preparation_fault{test::PreparationPoint::none};
+std::uint32_t preparation_fault_calls_before{};
+test::NumericFilePoint numeric_file_fault{test::NumericFilePoint::none};
+std::uint32_t numeric_file_fault_calls_before{};
 
 test::ExactReadFault consume_exact_read_fault() noexcept {
   if (exact_read_fault_calls_before != 0U) {
@@ -42,6 +46,28 @@ test::ExactReadFault consume_exact_read_fault() noexcept {
   const auto result = exact_read_fault;
   exact_read_fault = test::ExactReadFault::none;
   return result;
+}
+
+bool consume_preparation_fault(test::PreparationPoint point) noexcept {
+  if (preparation_fault != point)
+    return false;
+  if (preparation_fault_calls_before != 0U) {
+    --preparation_fault_calls_before;
+    return false;
+  }
+  preparation_fault = test::PreparationPoint::none;
+  return true;
+}
+
+bool consume_numeric_file_fault(test::NumericFilePoint point) noexcept {
+  if (numeric_file_fault != point)
+    return false;
+  if (numeric_file_fault_calls_before != 0U) {
+    --numeric_file_fault_calls_before;
+    return false;
+  }
+  numeric_file_fault = test::NumericFilePoint::none;
+  return true;
 }
 #endif
 
@@ -406,6 +432,10 @@ decode_completed_marker(const std::vector<std::uint8_t> &bytes) {
 
 VerifiedFile write_verified_temporary(const std::filesystem::path &path,
     const std::vector<std::uint8_t> &bytes) {
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::write_status))
+    file_system("Checkpoint v2 injected temporary status failure");
+#endif
   std::error_code status_error;
   const auto status = std::filesystem::symlink_status(path, status_error);
   if (status_error && status_error != std::errc::no_such_file_or_directory)
@@ -415,18 +445,34 @@ VerifiedFile write_verified_temporary(const std::filesystem::path &path,
   if (bytes.size() >
       static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
     malformed("Checkpoint v2 file exceeds stream size");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::write_open))
+    file_system("Checkpoint v2 injected temporary open failure");
+#endif
   std::ofstream stream(path, std::ios::binary | std::ios::out);
   if (!stream)
     file_system("Checkpoint v2 temporary file could not be opened");
   if (!bytes.empty())
     stream.write(reinterpret_cast<const char *>(bytes.data()),
                  static_cast<std::streamsize>(bytes.size()));
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::write_body))
+    file_system("Checkpoint v2 injected temporary write failure");
+#endif
   if (!stream)
     file_system("Checkpoint v2 temporary file write failed");
   stream.flush();
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::write_flush))
+    file_system("Checkpoint v2 injected temporary flush failure");
+#endif
   if (!stream)
     file_system("Checkpoint v2 temporary file flush failed");
   stream.close();
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::write_close))
+    file_system("Checkpoint v2 injected temporary close failure");
+#endif
   if (stream.fail())
     file_system("Checkpoint v2 temporary file close failed");
   const auto reread =
@@ -439,6 +485,10 @@ VerifiedFile write_verified_temporary(const std::filesystem::path &path,
 
 void create_directory_exclusive(const std::filesystem::path &path) {
   std::error_code error;
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::directory_status))
+    file_system("Checkpoint v2 injected directory status failure");
+#endif
   const auto target_status = std::filesystem::symlink_status(path, error);
   const bool absent =
       error == std::errc::no_such_file_or_directory ||
@@ -450,9 +500,17 @@ void create_directory_exclusive(const std::filesystem::path &path) {
   auto parent = path.parent_path();
   if (parent.empty())
     parent = ".";
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::parent_status))
+    file_system("Checkpoint v2 injected parent status failure");
+#endif
   const auto parent_status = std::filesystem::symlink_status(parent, error);
   if (error || parent_status.type() != std::filesystem::file_type::directory)
     file_system("Checkpoint v2 parent is not a directory");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::directory_create))
+    file_system("Checkpoint v2 injected directory create failure");
+#endif
   if (!std::filesystem::create_directory(path, error) || error)
     file_system("Checkpoint v2 directory creation failed");
 }
@@ -461,6 +519,10 @@ std::vector<std::uint8_t>
 read_regular_file_exact(const std::filesystem::path &path,
                         std::uint64_t expected_size) {
   std::error_code error;
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::read_status))
+    file_system("Checkpoint v2 injected read status failure");
+#endif
   const auto status = std::filesystem::symlink_status(path, error);
   if (error) {
     if (error == std::errc::no_such_file_or_directory)
@@ -469,6 +531,10 @@ read_regular_file_exact(const std::filesystem::path &path,
   }
   if (status.type() != std::filesystem::file_type::regular)
     file_integrity_unchecked("Checkpoint v2 entry is not a regular file");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::read_size))
+    file_system("Checkpoint v2 injected read size failure");
+#endif
   const auto actual = std::filesystem::file_size(path, error);
   if (error) {
     if (error == std::errc::no_such_file_or_directory)
@@ -490,6 +556,10 @@ read_regular_file_exact(const std::filesystem::path &path,
       static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
     malformed("Checkpoint v2 file exceeds stream size");
   std::vector<std::uint8_t> result(allocation_size);
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::read_open))
+    file_system("Checkpoint v2 injected read open failure");
+#endif
   std::ifstream stream(path, std::ios::binary | std::ios::in);
   if (!stream)
     file_system("Checkpoint v2 file could not be opened");
@@ -500,6 +570,10 @@ read_regular_file_exact(const std::filesystem::path &path,
   if (!result.empty())
     stream.read(reinterpret_cast<char *>(result.data()),
                 static_cast<std::streamsize>(result.size()));
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::read_body))
+    file_system("Checkpoint v2 injected read body failure");
+#endif
   if (stream.gcount() != static_cast<std::streamsize>(result.size()))
     file_integrity("Checkpoint v2 file became shorter while reading");
   if (!stream)
@@ -511,6 +585,10 @@ read_regular_file_exact(const std::filesystem::path &path,
     file_system("Checkpoint v2 file read failed");
   stream.clear();
   stream.close();
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::read_close))
+    file_system("Checkpoint v2 injected read close failure");
+#endif
   if (stream.fail())
     file_system("Checkpoint v2 file close failed");
 #ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
@@ -523,12 +601,20 @@ read_regular_file_exact(const std::filesystem::path &path,
 void publish_no_overwrite(const std::filesystem::path &temporary,
                           const std::filesystem::path &final_path) {
   std::error_code error;
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::publish_status))
+    file_system("Checkpoint v2 injected publish status failure");
+#endif
   const auto status = std::filesystem::symlink_status(final_path, error);
   if (error && error != std::errc::no_such_file_or_directory)
     file_system("Checkpoint v2 final file status failed");
   if (!error && status.type() != std::filesystem::file_type::not_found)
     file_system("Checkpoint v2 final file already exists");
   error.clear();
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::publish_rename))
+    file_system("Checkpoint v2 injected publish rename failure");
+#endif
   std::filesystem::rename(temporary, final_path, error);
   if (error)
     file_system("Checkpoint v2 file publication failed");
@@ -565,10 +651,26 @@ CollectiveResult opaque_bytes_agreement(const runtime::MpiContext &mpi,
   ++collective_count;
   const bool size_valid =
       root_size <= maximum && bytes.size() <= checked_size(maximum);
-  std::vector<std::uint8_t> root(root_size <= maximum ? checked_size(root_size)
-                                                      : 0U);
-  if (mpi.rank() == 0 && size_valid)
-    root = bytes;
+  std::vector<std::uint8_t> root;
+  bool prepared = true;
+  try {
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(test::PreparationPoint::opaque_bytes_buffer))
+      throw std::bad_alloc();
+#endif
+    root.resize(root_size <= maximum ? checked_size(root_size) : 0U);
+    if (mpi.rank() == 0 && size_valid)
+      root = bytes;
+  } catch (...) {
+    prepared = false;
+  }
+  const auto preparation =
+      converge_phase(mpi, prepared, collective_count,
+                     "MPI_Allreduce(Checkpoint opaque buffer preparation)");
+  if (!preparation.ok)
+    throw CollectivePreparationError(
+        preparation.failing_rank,
+        "Checkpoint v2 opaque buffer preparation failed");
   runtime::check_mpi_result(MPI_Bcast(root.data(),
                                       static_cast<int>(root.size()), MPI_BYTE,
                                       0, mpi.comm()),
@@ -588,7 +690,24 @@ std::vector<std::uint64_t> allgather_u64(const runtime::MpiContext &mpi,
     malformed("Checkpoint v2 opaque gather count is invalid");
   const auto total = checked_product(
       checked_size(static_cast<std::uint64_t>(mpi.size())), count);
-  std::vector<std::uint64_t> result(total);
+  std::vector<std::uint64_t> result;
+  bool prepared = true;
+  try {
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(test::PreparationPoint::allgather_result))
+      throw std::bad_alloc();
+#endif
+    result.resize(total);
+  } catch (...) {
+    prepared = false;
+  }
+  const auto preparation =
+      converge_phase(mpi, prepared, collective_count,
+                     "MPI_Allreduce(Checkpoint gather workspace preparation)");
+  if (!preparation.ok)
+    throw CollectivePreparationError(
+        preparation.failing_rank,
+        "Checkpoint v2 gather workspace preparation failed");
   runtime::check_mpi_result(
       MPI_Allgather(local, static_cast<int>(count), MPI_UINT64_T, result.data(),
                     static_cast<int>(count), MPI_UINT64_T, mpi.comm()),
@@ -601,8 +720,24 @@ std::uint64_t allreduce_sum_u64(const runtime::MpiContext &mpi,
                                 std::uint64_t local,
                                 std::uint64_t &collective_count,
                                 std::string_view operation) {
-  std::vector<std::uint64_t> items(
-      checked_size(static_cast<std::uint64_t>(mpi.size())));
+  std::vector<std::uint64_t> items;
+  bool prepared = true;
+  try {
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(test::PreparationPoint::allreduce_workspace))
+      throw std::bad_alloc();
+#endif
+    items.resize(checked_size(static_cast<std::uint64_t>(mpi.size())));
+  } catch (...) {
+    prepared = false;
+  }
+  const auto preparation = converge_phase(
+      mpi, prepared, collective_count,
+      "MPI_Allreduce(Checkpoint reduction workspace preparation)");
+  if (!preparation.ok)
+    throw CollectivePreparationError(
+        preparation.failing_rank,
+        "Checkpoint v2 reduction workspace preparation failed");
   runtime::check_mpi_result(MPI_Allgather(&local, 1, MPI_UINT64_T, items.data(),
                                           1, MPI_UINT64_T, mpi.comm()),
       operation);
@@ -628,6 +763,10 @@ bool exact_directory_inventory(const std::filesystem::path &directory,
   if (expected.size() != names.size())
     return false;
   std::set<std::string> observed;
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (consume_numeric_file_fault(test::NumericFilePoint::inventory_iteration))
+    file_system("Checkpoint v2 injected directory iteration failure");
+#endif
   for (std::filesystem::directory_iterator iterator(directory, error), end;
        !error && iterator != end; iterator.increment(error)) {
     const auto entry_status = iterator->symlink_status(error);
@@ -649,6 +788,18 @@ void set_exact_read_fault(ExactReadFault fault,
                           std::uint32_t calls_before) noexcept {
   exact_read_fault = fault;
   exact_read_fault_calls_before = calls_before;
+}
+
+void set_preparation_fault(PreparationPoint point,
+                           std::uint32_t calls_before) noexcept {
+  preparation_fault = point;
+  preparation_fault_calls_before = calls_before;
+}
+
+void set_numeric_file_fault(NumericFilePoint point,
+                            std::uint32_t calls_before) noexcept {
+  numeric_file_fault = point;
+  numeric_file_fault_calls_before = calls_before;
 }
 
 } // namespace test

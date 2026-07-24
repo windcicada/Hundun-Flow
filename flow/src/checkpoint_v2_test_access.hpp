@@ -12,9 +12,36 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace hundun::flow::test {
+
+enum class CheckpointV2PreparationPoint : std::uint8_t {
+  none,
+  local_layout,
+  local_topology,
+  local_geometry,
+  topology_common,
+  geometry_common,
+  resolved_case,
+  boundary_registry,
+  field_schema,
+  common_authority,
+  final_success_boundary
+};
+
+void set_checkpoint_v2_preparation_fault(
+    CheckpointV2PreparationPoint, std::uint32_t calls_before = 0U) noexcept;
+std::vector<std::uint8_t> checkpoint_v2_encode_global_payload_for_test(
+    AcceptedStepMetadata, const TimeControlState &,
+    const std::optional<IdealGasClosureState> &);
+std::vector<std::uint8_t>
+checkpoint_v2_encode_rank_payload_for_test(const FlowState &,
+                                           std::uint64_t &logical_bytes);
+std::uint64_t
+checkpoint_v2_field_schema_fingerprint_for_test(const runtime::FieldRegistry &,
+                                                const FlowFieldIds &);
 
 struct CheckpointV2DeepSnapshot final {
   std::array<std::vector<std::vector<std::uint64_t>>, 4> storage_bits;
@@ -184,6 +211,41 @@ public:
     const runtime::FieldStorage &rollback = state.impl_->rollback_snapshot;
     return {history.view<double>(field), committed.view<double>(field),
             trial.view<double>(field), rollback.view<double>(field)};
+  }
+
+  static bool all_cell_ghosts_are_positive_zero(const FlowState &state) {
+    if (!state.impl_)
+      throw runtime::Error("Checkpoint v2 test FlowState has been moved from");
+    const std::array<const runtime::FieldStorage *, 4> storages{
+        &state.impl_->history, &state.impl_->committed, &state.impl_->trial,
+        &state.impl_->rollback_snapshot};
+    std::vector<runtime::FieldId> fields{
+        state.impl_->fields.density, state.impl_->fields.velocity,
+        state.impl_->fields.mechanical_pressure};
+    fields.insert(fields.end(),
+                  state.impl_->fields.transported_cell_fields.begin(),
+                  state.impl_->fields.transported_cell_fields.end());
+    for (const auto *storage : storages)
+      for (const auto field : fields) {
+        const auto view = storage->view<double>(field);
+        const auto extent = view.interior_extent();
+        const int ghost = view.ghost_width();
+        const auto components =
+            state.impl_->registry->descriptor(field).components;
+        for (int k = -ghost; k < extent.z + ghost; ++k)
+          for (int j = -ghost; j < extent.y + ghost; ++j)
+            for (int i = -ghost; i < extent.x + ghost; ++i) {
+              const bool interior = i >= 0 && i < extent.x && j >= 0 &&
+                                    j < extent.y && k >= 0 && k < extent.z;
+              if (interior)
+                continue;
+              for (std::uint32_t component = 0; component < components;
+                   ++component)
+                if (bits(view(i, j, k, static_cast<int>(component))) != 0U)
+                  return false;
+            }
+      }
+    return true;
   }
 
 private:

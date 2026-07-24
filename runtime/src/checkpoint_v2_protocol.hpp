@@ -141,6 +141,16 @@ struct CollectiveResult final {
   int failing_rank{-1};
 };
 
+class CollectivePreparationError final : public Error {
+public:
+  CollectivePreparationError(int failing_rank, const std::string &message)
+      : Error(message), failing_rank_(failing_rank) {}
+  int failing_rank() const noexcept { return failing_rank_; }
+
+private:
+  int failing_rank_{-1};
+};
+
 CollectiveResult converge_phase(const runtime::MpiContext &, bool local_ok,
                                 std::uint64_t &collective_count,
                                 std::string_view operation);
@@ -166,6 +176,13 @@ bool exact_directory_inventory(const std::filesystem::path &,
 #ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
 namespace test {
 
+enum class PreparationPoint : std::uint8_t {
+  none,
+  opaque_bytes_buffer,
+  allgather_result,
+  allreduce_workspace
+};
+
 enum class ExactReadFault : std::uint8_t {
   none,
   truncate_after_size,
@@ -173,8 +190,32 @@ enum class ExactReadFault : std::uint8_t {
   close_failure
 };
 
+enum class NumericFilePoint : std::uint8_t {
+  none,
+  directory_status,
+  parent_status,
+  directory_create,
+  write_status,
+  write_open,
+  write_body,
+  write_flush,
+  write_close,
+  read_status,
+  read_size,
+  read_open,
+  read_body,
+  read_close,
+  publish_status,
+  publish_rename,
+  inventory_iteration
+};
+
 void set_exact_read_fault(ExactReadFault,
                           std::uint32_t calls_before = 0U) noexcept;
+void set_preparation_fault(PreparationPoint,
+                           std::uint32_t calls_before = 0U) noexcept;
+void set_numeric_file_fault(NumericFilePoint,
+                            std::uint32_t calls_before = 0U) noexcept;
 
 } // namespace test
 #endif

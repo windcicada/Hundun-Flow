@@ -4,6 +4,9 @@
 #include "adaptive_time_control_detail.hpp"
 #include "checkpoint_v2_detail.hpp"
 #include "checkpoint_v2_protocol.hpp"
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "checkpoint_v2_test_access.hpp"
+#endif
 
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
@@ -32,6 +35,39 @@
 
 namespace hundun::flow {
 namespace {
+
+enum class CheckpointPreparationPoint : std::uint8_t {
+  none,
+  local_layout,
+  local_topology,
+  local_geometry,
+  topology_common,
+  geometry_common,
+  resolved_case,
+  boundary_registry,
+  field_schema,
+  common_authority,
+  final_success_boundary
+};
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+CheckpointPreparationPoint checkpoint_preparation_fault{
+    CheckpointPreparationPoint::none};
+std::uint32_t checkpoint_preparation_fault_calls_before{};
+
+void inject_checkpoint_preparation_fault(CheckpointPreparationPoint point) {
+  if (checkpoint_preparation_fault != point)
+    return;
+  if (checkpoint_preparation_fault_calls_before != 0U) {
+    --checkpoint_preparation_fault_calls_before;
+    return;
+  }
+  checkpoint_preparation_fault = CheckpointPreparationPoint::none;
+  throw std::bad_alloc();
+}
+#else
+void inject_checkpoint_preparation_fault(CheckpointPreparationPoint) {}
+#endif
 
 template <class T>
 constexpr std::uint8_t value(T item) noexcept {
@@ -652,46 +688,92 @@ fingerprints(const runtime::MpiContext &mpi,
     const config::FlowCaseConfig &config,
     const runtime::FieldRegistry &registry, const FlowFieldIds &fields,
     std::uint64_t &collective_count) {
-  const auto local_topology = local_topology_fingerprint(
-      decomposition, topology, mpi.rank(), mpi.size());
-  const auto local_geometry =
-      local_geometry_fingerprint(topology, geometry, config, mpi.rank());
+  std::uint64_t local_topology{};
+  std::uint64_t local_geometry{};
+  std::uint64_t resolved{};
+  std::uint64_t boundary{};
+  std::uint64_t schema{};
+  bool local_prepared = true;
+  try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::local_topology);
+    local_topology = local_topology_fingerprint(decomposition, topology,
+                                                mpi.rank(), mpi.size());
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::local_geometry);
+    local_geometry =
+        local_geometry_fingerprint(topology, geometry, config, mpi.rank());
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::resolved_case);
+    resolved = resolved_fingerprint(config);
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::boundary_registry);
+    boundary = boundary_fingerprint(boundaries);
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::field_schema);
+    schema = field_schema_fingerprint(registry, fields);
+  } catch (...) {
+    local_prepared = false;
+  }
+  auto preparation = runtime::checkpoint_v2::converge_phase(
+      mpi, local_prepared, collective_count,
+      "MPI_Allreduce(Checkpoint local fingerprint preparation)");
+  if (!preparation.ok)
+    throw runtime::checkpoint_v2::CollectivePreparationError(
+        preparation.failing_rank,
+        "Checkpoint v2 local fingerprint preparation failed");
   const auto topology_parts = runtime::checkpoint_v2::allgather_u64(
       mpi, &local_topology, 1U, collective_count,
       "MPI_Allgather(Checkpoint topology fingerprints)");
   const auto geometry_parts = runtime::checkpoint_v2::allgather_u64(
       mpi, &local_geometry, 1U, collective_count,
       "MPI_Allgather(Checkpoint geometry fingerprints)");
-  const auto topology_common = make_fingerprint(
-      "hundun.checkpoint-v2.topology-common.v1", [&](Encoder &encoder) {
-    encoder.i32(mpi.size());
-    append(encoder, decomposition.process_grid());
-    append(encoder, topology.global_extent());
-    encoder.u64(topology_parts.size());
-    for (int rank = 0; rank < mpi.size(); ++rank) {
-      encoder.i32(rank);
-      encoder.u64(topology_parts[static_cast<std::size_t>(rank)]);
-    }
-  });
-  const auto geometry_common = make_fingerprint(
-      "hundun.checkpoint-v2.geometry-common.v1", [&](Encoder &encoder) {
-    encoder.u8(geometry.mapping_kind() == mesh::MappingKind::uniform_box
-                       ? 0U
-                       : 1U);
-    append(encoder, geometry.global_extent());
-    append(encoder, geometry.origin_m());
-    append(encoder, geometry.length_m());
-    append_optional(encoder, geometry.uniform_spacing_m());
-    append_optional(encoder, config.mesh.warp_amplitude);
-    encoder.u64(geometry_parts.size());
-    for (int rank = 0; rank < mpi.size(); ++rank) {
-      encoder.i32(rank);
-      encoder.u64(geometry_parts[static_cast<std::size_t>(rank)]);
-    }
-  });
-  return {resolved_fingerprint(config), topology_common, geometry_common,
-          boundary_fingerprint(boundaries),
-          field_schema_fingerprint(registry, fields)};
+  std::uint64_t topology_common{};
+  std::uint64_t geometry_common{};
+  bool common_prepared = true;
+  try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::topology_common);
+    topology_common = make_fingerprint(
+        "hundun.checkpoint-v2.topology-common.v1", [&](Encoder &encoder) {
+          encoder.i32(mpi.size());
+          append(encoder, decomposition.process_grid());
+          append(encoder, topology.global_extent());
+          encoder.u64(topology_parts.size());
+          for (int rank = 0; rank < mpi.size(); ++rank) {
+            encoder.i32(rank);
+            encoder.u64(topology_parts[static_cast<std::size_t>(rank)]);
+          }
+        });
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::geometry_common);
+    geometry_common = make_fingerprint(
+        "hundun.checkpoint-v2.geometry-common.v1", [&](Encoder &encoder) {
+          encoder.u8(geometry.mapping_kind() == mesh::MappingKind::uniform_box
+                         ? 0U
+                         : 1U);
+          append(encoder, geometry.global_extent());
+          append(encoder, geometry.origin_m());
+          append(encoder, geometry.length_m());
+          append_optional(encoder, geometry.uniform_spacing_m());
+          append_optional(encoder, config.mesh.warp_amplitude);
+          encoder.u64(geometry_parts.size());
+          for (int rank = 0; rank < mpi.size(); ++rank) {
+            encoder.i32(rank);
+            encoder.u64(geometry_parts[static_cast<std::size_t>(rank)]);
+          }
+        });
+  } catch (...) {
+    common_prepared = false;
+  }
+  preparation = runtime::checkpoint_v2::converge_phase(
+      mpi, common_prepared, collective_count,
+      "MPI_Allreduce(Checkpoint common fingerprint preparation)");
+  if (!preparation.ok)
+    throw runtime::checkpoint_v2::CollectivePreparationError(
+        preparation.failing_rank,
+        "Checkpoint v2 common fingerprint preparation failed");
+  return {resolved, topology_common, geometry_common, boundary, schema};
 }
 
 ByteVector
@@ -1049,6 +1131,29 @@ std::string rank_filename(int rank) {
 }
 
 using Convergence = runtime::checkpoint_v2::CollectiveResult;
+
+std::uint64_t sum_small_u64(const runtime::MpiContext &mpi, std::uint64_t local,
+                            std::uint64_t &collective_count,
+                            std::string_view operation) {
+  std::uint64_t result{};
+  runtime::check_mpi_result(
+      MPI_Allreduce(&local, &result, 1, MPI_UINT64_T, MPI_SUM, mpi.comm()),
+      operation);
+  ++collective_count;
+  return result;
+}
+
+void broadcast_root_u64(const runtime::MpiContext &mpi, std::uint64_t *items,
+                        std::size_t count, std::uint64_t &collective_count,
+                        std::string_view operation) {
+  if (items == nullptr ||
+      count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    throw runtime::Error("Checkpoint v2 broadcast buffer is invalid");
+  runtime::check_mpi_result(
+      MPI_Bcast(items, static_cast<int>(count), MPI_UINT64_T, 0, mpi.comm()),
+      operation);
+  ++collective_count;
+}
 Convergence path_agrees(const runtime::MpiContext &mpi,
                         const std::filesystem::path &path,
                         std::uint64_t &collective_count) {
@@ -1107,6 +1212,30 @@ CheckpointV2FailureReason file_failure_reason(
 }
 
 } // namespace
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+namespace test {
+void set_checkpoint_v2_preparation_fault(CheckpointV2PreparationPoint point,
+                                         std::uint32_t calls_before) noexcept {
+  checkpoint_preparation_fault = static_cast<CheckpointPreparationPoint>(point);
+  checkpoint_preparation_fault_calls_before = calls_before;
+}
+std::vector<std::uint8_t> checkpoint_v2_encode_global_payload_for_test(
+    AcceptedStepMetadata metadata, const TimeControlState &time,
+    const std::optional<IdealGasClosureState> &closure) {
+  return encode_global_payload(metadata, time, closure);
+}
+std::vector<std::uint8_t>
+checkpoint_v2_encode_rank_payload_for_test(const FlowState &state,
+                                           std::uint64_t &logical_bytes) {
+  return encode_rank_payload(state, logical_bytes);
+}
+std::uint64_t checkpoint_v2_field_schema_fingerprint_for_test(
+    const runtime::FieldRegistry &registry, const FlowFieldIds &fields) {
+  return field_schema_fingerprint(registry, fields);
+}
+} // namespace test
+#endif
 
 #define HUNDUN_CHECKPOINT_GETTER(type, name)                                  \
   type CheckpointV2Report::name() const noexcept { return name##_; }
@@ -1256,7 +1385,13 @@ CheckpointV2Report write_checkpoint_v2(
   bool local_ok = true;
   CheckpointV2FailureReason local_reason{
       CheckpointV2FailureReason::invalid_input};
-  const auto path_status = path_agrees(mpi, directory, collectives);
+  Convergence path_status;
+  try {
+    path_status = path_agrees(mpi, directory, collectives);
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    return fail(CheckpointV2FailureReason::state, CheckpointV2Phase::preflight,
+                error.failing_rank());
+  }
   if (!path_status.ok)
     return fail(CheckpointV2FailureReason::invalid_input,
                 CheckpointV2Phase::preflight, path_status.failing_rank);
@@ -1335,6 +1470,8 @@ CheckpointV2Report write_checkpoint_v2(
   bool payload_ok = true;
   local_reason = CheckpointV2FailureReason::state;
   try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::local_layout);
     local_layout = local_layout_fingerprint(decomposition, topology, mpi.rank(),
                                  mpi.size());
     global_payload = encode_global_payload(metadata, time, closure);
@@ -1366,18 +1503,42 @@ CheckpointV2Report write_checkpoint_v2(
   }
 
   const auto &registry = detail::FlowStateCheckpointAccess::registry(state);
-  identity = fingerprints(mpi, decomposition, topology, geometry, boundaries,
-                          config, registry, state.fields(), collectives);
+  try {
+    identity = fingerprints(mpi, decomposition, topology, geometry, boundaries,
+                            config, registry, state.fields(), collectives);
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    values.fingerprint = CheckpointV2CheckStatus::not_checked;
+    values.partition = CheckpointV2CheckStatus::passed;
+    return fail(CheckpointV2FailureReason::state, CheckpointV2Phase::preflight,
+                error.failing_rank());
+  }
   Encoder common_authority;
-  for (const auto fingerprint : identity)
-    common_authority.u64(fingerprint);
-  common_authority.i32(mpi.size());
-  append(common_authority, decomposition.process_grid());
-  common_authority.u64(global_payload.size());
-  common_authority.raw(global_payload.data(), global_payload.size());
-  status = runtime::checkpoint_v2::opaque_bytes_agreement(
-      mpi, common_authority.bytes(), collectives,
-      "MPI_Allreduce(Checkpoint common authority)");
+  bool authority_prepared = true;
+  try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::common_authority);
+    for (const auto fingerprint : identity)
+      common_authority.u64(fingerprint);
+    common_authority.i32(mpi.size());
+    append(common_authority, decomposition.process_grid());
+    common_authority.u64(global_payload.size());
+    common_authority.raw(global_payload.data(), global_payload.size());
+  } catch (...) {
+    authority_prepared = false;
+  }
+  status = converge(mpi, authority_prepared, collectives,
+                    "MPI_Allreduce(Checkpoint common authority preparation)");
+  if (!status.ok)
+    return fail(CheckpointV2FailureReason::state, CheckpointV2Phase::preflight,
+                status.failing_rank);
+  try {
+    status = runtime::checkpoint_v2::opaque_bytes_agreement(
+        mpi, common_authority.bytes(), collectives,
+        "MPI_Allreduce(Checkpoint common authority)");
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    return fail(CheckpointV2FailureReason::state, CheckpointV2Phase::preflight,
+                error.failing_rank());
+  }
   if (!status.ok)
     return fail(CheckpointV2FailureReason::invalid_input,
                 CheckpointV2Phase::preflight, status.failing_rank);
@@ -1439,9 +1600,9 @@ CheckpointV2Report write_checkpoint_v2(
   status = converge(mpi, rank_written, collectives,
                     "MPI_Allreduce(Checkpoint rank temporary)");
   if (!status.ok) {
-    values.crc_check_count = runtime::checkpoint_v2::allreduce_sum_u64(
-        mpi, rank_written ? 1U : 0U, collectives,
-        "MPI_Allreduce(Checkpoint verified rank files)");
+    values.crc_check_count =
+        sum_small_u64(mpi, rank_written ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint verified rank files)");
     values.rank_crc = rank_written ? CheckpointV2CheckStatus::passed
                       : rank_write_integrity_failed
                           ? CheckpointV2CheckStatus::failed
@@ -1466,9 +1627,9 @@ CheckpointV2Report write_checkpoint_v2(
   status = converge(mpi, rank_published, collectives,
                     "MPI_Allreduce(Checkpoint rank publish)");
   if (!status.ok) {
-    values.file_count = runtime::checkpoint_v2::allreduce_sum_u64(
-        mpi, rank_published ? 1U : 0U, collectives,
-        "MPI_Allreduce(Checkpoint published rank files)");
+    values.file_count =
+        sum_small_u64(mpi, rank_published ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint published rank files)");
     values.publication = CheckpointV2CheckStatus::failed;
     return fail(CheckpointV2FailureReason::filesystem,
                 CheckpointV2Phase::rank_publish, status.failing_rank);
@@ -1487,15 +1648,24 @@ CheckpointV2Report write_checkpoint_v2(
       values.local_actual_bytes,
       values.local_crc64,
       local_layout};
-  const auto gathered_records = runtime::checkpoint_v2::allgather_u64(
-      mpi, local_record.data(), local_record.size(), collectives,
-      "MPI_Allgather(Checkpoint rank records)");
-  const auto global_logical = runtime::checkpoint_v2::allreduce_sum_u64(
-      mpi, values.local_logical_bytes, collectives,
-      "MPI_Allreduce(Checkpoint logical bytes)");
-  const auto rank_actual = runtime::checkpoint_v2::allreduce_sum_u64(
-      mpi, values.local_actual_bytes, collectives,
-      "MPI_Allreduce(Checkpoint actual bytes)");
+  std::vector<std::uint64_t> gathered_records;
+  std::uint64_t global_logical{};
+  std::uint64_t rank_actual{};
+  try {
+    gathered_records = runtime::checkpoint_v2::allgather_u64(
+        mpi, local_record.data(), local_record.size(), collectives,
+        "MPI_Allgather(Checkpoint rank records)");
+    global_logical = runtime::checkpoint_v2::allreduce_sum_u64(
+        mpi, values.local_logical_bytes, collectives,
+        "MPI_Allreduce(Checkpoint logical bytes)");
+    rank_actual = runtime::checkpoint_v2::allreduce_sum_u64(
+        mpi, values.local_actual_bytes, collectives,
+        "MPI_Allreduce(Checkpoint actual bytes)");
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    values.publication = CheckpointV2CheckStatus::failed;
+    return fail(CheckpointV2FailureReason::state,
+                CheckpointV2Phase::rank_publish, error.failing_rank());
+  }
 
   std::uint64_t manifest_size = 0U;
   std::uint64_t manifest_crc = 0U;
@@ -1559,9 +1729,8 @@ CheckpointV2Report write_checkpoint_v2(
   status = converge(mpi, manifest_ok, collectives,
                     "MPI_Allreduce(Checkpoint manifest)");
   const bool manifest_verified_common =
-      runtime::checkpoint_v2::allreduce_sum_u64(
-          mpi, manifest_verified ? 1U : 0U, collectives,
-          "MPI_Allreduce(Checkpoint manifest verification)") == 1U;
+      sum_small_u64(mpi, manifest_verified ? 1U : 0U, collectives,
+                    "MPI_Allreduce(Checkpoint manifest verification)") == 1U;
   if (!status.ok) {
     values.manifest_crc =
         manifest_integrity_failed  ? CheckpointV2CheckStatus::failed
@@ -1579,9 +1748,9 @@ CheckpointV2Report write_checkpoint_v2(
   const std::array<std::uint64_t, 2> local_manifest{
       mpi.rank() == 0 ? manifest_size : 0U,
       mpi.rank() == 0 ? manifest_crc : 0U};
-  const auto manifest_authority = runtime::checkpoint_v2::allgather_u64(
-      mpi, local_manifest.data(), local_manifest.size(), collectives,
-      "MPI_Allgather(Checkpoint manifest authority)");
+  auto manifest_authority = local_manifest;
+  broadcast_root_u64(mpi, manifest_authority.data(), manifest_authority.size(),
+                     collectives, "MPI_Bcast(Checkpoint manifest authority)");
   manifest_size = manifest_authority[0U];
   manifest_crc = manifest_authority[1U];
   values.manifest_crc64 = manifest_crc;
@@ -1621,9 +1790,8 @@ CheckpointV2Report write_checkpoint_v2(
   status =
       converge(mpi, marker_ok, collectives, "MPI_Allreduce(Checkpoint marker)");
   const bool marker_verified_common =
-      runtime::checkpoint_v2::allreduce_sum_u64(
-          mpi, marker_verified ? 1U : 0U, collectives,
-          "MPI_Allreduce(Checkpoint marker verification)") == 1U;
+      sum_small_u64(mpi, marker_verified ? 1U : 0U, collectives,
+                    "MPI_Allreduce(Checkpoint marker verification)") == 1U;
   if (!status.ok) {
     if (marker_verified_common)
       ++values.crc_check_count;
@@ -1637,10 +1805,7 @@ CheckpointV2Report write_checkpoint_v2(
     return fail(marker_write_reason, CheckpointV2Phase::completed_marker,
                 status.failing_rank);
   }
-  const auto marker_authority = runtime::checkpoint_v2::allgather_u64(
-      mpi, &marker_size, 1U, collectives,
-      "MPI_Allgather(Checkpoint marker size)");
-  marker_size = marker_authority[0U];
+  marker_size = 40U;
   ++values.crc_check_count;
   values.global_logical_bytes = global_logical;
   values.global_actual_bytes = runtime::checkpoint_v2::checked_sum_u64(
@@ -1684,7 +1849,13 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   bool local_ok = true;
   CheckpointV2FailureReason local_reason{
       CheckpointV2FailureReason::invalid_input};
-  const auto path_status = path_agrees(mpi, directory, collectives);
+  Convergence path_status;
+  try {
+    path_status = path_agrees(mpi, directory, collectives);
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    return fail(CheckpointV2FailureReason::state, CheckpointV2Phase::preflight,
+                error.failing_rank());
+  }
   if (!path_status.ok)
     return fail(CheckpointV2FailureReason::invalid_input,
                 CheckpointV2Phase::preflight, path_status.failing_rank);
@@ -1897,6 +2068,7 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   values.partition = CheckpointV2CheckStatus::passed;
 
   bool fingerprint_ok = true;
+  int fingerprint_preparation_failure = -1;
   try {
     const auto &registry = detail::FlowStateCheckpointAccess::registry(state);
     const auto expected =
@@ -1909,9 +2081,16 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
                                manifest.global_payload);
   } catch (const runtime::MpiOperationError &) {
     throw;
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    fingerprint_preparation_failure = error.failing_rank();
+    fingerprint_ok = false;
   } catch (...) {
     fingerprint_ok = false;
   }
+  if (fingerprint_preparation_failure >= 0)
+    return fail(CheckpointV2FailureReason::state,
+                CheckpointV2Phase::restore_prepare,
+                fingerprint_preparation_failure);
   status = converge(mpi, fingerprint_ok, collectives,
                     "MPI_Allreduce(Checkpoint fingerprints)");
   if (!status.ok) {
@@ -1986,18 +2165,18 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   status = converge(mpi, rank_ok, collectives,
                     "MPI_Allreduce(Checkpoint rank read)");
   if (!status.ok) {
-    const auto exact_count = runtime::checkpoint_v2::allreduce_sum_u64(
-        mpi, rank_exact ? 1U : 0U, collectives,
-        "MPI_Allreduce(Checkpoint exact rank files)");
-    const auto exact_failure_count = runtime::checkpoint_v2::allreduce_sum_u64(
-            mpi, rank_exact_failed ? 1U : 0U, collectives,
-            "MPI_Allreduce(Checkpoint invalid rank sizes)");
-    const auto crc_count = runtime::checkpoint_v2::allreduce_sum_u64(
-        mpi, rank_crc_match ? 1U : 0U, collectives,
-        "MPI_Allreduce(Checkpoint matching rank CRCs)");
-    const auto complete_count = runtime::checkpoint_v2::allreduce_sum_u64(
-        mpi, rank_ok ? 1U : 0U, collectives,
-        "MPI_Allreduce(Checkpoint complete rank files)");
+    const auto exact_count =
+        sum_small_u64(mpi, rank_exact ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint exact rank files)");
+    const auto exact_failure_count =
+        sum_small_u64(mpi, rank_exact_failed ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint invalid rank sizes)");
+    const auto crc_count =
+        sum_small_u64(mpi, rank_crc_match ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint matching rank CRCs)");
+    const auto complete_count =
+        sum_small_u64(mpi, rank_ok ? 1U : 0U, collectives,
+                      "MPI_Allreduce(Checkpoint complete rank files)");
     values.file_count =
         runtime::checkpoint_v2::checked_sum_u64(2U, complete_count);
     values.crc_check_count =
@@ -2057,22 +2236,39 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   values.lowest_failing_rank = -1;
   values.file_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
   values.crc_check_count = static_cast<std::uint64_t>(mpi.size()) + 1U;
-  values.global_logical_bytes = runtime::checkpoint_v2::allreduce_sum_u64(
-      mpi, values.local_logical_bytes, collectives,
-      "MPI_Allreduce(Checkpoint restored logical bytes)");
-  const auto rank_actual = runtime::checkpoint_v2::allreduce_sum_u64(
-      mpi, values.local_actual_bytes, collectives,
-      "MPI_Allreduce(Checkpoint restored actual bytes)");
+  std::uint64_t rank_actual{};
+  try {
+    values.global_logical_bytes = runtime::checkpoint_v2::allreduce_sum_u64(
+        mpi, values.local_logical_bytes, collectives,
+        "MPI_Allreduce(Checkpoint restored logical bytes)");
+    rank_actual = runtime::checkpoint_v2::allreduce_sum_u64(
+        mpi, values.local_actual_bytes, collectives,
+        "MPI_Allreduce(Checkpoint restored actual bytes)");
+  } catch (const runtime::checkpoint_v2::CollectivePreparationError &error) {
+    values.publication = CheckpointV2CheckStatus::not_checked;
+    return fail(CheckpointV2FailureReason::state,
+                CheckpointV2Phase::restore_prepare, error.failing_rank());
+  }
   values.global_actual_bytes = runtime::checkpoint_v2::checked_sum_u64(
       rank_actual, runtime::checkpoint_v2::checked_sum_u64(
                        marker.manifest_actual_size, 40U));
   values.collective_count =
       runtime::checkpoint_v2::checked_sum_u64(collectives, 1U);
-  auto completed_report = detail::CheckpointV2Access::make(values);
-  status = converge(mpi, true, collectives,
+  bool success_boundary_ready = true;
+  try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::final_success_boundary);
+  } catch (...) {
+    success_boundary_ready = false;
+  }
+  status = converge(mpi, success_boundary_ready, collectives,
                     "MPI_Allreduce(Checkpoint restore success boundary)");
-  if (!status.ok)
-    throw runtime::Error("Checkpoint v2 success boundary is inconsistent");
+  if (!status.ok) {
+    values.publication = CheckpointV2CheckStatus::not_checked;
+    return fail(CheckpointV2FailureReason::state,
+                CheckpointV2Phase::restore_prepare, status.failing_rank);
+  }
+  auto completed_report = detail::CheckpointV2Access::make(values);
   detail::FlowStateCheckpointAccess::publish_replacement(
       state, std::move(*replacement));
   return detail::CheckpointV2Access::make_read(

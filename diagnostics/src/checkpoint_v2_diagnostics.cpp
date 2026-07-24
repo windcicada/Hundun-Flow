@@ -6,6 +6,10 @@
 #include "checkpoint_v2_protocol.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
 
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+#include "checkpoint_v2_diagnostics_test_access.hpp"
+#endif
+
 #include <mpi.h>
 
 #include <algorithm>
@@ -32,6 +36,25 @@ struct CheckpointV2Adapter final {
 
 namespace hundun::diagnostics {
 namespace {
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+test::CheckpointV2DiagnosticFault injected_fault{
+    test::CheckpointV2DiagnosticFault::none};
+int injected_fault_rank{-1};
+test::CheckpointV2DiagnosticWork diagnostic_work{};
+
+void before_collective(const runtime::MpiContext &mpi,
+                       std::string_view operation) {
+  ++diagnostic_work.collective_calls;
+  if (injected_fault == test::CheckpointV2DiagnosticFault::raw_mpi &&
+      (injected_fault_rank < 0 || injected_fault_rank == mpi.rank())) {
+    injected_fault = test::CheckpointV2DiagnosticFault::none;
+    runtime::check_mpi_result(MPI_ERR_OTHER, operation);
+  }
+}
+#else
+void before_collective(const runtime::MpiContext &, std::string_view) {}
+#endif
 
 constexpr DiagnosticCapabilityFlags kCapabilities =
     static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::summary) |
@@ -234,12 +257,14 @@ void require_collective_agreement(
     local_valid = false;
   }
   std::uint64_t root_signature = signature;
+  before_collective(mpi, "MPI_Bcast(Checkpoint diagnostic agreement)");
   runtime::check_mpi_result(
       MPI_Bcast(&root_signature, 1, MPI_UINT64_T, 0, mpi.comm()),
       "MPI_Bcast(Checkpoint diagnostic agreement)");
   const int candidate =
       local_valid && signature == root_signature ? mpi.size() : mpi.rank();
   int lowest = mpi.size();
+  before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostic agreement)");
   runtime::check_mpi_result(
       MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
       "MPI_Allreduce(Checkpoint diagnostic agreement)");
@@ -489,6 +514,7 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
       static_cast<std::uint64_t>(report.rank_crc_status())};
   std::vector<std::uint64_t> gathered(
       static_cast<std::size_t>(mpi.size()) * local.size());
+  before_collective(mpi, "MPI_Allgather(Checkpoint diagnostic local fields)");
   runtime::check_mpi_result(
       MPI_Allgather(local.data(), static_cast<int>(local.size()),
                     MPI_UINT64_T, gathered.data(),
@@ -565,10 +591,12 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
   }
   const auto parts = fingerprint(report).parts();
   std::array<std::uint64_t, 2> combined{parts.xor64, parts.sum64};
+  before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostics XOR)");
   runtime::check_mpi_result(
       MPI_Allreduce(MPI_IN_PLACE, combined.data(), 1, MPI_UINT64_T, MPI_BXOR,
                     mpi.comm()),
       "MPI_Allreduce(Checkpoint diagnostics XOR)");
+  before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostics sum)");
   runtime::check_mpi_result(
       MPI_Allreduce(MPI_IN_PLACE, combined.data() + 1, 1, MPI_UINT64_T,
                     MPI_SUM, mpi.comm()),
@@ -580,5 +608,22 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
       record.state_fingerprint.hex;
   submit(sink, record);
 }
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+void test::CheckpointV2DiagnosticsTestAccess::set_fault(
+    test::CheckpointV2DiagnosticFault fault, int rank) noexcept {
+  injected_fault = fault;
+  injected_fault_rank = rank;
+}
+void test::CheckpointV2DiagnosticsTestAccess::reset() noexcept {
+  injected_fault = test::CheckpointV2DiagnosticFault::none;
+  injected_fault_rank = -1;
+  diagnostic_work = {};
+}
+test::CheckpointV2DiagnosticWork
+test::CheckpointV2DiagnosticsTestAccess::work() noexcept {
+  return diagnostic_work;
+}
+#endif
 
 } // namespace hundun::diagnostics

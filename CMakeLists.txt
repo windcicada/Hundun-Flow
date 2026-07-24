@@ -246,6 +246,10 @@ target_link_libraries(hundun_checkpoint_diagnostics
     hundun_runtime
     hundun_options
     MPI::MPI_CXX)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_checkpoint_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
@@ -475,7 +479,7 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_field_storage PRIVATE hundun_runtime)
 
-  hundun_add_test(test_checkpoint_v2_protocol
+  add_executable(test_checkpoint_v2_protocol
     tests/unit/test_checkpoint_v2_protocol.cpp)
   target_include_directories(test_checkpoint_v2_protocol PRIVATE
     "${PROJECT_SOURCE_DIR}"
@@ -483,12 +487,28 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_checkpoint_v2_protocol PRIVATE hundun_runtime)
   target_compile_definitions(test_checkpoint_v2_protocol PRIVATE
     HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
+  add_test(NAME test_checkpoint_v2_protocol
+    COMMAND "$<TARGET_FILE:test_checkpoint_v2_protocol>" fast)
   set_tests_properties(test_checkpoint_v2_protocol PROPERTIES
     LABELS "unit;task23;task23-fast" TIMEOUT 30)
   add_test(NAME test_checkpoint_v2_protocol_acceptance
-    COMMAND "$<TARGET_FILE:test_checkpoint_v2_protocol>")
+    COMMAND "$<TARGET_FILE:test_checkpoint_v2_protocol>" acceptance)
   set_tests_properties(test_checkpoint_v2_protocol_acceptance PROPERTIES
     LABELS "unit;task23;task23-acceptance;task23-cluster-a" TIMEOUT 60)
+  foreach(selector_case IN ITEMS missing unknown extra)
+    if(selector_case STREQUAL "missing")
+      set(selector_args)
+    elseif(selector_case STREQUAL "unknown")
+      set(selector_args "not-a-task23-mode")
+    else()
+      set(selector_args "acceptance" "unexpected-extra-argument")
+    endif()
+    add_test(NAME "test_checkpoint_v2_protocol_selector_${selector_case}"
+      COMMAND "$<TARGET_FILE:test_checkpoint_v2_protocol>" ${selector_args})
+    set_tests_properties(
+      "test_checkpoint_v2_protocol_selector_${selector_case}" PROPERTIES
+      LABELS "unit;contract;task23;task23-fast" TIMEOUT 30 WILL_FAIL TRUE)
+  endforeach()
 
   hundun_add_test(test_checkpoint_v2_epoch
     tests/unit/test_checkpoint_v2_epoch.cpp)
@@ -1093,7 +1113,8 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/flow/src"
     "${PROJECT_SOURCE_DIR}/runtime/src")
   target_link_libraries(test_checkpoint_v2 PRIVATE
-    hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+    hundun_checkpoint_diagnostics hundun_flow hundun_options hundun_warnings
+    MPI::MPI_CXX)
   target_compile_definitions(test_checkpoint_v2 PRIVATE
     HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
@@ -1101,6 +1122,7 @@ if(HUNDUN_BUILD_TESTS)
     add_test(NAME "${task23_checkpoint_test}"
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_checkpoint_v2>"
+              fast
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${task23_checkpoint_test}" PROPERTIES
       LABELS "mpi;numerical;task23;task23-fast"
@@ -1110,11 +1132,28 @@ if(HUNDUN_BUILD_TESTS)
     add_test(NAME "${task23_checkpoint_acceptance}"
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_checkpoint_v2>"
+              acceptance
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${task23_checkpoint_acceptance}" PROPERTIES
       LABELS
         "mpi;numerical;task23;task23-acceptance;task23-cluster-b;task23-cluster-c;task23-cluster-d"
-      TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+      TIMEOUT 1200 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+  endforeach()
+  foreach(selector_case IN ITEMS missing unknown extra)
+    if(selector_case STREQUAL "missing")
+      set(selector_args)
+    elseif(selector_case STREQUAL "unknown")
+      set(selector_args "not-a-task23-mode")
+    else()
+      set(selector_args "acceptance" "unexpected-extra-argument")
+    endif()
+    add_test(NAME "test_checkpoint_v2_selector_${selector_case}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" 1
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_checkpoint_v2>"
+              ${selector_args} ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("test_checkpoint_v2_selector_${selector_case}"
+      PROPERTIES LABELS "mpi;contract;task23;task23-fast"
+      TIMEOUT 30 PROCESSORS 1 RUN_SERIAL TRUE WILL_FAIL TRUE)
   endforeach()
   add_executable(test_checkpoint_v2_diagnostics
     tests/mpi/test_checkpoint_v2_diagnostics.cpp)
@@ -1123,6 +1162,8 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_checkpoint_v2_diagnostics PRIVATE
     hundun_checkpoint_diagnostics hundun_flow hundun_options hundun_warnings
     MPI::MPI_CXX)
+  target_compile_definitions(test_checkpoint_v2_diagnostics PRIVATE
+    HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     set(task23_diagnostics_test
         "test_checkpoint_v2_diagnostics_${ranks}_rank")
@@ -1130,6 +1171,7 @@ if(HUNDUN_BUILD_TESTS)
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
               ${MPIEXEC_PREFLAGS}
               "$<TARGET_FILE:test_checkpoint_v2_diagnostics>"
+              fast
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${task23_diagnostics_test}" PROPERTIES
       LABELS "mpi;diagnostics;task23;task23-fast"
@@ -1140,10 +1182,29 @@ if(HUNDUN_BUILD_TESTS)
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
               ${MPIEXEC_PREFLAGS}
               "$<TARGET_FILE:test_checkpoint_v2_diagnostics>"
+              acceptance
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${task23_diagnostics_acceptance}" PROPERTIES
       LABELS "mpi;diagnostics;task23;task23-acceptance;task23-cluster-e"
-      TIMEOUT 180 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+      TIMEOUT 300 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+  endforeach()
+  foreach(selector_case IN ITEMS missing unknown extra)
+    if(selector_case STREQUAL "missing")
+      set(selector_args)
+    elseif(selector_case STREQUAL "unknown")
+      set(selector_args "not-a-task23-mode")
+    else()
+      set(selector_args "acceptance" "unexpected-extra-argument")
+    endif()
+    add_test(NAME "test_checkpoint_v2_diagnostics_selector_${selector_case}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" 1
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_checkpoint_v2_diagnostics>"
+              ${selector_args} ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      "test_checkpoint_v2_diagnostics_selector_${selector_case}" PROPERTIES
+      LABELS "mpi;diagnostics;contract;task23;task23-fast"
+      TIMEOUT 30 PROCESSORS 1 RUN_SERIAL TRUE WILL_FAIL TRUE)
   endforeach()
   set(task20_vortex_reference
       "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")

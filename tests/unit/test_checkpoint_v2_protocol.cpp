@@ -71,6 +71,19 @@ void test_rank_wrapper_literal_and_corruption() {
   HUNDUN_CHECK(decoded.rank == 3);
   HUNDUN_CHECK(decoded.rank_count == 8);
   HUNDUN_CHECK(decoded.payload == payload);
+  const auto is_exact = [&](const std::vector<std::uint8_t> &candidate) {
+    try {
+      const auto item = decode_rank_wrapper(candidate, payload.size());
+      return item.rank == 3 && item.rank_count == 8 && item.payload == payload;
+    } catch (const std::exception &) {
+      return false;
+    }
+  };
+  for (std::size_t index = 0; index < encoded.size(); ++index) {
+    auto corrupted = encoded;
+    corrupted[index] ^= 1U;
+    HUNDUN_CHECK(!is_exact(corrupted));
+  }
 
   for (std::size_t removed = 1; removed <= encoded.size(); ++removed) {
     auto truncated = encoded;
@@ -90,6 +103,15 @@ void test_rank_wrapper_literal_and_corruption() {
 void test_codec_limits() {
   using namespace hundun::runtime::checkpoint_v2;
   Encoder encoder;
+  encoder.string(std::string(4096U, 'x'));
+  Decoder maximum_string_decoder(encoder.bytes());
+  HUNDUN_CHECK(maximum_string_decoder.string() == std::string(4096U, 'x'));
+  maximum_string_decoder.require_eof();
+  HUNDUN_CHECK(rejects([&] {
+    Encoder nul;
+    nul.string(std::string("a\0b", 3U));
+  }));
+  encoder = Encoder{};
   HUNDUN_CHECK(rejects([&] { encoder.string(std::string(4097U, 'x')); }));
   HUNDUN_CHECK(rejects([&] { encoder.string(std::string("\xc0\xaf", 2)); }));
   HUNDUN_CHECK(
@@ -211,6 +233,53 @@ void test_manifest_and_completed_marker() {
   HUNDUN_CHECK(decoded.global_payload == manifest.global_payload);
   HUNDUN_CHECK(decoded.ranks.size() == 1U);
   HUNDUN_CHECK(decoded.ranks.front().filename == "rank-000000.v2.bin");
+  const auto manifest_is_exact =
+      [&](const std::vector<std::uint8_t> &candidate) {
+        try {
+          const auto item = decode_manifest(candidate, manifest.rank_count,
+                                            manifest.global_payload.size());
+          return item.rank_count == manifest.rank_count &&
+                 item.process_grid.x == manifest.process_grid.x &&
+                 item.process_grid.y == manifest.process_grid.y &&
+                 item.process_grid.z == manifest.process_grid.z &&
+                 item.fingerprints == manifest.fingerprints &&
+                 item.global_payload == manifest.global_payload &&
+                 item.ranks.size() == 1U &&
+                 item.ranks[0].rank == manifest.ranks[0].rank &&
+                 item.ranks[0].owned_box_begin.x ==
+                     manifest.ranks[0].owned_box_begin.x &&
+                 item.ranks[0].owned_box_begin.y ==
+                     manifest.ranks[0].owned_box_begin.y &&
+                 item.ranks[0].owned_box_begin.z ==
+                     manifest.ranks[0].owned_box_begin.z &&
+                 item.ranks[0].owned_box_end.x ==
+                     manifest.ranks[0].owned_box_end.x &&
+                 item.ranks[0].owned_box_end.y ==
+                     manifest.ranks[0].owned_box_end.y &&
+                 item.ranks[0].owned_box_end.z ==
+                     manifest.ranks[0].owned_box_end.z &&
+                 item.ranks[0].filename == manifest.ranks[0].filename &&
+                 item.ranks[0].logical_byte_size ==
+                     manifest.ranks[0].logical_byte_size &&
+                 item.ranks[0].actual_byte_size ==
+                     manifest.ranks[0].actual_byte_size &&
+                 item.ranks[0].crc64 == manifest.ranks[0].crc64 &&
+                 item.ranks[0].local_layout_fingerprint ==
+                     manifest.ranks[0].local_layout_fingerprint;
+        } catch (const std::exception &) {
+          return false;
+        }
+      };
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    auto corrupted = bytes;
+    corrupted[index] ^= 1U;
+    HUNDUN_CHECK(!manifest_is_exact(corrupted));
+  }
+  for (std::size_t size = 0; size < bytes.size(); ++size) {
+    auto truncated = bytes;
+    truncated.resize(size);
+    HUNDUN_CHECK(!manifest_is_exact(truncated));
+  }
   HUNDUN_CHECK(rejects([&] {
     static_cast<void>(decode_manifest(bytes, manifest.rank_count + 1U,
                                       manifest.global_payload.size()));
@@ -245,11 +314,25 @@ void test_manifest_and_completed_marker() {
                marker.manifest_actual_size);
   HUNDUN_CHECK(decoded_marker.manifest_crc64 == marker.manifest_crc64);
   HUNDUN_CHECK(decoded_marker.common_fingerprint == marker.common_fingerprint);
-  for (std::size_t index = 0; index < 16U; ++index) {
+  const auto marker_is_exact = [&](const std::vector<std::uint8_t> &candidate) {
+    try {
+      const auto item = decode_completed_marker(candidate);
+      return item.manifest_actual_size == marker.manifest_actual_size &&
+             item.manifest_crc64 == marker.manifest_crc64 &&
+             item.common_fingerprint == marker.common_fingerprint;
+    } catch (const std::exception &) {
+      return false;
+    }
+  };
+  for (std::size_t index = 0; index < marker_bytes.size(); ++index) {
     auto corrupted = marker_bytes;
     corrupted[index] ^= 1U;
-    HUNDUN_CHECK(rejects(
-        [&] { static_cast<void>(decode_completed_marker(corrupted)); }));
+    HUNDUN_CHECK(!marker_is_exact(corrupted));
+  }
+  for (std::size_t size = 0; size < marker_bytes.size(); ++size) {
+    auto truncated = marker_bytes;
+    truncated.resize(size);
+    HUNDUN_CHECK(!marker_is_exact(truncated));
   }
   auto marker_trailing = marker_bytes;
   marker_trailing.push_back(0U);
@@ -297,15 +380,88 @@ void test_exact_read_phase_failures() {
   std::filesystem::remove(path);
 }
 
+void test_numeric_file_phase_failures() {
+  using namespace hundun::runtime::checkpoint_v2;
+  using Point = test::NumericFilePoint;
+  const auto root = std::filesystem::temp_directory_path() /
+                    "hundun-task23-numeric-file-points";
+  std::filesystem::remove_all(root);
+  const auto expect_filesystem = [&](auto &&operation) {
+    try {
+      operation();
+      HUNDUN_CHECK(false);
+    } catch (const NumericFileError &error) {
+      HUNDUN_CHECK(error.failure() == NumericFileFailure::filesystem);
+    }
+  };
+
+  for (const auto point : {Point::directory_status, Point::parent_status,
+                           Point::directory_create}) {
+    std::filesystem::remove_all(root);
+    test::set_numeric_file_fault(point);
+    expect_filesystem([&] { create_directory_exclusive(root); });
+    HUNDUN_CHECK(!std::filesystem::exists(root));
+  }
+
+  std::filesystem::create_directories(root);
+  const std::vector<std::uint8_t> payload{'a', 'b', 'c', 'd'};
+  for (const auto point :
+       {Point::write_status, Point::write_open, Point::write_body,
+        Point::write_flush, Point::write_close, Point::read_status,
+        Point::read_size, Point::read_open, Point::read_body,
+        Point::read_close}) {
+    const auto path = root / "temporary.bin";
+    std::filesystem::remove(path);
+    test::set_numeric_file_fault(point);
+    expect_filesystem(
+        [&] { static_cast<void>(write_verified_temporary(path, payload)); });
+    std::filesystem::remove(path);
+  }
+
+  for (const auto point : {Point::publish_status, Point::publish_rename}) {
+    const auto temporary = root / "publish.tmp";
+    const auto final_path = root / "publish.bin";
+    std::filesystem::remove(temporary);
+    std::filesystem::remove(final_path);
+    {
+      std::ofstream stream(temporary, std::ios::binary);
+      stream.write("x", 1);
+    }
+    test::set_numeric_file_fault(point);
+    expect_filesystem([&] { publish_no_overwrite(temporary, final_path); });
+    HUNDUN_CHECK(!std::filesystem::exists(final_path));
+  }
+
+  {
+    const auto item = root / "item";
+    std::ofstream stream(item, std::ios::binary);
+    stream.write("x", 1);
+    stream.close();
+    test::set_numeric_file_fault(Point::inventory_iteration);
+    expect_filesystem(
+        [&] { static_cast<void>(exact_directory_inventory(root, {"item"})); });
+  }
+  test::set_numeric_file_fault(Point::none);
+  std::filesystem::remove_all(root);
+}
+
 } // namespace
 
-int main() {
-  return hundun::test::run([] {
+int main(int argc, char **argv) {
+  if (argc != 2)
+    return 2;
+  const std::string mode(argv[1]);
+  if (mode != "fast" && mode != "acceptance")
+    return 2;
+  return hundun::test::run([&] {
     test_crc_and_little_endian_codec();
-    test_rank_wrapper_literal_and_corruption();
     test_codec_limits();
-    test_integer_and_binary64_edges();
-    test_manifest_and_completed_marker();
     test_exact_read_phase_failures();
+    if (mode == "acceptance") {
+      test_rank_wrapper_literal_and_corruption();
+      test_integer_and_binary64_edges();
+      test_manifest_and_completed_marker();
+      test_numeric_file_phase_failures();
+    }
   });
 }
