@@ -227,37 +227,95 @@ std::uint8_t code(IdealGasPressureMode item) {
   throw runtime::Error("Checkpoint v2 pressure mode is invalid");
 }
 
+constexpr std::string_view kReportSealDomain =
+    "hundun.checkpoint-v2.report-semantic.v1";
+constexpr std::size_t kReportSealEncodedSize =
+    sizeof(std::uint32_t) + kReportSealDomain.size() +
+    4U * sizeof(std::uint8_t) + 2U * sizeof(std::int32_t) +
+    11U * sizeof(std::uint64_t) + 8U * sizeof(std::uint8_t);
+static_assert(kReportSealEncodedSize == 151U);
+
+class ReportSealEncoder final {
+public:
+  void u8(std::uint8_t item) noexcept {
+    if (size_ >= bytes_.size()) {
+      valid_ = false;
+      return;
+    }
+    bytes_[size_++] = item;
+  }
+  void u32(std::uint32_t item) noexcept {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U)
+      u8(static_cast<std::uint8_t>(item >> shift));
+  }
+  void i32(std::int32_t item) noexcept {
+    std::uint32_t wire{};
+    std::memcpy(&wire, &item, sizeof(wire));
+    u32(wire);
+  }
+  void u64(std::uint64_t item) noexcept {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      u8(static_cast<std::uint8_t>(item >> shift));
+  }
+  void f64(double item) noexcept {
+    std::uint64_t wire{};
+    std::memcpy(&wire, &item, sizeof(wire));
+    u64(wire);
+  }
+  void string(std::string_view item) noexcept {
+    if (item.size() > std::numeric_limits<std::uint32_t>::max()) {
+      valid_ = false;
+      return;
+    }
+    u32(static_cast<std::uint32_t>(item.size()));
+    if (!valid_ || item.size() > bytes_.size() - size_) {
+      valid_ = false;
+      return;
+    }
+    std::memcpy(bytes_.data() + size_, item.data(), item.size());
+    size_ += item.size();
+  }
+  const std::uint8_t *data() const noexcept { return bytes_.data(); }
+  std::size_t size() const noexcept { return size_; }
+  bool valid() const noexcept { return valid_; }
+
+private:
+  std::array<std::uint8_t, kReportSealEncodedSize> bytes_{};
+  std::size_t size_{};
+  bool valid_{true};
+};
+
 std::uint64_t report_seal(const CheckpointV2Report &report) noexcept {
-  runtime::checkpoint_v2::Encoder encoder;
-  const std::string domain = "hundun.checkpoint-v2.report-semantic.v1";
-  encoder.string(domain);
-  encoder.u8(value(report.operation()));
-  encoder.u8(value(report.disposition()));
-  encoder.u8(value(report.reason()));
-  encoder.u8(value(report.phase()));
-  encoder.i32(report.rank());
-  encoder.i32(report.lowest_failing_rank());
-  encoder.u64(report.step());
-  encoder.f64(report.time_s());
-  encoder.u64(report.local_logical_bytes());
-  encoder.u64(report.local_actual_bytes());
-  encoder.u64(report.global_logical_bytes());
-  encoder.u64(report.global_actual_bytes());
-  encoder.u64(report.local_crc64());
-  encoder.u64(report.manifest_crc64());
-  encoder.u64(report.file_count());
-  encoder.u64(report.crc_check_count());
-  encoder.u64(report.collective_count());
-  encoder.u8(value(report.rank_crc_status()));
-  encoder.u8(value(report.manifest_crc_status()));
-  encoder.u8(value(report.exact_size_and_eof_status()));
-  encoder.u8(value(report.fingerprint_status()));
-  encoder.u8(value(report.partition_status()));
-  encoder.u8(value(report.transaction_entry_status()));
-  encoder.u8(value(report.publication_status()));
-  encoder.u8(value(report.rollback_status()));
-  return runtime::checkpoint_v2::crc64_ecma(encoder.bytes().data(),
-                                            encoder.bytes().size());
+  ReportSealEncoder fixed;
+  fixed.string(kReportSealDomain);
+  fixed.u8(value(report.operation()));
+  fixed.u8(value(report.disposition()));
+  fixed.u8(value(report.reason()));
+  fixed.u8(value(report.phase()));
+  fixed.i32(report.rank());
+  fixed.i32(report.lowest_failing_rank());
+  fixed.u64(report.step());
+  fixed.f64(report.time_s());
+  fixed.u64(report.local_logical_bytes());
+  fixed.u64(report.local_actual_bytes());
+  fixed.u64(report.global_logical_bytes());
+  fixed.u64(report.global_actual_bytes());
+  fixed.u64(report.local_crc64());
+  fixed.u64(report.manifest_crc64());
+  fixed.u64(report.file_count());
+  fixed.u64(report.crc_check_count());
+  fixed.u64(report.collective_count());
+  fixed.u8(value(report.rank_crc_status()));
+  fixed.u8(value(report.manifest_crc_status()));
+  fixed.u8(value(report.exact_size_and_eof_status()));
+  fixed.u8(value(report.fingerprint_status()));
+  fixed.u8(value(report.partition_status()));
+  fixed.u8(value(report.transaction_entry_status()));
+  fixed.u8(value(report.publication_status()));
+  fixed.u8(value(report.rollback_status()));
+  if (!fixed.valid() || fixed.size() != kReportSealEncodedSize)
+    return 0U;
+  return runtime::checkpoint_v2::crc64_ecma(fixed.data(), fixed.size());
 }
 
 using ByteVector = std::vector<std::uint8_t>;
@@ -1230,6 +1288,33 @@ checkpoint_v2_encode_rank_payload_for_test(const FlowState &state,
                                            std::uint64_t &logical_bytes) {
   return encode_rank_payload(state, logical_bytes);
 }
+bool checkpoint_v2_authenticate_global_payload_for_test(
+    const std::vector<std::uint8_t> &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_size) noexcept {
+  try {
+    if (runtime::checkpoint_v2::crc64_ecma(bytes.data(), bytes.size()) !=
+        expected_crc)
+      return false;
+    static_cast<void>(decode_global_payload(bytes, expected_size));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+bool checkpoint_v2_authenticate_rank_payload_for_test(
+    const std::vector<std::uint8_t> &bytes, const FlowState &state,
+    std::uint64_t expected_crc) noexcept {
+  try {
+    if (runtime::checkpoint_v2::crc64_ecma(bytes.data(), bytes.size()) !=
+        expected_crc)
+      return false;
+    std::uint64_t logical_bytes{};
+    static_cast<void>(decode_rank_payload(bytes, state, logical_bytes));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
 std::uint64_t checkpoint_v2_field_schema_fingerprint_for_test(
     const runtime::FieldRegistry &registry, const FlowFieldIds &fields) {
   return field_schema_fingerprint(registry, fields);
@@ -1293,7 +1378,7 @@ CheckpointV2ReadResult::ideal_gas_closure_state() const {
 CheckpointV2Report
 detail::CheckpointV2Access::failed(CheckpointV2Operation operation, int rank,
                                    CheckpointV2FailureReason reason,
-    CheckpointV2Phase phase) {
+    CheckpointV2Phase phase) noexcept {
   CheckpointV2Report report;
   report.operation_ = operation;
   report.rank_ = rank;
@@ -1304,7 +1389,7 @@ detail::CheckpointV2Access::failed(CheckpointV2Operation operation, int rank,
   return report;
 }
 CheckpointV2Report
-detail::CheckpointV2Access::make(CheckpointV2ReportValues values) {
+detail::CheckpointV2Access::make(CheckpointV2ReportValues values) noexcept {
   CheckpointV2Report report;
   report.operation_ = values.operation;
   report.disposition_ = values.disposition;
@@ -1758,6 +1843,17 @@ CheckpointV2Report write_checkpoint_v2(
   values.crc_check_count = static_cast<std::uint64_t>(mpi.size()) + 1U;
   values.file_count = static_cast<std::uint64_t>(mpi.size()) + 1U;
 
+  marker_size = 40U;
+  if (rank_actual > std::numeric_limits<std::uint64_t>::max() - manifest_size ||
+      rank_actual + manifest_size >
+          std::numeric_limits<std::uint64_t>::max() - marker_size) {
+    values.publication = CheckpointV2CheckStatus::not_checked;
+    return fail(CheckpointV2FailureReason::state,
+                CheckpointV2Phase::completed_marker, 0);
+  }
+  values.global_logical_bytes = global_logical;
+  values.global_actual_bytes = rank_actual + manifest_size + marker_size;
+
   bool marker_ok = true;
   bool marker_verified = false;
   auto marker_write_reason = CheckpointV2FailureReason::filesystem;
@@ -1805,12 +1901,7 @@ CheckpointV2Report write_checkpoint_v2(
     return fail(marker_write_reason, CheckpointV2Phase::completed_marker,
                 status.failing_rank);
   }
-  marker_size = 40U;
   ++values.crc_check_count;
-  values.global_logical_bytes = global_logical;
-  values.global_actual_bytes = runtime::checkpoint_v2::checked_sum_u64(
-      runtime::checkpoint_v2::checked_sum_u64(rank_actual, manifest_size),
-      marker_size);
   values.file_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
   values.crc_check_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
   values.collective_count = collectives;
@@ -2249,13 +2340,20 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
     return fail(CheckpointV2FailureReason::state,
                 CheckpointV2Phase::restore_prepare, error.failing_rank());
   }
-  values.global_actual_bytes = runtime::checkpoint_v2::checked_sum_u64(
-      rank_actual, runtime::checkpoint_v2::checked_sum_u64(
-                       marker.manifest_actual_size, 40U));
-  values.collective_count =
-      runtime::checkpoint_v2::checked_sum_u64(collectives, 1U);
   bool success_boundary_ready = true;
   try {
+    if (marker.manifest_actual_size >
+            std::numeric_limits<std::uint64_t>::max() - 40U ||
+        rank_actual >
+            std::numeric_limits<std::uint64_t>::max() -
+                (marker.manifest_actual_size + 40U) ||
+        collectives == std::numeric_limits<std::uint64_t>::max()) {
+      success_boundary_ready = false;
+    } else {
+      values.global_actual_bytes =
+          rank_actual + marker.manifest_actual_size + 40U;
+      values.collective_count = collectives + 1U;
+    }
     inject_checkpoint_preparation_fault(
         CheckpointPreparationPoint::final_success_boundary);
   } catch (...) {

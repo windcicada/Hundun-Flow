@@ -46,3 +46,37 @@ foreach(required IN ITEMS
     message(FATAL_ERROR "Checkpoint v2 protocol misses ${required}")
   endif()
 endforeach()
+
+file(READ "${HUNDUN_SOURCE_ROOT}/flow/src/checkpoint_v2.cpp"
+  checkpoint_flow)
+string(FIND "${checkpoint_flow}" "class ReportSealEncoder final"
+  report_seal_begin)
+string(FIND "${checkpoint_flow}" "using ByteVector =" report_seal_end)
+if(report_seal_begin EQUAL -1 OR report_seal_end EQUAL -1 OR
+    report_seal_end LESS_EQUAL report_seal_begin)
+  message(FATAL_ERROR
+    "Checkpoint v2 fixed report-seal implementation was not found")
+endif()
+math(EXPR report_seal_length "${report_seal_end} - ${report_seal_begin}")
+string(SUBSTRING "${checkpoint_flow}" "${report_seal_begin}"
+  "${report_seal_length}" report_seal_implementation)
+foreach(forbidden IN ITEMS
+    "runtime::checkpoint_v2::Encoder" "std::vector" "std::pmr"
+    "ostringstream" "filesystem" "make_unique" "make_shared"
+    "malloc(" "calloc(" "realloc(" "new ")
+  string(FIND "${report_seal_implementation}" "${forbidden}" position)
+  if(NOT position EQUAL -1)
+    message(FATAL_ERROR
+      "Checkpoint v2 report authentication is allocation-capable: ${forbidden}")
+  endif()
+endforeach()
+foreach(required IN ITEMS
+    "std::array<std::uint8_t, kReportSealEncodedSize> bytes_{}"
+    "ReportSealEncoder fixed"
+    "fixed.size() != kReportSealEncodedSize")
+  string(FIND "${report_seal_implementation}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Checkpoint v2 report authentication misses fixed-storage contract: ${required}")
+  endif()
+endforeach()

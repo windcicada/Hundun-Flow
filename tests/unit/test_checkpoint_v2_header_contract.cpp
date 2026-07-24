@@ -17,6 +17,12 @@ static_assert(!std::is_copy_constructible_v<
               hundun::flow::CheckpointV2DiagnosticSource>);
 static_assert(!std::is_move_assignable_v<
               hundun::flow::CheckpointV2DiagnosticSource>);
+static_assert(noexcept(hundun::flow::detail::CheckpointV2Access::make(
+    hundun::flow::detail::CheckpointV2ReportValues{})));
+static_assert(noexcept(hundun::flow::detail::CheckpointV2Access::failed(
+    hundun::flow::CheckpointV2Operation::write, 0,
+    hundun::flow::CheckpointV2FailureReason::state,
+    hundun::flow::CheckpointV2Phase::preflight)));
 
 namespace {
 

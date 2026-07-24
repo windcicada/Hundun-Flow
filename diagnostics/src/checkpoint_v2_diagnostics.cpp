@@ -17,7 +17,9 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace hundun::diagnostics::detail {
@@ -55,6 +57,67 @@ void before_collective(const runtime::MpiContext &mpi,
 #else
 void before_collective(const runtime::MpiContext &, std::string_view) {}
 #endif
+
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+bool consume_preparation_fault(
+    const runtime::MpiContext &mpi,
+    test::CheckpointV2DiagnosticFault phase) noexcept {
+  if (injected_fault == phase &&
+      (injected_fault_rank < 0 || injected_fault_rank == mpi.rank())) {
+    injected_fault = test::CheckpointV2DiagnosticFault::none;
+    return true;
+  }
+  return false;
+}
+#endif
+
+void converge_preparation(const runtime::MpiContext &mpi,
+                          bool local_ready) {
+  const int candidate = local_ready ? mpi.size() : mpi.rank();
+  int lowest = mpi.size();
+  before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostic preparation)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic preparation)");
+  if (lowest != mpi.size())
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::collective_operation,
+        "checkpoint-v2.diagnostics.preparation", lowest,
+        "Checkpoint v2 diagnostic collective preparation failed");
+}
+
+void require_collective_capability_agreement(
+    const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
+  const bool unsupported =
+      request.level == DiagnosticLevel::bounded_state_sample ||
+      !request.selected_fields.empty() || request.sample_budget != 0U;
+  const int local_count = unsupported ? 1 : 0;
+  int unsupported_count{};
+  before_collective(mpi,
+                    "MPI_Allreduce(Checkpoint diagnostic capability count)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&local_count, &unsupported_count, 1, MPI_INT, MPI_SUM,
+                    mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic capability count)");
+  if (unsupported_count == mpi.size())
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::capability,
+        "checkpoint-v2.diagnostics.capability", -1,
+        "Checkpoint v2 diagnostic request uses an unsupported capability");
+  if (unsupported_count == 0)
+    return;
+  const int candidate = unsupported ? mpi.rank() : mpi.size();
+  int lowest = mpi.size();
+  before_collective(
+      mpi, "MPI_Allreduce(Checkpoint diagnostic capability disagreement)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic capability disagreement)");
+  throw DiagnosticCollectionError(
+      DiagnosticFailureClass::collective_operation,
+      "checkpoint-v2.diagnostics.collective-agreement", lowest,
+      "Checkpoint v2 collective diagnostic capability disagrees");
+}
 
 constexpr DiagnosticCapabilityFlags kCapabilities =
     static_cast<DiagnosticCapabilityFlags>(DiagnosticCapability::summary) |
@@ -174,6 +237,12 @@ std::string hex64(std::uint64_t value) {
 void require_request(const flow::CheckpointV2Report &report,
                      const DiagnosticRequest &request,
                      DiagnosticScope expected) {
+  if (request.level == DiagnosticLevel::bounded_state_sample ||
+      !request.selected_fields.empty() || request.sample_budget != 0U)
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::capability,
+        "checkpoint-v2.diagnostics.capability", -1,
+        "Checkpoint v2 diagnostic request uses an unsupported capability");
   try {
     validate(request);
   } catch (...) {
@@ -182,8 +251,7 @@ void require_request(const flow::CheckpointV2Report &report,
         "checkpoint-v2.diagnostics.frame", -1,
         "Checkpoint v2 diagnostic request is invalid");
   }
-  if (request.scope != expected || !request.selected_fields.empty() ||
-      request.sample_budget != 0U)
+  if (request.scope != expected)
     throw DiagnosticCollectionError(
         DiagnosticFailureClass::capability,
         "checkpoint-v2.diagnostics.capability", -1,
@@ -243,19 +311,22 @@ std::uint64_t collective_signature(
 void require_collective_agreement(
     const flow::CheckpointV2Report &report,
     const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
+  require_collective_capability_agreement(mpi, request);
   bool local_valid = true;
-  try {
-    require_request(report, request, DiagnosticScope::collective);
-    local_valid = mpi.rank() == report.rank();
-  } catch (...) {
-    local_valid = false;
-  }
   std::uint64_t signature{};
   try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(
+            mpi, test::CheckpointV2DiagnosticFault::request_preparation))
+      throw std::bad_alloc();
+#endif
+    require_request(report, request, DiagnosticScope::collective);
+    local_valid = mpi.rank() == report.rank();
     signature = collective_signature(report, request);
   } catch (...) {
     local_valid = false;
   }
+  converge_preparation(mpi, local_valid);
   std::uint64_t root_signature = signature;
   before_collective(mpi, "MPI_Bcast(Checkpoint diagnostic agreement)");
   runtime::check_mpi_result(
@@ -466,8 +537,7 @@ DiagnosticRecord build_record(const flow::CheckpointV2Report &report,
   return record;
 }
 
-void submit(DiagnosticSink &sink, const DiagnosticRecord &record) {
-  validate(record);
+void submit_validated(DiagnosticSink &sink, const DiagnosticRecord &record) {
   try {
     sink.submit(record);
   } catch (...) {
@@ -498,7 +568,9 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
                          DiagnosticSink &sink) {
   const auto &report = detail::CheckpointV2Adapter::report(source);
   require_request(report, request, DiagnosticScope::local);
-  submit(sink, build_record(report, request));
+  auto record = build_record(report, request);
+  validate(record);
+  submit_validated(sink, record);
 }
 
 void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
@@ -507,13 +579,26 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
                          DiagnosticSink &sink) {
   const auto &report = detail::CheckpointV2Adapter::report(source);
   require_collective_agreement(report, mpi, request);
-  auto record = build_record(report, request);
   const std::array<std::uint64_t, 4> local{
       report.local_logical_bytes(), report.local_actual_bytes(),
       report.local_crc64(),
       static_cast<std::uint64_t>(report.rank_crc_status())};
-  std::vector<std::uint64_t> gathered(
-      static_cast<std::size_t>(mpi.size()) * local.size());
+  DiagnosticRecord record;
+  std::vector<std::uint64_t> gathered;
+  bool local_ready = true;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(
+            mpi,
+            test::CheckpointV2DiagnosticFault::local_record_preparation))
+      throw std::bad_alloc();
+#endif
+    record = build_record(report, request);
+    gathered.resize(static_cast<std::size_t>(mpi.size()) * local.size());
+  } catch (...) {
+    local_ready = false;
+  }
+  converge_preparation(mpi, local_ready);
   before_collective(mpi, "MPI_Allgather(Checkpoint diagnostic local fields)");
   runtime::check_mpi_result(
       MPI_Allgather(local.data(), static_cast<int>(local.size()),
@@ -525,72 +610,82 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
   std::uint64_t actual_sum{};
   flow::CheckpointV2CheckStatus rank_crc{
       flow::CheckpointV2CheckStatus::passed};
-  runtime::checkpoint_v2::Encoder crc_encoder;
-  constexpr std::string_view crc_domain =
-      "hundun.checkpoint-v2.diagnostic-rank-crcs.v1";
-  crc_encoder.raw(crc_domain.data(), crc_domain.size());
-  crc_encoder.u8(0U);
-  crc_encoder.u32(1U);
-  crc_encoder.u32(static_cast<std::uint32_t>(mpi.size()));
-  for (int rank = 0; rank < mpi.size(); ++rank) {
-    const auto offset = static_cast<std::size_t>(rank) * local.size();
-    if (logical_sum >
-            std::numeric_limits<std::uint64_t>::max() - gathered[offset] ||
-        actual_sum >
-            std::numeric_limits<std::uint64_t>::max() -
-                gathered[offset + 1U])
-      throw DiagnosticCollectionError(
-          DiagnosticFailureClass::collective_operation,
-          "checkpoint-v2.diagnostics.collective-overflow", rank,
-          "Checkpoint v2 diagnostic byte aggregation overflowed");
-    logical_sum += gathered[offset];
-    actual_sum += gathered[offset + 1U];
-    crc_encoder.i32(rank);
-    crc_encoder.u64(gathered[offset + 2U]);
-    const auto status = static_cast<flow::CheckpointV2CheckStatus>(
-        gathered[offset + 3U]);
-    if (status == flow::CheckpointV2CheckStatus::failed)
-      rank_crc = flow::CheckpointV2CheckStatus::failed;
-    else if (status == flow::CheckpointV2CheckStatus::not_checked &&
-             rank_crc == flow::CheckpointV2CheckStatus::passed)
-      rank_crc = flow::CheckpointV2CheckStatus::not_checked;
-  }
-  const auto rank_crc_digest = runtime::checkpoint_v2::crc64_ecma(
-      crc_encoder.bytes().data(), crc_encoder.bytes().size());
-  if (request.level == DiagnosticLevel::summary) {
-    for (auto &metric : record.metrics) {
-      if (metric.id == "checkpoint.local-actual-bytes-high")
-        metric.value = describe_fp64(static_cast<double>(
-            static_cast<std::uint32_t>(actual_sum >> 32U)));
-      else if (metric.id == "checkpoint.local-actual-bytes-low")
-        metric.value = describe_fp64(
-            static_cast<double>(static_cast<std::uint32_t>(actual_sum)));
-      else if (metric.id == "checkpoint.local-logical-bytes-high")
-        metric.value = describe_fp64(static_cast<double>(
-            static_cast<std::uint32_t>(logical_sum >> 32U)));
-      else if (metric.id == "checkpoint.local-logical-bytes-low")
-        metric.value = describe_fp64(
-            static_cast<double>(static_cast<std::uint32_t>(logical_sum)));
+  std::array<std::uint64_t, 2> combined{};
+  local_ready = true;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(
+            mpi,
+            test::CheckpointV2DiagnosticFault::post_gather_preparation))
+      throw std::bad_alloc();
+#endif
+    runtime::checkpoint_v2::Encoder crc_encoder;
+    constexpr std::string_view crc_domain =
+        "hundun.checkpoint-v2.diagnostic-rank-crcs.v1";
+    crc_encoder.raw(crc_domain.data(), crc_domain.size());
+    crc_encoder.u8(0U);
+    crc_encoder.u32(1U);
+    crc_encoder.u32(static_cast<std::uint32_t>(mpi.size()));
+    for (int rank = 0; rank < mpi.size(); ++rank) {
+      const auto offset = static_cast<std::size_t>(rank) * local.size();
+      if (logical_sum >
+              std::numeric_limits<std::uint64_t>::max() - gathered[offset] ||
+          actual_sum >
+              std::numeric_limits<std::uint64_t>::max() -
+                  gathered[offset + 1U])
+        throw std::overflow_error(
+            "Checkpoint v2 diagnostic byte aggregation overflowed");
+      logical_sum += gathered[offset];
+      actual_sum += gathered[offset + 1U];
+      crc_encoder.i32(rank);
+      crc_encoder.u64(gathered[offset + 2U]);
+      const auto status = static_cast<flow::CheckpointV2CheckStatus>(
+          gathered[offset + 3U]);
+      if (status == flow::CheckpointV2CheckStatus::failed)
+        rank_crc = flow::CheckpointV2CheckStatus::failed;
+      else if (status == flow::CheckpointV2CheckStatus::not_checked &&
+               rank_crc == flow::CheckpointV2CheckStatus::passed)
+        rank_crc = flow::CheckpointV2CheckStatus::not_checked;
     }
-  } else if (request.level == DiagnosticLevel::invariants) {
-    for (auto &item : record.invariants)
-      if (item.id == "checkpoint.rank-crc")
-        item = invariant("checkpoint.rank-crc", rank_crc);
-  } else if (request.level == DiagnosticLevel::counters) {
-    for (auto &counter : record.counters) {
-      if (counter.id == "checkpoint.local-actual-bytes")
-        counter.value = actual_sum;
-      else if (counter.id == "checkpoint.local-logical-bytes")
-        counter.value = logical_sum;
-      else if (counter.id == "checkpoint.local-crc64-high")
-        counter.value = rank_crc_digest >> 32U;
-      else if (counter.id == "checkpoint.local-crc64-low")
-        counter.value =
-            static_cast<std::uint32_t>(rank_crc_digest);
+    const auto rank_crc_digest = runtime::checkpoint_v2::crc64_ecma(
+        crc_encoder.bytes().data(), crc_encoder.bytes().size());
+    if (request.level == DiagnosticLevel::summary) {
+      for (auto &metric : record.metrics) {
+        if (metric.id == "checkpoint.local-actual-bytes-high")
+          metric.value = describe_fp64(static_cast<double>(
+              static_cast<std::uint32_t>(actual_sum >> 32U)));
+        else if (metric.id == "checkpoint.local-actual-bytes-low")
+          metric.value = describe_fp64(
+              static_cast<double>(static_cast<std::uint32_t>(actual_sum)));
+        else if (metric.id == "checkpoint.local-logical-bytes-high")
+          metric.value = describe_fp64(static_cast<double>(
+              static_cast<std::uint32_t>(logical_sum >> 32U)));
+        else if (metric.id == "checkpoint.local-logical-bytes-low")
+          metric.value = describe_fp64(
+              static_cast<double>(static_cast<std::uint32_t>(logical_sum)));
+      }
+    } else if (request.level == DiagnosticLevel::invariants) {
+      for (auto &item : record.invariants)
+        if (item.id == "checkpoint.rank-crc")
+          item = invariant("checkpoint.rank-crc", rank_crc);
+    } else if (request.level == DiagnosticLevel::counters) {
+      for (auto &counter : record.counters) {
+        if (counter.id == "checkpoint.local-actual-bytes")
+          counter.value = actual_sum;
+        else if (counter.id == "checkpoint.local-logical-bytes")
+          counter.value = logical_sum;
+        else if (counter.id == "checkpoint.local-crc64-high")
+          counter.value = rank_crc_digest >> 32U;
+        else if (counter.id == "checkpoint.local-crc64-low")
+          counter.value = static_cast<std::uint32_t>(rank_crc_digest);
+      }
     }
+    const auto parts = fingerprint(report).parts();
+    combined = {parts.xor64, parts.sum64};
+  } catch (...) {
+    local_ready = false;
   }
-  const auto parts = fingerprint(report).parts();
-  std::array<std::uint64_t, 2> combined{parts.xor64, parts.sum64};
+  converge_preparation(mpi, local_ready);
   before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostics XOR)");
   runtime::check_mpi_result(
       MPI_Allreduce(MPI_IN_PLACE, combined.data(), 1, MPI_UINT64_T, MPI_BXOR,
@@ -601,12 +696,25 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
       MPI_Allreduce(MPI_IN_PLACE, combined.data() + 1, 1, MPI_UINT64_T,
                     MPI_SUM, mpi.comm()),
       "MPI_Allreduce(Checkpoint diagnostics sum)");
-  DiagnosticFingerprintAccumulator accumulator;
-  accumulator.combine({combined[0], combined[1]});
-  record.state_fingerprint = accumulator.finish();
-  record.identities.front().layout_fingerprint =
-      record.state_fingerprint.hex;
-  submit(sink, record);
+  local_ready = true;
+  try {
+#ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS
+    if (consume_preparation_fault(
+            mpi,
+            test::CheckpointV2DiagnosticFault::final_record_preparation))
+      throw std::bad_alloc();
+#endif
+    DiagnosticFingerprintAccumulator accumulator;
+    accumulator.combine({combined[0], combined[1]});
+    record.state_fingerprint = accumulator.finish();
+    record.identities.front().layout_fingerprint =
+        record.state_fingerprint.hex;
+    validate(record);
+  } catch (...) {
+    local_ready = false;
+  }
+  converge_preparation(mpi, local_ready);
+  submit_validated(sink, record);
 }
 
 #ifdef HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS

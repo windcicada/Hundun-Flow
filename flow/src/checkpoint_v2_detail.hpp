@@ -86,13 +86,13 @@ struct FlowStateCheckpointAccess final {
 };
 
 struct CheckpointV2Access final {
-  static CheckpointV2Report make(CheckpointV2ReportValues);
+  static CheckpointV2Report make(CheckpointV2ReportValues) noexcept;
   static CheckpointV2ReadResult
   make_read(CheckpointV2Report, TimeControlState,
             std::optional<IdealGasClosureState>, bool restored) noexcept;
   static CheckpointV2Report failed(CheckpointV2Operation, int,
                                    CheckpointV2FailureReason,
-                                   CheckpointV2Phase);
+                                   CheckpointV2Phase) noexcept;
   static CheckpointV2ReadResult failed_read(int, CheckpointV2FailureReason,
                                             CheckpointV2Phase);
   static void authenticate(CheckpointV2Report &) noexcept;

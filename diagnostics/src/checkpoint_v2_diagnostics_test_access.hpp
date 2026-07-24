@@ -9,7 +9,14 @@
 
 namespace hundun::diagnostics::test {
 
-enum class CheckpointV2DiagnosticFault : std::uint8_t { none, raw_mpi };
+enum class CheckpointV2DiagnosticFault : std::uint8_t {
+  none,
+  raw_mpi,
+  request_preparation,
+  local_record_preparation,
+  post_gather_preparation,
+  final_record_preparation
+};
 
 struct CheckpointV2DiagnosticWork final {
   std::uint64_t collective_calls{};

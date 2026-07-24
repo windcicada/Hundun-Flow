@@ -33,12 +33,19 @@ enum class CheckpointV2PreparationPoint : std::uint8_t {
 
 void set_checkpoint_v2_preparation_fault(
     CheckpointV2PreparationPoint, std::uint32_t calls_before = 0U) noexcept;
+void set_ideal_gas_restore_snapshot_preparation_fault(int rank) noexcept;
 std::vector<std::uint8_t> checkpoint_v2_encode_global_payload_for_test(
     AcceptedStepMetadata, const TimeControlState &,
     const std::optional<IdealGasClosureState> &);
 std::vector<std::uint8_t>
 checkpoint_v2_encode_rank_payload_for_test(const FlowState &,
                                            std::uint64_t &logical_bytes);
+bool checkpoint_v2_authenticate_global_payload_for_test(
+    const std::vector<std::uint8_t> &, std::uint64_t expected_crc,
+    std::uint64_t expected_size) noexcept;
+bool checkpoint_v2_authenticate_rank_payload_for_test(
+    const std::vector<std::uint8_t> &, const FlowState &,
+    std::uint64_t expected_crc) noexcept;
 std::uint64_t
 checkpoint_v2_field_schema_fingerprint_for_test(const runtime::FieldRegistry &,
                                                 const FlowFieldIds &);

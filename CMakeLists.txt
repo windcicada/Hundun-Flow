@@ -533,6 +533,17 @@ if(HUNDUN_BUILD_TESTS)
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task23_source_policy.cmake")
   set_tests_properties(test_task23_source_policy PROPERTIES
     LABELS "unit;source_policy;task23;task23-fast" TIMEOUT 30)
+  foreach(task23_r4_section IN ITEMS report fingerprint diagnostics)
+    add_test(NAME "test_task23_r4_${task23_r4_section}_contract"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+              "-DHUNDUN_R4_SECTION=${task23_r4_section}"
+              -P
+              "${PROJECT_SOURCE_DIR}/tests/cmake/task23_r4_oracle_contract.cmake")
+    set_tests_properties(
+      "test_task23_r4_${task23_r4_section}_contract" PROPERTIES
+      LABELS "unit;source_policy;task23;task23-fast" TIMEOUT 30)
+  endforeach()
   add_test(NAME test_task23_test_access_contract
     COMMAND "${CMAKE_COMMAND}"
             "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"

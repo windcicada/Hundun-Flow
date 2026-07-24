@@ -9,6 +9,7 @@
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+#include "checkpoint_v2_test_access.hpp"
 #include "ideal_gas_closure_test_access.hpp"
 #endif
 
@@ -19,6 +20,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -35,6 +37,8 @@ constexpr runtime::ActorId kStateActor = 1800U;
 constexpr std::uint64_t kClosureReportSeed = 0x696465616c676173ULL;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+int restore_snapshot_preparation_fault_rank{-1};
+
 bool create_fault(int selected_kind, int selected_rank,
                   test::IdealGasCreateFault fault, int rank) noexcept {
   return selected_kind == static_cast<int>(fault) && selected_rank == rank;
@@ -800,6 +804,38 @@ IdealGasClosure IdealGasClosure::restore(
     const runtime::MpiContext &mpi, const runtime::FieldRegistry &registry,
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec, IdealGasClosureState restored) {
+  FlowLayerValues history;
+  FlowLayerValues committed;
+  bool snapshots_prepared = true;
+  std::array<char, 96> snapshot_message{};
+  std::string_view local_message;
+  try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (restore_snapshot_preparation_fault_rank == mpi.rank()) {
+      restore_snapshot_preparation_fault_rank = -1;
+      throw std::bad_alloc();
+    }
+#endif
+    history = state.snapshot(FlowLayer::history);
+    committed = state.snapshot(FlowLayer::committed);
+  } catch (...) {
+    snapshots_prepared = false;
+    const int written = std::snprintf(
+        snapshot_message.data(), snapshot_message.size(),
+        "ideal-gas closure restore snapshot preparation failed on rank %d",
+        mpi.rank());
+    local_message =
+        written > 0 && static_cast<std::size_t>(written) <
+                           snapshot_message.size()
+            ? std::string_view(snapshot_message.data(),
+                               static_cast<std::size_t>(written))
+            : std::string_view(
+                  "ideal-gas closure restore snapshot preparation failed");
+  }
+  const auto snapshot_status =
+      runtime::collective_status(mpi, snapshots_prepared, local_message);
+  if (!snapshot_status.ok)
+    throw runtime::Error(snapshot_status.message);
   auto result =
       create(topology, geometry, boundaries, mpi, registry, fields, state, spec);
   std::uint64_t validation_collectives{};
@@ -807,9 +843,7 @@ IdealGasClosure IdealGasClosure::restore(
       mpi, topology, geometry, boundaries, spec.cp_J_per_kg_K,
       spec.gas_constant_J_per_kg_K,
       spec.configured_thermodynamic_pressure_pa,
-      state.snapshot(FlowLayer::history),
-      state.snapshot(FlowLayer::committed), restored,
-      validation_collectives);
+      history, committed, restored, validation_collectives);
   const auto status = runtime::collective_status(
       mpi, valid, "ideal-gas closure restore validation");
   if (!status.ok)
@@ -821,6 +855,13 @@ IdealGasClosure IdealGasClosure::restore(
   result.impl_->prepared_valid = false;
   return result;
 }
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+void test::set_ideal_gas_restore_snapshot_preparation_fault(
+    int rank) noexcept {
+  restore_snapshot_preparation_fault_rank = rank;
+}
+#endif
 
 IdealGasClosure IdealGasClosure::create_internal(
     const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,

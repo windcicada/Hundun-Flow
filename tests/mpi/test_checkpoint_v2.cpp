@@ -23,6 +23,7 @@
 #include "hundun/runtime/mpi_operation_error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "tests/support/flow_state_equality.hpp"
+#include "tests/support/checkpoint_v2_product_oracle.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <array>
@@ -39,6 +40,8 @@
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
+
+std::uint64_t bits_of(double value);
 
 void append_u8(Bytes &bytes, std::uint8_t value) { bytes.push_back(value); }
 void append_u32(Bytes &bytes, std::uint32_t value) {
@@ -200,21 +203,23 @@ std::uint64_t independent_crc64(const Bytes &bytes) {
   }
   return crc;
 }
-void require_authenticated_mutation_matrix(const Bytes &bytes) {
-  const auto reference_crc = independent_crc64(bytes);
+template <class Authenticator>
+void require_authenticated_mutation_matrix(const Bytes &bytes,
+                                           Authenticator authenticate) {
+  HUNDUN_CHECK(authenticate(bytes));
   for (std::size_t index = 0; index < bytes.size(); ++index) {
     auto changed = bytes;
     changed[index] ^= 1U;
-    HUNDUN_CHECK(independent_crc64(changed) != reference_crc);
+    HUNDUN_CHECK(!authenticate(changed));
   }
   for (std::size_t size = 0; size < bytes.size(); ++size) {
     auto changed = bytes;
     changed.resize(size);
-    HUNDUN_CHECK(changed.size() != bytes.size());
+    HUNDUN_CHECK(!authenticate(changed));
   }
   auto trailing = bytes;
   trailing.push_back(0U);
-  HUNDUN_CHECK(trailing.size() != bytes.size());
+  HUNDUN_CHECK(!authenticate(trailing));
 }
 Bytes canonical_prefix(std::string_view domain) {
   Bytes bytes(domain.begin(), domain.end());
@@ -481,8 +486,13 @@ std::uint64_t independent_local_geometry_fingerprint(
     append_real3(bytes, geometry.face_displacement_m(face));
     const auto owner =
         geometry.face_area_vector_m2(face, hundun::mesh::FaceSide::owner);
+    const auto neighbour =
+        geometry.face_area_vector_m2(face, hundun::mesh::FaceSide::neighbour);
     append_real3(bytes, owner);
-    append_real3(bytes, {-owner.x, -owner.y, -owner.z});
+    append_real3(bytes, neighbour);
+    HUNDUN_CHECK(bits_of(neighbour.x) == bits_of(-owner.x));
+    HUNDUN_CHECK(bits_of(neighbour.y) == bits_of(-owner.y));
+    HUNDUN_CHECK(bits_of(neighbour.z) == bits_of(-owner.z));
     append_f64(bytes, geometry.face_area_m2(face));
     append_f64(bytes, geometry.face_skewness(face));
     append_f64(bytes, geometry.face_non_orthogonality_degrees(face));
@@ -741,7 +751,140 @@ std::uint64_t independent_field_schema_fingerprint(
   return independent_crc64(bytes);
 }
 
-void require_common_report(const hundun::runtime::MpiContext &mpi,
+struct ExpectedProductReport final {
+  hundun::flow::detail::CheckpointV2ReportValues values;
+  std::uint64_t semantic_fingerprint{};
+};
+
+std::uint64_t independent_report_fingerprint(
+    const hundun::flow::detail::CheckpointV2ReportValues &v) {
+  Bytes bytes;
+  append_string(bytes, "hundun.checkpoint-v2.report-semantic.v1");
+  append_u8(bytes, static_cast<std::uint8_t>(v.operation));
+  append_u8(bytes, static_cast<std::uint8_t>(v.disposition));
+  append_u8(bytes, static_cast<std::uint8_t>(v.reason));
+  append_u8(bytes, static_cast<std::uint8_t>(v.phase));
+  append_i32(bytes, v.rank);
+  append_i32(bytes, v.lowest_failing_rank);
+  append_u64(bytes, v.step);
+  append_f64(bytes, v.time_s);
+  append_u64(bytes, v.local_logical_bytes);
+  append_u64(bytes, v.local_actual_bytes);
+  append_u64(bytes, v.global_logical_bytes);
+  append_u64(bytes, v.global_actual_bytes);
+  append_u64(bytes, v.local_crc64);
+  append_u64(bytes, v.manifest_crc64);
+  append_u64(bytes, v.file_count);
+  append_u64(bytes, v.crc_check_count);
+  append_u64(bytes, v.collective_count);
+  append_u8(bytes, static_cast<std::uint8_t>(v.rank_crc));
+  append_u8(bytes, static_cast<std::uint8_t>(v.manifest_crc));
+  append_u8(bytes, static_cast<std::uint8_t>(v.exact_size_eof));
+  append_u8(bytes, static_cast<std::uint8_t>(v.fingerprint));
+  append_u8(bytes, static_cast<std::uint8_t>(v.partition));
+  append_u8(bytes, static_cast<std::uint8_t>(v.transaction_entry));
+  append_u8(bytes, static_cast<std::uint8_t>(v.publication));
+  append_u8(bytes, static_cast<std::uint8_t>(v.rollback));
+  return independent_crc64(bytes);
+}
+
+hundun::flow::detail::CheckpointV2ReportValues observed_report_values(
+    const hundun::flow::CheckpointV2Report &report) {
+  hundun::flow::detail::CheckpointV2ReportValues v;
+  v.operation = report.operation();
+  v.disposition = report.disposition();
+  v.reason = report.reason();
+  v.phase = report.phase();
+  v.rank = report.rank();
+  v.lowest_failing_rank = report.lowest_failing_rank();
+  v.step = report.step();
+  v.time_s = report.time_s();
+  v.local_logical_bytes = report.local_logical_bytes();
+  v.local_actual_bytes = report.local_actual_bytes();
+  v.global_logical_bytes = report.global_logical_bytes();
+  v.global_actual_bytes = report.global_actual_bytes();
+  v.local_crc64 = report.local_crc64();
+  v.manifest_crc64 = report.manifest_crc64();
+  v.file_count = report.file_count();
+  v.crc_check_count = report.crc_check_count();
+  v.collective_count = report.collective_count();
+  v.rank_crc = report.rank_crc_status();
+  v.manifest_crc = report.manifest_crc_status();
+  v.exact_size_eof = report.exact_size_and_eof_status();
+  v.fingerprint = report.fingerprint_status();
+  v.partition = report.partition_status();
+  v.transaction_entry = report.transaction_entry_status();
+  v.publication = report.publication_status();
+  v.rollback = report.rollback_status();
+  return v;
+}
+
+bool product_report_matches(
+    const hundun::flow::CheckpointV2Report &report,
+    const ExpectedProductReport &expected) {
+  const auto &v = expected.values;
+  return report.operation() == v.operation &&
+         report.disposition() == v.disposition &&
+         report.reason() == v.reason && report.phase() == v.phase &&
+         report.rank() == v.rank &&
+         report.lowest_failing_rank() == v.lowest_failing_rank &&
+         report.step() == v.step && bits_of(report.time_s()) == bits_of(v.time_s) &&
+         report.local_logical_bytes() == v.local_logical_bytes &&
+         report.local_actual_bytes() == v.local_actual_bytes &&
+         report.global_logical_bytes() == v.global_logical_bytes &&
+         report.global_actual_bytes() == v.global_actual_bytes &&
+         report.local_crc64() == v.local_crc64 &&
+         report.manifest_crc64() == v.manifest_crc64 &&
+         report.file_count() == v.file_count &&
+         report.crc_check_count() == v.crc_check_count &&
+         report.collective_count() == v.collective_count &&
+         report.rank_crc_status() == v.rank_crc &&
+         report.manifest_crc_status() == v.manifest_crc &&
+         report.exact_size_and_eof_status() == v.exact_size_eof &&
+         report.fingerprint_status() == v.fingerprint &&
+         report.partition_status() == v.partition &&
+         report.transaction_entry_status() == v.transaction_entry &&
+         report.publication_status() == v.publication &&
+         report.rollback_status() == v.rollback &&
+         report.semantic_fingerprint() == expected.semantic_fingerprint;
+}
+
+void require_exact_product_report(
+    const hundun::flow::CheckpointV2Report &report,
+    const ExpectedProductReport &expected) {
+  if (report.semantic_fingerprint() != expected.semantic_fingerprint)
+    throw std::runtime_error("Task23 exact report semantic mismatch: actual=" +
+                             std::to_string(report.semantic_fingerprint()) +
+                             " expected=" +
+                             std::to_string(expected.semantic_fingerprint) +
+                             " collective=" +
+                             std::to_string(report.collective_count()) + "/" +
+                             std::to_string(
+                                 expected.values.collective_count) +
+                             " observed-recomputed=" +
+                             std::to_string(independent_report_fingerprint(
+                                 observed_report_values(report))));
+  if (report.global_actual_bytes() != expected.values.global_actual_bytes)
+    throw std::runtime_error("Task23 exact report global actual mismatch");
+  if (report.collective_count() != expected.values.collective_count)
+    throw std::runtime_error("Task23 exact report collective count mismatch");
+  HUNDUN_CHECK(product_report_matches(report, expected));
+  auto changed_count = expected;
+  ++changed_count.values.collective_count;
+  HUNDUN_CHECK(!product_report_matches(report, changed_count));
+  auto changed_tri_state = expected;
+  changed_tri_state.values.fingerprint =
+      changed_tri_state.values.fingerprint ==
+              hundun::flow::CheckpointV2CheckStatus::failed
+          ? hundun::flow::CheckpointV2CheckStatus::passed
+          : hundun::flow::CheckpointV2CheckStatus::failed;
+  HUNDUN_CHECK(!product_report_matches(report, changed_tri_state));
+  auto changed_identity = expected;
+  changed_identity.semantic_fingerprint ^= UINT64_C(1);
+  HUNDUN_CHECK(!product_report_matches(report, changed_identity));
+}
+
+void require_consistent_product_report(const hundun::runtime::MpiContext &mpi,
                            const hundun::flow::CheckpointV2Report &report) {
   std::uint64_t time_bits{};
   const double time_s = report.time_s();
@@ -817,25 +960,42 @@ void require_common_report(const hundun::runtime::MpiContext &mpi,
     return "none";
   }();
   const auto source = hundun::flow::checkpoint_v2_diagnostic_source(report);
-  const hundun::diagnostics::DiagnosticRequest diagnostic_request{
-      hundun::diagnostics::DiagnosticLevel::invariants,
-      hundun::diagnostics::DiagnosticScope::local,
-      {report.rank(), report.step(), report.time_s(), phase},
-      {},
-      0U};
-  ProductReportSink diagnostic;
-  hundun::diagnostics::collect_diagnostics(source, diagnostic_request,
-                                           diagnostic);
-  HUNDUN_CHECK(diagnostic.calls == 1);
-  HUNDUN_CHECK(diagnostic.record.rank == report.rank());
-  HUNDUN_CHECK(diagnostic.record.step == report.step());
-  HUNDUN_CHECK(diagnostic.record.phase == phase);
+  for (const auto level :
+       {hundun::diagnostics::DiagnosticLevel::summary,
+        hundun::diagnostics::DiagnosticLevel::invariants,
+        hundun::diagnostics::DiagnosticLevel::counters}) {
+    const hundun::diagnostics::DiagnosticRequest diagnostic_request{
+        level,
+        hundun::diagnostics::DiagnosticScope::local,
+        {report.rank(), report.step(), report.time_s(), phase},
+        {},
+        0U};
+    ProductReportSink diagnostic;
+    hundun::diagnostics::collect_diagnostics(source, diagnostic_request,
+                                             diagnostic);
+    HUNDUN_CHECK(diagnostic.calls == 1);
+    hundun::test::checkpoint_v2_oracle::
+        require_exact_product_diagnostic_record(report, level,
+                                                diagnostic.record);
+  }
+}
+
+void require_constructible_fingerprint_failure(
+    const hundun::flow::test::CheckpointV2DeepSnapshot &before,
+    const hundun::flow::FlowState &state,
+    const hundun::flow::CheckpointV2ReadResult &result) {
+  HUNDUN_CHECK(!result.restored());
   HUNDUN_CHECK(
-      diagnostic.record.status ==
-      (report.disposition() == hundun::flow::CheckpointV2Disposition::completed
-           ? hundun::diagnostics::DiagnosticStatus::ok
-           : hundun::diagnostics::DiagnosticStatus::failed));
-  HUNDUN_CHECK(diagnostic.record.failure.lowest_failing_rank == -1);
+      result.report().reason() ==
+      hundun::flow::CheckpointV2FailureReason::file_integrity);
+  HUNDUN_CHECK(result.report().phase() ==
+               hundun::flow::CheckpointV2Phase::manifest_read);
+  HUNDUN_CHECK(result.report().fingerprint_status() ==
+               hundun::flow::CheckpointV2CheckStatus::failed);
+  HUNDUN_CHECK(
+      hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
+          before,
+          hundun::flow::test::CheckpointV2TestAccess::snapshot(state)));
 }
 
 template <class Function> bool rejects(Function &&function) {
@@ -1037,6 +1197,60 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   HUNDUN_CHECK(actual_rank_wrapper.size() == independent_rank.size() + 32U);
   HUNDUN_CHECK(std::equal(independent_rank.begin(), independent_rank.end(),
                           actual_rank_wrapper.begin() + 32));
+  std::uint64_t expected_global_logical{};
+  std::uint64_t expected_rank_actual = independent_rank.size() + 32U;
+  std::uint64_t expected_rank_actual_sum{};
+  HUNDUN_CHECK(MPI_Allreduce(&independent_rank_logical,
+                             &expected_global_logical, 1, MPI_UINT64_T,
+                             MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Allreduce(&expected_rank_actual,
+                             &expected_rank_actual_sum, 1, MPI_UINT64_T,
+                             MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+  const auto manifest_bytes_for_report =
+      read_file_bytes(directory / "manifest.v2.bin");
+  const auto expected_manifest_size =
+      84U + independent_global.size() +
+      82U * static_cast<std::size_t>(mpi.size());
+  HUNDUN_CHECK(manifest_bytes_for_report.size() == expected_manifest_size);
+  hundun::flow::detail::CheckpointV2ReportValues expected_write;
+  expected_write.operation = hundun::flow::CheckpointV2Operation::write;
+  expected_write.disposition =
+      hundun::flow::CheckpointV2Disposition::completed;
+  expected_write.reason = hundun::flow::CheckpointV2FailureReason::none;
+  expected_write.phase = hundun::flow::CheckpointV2Phase::completed_marker;
+  expected_write.rank = mpi.rank();
+  expected_write.lowest_failing_rank = -1;
+  expected_write.step = metadata.step;
+  expected_write.time_s = metadata.time_s;
+  expected_write.local_logical_bytes = independent_rank_logical;
+  expected_write.local_actual_bytes = expected_rank_actual;
+  expected_write.global_logical_bytes = expected_global_logical;
+  expected_write.global_actual_bytes =
+      expected_rank_actual_sum + expected_manifest_size + 40U;
+  expected_write.local_crc64 = independent_crc64(actual_rank_wrapper);
+  expected_write.manifest_crc64 =
+      independent_crc64(manifest_bytes_for_report);
+  expected_write.file_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
+  expected_write.crc_check_count =
+      static_cast<std::uint64_t>(mpi.size()) + 2U;
+  expected_write.collective_count = 32U;
+  expected_write.rank_crc = hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.manifest_crc = hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.exact_size_eof =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.fingerprint =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.partition =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.transaction_entry =
+      hundun::flow::CheckpointV2CheckStatus::not_checked;
+  expected_write.publication =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_write.rollback =
+      hundun::flow::CheckpointV2CheckStatus::not_checked;
+  require_exact_product_report(
+      written,
+      {expected_write, independent_report_fingerprint(expected_write)});
   const auto independent_mesh_fingerprints =
       independent_common_mesh_fingerprints(mpi, decomposition, topology,
                                            geometry, config);
@@ -1133,8 +1347,9 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_field_schema_fingerprint_for_test(
               changed_registry, changed_fields) == independent_changed_schema);
-      if (changed_index != 4U && (descriptor_mutation_index <= 2U ||
-                                  descriptor_mutation_index >= 7U)) {
+      if (changed_index != 4U &&
+          (descriptor_mutation_index <= 2U ||
+           descriptor_mutation_index >= 7U)) {
         auto changed_state = hundun::flow::FlowState::create(
             changed_registry,
             {decomposition.local_extent(), topology.local_face_count()},
@@ -1144,18 +1359,45 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         const auto changed_read = hundun::flow::read_checkpoint_v2(
             mpi, decomposition, topology, geometry, boundaries, config,
             changed_state, directory);
-        HUNDUN_CHECK(!changed_read.restored());
-        HUNDUN_CHECK(changed_read.report().reason() ==
-                     hundun::flow::CheckpointV2FailureReason::file_integrity);
-        HUNDUN_CHECK(changed_read.report().phase() ==
-                     hundun::flow::CheckpointV2Phase::manifest_read);
-        HUNDUN_CHECK(changed_read.report().fingerprint_status() ==
-                     hundun::flow::CheckpointV2CheckStatus::failed);
-        HUNDUN_CHECK(
-            hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
-                changed_before, CheckpointAccess::snapshot(changed_state)));
+        require_constructible_fingerprint_failure(
+            changed_before, changed_state, changed_read);
       }
     }
+  }
+  {
+    hundun::runtime::FieldRegistry shifted_registry;
+    static_cast<void>(shifted_registry.declare_field(
+        cell("checkpoint-fingerprint-id-shift", 1U, false)));
+    hundun::flow::FlowFieldIds shifted_fields;
+    shifted_fields.density =
+        shifted_registry.declare_field(registry.descriptor(fields.density));
+    shifted_fields.velocity =
+        shifted_registry.declare_field(registry.descriptor(fields.velocity));
+    shifted_fields.mechanical_pressure = shifted_registry.declare_field(
+        registry.descriptor(fields.mechanical_pressure));
+    shifted_fields.face_velocity = shifted_registry.declare_field(
+        registry.descriptor(fields.face_velocity));
+    shifted_fields.face_mass_flux = shifted_registry.declare_field(
+        registry.descriptor(fields.face_mass_flux));
+    for (const auto field : fields.transported_cell_fields)
+      shifted_fields.transported_cell_fields.push_back(
+          shifted_registry.declare_field(registry.descriptor(field)));
+    shifted_registry.freeze();
+    HUNDUN_CHECK(
+        independent_field_schema_fingerprint(shifted_registry,
+                                             shifted_fields) !=
+        baseline_schema_fingerprint);
+    auto shifted_state = hundun::flow::FlowState::create(
+        shifted_registry,
+        {decomposition.local_extent(), topology.local_face_count()},
+        shifted_fields, metadata);
+    shifted_state.seed_accepted_layers(history, committed);
+    const auto shifted_before = CheckpointAccess::snapshot(shifted_state);
+    const auto shifted_read = hundun::flow::read_checkpoint_v2(
+        mpi, decomposition, topology, geometry, boundaries, config,
+        shifted_state, directory);
+    require_constructible_fingerprint_failure(shifted_before, shifted_state,
+                                              shifted_read);
   }
 
   auto destination = make_state();
@@ -1179,6 +1421,44 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       controller_state, restored.time_control_state()));
   HUNDUN_CHECK(
       CheckpointAccess::all_cell_ghosts_are_positive_zero(destination));
+  hundun::flow::detail::CheckpointV2ReportValues expected_read;
+  expected_read.operation = hundun::flow::CheckpointV2Operation::read;
+  expected_read.disposition =
+      hundun::flow::CheckpointV2Disposition::completed;
+  expected_read.reason = hundun::flow::CheckpointV2FailureReason::none;
+  expected_read.phase = hundun::flow::CheckpointV2Phase::restore_publish;
+  expected_read.rank = mpi.rank();
+  expected_read.lowest_failing_rank = -1;
+  expected_read.step = metadata.step;
+  expected_read.time_s = metadata.time_s;
+  expected_read.local_logical_bytes = independent_rank_logical;
+  expected_read.local_actual_bytes = expected_rank_actual;
+  expected_read.global_logical_bytes = expected_global_logical;
+  expected_read.global_actual_bytes =
+      expected_rank_actual_sum + expected_manifest_size + 40U;
+  expected_read.local_crc64 = independent_crc64(actual_rank_wrapper);
+  expected_read.manifest_crc64 =
+      independent_crc64(manifest_bytes_for_report);
+  expected_read.file_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
+  expected_read.crc_check_count =
+      static_cast<std::uint64_t>(mpi.size()) + 1U;
+  expected_read.collective_count = 28U;
+  expected_read.rank_crc = hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.manifest_crc =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.exact_size_eof =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.fingerprint =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.partition =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.transaction_entry =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  expected_read.publication =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  require_exact_product_report(
+      restored.report(),
+      {expected_read, independent_report_fingerprint(expected_read)});
   const auto restored_deep = CheckpointAccess::snapshot(destination);
   HUNDUN_CHECK(!restored_deep.rollback_snapshot_valid);
   HUNDUN_CHECK(!restored_deep.attempt_active);
@@ -1189,6 +1469,79 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       std::filesystem::remove_all(directory);
     return;
   }
+  const auto expected_write_failure =
+      [&](hundun::flow::CheckpointV2Phase phase, int lowest_failing_rank,
+          std::uint64_t file_count, std::uint64_t crc_check_count,
+          std::uint64_t collective_count,
+          hundun::flow::CheckpointV2CheckStatus rank_crc,
+          hundun::flow::CheckpointV2CheckStatus exact_size_eof,
+          hundun::flow::CheckpointV2CheckStatus publication) {
+        hundun::flow::detail::CheckpointV2ReportValues values;
+        values.operation = hundun::flow::CheckpointV2Operation::write;
+        values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+        values.reason = hundun::flow::CheckpointV2FailureReason::filesystem;
+        values.phase = phase;
+        values.rank = mpi.rank();
+        values.lowest_failing_rank = lowest_failing_rank;
+        values.step = metadata.step;
+        values.time_s = metadata.time_s;
+        values.local_logical_bytes = independent_rank_logical;
+        values.local_actual_bytes = expected_rank_actual;
+        values.local_crc64 = independent_crc64(actual_rank_wrapper);
+        values.file_count = file_count;
+        values.crc_check_count = crc_check_count;
+        values.collective_count = collective_count;
+        values.rank_crc = rank_crc;
+        values.exact_size_eof = exact_size_eof;
+        values.fingerprint = hundun::flow::CheckpointV2CheckStatus::passed;
+        values.partition = hundun::flow::CheckpointV2CheckStatus::passed;
+        values.publication = publication;
+        return ExpectedProductReport{
+            values, independent_report_fingerprint(values)};
+      };
+  const auto expected_read_file_failure =
+      [&](hundun::flow::CheckpointV2Phase phase, int lowest_failing_rank) {
+        hundun::flow::detail::CheckpointV2ReportValues values;
+        values.operation = hundun::flow::CheckpointV2Operation::read;
+        values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+        values.reason = hundun::flow::CheckpointV2FailureReason::filesystem;
+        values.phase = phase;
+        values.rank = mpi.rank();
+        values.lowest_failing_rank = lowest_failing_rank;
+        values.step = metadata.step;
+        values.time_s = metadata.time_s;
+        values.transaction_entry =
+            hundun::flow::CheckpointV2CheckStatus::passed;
+        values.rollback = hundun::flow::CheckpointV2CheckStatus::passed;
+        if (phase == hundun::flow::CheckpointV2Phase::marker_read) {
+          values.collective_count = 10U;
+        } else if (phase ==
+                   hundun::flow::CheckpointV2Phase::manifest_read) {
+          values.file_count = 1U;
+          values.collective_count = 11U;
+        } else {
+          values.file_count = static_cast<std::uint64_t>(mpi.size()) + 1U;
+          values.crc_check_count = static_cast<std::uint64_t>(mpi.size());
+          values.collective_count = 26U;
+          values.manifest_crc64 =
+              independent_crc64(manifest_bytes_for_report);
+          values.manifest_crc =
+              hundun::flow::CheckpointV2CheckStatus::passed;
+          values.fingerprint =
+              hundun::flow::CheckpointV2CheckStatus::passed;
+          values.partition =
+              hundun::flow::CheckpointV2CheckStatus::passed;
+          if (mpi.rank() != lowest_failing_rank) {
+            values.local_logical_bytes = independent_rank_logical;
+            values.local_actual_bytes = expected_rank_actual;
+            values.local_crc64 = independent_crc64(actual_rank_wrapper);
+            values.rank_crc =
+                hundun::flow::CheckpointV2CheckStatus::passed;
+          }
+        }
+        return ExpectedProductReport{
+            values, independent_report_fingerprint(values)};
+      };
   if (mpi.size() > 1) {
     using FlowPoint = hundun::flow::test::CheckpointV2PreparationPoint;
     const std::array flow_points{
@@ -1218,7 +1571,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.phase() ==
                    hundun::flow::CheckpointV2Phase::preflight);
       HUNDUN_CHECK(failed.lowest_failing_rank() == mpi.size() - 1);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory));
     }
 
@@ -1246,7 +1599,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.phase() ==
                    hundun::flow::CheckpointV2Phase::preflight);
       HUNDUN_CHECK(failed.lowest_failing_rank() == mpi.size() - 1);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory));
     }
 
@@ -1279,7 +1632,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.phase() ==
                    hundun::flow::CheckpointV2Phase::rank_publish);
       HUNDUN_CHECK(failed.lowest_failing_rank() == mpi.size() - 1);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory / "COMPLETED"));
       mpi.barrier();
       if (mpi.rank() == 0)
@@ -1302,7 +1655,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.report().phase() ==
                    hundun::flow::CheckpointV2Phase::restore_prepare);
       HUNDUN_CHECK(failed.report().lowest_failing_rank() == mpi.size() - 1);
-      require_common_report(mpi, failed.report());
+      require_consistent_product_report(mpi, failed.report());
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, CheckpointAccess::snapshot(failed_destination)));
@@ -1324,7 +1677,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.report().phase() ==
                    hundun::flow::CheckpointV2Phase::restore_prepare);
       HUNDUN_CHECK(failed.report().lowest_failing_rank() == mpi.size() - 1);
-      require_common_report(mpi, failed.report());
+      require_consistent_product_report(mpi, failed.report());
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, CheckpointAccess::snapshot(failed_destination)));
@@ -1351,7 +1704,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed.report().lowest_failing_rank() == failing_rank);
     HUNDUN_CHECK(failed.report().publication_status() ==
                  hundun::flow::CheckpointV2CheckStatus::not_checked);
-    require_common_report(mpi, failed.report());
+    require_consistent_product_report(mpi, failed.report());
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before, CheckpointAccess::snapshot(failed_destination)));
     for (const auto &view : old_views)
@@ -1388,7 +1741,18 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.phase() ==
                    hundun::flow::CheckpointV2Phase::rank_temporary_file);
       HUNDUN_CHECK(failed.lowest_failing_rank() == failing_rank);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
+      require_exact_product_report(
+          failed,
+          expected_write_failure(
+              hundun::flow::CheckpointV2Phase::rank_temporary_file,
+              failing_rank, 0U,
+              static_cast<std::uint64_t>(mpi.size() - 1), 22U,
+              mpi.rank() == failing_rank
+                  ? hundun::flow::CheckpointV2CheckStatus::not_checked
+                  : hundun::flow::CheckpointV2CheckStatus::passed,
+              hundun::flow::CheckpointV2CheckStatus::not_checked,
+              hundun::flow::CheckpointV2CheckStatus::not_checked));
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory / "COMPLETED"));
       mpi.barrier();
       if (mpi.rank() == 0)
@@ -1416,7 +1780,16 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.phase() ==
                    hundun::flow::CheckpointV2Phase::rank_publish);
       HUNDUN_CHECK(failed.lowest_failing_rank() == failing_rank);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
+      require_exact_product_report(
+          failed,
+          expected_write_failure(
+              hundun::flow::CheckpointV2Phase::rank_publish, failing_rank,
+              static_cast<std::uint64_t>(mpi.size() - 1),
+              static_cast<std::uint64_t>(mpi.size()), 23U,
+              hundun::flow::CheckpointV2CheckStatus::passed,
+              hundun::flow::CheckpointV2CheckStatus::passed,
+              hundun::flow::CheckpointV2CheckStatus::failed));
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory / "COMPLETED"));
       mpi.barrier();
       if (mpi.rank() == 0)
@@ -1446,7 +1819,14 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed.phase() ==
                  hundun::flow::CheckpointV2Phase::rank_temporary_file);
     HUNDUN_CHECK(failed.lowest_failing_rank() == 0);
-    require_common_report(mpi, failed);
+    require_consistent_product_report(mpi, failed);
+    require_exact_product_report(
+        failed,
+        expected_write_failure(
+            hundun::flow::CheckpointV2Phase::rank_temporary_file, 0, 0U, 0U,
+            20U, hundun::flow::CheckpointV2CheckStatus::not_checked,
+            hundun::flow::CheckpointV2CheckStatus::not_checked,
+            hundun::flow::CheckpointV2CheckStatus::not_checked));
     HUNDUN_CHECK(!std::filesystem::exists(failure_directory));
   }
 
@@ -1474,7 +1854,36 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                    hundun::flow::CheckpointV2FailureReason::filesystem);
       HUNDUN_CHECK(failed.phase() == phase_case.second);
       HUNDUN_CHECK(failed.lowest_failing_rank() == 0);
-      require_common_report(mpi, failed);
+      require_consistent_product_report(mpi, failed);
+      auto expected_late_failure =
+          expected_write_failure(
+              phase_case.second, 0,
+              phase_case.second == hundun::flow::CheckpointV2Phase::manifest
+                  ? static_cast<std::uint64_t>(mpi.size())
+                  : static_cast<std::uint64_t>(mpi.size()) + 1U,
+              phase_case.second == hundun::flow::CheckpointV2Phase::manifest
+                  ? static_cast<std::uint64_t>(mpi.size())
+                  : static_cast<std::uint64_t>(mpi.size()) + 1U,
+              phase_case.second == hundun::flow::CheckpointV2Phase::manifest
+                  ? 30U
+                  : 33U,
+              hundun::flow::CheckpointV2CheckStatus::passed,
+              hundun::flow::CheckpointV2CheckStatus::passed,
+              hundun::flow::CheckpointV2CheckStatus::failed);
+      if (phase_case.second ==
+          hundun::flow::CheckpointV2Phase::completed_marker) {
+        expected_late_failure.values.global_logical_bytes =
+            expected_global_logical;
+        expected_late_failure.values.global_actual_bytes =
+            expected_rank_actual_sum + expected_manifest_size + 40U;
+        expected_late_failure.values.manifest_crc64 =
+            independent_crc64(manifest_bytes_for_report);
+        expected_late_failure.values.manifest_crc =
+            hundun::flow::CheckpointV2CheckStatus::passed;
+      }
+      expected_late_failure.semantic_fingerprint =
+          independent_report_fingerprint(expected_late_failure.values);
+      require_exact_product_report(failed, expected_late_failure);
       HUNDUN_CHECK(!std::filesystem::exists(failure_directory / "COMPLETED"));
       mpi.barrier();
       if (mpi.rank() == 0)
@@ -1578,6 +1987,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   }
   const auto baseline_resolved_fingerprint =
       independent_resolved_fingerprint(config);
+  const auto is_constructible_resolved_fingerprint_case =
+      [](std::size_t index) {
+        return index == 2U || index == 6U || index == 7U ||
+               (index >= 10U && index <= 22U) || index == 26U ||
+               index == 27U;
+      };
   for (std::size_t mutation_index = 0U;
        mutation_index < resolved_tuple_mutations.size(); ++mutation_index) {
     auto changed = config;
@@ -1594,6 +2009,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       throw std::runtime_error(
           "Task23 resolved tuple mutation was not rejected: " +
           std::to_string(mutation_index));
+    if (is_constructible_resolved_fingerprint_case(mutation_index)) {
+      require_constructible_fingerprint_failure(
+          before, fingerprint_destination, rejected);
+      continue;
+    }
     const auto after = CheckpointAccess::snapshot(fingerprint_destination);
     const bool rejected_before_transaction =
         rejected.report().phase() ==
@@ -1608,8 +2028,52 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, after));
   }
-  require_authenticated_mutation_matrix(independent_global);
-  require_authenticated_mutation_matrix(independent_rank);
+  const auto global_crc = independent_crc64(independent_global);
+  require_authenticated_mutation_matrix(
+      independent_global, [&](const Bytes &candidate) {
+        return hundun::flow::test::
+            checkpoint_v2_authenticate_global_payload_for_test(
+                candidate, global_crc, independent_global.size());
+      });
+  for (const auto offset : {std::size_t{0U}, std::size_t{36U}}) {
+    auto rebuilt_crc_invalid_global = independent_global;
+    rebuilt_crc_invalid_global[offset] =
+        offset == 36U ? 2U : rebuilt_crc_invalid_global[offset] ^ 1U;
+    HUNDUN_CHECK(!hundun::flow::test::
+          checkpoint_v2_authenticate_global_payload_for_test(
+              rebuilt_crc_invalid_global,
+              independent_crc64(rebuilt_crc_invalid_global),
+              independent_global.size()));
+  }
+  auto rebuilt_crc_trailing_global = independent_global;
+  rebuilt_crc_trailing_global.push_back(0U);
+  HUNDUN_CHECK(!hundun::flow::test::
+        checkpoint_v2_authenticate_global_payload_for_test(
+            rebuilt_crc_trailing_global,
+            independent_crc64(rebuilt_crc_trailing_global),
+            independent_global.size()));
+  const auto rank_payload_crc = independent_crc64(independent_rank);
+  require_authenticated_mutation_matrix(
+      independent_rank, [&](const Bytes &candidate) {
+        return hundun::flow::test::
+            checkpoint_v2_authenticate_rank_payload_for_test(
+                candidate, source, rank_payload_crc);
+      });
+  for (const auto offset :
+       {std::size_t{0U}, std::size_t{4U}, std::size_t{16U}}) {
+    auto rebuilt_crc_invalid_rank = independent_rank;
+    rebuilt_crc_invalid_rank[offset] ^= 1U;
+    HUNDUN_CHECK(!hundun::flow::test::
+          checkpoint_v2_authenticate_rank_payload_for_test(
+              rebuilt_crc_invalid_rank, source,
+              independent_crc64(rebuilt_crc_invalid_rank)));
+  }
+  auto rebuilt_crc_trailing_rank = independent_rank;
+  rebuilt_crc_trailing_rank.push_back(0U);
+  HUNDUN_CHECK(!hundun::flow::test::
+        checkpoint_v2_authenticate_rank_payload_for_test(
+            rebuilt_crc_trailing_rank, source,
+            independent_crc64(rebuilt_crc_trailing_rank)));
 
   HUNDUN_CHECK(hundun::flow::test::
           checkpoint_v2_deep_snapshot_oracle_is_mutation_sensitive(
@@ -1750,7 +2214,10 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                      hundun::flow::CheckpointV2FailureReason::filesystem);
         HUNDUN_CHECK(failed.report().phase() == phase_case.phase);
         HUNDUN_CHECK(failed.report().lowest_failing_rank() == failing_rank);
-        require_common_report(mpi, failed.report());
+        require_consistent_product_report(mpi, failed.report());
+        require_exact_product_report(
+            failed.report(),
+            expected_read_file_failure(phase_case.phase, failing_rank));
         HUNDUN_CHECK(
             hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
                 before, CheckpointAccess::snapshot(phase_destination)));
@@ -1773,7 +2240,22 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                  hundun::flow::CheckpointV2Phase::manifest_read);
     HUNDUN_CHECK(inventory_failed.report().lowest_failing_rank() ==
                  failing_rank);
-    require_common_report(mpi, inventory_failed.report());
+    require_consistent_product_report(mpi, inventory_failed.report());
+    auto expected_inventory = expected_read_file_failure(
+        hundun::flow::CheckpointV2Phase::manifest_read, failing_rank);
+    expected_inventory.values.file_count = 2U;
+    expected_inventory.values.crc_check_count = 1U;
+    expected_inventory.values.collective_count = 12U;
+    expected_inventory.values.manifest_crc64 =
+        independent_crc64(manifest_bytes_for_report);
+    expected_inventory.values.manifest_crc =
+        hundun::flow::CheckpointV2CheckStatus::passed;
+    expected_inventory.values.exact_size_eof =
+        hundun::flow::CheckpointV2CheckStatus::passed;
+    expected_inventory.semantic_fingerprint =
+        independent_report_fingerprint(expected_inventory.values);
+    require_exact_product_report(inventory_failed.report(),
+                                 expected_inventory);
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         inventory_before, CheckpointAccess::snapshot(inventory_destination)));
   }
@@ -1860,6 +2342,29 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       ideal_state, ideal_spec);
   auto persisted_closure = initial_closure.state();
   persisted_closure.revision = 0U;
+  if (mpi.size() > 1) {
+    for (int failure_rank = 0; failure_rank < mpi.size(); ++failure_rank) {
+      const auto restore_before = CheckpointAccess::snapshot(ideal_state);
+      hundun::flow::test::set_ideal_gas_restore_snapshot_preparation_fault(
+          failure_rank);
+      bool exact_failure = false;
+      try {
+        static_cast<void>(hundun::flow::IdealGasClosure::restore(
+            topology, geometry, ideal_boundaries, mpi, ideal_registry,
+            ideal_fields, ideal_state, ideal_spec, persisted_closure));
+      } catch (const hundun::runtime::Error &error) {
+        exact_failure =
+            std::string_view(error.what()).find(
+                "ideal-gas closure restore snapshot preparation failed") !=
+                std::string_view::npos &&
+            std::string_view(error.what()).find(
+                std::to_string(failure_rank)) != std::string_view::npos;
+      }
+      HUNDUN_CHECK(exact_failure);
+      HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
+          restore_before, CheckpointAccess::snapshot(ideal_state)));
+    }
+  }
   auto restored_closure = hundun::flow::IdealGasClosure::restore(
       topology, geometry, ideal_boundaries, mpi, ideal_registry, ideal_fields,
       ideal_state, ideal_spec, persisted_closure);
@@ -1993,7 +2498,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         invalid_closure_before,
         CheckpointAccess::snapshot(invalid_closure_destination)));
-    require_common_report(mpi, invalid_closure_read.report());
+    require_consistent_product_report(mpi, invalid_closure_read.report());
     mpi.barrier();
     if (mpi.rank() == 0)
       std::filesystem::remove_all(invalid_closure_directory);
@@ -2169,6 +2674,132 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       open_directory);
   HUNDUN_CHECK(open_write.disposition() ==
                hundun::flow::CheckpointV2Disposition::completed);
+  const auto open_boundary_fingerprint =
+      independent_boundary_fingerprint(open_boundaries);
+  for (std::size_t inlet_patch = 0U;
+       inlet_patch < open_config.boundaries.size(); ++inlet_patch) {
+    auto changed_open_config = open_config;
+    for (std::size_t patch = 0U;
+         patch < changed_open_config.boundaries.size(); ++patch) {
+      const auto patch_name = changed_open_config.boundaries[patch].patch;
+      changed_open_config.boundaries[patch] = {};
+      changed_open_config.boundaries[patch].patch = patch_name;
+      changed_open_config.boundaries[patch].type =
+          hundun::config::BoundaryType::symmetry;
+    }
+    const auto outlet_patch = inlet_patch ^ 1U;
+    auto &inlet = changed_open_config.boundaries[inlet_patch];
+    inlet.type = hundun::config::BoundaryType::velocity_inlet;
+    const double speed =
+        1.0 + 0.01 * static_cast<double>(inlet_patch);
+    const std::array<hundun::runtime::Real3, 6> inward_velocity{
+        hundun::runtime::Real3{speed, 0.0, 0.0},
+        hundun::runtime::Real3{-speed, 0.0, 0.0},
+        hundun::runtime::Real3{0.0, speed, 0.0},
+        hundun::runtime::Real3{0.0, -speed, 0.0},
+        hundun::runtime::Real3{0.0, 0.0, speed},
+        hundun::runtime::Real3{0.0, 0.0, -speed}};
+    inlet.velocity_m_per_s = inward_velocity[inlet_patch];
+    inlet.thermal_authority =
+        inlet_patch % 2U == 0U
+            ? hundun::config::InletThermalAuthority::temperature
+            : hundun::config::InletThermalAuthority::enthalpy;
+    inlet.temperature_K = 300.0;
+    inlet.enthalpy_J_per_kg = 300000.0;
+    inlet.density_kg_per_m3 = ideal_density;
+    inlet.scalar_values =
+        std::vector<hundun::config::InletScalarValue>{};
+    auto &outlet = changed_open_config.boundaries[outlet_patch];
+    outlet.type = hundun::config::BoundaryType::pressure_outlet;
+    outlet.pressure_perturbation_pa =
+        0.5 + static_cast<double>(inlet_patch);
+    auto changed_open_boundaries =
+        hundun::boundary::BoundaryRegistry::create(changed_open_config,
+                                                   open_topology);
+    HUNDUN_CHECK(independent_boundary_fingerprint(changed_open_boundaries) !=
+                 open_boundary_fingerprint);
+    auto changed_open_state = make_open_state();
+    const auto changed_open_before =
+        CheckpointAccess::snapshot(changed_open_state);
+    const auto changed_open_read = hundun::flow::read_checkpoint_v2(
+        mpi, open_decomposition, open_topology, open_geometry,
+        changed_open_boundaries, changed_open_config, changed_open_state,
+        open_directory);
+    require_constructible_fingerprint_failure(
+        changed_open_before, changed_open_state, changed_open_read);
+
+    const auto variant_directory =
+        std::filesystem::temp_directory_path() /
+        ("hundun-task23-open-boundary-variant-" +
+         std::to_string(inlet_patch) + "-" + std::to_string(mpi.size()));
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(variant_directory);
+    mpi.barrier();
+    const auto variant_write = hundun::flow::write_checkpoint_v2(
+        mpi, open_decomposition, open_topology, open_geometry,
+        changed_open_boundaries, changed_open_config, open_state,
+        open_controller.state(), open_closure_state, variant_directory);
+    HUNDUN_CHECK(variant_write.disposition() ==
+                 hundun::flow::CheckpointV2Disposition::completed);
+    const auto require_single_boundary_mutation =
+        [&](const ConfigMutation &mutate) {
+          auto single = changed_open_config;
+          mutate(single);
+          auto single_boundaries =
+              hundun::boundary::BoundaryRegistry::create(single,
+                                                         open_topology);
+          HUNDUN_CHECK(
+              independent_boundary_fingerprint(single_boundaries) !=
+                  independent_boundary_fingerprint(changed_open_boundaries) ||
+              independent_resolved_fingerprint(single) !=
+                  independent_resolved_fingerprint(changed_open_config));
+          auto single_state = make_open_state();
+          const auto single_before = CheckpointAccess::snapshot(single_state);
+          const auto single_read = hundun::flow::read_checkpoint_v2(
+              mpi, open_decomposition, open_topology, open_geometry,
+              single_boundaries, single, single_state, variant_directory);
+          require_constructible_fingerprint_failure(
+              single_before, single_state, single_read);
+        };
+    require_single_boundary_mutation([inlet_patch](auto &single) {
+      auto &velocity =
+          *single.boundaries[inlet_patch].velocity_m_per_s;
+      velocity.x += velocity.x == 0.0 ? 0.0 : 0.001;
+      velocity.y += velocity.y == 0.0 ? 0.0 : 0.001;
+      velocity.z += velocity.z == 0.0 ? 0.0 : 0.001;
+    });
+    require_single_boundary_mutation([inlet_patch](auto &single) {
+      auto &authority =
+          *single.boundaries[inlet_patch].thermal_authority;
+      authority =
+          authority == hundun::config::InletThermalAuthority::temperature
+              ? hundun::config::InletThermalAuthority::enthalpy
+              : hundun::config::InletThermalAuthority::temperature;
+    });
+    require_single_boundary_mutation([inlet_patch](auto &single) {
+      const auto authority =
+          *single.boundaries[inlet_patch].thermal_authority;
+      if (authority ==
+          hundun::config::InletThermalAuthority::temperature)
+        single.boundaries[inlet_patch].enthalpy_J_per_kg.reset();
+      else
+        single.boundaries[inlet_patch].temperature_K.reset();
+    });
+    require_single_boundary_mutation(
+        [outlet_patch](auto &single) {
+          *single.boundaries[outlet_patch].pressure_perturbation_pa += 0.125;
+        });
+    for (std::size_t wall_patch = 0U;
+         wall_patch < changed_open_config.boundaries.size(); ++wall_patch)
+      if (wall_patch != inlet_patch && wall_patch != outlet_patch)
+        require_single_boundary_mutation([wall_patch](auto &single) {
+          single.boundaries[wall_patch].type =
+              hundun::config::BoundaryType::no_slip_wall;
+        });
+    mpi.barrier();
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(variant_directory);
+  }
   auto open_resumed = make_open_state();
   const auto open_read = hundun::flow::read_checkpoint_v2(
       mpi, open_decomposition, open_topology, open_geometry, open_boundaries,
@@ -2353,7 +2984,49 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed_phase.exact_size_and_eof_status() ==
                  hundun::flow::CheckpointV2CheckStatus::failed);
     HUNDUN_CHECK(!std::filesystem::exists(failure_directory / "COMPLETED"));
-    require_common_report(mpi, failed_phase);
+    require_consistent_product_report(mpi, failed_phase);
+    auto expected_integrity =
+        expected_write_failure(
+            write_phase_cases[index].phase,
+            write_phase_cases[index].failing_rank,
+            index == 0U
+                ? 0U
+                : index == 1U
+                      ? static_cast<std::uint64_t>(mpi.size())
+                      : static_cast<std::uint64_t>(mpi.size()) + 1U,
+            index == 0U
+                ? static_cast<std::uint64_t>(mpi.size() - 1)
+                : index == 1U
+                      ? static_cast<std::uint64_t>(mpi.size())
+                      : static_cast<std::uint64_t>(mpi.size()) + 1U,
+            index == 0U ? 22U : index == 1U ? 30U : 33U,
+            index == 0U &&
+                    mpi.rank() == write_phase_cases[index].failing_rank
+                ? hundun::flow::CheckpointV2CheckStatus::failed
+                : hundun::flow::CheckpointV2CheckStatus::passed,
+            hundun::flow::CheckpointV2CheckStatus::failed,
+            index == 0U
+                ? hundun::flow::CheckpointV2CheckStatus::not_checked
+                : hundun::flow::CheckpointV2CheckStatus::failed);
+    expected_integrity.values.reason =
+        hundun::flow::CheckpointV2FailureReason::file_integrity;
+    if (index >= 1U)
+      expected_integrity.values.manifest_crc =
+          index == 1U ? hundun::flow::CheckpointV2CheckStatus::failed
+                      : hundun::flow::CheckpointV2CheckStatus::passed;
+    if (index == 2U) {
+      expected_integrity.values.global_logical_bytes =
+          expected_global_logical;
+      expected_integrity.values.global_actual_bytes =
+          expected_rank_actual_sum + expected_manifest_size + 40U;
+      expected_integrity.values.manifest_crc64 =
+          independent_crc64(manifest_bytes_for_report);
+      expected_integrity.values.fingerprint =
+          hundun::flow::CheckpointV2CheckStatus::failed;
+    }
+    expected_integrity.semantic_fingerprint =
+        independent_report_fingerprint(expected_integrity.values);
+    require_exact_product_report(failed_phase, expected_integrity);
     mpi.barrier();
     if (mpi.rank() == 0)
       std::filesystem::remove_all(failure_directory);
@@ -2531,7 +3204,27 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed_phase.report().lowest_failing_rank() == failing_rank);
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before_failure, CheckpointAccess::snapshot(failed_destination)));
-    require_common_report(mpi, failed_phase.report());
+    require_consistent_product_report(mpi, failed_phase.report());
+    auto expected_read_fault =
+        expected_read_file_failure(phase_case.phase, failing_rank);
+    if (phase_case.phase == hundun::flow::CheckpointV2Phase::rank_read) {
+      const auto continuation_manifest =
+          read_file_bytes(continuation_directory / "manifest.v2.bin");
+      expected_read_fault.values.manifest_crc64 =
+          independent_crc64(continuation_manifest);
+      if (mpi.rank() != failing_rank) {
+        const auto continuation_rank =
+            read_file_bytes(rank_file_path(continuation_directory, mpi.rank()));
+        expected_read_fault.values.local_actual_bytes =
+            continuation_rank.size();
+        expected_read_fault.values.local_crc64 =
+            independent_crc64(continuation_rank);
+      }
+      expected_read_fault.semantic_fingerprint =
+          independent_report_fingerprint(expected_read_fault.values);
+    }
+    require_exact_product_report(failed_phase.report(),
+                                 expected_read_fault);
   }
 
   constexpr std::array<std::uint64_t, 4> invalid_density_bits{
@@ -2566,7 +3259,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                  hundun::flow::CheckpointV2Phase::restore_prepare);
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before_invalid, CheckpointAccess::snapshot(invalid_destination)));
-    require_common_report(mpi, invalid_read.report());
+    require_consistent_product_report(mpi, invalid_read.report());
     mpi.barrier();
     if (mpi.rank() == 0)
       std::filesystem::remove_all(invalid_state_directory);
@@ -2600,7 +3293,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
       before_invalid_generic,
       CheckpointAccess::snapshot(invalid_generic_destination)));
-  require_common_report(mpi, invalid_generic_read.report());
+  require_consistent_product_report(mpi, invalid_generic_read.report());
   mpi.barrier();
   if (mpi.rank() == 0)
     std::filesystem::remove_all(invalid_generic_directory);
@@ -2650,7 +3343,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before_invalid_ideal,
         CheckpointAccess::snapshot(invalid_ideal_destination)));
-    require_common_report(mpi, invalid_ideal_read.report());
+    require_consistent_product_report(mpi, invalid_ideal_read.report());
     mpi.barrier();
     if (mpi.rank() == 0)
       std::filesystem::remove_all(invalid_ideal_directory);
