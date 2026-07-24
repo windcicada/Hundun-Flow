@@ -841,6 +841,16 @@ if(HUNDUN_BUILD_TESTS)
             -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_source_policy.cmake")
   set_tests_properties(test_task22_source_policy PROPERTIES
     LABELS "unit;source_policy;task22" TIMEOUT 30)
+  add_test(NAME test_task22_tests_off_path_contract
+    COMMAND "${CMAKE_COMMAND}"
+            "-DHUNDUN_SETUP_SCRIPT=${PROJECT_SOURCE_DIR}/tests/cmake/task22_tests_off_setup.cmake"
+            "-DHUNDUN_TEST_BINARY_ROOT=${CMAKE_BINARY_DIR}"
+            "-DHUNDUN_GENERATOR=${CMAKE_GENERATOR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/task22_tests_off_path_contract.cmake")
+  set_tests_properties(test_task22_tests_off_path_contract PROPERTIES
+    LABELS "unit;contract;source_policy;task22"
+    RUN_SERIAL TRUE
+    TIMEOUT 60)
   string(REPLACE ";" "|" task22_mpi_include_dirs
          "${MPI_CXX_INCLUDE_DIRS}")
   set(task22_tests_off_binary_dir

@@ -1463,11 +1463,15 @@ Bdf2RetryController Bdf2RetryController::create(
                            "time-control.create.invalid-config");
   collective_factory_check(mpi, valid_density_model(model),
                            "time-control.create.identity");
-  local_ok = geometry.compatible(topology);
+  const bool state_live =
+      detail::AdaptiveTimeControlAccess::state_live(state);
+  local_ok =
+      geometry.compatible(topology) &&
+      (!state_live ||
+       detail::AdaptiveTimeControlAccess::state_layout_matches(state,
+                                                               topology));
   collective_factory_check(mpi, local_ok, "time-control.create.layout");
-  collective_factory_check(
-      mpi, detail::AdaptiveTimeControlAccess::state_live(state),
-      "time-control.create.state");
+  collective_factory_check(mpi, state_live, "time-control.create.state");
   auto observer = fresh_state(config, model);
   local_ok = detail::TimeControlStateCodec::semantically_valid(
       config, model, state.metadata(), observer);
@@ -1515,11 +1519,16 @@ Bdf2RetryController Bdf2RetryController::restore(
                            "time-control.restore.invalid-config");
   collective_factory_check(mpi, valid_density_model(model),
                            "time-control.restore.identity");
-  collective_factory_check(mpi, geometry.compatible(topology),
-                           "time-control.restore.layout");
+  const bool state_live =
+      detail::AdaptiveTimeControlAccess::state_live(state);
   collective_factory_check(
-      mpi, detail::AdaptiveTimeControlAccess::state_live(state),
-      "time-control.restore.state");
+      mpi,
+      geometry.compatible(topology) &&
+          (!state_live ||
+           detail::AdaptiveTimeControlAccess::state_layout_matches(state,
+                                                                   topology)),
+      "time-control.restore.layout");
+  collective_factory_check(mpi, state_live, "time-control.restore.state");
   collective_factory_check(
       mpi, detail::TimeControlStateCodec::semantically_valid(
                config, model, state.metadata(), observer),

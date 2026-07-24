@@ -588,9 +588,89 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
       pressure_preconditioner,
       {{fields.transported_cell_fields.front(),
         hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+  const int mismatch_rank = mpi.size() == 1 ? 0 : 1;
   const hundun::config::FlowTimeConfig time{
       hundun::config::TimeMode::adaptive, 2, 0.01, 0.00125, 0.02,
       0.5, 0.25, 1.25, 0.5, 8};
+  const auto make_layout_state =
+      [&](hundun::runtime::FieldLayoutSet layout) {
+        auto candidate = hundun::flow::FlowState::create(
+            registry, layout, fields,
+            {0U, 0.0, 0.01, 0.0,
+             hundun::flow::MomentumTimeOrder::backward_euler});
+        const auto candidate_cells =
+            static_cast<std::size_t>(layout.cell_interior_extent.x) *
+            static_cast<std::size_t>(layout.cell_interior_extent.y) *
+            static_cast<std::size_t>(layout.cell_interior_extent.z);
+        hundun::flow::FlowLayerValues values;
+        values.density.assign(candidate_cells, 1.0);
+        values.velocity.assign(candidate_cells * 3U, 0.0);
+        values.mechanical_pressure.assign(candidate_cells, 0.0);
+        values.face_velocity.assign(layout.face_count * 3U, 0.0);
+        values.face_mass_flux.assign(layout.face_count, 0.0);
+        values.transported_cell_fields = {
+            std::vector<double>(candidate_cells, 1.0)};
+        candidate.seed_accepted_layers(values, values);
+        return candidate;
+      };
+  {
+    const auto correct_layout =
+        hundun::runtime::FieldLayoutSet{local, topology.local_face_count()};
+    auto create_positive = hundun::flow::Bdf2RetryController::create(
+        time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+        state);
+    auto restore_positive = hundun::flow::Bdf2RetryController::restore(
+        time, hundun::config::DensityModel::constant, topology, geometry, mpi,
+        state, create_positive.state());
+    HUNDUN_CHECK(restore_positive.state().state_seal ==
+                 create_positive.state().state_seal);
+
+    const auto require_layout_rejection =
+        [&](bool restore, bool cell_extent_mismatch) {
+          auto layout = correct_layout;
+          if (mpi.rank() == mismatch_rank) {
+            if (cell_extent_mismatch)
+              ++layout.cell_interior_extent.x;
+            else
+              ++layout.face_count;
+          }
+          auto candidate = make_layout_state(layout);
+          const auto before = hundun::test::capture_adaptive_flow_state(
+              candidate, {});
+          bool rejected = false;
+          try {
+            if (restore) {
+              static_cast<void>(hundun::flow::Bdf2RetryController::restore(
+                  time, hundun::config::DensityModel::constant, topology,
+                  geometry, mpi, candidate, create_positive.state()));
+            } else {
+              static_cast<void>(hundun::flow::Bdf2RetryController::create(
+                  time, hundun::config::DensityModel::constant, topology,
+                  geometry, mpi, candidate));
+            }
+          } catch (const hundun::runtime::Error &error) {
+            rejected = true;
+            const std::string message(error.what());
+            HUNDUN_CHECK(
+                message.find(restore ? "time-control.restore.layout"
+                                     : "time-control.create.layout") !=
+                std::string::npos);
+            HUNDUN_CHECK(
+                message.find("lowest failing rank " +
+                             std::to_string(mismatch_rank)) !=
+                std::string::npos);
+          }
+          HUNDUN_CHECK(rejected);
+          const auto after = hundun::test::capture_adaptive_flow_state(
+              candidate, {});
+          HUNDUN_CHECK(hundun::test::adaptive_flow_state_bitwise_equal(
+              before, after));
+        };
+    require_layout_rejection(true, true);
+    require_layout_rejection(true, false);
+    require_layout_rejection(false, true);
+    require_layout_rejection(false, false);
+  }
   {
     auto cold_state = hundun::flow::FlowState::create(
         registry, {local, topology.local_face_count()}, fields,
@@ -657,7 +737,6 @@ void run_fast(const hundun::runtime::MpiContext &mpi) {
                                       cold_cache_published);
     require_jacobi_mutation_sensitive(cold_jacobi_published);
   }
-  const int mismatch_rank = mpi.size() == 1 ? 0 : 1;
   const auto expect_factory_failure =
       [&](const hundun::config::FlowTimeConfig &candidate,
           hundun::config::DensityModel model, const char *prefix) {

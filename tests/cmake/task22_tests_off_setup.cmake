@@ -8,6 +8,90 @@ if(NOT DEFINED HUNDUN_SOURCE_ROOT OR
   message(FATAL_ERROR "Task22 tests-off setup inputs are incomplete")
 endif()
 
+foreach(path_variable IN ITEMS
+    HUNDUN_SOURCE_ROOT
+    HUNDUN_OUTER_BINARY_DIR
+    HUNDUN_NESTED_BINARY_DIR
+    HUNDUN_ARCHIVE_DIR)
+  if("${${path_variable}}" STREQUAL "")
+    message(FATAL_ERROR
+      "Task22 tests-off setup path '${path_variable}' is empty")
+  endif()
+  set(path_value "${${path_variable}}")
+  cmake_path(ABSOLUTE_PATH path_value NORMALIZE
+             OUTPUT_VARIABLE "${path_variable}_ABSOLUTE")
+endforeach()
+
+if(NOT IS_DIRECTORY "${HUNDUN_SOURCE_ROOT_ABSOLUTE}")
+  message(FATAL_ERROR "Task22 tests-off source root is not a directory")
+endif()
+if(NOT IS_DIRECTORY "${HUNDUN_OUTER_BINARY_DIR_ABSOLUTE}")
+  message(FATAL_ERROR "Task22 tests-off outer binary root is not a directory")
+endif()
+
+file(REAL_PATH "${HUNDUN_SOURCE_ROOT_ABSOLUTE}" task22_source_root)
+file(REAL_PATH "${HUNDUN_OUTER_BINARY_DIR_ABSOLUTE}" task22_outer_binary_dir)
+cmake_path(GET task22_outer_binary_dir ROOT_PATH task22_filesystem_root)
+if(task22_outer_binary_dir STREQUAL task22_filesystem_root)
+  message(FATAL_ERROR
+    "Task22 tests-off outer binary directory cannot be a filesystem root")
+endif()
+if(task22_outer_binary_dir STREQUAL task22_source_root)
+  message(FATAL_ERROR
+    "Task22 tests-off outer binary directory cannot equal the source root")
+endif()
+
+if(IS_SYMLINK "${HUNDUN_NESTED_BINARY_DIR_ABSOLUTE}")
+  message(FATAL_ERROR
+    "Task22 tests-off nested binary directory cannot be a symlink")
+endif()
+if(EXISTS "${HUNDUN_NESTED_BINARY_DIR_ABSOLUTE}")
+  file(REAL_PATH "${HUNDUN_NESTED_BINARY_DIR_ABSOLUTE}"
+       task22_nested_binary_dir)
+else()
+  set(task22_nested_binary_dir "${HUNDUN_NESTED_BINARY_DIR_ABSOLUTE}")
+endif()
+set(task22_expected_nested "${task22_outer_binary_dir}/task22-tests-off")
+cmake_path(NORMAL_PATH task22_expected_nested)
+if(NOT task22_nested_binary_dir STREQUAL task22_expected_nested)
+  message(FATAL_ERROR
+    "Task22 tests-off nested binary directory must be the dedicated "
+    "outer/task22-tests-off path")
+endif()
+if(task22_nested_binary_dir STREQUAL task22_source_root OR
+   task22_nested_binary_dir STREQUAL task22_outer_binary_dir OR
+   task22_nested_binary_dir STREQUAL task22_filesystem_root)
+  message(FATAL_ERROR
+    "Task22 tests-off nested binary directory has an unsafe authority")
+endif()
+
+if(IS_SYMLINK "${HUNDUN_ARCHIVE_DIR_ABSOLUTE}")
+  message(FATAL_ERROR
+    "Task22 tests-off archive directory cannot be a symlink")
+endif()
+if(EXISTS "${HUNDUN_ARCHIVE_DIR_ABSOLUTE}")
+  file(REAL_PATH "${HUNDUN_ARCHIVE_DIR_ABSOLUTE}" task22_archive_dir)
+else()
+  set(task22_archive_dir "${HUNDUN_ARCHIVE_DIR_ABSOLUTE}")
+endif()
+set(task22_expected_archive "${task22_nested_binary_dir}/archives")
+cmake_path(NORMAL_PATH task22_expected_archive)
+if(NOT task22_archive_dir STREQUAL task22_expected_archive OR
+   task22_archive_dir STREQUAL task22_nested_binary_dir)
+  message(FATAL_ERROR
+    "Task22 tests-off archive directory must be nested/archives")
+endif()
+
+set(HUNDUN_SOURCE_ROOT "${task22_source_root}")
+set(HUNDUN_OUTER_BINARY_DIR "${task22_outer_binary_dir}")
+set(HUNDUN_NESTED_BINARY_DIR "${task22_nested_binary_dir}")
+set(HUNDUN_ARCHIVE_DIR "${task22_archive_dir}")
+
+if(DEFINED HUNDUN_TASK22_PATH_CONTRACT_VALIDATE_ONLY AND
+   HUNDUN_TASK22_PATH_CONTRACT_VALIDATE_ONLY)
+  return()
+endif()
+
 load_cache(
   "${HUNDUN_OUTER_BINARY_DIR}"
   READ_WITH_PREFIX outer_
