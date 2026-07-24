@@ -874,8 +874,8 @@ void require_exact_product_report(
   ++changed_count.values.collective_count;
   HUNDUN_CHECK(!product_report_matches(report, changed_count));
   auto changed_tri_state = expected;
-  changed_tri_state.values.fingerprint =
-      changed_tri_state.values.fingerprint ==
+  changed_tri_state.values.manifest_crc =
+      changed_tri_state.values.manifest_crc ==
               hundun::flow::CheckpointV2CheckStatus::failed
           ? hundun::flow::CheckpointV2CheckStatus::passed
           : hundun::flow::CheckpointV2CheckStatus::failed;
@@ -981,18 +981,55 @@ void require_consistent_product_report(const hundun::runtime::MpiContext &mpi,
   }
 }
 
+ExpectedProductReport expected_constructible_fingerprint_failure_report(
+    const hundun::runtime::MpiContext &mpi,
+    const std::filesystem::path &checkpoint_directory,
+    const hundun::flow::test::CheckpointV2DeepSnapshot &before) {
+  hundun::flow::detail::CheckpointV2ReportValues values;
+  values.operation = hundun::flow::CheckpointV2Operation::read;
+  values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+  values.reason =
+      hundun::flow::CheckpointV2FailureReason::file_integrity;
+  values.phase = hundun::flow::CheckpointV2Phase::manifest_read;
+  values.rank = mpi.rank();
+  values.lowest_failing_rank = 0;
+  values.step = before.metadata.step;
+  values.time_s = before.metadata.time_s;
+  values.local_logical_bytes = 0U;
+  values.local_actual_bytes = 0U;
+  values.global_logical_bytes = 0U;
+  values.global_actual_bytes = 0U;
+  values.local_crc64 = 0U;
+  values.manifest_crc64 = independent_crc64(
+      read_file_bytes(checkpoint_directory / "manifest.v2.bin"));
+  values.file_count = 2U;
+  values.crc_check_count = 1U;
+  values.collective_count = 20U;
+  values.rank_crc =
+      hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.manifest_crc = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.exact_size_eof = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.fingerprint = hundun::flow::CheckpointV2CheckStatus::failed;
+  values.partition = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.transaction_entry =
+      hundun::flow::CheckpointV2CheckStatus::passed;
+  values.publication =
+      hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.rollback = hundun::flow::CheckpointV2CheckStatus::passed;
+  return {values, independent_report_fingerprint(values)};
+}
+
 void require_constructible_fingerprint_failure(
+    const hundun::runtime::MpiContext &mpi,
+    const std::filesystem::path &checkpoint_directory,
     const hundun::flow::test::CheckpointV2DeepSnapshot &before,
     const hundun::flow::FlowState &state,
     const hundun::flow::CheckpointV2ReadResult &result) {
   HUNDUN_CHECK(!result.restored());
-  HUNDUN_CHECK(
-      result.report().reason() ==
-      hundun::flow::CheckpointV2FailureReason::file_integrity);
-  HUNDUN_CHECK(result.report().phase() ==
-               hundun::flow::CheckpointV2Phase::manifest_read);
-  HUNDUN_CHECK(result.report().fingerprint_status() ==
-               hundun::flow::CheckpointV2CheckStatus::failed);
+  const auto expected = expected_constructible_fingerprint_failure_report(
+      mpi, checkpoint_directory, before);
+  require_consistent_product_report(mpi, result.report());
+  require_exact_product_report(result.report(), expected);
   HUNDUN_CHECK(
       hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
           before,
@@ -1361,7 +1398,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
             mpi, decomposition, topology, geometry, boundaries, config,
             changed_state, directory);
         require_constructible_fingerprint_failure(
-            changed_before, changed_state, changed_read);
+            mpi, directory, changed_before, changed_state, changed_read);
       }
     }
   }
@@ -1397,8 +1434,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     const auto shifted_read = hundun::flow::read_checkpoint_v2(
         mpi, decomposition, topology, geometry, boundaries, config,
         shifted_state, directory);
-    require_constructible_fingerprint_failure(shifted_before, shifted_state,
-                                              shifted_read);
+    require_constructible_fingerprint_failure(
+        mpi, directory, shifted_before, shifted_state, shifted_read);
   }
 
   auto destination = make_state();
@@ -2012,7 +2049,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
           std::to_string(mutation_index));
     if (is_constructible_resolved_fingerprint_case(mutation_index)) {
       require_constructible_fingerprint_failure(
-          before, fingerprint_destination, rejected);
+          mpi, directory, before, fingerprint_destination, rejected);
       continue;
     }
     const auto after = CheckpointAccess::snapshot(fingerprint_destination);
@@ -2741,7 +2778,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         changed_open_boundaries, changed_open_config, changed_open_state,
         open_directory);
     require_constructible_fingerprint_failure(
-        changed_open_before, changed_open_state, changed_open_read);
+        mpi, open_directory, changed_open_before, changed_open_state,
+        changed_open_read);
       for (const auto &view : changed_open_views)
         HUNDUN_CHECK(rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
 
@@ -2778,7 +2816,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
               mpi, open_decomposition, open_topology, open_geometry,
               single_boundaries, single, single_state, variant_directory);
           require_constructible_fingerprint_failure(
-              single_before, single_state, single_read);
+              mpi, variant_directory, single_before, single_state,
+              single_read);
             for (const auto &view : single_views)
               HUNDUN_CHECK(
                   rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
@@ -2886,7 +2925,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                   mpi, open_decomposition, open_topology, open_geometry,
                   single_boundaries, single, single_state, variant_directory);
               require_constructible_fingerprint_failure(
-                  single_before, single_state, single_read);
+                  mpi, variant_directory, single_before, single_state,
+                  single_read);
               for (const auto &view : single_views)
                 HUNDUN_CHECK(
                     rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
@@ -3020,8 +3060,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         changed_material_open_boundaries, changed_material_open_config,
         changed_material_open_state, material_open_directory);
     require_constructible_fingerprint_failure(
-        changed_material_open_before, changed_material_open_state,
-        changed_material_open_read);
+        mpi, material_open_directory, changed_material_open_before,
+        changed_material_open_state, changed_material_open_read);
     for (const auto &view : changed_material_open_views)
       HUNDUN_CHECK(rejects([&] {
         static_cast<void>(view(0, 0, 0, 0));
