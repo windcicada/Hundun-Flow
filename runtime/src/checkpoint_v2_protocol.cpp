@@ -8,8 +8,8 @@
 
 #include <mpi.h>
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -20,15 +20,30 @@
 namespace hundun::runtime::checkpoint_v2 {
 namespace {
 
-constexpr std::array<std::uint8_t, 8> kRankMagic{
-    'H', 'F', 'C', '2', 'R', 'N', 'K', '\0'};
-constexpr std::array<std::uint8_t, 8> kManifestMagic{
-    'H', 'F', 'C', '2', 'M', 'A', 'N', '\0'};
-constexpr std::array<std::uint8_t, 8> kCompletedMagic{
-    'H', 'F', 'C', '2', 'D', 'O', 'N', '\0'};
+constexpr std::array<std::uint8_t, 8> kRankMagic{'H', 'F', 'C', '2',
+                                                 'R', 'N', 'K', '\0'};
+constexpr std::array<std::uint8_t, 8> kManifestMagic{'H', 'F', 'C', '2',
+                                                     'M', 'A', 'N', '\0'};
+constexpr std::array<std::uint8_t, 8> kCompletedMagic{'H', 'F', 'C', '2',
+                                                      'D', 'O', 'N', '\0'};
 constexpr std::uint32_t kFormatVersion = 2U;
 constexpr std::uint32_t kEndianMarker = UINT32_C(0x01020304);
 constexpr std::size_t kMaximumStringBytes = 4096U;
+
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+test::ExactReadFault exact_read_fault{test::ExactReadFault::none};
+std::uint32_t exact_read_fault_calls_before{};
+
+test::ExactReadFault consume_exact_read_fault() noexcept {
+  if (exact_read_fault_calls_before != 0U) {
+    --exact_read_fault_calls_before;
+    return test::ExactReadFault::none;
+  }
+  const auto result = exact_read_fault;
+  exact_read_fault = test::ExactReadFault::none;
+  return result;
+}
+#endif
 
 [[noreturn]] void malformed(const char *message) { throw Error(message); }
 [[noreturn]] void file_integrity(const char *message) {
@@ -83,8 +98,8 @@ bool valid_utf8(const std::uint8_t *data, std::size_t size) noexcept {
 } // namespace
 
 std::size_t checked_size(std::uint64_t value) {
-  if (value > static_cast<std::uint64_t>(
-                  std::numeric_limits<std::size_t>::max()) ||
+  if (value >
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
       value > static_cast<std::uint64_t>(
                   std::numeric_limits<std::ptrdiff_t>::max()))
     malformed("Checkpoint v2 size exceeds this platform");
@@ -110,8 +125,7 @@ std::uint64_t crc64_ecma(const void *data, std::size_t size) noexcept {
   for (std::size_t index = 0; index < size; ++index) {
     crc ^= static_cast<std::uint64_t>(bytes[index]) << 56U;
     for (unsigned bit = 0; bit < 8U; ++bit)
-      crc = (crc & (UINT64_C(1) << 63U)) != 0U
-                ? (crc << 1U) ^ polynomial
+      crc = (crc & (UINT64_C(1) << 63U)) != 0U ? (crc << 1U) ^ polynomial
                 : crc << 1U;
   }
   return crc;
@@ -170,10 +184,9 @@ Decoder::Decoder(const std::vector<std::uint8_t> &bytes) : bytes_(&bytes) {}
 std::vector<std::uint8_t> Decoder::raw(std::size_t count) {
   if (bytes_ == nullptr || count > bytes_->size() - offset_)
     malformed("Checkpoint v2 data is truncated");
-  std::vector<std::uint8_t> result(bytes_->begin() +
-                                       static_cast<std::ptrdiff_t>(offset_),
-                                   bytes_->begin() + static_cast<std::ptrdiff_t>(
-                                                         offset_ + count));
+  std::vector<std::uint8_t> result(
+      bytes_->begin() + static_cast<std::ptrdiff_t>(offset_),
+      bytes_->begin() + static_cast<std::ptrdiff_t>(offset_ + count));
   offset_ += count;
   return result;
 }
@@ -295,13 +308,10 @@ std::vector<std::uint8_t> encode_manifest(const Manifest &manifest) {
   for (std::size_t index = 0; index < manifest.ranks.size(); ++index) {
     const auto &record = manifest.ranks[index];
     if (record.rank != static_cast<std::int32_t>(index) ||
-        record.filename !=
-            "rank-" +
-                [&] {
+        record.filename != "rank-" + [&] {
                   std::string digits = std::to_string(index);
                   return std::string(6U - digits.size(), '0') + digits;
-                }() +
-                ".v2.bin")
+        }() + ".v2.bin")
       malformed("Checkpoint v2 manifest rank record is not canonical");
     encoder.i32(record.rank);
     encoder.i32(record.owned_box_begin.x);
@@ -382,8 +392,7 @@ CompletedMarker
 decode_completed_marker(const std::vector<std::uint8_t> &bytes) {
   Decoder decoder(bytes);
   if (decoder.raw(kCompletedMagic.size()) !=
-      std::vector<std::uint8_t>(kCompletedMagic.begin(),
-                                kCompletedMagic.end()))
+      std::vector<std::uint8_t>(kCompletedMagic.begin(), kCompletedMagic.end()))
     malformed("Checkpoint v2 completed magic is invalid");
   if (decoder.u32() != kFormatVersion || decoder.u32() != kEndianMarker)
     malformed("Checkpoint v2 completed header is invalid");
@@ -395,16 +404,13 @@ decode_completed_marker(const std::vector<std::uint8_t> &bytes) {
   return result;
 }
 
-VerifiedFile write_verified_temporary(
-    const std::filesystem::path &path,
+VerifiedFile write_verified_temporary(const std::filesystem::path &path,
     const std::vector<std::uint8_t> &bytes) {
   std::error_code status_error;
   const auto status = std::filesystem::symlink_status(path, status_error);
-  if (status_error &&
-      status_error != std::errc::no_such_file_or_directory)
+  if (status_error && status_error != std::errc::no_such_file_or_directory)
     file_system("Checkpoint v2 temporary file status failed");
-  if (!status_error &&
-      status.type() != std::filesystem::file_type::not_found)
+  if (!status_error && status.type() != std::filesystem::file_type::not_found)
     file_system("Checkpoint v2 temporary file already exists");
   if (bytes.size() >
       static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
@@ -426,7 +432,7 @@ VerifiedFile write_verified_temporary(
   const auto reread =
       read_regular_file_exact(path, static_cast<std::uint64_t>(bytes.size()));
   if (reread != bytes)
-    malformed("Checkpoint v2 temporary file verification failed");
+    file_integrity("Checkpoint v2 temporary file verification failed");
   return {static_cast<std::uint64_t>(bytes.size()),
           crc64_ecma(bytes.data(), bytes.size())};
 }
@@ -445,8 +451,7 @@ void create_directory_exclusive(const std::filesystem::path &path) {
   if (parent.empty())
     parent = ".";
   const auto parent_status = std::filesystem::symlink_status(parent, error);
-  if (error ||
-      parent_status.type() != std::filesystem::file_type::directory)
+  if (error || parent_status.type() != std::filesystem::file_type::directory)
     file_system("Checkpoint v2 parent is not a directory");
   if (!std::filesystem::create_directory(path, error) || error)
     file_system("Checkpoint v2 directory creation failed");
@@ -472,6 +477,14 @@ read_regular_file_exact(const std::filesystem::path &path,
   }
   if (actual != expected_size)
     file_integrity("Checkpoint v2 file size is invalid");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  const auto fault = consume_exact_read_fault();
+  if (fault == test::ExactReadFault::truncate_after_size) {
+    std::filesystem::resize_file(path, actual == 0U ? 0U : actual - 1U, error);
+    if (error)
+      file_system("Checkpoint v2 test truncation failed");
+  }
+#endif
   const auto allocation_size = checked_size(actual);
   if (allocation_size >
       static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
@@ -480,10 +493,16 @@ read_regular_file_exact(const std::filesystem::path &path,
   std::ifstream stream(path, std::ios::binary | std::ios::in);
   if (!stream)
     file_system("Checkpoint v2 file could not be opened");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (fault == test::ExactReadFault::read_failure)
+    file_system("Checkpoint v2 injected read failure");
+#endif
   if (!result.empty())
     stream.read(reinterpret_cast<char *>(result.data()),
                 static_cast<std::streamsize>(result.size()));
-  if (!stream && !stream.eof())
+  if (stream.gcount() != static_cast<std::streamsize>(result.size()))
+    file_integrity("Checkpoint v2 file became shorter while reading");
+  if (!stream)
     file_system("Checkpoint v2 file read failed");
   char trailing{};
   if (stream.get(trailing))
@@ -494,6 +513,10 @@ read_regular_file_exact(const std::filesystem::path &path,
   stream.close();
   if (stream.fail())
     file_system("Checkpoint v2 file close failed");
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  if (fault == test::ExactReadFault::close_failure)
+    file_system("Checkpoint v2 injected close failure");
+#endif
   return result;
 }
 
@@ -530,46 +553,45 @@ bool opaque_bytes_agree(const runtime::MpiContext &mpi,
   return opaque_bytes_agreement(mpi, bytes, collective_count, operation).ok;
 }
 
-CollectiveResult opaque_bytes_agreement(
-    const runtime::MpiContext &mpi, const std::vector<std::uint8_t> &bytes,
-    std::uint64_t &collective_count, std::string_view operation) {
+CollectiveResult opaque_bytes_agreement(const runtime::MpiContext &mpi,
+                                        const std::vector<std::uint8_t> &bytes,
+                                        std::uint64_t &collective_count,
+                                        std::string_view operation) {
   constexpr std::uint64_t maximum = UINT64_C(1024) * UINT64_C(1024);
   std::uint64_t root_size =
       mpi.rank() == 0 ? static_cast<std::uint64_t>(bytes.size()) : 0U;
   runtime::check_mpi_result(
-      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()),
-      operation);
+      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()), operation);
   ++collective_count;
   const bool size_valid =
       root_size <= maximum && bytes.size() <= checked_size(maximum);
-  std::vector<std::uint8_t> root(
-      root_size <= maximum ? checked_size(root_size) : 0U);
+  std::vector<std::uint8_t> root(root_size <= maximum ? checked_size(root_size)
+                                                      : 0U);
   if (mpi.rank() == 0 && size_valid)
     root = bytes;
-  runtime::check_mpi_result(
-      MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_BYTE, 0,
-                mpi.comm()),
+  runtime::check_mpi_result(MPI_Bcast(root.data(),
+                                      static_cast<int>(root.size()), MPI_BYTE,
+                                      0, mpi.comm()),
       operation);
   ++collective_count;
   return converge_phase(mpi, size_valid && bytes == root, collective_count,
                         operation);
 }
 
-std::vector<std::uint64_t>
-allgather_u64(const runtime::MpiContext &mpi, const std::uint64_t *local,
-              std::size_t count, std::uint64_t &collective_count,
+std::vector<std::uint64_t> allgather_u64(const runtime::MpiContext &mpi,
+                                         const std::uint64_t *local,
+                                         std::size_t count,
+                                         std::uint64_t &collective_count,
               std::string_view operation) {
   if ((count != 0U && local == nullptr) ||
       count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
     malformed("Checkpoint v2 opaque gather count is invalid");
-  const auto total = checked_product(checked_size(
-                                         static_cast<std::uint64_t>(mpi.size())),
-                                     count);
+  const auto total = checked_product(
+      checked_size(static_cast<std::uint64_t>(mpi.size())), count);
   std::vector<std::uint64_t> result(total);
   runtime::check_mpi_result(
-      MPI_Allgather(local, static_cast<int>(count), MPI_UINT64_T,
-                    result.data(), static_cast<int>(count), MPI_UINT64_T,
-                    mpi.comm()),
+      MPI_Allgather(local, static_cast<int>(count), MPI_UINT64_T, result.data(),
+                    static_cast<int>(count), MPI_UINT64_T, mpi.comm()),
       operation);
   ++collective_count;
   return result;
@@ -581,9 +603,8 @@ std::uint64_t allreduce_sum_u64(const runtime::MpiContext &mpi,
                                 std::string_view operation) {
   std::vector<std::uint64_t> items(
       checked_size(static_cast<std::uint64_t>(mpi.size())));
-  runtime::check_mpi_result(
-      MPI_Allgather(&local, 1, MPI_UINT64_T, items.data(), 1,
-                    MPI_UINT64_T, mpi.comm()),
+  runtime::check_mpi_result(MPI_Allgather(&local, 1, MPI_UINT64_T, items.data(),
+                                          1, MPI_UINT64_T, mpi.comm()),
       operation);
   ++collective_count;
   std::uint64_t result{};
@@ -620,5 +641,17 @@ bool exact_directory_inventory(const std::filesystem::path &directory,
     file_system("Checkpoint v2 directory iteration failed");
   return observed == expected;
 }
+
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+namespace test {
+
+void set_exact_read_fault(ExactReadFault fault,
+                          std::uint32_t calls_before) noexcept {
+  exact_read_fault = fault;
+  exact_read_fault_calls_before = calls_before;
+}
+
+} // namespace test
+#endif
 
 } // namespace hundun::runtime::checkpoint_v2

@@ -163,4 +163,20 @@ std::uint64_t allreduce_sum_u64(const runtime::MpiContext &,
 bool exact_directory_inventory(const std::filesystem::path &,
                                const std::vector<std::string> &);
 
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+namespace test {
+
+enum class ExactReadFault : std::uint8_t {
+  none,
+  truncate_after_size,
+  read_failure,
+  close_failure
+};
+
+void set_exact_read_fault(ExactReadFault,
+                          std::uint32_t calls_before = 0U) noexcept;
+
+} // namespace test
+#endif
+
 } // namespace hundun::runtime::checkpoint_v2

@@ -100,6 +100,10 @@ target_include_directories(hundun_runtime PUBLIC
 target_link_libraries(hundun_runtime
   PRIVATE hundun_warnings
   PUBLIC hundun_options MPI::MPI_CXX)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_runtime PRIVATE
+    HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_application STATIC
   applications/hundun/case_config_broadcast.cpp)
@@ -477,8 +481,14 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/runtime/src")
   target_link_libraries(test_checkpoint_v2_protocol PRIVATE hundun_runtime)
+  target_compile_definitions(test_checkpoint_v2_protocol PRIVATE
+    HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   set_tests_properties(test_checkpoint_v2_protocol PROPERTIES
     LABELS "unit;task23;task23-fast" TIMEOUT 30)
+  add_test(NAME test_checkpoint_v2_protocol_acceptance
+    COMMAND "$<TARGET_FILE:test_checkpoint_v2_protocol>")
+  set_tests_properties(test_checkpoint_v2_protocol_acceptance PROPERTIES
+    LABELS "unit;task23;task23-acceptance;task23-cluster-a" TIMEOUT 60)
 
   hundun_add_test(test_checkpoint_v2_epoch
     tests/unit/test_checkpoint_v2_epoch.cpp)
@@ -1084,6 +1094,8 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/runtime/src")
   target_link_libraries(test_checkpoint_v2 PRIVATE
     hundun_flow hundun_options hundun_warnings MPI::MPI_CXX)
+  target_compile_definitions(test_checkpoint_v2 PRIVATE
+    HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     set(task23_checkpoint_test "test_checkpoint_v2_${ranks}_rank")
     add_test(NAME "${task23_checkpoint_test}"
@@ -1093,6 +1105,16 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${task23_checkpoint_test}" PROPERTIES
       LABELS "mpi;numerical;task23;task23-fast"
       TIMEOUT 180 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+    set(task23_checkpoint_acceptance
+        "test_checkpoint_v2_acceptance_${ranks}_rank")
+    add_test(NAME "${task23_checkpoint_acceptance}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_checkpoint_v2>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task23_checkpoint_acceptance}" PROPERTIES
+      LABELS
+        "mpi;numerical;task23;task23-acceptance;task23-cluster-b;task23-cluster-c;task23-cluster-d"
+      TIMEOUT 240 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
   endforeach()
   add_executable(test_checkpoint_v2_diagnostics
     tests/mpi/test_checkpoint_v2_diagnostics.cpp)
@@ -1112,6 +1134,16 @@ if(HUNDUN_BUILD_TESTS)
     set_tests_properties("${task23_diagnostics_test}" PROPERTIES
       LABELS "mpi;diagnostics;task23;task23-fast"
       TIMEOUT 120 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
+    set(task23_diagnostics_acceptance
+        "test_checkpoint_v2_diagnostics_acceptance_${ranks}_rank")
+    add_test(NAME "${task23_diagnostics_acceptance}"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
+              ${MPIEXEC_PREFLAGS}
+              "$<TARGET_FILE:test_checkpoint_v2_diagnostics>"
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties("${task23_diagnostics_acceptance}" PROPERTIES
+      LABELS "mpi;diagnostics;task23;task23-acceptance;task23-cluster-e"
+      TIMEOUT 180 PROCESSORS "${ranks}" RUN_SERIAL TRUE)
   endforeach()
   set(task20_vortex_reference
       "${CMAKE_CURRENT_BINARY_DIR}/task20-variable-density-vortex-reference.v1.bin")

@@ -6,14 +6,15 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
 
 namespace {
 
-template <class Function>
-bool rejects(Function &&function) {
+template <class Function> bool rejects(Function &&function) {
   try {
     function();
   } catch (const std::exception &) {
@@ -42,10 +43,9 @@ void test_crc_and_little_endian_codec() {
   encoder.f64(-0.0);
   encoder.string("ok");
   const std::vector<std::uint8_t> expected{
-      0x7f, 0x04, 0x03, 0x02, 0x01, 0xfe, 0xff, 0xff, 0xff,
-      0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
-      0x02, 0x00, 0x00, 0x00, 'o',  'k'};
+      0x7f, 0x04, 0x03, 0x02, 0x01, 0xfe, 0xff, 0xff, 0xff, 0x08, 0x07,
+      0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x80, 0x02, 0x00, 0x00, 0x00, 'o',  'k'};
   HUNDUN_CHECK(encoder.bytes() == expected);
 
   Decoder decoder(encoder.bytes());
@@ -63,11 +63,9 @@ void test_rank_wrapper_literal_and_corruption() {
   const std::vector<std::uint8_t> payload{0xaa, 0x55};
   const auto encoded = encode_rank_wrapper(3, 8, payload);
   const std::vector<std::uint8_t> expected{
-      'H', 'F', 'C', '2', 'R', 'N', 'K', 0x00,
-      0x02, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01,
-      0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
-      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0xaa, 0x55};
+      'H',  'F',  'C',  '2',  'R',  'N',  'K',  0x00, 0x02, 0x00, 0x00, 0x00,
+      0x04, 0x03, 0x02, 0x01, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x55};
   HUNDUN_CHECK(encoded == expected);
   const auto decoded = decode_rank_wrapper(encoded, payload.size());
   HUNDUN_CHECK(decoded.rank == 3);
@@ -82,8 +80,7 @@ void test_rank_wrapper_literal_and_corruption() {
   }
   auto trailing = encoded;
   trailing.push_back(0U);
-  HUNDUN_CHECK(
-      rejects([&] { decode_rank_wrapper(trailing, payload.size()); }));
+  HUNDUN_CHECK(rejects([&] { decode_rank_wrapper(trailing, payload.size()); }));
   auto bad_magic = encoded;
   bad_magic.front() ^= 1U;
   HUNDUN_CHECK(
@@ -93,14 +90,10 @@ void test_rank_wrapper_literal_and_corruption() {
 void test_codec_limits() {
   using namespace hundun::runtime::checkpoint_v2;
   Encoder encoder;
+  HUNDUN_CHECK(rejects([&] { encoder.string(std::string(4097U, 'x')); }));
+  HUNDUN_CHECK(rejects([&] { encoder.string(std::string("\xc0\xaf", 2)); }));
   HUNDUN_CHECK(
-      rejects([&] { encoder.string(std::string(4097U, 'x')); }));
-  HUNDUN_CHECK(rejects([&] {
-    encoder.string(std::string("\xc0\xaf", 2));
-  }));
-  HUNDUN_CHECK(rejects([&] {
-    encoder.string(std::string("\xed\xa0\x80", 3));
-  }));
+      rejects([&] { encoder.string(std::string("\xed\xa0\x80", 3)); }));
 
   Encoder invalid_bool;
   invalid_bool.u8(2U);
@@ -122,17 +115,16 @@ void test_codec_limits() {
 
   HUNDUN_CHECK(rejects([&] {
     static_cast<void>(checked_size(
-        static_cast<std::uint64_t>(
-            std::numeric_limits<std::ptrdiff_t>::max()) +
+        static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) +
         1U));
   }));
   HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(checked_product(
-        std::numeric_limits<std::size_t>::max(), 2U));
+    static_cast<void>(
+        checked_product(std::numeric_limits<std::size_t>::max(), 2U));
   }));
   HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(checked_sum_u64(
-        std::numeric_limits<std::uint64_t>::max(), 1U));
+    static_cast<void>(
+        checked_sum_u64(std::numeric_limits<std::uint64_t>::max(), 1U));
   }));
 }
 
@@ -209,8 +201,8 @@ void test_manifest_and_completed_marker() {
   for (const auto value : {192U, 226U, 7U, 8U})
     u64(value);
   HUNDUN_CHECK(bytes == expected);
-  const auto decoded =
-      decode_manifest(bytes, manifest.rank_count, manifest.global_payload.size());
+  const auto decoded = decode_manifest(bytes, manifest.rank_count,
+                                       manifest.global_payload.size());
   HUNDUN_CHECK(decoded.rank_count == manifest.rank_count);
   HUNDUN_CHECK(decoded.process_grid.x == manifest.process_grid.x);
   HUNDUN_CHECK(decoded.process_grid.y == manifest.process_grid.y);
@@ -220,31 +212,29 @@ void test_manifest_and_completed_marker() {
   HUNDUN_CHECK(decoded.ranks.size() == 1U);
   HUNDUN_CHECK(decoded.ranks.front().filename == "rank-000000.v2.bin");
   HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(decode_manifest(
-        bytes, manifest.rank_count + 1U, manifest.global_payload.size()));
+    static_cast<void>(decode_manifest(bytes, manifest.rank_count + 1U,
+                                      manifest.global_payload.size()));
   }));
   HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(decode_manifest(
-        bytes, manifest.rank_count, manifest.global_payload.size() + 1U));
+    static_cast<void>(decode_manifest(bytes, manifest.rank_count,
+                                      manifest.global_payload.size() + 1U));
   }));
   auto manifest_trailing = bytes;
   manifest_trailing.push_back(0U);
   HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(decode_manifest(
-        manifest_trailing, manifest.rank_count,
+    static_cast<void>(decode_manifest(manifest_trailing, manifest.rank_count,
         manifest.global_payload.size()));
   }));
 
   CompletedMarker marker{static_cast<std::uint64_t>(bytes.size()),
                          crc64_ecma(bytes.data(), bytes.size()), 99U};
   const auto marker_bytes = encode_completed_marker(marker);
-  std::vector<std::uint8_t> expected_marker{
-      'H', 'F', 'C', '2', 'D', 'O', 'N', 0x00,
-      0x02, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01};
+  std::vector<std::uint8_t> expected_marker{'H',  'F',  'C',  '2',  'D',  'O',
+                                            'N',  0x00, 0x02, 0x00, 0x00, 0x00,
+                                            0x04, 0x03, 0x02, 0x01};
   const auto marker_u64 = [&](std::uint64_t value) {
     for (unsigned shift = 0U; shift < 64U; shift += 8U)
-      expected_marker.push_back(
-          static_cast<std::uint8_t>(value >> shift));
+      expected_marker.push_back(static_cast<std::uint8_t>(value >> shift));
   };
   marker_u64(marker.manifest_actual_size);
   marker_u64(marker.manifest_crc64);
@@ -254,18 +244,57 @@ void test_manifest_and_completed_marker() {
   HUNDUN_CHECK(decoded_marker.manifest_actual_size ==
                marker.manifest_actual_size);
   HUNDUN_CHECK(decoded_marker.manifest_crc64 == marker.manifest_crc64);
-  HUNDUN_CHECK(decoded_marker.common_fingerprint ==
-               marker.common_fingerprint);
+  HUNDUN_CHECK(decoded_marker.common_fingerprint == marker.common_fingerprint);
   for (std::size_t index = 0; index < 16U; ++index) {
     auto corrupted = marker_bytes;
     corrupted[index] ^= 1U;
-    HUNDUN_CHECK(
-        rejects([&] { static_cast<void>(decode_completed_marker(corrupted)); }));
+    HUNDUN_CHECK(rejects(
+        [&] { static_cast<void>(decode_completed_marker(corrupted)); }));
   }
   auto marker_trailing = marker_bytes;
   marker_trailing.push_back(0U);
   HUNDUN_CHECK(rejects(
       [&] { static_cast<void>(decode_completed_marker(marker_trailing)); }));
+}
+
+void test_exact_read_phase_failures() {
+  using namespace hundun::runtime::checkpoint_v2;
+  const auto path =
+      std::filesystem::temp_directory_path() / "hundun-task23-exact-read.bin";
+  {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    const std::array<char, 4> bytes{'a', '\0', '\0', '\0'};
+    stream.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  test::set_exact_read_fault(test::ExactReadFault::truncate_after_size);
+  try {
+    static_cast<void>(read_regular_file_exact(path, 4U));
+    HUNDUN_CHECK(false);
+  } catch (const NumericFileError &error) {
+    HUNDUN_CHECK(error.failure() == NumericFileFailure::integrity);
+  }
+
+  {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    stream.write("abcd", 4);
+  }
+  test::set_exact_read_fault(test::ExactReadFault::read_failure);
+  try {
+    static_cast<void>(read_regular_file_exact(path, 4U));
+    HUNDUN_CHECK(false);
+  } catch (const NumericFileError &error) {
+    HUNDUN_CHECK(error.failure() == NumericFileFailure::filesystem);
+  }
+
+  test::set_exact_read_fault(test::ExactReadFault::close_failure);
+  try {
+    static_cast<void>(read_regular_file_exact(path, 4U));
+    HUNDUN_CHECK(false);
+  } catch (const NumericFileError &error) {
+    HUNDUN_CHECK(error.failure() == NumericFileFailure::filesystem);
+  }
+  test::set_exact_read_fault(test::ExactReadFault::none);
+  std::filesystem::remove(path);
 }
 
 } // namespace
@@ -277,5 +306,6 @@ int main() {
     test_codec_limits();
     test_integer_and_binary64_edges();
     test_manifest_and_completed_marker();
+    test_exact_read_phase_failures();
   });
 }

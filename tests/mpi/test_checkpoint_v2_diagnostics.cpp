@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include "flow/src/checkpoint_v2_detail.hpp"
 #include "hundun/diagnostics/checkpoint_v2_diagnostics.hpp"
 #include "hundun/runtime/mpi_context.hpp"
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/mpi_operation_error.hpp"
-#include "flow/src/checkpoint_v2_detail.hpp"
 #include "tests/support/test_main.hpp"
 
-#include <array>
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -24,8 +27,7 @@ public:
   int calls{};
 };
 
-class DiagnosticErrorSink final
-    : public hundun::diagnostics::DiagnosticSink {
+class DiagnosticErrorSink final : public hundun::diagnostics::DiagnosticSink {
 public:
   void submit(const hundun::diagnostics::DiagnosticRecord &) override {
     throw hundun::diagnostics::DiagnosticCollectionError(
@@ -34,8 +36,7 @@ public:
   }
 };
 
-template <class Function>
-bool rejects(Function &&function) {
+template <class Function> bool rejects(Function &&function) {
   try {
     function();
   } catch (const hundun::diagnostics::DiagnosticCollectionError &) {
@@ -71,10 +72,96 @@ hundun::flow::CheckpointV2Report report(int rank) {
   return hundun::flow::detail::CheckpointV2Access::make(values);
 }
 
-hundun::diagnostics::DiagnosticRequest request(
-    int rank, hundun::diagnostics::DiagnosticLevel level,
-    hundun::diagnostics::DiagnosticScope scope) {
-  return {level, scope, {rank, 4U, 0.125, "completed-marker"}, {}, 0U};
+hundun::diagnostics::DiagnosticRequest
+request(int rank, hundun::diagnostics::DiagnosticLevel level,
+        hundun::diagnostics::DiagnosticScope scope,
+        std::string_view phase = "completed-marker") {
+  return {level, scope, {rank, 4U, 0.125, phase}, {}, 0U};
+}
+
+std::string_view phase_name(hundun::flow::CheckpointV2Phase phase) {
+  using Phase = hundun::flow::CheckpointV2Phase;
+  switch (phase) {
+  case Phase::preflight:
+    return "preflight";
+  case Phase::manifest:
+    return "manifest";
+  case Phase::rank_read:
+    return "rank-read";
+  case Phase::restore_prepare:
+    return "restore-prepare";
+  default:
+    return "none";
+  }
+}
+
+hundun::flow::CheckpointV2Report
+failure_report(int rank, hundun::flow::CheckpointV2FailureReason reason,
+               hundun::flow::CheckpointV2Phase phase) {
+  hundun::flow::detail::CheckpointV2ReportValues values;
+  values.operation =
+      phase == hundun::flow::CheckpointV2Phase::rank_read ||
+              phase == hundun::flow::CheckpointV2Phase::restore_prepare
+          ? hundun::flow::CheckpointV2Operation::read
+          : hundun::flow::CheckpointV2Operation::write;
+  values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+  values.reason = reason;
+  values.phase = phase;
+  values.rank = rank;
+  values.lowest_failing_rank = 0;
+  values.step = 4U;
+  values.time_s = 0.125;
+  values.local_logical_bytes = 10U + static_cast<std::uint64_t>(rank);
+  values.local_actual_bytes = 20U + static_cast<std::uint64_t>(rank);
+  values.local_crc64 =
+      UINT64_C(0x1020304050607000) + static_cast<std::uint64_t>(rank);
+  values.manifest_crc = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.exact_size_eof = hundun::flow::CheckpointV2CheckStatus::failed;
+  values.fingerprint = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.partition = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.transaction_entry = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.publication = hundun::flow::CheckpointV2CheckStatus::not_checked;
+  values.rollback = hundun::flow::CheckpointV2CheckStatus::passed;
+  values.rank_crc = rank == 0
+                        ? hundun::flow::CheckpointV2CheckStatus::failed
+                        : hundun::flow::CheckpointV2CheckStatus::not_checked;
+  return hundun::flow::detail::CheckpointV2Access::make(values);
+}
+
+std::uint64_t independent_rank_crc_digest(int ranks) {
+  std::vector<std::uint8_t> bytes;
+  constexpr std::string_view domain =
+      "hundun.checkpoint-v2.diagnostic-rank-crcs.v1";
+  bytes.insert(bytes.end(), domain.begin(), domain.end());
+  bytes.push_back(0U);
+  const auto u32 = [&](std::uint32_t value) {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U)
+      bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+  };
+  const auto i32 = [&](std::int32_t value) {
+    std::uint32_t wire{};
+    std::memcpy(&wire, &value, sizeof(wire));
+    u32(wire);
+  };
+  const auto u64 = [&](std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+  };
+  u32(1U);
+  u32(static_cast<std::uint32_t>(ranks));
+  for (int rank = 0; rank < ranks; ++rank) {
+    i32(rank);
+    u64(UINT64_C(0x1020304050607000) + static_cast<std::uint64_t>(rank));
+  }
+  constexpr std::uint64_t polynomial = UINT64_C(0x42F0E1EBA9EA3693);
+  std::uint64_t crc{};
+  for (const auto byte : bytes) {
+    crc ^= static_cast<std::uint64_t>(byte) << 56U;
+    for (unsigned bit = 0; bit < 8U; ++bit)
+      crc = (crc & (UINT64_C(1) << 63U)) != 0U ? (crc << 1U) ^ polynomial
+                                               : crc << 1U;
+  }
+  return crc;
 }
 
 double finite_value(const hundun::diagnostics::DiagnosticFp64 &value) {
@@ -116,26 +203,22 @@ expected_local_fingerprint(const hundun::flow::CheckpointV2Report &value) {
       "checkpoint.transaction-entry-status"};
   hundun::diagnostics::DiagnosticFingerprintAccumulator accumulator;
   const auto limb = [&](std::size_t index, std::uint64_t item) {
-    accumulator.add(
-        ids[index], static_cast<std::uint64_t>(value.rank()), 0U,
+    accumulator.add(ids[index], static_cast<std::uint64_t>(value.rank()), 0U,
         hundun::diagnostics::describe_fp64(
             static_cast<double>(static_cast<std::uint32_t>(item))));
-    accumulator.add(
-        ids[index], static_cast<std::uint64_t>(value.rank()), 1U,
-        hundun::diagnostics::describe_fp64(
-            static_cast<double>(static_cast<std::uint32_t>(item >> 32U))));
+    accumulator.add(ids[index], static_cast<std::uint64_t>(value.rank()), 1U,
+                    hundun::diagnostics::describe_fp64(static_cast<double>(
+                        static_cast<std::uint32_t>(item >> 32U))));
   };
   const auto count = [&](std::size_t index, std::int64_t item) {
-    accumulator.add(ids[index],
-                    static_cast<std::uint64_t>(value.rank()), 0U,
-                    hundun::diagnostics::describe_fp64(
-                        static_cast<double>(item)));
+    accumulator.add(
+        ids[index], static_cast<std::uint64_t>(value.rank()), 0U,
+        hundun::diagnostics::describe_fp64(static_cast<double>(item)));
   };
   limb(0U, value.collective_count());
   limb(1U, value.crc_check_count());
   count(2U, static_cast<std::uint8_t>(value.disposition()));
-  count(3U, static_cast<std::uint8_t>(
-                value.exact_size_and_eof_status()));
+  count(3U, static_cast<std::uint8_t>(value.exact_size_and_eof_status()));
   limb(4U, value.file_count());
   count(5U, static_cast<std::uint8_t>(value.fingerprint_status()));
   limb(6U, value.global_actual_bytes());
@@ -158,19 +241,15 @@ expected_local_fingerprint(const hundun::flow::CheckpointV2Report &value) {
   limb(23U, value.step());
   accumulator.add(ids[24U], static_cast<std::uint64_t>(value.rank()), 0U,
                   hundun::diagnostics::describe_fp64(value.time_s()));
-  count(25U,
-        static_cast<std::uint8_t>(value.transaction_entry_status()));
+  count(25U, static_cast<std::uint8_t>(value.transaction_entry_status()));
   return accumulator.finish();
 }
 
 void run(const hundun::runtime::MpiContext &mpi) {
   const auto local_report = report(mpi.rank());
-  const auto expected_fingerprint =
-      expected_local_fingerprint(local_report);
-  auto source =
-      hundun::flow::checkpoint_v2_diagnostic_source(local_report);
-  const auto descriptor =
-      hundun::diagnostics::describe_diagnostics(source);
+  const auto expected_fingerprint = expected_local_fingerprint(local_report);
+  auto source = hundun::flow::checkpoint_v2_diagnostic_source(local_report);
+  const auto descriptor = hundun::diagnostics::describe_diagnostics(source);
   HUNDUN_CHECK(descriptor.module_kind ==
                hundun::diagnostics::DiagnosticModuleKind::checkpoint);
   HUNDUN_CHECK(!hundun::diagnostics::has_capability(
@@ -181,14 +260,12 @@ void run(const hundun::runtime::MpiContext &mpi) {
   HUNDUN_CHECK(ids.size() == 26U);
   HUNDUN_CHECK(std::is_sorted(ids.begin(), ids.end()));
 
-  for (const auto level : {
-           hundun::diagnostics::DiagnosticLevel::summary,
+  for (const auto level : {hundun::diagnostics::DiagnosticLevel::summary,
            hundun::diagnostics::DiagnosticLevel::invariants,
            hundun::diagnostics::DiagnosticLevel::counters}) {
     OneRecordSink first;
     const auto local =
-        request(mpi.rank(), level,
-                hundun::diagnostics::DiagnosticScope::local);
+        request(mpi.rank(), level, hundun::diagnostics::DiagnosticScope::local);
     hundun::diagnostics::collect_diagnostics(source, local, first);
     HUNDUN_CHECK(first.calls == 1);
     HUNDUN_CHECK(first.record.scope ==
@@ -203,9 +280,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
                  hundun::diagnostics::to_canonical_json(second.record));
 
     OneRecordSink collective;
-    const auto global =
-        request(mpi.rank(), level,
-                hundun::diagnostics::DiagnosticScope::collective);
+    const auto global = request(
+        mpi.rank(), level, hundun::diagnostics::DiagnosticScope::collective);
     hundun::diagnostics::collect_diagnostics(source, mpi, global, collective);
     HUNDUN_CHECK(collective.calls == 1);
     HUNDUN_CHECK(collective.record.scope ==
@@ -222,8 +298,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
                             collective.record.metrics.end(),
                             [&](const auto &item) { return item.id == id; });
       };
-      const auto logical =
-          find_metric("checkpoint.local-logical-bytes-low");
+      const auto logical = find_metric("checkpoint.local-logical-bytes-low");
       const auto actual = find_metric("checkpoint.local-actual-bytes-low");
       HUNDUN_CHECK(logical != collective.record.metrics.end());
       HUNDUN_CHECK(actual != collective.record.metrics.end());
@@ -244,8 +319,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
                             collective.record.counters.end(),
                             [&](const auto &item) { return item.id == id; });
       };
-      const auto logical =
-          find_counter("checkpoint.local-logical-bytes");
+      const auto logical = find_counter("checkpoint.local-logical-bytes");
       const auto actual = find_counter("checkpoint.local-actual-bytes");
       HUNDUN_CHECK(logical != collective.record.counters.end());
       HUNDUN_CHECK(actual != collective.record.counters.end());
@@ -273,11 +347,10 @@ void run(const hundun::runtime::MpiContext &mpi) {
     bool rejected = false;
     try {
       OneRecordSink rejected_sink;
-      hundun::diagnostics::collect_diagnostics(
-          source, mpi, disagreement, rejected_sink);
+      hundun::diagnostics::collect_diagnostics(source, mpi, disagreement,
+                                               rejected_sink);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
-      rejected =
-          error.classification() ==
+      rejected = error.classification() ==
               hundun::diagnostics::DiagnosticFailureClass::
                   collective_operation &&
           error.lowest_failing_rank() == mpi.size() - 1;
@@ -312,8 +385,7 @@ void run(const hundun::runtime::MpiContext &mpi) {
                                                rejected_sink);
       HUNDUN_CHECK(false);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
-      HUNDUN_CHECK(
-          error.classification() ==
+      HUNDUN_CHECK(error.classification() ==
           hundun::diagnostics::DiagnosticFailureClass::capability);
     }
   }
@@ -322,18 +394,118 @@ void run(const hundun::runtime::MpiContext &mpi) {
     try {
       hundun::diagnostics::collect_diagnostics(
           moved,
-          request(mpi.rank(),
-                  hundun::diagnostics::DiagnosticLevel::summary,
+          request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
                   hundun::diagnostics::DiagnosticScope::local),
           rejected_sink);
       HUNDUN_CHECK(false);
     } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
-      HUNDUN_CHECK(
-          error.classification() ==
+      HUNDUN_CHECK(error.classification() ==
           hundun::diagnostics::DiagnosticFailureClass::sink_failure);
       HUNDUN_CHECK(error.code() == "diagnostics.sink.submit");
     }
   }
+
+  using Reason = hundun::flow::CheckpointV2FailureReason;
+  using Phase = hundun::flow::CheckpointV2Phase;
+  struct FailureCase final {
+    Reason reason;
+    Phase phase;
+    hundun::diagnostics::DiagnosticFailureClass classification;
+    std::string_view suffix;
+  };
+  constexpr std::array failure_cases{
+      FailureCase{Reason::invalid_input, Phase::preflight,
+                  hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+                  "write.preflight.invalid-input"},
+      FailureCase{Reason::layout, Phase::preflight,
+                  hundun::diagnostics::DiagnosticFailureClass::layout,
+                  "write.preflight.layout"},
+      FailureCase{Reason::state, Phase::restore_prepare,
+                  hundun::diagnostics::DiagnosticFailureClass::invalid_input,
+                  "read.restore-prepare.state"},
+      FailureCase{Reason::file_integrity, Phase::rank_read,
+                  hundun::diagnostics::DiagnosticFailureClass::file_integrity,
+                  "read.rank-read.file-integrity"},
+      FailureCase{Reason::filesystem, Phase::manifest,
+                  hundun::diagnostics::DiagnosticFailureClass::file_integrity,
+                  "write.manifest.filesystem"}};
+  for (const auto &item : failure_cases) {
+    const auto failed = failure_report(mpi.rank(), item.reason, item.phase);
+    auto failed_source = hundun::flow::checkpoint_v2_diagnostic_source(failed);
+    OneRecordSink local_failure;
+    hundun::diagnostics::collect_diagnostics(
+        failed_source,
+        request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::invariants,
+                hundun::diagnostics::DiagnosticScope::local,
+                phase_name(item.phase)),
+        local_failure);
+    HUNDUN_CHECK(local_failure.record.status ==
+                 hundun::diagnostics::DiagnosticStatus::failed);
+    HUNDUN_CHECK(local_failure.record.failure.classification ==
+                 item.classification);
+    HUNDUN_CHECK(local_failure.record.failure.code ==
+                 std::string("checkpoint-v2.") + std::string(item.suffix));
+    const auto exact = std::find_if(
+        local_failure.record.invariants.begin(),
+        local_failure.record.invariants.end(), [](const auto &invariant) {
+          return invariant.id == "checkpoint.exact-size-eof";
+        });
+    const auto manifest = std::find_if(
+        local_failure.record.invariants.begin(),
+        local_failure.record.invariants.end(), [](const auto &invariant) {
+          return invariant.id == "checkpoint.manifest-crc";
+        });
+    HUNDUN_CHECK(exact != local_failure.record.invariants.end());
+    HUNDUN_CHECK(manifest != local_failure.record.invariants.end());
+    HUNDUN_CHECK(finite_value(exact->observed) == 0.0);
+    HUNDUN_CHECK(finite_value(manifest->observed) == -1.0);
+  }
+
+  const auto failed =
+      failure_report(mpi.rank(), Reason::file_integrity, Phase::rank_read);
+  auto failed_source = hundun::flow::checkpoint_v2_diagnostic_source(failed);
+  OneRecordSink failed_invariants;
+  hundun::diagnostics::collect_diagnostics(
+      failed_source, mpi,
+      request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::invariants,
+              hundun::diagnostics::DiagnosticScope::collective, "rank-read"),
+      failed_invariants);
+  const auto rank_crc = std::find_if(
+      failed_invariants.record.invariants.begin(),
+      failed_invariants.record.invariants.end(), [](const auto &invariant) {
+        return invariant.id == "checkpoint.rank-crc";
+      });
+  HUNDUN_CHECK(rank_crc != failed_invariants.record.invariants.end());
+  HUNDUN_CHECK(!rank_crc->passed);
+  HUNDUN_CHECK(finite_value(rank_crc->observed) == 0.0);
+
+  OneRecordSink failed_counters;
+  hundun::diagnostics::collect_diagnostics(
+      failed_source, mpi,
+      request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::counters,
+              hundun::diagnostics::DiagnosticScope::collective, "rank-read"),
+      failed_counters);
+  const auto counter = [&](std::string_view id) {
+    return std::find_if(failed_counters.record.counters.begin(),
+                        failed_counters.record.counters.end(),
+                        [&](const auto &value) { return value.id == id; });
+  };
+  const auto high = counter("checkpoint.local-crc64-high");
+  const auto low = counter("checkpoint.local-crc64-low");
+  HUNDUN_CHECK(high != failed_counters.record.counters.end());
+  HUNDUN_CHECK(low != failed_counters.record.counters.end());
+  const auto digest = independent_rank_crc_digest(mpi.size());
+  HUNDUN_CHECK(high->value == (digest >> 32U));
+  HUNDUN_CHECK(low->value == static_cast<std::uint32_t>(digest));
+
+  auto unsupported = request(
+      mpi.rank(), hundun::diagnostics::DiagnosticLevel::bounded_state_sample,
+      hundun::diagnostics::DiagnosticScope::local);
+  unsupported.sample_budget = 1U;
+  HUNDUN_CHECK(rejects([&] {
+    OneRecordSink rejected;
+    hundun::diagnostics::collect_diagnostics(moved, unsupported, rejected);
+  }));
 }
 
 } // namespace
