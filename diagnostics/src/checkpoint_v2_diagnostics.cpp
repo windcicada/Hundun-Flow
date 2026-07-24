@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -24,14 +25,20 @@
 
 namespace hundun::diagnostics::detail {
 struct CheckpointV2Adapter final {
+  static const flow::CheckpointV2Report *
+  report_if_ready(const flow::CheckpointV2DiagnosticSource &source) noexcept {
+    return source.impl_ ? &source.impl_->report : nullptr;
+  }
+
   static const flow::CheckpointV2Report &
   report(const flow::CheckpointV2DiagnosticSource &source) {
-    if (!source.impl_)
+    const auto *value = report_if_ready(source);
+    if (value == nullptr)
       throw DiagnosticCollectionError(
           DiagnosticFailureClass::invalid_input,
           "checkpoint-v2.diagnostics.stale-source", -1,
           "Checkpoint v2 diagnostic source has been moved from");
-    return source.impl_->report;
+    return *value;
   }
 };
 } // namespace hundun::diagnostics::detail
@@ -86,37 +93,22 @@ void converge_preparation(const runtime::MpiContext &mpi,
         "Checkpoint v2 diagnostic collective preparation failed");
 }
 
-void require_collective_capability_agreement(
-    const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
-  const bool unsupported =
-      request.level == DiagnosticLevel::bounded_state_sample ||
-      !request.selected_fields.empty() || request.sample_budget != 0U;
-  const int local_count = unsupported ? 1 : 0;
-  int unsupported_count{};
-  before_collective(mpi,
-                    "MPI_Allreduce(Checkpoint diagnostic capability count)");
-  runtime::check_mpi_result(
-      MPI_Allreduce(&local_count, &unsupported_count, 1, MPI_INT, MPI_SUM,
-                    mpi.comm()),
-      "MPI_Allreduce(Checkpoint diagnostic capability count)");
-  if (unsupported_count == mpi.size())
-    throw DiagnosticCollectionError(
-        DiagnosticFailureClass::capability,
-        "checkpoint-v2.diagnostics.capability", -1,
-        "Checkpoint v2 diagnostic request uses an unsupported capability");
-  if (unsupported_count == 0)
-    return;
-  const int candidate = unsupported ? mpi.rank() : mpi.size();
+const flow::CheckpointV2Report &require_collective_source_readiness(
+    const flow::CheckpointV2DiagnosticSource &source,
+    const runtime::MpiContext &mpi) {
+  const auto *report = detail::CheckpointV2Adapter::report_if_ready(source);
+  const int candidate = report == nullptr ? mpi.rank() : mpi.size();
   int lowest = mpi.size();
-  before_collective(
-      mpi, "MPI_Allreduce(Checkpoint diagnostic capability disagreement)");
+  before_collective(mpi, "MPI_Allreduce(Checkpoint diagnostic source)");
   runtime::check_mpi_result(
       MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
-      "MPI_Allreduce(Checkpoint diagnostic capability disagreement)");
-  throw DiagnosticCollectionError(
-      DiagnosticFailureClass::collective_operation,
-      "checkpoint-v2.diagnostics.collective-agreement", lowest,
-      "Checkpoint v2 collective diagnostic capability disagrees");
+      "MPI_Allreduce(Checkpoint diagnostic source)");
+  if (lowest != mpi.size())
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::invalid_input,
+        "checkpoint-v2.diagnostics.stale-source", lowest,
+        "Checkpoint v2 diagnostic source has been moved from");
+  return *report;
 }
 
 constexpr DiagnosticCapabilityFlags kCapabilities =
@@ -266,8 +258,88 @@ void require_request(const flow::CheckpointV2Report &report,
         "Checkpoint v2 diagnostic frame does not match the report");
 }
 
-std::uint64_t collective_signature(
-    const flow::CheckpointV2Report &report,
+enum class CollectiveRequestStatus : int {
+  valid = 0,
+  capability = 1,
+  invalid_request = 2
+};
+
+bool valid_request_phase(std::string_view phase) noexcept {
+  if (phase.empty() || phase.size() > 128U)
+    return false;
+  return std::all_of(phase.begin(), phase.end(), [](char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') || character == '_' ||
+           character == '.' || character == '-';
+  });
+}
+
+CollectiveRequestStatus
+classify_collective_request(const flow::CheckpointV2Report &report,
+                            const DiagnosticRequest &request) noexcept {
+  const auto level = static_cast<std::uint8_t>(request.level);
+  const auto scope = static_cast<std::uint8_t>(request.scope);
+  if (level >
+          static_cast<std::uint8_t>(DiagnosticLevel::bounded_state_sample) ||
+      scope > static_cast<std::uint8_t>(DiagnosticScope::collective))
+    return CollectiveRequestStatus::invalid_request;
+  if (request.level == DiagnosticLevel::bounded_state_sample ||
+      !request.selected_fields.empty() || request.sample_budget != 0U ||
+      request.scope != DiagnosticScope::collective)
+    return CollectiveRequestStatus::capability;
+  if (request.frame.rank < 0 || !std::isfinite(request.frame.time_s) ||
+      request.frame.time_s < 0.0 || !valid_request_phase(request.frame.phase) ||
+      request.frame.rank != report.rank() ||
+      request.frame.step != report.step() ||
+      bits(request.frame.time_s) != bits(report.time_s()) ||
+      request.frame.phase != phase_name(report.phase()))
+    return CollectiveRequestStatus::invalid_request;
+  return CollectiveRequestStatus::valid;
+}
+
+void require_collective_request_classification(
+    const runtime::MpiContext &mpi, CollectiveRequestStatus local_status) {
+  const int local = static_cast<int>(local_status);
+  int lowest_status{};
+  int highest_status{};
+  before_collective(mpi,
+                    "MPI_Allreduce(Checkpoint diagnostic request minimum)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&local, &lowest_status, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic request minimum)");
+  before_collective(mpi,
+                    "MPI_Allreduce(Checkpoint diagnostic request maximum)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&local, &highest_status, 1, MPI_INT, MPI_MAX, mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic request maximum)");
+  if (lowest_status == highest_status) {
+    if (local_status == CollectiveRequestStatus::valid)
+      return;
+    if (local_status == CollectiveRequestStatus::capability)
+      throw DiagnosticCollectionError(
+          DiagnosticFailureClass::capability,
+          "checkpoint-v2.diagnostics.capability", -1,
+          "Checkpoint v2 diagnostic request uses an unsupported capability");
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::invalid_request,
+        "checkpoint-v2.diagnostics.frame", -1,
+        "Checkpoint v2 diagnostic request is invalid");
+  }
+  const int candidate =
+      local_status == CollectiveRequestStatus::valid ? mpi.size() : mpi.rank();
+  int lowest = mpi.size();
+  before_collective(
+      mpi, "MPI_Allreduce(Checkpoint diagnostic request disagreement)");
+  runtime::check_mpi_result(
+      MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(Checkpoint diagnostic request disagreement)");
+  throw DiagnosticCollectionError(
+      DiagnosticFailureClass::collective_operation,
+      "checkpoint-v2.diagnostics.collective-agreement", lowest,
+      "Checkpoint v2 collective diagnostic request disagrees");
+}
+
+std::uint64_t collective_signature(const flow::CheckpointV2Report &report,
     const DiagnosticRequest &request) {
   runtime::checkpoint_v2::Encoder encoder;
   constexpr std::string_view domain =
@@ -294,24 +366,22 @@ std::uint64_t collective_signature(
   encoder.u64(report.file_count());
   encoder.u64(report.crc_check_count());
   encoder.u64(report.collective_count());
-  encoder.u8(
-      static_cast<std::uint8_t>(report.manifest_crc_status()));
-  encoder.u8(
-      static_cast<std::uint8_t>(report.exact_size_and_eof_status()));
+  encoder.u8(static_cast<std::uint8_t>(report.manifest_crc_status()));
+  encoder.u8(static_cast<std::uint8_t>(report.exact_size_and_eof_status()));
   encoder.u8(static_cast<std::uint8_t>(report.fingerprint_status()));
   encoder.u8(static_cast<std::uint8_t>(report.partition_status()));
-  encoder.u8(
-      static_cast<std::uint8_t>(report.transaction_entry_status()));
+  encoder.u8(static_cast<std::uint8_t>(report.transaction_entry_status()));
   encoder.u8(static_cast<std::uint8_t>(report.publication_status()));
   encoder.u8(static_cast<std::uint8_t>(report.rollback_status()));
   return runtime::checkpoint_v2::crc64_ecma(encoder.bytes().data(),
                                              encoder.bytes().size());
 }
 
-void require_collective_agreement(
-    const flow::CheckpointV2Report &report,
-    const runtime::MpiContext &mpi, const DiagnosticRequest &request) {
-  require_collective_capability_agreement(mpi, request);
+void require_collective_agreement(const flow::CheckpointV2Report &report,
+                                  const runtime::MpiContext &mpi,
+                                  const DiagnosticRequest &request) {
+  require_collective_request_classification(
+      mpi, classify_collective_request(report, request));
   bool local_valid = true;
   std::uint64_t signature{};
   try {
@@ -320,7 +390,6 @@ void require_collective_agreement(
             mpi, test::CheckpointV2DiagnosticFault::request_preparation))
       throw std::bad_alloc();
 #endif
-    require_request(report, request, DiagnosticScope::collective);
     local_valid = mpi.rank() == report.rank();
     signature = collective_signature(report, request);
   } catch (...) {
@@ -577,7 +646,7 @@ void collect_diagnostics(const flow::CheckpointV2DiagnosticSource &source,
                          const runtime::MpiContext &mpi,
                          const DiagnosticRequest &request,
                          DiagnosticSink &sink) {
-  const auto &report = detail::CheckpointV2Adapter::report(source);
+  const auto &report = require_collective_source_readiness(source, mpi);
   require_collective_agreement(report, mpi, request);
   const std::array<std::uint64_t, 4> local{
       report.local_logical_bytes(), report.local_actual_bytes(),

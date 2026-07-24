@@ -33,6 +33,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -2294,7 +2295,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
 
   auto ideal_config = config;
   ideal_config.density_model = hundun::config::DensityModel::ideal_gas;
-  ideal_config.scalars.clear();
+  ideal_config.scalars = {{"alpha", 0.0}};
   ideal_config.physics.cp_J_per_kg_K = 1000.0;
   ideal_config.physics.gas_constant_J_per_kg_K = 287.05;
   ideal_config.physics.thermodynamic_pressure_pa = 101325.0;
@@ -2312,7 +2313,9 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       hundun::finite_volume::declare_face_mass_flux(ideal_registry);
   const auto rho_h =
       ideal_registry.declare_field(physical_cell("rho_h", "J/m3", true));
-  ideal_fields.transported_cell_fields = {rho_h};
+  const auto ideal_rho_alpha =
+      ideal_registry.declare_field(physical_cell("rho_alpha", "kg/m3", true));
+  ideal_fields.transported_cell_fields = {rho_h, ideal_rho_alpha};
   ideal_registry.freeze();
   auto ideal_state = hundun::flow::FlowState::create(
       ideal_registry,
@@ -2333,7 +2336,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   ideal_values.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
   ideal_values.face_mass_flux.assign(topology.local_face_count(), 0.0);
   ideal_values.transported_cell_fields = {
-      std::vector<double>(cells, 101325.0 * 1000.0 / 287.05)};
+      std::vector<double>(cells, 101325.0 * 1000.0 / 287.05),
+      std::vector<double>(cells)};
+  for (std::size_t cell_id = 0; cell_id < cells; ++cell_id)
+    ideal_values.transported_cell_fields[1][cell_id] =
+        ideal_values.density[cell_id] * 0.2;
   ideal_state.seed_accepted_layers(ideal_values, ideal_values);
   const hundun::flow::IdealGasClosureSpec ideal_spec{rho_h, 1000.0, 287.05,
                                                      101325.0};
@@ -2354,11 +2361,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
             ideal_fields, ideal_state, ideal_spec, persisted_closure));
       } catch (const hundun::runtime::Error &error) {
         exact_failure =
-            std::string_view(error.what()).find(
-                "ideal-gas closure restore snapshot preparation failed") !=
-                std::string_view::npos &&
-            std::string_view(error.what()).find(
-                std::to_string(failure_rank)) != std::string_view::npos;
+            std::string_view(error.what())
+                    .find("ideal-gas closure restore snapshot preparation "
+                          "failed") != std::string_view::npos &&
+            std::string_view(error.what()).find(std::to_string(failure_rank)) !=
+                std::string_view::npos;
       }
       HUNDUN_CHECK(exact_failure);
       HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
@@ -2552,6 +2559,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   hundun::flow::MaterialDensityTransportSpec ideal_material_spec;
   ideal_material_spec.enthalpy_density = rho_h;
   ideal_material_spec.enthalpy_diffusivity_kg_per_m_s = 0.0;
+  ideal_material_spec.scalar_densities = {ideal_rho_alpha};
+  ideal_material_spec.scalar_diffusivities_kg_per_m_s = {0.0};
   auto ideal_flow = hundun::flow::FixedStepIdealGasFlow::create(
       decomposition, topology, geometry, ideal_boundaries, mpi, ideal_execution,
       ideal_halo, ideal_momentum, {&ideal_mx, &ideal_my, &ideal_mz},
@@ -2594,7 +2603,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   open_config.boundaries[0].enthalpy_J_per_kg = 300000.0;
   open_config.boundaries[0].density_kg_per_m3 = ideal_density;
   open_config.boundaries[0].scalar_values =
-      std::vector<hundun::config::InletScalarValue>{};
+      std::vector<hundun::config::InletScalarValue>{{"alpha", 0.2}};
   open_config.boundaries[1].type =
       hundun::config::BoundaryType::pressure_outlet;
   open_config.boundaries[1].pressure_perturbation_pa = 0.0;
@@ -2621,7 +2630,9 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       hundun::finite_volume::declare_face_mass_flux(open_registry);
   const auto open_rho_h =
       open_registry.declare_field(physical_cell("rho_h", "J/m3", true));
-  open_fields.transported_cell_fields = {open_rho_h};
+  const auto open_rho_alpha =
+      open_registry.declare_field(physical_cell("rho_alpha", "kg/m3", true));
+  open_fields.transported_cell_fields = {open_rho_h, open_rho_alpha};
   open_registry.freeze();
   hundun::flow::FlowLayerValues open_values;
   open_values.density.assign(open_topology.owned_cell_count(), ideal_density);
@@ -2639,8 +2650,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     open_values.face_velocity[face_id * 3U] = 1.0;
     open_values.face_mass_flux[face_id] = ideal_density * area.x;
   }
-  open_values.transported_cell_fields = {std::vector<double>(
-      open_topology.owned_cell_count(), ideal_density * 300000.0)};
+  open_values.transported_cell_fields = {
+      std::vector<double>(open_topology.owned_cell_count(),
+                          ideal_density * 300000.0),
+      std::vector<double>(open_topology.owned_cell_count(),
+                          ideal_density * 0.2)};
   const auto make_open_state = [&] {
     auto result = hundun::flow::FlowState::create(
         open_registry,
@@ -2678,6 +2692,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       independent_boundary_fingerprint(open_boundaries);
   for (std::size_t inlet_patch = 0U;
        inlet_patch < open_config.boundaries.size(); ++inlet_patch) {
+    for (std::size_t authority_case = 0U; authority_case < 2U;
+         ++authority_case) {
     auto changed_open_config = open_config;
     for (std::size_t patch = 0U;
          patch < changed_open_config.boundaries.size(); ++patch) {
@@ -2690,8 +2706,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     const auto outlet_patch = inlet_patch ^ 1U;
     auto &inlet = changed_open_config.boundaries[inlet_patch];
     inlet.type = hundun::config::BoundaryType::velocity_inlet;
-    const double speed =
-        1.0 + 0.01 * static_cast<double>(inlet_patch);
+      const double speed = 1.0 + 0.01 * static_cast<double>(inlet_patch);
     const std::array<hundun::runtime::Real3, 6> inward_velocity{
         hundun::runtime::Real3{speed, 0.0, 0.0},
         hundun::runtime::Real3{-speed, 0.0, 0.0},
@@ -2701,37 +2716,40 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         hundun::runtime::Real3{0.0, 0.0, -speed}};
     inlet.velocity_m_per_s = inward_velocity[inlet_patch];
     inlet.thermal_authority =
-        inlet_patch % 2U == 0U
+          authority_case == 0U
             ? hundun::config::InletThermalAuthority::temperature
             : hundun::config::InletThermalAuthority::enthalpy;
     inlet.temperature_K = 300.0;
     inlet.enthalpy_J_per_kg = 300000.0;
     inlet.density_kg_per_m3 = ideal_density;
     inlet.scalar_values =
-        std::vector<hundun::config::InletScalarValue>{};
+          std::vector<hundun::config::InletScalarValue>{{"alpha", 0.2}};
     auto &outlet = changed_open_config.boundaries[outlet_patch];
     outlet.type = hundun::config::BoundaryType::pressure_outlet;
-    outlet.pressure_perturbation_pa =
-        0.5 + static_cast<double>(inlet_patch);
-    auto changed_open_boundaries =
-        hundun::boundary::BoundaryRegistry::create(changed_open_config,
-                                                   open_topology);
+      outlet.pressure_perturbation_pa = 0.5 + static_cast<double>(inlet_patch);
+      auto changed_open_boundaries = hundun::boundary::BoundaryRegistry::create(
+          changed_open_config, open_topology);
     HUNDUN_CHECK(independent_boundary_fingerprint(changed_open_boundaries) !=
                  open_boundary_fingerprint);
     auto changed_open_state = make_open_state();
     const auto changed_open_before =
         CheckpointAccess::snapshot(changed_open_state);
+      const auto changed_open_views =
+          CheckpointAccess::density_views(changed_open_state);
     const auto changed_open_read = hundun::flow::read_checkpoint_v2(
         mpi, open_decomposition, open_topology, open_geometry,
         changed_open_boundaries, changed_open_config, changed_open_state,
         open_directory);
     require_constructible_fingerprint_failure(
         changed_open_before, changed_open_state, changed_open_read);
+      for (const auto &view : changed_open_views)
+        HUNDUN_CHECK(rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
 
     const auto variant_directory =
         std::filesystem::temp_directory_path() /
         ("hundun-task23-open-boundary-variant-" +
-         std::to_string(inlet_patch) + "-" + std::to_string(mpi.size()));
+           std::to_string(inlet_patch) + "-" + std::to_string(authority_case) +
+           "-" + std::to_string(mpi.size()));
     if (mpi.rank() == 0)
       std::filesystem::remove_all(variant_directory);
     mpi.barrier();
@@ -2745,9 +2763,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         [&](const ConfigMutation &mutate) {
           auto single = changed_open_config;
           mutate(single);
-          auto single_boundaries =
-              hundun::boundary::BoundaryRegistry::create(single,
-                                                         open_topology);
+            auto single_boundaries = hundun::boundary::BoundaryRegistry::create(
+                single, open_topology);
           HUNDUN_CHECK(
               independent_boundary_fingerprint(single_boundaries) !=
                   independent_boundary_fingerprint(changed_open_boundaries) ||
@@ -2755,22 +2772,25 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                   independent_resolved_fingerprint(changed_open_config));
           auto single_state = make_open_state();
           const auto single_before = CheckpointAccess::snapshot(single_state);
+            const auto single_views =
+                CheckpointAccess::density_views(single_state);
           const auto single_read = hundun::flow::read_checkpoint_v2(
               mpi, open_decomposition, open_topology, open_geometry,
               single_boundaries, single, single_state, variant_directory);
           require_constructible_fingerprint_failure(
               single_before, single_state, single_read);
+            for (const auto &view : single_views)
+              HUNDUN_CHECK(
+                  rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
         };
     require_single_boundary_mutation([inlet_patch](auto &single) {
-      auto &velocity =
-          *single.boundaries[inlet_patch].velocity_m_per_s;
+        auto &velocity = *single.boundaries[inlet_patch].velocity_m_per_s;
       velocity.x += velocity.x == 0.0 ? 0.0 : 0.001;
       velocity.y += velocity.y == 0.0 ? 0.0 : 0.001;
       velocity.z += velocity.z == 0.0 ? 0.0 : 0.001;
     });
     require_single_boundary_mutation([inlet_patch](auto &single) {
-      auto &authority =
-          *single.boundaries[inlet_patch].thermal_authority;
+        auto &authority = *single.boundaries[inlet_patch].thermal_authority;
       authority =
           authority == hundun::config::InletThermalAuthority::temperature
               ? hundun::config::InletThermalAuthority::enthalpy
@@ -2779,27 +2799,212 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     require_single_boundary_mutation([inlet_patch](auto &single) {
       const auto authority =
           *single.boundaries[inlet_patch].thermal_authority;
-      if (authority ==
-          hundun::config::InletThermalAuthority::temperature)
+        if (authority == hundun::config::InletThermalAuthority::temperature)
         single.boundaries[inlet_patch].enthalpy_J_per_kg.reset();
       else
         single.boundaries[inlet_patch].temperature_K.reset();
     });
-    require_single_boundary_mutation(
-        [outlet_patch](auto &single) {
-          *single.boundaries[outlet_patch].pressure_perturbation_pa += 0.125;
-        });
-    for (std::size_t wall_patch = 0U;
-         wall_patch < changed_open_config.boundaries.size(); ++wall_patch)
-      if (wall_patch != inlet_patch && wall_patch != outlet_patch)
-        require_single_boundary_mutation([wall_patch](auto &single) {
-          single.boundaries[wall_patch].type =
-              hundun::config::BoundaryType::no_slip_wall;
-        });
+      const ConfigMutation r5_authoritative_thermal_numeric =
+          [inlet_patch](auto &single) {
+            constexpr double changed_temperature = 310.0;
+            auto &changed = single.boundaries[inlet_patch];
+            changed.temperature_K = changed_temperature;
+            changed.enthalpy_J_per_kg = 1000.0 * changed_temperature;
+            changed.density_kg_per_m3 =
+                101325.0 / (287.05 * changed_temperature);
+          };
+      require_single_boundary_mutation(r5_authoritative_thermal_numeric);
+      const ConfigMutation r5_density_optional_presence =
+          [inlet_patch](auto &single) {
+            single.boundaries[inlet_patch].density_kg_per_m3.reset();
+          };
+      require_single_boundary_mutation(r5_density_optional_presence);
+      const ConfigMutation r5_inlet_scalar_value = [inlet_patch](auto &single) {
+        single.boundaries[inlet_patch].scalar_values->front().value += 0.05;
+      };
+      require_single_boundary_mutation(r5_inlet_scalar_value);
+      require_single_boundary_mutation([outlet_patch](auto &single) {
+        *single.boundaries[outlet_patch].pressure_perturbation_pa += 0.125;
+      });
+      for (std::size_t wall_patch = 0U;
+           wall_patch < changed_open_config.boundaries.size(); ++wall_patch) {
+        if (wall_patch != inlet_patch && wall_patch != outlet_patch)
+          require_single_boundary_mutation([wall_patch](auto &single) {
+            single.boundaries[wall_patch].type =
+                hundun::config::BoundaryType::no_slip_wall;
+          });
+      }
+
+      if (inlet_patch == 0U && authority_case == 0U) {
+        const auto require_scalar_schema_mutation =
+            [&](hundun::config::FlowCaseConfig single,
+                const std::optional<std::string> &field_name) {
+              auto single_boundaries =
+                  hundun::boundary::BoundaryRegistry::create(single,
+                                                             open_topology);
+              HUNDUN_CHECK(
+                  independent_boundary_fingerprint(single_boundaries) !=
+                      independent_boundary_fingerprint(
+                          changed_open_boundaries) ||
+                  independent_resolved_fingerprint(single) !=
+                      independent_resolved_fingerprint(changed_open_config));
+              hundun::runtime::FieldRegistry single_registry;
+              hundun::flow::FlowFieldIds single_fields;
+              single_fields.density = single_registry.declare_field(
+                  physical_cell("rho", "kg/m3", true));
+              single_fields.velocity =
+                  single_registry.declare_field(cell("u", 3U, false));
+              single_fields.mechanical_pressure =
+                  single_registry.declare_field(cell("pi", 1U, false));
+              single_fields.face_velocity =
+                  single_registry.declare_field(face("uf", 3U));
+              single_fields.face_mass_flux =
+                  hundun::finite_volume::declare_face_mass_flux(
+                      single_registry);
+              single_fields.transported_cell_fields = {
+                  single_registry.declare_field(
+                      physical_cell("rho_h", "J/m3", true))};
+              if (field_name)
+                single_fields.transported_cell_fields.push_back(
+                    single_registry.declare_field(
+                        physical_cell(field_name->c_str(), "kg/m3", true)));
+              single_registry.freeze();
+              auto single_values = open_values;
+              single_values.transported_cell_fields.resize(field_name ? 2U
+                                                                      : 1U);
+              auto single_state = hundun::flow::FlowState::create(
+                  single_registry,
+                  {open_decomposition.local_extent(),
+                   open_topology.local_face_count()},
+                  single_fields, metadata);
+              single_state.seed_accepted_layers(single_values, single_values);
+              const auto single_before =
+                  CheckpointAccess::snapshot(single_state);
+              const auto single_views =
+                  CheckpointAccess::density_views(single_state);
+              const auto single_read = hundun::flow::read_checkpoint_v2(
+                  mpi, open_decomposition, open_topology, open_geometry,
+                  single_boundaries, single, single_state, variant_directory);
+              require_constructible_fingerprint_failure(
+                  single_before, single_state, single_read);
+              for (const auto &view : single_views)
+                HUNDUN_CHECK(
+                    rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
+            };
+        auto r5_scalar_list_membership = changed_open_config;
+        r5_scalar_list_membership.scalars.clear();
+        r5_scalar_list_membership.boundaries[inlet_patch].scalar_values =
+            std::vector<hundun::config::InletScalarValue>{};
+        require_scalar_schema_mutation(r5_scalar_list_membership, std::nullopt);
+        auto r5_scalar_name = changed_open_config;
+        r5_scalar_name.scalars.front().name = "beta";
+        r5_scalar_name.boundaries[inlet_patch].scalar_values->front().name =
+            "beta";
+        require_scalar_schema_mutation(r5_scalar_name, std::string("rho_beta"));
+      }
     mpi.barrier();
     if (mpi.rank() == 0)
       std::filesystem::remove_all(variant_directory);
   }
+  }
+
+  auto material_open_config = open_config;
+  material_open_config.density_model = hundun::config::DensityModel::material;
+  material_open_config.physics.cp_J_per_kg_K.reset();
+  material_open_config.physics.gas_constant_J_per_kg_K.reset();
+  material_open_config.physics.thermodynamic_pressure_pa.reset();
+  for (auto &boundary : material_open_config.boundaries) {
+    const auto patch_name = boundary.patch;
+    boundary = {};
+    boundary.patch = patch_name;
+    boundary.type = hundun::config::BoundaryType::symmetry;
+  }
+  auto &material_inlet = material_open_config.boundaries[0];
+  material_inlet.type = hundun::config::BoundaryType::velocity_inlet;
+  material_inlet.velocity_m_per_s = {1.0, 0.0, 0.0};
+  material_inlet.thermal_authority =
+      hundun::config::InletThermalAuthority::enthalpy;
+  material_inlet.enthalpy_J_per_kg = 300000.0;
+  material_inlet.density_kg_per_m3 = 1.0;
+  material_inlet.scalar_values =
+      std::vector<hundun::config::InletScalarValue>{{"alpha", 0.2}};
+  auto &material_outlet = material_open_config.boundaries[1];
+  material_outlet.type = hundun::config::BoundaryType::pressure_outlet;
+  material_outlet.pressure_perturbation_pa = 0.0;
+  auto material_open_boundaries = hundun::boundary::BoundaryRegistry::create(
+      material_open_config, open_topology);
+  auto material_open_values = open_values;
+  std::fill(material_open_values.density.begin(),
+            material_open_values.density.end(), 1.0);
+  std::fill(material_open_values.face_mass_flux.begin(),
+            material_open_values.face_mass_flux.end(), 0.0);
+  for (hundun::mesh::LocalFaceId face_id = 0;
+       face_id < open_topology.local_face_count(); ++face_id) {
+    const auto area = open_geometry.face_area_vector_m2(
+        face_id, hundun::mesh::FaceSide::owner);
+    material_open_values.face_mass_flux[face_id] = area.x;
+  }
+  std::fill(material_open_values.transported_cell_fields[0].begin(),
+            material_open_values.transported_cell_fields[0].end(), 300000.0);
+  std::fill(material_open_values.transported_cell_fields[1].begin(),
+            material_open_values.transported_cell_fields[1].end(), 0.2);
+  const auto make_material_open_state = [&] {
+    auto result = hundun::flow::FlowState::create(
+        open_registry,
+        {open_decomposition.local_extent(), open_topology.local_face_count()},
+        open_fields, metadata);
+    result.seed_accepted_layers(material_open_values, material_open_values);
+    return result;
+  };
+  auto material_open_state = make_material_open_state();
+  auto material_open_controller = hundun::flow::Bdf2RetryController::create(
+      material_open_config.time, material_open_config.density_model,
+      open_topology, open_geometry, mpi, material_open_state);
+  const auto material_open_directory =
+      std::filesystem::temp_directory_path() /
+      ("hundun-task23-r5-material-open-" + std::to_string(mpi.size()));
+  if (mpi.rank() == 0)
+    std::filesystem::remove_all(material_open_directory);
+  mpi.barrier();
+  const auto material_open_write = hundun::flow::write_checkpoint_v2(
+      mpi, open_decomposition, open_topology, open_geometry,
+      material_open_boundaries, material_open_config, material_open_state,
+      material_open_controller.state(), std::nullopt, material_open_directory);
+  HUNDUN_CHECK(material_open_write.disposition() ==
+               hundun::flow::CheckpointV2Disposition::completed);
+
+  auto changed_material_open_config = material_open_config;
+  const ConfigMutation r5_density_numeric_value = [](auto &single) {
+    single.boundaries[0].density_kg_per_m3 = 1.1;
+  };
+  r5_density_numeric_value(changed_material_open_config);
+  auto changed_material_open_boundaries =
+      hundun::boundary::BoundaryRegistry::create(changed_material_open_config,
+                                                 open_topology);
+  HUNDUN_CHECK(independent_resolved_fingerprint(changed_material_open_config) !=
+               independent_resolved_fingerprint(material_open_config));
+  HUNDUN_CHECK(
+      independent_boundary_fingerprint(changed_material_open_boundaries) !=
+      independent_boundary_fingerprint(material_open_boundaries));
+  auto changed_material_open_state = make_material_open_state();
+  const auto changed_material_open_before =
+      CheckpointAccess::snapshot(changed_material_open_state);
+  const auto changed_material_open_views =
+      CheckpointAccess::density_views(changed_material_open_state);
+  const auto changed_material_open_read = hundun::flow::read_checkpoint_v2(
+      mpi, open_decomposition, open_topology, open_geometry,
+      changed_material_open_boundaries, changed_material_open_config,
+      changed_material_open_state, material_open_directory);
+  require_constructible_fingerprint_failure(
+      changed_material_open_before, changed_material_open_state,
+      changed_material_open_read);
+  for (const auto &view : changed_material_open_views)
+    HUNDUN_CHECK(rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
+  mpi.barrier();
+  if (mpi.rank() == 0)
+    std::filesystem::remove_all(material_open_directory);
+  mpi.barrier();
+
   auto open_resumed = make_open_state();
   const auto open_read = hundun::flow::read_checkpoint_v2(
       mpi, open_decomposition, open_topology, open_geometry, open_boundaries,
@@ -2841,6 +3046,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       open_resumed_pressure_preconditioner(open_resumed_execution);
   hundun::flow::MaterialDensityTransportSpec open_material_spec;
   open_material_spec.enthalpy_density = open_rho_h;
+  open_material_spec.scalar_densities = {open_rho_alpha};
+  open_material_spec.scalar_diffusivities_kg_per_m_s = {0.0};
   auto open_flow = hundun::flow::FixedStepIdealGasFlow::create(
       open_decomposition, open_topology, open_geometry, open_boundaries, mpi,
       open_execution, open_halo, open_momentum, {&open_mx, &open_my, &open_mz},

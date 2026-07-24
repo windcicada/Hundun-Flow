@@ -483,8 +483,10 @@ if(HUNDUN_BUILD_TESTS)
     tests/unit/test_checkpoint_v2_protocol.cpp)
   target_include_directories(test_checkpoint_v2_protocol PRIVATE
     "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/flow/src"
     "${PROJECT_SOURCE_DIR}/runtime/src")
-  target_link_libraries(test_checkpoint_v2_protocol PRIVATE hundun_runtime)
+  target_link_libraries(test_checkpoint_v2_protocol PRIVATE
+    hundun_flow hundun_runtime)
   target_compile_definitions(test_checkpoint_v2_protocol PRIVATE
     HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   add_test(NAME test_checkpoint_v2_protocol

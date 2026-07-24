@@ -15,6 +15,10 @@
 #include <optional>
 #include <vector>
 
+namespace hundun::runtime::checkpoint_v2 {
+struct Manifest;
+}
+
 namespace hundun::flow::test {
 
 enum class CheckpointV2PreparationPoint : std::uint8_t {
@@ -46,6 +50,20 @@ bool checkpoint_v2_authenticate_global_payload_for_test(
 bool checkpoint_v2_authenticate_rank_payload_for_test(
     const std::vector<std::uint8_t> &, const FlowState &,
     std::uint64_t expected_crc) noexcept;
+bool checkpoint_v2_authenticate_rank_wrapper_for_test(
+    const std::vector<std::uint8_t> &, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::int32_t expected_rank,
+    std::int32_t expected_rank_count,
+    std::uint64_t expected_payload_size) noexcept;
+bool checkpoint_v2_authenticate_manifest_for_test(
+    const std::vector<std::uint8_t> &, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size,
+    const runtime::checkpoint_v2::Manifest &expected) noexcept;
+bool checkpoint_v2_authenticate_completed_marker_for_test(
+    const std::vector<std::uint8_t> &,
+    std::uint64_t expected_manifest_actual_size,
+    std::uint64_t expected_manifest_crc64,
+    std::uint64_t expected_common_fingerprint) noexcept;
 std::uint64_t
 checkpoint_v2_field_schema_fingerprint_for_test(const runtime::FieldRegistry &,
                                                 const FlowFieldIds &);

@@ -24,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -260,8 +261,7 @@ struct ProductReports final {
   hundun::flow::CheckpointV2Report failure;
 };
 
-ProductReports product_failure_reports(
-    const hundun::runtime::MpiContext &mpi) {
+ProductReports product_failure_reports(const hundun::runtime::MpiContext &mpi) {
   auto config = diagnostic_case(mpi.size());
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
       mpi, config.mesh.cells, {true, true, true},
@@ -506,8 +506,8 @@ void require_exact_product_diagnostic_record(
     const hundun::flow::CheckpointV2Report &report,
     hundun::diagnostics::DiagnosticLevel level,
     const hundun::diagnostics::DiagnosticRecord &record) {
-  hundun::test::checkpoint_v2_oracle::
-      require_exact_product_diagnostic_record(report, level, record);
+  hundun::test::checkpoint_v2_oracle::require_exact_product_diagnostic_record(
+      report, level, record);
   using Check = hundun::flow::CheckpointV2CheckStatus;
   HUNDUN_CHECK(record.schema_version == 1U);
   HUNDUN_CHECK(record.module_kind ==
@@ -693,33 +693,26 @@ bool diagnostic_oracle_is_mutation_sensitive(
             hundun::diagnostics::DiagnosticFailureClass::unavailable;
       }) &&
       rejected([](auto &item) { item.failure.code += "-changed"; }) &&
-      rejected([](auto &item) {
-        ++item.failure.lowest_failing_rank;
-      }) &&
+      rejected([](auto &item) { ++item.failure.lowest_failing_rank; }) &&
       rejected([](auto &item) {
         item.state_fingerprint.hex.front() =
             item.state_fingerprint.hex.front() == '0' ? '1' : '0';
       }) &&
-      rejected([](auto &item) {
-        item.identities.front().subject_id += "-changed";
-      });
+      rejected(
+          [](auto &item) { item.identities.front().subject_id += "-changed"; });
   if (level == hundun::diagnostics::DiagnosticLevel::summary)
     return common && rejected([](auto &item) {
              item.metrics.front().value.bits ^= UINT64_C(1);
            });
   if (level == hundun::diagnostics::DiagnosticLevel::invariants)
-    return common &&
-           rejected([](auto &item) {
+    return common && rejected([](auto &item) {
              item.invariants.front().observed.status =
                  hundun::diagnostics::DiagnosticValueStatus::unavailable;
            }) &&
            rejected([](auto &item) {
-             item.invariants.front().passed =
-                 !item.invariants.front().passed;
-           });
-  return common && rejected([](auto &item) {
-           ++item.counters.front().value;
+             item.invariants.front().passed = !item.invariants.front().passed;
          });
+  return common && rejected([](auto &item) { ++item.counters.front().value; });
 }
 
 void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
@@ -774,8 +767,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     hundun::diagnostics::collect_diagnostics(source, local, first);
     HUNDUN_CHECK(first.calls == 1);
     require_exact_product_diagnostic_record(local_report, level, first.record);
-    HUNDUN_CHECK(diagnostic_oracle_is_mutation_sensitive(
-        local_report, level, first.record));
+    HUNDUN_CHECK(diagnostic_oracle_is_mutation_sensitive(local_report, level,
+                                                         first.record));
     HUNDUN_CHECK(first.record.scope ==
                  hundun::diagnostics::DiagnosticScope::local);
     HUNDUN_CHECK(first.record.state_fingerprint.hex ==
@@ -910,6 +903,151 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       hundun::diagnostics::test::CheckpointV2DiagnosticsTestAccess;
   using DiagnosticFault =
       hundun::diagnostics::test::CheckpointV2DiagnosticFault;
+  if (mpi.size() > 1) {
+    for (int stale_rank = 0; stale_rank < mpi.size(); ++stale_rank) {
+      auto stale_source =
+          hundun::flow::checkpoint_v2_diagnostic_source(local_report);
+      std::unique_ptr<hundun::flow::CheckpointV2DiagnosticSource> retained;
+      if (mpi.rank() == stale_rank)
+        retained = std::make_unique<hundun::flow::CheckpointV2DiagnosticSource>(
+            std::move(stale_source));
+      OneRecordSink rejected_sink;
+      bool exact = false;
+      try {
+        hundun::diagnostics::collect_diagnostics(
+            stale_source, mpi,
+            request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
+                    hundun::diagnostics::DiagnosticScope::collective),
+            rejected_sink);
+      } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+        exact =
+            error.classification() ==
+                hundun::diagnostics::DiagnosticFailureClass::invalid_input &&
+            error.code() == "checkpoint-v2.diagnostics.stale-source" &&
+            error.lowest_failing_rank() == stale_rank;
+      }
+      HUNDUN_CHECK(exact);
+      HUNDUN_CHECK(rejected_sink.calls == 0);
+    }
+  }
+
+  enum class CollectiveRequestCase : std::uint8_t {
+    wrong_scope,
+    selected_field,
+    sample_budget,
+    bounded_level,
+    invalid_level,
+    invalid_scope,
+    frame_rank,
+    frame_step,
+    frame_time,
+    frame_phase
+  };
+  constexpr std::array collective_request_cases{
+      CollectiveRequestCase::wrong_scope,
+      CollectiveRequestCase::selected_field,
+      CollectiveRequestCase::sample_budget,
+      CollectiveRequestCase::bounded_level,
+      CollectiveRequestCase::invalid_level,
+      CollectiveRequestCase::invalid_scope,
+      CollectiveRequestCase::frame_rank,
+      CollectiveRequestCase::frame_step,
+      CollectiveRequestCase::frame_time,
+      CollectiveRequestCase::frame_phase};
+  const auto mutate_collective_request =
+      [](auto &candidate, CollectiveRequestCase request_case) {
+        using Level = hundun::diagnostics::DiagnosticLevel;
+        using Scope = hundun::diagnostics::DiagnosticScope;
+        switch (request_case) {
+        case CollectiveRequestCase::wrong_scope:
+          candidate.scope = Scope::local;
+          break;
+        case CollectiveRequestCase::selected_field:
+          candidate.selected_fields = {"rho"};
+          break;
+        case CollectiveRequestCase::sample_budget:
+          candidate.sample_budget = 1U;
+          break;
+        case CollectiveRequestCase::bounded_level:
+          candidate.level = Level::bounded_state_sample;
+          break;
+        case CollectiveRequestCase::invalid_level:
+          candidate.level = static_cast<Level>(255U);
+          break;
+        case CollectiveRequestCase::invalid_scope:
+          candidate.scope = static_cast<Scope>(255U);
+          break;
+        case CollectiveRequestCase::frame_rank:
+          ++candidate.frame.rank;
+          break;
+        case CollectiveRequestCase::frame_step:
+          ++candidate.frame.step;
+          break;
+        case CollectiveRequestCase::frame_time:
+          candidate.frame.time_s = std::nextafter(
+              candidate.frame.time_s, std::numeric_limits<double>::infinity());
+          break;
+        case CollectiveRequestCase::frame_phase:
+          candidate.frame.phase = "wrong-phase";
+          break;
+        }
+      };
+  const auto is_capability_case = [](CollectiveRequestCase request_case) {
+    return request_case == CollectiveRequestCase::wrong_scope ||
+           request_case == CollectiveRequestCase::selected_field ||
+           request_case == CollectiveRequestCase::sample_budget ||
+           request_case == CollectiveRequestCase::bounded_level;
+  };
+  for (const auto request_case : collective_request_cases) {
+    auto candidate =
+        request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
+                hundun::diagnostics::DiagnosticScope::collective);
+    mutate_collective_request(candidate, request_case);
+    OneRecordSink rejected_sink;
+    bool exact = false;
+    try {
+      hundun::diagnostics::collect_diagnostics(source, mpi, candidate,
+                                               rejected_sink);
+    } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+      exact = error.classification() ==
+                  (is_capability_case(request_case)
+                       ? hundun::diagnostics::DiagnosticFailureClass::capability
+                       : hundun::diagnostics::DiagnosticFailureClass::
+                             invalid_request) &&
+              error.code() == (is_capability_case(request_case)
+                                   ? "checkpoint-v2.diagnostics.capability"
+                                   : "checkpoint-v2.diagnostics.frame") &&
+              error.lowest_failing_rank() == -1;
+    }
+    HUNDUN_CHECK(exact);
+    HUNDUN_CHECK(rejected_sink.calls == 0);
+  }
+  if (mpi.size() > 1) {
+    for (int failing_rank = 0; failing_rank < mpi.size(); ++failing_rank)
+      for (const auto request_case : collective_request_cases) {
+        auto candidate =
+            request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
+                    hundun::diagnostics::DiagnosticScope::collective);
+        if (mpi.rank() == failing_rank)
+          mutate_collective_request(candidate, request_case);
+        OneRecordSink rejected_sink;
+        bool exact = false;
+        try {
+          hundun::diagnostics::collect_diagnostics(source, mpi, candidate,
+                                                   rejected_sink);
+        } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+          exact = error.classification() ==
+                      hundun::diagnostics::DiagnosticFailureClass::
+                          collective_operation &&
+                  error.code() ==
+                      "checkpoint-v2.diagnostics.collective-agreement" &&
+                  error.lowest_failing_rank() == failing_rank;
+        }
+        HUNDUN_CHECK(exact);
+        HUNDUN_CHECK(rejected_sink.calls == 0);
+      }
+  }
+
   DiagnosticAccess::reset();
   DiagnosticAccess::set_fault(DiagnosticFault::raw_mpi);
   {
@@ -950,12 +1088,10 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       try {
         hundun::diagnostics::collect_diagnostics(
             source, mpi,
-            request(mpi.rank(),
-                    hundun::diagnostics::DiagnosticLevel::summary,
+            request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
                     hundun::diagnostics::DiagnosticScope::collective),
             rejected_sink);
-      } catch (
-          const hundun::diagnostics::DiagnosticCollectionError &error) {
+      } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
         exact_failure =
             error.classification() ==
                 hundun::diagnostics::DiagnosticFailureClass::
@@ -989,8 +1125,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(first.calls == 1);
       require_exact_product_diagnostic_record(actual_report, level,
                                               first.record);
-      HUNDUN_CHECK(diagnostic_oracle_is_mutation_sensitive(
-          actual_report, level, first.record));
+      HUNDUN_CHECK(diagnostic_oracle_is_mutation_sensitive(actual_report, level,
+                                                           first.record));
       HUNDUN_CHECK(first.record.rank == actual_report.rank());
       HUNDUN_CHECK(first.record.step == actual_report.step());
       HUNDUN_CHECK(first.record.phase == phase_name(actual_report.phase()));

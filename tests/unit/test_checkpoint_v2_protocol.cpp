@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "checkpoint_v2_protocol.hpp"
+#include "flow/src/checkpoint_v2_test_access.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <array>
@@ -71,33 +72,35 @@ void test_rank_wrapper_literal_and_corruption() {
   HUNDUN_CHECK(decoded.rank == 3);
   HUNDUN_CHECK(decoded.rank_count == 8);
   HUNDUN_CHECK(decoded.payload == payload);
-  const auto is_exact = [&](const std::vector<std::uint8_t> &candidate) {
-    try {
-      const auto item = decode_rank_wrapper(candidate, payload.size());
-      return item.rank == 3 && item.rank_count == 8 && item.payload == payload;
-    } catch (const std::exception &) {
-      return false;
-    }
+  const auto expected_crc = crc64_ecma(encoded.data(), encoded.size());
+  const auto is_authenticated = [&](const std::vector<std::uint8_t> &candidate,
+                                    std::uint64_t crc) {
+    return hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+        candidate, crc, encoded.size(), 3, 8, payload.size());
   };
+  HUNDUN_CHECK(is_authenticated(encoded, expected_crc));
   for (std::size_t index = 0; index < encoded.size(); ++index) {
     auto corrupted = encoded;
     corrupted[index] ^= 1U;
-    HUNDUN_CHECK(!is_exact(corrupted));
+    HUNDUN_CHECK(!is_authenticated(corrupted, expected_crc));
   }
 
   for (std::size_t removed = 1; removed <= encoded.size(); ++removed) {
     auto truncated = encoded;
     truncated.resize(encoded.size() - removed);
-    HUNDUN_CHECK(
-        rejects([&] { decode_rank_wrapper(truncated, payload.size()); }));
+    HUNDUN_CHECK(!is_authenticated(truncated, expected_crc));
   }
   auto trailing = encoded;
   trailing.push_back(0U);
-  HUNDUN_CHECK(rejects([&] { decode_rank_wrapper(trailing, payload.size()); }));
+  HUNDUN_CHECK(!is_authenticated(trailing, expected_crc));
   auto bad_magic = encoded;
   bad_magic.front() ^= 1U;
+  HUNDUN_CHECK(!is_authenticated(bad_magic, expected_crc));
+  auto rebuilt_identity = encoded;
+  rebuilt_identity[16U] = 4U;
   HUNDUN_CHECK(
-      rejects([&] { decode_rank_wrapper(bad_magic, payload.size()); }));
+      !is_authenticated(rebuilt_identity, crc64_ecma(rebuilt_identity.data(),
+                                                     rebuilt_identity.size())));
 }
 
 void test_codec_limits() {
@@ -233,52 +236,22 @@ void test_manifest_and_completed_marker() {
   HUNDUN_CHECK(decoded.global_payload == manifest.global_payload);
   HUNDUN_CHECK(decoded.ranks.size() == 1U);
   HUNDUN_CHECK(decoded.ranks.front().filename == "rank-000000.v2.bin");
-  const auto manifest_is_exact =
-      [&](const std::vector<std::uint8_t> &candidate) {
-        try {
-          const auto item = decode_manifest(candidate, manifest.rank_count,
-                                            manifest.global_payload.size());
-          return item.rank_count == manifest.rank_count &&
-                 item.process_grid.x == manifest.process_grid.x &&
-                 item.process_grid.y == manifest.process_grid.y &&
-                 item.process_grid.z == manifest.process_grid.z &&
-                 item.fingerprints == manifest.fingerprints &&
-                 item.global_payload == manifest.global_payload &&
-                 item.ranks.size() == 1U &&
-                 item.ranks[0].rank == manifest.ranks[0].rank &&
-                 item.ranks[0].owned_box_begin.x ==
-                     manifest.ranks[0].owned_box_begin.x &&
-                 item.ranks[0].owned_box_begin.y ==
-                     manifest.ranks[0].owned_box_begin.y &&
-                 item.ranks[0].owned_box_begin.z ==
-                     manifest.ranks[0].owned_box_begin.z &&
-                 item.ranks[0].owned_box_end.x ==
-                     manifest.ranks[0].owned_box_end.x &&
-                 item.ranks[0].owned_box_end.y ==
-                     manifest.ranks[0].owned_box_end.y &&
-                 item.ranks[0].owned_box_end.z ==
-                     manifest.ranks[0].owned_box_end.z &&
-                 item.ranks[0].filename == manifest.ranks[0].filename &&
-                 item.ranks[0].logical_byte_size ==
-                     manifest.ranks[0].logical_byte_size &&
-                 item.ranks[0].actual_byte_size ==
-                     manifest.ranks[0].actual_byte_size &&
-                 item.ranks[0].crc64 == manifest.ranks[0].crc64 &&
-                 item.ranks[0].local_layout_fingerprint ==
-                     manifest.ranks[0].local_layout_fingerprint;
-        } catch (const std::exception &) {
-          return false;
-        }
+  const auto expected_manifest_crc = crc64_ecma(bytes.data(), bytes.size());
+  const auto manifest_is_authenticated =
+      [&](const std::vector<std::uint8_t> &candidate, std::uint64_t crc) {
+        return hundun::flow::test::checkpoint_v2_authenticate_manifest_for_test(
+            candidate, crc, bytes.size(), manifest);
       };
+  HUNDUN_CHECK(manifest_is_authenticated(bytes, expected_manifest_crc));
   for (std::size_t index = 0; index < bytes.size(); ++index) {
     auto corrupted = bytes;
     corrupted[index] ^= 1U;
-    HUNDUN_CHECK(!manifest_is_exact(corrupted));
+    HUNDUN_CHECK(!manifest_is_authenticated(corrupted, expected_manifest_crc));
   }
   for (std::size_t size = 0; size < bytes.size(); ++size) {
     auto truncated = bytes;
     truncated.resize(size);
-    HUNDUN_CHECK(!manifest_is_exact(truncated));
+    HUNDUN_CHECK(!manifest_is_authenticated(truncated, expected_manifest_crc));
   }
   HUNDUN_CHECK(rejects([&] {
     static_cast<void>(decode_manifest(bytes, manifest.rank_count + 1U,
@@ -290,10 +263,13 @@ void test_manifest_and_completed_marker() {
   }));
   auto manifest_trailing = bytes;
   manifest_trailing.push_back(0U);
-  HUNDUN_CHECK(rejects([&] {
-    static_cast<void>(decode_manifest(manifest_trailing, manifest.rank_count,
-        manifest.global_payload.size()));
-  }));
+  HUNDUN_CHECK(
+      !manifest_is_authenticated(manifest_trailing, expected_manifest_crc));
+  auto rebuilt_manifest = bytes;
+  rebuilt_manifest[24U] ^= 1U;
+  HUNDUN_CHECK(!manifest_is_authenticated(
+      rebuilt_manifest,
+      crc64_ecma(rebuilt_manifest.data(), rebuilt_manifest.size())));
 
   CompletedMarker marker{static_cast<std::uint64_t>(bytes.size()),
                          crc64_ecma(bytes.data(), bytes.size()), 99U};
@@ -314,30 +290,39 @@ void test_manifest_and_completed_marker() {
                marker.manifest_actual_size);
   HUNDUN_CHECK(decoded_marker.manifest_crc64 == marker.manifest_crc64);
   HUNDUN_CHECK(decoded_marker.common_fingerprint == marker.common_fingerprint);
-  const auto marker_is_exact = [&](const std::vector<std::uint8_t> &candidate) {
-    try {
-      const auto item = decode_completed_marker(candidate);
-      return item.manifest_actual_size == marker.manifest_actual_size &&
-             item.manifest_crc64 == marker.manifest_crc64 &&
-             item.common_fingerprint == marker.common_fingerprint;
-    } catch (const std::exception &) {
-      return false;
-    }
+  const auto marker_is_authenticated =
+      [&](const std::vector<std::uint8_t> &candidate) {
+        return hundun::flow::test::
+            checkpoint_v2_authenticate_completed_marker_for_test(
+                candidate, marker.manifest_actual_size, marker.manifest_crc64,
+                marker.common_fingerprint);
   };
+  HUNDUN_CHECK(marker_is_authenticated(marker_bytes));
   for (std::size_t index = 0; index < marker_bytes.size(); ++index) {
     auto corrupted = marker_bytes;
     corrupted[index] ^= 1U;
-    HUNDUN_CHECK(!marker_is_exact(corrupted));
+    HUNDUN_CHECK(!marker_is_authenticated(corrupted));
   }
   for (std::size_t size = 0; size < marker_bytes.size(); ++size) {
     auto truncated = marker_bytes;
     truncated.resize(size);
-    HUNDUN_CHECK(!marker_is_exact(truncated));
+    HUNDUN_CHECK(!marker_is_authenticated(truncated));
   }
   auto marker_trailing = marker_bytes;
   marker_trailing.push_back(0U);
-  HUNDUN_CHECK(rejects(
-      [&] { static_cast<void>(decode_completed_marker(marker_trailing)); }));
+  HUNDUN_CHECK(!marker_is_authenticated(marker_trailing));
+  HUNDUN_CHECK(
+      !hundun::flow::test::checkpoint_v2_authenticate_completed_marker_for_test(
+          marker_bytes, marker.manifest_actual_size + 1U, marker.manifest_crc64,
+          marker.common_fingerprint));
+  HUNDUN_CHECK(
+      !hundun::flow::test::checkpoint_v2_authenticate_completed_marker_for_test(
+          marker_bytes, marker.manifest_actual_size, marker.manifest_crc64 + 1U,
+          marker.common_fingerprint));
+  HUNDUN_CHECK(
+      !hundun::flow::test::checkpoint_v2_authenticate_completed_marker_for_test(
+          marker_bytes, marker.manifest_actual_size, marker.manifest_crc64,
+          marker.common_fingerprint + 1U));
 }
 
 void test_exact_read_phase_failures() {

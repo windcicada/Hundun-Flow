@@ -1269,6 +1269,81 @@ CheckpointV2FailureReason file_failure_reason(
              : CheckpointV2FailureReason::file_integrity;
 }
 
+runtime::checkpoint_v2::RankWrapper decode_authenticated_rank_wrapper(
+    const ByteVector &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::int32_t expected_rank,
+    std::int32_t expected_rank_count, std::uint64_t expected_payload_size) {
+  if (bytes.size() !=
+          runtime::checkpoint_v2::checked_size(expected_actual_size) ||
+      expected_actual_size !=
+          runtime::checkpoint_v2::checked_sum_u64(32U, expected_payload_size) ||
+      runtime::checkpoint_v2::crc64_ecma(bytes.data(), bytes.size()) !=
+          expected_crc)
+    throw runtime::Error("Checkpoint v2 rank wrapper authentication failed");
+  auto wrapper =
+      runtime::checkpoint_v2::decode_rank_wrapper(bytes, expected_payload_size);
+  if (wrapper.rank != expected_rank ||
+      wrapper.rank_count != expected_rank_count)
+    throw runtime::Error("Checkpoint v2 rank wrapper identity is invalid");
+  return wrapper;
+}
+
+runtime::checkpoint_v2::Manifest decode_authenticated_manifest(
+    const ByteVector &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::uint32_t expected_rank_count,
+    std::uint64_t expected_global_payload_size) {
+  if (bytes.size() !=
+          runtime::checkpoint_v2::checked_size(expected_actual_size) ||
+      runtime::checkpoint_v2::crc64_ecma(bytes.data(), bytes.size()) !=
+          expected_crc)
+    throw runtime::Error("Checkpoint v2 manifest authentication failed");
+  return runtime::checkpoint_v2::decode_manifest(bytes, expected_rank_count,
+                                                 expected_global_payload_size);
+}
+
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+bool same(const runtime::checkpoint_v2::ManifestRankRecord &left,
+          const runtime::checkpoint_v2::ManifestRankRecord &right) noexcept {
+  return left.rank == right.rank &&
+         same(left.owned_box_begin, right.owned_box_begin) &&
+         same(left.owned_box_end, right.owned_box_end) &&
+         left.filename == right.filename &&
+         left.logical_byte_size == right.logical_byte_size &&
+         left.actual_byte_size == right.actual_byte_size &&
+         left.crc64 == right.crc64 &&
+         left.local_layout_fingerprint == right.local_layout_fingerprint;
+}
+
+bool same(const runtime::checkpoint_v2::Manifest &left,
+          const runtime::checkpoint_v2::Manifest &right) noexcept {
+  if (left.rank_count != right.rank_count ||
+      !same(left.process_grid, right.process_grid) ||
+      left.fingerprints != right.fingerprints ||
+      left.global_payload != right.global_payload ||
+      left.ranks.size() != right.ranks.size())
+    return false;
+  for (std::size_t index = 0; index < left.ranks.size(); ++index)
+    if (!same(left.ranks[index], right.ranks[index]))
+      return false;
+  return true;
+}
+
+runtime::checkpoint_v2::CompletedMarker decode_authenticated_completed_marker(
+    const ByteVector &bytes, std::uint64_t expected_manifest_actual_size,
+    std::uint64_t expected_manifest_crc64,
+    std::uint64_t expected_common_fingerprint) {
+  if (bytes.size() != 40U)
+    throw runtime::Error("Checkpoint v2 completed marker size is invalid");
+  const auto marker = runtime::checkpoint_v2::decode_completed_marker(bytes);
+  if (marker.manifest_actual_size != expected_manifest_actual_size ||
+      marker.manifest_crc64 != expected_manifest_crc64 ||
+      marker.common_fingerprint != expected_common_fingerprint)
+    throw runtime::Error(
+        "Checkpoint v2 completed marker authentication failed");
+  return marker;
+}
+#endif
+
 } // namespace
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1310,6 +1385,47 @@ bool checkpoint_v2_authenticate_rank_payload_for_test(
       return false;
     std::uint64_t logical_bytes{};
     static_cast<void>(decode_rank_payload(bytes, state, logical_bytes));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+bool checkpoint_v2_authenticate_rank_wrapper_for_test(
+    const std::vector<std::uint8_t> &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::int32_t expected_rank,
+    std::int32_t expected_rank_count,
+    std::uint64_t expected_payload_size) noexcept {
+  try {
+    static_cast<void>(decode_authenticated_rank_wrapper(
+        bytes, expected_crc, expected_actual_size, expected_rank,
+        expected_rank_count, expected_payload_size));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+bool checkpoint_v2_authenticate_manifest_for_test(
+    const std::vector<std::uint8_t> &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size,
+    const runtime::checkpoint_v2::Manifest &expected) noexcept {
+  try {
+    const auto decoded = decode_authenticated_manifest(
+        bytes, expected_crc, expected_actual_size, expected.rank_count,
+        expected.global_payload.size());
+    return same(decoded, expected);
+  } catch (...) {
+    return false;
+  }
+}
+bool checkpoint_v2_authenticate_completed_marker_for_test(
+    const std::vector<std::uint8_t> &bytes,
+    std::uint64_t expected_manifest_actual_size,
+    std::uint64_t expected_manifest_crc64,
+    std::uint64_t expected_common_fingerprint) noexcept {
+  try {
+    static_cast<void>(decode_authenticated_completed_marker(
+        bytes, expected_manifest_actual_size, expected_manifest_crc64,
+        expected_common_fingerprint));
     return true;
   } catch (...) {
     return false;
@@ -2080,8 +2196,9 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
     if (values.manifest_crc64 != marker.manifest_crc64)
       throw runtime::Error("Checkpoint v2 manifest CRC is invalid");
     manifest_crc_match = true;
-    manifest = runtime::checkpoint_v2::decode_manifest(
-        manifest_bytes, static_cast<std::uint32_t>(mpi.size()), global_size);
+    manifest = decode_authenticated_manifest(
+        manifest_bytes, marker.manifest_crc64, marker.manifest_actual_size,
+        static_cast<std::uint32_t>(mpi.size()), global_size);
     global = decode_global_payload(manifest.global_payload, global_size);
   } catch (const runtime::checkpoint_v2::NumericFileError &error) {
     manifest_reason = file_failure_reason(error.failure());
@@ -2232,10 +2349,9 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
     if (values.local_crc64 != record.crc64)
       throw runtime::Error("Checkpoint v2 rank CRC is invalid");
     rank_crc_match = true;
-    const auto wrapper = runtime::checkpoint_v2::decode_rank_wrapper(
-        rank_bytes, shape.payload_bytes);
-    if (wrapper.rank != mpi.rank() || wrapper.rank_count != mpi.size())
-      throw runtime::Error("Checkpoint v2 rank wrapper identity is invalid");
+    const auto wrapper = decode_authenticated_rank_wrapper(
+        rank_bytes, record.crc64, expected_actual, mpi.rank(), mpi.size(),
+        shape.payload_bytes);
     std::uint64_t decoded_logical{};
     layers = decode_rank_payload(wrapper.payload, state, decoded_logical);
     if (decoded_logical != record.logical_byte_size)
