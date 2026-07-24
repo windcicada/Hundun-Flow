@@ -981,6 +981,17 @@ void require_consistent_product_report(const hundun::runtime::MpiContext &mpi,
   }
 }
 
+void require_destination_report_authority(
+    const hundun::runtime::MpiContext &mpi,
+    const hundun::flow::test::CheckpointV2DeepSnapshot &before,
+    const hundun::flow::CheckpointV2Report &report) {
+  HUNDUN_CHECK(report.step() == before.metadata.step);
+  HUNDUN_CHECK(bits_of(report.time_s()) == bits_of(before.metadata.time_s));
+  require_consistent_product_report(mpi, report);
+  HUNDUN_CHECK(report.semantic_fingerprint() ==
+               independent_report_fingerprint(observed_report_values(report)));
+}
+
 ExpectedProductReport expected_constructible_fingerprint_failure_report(
     const hundun::runtime::MpiContext &mpi,
     const std::filesystem::path &checkpoint_directory,
@@ -1146,10 +1157,18 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   const auto metadata = hundun::flow::AcceptedStepMetadata{
       0U, 0.0, config.time.initial_dt_s, 0.0,
       hundun::flow::MomentumTimeOrder::backward_euler};
+  const auto destination_metadata = hundun::flow::AcceptedStepMetadata{
+      17U, 1.25, config.time.initial_dt_s, 0.0,
+      hundun::flow::MomentumTimeOrder::backward_euler};
   auto make_state = [&] {
     return hundun::flow::FlowState::create(
         registry, {decomposition.local_extent(), topology.local_face_count()},
         fields, metadata);
+  };
+  auto make_destination_state = [&] {
+    return hundun::flow::FlowState::create(
+        registry, {decomposition.local_extent(), topology.local_face_count()},
+        fields, destination_metadata);
   };
   const std::size_t cells = topology.owned_cell_count();
   hundun::flow::FlowLayerValues history;
@@ -1391,7 +1410,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         auto changed_state = hundun::flow::FlowState::create(
             changed_registry,
             {decomposition.local_extent(), topology.local_face_count()},
-            changed_fields, metadata);
+            changed_fields, destination_metadata);
         changed_state.seed_accepted_layers(history, committed);
         const auto changed_before = CheckpointAccess::snapshot(changed_state);
         const auto changed_read = hundun::flow::read_checkpoint_v2(
@@ -1428,7 +1447,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     auto shifted_state = hundun::flow::FlowState::create(
         shifted_registry,
         {decomposition.local_extent(), topology.local_face_count()},
-        shifted_fields, metadata);
+        shifted_fields, destination_metadata);
     shifted_state.seed_accepted_layers(history, committed);
     const auto shifted_before = CheckpointAccess::snapshot(shifted_state);
     const auto shifted_read = hundun::flow::read_checkpoint_v2(
@@ -1438,11 +1457,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         mpi, directory, shifted_before, shifted_state, shifted_read);
   }
 
-  auto destination = make_state();
+  auto destination = make_destination_state();
   auto different = history;
   for (double &item : different.density)
     item += 9.0;
   destination.seed_accepted_layers(different, different);
+  const auto destination_before = CheckpointAccess::snapshot(destination);
   const auto restored = hundun::flow::read_checkpoint_v2(
       mpi, decomposition, topology, geometry, boundaries, config, destination,
       directory);
@@ -1459,6 +1479,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       controller_state, restored.time_control_state()));
   HUNDUN_CHECK(
       CheckpointAccess::all_cell_ghosts_are_positive_zero(destination));
+  require_destination_report_authority(mpi, destination_before,
+                                       restored.report());
   hundun::flow::detail::CheckpointV2ReportValues expected_read;
   expected_read.operation = hundun::flow::CheckpointV2Operation::read;
   expected_read.disposition =
@@ -1467,8 +1489,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   expected_read.phase = hundun::flow::CheckpointV2Phase::restore_publish;
   expected_read.rank = mpi.rank();
   expected_read.lowest_failing_rank = -1;
-  expected_read.step = metadata.step;
-  expected_read.time_s = metadata.time_s;
+  expected_read.step = destination_metadata.step;
+  expected_read.time_s = destination_metadata.time_s;
   expected_read.local_logical_bytes = independent_rank_logical;
   expected_read.local_actual_bytes = expected_rank_actual;
   expected_read.global_logical_bytes = expected_global_logical;
@@ -1546,8 +1568,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         values.phase = phase;
         values.rank = mpi.rank();
         values.lowest_failing_rank = lowest_failing_rank;
-        values.step = metadata.step;
-        values.time_s = metadata.time_s;
+        values.step = destination_metadata.step;
+        values.time_s = destination_metadata.time_s;
         values.transaction_entry =
             hundun::flow::CheckpointV2CheckStatus::passed;
         values.rollback = hundun::flow::CheckpointV2CheckStatus::passed;
@@ -1575,6 +1597,73 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
             values.local_crc64 = independent_crc64(actual_rank_wrapper);
             values.rank_crc =
                 hundun::flow::CheckpointV2CheckStatus::passed;
+          }
+        }
+        return ExpectedProductReport{
+            values, independent_report_fingerprint(values)};
+      };
+  enum class LateReadEvidence {
+    partition,
+    global_state,
+    physical_state,
+    final_success_boundary
+  };
+  const auto expected_late_read_report =
+      [&](const std::filesystem::path &checkpoint_directory,
+          const hundun::flow::test::CheckpointV2DeepSnapshot &before,
+          LateReadEvidence evidence, int lowest_failing_rank) {
+        hundun::flow::detail::CheckpointV2ReportValues values;
+        values.operation = hundun::flow::CheckpointV2Operation::read;
+        values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+        values.reason = evidence == LateReadEvidence::partition
+                            ? hundun::flow::CheckpointV2FailureReason::layout
+                            : hundun::flow::CheckpointV2FailureReason::state;
+        values.phase = evidence == LateReadEvidence::partition
+                           ? hundun::flow::CheckpointV2Phase::manifest_read
+                           : hundun::flow::CheckpointV2Phase::restore_prepare;
+        values.rank = mpi.rank();
+        values.lowest_failing_rank = lowest_failing_rank;
+        values.step = before.metadata.step;
+        values.time_s = before.metadata.time_s;
+        values.manifest_crc64 = independent_crc64(
+            read_file_bytes(checkpoint_directory / "manifest.v2.bin"));
+        values.file_count = 2U;
+        values.crc_check_count = 1U;
+        values.manifest_crc =
+            hundun::flow::CheckpointV2CheckStatus::passed;
+        values.exact_size_eof =
+            hundun::flow::CheckpointV2CheckStatus::passed;
+        values.partition =
+            evidence == LateReadEvidence::partition
+                ? hundun::flow::CheckpointV2CheckStatus::failed
+                : hundun::flow::CheckpointV2CheckStatus::passed;
+        values.fingerprint =
+            evidence == LateReadEvidence::partition
+                ? hundun::flow::CheckpointV2CheckStatus::not_checked
+                : hundun::flow::CheckpointV2CheckStatus::passed;
+        values.transaction_entry =
+            hundun::flow::CheckpointV2CheckStatus::passed;
+        values.rollback = hundun::flow::CheckpointV2CheckStatus::passed;
+        if (evidence == LateReadEvidence::partition) {
+          values.collective_count = 13U;
+        } else if (evidence == LateReadEvidence::global_state) {
+          values.collective_count = 21U;
+        } else {
+          const auto rank_bytes =
+              read_file_bytes(rank_file_path(checkpoint_directory, mpi.rank()));
+          values.local_logical_bytes = independent_rank_logical;
+          values.local_actual_bytes = rank_bytes.size();
+          values.local_crc64 = independent_crc64(rank_bytes);
+          values.file_count = static_cast<std::uint64_t>(mpi.size()) + 2U;
+          values.crc_check_count = static_cast<std::uint64_t>(mpi.size()) + 1U;
+          values.rank_crc = hundun::flow::CheckpointV2CheckStatus::passed;
+          if (evidence == LateReadEvidence::physical_state) {
+            values.collective_count = 23U;
+          } else {
+            values.global_logical_bytes = expected_global_logical;
+            values.global_actual_bytes =
+                expected_rank_actual_sum + expected_manifest_size + 40U;
+            values.collective_count = 29U;
           }
         }
         return ExpectedProductReport{
@@ -1678,7 +1767,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     }
 
     {
-      auto failed_destination = make_state();
+      auto failed_destination = make_destination_state();
       failed_destination.seed_accepted_layers(different, different);
       const auto before = CheckpointAccess::snapshot(failed_destination);
       if (mpi.rank() == mpi.size() - 1)
@@ -1693,14 +1782,14 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.report().phase() ==
                    hundun::flow::CheckpointV2Phase::restore_prepare);
       HUNDUN_CHECK(failed.report().lowest_failing_rank() == mpi.size() - 1);
-      require_consistent_product_report(mpi, failed.report());
+      require_destination_report_authority(mpi, before, failed.report());
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, CheckpointAccess::snapshot(failed_destination)));
     }
 
     {
-      auto failed_destination = make_state();
+      auto failed_destination = make_destination_state();
       failed_destination.seed_accepted_layers(different, different);
       const auto before = CheckpointAccess::snapshot(failed_destination);
       if (mpi.rank() == mpi.size() - 1)
@@ -1715,7 +1804,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       HUNDUN_CHECK(failed.report().phase() ==
                    hundun::flow::CheckpointV2Phase::restore_prepare);
       HUNDUN_CHECK(failed.report().lowest_failing_rank() == mpi.size() - 1);
-      require_consistent_product_report(mpi, failed.report());
+      require_destination_report_authority(mpi, before, failed.report());
       HUNDUN_CHECK(
           hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
               before, CheckpointAccess::snapshot(failed_destination)));
@@ -1723,7 +1812,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   }
 
   for (int failing_rank = 0; failing_rank < mpi.size(); ++failing_rank) {
-    auto failed_destination = make_state();
+    auto failed_destination = make_destination_state();
     failed_destination.seed_accepted_layers(different, different);
     const auto before = CheckpointAccess::snapshot(failed_destination);
     const auto old_views = CheckpointAccess::density_views(failed_destination);
@@ -1742,7 +1831,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed.report().lowest_failing_rank() == failing_rank);
     HUNDUN_CHECK(failed.report().publication_status() ==
                  hundun::flow::CheckpointV2CheckStatus::not_checked);
-    require_consistent_product_report(mpi, failed.report());
+    require_destination_report_authority(mpi, before, failed.report());
+    require_exact_product_report(
+        failed.report(),
+        expected_late_read_report(
+            directory, before, LateReadEvidence::final_success_boundary,
+            failing_rank));
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before, CheckpointAccess::snapshot(failed_destination)));
     for (const auto &view : old_views)
@@ -2037,7 +2131,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     resolved_tuple_mutations[mutation_index](changed);
     HUNDUN_CHECK(independent_resolved_fingerprint(changed) !=
                  baseline_resolved_fingerprint);
-    auto fingerprint_destination = make_state();
+    auto fingerprint_destination = make_destination_state();
     fingerprint_destination.seed_accepted_layers(different, different);
     const auto before = CheckpointAccess::snapshot(fingerprint_destination);
     const auto rejected = hundun::flow::read_checkpoint_v2(
@@ -2162,7 +2256,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         hundun::flow::FlowState::create(registry,
         {partition_decomposition.local_extent(),
          partition_topology.local_face_count()},
-        fields, metadata);
+        fields, destination_metadata);
     const auto partition_values = [&] {
           auto values = history;
           const auto partition_cells = partition_topology.owned_cell_count();
@@ -2189,6 +2283,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                  hundun::flow::CheckpointV2FailureReason::layout);
     HUNDUN_CHECK(partition_read.report().partition_status() ==
                  hundun::flow::CheckpointV2CheckStatus::failed);
+    require_destination_report_authority(mpi, partition_before,
+                                         partition_read.report());
+    require_exact_product_report(
+        partition_read.report(),
+        expected_late_read_report(directory, partition_before,
+                                  LateReadEvidence::partition, 0));
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
             partition_before, CheckpointAccess::snapshot(partition_state)));
     for (const auto &view : partition_views)
@@ -2199,7 +2299,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       topology, hundun::mesh::AnalyticWarpedBoxMapping(config.mesh.origin_m,
                                                        config.mesh.length_m,
                                                        {0.01, -0.005, 0.0025}));
-  auto geometry_destination = make_state();
+  auto geometry_destination = make_destination_state();
   geometry_destination.seed_accepted_layers(different, different);
   const auto geometry_before = CheckpointAccess::snapshot(geometry_destination);
   const auto geometry_rejected = hundun::flow::read_checkpoint_v2(
@@ -2210,6 +2310,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                hundun::flow::CheckpointV2FailureReason::file_integrity);
   HUNDUN_CHECK(geometry_rejected.report().fingerprint_status() ==
                hundun::flow::CheckpointV2CheckStatus::failed);
+  require_destination_report_authority(mpi, geometry_before,
+                                       geometry_rejected.report());
   HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
       geometry_before, CheckpointAccess::snapshot(geometry_destination)));
 
@@ -2238,7 +2340,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   for (int failing_rank = 0; failing_rank < mpi.size(); ++failing_rank) {
     for (const auto phase_case : numeric_read_phase_cases) {
       for (const auto point : read_points) {
-        auto phase_destination = make_state();
+        auto phase_destination = make_destination_state();
         phase_destination.seed_accepted_layers(different, different);
         const auto before = CheckpointAccess::snapshot(phase_destination);
         if (mpi.rank() == failing_rank)
@@ -2252,7 +2354,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                      hundun::flow::CheckpointV2FailureReason::filesystem);
         HUNDUN_CHECK(failed.report().phase() == phase_case.phase);
         HUNDUN_CHECK(failed.report().lowest_failing_rank() == failing_rank);
-        require_consistent_product_report(mpi, failed.report());
+        require_destination_report_authority(mpi, before, failed.report());
         require_exact_product_report(
             failed.report(),
             expected_read_file_failure(phase_case.phase, failing_rank));
@@ -2261,7 +2363,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                 before, CheckpointAccess::snapshot(phase_destination)));
       }
     }
-    auto inventory_destination = make_state();
+    auto inventory_destination = make_destination_state();
     inventory_destination.seed_accepted_layers(different, different);
     const auto inventory_before =
         CheckpointAccess::snapshot(inventory_destination);
@@ -2278,7 +2380,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                  hundun::flow::CheckpointV2Phase::manifest_read);
     HUNDUN_CHECK(inventory_failed.report().lowest_failing_rank() ==
                  failing_rank);
-    require_consistent_product_report(mpi, inventory_failed.report());
+    require_destination_report_authority(mpi, inventory_before,
+                                         inventory_failed.report());
     auto expected_inventory = expected_read_file_failure(
         hundun::flow::CheckpointV2Phase::manifest_read, failing_rank);
     expected_inventory.values.file_count = 2U;
@@ -2452,7 +2555,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   auto max_revision_destination = hundun::flow::FlowState::create(
       ideal_registry,
       {decomposition.local_extent(), topology.local_face_count()}, ideal_fields,
-      metadata);
+      destination_metadata);
   max_revision_destination.seed_accepted_layers(ideal_values, ideal_values);
   const auto max_revision_before =
       CheckpointAccess::snapshot(max_revision_destination);
@@ -2464,6 +2567,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                hundun::flow::CheckpointV2FailureReason::state);
   HUNDUN_CHECK(max_revision_read.report().phase() ==
                hundun::flow::CheckpointV2Phase::restore_prepare);
+  require_destination_report_authority(mpi, max_revision_before,
+                                       max_revision_read.report());
   HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
       max_revision_before,
       CheckpointAccess::snapshot(max_revision_destination)));
@@ -2700,6 +2805,14 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     result.seed_accepted_layers(open_values, open_values);
     return result;
   };
+  const auto make_open_destination_state = [&] {
+    auto result = hundun::flow::FlowState::create(
+        open_registry,
+        {open_decomposition.local_extent(), open_topology.local_face_count()},
+        open_fields, destination_metadata);
+    result.seed_accepted_layers(open_values, open_values);
+    return result;
+  };
   auto open_state = make_open_state();
   const hundun::flow::IdealGasClosureSpec open_spec{open_rho_h, 1000.0, 287.05,
                                                     101325.0};
@@ -2768,7 +2881,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
           changed_open_config, open_topology);
     HUNDUN_CHECK(independent_boundary_fingerprint(changed_open_boundaries) !=
                  open_boundary_fingerprint);
-    auto changed_open_state = make_open_state();
+    auto changed_open_state = make_open_destination_state();
     const auto changed_open_before =
         CheckpointAccess::snapshot(changed_open_state);
       const auto changed_open_views =
@@ -2808,7 +2921,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                   independent_boundary_fingerprint(changed_open_boundaries) ||
               independent_resolved_fingerprint(single) !=
                   independent_resolved_fingerprint(changed_open_config));
-          auto single_state = make_open_state();
+          auto single_state = make_open_destination_state();
           const auto single_before = CheckpointAccess::snapshot(single_state);
             const auto single_views =
                 CheckpointAccess::density_views(single_state);
@@ -2915,7 +3028,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                   single_registry,
                   {open_decomposition.local_extent(),
                    open_topology.local_face_count()},
-                  single_fields, metadata);
+                  single_fields, destination_metadata);
               single_state.seed_accepted_layers(single_values, single_values);
               const auto single_before =
                   CheckpointAccess::snapshot(single_state);
@@ -2979,6 +3092,14 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         open_registry,
         {open_decomposition.local_extent(), open_topology.local_face_count()},
         open_fields, metadata);
+    result.seed_accepted_layers(material_open_values, material_open_values);
+    return result;
+  };
+  const auto make_material_open_destination_state = [&] {
+    auto result = hundun::flow::FlowState::create(
+        open_registry,
+        {open_decomposition.local_extent(), open_topology.local_face_count()},
+        open_fields, destination_metadata);
     result.seed_accepted_layers(material_open_values, material_open_values);
     return result;
   };
@@ -3050,7 +3171,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(
         independent_boundary_fingerprint(changed_material_open_boundaries) !=
         independent_boundary_fingerprint(material_open_boundaries));
-    auto changed_material_open_state = make_material_open_state();
+    auto changed_material_open_state = make_material_open_destination_state();
     const auto changed_material_open_before =
         CheckpointAccess::snapshot(changed_material_open_state);
     const auto changed_material_open_views =
@@ -3436,7 +3557,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     mpi.barrier();
     rebuild_checkpoint_global_bytes(mpi, invalid_time_directory,
                                     mutation.offset, mutation.replacement);
-    auto invalid_time_destination = make_state();
+    auto invalid_time_destination = make_destination_state();
     invalid_time_destination.seed_accepted_layers(different, different);
     const auto before = CheckpointAccess::snapshot(invalid_time_destination);
     const auto rejected = hundun::flow::read_checkpoint_v2(
@@ -3445,6 +3566,12 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(!rejected.restored());
     HUNDUN_CHECK(rejected.report().reason() == mutation.reason);
     HUNDUN_CHECK(rejected.report().phase() == mutation.phase);
+    require_destination_report_authority(mpi, before, rejected.report());
+    if (std::string_view(mutation.name) == "schema")
+      require_exact_product_report(
+          rejected.report(),
+          expected_late_read_report(invalid_time_directory, before,
+                                    LateReadEvidence::global_state, 0));
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before, CheckpointAccess::snapshot(invalid_time_destination)));
     mpi.barrier();
@@ -3461,7 +3588,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       ReadPhaseCase{1U, hundun::flow::CheckpointV2Phase::manifest_read},
       ReadPhaseCase{2U, hundun::flow::CheckpointV2Phase::rank_read}};
   for (const auto &phase_case : read_phase_cases) {
-    auto failed_destination = make_state();
+    auto failed_destination = make_destination_state();
     failed_destination.seed_accepted_layers(different, different);
     const auto before_failure = CheckpointAccess::snapshot(failed_destination);
     const int failing_rank = mpi.size() - 1;
@@ -3478,7 +3605,8 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     HUNDUN_CHECK(failed_phase.report().lowest_failing_rank() == failing_rank);
     HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
         before_failure, CheckpointAccess::snapshot(failed_destination)));
-    require_consistent_product_report(mpi, failed_phase.report());
+    require_destination_report_authority(mpi, before_failure,
+                                         failed_phase.report());
     auto expected_read_fault =
         expected_read_file_failure(phase_case.phase, failing_rank);
     if (phase_case.phase == hundun::flow::CheckpointV2Phase::rank_read) {
@@ -3552,7 +3680,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   rebuild_checkpoint_rank_value(
       mpi, invalid_generic_directory, topology.owned_cell_count(),
       topology.local_face_count(), 2U, 6U, UINT64_C(0x7ff8000000000001));
-  auto invalid_generic_destination = make_state();
+  auto invalid_generic_destination = make_destination_state();
   invalid_generic_destination.seed_accepted_layers(different, different);
   const auto before_invalid_generic =
       CheckpointAccess::snapshot(invalid_generic_destination);
@@ -3564,10 +3692,19 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                hundun::flow::CheckpointV2FailureReason::state);
   HUNDUN_CHECK(invalid_generic_read.report().phase() ==
                hundun::flow::CheckpointV2Phase::restore_prepare);
+  HUNDUN_CHECK(invalid_generic_read.report().lowest_failing_rank() ==
+               mpi.size() - 1);
   HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_failed_read_preserved_values(
       before_invalid_generic,
       CheckpointAccess::snapshot(invalid_generic_destination)));
-  require_consistent_product_report(mpi, invalid_generic_read.report());
+  require_destination_report_authority(mpi, before_invalid_generic,
+                                       invalid_generic_read.report());
+  require_exact_product_report(
+      invalid_generic_read.report(),
+      expected_late_read_report(invalid_generic_directory,
+                                before_invalid_generic,
+                                LateReadEvidence::physical_state,
+                                mpi.size() - 1));
   mpi.barrier();
   if (mpi.rank() == 0)
     std::filesystem::remove_all(invalid_generic_directory);

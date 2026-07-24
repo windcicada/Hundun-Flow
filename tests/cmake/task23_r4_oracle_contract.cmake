@@ -47,6 +47,34 @@ function(task23_require_text input_variable required label)
   endif()
 endfunction()
 
+function(task23_compact input_variable output_variable)
+  string(REGEX REPLACE "[\t\r\n ]+" "" compact "${${input_variable}}")
+  set(${output_variable} "${compact}" PARENT_SCOPE)
+endfunction()
+
+function(task23_require_compact_text input_variable required label)
+  task23_compact(${input_variable} compact)
+  string(REGEX REPLACE "[\t\r\n ]+" "" compact_required "${required}")
+  string(FIND "${compact}" "${compact_required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R8 ${label} is not bound to '${required}'")
+  endif()
+endfunction()
+
+function(task23_require_compact_order input_variable first second label)
+  task23_compact(${input_variable} compact)
+  string(REGEX REPLACE "[\t\r\n ]+" "" compact_first "${first}")
+  string(REGEX REPLACE "[\t\r\n ]+" "" compact_second "${second}")
+  string(FIND "${compact}" "${compact_first}" first_position)
+  string(FIND "${compact}" "${compact_second}" second_position)
+  if(first_position EQUAL -1 OR second_position EQUAL -1 OR
+      NOT first_position LESS second_position)
+    message(FATAL_ERROR
+      "Task 23 R8 ${label} data-flow order is not established")
+  endif()
+endfunction()
+
 function(task23_require_match_count input_variable pattern expected label)
   string(REGEX MATCHALL "${pattern}" matches "${${input_variable}}")
   list(LENGTH matches actual)
@@ -116,6 +144,32 @@ if(NOT hard_coded_binding EQUAL -1)
   message(FATAL_ERROR "Task 23 R7 boolean-binding self-oracle failed")
 endif()
 
+# R8 data-flow self-oracles reject checked work whose result is unused and
+# consumer sections that retain only an unused shared-formula call.
+set(task23_formula_return_fixture
+  "const auto result = checked_sum_u64(a, b);\nchecked_size(result);\nreturn a + b;\n")
+task23_compact(task23_formula_return_fixture
+  task23_formula_return_fixture_compact)
+string(FIND "${task23_formula_return_fixture_compact}" "returnresult;"
+  task23_formula_return_binding)
+if(NOT task23_formula_return_binding EQUAL -1)
+  message(FATAL_ERROR "Task 23 R8 formula-return self-oracle failed")
+endif()
+
+foreach(consumer_name IN ITEMS exact_size expected_size expected_manifest_size)
+  set(task23_unused_formula_fixture
+    "const auto ${consumer_name} = unchecked_value;\nstatic_cast<void>(expected_manifest_actual_size(a, b));\nif (observed != ${consumer_name}) reject();\n")
+  task23_compact(task23_unused_formula_fixture
+    task23_unused_formula_fixture_compact)
+  string(FIND "${task23_unused_formula_fixture_compact}"
+    "constauto${consumer_name}=expected_manifest_actual_size("
+    task23_unused_formula_binding)
+  if(NOT task23_unused_formula_binding EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R8 ${consumer_name} unused-formula self-oracle failed")
+  endif()
+endforeach()
+
 task23_strip_cpp_comments(checkpoint_test checkpoint_test_clean)
 task23_strip_cpp_comments(protocol_test protocol_test_clean)
 task23_strip_cpp_comments(checkpoint_product checkpoint_product_clean)
@@ -182,6 +236,36 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
     task23_require_text(constructible_report_section "${required}"
       "constructible fingerprint report helper")
   endforeach()
+  task23_extract_bounded(checkpoint_test_clean
+    "void require_destination_report_authority("
+    "ExpectedProductReport expected_constructible_fingerprint_failure_report("
+    destination_authority_section "destination report authority helper")
+  foreach(required IN ITEMS
+      "report.step() == before.metadata.step"
+      "bits_of(report.time_s()) == bits_of(before.metadata.time_s)"
+      "require_consistent_product_report(mpi, report)"
+      "independent_report_fingerprint(observed_report_values(report))")
+    task23_require_text(destination_authority_section "${required}"
+      "destination report authority helper")
+  endforeach()
+  foreach(required IN ITEMS
+      "17U, 1.25"
+      "changed_fields, destination_metadata"
+      "shifted_fields, destination_metadata"
+      "auto fingerprint_destination = make_destination_state()"
+      "const auto make_open_destination_state ="
+      "single_fields, destination_metadata"
+      "const auto make_material_open_destination_state ="
+      "LateReadEvidence::partition"
+      "LateReadEvidence::global_state"
+      "LateReadEvidence::physical_state"
+      "LateReadEvidence::final_success_boundary")
+    task23_require_text(checkpoint_test_clean "${required}"
+      "destination report authority matrix")
+  endforeach()
+  task23_require_match_count(checkpoint_test_clean
+    "expected_late_read_report\\("
+    4 "destination late-read expected-report calls")
   string(REGEX MATCHALL
     "require_constructible_fingerprint_failure\\([\t\r\n ]*mpi,[\t\r\n ]*(directory|open_directory|variant_directory|material_open_directory),"
     constructible_report_calls "${checkpoint_test_clean}")
@@ -298,15 +382,23 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
       "std::uint64_t expected_manifest_actual_size("
       "runtime::checkpoint_v2::Manifest decode_authenticated_manifest("
       manifest_formula_section "manifest size formula")
-    foreach(required IN ITEMS
-        "checked_size(rank_count)"
-        "checked_product("
-        "checked_sum_u64(84U, global_payload_size)"
-        "checked_sum_u64("
-        "checked_size(result)")
-      task23_require_text(manifest_formula_section "${required}"
-        "manifest size formula")
-    endforeach()
+    task23_require_compact_text(manifest_formula_section
+      "const auto rank_records = runtime::checkpoint_v2::checked_product(
+        runtime::checkpoint_v2::checked_size(rank_count), 82U);"
+      "manifest rank-record formula")
+    task23_require_compact_text(manifest_formula_section
+      "const auto header_and_payload =
+        runtime::checkpoint_v2::checked_sum_u64(84U, global_payload_size);"
+      "manifest header/payload formula")
+    task23_require_compact_text(manifest_formula_section
+      "const auto result = runtime::checkpoint_v2::checked_sum_u64(
+        header_and_payload, static_cast<std::uint64_t>(rank_records));"
+      "manifest final checked sum")
+    task23_require_compact_text(manifest_formula_section
+      "static_cast<void>(runtime::checkpoint_v2::checked_size(result));"
+      "manifest final platform conversion")
+    task23_require_compact_text(manifest_formula_section
+      "return result;" "manifest checked return")
 
     string(REGEX MATCHALL "checked_sum_u64\\("
       manifest_formula_sums "${manifest_formula_section}")
@@ -320,21 +412,40 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
       "runtime::checkpoint_v2::Manifest decode_authenticated_manifest("
       "#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS"
       manifest_authenticator_section "manifest authenticator")
-    task23_require_text(manifest_authenticator_section
-      "expected_manifest_actual_size("
-      "manifest authenticator formula call")
+    task23_require_compact_text(manifest_authenticator_section
+      "const auto exact_size = expected_manifest_actual_size(
+        expected_global_payload_size, expected_rank_count);"
+      "manifest authenticator formula initializer")
+    task23_require_compact_text(manifest_authenticator_section
+      "expected_actual_size != exact_size"
+      "manifest authenticator exact-size comparison")
     task23_extract_bounded(checkpoint_product_clean
       "CheckpointV2Report write_checkpoint_v2("
       "CheckpointV2ReadResult\nread_checkpoint_v2("
       checkpoint_write_section "checkpoint writer")
-    task23_require_text(checkpoint_write_section
-      "expected_manifest_actual_size(" "checkpoint writer formula call")
+    task23_require_compact_text(checkpoint_write_section
+      "const auto expected_size = expected_manifest_actual_size(
+        static_cast<std::uint64_t>(global_payload.size()),
+        static_cast<std::uint64_t>(mpi.size()));"
+      "checkpoint writer formula initializer")
+    task23_require_compact_text(checkpoint_write_section
+      "bytes.size() != expected_size"
+      "checkpoint writer expected-size comparison")
     task23_extract_bounded(checkpoint_product_clean
       "CheckpointV2ReadResult\nread_checkpoint_v2("
       "CheckpointV2DiagnosticSource::CheckpointV2DiagnosticSource("
       checkpoint_read_section "checkpoint reader")
-    task23_require_text(checkpoint_read_section
-      "expected_manifest_actual_size(" "checkpoint reader formula call")
+    task23_require_compact_text(checkpoint_read_section
+      "const auto expected_manifest_size = expected_manifest_actual_size(
+        global_size, static_cast<std::uint64_t>(mpi.size()));"
+      "checkpoint reader formula initializer")
+    task23_require_compact_text(checkpoint_read_section
+      "marker.manifest_actual_size != expected_manifest_size"
+      "checkpoint reader marker-size comparison")
+    task23_require_compact_order(checkpoint_read_section
+      "marker.manifest_actual_size != expected_manifest_size"
+      "manifest_bytes = runtime::checkpoint_v2::read_regular_file_exact("
+      "checkpoint reader comparison before exact read")
 
     task23_extract_bounded(protocol_test_clean
       "void test_authenticated_rank_wrapper_limits()"

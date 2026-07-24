@@ -2257,8 +2257,6 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   values.exact_size_eof = CheckpointV2CheckStatus::passed;
   values.file_count = 2U;
   values.crc_check_count = 1U;
-  values.step = global.metadata.step;
-  values.time_s = global.metadata.time_s;
 
   bool inventory_ok = false;
   auto inventory_reason = CheckpointV2FailureReason::file_integrity;
