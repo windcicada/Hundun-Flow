@@ -47,7 +47,9 @@ enum class CheckpointPreparationPoint : std::uint8_t {
   boundary_registry,
   field_schema,
   common_authority,
-  final_success_boundary
+  final_success_boundary,
+  path,
+  rank_path
 };
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1215,21 +1217,48 @@ void broadcast_root_u64(const runtime::MpiContext &mpi, std::uint64_t *items,
 Convergence path_agrees(const runtime::MpiContext &mpi,
                         const std::filesystem::path &path,
                         std::uint64_t &collective_count) {
-  const auto text = path.lexically_normal().generic_string();
-  bool local_valid = !text.empty() && text.find('\0') == std::string::npos;
+  bool local_prepared = true;
+  bool local_valid = false;
   Encoder encoder;
   try {
-    if (local_valid)
-      encoder.string(text);
+    inject_checkpoint_preparation_fault(CheckpointPreparationPoint::path);
+    const auto text = path.lexically_normal().generic_string();
+    local_valid = !text.empty() && text.find('\0') == std::string::npos;
+    if (local_valid) {
+      try {
+        encoder.string(text);
+      } catch (const std::bad_alloc &) {
+        throw;
+      } catch (...) {
+        local_valid = false;
+      }
+    }
   } catch (...) {
-    local_valid = false;
+    local_prepared = false;
   }
-  const auto agreement = runtime::checkpoint_v2::opaque_bytes_agreement(
+  constexpr int state_failure_code = 0;
+  constexpr int invalid_input_code = 1;
+  const int success = 2 * mpi.size();
+  const int candidate =
+      local_prepared && local_valid
+          ? success
+          : 2 * mpi.rank() +
+                (local_prepared ? invalid_input_code : state_failure_code);
+  int selected = success;
+  runtime::check_mpi_result(
+      MPI_Allreduce(&candidate, &selected, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      "MPI_Allreduce(Checkpoint v2 path preparation)");
+  ++collective_count;
+  if (selected != success) {
+    const int failing_rank = selected / 2;
+    if (selected % 2 == state_failure_code)
+      throw runtime::checkpoint_v2::CollectivePreparationError(
+          failing_rank, "Checkpoint v2 path preparation failed");
+    return {false, failing_rank};
+  }
+  return runtime::checkpoint_v2::opaque_bytes_agreement(
       mpi, encoder.bytes(), collective_count,
       "MPI_Allreduce(Checkpoint v2 path agreement)");
-  return runtime::checkpoint_v2::converge_phase(
-      mpi, local_valid && agreement.ok, collective_count,
-      "MPI_Allreduce(Checkpoint v2 path validity)");
 }
 
 Convergence converge(const runtime::MpiContext &mpi, bool local_ok,
@@ -1608,6 +1637,9 @@ CheckpointV2Report write_checkpoint_v2(
   ByteVector global_payload;
   ByteVector rank_payload;
   ByteVector rank_wrapper;
+  std::string rank_name;
+  std::filesystem::path rank_temp;
+  std::filesystem::path rank_final;
   FlowLayerValues history;
   FlowLayerValues committed;
   std::array<std::uint64_t, 5> identity{};
@@ -1701,6 +1733,11 @@ CheckpointV2Report write_checkpoint_v2(
   bool payload_ok = true;
   local_reason = CheckpointV2FailureReason::state;
   try {
+    inject_checkpoint_preparation_fault(
+        CheckpointPreparationPoint::rank_path);
+    rank_name = rank_filename(mpi.rank());
+    rank_temp = directory / (rank_name + ".tmp");
+    rank_final = directory / rank_name;
     inject_checkpoint_preparation_fault(
         CheckpointPreparationPoint::local_layout);
     local_layout = local_layout_fingerprint(decomposition, topology, mpi.rank(),
@@ -1809,8 +1846,6 @@ CheckpointV2Report write_checkpoint_v2(
     return fail(CheckpointV2FailureReason::filesystem,
                 CheckpointV2Phase::rank_temporary_file, status.failing_rank);
 
-  const auto rank_name = rank_filename(mpi.rank());
-  const auto rank_temp = directory / (rank_name + ".tmp");
   bool rank_written = true;
   auto rank_write_reason = CheckpointV2FailureReason::filesystem;
   bool rank_write_integrity_failed = false;
@@ -1850,8 +1885,7 @@ CheckpointV2Report write_checkpoint_v2(
 
   bool rank_published = true;
   try {
-    runtime::checkpoint_v2::publish_no_overwrite(rank_temp,
-                                                  directory / rank_name);
+    runtime::checkpoint_v2::publish_no_overwrite(rank_temp, rank_final);
   } catch (...) {
     rank_published = false;
   }

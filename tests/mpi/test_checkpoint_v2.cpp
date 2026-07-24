@@ -1024,6 +1024,25 @@ ExpectedProductReport expected_read_preflight_failure_report(
   return {values, independent_report_fingerprint(values)};
 }
 
+ExpectedProductReport expected_preparation_failure_report(
+    const hundun::runtime::MpiContext &mpi,
+    hundun::flow::CheckpointV2Operation operation, int lowest_failing_rank,
+    std::uint64_t step, double time_s, std::uint64_t collective_count,
+    hundun::flow::CheckpointV2CheckStatus partition) {
+  hundun::flow::detail::CheckpointV2ReportValues values;
+  values.operation = operation;
+  values.disposition = hundun::flow::CheckpointV2Disposition::failed;
+  values.reason = hundun::flow::CheckpointV2FailureReason::state;
+  values.phase = hundun::flow::CheckpointV2Phase::preflight;
+  values.rank = mpi.rank();
+  values.lowest_failing_rank = lowest_failing_rank;
+  values.step = step;
+  values.time_s = time_s;
+  values.collective_count = collective_count;
+  values.partition = partition;
+  return {values, independent_report_fingerprint(values)};
+}
+
 ExpectedProductReport expected_constructible_fingerprint_failure_report(
     const hundun::runtime::MpiContext &mpi,
     const std::filesystem::path &checkpoint_directory,
@@ -1701,8 +1720,114 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
         return ExpectedProductReport{
             values, independent_report_fingerprint(values)};
       };
+  using FlowPoint = hundun::flow::test::CheckpointV2PreparationPoint;
+  for (int failing_rank = 0; failing_rank < mpi.size(); ++failing_rank) {
+    const auto lexical_write_directory =
+        std::filesystem::temp_directory_path() /
+        ("hundun-task23-lexical-write-preparation-" +
+         std::to_string(mpi.size()) + "-" + std::to_string(failing_rank));
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(lexical_write_directory);
+    mpi.barrier();
+    const auto write_before = CheckpointAccess::snapshot(source);
+    const auto write_views = CheckpointAccess::density_views(source);
+    if (mpi.rank() == failing_rank)
+      hundun::flow::test::set_checkpoint_v2_preparation_fault(FlowPoint::path);
+    const auto lexical_write = hundun::flow::write_checkpoint_v2(
+        mpi, decomposition, topology, geometry, boundaries, config, source,
+        controller_state, std::nullopt, lexical_write_directory);
+    HUNDUN_CHECK(lexical_write.disposition() ==
+                 hundun::flow::CheckpointV2Disposition::failed);
+    HUNDUN_CHECK(lexical_write.reason() ==
+                 hundun::flow::CheckpointV2FailureReason::state);
+    HUNDUN_CHECK(lexical_write.phase() ==
+                 hundun::flow::CheckpointV2Phase::preflight);
+    HUNDUN_CHECK(lexical_write.lowest_failing_rank() == failing_rank);
+    require_consistent_product_report(mpi, lexical_write);
+    require_exact_product_report(
+        lexical_write,
+        expected_preparation_failure_report(
+            mpi, hundun::flow::CheckpointV2Operation::write, failing_rank, 0U,
+            0.0, 2U, hundun::flow::CheckpointV2CheckStatus::not_checked));
+    HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
+        write_before, CheckpointAccess::snapshot(source)));
+    for (const auto &view : write_views)
+      HUNDUN_CHECK(!rejects(
+          [&] { static_cast<void>(view(0, 0, 0, 0)); }));
+    HUNDUN_CHECK(!std::filesystem::exists(lexical_write_directory));
+
+    auto lexical_destination = make_destination_state();
+    lexical_destination.seed_accepted_layers(different, different);
+    const auto read_before = CheckpointAccess::snapshot(lexical_destination);
+    const auto read_views =
+        CheckpointAccess::density_views(lexical_destination);
+    if (mpi.rank() == failing_rank)
+      hundun::flow::test::set_checkpoint_v2_preparation_fault(FlowPoint::path);
+    const auto lexical_read = hundun::flow::read_checkpoint_v2(
+        mpi, decomposition, topology, geometry, boundaries, config,
+        lexical_destination, directory);
+    HUNDUN_CHECK(!lexical_read.restored());
+    HUNDUN_CHECK(lexical_read.report().reason() ==
+                 hundun::flow::CheckpointV2FailureReason::state);
+    HUNDUN_CHECK(lexical_read.report().phase() ==
+                 hundun::flow::CheckpointV2Phase::preflight);
+    HUNDUN_CHECK(lexical_read.report().lowest_failing_rank() == failing_rank);
+    require_consistent_product_report(mpi, lexical_read.report());
+    require_exact_product_report(
+        lexical_read.report(),
+        expected_preparation_failure_report(
+            mpi, hundun::flow::CheckpointV2Operation::read, failing_rank, 0U,
+            0.0, 2U, hundun::flow::CheckpointV2CheckStatus::not_checked));
+    HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
+        read_before, CheckpointAccess::snapshot(lexical_destination)));
+    for (const auto &view : read_views)
+      HUNDUN_CHECK(!rejects(
+          [&] { static_cast<void>(view(0, 0, 0, 0)); }));
+
+    const auto rank_path_directory =
+        std::filesystem::temp_directory_path() /
+        ("hundun-task23-rank-path-preparation-" +
+         std::to_string(mpi.size()) + "-" + std::to_string(failing_rank));
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(rank_path_directory);
+    mpi.barrier();
+    const auto rank_path_before = CheckpointAccess::snapshot(source);
+    const auto rank_path_views = CheckpointAccess::density_views(source);
+    if (mpi.rank() == failing_rank)
+      hundun::flow::test::set_checkpoint_v2_preparation_fault(
+          FlowPoint::rank_path);
+    const auto rank_path_write = hundun::flow::write_checkpoint_v2(
+        mpi, decomposition, topology, geometry, boundaries, config, source,
+        controller_state, std::nullopt, rank_path_directory);
+    HUNDUN_CHECK(rank_path_write.disposition() ==
+                 hundun::flow::CheckpointV2Disposition::failed);
+    HUNDUN_CHECK(rank_path_write.reason() ==
+                 hundun::flow::CheckpointV2FailureReason::state);
+    HUNDUN_CHECK(rank_path_write.phase() ==
+                 hundun::flow::CheckpointV2Phase::preflight);
+    HUNDUN_CHECK(rank_path_write.lowest_failing_rank() == failing_rank);
+    require_consistent_product_report(mpi, rank_path_write);
+    auto expected_rank_path = expected_preparation_failure_report(
+        mpi, hundun::flow::CheckpointV2Operation::write, failing_rank,
+        metadata.step, metadata.time_s, 8U,
+        hundun::flow::CheckpointV2CheckStatus::passed);
+    if (mpi.rank() != failing_rank) {
+      expected_rank_path.values.local_logical_bytes = independent_rank_logical;
+      expected_rank_path.values.local_actual_bytes = expected_rank_actual;
+      expected_rank_path.values.local_crc64 =
+          independent_crc64(actual_rank_wrapper);
+      expected_rank_path.semantic_fingerprint =
+          independent_report_fingerprint(expected_rank_path.values);
+    }
+    require_exact_product_report(rank_path_write, expected_rank_path);
+    HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
+        rank_path_before, CheckpointAccess::snapshot(source)));
+    for (const auto &view : rank_path_views)
+      HUNDUN_CHECK(!rejects(
+          [&] { static_cast<void>(view(0, 0, 0, 0)); }));
+    HUNDUN_CHECK(!std::filesystem::exists(rank_path_directory));
+  }
   if (mpi.size() > 1) {
-    using FlowPoint = hundun::flow::test::CheckpointV2PreparationPoint;
     const std::array flow_points{
         FlowPoint::local_layout,      FlowPoint::local_topology,
         FlowPoint::local_geometry,    FlowPoint::topology_common,
@@ -2526,7 +2651,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
       topology, geometry, ideal_boundaries, mpi, ideal_registry, ideal_fields,
       ideal_state, ideal_spec);
   auto persisted_closure = initial_closure.state();
-  persisted_closure.revision = 0U;
+  for (double &rho_h_value : ideal_values.transported_cell_fields.front())
+    rho_h_value *= 2.0;
+  ideal_state.seed_accepted_layers(ideal_values, ideal_values);
+  persisted_closure.thermodynamic_pressure_pa = 202650.0;
+  persisted_closure.revision = 7U;
   if (mpi.size() > 1) {
     for (int failure_rank = 0; failure_rank < mpi.size(); ++failure_rank) {
       const auto restore_before = CheckpointAccess::snapshot(ideal_state);
@@ -2761,6 +2890,22 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
                hundun::flow::TimeAdvanceDisposition::committed);
   HUNDUN_CHECK(ideal_resumed_next.disposition() ==
                hundun::flow::TimeAdvanceDisposition::committed);
+  HUNDUN_CHECK(ideal_next.final_attempt_available());
+  HUNDUN_CHECK(ideal_resumed_next.final_attempt_available());
+  const auto &ideal_next_attempt =
+      std::get<hundun::flow::IdealGasStepAttemptReport>(
+          ideal_next.final_attempt());
+  const auto &ideal_resumed_attempt =
+      std::get<hundun::flow::IdealGasStepAttemptReport>(
+          ideal_resumed_next.final_attempt());
+  HUNDUN_CHECK(ideal_next_attempt.closure_report_available());
+  HUNDUN_CHECK(ideal_resumed_attempt.closure_report_available());
+  HUNDUN_CHECK(bits_of(
+                   ideal_next_attempt.closure_report().configured_pressure_pa()) ==
+               bits_of(101325.0));
+  HUNDUN_CHECK(
+      bits_of(ideal_resumed_attempt.closure_report().configured_pressure_pa()) ==
+      bits_of(101325.0));
   for (const auto layer :
        {hundun::flow::FlowLayer::history, hundun::flow::FlowLayer::committed,
         hundun::flow::FlowLayer::trial}) {

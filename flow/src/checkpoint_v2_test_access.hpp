@@ -32,7 +32,9 @@ enum class CheckpointV2PreparationPoint : std::uint8_t {
   boundary_registry,
   field_schema,
   common_authority,
-  final_success_boundary
+  final_success_boundary,
+  path,
+  rank_path
 };
 
 void set_checkpoint_v2_preparation_fault(

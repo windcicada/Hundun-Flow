@@ -790,7 +790,7 @@ IdealGasClosure IdealGasClosure::create(
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec) {
   return create_internal(topology, geometry, boundaries, mpi, registry, fields,
-                         state, spec
+                         state, spec, nullptr
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
                          ,
                          -1, -1
@@ -836,8 +836,6 @@ IdealGasClosure IdealGasClosure::restore(
       runtime::collective_status(mpi, snapshots_prepared, local_message);
   if (!snapshot_status.ok)
     throw runtime::Error(snapshot_status.message);
-  auto result =
-      create(topology, geometry, boundaries, mpi, registry, fields, state, spec);
   std::uint64_t validation_collectives{};
   const bool valid = detail::validate_ideal_gas_restore_state(
       mpi, topology, geometry, boundaries, spec.cp_J_per_kg_K,
@@ -848,12 +846,13 @@ IdealGasClosure IdealGasClosure::restore(
       mpi, valid, "ideal-gas closure restore validation");
   if (!status.ok)
     throw runtime::Error(status.message);
-  result.impl_->committed = restored;
-  result.impl_->trial = restored;
-  result.impl_->prepared = restored;
-  result.impl_->active = false;
-  result.impl_->prepared_valid = false;
-  return result;
+  return create_internal(topology, geometry, boundaries, mpi, registry, fields,
+                         state, spec, &restored
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+                         ,
+                         -1, -1
+#endif
+  );
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -867,7 +866,8 @@ IdealGasClosure IdealGasClosure::create_internal(
     const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
     const boundary::BoundaryRegistry &boundaries,
     const runtime::MpiContext &mpi, const runtime::FieldRegistry &registry,
-    const FlowFieldIds &fields, const FlowState &state, IdealGasClosureSpec spec
+    const FlowFieldIds &fields, const FlowState &state, IdealGasClosureSpec spec,
+    const IdealGasClosureState *restored_authority
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     ,
     int create_fault_kind, int create_fault_rank
@@ -1009,7 +1009,9 @@ IdealGasClosure IdealGasClosure::create_internal(
             spec.gas_constant_J_per_kg_K > 0.0 &&
             std::isfinite(spec.gas_constant_J_per_kg_K) &&
             spec.configured_thermodynamic_pressure_pa > 0.0 &&
-            std::isfinite(spec.configured_thermodynamic_pressure_pa);
+            std::isfinite(spec.configured_thermodynamic_pressure_pa) &&
+            (restored_authority == nullptr ||
+             restored_authority->mode == mode);
     const auto owned = topology.owned_global_box();
     valid = valid && same(local_extent, {owned.end.x - owned.begin.x,
                                          owned.end.y - owned.begin.y,
@@ -1200,18 +1202,23 @@ IdealGasClosure IdealGasClosure::create_internal(
       (mode == IdealGasPressureMode::open_fixed ||
        (target_mass > 0.0 && std::isfinite(target_mass) &&
         relative_error(sums[2], target_mass) <= 5.0e-12)) &&
-      relative_error(current_pressure,
-                     spec.configured_thermodynamic_pressure_pa) <= 1.0e-12 &&
+      (restored_authority != nullptr ||
+       relative_error(current_pressure,
+                      spec.configured_thermodynamic_pressure_pa) <= 1.0e-12) &&
       maxima[6] <= 1.0e-12 && maxima[7] <= 1.0e-12 && maxima[8] <= 1.0e-12 &&
       maxima[9] <= 1.0e-12;
   if (!consistent)
     throw runtime::Error("ideal-gas closure initial EOS is inconsistent");
 
-  impl->committed = {mode, current_pressure,
-                     mode == IdealGasPressureMode::closed_dynamic
-                         ? std::optional<double>(target_mass)
-                         : std::nullopt,
-                     0U};
+  impl->committed =
+      restored_authority != nullptr
+          ? *restored_authority
+          : IdealGasClosureState{
+                mode, current_pressure,
+                mode == IdealGasPressureMode::closed_dynamic
+                    ? std::optional<double>(target_mass)
+                    : std::nullopt,
+                0U};
   impl->trial = impl->committed;
   impl->prepared = impl->committed;
   return IdealGasClosure(std::move(impl));
@@ -2009,7 +2016,7 @@ IdealGasClosure test::IdealGasClosureTestAccess::create(
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec, IdealGasCreateFault fault, int rank) {
   return IdealGasClosure::create_internal(topology, geometry, boundaries, mpi,
-                                          registry, fields, state, spec,
+                                          registry, fields, state, spec, nullptr,
                                           static_cast<int>(fault), rank);
 }
 

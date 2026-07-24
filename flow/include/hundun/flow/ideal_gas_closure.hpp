@@ -193,7 +193,8 @@ private:
   create_internal(const mesh::MeshTopology &, const mesh::MeshGeometry &,
                   const boundary::BoundaryRegistry &,
                   const runtime::MpiContext &, const runtime::FieldRegistry &,
-                  const FlowFieldIds &, const FlowState &, IdealGasClosureSpec
+                  const FlowFieldIds &, const FlowState &, IdealGasClosureSpec,
+                  const IdealGasClosureState *
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
                   ,
                   int, int
