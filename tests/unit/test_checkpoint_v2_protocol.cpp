@@ -30,6 +30,18 @@ std::uint64_t bits(double value) {
   return result;
 }
 
+void write_u32(std::vector<std::uint8_t> &bytes, std::size_t offset,
+               std::uint32_t value) {
+  for (unsigned shift = 0U; shift < 32U; shift += 8U)
+    bytes[offset++] = static_cast<std::uint8_t>(value >> shift);
+}
+
+void write_u64(std::vector<std::uint8_t> &bytes, std::size_t offset,
+               std::uint64_t value) {
+  for (unsigned shift = 0U; shift < 64U; shift += 8U)
+    bytes[offset++] = static_cast<std::uint8_t>(value >> shift);
+}
+
 void test_crc_and_little_endian_codec() {
   using namespace hundun::runtime::checkpoint_v2;
   const std::string check = "123456789";
@@ -101,6 +113,58 @@ void test_rank_wrapper_literal_and_corruption() {
   HUNDUN_CHECK(
       !is_authenticated(rebuilt_identity, crc64_ecma(rebuilt_identity.data(),
                                                      rebuilt_identity.size())));
+}
+
+void test_authenticated_rank_wrapper_limits() {
+  using namespace hundun::runtime::checkpoint_v2;
+  const std::vector<std::uint8_t> payload{0xaaU, 0x55U};
+  const auto bytes = encode_rank_wrapper(3, 8, payload);
+  const auto crc = crc64_ecma(bytes.data(), bytes.size());
+  const bool rank_wrapper_expected_actual_size_mismatch =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          bytes, crc, bytes.size() + 1U, 3, 8, payload.size());
+  HUNDUN_CHECK(rank_wrapper_expected_actual_size_mismatch);
+  const bool rank_wrapper_expected_rank_mismatch =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          bytes, crc, bytes.size(), 4, 8, payload.size());
+  HUNDUN_CHECK(rank_wrapper_expected_rank_mismatch);
+  const bool rank_wrapper_expected_rank_count_mismatch =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          bytes, crc, bytes.size(), 3, 9, payload.size());
+  HUNDUN_CHECK(rank_wrapper_expected_rank_count_mismatch);
+
+  auto declared_rank_count = bytes;
+  write_u32(declared_rank_count, 20U, 0U);
+  const bool rank_wrapper_declared_rank_count =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          declared_rank_count,
+          crc64_ecma(declared_rank_count.data(), declared_rank_count.size()),
+          declared_rank_count.size(), 3, 8, payload.size());
+  HUNDUN_CHECK(rank_wrapper_declared_rank_count);
+
+  auto declared_payload_size = bytes;
+  write_u64(declared_payload_size, 24U, payload.size() + 1U);
+  const bool rank_wrapper_declared_payload_size =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          declared_payload_size,
+          crc64_ecma(declared_payload_size.data(),
+                     declared_payload_size.size()),
+          declared_payload_size.size(), 3, 8, payload.size());
+  HUNDUN_CHECK(rank_wrapper_declared_payload_size);
+
+  const bool rank_wrapper_checked_sum_overflow =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          bytes, crc, bytes.size(), 3, 8,
+          std::numeric_limits<std::uint64_t>::max());
+  HUNDUN_CHECK(rank_wrapper_checked_sum_overflow);
+  const bool rank_wrapper_platform_size_rejection =
+      !hundun::flow::test::checkpoint_v2_authenticate_rank_wrapper_for_test(
+          bytes, crc,
+          static_cast<std::uint64_t>(
+              std::numeric_limits<std::ptrdiff_t>::max()) +
+              1U,
+          3, 8, payload.size());
+  HUNDUN_CHECK(rank_wrapper_platform_size_rejection);
 }
 
 void test_codec_limits() {
@@ -325,6 +389,94 @@ void test_manifest_and_completed_marker() {
           marker.common_fingerprint + 1U));
 }
 
+void test_authenticated_manifest_limits() {
+  using namespace hundun::runtime::checkpoint_v2;
+  Manifest manifest;
+  manifest.rank_count = 1U;
+  manifest.process_grid = {1, 1, 1};
+  manifest.fingerprints = {1U, 2U, 3U, 4U, 5U};
+  manifest.global_payload = {0x12U, 0x34U};
+  manifest.ranks.push_back(
+      {0, {0, 0, 0}, {2, 3, 4}, "rank-000000.v2.bin", 192U, 226U, 7U, 8U});
+  const auto bytes = encode_manifest(manifest);
+  const auto crc = crc64_ecma(bytes.data(), bytes.size());
+  const auto authenticate =
+      [&](const std::vector<std::uint8_t> &candidate,
+          std::uint64_t candidate_crc, std::uint64_t actual_size,
+          std::uint64_t rank_count, std::uint64_t global_payload_size) {
+        return hundun::flow::test::
+            checkpoint_v2_authenticate_manifest_limits_for_test(
+                candidate, candidate_crc, actual_size, rank_count,
+                global_payload_size);
+      };
+  const bool manifest_expected_actual_size_mismatch =
+      !authenticate(bytes, crc, bytes.size() + 1U, manifest.rank_count,
+                    manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_expected_actual_size_mismatch);
+  const bool manifest_expected_rank_count_mismatch =
+      !authenticate(bytes, crc, bytes.size(), manifest.rank_count + 1U,
+                    manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_expected_rank_count_mismatch);
+  const bool manifest_expected_global_payload_size_mismatch =
+      !authenticate(bytes, crc, bytes.size(), manifest.rank_count,
+                    manifest.global_payload.size() + 1U);
+  HUNDUN_CHECK(manifest_expected_global_payload_size_mismatch);
+
+  auto declared_rank_count_bytes = bytes;
+  write_u32(declared_rank_count_bytes, 16U, manifest.rank_count + 1U);
+  const bool manifest_declared_rank_count = !authenticate(
+      declared_rank_count_bytes,
+      crc64_ecma(declared_rank_count_bytes.data(),
+                 declared_rank_count_bytes.size()),
+      declared_rank_count_bytes.size(), manifest.rank_count,
+      manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_declared_rank_count);
+
+  auto declared_global_payload_size_bytes = bytes;
+  write_u64(declared_global_payload_size_bytes, 72U,
+            manifest.global_payload.size() + 1U);
+  const bool manifest_declared_global_payload_size = !authenticate(
+      declared_global_payload_size_bytes,
+      crc64_ecma(declared_global_payload_size_bytes.data(),
+                 declared_global_payload_size_bytes.size()),
+      declared_global_payload_size_bytes.size(), manifest.rank_count,
+      manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_declared_global_payload_size);
+
+  auto declared_record_count_bytes = bytes;
+  write_u32(declared_record_count_bytes,
+            80U + manifest.global_payload.size(), manifest.rank_count + 1U);
+  const bool manifest_declared_record_count = !authenticate(
+      declared_record_count_bytes,
+      crc64_ecma(declared_record_count_bytes.data(),
+                 declared_record_count_bytes.size()),
+      declared_record_count_bytes.size(), manifest.rank_count,
+      manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_declared_record_count);
+
+  const auto overflowing_rank_product =
+      static_cast<std::uint64_t>(
+          std::numeric_limits<std::size_t>::max() / 82U) +
+      1U;
+  HUNDUN_CHECK(
+      overflowing_rank_product <=
+      static_cast<std::uint64_t>(
+          std::numeric_limits<std::ptrdiff_t>::max()));
+  const bool manifest_rank_product_limit = !authenticate(
+      bytes, crc, bytes.size(), overflowing_rank_product,
+      manifest.global_payload.size());
+  HUNDUN_CHECK(manifest_rank_product_limit);
+  const bool manifest_checked_sum_overflow = !authenticate(
+      bytes, crc, bytes.size(), 0U,
+      std::numeric_limits<std::uint64_t>::max());
+  HUNDUN_CHECK(manifest_checked_sum_overflow);
+  const bool manifest_platform_size_rejection = !authenticate(
+      bytes, crc, bytes.size(), 0U,
+      static_cast<std::uint64_t>(
+          std::numeric_limits<std::ptrdiff_t>::max()));
+  HUNDUN_CHECK(manifest_platform_size_rejection);
+}
+
 void test_exact_read_phase_failures() {
   using namespace hundun::runtime::checkpoint_v2;
   const auto path =
@@ -444,8 +596,10 @@ int main(int argc, char **argv) {
     test_exact_read_phase_failures();
     if (mode == "acceptance") {
       test_rank_wrapper_literal_and_corruption();
+      test_authenticated_rank_wrapper_limits();
       test_integer_and_binary64_edges();
       test_manifest_and_completed_marker();
+      test_authenticated_manifest_limits();
       test_numeric_file_phase_failures();
     }
   });

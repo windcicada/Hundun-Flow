@@ -1288,17 +1288,34 @@ runtime::checkpoint_v2::RankWrapper decode_authenticated_rank_wrapper(
   return wrapper;
 }
 
+std::uint64_t expected_manifest_actual_size(
+    std::uint64_t global_payload_size, std::uint64_t rank_count) {
+  const auto rank_records = runtime::checkpoint_v2::checked_product(
+      runtime::checkpoint_v2::checked_size(rank_count), 82U);
+  const auto header_and_payload =
+      runtime::checkpoint_v2::checked_sum_u64(84U, global_payload_size);
+  const auto result = runtime::checkpoint_v2::checked_sum_u64(
+      header_and_payload, static_cast<std::uint64_t>(rank_records));
+  static_cast<void>(runtime::checkpoint_v2::checked_size(result));
+  return result;
+}
+
 runtime::checkpoint_v2::Manifest decode_authenticated_manifest(
     const ByteVector &bytes, std::uint64_t expected_crc,
-    std::uint64_t expected_actual_size, std::uint32_t expected_rank_count,
+    std::uint64_t expected_actual_size, std::uint64_t expected_rank_count,
     std::uint64_t expected_global_payload_size) {
-  if (bytes.size() !=
+  const auto exact_size = expected_manifest_actual_size(
+      expected_global_payload_size, expected_rank_count);
+  if (expected_rank_count > std::numeric_limits<std::uint32_t>::max() ||
+      expected_actual_size != exact_size ||
+      bytes.size() !=
           runtime::checkpoint_v2::checked_size(expected_actual_size) ||
       runtime::checkpoint_v2::crc64_ecma(bytes.data(), bytes.size()) !=
           expected_crc)
     throw runtime::Error("Checkpoint v2 manifest authentication failed");
-  return runtime::checkpoint_v2::decode_manifest(bytes, expected_rank_count,
-                                                 expected_global_payload_size);
+  return runtime::checkpoint_v2::decode_manifest(
+      bytes, static_cast<std::uint32_t>(expected_rank_count),
+      expected_global_payload_size);
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -1413,6 +1430,19 @@ bool checkpoint_v2_authenticate_manifest_for_test(
         bytes, expected_crc, expected_actual_size, expected.rank_count,
         expected.global_payload.size());
     return same(decoded, expected);
+  } catch (...) {
+    return false;
+  }
+}
+bool checkpoint_v2_authenticate_manifest_limits_for_test(
+    const std::vector<std::uint8_t> &bytes, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::uint64_t expected_rank_count,
+    std::uint64_t expected_global_payload_size) noexcept {
+  try {
+    static_cast<void>(decode_authenticated_manifest(
+        bytes, expected_crc, expected_actual_size, expected_rank_count,
+        expected_global_payload_size));
+    return true;
   } catch (...) {
     return false;
   }
@@ -1902,11 +1932,9 @@ CheckpointV2Report write_checkpoint_v2(
              gathered_records[offset + 10U]});
       }
       const auto bytes = runtime::checkpoint_v2::encode_manifest(manifest);
-      const auto expected_size = runtime::checkpoint_v2::checked_sum_u64(
-          runtime::checkpoint_v2::checked_sum_u64(
-              84U, static_cast<std::uint64_t>(global_payload.size())),
-          runtime::checkpoint_v2::checked_product(
-              static_cast<std::size_t>(mpi.size()), 82U));
+      const auto expected_size = expected_manifest_actual_size(
+          static_cast<std::uint64_t>(global_payload.size()),
+          static_cast<std::uint64_t>(mpi.size()));
       if (bytes.size() != expected_size)
         throw runtime::Error("Checkpoint v2 manifest size is invalid");
       const auto temp = directory / "manifest.v2.bin.tmp";
@@ -2179,10 +2207,8 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   try {
     const auto global_size = expected_global_payload_size(
         config.density_model, boundaries.open_domain());
-    const auto expected_manifest_size = runtime::checkpoint_v2::checked_sum_u64(
-            runtime::checkpoint_v2::checked_sum_u64(84U, global_size),
-            runtime::checkpoint_v2::checked_product(
-                static_cast<std::size_t>(mpi.size()), 82U));
+    const auto expected_manifest_size = expected_manifest_actual_size(
+        global_size, static_cast<std::uint64_t>(mpi.size()));
     if (marker.manifest_actual_size != expected_manifest_size)
       manifest_exact_failed = true;
     if (manifest_exact_failed)

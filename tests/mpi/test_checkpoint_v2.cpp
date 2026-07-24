@@ -2835,7 +2835,7 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
           });
       }
 
-      if (inlet_patch == 0U && authority_case == 0U) {
+      {
         const auto require_scalar_schema_mutation =
             [&](hundun::config::FlowCaseConfig single,
                 const std::optional<std::string> &field_name) {
@@ -2919,20 +2919,6 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     boundary.patch = patch_name;
     boundary.type = hundun::config::BoundaryType::symmetry;
   }
-  auto &material_inlet = material_open_config.boundaries[0];
-  material_inlet.type = hundun::config::BoundaryType::velocity_inlet;
-  material_inlet.velocity_m_per_s = {1.0, 0.0, 0.0};
-  material_inlet.thermal_authority =
-      hundun::config::InletThermalAuthority::enthalpy;
-  material_inlet.enthalpy_J_per_kg = 300000.0;
-  material_inlet.density_kg_per_m3 = 1.0;
-  material_inlet.scalar_values =
-      std::vector<hundun::config::InletScalarValue>{{"alpha", 0.2}};
-  auto &material_outlet = material_open_config.boundaries[1];
-  material_outlet.type = hundun::config::BoundaryType::pressure_outlet;
-  material_outlet.pressure_perturbation_pa = 0.0;
-  auto material_open_boundaries = hundun::boundary::BoundaryRegistry::create(
-      material_open_config, open_topology);
   auto material_open_values = open_values;
   std::fill(material_open_values.density.begin(),
             material_open_values.density.end(), 1.0);
@@ -2956,54 +2942,95 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
     result.seed_accepted_layers(material_open_values, material_open_values);
     return result;
   };
-  auto material_open_state = make_material_open_state();
-  auto material_open_controller = hundun::flow::Bdf2RetryController::create(
-      material_open_config.time, material_open_config.density_model,
-      open_topology, open_geometry, mpi, material_open_state);
-  const auto material_open_directory =
-      std::filesystem::temp_directory_path() /
-      ("hundun-task23-r5-material-open-" + std::to_string(mpi.size()));
-  if (mpi.rank() == 0)
-    std::filesystem::remove_all(material_open_directory);
-  mpi.barrier();
-  const auto material_open_write = hundun::flow::write_checkpoint_v2(
-      mpi, open_decomposition, open_topology, open_geometry,
-      material_open_boundaries, material_open_config, material_open_state,
-      material_open_controller.state(), std::nullopt, material_open_directory);
-  HUNDUN_CHECK(material_open_write.disposition() ==
-               hundun::flow::CheckpointV2Disposition::completed);
+  const std::array<hundun::runtime::Real3, 6> material_inward_velocity{
+      hundun::runtime::Real3{1.0, 0.0, 0.0},
+      hundun::runtime::Real3{-1.0, 0.0, 0.0},
+      hundun::runtime::Real3{0.0, 1.0, 0.0},
+      hundun::runtime::Real3{0.0, -1.0, 0.0},
+      hundun::runtime::Real3{0.0, 0.0, 1.0},
+      hundun::runtime::Real3{0.0, 0.0, -1.0}};
+  for (std::size_t material_inlet_patch = 0U;
+       material_inlet_patch < material_open_config.boundaries.size();
+       ++material_inlet_patch) {
+    auto material_patch_config = material_open_config;
+    const auto material_outlet_patch = material_inlet_patch ^ 1U;
+    auto &material_inlet =
+        material_patch_config.boundaries[material_inlet_patch];
+    material_inlet.type = hundun::config::BoundaryType::velocity_inlet;
+    material_inlet.velocity_m_per_s =
+        material_inward_velocity[material_inlet_patch];
+    material_inlet.thermal_authority =
+        hundun::config::InletThermalAuthority::enthalpy;
+    material_inlet.enthalpy_J_per_kg = 300000.0;
+    material_inlet.density_kg_per_m3 = 1.0;
+    material_inlet.scalar_values =
+        std::vector<hundun::config::InletScalarValue>{{"alpha", 0.2}};
+    auto &material_outlet =
+        material_patch_config.boundaries[material_outlet_patch];
+    material_outlet.type = hundun::config::BoundaryType::pressure_outlet;
+    material_outlet.pressure_perturbation_pa = 0.0;
+    auto material_open_boundaries =
+        hundun::boundary::BoundaryRegistry::create(material_patch_config,
+                                                   open_topology);
+    auto material_open_state = make_material_open_state();
+    auto material_open_controller =
+        hundun::flow::Bdf2RetryController::create(
+            material_patch_config.time, material_patch_config.density_model,
+            open_topology, open_geometry, mpi, material_open_state);
+    const auto material_open_directory =
+        std::filesystem::temp_directory_path() /
+        ("hundun-task23-r6-material-open-" +
+         std::to_string(material_inlet_patch) + "-" +
+         std::to_string(mpi.size()));
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(material_open_directory);
+    mpi.barrier();
+    const auto material_open_write = hundun::flow::write_checkpoint_v2(
+        mpi, open_decomposition, open_topology, open_geometry,
+        material_open_boundaries, material_patch_config, material_open_state,
+        material_open_controller.state(), std::nullopt,
+        material_open_directory);
+    HUNDUN_CHECK(material_open_write.disposition() ==
+                 hundun::flow::CheckpointV2Disposition::completed);
 
-  auto changed_material_open_config = material_open_config;
-  const ConfigMutation r5_density_numeric_value = [](auto &single) {
-    single.boundaries[0].density_kg_per_m3 = 1.1;
-  };
-  r5_density_numeric_value(changed_material_open_config);
-  auto changed_material_open_boundaries =
-      hundun::boundary::BoundaryRegistry::create(changed_material_open_config,
-                                                 open_topology);
-  HUNDUN_CHECK(independent_resolved_fingerprint(changed_material_open_config) !=
-               independent_resolved_fingerprint(material_open_config));
-  HUNDUN_CHECK(
-      independent_boundary_fingerprint(changed_material_open_boundaries) !=
-      independent_boundary_fingerprint(material_open_boundaries));
-  auto changed_material_open_state = make_material_open_state();
-  const auto changed_material_open_before =
-      CheckpointAccess::snapshot(changed_material_open_state);
-  const auto changed_material_open_views =
-      CheckpointAccess::density_views(changed_material_open_state);
-  const auto changed_material_open_read = hundun::flow::read_checkpoint_v2(
-      mpi, open_decomposition, open_topology, open_geometry,
-      changed_material_open_boundaries, changed_material_open_config,
-      changed_material_open_state, material_open_directory);
-  require_constructible_fingerprint_failure(
-      changed_material_open_before, changed_material_open_state,
-      changed_material_open_read);
-  for (const auto &view : changed_material_open_views)
-    HUNDUN_CHECK(rejects([&] { static_cast<void>(view(0, 0, 0, 0)); }));
-  mpi.barrier();
-  if (mpi.rank() == 0)
-    std::filesystem::remove_all(material_open_directory);
-  mpi.barrier();
+    auto changed_material_open_config = material_patch_config;
+    const ConfigMutation r5_density_numeric_value =
+        [material_inlet_patch](auto &single) {
+          single.boundaries[material_inlet_patch].density_kg_per_m3 = 1.1;
+        };
+    const auto &r6_material_density_all_patches =
+        r5_density_numeric_value;
+    r6_material_density_all_patches(changed_material_open_config);
+    auto changed_material_open_boundaries =
+        hundun::boundary::BoundaryRegistry::create(
+            changed_material_open_config, open_topology);
+    HUNDUN_CHECK(
+        independent_resolved_fingerprint(changed_material_open_config) !=
+        independent_resolved_fingerprint(material_patch_config));
+    HUNDUN_CHECK(
+        independent_boundary_fingerprint(changed_material_open_boundaries) !=
+        independent_boundary_fingerprint(material_open_boundaries));
+    auto changed_material_open_state = make_material_open_state();
+    const auto changed_material_open_before =
+        CheckpointAccess::snapshot(changed_material_open_state);
+    const auto changed_material_open_views =
+        CheckpointAccess::density_views(changed_material_open_state);
+    const auto changed_material_open_read = hundun::flow::read_checkpoint_v2(
+        mpi, open_decomposition, open_topology, open_geometry,
+        changed_material_open_boundaries, changed_material_open_config,
+        changed_material_open_state, material_open_directory);
+    require_constructible_fingerprint_failure(
+        changed_material_open_before, changed_material_open_state,
+        changed_material_open_read);
+    for (const auto &view : changed_material_open_views)
+      HUNDUN_CHECK(rejects([&] {
+        static_cast<void>(view(0, 0, 0, 0));
+      }));
+    mpi.barrier();
+    if (mpi.rank() == 0)
+      std::filesystem::remove_all(material_open_directory);
+    mpi.barrier();
+  }
 
   auto open_resumed = make_open_state();
   const auto open_read = hundun::flow::read_checkpoint_v2(

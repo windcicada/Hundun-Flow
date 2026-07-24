@@ -59,6 +59,10 @@ bool checkpoint_v2_authenticate_manifest_for_test(
     const std::vector<std::uint8_t> &, std::uint64_t expected_crc,
     std::uint64_t expected_actual_size,
     const runtime::checkpoint_v2::Manifest &expected) noexcept;
+bool checkpoint_v2_authenticate_manifest_limits_for_test(
+    const std::vector<std::uint8_t> &, std::uint64_t expected_crc,
+    std::uint64_t expected_actual_size, std::uint64_t expected_rank_count,
+    std::uint64_t expected_global_payload_size) noexcept;
 bool checkpoint_v2_authenticate_completed_marker_for_test(
     const std::vector<std::uint8_t> &,
     std::uint64_t expected_manifest_actual_size,

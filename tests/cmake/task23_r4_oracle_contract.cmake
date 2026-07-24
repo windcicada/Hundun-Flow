@@ -44,6 +44,27 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
         "Task 23 R4 checkpoint product oracle is missing '${required}'")
     endif()
   endforeach()
+  if(NOT DEFINED HUNDUN_R6_SECTION OR HUNDUN_R6_SECTION STREQUAL "boundary")
+    string(FIND "${checkpoint_test}"
+      "if (inlet_patch == 0U && authority_case == 0U)"
+      scalar_patch_zero_gate)
+    if(NOT scalar_patch_zero_gate EQUAL -1)
+      message(FATAL_ERROR
+        "Task 23 R6 scalar schema mutations remain guarded to patch 0")
+    endif()
+    foreach(required IN ITEMS
+        "for (std::size_t material_inlet_patch"
+        "r6_material_density_all_patches"
+        "boundaries[material_inlet_patch]"
+        "r5_scalar_list_membership"
+        "r5_scalar_name")
+      string(FIND "${checkpoint_test}" "${required}" position)
+      if(position EQUAL -1)
+        message(FATAL_ERROR
+          "Task 23 R6 six-patch boundary matrix is missing '${required}'")
+      endif()
+    endforeach()
+  endif()
   foreach(required IN ITEMS
       "checkpoint_v2_authenticate_rank_wrapper_for_test"
       "checkpoint_v2_authenticate_manifest_for_test"
@@ -55,6 +76,58 @@ if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "fingerprint")
         "Task 23 R5 authenticated product call site is missing '${required}'")
     endif()
   endforeach()
+  if(NOT DEFINED HUNDUN_R6_SECTION OR HUNDUN_R6_SECTION STREQUAL "limits")
+    string(REGEX MATCHALL "expected_manifest_actual_size\\("
+      manifest_formula_calls "${checkpoint_product}")
+    list(LENGTH manifest_formula_calls manifest_formula_call_count)
+    if(manifest_formula_call_count LESS 4)
+      message(FATAL_ERROR
+        "Task 23 R6 manifest authentication lacks the shared checked formula")
+    endif()
+    foreach(required IN ITEMS
+        "test_authenticated_rank_wrapper_limits"
+        "rank_wrapper_expected_actual_size_mismatch"
+        "rank_wrapper_expected_rank_mismatch"
+        "rank_wrapper_expected_rank_count_mismatch"
+        "rank_wrapper_declared_rank_count"
+        "rank_wrapper_declared_payload_size"
+        "rank_wrapper_checked_sum_overflow"
+        "rank_wrapper_platform_size_rejection"
+        "test_authenticated_manifest_limits"
+        "checkpoint_v2_authenticate_manifest_limits_for_test("
+        "manifest_expected_actual_size_mismatch"
+        "manifest_expected_rank_count_mismatch"
+        "manifest_expected_global_payload_size_mismatch"
+        "manifest_declared_rank_count"
+        "manifest_declared_global_payload_size"
+        "manifest_declared_record_count"
+        "manifest_rank_product_limit"
+        "manifest_checked_sum_overflow"
+        "manifest_platform_size_rejection")
+      string(FIND "${protocol_test}" "${required}" position)
+      if(position EQUAL -1)
+        message(FATAL_ERROR
+          "Task 23 R6 authenticated limit call site is missing '${required}'")
+      endif()
+    endforeach()
+    string(REGEX MATCHALL
+      "checkpoint_v2_authenticate_rank_wrapper_for_test\\("
+      rank_auth_calls "${protocol_test}")
+    list(LENGTH rank_auth_calls rank_auth_call_count)
+    string(REGEX MATCHALL
+      "checkpoint_v2_authenticate_manifest_for_test\\("
+      manifest_auth_calls "${protocol_test}")
+    list(LENGTH manifest_auth_calls manifest_auth_call_count)
+    string(REGEX MATCHALL
+      "checkpoint_v2_authenticate_manifest_limits_for_test\\("
+      manifest_limit_auth_calls "${protocol_test}")
+    list(LENGTH manifest_limit_auth_calls manifest_limit_auth_call_count)
+    if(rank_auth_call_count LESS 2 OR manifest_auth_call_count LESS 1 OR
+       manifest_limit_auth_call_count LESS 1)
+      message(FATAL_ERROR
+        "Task 23 R6 limit sections do not call both product authenticators")
+    endif()
+  endif()
 endif()
 
 if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "diagnostics")
