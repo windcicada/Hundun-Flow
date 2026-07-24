@@ -2,6 +2,7 @@
 
 #include "hundun/flow/ideal_gas_closure.hpp"
 
+#include "checkpoint_v2_detail.hpp"
 #include "density_closure_detail.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/runtime/collective_status.hpp"
@@ -450,6 +451,100 @@ final_gate_reason(FinalGateOrigin origin) noexcept {
 
 } // namespace
 
+bool detail::validate_ideal_gas_restore_state(
+    const runtime::MpiContext &mpi, const mesh::MeshTopology &topology,
+    const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    double cp, double gas_constant, double configured_pressure,
+    const FlowLayerValues &history,
+    const FlowLayerValues &committed, const IdealGasClosureState &restored,
+    std::uint64_t &collective_count) {
+  if (!(cp > 0.0) || !(gas_constant > 0.0) ||
+      !(configured_pressure > 0.0) || !std::isfinite(cp) ||
+      !std::isfinite(gas_constant) || !std::isfinite(configured_pressure))
+    return false;
+  const bool open = boundaries.open_domain();
+  bool valid =
+      restored.mode == (open ? IdealGasPressureMode::open_fixed
+                             : IdealGasPressureMode::closed_dynamic) &&
+      restored.thermodynamic_pressure_pa > 0.0 &&
+      std::isfinite(restored.thermodynamic_pressure_pa) &&
+      restored.revision != std::numeric_limits<std::uint64_t>::max() &&
+      restored.target_mass_kg.has_value() == !open;
+  if (open)
+    valid =
+        valid &&
+        fp_bits(restored.thermodynamic_pressure_pa) ==
+            fp_bits(configured_pressure);
+  const double target_mass = restored.target_mass_kg.value_or(
+      std::numeric_limits<double>::quiet_NaN());
+  if (!open)
+    valid = valid && target_mass > 0.0 && std::isfinite(target_mass);
+
+  std::array<double, 3> sums{};
+  bool shapes_valid = true;
+  const auto accumulate = [&](const FlowLayerValues &layer,
+                              std::size_t mass_index,
+                              bool inverse_temperature) {
+    if (layer.transported_cell_fields.empty() ||
+        layer.density.size() != topology.owned_cell_count() ||
+        layer.transported_cell_fields.front().size() !=
+            topology.owned_cell_count()) {
+      valid = false;
+      shapes_valid = false;
+      return;
+    }
+    for (std::size_t cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const double rho = layer.density[cell];
+      const double q = layer.transported_cell_fields.front()[cell];
+      const double enthalpy = q / rho;
+      const double temperature = enthalpy / cp;
+      const double volume = geometry.cell_volume_m3(cell);
+      if (!(rho > 0.0) || !(q > 0.0) || !(enthalpy > 0.0) ||
+          !(temperature > 0.0) || !(volume > 0.0) ||
+          !std::isfinite(rho) || !std::isfinite(q) ||
+          !std::isfinite(enthalpy) || !std::isfinite(temperature) ||
+          !std::isfinite(volume)) {
+        valid = false;
+        continue;
+      }
+      sums[mass_index] += volume * rho;
+      if (inverse_temperature)
+        sums[2] += volume / temperature;
+    }
+  };
+  accumulate(history, 0U, !open);
+  accumulate(committed, 1U, false);
+  if (!open) {
+    mpi.allreduce_fp64_in_place(sums.data(), sums.size(),
+                                runtime::Fp64ReductionOperation::sum);
+    ++collective_count;
+    valid = valid && sums[2] > 0.0 && std::isfinite(sums[2]) &&
+            relative_error(sums[0], target_mass) <= 5.0e-12 &&
+            relative_error(sums[1], target_mass) <= 5.0e-12;
+  }
+  if (!shapes_valid)
+    return false;
+  const double history_pressure =
+      open ? restored.thermodynamic_pressure_pa
+           : target_mass * gas_constant / sums[2];
+  const auto eos_valid = [&](const FlowLayerValues &layer, double pressure) {
+    if (!(pressure > 0.0) || !std::isfinite(pressure))
+      return false;
+    for (std::size_t cell = 0; cell < topology.owned_cell_count(); ++cell) {
+      const double rho = layer.density[cell];
+      const double q = layer.transported_cell_fields.front()[cell];
+      const double temperature = (q / rho) / cp;
+      const double ratio = rho * gas_constant * temperature / pressure;
+      if (!std::isfinite(ratio) || std::abs(ratio - 1.0) > 1.0e-12)
+        return false;
+    }
+    return true;
+  };
+  return valid && eos_valid(history, history_pressure) &&
+         eos_valid(committed, restored.thermodynamic_pressure_pa);
+}
+
 struct IdealGasClosure::Impl final {
   const mesh::MeshTopology *topology{};
   const mesh::MeshGeometry *geometry{};
@@ -707,26 +802,14 @@ IdealGasClosure IdealGasClosure::restore(
     IdealGasClosureSpec spec, IdealGasClosureState restored) {
   auto result =
       create(topology, geometry, boundaries, mpi, registry, fields, state, spec);
-  const auto created = result.state();
-  bool valid = restored.mode == created.mode &&
-               restored.revision !=
-                   std::numeric_limits<std::uint64_t>::max() &&
-               restored.thermodynamic_pressure_pa > 0.0 &&
-               std::isfinite(restored.thermodynamic_pressure_pa);
-  if (restored.mode == IdealGasPressureMode::open_fixed) {
-    valid = valid && !restored.target_mass_kg &&
-            fp_bits(restored.thermodynamic_pressure_pa) ==
-                fp_bits(spec.configured_thermodynamic_pressure_pa);
-  } else {
-    valid = valid && restored.target_mass_kg &&
-            *restored.target_mass_kg > 0.0 &&
-            std::isfinite(*restored.target_mass_kg) &&
-            created.target_mass_kg &&
-            relative_error(*created.target_mass_kg,
-                           *restored.target_mass_kg) <= 5.0e-12 &&
-            relative_error(created.thermodynamic_pressure_pa,
-                           restored.thermodynamic_pressure_pa) <= 1.0e-12;
-  }
+  std::uint64_t validation_collectives{};
+  const bool valid = detail::validate_ideal_gas_restore_state(
+      mpi, topology, geometry, boundaries, spec.cp_J_per_kg_K,
+      spec.gas_constant_J_per_kg_K,
+      spec.configured_thermodynamic_pressure_pa,
+      state.snapshot(FlowLayer::history),
+      state.snapshot(FlowLayer::committed), restored,
+      validation_collectives);
   const auto status = runtime::collective_status(
       mpi, valid, "ideal-gas closure restore validation");
   if (!status.ok)

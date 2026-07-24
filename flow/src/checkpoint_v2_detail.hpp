@@ -30,6 +30,14 @@ struct FlowState::Impl final {
 
 namespace detail {
 
+bool validate_ideal_gas_restore_state(
+    const runtime::MpiContext &, const mesh::MeshTopology &,
+    const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
+    double cp_J_per_kg_K, double gas_constant_J_per_kg_K,
+    double configured_pressure_pa, const FlowLayerValues &history,
+    const FlowLayerValues &committed, const IdealGasClosureState &,
+    std::uint64_t &collective_count);
+
 struct CheckpointV2ReportValues final {
   CheckpointV2Operation operation{CheckpointV2Operation::write};
   CheckpointV2Disposition disposition{CheckpointV2Disposition::failed};
@@ -81,7 +89,7 @@ struct CheckpointV2Access final {
   static CheckpointV2Report make(CheckpointV2ReportValues);
   static CheckpointV2ReadResult
   make_read(CheckpointV2Report, TimeControlState,
-            std::optional<IdealGasClosureState>, bool restored);
+            std::optional<IdealGasClosureState>, bool restored) noexcept;
   static CheckpointV2Report failed(CheckpointV2Operation, int,
                                    CheckpointV2FailureReason,
                                    CheckpointV2Phase);

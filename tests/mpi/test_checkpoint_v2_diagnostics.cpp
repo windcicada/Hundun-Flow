@@ -24,6 +24,16 @@ public:
   int calls{};
 };
 
+class DiagnosticErrorSink final
+    : public hundun::diagnostics::DiagnosticSink {
+public:
+  void submit(const hundun::diagnostics::DiagnosticRecord &) override {
+    throw hundun::diagnostics::DiagnosticCollectionError(
+        hundun::diagnostics::DiagnosticFailureClass::invalid_request,
+        "test.sink.original", -1, "deliberate sink rejection");
+  }
+};
+
 template <class Function>
 bool rejects(Function &&function) {
   try {
@@ -75,9 +85,90 @@ double finite_value(const hundun::diagnostics::DiagnosticFp64 &value) {
   return result;
 }
 
+hundun::diagnostics::DiagnosticStateFingerprint
+expected_local_fingerprint(const hundun::flow::CheckpointV2Report &value) {
+  constexpr std::array<std::string_view, 26> ids{
+      "checkpoint.collective-count",
+      "checkpoint.crc-check-count",
+      "checkpoint.disposition",
+      "checkpoint.exact-size-eof-status",
+      "checkpoint.file-count",
+      "checkpoint.fingerprint-status",
+      "checkpoint.global-actual-bytes",
+      "checkpoint.global-logical-bytes",
+      "checkpoint.local-actual-bytes",
+      "checkpoint.local-crc64",
+      "checkpoint.local-logical-bytes",
+      "checkpoint.lowest-failing-rank",
+      "checkpoint.manifest-crc-status",
+      "checkpoint.manifest-crc64",
+      "checkpoint.operation",
+      "checkpoint.partition-status",
+      "checkpoint.phase",
+      "checkpoint.publication-status",
+      "checkpoint.rank",
+      "checkpoint.rank-crc-status",
+      "checkpoint.reason",
+      "checkpoint.rollback-status",
+      "checkpoint.semantic-fingerprint",
+      "checkpoint.step",
+      "checkpoint.time",
+      "checkpoint.transaction-entry-status"};
+  hundun::diagnostics::DiagnosticFingerprintAccumulator accumulator;
+  const auto limb = [&](std::size_t index, std::uint64_t item) {
+    accumulator.add(
+        ids[index], static_cast<std::uint64_t>(value.rank()), 0U,
+        hundun::diagnostics::describe_fp64(
+            static_cast<double>(static_cast<std::uint32_t>(item))));
+    accumulator.add(
+        ids[index], static_cast<std::uint64_t>(value.rank()), 1U,
+        hundun::diagnostics::describe_fp64(
+            static_cast<double>(static_cast<std::uint32_t>(item >> 32U))));
+  };
+  const auto count = [&](std::size_t index, std::int64_t item) {
+    accumulator.add(ids[index],
+                    static_cast<std::uint64_t>(value.rank()), 0U,
+                    hundun::diagnostics::describe_fp64(
+                        static_cast<double>(item)));
+  };
+  limb(0U, value.collective_count());
+  limb(1U, value.crc_check_count());
+  count(2U, static_cast<std::uint8_t>(value.disposition()));
+  count(3U, static_cast<std::uint8_t>(
+                value.exact_size_and_eof_status()));
+  limb(4U, value.file_count());
+  count(5U, static_cast<std::uint8_t>(value.fingerprint_status()));
+  limb(6U, value.global_actual_bytes());
+  limb(7U, value.global_logical_bytes());
+  limb(8U, value.local_actual_bytes());
+  limb(9U, value.local_crc64());
+  limb(10U, value.local_logical_bytes());
+  count(11U, value.lowest_failing_rank());
+  count(12U, static_cast<std::uint8_t>(value.manifest_crc_status()));
+  limb(13U, value.manifest_crc64());
+  count(14U, static_cast<std::uint8_t>(value.operation()));
+  count(15U, static_cast<std::uint8_t>(value.partition_status()));
+  count(16U, static_cast<std::uint8_t>(value.phase()));
+  count(17U, static_cast<std::uint8_t>(value.publication_status()));
+  count(18U, value.rank());
+  count(19U, static_cast<std::uint8_t>(value.rank_crc_status()));
+  count(20U, static_cast<std::uint8_t>(value.reason()));
+  count(21U, static_cast<std::uint8_t>(value.rollback_status()));
+  limb(22U, value.semantic_fingerprint());
+  limb(23U, value.step());
+  accumulator.add(ids[24U], static_cast<std::uint64_t>(value.rank()), 0U,
+                  hundun::diagnostics::describe_fp64(value.time_s()));
+  count(25U,
+        static_cast<std::uint8_t>(value.transaction_entry_status()));
+  return accumulator.finish();
+}
+
 void run(const hundun::runtime::MpiContext &mpi) {
+  const auto local_report = report(mpi.rank());
+  const auto expected_fingerprint =
+      expected_local_fingerprint(local_report);
   auto source =
-      hundun::flow::checkpoint_v2_diagnostic_source(report(mpi.rank()));
+      hundun::flow::checkpoint_v2_diagnostic_source(local_report);
   const auto descriptor =
       hundun::diagnostics::describe_diagnostics(source);
   HUNDUN_CHECK(descriptor.module_kind ==
@@ -102,6 +193,8 @@ void run(const hundun::runtime::MpiContext &mpi) {
     HUNDUN_CHECK(first.calls == 1);
     HUNDUN_CHECK(first.record.scope ==
                  hundun::diagnostics::DiagnosticScope::local);
+    HUNDUN_CHECK(first.record.state_fingerprint.hex ==
+                 expected_fingerprint.hex);
     const auto first_json =
         hundun::diagnostics::to_canonical_json(first.record);
     OneRecordSink second;
@@ -208,6 +301,39 @@ void run(const hundun::runtime::MpiContext &mpi) {
               hundun::diagnostics::DiagnosticScope::local),
       sink);
   HUNDUN_CHECK(sink.calls == 1);
+
+  {
+    auto wrong_scope =
+        request(mpi.rank(), hundun::diagnostics::DiagnosticLevel::summary,
+                hundun::diagnostics::DiagnosticScope::collective);
+    try {
+      OneRecordSink rejected_sink;
+      hundun::diagnostics::collect_diagnostics(moved, wrong_scope,
+                                               rejected_sink);
+      HUNDUN_CHECK(false);
+    } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::capability);
+    }
+  }
+  {
+    DiagnosticErrorSink rejected_sink;
+    try {
+      hundun::diagnostics::collect_diagnostics(
+          moved,
+          request(mpi.rank(),
+                  hundun::diagnostics::DiagnosticLevel::summary,
+                  hundun::diagnostics::DiagnosticScope::local),
+          rejected_sink);
+      HUNDUN_CHECK(false);
+    } catch (const hundun::diagnostics::DiagnosticCollectionError &error) {
+      HUNDUN_CHECK(
+          error.classification() ==
+          hundun::diagnostics::DiagnosticFailureClass::sink_failure);
+      HUNDUN_CHECK(error.code() == "diagnostics.sink.submit");
+    }
+  }
 }
 
 } // namespace

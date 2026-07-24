@@ -3,12 +3,17 @@
 #include "checkpoint_v2_protocol.hpp"
 
 #include "hundun/runtime/error.hpp"
+#include "hundun/runtime/mpi_context.hpp"
+#include "hundun/runtime/mpi_operation_error.hpp"
+
+#include <mpi.h>
 
 #include <array>
 #include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <set>
 #include <system_error>
 #include <type_traits>
 
@@ -26,15 +31,77 @@ constexpr std::uint32_t kEndianMarker = UINT32_C(0x01020304);
 constexpr std::size_t kMaximumStringBytes = 4096U;
 
 [[noreturn]] void malformed(const char *message) { throw Error(message); }
+[[noreturn]] void file_integrity(const char *message) {
+  throw NumericFileError(NumericFileFailure::integrity, message);
+}
+[[noreturn]] void file_integrity_unchecked(const char *message) {
+  throw NumericFileError(NumericFileFailure::integrity_unchecked, message);
+}
+[[noreturn]] void file_system(const char *message) {
+  throw NumericFileError(NumericFileFailure::filesystem, message);
+}
+
+bool valid_utf8(const std::uint8_t *data, std::size_t size) noexcept {
+  std::size_t index = 0U;
+  while (index < size) {
+    const auto first = data[index++];
+    if (first <= 0x7fU)
+      continue;
+    std::uint32_t codepoint{};
+    std::size_t continuation{};
+    std::uint32_t minimum{};
+    if (first >= 0xc2U && first <= 0xdfU) {
+      codepoint = first & 0x1fU;
+      continuation = 1U;
+      minimum = 0x80U;
+    } else if (first >= 0xe0U && first <= 0xefU) {
+      codepoint = first & 0x0fU;
+      continuation = 2U;
+      minimum = 0x800U;
+    } else if (first >= 0xf0U && first <= 0xf4U) {
+      codepoint = first & 0x07U;
+      continuation = 3U;
+      minimum = 0x10000U;
+    } else {
+      return false;
+    }
+    if (continuation > size - index)
+      return false;
+    for (std::size_t offset = 0; offset < continuation; ++offset) {
+      const auto next = data[index++];
+      if ((next & 0xc0U) != 0x80U)
+        return false;
+      codepoint = (codepoint << 6U) | (next & 0x3fU);
+    }
+    if (codepoint < minimum || codepoint > 0x10ffffU ||
+        (codepoint >= 0xd800U && codepoint <= 0xdfffU))
+      return false;
+  }
+  return true;
+}
+
+} // namespace
 
 std::size_t checked_size(std::uint64_t value) {
   if (value > static_cast<std::uint64_t>(
-                  std::numeric_limits<std::size_t>::max()))
+                  std::numeric_limits<std::size_t>::max()) ||
+      value > static_cast<std::uint64_t>(
+                  std::numeric_limits<std::ptrdiff_t>::max()))
     malformed("Checkpoint v2 size exceeds this platform");
   return static_cast<std::size_t>(value);
 }
 
-} // namespace
+std::size_t checked_product(std::size_t left, std::size_t right) {
+  if (right != 0U && left > std::numeric_limits<std::size_t>::max() / right)
+    malformed("Checkpoint v2 size product overflows");
+  return left * right;
+}
+
+std::uint64_t checked_sum_u64(std::uint64_t left, std::uint64_t right) {
+  if (left > std::numeric_limits<std::uint64_t>::max() - right)
+    malformed("Checkpoint v2 byte sum overflows");
+  return left + right;
+}
 
 std::uint64_t crc64_ecma(const void *data, std::size_t size) noexcept {
   constexpr std::uint64_t polynomial = UINT64_C(0x42F0E1EBA9EA3693);
@@ -76,6 +143,9 @@ void Encoder::string(const std::string &value) {
     malformed("Checkpoint v2 string exceeds 4096 bytes");
   if (value.find('\0') != std::string::npos)
     malformed("Checkpoint v2 string contains NUL");
+  if (!valid_utf8(reinterpret_cast<const std::uint8_t *>(value.data()),
+                  value.size()))
+    malformed("Checkpoint v2 string is not valid UTF-8");
   u32(static_cast<std::uint32_t>(value.size()));
   raw(value.data(), value.size());
 }
@@ -150,6 +220,8 @@ std::string Decoder::string() {
   const auto value = raw(count);
   if (std::find(value.begin(), value.end(), std::uint8_t{}) != value.end())
     malformed("Checkpoint v2 string contains NUL");
+  if (!valid_utf8(value.data(), value.size()))
+    malformed("Checkpoint v2 string is not valid UTF-8");
   return std::string(value.begin(), value.end());
 }
 std::size_t Decoder::remaining() const noexcept {
@@ -176,7 +248,11 @@ encode_rank_wrapper(std::int32_t rank, std::int32_t rank_count,
   return std::move(encoder).take();
 }
 
-RankWrapper decode_rank_wrapper(const std::vector<std::uint8_t> &bytes) {
+RankWrapper decode_rank_wrapper(const std::vector<std::uint8_t> &bytes,
+                                std::uint64_t expected_payload_size) {
+  const auto expected_total = checked_sum_u64(32U, expected_payload_size);
+  if (bytes.size() != checked_size(expected_total))
+    malformed("Checkpoint v2 rank wrapper size is invalid");
   Decoder decoder(bytes);
   if (decoder.raw(kRankMagic.size()) !=
       std::vector<std::uint8_t>(kRankMagic.begin(), kRankMagic.end()))
@@ -191,7 +267,10 @@ RankWrapper decode_rank_wrapper(const std::vector<std::uint8_t> &bytes) {
   if (result.rank_count <= 0 || result.rank < 0 ||
       result.rank >= result.rank_count)
     malformed("Checkpoint v2 rank identity is invalid");
-  result.payload = decoder.raw(checked_size(decoder.u64()));
+  const auto declared_size = decoder.u64();
+  if (declared_size != expected_payload_size)
+    malformed("Checkpoint v2 rank payload size is invalid");
+  result.payload = decoder.raw(checked_size(declared_size));
   decoder.require_eof();
   return result;
 }
@@ -240,7 +319,9 @@ std::vector<std::uint8_t> encode_manifest(const Manifest &manifest) {
   return std::move(encoder).take();
 }
 
-Manifest decode_manifest(const std::vector<std::uint8_t> &bytes) {
+Manifest decode_manifest(const std::vector<std::uint8_t> &bytes,
+                         std::uint32_t expected_rank_count,
+                         std::uint64_t expected_global_payload_size) {
   Decoder decoder(bytes);
   if (decoder.raw(kManifestMagic.size()) !=
       std::vector<std::uint8_t>(kManifestMagic.begin(), kManifestMagic.end()))
@@ -249,12 +330,16 @@ Manifest decode_manifest(const std::vector<std::uint8_t> &bytes) {
     malformed("Checkpoint v2 manifest header is invalid");
   Manifest manifest;
   manifest.rank_count = decoder.u32();
-  if (manifest.rank_count == 0U || manifest.rank_count > 999999U)
+  if (manifest.rank_count == 0U || manifest.rank_count > 999999U ||
+      manifest.rank_count != expected_rank_count)
     malformed("Checkpoint v2 manifest rank count is invalid");
   manifest.process_grid = {decoder.i32(), decoder.i32(), decoder.i32()};
   for (auto &fingerprint : manifest.fingerprints)
     fingerprint = decoder.u64();
-  manifest.global_payload = decoder.raw(checked_size(decoder.u64()));
+  const auto declared_global_size = decoder.u64();
+  if (declared_global_size != expected_global_payload_size)
+    malformed("Checkpoint v2 global payload size is invalid");
+  manifest.global_payload = decoder.raw(checked_size(declared_global_size));
   const auto record_count = decoder.u32();
   if (record_count != manifest.rank_count)
     malformed("Checkpoint v2 manifest record count is invalid");
@@ -313,19 +398,31 @@ decode_completed_marker(const std::vector<std::uint8_t> &bytes) {
 VerifiedFile write_verified_temporary(
     const std::filesystem::path &path,
     const std::vector<std::uint8_t> &bytes) {
-  if (std::filesystem::exists(path))
-    malformed("Checkpoint v2 temporary file already exists");
-  {
-    std::ofstream stream(path, std::ios::binary | std::ios::out);
-    if (!stream)
-      malformed("Checkpoint v2 temporary file could not be opened");
-    if (!bytes.empty())
-      stream.write(reinterpret_cast<const char *>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    stream.flush();
-    if (!stream)
-      malformed("Checkpoint v2 temporary file write failed");
-  }
+  std::error_code status_error;
+  const auto status = std::filesystem::symlink_status(path, status_error);
+  if (status_error &&
+      status_error != std::errc::no_such_file_or_directory)
+    file_system("Checkpoint v2 temporary file status failed");
+  if (!status_error &&
+      status.type() != std::filesystem::file_type::not_found)
+    file_system("Checkpoint v2 temporary file already exists");
+  if (bytes.size() >
+      static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
+    malformed("Checkpoint v2 file exceeds stream size");
+  std::ofstream stream(path, std::ios::binary | std::ios::out);
+  if (!stream)
+    file_system("Checkpoint v2 temporary file could not be opened");
+  if (!bytes.empty())
+    stream.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  if (!stream)
+    file_system("Checkpoint v2 temporary file write failed");
+  stream.flush();
+  if (!stream)
+    file_system("Checkpoint v2 temporary file flush failed");
+  stream.close();
+  if (stream.fail())
+    file_system("Checkpoint v2 temporary file close failed");
   const auto reread =
       read_regular_file_exact(path, static_cast<std::uint64_t>(bytes.size()));
   if (reread != bytes)
@@ -334,40 +431,194 @@ VerifiedFile write_verified_temporary(
           crc64_ecma(bytes.data(), bytes.size())};
 }
 
+void create_directory_exclusive(const std::filesystem::path &path) {
+  std::error_code error;
+  const auto target_status = std::filesystem::symlink_status(path, error);
+  const bool absent =
+      error == std::errc::no_such_file_or_directory ||
+      target_status.type() == std::filesystem::file_type::not_found;
+  if (!absent || std::filesystem::is_symlink(target_status))
+    file_system("Checkpoint v2 target already exists");
+
+  error.clear();
+  auto parent = path.parent_path();
+  if (parent.empty())
+    parent = ".";
+  const auto parent_status = std::filesystem::symlink_status(parent, error);
+  if (error ||
+      parent_status.type() != std::filesystem::file_type::directory)
+    file_system("Checkpoint v2 parent is not a directory");
+  if (!std::filesystem::create_directory(path, error) || error)
+    file_system("Checkpoint v2 directory creation failed");
+}
+
 std::vector<std::uint8_t>
 read_regular_file_exact(const std::filesystem::path &path,
                         std::uint64_t expected_size) {
   std::error_code error;
   const auto status = std::filesystem::symlink_status(path, error);
-  if (error || status.type() != std::filesystem::file_type::regular)
-    malformed("Checkpoint v2 entry is not a regular file");
+  if (error) {
+    if (error == std::errc::no_such_file_or_directory)
+      file_integrity_unchecked("Checkpoint v2 required file is missing");
+    file_system("Checkpoint v2 file status failed");
+  }
+  if (status.type() != std::filesystem::file_type::regular)
+    file_integrity_unchecked("Checkpoint v2 entry is not a regular file");
   const auto actual = std::filesystem::file_size(path, error);
-  if (error || actual != expected_size)
-    malformed("Checkpoint v2 file size is invalid");
-  std::vector<std::uint8_t> result(checked_size(actual));
+  if (error) {
+    if (error == std::errc::no_such_file_or_directory)
+      file_integrity_unchecked("Checkpoint v2 required file is missing");
+    file_system("Checkpoint v2 file size query failed");
+  }
+  if (actual != expected_size)
+    file_integrity("Checkpoint v2 file size is invalid");
+  const auto allocation_size = checked_size(actual);
+  if (allocation_size >
+      static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
+    malformed("Checkpoint v2 file exceeds stream size");
+  std::vector<std::uint8_t> result(allocation_size);
   std::ifstream stream(path, std::ios::binary | std::ios::in);
   if (!stream)
-    malformed("Checkpoint v2 file could not be opened");
+    file_system("Checkpoint v2 file could not be opened");
   if (!result.empty())
     stream.read(reinterpret_cast<char *>(result.data()),
                 static_cast<std::streamsize>(result.size()));
   if (!stream && !stream.eof())
-    malformed("Checkpoint v2 file read failed");
+    file_system("Checkpoint v2 file read failed");
   char trailing{};
   if (stream.get(trailing))
-    malformed("Checkpoint v2 file has trailing bytes");
+    file_integrity("Checkpoint v2 file has trailing bytes");
+  if (!stream.eof() && stream.fail())
+    file_system("Checkpoint v2 file read failed");
+  stream.clear();
+  stream.close();
+  if (stream.fail())
+    file_system("Checkpoint v2 file close failed");
   return result;
 }
 
 void publish_no_overwrite(const std::filesystem::path &temporary,
                           const std::filesystem::path &final_path) {
-  if (std::filesystem::exists(final_path) ||
-      std::filesystem::is_symlink(final_path))
-    malformed("Checkpoint v2 final file already exists");
   std::error_code error;
+  const auto status = std::filesystem::symlink_status(final_path, error);
+  if (error && error != std::errc::no_such_file_or_directory)
+    file_system("Checkpoint v2 final file status failed");
+  if (!error && status.type() != std::filesystem::file_type::not_found)
+    file_system("Checkpoint v2 final file already exists");
+  error.clear();
   std::filesystem::rename(temporary, final_path, error);
   if (error)
-    malformed("Checkpoint v2 file publication failed");
+    file_system("Checkpoint v2 file publication failed");
+}
+
+CollectiveResult converge_phase(const runtime::MpiContext &mpi, bool local_ok,
+                                std::uint64_t &collective_count,
+                                std::string_view operation) {
+  const int candidate = local_ok ? mpi.size() : mpi.rank();
+  int lowest = mpi.size();
+  runtime::check_mpi_result(
+      MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      operation);
+  ++collective_count;
+  return {lowest == mpi.size(), lowest == mpi.size() ? -1 : lowest};
+}
+
+bool opaque_bytes_agree(const runtime::MpiContext &mpi,
+                        const std::vector<std::uint8_t> &bytes,
+                        std::uint64_t &collective_count,
+                        std::string_view operation) {
+  return opaque_bytes_agreement(mpi, bytes, collective_count, operation).ok;
+}
+
+CollectiveResult opaque_bytes_agreement(
+    const runtime::MpiContext &mpi, const std::vector<std::uint8_t> &bytes,
+    std::uint64_t &collective_count, std::string_view operation) {
+  constexpr std::uint64_t maximum = UINT64_C(1024) * UINT64_C(1024);
+  std::uint64_t root_size =
+      mpi.rank() == 0 ? static_cast<std::uint64_t>(bytes.size()) : 0U;
+  runtime::check_mpi_result(
+      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      operation);
+  ++collective_count;
+  const bool size_valid =
+      root_size <= maximum && bytes.size() <= checked_size(maximum);
+  std::vector<std::uint8_t> root(
+      root_size <= maximum ? checked_size(root_size) : 0U);
+  if (mpi.rank() == 0 && size_valid)
+    root = bytes;
+  runtime::check_mpi_result(
+      MPI_Bcast(root.data(), static_cast<int>(root.size()), MPI_BYTE, 0,
+                mpi.comm()),
+      operation);
+  ++collective_count;
+  return converge_phase(mpi, size_valid && bytes == root, collective_count,
+                        operation);
+}
+
+std::vector<std::uint64_t>
+allgather_u64(const runtime::MpiContext &mpi, const std::uint64_t *local,
+              std::size_t count, std::uint64_t &collective_count,
+              std::string_view operation) {
+  if ((count != 0U && local == nullptr) ||
+      count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    malformed("Checkpoint v2 opaque gather count is invalid");
+  const auto total = checked_product(checked_size(
+                                         static_cast<std::uint64_t>(mpi.size())),
+                                     count);
+  std::vector<std::uint64_t> result(total);
+  runtime::check_mpi_result(
+      MPI_Allgather(local, static_cast<int>(count), MPI_UINT64_T,
+                    result.data(), static_cast<int>(count), MPI_UINT64_T,
+                    mpi.comm()),
+      operation);
+  ++collective_count;
+  return result;
+}
+
+std::uint64_t allreduce_sum_u64(const runtime::MpiContext &mpi,
+                                std::uint64_t local,
+                                std::uint64_t &collective_count,
+                                std::string_view operation) {
+  std::vector<std::uint64_t> items(
+      checked_size(static_cast<std::uint64_t>(mpi.size())));
+  runtime::check_mpi_result(
+      MPI_Allgather(&local, 1, MPI_UINT64_T, items.data(), 1,
+                    MPI_UINT64_T, mpi.comm()),
+      operation);
+  ++collective_count;
+  std::uint64_t result{};
+  for (const auto item : items)
+    result = checked_sum_u64(result, item);
+  return result;
+}
+
+bool exact_directory_inventory(const std::filesystem::path &directory,
+                               const std::vector<std::string> &names) {
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(directory, error);
+  if (error) {
+    if (error == std::errc::no_such_file_or_directory)
+      return false;
+    file_system("Checkpoint v2 directory status failed");
+  }
+  if (status.type() != std::filesystem::file_type::directory)
+    return false;
+  const std::set<std::string> expected(names.begin(), names.end());
+  if (expected.size() != names.size())
+    return false;
+  std::set<std::string> observed;
+  for (std::filesystem::directory_iterator iterator(directory, error), end;
+       !error && iterator != end; iterator.increment(error)) {
+    const auto entry_status = iterator->symlink_status(error);
+    if (error)
+      file_system("Checkpoint v2 directory entry status failed");
+    if (entry_status.type() != std::filesystem::file_type::regular)
+      return false;
+    observed.insert(iterator->path().filename().generic_string());
+  }
+  if (error)
+    file_system("Checkpoint v2 directory iteration failed");
+  return observed == expected;
 }
 
 } // namespace hundun::runtime::checkpoint_v2

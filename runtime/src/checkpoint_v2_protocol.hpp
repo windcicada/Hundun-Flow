@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "hundun/runtime/error.hpp"
 #include "hundun/runtime/types.hpp"
 
 #include <array>
@@ -8,11 +9,35 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace hundun::runtime {
+class MpiContext;
+}
 
 namespace hundun::runtime::checkpoint_v2 {
 
+enum class NumericFileFailure : std::uint8_t {
+  integrity_unchecked,
+  integrity,
+  filesystem
+};
+
+class NumericFileError final : public Error {
+public:
+  NumericFileError(NumericFileFailure failure, const std::string &message)
+      : Error(message), failure_(failure) {}
+  NumericFileFailure failure() const noexcept { return failure_; }
+
+private:
+  NumericFileFailure failure_;
+};
+
 std::uint64_t crc64_ecma(const void *data, std::size_t size) noexcept;
+std::size_t checked_size(std::uint64_t value);
+std::size_t checked_product(std::size_t left, std::size_t right);
+std::uint64_t checked_sum_u64(std::uint64_t left, std::uint64_t right);
 
 class Encoder final {
 public:
@@ -59,7 +84,8 @@ struct RankWrapper final {
 std::vector<std::uint8_t>
 encode_rank_wrapper(std::int32_t rank, std::int32_t rank_count,
                     const std::vector<std::uint8_t> &payload);
-RankWrapper decode_rank_wrapper(const std::vector<std::uint8_t> &bytes);
+RankWrapper decode_rank_wrapper(const std::vector<std::uint8_t> &bytes,
+                                std::uint64_t expected_payload_size);
 
 struct ManifestRankRecord final {
   std::int32_t rank{};
@@ -81,7 +107,9 @@ struct Manifest final {
 };
 
 std::vector<std::uint8_t> encode_manifest(const Manifest &);
-Manifest decode_manifest(const std::vector<std::uint8_t> &);
+Manifest decode_manifest(const std::vector<std::uint8_t> &,
+                         std::uint32_t expected_rank_count,
+                         std::uint64_t expected_global_payload_size);
 
 struct CompletedMarker final {
   std::uint64_t manifest_actual_size{};
@@ -101,10 +129,38 @@ struct VerifiedFile final {
 VerifiedFile write_verified_temporary(
     const std::filesystem::path &path,
     const std::vector<std::uint8_t> &bytes);
+void create_directory_exclusive(const std::filesystem::path &path);
 std::vector<std::uint8_t>
 read_regular_file_exact(const std::filesystem::path &path,
                         std::uint64_t expected_size);
 void publish_no_overwrite(const std::filesystem::path &temporary,
                           const std::filesystem::path &final_path);
+
+struct CollectiveResult final {
+  bool ok{};
+  int failing_rank{-1};
+};
+
+CollectiveResult converge_phase(const runtime::MpiContext &, bool local_ok,
+                                std::uint64_t &collective_count,
+                                std::string_view operation);
+CollectiveResult opaque_bytes_agreement(const runtime::MpiContext &,
+                                        const std::vector<std::uint8_t> &,
+                                        std::uint64_t &collective_count,
+                                        std::string_view operation);
+bool opaque_bytes_agree(const runtime::MpiContext &,
+                        const std::vector<std::uint8_t> &,
+                        std::uint64_t &collective_count,
+                        std::string_view operation);
+std::vector<std::uint64_t>
+allgather_u64(const runtime::MpiContext &, const std::uint64_t *local,
+              std::size_t count, std::uint64_t &collective_count,
+              std::string_view operation);
+std::uint64_t allreduce_sum_u64(const runtime::MpiContext &,
+                                std::uint64_t local,
+                                std::uint64_t &collective_count,
+                                std::string_view operation);
+bool exact_directory_inventory(const std::filesystem::path &,
+                               const std::vector<std::string> &);
 
 } // namespace hundun::runtime::checkpoint_v2

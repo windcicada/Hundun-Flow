@@ -159,15 +159,18 @@ void require_request(const flow::CheckpointV2Report &report,
         "checkpoint-v2.diagnostics.frame", -1,
         "Checkpoint v2 diagnostic request is invalid");
   }
-  if (request.scope != expected || request.frame.rank != report.rank() ||
+  if (request.scope != expected || !request.selected_fields.empty() ||
+      request.sample_budget != 0U)
+    throw DiagnosticCollectionError(
+        DiagnosticFailureClass::capability,
+        "checkpoint-v2.diagnostics.capability", -1,
+        "Checkpoint v2 diagnostic request uses an unsupported capability");
+  if (request.frame.rank != report.rank() ||
       request.frame.step != report.step() ||
       bits(request.frame.time_s) != bits(report.time_s()) ||
-      request.frame.phase != phase_name(report.phase()) ||
-      !request.selected_fields.empty() || request.sample_budget != 0U)
+      request.frame.phase != phase_name(report.phase()))
     throw DiagnosticCollectionError(
-        request.selected_fields.empty() && request.sample_budget == 0U
-            ? DiagnosticFailureClass::invalid_request
-            : DiagnosticFailureClass::capability,
+        DiagnosticFailureClass::invalid_request,
         "checkpoint-v2.diagnostics.frame", -1,
         "Checkpoint v2 diagnostic frame does not match the report");
 }
@@ -257,7 +260,7 @@ void add_u64(DiagnosticFingerprintAccumulator &accumulator,
                       static_cast<std::uint32_t>(value >> 32U))));
 }
 void add_count(DiagnosticFingerprintAccumulator &accumulator,
-               std::string_view id, int rank, std::uint64_t value) {
+               std::string_view id, int rank, std::int64_t value) {
   accumulator.add(id, static_cast<std::uint64_t>(rank), 0U,
                   describe_fp64(static_cast<double>(value)));
 }
@@ -286,7 +289,7 @@ fingerprint(const flow::CheckpointV2Report &report) {
   add_u64(result, kFingerprintIds[10], report.rank(),
           report.local_logical_bytes());
   add_count(result, kFingerprintIds[11], report.rank(),
-            static_cast<std::uint64_t>(report.lowest_failing_rank() + 1));
+            report.lowest_failing_rank());
   add_count(result, kFingerprintIds[12], report.rank(),
             static_cast<std::uint8_t>(report.manifest_crc_status()));
   add_u64(result, kFingerprintIds[13], report.rank(),
@@ -300,7 +303,7 @@ fingerprint(const flow::CheckpointV2Report &report) {
   add_count(result, kFingerprintIds[17], report.rank(),
             static_cast<std::uint8_t>(report.publication_status()));
   add_count(result, kFingerprintIds[18], report.rank(),
-            static_cast<std::uint64_t>(report.rank()));
+            report.rank());
   add_count(result, kFingerprintIds[19], report.rank(),
             static_cast<std::uint8_t>(report.rank_crc_status()));
   add_count(result, kFingerprintIds[20], report.rank(),
@@ -439,11 +442,9 @@ DiagnosticRecord build_record(const flow::CheckpointV2Report &report,
 }
 
 void submit(DiagnosticSink &sink, const DiagnosticRecord &record) {
+  validate(record);
   try {
-    validate(record);
     sink.submit(record);
-  } catch (const DiagnosticCollectionError &) {
-    throw;
   } catch (...) {
     throw DiagnosticCollectionError(
         DiagnosticFailureClass::sink_failure,

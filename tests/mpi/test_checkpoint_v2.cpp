@@ -185,6 +185,14 @@ void run(const hundun::runtime::MpiContext &mpi) {
   const auto written = hundun::flow::write_checkpoint_v2(
       mpi, decomposition, topology, geometry, boundaries, config, source,
       controller_state, std::nullopt, directory);
+  if (written.disposition() !=
+      hundun::flow::CheckpointV2Disposition::completed)
+    throw std::runtime_error(
+        "Checkpoint write failed: reason=" +
+        std::to_string(static_cast<unsigned>(written.reason())) +
+        " phase=" +
+        std::to_string(static_cast<unsigned>(written.phase())) +
+        " rank=" + std::to_string(written.lowest_failing_rank()));
   HUNDUN_CHECK(written.disposition() ==
                hundun::flow::CheckpointV2Disposition::completed);
   HUNDUN_CHECK(written.file_count() ==
@@ -466,11 +474,41 @@ void run(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::CheckpointV2FailureReason::state);
   HUNDUN_CHECK(!std::filesystem::exists(invalid_directory));
 
+  const auto common_mismatch_directory =
+      std::filesystem::temp_directory_path() /
+      ("hundun-task23-common-mismatch-" + std::to_string(mpi.size()));
+  if (mpi.rank() == 0)
+    std::filesystem::remove_all(common_mismatch_directory);
+  mpi.barrier();
+  if (mpi.size() > 1) {
+    auto mismatched_config = config;
+    if (mpi.rank() == mpi.size() - 1)
+      mismatched_config.physics.dynamic_viscosity_pa_s *= 2.0;
+    const auto source_before = CheckpointAccess::snapshot(source);
+    const auto mismatch = hundun::flow::write_checkpoint_v2(
+        mpi, decomposition, topology, geometry, boundaries,
+        mismatched_config, source, controller_state, std::nullopt,
+        common_mismatch_directory);
+    HUNDUN_CHECK(mismatch.disposition() ==
+                 hundun::flow::CheckpointV2Disposition::failed);
+    HUNDUN_CHECK(mismatch.reason() ==
+                 hundun::flow::CheckpointV2FailureReason::invalid_input);
+    HUNDUN_CHECK(mismatch.phase() ==
+                 hundun::flow::CheckpointV2Phase::preflight);
+    HUNDUN_CHECK(mismatch.lowest_failing_rank() == mpi.size() - 1);
+    HUNDUN_CHECK(mismatch.step() == metadata.step);
+    HUNDUN_CHECK(mismatch.time_s() == metadata.time_s);
+    HUNDUN_CHECK(!std::filesystem::exists(common_mismatch_directory));
+    HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(
+        source_before, CheckpointAccess::snapshot(source)));
+  }
+
   mpi.barrier();
   if (mpi.rank() == 0) {
     std::filesystem::remove_all(directory);
     std::filesystem::remove_all(ideal_directory);
     std::filesystem::remove_all(invalid_directory);
+    std::filesystem::remove_all(common_mismatch_directory);
   }
 }
 

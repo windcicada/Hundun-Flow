@@ -156,7 +156,7 @@ public:
   const IdealGasClosureState &ideal_gas_closure_state() const;
 
 private:
-  explicit CheckpointV2ReadResult(CheckpointV2Report);
+  explicit CheckpointV2ReadResult(CheckpointV2Report) noexcept;
   CheckpointV2Report report_;
   bool restored_{};
   TimeControlState time_control_;
