@@ -129,6 +129,8 @@ public:
   preflight_wire_exchange_count(const IdealGasClosure &) noexcept;
   static IdealGasClosureFailureReason
   create_validation_failure_reason(const runtime::Error &) noexcept;
+  static void set_restore_preparation_fault(int rank) noexcept;
+  static void set_restore_snapshot_shape_fault(int rank) noexcept;
   static void set_facade_create_fault(IdealGasClosure &, int rank);
   static void set_material_factory_create_fault(IdealGasClosure &, int rank);
   static bool consume_facade_create_fault(IdealGasClosure &, int rank) noexcept;

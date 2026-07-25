@@ -20,7 +20,6 @@
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -38,6 +37,7 @@ constexpr std::uint64_t kClosureReportSeed = 0x696465616c676173ULL;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 int restore_snapshot_preparation_fault_rank{-1};
+int restore_snapshot_shape_fault_rank{-1};
 
 bool create_fault(int selected_kind, int selected_rank,
                   test::IdealGasCreateFault fault, int rank) noexcept {
@@ -167,6 +167,12 @@ struct PreflightWire final {
   std::uint64_t cp{};
   std::uint64_t gas_constant{};
   std::uint64_t configured_pressure{};
+  std::uint64_t restored_present{};
+  std::uint64_t restored_mode{};
+  std::uint64_t restored_pressure{};
+  std::uint64_t restored_target_present{};
+  std::uint64_t restored_target{};
+  std::uint64_t restored_revision{};
   std::uint64_t global_cells[3]{};
   std::uint64_t attempt_identity{};
   std::uint64_t local_cells[3]{};
@@ -176,6 +182,7 @@ struct PreflightWire final {
   std::uint64_t first_owned_global_id{};
   std::uint64_t last_owned_global_id{};
   std::uint64_t local_layout_valid{};
+  std::uint64_t local_contract_valid{};
 };
 
 static_assert(std::is_trivially_copyable_v<PreflightWire>);
@@ -244,6 +251,10 @@ int agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
   bool contract_valid =
       common.mode <=
           static_cast<std::uint64_t>(IdealGasPressureMode::open_fixed) &&
+      common.restored_present <= 1U &&
+      common.restored_mode <=
+          static_cast<std::uint64_t>(IdealGasPressureMode::open_fixed) &&
+      common.restored_target_present <= 1U &&
       common.global_cells[0] != 0U && common.global_cells[1] != 0U &&
       common.global_cells[2] != 0U;
   for (const auto extent : common.global_cells) {
@@ -260,6 +271,10 @@ int agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
         preflight_workspace[static_cast<std::size_t>(rank)];
     if (candidate.local_layout_valid == 0U && result.rank < 0) {
       result.code = PreflightResultCode::invalid_layout;
+      result.rank = rank;
+    }
+    if (candidate.local_contract_valid == 0U && result.rank < 0) {
+      result.code = PreflightResultCode::invalid_contract;
       result.rank = rank;
     }
     if (std::memcmp(&candidate, &common, common_bytes) != 0)
@@ -299,7 +314,7 @@ int agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
         contract_valid = false;
   if (result.code == PreflightResultCode::ok && !contract_valid)
     result.code = PreflightResultCode::invalid_contract;
-  if (result.code == PreflightResultCode::invalid_layout)
+  if (result.rank >= 0)
     return result.rank;
   if (result.code != PreflightResultCode::ok)
     throw runtime::Error("ideal-gas closure rank preflight disagrees");
@@ -455,7 +470,7 @@ final_gate_reason(FinalGateOrigin origin) noexcept {
 
 } // namespace
 
-bool detail::validate_ideal_gas_restore_state(
+bool detail::validate_preflighted_ideal_gas_restore_state(
     const runtime::MpiContext &mpi, const mesh::MeshTopology &topology,
     const mesh::MeshGeometry &geometry,
     const boundary::BoundaryRegistry &boundaries,
@@ -804,48 +819,6 @@ IdealGasClosure IdealGasClosure::restore(
     const runtime::MpiContext &mpi, const runtime::FieldRegistry &registry,
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec, IdealGasClosureState restored) {
-  FlowLayerValues history;
-  FlowLayerValues committed;
-  bool snapshots_prepared = true;
-  std::array<char, 96> snapshot_message{};
-  std::string_view local_message;
-  try {
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
-    if (restore_snapshot_preparation_fault_rank == mpi.rank()) {
-      restore_snapshot_preparation_fault_rank = -1;
-      throw std::bad_alloc();
-    }
-#endif
-    history = state.snapshot(FlowLayer::history);
-    committed = state.snapshot(FlowLayer::committed);
-  } catch (...) {
-    snapshots_prepared = false;
-    const int written = std::snprintf(
-        snapshot_message.data(), snapshot_message.size(),
-        "ideal-gas closure restore snapshot preparation failed on rank %d",
-        mpi.rank());
-    local_message =
-        written > 0 && static_cast<std::size_t>(written) <
-                           snapshot_message.size()
-            ? std::string_view(snapshot_message.data(),
-                               static_cast<std::size_t>(written))
-            : std::string_view(
-                  "ideal-gas closure restore snapshot preparation failed");
-  }
-  const auto snapshot_status =
-      runtime::collective_status(mpi, snapshots_prepared, local_message);
-  if (!snapshot_status.ok)
-    throw runtime::Error(snapshot_status.message);
-  std::uint64_t validation_collectives{};
-  const bool valid = detail::validate_ideal_gas_restore_state(
-      mpi, topology, geometry, boundaries, spec.cp_J_per_kg_K,
-      spec.gas_constant_J_per_kg_K,
-      spec.configured_thermodynamic_pressure_pa,
-      history, committed, restored, validation_collectives);
-  const auto status = runtime::collective_status(
-      mpi, valid, "ideal-gas closure restore validation");
-  if (!status.ok)
-    throw runtime::Error(status.message);
   return create_internal(topology, geometry, boundaries, mpi, registry, fields,
                          state, spec, &restored
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -885,8 +858,27 @@ IdealGasClosure IdealGasClosure::create_internal(
   wire.cp = fp_bits(spec.cp_J_per_kg_K);
   wire.gas_constant = fp_bits(spec.gas_constant_J_per_kg_K);
   wire.configured_pressure = fp_bits(spec.configured_thermodynamic_pressure_pa);
+  wire.restored_present = restored_authority != nullptr ? 1U : 0U;
+  if (restored_authority != nullptr) {
+    wire.restored_mode =
+        static_cast<std::uint64_t>(restored_authority->mode);
+    wire.restored_pressure =
+        fp_bits(restored_authority->thermodynamic_pressure_pa);
+    wire.restored_target_present =
+        restored_authority->target_mass_kg.has_value() ? 1U : 0U;
+    wire.restored_target =
+        fp_bits(restored_authority->target_mass_kg.value_or(0.0));
+    wire.restored_revision = restored_authority->revision;
+  }
   bool preparation_valid = true;
   try {
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (restored_authority != nullptr &&
+        restore_snapshot_preparation_fault_rank == mpi.rank()) {
+      restore_snapshot_preparation_fault_rank = -1;
+      throw std::bad_alloc();
+    }
+#endif
     geometry.require_compatible(topology);
     if (!state.impl_)
       throw runtime::Error("ideal-gas closure state has been moved from");
@@ -922,9 +914,32 @@ IdealGasClosure IdealGasClosure::create_internal(
                 committed_layout.face_count == topology.local_face_count()
             ? 1U
             : 0U;
+    const bool spec_valid =
+        spec.cp_J_per_kg_K > 0.0 && std::isfinite(spec.cp_J_per_kg_K) &&
+        spec.gas_constant_J_per_kg_K > 0.0 &&
+        std::isfinite(spec.gas_constant_J_per_kg_K) &&
+        spec.configured_thermodynamic_pressure_pa > 0.0 &&
+        std::isfinite(spec.configured_thermodynamic_pressure_pa);
+    const bool restored_valid =
+        restored_authority == nullptr ||
+        (restored_authority->mode == mode &&
+         restored_authority->thermodynamic_pressure_pa > 0.0 &&
+         std::isfinite(restored_authority->thermodynamic_pressure_pa) &&
+         restored_authority->revision !=
+             std::numeric_limits<std::uint64_t>::max() &&
+         restored_authority->target_mass_kg.has_value() ==
+             (mode == IdealGasPressureMode::closed_dynamic) &&
+         (mode != IdealGasPressureMode::closed_dynamic ||
+          (*restored_authority->target_mass_kg > 0.0 &&
+           std::isfinite(*restored_authority->target_mass_kg))) &&
+         (mode != IdealGasPressureMode::open_fixed ||
+          fp_bits(restored_authority->thermodynamic_pressure_pa) ==
+              fp_bits(spec.configured_thermodynamic_pressure_pa)));
+    wire.local_contract_valid = spec_valid && restored_valid ? 1U : 0U;
   } catch (...) {
     preparation_valid = false;
     wire.local_layout_valid = 0U;
+    wire.local_contract_valid = 0U;
   }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   if (create_fault(create_fault_kind, create_fault_rank,
@@ -1011,7 +1026,20 @@ IdealGasClosure IdealGasClosure::create_internal(
             spec.configured_thermodynamic_pressure_pa > 0.0 &&
             std::isfinite(spec.configured_thermodynamic_pressure_pa) &&
             (restored_authority == nullptr ||
-             restored_authority->mode == mode);
+             (restored_authority->mode == mode &&
+              restored_authority->thermodynamic_pressure_pa > 0.0 &&
+              std::isfinite(
+                  restored_authority->thermodynamic_pressure_pa) &&
+              restored_authority->revision !=
+                  std::numeric_limits<std::uint64_t>::max() &&
+              restored_authority->target_mass_kg.has_value() ==
+                  (mode == IdealGasPressureMode::closed_dynamic) &&
+              (mode != IdealGasPressureMode::closed_dynamic ||
+               (*restored_authority->target_mass_kg > 0.0 &&
+                std::isfinite(*restored_authority->target_mass_kg))) &&
+              (mode != IdealGasPressureMode::open_fixed ||
+               fp_bits(restored_authority->thermodynamic_pressure_pa) ==
+                   fp_bits(spec.configured_thermodynamic_pressure_pa))));
     const auto owned = topology.owned_global_box();
     valid = valid && same(local_extent, {owned.end.x - owned.begin.x,
                                          owned.end.y - owned.begin.y,
@@ -1030,6 +1058,14 @@ IdealGasClosure IdealGasClosure::create_internal(
             h_descriptor.conservative && h_descriptor.unit == "J/m3";
     committed = state.snapshot(FlowLayer::committed);
     history = state.snapshot(FlowLayer::history);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    if (restored_authority != nullptr &&
+        restore_snapshot_shape_fault_rank == mpi.rank()) {
+      restore_snapshot_shape_fault_rank = -1;
+      if (!committed.density.empty())
+        committed.density.pop_back();
+    }
+#endif
     constexpr std::size_t enthalpy_index = 0U;
     owned_cell_count = topology.owned_cell_count();
     valid = valid && committed.density.size() == owned_cell_count &&
@@ -1152,13 +1188,21 @@ IdealGasClosure IdealGasClosure::create_internal(
 #endif
   mpi.allreduce_fp64_in_place(sums.data(), sums.size(),
                               runtime::Fp64ReductionOperation::sum);
-  const double target_mass = sums[0];
+  const double target_mass =
+      restored_authority != nullptr &&
+              restored_authority->target_mass_kg.has_value()
+          ? *restored_authority->target_mass_kg
+          : sums[0];
   double current_pressure = spec.configured_thermodynamic_pressure_pa;
   double history_pressure = spec.configured_thermodynamic_pressure_pa;
   if (mode == IdealGasPressureMode::closed_dynamic) {
-    current_pressure = checked_ratio(
-        static_cast<long double>(target_mass) * spec.gas_constant_J_per_kg_K,
-        sums[1], "ideal-gas initial pressure is invalid");
+    current_pressure =
+        restored_authority != nullptr
+            ? restored_authority->thermodynamic_pressure_pa
+            : checked_ratio(
+                  static_cast<long double>(target_mass) *
+                      spec.gas_constant_J_per_kg_K,
+                  sums[1], "ideal-gas initial pressure is invalid");
     history_pressure = checked_ratio(
         static_cast<long double>(target_mass) * spec.gas_constant_J_per_kg_K,
         sums[3], "ideal-gas historical pressure is invalid");
@@ -1201,6 +1245,7 @@ IdealGasClosure IdealGasClosure::create_internal(
       sums[1] > 0.0 && sums[3] > 0.0 &&
       (mode == IdealGasPressureMode::open_fixed ||
        (target_mass > 0.0 && std::isfinite(target_mass) &&
+        relative_error(sums[0], target_mass) <= 5.0e-12 &&
         relative_error(sums[2], target_mass) <= 5.0e-12)) &&
       (restored_authority != nullptr ||
        relative_error(current_pressure,
@@ -1247,6 +1292,7 @@ void IdealGasClosure::begin_attempt(const FlowState &state,
   wire.configured_pressure =
       fp_bits(impl_->spec.configured_thermodynamic_pressure_pa);
   wire.attempt_identity = identity;
+  wire.local_contract_valid = 1U;
   bool layout_valid = true;
   try {
     if (!state.impl_)
@@ -2044,6 +2090,16 @@ test::IdealGasClosureTestAccess::create_validation_failure_reason(
       dynamic_cast<const DensityClosureCreateValidationFailure *>(&error);
   return validation == nullptr ? IdealGasClosureFailureReason::none
                                : validation->reason();
+}
+
+void test::IdealGasClosureTestAccess::set_restore_preparation_fault(
+    int rank) noexcept {
+  restore_snapshot_preparation_fault_rank = rank;
+}
+
+void test::IdealGasClosureTestAccess::set_restore_snapshot_shape_fault(
+    int rank) noexcept {
+  restore_snapshot_shape_fault_rank = rank;
 }
 
 void test::IdealGasClosureTestAccess::begin_attempt(

@@ -6,7 +6,7 @@
 #endif
 
 #include "checkpoint_v2_detail.hpp"
-#include "field_epoch_test_access.hpp"
+#include "../../runtime/src/field_epoch_test_access.hpp"
 
 #include <array>
 #include <cstdint>
@@ -40,6 +40,20 @@ enum class CheckpointV2PreparationPoint : std::uint8_t {
 void set_checkpoint_v2_preparation_fault(
     CheckpointV2PreparationPoint, std::uint32_t calls_before = 0U) noexcept;
 void set_ideal_gas_restore_snapshot_preparation_fault(int rank) noexcept;
+
+struct CheckpointV2PathCodeObservation final {
+  std::uint64_t success_code{};
+  std::uint64_t candidate_code{};
+  bool decoded{};
+  bool success{};
+  int rank{-1};
+  int reason{-1};
+};
+
+CheckpointV2PathCodeObservation
+checkpoint_v2_path_code_observation_for_test(int size, int rank, int reason,
+                                             bool local_success,
+                                             std::uint64_t selected) noexcept;
 std::vector<std::uint8_t> checkpoint_v2_encode_global_payload_for_test(
     AcceptedStepMetadata, const TimeControlState &,
     const std::optional<IdealGasClosureState> &);

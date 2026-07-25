@@ -195,6 +195,41 @@ task23_strip_cpp_comments(checkpoint_test checkpoint_test_clean)
 task23_strip_cpp_comments(protocol_test protocol_test_clean)
 task23_strip_cpp_comments(checkpoint_product checkpoint_product_clean)
 
+foreach(required IN ITEMS
+    "checkpoint_v2_path_code_observation_for_test"
+    "constexpr int half = maximum / 2"
+    "for (const auto size : {half, half + 1, maximum})"
+    "HUNDUN_CHECK(!invalid.decoded)")
+  string(FIND "${checkpoint_test_clean}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R11 wide path-code product oracle is missing '${required}'")
+  endif()
+endforeach()
+
+file(READ
+  "${HUNDUN_SOURCE_ROOT}/tests/mpi/test_ideal_gas_closure.cpp"
+  ideal_gas_test)
+task23_strip_cpp_comments(ideal_gas_test ideal_gas_test_clean)
+foreach(required IN ITEMS
+    "const auto expect_restore_rejected"
+    "preflight_failure_rank(error)"
+    "create_validation_failure_reason(error)"
+    "CheckpointV2TestAccess::snapshot(candidate_state)"
+    "checkpoint_v2_deep_snapshot_equal("
+    "set_restore_preparation_fault(target)"
+    "set_restore_snapshot_shape_fault(target)"
+    "auto public_open_restore = hundun::flow::IdealGasClosure::restore("
+    "ideal_gas_closure_state_bitwise_equal("
+    "mpi.rank() == target ? closed_boundaries : open_boundaries"
+    "mpi.rank() == target ? open_boundaries : closed_boundaries")
+  string(FIND "${ideal_gas_test_clean}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R11 public restore oracle is missing '${required}'")
+  endif()
+endforeach()
+
 if(NOT DEFINED HUNDUN_R4_SECTION OR HUNDUN_R4_SECTION STREQUAL "report")
   foreach(required IN ITEMS "require_exact_product_report")
     string(FIND "${checkpoint_test}" "${required}" position)

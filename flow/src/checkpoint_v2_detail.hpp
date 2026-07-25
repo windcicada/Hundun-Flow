@@ -30,7 +30,7 @@ struct FlowState::Impl final {
 
 namespace detail {
 
-bool validate_ideal_gas_restore_state(
+bool validate_preflighted_ideal_gas_restore_state(
     const runtime::MpiContext &, const mesh::MeshTopology &,
     const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
     double cp_J_per_kg_K, double gas_constant_J_per_kg_K,

@@ -80,3 +80,65 @@ foreach(required IN ITEMS
       "Checkpoint v2 report authentication misses fixed-storage contract: ${required}")
   endif()
 endforeach()
+
+file(READ "${HUNDUN_SOURCE_ROOT}/flow/src/ideal_gas_closure.cpp"
+  ideal_gas_flow)
+file(READ "${HUNDUN_SOURCE_ROOT}/flow/src/checkpoint_v2_detail.hpp"
+  checkpoint_detail)
+string(REGEX MATCHALL
+  "validate_preflighted_ideal_gas_restore_state\\("
+  checkpoint_validator_calls "${checkpoint_flow}")
+list(LENGTH checkpoint_validator_calls checkpoint_validator_call_count)
+if(NOT checkpoint_validator_call_count EQUAL 2)
+  message(FATAL_ERROR
+    "Checkpoint v2 must have exactly two preflighted ideal-gas validator calls")
+endif()
+string(REGEX MATCHALL
+  "validate_preflighted_ideal_gas_restore_state\\("
+  ideal_gas_validator_definitions "${ideal_gas_flow}")
+list(LENGTH ideal_gas_validator_definitions ideal_gas_validator_count)
+if(NOT ideal_gas_validator_count EQUAL 1)
+  message(FATAL_ERROR
+    "Ideal-gas product must contain only the preflighted validator definition")
+endif()
+foreach(content IN ITEMS "${checkpoint_flow}" "${checkpoint_detail}"
+    "${ideal_gas_flow}")
+  string(FIND "${content}" "validate_ideal_gas_restore_state(" old_validator)
+  if(NOT old_validator EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 retains the unsafe unqualified restore validator name")
+  endif()
+endforeach()
+
+string(FIND "${ideal_gas_flow}" "IdealGasClosure IdealGasClosure::restore("
+  restore_begin)
+string(FIND "${ideal_gas_flow}"
+  "#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS\nvoid test::set_ideal_gas_restore"
+  restore_end)
+if(restore_begin EQUAL -1 OR restore_end EQUAL -1 OR
+    restore_end LESS_EQUAL restore_begin)
+  message(FATAL_ERROR "Ideal-gas public restore section was not found")
+endif()
+math(EXPR restore_length "${restore_end} - ${restore_begin}")
+string(SUBSTRING "${ideal_gas_flow}" "${restore_begin}" "${restore_length}"
+  restore_section)
+string(FIND "${restore_section}" "create_internal(" restore_factory)
+string(FIND "${restore_section}"
+  "validate_preflighted_ideal_gas_restore_state(" restore_validator)
+if(restore_factory EQUAL -1 OR NOT restore_validator EQUAL -1)
+  message(FATAL_ERROR
+    "Public ideal-gas restore bypasses the common construction preflight")
+endif()
+
+foreach(required IN ITEMS
+    "std::uint64_t path_preparation_success_code"
+    "std::uint64_t path_preparation_candidate_code"
+    "MPI_UINT64_T"
+    "decode_path_preparation_code"
+    "if (!decoded.valid)")
+  string(FIND "${checkpoint_flow}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Checkpoint v2 wide path preparation misses ${required}")
+  endif()
+endforeach()

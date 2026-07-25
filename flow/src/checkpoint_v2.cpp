@@ -1214,6 +1214,56 @@ void broadcast_root_u64(const runtime::MpiContext &mpi, std::uint64_t *items,
       operation);
   ++collective_count;
 }
+
+constexpr std::uint64_t kPathStateFailureCode = 0U;
+constexpr std::uint64_t kPathInvalidInputCode = 1U;
+
+std::uint64_t path_preparation_success_code(int size) {
+  if (size <= 0)
+    throw runtime::Error("Checkpoint v2 path communicator size is invalid");
+  return 2U * static_cast<std::uint64_t>(size);
+}
+
+std::uint64_t path_preparation_candidate_code(int size, int rank, int reason,
+                                              bool local_success) {
+  const auto success = path_preparation_success_code(size);
+  if (rank < 0 || rank >= size ||
+      (reason != static_cast<int>(kPathStateFailureCode) &&
+       reason != static_cast<int>(kPathInvalidInputCode)))
+    throw runtime::Error("Checkpoint v2 path preparation code is invalid");
+  return local_success
+             ? success
+             : 2U * static_cast<std::uint64_t>(rank) +
+                   static_cast<std::uint64_t>(reason);
+}
+
+struct PathPreparationSelection final {
+  bool valid{};
+  bool success{};
+  int rank{-1};
+  int reason{-1};
+};
+
+PathPreparationSelection decode_path_preparation_code(
+    int size, std::uint64_t selected) noexcept {
+  if (size <= 0)
+    return {};
+  const auto success = 2U * static_cast<std::uint64_t>(size);
+  if (selected == success)
+    return {true, true, -1, -1};
+  if (selected >= success)
+    return {};
+  const auto decoded_rank = selected / 2U;
+  const auto decoded_reason = selected % 2U;
+  if (decoded_rank >= static_cast<std::uint64_t>(size) ||
+      decoded_rank >
+          static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+      decoded_reason > kPathInvalidInputCode)
+    return {};
+  return {true, false, static_cast<int>(decoded_rank),
+          static_cast<int>(decoded_reason)};
+}
+
 Convergence path_agrees(const runtime::MpiContext &mpi,
                         const std::filesystem::path &path,
                         std::uint64_t &collective_count) {
@@ -1236,25 +1286,25 @@ Convergence path_agrees(const runtime::MpiContext &mpi,
   } catch (...) {
     local_prepared = false;
   }
-  constexpr int state_failure_code = 0;
-  constexpr int invalid_input_code = 1;
-  const int success = 2 * mpi.size();
-  const int candidate =
-      local_prepared && local_valid
-          ? success
-          : 2 * mpi.rank() +
-                (local_prepared ? invalid_input_code : state_failure_code);
-  int selected = success;
+  const int reason =
+      local_prepared ? static_cast<int>(kPathInvalidInputCode)
+                     : static_cast<int>(kPathStateFailureCode);
+  const std::uint64_t candidate = path_preparation_candidate_code(
+      mpi.size(), mpi.rank(), reason, local_prepared && local_valid);
+  std::uint64_t selected = path_preparation_success_code(mpi.size());
   runtime::check_mpi_result(
-      MPI_Allreduce(&candidate, &selected, 1, MPI_INT, MPI_MIN, mpi.comm()),
+      MPI_Allreduce(&candidate, &selected, 1, MPI_UINT64_T, MPI_MIN,
+                    mpi.comm()),
       "MPI_Allreduce(Checkpoint v2 path preparation)");
   ++collective_count;
-  if (selected != success) {
-    const int failing_rank = selected / 2;
-    if (selected % 2 == state_failure_code)
+  const auto decoded = decode_path_preparation_code(mpi.size(), selected);
+  if (!decoded.valid)
+    throw runtime::Error("Checkpoint v2 path preparation result is invalid");
+  if (!decoded.success) {
+    if (decoded.reason == static_cast<int>(kPathStateFailureCode))
       throw runtime::checkpoint_v2::CollectivePreparationError(
-          failing_rank, "Checkpoint v2 path preparation failed");
-    return {false, failing_rank};
+          decoded.rank, "Checkpoint v2 path preparation failed");
+    return {false, decoded.rank};
   }
   return runtime::checkpoint_v2::opaque_bytes_agreement(
       mpi, encoder.bytes(), collective_count,
@@ -1398,6 +1448,24 @@ void set_checkpoint_v2_preparation_fault(CheckpointV2PreparationPoint point,
                                          std::uint32_t calls_before) noexcept {
   checkpoint_preparation_fault = static_cast<CheckpointPreparationPoint>(point);
   checkpoint_preparation_fault_calls_before = calls_before;
+}
+CheckpointV2PathCodeObservation
+checkpoint_v2_path_code_observation_for_test(int size, int rank, int reason,
+                                             bool local_success,
+                                             std::uint64_t selected) noexcept {
+  CheckpointV2PathCodeObservation result;
+  try {
+    result.success_code = path_preparation_success_code(size);
+    result.candidate_code =
+        path_preparation_candidate_code(size, rank, reason, local_success);
+    const auto decoded = decode_path_preparation_code(size, selected);
+    result.decoded = decoded.valid;
+    result.success = decoded.success;
+    result.rank = decoded.rank;
+    result.reason = decoded.reason;
+  } catch (...) {
+  }
+  return result;
 }
 std::vector<std::uint8_t> checkpoint_v2_encode_global_payload_for_test(
     AcceptedStepMetadata metadata, const TimeControlState &time,
@@ -1816,7 +1884,8 @@ CheckpointV2Report write_checkpoint_v2(
   values.partition = CheckpointV2CheckStatus::passed;
 
   if (config.density_model == config::DensityModel::ideal_gas) {
-    const bool model_valid = detail::validate_ideal_gas_restore_state(
+    const bool model_valid =
+        detail::validate_preflighted_ideal_gas_restore_state(
         mpi, topology, geometry, boundaries,
         config.physics.cp_J_per_kg_K.value_or(
             std::numeric_limits<double>::quiet_NaN()),
@@ -2463,7 +2532,7 @@ read_checkpoint_v2(const runtime::MpiContext &mpi,
   bool state_ok =
       valid_layer(layers.first, config) && valid_layer(layers.second, config);
   if (config.density_model == config::DensityModel::ideal_gas && global.closure)
-    state_ok = detail::validate_ideal_gas_restore_state(
+    state_ok = detail::validate_preflighted_ideal_gas_restore_state(
             mpi, topology, geometry, boundaries,
             config.physics.cp_J_per_kg_K.value_or(
                 std::numeric_limits<double>::quiet_NaN()),
