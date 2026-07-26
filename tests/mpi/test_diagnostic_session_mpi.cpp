@@ -21,11 +21,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iomanip>
 #include <iterator>
+#include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -139,6 +143,120 @@ std::vector<char> read_bytes(const std::filesystem::path& path) {
   HUNDUN_CHECK(static_cast<bool>(stream));
   return {std::istreambuf_iterator<char>(stream),
           std::istreambuf_iterator<char>()};
+}
+
+struct IncidentAreaEvidence {
+  std::uint64_t remote_owner_face_count{};
+  std::optional<std::uint64_t> mutation_cell;
+  double old_owned_face_area_sum{};
+  double complete_incident_area_sum{};
+};
+
+IncidentAreaEvidence check_incident_face_areas(
+    const hundun::mesh::MeshTopology& topology,
+    const hundun::mesh::MeshGeometry& geometry,
+    const hundun::diagnostics::MeshDiagnosticV2& decoded) {
+  std::vector<hundun::mesh::LocalFaceId> incident_faces;
+  for (hundun::mesh::LocalFaceId face = 0;
+       face < topology.local_face_count(); ++face) {
+    const auto owner = topology.owner(face);
+    const auto neighbour = topology.neighbour(face);
+    if (topology.cell_ownership(owner) ==
+            hundun::mesh::EntityOwnership::owned ||
+        (neighbour &&
+         topology.cell_ownership(*neighbour) ==
+             hundun::mesh::EntityOwnership::owned)) {
+      incident_faces.push_back(face);
+    }
+  }
+  std::sort(incident_faces.begin(), incident_faces.end(),
+            [&](const auto left, const auto right) {
+              return topology.global_face_id(left) <
+                     topology.global_face_id(right);
+            });
+  HUNDUN_CHECK(incident_faces.size() == decoded.faces.size());
+
+  std::map<std::uint64_t, double> expected_area_sums;
+  std::map<std::uint64_t, double> decoded_area_sums;
+  for (hundun::mesh::LocalCellId cell = 0;
+       cell < topology.owned_cell_count(); ++cell) {
+    const auto global_id = topology.global_cell_id(cell);
+    expected_area_sums.emplace(global_id, 0.0);
+    decoded_area_sums.emplace(global_id, 0.0);
+  }
+
+  IncidentAreaEvidence evidence;
+  for (std::size_t index = 0; index < incident_faces.size(); ++index) {
+    const auto local_face = incident_faces[index];
+    const auto owner = topology.owner(local_face);
+    const auto neighbour = topology.neighbour(local_face);
+    const auto owner_global = topology.global_cell_id(owner);
+    const auto& actual = decoded.faces[index];
+    HUNDUN_CHECK(actual.global_id == topology.global_face_id(local_face));
+    HUNDUN_CHECK(actual.owner_global_cell == owner_global);
+    HUNDUN_CHECK(
+        actual.neighbour_global_cell ==
+        (neighbour
+             ? std::optional<std::uint64_t>{
+                   topology.global_cell_id(*neighbour)}
+             : std::nullopt));
+    HUNDUN_CHECK(actual.area_m2 == geometry.face_area_m2(local_face));
+
+    if (const auto found = expected_area_sums.find(owner_global);
+        found != expected_area_sums.end())
+      found->second += geometry.face_area_m2(local_face);
+    if (neighbour) {
+      if (const auto found =
+              expected_area_sums.find(topology.global_cell_id(*neighbour));
+          found != expected_area_sums.end())
+        found->second += geometry.face_area_m2(local_face);
+    }
+    if (const auto found =
+            decoded_area_sums.find(actual.owner_global_cell);
+        found != decoded_area_sums.end())
+      found->second += actual.area_m2;
+    if (actual.neighbour_global_cell) {
+      if (const auto found =
+              decoded_area_sums.find(*actual.neighbour_global_cell);
+          found != decoded_area_sums.end())
+        found->second += actual.area_m2;
+    }
+
+    if (neighbour &&
+        topology.cell_ownership(owner) ==
+            hundun::mesh::EntityOwnership::ghost &&
+        topology.cell_ownership(*neighbour) ==
+            hundun::mesh::EntityOwnership::owned) {
+      ++evidence.remote_owner_face_count;
+      if (!evidence.mutation_cell)
+        evidence.mutation_cell = topology.global_cell_id(*neighbour);
+    }
+  }
+  HUNDUN_CHECK(expected_area_sums == decoded_area_sums);
+
+  if (evidence.mutation_cell) {
+    for (const auto local_face : incident_faces) {
+      const auto owner = topology.owner(local_face);
+      const auto neighbour = topology.neighbour(local_face);
+      const bool incident =
+          topology.global_cell_id(owner) == *evidence.mutation_cell ||
+          (neighbour &&
+           topology.global_cell_id(*neighbour) ==
+               *evidence.mutation_cell);
+      if (!incident)
+        continue;
+      evidence.complete_incident_area_sum +=
+          geometry.face_area_m2(local_face);
+      if (topology.cell_ownership(owner) ==
+          hundun::mesh::EntityOwnership::owned) {
+        evidence.old_owned_face_area_sum +=
+            geometry.face_area_m2(local_face);
+      }
+    }
+    HUNDUN_CHECK(evidence.complete_incident_area_sum >
+                 evidence.old_owned_face_area_sum);
+  }
+  return evidence;
 }
 
 }  // namespace
@@ -347,7 +465,8 @@ int main(int argc, char** argv) {
           decomposition, topology, execution);
       check_fingerprint_ids(vector, {"allocation_identity", "backend_identity",
                                      "epoch", "ghost_count", "layout.global_id",
-                                     "local_count", "owned_count", "space"});
+                                     "layout.global_id.count", "local_count",
+                                     "owned_count", "space"});
       check_fingerprint_ids(vector_halo,
                             {"ghost_count", "owned_count", "path",
                              "receive_value_count", "send_value_count"});
@@ -437,6 +556,58 @@ int main(int argc, char** argv) {
       HUNDUN_CHECK(
           hundun::diagnostics::encode_mesh_diagnostic_v2(uniform_read) ==
           uniform_bytes);
+      const auto uniform_incident_evidence =
+          check_incident_face_areas(topology, geometry, uniform_read);
+      std::uint64_t global_remote_owner_faces = 0U;
+      HUNDUN_CHECK(
+          MPI_Allreduce(
+              &uniform_incident_evidence.remote_owner_face_count,
+              &global_remote_owner_faces, 1, MPI_UINT64_T, MPI_SUM,
+              mpi.comm()) == MPI_SUCCESS);
+      if (mpi.size() > 1)
+        HUNDUN_CHECK(global_remote_owner_faces > 0U);
+
+      std::uint64_t local_mutation_count = 0U;
+      if (uniform_incident_evidence.mutation_cell) {
+        auto incident_area_mutation = uniform_read;
+        const double old_limit =
+            256.0 * std::numeric_limits<double>::epsilon() *
+            uniform_incident_evidence.old_owned_face_area_sum;
+        const double complete_limit =
+            256.0 * std::numeric_limits<double>::epsilon() *
+            uniform_incident_evidence.complete_incident_area_sum;
+        HUNDUN_CHECK(complete_limit > old_limit);
+        const double mutation =
+            old_limit + 0.5 * (complete_limit - old_limit);
+        bool found_mutation_cell = false;
+        double maximum_closure = 0.0;
+        for (auto& cell : incident_area_mutation.cells) {
+          if (cell.global_id ==
+              *uniform_incident_evidence.mutation_cell) {
+            cell.closure_m2 = {mutation, 0.0, 0.0};
+            found_mutation_cell = true;
+          }
+          maximum_closure =
+              std::max(maximum_closure,
+                       std::sqrt(cell.closure_m2.x * cell.closure_m2.x +
+                                 cell.closure_m2.y * cell.closure_m2.y +
+                                 cell.closure_m2.z * cell.closure_m2.z));
+        }
+        HUNDUN_CHECK(found_mutation_cell);
+        incident_area_mutation.maximum_cell_closure_norm =
+            maximum_closure;
+        static_cast<void>(
+            hundun::diagnostics::encode_mesh_diagnostic_v2(
+                incident_area_mutation));
+        local_mutation_count = 1U;
+      }
+      std::uint64_t global_mutation_count = 0U;
+      HUNDUN_CHECK(
+          MPI_Allreduce(&local_mutation_count, &global_mutation_count, 1,
+                        MPI_UINT64_T, MPI_SUM,
+                        mpi.comm()) == MPI_SUCCESS);
+      if (mpi.size() > 1)
+        HUNDUN_CHECK(global_mutation_count > 0U);
 
       auto wrong_in_range_owner = uniform_record;
       bool mutated_owner = false;
@@ -486,6 +657,8 @@ int main(int argc, char** argv) {
       HUNDUN_CHECK(
           hundun::diagnostics::encode_mesh_diagnostic_v2(warped_read) ==
           warped_bytes);
+      static_cast<void>(
+          check_incident_face_areas(topology, warped_geometry, warped_read));
     }
 
     const auto directory = root / "records";

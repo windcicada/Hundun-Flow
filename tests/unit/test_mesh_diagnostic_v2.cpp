@@ -4,6 +4,7 @@
 #include "hundun/runtime/error.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -300,6 +301,36 @@ hundun::diagnostics::MeshDiagnosticV2 rescaled_three_cell_fixture() {
   return value;
 }
 
+hundun::diagnostics::MeshDiagnosticV2 partition_middle_cell_fixture() {
+  auto value = rescaled_three_cell_fixture();
+  value.rank = 1;
+  value.rank_count = 3;
+  value.owned_box = {{1, 0, 0}, {2, 1, 1}};
+  value.cells = {value.cells[1]};
+  value.owned_volume_sum = value.cells.front().volume_m3;
+  value.maximum_cell_closure_norm = 0.0;
+  value.faces.erase(
+      std::remove_if(value.faces.begin(), value.faces.end(),
+                     [](const auto& face) {
+                       return face.global_id != 1U &&
+                              face.global_id != 2U &&
+                              face.global_id != 5U &&
+                              face.global_id != 8U &&
+                              face.global_id != 11U &&
+                              face.global_id != 14U;
+                     }),
+      value.faces.end());
+  value.vertices.erase(
+      std::remove_if(value.vertices.begin(), value.vertices.end(),
+                     [](const auto& vertex) {
+                       return vertex.logical.x < 1 || vertex.logical.x > 2;
+                     }),
+      value.vertices.end());
+  value.reciprocal_check_count = 2U;
+  value.reciprocal_failure_count = 0U;
+  return value;
+}
+
 template <class Function> bool rejects(Function &&operation) {
   try {
     operation();
@@ -471,6 +502,36 @@ int main() {
     HUNDUN_CHECK(!rejects([&] {
       static_cast<void>(
           hundun::diagnostics::encode_mesh_diagnostic_v2(just_inside));
+    }));
+    const auto partition_middle = partition_middle_cell_fixture();
+    HUNDUN_CHECK(partition_middle.faces.size() == 6U);
+    HUNDUN_CHECK(partition_middle.faces.front().owner_global_cell == 0U);
+    HUNDUN_CHECK(partition_middle.faces.front().neighbour_global_cell ==
+                 std::optional<std::uint64_t>{1U});
+    HUNDUN_CHECK(!rejects([&] {
+      const auto bytes =
+          hundun::diagnostics::encode_mesh_diagnostic_v2(partition_middle);
+      const auto decoded =
+          hundun::diagnostics::decode_mesh_diagnostic_v2(bytes);
+      HUNDUN_CHECK(decoded.faces.size() == 6U);
+      HUNDUN_CHECK(exact(decoded, partition_middle));
+    }));
+    auto partition_mutation = partition_middle;
+    const double complete_area_sum = 1.0e-6 + 5.0;
+    const double old_owned_face_area_sum = 5.0;
+    const double complete_limit =
+        256.0 * std::numeric_limits<double>::epsilon() * complete_area_sum;
+    const double old_limit =
+        256.0 * std::numeric_limits<double>::epsilon() *
+        old_owned_face_area_sum;
+    HUNDUN_CHECK(complete_limit > old_limit);
+    partition_mutation.cells.front().closure_m2 = {
+        old_limit + 0.5 * (complete_limit - old_limit), 0.0, 0.0};
+    partition_mutation.maximum_cell_closure_norm =
+        partition_mutation.cells.front().closure_m2.x;
+    HUNDUN_CHECK(!rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(partition_mutation));
     }));
     auto missing_face = value;
     missing_face.faces.pop_back();

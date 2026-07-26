@@ -298,7 +298,8 @@ ExpectedFace expected_face(runtime::Int3 extent, runtime::Box3 owned_box,
                       pair};
   if (neighbour)
     result.neighbour = global_cell_id(extent, *neighbour);
-  if (!contains(owned_box, owner))
+  if (!contains(owned_box, owner) &&
+      (!neighbour || !contains(owned_box, *neighbour)))
     result.global_id = std::numeric_limits<std::uint64_t>::max();
   return result;
 }
@@ -741,15 +742,19 @@ MeshDiagnosticV2 make_mesh_diagnostic_v2(
             });
 
   for (mesh::LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
-    if (topology.face_ownership(face) != mesh::EntityOwnership::owned)
+    const auto owner = topology.owner(face);
+    const auto neighbour = topology.neighbour(face);
+    if (topology.cell_ownership(owner) != mesh::EntityOwnership::owned &&
+        (!neighbour ||
+         topology.cell_ownership(*neighbour) != mesh::EntityOwnership::owned))
       continue;
     const auto logical = topology.logical_face(face);
     MeshDiagnosticFaceV2 item;
     item.global_id = topology.global_face_id(face);
     item.axis = logical.axis;
     item.logical = logical.coordinate;
-    item.owner_global_cell = topology.global_cell_id(topology.owner(face));
-    if (const auto neighbour = topology.neighbour(face)) {
+    item.owner_global_cell = topology.global_cell_id(owner);
+    if (neighbour) {
       item.neighbour_global_cell = topology.global_cell_id(*neighbour);
       item.neighbour_area_vector_m2 =
           geometry.face_area_vector_m2(face, mesh::FaceSide::neighbour);

@@ -574,7 +574,8 @@ void collect_diagnostics(const runtime::MpiContext& source,
     return descriptor(DiagnosticModuleKind::Kind, Id, kSummary);            \
   }                                                                         \
   std::vector<std::string_view> diagnostic_fingerprint_field_ids(           \
-      const Type&) {                                                        \
+      const Type& source) {                                                 \
+    static_cast<void>(source);                                              \
     return Fields;                                                          \
   }                                                                         \
   void collect_diagnostics(const Type& source,                              \
@@ -840,13 +841,22 @@ describe_diagnostics(const FieldLayoutDiagnosticSource&) noexcept {
                     kSummary);
 }
 std::vector<std::string_view>
-diagnostic_fingerprint_field_ids(const FieldLayoutDiagnosticSource&) {
-  return {"field.components", "field.conservative", "field.ghost_width",
-          "field.id", "field.name", "field.name.length", "field.output",
-          "field.owner", "field.owner.length", "field.restart",
-          "field.scalar_type", "field.space", "field.unit",
-          "field.unit.length", "layout.cell_extent", "layout.face_count",
-          "role.field", "role.name", "role.name.length"};
+diagnostic_fingerprint_field_ids(const FieldLayoutDiagnosticSource& source) {
+  std::vector<std::string_view> ids{
+      "field.count", "layout.cell_extent", "layout.face_count", "role.count"};
+  if (source.registry != nullptr && source.registry->size() != 0U) {
+    ids.insert(ids.end(),
+               {"field.components", "field.conservative",
+                "field.ghost_width", "field.id", "field.name",
+                "field.name.length", "field.output", "field.owner",
+                "field.owner.length", "field.restart", "field.scalar_type",
+                "field.space", "field.unit", "field.unit.length"});
+  }
+  if (!source.roles.empty())
+    ids.insert(ids.end(),
+               {"role.field", "role.name", "role.name.length"});
+  std::sort(ids.begin(), ids.end());
+  return ids;
 }
 void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                          const DiagnosticRequest& request,
@@ -864,6 +874,7 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                          source.layout.cell_interior_extent.z})
                      fp.add_i64("layout.cell_extent", value);
                    fp.add_u64("layout.face_count", source.layout.face_count);
+                   fp.add_u64("field.count", source.registry->size());
                    for (runtime::FieldId id = 0U;
                         id < source.registry->size(); ++id) {
                      const auto& field = source.registry->descriptor(id);
@@ -887,6 +898,7 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                      fp.add_u64("field.output",
                                 static_cast<std::uint64_t>(field.output));
                    }
+                   fp.add_u64("role.count", source.roles.size());
                    for (const auto& role : source.roles) {
                      fp.add_text("role.name", "role.name.length", role.role);
                      fp.add_u64("role.field", role.field);
@@ -1223,12 +1235,20 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     linear::GhostedVector, execution, "hundun.linear.ghosted_vector",
-    (std::vector<std::string_view>{"allocation_identity", "backend_identity",
-                                   "epoch", "ghost_count", "layout.global_id",
-                                   "local_count", "owned_count", "space"}),
+    ([&] {
+      std::vector<std::string_view> ids{
+          "allocation_identity", "backend_identity", "epoch", "ghost_count",
+          "layout.global_id.count", "local_count", "owned_count", "space"};
+      if (!source.layout().global_ids().empty())
+        ids.push_back("layout.global_id");
+      std::sort(ids.begin(), ids.end());
+      return ids;
+    }()),
     fp.add_u64("owned_count", source.owned_count());
     fp.add_u64("ghost_count", source.ghost_count());
     fp.add_u64("local_count", source.local_count());
+    fp.add_u64("layout.global_id.count",
+               source.layout().global_ids().size());
     for (const auto id : source.layout().global_ids())
       fp.add_u64("layout.global_id", id);
     fp.add_u64("allocation_identity", source.allocation_identity());
@@ -1268,23 +1288,33 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     linear::LinearOperator, linear_operator, "hundun.linear.operator",
-    (std::vector<std::string_view>{
-        "context.backend_identity", "context.backend_name",
-        "context.backend_name.length", "context.space", "diagonal_available",
-        "domain.ghost", "domain.global_id", "domain.local", "domain.owned",
-        "range.ghost", "range.global_id", "range.local", "range.owned",
-        "revision"}),
+    ([&] {
+      std::vector<std::string_view> ids{
+          "context.backend_identity", "context.backend_name",
+          "context.backend_name.length", "context.space",
+          "diagonal_available", "domain.ghost", "domain.global_id.count",
+          "domain.local", "domain.owned", "range.ghost",
+          "range.global_id.count", "range.local", "range.owned", "revision"};
+      if (!source.domain_layout().global_ids().empty())
+        ids.push_back("domain.global_id");
+      if (!source.range_layout().global_ids().empty())
+        ids.push_back("range.global_id");
+      std::sort(ids.begin(), ids.end());
+      return ids;
+    }()),
     ([&] {
       const auto domain = source.domain_layout();
       const auto range = source.range_layout();
       fp.add_u64("domain.owned", domain.owned_count());
       fp.add_u64("domain.ghost", domain.ghost_count());
       fp.add_u64("domain.local", domain.local_count());
+      fp.add_u64("domain.global_id.count", domain.global_ids().size());
       for (const auto id : domain.global_ids())
         fp.add_u64("domain.global_id", id);
       fp.add_u64("range.owned", range.owned_count());
       fp.add_u64("range.ghost", range.ghost_count());
       fp.add_u64("range.local", range.local_count());
+      fp.add_u64("range.global_id.count", range.global_ids().size());
       for (const auto id : range.global_ids())
         fp.add_u64("range.global_id", id);
       fp.add_text("context.backend_name", "context.backend_name.length",
@@ -1713,13 +1743,17 @@ std::vector<std::string_view> diagnostic_fingerprint_field_ids(
       "solve.lowest_failing_rank", "solve.matvec_count",
       "solve.preconditioner_apply_count", "solve.prefix",
       "solve.prefix.length", "solve.reason", "solve.recursive_residual",
-      "suggested_dt", "transport_conservation", "transport_residual"};
+      "suggested_dt", "transport.count"};
+  if (source.report != nullptr &&
+      !source.report->final_transport_normalized_l2.empty())
+    ids.insert(ids.end(),
+               {"transport_conservation", "transport_residual"});
   if (source.report != nullptr && source.report->final_backflow_evidence) {
     ids.insert(ids.end(),
                {"backflow.face", "backflow.minimum_flux", "backflow.patch",
                 "backflow.rank", "backflow.step", "backflow.time"});
-    std::sort(ids.begin(), ids.end());
   }
+  std::sort(ids.begin(), ids.end());
   return ids;
 }
 void collect_diagnostics(const ConstantDensityPisoDiagnosticSource& source,
@@ -1768,6 +1802,8 @@ void collect_diagnostics(const ConstantDensityPisoDiagnosticSource& source,
                    for (double value :
                         report.final_momentum_normalized_l2)
                      fp.add_fp64("momentum_residual", value);
+                   fp.add_u64("transport.count",
+                              report.final_transport_normalized_l2.size());
                    for (double value :
                         report.final_transport_normalized_l2)
                      fp.add_fp64("transport_residual", value);
