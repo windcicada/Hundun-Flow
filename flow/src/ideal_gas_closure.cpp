@@ -312,8 +312,10 @@ int agree_preflight(const runtime::MpiContext &mpi, const PreflightWire &local,
               preflight_workspace[static_cast<std::size_t>(left_rank)],
               preflight_workspace[static_cast<std::size_t>(right_rank)]))
         contract_valid = false;
-  if (result.code == PreflightResultCode::ok && !contract_valid)
+  if (result.code == PreflightResultCode::ok && !contract_valid) {
     result.code = PreflightResultCode::invalid_contract;
+    result.rank = 0;
+  }
   if (result.rank >= 0)
     return result.rank;
   if (result.code != PreflightResultCode::ok)

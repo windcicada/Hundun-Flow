@@ -213,6 +213,60 @@ void run(const hundun::runtime::MpiContext &mpi) {
   const auto closed_restored = hundun::flow::IdealGasClosureState{
       hundun::flow::IdealGasPressureMode::closed_dynamic, pressure, density,
       0U};
+  enum class PureWireMutation : std::uint8_t {
+    restored_pressure,
+    restored_target,
+    restored_revision,
+    cp,
+    gas_constant,
+    configured_pressure
+  };
+  constexpr std::array pure_wire_mutations{
+      PureWireMutation::restored_pressure,
+      PureWireMutation::restored_target,
+      PureWireMutation::restored_revision,
+      PureWireMutation::cp,
+      PureWireMutation::gas_constant,
+      PureWireMutation::configured_pressure};
+  if (mpi.size() > 1) {
+    for (int target = 0; target < mpi.size(); ++target) {
+      for (const auto mutation : pure_wire_mutations) {
+        auto spec = hundun::flow::IdealGasClosureSpec{
+            rho_h, cp, gas_constant, pressure};
+        auto restored = closed_restored;
+        if (mpi.rank() == target) {
+          switch (mutation) {
+          case PureWireMutation::restored_pressure:
+            restored.thermodynamic_pressure_pa = std::nextafter(
+                pressure, std::numeric_limits<double>::infinity());
+            break;
+          case PureWireMutation::restored_target:
+            restored.target_mass_kg = std::nextafter(
+                density, std::numeric_limits<double>::infinity());
+            break;
+          case PureWireMutation::restored_revision:
+            restored.revision = 1U;
+            break;
+          case PureWireMutation::cp:
+            spec.cp_J_per_kg_K =
+                std::nextafter(cp, std::numeric_limits<double>::infinity());
+            break;
+          case PureWireMutation::gas_constant:
+            spec.gas_constant_J_per_kg_K = std::nextafter(
+                gas_constant, std::numeric_limits<double>::infinity());
+            break;
+          case PureWireMutation::configured_pressure:
+            spec.configured_thermodynamic_pressure_pa = std::nextafter(
+                pressure, std::numeric_limits<double>::infinity());
+            break;
+          }
+        }
+        expect_restore_rejected(
+            topology, geometry, boundaries, state, spec, restored, 0,
+            hundun::flow::IdealGasClosureFailureReason::none);
+      }
+    }
+  }
   for (const int target : {0, mpi.size() - 1}) {
     for (std::uint8_t mutation = 0U; mutation < 3U; ++mutation) {
       auto spec = hundun::flow::IdealGasClosureSpec{

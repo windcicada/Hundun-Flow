@@ -84,6 +84,30 @@ function(task23_require_match_count input_variable pattern expected label)
   endif()
 endfunction()
 
+function(task23_restore_wire_matrix_valid input_variable output_variable)
+  task23_strip_cpp_comments(${input_variable} matrix_clean)
+  task23_compact(matrix_clean matrix_compact)
+  set(valid TRUE)
+  foreach(required IN ITEMS
+      "if(mpi.size()>1){"
+      "for(inttarget=0;target<mpi.size();++target)"
+      "for(constautomutation:pure_wire_mutations)"
+      "if(mpi.rank()==target){switch(mutation){"
+      "casePureWireMutation::restored_pressure:restored.thermodynamic_pressure_pa=std::nextafter(pressure,std::numeric_limits<double>::infinity());break;"
+      "casePureWireMutation::restored_target:restored.target_mass_kg=std::nextafter(density,std::numeric_limits<double>::infinity());break;"
+      "casePureWireMutation::restored_revision:restored.revision=1U;break;"
+      "casePureWireMutation::cp:spec.cp_J_per_kg_K=std::nextafter(cp,std::numeric_limits<double>::infinity());break;"
+      "casePureWireMutation::gas_constant:spec.gas_constant_J_per_kg_K=std::nextafter(gas_constant,std::numeric_limits<double>::infinity());break;"
+      "casePureWireMutation::configured_pressure:spec.configured_thermodynamic_pressure_pa=std::nextafter(pressure,std::numeric_limits<double>::infinity());break;"
+      "expect_restore_rejected(topology,geometry,boundaries,state,spec,restored,0,hundun::flow::IdealGasClosureFailureReason::none);")
+    string(FIND "${matrix_compact}" "${required}" position)
+    if(position EQUAL -1)
+      set(valid FALSE)
+    endif()
+  endforeach()
+  set(${output_variable} "${valid}" PARENT_SCOPE)
+endfunction()
+
 function(task23_require_boolean_binding input_variable boolean_name
     authenticator label)
   task23_extract_bounded(${input_variable}
@@ -116,6 +140,52 @@ string(FIND "${task23_comment_fixture_clean}" "required_block_call"
   block_comment)
 if(NOT line_comment EQUAL -1 OR NOT block_comment EQUAL -1)
   message(FATAL_ERROR "Task 23 R7 C++ comment stripping self-oracle failed")
+endif()
+
+# R12 pure-wire self-oracles reject a target selection that can omit
+# intermediate ranks and a matrix with any one authority mutation absent.
+set(task23_wire_matrix_fixture
+  "if (mpi.size() > 1) {\n"
+  "  for (int target = 0; target < mpi.size(); ++target) {\n"
+  "    for (const auto mutation : pure_wire_mutations) {\n"
+  "      if (mpi.rank() == target) { switch (mutation) {\n"
+  "      case PureWireMutation::restored_pressure: restored.thermodynamic_pressure_pa = std::nextafter(pressure, std::numeric_limits<double>::infinity()); break;\n"
+  "      case PureWireMutation::restored_target: restored.target_mass_kg = std::nextafter(density, std::numeric_limits<double>::infinity()); break;\n"
+  "      case PureWireMutation::restored_revision: restored.revision = 1U; break;\n"
+  "      case PureWireMutation::cp: spec.cp_J_per_kg_K = std::nextafter(cp, std::numeric_limits<double>::infinity()); break;\n"
+  "      case PureWireMutation::gas_constant: spec.gas_constant_J_per_kg_K = std::nextafter(gas_constant, std::numeric_limits<double>::infinity()); break;\n"
+  "      case PureWireMutation::configured_pressure: spec.configured_thermodynamic_pressure_pa = std::nextafter(pressure, std::numeric_limits<double>::infinity()); break;\n"
+  "      }}\n"
+  "      expect_restore_rejected(topology, geometry, boundaries, state, spec, restored, 0, hundun::flow::IdealGasClosureFailureReason::none);\n"
+  "    }\n"
+  "  }\n"
+  "}\n")
+task23_restore_wire_matrix_valid(task23_wire_matrix_fixture
+  task23_wire_matrix_fixture_valid)
+if(NOT task23_wire_matrix_fixture_valid)
+  message(FATAL_ERROR "Task 23 R12 pure-wire positive self-oracle failed")
+endif()
+
+string(REPLACE
+  "for (int target = 0; target < mpi.size(); ++target)"
+  "for (const int target : {0, mpi.size() - 1})"
+  task23_wire_target_gap_fixture "${task23_wire_matrix_fixture}")
+task23_restore_wire_matrix_valid(task23_wire_target_gap_fixture
+  task23_wire_target_gap_valid)
+if(task23_wire_target_gap_valid)
+  message(FATAL_ERROR
+    "Task 23 R12 intermediate-target mutation self-oracle failed")
+endif()
+
+string(REPLACE
+  "case PureWireMutation::restored_target: restored.target_mass_kg = std::nextafter(density, std::numeric_limits<double>::infinity()); break;\n"
+  ""
+  task23_wire_missing_mutation_fixture "${task23_wire_matrix_fixture}")
+task23_restore_wire_matrix_valid(task23_wire_missing_mutation_fixture
+  task23_wire_missing_mutation_valid)
+if(task23_wire_missing_mutation_valid)
+  message(FATAL_ERROR
+    "Task 23 R12 missing-authority mutation self-oracle failed")
 endif()
 
 # The bounded-section self-oracle rejects both an unused marker outside the
@@ -211,6 +281,37 @@ file(READ
   "${HUNDUN_SOURCE_ROOT}/tests/mpi/test_ideal_gas_closure.cpp"
   ideal_gas_test)
 task23_strip_cpp_comments(ideal_gas_test ideal_gas_test_clean)
+task23_extract_bounded(ideal_gas_test_clean
+  "const auto expect_restore_rejected"
+  "const auto closed_restored"
+  ideal_gas_restore_rejection_helper
+  "public restore rejection helper")
+foreach(required IN ITEMS
+    "CheckpointV2TestAccess::snapshot(candidate_state)"
+    "static_cast<void>(hundun::flow::IdealGasClosure::restore("
+    "failing_rank = TestAccess::preflight_failure_rank(error)"
+    "reason = TestAccess::create_validation_failure_reason(error)"
+    "HUNDUN_CHECK(rejected)"
+    "HUNDUN_CHECK(failing_rank == expected_rank)"
+    "HUNDUN_CHECK(reason == expected_reason)"
+    "checkpoint_v2_deep_snapshot_equal(")
+  string(FIND "${ideal_gas_restore_rejection_helper}" "${required}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR
+      "Task 23 R12 public restore rejection helper is missing '${required}'")
+  endif()
+endforeach()
+task23_extract_bounded(ideal_gas_test_clean
+  "enum class PureWireMutation"
+  "const auto expect_create_rejected"
+  ideal_gas_pure_wire_matrix
+  "pure-wire public restore matrix")
+task23_restore_wire_matrix_valid(ideal_gas_pure_wire_matrix
+  ideal_gas_pure_wire_matrix_valid)
+if(NOT ideal_gas_pure_wire_matrix_valid)
+  message(FATAL_ERROR
+    "Task 23 R12 pure-wire public restore matrix is incomplete")
+endif()
 foreach(required IN ITEMS
     "const auto expect_restore_rejected"
     "preflight_failure_rank(error)"
