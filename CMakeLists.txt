@@ -251,6 +251,26 @@ if(HUNDUN_BUILD_TESTS)
     HUNDUN_DIAGNOSTICS_ENABLE_TEST_ACCESS=1)
 endif()
 
+add_library(hundun_task24_diagnostics STATIC
+  diagnostics/src/diagnostic_session.cpp
+  diagnostics/src/mesh_diagnostic_v2.cpp
+  diagnostics/src/stage2_module_diagnostics.cpp)
+target_include_directories(hundun_task24_diagnostics PUBLIC
+  "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
+target_link_libraries(hundun_task24_diagnostics
+  PRIVATE hundun_warnings
+  PUBLIC
+    hundun_diagnostics_core
+    hundun_boundary
+    hundun_finite_volume
+    hundun_flow
+    hundun_linear
+    hundun_mesh
+    hundun_runtime
+    hundun_execution
+    hundun_options
+    MPI::MPI_CXX)
+
 add_library(hundun_io STATIC
   runtime/src/restart_binary.cpp
   runtime/src/vtk_legacy.cpp)
@@ -270,12 +290,17 @@ target_link_libraries(hundun_solver
 
 add_executable(hundun
   applications/hundun/main.cpp
-  applications/hundun/stage1_driver.cpp)
+  applications/hundun/stage1_driver.cpp
+  applications/hundun/stage2_driver.cpp)
 target_include_directories(hundun PRIVATE "${PROJECT_SOURCE_DIR}")
 target_link_libraries(hundun PRIVATE
   hundun_application
   hundun_cli
   hundun_config
+  hundun_checkpoint_diagnostics
+  hundun_material_diagnostics
+  hundun_task24_diagnostics
+  hundun_flow
   hundun_io
   hundun_solver
   hundun_options
@@ -309,6 +334,81 @@ endfunction()
 
 if(HUNDUN_BUILD_TESTS)
   enable_testing()
+
+  hundun_add_test(test_task24_header_contract
+    tests/unit/test_task24_header_contract.cpp)
+  target_include_directories(test_task24_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_task24_header_contract PRIVATE
+    hundun_application hundun_task24_diagnostics)
+  set_tests_properties(test_task24_header_contract PROPERTIES
+    LABELS "unit;task24;header")
+
+  hundun_add_test(test_mesh_diagnostic_v2
+    tests/unit/test_mesh_diagnostic_v2.cpp)
+  target_include_directories(test_mesh_diagnostic_v2 PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include"
+    "${PROJECT_SOURCE_DIR}/mesh/include"
+    "${PROJECT_SOURCE_DIR}/runtime/include")
+  target_link_libraries(test_mesh_diagnostic_v2 PRIVATE
+    hundun_task24_diagnostics)
+  set_tests_properties(test_mesh_diagnostic_v2 PROPERTIES
+    LABELS "unit;task24;io")
+
+  hundun_add_test(test_diagnostic_session
+    tests/unit/test_diagnostic_session.cpp)
+  target_include_directories(test_diagnostic_session PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_diagnostic_session PRIVATE
+    hundun_task24_diagnostics)
+  set_tests_properties(test_diagnostic_session PROPERTIES
+    LABELS "unit;task24;diagnostics")
+
+  hundun_add_test(test_stage2_module_diagnostics
+    tests/unit/test_stage2_module_diagnostics.cpp)
+  target_include_directories(test_stage2_module_diagnostics PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_stage2_module_diagnostics PRIVATE
+    hundun_task24_diagnostics)
+  set_tests_properties(test_stage2_module_diagnostics PROPERTIES
+    LABELS "unit;task24;diagnostics")
+
+  add_executable(test_diagnostic_session_mpi
+    tests/mpi/test_diagnostic_session_mpi.cpp)
+  target_include_directories(test_diagnostic_session_mpi PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include")
+  target_link_libraries(test_diagnostic_session_mpi PRIVATE
+    hundun_task24_diagnostics MPI::MPI_CXX)
+  foreach(task24_session_ranks IN ITEMS 1 2 4)
+    add_test(NAME
+      "test_diagnostic_session_mpi_${task24_session_ranks}rank"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}"
+        "${task24_session_ranks}"
+        "$<TARGET_FILE:test_diagnostic_session_mpi>")
+    set_tests_properties(
+      "test_diagnostic_session_mpi_${task24_session_ranks}rank"
+      PROPERTIES LABELS "io;mpi;task24;diagnostics")
+  endforeach()
+
+  foreach(task24_ranks IN ITEMS 1 2 4)
+    add_test(NAME "test_task24_flow_models_${task24_ranks}rank"
+      COMMAND bash
+        "${PROJECT_SOURCE_DIR}/tests/acceptance/task24_flow_models.sh"
+        "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task24_ranks}")
+    set_tests_properties("test_task24_flow_models_${task24_ranks}rank"
+      PROPERTIES LABELS "application;mpi;task24")
+    add_test(NAME "test_task24_restart_${task24_ranks}rank"
+      COMMAND bash
+        "${PROJECT_SOURCE_DIR}/tests/acceptance/task24_restart_continuation.sh"
+        "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task24_ranks}")
+    set_tests_properties("test_task24_restart_${task24_ranks}rank"
+      PROPERTIES LABELS "application;io;mpi;task24")
+  endforeach()
 
   function(hundun_add_mock_plugin target)
     add_library("${target}" MODULE tests/plugins/mock_plugin.c)
