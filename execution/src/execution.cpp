@@ -4,10 +4,12 @@
 
 #include "execution_test_access.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -26,6 +28,81 @@ std::mutex identity_mutex;
 AllocationIdentity next_identity = 1;
 std::atomic<bool> inject_allocation_failure{false};
 std::atomic<bool> inject_completed_event_allocation_failure{false};
+
+struct AllocationCounterState final {
+  AllocationCounters counters;
+  std::uint64_t outstanding_events{};
+  std::uint64_t outstanding_bytes{};
+};
+
+std::mutex allocation_counter_mutex;
+AllocationCounterState allocation_counter_state;
+
+std::uint64_t checked_counter_add(std::uint64_t left, std::uint64_t right,
+                                  const char* message) {
+  if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+    throw runtime::Error(message);
+  }
+  return left + right;
+}
+
+AllocationCounterState allocation_candidate(std::uint64_t bytes) {
+  auto candidate = allocation_counter_state;
+  candidate.counters.allocation_events = checked_counter_add(
+      candidate.counters.allocation_events, 1U,
+      "allocation event counter would overflow");
+  candidate.counters.allocated_bytes = checked_counter_add(
+      candidate.counters.allocated_bytes, bytes,
+      "allocated byte counter would overflow");
+  candidate.counters.live_bytes = checked_counter_add(
+      candidate.counters.live_bytes, bytes,
+      "live allocation byte counter would overflow");
+  candidate.counters.peak_live_bytes =
+      std::max(candidate.counters.peak_live_bytes,
+               candidate.counters.live_bytes);
+  candidate.outstanding_events = checked_counter_add(
+      candidate.outstanding_events, 1U,
+      "outstanding allocation counter would overflow");
+  candidate.outstanding_bytes = checked_counter_add(
+      candidate.outstanding_bytes, bytes,
+      "outstanding allocation byte counter would overflow");
+  static_cast<void>(checked_counter_add(
+      candidate.counters.deallocation_events, candidate.outstanding_events,
+      "future deallocation event counter would overflow"));
+  static_cast<void>(checked_counter_add(
+      candidate.counters.deallocated_bytes, candidate.outstanding_bytes,
+      "future deallocation byte counter would overflow"));
+  return candidate;
+}
+
+void preflight_allocation(std::uint64_t bytes) {
+  const std::lock_guard<std::mutex> lock(allocation_counter_mutex);
+  static_cast<void>(allocation_candidate(bytes));
+}
+
+void register_allocation(std::uint64_t bytes) {
+  const std::lock_guard<std::mutex> lock(allocation_counter_mutex);
+  auto candidate = allocation_candidate(bytes);
+  allocation_counter_state = candidate;
+}
+
+void retire_allocation_noexcept(std::uint64_t bytes) noexcept {
+  const std::lock_guard<std::mutex> lock(allocation_counter_mutex);
+  auto& state = allocation_counter_state;
+  if (state.outstanding_events == 0U || state.outstanding_bytes < bytes ||
+      state.counters.live_bytes < bytes ||
+      state.counters.deallocation_events ==
+          std::numeric_limits<std::uint64_t>::max() ||
+      state.counters.deallocated_bytes >
+          std::numeric_limits<std::uint64_t>::max() - bytes) {
+    std::terminate();
+  }
+  ++state.counters.deallocation_events;
+  state.counters.deallocated_bytes += bytes;
+  state.counters.live_bytes -= bytes;
+  --state.outstanding_events;
+  state.outstanding_bytes -= bytes;
+}
 
 std::size_t checked_multiply(std::size_t left, std::size_t right,
                              const char* message) {
@@ -107,6 +184,12 @@ struct AllocationControl final {
         backend_identity(backend_identity_value),
         space(space_value) {}
 
+  ~AllocationControl() {
+    if (counted) {
+      retire_allocation_noexcept(static_cast<std::uint64_t>(byte_size));
+    }
+  }
+
   std::unique_ptr<std::byte, AlignedDelete> storage;
   std::size_t byte_size;
   AllocationIdentity allocation_identity;
@@ -114,6 +197,7 @@ struct AllocationControl final {
   BackendIdentity backend_identity;
   ExecutionSpace space;
   bool owner_live{true};
+  bool counted{false};
 };
 
 struct EventState final {
@@ -206,6 +290,11 @@ std::string_view CpuReferenceContext::backend_name() const noexcept {
   return "cpu_reference";
 }
 
+AllocationCounters allocation_counters() noexcept {
+  const std::lock_guard<std::mutex> lock(allocation_counter_mutex);
+  return allocation_counter_state.counters;
+}
+
 BackendIdentity CpuReferenceContext::backend_identity() const noexcept {
   return kCpuReferenceIdentity;
 }
@@ -234,12 +323,16 @@ namespace {
 std::shared_ptr<detail::AllocationControl> make_host_control(
     BackendIdentity backend_identity, ExecutionSpace space,
     std::size_t byte_size, std::uint64_t epoch) {
+  preflight_allocation(static_cast<std::uint64_t>(byte_size));
   auto storage = allocate_bytes(byte_size);
   const auto identity = issue_allocation_identity();
   try {
-    return std::make_shared<detail::AllocationControl>(
+    auto control = std::make_shared<detail::AllocationControl>(
         std::move(storage), byte_size, identity, epoch, backend_identity,
         space);
+    register_allocation(static_cast<std::uint64_t>(byte_size));
+    control->counted = true;
+    return control;
   } catch (const std::bad_alloc&) {
     throw runtime::Error("buffer allocation control creation failed");
   }
@@ -518,6 +611,18 @@ AllocationIdentity ExecutionTestAccess::next_allocation_identity() noexcept {
   const std::lock_guard<std::mutex> lock(identity_mutex);
   return next_identity;
 }
+
+#ifdef HUNDUN_EXECUTION_ENABLE_TEST_ACCESS
+void ExecutionTestAccess::set_allocation_counters_for_test(
+    AllocationCounters counters) noexcept {
+  const std::lock_guard<std::mutex> lock(allocation_counter_mutex);
+  if (counters.live_bytes !=
+      allocation_counter_state.outstanding_bytes) {
+    std::terminate();
+  }
+  allocation_counter_state.counters = counters;
+}
+#endif
 
 void ExecutionTestAccess::set_next_allocation_identity(
     AllocationIdentity next) noexcept {

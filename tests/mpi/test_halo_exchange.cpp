@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/runtime/error.hpp"
+#include "hundun/execution/execution.hpp"
 #include "hundun/runtime/exchange_plan.hpp"
 #include "hundun/runtime/field_descriptor.hpp"
 #include "hundun/runtime/field_registry.hpp"
@@ -11,6 +12,7 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "runtime/src/halo_detail.hpp"
 #include "runtime/src/halo_test_access.hpp"
+#include "tests/support/task25_counter_checks.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <mpi.h>
@@ -18,8 +20,10 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <limits>
 #include <optional>
@@ -55,6 +59,8 @@ static_assert(!std::is_copy_constructible_v<HaloExchange>);
 static_assert(!std::is_copy_assignable_v<HaloExchange>);
 static_assert(std::is_nothrow_move_constructible_v<HaloExchange>);
 static_assert(!std::is_move_assignable_v<HaloExchange>);
+static_assert(std::is_trivially_copyable_v<
+              hundun::runtime::HaloPerformanceCounters>);
 static_assert(std::is_same_v<decltype(std::declval<const HaloExchange&>()
                                           .ghost_width()),
                              int>);
@@ -630,6 +636,17 @@ void test_nonperiodic_and_zero_width(const MpiContext& context) {
   static_cast<void>(expect_collective_error(
       context, [&] { zero.begin(zero_storage, zero_id); }));
   zero.wait(zero_storage, zero_id);
+  const auto zero_counters = zero.performance_counters();
+  HUNDUN_CHECK(zero_counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(zero_counters.begin_calls == 1U);
+  HUNDUN_CHECK(zero_counters.wait_calls == 1U);
+  HUNDUN_CHECK(zero_counters.send_payload_bytes == 0U);
+  HUNDUN_CHECK(zero_counters.receive_payload_bytes == 0U);
+  HUNDUN_CHECK(zero_counters.pack_bytes == 0U);
+  HUNDUN_CHECK(zero_counters.unpack_bytes == 0U);
+  HUNDUN_CHECK(zero_counters.send_messages == 0U);
+  HUNDUN_CHECK(zero_counters.receive_messages == 0U);
+  HUNDUN_CHECK(zero_counters.completed_wait_seconds == 0.0);
   const auto snapshot = hundun::runtime::detail::halo_test_snapshot();
   HUNDUN_CHECK(snapshot.receive_posts == 0U);
   HUNDUN_CHECK(snapshot.send_posts == 0U);
@@ -667,6 +684,7 @@ void test_state_machine_and_moves(const MpiContext& context) {
 
   halo.begin(storage, first);
   check_field<double>(storage, first, decomposition, kPeriodic, 0, 1, 1);
+  const auto counters_before_target_failures = halo.performance_counters();
   static_cast<void>(expect_collective_error(
       context, [&] { halo.begin(storage, first); }));
   static_cast<void>(expect_collective_error(
@@ -677,6 +695,8 @@ void test_state_machine_and_moves(const MpiContext& context) {
       context, [&] { halo.wait(wrong_layout, wrong_layout_id); }));
   static_cast<void>(expect_collective_error(
       context, [&] { halo.wait(storage, second); }));
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_target_failures, halo.performance_counters()));
   halo.wait(storage, first);
   check_field<double>(storage, first, decomposition, kPeriodic, 1, 1, 1);
 
@@ -960,6 +980,8 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
                              MPI_UNSIGNED_LONG_LONG, MPI_SUM,
                              context.comm()) == MPI_SUCCESS);
   HUNDUN_CHECK(total_wire_injections == 1U);
+  const auto counters_after_wire_failure = halo.performance_counters();
+  HUNDUN_CHECK(counters_after_wire_failure.completed_exchanges == 0U);
   check_only_hook_fired(context, wire_collective_snapshot,
                         ExpectedHook::wire_collective);
   hundun::runtime::detail::set_halo_test_options({});
@@ -978,6 +1000,7 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
   FieldStorage ids(ids_registry, decomposition.local_extent());
   initialize_field<double>(ids, id_zero, decomposition, 1);
   initialize_field<double>(ids, id_one, decomposition, 1);
+  const auto counters_before_layout_failures = halo.performance_counters();
   static_cast<void>(expect_collective_error(context, [&] {
     halo.begin(ids, context.rank() == 0 ? id_zero : id_one);
   }));
@@ -1022,6 +1045,8 @@ void test_collective_preflight_mismatches(const MpiContext& context) {
   FieldStorage wrong_extent(normal_registry, rank_extent);
   static_cast<void>(expect_collective_error(
       context, [&] { halo.begin(wrong_extent, normal_id); }));
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_layout_failures, halo.performance_counters()));
 
   const auto snapshot = hundun::runtime::detail::halo_test_snapshot();
   HUNDUN_CHECK(snapshot.wire_second_collective_entries == 4U);
@@ -1077,6 +1102,18 @@ void test_small_chunks_and_reuse(const MpiContext& context) {
   HUNDUN_CHECK(first.chunk_offsets_ordered);
   HUNDUN_CHECK(first.pack_row_copy_events == expected_row_copies);
   HUNDUN_CHECK(first.unpack_row_copy_events == expected_row_copies);
+  const auto first_counters = halo.performance_counters();
+  HUNDUN_CHECK(first_counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(first_counters.begin_calls == 1U);
+  HUNDUN_CHECK(first_counters.wait_calls == 1U);
+  HUNDUN_CHECK(first_counters.send_messages == first.send_posts);
+  HUNDUN_CHECK(first_counters.receive_messages == first.receive_posts);
+  HUNDUN_CHECK(first_counters.pack_bytes ==
+               first_counters.send_payload_bytes);
+  HUNDUN_CHECK(first_counters.unpack_bytes ==
+               first_counters.receive_payload_bytes);
+  HUNDUN_CHECK(std::isfinite(first_counters.completed_wait_seconds));
+  HUNDUN_CHECK(first_counters.completed_wait_seconds >= 0.0);
 
   initialize_field<double>(storage, wide, decomposition, 2);
   halo.exchange(storage, wide);
@@ -1105,6 +1142,26 @@ void test_recoverable_failures(const MpiContext& context) {
   FieldStorage storage(registry, decomposition.local_extent());
   const int injection_rank = context.size() > 1 ? 1 : 0;
 
+  hundun::runtime::detail::HaloTestOptions overflow_options;
+  overflow_options.use_initial_performance_counters = true;
+  if (context.rank() == injection_rank) {
+    overflow_options.initial_performance_counters.completed_exchanges =
+        std::numeric_limits<std::uint64_t>::max();
+  }
+  hundun::runtime::detail::set_halo_test_options(overflow_options);
+  auto overflow_halo = HaloExchange::create(
+      decomposition,
+      ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
+  const auto overflow_before = overflow_halo.performance_counters();
+  const auto overflow_message = expect_collective_error(
+      context, [&] { overflow_halo.begin(storage, id); });
+  HUNDUN_CHECK(overflow_message ==
+               "Halo performance counter preflight failed");
+  const auto overflow_after = overflow_halo.performance_counters();
+  HUNDUN_CHECK(
+      hundun::test::task25_counters_equal(overflow_before, overflow_after));
+  hundun::runtime::detail::set_halo_test_options({});
+
   initialize_field<double>(storage, id, decomposition, 1);
   hundun::runtime::detail::reset_halo_test_observation();
   hundun::runtime::detail::HaloTestOptions post_options;
@@ -1116,8 +1173,12 @@ void test_recoverable_failures(const MpiContext& context) {
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
   HUNDUN_CHECK(hundun::runtime::detail::halo_test_snapshot()
                    .context_generation == 1U);
+  const auto counters_before_post_failure = halo.performance_counters();
   const std::string post_message = expect_collective_error(
       context, [&] { halo.begin(storage, id); });
+  const auto counters_after_post_failure = halo.performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_post_failure, counters_after_post_failure));
   HUNDUN_CHECK(post_message.find("post") != std::string::npos);
   HUNDUN_CHECK(post_message.find("rank=" + std::to_string(injection_rank)) !=
                std::string::npos);
@@ -1152,10 +1213,14 @@ void test_recoverable_failures(const MpiContext& context) {
   wait_options.observe = true;
   hundun::runtime::detail::set_halo_test_options(wait_options);
   halo.begin(storage, id);
+  const auto counters_before_wait_failure = halo.performance_counters();
   HUNDUN_CHECK(hundun::runtime::detail::halo_test_snapshot()
                    .context_generation == 2U);
   const std::string wait_message = expect_collective_error(
       context, [&] { halo.wait(storage, id); });
+  const auto counters_after_wait_failure = halo.performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_wait_failure, counters_after_wait_failure));
   HUNDUN_CHECK(wait_message.find("completion") != std::string::npos);
   HUNDUN_CHECK(wait_message.find("rank=" + std::to_string(injection_rank)) !=
                std::string::npos);
@@ -1174,6 +1239,23 @@ void test_recoverable_failures(const MpiContext& context) {
   hundun::runtime::detail::set_halo_test_options({});
   halo.exchange(storage, id);
   check_field<double>(storage, id, decomposition, kPeriodic, 1, 2, 2);
+
+  initialize_field<double>(storage, id, decomposition, 3);
+  hundun::runtime::detail::HaloTestOptions unpack_options;
+  unpack_options.inject_unpack_failure_rank = injection_rank;
+  hundun::runtime::detail::set_halo_test_options(unpack_options);
+  halo.begin(storage, id);
+  const auto counters_before_unpack_failure = halo.performance_counters();
+  const std::string unpack_message = expect_collective_error(
+      context, [&] { halo.wait(storage, id); });
+  HUNDUN_CHECK(unpack_message.find("unpack") != std::string::npos);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_unpack_failure, halo.performance_counters()));
+  check_field<double>(storage, id, decomposition, kPeriodic, 0, 3, 3);
+
+  hundun::runtime::detail::set_halo_test_options({});
+  halo.exchange(storage, id);
+  check_field<double>(storage, id, decomposition, kPeriodic, 1, 3, 3);
 }
 
 void run_full(const MpiContext& context) {
@@ -1211,6 +1293,7 @@ void run_failure(const MpiContext& context) {
 int run_finalized_idle(int argc, char** argv) {
   std::optional<HaloExchange> halo;
   std::optional<StructuredDecomposition> decomposition;
+  hundun::runtime::HaloPerformanceCounters expected_counters{};
   int active_result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
@@ -1225,6 +1308,11 @@ int run_finalized_idle(int argc, char** argv) {
                                0)));
       HUNDUN_CHECK(halo->ghost_width() == 0);
       HUNDUN_CHECK(halo->is_compatible_with(*decomposition));
+      HaloExchange moved(std::move(*halo));
+      expect_local_error(
+          [&] { static_cast<void>(halo->performance_counters()); });
+      expected_counters = moved.performance_counters();
+      halo.emplace(std::move(moved));
     });
   }
   if (active_result != EXIT_SUCCESS) {
@@ -1235,6 +1323,15 @@ int run_finalized_idle(int argc, char** argv) {
     HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
     HUNDUN_CHECK(finalized != 0);
     HUNDUN_CHECK(halo->ghost_width() == 0);
+    const auto allocation_before =
+        hundun::execution::allocation_counters();
+    const auto counters = halo->performance_counters();
+    const auto allocation_after =
+        hundun::execution::allocation_counters();
+    HUNDUN_CHECK(
+        hundun::test::task25_counters_equal(expected_counters, counters));
+    HUNDUN_CHECK(hundun::test::task25_counters_equal(allocation_before,
+                                                     allocation_after));
     bool rejected = false;
     std::string message;
     try {

@@ -104,6 +104,10 @@ struct ArtifactMetadata {
   CompatibilityMetadata compatibility;
 };
 
+ComparisonResult compare_artifact_metadata(const ArtifactMetadata& baseline,
+                                           const ArtifactMetadata& candidate,
+                                           ComparisonMode mode);
+
 struct CorrectnessResult {
   bool passed{};
   std::string summary;

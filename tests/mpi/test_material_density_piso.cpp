@@ -7,6 +7,7 @@
 #include "hundun/execution/execution.hpp"
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/flow/material_density_piso.hpp"
+#include "hundun/linear/bicgstab.hpp"
 #include "hundun/linear/conjugate_gradient.hpp"
 #include "hundun/linear/preconditioners.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
@@ -18,6 +19,7 @@
 #include "hundun/runtime/mpi_operation_error.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "tests/support/flow_state_equality.hpp"
+#include "tests/support/task25_counter_checks.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <array>
@@ -451,19 +453,25 @@ int main(int argc, char **argv) {
       hundun::mesh::MeshGeometry warped_geometry(
           topology, hundun::mesh::AnalyticWarpedBoxMapping(
                         {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
-                        {0.0, 0.0, 0.0}));
-      bool rejected = false;
-      try {
-        static_cast<void>(hundun::flow::FixedStepMaterialDensityFlow::create(
-            decomposition, topology, warped_geometry, boundaries, mpi,
-            execution, halo, momentum_solver, {&mx, &my, &mz},
-            pressure_solver, pressure_preconditioner, registry, fields,
-            specification));
-      } catch (const hundun::runtime::Error &error) {
-        rejected = std::string_view(error.what()) ==
-                   "material flow supports uniform geometry only";
-      }
-      HUNDUN_CHECK(rejected);
+                        {0.02, -0.015, 0.01}));
+      hundun::linear::BiCGStabSolver warped_pressure_solver(execution, mpi);
+      hundun::linear::JacobiPreconditioner warped_pressure_preconditioner(
+          execution);
+      auto warped = hundun::flow::FixedStepMaterialDensityFlow::create(
+          decomposition, topology, warped_geometry, boundaries, mpi,
+          execution, halo, momentum_solver, {&mx, &my, &mz},
+          warped_pressure_solver, warped_pressure_preconditioner, registry,
+          fields, specification);
+      auto warped_state = make_state(1.0);
+      const auto warped_report = warped.attempt(
+          warped_state, 0.0,
+          hundun::flow::make_momentum_time_stencil(
+              hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0),
+          {}, {});
+      HUNDUN_CHECK(warped_report.flow().disposition ==
+                   hundun::flow::StepAttemptDisposition::committed);
+      HUNDUN_CHECK(warped_report.flow().pressure_corrector_count == 2U);
+      HUNDUN_CHECK(warped_state.metadata().step == 1U);
     }
     {
       auto wall_decomposition =
@@ -501,6 +509,30 @@ int main(int argc, char **argv) {
         decomposition, topology, geometry, boundaries, mpi, execution, halo,
         momentum_solver, {&mx, &my, &mz}, pressure_solver,
         pressure_preconditioner, registry, fields, specification);
+    const auto initial_pressure_halo =
+        flow.pressure_halo_performance_counters();
+    HUNDUN_CHECK(initial_pressure_halo.completed_exchanges == 0U);
+    HUNDUN_CHECK(initial_pressure_halo.begin_calls == 0U);
+    HUNDUN_CHECK(initial_pressure_halo.wait_calls == 0U);
+    {
+      auto movable_flow =
+          hundun::flow::FixedStepMaterialDensityFlow::create(
+              decomposition, topology, geometry, boundaries, mpi, execution,
+              halo, momentum_solver, {&mx, &my, &mz}, pressure_solver,
+              pressure_preconditioner, registry, fields, specification);
+      hundun::flow::FixedStepMaterialDensityFlow moved_flow(
+          std::move(movable_flow));
+      HUNDUN_CHECK(moved_flow.pressure_halo_performance_counters()
+                       .completed_exchanges == 0U);
+      bool moved_from_rejected = false;
+      try {
+        static_cast<void>(
+            movable_flow.pressure_halo_performance_counters());
+      } catch (const hundun::runtime::Error &) {
+        moved_from_rejected = true;
+      }
+      HUNDUN_CHECK(moved_from_rejected);
+    }
     const auto be = hundun::flow::make_momentum_time_stencil(
         hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
 
@@ -524,6 +556,38 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(report.final_continuity_residual_available());
     HUNDUN_CHECK(report.final_pressure_residual_available());
     HUNDUN_CHECK(state.metadata().step == 1U);
+    const auto pressure_halo =
+        flow.pressure_halo_performance_counters();
+    const auto pressure_halo_parts =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            material_pressure_halo_counters(flow);
+    HUNDUN_CHECK(pressure_halo_parts.ordinary_available);
+    HUNDUN_CHECK(pressure_halo_parts.material_final_available);
+    const auto expected_pressure_halo =
+        hundun::flow::test::MaterialDensityPisoTestAccess::
+            combine_pressure_halo_counters(
+                pressure_halo_parts.ordinary,
+                pressure_halo_parts.material_final);
+    HUNDUN_CHECK(hundun::test::task25_counters_equal(
+        pressure_halo, expected_pressure_halo));
+    HUNDUN_CHECK(pressure_halo.completed_exchanges > 0U);
+    {
+      auto overflow_left = pressure_halo_parts.ordinary;
+      auto overflow_right = pressure_halo_parts.material_final;
+      overflow_left.completed_exchanges =
+          std::numeric_limits<std::uint64_t>::max();
+      overflow_right.completed_exchanges = 1U;
+      bool overflow_rejected = false;
+      try {
+        static_cast<void>(
+            hundun::flow::test::MaterialDensityPisoTestAccess::
+                combine_pressure_halo_counters(overflow_left,
+                                               overflow_right));
+      } catch (const hundun::runtime::Error &) {
+        overflow_rejected = true;
+      }
+      HUNDUN_CHECK(overflow_rejected);
+    }
     const auto pressure_evidence =
         hundun::flow::test::MaterialDensityPisoTestAccess::
             material_pressure_evidence(flow);

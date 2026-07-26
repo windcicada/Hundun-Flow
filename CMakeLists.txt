@@ -38,9 +38,14 @@ target_include_directories(hundun_execution PUBLIC
 target_link_libraries(hundun_execution
   PRIVATE hundun_warnings
   PUBLIC hundun_options Threads::Threads)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_execution PRIVATE
+    HUNDUN_EXECUTION_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_diagnostics STATIC
-  diagnostics/src/performance_artifact.cpp)
+  diagnostics/src/performance_artifact.cpp
+  diagnostics/src/performance_correctness.cpp)
 target_include_directories(hundun_diagnostics PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/diagnostics/include>")
 target_link_libraries(hundun_diagnostics
@@ -288,16 +293,86 @@ target_link_libraries(hundun_solver
   PRIVATE hundun_options hundun_warnings
   PUBLIC hundun_mesh hundun_runtime)
 
+set(HUNDUN_SOURCE_COMMIT "unavailable")
+set(HUNDUN_SOURCE_CLEAN "false")
+set(HUNDUN_SOURCE_DIRTY_SUMMARY "unavailable")
+include(applications/hundun/stage2_performance_source_metadata.cmake)
+find_package(Git QUIET)
+if(Git_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --verify HEAD
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE HUNDUN_GIT_COMMIT_RESULT
+    OUTPUT_VARIABLE HUNDUN_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(HUNDUN_GIT_COMMIT_RESULT EQUAL 0 AND
+     HUNDUN_GIT_COMMIT MATCHES "^[0-9a-fA-F]+$")
+    string(TOLOWER "${HUNDUN_GIT_COMMIT}" HUNDUN_SOURCE_COMMIT)
+  endif()
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" status --porcelain=v1 --untracked-files=normal
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE HUNDUN_GIT_STATUS_RESULT
+    OUTPUT_VARIABLE HUNDUN_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  hundun_source_status_metadata(
+    "${HUNDUN_GIT_STATUS_RESULT}" "${HUNDUN_GIT_STATUS}"
+    HUNDUN_SOURCE_CLEAN HUNDUN_SOURCE_DIRTY_SUMMARY)
+endif()
+
+string(TOUPPER "${CMAKE_BUILD_TYPE}" HUNDUN_BUILD_TYPE_UPPER)
+set(HUNDUN_PERFORMANCE_COMPILER_FLAGS
+  "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${HUNDUN_BUILD_TYPE_UPPER}}")
+if(MPI_CXX_COMPILE_OPTIONS)
+  string(JOIN " " HUNDUN_MPI_CXX_COMPILE_OPTIONS
+    ${MPI_CXX_COMPILE_OPTIONS})
+  string(APPEND HUNDUN_PERFORMANCE_COMPILER_FLAGS
+    " ${HUNDUN_MPI_CXX_COMPILE_OPTIONS}")
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  string(APPEND HUNDUN_PERFORMANCE_COMPILER_FLAGS
+    " -Wall -Wextra -Wpedantic -Wconversion -Wshadow")
+endif()
+string(APPEND HUNDUN_PERFORMANCE_COMPILER_FLAGS " -std=c++17")
+string(STRIP "${HUNDUN_PERFORMANCE_COMPILER_FLAGS}"
+  HUNDUN_PERFORMANCE_COMPILER_FLAGS)
+set(HUNDUN_PERFORMANCE_LINK_FLAGS
+  "${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_EXE_LINKER_FLAGS_${HUNDUN_BUILD_TYPE_UPPER}}")
+if(MPI_CXX_LINK_FLAGS)
+  string(APPEND HUNDUN_PERFORMANCE_LINK_FLAGS " ${MPI_CXX_LINK_FLAGS}")
+endif()
+string(STRIP "${HUNDUN_PERFORMANCE_LINK_FLAGS}"
+  HUNDUN_PERFORMANCE_LINK_FLAGS)
+foreach(HUNDUN_METADATA_FIELD IN ITEMS
+    HUNDUN_SOURCE_COMMIT
+    HUNDUN_SOURCE_DIRTY_SUMMARY
+    HUNDUN_PERFORMANCE_COMPILER_FLAGS
+    HUNDUN_PERFORMANCE_LINK_FLAGS)
+  hundun_escape_cpp_string(
+    "${${HUNDUN_METADATA_FIELD}}" HUNDUN_METADATA_ESCAPED)
+  set("${HUNDUN_METADATA_FIELD}_ESCAPED" "${HUNDUN_METADATA_ESCAPED}")
+endforeach()
+file(MAKE_DIRECTORY
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/applications/hundun")
+configure_file(
+  applications/hundun/stage2_performance_build.hpp.in
+  generated/applications/hundun/stage2_performance_build.hpp
+  @ONLY)
+
 add_executable(hundun
   applications/hundun/main.cpp
   applications/hundun/stage1_driver.cpp
   applications/hundun/stage2_driver.cpp)
-target_include_directories(hundun PRIVATE "${PROJECT_SOURCE_DIR}")
+target_include_directories(hundun PRIVATE
+  "${PROJECT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(hundun PRIVATE
   hundun_application
   hundun_cli
   hundun_config
   hundun_checkpoint_diagnostics
+  hundun_diagnostics
   hundun_material_diagnostics
   hundun_task24_diagnostics
   hundun_flow
@@ -306,6 +381,10 @@ target_link_libraries(hundun PRIVATE
   hundun_options
   hundun_warnings
   MPI::MPI_CXX)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun PRIVATE
+    HUNDUN_APPLICATION_ENABLE_TEST_ACCESS=1)
+endif()
 
 add_library(hundun_plugin_sdk STATIC sdk/src/plugin_loader.cpp)
 target_include_directories(hundun_plugin_sdk
@@ -402,7 +481,7 @@ if(HUNDUN_BUILD_TESTS)
         "${PROJECT_SOURCE_DIR}/tests/acceptance/task24_flow_models.sh"
         "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task24_ranks}")
     set_tests_properties("test_task24_flow_models_${task24_ranks}rank"
-      PROPERTIES LABELS "application;mpi;task24"
+      PROPERTIES LABELS "application;mpi;task24;task25"
       TIMEOUT 120 PROCESSORS "${task24_ranks}")
     add_test(NAME "test_task24_restart_${task24_ranks}rank"
       COMMAND bash
@@ -679,6 +758,119 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/diagnostics/include")
   target_link_libraries(test_performance_artifact PRIVATE
     hundun_diagnostics yyjson)
+  set_tests_properties(test_performance_artifact PROPERTIES
+    LABELS "unit;task25;performance")
+
+  hundun_add_test(test_task25_performance_contract
+    tests/unit/test_task25_performance_contract.cpp)
+  target_include_directories(test_task25_performance_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/diagnostics/include"
+    "${PROJECT_SOURCE_DIR}/execution/include"
+    "${PROJECT_SOURCE_DIR}/execution/src")
+  target_link_libraries(test_task25_performance_contract PRIVATE
+    hundun_diagnostics hundun_execution)
+  target_compile_definitions(test_task25_performance_contract PRIVATE
+    HUNDUN_EXECUTION_ENABLE_TEST_ACCESS=1)
+  set_tests_properties(test_task25_performance_contract PROPERTIES
+    LABELS "unit;task25;performance" TIMEOUT 30)
+
+  hundun_add_test(test_task25_performance_header_contract
+    tests/unit/test_task25_performance_header_contract.cpp
+    tests/unit/test_task25_correctness_header_contract.cpp)
+  target_include_directories(test_task25_performance_header_contract PRIVATE
+    "${PROJECT_SOURCE_DIR}/diagnostics/include"
+    "${PROJECT_SOURCE_DIR}/runtime/include")
+  set_tests_properties(test_task25_performance_header_contract PROPERTIES
+    LABELS "unit;task25;performance" TIMEOUT 30)
+
+  add_test(NAME test_task25_tests_off_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+      "-DHUNDUN_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DHUNDUN_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+      "-DHUNDUN_TESTS_OFF_EXECUTION=${CMAKE_BINARY_DIR}/task22-tests-off/archives/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_execution${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "-DHUNDUN_TESTS_OFF_RUNTIME=${CMAKE_BINARY_DIR}/task22-tests-off/archives/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_runtime${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "-DHUNDUN_TESTS_OFF_DIAGNOSTICS=${CMAKE_BINARY_DIR}/task22-tests-off/archives/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_diagnostics${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "-DHUNDUN_TESTS_OFF_LINEAR=${CMAKE_BINARY_DIR}/task22-tests-off/archives/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_linear${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "-DHUNDUN_TESTS_OFF_FLOW=${CMAKE_BINARY_DIR}/task22-tests-off/archives/${CMAKE_STATIC_LIBRARY_PREFIX}hundun_flow${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "-DHUNDUN_TESTS_OFF_HUNDUN=${CMAKE_BINARY_DIR}/task22-tests-off/archives/hundun${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${PROJECT_SOURCE_DIR}/tests/cmake/task25_tests_off_contract.cmake")
+  set_tests_properties(test_task25_tests_off_contract PROPERTIES
+    FIXTURES_REQUIRED task22_tests_off_archives
+    LABELS "unit;source_policy;task25"
+    RUN_SERIAL TRUE
+    TIMEOUT 60)
+
+  add_test(NAME test_task25_source_metadata_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+      -P "${PROJECT_SOURCE_DIR}/tests/cmake/task25_source_metadata_contract.cmake")
+  set_tests_properties(test_task25_source_metadata_contract PROPERTIES
+    LABELS "unit;source_policy;task25;performance" TIMEOUT 30)
+
+  hundun_add_test(test_task25_state_fingerprint
+    tests/unit/test_task25_state_fingerprint.cpp)
+  target_include_directories(test_task25_state_fingerprint PRIVATE
+    "${PROJECT_SOURCE_DIR}")
+  target_link_libraries(test_task25_state_fingerprint PRIVATE
+    hundun_flow hundun_options hundun_warnings)
+  set_tests_properties(test_task25_state_fingerprint PROPERTIES
+    LABELS "unit;task25;performance" TIMEOUT 30)
+
+  add_executable(task25_performance_evidence
+    tests/support/task25_performance_evidence.cpp)
+  target_include_directories(task25_performance_evidence PRIVATE
+    "${PROJECT_SOURCE_DIR}/third_party/yyjson")
+  target_link_libraries(task25_performance_evidence PRIVATE
+    hundun_diagnostics hundun_options hundun_warnings yyjson)
+  add_test(NAME test_task25_performance_evidence_self
+    COMMAND "$<TARGET_FILE:task25_performance_evidence>" --self-test)
+  set_tests_properties(test_task25_performance_evidence_self PROPERTIES
+    LABELS "unit;task25;performance" TIMEOUT 30)
+
+  add_executable(task25_performance_oracle
+    tests/mpi/task25_performance_oracle.cpp)
+  target_include_directories(task25_performance_oracle PRIVATE
+    "${PROJECT_SOURCE_DIR}/third_party/yyjson")
+  target_link_libraries(task25_performance_oracle PRIVATE
+    hundun_diagnostics hundun_mesh hundun_runtime yyjson
+    hundun_options hundun_warnings)
+  add_test(NAME test_task25_performance_oracle_self
+    COMMAND "$<TARGET_FILE:task25_performance_oracle>" --self-test)
+  set_tests_properties(test_task25_performance_oracle_self PROPERTIES
+    LABELS "unit;task25;performance" TIMEOUT 30)
+
+  hundun_add_test(test_task25_diagnostic_branch
+    tests/unit/test_task25_diagnostic_branch.cpp)
+  target_include_directories(test_task25_diagnostic_branch PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/execution/include")
+  target_link_libraries(test_task25_diagnostic_branch PRIVATE
+    hundun_execution)
+  set_tests_properties(test_task25_diagnostic_branch PROPERTIES
+    LABELS "unit;task25;diagnostics" TIMEOUT 30)
+  foreach(task25_diagnostic_ranks IN ITEMS 1 2 4)
+    add_test(NAME
+        "test_task25_diagnostic_branch_${task25_diagnostic_ranks}rank"
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}"
+        "${task25_diagnostic_ranks}" ${MPIEXEC_PREFLAGS}
+        "$<TARGET_FILE:test_task25_diagnostic_branch>" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      "test_task25_diagnostic_branch_${task25_diagnostic_ranks}rank"
+      PROPERTIES LABELS "mpi;task25;diagnostics"
+      TIMEOUT 30 PROCESSORS "${task25_diagnostic_ranks}")
+  endforeach()
+
+  foreach(task25_ranks IN ITEMS 1 2 4)
+    add_test(NAME "test_task25_performance_${task25_ranks}rank"
+      COMMAND bash
+        "${PROJECT_SOURCE_DIR}/tests/acceptance/task25_performance.sh"
+        "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task25_ranks}")
+    set_tests_properties("test_task25_performance_${task25_ranks}rank"
+      PROPERTIES LABELS "acceptance;mpi;task25;performance"
+      TIMEOUT 300 PROCESSORS "${task25_ranks}" RUN_SERIAL TRUE)
+  endforeach()
 
   hundun_add_test(test_structured_diagnostics_header_contract
     tests/unit/test_structured_diagnostics_header_contract.cpp)
@@ -1157,7 +1349,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_fixed_step_piso>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${fixed_step_piso_test}" PROPERTIES
-      LABELS "mpi;numerical;task18"
+      LABELS "mpi;numerical;task18;task25"
       TIMEOUT 120
       PROCESSORS "${ranks}")
   endforeach()
@@ -1339,9 +1531,13 @@ if(HUNDUN_BUILD_TESTS)
         COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${ranks}"
                 ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_${target}>"
                 ${MPIEXEC_POSTFLAGS})
+      if(target STREQUAL "material_density_piso")
+        set(task20_labels "mpi;numerical;task20;task20-fast;task25")
+      else()
+        set(task20_labels "mpi;numerical;task20;task20-fast")
+      endif()
       set_tests_properties("${task20_test}" PROPERTIES
-        LABELS "mpi;numerical;task20;task20-fast"
-        TIMEOUT 240 PROCESSORS "${ranks}")
+        LABELS "${task20_labels}" TIMEOUT 240 PROCESSORS "${ranks}")
     endforeach()
     foreach(target IN ITEMS ideal_gas_closure ideal_gas_piso
                             ideal_gas_diagnostics)
@@ -1506,7 +1702,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_taylor_green_piso>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${taylor_green_piso_test}" PROPERTIES
-      LABELS "mpi;numerical;task18"
+      LABELS "mpi;numerical;task18;task25"
       TIMEOUT 300
       PROCESSORS "${ranks}")
   endforeach()
@@ -1545,8 +1741,8 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_cell_centered_fvm>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${cell_centered_fvm_test}" PROPERTIES
-      LABELS "mpi;numerical"
-      TIMEOUT 120
+      LABELS "mpi;numerical;task25"
+      TIMEOUT 300
       PROCESSORS "${ranks}")
   endforeach()
 
@@ -1565,7 +1761,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_matrix_free_poisson>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${matrix_free_poisson_test}" PROPERTIES
-      LABELS "mpi;numerical"
+      LABELS "mpi;numerical;task25"
       TIMEOUT 90
       PROCESSORS "${ranks}")
   endforeach()
@@ -1653,7 +1849,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
               full ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${vector_halo_test}" PROPERTIES
-      LABELS mpi TIMEOUT 60 PROCESSORS "${ranks}")
+      LABELS "mpi;task25" TIMEOUT 60 PROCESSORS "${ranks}")
   endforeach()
   foreach(mode IN ITEMS mismatch failure)
     set(vector_halo_mode_test "test_ghosted_vector_halo_${mode}")
@@ -1662,14 +1858,14 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
               "${mode}" ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${vector_halo_mode_test}" PROPERTIES
-      LABELS mpi TIMEOUT 60 PROCESSORS 4)
+      LABELS "mpi;task25" TIMEOUT 60 PROCESSORS 4)
   endforeach()
   add_test(NAME test_ghosted_vector_halo_finalized_idle
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "1"
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_ghosted_vector_halo>"
             finalized_idle ${MPIEXEC_POSTFLAGS})
   set_tests_properties(test_ghosted_vector_halo_finalized_idle PROPERTIES
-    LABELS mpi TIMEOUT 30 PROCESSORS 1)
+    LABELS "mpi;task25" TIMEOUT 30 PROCESSORS 1)
 
   add_executable(test_passive_scalar tests/unit/test_passive_scalar.cpp)
   target_include_directories(test_passive_scalar PRIVATE
@@ -1804,7 +2000,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_mesh_geometry>"
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${mesh_geometry_test}" PROPERTIES
-      LABELS "mpi;numerical"
+      LABELS "mpi;numerical;task25"
       TIMEOUT 90
       PROCESSORS "${ranks}")
   endforeach()
@@ -1817,16 +2013,20 @@ if(HUNDUN_BUILD_TESTS)
             "-DTEST_EXECUTABLE=$<TARGET_FILE:test_mesh_geometry>"
             -P "${PROJECT_SOURCE_DIR}/tests/support/expected_geometry_sample_failure.cmake")
   set_tests_properties(test_mesh_geometry_injected_sample_failure PROPERTIES
-    LABELS "mpi;numerical"
+    LABELS "mpi;numerical;task25"
     TIMEOUT 10
     PROCESSORS 2
     WILL_FAIL TRUE)
 
   add_executable(test_halo_exchange tests/mpi/test_halo_exchange.cpp)
   target_include_directories(test_halo_exchange PRIVATE
-    "${PROJECT_SOURCE_DIR}")
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/execution/include")
   target_link_libraries(test_halo_exchange PRIVATE
-    hundun_options hundun_warnings hundun_runtime MPI::MPI_CXX)
+    hundun_options hundun_warnings hundun_runtime hundun_execution
+    MPI::MPI_CXX)
+  target_compile_definitions(test_halo_exchange PRIVATE
+    HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     set(halo_test "test_halo_exchange_${ranks}_rank")
     add_test(NAME "${halo_test}"
@@ -1834,7 +2034,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
               full ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${halo_test}" PROPERTIES
-      LABELS mpi
+      LABELS "mpi;task25"
       TIMEOUT 60
       PROCESSORS "${ranks}")
   endforeach()
@@ -1846,7 +2046,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
               "${mode}" ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${halo_mode_test}" PROPERTIES
-      LABELS mpi
+      LABELS "mpi;task25"
       TIMEOUT 60
       PROCESSORS 4)
   endforeach()
@@ -1856,7 +2056,7 @@ if(HUNDUN_BUILD_TESTS)
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:test_halo_exchange>"
             finalized_idle ${MPIEXEC_POSTFLAGS})
   set_tests_properties(test_halo_exchange_finalized_idle PROPERTIES
-    LABELS mpi
+    LABELS "mpi;task25"
     TIMEOUT 30
     PROCESSORS 1)
 

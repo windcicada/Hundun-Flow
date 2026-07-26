@@ -976,6 +976,7 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
                1024.0 * std::numeric_limits<double>::epsilon() * box_volume);
 
   int local_curved_metric = 0;
+  int local_orientation_mutation_detected = 0;
   for (LocalFaceId face = 0; face < topology.local_face_count(); ++face) {
     const auto expected = oracle_face_geometry(topology.logical_face(face));
     check_near(geometry.face_center_m(face), expected.first, 256.0);
@@ -997,6 +998,16 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
       HUNDUN_CHECK(bits(neighbour.x) == bits(-owner.x));
       HUNDUN_CHECK(bits(neighbour.y) == bits(-owner.y));
       HUNDUN_CHECK(bits(neighbour.z) == bits(-owner.z));
+      if (local_orientation_mutation_detected == 0) {
+        const Real3 mutated_owner{owner.x + geometry.face_area_m2(face),
+                                  owner.y, owner.z};
+        const bool mutated_reciprocal =
+            bits(neighbour.x) == bits(-mutated_owner.x) &&
+            bits(neighbour.y) == bits(-mutated_owner.y) &&
+            bits(neighbour.z) == bits(-mutated_owner.z);
+        HUNDUN_CHECK(!mutated_reciprocal);
+        local_orientation_mutation_detected = 1;
+      }
     } else {
       HUNDUN_CHECK(geometry.face_skewness(face) == 0.0);
       expect_error([&] {
@@ -1006,8 +1017,13 @@ void test_warped_invariants(const MpiContext& mpi, const MeshTopology& topology,
     }
   }
   int global_curved_metric = 0;
+  int global_orientation_mutation_detected = 0;
   HUNDUN_CHECK(MPI_Allreduce(&local_curved_metric, &global_curved_metric, 1,
                              MPI_INT, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(MPI_Allreduce(&local_orientation_mutation_detected,
+                             &global_orientation_mutation_detected, 1,
+                             MPI_INT, MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(global_orientation_mutation_detected == 1);
   HUNDUN_CHECK(global_curved_metric == 1);
   test_duplicate_face_bits(mpi, topology, geometry);
 }

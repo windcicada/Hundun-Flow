@@ -2,6 +2,7 @@
 #pragma once
 
 #include "hundun/linear/ghosted_vector.hpp"
+#include "hundun/runtime/halo_performance_counters.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -36,6 +37,7 @@ class GhostedVectorHalo final {
   std::size_t ghost_count() const;
   std::size_t send_value_count() const;
   std::size_t receive_value_count() const;
+  [[nodiscard]] runtime::HaloPerformanceCounters performance_counters() const;
 
   void exchange(GhostedVector& vector);
   void begin(const GhostedVector& vector);

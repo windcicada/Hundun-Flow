@@ -93,6 +93,9 @@ struct VectorHaloTestOptions {
   int inject_metadata_completion_failure_rank{-1};
   int inject_post_failure_rank{-1};
   int inject_completion_failure_rank{-1};
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+  int inject_target_copy_failure_rank{-1};
+#endif
 };
 
 struct WirePostEvent {

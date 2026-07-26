@@ -7,6 +7,7 @@
 #include "hundun/finite_volume/cell_centered_fvm.hpp"
 #include "hundun/finite_volume/matrix_free_poisson.hpp"
 #include "hundun/flow/constant_density_piso.hpp"
+#include "hundun/linear/bicgstab.hpp"
 #include "hundun/linear/conjugate_gradient.hpp"
 #include "hundun/linear/preconditioners.hpp"
 #include "hundun/mesh/mesh_geometry.hpp"
@@ -22,6 +23,7 @@
 #include "linear/src/preconditioners_test_access.hpp"
 #include "runtime/src/mpi_error.hpp"
 #include "tests/support/flow_state_equality.hpp"
+#include "tests/support/task25_counter_checks.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <algorithm>
@@ -36,6 +38,16 @@
 #include <vector>
 
 namespace {
+
+template <class Function> void expect_local_error(Function &&function) {
+  bool rejected = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const hundun::runtime::Error &) {
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
+}
 
 hundun::runtime::Int3 process_grid(int ranks) {
   if (ranks == 1)
@@ -305,16 +317,27 @@ double checkerboard_amplitude(const hundun::runtime::MpiContext &mpi,
   return std::abs(parity[0] / parity[1]);
 }
 
-void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
-  constexpr double rho_ref = 1.25;
+void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi,
+                               bool curved) {
+  const double rho_ref = curved ? 1.0 : 1.25;
+  const double dt_s = curved ? 1.0e-4 : 0.01;
   constexpr hundun::runtime::Int3 extent{8, 6, 4};
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
       mpi, extent, {true, true, true},
       hundun::runtime::DecompositionOptions{process_grid(mpi.size())});
+  const auto fixture_local = decomposition.local_extent();
+  HUNDUN_CHECK(fixture_local.x >= 2);
+  HUNDUN_CHECK(fixture_local.y >= 2);
+  HUNDUN_CHECK(fixture_local.z >= 2);
   const hundun::mesh::MeshTopology topology(decomposition);
-  const hundun::mesh::MeshGeometry geometry(
-      topology,
-      hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  const hundun::mesh::MeshGeometry geometry =
+      curved ? hundun::mesh::MeshGeometry(
+                   topology, hundun::mesh::AnalyticWarpedBoxMapping(
+                                 {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
+                                 {0.02, -0.015, 0.01}))
+             : hundun::mesh::MeshGeometry(
+                   topology, hundun::mesh::UniformBoxMapping(
+                                 {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
   auto boundaries = hundun::boundary::BoundaryRegistry::create(
       periodic_case(rho_ref), topology);
 
@@ -327,7 +350,11 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   fields.face_mass_flux =
       hundun::finite_volume::declare_face_mass_flux(registry);
   fields.transported_cell_fields.push_back(
-      registry.declare_field(cell_field("alpha", 1U)));
+      registry.declare_field(cell_field(curved ? "h" : "alpha", 1U)));
+  if (curved) {
+    fields.transported_cell_fields.push_back(
+        registry.declare_field(cell_field("alpha", 1U)));
+  }
   const auto rank_mismatch_extra_field =
       registry.declare_field(cell_field("rank_mismatch_extra", 1U));
   const auto direct_momentum_diagonal =
@@ -340,7 +367,8 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                                     box.end.z - box.begin.z};
   auto state = hundun::flow::FlowState::create(
       registry, {local, topology.local_face_count()}, fields,
-      {0U, 0.0, 0.01, 0.0, hundun::flow::MomentumTimeOrder::backward_euler});
+      {0U, 0.0, dt_s, 0.0,
+       hundun::flow::MomentumTimeOrder::backward_euler});
   const std::size_t cells = topology.owned_cell_count();
   hundun::flow::FlowLayerValues initial;
   initial.density.assign(cells, rho_ref);
@@ -348,13 +376,39 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
   initial.mechanical_pressure.assign(cells, 0.0);
   initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
   initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
-  initial.transported_cell_fields.resize(1U);
+  initial.transported_cell_fields.resize(curved ? 2U : 1U);
   initial.transported_cell_fields[0].resize(cells);
+  if (curved)
+    initial.transported_cell_fields[1].resize(cells);
+  constexpr hundun::runtime::Real3 free_stream_velocity{
+      0.125, -0.25, 0.375};
   for (hundun::mesh::LocalCellId cell = 0; cell < topology.owned_cell_count();
        ++cell) {
     const auto center = geometry.cell_center_m(cell);
-    initial.transported_cell_fields[0][cell] =
-        1.0 + 0.2 * std::sin(2.0 * 3.14159265358979323846 * center.x);
+    if (curved) {
+      initial.velocity[cell * 3U] = free_stream_velocity.x;
+      initial.velocity[cell * 3U + 1U] = free_stream_velocity.y;
+      initial.velocity[cell * 3U + 2U] = free_stream_velocity.z;
+      initial.transported_cell_fields[0][cell] = 2.0;
+      initial.transported_cell_fields[1][cell] = 0.25;
+    } else {
+      initial.transported_cell_fields[0][cell] =
+          1.0 + 0.2 * std::sin(2.0 * 3.14159265358979323846 * center.x);
+    }
+  }
+  if (curved) {
+    for (hundun::mesh::LocalFaceId face = 0;
+         face < topology.local_face_count(); ++face) {
+      initial.face_velocity[face * 3U] = free_stream_velocity.x;
+      initial.face_velocity[face * 3U + 1U] = free_stream_velocity.y;
+      initial.face_velocity[face * 3U + 2U] = free_stream_velocity.z;
+      const auto area =
+          geometry.face_area_vector_m2(face, hundun::mesh::FaceSide::owner);
+      initial.face_mass_flux[face] =
+          rho_ref * (free_stream_velocity.x * area.x +
+                     free_stream_velocity.y * area.y +
+                     free_stream_velocity.z * area.z);
+    }
   }
   state.seed_accepted_layers(initial, initial);
 
@@ -362,8 +416,18 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
       decomposition,
       hundun::runtime::ExchangePlan::create(decomposition, local, 2));
   hundun::execution::CpuReferenceContext execution;
-  hundun::linear::ConjugateGradientSolver momentum_solver(execution, mpi);
-  hundun::linear::ConjugateGradientSolver pressure_solver(execution, mpi);
+  hundun::linear::ConjugateGradientSolver momentum_cg(execution, mpi);
+  hundun::linear::BiCGStabSolver momentum_bicgstab(execution, mpi);
+  hundun::linear::ConjugateGradientSolver pressure_cg(execution, mpi);
+  hundun::linear::BiCGStabSolver pressure_bicgstab(execution, mpi);
+  const hundun::linear::LinearSolver &pressure_solver =
+      curved ? static_cast<const hundun::linear::LinearSolver &>(
+                   pressure_bicgstab)
+             : static_cast<const hundun::linear::LinearSolver &>(pressure_cg);
+  const hundun::linear::LinearSolver &momentum_solver =
+      curved ? static_cast<const hundun::linear::LinearSolver &>(
+                   momentum_bicgstab)
+             : static_cast<const hundun::linear::LinearSolver &>(momentum_cg);
   hundun::linear::JacobiPreconditioner mx(execution);
   hundun::linear::JacobiPreconditioner my(execution);
   hundun::linear::JacobiPreconditioner mz(execution);
@@ -372,10 +436,40 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
       decomposition, topology, geometry, boundaries, mpi, execution, halo,
       momentum_solver, {&mx, &my, &mz}, pressure_solver,
       pressure_preconditioner,
-      {{fields.transported_cell_fields[0],
-        hundun::finite_volume::FiniteVolumeQuantity::scalar(0U), 0.0}});
+      curved
+          ? std::vector<hundun::flow::ConstantDensityTransportSpec>{
+                {fields.transported_cell_fields[0],
+                 hundun::finite_volume::FiniteVolumeQuantity::enthalpy(),
+                 0.0},
+                {fields.transported_cell_fields[1],
+                 hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+                 0.02}}
+          : std::vector<hundun::flow::ConstantDensityTransportSpec>{
+                {fields.transported_cell_fields[0],
+                 hundun::finite_volume::FiniteVolumeQuantity::scalar(0U),
+                 0.0}});
+  const auto initial_pressure_halo =
+      flow.pressure_halo_performance_counters();
+  HUNDUN_CHECK(initial_pressure_halo.completed_exchanges == 0U);
+  HUNDUN_CHECK(initial_pressure_halo.begin_calls == 0U);
+  HUNDUN_CHECK(initial_pressure_halo.wait_calls == 0U);
+  {
+    auto movable_flow = hundun::flow::FixedStepConstantDensityFlow::create(
+        decomposition, topology, geometry, boundaries, mpi, execution, halo,
+        momentum_solver, {&mx, &my, &mz}, pressure_solver,
+        pressure_preconditioner, {});
+    hundun::flow::FixedStepConstantDensityFlow moved_flow(
+        std::move(movable_flow));
+    const auto moved_counters =
+        moved_flow.pressure_halo_performance_counters();
+    HUNDUN_CHECK(moved_counters.completed_exchanges == 0U);
+    expect_local_error([&] {
+      static_cast<void>(
+          movable_flow.pressure_halo_performance_counters());
+    });
+  }
   const auto stencil = hundun::flow::make_momentum_time_stencil(
-      hundun::flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
+      hundun::flow::MomentumTimeOrder::backward_euler, dt_s, 0.0);
   using TestAccess = hundun::flow::test::ConstantDensityPisoTestAccess;
 
   auto direct_coupler = hundun::flow::PisoCoupler::create(
@@ -393,6 +487,15 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepFailureReason::invalid_input);
   HUNDUN_CHECK(direct_report.lowest_failing_rank == 0);
   HUNDUN_CHECK(!direct_report.accepted);
+  hundun::flow::PisoCoupler moved_direct_coupler(
+      std::move(direct_coupler));
+  const auto moved_coupler_counters =
+      moved_direct_coupler.pressure_halo_performance_counters();
+  HUNDUN_CHECK(moved_coupler_counters.completed_exchanges == 0U);
+  expect_local_error([&] {
+    static_cast<void>(
+        direct_coupler.pressure_halo_performance_counters());
+  });
 
   hundun::linear::JacobiPreconditioner direct_diagonal_preconditioner(
       execution);
@@ -506,6 +609,19 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepFailureReason::none);
   HUNDUN_CHECK(direct_diagonal_retry.lowest_failing_rank == -1);
   HUNDUN_CHECK(direct_diagonal_retry.accepted);
+  const auto direct_diagonal_halo =
+      direct_diagonal_coupler.pressure_halo_performance_counters();
+  HUNDUN_CHECK(direct_diagonal_halo.completed_exchanges > 0U);
+  hundun::flow::PisoCoupler moved_direct_diagonal_coupler(
+      std::move(direct_diagonal_coupler));
+  const auto moved_direct_diagonal_halo =
+      moved_direct_diagonal_coupler.pressure_halo_performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      direct_diagonal_halo, moved_direct_diagonal_halo));
+  expect_local_error([&] {
+    static_cast<void>(
+        direct_diagonal_coupler.pressure_halo_performance_counters());
+  });
   direct_diagonal_state.rollback_attempt();
 
   auto invalid_quantity_state = hundun::flow::FlowState::create(
@@ -534,7 +650,7 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepFailureReason::invalid_input);
   HUNDUN_CHECK(invalid_quantity_report.suggested_dt_s == 0.0);
   HUNDUN_CHECK(invalid_quantity_state.metadata().step == 0U);
-  HUNDUN_CHECK_NEAR(preflight_trial(0, 0, 0, 0), 0.0, 0.0);
+  HUNDUN_CHECK_NEAR(preflight_trial(0, 0, 0, 0), initial.velocity[0], 0.0);
 
   const auto require_invalid_transport = [&](auto specs) {
     auto invalid_state = hundun::flow::FlowState::create(
@@ -611,7 +727,8 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
         check_layer_equal(
             invalid_state.snapshot(hundun::flow::FlowLayer::committed),
             committed_before);
-        HUNDUN_CHECK_NEAR(trial_before(0, 0, 0, 0), 0.0, 0.0);
+        HUNDUN_CHECK_NEAR(trial_before(0, 0, 0, 0),
+                          initial.velocity[0], 0.0);
       };
 
   const int local_invalid_rank = mpi.size() == 1 ? 0 : 1;
@@ -639,7 +756,8 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
     require_control_preflight({}, mismatched_pressure_control, 1);
   }
 
-  const auto report = flow.attempt(state, rho_ref, 0.01, stencil, {}, {});
+  const auto report =
+      flow.attempt(state, rho_ref, curved ? 0.01 : 0.01, stencil, {}, {});
   if (report.disposition != hundun::flow::StepAttemptDisposition::committed) {
     std::cerr << "TASK18_ZERO_REPORT rank=" << mpi.rank()
               << " disposition=" << static_cast<int>(report.disposition)
@@ -653,6 +771,19 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
                hundun::flow::StepAttemptDisposition::committed);
   HUNDUN_CHECK(report.pressure_corrector_count == 2U);
   HUNDUN_CHECK(report.final_continuity_normalized_l2 <= 1.0e-10);
+  for (const double residual : report.final_momentum_normalized_l2)
+    HUNDUN_CHECK(residual <= 1.0e-9);
+  HUNDUN_CHECK(report.final_transport_normalized_l2.size() ==
+               (curved ? 2U : 1U));
+  for (const double residual : report.final_transport_normalized_l2)
+    HUNDUN_CHECK(residual <= 1.0e-9);
+  const auto completed_pressure_halo =
+      flow.pressure_halo_performance_counters();
+  HUNDUN_CHECK(completed_pressure_halo.completed_exchanges > 0U);
+  HUNDUN_CHECK(completed_pressure_halo.begin_calls ==
+               completed_pressure_halo.completed_exchanges);
+  HUNDUN_CHECK(completed_pressure_halo.wait_calls ==
+               completed_pressure_halo.completed_exchanges);
   if (mpi.rank() == 0) {
     std::cout << "TASK18_FINAL_GATES momentum_residual="
               << report.final_momentum_normalized_l2[0] << ','
@@ -671,11 +802,74 @@ void run_zero_flow_transaction(const hundun::runtime::MpiContext &mpi) {
               << '\n';
   }
   HUNDUN_CHECK(state.metadata().step == 1U);
-  HUNDUN_CHECK(state.metadata().time_s == 0.01);
+  HUNDUN_CHECK(state.metadata().time_s == dt_s);
   HUNDUN_CHECK(fp64_vector_bitwise_equal(
       state.snapshot(hundun::flow::FlowLayer::committed)
           .transported_cell_fields[0],
       initial.transported_cell_fields[0]));
+  if (curved) {
+    const auto committed =
+        state.snapshot(hundun::flow::FlowLayer::committed);
+    double pressure_moments[2]{};
+    for (hundun::mesh::LocalCellId cell = 0;
+         cell < topology.owned_cell_count(); ++cell) {
+      const double volume = geometry.cell_volume_m3(cell);
+      pressure_moments[0] += volume * committed.mechanical_pressure[cell];
+      pressure_moments[1] += volume;
+    }
+    mpi.allreduce_fp64_in_place(
+        pressure_moments, 2U,
+        hundun::runtime::Fp64ReductionOperation::sum);
+    HUNDUN_CHECK(pressure_moments[1] > 0.0);
+    const double pressure_mean =
+        pressure_moments[0] / pressure_moments[1];
+    HUNDUN_CHECK(std::abs(pressure_mean) <=
+                 512.0 * std::numeric_limits<double>::epsilon());
+    double local_pressure_departure = 0.0;
+    for (const double pressure : committed.mechanical_pressure)
+      local_pressure_departure =
+          std::max(local_pressure_departure,
+                   std::abs(pressure - pressure_mean));
+    double pressure_departure = local_pressure_departure;
+    HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, &pressure_departure, 1,
+                               MPI_DOUBLE, MPI_MAX, mpi.comm()) ==
+                 MPI_SUCCESS);
+    HUNDUN_CHECK(pressure_departure <=
+                 512.0 * std::numeric_limits<double>::epsilon());
+    HUNDUN_CHECK(fp64_vector_bitwise_equal(committed.density,
+                                           initial.density));
+    HUNDUN_CHECK(fp64_vector_bitwise_equal(committed.velocity,
+                                           initial.velocity));
+    HUNDUN_CHECK(fp64_vector_bitwise_equal(committed.face_velocity,
+                                           initial.face_velocity));
+    HUNDUN_CHECK(fp64_vector_bitwise_equal(committed.face_mass_flux,
+                                           initial.face_mass_flux));
+    HUNDUN_CHECK(fp64_vector_bitwise_equal(
+        committed.transported_cell_fields[1],
+        initial.transported_cell_fields[1]));
+    HUNDUN_CHECK(report.final_mass_relative_conservation_defect <= 5.0e-11);
+    for (const double defect :
+         report.final_momentum_relative_conservation_defect)
+      HUNDUN_CHECK(defect <= 5.0e-11);
+    for (const double defect :
+         report.final_transport_relative_conservation_defect)
+      HUNDUN_CHECK(defect <= 5.0e-11);
+    if (mpi.rank() == 0) {
+      std::cout << "TASK25_CURVED_FREE_STREAM continuity="
+                << report.final_continuity_normalized_l2
+                << " pressure=" << report.final_pressure_residual_l2
+                << " pressure_mean=" << pressure_mean
+                << " pressure_departure=" << pressure_departure
+                << " correctors=" << report.pressure_corrector_count
+                << " mass_defect="
+                << report.final_mass_relative_conservation_defect
+                << " transport_defect="
+                << report.final_transport_relative_conservation_defect[0]
+                << ',' << report.final_transport_relative_conservation_defect[1]
+                << '\n';
+    }
+    return;
+  }
 
   const auto make_zero_state = [&] {
     auto candidate = hundun::flow::FlowState::create(
@@ -2637,7 +2831,8 @@ int main(int argc, char **argv) {
   auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
   return hundun::test::run([&] {
     check_flow_layer_bitwise_oracle();
-    run_zero_flow_transaction(mpi);
+    run_zero_flow_transaction(mpi, true);
+    run_zero_flow_transaction(mpi, false);
     run_open_boundary_composition(mpi);
   });
 }

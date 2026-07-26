@@ -3,6 +3,7 @@
 
 #include "hundun/runtime/exchange_plan.hpp"
 #include "hundun/runtime/field_descriptor.hpp"
+#include "hundun/runtime/halo_performance_counters.hpp"
 
 #include <memory>
 
@@ -30,6 +31,7 @@ class HaloExchange final {
   // decomposition throws Error; rank reordering or a plan mismatch is false.
   [[nodiscard]] bool is_compatible_with(
       const StructuredDecomposition& decomposition) const;
+  [[nodiscard]] HaloPerformanceCounters performance_counters() const;
 
   void exchange(FieldStorage& storage, FieldId id);
   void begin(const FieldStorage& storage, FieldId id);

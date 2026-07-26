@@ -7,6 +7,7 @@
 #include "hundun/mesh/mesh_topology.hpp"
 #include "hundun/runtime/error.hpp"
 #include "hundun/runtime/mpi_context.hpp"
+#include "hundun/runtime/halo_performance_counters.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 
 #include <cstdint>
@@ -81,6 +82,8 @@ class MatrixFreePoissonOperator final : public linear::LinearOperator {
   PressureConstraintMode constraint_mode() const noexcept;
   std::optional<std::uint32_t> pressure_reference_patch_id() const noexcept;
   PoissonSolverFamily solver_family() const noexcept;
+  [[nodiscard]] runtime::HaloPerformanceCounters
+  halo_performance_counters() const;
 
   // Local transactional replacement. Failure preserves the active
   // coefficients, diagonal and revision. Distributed callers that require

@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <string_view>
+
+namespace hundun::application::detail {
+
+inline constexpr std::string_view performance_source_commit =
+    "@HUNDUN_SOURCE_COMMIT_ESCAPED@";
+inline constexpr bool performance_source_clean = @HUNDUN_SOURCE_CLEAN@;
+inline constexpr std::string_view performance_source_dirty_summary =
+    "@HUNDUN_SOURCE_DIRTY_SUMMARY_ESCAPED@";
+inline constexpr std::string_view performance_compiler_flags =
+    "@HUNDUN_PERFORMANCE_COMPILER_FLAGS_ESCAPED@";
+inline constexpr std::string_view performance_link_flags =
+    "@HUNDUN_PERFORMANCE_LINK_FLAGS_ESCAPED@";
+inline constexpr std::string_view performance_build_type =
+    "@CMAKE_BUILD_TYPE@";
+
+}  // namespace hundun::application::detail

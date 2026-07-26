@@ -693,6 +693,15 @@ PoissonSolverFamily MatrixFreePoissonOperator::solver_family() const noexcept {
   return impl_->solver;
 }
 
+runtime::HaloPerformanceCounters
+MatrixFreePoissonOperator::halo_performance_counters() const {
+  if (!impl_ || !impl_->halo.has_value()) {
+    throw runtime::Error(
+        "moved-from matrix-free Poisson operator has no Halo state");
+  }
+  return impl_->halo->performance_counters();
+}
+
 std::uint64_t MatrixFreePoissonOperator::replace_face_coefficients(
     execution::VectorView<const double> gamma_by_local_face) {
   OperationGuard guard(impl_->active);

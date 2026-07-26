@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/diagnostics/performance_artifact.hpp"
+#include "hundun/diagnostics/performance_correctness.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -518,6 +519,61 @@ ComparisonResult compare_compatibility(const CompatibilityMetadata &baseline,
                           std::move(reasons)};
 }
 
+ComparisonResult compare_artifact_metadata(const ArtifactMetadata& baseline,
+                                           const ArtifactMetadata& candidate,
+                                           ComparisonMode mode) {
+  ComparisonResult result =
+      compare_compatibility(baseline.compatibility, candidate.compatibility,
+                            mode);
+  constexpr std::string_view unavailable = "unavailable";
+  const auto add = [&](std::string reason) {
+    result.reasons.push_back(std::move(reason));
+  };
+  if (baseline.commit == unavailable || candidate.commit == unavailable) {
+    add("source.commit.unavailable");
+  } else if (baseline.commit != candidate.commit) {
+    add("source.commit.mismatch");
+  }
+  if (baseline.clean != candidate.clean) {
+    add("source.clean.mismatch");
+  } else if (baseline.clean) {
+    if (!baseline.dirty_summary.empty() ||
+        !candidate.dirty_summary.empty()) {
+      add("source.clean.mismatch");
+    }
+  } else if (baseline.dirty_summary == unavailable ||
+             candidate.dirty_summary == unavailable ||
+             baseline.dirty_summary.empty() ||
+             candidate.dirty_summary.empty()) {
+    add("source.dirty-summary.unavailable");
+  } else if (baseline.dirty_summary != candidate.dirty_summary) {
+    add("source.dirty-summary.mismatch");
+  }
+  const auto required_unavailable = [unavailable](
+                                        const CompatibilityMetadata& value) {
+    return value.hardware_identity == unavailable ||
+           value.node_identity == unavailable ||
+           value.mpi_identity == unavailable ||
+           value.compiler_identity == unavailable ||
+           value.compiler_version == unavailable ||
+           value.build_type == unavailable ||
+           value.cpu_affinity == unavailable ||
+           value.rank_placement == unavailable ||
+           value.execution_backend == unavailable;
+  };
+  if (required_unavailable(baseline.compatibility) ||
+      required_unavailable(candidate.compatibility)) {
+    add("platform.required-identity.unavailable");
+  }
+  std::sort(result.reasons.begin(), result.reasons.end());
+  result.reasons.erase(
+      std::unique(result.reasons.begin(), result.reasons.end()),
+      result.reasons.end());
+  result.status = result.reasons.empty() ? ComparisonStatus::comparable
+                                        : ComparisonStatus::incomparable;
+  return result;
+}
+
 double strong_scaling_speedup(double single_rank_step_seconds,
                               double parallel_step_seconds) {
   validate_positive_time(single_rank_step_seconds, "single-rank step time");
@@ -559,6 +615,17 @@ std::string to_json(const Artifact &artifact) {
   if (artifact.correctness.summary.empty()) {
     throw std::invalid_argument("correctness summary must not be empty");
   }
+  const auto correctness =
+      parse_performance_correctness(artifact.correctness.summary);
+  if (correctness.passed != artifact.correctness.passed) {
+    throw std::invalid_argument(
+        "correctness summary passed flag does not match artifact");
+  }
+  validate_performance_correctness_coverage(
+      correctness, artifact.metadata.compatibility.warmup_steps,
+      artifact.metadata.compatibility.measured_steps,
+      static_cast<std::uint64_t>(
+          artifact.metadata.compatibility.repetitions));
   if (artifact.aggregation.repetitions !=
           artifact.metadata.compatibility.repetitions ||
       artifact.aggregation.ranks != artifact.metadata.compatibility.ranks ||

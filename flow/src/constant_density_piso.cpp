@@ -53,6 +53,36 @@ constexpr double kContinuityTolerance = 1.0e-10;
 constexpr double kFinalEquationTolerance = 1.0e-9;
 constexpr double kFinalConservationTolerance = 5.0e-11;
 
+std::uint64_t checked_halo_add(std::uint64_t left, std::uint64_t right) {
+  if (right > std::numeric_limits<std::uint64_t>::max() - left)
+    throw runtime::Error("pressure Halo counter would overflow");
+  return left + right;
+}
+
+runtime::HaloPerformanceCounters combine_halo_counters(
+    runtime::HaloPerformanceCounters left,
+    const runtime::HaloPerformanceCounters &right) {
+  left.completed_exchanges =
+      checked_halo_add(left.completed_exchanges, right.completed_exchanges);
+  left.begin_calls = checked_halo_add(left.begin_calls, right.begin_calls);
+  left.wait_calls = checked_halo_add(left.wait_calls, right.wait_calls);
+  left.send_payload_bytes =
+      checked_halo_add(left.send_payload_bytes, right.send_payload_bytes);
+  left.receive_payload_bytes = checked_halo_add(
+      left.receive_payload_bytes, right.receive_payload_bytes);
+  left.pack_bytes = checked_halo_add(left.pack_bytes, right.pack_bytes);
+  left.unpack_bytes = checked_halo_add(left.unpack_bytes, right.unpack_bytes);
+  left.send_messages =
+      checked_halo_add(left.send_messages, right.send_messages);
+  left.receive_messages =
+      checked_halo_add(left.receive_messages, right.receive_messages);
+  left.completed_wait_seconds += right.completed_wait_seconds;
+  if (!std::isfinite(left.completed_wait_seconds) ||
+      left.completed_wait_seconds < 0.0)
+    throw runtime::Error("pressure Halo wait counter is invalid");
+  return left;
+}
+
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 std::atomic<bool> force_final_continuity_failure{false};
 std::atomic<bool> force_final_pressure_failure{false};
@@ -674,9 +704,6 @@ PisoCoupler::create(const runtime::StructuredDecomposition &decomposition,
                     linear::Preconditioner &pressure_preconditioner) {
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
-  if (geometry.mapping_kind() != mesh::MappingKind::uniform_box) {
-    throw runtime::Error("Task 18 PISO supports uniform geometry only");
-  }
   if (!cell_halo.is_compatible_with(decomposition) ||
       cell_halo.ghost_width() != 2) {
     throw runtime::Error("Task 18 PISO requires a compatible width-two Halo");
@@ -690,6 +717,20 @@ PisoCoupler::PisoCoupler(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 PisoCoupler::~PisoCoupler() noexcept = default;
 PisoCoupler::PisoCoupler(PisoCoupler &&) noexcept = default;
+
+runtime::HaloPerformanceCounters
+PisoCoupler::pressure_halo_performance_counters() const {
+  if (!impl_)
+    throw runtime::Error("PISO coupler has been moved from");
+  runtime::HaloPerformanceCounters result{};
+  if (impl_->pressure_operator)
+    result = combine_halo_counters(
+        result, impl_->pressure_operator->halo_performance_counters());
+  if (impl_->material_final_operator)
+    result = combine_halo_counters(
+        result, impl_->material_final_operator->halo_performance_counters());
+  return result;
+}
 
 void PisoCoupler::prepare_material_density_assessment() {
   if (!impl_)
@@ -1883,10 +1924,6 @@ FixedStepConstantDensityFlow FixedStepConstantDensityFlow::create(
     std::vector<ConstantDensityTransportSpec> transported_fields) {
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
-  if (geometry.mapping_kind() != mesh::MappingKind::uniform_box) {
-    throw runtime::Error(
-        "Task 18 fixed-step flow supports uniform geometry only");
-  }
   if (!cell_halo.is_compatible_with(decomposition) ||
       cell_halo.ghost_width() != 2) {
     throw runtime::Error("Task 18 fixed-step flow requires width-two Halo");
@@ -1936,6 +1973,13 @@ FixedStepConstantDensityFlow FixedStepConstantDensityFlow::create(
 FixedStepConstantDensityFlow::FixedStepConstantDensityFlow(
     std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
+
+runtime::HaloPerformanceCounters
+FixedStepConstantDensityFlow::pressure_halo_performance_counters() const {
+  if (!impl_)
+    throw runtime::Error("fixed-step flow has been moved from");
+  return impl_->coupler.pressure_halo_performance_counters();
+}
 FixedStepConstantDensityFlow::~FixedStepConstantDensityFlow() noexcept =
     default;
 FixedStepConstantDensityFlow::FixedStepConstantDensityFlow(
@@ -2991,7 +3035,6 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
           rho_ref > 0.0 && std::isfinite(rho_ref) && mu >= 0.0 &&
           std::isfinite(mu) &&
           impl_->transport_specs_valid &&
-          impl_->geometry->mapping_kind() == mesh::MappingKind::uniform_box &&
           !state.attempt_active() &&
           layout.cell_interior_extent.x == local_extent.x &&
           layout.cell_interior_extent.y == local_extent.y &&
@@ -4111,6 +4154,31 @@ test::MaterialDensityPisoTestAccess::material_pressure_evidence(
     result.final_operator_revision =
         coupler.impl_->material_final_operator->revision();
   return result;
+}
+
+test::MaterialPressureHaloCountersForTest
+test::MaterialDensityPisoTestAccess::material_pressure_halo_counters(
+    const PisoCoupler &coupler) {
+  test::MaterialPressureHaloCountersForTest result;
+  if (!coupler.impl_)
+    return result;
+  result.ordinary_available = coupler.impl_->pressure_operator.has_value();
+  if (result.ordinary_available)
+    result.ordinary =
+        coupler.impl_->pressure_operator->halo_performance_counters();
+  result.material_final_available =
+      coupler.impl_->material_final_operator.has_value();
+  if (result.material_final_available)
+    result.material_final =
+        coupler.impl_->material_final_operator->halo_performance_counters();
+  return result;
+}
+
+runtime::HaloPerformanceCounters
+test::MaterialDensityPisoTestAccess::combine_pressure_halo_counters(
+    runtime::HaloPerformanceCounters left,
+    const runtime::HaloPerformanceCounters &right) {
+  return ::hundun::flow::combine_halo_counters(left, right);
 }
 #endif
 

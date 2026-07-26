@@ -18,6 +18,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -37,6 +38,52 @@ static_assert(sizeof(detail::HaloFailureRecord) ==
 
 namespace detail {
 namespace {
+
+std::uint64_t checked_u64_add(std::uint64_t left, std::uint64_t right,
+                              const char* message) {
+  if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+    throw Error(message);
+  }
+  return left + right;
+}
+
+HaloPerformanceCounters checked_counter_sum(
+    HaloPerformanceCounters left, const HaloPerformanceCounters& right) {
+  left.completed_exchanges = checked_u64_add(
+      left.completed_exchanges, right.completed_exchanges,
+      "Halo completed exchange counter would overflow");
+  left.begin_calls = checked_u64_add(
+      left.begin_calls, right.begin_calls,
+      "Halo begin counter would overflow");
+  left.wait_calls = checked_u64_add(
+      left.wait_calls, right.wait_calls,
+      "Halo wait counter would overflow");
+  left.send_payload_bytes = checked_u64_add(
+      left.send_payload_bytes, right.send_payload_bytes,
+      "Halo send byte counter would overflow");
+  left.receive_payload_bytes = checked_u64_add(
+      left.receive_payload_bytes, right.receive_payload_bytes,
+      "Halo receive byte counter would overflow");
+  left.pack_bytes = checked_u64_add(
+      left.pack_bytes, right.pack_bytes,
+      "Halo pack byte counter would overflow");
+  left.unpack_bytes = checked_u64_add(
+      left.unpack_bytes, right.unpack_bytes,
+      "Halo unpack byte counter would overflow");
+  left.send_messages = checked_u64_add(
+      left.send_messages, right.send_messages,
+      "Halo send message counter would overflow");
+  left.receive_messages = checked_u64_add(
+      left.receive_messages, right.receive_messages,
+      "Halo receive message counter would overflow");
+  const double wait = left.completed_wait_seconds +
+                      right.completed_wait_seconds;
+  if (!std::isfinite(wait) || wait < 0.0) {
+    throw Error("Halo completed wait counter is invalid");
+  }
+  left.completed_wait_seconds = wait;
+  return left;
+}
 
 thread_local HaloTestOptions test_options;
 thread_local HaloTestSnapshot test_snapshot;
@@ -277,6 +324,11 @@ class HaloExchange::Impl final {
  public:
   Impl(ExchangePlan plan, MpiContext context) noexcept
       : plan_(std::move(plan)), context_(std::move(context)) {
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+    const auto options = detail::current_halo_test_options();
+    if (options.use_initial_performance_counters)
+      performance_ = options.initial_performance_counters;
+#endif
     observe_context_generation();
   }
 
@@ -337,6 +389,10 @@ class HaloExchange::Impl final {
       }
     }
     return true;
+  }
+
+  HaloPerformanceCounters performance_counters() const noexcept {
+    return performance_;
   }
 
   static std::unique_ptr<Impl> create(
@@ -518,6 +574,46 @@ class HaloExchange::Impl final {
       throw Error(preparation_status.message);
     }
 
+    HaloPerformanceCounters staged_candidate{};
+    bool counters_valid = true;
+    try {
+      staged_candidate.begin_calls = 1U;
+      staged_candidate.wait_calls = 1U;
+      staged_candidate.completed_exchanges = 1U;
+      for (const auto& buffers : regions_) {
+        staged_candidate.send_payload_bytes = detail::checked_u64_add(
+            staged_candidate.send_payload_bytes,
+            static_cast<std::uint64_t>(buffers.send.size()),
+            "Halo staged send bytes would overflow");
+        staged_candidate.receive_payload_bytes = detail::checked_u64_add(
+            staged_candidate.receive_payload_bytes,
+            static_cast<std::uint64_t>(buffers.receive.size()),
+            "Halo staged receive bytes would overflow");
+        staged_candidate.send_messages = detail::checked_u64_add(
+            staged_candidate.send_messages,
+            static_cast<std::uint64_t>(buffers.chunks.size()),
+            "Halo staged send messages would overflow");
+        staged_candidate.receive_messages = detail::checked_u64_add(
+            staged_candidate.receive_messages,
+            static_cast<std::uint64_t>(buffers.chunks.size()),
+            "Halo staged receive messages would overflow");
+      }
+      staged_candidate.pack_bytes =
+          staged_candidate.send_payload_bytes;
+      staged_candidate.unpack_bytes =
+          staged_candidate.receive_payload_bytes;
+      static_cast<void>(
+          detail::checked_counter_sum(performance_, staged_candidate));
+    } catch (...) {
+      counters_valid = false;
+    }
+    const auto counter_status = collective_status(
+        context_, counters_valid, "Halo performance counter preflight failed");
+    if (!counter_status.ok)
+      throw Error(counter_status.message);
+    staged_ = staged_candidate;
+    staged_active_ = true;
+
     pending_ = layout;
     pending_id_ = id;
     active_ = true;
@@ -569,8 +665,10 @@ class HaloExchange::Impl final {
       throw_halo_error(target_error);
     }
 
+    const double wait_start = requests_.empty() ? 0.0 : MPI_Wtime();
     CompletionAttempt completion =
         wait_all_noexcept(WaitInjection::explicit_completion);
+    const double wait_finish = requests_.empty() ? 0.0 : MPI_Wtime();
     const bool local_completion_ok =
         detail::completion_succeeded(completion.outcome);
     if (!local_completion_ok && !has_failure(completion.failure)) {
@@ -604,7 +702,43 @@ class HaloExchange::Impl final {
       throw Error(format_failure(global_completion_failure));
     }
 
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+    const bool unpack_allowed =
+        context_.rank() !=
+        detail::current_halo_test_options().inject_unpack_failure_rank;
+    const auto unpack_status = collective_status(
+        context_, unpack_allowed, "injected Halo unpack failure");
+    if (!unpack_status.ok) {
+      clear_pending();
+      throw Error(unpack_status.message);
+    }
+#endif
     unpack(storage);
+    if (!staged_active_) {
+      std::terminate();
+    }
+    HaloPerformanceCounters published_candidate{};
+    bool counter_valid = true;
+    try {
+      staged_.completed_wait_seconds =
+          requests_.empty() ? 0.0 : wait_finish - wait_start;
+      if (!std::isfinite(staged_.completed_wait_seconds) ||
+          staged_.completed_wait_seconds < 0.0) {
+        throw Error("Halo measured wait time is invalid");
+      }
+      published_candidate =
+          detail::checked_counter_sum(performance_, staged_);
+    } catch (...) {
+      counter_valid = false;
+    }
+    const auto counter_status = collective_status(
+        context_, counter_valid,
+        "Halo performance counter publication failed");
+    if (!counter_status.ok) {
+      clear_pending();
+      throw Error(counter_status.message);
+    }
+    performance_ = published_candidate;
     clear_pending();
   }
 
@@ -1167,6 +1301,8 @@ class HaloExchange::Impl final {
     pending_id_ = 0U;
     requests_.clear();
     wait_batches_.clear();
+    staged_ = HaloPerformanceCounters{};
+    staged_active_ = false;
   }
 
   ExchangePlan plan_;
@@ -1178,6 +1314,9 @@ class HaloExchange::Impl final {
   FieldId pending_id_{};
   bool active_{};
   std::size_t context_generation_{1U};
+  HaloPerformanceCounters performance_{};
+  HaloPerformanceCounters staged_{};
+  bool staged_active_{};
 };
 
 HaloExchange HaloExchange::create(
@@ -1206,6 +1345,13 @@ bool HaloExchange::is_compatible_with(
     throw_halo_error(HaloError::moved_from);
   }
   return implementation_->is_compatible_with(decomposition);
+}
+
+HaloPerformanceCounters HaloExchange::performance_counters() const {
+  if (!implementation_) {
+    throw_halo_error(HaloError::moved_from);
+  }
+  return implementation_->performance_counters();
 }
 
 void HaloExchange::exchange(FieldStorage& storage, FieldId id) {

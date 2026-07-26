@@ -172,6 +172,7 @@ void DiagnosticSession::publish(const runtime::MpiContext& mpi,
   std::filesystem::path temporary;
   std::string bytes;
   bool local_ok = true;
+  bool temporary_owned = false;
   std::string message;
   try {
     path = output_path(directory_, rank_, step);
@@ -186,9 +187,19 @@ void DiagnosticSession::publish(const runtime::MpiContext& mpi,
     throw runtime::Error(status.message);
   try {
     std::filesystem::create_directories(directory_);
+    std::error_code staging_error;
+    const auto staging_status =
+        std::filesystem::symlink_status(temporary, staging_error);
+    if (staging_error &&
+        staging_status.type() != std::filesystem::file_type::not_found)
+      throw runtime::Error(
+          "unable to inspect diagnostic staging path");
+    if (staging_status.type() != std::filesystem::file_type::not_found)
+      throw runtime::Error("diagnostic staging path already exists");
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream)
       throw runtime::Error("unable to open diagnostic staging file");
+    temporary_owned = true;
     stream.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     stream.flush();
     if (!stream)
@@ -202,8 +213,10 @@ void DiagnosticSession::publish(const runtime::MpiContext& mpi,
   }
   status = runtime::collective_status(mpi, local_ok, message);
   if (!status.ok) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+    if (temporary_owned) {
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+    }
     throw runtime::Error(status.message);
   }
   std::error_code error;
@@ -211,8 +224,10 @@ void DiagnosticSession::publish(const runtime::MpiContext& mpi,
   status = runtime::collective_status(
       mpi, !error, error ? "unable to publish diagnostic records" : "");
   if (!status.ok) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+    if (temporary_owned) {
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+    }
     throw runtime::Error(status.message);
   }
 }
