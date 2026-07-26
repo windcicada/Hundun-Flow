@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/diagnostics/performance_artifact.hpp"
-#include "hundun/diagnostics/performance_correctness.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -615,17 +614,6 @@ std::string to_json(const Artifact &artifact) {
   if (artifact.correctness.summary.empty()) {
     throw std::invalid_argument("correctness summary must not be empty");
   }
-  const auto correctness =
-      parse_performance_correctness(artifact.correctness.summary);
-  if (correctness.passed != artifact.correctness.passed) {
-    throw std::invalid_argument(
-        "correctness summary passed flag does not match artifact");
-  }
-  validate_performance_correctness_coverage(
-      correctness, artifact.metadata.compatibility.warmup_steps,
-      artifact.metadata.compatibility.measured_steps,
-      static_cast<std::uint64_t>(
-          artifact.metadata.compatibility.repetitions));
   if (artifact.aggregation.repetitions !=
           artifact.metadata.compatibility.repetitions ||
       artifact.aggregation.ranks != artifact.metadata.compatibility.ranks ||

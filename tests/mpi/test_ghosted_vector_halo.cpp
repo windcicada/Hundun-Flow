@@ -34,6 +34,7 @@
 
 namespace {
 
+std::uint64_t raw_allreduce_calls = 0U;
 thread_local bool count_allocation_attempts = false;
 thread_local std::size_t allocation_attempts = 0U;
 
@@ -73,6 +74,14 @@ class AllocationAttemptGuard final {
 };
 
 }  // namespace
+
+extern "C" int MPI_Allreduce(const void* send_buffer, void* receive_buffer,
+                             int count, MPI_Datatype datatype, MPI_Op operation,
+                             MPI_Comm communicator) {
+  ++raw_allreduce_calls;
+  return PMPI_Allreduce(send_buffer, receive_buffer, count, datatype,
+                        operation, communicator);
+}
 
 void* operator new(std::size_t bytes) { return allocate_bytes(bytes); }
 void* operator new[](std::size_t bytes) { return allocate_bytes(bytes); }
@@ -170,6 +179,18 @@ using hundun::runtime::MpiEnvironment;
 using hundun::runtime::StructuredDecomposition;
 
 constexpr Int3 kExtent{7, 5, 3};
+
+std::uint64_t allreduce_calls() noexcept { return raw_allreduce_calls; }
+
+void require_allreduce_delta(std::uint64_t before, std::uint64_t expected,
+                             const char* subject) {
+  const std::uint64_t actual = allreduce_calls() - before;
+  if (actual != expected) {
+    throw Error(std::string(subject) + " raw MPI_Allreduce count: expected=" +
+                std::to_string(expected) + " actual=" +
+                std::to_string(actual));
+  }
+}
 
 static_assert(!std::is_copy_constructible_v<GhostedVectorHalo>);
 static_assert(!std::is_copy_assignable_v<GhostedVectorHalo>);
@@ -395,7 +416,10 @@ void run_exchange_case(const MpiContext& world,
   const auto epoch = vector.epoch();
 
   fill_vector(vector, topology, 1, -1.0);
+  const auto exchange_collectives = allreduce_calls();
   halo.exchange(vector);
+  require_allreduce_delta(exchange_collectives, 10U,
+                          "compact Buffer Halo exchange");
   check_vector(vector, topology, 1);
   const auto counters = halo.performance_counters();
   HUNDUN_CHECK(counters.completed_exchanges == 1U);
@@ -411,6 +435,12 @@ void run_exchange_case(const MpiContext& world,
   HUNDUN_CHECK(counters.completed_wait_seconds >= 0.0);
   HUNDUN_CHECK(vector.allocation_identity() == identity);
   HUNDUN_CHECK(vector.epoch() == epoch);
+  fill_vector(vector, topology, 3, -3.0);
+  const auto repeated_collectives = allreduce_calls();
+  halo.exchange(vector);
+  require_allreduce_delta(repeated_collectives, 10U,
+                          "repeated compact Buffer Halo exchange");
+  check_vector(vector, topology, 3);
 
   hundun::linear::detail::set_vector_halo_test_options({});
   hundun::runtime::HaloPerformanceCounters overflow_seed{};
@@ -593,7 +623,35 @@ void run_exchange_case(const MpiContext& world,
   hundun::linear::detail::set_vector_halo_test_options({});
 }
 
+void run_zero_neighbour_collective_case() {
+  auto self = MpiContext::duplicate(MPI_COMM_SELF);
+  const auto decomposition = StructuredDecomposition::create(
+      self, {4, 4, 4}, {false, false, false},
+      DecompositionOptions{Int3{1, 1, 1}});
+  const MeshTopology topology(decomposition);
+  HUNDUN_CHECK(topology.ghost_cell_count() == 0U);
+  CpuReferenceContext execution;
+  GhostedVector vector(execution, VectorLayout::from_topology(topology));
+  hundun::linear::detail::set_vector_halo_test_options({});
+  auto halo =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  fill_vector(vector, topology, 9, -9.0);
+  const auto before = allreduce_calls();
+  halo.exchange(vector);
+  require_allreduce_delta(before, 10U,
+                          "zero-neighbour compact Buffer Halo exchange");
+  check_vector(vector, topology, 9);
+  const auto counters = halo.performance_counters();
+  HUNDUN_CHECK(counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(counters.send_payload_bytes == 0U);
+  HUNDUN_CHECK(counters.receive_payload_bytes == 0U);
+  HUNDUN_CHECK(counters.send_messages == 0U);
+  HUNDUN_CHECK(counters.receive_messages == 0U);
+  HUNDUN_CHECK(counters.completed_wait_seconds == 0.0);
+}
+
 void run_full(const MpiContext& world) {
+  run_zero_neighbour_collective_case();
   run_exchange_case(world, {true, true, true});
   run_exchange_case(world, {false, false, false});
 

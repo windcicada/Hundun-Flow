@@ -255,14 +255,27 @@ detail::HaloFailureRecord make_failure_record(
 
 bool converge_failure_record(const MpiContext& context,
                              detail::HaloFailureRecord local,
-                             detail::HaloFailureRecord& global) noexcept {
+                             detail::HaloFailureRecord& global,
+                             bool* communication_failure_present =
+                                 nullptr) noexcept {
   const int local_failing_rank =
       has_failure(local) ? context.rank() : context.size();
-  int failing_rank = context.size();
-  if (MPI_Allreduce(&local_failing_rank, &failing_rank, 1, MPI_INT, MPI_MIN,
+  const bool local_communication_failure =
+      local.category ==
+          static_cast<std::int64_t>(detail::HaloFailureCategory::post) ||
+      local.category ==
+          static_cast<std::int64_t>(detail::HaloFailureCategory::completion);
+  const std::array<int, 2> local_status{
+      local_failing_rank, local_communication_failure ? 0 : 1};
+  std::array<int, 2> global_status{context.size(), 1};
+  if (MPI_Allreduce(local_status.data(), global_status.data(),
+                    static_cast<int>(local_status.size()), MPI_INT, MPI_MIN,
                     context.comm()) != MPI_SUCCESS) {
     return false;
   }
+  const int failing_rank = global_status[0];
+  if (communication_failure_present != nullptr)
+    *communication_failure_present = global_status[1] == 0;
   if (failing_rank == context.size()) {
     global = detail::HaloFailureRecord{};
     return true;
@@ -294,6 +307,12 @@ const char* operation_text(std::int64_t operation) noexcept {
 }
 
 std::string format_failure(detail::HaloFailureRecord record) {
+  if (record.category == static_cast<std::int64_t>(
+                             detail::HaloFailureCategory::
+                                 performance_counter)) {
+    return "Halo performance counter publication failed: rank=" +
+           std::to_string(record.failing_rank);
+  }
   const char* category =
       record.category ==
               static_cast<std::int64_t>(detail::HaloFailureCategory::post)
@@ -562,55 +581,53 @@ class HaloExchange::Impl final {
     }
 
     bool prepared = true;
+    std::string preparation_message;
+    HaloPerformanceCounters staged_candidate{};
     try {
       prepare(storage, layout, id);
     } catch (...) {
       prepared = false;
+      preparation_message = halo_error_text(HaloError::preparation_failure);
+    }
+    if (prepared) {
+      try {
+        staged_candidate.begin_calls = 1U;
+        staged_candidate.wait_calls = 1U;
+        staged_candidate.completed_exchanges = 1U;
+        for (const auto& buffers : regions_) {
+          staged_candidate.send_payload_bytes = detail::checked_u64_add(
+              staged_candidate.send_payload_bytes,
+              static_cast<std::uint64_t>(buffers.send.size()),
+              "Halo staged send bytes would overflow");
+          staged_candidate.receive_payload_bytes = detail::checked_u64_add(
+              staged_candidate.receive_payload_bytes,
+              static_cast<std::uint64_t>(buffers.receive.size()),
+              "Halo staged receive bytes would overflow");
+          staged_candidate.send_messages = detail::checked_u64_add(
+              staged_candidate.send_messages,
+              static_cast<std::uint64_t>(buffers.chunks.size()),
+              "Halo staged send messages would overflow");
+          staged_candidate.receive_messages = detail::checked_u64_add(
+              staged_candidate.receive_messages,
+              static_cast<std::uint64_t>(buffers.chunks.size()),
+              "Halo staged receive messages would overflow");
+        }
+        staged_candidate.pack_bytes =
+            staged_candidate.send_payload_bytes;
+        staged_candidate.unpack_bytes =
+            staged_candidate.receive_payload_bytes;
+        static_cast<void>(
+            detail::checked_counter_sum(performance_, staged_candidate));
+      } catch (...) {
+        prepared = false;
+        preparation_message = "Halo performance counter preflight failed";
+      }
     }
     const CollectiveStatus preparation_status = collective_status(
-        context_, prepared,
-        prepared ? "" : halo_error_text(HaloError::preparation_failure));
+        context_, prepared, prepared ? "" : preparation_message);
     if (!preparation_status.ok) {
       throw Error(preparation_status.message);
     }
-
-    HaloPerformanceCounters staged_candidate{};
-    bool counters_valid = true;
-    try {
-      staged_candidate.begin_calls = 1U;
-      staged_candidate.wait_calls = 1U;
-      staged_candidate.completed_exchanges = 1U;
-      for (const auto& buffers : regions_) {
-        staged_candidate.send_payload_bytes = detail::checked_u64_add(
-            staged_candidate.send_payload_bytes,
-            static_cast<std::uint64_t>(buffers.send.size()),
-            "Halo staged send bytes would overflow");
-        staged_candidate.receive_payload_bytes = detail::checked_u64_add(
-            staged_candidate.receive_payload_bytes,
-            static_cast<std::uint64_t>(buffers.receive.size()),
-            "Halo staged receive bytes would overflow");
-        staged_candidate.send_messages = detail::checked_u64_add(
-            staged_candidate.send_messages,
-            static_cast<std::uint64_t>(buffers.chunks.size()),
-            "Halo staged send messages would overflow");
-        staged_candidate.receive_messages = detail::checked_u64_add(
-            staged_candidate.receive_messages,
-            static_cast<std::uint64_t>(buffers.chunks.size()),
-            "Halo staged receive messages would overflow");
-      }
-      staged_candidate.pack_bytes =
-          staged_candidate.send_payload_bytes;
-      staged_candidate.unpack_bytes =
-          staged_candidate.receive_payload_bytes;
-      static_cast<void>(
-          detail::checked_counter_sum(performance_, staged_candidate));
-    } catch (...) {
-      counters_valid = false;
-    }
-    const auto counter_status = collective_status(
-        context_, counters_valid, "Halo performance counter preflight failed");
-    if (!counter_status.ok)
-      throw Error(counter_status.message);
     staged_ = staged_candidate;
     staged_active_ = true;
 
@@ -676,12 +693,39 @@ class HaloExchange::Impl final {
           detail::HaloFailureCategory::completion, context_.rank(),
           detail::HaloMpiOperation::none, MPI_ERR_OTHER, -1, 0U, 0, -1);
     }
+    HaloPerformanceCounters published_candidate{};
+    if (!has_failure(completion.failure)) {
+      try {
+        staged_.completed_wait_seconds =
+            requests_.empty() ? 0.0 : wait_finish - wait_start;
+        if (!std::isfinite(staged_.completed_wait_seconds) ||
+            staged_.completed_wait_seconds < 0.0) {
+          throw Error("Halo measured wait time is invalid");
+        }
+        published_candidate =
+            detail::checked_counter_sum(performance_, staged_);
+      } catch (...) {
+        completion.failure = make_failure_record(
+            detail::HaloFailureCategory::performance_counter,
+            context_.rank(), detail::HaloMpiOperation::none, 0, -1, 0U, 0,
+            -1);
+      }
+    }
     detail::HaloFailureRecord global_completion_failure;
+    bool communication_failure_present = false;
     if (!converge_failure_record(context_, completion.failure,
-                                 global_completion_failure)) {
+                                 global_completion_failure,
+                                 &communication_failure_present)) {
       std::terminate();
     }
     if (has_failure(global_completion_failure)) {
+      if (!communication_failure_present &&
+          global_completion_failure.category ==
+              static_cast<std::int64_t>(
+                  detail::HaloFailureCategory::performance_counter)) {
+        clear_pending();
+        throw Error(format_failure(global_completion_failure));
+      }
       const bool local_proven = completion.outcome.requests_proven_null;
       const int local_value = local_proven ? 1 : 0;
       int every_proven = 0;
@@ -716,27 +760,6 @@ class HaloExchange::Impl final {
     unpack(storage);
     if (!staged_active_) {
       std::terminate();
-    }
-    HaloPerformanceCounters published_candidate{};
-    bool counter_valid = true;
-    try {
-      staged_.completed_wait_seconds =
-          requests_.empty() ? 0.0 : wait_finish - wait_start;
-      if (!std::isfinite(staged_.completed_wait_seconds) ||
-          staged_.completed_wait_seconds < 0.0) {
-        throw Error("Halo measured wait time is invalid");
-      }
-      published_candidate =
-          detail::checked_counter_sum(performance_, staged_);
-    } catch (...) {
-      counter_valid = false;
-    }
-    const auto counter_status = collective_status(
-        context_, counter_valid,
-        "Halo performance counter publication failed");
-    if (!counter_status.ok) {
-      clear_pending();
-      throw Error(counter_status.message);
     }
     performance_ = published_candidate;
     clear_pending();

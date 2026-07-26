@@ -27,6 +27,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <vector>
 
 namespace {
@@ -109,6 +110,7 @@ struct TrajectoryResult final {
   hundun::flow::FlowLayerValues committed;
   std::vector<hundun::mesh::GlobalCellId> cell_ids;
   std::vector<hundun::mesh::GlobalFaceId> face_ids;
+  std::vector<hundun::mesh::LocalFaceId> face_local_ids;
   double pressure_mean{};
   double cell_volume_m3{};
   double velocity_l2_error{};
@@ -527,9 +529,21 @@ TrajectoryResult run_trajectory(const hundun::runtime::MpiContext &mpi,
        cell < topology.owned_cell_count(); ++cell)
     trajectory.cell_ids.push_back(topology.global_cell_id(cell));
   trajectory.face_ids.reserve(topology.owned_face_count());
+  trajectory.face_local_ids.reserve(topology.owned_face_count());
   for (hundun::mesh::LocalFaceId face = 0;
-       face < topology.owned_face_count(); ++face)
+       face < topology.local_face_count(); ++face) {
+    if (topology.face_ownership(face) !=
+        hundun::mesh::EntityOwnership::owned)
+      continue;
     trajectory.face_ids.push_back(topology.global_face_id(face));
+    trajectory.face_local_ids.push_back(face);
+  }
+  HUNDUN_CHECK(trajectory.face_ids.size() == topology.owned_face_count());
+  HUNDUN_CHECK(trajectory.face_local_ids.size() ==
+               topology.owned_face_count());
+  HUNDUN_CHECK(std::set<hundun::mesh::GlobalFaceId>(
+                   trajectory.face_ids.begin(), trajectory.face_ids.end())
+                   .size() == trajectory.face_ids.size());
   trajectory.pressure_mean = sums[4] / sums[3];
   trajectory.cell_volume_m3 = geometry.cell_volume_m3(0U);
   trajectory.velocity_l2_error = std::sqrt(sums[0] / sums[1]);
@@ -586,8 +600,41 @@ std::array<double, 10> decomposition_field_differences(
                                std::numeric_limits<std::size_t>::max());
   }
   for (std::size_t local = 0; local < single_rank.face_ids.size(); ++local)
-    single_face_local[static_cast<std::size_t>(
-        single_rank.face_ids[local])] = local;
+  {
+    const auto global =
+        static_cast<std::size_t>(single_rank.face_ids[local]);
+    HUNDUN_CHECK(single_face_local[global] ==
+                 std::numeric_limits<std::size_t>::max());
+    single_face_local[global] =
+        static_cast<std::size_t>(single_rank.face_local_ids[local]);
+  }
+  HUNDUN_CHECK(single_face_local.size() <=
+               static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  std::vector<int> distributed_ownership(single_face_local.size(), 0);
+  for (const auto id : distributed.face_ids) {
+    const auto global = static_cast<std::size_t>(id);
+    HUNDUN_CHECK(global < distributed_ownership.size());
+    HUNDUN_CHECK(distributed_ownership[global] == 0);
+    distributed_ownership[global] = 1;
+  }
+  HUNDUN_CHECK(MPI_Allreduce(
+                   MPI_IN_PLACE, distributed_ownership.data(),
+                   static_cast<int>(distributed_ownership.size()), MPI_INT,
+                   MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+  for (const auto id : single_rank.face_ids)
+    HUNDUN_CHECK(distributed_ownership[static_cast<std::size_t>(id)] == 1);
+  HUNDUN_CHECK(distributed.committed.transported_cell_fields.size() ==
+               single_rank.committed.transported_cell_fields.size());
+  for (std::size_t nested = 0;
+       nested < distributed.committed.transported_cell_fields.size();
+       ++nested) {
+    HUNDUN_CHECK(
+        distributed.committed.transported_cell_fields[nested].size() ==
+        distributed.committed.density.size());
+    HUNDUN_CHECK(
+        single_rank.committed.transported_cell_fields[nested].size() ==
+        single_rank.committed.density.size());
+  }
   for (std::size_t local = 0; local < distributed.cell_ids.size(); ++local) {
     const auto global =
         static_cast<std::size_t>(distributed.cell_ids[local]);
@@ -617,16 +664,27 @@ std::array<double, 10> decomposition_field_differences(
   for (std::size_t local = 0; local < distributed.face_ids.size(); ++local) {
     const auto global =
         static_cast<std::size_t>(distributed.face_ids[local]);
+    const auto distributed_local =
+        static_cast<std::size_t>(distributed.face_local_ids[local]);
+    HUNDUN_CHECK(distributed_local * 3U + 2U <
+                 distributed.committed.face_velocity.size());
+    HUNDUN_CHECK(distributed_local <
+                 distributed.committed.face_mass_flux.size());
     HUNDUN_CHECK(global < single_face_local.size());
     const auto reference_local = single_face_local[global];
     HUNDUN_CHECK(reference_local !=
                  std::numeric_limits<std::size_t>::max());
+    HUNDUN_CHECK(reference_local * 3U + 2U <
+                 single_rank.committed.face_velocity.size());
+    HUNDUN_CHECK(reference_local <
+                 single_rank.committed.face_mass_flux.size());
     for (std::size_t component = 0; component < 3U; ++component)
       compare(5U + component,
-              distributed.committed.face_velocity[local * 3U + component],
+              distributed.committed
+                  .face_velocity[distributed_local * 3U + component],
               single_rank.committed
                   .face_velocity[reference_local * 3U + component]);
-    compare(8U, distributed.committed.face_mass_flux[local],
+    compare(8U, distributed.committed.face_mass_flux[distributed_local],
             single_rank.committed.face_mass_flux[reference_local]);
   }
   values[9U] =
@@ -653,6 +711,50 @@ std::array<double, 10> decomposition_field_differences(
                      std::max(1.0, values[field + field_count]));
   }
   return differences;
+}
+
+void require_outside_prefix_face_mutation_rejected(
+    const hundun::runtime::MpiContext &mpi,
+    const TrajectoryResult &distributed,
+    const TrajectoryResult &single_rank) {
+  const auto missing = std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t local_global = missing;
+  hundun::mesh::LocalFaceId local_face =
+      std::numeric_limits<hundun::mesh::LocalFaceId>::max();
+  for (std::size_t index = 0;
+       index < distributed.face_ids.size(); ++index) {
+    const auto candidate_local = distributed.face_local_ids[index];
+    if (candidate_local < distributed.face_ids.size())
+      continue;
+    const auto candidate_global = static_cast<std::uint64_t>(
+        distributed.face_ids[index]);
+    if (candidate_global < local_global) {
+      local_global = candidate_global;
+      local_face = candidate_local;
+    }
+  }
+  std::uint64_t selected_global = local_global;
+  HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, &selected_global, 1, MPI_UINT64_T,
+                             MPI_MIN, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(selected_global != missing);
+
+  auto mutated = distributed;
+  if (local_global == selected_global) {
+    HUNDUN_CHECK(local_face < mutated.committed.face_mass_flux.size());
+    mutated.committed.face_mass_flux[local_face] += 1.0;
+  }
+  bool rejected = false;
+  try {
+    static_cast<void>(
+        decomposition_field_differences(mpi, mutated, single_rank));
+  } catch (const std::runtime_error &) {
+    rejected = true;
+  }
+  const int local_rejected = rejected ? 1 : 0;
+  int rejected_count = 0;
+  HUNDUN_CHECK(MPI_Allreduce(&local_rejected, &rejected_count, 1, MPI_INT,
+                             MPI_SUM, mpi.comm()) == MPI_SUCCESS);
+  HUNDUN_CHECK(rejected_count == mpi.size());
 }
 
 void run_taylor_green(const hundun::runtime::MpiContext &mpi) {
@@ -689,6 +791,9 @@ void run_taylor_green(const hundun::runtime::MpiContext &mpi) {
       decomposition_differences[level] =
           decomposition_field_differences(
               mpi, warped_spatial[level], single_rank);
+      if (level == 0U)
+        require_outside_prefix_face_mutation_rejected(
+            mpi, warped_spatial[level], single_rank);
     }
   }
 

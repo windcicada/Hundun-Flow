@@ -243,6 +243,10 @@ expect_injected_failure missing_work \
   'unable to serialize performance artifact'
 expect_injected_failure malformed_work \
   'unable to serialize performance artifact'
+expect_injected_failure reordered_work \
+  'unable to serialize performance artifact'
+expect_injected_failure metadata_mismatch \
+  'unable to serialize performance artifact'
 expect_injected_failure missing_counter_key \
   'unable to serialize performance artifact'
 expect_injected_failure extra_counter_key \

@@ -40,7 +40,8 @@ struct PostEventState {
 enum class HaloFailureCategory : std::int64_t {
   none = 0,
   post = 1,
-  completion = 2
+  completion = 2,
+  performance_counter = 3
 };
 
 enum class HaloMpiOperation : std::int64_t {

@@ -35,6 +35,18 @@
 #include <utility>
 
 namespace {
+std::uint64_t raw_allreduce_calls = 0U;
+}
+
+extern "C" int MPI_Allreduce(const void* send_buffer, void* receive_buffer,
+                             int count, MPI_Datatype datatype, MPI_Op operation,
+                             MPI_Comm communicator) {
+  ++raw_allreduce_calls;
+  return PMPI_Allreduce(send_buffer, receive_buffer, count, datatype,
+                        operation, communicator);
+}
+
+namespace {
 
 using hundun::runtime::Box3;
 using hundun::runtime::DecompositionOptions;
@@ -71,6 +83,18 @@ static_assert(std::is_same_v<decltype(std::declval<const HaloExchange&>()
 
 constexpr Int3 kGlobal{12, 10, 8};
 constexpr std::array<bool, 3> kPeriodic{true, true, true};
+
+std::uint64_t allreduce_calls() noexcept { return raw_allreduce_calls; }
+
+void require_allreduce_delta(std::uint64_t before, std::uint64_t expected,
+                             const char* subject) {
+  const std::uint64_t actual = allreduce_calls() - before;
+  if (actual != expected) {
+    throw Error(std::string(subject) + " raw MPI_Allreduce count: expected=" +
+                std::to_string(expected) + " actual=" +
+                std::to_string(actual));
+  }
+}
 
 bool same(Int3 left, Int3 right) {
   return left.x == right.x && left.y == right.y && left.z == right.z;
@@ -616,8 +640,16 @@ void test_nonperiodic_and_zero_width(const MpiContext& context) {
   auto halo = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
+  const auto exchange_collectives = allreduce_calls();
   halo.exchange(storage, id);
+  require_allreduce_delta(exchange_collectives, 10U, "runtime Halo exchange");
   check_field<double>(storage, id, decomposition, nonperiodic, 1, 1, 1);
+  initialize_field<double>(storage, id, decomposition, 2);
+  const auto repeated_collectives = allreduce_calls();
+  halo.exchange(storage, id);
+  require_allreduce_delta(repeated_collectives, 10U,
+                          "repeated runtime Halo exchange");
+  check_field<double>(storage, id, decomposition, nonperiodic, 1, 2, 2);
 
   FieldRegistry zero_registry;
   const FieldId zero_id = zero_registry.declare_field(
@@ -632,14 +664,19 @@ void test_nonperiodic_and_zero_width(const MpiContext& context) {
   auto zero = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 0));
+  const auto zero_collectives = allreduce_calls();
+  zero.begin(zero_storage, zero_id);
+  zero.wait(zero_storage, zero_id);
+  require_allreduce_delta(zero_collectives, 10U,
+                          "runtime zero-width Halo exchange");
   zero.begin(zero_storage, zero_id);
   static_cast<void>(expect_collective_error(
       context, [&] { zero.begin(zero_storage, zero_id); }));
   zero.wait(zero_storage, zero_id);
   const auto zero_counters = zero.performance_counters();
-  HUNDUN_CHECK(zero_counters.completed_exchanges == 1U);
-  HUNDUN_CHECK(zero_counters.begin_calls == 1U);
-  HUNDUN_CHECK(zero_counters.wait_calls == 1U);
+  HUNDUN_CHECK(zero_counters.completed_exchanges == 2U);
+  HUNDUN_CHECK(zero_counters.begin_calls == 2U);
+  HUNDUN_CHECK(zero_counters.wait_calls == 2U);
   HUNDUN_CHECK(zero_counters.send_payload_bytes == 0U);
   HUNDUN_CHECK(zero_counters.receive_payload_bytes == 0U);
   HUNDUN_CHECK(zero_counters.pack_bytes == 0U);

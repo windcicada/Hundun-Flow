@@ -2826,6 +2826,9 @@ int run_performance_case(
     if (performance_failure_injection("malformed_work") &&
         !correctness.work.empty())
       correctness.work.front().phase = 'X';
+    if (performance_failure_injection("reordered_work") &&
+        correctness.work.size() >= 2U)
+      std::swap(correctness.work[0], correctness.work[1]);
     const auto cells_xy = checked_multiply(
         static_cast<std::uint64_t>(config.mesh.cells.x),
         static_cast<std::uint64_t>(config.mesh.cells.y),
@@ -2877,6 +2880,8 @@ int run_performance_case(
     artifact.metadata = std::move(*metadata);
     artifact.correctness = {
         true, diagnostics::serialize_performance_correctness(correctness)};
+    if (performance_failure_injection("metadata_mismatch"))
+      ++artifact.metadata.compatibility.warmup_steps;
     artifact.aggregation = diagnostics::aggregate_samples(
         std::move(raw_samples), config.performance.repetitions, mpi.size());
     artifact.comparison = diagnostics::compare_artifact_metadata(
@@ -2912,6 +2917,18 @@ int run_performance_case(
     if (performance_failure_injection("extra_counter_key"))
       artifact.counters.allocated_bytes.emplace("unapproved", 0U);
     validate_canonical_counter_maps(artifact.counters);
+    const auto parsed_correctness =
+        diagnostics::parse_performance_correctness(
+            artifact.correctness.summary);
+    if (parsed_correctness.passed != artifact.correctness.passed)
+      throw Error(
+          "performance correctness passed flag differs from artifact");
+    diagnostics::validate_performance_correctness_coverage(
+        parsed_correctness,
+        artifact.metadata.compatibility.warmup_steps,
+        artifact.metadata.compatibility.measured_steps,
+        static_cast<std::uint64_t>(
+            artifact.metadata.compatibility.repetitions));
     json = diagnostics::to_json(artifact);
   });
   std::string evidence_input;

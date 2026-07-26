@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/diagnostics/performance_artifact.hpp"
-#include "hundun/diagnostics/performance_correctness.hpp"
 #include "tests/support/test_main.hpp"
 #include "yyjson.h"
 
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -86,31 +84,7 @@ Artifact make_artifact() {
       {{1, 1, 80.0, 20}, {0, 0, 20.0, 20}, {1, 0, 60.0, 20}, {0, 1, 40.0, 20}},
       2, 2);
   artifact.correctness.passed = true;
-  hundun::diagnostics::PerformanceCorrectnessRecord correctness;
-  correctness.passed = true;
-  correctness.allocation_bytes_per_owned_cell = 8.0;
-  correctness.peak_allocation_bytes_per_owned_cell = 12.0;
-  correctness.repetitions = 2U;
-  correctness.states = {
-      {0U, "hundun-performance-state-fp-v1:0123456789abcdef"},
-      {1U, "hundun-performance-state-fp-v1:0123456789abcdef"}};
-  for (std::uint64_t repetition = 0U; repetition < 2U; ++repetition) {
-    for (const auto& phase :
-         std::array<std::pair<char, std::uint64_t>, 2>{
-             std::pair{'W', 5U}, std::pair{'M', 20U}}) {
-      for (std::uint64_t step = 0U; step < phase.second; ++step) {
-        for (std::uint64_t slot = 0U; slot < 5U; ++slot) {
-          correctness.work.push_back(
-              {repetition, phase.first, step, slot, "converged", 1U, 2U,
-               3U, 4U, UINT64_C(0x3ff0000000000000),
-               UINT64_C(0x3fe0000000000000),
-               UINT64_C(0x3fd0000000000000)});
-        }
-      }
-    }
-  }
-  artifact.correctness.summary =
-      hundun::diagnostics::serialize_performance_correctness(correctness);
+  artifact.correctness.summary = "all numerical contracts passed";
   artifact.comparison = ComparisonResult{
       ComparisonMode::identical, ComparisonStatus::comparable, {}};
   artifact.counters.allocated_bytes["field_storage"] = 4096;
@@ -511,14 +485,6 @@ void test_artifact_validation() {
   expect_invalid(
       [&] { static_cast<void>(hundun::diagnostics::to_json(artifact)); });
 
-  artifact = make_artifact();
-  artifact.correctness.passed = false;
-  expect_invalid(
-      [&] { static_cast<void>(hundun::diagnostics::to_json(artifact)); });
-  artifact = make_artifact();
-  ++artifact.metadata.compatibility.warmup_steps;
-  expect_invalid(
-      [&] { static_cast<void>(hundun::diagnostics::to_json(artifact)); });
   artifact = make_artifact();
   artifact.aggregation.raw_samples[0].elapsed_seconds =
       std::numeric_limits<double>::infinity();
