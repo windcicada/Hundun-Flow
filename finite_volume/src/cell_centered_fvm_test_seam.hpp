@@ -40,6 +40,9 @@ void fail_next_face_mass_flux_construction(
     FaceMassFluxConstructionFailureForTest failure);
 
 #ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+void reverse_scalar_diffusion_nonorthogonal_contribution_for_test(
+    bool enabled);
+
 class PreparedFaceMassFluxForTest final {
 public:
   static PreparedFaceMassFluxForTest create(

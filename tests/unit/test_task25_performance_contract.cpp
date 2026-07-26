@@ -152,8 +152,24 @@ void test_allocation_counters() {
   check_delta(begin, end, 3U, 96U, 3U, 96U, begin.live_bytes);
 
   const auto unchanged = allocation_counters();
-  ExecutionTestAccess::fail_next_allocation();
+  const auto identity_before_unsupported_construction =
+      ExecutionTestAccess::next_allocation_identity();
   bool failed = false;
+  try {
+    Buffer rejected(context, std::numeric_limits<std::size_t>::max());
+  } catch (const hundun::runtime::Error& error) {
+    failed = std::string(error.what()).find("byte size") != std::string::npos;
+  }
+  HUNDUN_CHECK(failed);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      unchanged, allocation_counters()));
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_unsupported_construction);
+
+  const auto identity_before_injected_construction =
+      ExecutionTestAccess::next_allocation_identity();
+  ExecutionTestAccess::fail_next_allocation();
+  failed = false;
   try {
     Buffer rejected(context, 8U);
   } catch (const hundun::runtime::Error&) {
@@ -162,9 +178,13 @@ void test_allocation_counters() {
   HUNDUN_CHECK(failed);
   HUNDUN_CHECK(allocation_counters().allocation_events ==
                unchanged.allocation_events);
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_injected_construction);
 
   ExecutionTestAccess::set_allocation_counters_for_test(
       {std::numeric_limits<std::uint64_t>::max(), 0U, 0U, 0U, 0U, 0U});
+  const auto identity_before_construction_counter_overflow =
+      ExecutionTestAccess::next_allocation_identity();
   failed = false;
   try {
     Buffer rejected(context, 0U);
@@ -172,6 +192,8 @@ void test_allocation_counters() {
     failed = true;
   }
   HUNDUN_CHECK(failed);
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_construction_counter_overflow);
   ExecutionTestAccess::set_allocation_counters_for_test(unchanged);
 
   {
@@ -200,6 +222,27 @@ void test_allocation_counters() {
     const auto epoch = stable.epoch();
     const auto bytes = stable.byte_size();
     const auto before_failure = allocation_counters();
+    const auto identity_before_unsupported_reallocation =
+        ExecutionTestAccess::next_allocation_identity();
+    failed = false;
+    try {
+      stable.reallocate(std::numeric_limits<std::size_t>::max());
+    } catch (const hundun::runtime::Error& error) {
+      failed =
+          std::string(error.what()).find("byte size") != std::string::npos;
+    }
+    HUNDUN_CHECK(failed);
+    HUNDUN_CHECK(hundun::test::task25_counters_equal(
+        before_failure, allocation_counters()));
+    HUNDUN_CHECK(stable.allocation_identity() == identity);
+    HUNDUN_CHECK(stable.epoch() == epoch);
+    HUNDUN_CHECK(stable.byte_size() == bytes);
+    HUNDUN_CHECK(view[0] == 7.0);
+    HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+                 identity_before_unsupported_reallocation);
+
+    const auto identity_before_injected_reallocation =
+        ExecutionTestAccess::next_allocation_identity();
     ExecutionTestAccess::fail_next_allocation();
     failed = false;
     try {
@@ -214,11 +257,15 @@ void test_allocation_counters() {
     HUNDUN_CHECK(stable.epoch() == epoch);
     HUNDUN_CHECK(stable.byte_size() == bytes);
     HUNDUN_CHECK(view[0] == 7.0);
+    HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+                 identity_before_injected_reallocation);
 
     auto injected = before_failure;
     injected.allocation_events =
         std::numeric_limits<std::uint64_t>::max();
     ExecutionTestAccess::set_allocation_counters_for_test(injected);
+    const auto identity_before_counter_overflow =
+        ExecutionTestAccess::next_allocation_identity();
     failed = false;
     try {
       stable.reallocate(64U);
@@ -232,6 +279,8 @@ void test_allocation_counters() {
     HUNDUN_CHECK(stable.epoch() == epoch);
     HUNDUN_CHECK(stable.byte_size() == bytes);
     HUNDUN_CHECK(view[0] == 7.0);
+    HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+                 identity_before_counter_overflow);
     ExecutionTestAccess::set_allocation_counters_for_test(before_failure);
   }
 
@@ -240,6 +289,8 @@ void test_allocation_counters() {
   future_event.deallocation_events =
       std::numeric_limits<std::uint64_t>::max();
   ExecutionTestAccess::set_allocation_counters_for_test(future_event);
+  const auto identity_before_future_event_overflow =
+      ExecutionTestAccess::next_allocation_identity();
   failed = false;
   try {
     Buffer rejected(context, 0U);
@@ -249,6 +300,8 @@ void test_allocation_counters() {
   HUNDUN_CHECK(failed);
   HUNDUN_CHECK(hundun::test::task25_counters_equal(
       future_event, allocation_counters()));
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_future_event_overflow);
   ExecutionTestAccess::set_allocation_counters_for_test(
       before_future_overflow);
 
@@ -256,6 +309,8 @@ void test_allocation_counters() {
   future_bytes.deallocated_bytes =
       std::numeric_limits<std::uint64_t>::max() - 3U;
   ExecutionTestAccess::set_allocation_counters_for_test(future_bytes);
+  const auto identity_before_future_byte_overflow =
+      ExecutionTestAccess::next_allocation_identity();
   failed = false;
   try {
     Buffer rejected(context, 8U);
@@ -265,6 +320,8 @@ void test_allocation_counters() {
   HUNDUN_CHECK(failed);
   HUNDUN_CHECK(hundun::test::task25_counters_equal(
       future_bytes, allocation_counters()));
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_future_byte_overflow);
   ExecutionTestAccess::set_allocation_counters_for_test(
       before_future_overflow);
 }

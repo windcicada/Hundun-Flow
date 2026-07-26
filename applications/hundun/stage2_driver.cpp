@@ -1007,6 +1007,47 @@ bool performance_failure_injection(std::string_view selected) {
 #endif
 }
 
+template <class Map, std::size_t Size>
+void validate_canonical_counter_keys(
+    const Map& values, const std::array<std::string_view, Size>& expected) {
+  if (values.size() != Size)
+    throw Error("canonical performance counter key set differs");
+  for (const auto key : expected) {
+    if (values.find(std::string(key)) == values.end())
+      throw Error("canonical performance counter key set differs");
+  }
+}
+
+void validate_canonical_counter_maps(
+    const diagnostics::ExactCounterMaps& counters) {
+  validate_canonical_counter_keys(
+      counters.allocated_bytes,
+      std::array<std::string_view, 2>{"execution.allocated",
+                                      "execution.peak-live"});
+  validate_canonical_counter_keys(
+      counters.halo_payload_bytes,
+      std::array<std::string_view, 4>{"pack", "receive", "send", "unpack"});
+  validate_canonical_counter_keys(
+      counters.halo_messages,
+      std::array<std::string_view, 2>{"receive", "send"});
+  validate_canonical_counter_keys(
+      counters.collectives,
+      std::array<std::string_view, 3>{"checkpoint", "fp64-reduction",
+                                      "linear-reduction"});
+  validate_canonical_counter_keys(
+      counters.collective_logical_payload_bytes,
+      std::array<std::string_view, 1>{"fp64-reduction"});
+  validate_canonical_counter_keys(
+      counters.matvec,
+      std::array<std::string_view, 2>{"momentum", "pressure"});
+  validate_canonical_counter_keys(
+      counters.preconditioner_applications,
+      std::array<std::string_view, 2>{"momentum", "pressure"});
+  validate_canonical_counter_keys(
+      counters.logical_io_bytes,
+      std::array<std::string_view, 2>{"checkpoint", "diagnostics"});
+}
+
 void append_u64_fingerprint(std::string& output, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8)
     output.push_back(static_cast<char>(
@@ -2866,8 +2907,13 @@ int run_performance_case(
     artifact.counters.logical_io_bytes = {
         {"checkpoint", totals.checkpoint_logical_bytes},
         {"diagnostics", totals.diagnostic_logical_bytes}};
-        json = diagnostics::to_json(artifact);
-      });
+    if (performance_failure_injection("missing_counter_key"))
+      artifact.counters.allocated_bytes.erase("execution.allocated");
+    if (performance_failure_injection("extra_counter_key"))
+      artifact.counters.allocated_bytes.emplace("unapproved", 0U);
+    validate_canonical_counter_maps(artifact.counters);
+    json = diagnostics::to_json(artifact);
+  });
   std::string evidence_input;
   collective_transaction(
       mpi, mpi.rank() == 0,

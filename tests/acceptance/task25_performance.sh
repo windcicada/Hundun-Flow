@@ -200,6 +200,21 @@ grep -Fq \
   'Task 25 artifact differs from independent exact-counter oracle' \
   "${work_root}/oracle-receive-mutation.stderr"
 
+missing_key_artifact="${work_root}/missing-counter-key.json"
+sed 's/"execution.allocated":[0-9]*,//' \
+  "${artifact}" >"${missing_key_artifact}"
+expect_invalid_oracle_input "${missing_key_artifact}" missing-counter-key
+
+extra_key_artifact="${work_root}/extra-counter-key.json"
+sed 's/"execution.peak-live":\([0-9]*\)/"execution.peak-live":\1,"unapproved":0/' \
+  "${artifact}" >"${extra_key_artifact}"
+expect_invalid_oracle_input "${extra_key_artifact}" extra-counter-key
+
+extra_map_artifact="${work_root}/extra-counter-map.json"
+sed 's/"logical_io_bytes":/"unapproved_map":{},"logical_io_bytes":/' \
+  "${artifact}" >"${extra_map_artifact}"
+expect_invalid_oracle_input "${extra_map_artifact}" extra-counter-map
+
 old_sha=$(sha256sum "${artifact}" | cut -d' ' -f1)
 old_evidence_sha=$(sha256sum "${evidence_input}" | cut -d' ' -f1)
 
@@ -227,6 +242,10 @@ expect_injected_failure root_overflow \
 expect_injected_failure missing_work \
   'unable to serialize performance artifact'
 expect_injected_failure malformed_work \
+  'unable to serialize performance artifact'
+expect_injected_failure missing_counter_key \
+  'unable to serialize performance artifact'
+expect_injected_failure extra_counter_key \
   'unable to serialize performance artifact'
 expect_injected_failure stage \
   'unable to publish performance artifact'

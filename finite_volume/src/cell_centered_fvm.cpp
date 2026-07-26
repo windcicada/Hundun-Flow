@@ -505,6 +505,8 @@ double boundary_exterior_value(const boundary::BoundaryRegistry &boundaries,
       .exterior;
 }
 
+double scalar_diffusion_nonorthogonal_sign() noexcept;
+
 double physical_scalar_diffusive_flux(
     const FaceStencil &face, FiniteVolumeQuantity quantity,
     const boundary::BoundaryRegistry &boundaries,
@@ -546,7 +548,9 @@ double physical_scalar_diffusive_flux(
     throw Error("prescribed scalar diffusion stencil is invalid");
   }
   const double flux =
-      gamma * ((q_n - q_p) * factor + dot(gradient, nonorth));
+      gamma * ((q_n - q_p) * factor +
+               scalar_diffusion_nonorthogonal_sign() *
+                   dot(gradient, nonorth));
   if (!std::isfinite(flux)) {
     throw Error("scalar diffusion contribution is non-finite");
   }
@@ -649,8 +653,19 @@ struct MetricOverride final {
 
 thread_local MetricOverride next_metric_override{};
 thread_local bool force_singular_least_squares{};
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+thread_local bool reverse_scalar_diffusion_nonorthogonal_contribution{};
+#endif
 thread_local std::optional<test::FaceMassFluxConstructionFailureForTest>
     next_face_mass_flux_construction_failure;
+
+double scalar_diffusion_nonorthogonal_sign() noexcept {
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+  return reverse_scalar_diffusion_nonorthogonal_contribution ? -1.0 : 1.0;
+#else
+  return 1.0;
+#endif
+}
 
 MetricOverride consume_metric_override() noexcept {
   const MetricOverride result = next_metric_override;
@@ -773,6 +788,13 @@ struct CellCenteredFvmOperators::Impl final {
 };
 
 namespace test {
+
+#ifdef HUNDUN_FINITE_VOLUME_ENABLE_TEST_ACCESS
+void reverse_scalar_diffusion_nonorthogonal_contribution_for_test(
+    bool enabled) {
+  reverse_scalar_diffusion_nonorthogonal_contribution = enabled;
+}
+#endif
 
 void mutate_next_topology_signature(TopologySignatureMutationForTest mutation) {
   if (next_topology_signature_mutation.has_value()) {
@@ -1806,7 +1828,9 @@ void CellCenteredFvmOperators::accumulate_scalar_diffusive_residual(
       }
       const Real3 nonorth = subtract(canonical.area, multiply(factor, d));
       const double canonical_flux =
-          gamma * ((q_n - q_p) * factor + dot(gradient, nonorth));
+          gamma * ((q_n - q_p) * factor +
+                   scalar_diffusion_nonorthogonal_sign() *
+                       dot(gradient, nonorth));
       flux = canonical.reversed ? -canonical_flux : canonical_flux;
     }
     if (!std::isfinite(flux)) {

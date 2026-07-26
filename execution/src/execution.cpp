@@ -138,12 +138,16 @@ struct AlignedDelete final {
   }
 };
 
-std::unique_ptr<std::byte, AlignedDelete> allocate_bytes(
-    std::size_t byte_size) {
+void validate_supported_byte_size(std::size_t byte_size) {
   if (byte_size >
       static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
     throw runtime::Error("buffer byte size exceeds the supported range");
   }
+}
+
+std::unique_ptr<std::byte, AlignedDelete> allocate_bytes(
+    std::size_t byte_size) {
+  validate_supported_byte_size(byte_size);
   if (inject_allocation_failure.exchange(false)) {
     throw runtime::Error("buffer allocation failed by the test seam");
   }
@@ -323,6 +327,7 @@ namespace {
 std::shared_ptr<detail::AllocationControl> make_host_control(
     BackendIdentity backend_identity, ExecutionSpace space,
     std::size_t byte_size, std::uint64_t epoch) {
+  validate_supported_byte_size(byte_size);
   preflight_allocation(static_cast<std::uint64_t>(byte_size));
   auto storage = allocate_bytes(byte_size);
   const auto identity = issue_allocation_identity();

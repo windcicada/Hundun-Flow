@@ -77,6 +77,17 @@ yyjson_val* required(yyjson_val* object, const char* key) {
   return value;
 }
 
+template <std::size_t Size>
+void require_exact_keys(yyjson_val* object,
+                        const std::array<const char*, Size>& keys) {
+  if (!yyjson_is_obj(object) || yyjson_obj_size(object) != Size)
+    throw std::runtime_error("Task 25 exact-counter key set differs");
+  for (const char* key : keys) {
+    if (yyjson_obj_get(object, key) == nullptr)
+      throw std::runtime_error("Task 25 exact-counter key set differs");
+  }
+}
+
 std::uint64_t u64(yyjson_val* object, const char* key) {
   auto* value = required(object, key);
   if (!yyjson_is_uint(value))
@@ -400,6 +411,12 @@ ArtifactInput parse_artifact(
       }
     }
     auto* exact = required(root, "exact_counters");
+    require_exact_keys(
+        exact,
+        std::array<const char*, 8>{
+            "allocated_bytes", "halo_payload_bytes", "halo_messages",
+            "collectives", "collective_logical_payload_bytes", "matvec",
+            "preconditioner_applications", "logical_io_bytes"});
     auto* allocated = required(exact, "allocated_bytes");
     auto* payload = required(exact, "halo_payload_bytes");
     auto* messages = required(exact, "halo_messages");
@@ -410,6 +427,29 @@ ArtifactInput parse_artifact(
     auto* preconditioner =
         required(exact, "preconditioner_applications");
     auto* io = required(exact, "logical_io_bytes");
+    require_exact_keys(
+        allocated,
+        std::array<const char*, 2>{"execution.allocated",
+                                   "execution.peak-live"});
+    require_exact_keys(
+        payload,
+        std::array<const char*, 4>{"pack", "receive", "send", "unpack"});
+    require_exact_keys(messages,
+                       std::array<const char*, 2>{"receive", "send"});
+    require_exact_keys(
+        collectives,
+        std::array<const char*, 3>{"checkpoint", "fp64-reduction",
+                                   "linear-reduction"});
+    require_exact_keys(
+        collective_bytes,
+        std::array<const char*, 1>{"fp64-reduction"});
+    require_exact_keys(matvec,
+                       std::array<const char*, 2>{"momentum", "pressure"});
+    require_exact_keys(
+        preconditioner,
+        std::array<const char*, 2>{"momentum", "pressure"});
+    require_exact_keys(
+        io, std::array<const char*, 2>{"checkpoint", "diagnostics"});
     result.actual.allocated = u64(allocated, "execution.allocated");
     result.actual.peak = u64(allocated, "execution.peak-live");
     result.actual.halo_send_bytes = u64(payload, "send");

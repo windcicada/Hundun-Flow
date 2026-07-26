@@ -1689,12 +1689,14 @@ void run_uniform_quadratic_diffusion_case(const MpiContext &mpi, int ranks) {
 struct WarpedDiffusionResult {
   double error{};
   double integral_defect{};
-  std::vector<double> laplacian;
+  std::vector<double> physical_laplacian;
   std::vector<hundun::mesh::GlobalCellId> global_ids;
 };
 
 WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
-                                             int n) {
+                                             int n,
+                                             bool reverse_nonorthogonal =
+                                                 false) {
   const Int3 extent{n, n, n};
   const std::array<bool, 3> periodic{true, true, true};
   auto decomposition = StructuredDecomposition::create(
@@ -1767,6 +1769,22 @@ WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
   const auto gradient_read = read_storage.view<double>(gradient);
   const auto gamma_read =
       read_storage.acquire_face_read<double>(access, phase, actor, gamma);
+  struct NonorthogonalSignGuard final {
+    explicit NonorthogonalSignGuard(bool reverse) : active(reverse) {
+      if (active) {
+        hundun::finite_volume::test::
+            reverse_scalar_diffusion_nonorthogonal_contribution_for_test(true);
+      }
+    }
+    ~NonorthogonalSignGuard() {
+      if (active) {
+        hundun::finite_volume::test::
+            reverse_scalar_diffusion_nonorthogonal_contribution_for_test(
+                false);
+      }
+    }
+    bool active;
+  } sign_guard(reverse_nonorthogonal);
   operators.accumulate_scalar_diffusive_residual(
       FiniteVolumeQuantity::density(), boundaries, q_read, gradient_read,
       gamma_read, residual_write);
@@ -1774,9 +1792,9 @@ WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
   double local_volume = 0.0;
   double local_signed_residual = 0.0;
   double local_absolute_residual = 0.0;
-  std::vector<double> laplacian;
+  std::vector<double> physical_laplacian;
   std::vector<hundun::mesh::GlobalCellId> global_ids;
-  laplacian.reserve(topology.owned_cell_count());
+  physical_laplacian.reserve(topology.owned_cell_count());
   global_ids.reserve(topology.owned_cell_count());
   for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
     const int i = static_cast<int>(
@@ -1789,12 +1807,26 @@ WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
         yz / static_cast<std::size_t>(decomposition.local_extent().y));
     const Real3 center = geometry.cell_center_m(cell);
     const double volume = geometry.cell_volume_m3(cell);
-    const double exact = two_pi * two_pi * std::sin(two_pi * center.x);
-    const double error = residual_write(i, j, k, 0) / volume - exact;
+    const double analytic_negative_laplacian =
+        two_pi * two_pi * std::sin(two_pi * center.x);
+    const double analytic_physical_laplacian =
+        -two_pi * two_pi * std::sin(two_pi * center.x);
+    const double discrete_negative_laplacian =
+        residual_write(i, j, k, 0) / volume;
+    const double discrete_physical_laplacian =
+        -residual_write(i, j, k, 0) / volume;
+    const double error =
+        discrete_negative_laplacian - analytic_negative_laplacian;
+    const double physical_error =
+        discrete_physical_laplacian - analytic_physical_laplacian;
+    HUNDUN_CHECK_NEAR(
+        error, -physical_error,
+        64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(error), std::abs(physical_error)}));
     local_error += error * error * volume;
     local_volume += volume;
     const double integrated = residual_write(i, j, k, 0);
-    laplacian.push_back(integrated / volume);
+    physical_laplacian.push_back(discrete_physical_laplacian);
     global_ids.push_back(topology.global_cell_id(cell));
     local_signed_residual += integrated;
     local_absolute_residual += std::abs(integrated);
@@ -1808,7 +1840,19 @@ WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
       defect <= 512.0 * std::numeric_limits<double>::epsilon() *
                     std::max(1.0, values[3]));
   return {std::sqrt(values[0] / values[1]), defect,
-          std::move(laplacian), std::move(global_ids)};
+          std::move(physical_laplacian), std::move(global_ids)};
+}
+
+double reject_reversed_nonorthogonal_diffusion(
+    const MpiContext &mpi, int ranks,
+    const WarpedDiffusionResult &normal_error16) {
+  const auto reversed16 = warped_diffusion_error(mpi, ranks, 16, true);
+  const auto reversed32 = warped_diffusion_error(mpi, ranks, 32, true);
+  const double reversed_order =
+      std::log(reversed16.error / reversed32.error) / std::log(2.0);
+  HUNDUN_CHECK(reversed_order < 1.8);
+  HUNDUN_CHECK(reversed16.error > normal_error16.error);
+  return reversed_order;
 }
 
 void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
@@ -2805,10 +2849,19 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
     const std::string_view mode =
         argc == 1 ? "full" : (argv[1] == nullptr ? "" : argv[1]);
-    HUNDUN_CHECK(argc == 1 ||
-                 (argc == 2 && mode == "task25-warped-free-stream"));
+    HUNDUN_CHECK(
+        argc == 1 ||
+        (argc == 2 &&
+         (mode == "task25-warped-free-stream" ||
+          mode == "task25-warped-diffusion-mutation")));
     if (mode == "task25-warped-free-stream") {
       run_gradient_case(mpi, mpi.size(), true);
+      return;
+    }
+    if (mode == "task25-warped-diffusion-mutation") {
+      const auto normal16 = warped_diffusion_error(mpi, mpi.size(), 16);
+      static_cast<void>(
+          reject_reversed_nonorthogonal_diffusion(mpi, mpi.size(), normal16));
       return;
     }
     check_limiter();
@@ -2854,14 +2907,16 @@ int main(int argc, char **argv) {
              cell < distributed[level]->global_ids.size(); ++cell) {
           const auto global = static_cast<std::size_t>(
               distributed[level]->global_ids[cell]);
-          HUNDUN_CHECK(global < references[level].laplacian.size());
+          HUNDUN_CHECK(global <
+                       references[level].physical_laplacian.size());
           local_max = std::max(
               local_max,
-              std::abs(distributed[level]->laplacian[cell] -
-                       references[level].laplacian[global]));
+              std::abs(distributed[level]->physical_laplacian[cell] -
+                       references[level].physical_laplacian[global]));
           local_reference_max =
               std::max(local_reference_max,
-                       std::abs(references[level].laplacian[global]));
+                       std::abs(
+                           references[level].physical_laplacian[global]));
         }
         double comparison[2]{local_max, local_reference_max};
         HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, comparison, 2, MPI_DOUBLE,
@@ -2871,12 +2926,8 @@ int main(int argc, char **argv) {
                      5.0e-12 * std::max(1.0, comparison[1]));
       }
     }
-    auto mutated_oracle = error16.laplacian;
-    HUNDUN_CHECK(!mutated_oracle.empty());
-    mutated_oracle[0] += 1.0;
-    HUNDUN_CHECK(std::abs(mutated_oracle[0] - error16.laplacian[0]) >
-                 5.0e-12 *
-                     std::max(1.0, std::abs(error16.laplacian[0])));
+    const double reversed_order =
+        reject_reversed_nonorthogonal_diffusion(mpi, mpi.size(), error16);
     if (mpi.rank() == 0) {
       std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
                 << "TASK25_WARPED_DIFFUSION ranks=" << mpi.size()
@@ -2891,7 +2942,7 @@ int main(int argc, char **argv) {
                 << " decomposition16=" << decomposition_differences[0]
                 << " decomposition32=" << decomposition_differences[1]
                 << " decomposition64=" << decomposition_differences[2]
-                << " mutation_delta=1" << '\n';
+                << " reversed_nonorth_order=" << reversed_order << '\n';
     }
   });
 }
