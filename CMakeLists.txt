@@ -414,6 +414,19 @@ endfunction()
 if(HUNDUN_BUILD_TESTS)
   enable_testing()
 
+  add_test(NAME test_task26_stage2_acceptance_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+      "-DHUNDUN_BINARY_ROOT=${CMAKE_BINARY_DIR}"
+      "-DHUNDUN_STAGE2_ACCEPTANCE_SCRIPT=${PROJECT_SOURCE_DIR}/tests/acceptance/stage2_acceptance.sh"
+      "-DHUNDUN_STAGE2_CAPABILITY_LEDGER=${PROJECT_SOURCE_DIR}/docs/numerics/stage2-capability-ledger.md"
+      "-DHUNDUN_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
+      -P "${PROJECT_SOURCE_DIR}/tests/cmake/task26_stage2_acceptance_contract.cmake")
+  set_tests_properties(test_task26_stage2_acceptance_contract PROPERTIES
+    LABELS "unit;contract;acceptance;task26"
+    RUN_SERIAL TRUE
+    TIMEOUT 30)
+
   hundun_add_test(test_task24_header_contract
     tests/unit/test_task24_header_contract.cpp)
   target_include_directories(test_task24_header_contract PRIVATE
