@@ -4,6 +4,7 @@
 #include "hundun/mesh/mesh_topology.hpp"
 #include "hundun/runtime/types.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -72,6 +73,7 @@ class MeshGeometry final {
   runtime::Real3 origin_m() const noexcept;
   runtime::Real3 length_m() const noexcept;
   std::optional<runtime::Real3> uniform_spacing_m() const noexcept;
+  std::size_t local_face_count() const noexcept;
 
   bool compatible(const MeshTopology&) const;
   void require_compatible(const MeshTopology&) const;

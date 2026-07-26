@@ -434,6 +434,9 @@ void validate(const MeshDiagnosticV2& value) {
 
   std::uint64_t reciprocal_checks{};
   std::uint64_t reciprocal_failures{};
+  std::map<std::uint64_t, double> incident_face_area_sums;
+  for (const auto &cell : value.cells)
+    incident_face_area_sums.emplace(cell.global_id, 0.0);
   std::array<bool, 3> periodic{};
   for (const auto& face : value.faces) {
     if (face.axis != mesh::FaceAxis::x &&
@@ -544,6 +547,15 @@ void validate(const MeshDiagnosticV2& value) {
                                      *face.neighbour_area_vector_m2))
         ++reciprocal_failures;
     }
+    if (const auto owner = incident_face_area_sums.find(face.owner_global_cell);
+        owner != incident_face_area_sums.end())
+      owner->second += face.area_m2;
+    if (face.neighbour_global_cell) {
+      if (const auto neighbour =
+              incident_face_area_sums.find(*face.neighbour_global_cell);
+          neighbour != incident_face_area_sums.end())
+        neighbour->second += face.area_m2;
+    }
     first = false;
     previous = face.global_id;
   }
@@ -552,14 +564,15 @@ void validate(const MeshDiagnosticV2& value) {
     fail("face reciprocity summary differs from records");
   if (reciprocal_failures != 0U)
     fail("face reciprocity check failed");
-  double maximum_area{};
-  for (const auto& face : value.faces)
-    maximum_area = std::max(maximum_area, face.area_m2);
-  const double closure_limit =
-      256.0 * std::numeric_limits<double>::epsilon() *
-      std::max(1.0, 6.0 * maximum_area);
-  if (value.maximum_cell_closure_norm > closure_limit)
-    fail("cell closure exceeds the accepted geometry tolerance");
+  for (const auto &cell : value.cells) {
+    const auto area_sum = incident_face_area_sums.find(cell.global_id);
+    if (area_sum == incident_face_area_sums.end() || !(area_sum->second > 0.0))
+      fail("owned cell has no incident face-area scale");
+    const double closure_limit =
+        256.0 * std::numeric_limits<double>::epsilon() * area_sum->second;
+    if (norm(cell.closure_m2) > closure_limit)
+      fail("cell closure exceeds the accepted geometry tolerance");
+  }
   const bool same_vertices =
       vertices.size() == referenced_vertices.size() &&
       std::equal(vertices.begin(), vertices.end(), referenced_vertices.begin(),

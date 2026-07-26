@@ -5,6 +5,8 @@
 
 #include "hundun/linear/preconditioners.hpp"
 
+#include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -91,11 +93,25 @@ hundun::diagnostics::DiagnosticRecord collect_one(
   return sink.records.front();
 }
 
-}  // namespace
+template <class Source>
+void check_fingerprint_ids(const Source &source,
+                           std::initializer_list<std::string_view> expected) {
+  const auto actual =
+      hundun::diagnostics::diagnostic_fingerprint_field_ids(source);
+  HUNDUN_CHECK(std::is_sorted(actual.begin(), actual.end()));
+  HUNDUN_CHECK(std::adjacent_find(actual.begin(), actual.end()) ==
+               actual.end());
+  HUNDUN_CHECK(std::vector<std::string_view>(expected) == actual);
+}
+
+} // namespace
 
 int main() {
   return hundun::test::run([] {
     hundun::execution::CpuReferenceContext execution;
+    check_fingerprint_ids(execution, {"backend_identity", "backend_name",
+                                      "backend_name.length", "capabilities",
+                                      "ordered", "space"});
     const auto context_record = collect_one(execution);
     HUNDUN_CHECK(context_record.module_id == "hundun.execution.context");
     bool rejected = false;
@@ -110,6 +126,8 @@ int main() {
     HUNDUN_CHECK(rejected);
 
     hundun::execution::Buffer buffer(execution, 4U * sizeof(double));
+    check_fingerprint_ids(buffer, {"allocation_identity", "backend_identity",
+                                   "byte_size", "epoch", "space"});
     const auto allocation = buffer.allocation_identity();
     const auto epoch = buffer.epoch();
     const auto buffer_record = collect_one(buffer);
@@ -119,13 +137,23 @@ int main() {
 
     const auto& const_buffer = buffer;
     const auto view = const_buffer.view(1U, 2U);
+    check_fingerprint_ids(view,
+                          {"allocation_identity", "backend_identity",
+                           "element_count", "epoch", "offset_bytes",
+                           "scalar_format", "space", "stride", "writable"});
     const auto view_record = collect_one(view);
     HUNDUN_CHECK(view_record.module_id == "hundun.execution.vector_view");
 
     QueryOnlyOperator linear_operator(execution);
-    const auto operator_record =
-        collect_one(static_cast<const hundun::linear::LinearOperator&>(
-            linear_operator));
+    check_fingerprint_ids(
+        static_cast<const hundun::linear::LinearOperator &>(linear_operator),
+        {"context.backend_identity", "context.backend_name",
+         "context.backend_name.length", "context.space", "diagonal_available",
+         "domain.ghost", "domain.global_id", "domain.local", "domain.owned",
+         "range.ghost", "range.global_id", "range.local", "range.owned",
+         "revision"});
+    const auto operator_record = collect_one(
+        static_cast<const hundun::linear::LinearOperator &>(linear_operator));
     HUNDUN_CHECK(operator_record.module_id == "hundun.linear.operator");
     HUNDUN_CHECK(linear_operator.apply_calls == 0U);
     HUNDUN_CHECK(linear_operator.diagonal_calls == 0U);
@@ -139,6 +167,12 @@ int main() {
     solve_report.global_reduction_count = 6U;
     const hundun::diagnostics::LinearSolveDiagnosticSource solve_source{
         "momentum-x", &solve_report};
+    check_fingerprint_ids(
+        solve_source,
+        {"final_residual", "global_reduction_count", "initial_residual",
+         "instance_id", "instance_id.length", "iterations",
+         "lowest_failing_rank", "matvec_count", "preconditioner_apply_count",
+         "recursive_residual", "termination"});
     const auto solve_summary = collect_one(solve_source);
     const auto solve_counters =
         collect_one(solve_source,
@@ -162,6 +196,9 @@ int main() {
         hundun::flow::TimeAdvanceDisposition::committed,
         hundun::flow::StepFailureReason::none,
         -1};
+    check_fingerprint_ids(driver_source,
+                          {"attempt_count", "density_model", "disposition",
+                           "lowest_failing_rank", "reason", "step", "time"});
     const auto driver_summary = collect_one(driver_source);
     const auto driver_counters =
         collect_one(driver_source,
@@ -187,12 +224,22 @@ int main() {
     const hundun::diagnostics::FieldLayoutDiagnosticSource field_source{
         &registry, {{2, 2, 2}, 36U},
         {{"density", density}, {"face-mass-flux", flux}}};
+    check_fingerprint_ids(
+        field_source,
+        {"field.components", "field.conservative", "field.ghost_width",
+         "field.id", "field.name", "field.name.length", "field.output",
+         "field.owner", "field.owner.length", "field.restart",
+         "field.scalar_type", "field.space", "field.unit", "field.unit.length",
+         "layout.cell_extent", "layout.face_count", "role.field", "role.name",
+         "role.name.length"});
     const auto field_record = collect_one(field_source);
     HUNDUN_CHECK(field_record.module_id == "hundun.runtime.field_layout");
     HUNDUN_CHECK(field_record.identities.size() == 4U);
 
-    const hundun::diagnostics::SharedFluxDiagnosticSource shared_flux{
-        flux, 36U, true};
+    const hundun::diagnostics::SharedFluxDiagnosticSource shared_flux{flux, 36U,
+                                                                      true};
+    check_fingerprint_ids(shared_flux,
+                          {"face_count", "field_id", "final_flux"});
     const auto shared_record = collect_one(shared_flux);
     HUNDUN_CHECK(shared_record.module_id ==
                  "hundun.finite_volume.shared_flux");
@@ -212,8 +259,33 @@ int main() {
           hundun::linear::SolveTerminationReason::converged;
     piso_report.final_transport_normalized_l2 = {0.0};
     piso_report.final_transport_relative_conservation_defect = {0.0};
-    const hundun::diagnostics::ConstantDensityPisoDiagnosticSource
-        piso_source{&piso_report};
+    const hundun::diagnostics::ConstantDensityPisoDiagnosticSource piso_source{
+        &piso_report};
+    check_fingerprint_ids(piso_source, {"attempted_dt",
+                                        "backflow.present",
+                                        "continuity",
+                                        "disposition",
+                                        "lowest_failing_rank",
+                                        "mass_conservation",
+                                        "momentum_conservation",
+                                        "momentum_residual",
+                                        "pressure",
+                                        "pressure_corrector_count",
+                                        "reason",
+                                        "solve.final_residual",
+                                        "solve.global_reduction_count",
+                                        "solve.initial_residual",
+                                        "solve.iterations",
+                                        "solve.lowest_failing_rank",
+                                        "solve.matvec_count",
+                                        "solve.preconditioner_apply_count",
+                                        "solve.prefix",
+                                        "solve.prefix.length",
+                                        "solve.reason",
+                                        "solve.recursive_residual",
+                                        "suggested_dt",
+                                        "transport_conservation",
+                                        "transport_residual"});
     const auto piso_summary = collect_one(piso_source);
     const auto piso_counters =
         collect_one(piso_source,

@@ -4,6 +4,7 @@
 #include "hundun/runtime/error.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -205,8 +206,101 @@ hundun::diagnostics::MeshDiagnosticV2 fixture() {
   return value;
 }
 
-template <class Function>
-bool rejects(Function&& operation) {
+hundun::diagnostics::MeshDiagnosticV2 rescaled_three_cell_fixture() {
+  using namespace hundun;
+  diagnostics::MeshDiagnosticV2 value;
+  value.rank = 0;
+  value.rank_count = 1;
+  value.global_extent = {3, 1, 1};
+  value.owned_box = {{0, 0, 0}, {3, 1, 1}};
+  value.mapping_kind = mesh::MappingKind::uniform_box;
+  value.origin_m = {0.0, 0.0, 0.0};
+  value.length_m = {3.0, 1.0, 1.0};
+  for (int z = 0; z <= 1; ++z)
+    for (int y = 0; y <= 1; ++y)
+      for (int x = 0; x <= 3; ++x) {
+        const auto id = static_cast<std::uint64_t>((z * 2 + y) * 4 + x);
+        value.vertices.push_back(
+            {id,
+             {x, y, z},
+             {static_cast<double>(x), static_cast<double>(y),
+              static_cast<double>(z)}});
+      }
+  for (int x = 0; x < 3; ++x)
+    value.cells.push_back({static_cast<std::uint64_t>(x),
+                           {static_cast<double>(x) + 0.5, 0.5, 0.5},
+                           1.0,
+                           1.0,
+                           {0.0, 0.0, 0.0}});
+  value.owned_volume_sum = 3.0;
+
+  const auto vertex_id = [](int x, int y, int z) {
+    return static_cast<std::uint64_t>((z * 2 + y) * 4 + x);
+  };
+  const auto add_face = [&](std::uint64_t id, mesh::FaceAxis axis,
+                            runtime::Int3 logical, std::uint64_t owner,
+                            std::optional<std::uint64_t> neighbour,
+                            std::optional<std::uint32_t> patch, double area) {
+    diagnostics::MeshDiagnosticFaceV2 face;
+    face.global_id = id;
+    face.axis = axis;
+    face.logical = logical;
+    face.owner_global_cell = owner;
+    face.neighbour_global_cell = neighbour;
+    face.patch_id = patch;
+    if (axis == mesh::FaceAxis::x) {
+      face.vertex_ids = {vertex_id(logical.x, 0, 0), vertex_id(logical.x, 1, 0),
+                         vertex_id(logical.x, 1, 1),
+                         vertex_id(logical.x, 0, 1)};
+      face.centre_m = {static_cast<double>(logical.x), 0.5, 0.5};
+      face.owner_area_vector_m2 = {logical.x == 0 ? -area : area, 0.0, 0.0};
+    } else if (axis == mesh::FaceAxis::y) {
+      face.vertex_ids = {vertex_id(logical.x, logical.y, 0),
+                         vertex_id(logical.x, logical.y, 1),
+                         vertex_id(logical.x + 1, logical.y, 1),
+                         vertex_id(logical.x + 1, logical.y, 0)};
+      face.centre_m = {static_cast<double>(logical.x) + 0.5,
+                       static_cast<double>(logical.y), 0.5};
+      face.owner_area_vector_m2 = {0.0, logical.y == 0 ? -area : area, 0.0};
+    } else {
+      face.vertex_ids = {vertex_id(logical.x, 0, logical.z),
+                         vertex_id(logical.x + 1, 0, logical.z),
+                         vertex_id(logical.x + 1, 1, logical.z),
+                         vertex_id(logical.x, 1, logical.z)};
+      face.centre_m = {static_cast<double>(logical.x) + 0.5, 0.5,
+                       static_cast<double>(logical.z)};
+      face.owner_area_vector_m2 = {0.0, 0.0, logical.z == 0 ? -area : area};
+    }
+    if (neighbour)
+      face.neighbour_area_vector_m2 = runtime::Real3{
+          -face.owner_area_vector_m2.x, -face.owner_area_vector_m2.y,
+          -face.owner_area_vector_m2.z};
+    face.area_m2 = area;
+    value.faces.push_back(std::move(face));
+  };
+
+  constexpr double small = 1.0e-6;
+  add_face(0U, mesh::FaceAxis::x, {0, 0, 0}, 0U, std::nullopt, 0U, small);
+  add_face(1U, mesh::FaceAxis::x, {1, 0, 0}, 0U, 1U, std::nullopt, small);
+  add_face(2U, mesh::FaceAxis::x, {2, 0, 0}, 1U, 2U, std::nullopt, 1.0);
+  add_face(3U, mesh::FaceAxis::x, {3, 0, 0}, 2U, std::nullopt, 1U, 1.0e6);
+  for (int y = 0; y <= 1; ++y)
+    for (int x = 0; x < 3; ++x)
+      add_face(static_cast<std::uint64_t>(4 + y * 3 + x), mesh::FaceAxis::y,
+               {x, y, 0}, static_cast<std::uint64_t>(x), std::nullopt,
+               static_cast<std::uint32_t>(2 + y),
+               x == 0 ? small : (x == 1 ? 1.0 : 1.0e6));
+  for (int z = 0; z <= 1; ++z)
+    for (int x = 0; x < 3; ++x)
+      add_face(static_cast<std::uint64_t>(10 + z * 3 + x), mesh::FaceAxis::z,
+               {x, 0, z}, static_cast<std::uint64_t>(x), std::nullopt,
+               static_cast<std::uint32_t>(4 + z),
+               x == 0 ? small : (x == 1 ? 1.0 : 1.0e6));
+  value.reciprocal_check_count = 2U;
+  return value;
+}
+
+template <class Function> bool rejects(Function &&operation) {
   try {
     operation();
   } catch (const hundun::runtime::Error&) {
@@ -359,6 +453,24 @@ int main() {
     HUNDUN_CHECK(rejects([&] {
       static_cast<void>(
           hundun::diagnostics::encode_mesh_diagnostic_v2(invalid_closure));
+    }));
+    auto bad_small_cell = rescaled_three_cell_fixture();
+    bad_small_cell.cells.front().closure_m2 = {1.0e-12, 0.0, 0.0};
+    bad_small_cell.maximum_cell_closure_norm = 1.0e-12;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(bad_small_cell));
+    }));
+    auto just_inside = rescaled_three_cell_fixture();
+    const double per_cell_limit =
+        256.0 * std::numeric_limits<double>::epsilon() * 6.0e-6;
+    just_inside.cells.front().closure_m2 = {std::nextafter(per_cell_limit, 0.0),
+                                            0.0, 0.0};
+    just_inside.maximum_cell_closure_norm =
+        just_inside.cells.front().closure_m2.x;
+    HUNDUN_CHECK(!rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(just_inside));
     }));
     auto missing_face = value;
     missing_face.faces.pop_back();

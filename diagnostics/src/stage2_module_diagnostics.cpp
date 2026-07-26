@@ -86,9 +86,11 @@ DiagnosticInvariant positive_invariant(std::string id, std::string unit,
 class FingerprintBuilder final {
  public:
   void add_fp64(std::string_view id, double value) {
+    observe(id);
     accumulator_.add(id, ordinal_++, 0U, describe_fp64(value));
   }
   void add_u64(std::string_view id, std::uint64_t value) {
+    observe(id);
     accumulator_.add(id, ordinal_, 0U,
                      describe_fp64(static_cast<double>(
                          static_cast<std::uint32_t>(value >> 32U))));
@@ -101,22 +103,43 @@ class FingerprintBuilder final {
     std::memcpy(&bits, &value, sizeof(bits));
     add_u64(id, bits);
   }
-  void add_text(std::string_view id, std::string_view value) {
+  void add_text(std::string_view id, std::string_view length_id,
+                std::string_view value) {
     std::uint64_t hash = 1469598103934665603ULL;
     for (char raw : value) {
       hash ^= static_cast<unsigned char>(raw);
       hash *= 1099511628211ULL;
     }
     add_u64(id, hash);
-    add_u64("text-length", static_cast<std::uint64_t>(value.size()));
+    add_u64(length_id, static_cast<std::uint64_t>(value.size()));
   }
   DiagnosticStateFingerprint finish() const { return accumulator_.finish(); }
+  DiagnosticStateFingerprint finish(
+      const std::vector<std::string_view>& advertised) const {
+    auto published = advertised;
+    auto observed = observed_;
+    const auto normalize = [](auto& ids) {
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    };
+    normalize(published);
+    normalize(observed);
+    if (published != advertised || observed != published)
+      throw DiagnosticCollectionError(
+          DiagnosticFailureClass::invalid_input,
+          "diagnostics.fingerprint.fields", -1,
+          "diagnostic fingerprint field IDs do not match hashed fields");
+    return finish();
+  }
   DiagnosticFingerprintParts parts() const noexcept {
     return accumulator_.parts();
   }
 
  private:
+  void observe(std::string_view id) { observed_.push_back(id); }
+
   DiagnosticFingerprintAccumulator accumulator_;
+  std::vector<std::string_view> observed_;
   std::uint64_t ordinal_{};
 };
 
@@ -183,21 +206,21 @@ void require_exact_bytes_agreement(const runtime::MpiContext& mpi,
   if (!status.ok)
     throw DiagnosticCollectionError(
         DiagnosticFailureClass::invalid_request,
-        "diagnostics.collective.agreement", 0,
+        "diagnostics.collective.agreement", status.failing_rank,
         status.message);
 }
 
 template <class Fingerprint>
 DiagnosticStateFingerprint authoritative_fingerprint(
-    Fingerprint&& fingerprint) {
+    const std::vector<std::string_view>& field_ids, Fingerprint&& fingerprint) {
   FingerprintBuilder builder;
   std::forward<Fingerprint>(fingerprint)(builder);
-  return builder.finish();
+  return builder.finish(field_ids);
 }
 
 void add_solve_fingerprint(FingerprintBuilder& fp, std::string_view prefix,
                            const linear::SolveReport& solve) {
-  fp.add_text("solve.prefix", prefix);
+  fp.add_text("solve.prefix", "solve.prefix.length", prefix);
   fp.add_u64("solve.reason",
              static_cast<std::uint64_t>(solve.reason));
   fp.add_u64("solve.iterations", solve.iterations);
@@ -215,6 +238,7 @@ void add_solve_fingerprint(FingerprintBuilder& fp, std::string_view prefix,
 template <class Fingerprint, class Fill>
 void collect_common(const DiagnosticDescriptor& descriptor,
                     const DiagnosticRequest& request, DiagnosticSink& sink,
+                    const std::vector<std::string_view>& field_ids,
                     Fingerprint&& fingerprint,
                     Fill&& fill) {
   validate(request, descriptor);
@@ -237,7 +261,8 @@ void collect_common(const DiagnosticDescriptor& descriptor,
               return left.subject_id < right.subject_id;
             });
   record.state_fingerprint =
-      authoritative_fingerprint(std::forward<Fingerprint>(fingerprint));
+      authoritative_fingerprint(field_ids,
+                                std::forward<Fingerprint>(fingerprint));
   validate(record, descriptor, request);
   try {
     sink.submit(record);
@@ -349,13 +374,14 @@ DiagnosticDescriptor describe_diagnostics(const runtime::MpiContext&) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const runtime::MpiContext&) {
-  return {"rank", "size", "thread_level", "collective_calls",
-          "logical_payload_bytes", "reduced_scalars"};
+  return {"collective_calls", "logical_payload_bytes", "rank",
+          "reduced_scalars", "size", "thread_level"};
 }
 void collect_diagnostics(const runtime::MpiContext& source,
                          const DiagnosticRequest& request,
                          DiagnosticSink& sink) {
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fingerprint) {
                    const auto values = source.fp64_reduction_counters();
                    fingerprint.add_i64("rank", source.rank());
@@ -481,6 +507,8 @@ void collect_diagnostics(const runtime::MpiContext& source,
                             counters.logical_payload_bytes);
   local_fingerprint.add_u64("reduced_scalars",
                             counters.reduced_scalars);
+  static_cast<void>(
+      local_fingerprint.finish(diagnostic_fingerprint_field_ids(source)));
   const auto local_parts = local_fingerprint.parts();
   std::array<std::uint64_t, 2> combined_parts{};
   runtime::check_mpi_result(
@@ -553,6 +581,7 @@ void collect_diagnostics(const runtime::MpiContext& source,
                            const DiagnosticRequest& request,                \
                            DiagnosticSink& sink) {                           \
     collect_common(describe_diagnostics(source), request, sink,             \
+                   diagnostic_fingerprint_field_ids(source),                \
                    [&](FingerprintBuilder& fp) { Fingerprint; },             \
                    [&](DiagnosticRecord& record) {                           \
                      require_summary(request);                              \
@@ -567,8 +596,7 @@ DiagnosticDescriptor describe_diagnostics(
 }
 std::vector<std::string_view> diagnostic_fingerprint_field_ids(
     const runtime::StructuredDecomposition&) {
-  return {"global_extent", "process_grid", "process_coordinates",
-          "owned_box", "local_extent", "periodicity"};
+  return {"decomposition", "periodicity"};
 }
 void collect_diagnostics(const runtime::StructuredDecomposition& source,
                          const DiagnosticRequest& request,
@@ -581,6 +609,7 @@ void collect_diagnostics(const runtime::StructuredDecomposition& source,
   const auto periodic = source.periodic();
   collect_common(
       describe_diagnostics(source), request, sink,
+      diagnostic_fingerprint_field_ids(source),
       [&](FingerprintBuilder& fp) {
         for (const auto value :
              {global.x, global.y, global.z, grid.x, grid.y, grid.z,
@@ -633,8 +662,10 @@ void collect_diagnostics(const runtime::ExchangePlan& source,
                          DiagnosticSink& sink) {
   collect_common(
       describe_diagnostics(source), request, sink,
+      diagnostic_fingerprint_field_ids(source),
       [&](FingerprintBuilder& fp) {
         fp.add_i64("ghost_width", source.ghost_width());
+        fp.add_u64("regions", source.regions().size());
         for (const auto& region : source.regions()) {
           for (const auto value :
                {region.offset.x, region.offset.y, region.offset.z,
@@ -690,13 +721,21 @@ describe_diagnostics(const mesh::MeshTopology&) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const mesh::MeshTopology&) {
-  return {"mesh_metadata", "cells", "faces", "patches"};
+  return {"cells.global_id", "cells.ownership", "cells.x", "cells.y",
+          "cells.z", "faces.axis", "faces.global_id", "faces.neighbour",
+          "faces.neighbour.present", "faces.owner", "faces.ownership",
+          "faces.pair", "faces.pair.present", "faces.patch",
+          "faces.patch.present", "faces.x", "faces.y", "faces.z",
+          "mesh_metadata", "patches.face", "patches.id", "patches.name",
+          "patches.name.length", "patches.paired",
+          "patches.paired.present", "patches.pairing"};
 }
 void collect_diagnostics(const mesh::MeshTopology& source,
                          const DiagnosticRequest& request,
                          DiagnosticSink& sink) {
   collect_common(
       describe_diagnostics(source), request, sink,
+      diagnostic_fingerprint_field_ids(source),
       [&](FingerprintBuilder& fp) {
         const auto extent = source.global_extent();
         const auto box = source.owned_global_box();
@@ -729,27 +768,31 @@ void collect_diagnostics(const mesh::MeshTopology& source,
                      source.global_cell_id(source.owner(face)));
           const auto neighbour = source.neighbour(face);
           fp.add_u64("faces.neighbour.present", neighbour ? 1U : 0U);
-          if (neighbour)
-            fp.add_u64("faces.neighbour",
-                       source.global_cell_id(*neighbour));
+          fp.add_u64("faces.neighbour",
+                     neighbour ? source.global_cell_id(*neighbour)
+                               : std::numeric_limits<std::uint64_t>::max());
           const auto patch = source.patch_id(face);
           fp.add_u64("faces.patch.present", patch ? 1U : 0U);
-          if (patch)
-            fp.add_u64("faces.patch", *patch);
+          fp.add_u64("faces.patch",
+                     patch.value_or(
+                         std::numeric_limits<std::uint32_t>::max()));
           const auto pair = source.periodic_pair(face);
           fp.add_u64("faces.pair.present", pair ? 1U : 0U);
-          if (pair)
-            fp.add_u64("faces.pair", *pair);
+          fp.add_u64("faces.pair",
+                     pair.value_or(
+                         std::numeric_limits<std::uint64_t>::max()));
         }
         for (const auto& patch : source.patches()) {
           fp.add_u64("patches.id", patch.stable_id());
-          fp.add_text("patches.name", patch.name());
+          fp.add_text("patches.name", "patches.name.length", patch.name());
           fp.add_u64("patches.pairing",
                      static_cast<std::uint64_t>(patch.pairing_kind()));
           const auto paired = patch.paired_patch_id();
           fp.add_u64("patches.paired.present", paired ? 1U : 0U);
-          if (paired)
-            fp.add_u64("patches.paired", *paired);
+          fp.add_u64("patches.paired",
+                     paired.value_or(
+                         std::numeric_limits<std::uint32_t>::max()));
+          fp.add_u64("patches.face", patch.local_faces().size());
           for (const auto face : patch.local_faces())
             fp.add_u64("patches.face", source.global_face_id(face));
         }
@@ -798,7 +841,12 @@ describe_diagnostics(const FieldLayoutDiagnosticSource&) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const FieldLayoutDiagnosticSource&) {
-  return {"layout", "field_descriptors", "field_roles"};
+  return {"field.components", "field.conservative", "field.ghost_width",
+          "field.id", "field.name", "field.name.length", "field.output",
+          "field.owner", "field.owner.length", "field.restart",
+          "field.scalar_type", "field.space", "field.unit",
+          "field.unit.length", "layout.cell_extent", "layout.face_count",
+          "role.field", "role.name", "role.name.length"};
 }
 void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                          const DiagnosticRequest& request,
@@ -808,6 +856,7 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
         DiagnosticFailureClass::invalid_input, "field-layout.invalid", -1,
         "field layout source is not frozen");
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
                    for (const auto value :
                         {source.layout.cell_interior_extent.x,
@@ -819,9 +868,12 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                         id < source.registry->size(); ++id) {
                      const auto& field = source.registry->descriptor(id);
                      fp.add_u64("field.id", id);
-                     fp.add_text("field.name", field.name);
-                     fp.add_text("field.unit", field.unit);
-                     fp.add_text("field.owner", field.owner);
+                     fp.add_text("field.name", "field.name.length",
+                                 field.name);
+                     fp.add_text("field.unit", "field.unit.length",
+                                 field.unit);
+                     fp.add_text("field.owner", "field.owner.length",
+                                 field.owner);
                      fp.add_u64("field.space",
                                 static_cast<std::uint64_t>(field.space));
                      fp.add_u64("field.scalar_type",
@@ -836,7 +888,7 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                                 static_cast<std::uint64_t>(field.output));
                    }
                    for (const auto& role : source.roles) {
-                     fp.add_text("role.name", role.role);
+                     fp.add_text("role.name", "role.name.length", role.role);
                      fp.add_u64("role.field", role.field);
                    }
                  },
@@ -860,10 +912,17 @@ void collect_diagnostics(const FieldLayoutDiagnosticSource& source,
                      const auto prefix = "field." + std::to_string(id) + ".";
                      const auto descriptor_fingerprint =
                          authoritative_fingerprint(
+                             {"components", "conservative", "ghost_width",
+                              "name", "name.length", "output", "owner",
+                              "owner.length", "restart", "scalar_type",
+                              "space", "unit", "unit.length"},
                              [&](FingerprintBuilder& descriptor_fp) {
-                               descriptor_fp.add_text("name", field.name);
-                               descriptor_fp.add_text("unit", field.unit);
-                               descriptor_fp.add_text("owner", field.owner);
+                               descriptor_fp.add_text("name", "name.length",
+                                                      field.name);
+                               descriptor_fp.add_text("unit", "unit.length",
+                                                      field.unit);
+                               descriptor_fp.add_text("owner", "owner.length",
+                                                      field.owner);
                                descriptor_fp.add_u64(
                                    "space",
                                    static_cast<std::uint64_t>(field.space));
@@ -935,12 +994,14 @@ describe_diagnostics(const mesh::MeshGeometry&) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const mesh::MeshGeometry&) {
-  return {"mapping", "cells", "faces"};
+  return {"cells", "faces", "faces.local_count", "mapping.extent",
+          "mapping.kind", "mapping.metric"};
 }
 void collect_diagnostics(const mesh::MeshGeometry& source,
                          const DiagnosticRequest& request,
                          DiagnosticSink& sink) {
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
                    const auto extent = source.global_extent();
                    const auto box = source.owned_global_box();
@@ -972,32 +1033,22 @@ void collect_diagnostics(const mesh::MeshGeometry& source,
                            closure.x, closure.y, closure.z})
                        fp.add_fp64("cells", value);
                    }
-                   const auto nx =
-                       static_cast<std::size_t>(box.end.x - box.begin.x);
-                   const auto ny =
-                       static_cast<std::size_t>(box.end.y - box.begin.y);
-                   const auto nz =
-                       static_cast<std::size_t>(box.end.z - box.begin.z);
-                   const auto maximum_faces =
-                       (nx + 1U) * ny * nz + nx * (ny + 1U) * nz +
-                       nx * ny * (nz + 1U);
-                   for (std::size_t face = 0; face < maximum_faces; ++face) {
-                     try {
-                       const auto centre = source.face_center_m(face);
-                       const auto displacement =
-                           source.face_displacement_m(face);
-                       const auto owner = source.face_area_vector_m2(
-                           face, mesh::FaceSide::owner);
-                       for (const auto value :
-                            {centre.x, centre.y, centre.z, displacement.x,
-                             displacement.y, displacement.z, owner.x, owner.y,
-                             owner.z, source.face_area_m2(face),
-                             source.face_skewness(face),
-                             source.face_non_orthogonality_degrees(face)})
-                         fp.add_fp64("faces", value);
-                     } catch (const runtime::Error&) {
-                       break;
-                     }
+                   fp.add_u64("faces.local_count",
+                              source.local_face_count());
+                   for (std::size_t face = 0;
+                        face < source.local_face_count(); ++face) {
+                     const auto centre = source.face_center_m(face);
+                     const auto displacement =
+                         source.face_displacement_m(face);
+                     const auto owner = source.face_area_vector_m2(
+                         face, mesh::FaceSide::owner);
+                     for (const auto value :
+                          {centre.x, centre.y, centre.z, displacement.x,
+                           displacement.y, displacement.z, owner.x, owner.y,
+                           owner.z, source.face_area_m2(face),
+                           source.face_skewness(face),
+                           source.face_non_orthogonality_degrees(face)})
+                       fp.add_fp64("faces", value);
                    }
                  },
                  [&](DiagnosticRecord& record) {
@@ -1024,29 +1075,17 @@ void collect_diagnostics(const mesh::MeshGeometry& source,
                                   std::hypot(closure.x,
                                              std::hypot(closure.y, closure.z)));
                    }
-                   const auto nx =
-                       static_cast<std::size_t>(box.end.x - box.begin.x);
-                   const auto ny =
-                       static_cast<std::size_t>(box.end.y - box.begin.y);
-                   const auto nz =
-                       static_cast<std::size_t>(box.end.z - box.begin.z);
-                   const auto maximum_faces =
-                       (nx + 1U) * ny * nz + nx * (ny + 1U) * nz +
-                       nx * ny * (nz + 1U);
-                   for (std::size_t face = 0; face < maximum_faces; ++face) {
-                     try {
-                       maximum_face_area =
-                           std::max(maximum_face_area,
-                                    source.face_area_m2(face));
-                       maximum_skewness =
-                           std::max(maximum_skewness,
-                                    source.face_skewness(face));
-                       maximum_non_orthogonality = std::max(
-                           maximum_non_orthogonality,
-                           source.face_non_orthogonality_degrees(face));
-                     } catch (const runtime::Error&) {
-                       break;
-                     }
+                   for (std::size_t face = 0;
+                        face < source.local_face_count(); ++face) {
+                     maximum_face_area =
+                         std::max(maximum_face_area,
+                                  source.face_area_m2(face));
+                     maximum_skewness =
+                         std::max(maximum_skewness,
+                                  source.face_skewness(face));
+                     maximum_non_orthogonality = std::max(
+                         maximum_non_orthogonality,
+                         source.face_non_orthogonality_degrees(face));
                    }
                    const auto origin = source.origin_m();
                    const auto length = source.length_m();
@@ -1061,6 +1100,8 @@ void collect_diagnostics(const mesh::MeshGeometry& source,
                          metric("length_x", "m", length.x),
                          metric("length_y", "m", length.y),
                          metric("length_z", "m", length.z),
+                         metric("local_face_count", "count",
+                                as_double(source.local_face_count())),
                          metric("cell_volume_sum", "m3", volume_sum),
                          metric("maximum_closure_norm", "m2",
                                 maximum_closure),
@@ -1086,10 +1127,12 @@ void collect_diagnostics(const mesh::MeshGeometry& source,
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     execution::ExecutionContext, execution, "hundun.execution.context",
-    (std::vector<std::string_view>{"backend_name", "backend_identity", "space",
-                                   "ordered", "capabilities"}),
+    (std::vector<std::string_view>{"backend_identity", "backend_name",
+                                   "backend_name.length", "capabilities",
+                                   "ordered", "space"}),
     ([&] {
-      fp.add_text("backend_name", source.backend_name());
+      fp.add_text("backend_name", "backend_name.length",
+                  source.backend_name());
       fp.add_u64("backend_identity", source.backend_identity());
       fp.add_u64("space", static_cast<std::uint64_t>(source.space()));
       fp.add_u64("ordered", source.ordered() ? 1U : 0U);
@@ -1129,8 +1172,8 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     execution::Buffer, execution, "hundun.execution.buffer",
-    (std::vector<std::string_view>{"allocation_identity", "byte_size", "epoch",
-                                   "backend_identity", "space"}),
+    (std::vector<std::string_view>{"allocation_identity", "backend_identity",
+                                   "byte_size", "epoch", "space"}),
     fp.add_u64("allocation_identity", source.allocation_identity());
     fp.add_u64("byte_size", source.byte_size());
     fp.add_u64("epoch", source.epoch());
@@ -1149,10 +1192,10 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     execution::VectorView<const double>, execution,
     "hundun.execution.vector_view",
-    (std::vector<std::string_view>{"allocation_identity", "element_count",
-                                   "epoch", "offset_bytes", "stride",
-                                   "backend_identity", "space",
-                                   "scalar_format", "writable"}),
+    (std::vector<std::string_view>{"allocation_identity", "backend_identity",
+                                   "element_count", "epoch", "offset_bytes",
+                                   "scalar_format", "space", "stride",
+                                   "writable"}),
     fp.add_u64("allocation_identity", source.allocation_identity());
     fp.add_u64("element_count", source.size());
     fp.add_u64("epoch", source.epoch());
@@ -1180,8 +1223,9 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     linear::GhostedVector, execution, "hundun.linear.ghosted_vector",
-    (std::vector<std::string_view>{"layout", "allocation_identity", "epoch",
-                                   "backend_identity", "space"}),
+    (std::vector<std::string_view>{"allocation_identity", "backend_identity",
+                                   "epoch", "ghost_count", "layout.global_id",
+                                   "local_count", "owned_count", "space"}),
     fp.add_u64("owned_count", source.owned_count());
     fp.add_u64("ghost_count", source.ghost_count());
     fp.add_u64("local_count", source.local_count());
@@ -1205,9 +1249,9 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     linear::GhostedVectorHalo, halo, "hundun.linear.ghosted_vector_halo",
-    (std::vector<std::string_view>{"path", "owned_count", "ghost_count",
-                                   "send_value_count",
-                                   "receive_value_count"}),
+    (std::vector<std::string_view>{"ghost_count", "owned_count", "path",
+                                   "receive_value_count",
+                                   "send_value_count"}),
     fp.add_u64("path", static_cast<std::uint64_t>(source.path()));
     fp.add_u64("owned_count", source.owned_count());
     fp.add_u64("ghost_count", source.ghost_count());
@@ -1224,9 +1268,12 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     linear::LinearOperator, linear_operator, "hundun.linear.operator",
-    (std::vector<std::string_view>{"domain_layout", "range_layout",
-                                   "context", "revision",
-                                   "diagonal_available"}),
+    (std::vector<std::string_view>{
+        "context.backend_identity", "context.backend_name",
+        "context.backend_name.length", "context.space", "diagonal_available",
+        "domain.ghost", "domain.global_id", "domain.local", "domain.owned",
+        "range.ghost", "range.global_id", "range.local", "range.owned",
+        "revision"}),
     ([&] {
       const auto domain = source.domain_layout();
       const auto range = source.range_layout();
@@ -1240,7 +1287,8 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
       fp.add_u64("range.local", range.local_count());
       for (const auto id : range.global_ids())
         fp.add_u64("range.global_id", id);
-      fp.add_text("context.backend_name", source.context().backend_name());
+      fp.add_text("context.backend_name", "context.backend_name.length",
+                  source.context().backend_name());
       fp.add_u64("context.backend_identity",
                  source.context().backend_identity());
       fp.add_u64("context.space",
@@ -1273,9 +1321,12 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     finite_volume::MatrixFreePoissonOperator, linear_operator,
     "hundun.finite_volume.poisson",
-    (std::vector<std::string_view>{"operator", "constraint_mode",
-                                   "pressure_reference_patch",
-                                   "solver_family"}),
+    (std::vector<std::string_view>{
+        "constraint_mode", "context.backend_identity", "context.backend_name",
+        "context.backend_name.length", "context.space", "diagonal_available",
+        "domain.global_id", "domain.owned", "pressure_reference_patch",
+        "pressure_reference_patch.present", "range.global_id", "range.owned",
+        "revision", "solver_family"}),
     ([&] {
       const auto domain = source.domain_layout();
       const auto range = source.range_layout();
@@ -1285,7 +1336,8 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
         fp.add_u64("range.global_id", id);
       fp.add_u64("domain.owned", domain.owned_count());
       fp.add_u64("range.owned", range.owned_count());
-      fp.add_text("context.backend_name", source.context().backend_name());
+      fp.add_text("context.backend_name", "context.backend_name.length",
+                  source.context().backend_name());
       fp.add_u64("context.backend_identity",
                  source.context().backend_identity());
       fp.add_u64("context.space",
@@ -1298,8 +1350,9 @@ HUNDUN_SIMPLE_SUMMARY_ADAPTER(
       const auto reference = source.pressure_reference_patch_id();
       fp.add_u64("pressure_reference_patch.present",
                  reference ? 1U : 0U);
-      if (reference)
-        fp.add_u64("pressure_reference_patch", *reference);
+      fp.add_u64("pressure_reference_patch",
+                 reference.value_or(
+                     std::numeric_limits<std::uint32_t>::max()));
       fp.add_u64("solver_family",
                  static_cast<std::uint64_t>(source.solver_family()));
     }()),
@@ -1327,9 +1380,10 @@ describe_diagnostics(const LinearSolveDiagnosticSource& source) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const LinearSolveDiagnosticSource&) {
-  return {"instance_id", "termination", "iterations", "residuals",
-          "matvec_count", "preconditioner_apply_count",
-          "global_reduction_count", "lowest_failing_rank"};
+  return {"final_residual", "global_reduction_count", "initial_residual",
+          "instance_id", "instance_id.length", "iterations",
+          "lowest_failing_rank", "matvec_count",
+          "preconditioner_apply_count", "recursive_residual", "termination"};
 }
 void collect_diagnostics(const LinearSolveDiagnosticSource& source,
                          const DiagnosticRequest& request,
@@ -1339,8 +1393,10 @@ void collect_diagnostics(const LinearSolveDiagnosticSource& source,
                                     "linear-solve.invalid", -1,
                                     "linear solve source is invalid");
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
-                   fp.add_text("instance_id", source.instance_id);
+                   fp.add_text("instance_id", "instance_id.length",
+                               source.instance_id);
                    fp.add_u64("termination",
                               static_cast<std::uint64_t>(
                                   source.report->reason));
@@ -1386,7 +1442,7 @@ void collect_diagnostics(const LinearSolveDiagnosticSource& source,
 HUNDUN_SIMPLE_SUMMARY_ADAPTER(
     SharedFluxDiagnosticSource, finite_volume,
     "hundun.finite_volume.shared_flux",
-    (std::vector<std::string_view>{"field_id", "face_count", "final_flux"}),
+    (std::vector<std::string_view>{"face_count", "field_id", "final_flux"}),
     fp.add_u64("field_id", source.field);
     fp.add_u64("face_count", source.face_count);
     fp.add_u64("final_flux", source.final_flux ? 1U : 0U),
@@ -1402,20 +1458,64 @@ describe_diagnostics(const boundary::BoundaryRegistry&) noexcept {
                     "hundun.boundary.registry", kSummaryCounters);
 }
 std::vector<std::string_view>
-diagnostic_fingerprint_field_ids(const boundary::BoundaryRegistry&) {
-  return {"open_domain", "scalars", "open_patches", "patch_descriptors",
-          "inlet_state", "outlet_pressure"};
+diagnostic_fingerprint_field_ids(const boundary::BoundaryRegistry& source) {
+  std::vector<std::string_view> ids{
+      "inlet_patch.present", "open_domain", "outlet_patch.present",
+      "patch.density_rule", "patch.enthalpy_rule", "patch.id",
+      "patch.inlet.present", "patch.kind", "patch.mass_flux_rule",
+      "patch.name", "patch.name.length", "patch.paired.present",
+      "patch.pressure.present", "patch.pressure_rule", "patch.scalar_rule",
+      "patch.velocity_rule"};
+  if (source.scalar_count() != 0U)
+    ids.insert(ids.end(), {"scalar", "scalar.length"});
+  if (source.velocity_inlet_patch_id())
+    ids.push_back("inlet_patch");
+  if (source.pressure_outlet_patch_id())
+    ids.push_back("outlet_patch");
+  bool has_pair = false;
+  bool has_inlet = false;
+  bool has_inlet_scalar = false;
+  bool has_inlet_temperature = false;
+  bool has_pressure = false;
+  for (std::uint32_t patch = 0; patch < 6U; ++patch) {
+    const auto& descriptor = source.patch(patch);
+    has_pair = has_pair || descriptor.paired_patch_id().has_value();
+    has_pressure =
+        has_pressure || descriptor.pressure_value_pa().has_value();
+    if (const auto& inlet = descriptor.inlet_state()) {
+      has_inlet = true;
+      has_inlet_scalar =
+          has_inlet_scalar || !inlet->scalar_values.empty();
+      has_inlet_temperature =
+          has_inlet_temperature || inlet->temperature_K.has_value();
+    }
+  }
+  if (has_pair)
+    ids.push_back("patch.paired");
+  if (has_inlet)
+    ids.insert(ids.end(),
+               {"patch.inlet", "patch.inlet.temperature.present"});
+  if (has_inlet_scalar)
+    ids.push_back("patch.inlet.scalar");
+  if (has_inlet_temperature)
+    ids.push_back("patch.inlet.temperature");
+  if (has_pressure)
+    ids.push_back("patch.pressure");
+  std::sort(ids.begin(), ids.end());
+  return ids;
 }
 void collect_diagnostics(const boundary::BoundaryRegistry& source,
                          const DiagnosticRequest& request,
                          DiagnosticSink& sink) {
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
                    fp.add_u64("open_domain",
                               source.open_domain() ? 1U : 0U);
                    for (std::size_t scalar = 0;
                         scalar < source.scalar_count(); ++scalar)
-                     fp.add_text("scalar", source.scalar_name(scalar));
+                     fp.add_text("scalar", "scalar.length",
+                                 source.scalar_name(scalar));
                    const auto inlet_patch =
                        source.velocity_inlet_patch_id();
                    const auto outlet_patch =
@@ -1431,7 +1531,8 @@ void collect_diagnostics(const boundary::BoundaryRegistry& source,
                    for (std::uint32_t patch = 0; patch < 6U; ++patch) {
                      const auto& descriptor = source.patch(patch);
                      fp.add_u64("patch.id", descriptor.stable_id());
-                     fp.add_text("patch.name", descriptor.name());
+                     fp.add_text("patch.name", "patch.name.length",
+                                 descriptor.name());
                      fp.add_u64("patch.kind",
                                 static_cast<std::uint64_t>(
                                     descriptor.kind()));
@@ -1602,10 +1703,24 @@ DiagnosticDescriptor describe_diagnostics(
                     kSummaryCounters);
 }
 std::vector<std::string_view> diagnostic_fingerprint_field_ids(
-    const ConstantDensityPisoDiagnosticSource&) {
-  return {"disposition", "reason", "lowest_failing_rank", "dt",
-          "momentum_solves", "pressure_solves", "residuals",
-          "conservation", "backflow"};
+    const ConstantDensityPisoDiagnosticSource& source) {
+  std::vector<std::string_view> ids{
+      "attempted_dt", "backflow.present", "continuity", "disposition",
+      "lowest_failing_rank", "mass_conservation", "momentum_conservation",
+      "momentum_residual", "pressure", "pressure_corrector_count", "reason",
+      "solve.final_residual", "solve.global_reduction_count",
+      "solve.initial_residual", "solve.iterations",
+      "solve.lowest_failing_rank", "solve.matvec_count",
+      "solve.preconditioner_apply_count", "solve.prefix",
+      "solve.prefix.length", "solve.reason", "solve.recursive_residual",
+      "suggested_dt", "transport_conservation", "transport_residual"};
+  if (source.report != nullptr && source.report->final_backflow_evidence) {
+    ids.insert(ids.end(),
+               {"backflow.face", "backflow.minimum_flux", "backflow.patch",
+                "backflow.rank", "backflow.step", "backflow.time"});
+    std::sort(ids.begin(), ids.end());
+  }
+  return ids;
 }
 void collect_diagnostics(const ConstantDensityPisoDiagnosticSource& source,
                          const DiagnosticRequest& request,
@@ -1622,6 +1737,7 @@ void collect_diagnostics(const ConstantDensityPisoDiagnosticSource& source,
                                     "constant-piso.invalid", -1,
                                     "constant density PISO source is invalid");
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
                    const auto& report = *source.report;
                    fp.add_u64("disposition",
@@ -1838,8 +1954,8 @@ describe_diagnostics(const FlowDriverDiagnosticSource&) noexcept {
 }
 std::vector<std::string_view>
 diagnostic_fingerprint_field_ids(const FlowDriverDiagnosticSource&) {
-  return {"density_model", "step", "time", "attempt_count", "disposition",
-          "reason", "lowest_failing_rank"};
+  return {"attempt_count", "density_model", "disposition",
+          "lowest_failing_rank", "reason", "step", "time"};
 }
 void collect_diagnostics(const FlowDriverDiagnosticSource& source,
                          const DiagnosticRequest& request,
@@ -1850,6 +1966,7 @@ void collect_diagnostics(const FlowDriverDiagnosticSource& source,
                                     "flow-driver.invalid", -1,
                                     "flow driver source is inconsistent");
   collect_common(describe_diagnostics(source), request, sink,
+                 diagnostic_fingerprint_field_ids(source),
                  [&](FingerprintBuilder& fp) {
                    fp.add_u64("density_model",
                               static_cast<std::uint64_t>(

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/diagnostics/diagnostic_session.hpp"
 #include "hundun/diagnostics/mesh_diagnostic_v2.hpp"
 #include "hundun/diagnostics/stage2_module_diagnostics.hpp"
@@ -18,8 +19,11 @@
 
 #include <mpi.h>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <iterator>
 #include <optional>
@@ -53,6 +57,37 @@ class RankFailingSink final : public hundun::diagnostics::DiagnosticSink {
   int rank_{};
   int failing_rank_{};
 };
+
+template <class Source>
+void check_fingerprint_ids(const Source &source,
+                           std::initializer_list<std::string_view> expected) {
+  const auto actual =
+      hundun::diagnostics::diagnostic_fingerprint_field_ids(source);
+  HUNDUN_CHECK(std::is_sorted(actual.begin(), actual.end()));
+  HUNDUN_CHECK(std::adjacent_find(actual.begin(), actual.end()) ==
+               actual.end());
+  HUNDUN_CHECK(std::vector<std::string_view>(expected) == actual);
+}
+
+hundun::config::FlowCaseConfig periodic_case() {
+  hundun::config::FlowCaseConfig config{};
+  config.schema_version = 2;
+  config.simulation_type =
+      hundun::config::SimulationType::variable_density_flow;
+  config.density_model = hundun::config::DensityModel::constant;
+  config.physics.rho_ref_kg_per_m3 = 1.0;
+  config.physics.inlet_consistency_rtol = 1.0e-12;
+  config.scalars.push_back({"alpha", 0.0});
+  constexpr std::array<hundun::config::PatchName, 6> names{
+      hundun::config::PatchName::x_min, hundun::config::PatchName::x_max,
+      hundun::config::PatchName::y_min, hundun::config::PatchName::y_max,
+      hundun::config::PatchName::z_min, hundun::config::PatchName::z_max};
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    config.boundaries[i].patch = names[i];
+    config.boundaries[i].type = hundun::config::BoundaryType::periodic;
+  }
+  return config;
+}
 
 hundun::diagnostics::DiagnosticBatch batch_for_rank(int rank) {
   using namespace hundun::diagnostics;
@@ -111,8 +146,10 @@ std::vector<char> read_bytes(const std::filesystem::path& path) {
 int main(int argc, char** argv) {
   return hundun::test::run([&] {
     hundun::runtime::MpiEnvironment environment(argc, argv);
-    auto mpi =
-        hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
+    auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
+    check_fingerprint_ids(mpi,
+                          {"collective_calls", "logical_payload_bytes", "rank",
+                           "reduced_scalars", "size", "thread_level"});
     const auto counters_before = mpi.fp64_reduction_counters();
     const hundun::diagnostics::DiagnosticRequest local_request{
         hundun::diagnostics::DiagnosticLevel::summary,
@@ -164,7 +201,8 @@ int main(int argc, char** argv) {
                  counters_before.logical_payload_bytes);
     if (mpi.size() > 1) {
       const auto expect_collective_rejection =
-          [&](hundun::diagnostics::DiagnosticRequest mismatched) {
+          [&](hundun::diagnostics::DiagnosticRequest mismatched,
+              int expected_lowest) {
             CaptureSink sink;
             bool rejected = false;
             int lowest = -1;
@@ -177,50 +215,50 @@ int main(int argc, char** argv) {
               lowest = error.lowest_failing_rank();
             }
             HUNDUN_CHECK(rejected);
-            HUNDUN_CHECK(lowest == 0);
+            HUNDUN_CHECK(lowest == expected_lowest);
           };
       {
         auto mismatched = collective_request;
         if (mpi.rank() == 0)
           mismatched.frame.rank = 1;
-        expect_collective_rejection(std::move(mismatched));
+        expect_collective_rejection(std::move(mismatched), 0);
       }
       {
         auto mismatched = collective_request;
-        if (mpi.rank() == 0)
-          mismatched.level =
-              hundun::diagnostics::DiagnosticLevel::counters;
-        expect_collective_rejection(std::move(mismatched));
+        if (mpi.rank() == 1)
+          mismatched.level = hundun::diagnostics::DiagnosticLevel::counters;
+        expect_collective_rejection(std::move(mismatched), 1);
       }
       {
         auto mismatched = collective_request;
-        if (mpi.rank() == 0)
+        if (mpi.size() == 4 && mpi.rank() >= 2)
           mismatched.frame.step += 1U;
-        expect_collective_rejection(std::move(mismatched));
+        if (mpi.size() == 4)
+          expect_collective_rejection(std::move(mismatched), 2);
       }
       {
         auto mismatched = collective_request;
         if (mpi.rank() == 0)
           mismatched.frame.time_s = 0.5;
-        expect_collective_rejection(std::move(mismatched));
+        expect_collective_rejection(std::move(mismatched), 1);
       }
       {
         auto mismatched = collective_request;
         if (mpi.rank() == 0)
           mismatched.frame.phase = "different-phase";
-        expect_collective_rejection(std::move(mismatched));
+        expect_collective_rejection(std::move(mismatched), 1);
       }
       {
         auto mismatched = collective_request;
-        if (mpi.rank() == 0)
+        if (mpi.rank() == 1)
           mismatched.selected_fields = {"rank"};
-        expect_collective_rejection(std::move(mismatched));
+        expect_collective_rejection(std::move(mismatched), 1);
       }
       {
         auto mismatched = collective_request;
-        if (mpi.rank() == 0)
+        if (mpi.rank() == 1)
           mismatched.sample_budget = 1U;
-        expect_collective_rejection(std::move(mismatched));
+        expect_collective_rejection(std::move(mismatched), 1);
       }
 
       RankFailingSink failing_sink(mpi.rank(), 0);
@@ -256,27 +294,92 @@ int main(int argc, char** argv) {
               decomposition, decomposition.local_extent(), 2);
       hundun::mesh::MeshTopology topology(decomposition);
       hundun::mesh::MeshGeometry geometry(
-          topology, hundun::mesh::UniformBoxMapping(
-                        {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+          topology,
+          hundun::mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+      HUNDUN_CHECK(geometry.local_face_count() == topology.local_face_count());
+      if (mpi.size() > 1) {
+        std::uint64_t local_ghost_faces = topology.ghost_face_count();
+        std::uint64_t global_ghost_faces = 0U;
+        HUNDUN_CHECK(MPI_Allreduce(&local_ghost_faces, &global_ghost_faces, 1,
+                                   MPI_UINT64_T, MPI_SUM,
+                                   mpi.comm()) == MPI_SUCCESS);
+        HUNDUN_CHECK(global_ghost_faces > 0U);
+        if (local_ghost_faces > 0U)
+          HUNDUN_CHECK(geometry.local_face_count() >
+                       topology.owned_face_count());
+      }
+      check_fingerprint_ids(decomposition, {"decomposition", "periodicity"});
+      check_fingerprint_ids(exchange_plan, {"ghost_width", "regions"});
+      check_fingerprint_ids(topology, {"cells.global_id",
+                                       "cells.ownership",
+                                       "cells.x",
+                                       "cells.y",
+                                       "cells.z",
+                                       "faces.axis",
+                                       "faces.global_id",
+                                       "faces.neighbour",
+                                       "faces.neighbour.present",
+                                       "faces.owner",
+                                       "faces.ownership",
+                                       "faces.pair",
+                                       "faces.pair.present",
+                                       "faces.patch",
+                                       "faces.patch.present",
+                                       "faces.x",
+                                       "faces.y",
+                                       "faces.z",
+                                       "mesh_metadata",
+                                       "patches.face",
+                                       "patches.id",
+                                       "patches.name",
+                                       "patches.name.length",
+                                       "patches.paired",
+                                       "patches.paired.present",
+                                       "patches.pairing"});
+      check_fingerprint_ids(geometry, {"cells", "faces", "faces.local_count",
+                                       "mapping.extent", "mapping.kind",
+                                       "mapping.metric"});
       hundun::execution::CpuReferenceContext execution;
       hundun::linear::GhostedVector vector(
           execution,
           hundun::linear::VectorLayout::from_topology(topology));
       auto vector_halo = hundun::linear::GhostedVectorHalo::create(
           decomposition, topology, execution);
-      hundun::execution::Buffer gamma(
-          execution, topology.local_face_count() * sizeof(double));
+      check_fingerprint_ids(vector, {"allocation_identity", "backend_identity",
+                                     "epoch", "ghost_count", "layout.global_id",
+                                     "local_count", "owned_count", "space"});
+      check_fingerprint_ids(vector_halo,
+                            {"ghost_count", "owned_count", "path",
+                             "receive_value_count", "send_value_count"});
+      auto boundaries =
+          hundun::boundary::BoundaryRegistry::create(periodic_case(), topology);
+      check_fingerprint_ids(
+          boundaries,
+          {"inlet_patch.present", "open_domain", "outlet_patch.present",
+           "patch.density_rule", "patch.enthalpy_rule", "patch.id",
+           "patch.inlet.present", "patch.kind", "patch.mass_flux_rule",
+           "patch.name", "patch.name.length", "patch.paired",
+           "patch.paired.present", "patch.pressure.present",
+           "patch.pressure_rule", "patch.scalar_rule", "patch.velocity_rule",
+           "scalar", "scalar.length"});
+      hundun::execution::Buffer gamma(execution, topology.local_face_count() *
+                                                     sizeof(double));
       auto gamma_values = gamma.view(0U, topology.local_face_count());
       for (std::size_t face = 0; face < gamma_values.size(); ++face)
         gamma_values[face] = 1.0;
-      const auto& const_gamma = gamma;
-      auto poisson =
-          hundun::finite_volume::MatrixFreePoissonOperator::create(
-              decomposition, topology, geometry, execution,
-              const_gamma.view(0U, topology.local_face_count()),
-              {hundun::finite_volume::PressureConstraintMode::
-                   constant_nullspace,
-               std::nullopt});
+      const auto &const_gamma = gamma;
+      auto poisson = hundun::finite_volume::MatrixFreePoissonOperator::create(
+          decomposition, topology, geometry, execution,
+          const_gamma.view(0U, topology.local_face_count()),
+          {hundun::finite_volume::PressureConstraintMode::constant_nullspace,
+           std::nullopt});
+      check_fingerprint_ids(
+          poisson, {"constraint_mode", "context.backend_identity",
+                    "context.backend_name", "context.backend_name.length",
+                    "context.space", "diagonal_available", "domain.global_id",
+                    "domain.owned", "pressure_reference_patch",
+                    "pressure_reference_patch.present", "range.global_id",
+                    "range.owned", "revision", "solver_family"});
       const auto adapter_counters_before = mpi.fp64_reduction_counters();
       for (const auto* source_name :
            {"hundun.runtime.structured_decomposition",
