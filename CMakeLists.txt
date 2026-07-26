@@ -1894,6 +1894,8 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}/solver/include")
   target_link_libraries(test_passive_scalar_mpi PRIVATE
     hundun_solver hundun_options hundun_warnings MPI::MPI_CXX)
+  target_compile_definitions(test_passive_scalar_mpi PRIVATE
+    HUNDUN_RUNTIME_ENABLE_TEST_ACCESS=1)
   foreach(ranks IN ITEMS 1 2 4)
     set(passive_scalar_test "test_passive_scalar_mpi_${ranks}_rank")
     add_test(NAME "${passive_scalar_test}"
