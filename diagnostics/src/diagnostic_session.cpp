@@ -8,10 +8,12 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <limits>
 #include <sstream>
 #include <system_error>
 
@@ -27,33 +29,59 @@ std::filesystem::path output_path(const std::filesystem::path& directory,
   return directory / name.str();
 }
 
-std::uint64_t stable_hash(std::string_view value) noexcept {
-  std::uint64_t result = 1469598103934665603ULL;
-  for (char raw : value) {
-    const auto byte = static_cast<unsigned char>(raw);
-    result ^= byte;
-    result *= 1099511628211ULL;
-  }
-  return result;
-}
-
 void require_path_agreement(const runtime::MpiContext& mpi,
                             const std::filesystem::path& path) {
-  const auto text = path.lexically_normal().generic_string();
-  const std::array<std::uint64_t, 2> local{
-      static_cast<std::uint64_t>(text.size()), stable_hash(text)};
-  std::array<std::uint64_t, 2> minimum = local;
-  std::array<std::uint64_t, 2> maximum = local;
+  std::string text;
+  bool local_ok = true;
+  std::string message;
+  try {
+    auto resolved = std::filesystem::absolute(path).lexically_normal();
+    if (resolved.filename().empty() &&
+        resolved.parent_path() != resolved)
+      resolved = resolved.parent_path();
+    text = resolved.generic_string();
+  } catch (const std::exception& error) {
+    local_ok = false;
+    message = error.what();
+  }
+  auto status = runtime::collective_status(
+      mpi, local_ok,
+      message.empty() ? "unable to resolve diagnostic output path"
+                      : message);
+  if (!status.ok)
+    throw runtime::Error(status.message);
+  std::uint64_t root_size =
+      mpi.rank() == 0 ? static_cast<std::uint64_t>(text.size()) : 0U;
   runtime::check_mpi_result(
-      MPI_Allreduce(local.data(), minimum.data(), 2, MPI_UINT64_T, MPI_MIN,
-                    mpi.comm()),
-      "MPI_Allreduce diagnostic path minimum");
+      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      "MPI_Bcast diagnostic path size");
+  local_ok =
+      root_size <= static_cast<std::uint64_t>(
+                       std::numeric_limits<std::size_t>::max()) &&
+      root_size <= static_cast<std::uint64_t>(
+                       std::numeric_limits<int>::max());
+  std::string root;
+  if (local_ok) {
+    try {
+      root.resize(static_cast<std::size_t>(root_size));
+    } catch (...) {
+      local_ok = false;
+    }
+  }
+  status = runtime::collective_status(
+      mpi, local_ok, "unable to compare diagnostic output paths");
+  if (!status.ok)
+    throw runtime::Error(status.message);
+  if (mpi.rank() == 0)
+    std::copy(text.begin(), text.end(), root.begin());
   runtime::check_mpi_result(
-      MPI_Allreduce(local.data(), maximum.data(), 2, MPI_UINT64_T, MPI_MAX,
-                    mpi.comm()),
-      "MPI_Allreduce diagnostic path maximum");
-  if (minimum != maximum)
-    throw runtime::Error("diagnostic output path differs across ranks");
+      MPI_Bcast(root.data(), static_cast<int>(root_size), MPI_BYTE, 0,
+                mpi.comm()),
+      "MPI_Bcast diagnostic path bytes");
+  status = runtime::collective_status(
+      mpi, text == root, "diagnostic output path differs across ranks");
+  if (!status.ok)
+    throw runtime::Error(status.message);
 }
 
 void require_schedule_agreement(const runtime::MpiContext& mpi,
@@ -134,15 +162,28 @@ int DiagnosticSession::rank() const noexcept { return rank_; }
 void DiagnosticSession::publish(const runtime::MpiContext& mpi,
                                 std::uint64_t step,
                                 const DiagnosticBatch& batch) const {
-  if (rank_ != mpi.rank())
-    throw runtime::Error("diagnostic session rank mismatch");
+  auto status = runtime::collective_status(
+      mpi, rank_ == mpi.rank(), "diagnostic session rank mismatch");
+  if (!status.ok)
+    throw runtime::Error(status.message);
   require_schedule_agreement(mpi, step, write_interval_);
-  const auto path = output_path(directory_, rank_, step);
-  const auto temporary = std::filesystem::path(path.string() + ".tmp");
   require_path_agreement(mpi, directory_);
-  const auto bytes = batch.canonical_json_lines();
+  std::filesystem::path path;
+  std::filesystem::path temporary;
+  std::string bytes;
   bool local_ok = true;
   std::string message;
+  try {
+    path = output_path(directory_, rank_, step);
+    temporary = std::filesystem::path(path.string() + ".tmp");
+    bytes = batch.canonical_json_lines();
+  } catch (const std::exception& error) {
+    local_ok = false;
+    message = error.what();
+  }
+  status = runtime::collective_status(mpi, local_ok, message);
+  if (!status.ok)
+    throw runtime::Error(status.message);
   try {
     std::filesystem::create_directories(directory_);
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
@@ -159,7 +200,7 @@ void DiagnosticSession::publish(const runtime::MpiContext& mpi,
     local_ok = false;
     message = error.what();
   }
-  auto status = runtime::collective_status(mpi, local_ok, message);
+  status = runtime::collective_status(mpi, local_ok, message);
   if (!status.ok) {
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);

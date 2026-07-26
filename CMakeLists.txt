@@ -392,7 +392,8 @@ if(HUNDUN_BUILD_TESTS)
         "$<TARGET_FILE:test_diagnostic_session_mpi>")
     set_tests_properties(
       "test_diagnostic_session_mpi_${task24_session_ranks}rank"
-      PROPERTIES LABELS "io;mpi;task24;diagnostics")
+      PROPERTIES LABELS "io;mpi;task24;diagnostics"
+      TIMEOUT 60 PROCESSORS "${task24_session_ranks}")
   endforeach()
 
   foreach(task24_ranks IN ITEMS 1 2 4)
@@ -401,13 +402,15 @@ if(HUNDUN_BUILD_TESTS)
         "${PROJECT_SOURCE_DIR}/tests/acceptance/task24_flow_models.sh"
         "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task24_ranks}")
     set_tests_properties("test_task24_flow_models_${task24_ranks}rank"
-      PROPERTIES LABELS "application;mpi;task24")
+      PROPERTIES LABELS "application;mpi;task24"
+      TIMEOUT 120 PROCESSORS "${task24_ranks}")
     add_test(NAME "test_task24_restart_${task24_ranks}rank"
       COMMAND bash
         "${PROJECT_SOURCE_DIR}/tests/acceptance/task24_restart_continuation.sh"
         "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${task24_ranks}")
     set_tests_properties("test_task24_restart_${task24_ranks}rank"
-      PROPERTIES LABELS "application;io;mpi;task24")
+      PROPERTIES LABELS "application;io;mpi;task24"
+      TIMEOUT 180 PROCESSORS "${task24_ranks}")
   endforeach()
 
   function(hundun_add_mock_plugin target)

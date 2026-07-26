@@ -20,14 +20,21 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace hundun::diagnostics {
 
+struct FieldRoleDiagnostic final {
+  std::string role;
+  runtime::FieldId field{};
+};
+
 struct FieldLayoutDiagnosticSource final {
   const runtime::FieldRegistry* registry{};
   runtime::FieldLayoutSet layout{};
+  std::vector<FieldRoleDiagnostic> roles;
 };
 
 struct LinearSolveDiagnosticSource final {

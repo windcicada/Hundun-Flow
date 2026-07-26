@@ -44,8 +44,13 @@ cat >"${work_root}/open-ideal.json" <<JSON
 JSON
 
 for model in constant material ideal-gas; do
-  "${mpiexec}" -n "${ranks}" "${hundun}" "${work_root}/${model}.json" \
-    >"${work_root}/${model}.stdout" 2>"${work_root}/${model}.stderr"
+  if ! "${mpiexec}" -n "${ranks}" "${hundun}" \
+      "${work_root}/${model}.json" \
+      >"${work_root}/${model}.stdout" 2>"${work_root}/${model}.stderr"; then
+    cat "${work_root}/${model}.stdout" >&2
+    cat "${work_root}/${model}.stderr" >&2
+    exit 1
+  fi
   test ! -s "${work_root}/${model}.stderr"
   grep -Fxq 'HUNDUN-FLOW 0.0.0-stage2' "${work_root}/${model}.stdout"
   grep -Fq 'FINISHED step=1 time_s=0.001' "${work_root}/${model}.stdout"
@@ -96,6 +101,23 @@ require_module_once() {
   test "$(grep -Fc "\"module_id\":\"${module}\"" "${file}")" -eq 1
 }
 
+module_sequence() {
+  sed -n 's/.*"module_id":"\([^"]*\)".*/\1/p' "$1"
+}
+
+require_solve_instances() {
+  sed -n \
+    '/"module_id":"hundun.linear.solve"/s/.*"instance_id":"\([^"]*\)".*/\1/p' \
+    "$1" | diff -u - <(cat <<'EXPECTED'
+momentum-x
+momentum-y
+momentum-z
+pressure-corrector-1
+pressure-corrector-2
+EXPECTED
+)
+}
+
 constant_records="${work_root}/diagnostics-constant/diagnostics.v1.rank-000000.step-00000000000000000001.jsonl"
 material_records="${work_root}/diagnostics-material/diagnostics.v1.rank-000000.step-00000000000000000001.jsonl"
 ideal_records="${work_root}/diagnostics-ideal_gas/diagnostics.v1.rank-000000.step-00000000000000000001.jsonl"
@@ -117,12 +139,109 @@ for records in "${constant_records}" "${material_records}" "${ideal_records}"; d
   done
 done
 
+for records in "${constant_records}" "${material_records}" "${ideal_records}"; do
+  test "$(grep -Fc '"module_id":"hundun.linear.solve"' "${records}")" -eq 5
+  require_solve_instances "${records}"
+done
+
 require_module_once "${constant_records}" hundun.flow.constant_density_piso
 require_module_once \
   "${material_records}" hundun.flow.fixed_step_material_density
 require_module_once \
   "${ideal_records}" hundun.flow.fixed_step_material_density
 require_module_once "${ideal_records}" flow.ideal-gas-closure
+
+module_sequence "${constant_records}" | diff -u - <(cat <<'EXPECTED'
+hundun.runtime.mpi_context
+hundun.runtime.structured_decomposition
+hundun.runtime.field_layout
+hundun.runtime.halo
+hundun.mesh.topology
+hundun.mesh.geometry
+hundun.execution.context
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.finite_volume.shared_flux
+hundun.boundary.registry
+hundun.flow.constant_density_piso
+hundun.application.flow_driver
+hundun.flow.bdf2-retry-controller
+EXPECTED
+)
+module_sequence "${material_records}" | diff -u - <(cat <<'EXPECTED'
+hundun.runtime.mpi_context
+hundun.runtime.structured_decomposition
+hundun.runtime.field_layout
+hundun.runtime.halo
+hundun.mesh.topology
+hundun.mesh.geometry
+hundun.execution.context
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.finite_volume.shared_flux
+hundun.boundary.registry
+hundun.application.flow_driver
+hundun.flow.fixed_step_material_density
+hundun.flow.bdf2-retry-controller
+EXPECTED
+)
+module_sequence "${ideal_records}" | diff -u - <(cat <<'EXPECTED'
+hundun.runtime.mpi_context
+hundun.runtime.structured_decomposition
+hundun.runtime.field_layout
+hundun.runtime.halo
+hundun.mesh.topology
+hundun.mesh.geometry
+hundun.execution.context
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.linear.solve
+hundun.finite_volume.shared_flux
+hundun.boundary.registry
+hundun.application.flow_driver
+hundun.flow.fixed_step_material_density
+flow.ideal-gas-closure
+hundun.flow.bdf2-retry-controller
+EXPECTED
+)
+
+sed -e 's/"write_interval":1,"write_mesh":true/"write_interval":10,"write_mesh":false/' \
+  -e 's/checkpoint-constant/checkpoint-null-session/' \
+  -e 's/diagnostics-constant/diagnostics-null-session/' \
+  "${work_root}/constant.json" >"${work_root}/null-session.json"
+"${mpiexec}" -n "${ranks}" "${hundun}" "${work_root}/null-session.json" \
+  >"${work_root}/null-session.stdout" 2>"${work_root}/null-session.stderr"
+test ! -s "${work_root}/null-session.stderr"
+test ! -e "${work_root}/diagnostics-null-session"
+
+sed -e 's/"write_interval":1,"write_mesh"/"write_interval":10,"write_mesh"/' \
+  -e 's/checkpoint-constant/checkpoint-not-due/' \
+  -e 's/diagnostics-constant/diagnostics-not-due/' \
+  "${work_root}/constant.json" >"${work_root}/not-due.json"
+"${mpiexec}" -n "${ranks}" "${hundun}" "${work_root}/not-due.json" \
+  >"${work_root}/not-due.stdout" 2>"${work_root}/not-due.stderr"
+test ! -s "${work_root}/not-due.stderr"
+test -f "${work_root}/diagnostics-not-due/meshdiag.v2.rank-000000.bin"
+test ! -e \
+  "${work_root}/diagnostics-not-due/diagnostics.v1.rank-000000.step-00000000000000000001.jsonl"
+
+if "${mpiexec}" -n "${ranks}" sh -c \
+    'exec 1>/dev/full; exec "$1" "$2"' _ "${hundun}" \
+    "${work_root}/null-session.json" \
+    2>"${work_root}/stdout-failure.stderr"; then
+  echo "root output failure unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq 'unable to write Stage 2 output' \
+  "${work_root}/stdout-failure.stderr"
 
 sed -e 's/"enabled":false/"enabled":true/' \
   -e 's/checkpoint-constant/checkpoint-performance-reject/' \

@@ -32,32 +32,74 @@ constexpr std::uint32_t kEndian = 0x01020304U;
   throw runtime::Error("meshdiag v2: " + std::move(message));
 }
 
-std::uint64_t stable_path_hash(std::string_view value) noexcept {
-  std::uint64_t result = 1469598103934665603ULL;
-  for (char raw : value) {
-    result ^= static_cast<unsigned char>(raw);
-    result *= 1099511628211ULL;
-  }
-  return result;
+std::uint64_t checked_add(std::uint64_t left, std::uint64_t right,
+                          std::string_view subject) {
+  if (left > std::numeric_limits<std::uint64_t>::max() - right)
+    fail(std::string(subject) + " addition overflows u64");
+  return left + right;
+}
+
+std::uint64_t checked_multiply(std::uint64_t left, std::uint64_t right,
+                               std::string_view subject) {
+  if (right != 0U &&
+      left > std::numeric_limits<std::uint64_t>::max() / right)
+    fail(std::string(subject) + " multiplication overflows u64");
+  return left * right;
 }
 
 void require_directory_agreement(const runtime::MpiContext& mpi,
                                  const std::filesystem::path& directory) {
-  const auto text = directory.lexically_normal().generic_string();
-  const std::array<std::uint64_t, 2> local{
-      static_cast<std::uint64_t>(text.size()), stable_path_hash(text)};
-  std::array<std::uint64_t, 2> minimum = local;
-  std::array<std::uint64_t, 2> maximum = local;
+  std::string text;
+  bool local_ok = true;
+  std::string message;
+  try {
+    auto resolved =
+        std::filesystem::absolute(directory).lexically_normal();
+    if (resolved.filename().empty() &&
+        resolved.parent_path() != resolved)
+      resolved = resolved.parent_path();
+    text = resolved.generic_string();
+  } catch (const std::exception& error) {
+    local_ok = false;
+    message = error.what();
+  }
+  auto status = runtime::collective_status(
+      mpi, local_ok,
+      message.empty() ? "unable to resolve meshdiag output path" : message);
+  if (!status.ok)
+    fail(status.message);
+  std::uint64_t root_size =
+      mpi.rank() == 0 ? static_cast<std::uint64_t>(text.size()) : 0U;
   runtime::check_mpi_result(
-      MPI_Allreduce(local.data(), minimum.data(), 2, MPI_UINT64_T, MPI_MIN,
-                    mpi.comm()),
-      "MPI_Allreduce meshdiag directory minimum");
+      MPI_Bcast(&root_size, 1, MPI_UINT64_T, 0, mpi.comm()),
+      "MPI_Bcast meshdiag directory size");
+  local_ok =
+      root_size <= static_cast<std::uint64_t>(
+                       std::numeric_limits<std::size_t>::max()) &&
+      root_size <= static_cast<std::uint64_t>(
+                       std::numeric_limits<int>::max());
+  std::string root;
+  if (local_ok) {
+    try {
+      root.resize(static_cast<std::size_t>(root_size));
+    } catch (...) {
+      local_ok = false;
+    }
+  }
+  status = runtime::collective_status(
+      mpi, local_ok, "unable to compare meshdiag output paths");
+  if (!status.ok)
+    fail(status.message);
+  if (mpi.rank() == 0)
+    std::copy(text.begin(), text.end(), root.begin());
   runtime::check_mpi_result(
-      MPI_Allreduce(local.data(), maximum.data(), 2, MPI_UINT64_T, MPI_MAX,
-                    mpi.comm()),
-      "MPI_Allreduce meshdiag directory maximum");
-  if (minimum != maximum)
-    fail("output directory differs across ranks");
+      MPI_Bcast(root.data(), static_cast<int>(root_size), MPI_BYTE, 0,
+                mpi.comm()),
+      "MPI_Bcast meshdiag directory bytes");
+  status = runtime::collective_status(
+      mpi, text == root, "meshdiag output directory differs across ranks");
+  if (!status.ok)
+    fail(status.message);
 }
 
 template <class Unsigned>
@@ -112,10 +154,153 @@ std::uint64_t global_cell_id(runtime::Int3 extent,
     fail("logical cell is outside the mesh");
   const auto nx = static_cast<std::uint64_t>(extent.x);
   const auto ny = static_cast<std::uint64_t>(extent.y);
-  return (static_cast<std::uint64_t>(cell.z) * ny +
-          static_cast<std::uint64_t>(cell.y)) *
-             nx +
-         static_cast<std::uint64_t>(cell.x);
+  const auto row = checked_add(
+      checked_multiply(static_cast<std::uint64_t>(cell.z), ny,
+                       "global cell ID"),
+      static_cast<std::uint64_t>(cell.y), "global cell ID");
+  return checked_add(checked_multiply(row, nx, "global cell ID"),
+                     static_cast<std::uint64_t>(cell.x),
+                     "global cell ID");
+}
+
+std::uint64_t global_face_id(runtime::Int3 extent, mesh::FaceAxis axis,
+                             runtime::Int3 logical) {
+  const auto nx = static_cast<std::uint64_t>(extent.x);
+  const auto ny = static_cast<std::uint64_t>(extent.y);
+  const auto nz = static_cast<std::uint64_t>(extent.z);
+  const auto x_count = checked_multiply(
+      checked_multiply(checked_add(nx, 1U, "x face extent"), ny,
+                       "x face count"),
+      nz, "x face count");
+  const auto y_count = checked_multiply(
+      checked_multiply(nx, checked_add(ny, 1U, "y face extent"),
+                       "y face count"),
+      nz, "y face count");
+  const auto i = static_cast<std::uint64_t>(logical.x);
+  const auto j = static_cast<std::uint64_t>(logical.y);
+  const auto k = static_cast<std::uint64_t>(logical.z);
+  if (axis == mesh::FaceAxis::x) {
+    if (logical.x < 0 || logical.x > extent.x || logical.y < 0 ||
+        logical.y >= extent.y || logical.z < 0 || logical.z >= extent.z)
+      fail("x face logical coordinate is invalid");
+    const auto row =
+        checked_add(checked_multiply(k, ny, "x face ID"), j, "x face ID");
+    return checked_add(
+        checked_multiply(row, checked_add(nx, 1U, "x face extent"),
+                         "x face ID"),
+        i, "x face ID");
+  }
+  if (axis == mesh::FaceAxis::y) {
+    if (logical.x < 0 || logical.x >= extent.x || logical.y < 0 ||
+        logical.y > extent.y || logical.z < 0 || logical.z >= extent.z)
+      fail("y face logical coordinate is invalid");
+    const auto row = checked_add(
+        checked_multiply(k, checked_add(ny, 1U, "y face extent"),
+                         "y face ID"),
+        j, "y face ID");
+    return checked_add(
+        x_count,
+        checked_add(checked_multiply(row, nx, "y face ID"), i,
+                    "y face ID"),
+        "y face ID");
+  }
+  if (axis == mesh::FaceAxis::z) {
+    if (logical.x < 0 || logical.x >= extent.x || logical.y < 0 ||
+        logical.y >= extent.y || logical.z < 0 || logical.z > extent.z)
+      fail("z face logical coordinate is invalid");
+    const auto row =
+        checked_add(checked_multiply(k, ny, "z face ID"), j, "z face ID");
+    const auto local =
+        checked_add(checked_multiply(row, nx, "z face ID"), i, "z face ID");
+    return checked_add(checked_add(x_count, y_count, "z face offset"), local,
+                       "z face ID");
+  }
+  fail("face axis is invalid");
+}
+
+bool contains(runtime::Box3 box, runtime::Int3 cell) noexcept {
+  return cell.x >= box.begin.x && cell.x < box.end.x &&
+         cell.y >= box.begin.y && cell.y < box.end.y &&
+         cell.z >= box.begin.z && cell.z < box.end.z;
+}
+
+struct ExpectedFace final {
+  std::uint64_t global_id{};
+  mesh::FaceAxis axis{};
+  runtime::Int3 logical{};
+  std::uint64_t owner{};
+  std::optional<std::uint64_t> neighbour;
+  std::optional<std::uint32_t> patch;
+  std::optional<std::uint64_t> periodic_pair;
+};
+
+ExpectedFace expected_face(runtime::Int3 extent, runtime::Box3 owned_box,
+                           const std::array<bool, 3>& periodic,
+                           mesh::FaceAxis axis, runtime::Int3 logical) {
+  static_cast<void>(global_face_id(extent, axis, logical));
+  runtime::Int3 lower = logical;
+  runtime::Int3 upper = logical;
+  int plane{};
+  int cells{};
+  std::size_t axis_index{};
+  if (axis == mesh::FaceAxis::x) {
+    --lower.x;
+    plane = logical.x;
+    cells = extent.x;
+    axis_index = 0U;
+  } else if (axis == mesh::FaceAxis::y) {
+    --lower.y;
+    plane = logical.y;
+    cells = extent.y;
+    axis_index = 1U;
+  } else {
+    --lower.z;
+    plane = logical.z;
+    cells = extent.z;
+    axis_index = 2U;
+  }
+  runtime::Int3 owner =
+      plane == 0 ? upper : lower;
+  std::optional<runtime::Int3> neighbour;
+  if (plane > 0 && plane < cells) {
+    neighbour = upper;
+  } else if (periodic[axis_index]) {
+    neighbour = owner;
+    if (axis == mesh::FaceAxis::x)
+      neighbour->x = plane == 0 ? extent.x - 1 : 0;
+    else if (axis == mesh::FaceAxis::y)
+      neighbour->y = plane == 0 ? extent.y - 1 : 0;
+    else
+      neighbour->z = plane == 0 ? extent.z - 1 : 0;
+  }
+  std::optional<std::uint32_t> patch;
+  if (plane == 0)
+    patch = static_cast<std::uint32_t>(2U * axis_index);
+  else if (plane == cells)
+    patch = static_cast<std::uint32_t>(2U * axis_index + 1U);
+  std::optional<std::uint64_t> pair;
+  if (patch && periodic[axis_index]) {
+    auto opposite = logical;
+    if (axis == mesh::FaceAxis::x)
+      opposite.x = plane == 0 ? extent.x : 0;
+    else if (axis == mesh::FaceAxis::y)
+      opposite.y = plane == 0 ? extent.y : 0;
+    else
+      opposite.z = plane == 0 ? extent.z : 0;
+    pair = global_face_id(extent, axis, opposite);
+  }
+  ExpectedFace result{global_face_id(extent, axis, logical),
+                      axis,
+                      logical,
+                      global_cell_id(extent, owner),
+                      std::nullopt,
+                      patch,
+                      pair};
+  if (neighbour)
+    result.neighbour = global_cell_id(extent, *neighbour);
+  if (!contains(owned_box, owner))
+    result.global_id = std::numeric_limits<std::uint64_t>::max();
+  return result;
 }
 
 bool patch_matches_logical_face(std::uint32_t patch,
@@ -249,6 +434,36 @@ void validate(const MeshDiagnosticV2& value) {
 
   std::uint64_t reciprocal_checks{};
   std::uint64_t reciprocal_failures{};
+  std::array<bool, 3> periodic{};
+  for (const auto& face : value.faces) {
+    if (face.axis != mesh::FaceAxis::x &&
+        face.axis != mesh::FaceAxis::y &&
+        face.axis != mesh::FaceAxis::z)
+      fail("face axis is invalid");
+    if (face.periodic_pair)
+      periodic[static_cast<std::size_t>(face.axis)] = true;
+  }
+  std::map<std::uint64_t, ExpectedFace> expected_faces;
+  const auto add_expected = [&](mesh::FaceAxis axis,
+                                runtime::Int3 logical) {
+    const auto expected = expected_face(value.global_extent, value.owned_box,
+                                        periodic, axis, logical);
+    if (expected.global_id != std::numeric_limits<std::uint64_t>::max())
+      expected_faces.emplace(expected.global_id, expected);
+  };
+  for (int z = value.owned_box.begin.z; z < value.owned_box.end.z; ++z)
+    for (int y = value.owned_box.begin.y; y < value.owned_box.end.y; ++y)
+      for (int x = value.owned_box.begin.x; x < value.owned_box.end.x; ++x) {
+        add_expected(mesh::FaceAxis::x, {x, y, z});
+        add_expected(mesh::FaceAxis::x, {x + 1, y, z});
+        add_expected(mesh::FaceAxis::y, {x, y, z});
+        add_expected(mesh::FaceAxis::y, {x, y + 1, z});
+        add_expected(mesh::FaceAxis::z, {x, y, z});
+        add_expected(mesh::FaceAxis::z, {x, y, z + 1});
+      }
+  if (value.faces.size() != expected_faces.size())
+    fail("face table does not match the complete owned face set");
+
   std::map<std::uint64_t, runtime::Int3> referenced_vertices;
   for (int z = value.owned_box.begin.z; z <= value.owned_box.end.z; ++z)
     for (int y = value.owned_box.begin.y; y <= value.owned_box.end.y; ++y)
@@ -260,10 +475,12 @@ void validate(const MeshDiagnosticV2& value) {
       }
   first = true;
   previous = 0U;
-  const std::uint64_t global_cells =
-      static_cast<std::uint64_t>(value.global_extent.x) *
-      static_cast<std::uint64_t>(value.global_extent.y) *
-      static_cast<std::uint64_t>(value.global_extent.z);
+  const std::uint64_t global_cells = checked_multiply(
+      checked_multiply(static_cast<std::uint64_t>(value.global_extent.x),
+                       static_cast<std::uint64_t>(value.global_extent.y),
+                       "global cell count"),
+      static_cast<std::uint64_t>(value.global_extent.z),
+      "global cell count");
   for (const auto& face : value.faces) {
     if ((!first && face.global_id <= previous) ||
         (face.axis != mesh::FaceAxis::x &&
@@ -287,6 +504,19 @@ void validate(const MeshDiagnosticV2& value) {
          !face.periodic_pair.has_value()) ||
         (face.periodic_pair.has_value() && !face.patch_id.has_value()))
       fail("face table is invalid");
+    const auto expected = expected_faces.find(face.global_id);
+    if (expected == expected_faces.end() ||
+        face.global_id !=
+            global_face_id(value.global_extent, face.axis, face.logical) ||
+        expected->second.axis != face.axis ||
+        expected->second.logical.x != face.logical.x ||
+        expected->second.logical.y != face.logical.y ||
+        expected->second.logical.z != face.logical.z ||
+        expected->second.owner != face.owner_global_cell ||
+        expected->second.neighbour != face.neighbour_global_cell ||
+        expected->second.patch != face.patch_id ||
+        expected->second.periodic_pair != face.periodic_pair)
+      fail("face logical topology is invalid");
     if (face.patch_id &&
         !patch_matches_logical_face(*face.patch_id, face,
                                     value.global_extent))
@@ -299,12 +529,13 @@ void validate(const MeshDiagnosticV2& value) {
       fail("face area differs from area-vector norm");
     const auto logical_vertices = face_vertices(face.axis, face.logical);
     for (std::size_t corner = 0; corner < logical_vertices.size(); ++corner) {
-      const auto expected = mesh_diagnostic_global_vertex_id(
+      const auto expected_vertex = mesh_diagnostic_global_vertex_id(
           value.global_extent, logical_vertices[corner]);
-      if (face.vertex_ids[corner] != expected ||
-          vertices.find(expected) == vertices.end())
+      if (face.vertex_ids[corner] != expected_vertex ||
+          vertices.find(expected_vertex) == vertices.end())
         fail("face vertex ordering is invalid");
-      referenced_vertices.emplace(expected, logical_vertices[corner]);
+      referenced_vertices.emplace(expected_vertex,
+                                  logical_vertices[corner]);
     }
     if (face.neighbour_area_vector_m2) {
       ++reciprocal_checks;
@@ -319,6 +550,16 @@ void validate(const MeshDiagnosticV2& value) {
   if (reciprocal_checks != value.reciprocal_check_count ||
       reciprocal_failures != value.reciprocal_failure_count)
     fail("face reciprocity summary differs from records");
+  if (reciprocal_failures != 0U)
+    fail("face reciprocity check failed");
+  double maximum_area{};
+  for (const auto& face : value.faces)
+    maximum_area = std::max(maximum_area, face.area_m2);
+  const double closure_limit =
+      256.0 * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, 6.0 * maximum_area);
+  if (value.maximum_cell_closure_norm > closure_limit)
+    fail("cell closure exceeds the accepted geometry tolerance");
   const bool same_vertices =
       vertices.size() == referenced_vertices.size() &&
       std::equal(vertices.begin(), vertices.end(), referenced_vertices.begin(),
@@ -441,11 +682,11 @@ std::uint64_t mesh_diagnostic_global_vertex_id(
   const auto x = static_cast<std::uint64_t>(vertex.x);
   const auto y = static_cast<std::uint64_t>(vertex.y);
   const auto z = static_cast<std::uint64_t>(vertex.z);
-  if (z > (std::numeric_limits<std::uint64_t>::max() / ny) ||
-      z * ny + y >
-          (std::numeric_limits<std::uint64_t>::max() / nx))
-    fail("global vertex id overflows u64");
-  return (z * ny + y) * nx + x;
+  const auto row = checked_add(
+      checked_multiply(z, ny, "global vertex ID"), y,
+      "global vertex ID");
+  return checked_add(checked_multiply(row, nx, "global vertex ID"), x,
+                     "global vertex ID");
 }
 
 MeshDiagnosticV2 make_mesh_diagnostic_v2(

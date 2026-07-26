@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -127,6 +129,76 @@ hundun::diagnostics::MeshDiagnosticV2 fixture() {
        1.0,
        0.0,
        0.0},
+      {1,
+       mesh::FaceAxis::x,
+       {1, 0, 0},
+       0,
+       std::nullopt,
+       1U,
+       std::nullopt,
+       {1, 3, 7, 5},
+       {1.0, 0.5, 0.5},
+       {1.0, 0.0, 0.0},
+       std::nullopt,
+       1.0,
+       0.0,
+       0.0},
+      {2,
+       mesh::FaceAxis::y,
+       {0, 0, 0},
+       0,
+       std::nullopt,
+       2U,
+       std::nullopt,
+       {0, 4, 5, 1},
+       {0.5, 0.0, 0.5},
+       {0.0, -1.0, 0.0},
+       std::nullopt,
+       1.0,
+       0.0,
+       0.0},
+      {3,
+       mesh::FaceAxis::y,
+       {0, 1, 0},
+       0,
+       std::nullopt,
+       3U,
+       std::nullopt,
+       {2, 6, 7, 3},
+       {0.5, 1.0, 0.5},
+       {0.0, 1.0, 0.0},
+       std::nullopt,
+       1.0,
+       0.0,
+       0.0},
+      {4,
+       mesh::FaceAxis::z,
+       {0, 0, 0},
+       0,
+       std::nullopt,
+       4U,
+       std::nullopt,
+       {0, 1, 3, 2},
+       {0.5, 0.5, 0.0},
+       {0.0, 0.0, -1.0},
+       std::nullopt,
+       1.0,
+       0.0,
+       0.0},
+      {5,
+       mesh::FaceAxis::z,
+       {0, 0, 1},
+       0,
+       std::nullopt,
+       5U,
+       std::nullopt,
+       {4, 5, 7, 6},
+       {0.5, 0.5, 1.0},
+       {0.0, 0.0, 1.0},
+       std::nullopt,
+       1.0,
+       0.0,
+       0.0},
   };
   value.owned_volume_sum = 1.0;
   value.maximum_cell_closure_norm = 0.0;
@@ -185,6 +257,18 @@ int main() {
     auto changed = decoded;
     changed.cells.front().volume_m3 = 2.0;
     HUNDUN_CHECK(!exact(decoded, changed));
+    auto nested_changed = decoded;
+    nested_changed.faces.front().vertex_ids[0] =
+        nested_changed.faces.front().vertex_ids[1];
+    HUNDUN_CHECK(!exact(decoded, nested_changed));
+
+    const std::string_view crc_reference = "123456789";
+    std::vector<std::byte> crc_reference_bytes;
+    for (const char byte : crc_reference)
+      crc_reference_bytes.push_back(
+          static_cast<std::byte>(static_cast<unsigned char>(byte)));
+    HUNDUN_CHECK(crc64(crc_reference_bytes, crc_reference_bytes.size()) ==
+                 UINT64_C(0x6c40df5f0b497347));
 
     auto corrupted = bytes;
     corrupted.back() ^= std::byte{1};
@@ -192,12 +276,15 @@ int main() {
       static_cast<void>(
           hundun::diagnostics::decode_mesh_diagnostic_v2(corrupted));
     }));
-    auto truncated = bytes;
-    truncated.pop_back();
-    HUNDUN_CHECK(rejects([&] {
-      static_cast<void>(
-          hundun::diagnostics::decode_mesh_diagnostic_v2(truncated));
-    }));
+    for (std::size_t size = 0; size < bytes.size(); ++size) {
+      std::vector<std::byte> truncated(
+          bytes.begin(),
+          bytes.begin() + static_cast<std::ptrdiff_t>(size));
+      HUNDUN_CHECK(rejects([&] {
+        static_cast<void>(
+            hundun::diagnostics::decode_mesh_diagnostic_v2(truncated));
+      }));
+    }
     auto trailing = bytes;
     trailing.push_back(std::byte{0});
     HUNDUN_CHECK(rejects([&] {
@@ -241,10 +328,59 @@ int main() {
           hundun::diagnostics::encode_mesh_diagnostic_v2(wrong_patch));
     }));
     auto wrong_owner = value;
+    wrong_owner.global_extent = {2, 1, 1};
+    wrong_owner.owned_box = {{0, 0, 0}, {1, 1, 1}};
     wrong_owner.faces.front().owner_global_cell = 1U;
     HUNDUN_CHECK(rejects([&] {
       static_cast<void>(
           hundun::diagnostics::encode_mesh_diagnostic_v2(wrong_owner));
+    }));
+    auto wrong_neighbour = value;
+    wrong_neighbour.faces.front().neighbour_global_cell = 0U;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(wrong_neighbour));
+    }));
+    auto wrong_face_id = value;
+    wrong_face_id.faces.front().global_id = 5U;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(wrong_face_id));
+    }));
+    auto nonzero_reciprocal_failure = value;
+    nonzero_reciprocal_failure.reciprocal_failure_count = 1U;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(hundun::diagnostics::encode_mesh_diagnostic_v2(
+          nonzero_reciprocal_failure));
+    }));
+    auto invalid_closure = value;
+    invalid_closure.cells.front().closure_m2 = {1.0, 0.0, 0.0};
+    invalid_closure.maximum_cell_closure_norm = 1.0;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(invalid_closure));
+    }));
+    auto missing_face = value;
+    missing_face.faces.pop_back();
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(missing_face));
+    }));
+    auto extra_face = value;
+    extra_face.faces.push_back(extra_face.faces.back());
+    extra_face.faces.back().global_id = 6U;
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(
+          hundun::diagnostics::encode_mesh_diagnostic_v2(extra_face));
+    }));
+    HUNDUN_CHECK(rejects([&] {
+      static_cast<void>(hundun::diagnostics::mesh_diagnostic_global_vertex_id(
+          {std::numeric_limits<int>::max(),
+           std::numeric_limits<int>::max(),
+           std::numeric_limits<int>::max()},
+          {std::numeric_limits<int>::max(),
+           std::numeric_limits<int>::max(),
+           std::numeric_limits<int>::max()}));
     }));
 
     const auto directory = std::filesystem::temp_directory_path() /

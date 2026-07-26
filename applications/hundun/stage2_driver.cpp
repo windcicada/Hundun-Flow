@@ -335,6 +335,13 @@ void ensure_directory(const MpiContext& mpi,
     throw Error(status.message);
 }
 
+void require_collective_success(const MpiContext& mpi, bool local_ok,
+                                std::string_view message) {
+  const auto status = runtime::collective_status(mpi, local_ok, message);
+  if (!status.ok)
+    throw Error(status.message);
+}
+
 template <class Source>
 void append_summary(const Source& source, std::uint64_t step, double time_s,
                     int rank, std::string_view phase, DiagnosticBatch& batch) {
@@ -348,15 +355,33 @@ void append_summary(const Source& source, std::uint64_t step, double time_s,
   diagnostics::collect_diagnostics(source, request, sink);
 }
 
-void append_static_diagnostics(
+diagnostics::FieldLayoutDiagnosticSource field_layout_source(
+    const DeclaredFields& fields,
+    const runtime::StructuredDecomposition& decomposition,
+    const mesh::MeshTopology& topology) {
+  diagnostics::FieldLayoutDiagnosticSource source{
+      &fields.registry,
+      {local_extent(decomposition), topology.local_face_count()},
+      {{"density", fields.ids.density},
+       {"velocity", fields.ids.velocity},
+       {"mechanical-pressure", fields.ids.mechanical_pressure},
+       {"face-velocity", fields.ids.face_velocity},
+       {"face-mass-flux", fields.ids.face_mass_flux}}};
+  for (std::size_t field = 0;
+       field < fields.ids.transported_cell_fields.size(); ++field)
+    source.roles.push_back(
+        {"transported." + std::to_string(field),
+         fields.ids.transported_cell_fields[field]});
+  return source;
+}
+
+void append_static_prefix_diagnostics(
     const MpiContext& mpi,
     const runtime::StructuredDecomposition& decomposition,
     const diagnostics::FieldLayoutDiagnosticSource& field_layout,
     const runtime::ExchangePlan& exchange_plan,
     const mesh::MeshTopology& topology, const mesh::MeshGeometry& geometry,
     const execution::ExecutionContext& execution,
-    const boundary::BoundaryRegistry& boundaries,
-    const diagnostics::SharedFluxDiagnosticSource& shared_flux,
     std::uint64_t step, double time_s,
     DiagnosticBatch& batch) {
   append_summary(mpi, step, time_s, mpi.rank(), "accepted-step", batch);
@@ -369,9 +394,46 @@ void append_static_diagnostics(
   append_summary(topology, step, time_s, mpi.rank(), "accepted-step", batch);
   append_summary(geometry, step, time_s, mpi.rank(), "accepted-step", batch);
   append_summary(execution, step, time_s, mpi.rank(), "accepted-step", batch);
+}
+
+void append_static_suffix_diagnostics(
+    const MpiContext& mpi, const boundary::BoundaryRegistry& boundaries,
+    const diagnostics::SharedFluxDiagnosticSource& shared_flux,
+    std::uint64_t step, double time_s, DiagnosticBatch& batch) {
   append_summary(shared_flux, step, time_s, mpi.rank(), "accepted-step",
                  batch);
   append_summary(boundaries, step, time_s, mpi.rank(), "accepted-step", batch);
+}
+
+const flow::StepAttemptReport& base_flow_report(
+    const flow::DensityStepAttemptReport& report) {
+  if (const auto* constant = std::get_if<flow::StepAttemptReport>(&report))
+    return *constant;
+  if (const auto* material =
+          std::get_if<flow::MaterialDensityStepAttemptReport>(&report))
+    return material->flow();
+  return std::get<flow::IdealGasStepAttemptReport>(report).flow().flow();
+}
+
+void append_linear_solve_diagnostics(const flow::StepAttemptReport& report,
+                                     std::uint64_t step, double time_s,
+                                     int rank, DiagnosticBatch& batch) {
+  constexpr std::array<std::string_view, 3> momentum_ids{
+      "momentum-x", "momentum-y", "momentum-z"};
+  for (std::size_t component = 0; component < momentum_ids.size();
+       ++component)
+    append_summary(
+        diagnostics::LinearSolveDiagnosticSource{
+            momentum_ids[component], &report.momentum.components[component]},
+        step, time_s, rank, "accepted-step", batch);
+  constexpr std::array<std::string_view, 2> pressure_ids{
+      "pressure-corrector-1", "pressure-corrector-2"};
+  for (std::size_t corrector = 0; corrector < pressure_ids.size();
+       ++corrector)
+    append_summary(
+        diagnostics::LinearSolveDiagnosticSource{
+            pressure_ids[corrector], &report.pressure[corrector]},
+        step, time_s, rank, "accepted-step", batch);
 }
 
 template <class AdvanceReport>
@@ -398,35 +460,62 @@ closure_state_for_checkpoint(const flow::FixedStepIdealGasFlow& value) {
 
 void print_start(const config::FlowCaseConfig& config,
                  const MpiContext& mpi) {
-  if (mpi.rank() != 0)
-    return;
-  std::cout << kStage2Banner << '\n'
-            << "CASE name=" << config.case_name << " ranks=" << mpi.size()
-            << " cells=" << config.mesh.cells.x << 'x' << config.mesh.cells.y
-            << 'x' << config.mesh.cells.z
-            << " density_model=" << density_model_name(config.density_model)
-            << '\n';
+  bool local_ok = true;
+  if (mpi.rank() == 0) {
+    std::cout << kStage2Banner << '\n'
+              << "CASE name=" << config.case_name << " ranks=" << mpi.size()
+              << " cells=" << config.mesh.cells.x << 'x'
+              << config.mesh.cells.y << 'x' << config.mesh.cells.z
+              << " density_model="
+              << density_model_name(config.density_model) << '\n';
+    std::cout.flush();
+    local_ok = static_cast<bool>(std::cout);
+  }
+  require_collective_success(mpi, local_ok,
+                             "unable to write Stage 2 output");
 }
 
 void print_step(const flow::FlowState& state, std::size_t attempts,
                 const MpiContext& mpi) {
-  if (mpi.rank() != 0)
-    return;
-  const auto metadata = state.metadata();
-  std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
-            << "STEP " << metadata.step << " time_s=" << metadata.time_s
-            << " dt_s=" << metadata.dt_s << " attempts=" << attempts << '\n';
+  bool local_ok = true;
+  if (mpi.rank() == 0) {
+    const auto metadata = state.metadata();
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
+              << "STEP " << metadata.step << " time_s=" << metadata.time_s
+              << " dt_s=" << metadata.dt_s << " attempts=" << attempts
+              << '\n';
+    std::cout.flush();
+    local_ok = static_cast<bool>(std::cout);
+  }
+  require_collective_success(mpi, local_ok,
+                             "unable to write Stage 2 output");
 }
 
 void print_finished(const flow::FlowState& state, const MpiContext& mpi) {
-  if (mpi.rank() != 0)
-    return;
-  std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
-            << "FINISHED step=" << state.metadata().step
-            << " time_s=" << state.metadata().time_s << '\n';
-  std::cout.flush();
-  if (!std::cout)
-    throw Error("unable to write Stage 2 output");
+  bool local_ok = true;
+  if (mpi.rank() == 0) {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
+              << "FINISHED step=" << state.metadata().step
+              << " time_s=" << state.metadata().time_s << '\n';
+    std::cout.flush();
+    local_ok = static_cast<bool>(std::cout);
+  }
+  require_collective_success(mpi, local_ok,
+                             "unable to write Stage 2 output");
+}
+
+bool has_scheduled_diagnostics(std::uint64_t current_step,
+                               std::uint64_t target_step,
+                               std::uint64_t interval,
+                               bool include_current) noexcept {
+  if (include_current && current_step != 0U &&
+      current_step % interval == 0U)
+    return true;
+  if (current_step >= target_step)
+    return false;
+  const auto first =
+      ((current_step / interval) + 1U) * interval;
+  return first <= target_step;
 }
 
 template <class Flow>
@@ -481,70 +570,91 @@ void run_loop(
     if (diagnostic_session != nullptr &&
         diagnostic_session->due(state.metadata().step)) {
       DiagnosticBatch batch;
-      const auto& final_attempt = advance.final_attempt();
-      const auto reason = advance.reason();
-      diagnostics::FlowDriverDiagnosticSource driver_source{
-          config.density_model,
-          state.metadata().step,
-          state.metadata().time_s,
-          advance.attempt_count(),
-          advance.disposition(),
-          reason,
-          advance.lowest_failing_rank()};
-      append_static_diagnostics(
-          mpi, decomposition,
-          {&fields.registry,
-           {local_extent(decomposition), topology.local_face_count()}},
-          exchange_plan, topology, geometry, execution, boundaries,
-          {fields.ids.face_mass_flux, topology.local_face_count(), true},
-          state.metadata().step, state.metadata().time_s, batch);
-      if constexpr (std::is_same_v<Flow,
-                                   flow::FixedStepConstantDensityFlow>) {
-        const auto& report = std::get<flow::StepAttemptReport>(final_attempt);
-        append_summary(diagnostics::ConstantDensityPisoDiagnosticSource{
-                           &report},
-                       state.metadata().step, state.metadata().time_s,
-                       mpi.rank(), "accepted-step", batch);
-        append_summary(driver_source, state.metadata().step,
-                       state.metadata().time_s, mpi.rank(), "accepted-step",
-                       batch);
-      } else if constexpr (std::is_same_v<
-                               Flow, flow::FixedStepMaterialDensityFlow>) {
-        append_summary(driver_source, state.metadata().step,
-                       state.metadata().time_s, mpi.rank(), "accepted-step",
-                       batch);
-        const auto& report =
-            std::get<flow::MaterialDensityStepAttemptReport>(final_attempt);
-        auto source = flow.diagnostic_source(state, report);
-        append_summary(source, state.metadata().step, state.metadata().time_s,
-                       mpi.rank(), "material-density.attempt-result", batch);
-      } else {
-        append_summary(driver_source, state.metadata().step,
-                       state.metadata().time_s, mpi.rank(), "accepted-step",
-                       batch);
-        const auto& report =
-            std::get<flow::IdealGasStepAttemptReport>(final_attempt);
-        {
-          auto source = flow.flow_diagnostic_source(state, report);
+      bool batch_ok = true;
+      std::string batch_message;
+      try {
+        const auto& final_attempt = advance.final_attempt();
+        const auto& report = base_flow_report(final_attempt);
+        const auto reason = advance.reason();
+        diagnostics::FlowDriverDiagnosticSource driver_source{
+            config.density_model,
+            state.metadata().step,
+            state.metadata().time_s,
+            advance.attempt_count(),
+            advance.disposition(),
+            reason,
+            advance.lowest_failing_rank()};
+        auto field_layout =
+            field_layout_source(fields, decomposition, topology);
+        append_static_prefix_diagnostics(
+            mpi, decomposition, field_layout, exchange_plan, topology,
+            geometry, execution, state.metadata().step,
+            state.metadata().time_s, batch);
+        append_linear_solve_diagnostics(
+            report, state.metadata().step, state.metadata().time_s,
+            mpi.rank(), batch);
+        append_static_suffix_diagnostics(
+            mpi, boundaries,
+            {fields.ids.face_mass_flux, topology.local_face_count(), true},
+            state.metadata().step, state.metadata().time_s, batch);
+        if constexpr (std::is_same_v<
+                          Flow, flow::FixedStepConstantDensityFlow>) {
+          append_summary(
+              diagnostics::ConstantDensityPisoDiagnosticSource{&report},
+              state.metadata().step, state.metadata().time_s, mpi.rank(),
+              "accepted-step", batch);
+          append_summary(driver_source, state.metadata().step,
+                         state.metadata().time_s, mpi.rank(), "accepted-step",
+                         batch);
+        } else if constexpr (std::is_same_v<
+                                 Flow, flow::FixedStepMaterialDensityFlow>) {
+          append_summary(driver_source, state.metadata().step,
+                         state.metadata().time_s, mpi.rank(), "accepted-step",
+                         batch);
+          const auto& material_report =
+              std::get<flow::MaterialDensityStepAttemptReport>(final_attempt);
+          auto source = flow.diagnostic_source(state, material_report);
           append_summary(source, state.metadata().step,
                          state.metadata().time_s, mpi.rank(),
                          "material-density.attempt-result", batch);
+        } else {
+          const auto& ideal_report =
+              std::get<flow::IdealGasStepAttemptReport>(final_attempt);
+          append_summary(driver_source, state.metadata().step,
+                         state.metadata().time_s, mpi.rank(), "accepted-step",
+                         batch);
+          {
+            auto source =
+                flow.flow_diagnostic_source(state, ideal_report);
+            append_summary(source, state.metadata().step,
+                           state.metadata().time_s, mpi.rank(),
+                           "material-density.attempt-result", batch);
+          }
+          {
+            auto source =
+                flow.closure_diagnostic_source(state, ideal_report);
+            append_summary(source, state.metadata().step,
+                           state.metadata().time_s, mpi.rank(),
+                           "ideal-gas-closure.attempt-result", batch);
+          }
         }
-        {
-          auto source = flow.closure_diagnostic_source(state, report);
-          append_summary(source, state.metadata().step,
-                         state.metadata().time_s, mpi.rank(),
-                         "ideal-gas-closure.attempt-result", batch);
+        append_time_diagnostics(controller, state, advance, mpi.rank(), batch);
+        if (checkpoint_report) {
+          auto source =
+              flow::checkpoint_v2_diagnostic_source(*checkpoint_report);
+          append_summary(
+              source, state.metadata().step, state.metadata().time_s,
+              mpi.rank(), checkpoint_phase(checkpoint_report->phase()),
+              batch);
         }
+      } catch (const std::exception& error) {
+        batch_ok = false;
+        batch_message = error.what();
       }
-      append_time_diagnostics(controller, state, advance, mpi.rank(), batch);
-      if (checkpoint_report) {
-        auto source =
-            flow::checkpoint_v2_diagnostic_source(*checkpoint_report);
-        append_summary(source, state.metadata().step, state.metadata().time_s,
-                       mpi.rank(), checkpoint_phase(checkpoint_report->phase()),
-                       batch);
-      }
+      require_collective_success(
+          mpi, batch_ok,
+          batch_message.empty() ? "unable to construct diagnostic batch"
+                                : batch_message);
       diagnostic_session->publish(mpi, state.metadata().step, batch);
     }
     print_step(state, advance.attempt_count(), mpi);
@@ -556,13 +666,14 @@ void run_loop(
 int run_stage2_case(const CliOptions&, MpiContext& mpi,
                     const config::FlowCaseConfig& config,
                     const std::filesystem::path& authoritative_case_root) {
-  if (config.resources.expected_ranks &&
-      *config.resources.expected_ranks != mpi.size())
-    throw Error("expected MPI rank count " +
-                std::to_string(*config.resources.expected_ranks) + ", got " +
-                std::to_string(mpi.size()));
-  if (config.performance.enabled)
-    throw Error("Stage 2 performance artifacts are unavailable before Task 25");
+  require_collective_success(
+      mpi,
+      !config.resources.expected_ranks ||
+          *config.resources.expected_ranks == mpi.size(),
+      "configured MPI rank count differs from runtime");
+  require_collective_success(
+      mpi, !config.performance.enabled,
+      "Stage 2 performance artifacts are unavailable before Task 25");
 
   auto decomposition = runtime::StructuredDecomposition::create(
       mpi, config.mesh.cells, periodicity(config),
@@ -602,9 +713,8 @@ int run_stage2_case(const CliOptions&, MpiContext& mpi,
 
   auto exchange_plan = runtime::ExchangePlan::create(
       decomposition, local_extent(decomposition), 2);
-  auto halo = runtime::HaloExchange::create(
-      decomposition, runtime::ExchangePlan::create(
-                         decomposition, local_extent(decomposition), 2));
+  auto halo =
+      runtime::HaloExchange::create(decomposition, exchange_plan);
   execution::CpuReferenceContext execution;
   linear::BiCGStabSolver momentum_solver(execution, mpi);
   linear::ConjugateGradientSolver pressure_cg(execution, mpi);
@@ -624,46 +734,85 @@ int run_stage2_case(const CliOptions&, MpiContext& mpi,
                         : flow::Bdf2RetryController::create(
                               config.time, config.density_model, topology,
                               geometry, mpi, state);
-  diagnostics::DiagnosticSession diagnostic_session(
-      beneath(authoritative_case_root, config.diagnostics.directory),
-      config.diagnostics.write_interval, mpi.rank());
+  const auto diagnostics_directory =
+      beneath(authoritative_case_root, config.diagnostics.directory);
+  std::optional<diagnostics::DiagnosticSession> diagnostic_session;
+  const auto target_step =
+      static_cast<std::uint64_t>(config.time.steps);
+  if (config.diagnostics.write_mesh ||
+      has_scheduled_diagnostics(
+          state.metadata().step, target_step,
+          static_cast<std::uint64_t>(
+              config.diagnostics.write_interval),
+          restored.has_value()))
+    diagnostic_session.emplace(
+        diagnostics_directory, config.diagnostics.write_interval,
+        mpi.rank());
   const auto checkpoint_root =
       beneath(authoritative_case_root, config.restart.write_directory);
   ensure_directory(mpi, checkpoint_root);
 
-  if (config.diagnostics.write_mesh)
+  if (config.diagnostics.write_mesh) {
+    std::optional<diagnostics::MeshDiagnosticV2> mesh_record;
+    bool mesh_ok = true;
+    std::string mesh_message;
+    try {
+      mesh_record = diagnostics::make_mesh_diagnostic_v2(
+          mpi.rank(), mpi.size(), topology, geometry);
+    } catch (const std::exception& error) {
+      mesh_ok = false;
+      mesh_message = error.what();
+    }
+    require_collective_success(
+        mpi, mesh_ok,
+        mesh_message.empty() ? "unable to construct mesh diagnostic"
+                             : mesh_message);
     diagnostics::write_mesh_diagnostic_v2(
-        mpi, diagnostic_session.directory(),
-        diagnostics::make_mesh_diagnostic_v2(mpi.rank(), mpi.size(), topology,
-                                             geometry));
+        mpi, diagnostics_directory, *mesh_record);
+  }
 
   print_start(config, mpi);
-  if (restored && diagnostic_session.due(state.metadata().step)) {
+  if (restored && diagnostic_session &&
+      diagnostic_session->due(state.metadata().step)) {
     DiagnosticBatch batch;
-    const diagnostics::FlowDriverDiagnosticSource driver_source{
-        config.density_model,
-        state.metadata().step,
-        state.metadata().time_s,
-        0U,
-        flow::TimeAdvanceDisposition::committed,
-        flow::StepFailureReason::none,
-        -1};
-    append_static_diagnostics(
-        mpi, decomposition,
-        {&fields.registry,
-         {local_extent(decomposition), topology.local_face_count()}},
-        exchange_plan, topology, geometry, execution, boundaries,
-        {fields.ids.face_mass_flux, topology.local_face_count(), true},
-        state.metadata().step, state.metadata().time_s, batch);
-    append_summary(driver_source, state.metadata().step,
-                   state.metadata().time_s, mpi.rank(), "accepted-step",
-                   batch);
-    auto source =
-        flow::checkpoint_v2_diagnostic_source(restored->report());
-    append_summary(source, state.metadata().step, state.metadata().time_s,
-                   mpi.rank(), checkpoint_phase(restored->report().phase()),
-                   batch);
-    diagnostic_session.publish(mpi, state.metadata().step, batch);
+    bool batch_ok = true;
+    std::string batch_message;
+    try {
+      const diagnostics::FlowDriverDiagnosticSource driver_source{
+          config.density_model,
+          state.metadata().step,
+          state.metadata().time_s,
+          0U,
+          flow::TimeAdvanceDisposition::committed,
+          flow::StepFailureReason::none,
+          -1};
+      auto field_layout =
+          field_layout_source(fields, decomposition, topology);
+      append_static_prefix_diagnostics(
+          mpi, decomposition, field_layout, exchange_plan, topology,
+          geometry, execution, state.metadata().step,
+          state.metadata().time_s, batch);
+      append_static_suffix_diagnostics(
+          mpi, boundaries,
+          {fields.ids.face_mass_flux, topology.local_face_count(), true},
+          state.metadata().step, state.metadata().time_s, batch);
+      append_summary(driver_source, state.metadata().step,
+                     state.metadata().time_s, mpi.rank(), "accepted-step",
+                     batch);
+      auto source =
+          flow::checkpoint_v2_diagnostic_source(restored->report());
+      append_summary(source, state.metadata().step,
+                     state.metadata().time_s, mpi.rank(),
+                     checkpoint_phase(restored->report().phase()), batch);
+    } catch (const std::exception& error) {
+      batch_ok = false;
+      batch_message = error.what();
+    }
+    require_collective_success(
+        mpi, batch_ok,
+        batch_message.empty() ? "unable to construct diagnostic batch"
+                              : batch_message);
+    diagnostic_session->publish(mpi, state.metadata().step, batch);
   }
   if (config.density_model == DensityModel::constant) {
     auto facade = flow::FixedStepConstantDensityFlow::create(
@@ -673,7 +822,8 @@ int run_stage2_case(const CliOptions&, MpiContext& mpi,
         constant_transport_specs(fields, config));
     run_loop(config, mpi, decomposition, topology, geometry, boundaries,
              fields, exchange_plan, execution, state, facade, controller,
-             &diagnostic_session, checkpoint_root);
+             diagnostic_session ? &*diagnostic_session : nullptr,
+             checkpoint_root);
   } else if (config.density_model == DensityModel::material) {
     auto facade = flow::FixedStepMaterialDensityFlow::create(
         decomposition, topology, geometry, boundaries, mpi, execution, halo,
@@ -682,7 +832,8 @@ int run_stage2_case(const CliOptions&, MpiContext& mpi,
         material_transport_spec(fields, config));
     run_loop(config, mpi, decomposition, topology, geometry, boundaries,
              fields, exchange_plan, execution, state, facade, controller,
-             &diagnostic_session, checkpoint_root);
+             diagnostic_session ? &*diagnostic_session : nullptr,
+             checkpoint_root);
   } else {
     const flow::IdealGasClosureSpec spec{
         fields.transported.front(),
@@ -704,7 +855,8 @@ int run_stage2_case(const CliOptions&, MpiContext& mpi,
         material_transport_spec(fields, config), std::move(closure));
     run_loop(config, mpi, decomposition, topology, geometry, boundaries,
              fields, exchange_plan, execution, state, facade, controller,
-             &diagnostic_session, checkpoint_root);
+             diagnostic_session ? &*diagnostic_session : nullptr,
+             checkpoint_root);
   }
   print_finished(state, mpi);
   mpi.barrier();

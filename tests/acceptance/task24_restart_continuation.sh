@@ -30,6 +30,41 @@ test -f \
   "${work_root}/checkpoint/step00000000000000000002/COMPLETED"
 cp -a "${work_root}/checkpoint/step00000000000000000002" \
   "${work_root}/continuous-step2"
+
+sed \
+  -e 's|"read":false|"read":true,"read_directory":"missing-checkpoint"|' \
+  -e 's|"write_directory":"checkpoint"|"write_directory":"checkpoint-missing-read"|' \
+  -e 's|"directory":"diagnostics"|"directory":"diagnostics-missing-read"|' \
+  "${work_root}/continuous.json" >"${work_root}/missing-read.json"
+if "${mpiexec}" -n "${ranks}" "${hundun}" \
+    "${work_root}/missing-read.json" \
+    >"${work_root}/missing-read.stdout" \
+    2>"${work_root}/missing-read.stderr"; then
+  echo "missing checkpoint read unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq 'Stage 2 checkpoint read failed' \
+  "${work_root}/missing-read.stderr"
+test ! -e "${work_root}/checkpoint-missing-read"
+
+printf 'not a directory\n' >"${work_root}/blocked-checkpoint"
+sed \
+  -e 's|"write_directory":"checkpoint"|"write_directory":"blocked-checkpoint"|' \
+  -e 's|"directory":"diagnostics"|"directory":"diagnostics-blocked-write"|' \
+  "${work_root}/continuous.json" >"${work_root}/blocked-write.json"
+if "${mpiexec}" -n "${ranks}" "${hundun}" \
+    "${work_root}/blocked-write.json" \
+    >"${work_root}/blocked-write.stdout" \
+    2>"${work_root}/blocked-write.stderr"; then
+  echo "blocked checkpoint write unexpectedly succeeded" >&2
+  exit 1
+fi
+test ! -e "${work_root}/diagnostics-blocked-write"
+if grep -Fq 'FINISHED ' "${work_root}/blocked-write.stdout"; then
+  echo "failed checkpoint write printed FINISHED" >&2
+  exit 1
+fi
+
 rm -rf -- "${work_root}/checkpoint/step00000000000000000002"
 
 sed \
@@ -43,3 +78,8 @@ grep -Fq 'STEP 2 ' "${work_root}/restart.stdout"
 grep -Fq 'FINISHED step=2 ' "${work_root}/restart.stdout"
 diff -r "${work_root}/continuous-step2" \
   "${work_root}/checkpoint/step00000000000000000002"
+
+records="${work_root}/diagnostics/diagnostics.v1.rank-000000.step-00000000000000000002.jsonl"
+test -f "${records}"
+test "$(grep -Fc '"module_id":"checkpoint-v2"' "${records}")" -eq 1
+test "$(tail -n 1 "${records}" | grep -Fc '"module_id":"checkpoint-v2"')" -eq 1
