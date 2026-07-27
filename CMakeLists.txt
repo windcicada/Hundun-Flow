@@ -1750,6 +1750,10 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_cell_centered_fvm PRIVATE
     hundun_finite_volume hundun_options hundun_warnings MPI::MPI_CXX)
+  set(cell_centered_fvm_timeout 300)
+  if(HUNDUN_ENABLE_ASAN)
+    set(cell_centered_fvm_timeout 600)
+  endif()
   foreach(ranks IN ITEMS 1 2 4)
     set(cell_centered_fvm_test "test_cell_centered_fvm_${ranks}_rank")
     add_test(NAME "${cell_centered_fvm_test}"
@@ -1758,7 +1762,7 @@ if(HUNDUN_BUILD_TESTS)
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties("${cell_centered_fvm_test}" PROPERTIES
       LABELS "mpi;numerical;task25"
-      TIMEOUT 300
+      TIMEOUT "${cell_centered_fvm_timeout}"
       PROCESSORS "${ranks}")
   endforeach()
 
