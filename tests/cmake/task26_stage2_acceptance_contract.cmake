@@ -35,70 +35,94 @@ if(NOT bash_syntax_result EQUAL 0)
     "${bash_syntax_stdout}${bash_syntax_stderr}")
 endif()
 
-string(CONCAT script_runtime "py" "thon")
-string(CONCAT package_tool_a "p" "ip")
-string(CONCAT package_tool_a3 "p" "ip3")
-string(CONCAT package_tool_b "con" "da")
-string(CONCAT download_tool_a "cu" "rl")
-string(CONCAT download_tool_b "wg" "et")
+# This final gate is deliberately a frozen artifact, not a shell language
+# classifier. The exact-content guard covers command indirection, redirection
+# and unenumerated external operations that a token denylist cannot classify
+# soundly. The inventory below independently documents every accepted
+# external/read-only command site plus the shell entry/control/output
+# boundaries; each signature must occur exactly once in the accepted bytes.
+# Reviewed shell-language sites are assignments and parameter expansion,
+# functions, if/test/then/else/fi, case/esac, for/do/done, cd, command -v,
+# printf and exit. External sites are dirname, pwd, sed, awk, sort, the one
+# read-only Git query and the CTest registry/run operations named below.
+set(HUNDUN_TASK26_APPROVED_GATE_SHA256
+    "f45b4861a4ac59e9dd9a9d1bbb52efc3d5c5c23e58e218fc4f7394e87bbe9657")
+set(HUNDUN_TASK26_ALLOWED_COMMAND_SITES
+  [=[bash-shebang|#!/usr/bin/env bash]=]
+  [=[shell-strict-mode|set -euo pipefail]=]
+  [=[shell-control-boundary|fail() {]=]
+  [=[bounded-failure-output|printf 'stage2 acceptance: %s\n' "$*" >&2]=]
+  [=[source-path-query|CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P]=]
+  [=[build-path-query|build_root=$(CDPATH= cd -- "${requested_build}" && pwd -P)]=]
+  [=[cache-source-read|cache_source=$(sed -n 's/^HundunFlow_SOURCE_DIR:STATIC=//p' "${cache}")]=]
+  [=[cache-type-read|cache_type=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "${cache}")]=]
+  [=[cache-tests-read|cache_tests=$(sed -n 's/^HUNDUN_BUILD_TESTS:BOOL=//p' "${cache}")]=]
+  [=[build-identity-read|awk '/performance_source_commit[ \t]*=/{getline]=]
+  [=[source-head-read|source_commit=$(git -C "${source_root}" rev-parse HEAD]=]
+  [=[ctest-path-query|command -v "${ctest_command}" >/dev/null 2>&1]=]
+  [=[ctest-registry-query|"${ctest_command}" --test-dir "${build_root}" -N -R "${selection_regex}" 2>&1]=]
+  [=[registry-name-read|  printf '%s\n' "${inventory_output}" |
+    sed -n]=]
+  [=[registry-count-read|  printf '%s\n' "${actual_tests}" |
+    awk]=]
+  [=[expected-name-sort|printf '%s\n' "${required_tests[@]}" | LC_ALL=C sort]=]
+  [=[actual-name-sort|printf '%s\n' "${actual_tests}" | LC_ALL=C sort]=]
+  [=[bounded-inventory-output|printf 'STAGE2_ACCEPTANCE_INVENTORY cardinality=%s\n' "${required_count}"]=]
+  [=[bounded-inventory-names|  printf '%s\n' "${required_tests[@]}"
+  exit 0]=]
+  [=[bounded-run-output|printf 'STAGE2_ACCEPTANCE_RUN cardinality=%s build=%s\n']=]
+  [=[ctest-serial-run|"${ctest_command}" --test-dir "${build_root}" --output-on-failure]=]
+  [=[ctest-serial-limit|-j1 -R "${selection_regex}"]=])
 
-function(hundun_task26_classify_script script_path output_class)
+function(hundun_task26_classify_gate_policy script_path allowed_sites
+         output_class)
+  if(NOT EXISTS "${script_path}")
+    set(${output_class} "missing-file" PARENT_SCOPE)
+    return()
+  endif()
+
+  file(SHA256 "${script_path}" candidate_sha256)
+  if(NOT candidate_sha256 STREQUAL HUNDUN_TASK26_APPROVED_GATE_SHA256)
+    set(${output_class} "unapproved-gate-content" PARENT_SCOPE)
+    return()
+  endif()
+
+  set(candidate_allowed_sites "${allowed_sites}")
+  list(JOIN candidate_allowed_sites "\n" candidate_inventory)
+  list(JOIN HUNDUN_TASK26_ALLOWED_COMMAND_SITES "\n" approved_inventory)
+  if(NOT candidate_inventory STREQUAL approved_inventory)
+    set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+    return()
+  endif()
+
   file(READ "${script_path}" candidate_script)
-  string(TOLOWER "${candidate_script}" candidate_script)
-  foreach(command_quote IN ITEMS "\"" "'")
-    string(REPLACE "${command_quote}" "" candidate_script
-      "${candidate_script}")
+  foreach(command_site IN LISTS HUNDUN_TASK26_ALLOWED_COMMAND_SITES)
+    string(FIND "${command_site}" "|" delimiter_offset)
+    if(delimiter_offset LESS 1)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    math(EXPR signature_offset "${delimiter_offset} + 1")
+    string(SUBSTRING "${command_site}" "${signature_offset}" -1 signature)
+    string(FIND "${candidate_script}" "${signature}" first_match)
+    if(first_match LESS 0)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    string(LENGTH "${signature}" signature_length)
+    math(EXPR remainder_offset "${first_match} + ${signature_length}")
+    string(SUBSTRING "${candidate_script}" "${remainder_offset}" -1 remainder)
+    string(FIND "${remainder}" "${signature}" second_match)
+    if(NOT second_match LESS 0)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
   endforeach()
 
-  set(command_token_prefix "(^|[\n;|&(): \t])")
-  set(executable_prefix "([^ \t\n;|&()]+[/])?")
-  set(command_token_suffix "([ \t\n;|&()]|$)")
-
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}${script_runtime}([0-9]+([.][0-9]+)*)?${command_token_suffix}")
-    set(${output_class} "scripting-runtime" PARENT_SCOPE)
-    return()
-  endif()
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}(${package_tool_a}|${package_tool_a3}|${package_tool_b})${command_token_suffix}")
-    set(${output_class} "package-command" PARENT_SCOPE)
-    return()
-  endif()
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}(${download_tool_a}|${download_tool_b})${command_token_suffix}")
-    set(${output_class} "download-command" PARENT_SCOPE)
-    return()
-  endif()
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}(rm|mv|cp|touch|install)${command_token_suffix}")
-    set(${output_class} "source-modification-command" PARENT_SCOPE)
-    return()
-  endif()
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}(sed|perl)[ \t]+[^\n;|&]*-[A-Za-z]*i[A-Za-z]*${command_token_suffix}")
-    set(${output_class} "source-modification-command" PARENT_SCOPE)
-    return()
-  endif()
-
-  set(git_option_with_value
-      "(-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)[ \t]+[^ \t\n;|&()]+")
-  set(git_option_with_equals
-      "(--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)=[^ \t\n;|&()]+")
-  set(git_flag_option
-      "(--paginate|--no-pager|--literal-pathspecs|--no-literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--bare)")
-  set(git_global_option
-      "(${git_option_with_value}|${git_option_with_equals}|${git_flag_option})")
-  if(candidate_script MATCHES
-      "${command_token_prefix}${executable_prefix}git[ \t]+(${git_global_option}[ \t]+)*(add|commit|checkout|reset|clean|restore|switch)${command_token_suffix}")
-    set(${output_class} "source-modification-command" PARENT_SCOPE)
-    return()
-  endif()
-
-  set(${output_class} "" PARENT_SCOPE)
+  set(${output_class} "approved" PARENT_SCOPE)
 endfunction()
 
-function(hundun_task26_require_rejected_fixture fixture_name expected_class
-         mutation_text)
+function(hundun_task26_require_unapproved_fixture fixture_name mutation_text)
   set(fixture_path
       "${HUNDUN_BINARY_ROOT}/task26-contract-mutation-${fixture_name}.sh")
   file(READ "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" fixture_contents)
@@ -106,92 +130,80 @@ function(hundun_task26_require_rejected_fixture fixture_name expected_class
                  "#!/usr/bin/env bash\n${mutation_text}\n"
                  fixture_contents "${fixture_contents}")
   file(WRITE "${fixture_path}" "${fixture_contents}")
-  hundun_task26_classify_script("${fixture_path}" observed_class)
+  hundun_task26_classify_gate_policy(
+    "${fixture_path}" "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}" observed_class)
   file(REMOVE "${fixture_path}")
-  if(NOT observed_class STREQUAL expected_class)
+  if(NOT observed_class STREQUAL "unapproved-gate-content")
     message(FATAL_ERROR
       "Task 26 contract: ${fixture_name} mutation classification mismatch: "
-      "expected ${expected_class}, observed ${observed_class}")
+      "expected unapproved-gate-content, observed ${observed_class}")
   endif()
 endfunction()
 
-function(hundun_task26_require_command_forms fixture_root expected_class
-         command_name command_arguments)
-  foreach(command_form IN ITEMS bare path-qualified env)
-    if(command_form STREQUAL "bare")
-      set(invocation "${command_name}")
-    elseif(command_form STREQUAL "path-qualified")
-      set(invocation "/usr/bin/${command_name}")
-    else()
-      set(invocation "/usr/bin/env ${command_name}")
-    endif()
-    set(mutation_text
-      "if false\nthen\n  ${invocation} ${command_arguments}\nfi")
-    hundun_task26_require_rejected_fixture(
-      "${fixture_root}-${command_form}" "${expected_class}"
-      "${mutation_text}")
-  endforeach()
-endfunction()
-
-hundun_task26_classify_script(
-  "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" acceptance_script_class)
-if(acceptance_script_class STREQUAL "scripting-runtime"
-   OR acceptance_script_class STREQUAL "package-command")
+hundun_task26_classify_gate_policy(
+  "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}"
+  "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}" acceptance_script_class)
+if(NOT acceptance_script_class STREQUAL "approved")
   message(FATAL_ERROR
-    "Task 26 contract: script invokes a forbidden scripting runtime")
-elseif(acceptance_script_class STREQUAL "download-command")
-  message(FATAL_ERROR
-    "Task 26 contract: script invokes a network download command")
-elseif(acceptance_script_class STREQUAL "source-modification-command")
-  message(FATAL_ERROR
-    "Task 26 contract: script contains a source-modification command")
+    "Task 26 contract: acceptance gate policy rejected the script: "
+    "${acceptance_script_class}")
 endif()
 
-hundun_task26_require_command_forms(
-  runtime scripting-runtime "${script_runtime}3" "--version")
-foreach(package_tool IN ITEMS
-    "${package_tool_a}" "${package_tool_a3}" "${package_tool_b}")
-  hundun_task26_require_command_forms(
-    "package-${package_tool}" package-command "${package_tool}" "--version")
-endforeach()
-foreach(download_tool IN ITEMS "${download_tool_a}" "${download_tool_b}")
-  hundun_task26_require_command_forms(
-    "download-${download_tool}" download-command "${download_tool}" "--version")
-endforeach()
-foreach(file_verb IN ITEMS rm mv cp touch install)
-  hundun_task26_require_command_forms(
-    "file-${file_verb}" source-modification-command
-    "${file_verb}" "never-created")
-endforeach()
-hundun_task26_require_command_forms(
-  sed-in-place source-modification-command sed "-n -i never-created")
-hundun_task26_require_command_forms(
-  perl-in-place source-modification-command perl "-pi never-created")
+set(missing_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(REMOVE_ITEM missing_inventory
+  [=[source-head-read|source_commit=$(git -C "${source_root}" rev-parse HEAD]=])
+hundun_task26_classify_gate_policy(
+  "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" "${missing_inventory}"
+  missing_inventory_class)
+if(NOT missing_inventory_class STREQUAL
+   "allowed-command-inventory-mismatch")
+  message(FATAL_ERROR
+    "Task 26 contract: allowed-command inventory mutation was not rejected")
+endif()
 
-set(git_clean_mutation
-  [=[if false
+string(CONCAT script_runtime "py" "thon")
+string(CONCAT download_tool "cu" "rl")
+set(dynamic_runtime_mutation
+  "if false\nthen\n  forbidden=${script_runtime}3\n  \"\${forbidden}\" --version\nfi")
+set(git_fetch_mutation [=[if false
 then
-  /usr/bin/git -C "${source_root:-.}" clean -fdx
+  /usr/bin/git -C . fetch
 fi]=])
-hundun_task26_require_rejected_fixture(
-  git-global-option source-modification-command "${git_clean_mutation}")
+set(source_redirect_mutation [=[if false
+then
+  printf x > "${source_root}/CMakeLists.txt"
+fi]=])
+set(harmless_argument_mutation
+  "if false\nthen\n  printf '%s\\n' ${script_runtime}3\nfi")
+set(path_runtime_mutation
+  "if false\nthen\n  /usr/bin/${script_runtime}3 --version\nfi")
+set(env_download_mutation
+  "if false\nthen\n  /usr/bin/env ${download_tool} --version\nfi")
+set(path_file_mutation [=[if false
+then
+  /usr/bin/rm never-created
+fi]=])
+set(env_git_mutation [=[if false
+then
+  /usr/bin/env git -C . clean -fdx
+fi]=])
 
-foreach(git_verb IN ITEMS add commit checkout reset clean restore switch)
-  foreach(git_form IN ITEMS bare path-qualified env)
-    if(git_form STREQUAL "bare")
-      set(git_invocation "git")
-    elseif(git_form STREQUAL "path-qualified")
-      set(git_invocation "/usr/bin/git")
-    else()
-      set(git_invocation "/usr/bin/env git")
-    endif()
-    set(git_verb_mutation
-      "if false\nthen\n  ${git_invocation} -C . ${git_verb}\nfi")
-    hundun_task26_require_rejected_fixture(
-      "git-${git_form}-${git_verb}" source-modification-command
-      "${git_verb_mutation}")
-  endforeach()
-endforeach()
+hundun_task26_require_unapproved_fixture(
+  dynamic-runtime "${dynamic_runtime_mutation}")
+hundun_task26_require_unapproved_fixture(
+  git-fetch "${git_fetch_mutation}")
+hundun_task26_require_unapproved_fixture(
+  source-redirection "${source_redirect_mutation}")
+hundun_task26_require_unapproved_fixture(
+  harmless-runtime-argument "${harmless_argument_mutation}")
+hundun_task26_require_unapproved_fixture(
+  path-runtime "${path_runtime_mutation}")
+hundun_task26_require_unapproved_fixture(
+  env-download "${env_download_mutation}")
+hundun_task26_require_unapproved_fixture(
+  path-file-operation "${path_file_mutation}")
+hundun_task26_require_unapproved_fixture(
+  env-git-operation "${env_git_mutation}")
 
 file(READ "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" acceptance_script)
 if(acceptance_script MATCHES "stage2_acceptance\\.sh")
