@@ -47,6 +47,9 @@ endif()
 # read-only Git query and the CTest registry/run operations named below.
 set(HUNDUN_TASK26_APPROVED_GATE_SHA256
     "f45b4861a4ac59e9dd9a9d1bbb52efc3d5c5c23e58e218fc4f7394e87bbe9657")
+set(HUNDUN_TASK26_APPROVED_INVENTORY_COUNT 22)
+set(HUNDUN_TASK26_APPROVED_INVENTORY_SHA256
+    "622ef39ca68d03733dc6bad678f4222923ce4f6a349c513d3aa5db6b3e095e56")
 set(HUNDUN_TASK26_ALLOWED_COMMAND_SITES
   [=[bash-shebang|#!/usr/bin/env bash]=]
   [=[shell-strict-mode|set -euo pipefail]=]
@@ -74,6 +77,35 @@ set(HUNDUN_TASK26_ALLOWED_COMMAND_SITES
   [=[ctest-serial-run|"${ctest_command}" --test-dir "${build_root}" --output-on-failure]=]
   [=[ctest-serial-limit|-j1 -R "${selection_regex}"]=])
 
+function(hundun_task26_inventory_identity allowed_sites output_count
+         output_sha256)
+  set(inventory_entries "${allowed_sites}")
+  list(LENGTH inventory_entries inventory_count)
+  set(canonical_inventory "")
+  foreach(inventory_entry IN LISTS inventory_entries)
+    string(LENGTH "${inventory_entry}" inventory_entry_length)
+    string(APPEND canonical_inventory
+      "${inventory_entry_length}:${inventory_entry}")
+  endforeach()
+  string(SHA256 inventory_sha256 "${canonical_inventory}")
+  set(${output_count} "${inventory_count}" PARENT_SCOPE)
+  set(${output_sha256} "${inventory_sha256}" PARENT_SCOPE)
+endfunction()
+
+set(task26_canonical_identity_test_vector
+  [=[first-id|white space
+line two\;semicolon|pipe]=]
+  [=[second-id|tail]=])
+hundun_task26_inventory_identity(
+  "${task26_canonical_identity_test_vector}"
+  task26_canonical_test_count task26_canonical_test_sha256)
+if(NOT task26_canonical_test_count EQUAL 2
+   OR NOT task26_canonical_test_sha256 STREQUAL
+      "0024dfb2c048e02b2ef501f4cc1fb6b83dc0e51719789459c34e361f5f60e5dc")
+  message(FATAL_ERROR
+    "Task 26 contract: canonical inventory encoding is ambiguous")
+endif()
+
 function(hundun_task26_classify_gate_policy script_path allowed_sites
          output_class)
   if(NOT EXISTS "${script_path}")
@@ -88,28 +120,65 @@ function(hundun_task26_classify_gate_policy script_path allowed_sites
   endif()
 
   set(candidate_allowed_sites "${allowed_sites}")
-  list(JOIN candidate_allowed_sites "\n" candidate_inventory)
-  list(JOIN HUNDUN_TASK26_ALLOWED_COMMAND_SITES "\n" approved_inventory)
-  if(NOT candidate_inventory STREQUAL approved_inventory)
+  set(expected_inventory_count
+      "${HUNDUN_TASK26_APPROVED_INVENTORY_COUNT}")
+  set(expected_inventory_sha256
+      "${HUNDUN_TASK26_APPROVED_INVENTORY_SHA256}")
+  if(ARGC GREATER 3)
+    if(NOT ARGC EQUAL 5)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    set(expected_inventory_count "${ARGV3}")
+    set(expected_inventory_sha256 "${ARGV4}")
+  endif()
+  hundun_task26_inventory_identity(
+    "${candidate_allowed_sites}" candidate_inventory_count
+    candidate_inventory_sha256)
+  if(NOT candidate_inventory_count EQUAL expected_inventory_count
+     OR NOT candidate_inventory_sha256 STREQUAL expected_inventory_sha256)
     set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
     return()
   endif()
 
   file(READ "${script_path}" candidate_script)
-  foreach(command_site IN LISTS HUNDUN_TASK26_ALLOWED_COMMAND_SITES)
+  set(seen_command_site_ids "")
+  set(seen_command_site_signatures "")
+  foreach(command_site IN LISTS candidate_allowed_sites)
     string(FIND "${command_site}" "|" delimiter_offset)
     if(delimiter_offset LESS 1)
       set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
       return()
     endif()
+    string(SUBSTRING "${command_site}" 0 "${delimiter_offset}"
+      command_site_id)
     math(EXPR signature_offset "${delimiter_offset} + 1")
     string(SUBSTRING "${command_site}" "${signature_offset}" -1 signature)
+    if(signature STREQUAL "")
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    list(FIND seen_command_site_ids "${command_site_id}" duplicate_id_offset)
+    if(NOT duplicate_id_offset LESS 0)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    list(APPEND seen_command_site_ids "${command_site_id}")
+    string(LENGTH "${signature}" signature_length)
+    string(SHA256 signature_sha256 "${signature}")
+    set(signature_identity "${signature_length}:${signature_sha256}")
+    list(FIND seen_command_site_signatures "${signature_identity}"
+      duplicate_signature_offset)
+    if(NOT duplicate_signature_offset LESS 0)
+      set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
+      return()
+    endif()
+    list(APPEND seen_command_site_signatures "${signature_identity}")
     string(FIND "${candidate_script}" "${signature}" first_match)
     if(first_match LESS 0)
       set(${output_class} "allowed-command-inventory-mismatch" PARENT_SCOPE)
       return()
     endif()
-    string(LENGTH "${signature}" signature_length)
     math(EXPR remainder_offset "${first_match} + ${signature_length}")
     string(SUBSTRING "${candidate_script}" "${remainder_offset}" -1 remainder)
     string(FIND "${remainder}" "${signature}" second_match)
@@ -149,17 +218,122 @@ if(NOT acceptance_script_class STREQUAL "approved")
     "${acceptance_script_class}")
 endif()
 
-set(missing_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
-list(REMOVE_ITEM missing_inventory
-  [=[source-head-read|source_commit=$(git -C "${source_root}" rev-parse HEAD]=])
-hundun_task26_classify_gate_policy(
-  "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" "${missing_inventory}"
-  missing_inventory_class)
-if(NOT missing_inventory_class STREQUAL
-   "allowed-command-inventory-mismatch")
-  message(FATAL_ERROR
-    "Task 26 contract: allowed-command inventory mutation was not rejected")
-endif()
+function(hundun_task26_require_inventory_mismatch mutation_name
+         candidate_inventory)
+  hundun_task26_classify_gate_policy(
+    "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" "${candidate_inventory}"
+    observed_inventory_class)
+  if(NOT observed_inventory_class STREQUAL
+     "allowed-command-inventory-mismatch")
+    message(FATAL_ERROR
+      "Task 26 contract: ${mutation_name} inventory mutation was not rejected")
+  endif()
+endfunction()
+
+function(hundun_task26_require_post_identity_mismatch mutation_name
+         candidate_inventory)
+  hundun_task26_inventory_identity(
+    "${candidate_inventory}" candidate_count candidate_sha256)
+  hundun_task26_classify_gate_policy(
+    "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" "${candidate_inventory}"
+    observed_inventory_class "${candidate_count}" "${candidate_sha256}")
+  if(NOT observed_inventory_class STREQUAL
+     "allowed-command-inventory-mismatch")
+    message(FATAL_ERROR
+      "Task 26 contract: ${mutation_name} post-identity check was bypassed")
+  endif()
+endfunction()
+
+math(EXPR task26_last_inventory_index
+  "${HUNDUN_TASK26_APPROVED_INVENTORY_COUNT} - 1")
+foreach(inventory_index RANGE 0 ${task26_last_inventory_index})
+  set(removed_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+  list(REMOVE_AT removed_inventory "${inventory_index}")
+  hundun_task26_require_inventory_mismatch(
+    "remove-${inventory_index}" "${removed_inventory}")
+
+  set(duplicated_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+  list(GET duplicated_inventory "${inventory_index}" duplicated_entry)
+  list(INSERT duplicated_inventory "${inventory_index}" "${duplicated_entry}")
+  hundun_task26_require_inventory_mismatch(
+    "duplicate-${inventory_index}" "${duplicated_inventory}")
+endforeach()
+
+set(relabeled_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(GET relabeled_inventory 6 relabeled_entry)
+string(FIND "${relabeled_entry}" "|" relabeled_delimiter)
+math(EXPR relabeled_signature_offset "${relabeled_delimiter} + 1")
+string(SUBSTRING "${relabeled_entry}" "${relabeled_signature_offset}" -1
+  relabeled_signature)
+list(REMOVE_AT relabeled_inventory 6)
+list(INSERT relabeled_inventory 6
+  "renamed-cache-source-read|${relabeled_signature}")
+hundun_task26_require_inventory_mismatch(
+  "stable-id-change" "${relabeled_inventory}")
+
+set(changed_signature_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(GET changed_signature_inventory 6 changed_signature_entry)
+string(FIND "${changed_signature_entry}" "|" changed_signature_delimiter)
+string(SUBSTRING "${changed_signature_entry}" 0
+  "${changed_signature_delimiter}" changed_signature_id)
+math(EXPR changed_signature_offset "${changed_signature_delimiter} + 1")
+string(SUBSTRING "${changed_signature_entry}" "${changed_signature_offset}" -1
+  changed_signature)
+list(REMOVE_AT changed_signature_inventory 6)
+list(INSERT changed_signature_inventory 6
+  "${changed_signature_id}|${changed_signature} changed")
+hundun_task26_require_inventory_mismatch(
+  "signature-change" "${changed_signature_inventory}")
+
+# The remaining mutations deliberately substitute their candidate identity as
+# a narrow test-only seam. This bypasses only the immutable count/fingerprint
+# precheck so duplicate-ID, duplicate-signature and exact-occurrence branches
+# remain directly mutation-sensitive. The default production policy always
+# uses the two frozen constants above.
+set(duplicate_id_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(GET duplicate_id_inventory 0 duplicate_id_source)
+list(GET duplicate_id_inventory 1 duplicate_id_target)
+string(FIND "${duplicate_id_source}" "|" duplicate_id_source_delimiter)
+string(SUBSTRING "${duplicate_id_source}" 0
+  "${duplicate_id_source_delimiter}" duplicate_id)
+string(FIND "${duplicate_id_target}" "|" duplicate_id_target_delimiter)
+math(EXPR duplicate_id_signature_offset
+  "${duplicate_id_target_delimiter} + 1")
+string(SUBSTRING "${duplicate_id_target}"
+  "${duplicate_id_signature_offset}" -1 duplicate_id_signature)
+list(REMOVE_AT duplicate_id_inventory 1)
+list(INSERT duplicate_id_inventory 1
+  "${duplicate_id}|${duplicate_id_signature}")
+hundun_task26_require_post_identity_mismatch(
+  "duplicate stable ID" "${duplicate_id_inventory}")
+
+set(duplicate_signature_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(GET duplicate_signature_inventory 0 duplicate_signature_source)
+string(FIND "${duplicate_signature_source}" "|"
+  duplicate_signature_delimiter)
+math(EXPR duplicate_signature_offset "${duplicate_signature_delimiter} + 1")
+string(SUBSTRING "${duplicate_signature_source}"
+  "${duplicate_signature_offset}" -1 duplicate_signature)
+list(REMOVE_AT duplicate_signature_inventory 1)
+list(INSERT duplicate_signature_inventory 1
+  "different-id-with-duplicate-signature|${duplicate_signature}")
+hundun_task26_require_post_identity_mismatch(
+  "duplicate signature" "${duplicate_signature_inventory}")
+
+hundun_task26_require_post_identity_mismatch(
+  "changed signature exact occurrence" "${changed_signature_inventory}")
+
+set(empty_id_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(REMOVE_AT empty_id_inventory 1)
+list(INSERT empty_id_inventory 1 "|${duplicate_id_signature}")
+hundun_task26_require_post_identity_mismatch(
+  "empty stable ID" "${empty_id_inventory}")
+
+set(empty_signature_inventory "${HUNDUN_TASK26_ALLOWED_COMMAND_SITES}")
+list(REMOVE_AT empty_signature_inventory 1)
+list(INSERT empty_signature_inventory 1 "empty-signature-id|")
+hundun_task26_require_post_identity_mismatch(
+  "empty signature" "${empty_signature_inventory}")
 
 string(CONCAT script_runtime "py" "thon")
 string(CONCAT download_tool "cu" "rl")
