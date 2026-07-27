@@ -1751,7 +1751,7 @@ if(HUNDUN_BUILD_TESTS)
   target_link_libraries(test_cell_centered_fvm PRIVATE
     hundun_finite_volume hundun_options hundun_warnings MPI::MPI_CXX)
   set(cell_centered_fvm_timeout 300)
-  if(HUNDUN_ENABLE_ASAN)
+  if(HUNDUN_ENABLE_ASAN OR HUNDUN_ENABLE_UBSAN)
     set(cell_centered_fvm_timeout 600)
   endif()
   foreach(ranks IN ITEMS 1 2 4)
