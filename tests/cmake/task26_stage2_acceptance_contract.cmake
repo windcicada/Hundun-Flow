@@ -35,27 +35,165 @@ if(NOT bash_syntax_result EQUAL 0)
     "${bash_syntax_stdout}${bash_syntax_stderr}")
 endif()
 
-file(READ "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" acceptance_script)
 string(CONCAT script_runtime "py" "thon")
-if(acceptance_script MATCHES
-    "(^|[\n;|&])[ \t]*(${script_runtime}([0-9.]*)?|pip([0-9.]*)?)([ \t]|$)")
+string(CONCAT package_tool_a "p" "ip")
+string(CONCAT package_tool_a3 "p" "ip3")
+string(CONCAT package_tool_b "con" "da")
+string(CONCAT download_tool_a "cu" "rl")
+string(CONCAT download_tool_b "wg" "et")
+
+function(hundun_task26_classify_script script_path output_class)
+  file(READ "${script_path}" candidate_script)
+  string(TOLOWER "${candidate_script}" candidate_script)
+  foreach(command_quote IN ITEMS "\"" "'")
+    string(REPLACE "${command_quote}" "" candidate_script
+      "${candidate_script}")
+  endforeach()
+
+  set(command_token_prefix "(^|[\n;|&(): \t])")
+  set(executable_prefix "([^ \t\n;|&()]+[/])?")
+  set(command_token_suffix "([ \t\n;|&()]|$)")
+
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}${script_runtime}([0-9]+([.][0-9]+)*)?${command_token_suffix}")
+    set(${output_class} "scripting-runtime" PARENT_SCOPE)
+    return()
+  endif()
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}(${package_tool_a}|${package_tool_a3}|${package_tool_b})${command_token_suffix}")
+    set(${output_class} "package-command" PARENT_SCOPE)
+    return()
+  endif()
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}(${download_tool_a}|${download_tool_b})${command_token_suffix}")
+    set(${output_class} "download-command" PARENT_SCOPE)
+    return()
+  endif()
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}(rm|mv|cp|touch|install)${command_token_suffix}")
+    set(${output_class} "source-modification-command" PARENT_SCOPE)
+    return()
+  endif()
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}(sed|perl)[ \t]+[^\n;|&]*-[A-Za-z]*i[A-Za-z]*${command_token_suffix}")
+    set(${output_class} "source-modification-command" PARENT_SCOPE)
+    return()
+  endif()
+
+  set(git_option_with_value
+      "(-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)[ \t]+[^ \t\n;|&()]+")
+  set(git_option_with_equals
+      "(--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)=[^ \t\n;|&()]+")
+  set(git_flag_option
+      "(--paginate|--no-pager|--literal-pathspecs|--no-literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--bare)")
+  set(git_global_option
+      "(${git_option_with_value}|${git_option_with_equals}|${git_flag_option})")
+  if(candidate_script MATCHES
+      "${command_token_prefix}${executable_prefix}git[ \t]+(${git_global_option}[ \t]+)*(add|commit|checkout|reset|clean|restore|switch)${command_token_suffix}")
+    set(${output_class} "source-modification-command" PARENT_SCOPE)
+    return()
+  endif()
+
+  set(${output_class} "" PARENT_SCOPE)
+endfunction()
+
+function(hundun_task26_require_rejected_fixture fixture_name expected_class
+         mutation_text)
+  set(fixture_path
+      "${HUNDUN_BINARY_ROOT}/task26-contract-mutation-${fixture_name}.sh")
+  file(READ "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" fixture_contents)
+  string(REPLACE "#!/usr/bin/env bash\n"
+                 "#!/usr/bin/env bash\n${mutation_text}\n"
+                 fixture_contents "${fixture_contents}")
+  file(WRITE "${fixture_path}" "${fixture_contents}")
+  hundun_task26_classify_script("${fixture_path}" observed_class)
+  file(REMOVE "${fixture_path}")
+  if(NOT observed_class STREQUAL expected_class)
+    message(FATAL_ERROR
+      "Task 26 contract: ${fixture_name} mutation classification mismatch: "
+      "expected ${expected_class}, observed ${observed_class}")
+  endif()
+endfunction()
+
+function(hundun_task26_require_command_forms fixture_root expected_class
+         command_name command_arguments)
+  foreach(command_form IN ITEMS bare path-qualified env)
+    if(command_form STREQUAL "bare")
+      set(invocation "${command_name}")
+    elseif(command_form STREQUAL "path-qualified")
+      set(invocation "/usr/bin/${command_name}")
+    else()
+      set(invocation "/usr/bin/env ${command_name}")
+    endif()
+    set(mutation_text
+      "if false\nthen\n  ${invocation} ${command_arguments}\nfi")
+    hundun_task26_require_rejected_fixture(
+      "${fixture_root}-${command_form}" "${expected_class}"
+      "${mutation_text}")
+  endforeach()
+endfunction()
+
+hundun_task26_classify_script(
+  "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" acceptance_script_class)
+if(acceptance_script_class STREQUAL "scripting-runtime"
+   OR acceptance_script_class STREQUAL "package-command")
   message(FATAL_ERROR
     "Task 26 contract: script invokes a forbidden scripting runtime")
-endif()
-if(acceptance_script MATCHES
-    "(^|[\n;|&])[ \t]*(curl|wget)([ \t]|$)")
+elseif(acceptance_script_class STREQUAL "download-command")
   message(FATAL_ERROR
     "Task 26 contract: script invokes a network download command")
-endif()
-if(acceptance_script MATCHES
-    "(^|[\n;|&])[ \t]*(rm|mv|cp|touch|install)([ \t]|$)"
-    OR acceptance_script MATCHES
-       "(^|[\n;|&])[ \t]*git[ \t]+(add|commit|checkout|reset|clean|restore|switch)"
-    OR acceptance_script MATCHES
-       "(^|[\n;|&])[ \t]*(sed|perl)[ \t]+-[A-Za-z]*i")
+elseif(acceptance_script_class STREQUAL "source-modification-command")
   message(FATAL_ERROR
     "Task 26 contract: script contains a source-modification command")
 endif()
+
+hundun_task26_require_command_forms(
+  runtime scripting-runtime "${script_runtime}3" "--version")
+foreach(package_tool IN ITEMS
+    "${package_tool_a}" "${package_tool_a3}" "${package_tool_b}")
+  hundun_task26_require_command_forms(
+    "package-${package_tool}" package-command "${package_tool}" "--version")
+endforeach()
+foreach(download_tool IN ITEMS "${download_tool_a}" "${download_tool_b}")
+  hundun_task26_require_command_forms(
+    "download-${download_tool}" download-command "${download_tool}" "--version")
+endforeach()
+foreach(file_verb IN ITEMS rm mv cp touch install)
+  hundun_task26_require_command_forms(
+    "file-${file_verb}" source-modification-command
+    "${file_verb}" "never-created")
+endforeach()
+hundun_task26_require_command_forms(
+  sed-in-place source-modification-command sed "-n -i never-created")
+hundun_task26_require_command_forms(
+  perl-in-place source-modification-command perl "-pi never-created")
+
+set(git_clean_mutation
+  [=[if false
+then
+  /usr/bin/git -C "${source_root:-.}" clean -fdx
+fi]=])
+hundun_task26_require_rejected_fixture(
+  git-global-option source-modification-command "${git_clean_mutation}")
+
+foreach(git_verb IN ITEMS add commit checkout reset clean restore switch)
+  foreach(git_form IN ITEMS bare path-qualified env)
+    if(git_form STREQUAL "bare")
+      set(git_invocation "git")
+    elseif(git_form STREQUAL "path-qualified")
+      set(git_invocation "/usr/bin/git")
+    else()
+      set(git_invocation "/usr/bin/env git")
+    endif()
+    set(git_verb_mutation
+      "if false\nthen\n  ${git_invocation} -C . ${git_verb}\nfi")
+    hundun_task26_require_rejected_fixture(
+      "git-${git_form}-${git_verb}" source-modification-command
+      "${git_verb_mutation}")
+  endforeach()
+endforeach()
+
+file(READ "${HUNDUN_STAGE2_ACCEPTANCE_SCRIPT}" acceptance_script)
 if(acceptance_script MATCHES "stage2_acceptance\\.sh")
   message(FATAL_ERROR
     "Task 26 contract: script recursively names or invokes itself")
@@ -206,6 +344,87 @@ if(NOT "${inventory_stdout}" STREQUAL "${expected_inventory}")
 endif()
 
 file(READ "${HUNDUN_STAGE2_CAPABILITY_LEDGER}" capability_ledger)
+
+function(hundun_task26_classify_field_diagnostic_ledger
+         ledger_text output_class)
+  if(ledger_text MATCHES "deterministic layout/generation summaries")
+    set(${output_class} "field-generation-overclaim" PARENT_SCOPE)
+    return()
+  endif()
+
+  string(REPLACE "\n" ";" ledger_lines "${ledger_text}")
+  set(provider_claim_present FALSE)
+  set(deferred_disposition_present FALSE)
+  set(deferred_boundary_present FALSE)
+  foreach(ledger_line IN LISTS ledger_lines)
+    if(ledger_line MATCHES "^\\| CAP-DIAG-FIELD \\|"
+       AND ledger_line MATCHES
+           "deterministic layout/descriptor/role summaries")
+      set(provider_claim_present TRUE)
+    endif()
+    if(ledger_line MATCHES "^\\| CAP-DEFER-FIELD-GENERATION \\|"
+       AND ledger_line MATCHES
+           "field-storage/access/checked-view generation diagnostics"
+       AND ledger_line MATCHES "\\| explicitly-deferred \\|")
+      set(deferred_disposition_present TRUE)
+      if(ledger_line MATCHES
+          "registry/layout/roles-only")
+        set(deferred_boundary_present TRUE)
+      endif()
+    endif()
+  endforeach()
+
+  if(NOT provider_claim_present)
+    set(${output_class} "field-provider-claim-missing" PARENT_SCOPE)
+    return()
+  endif()
+  if(NOT deferred_disposition_present)
+    set(${output_class} "field-generation-disposition-missing"
+        PARENT_SCOPE)
+    return()
+  endif()
+  if(NOT deferred_boundary_present
+     OR NOT ledger_text MATCHES
+        "no `FieldStorage` generation query or test-only seam")
+    set(${output_class} "field-generation-boundary-missing" PARENT_SCOPE)
+    return()
+  endif()
+  set(${output_class} "" PARENT_SCOPE)
+endfunction()
+
+hundun_task26_classify_field_diagnostic_ledger(
+  "${capability_ledger}" field_diagnostic_ledger_class)
+if(NOT field_diagnostic_ledger_class STREQUAL "")
+  message(FATAL_ERROR
+    "Task 26 contract: field diagnostic ledger is invalid: "
+    "${field_diagnostic_ledger_class}")
+endif()
+
+string(REPLACE "deterministic layout/descriptor/role summaries"
+               "deterministic layout/generation summaries"
+               overclaim_ledger "${capability_ledger}")
+hundun_task26_classify_field_diagnostic_ledger(
+  "${overclaim_ledger}" overclaim_ledger_class)
+if(NOT overclaim_ledger_class STREQUAL "field-generation-overclaim")
+  message(FATAL_ERROR
+    "Task 26 contract: field-generation overclaim mutation was not rejected")
+endif()
+
+string(REPLACE "\n" ";" ledger_lines "${capability_ledger}")
+set(missing_deferred_ledger "")
+foreach(ledger_line IN LISTS ledger_lines)
+  if(NOT ledger_line MATCHES "^\\| CAP-DEFER-FIELD-GENERATION \\|")
+    string(APPEND missing_deferred_ledger "${ledger_line}\n")
+  endif()
+endforeach()
+hundun_task26_classify_field_diagnostic_ledger(
+  "${missing_deferred_ledger}" missing_deferred_ledger_class)
+if(NOT missing_deferred_ledger_class STREQUAL
+   "field-generation-disposition-missing")
+  message(FATAL_ERROR
+    "Task 26 contract: missing field-generation disposition was not rejected")
+endif()
+
 foreach(required_heading IN ITEMS
     "Approved requirement"
     "Disposition"
