@@ -79,7 +79,7 @@ check_normal_log() {
   local step_10='^STEP 10 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
   local step_20='^STEP 20 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
   local finished='^FINISHED step=20 time_s=[0-9.eE+-]+$'
-  if test "${lines[0]}" != "HUNDUN-FLOW 0.0.0-stage1"; then
+  if test "${lines[0]}" != "HUNDUN-FLOW 0.1.0-stage2"; then
     echo "normal numerical log line 1 is not the Stage 1 banner" >&2
     return 1
   fi
@@ -328,7 +328,7 @@ check_minimum_valid_partition() {
     return 1
   fi
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=minimum_valid_partition ranks=2 cells=4x2x2' \
     'FINISHED step=0 time_s=0' >"${expected_output}"
   cmp --silent "${expected_output}" "${normal_output}"
@@ -651,7 +651,7 @@ run_fast_shell_contract_fixtures() {
   local extra_stderr="${work_root}/normal-log-extra.stderr"
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
@@ -660,7 +660,7 @@ run_fast_shell_contract_fixtures() {
   check_normal_log "${stdout_path}" "${stderr_path}"
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' >"${no_final_lf}"
@@ -671,7 +671,7 @@ run_fast_shell_contract_fixtures() {
   fi
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
     'FINISHED step=20 time_s=0.2' >"${moved_stdout}"
@@ -1173,7 +1173,7 @@ EOF
 "${cmake_command}" --build "${build_dir}" -j 2
 
 "${build_dir}/hundun" --version >"${work_root}/version.txt"
-printf '%s\n' "HUNDUN-FLOW 0.0.0-stage1" \
+printf '%s\n' "HUNDUN-FLOW 0.1.0-stage2" \
   >"${work_root}/version.expected"
 cmp --silent "${work_root}/version.expected" "${work_root}/version.txt"
 set +e
@@ -1236,7 +1236,7 @@ if test -s "${root_stderr}"; then
   echo "authoritative-root MPMD run emitted stderr" >&2
   exit 1
 fi
-grep -Fx 'HUNDUN-FLOW 0.0.0-stage1' "${root_stdout}" >/dev/null
+grep -Fx 'HUNDUN-FLOW 0.1.0-stage2' "${root_stdout}" >/dev/null
 grep -Fx 'CASE name=rank_zero_authoritative_root ranks=2 cells=4x2x2' \
   "${root_stdout}" >/dev/null
 grep -E '^STEP 1 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \

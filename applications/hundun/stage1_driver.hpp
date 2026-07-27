@@ -12,7 +12,7 @@
 namespace hundun::application {
 
 inline constexpr std::string_view kHundunVersion =
-    "HUNDUN-FLOW 0.0.0-stage1";
+    "HUNDUN-FLOW 0.1.0-stage2";
 
 std::filesystem::path establish_authoritative_case_root(
     const runtime::MpiContext& context,
