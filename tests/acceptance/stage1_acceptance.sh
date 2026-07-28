@@ -189,7 +189,10 @@ require_bounded_diagnostic() {
   local bytes
   bytes=$(wc -c <"${path}")
   if test "${bytes}" -gt 256; then
-    echo "output failure diagnostic is not bounded" >&2
+    printf 'output failure diagnostic is not bounded: path=%s bytes=%s\n' \
+      "${path}" "${bytes}" >&2
+    LC_ALL=C head -c 512 -- "${path}" >&2 || true
+    printf '\n' >&2
     return 1
   fi
 }
