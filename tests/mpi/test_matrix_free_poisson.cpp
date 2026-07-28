@@ -14,6 +14,7 @@
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "finite_volume/src/matrix_free_poisson_detail.hpp"
 #include "tests/support/allocation_attempt_guard.hpp"
+#include "tests/support/task25_counter_checks.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <mpi.h>
@@ -245,6 +246,11 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
                boundary.pressure_reference_patch_id);
   HUNDUN_CHECK(linear_operator.solver_family() ==
                PoissonSolverFamily::conjugate_gradient);
+  const auto initial_halo_counters =
+      linear_operator.halo_performance_counters();
+  HUNDUN_CHECK(initial_halo_counters.completed_exchanges == 0U);
+  HUNDUN_CHECK(initial_halo_counters.begin_calls == 0U);
+  HUNDUN_CHECK(initial_halo_counters.wait_calls == 0U);
 
   const std::vector<double> owned = owned_values(topology, -0.75);
   Buffer x_buffer(execution, bytes_for(owned.size()));
@@ -261,6 +267,11 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
       linear_operator.apply(x_buffer.view(0U, owned.size()), y);
   HUNDUN_CHECK(apply_event.ready());
   apply_event.wait();
+  const auto applied_halo_counters =
+      linear_operator.halo_performance_counters();
+  HUNDUN_CHECK(applied_halo_counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(applied_halo_counters.begin_calls == 1U);
+  HUNDUN_CHECK(applied_halo_counters.wait_calls == 1U);
   auto diagonal_event = linear_operator.diagonal(diagonal);
   HUNDUN_CHECK(diagonal_event.ready());
   diagonal_event.wait();
@@ -451,6 +462,16 @@ void run_operator_case(const MpiContext& mpi, PoissonBoundarySpec boundary,
     HUNDUN_CHECK(unchanged_collective.revision == before_failure + 1U);
     HUNDUN_CHECK(linear_operator.revision() == before_failure + 1U);
   }
+  const auto expected_halo_counters =
+      linear_operator.halo_performance_counters();
+  MatrixFreePoissonOperator moved_operator(std::move(linear_operator));
+  const auto moved_halo_counters =
+      moved_operator.halo_performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      moved_halo_counters, expected_halo_counters));
+  expect_error([&] {
+    static_cast<void>(linear_operator.halo_performance_counters());
+  });
 }
 
 void test_construction_rejections(const MpiContext& mpi) {

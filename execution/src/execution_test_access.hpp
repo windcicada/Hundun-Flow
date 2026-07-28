@@ -41,6 +41,10 @@ struct TestViewMetadata {
 
 class ExecutionTestAccess final {
  public:
+#ifdef HUNDUN_EXECUTION_ENABLE_TEST_ACCESS
+  static void set_allocation_counters_for_test(
+      AllocationCounters counters) noexcept;
+#endif
   static AllocationIdentity next_allocation_identity() noexcept;
   static void set_next_allocation_identity(AllocationIdentity next) noexcept;
   static void fail_next_allocation() noexcept;

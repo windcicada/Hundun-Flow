@@ -9,15 +9,20 @@
 #include "hundun/runtime/mpi_environment.hpp"
 #include "hundun/runtime/structured_decomposition.hpp"
 #include "linear/src/ghosted_vector_halo_detail.hpp"
+#include "linear/src/ghosted_vector_halo_test_access.hpp"
+#include "tests/support/task25_counter_checks.hpp"
 #include "tests/support/test_main.hpp"
 
 #include <mpi.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <new>
 #include <memory>
 #include <optional>
@@ -29,6 +34,7 @@
 
 namespace {
 
+std::uint64_t raw_allreduce_calls = 0U;
 thread_local bool count_allocation_attempts = false;
 thread_local std::size_t allocation_attempts = 0U;
 
@@ -68,6 +74,14 @@ class AllocationAttemptGuard final {
 };
 
 }  // namespace
+
+extern "C" int MPI_Allreduce(const void* send_buffer, void* receive_buffer,
+                             int count, MPI_Datatype datatype, MPI_Op operation,
+                             MPI_Comm communicator) {
+  ++raw_allreduce_calls;
+  return PMPI_Allreduce(send_buffer, receive_buffer, count, datatype,
+                        operation, communicator);
+}
 
 void* operator new(std::size_t bytes) { return allocate_bytes(bytes); }
 void* operator new[](std::size_t bytes) { return allocate_bytes(bytes); }
@@ -166,10 +180,24 @@ using hundun::runtime::StructuredDecomposition;
 
 constexpr Int3 kExtent{7, 5, 3};
 
+std::uint64_t allreduce_calls() noexcept { return raw_allreduce_calls; }
+
+void require_allreduce_delta(std::uint64_t before, std::uint64_t expected,
+                             const char* subject) {
+  const std::uint64_t actual = allreduce_calls() - before;
+  if (actual != expected) {
+    throw Error(std::string(subject) + " raw MPI_Allreduce count: expected=" +
+                std::to_string(expected) + " actual=" +
+                std::to_string(actual));
+  }
+}
+
 static_assert(!std::is_copy_constructible_v<GhostedVectorHalo>);
 static_assert(!std::is_copy_assignable_v<GhostedVectorHalo>);
 static_assert(std::is_nothrow_move_constructible_v<GhostedVectorHalo>);
 static_assert(!std::is_move_assignable_v<GhostedVectorHalo>);
+static_assert(std::is_trivially_copyable_v<
+              hundun::runtime::HaloPerformanceCounters>);
 
 Int3 process_grid_for(int ranks) {
   switch (ranks) {
@@ -388,10 +416,57 @@ void run_exchange_case(const MpiContext& world,
   const auto epoch = vector.epoch();
 
   fill_vector(vector, topology, 1, -1.0);
+  const auto exchange_collectives = allreduce_calls();
   halo.exchange(vector);
+  require_allreduce_delta(exchange_collectives, 10U,
+                          "compact Buffer Halo exchange");
   check_vector(vector, topology, 1);
+  const auto counters = halo.performance_counters();
+  HUNDUN_CHECK(counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(counters.begin_calls == 1U);
+  HUNDUN_CHECK(counters.wait_calls == 1U);
+  HUNDUN_CHECK(counters.send_payload_bytes ==
+               halo.send_value_count() * sizeof(double));
+  HUNDUN_CHECK(counters.receive_payload_bytes ==
+               halo.receive_value_count() * sizeof(double));
+  HUNDUN_CHECK(counters.pack_bytes == counters.send_payload_bytes);
+  HUNDUN_CHECK(counters.unpack_bytes == counters.receive_payload_bytes);
+  HUNDUN_CHECK(std::isfinite(counters.completed_wait_seconds));
+  HUNDUN_CHECK(counters.completed_wait_seconds >= 0.0);
   HUNDUN_CHECK(vector.allocation_identity() == identity);
   HUNDUN_CHECK(vector.epoch() == epoch);
+  fill_vector(vector, topology, 3, -3.0);
+  const auto repeated_collectives = allreduce_calls();
+  halo.exchange(vector);
+  require_allreduce_delta(repeated_collectives, 10U,
+                          "repeated compact Buffer Halo exchange");
+  check_vector(vector, topology, 3);
+
+  hundun::linear::detail::set_vector_halo_test_options({});
+  hundun::runtime::HaloPerformanceCounters overflow_seed{};
+  const int overflow_rank = world.size() > 1 ? 1 : 0;
+  if (world.rank() == overflow_rank) {
+    overflow_seed.completed_exchanges =
+        std::numeric_limits<std::uint64_t>::max();
+  }
+  hundun::linear::test::GhostedVectorHaloTestAccess::
+      set_initial_performance_counters(overflow_seed);
+  GhostedVectorHalo overflow_halo =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  const auto before_overflow = overflow_halo.performance_counters();
+  fill_vector(vector, topology, 31, -31.0);
+  const std::string overflow_message =
+      expect_collective_error(world, [&] { overflow_halo.exchange(vector); });
+  HUNDUN_CHECK(
+      overflow_message.find(
+          "compact Halo performance counter preflight failed") !=
+      std::string::npos);
+  HUNDUN_CHECK(
+      overflow_message.find("rank=" + std::to_string(overflow_rank)) !=
+      std::string::npos);
+  const auto after_overflow = overflow_halo.performance_counters();
+  HUNDUN_CHECK(
+      hundun::test::task25_counters_equal(before_overflow, after_overflow));
 
   hundun::linear::detail::set_vector_halo_test_options(
       hundun::linear::detail::VectorHaloTestOptions{1U, true});
@@ -548,7 +623,35 @@ void run_exchange_case(const MpiContext& world,
   hundun::linear::detail::set_vector_halo_test_options({});
 }
 
+void run_zero_neighbour_collective_case() {
+  auto self = MpiContext::duplicate(MPI_COMM_SELF);
+  const auto decomposition = StructuredDecomposition::create(
+      self, {4, 4, 4}, {false, false, false},
+      DecompositionOptions{Int3{1, 1, 1}});
+  const MeshTopology topology(decomposition);
+  HUNDUN_CHECK(topology.ghost_cell_count() == 0U);
+  CpuReferenceContext execution;
+  GhostedVector vector(execution, VectorLayout::from_topology(topology));
+  hundun::linear::detail::set_vector_halo_test_options({});
+  auto halo =
+      GhostedVectorHalo::create(decomposition, topology, execution);
+  fill_vector(vector, topology, 9, -9.0);
+  const auto before = allreduce_calls();
+  halo.exchange(vector);
+  require_allreduce_delta(before, 10U,
+                          "zero-neighbour compact Buffer Halo exchange");
+  check_vector(vector, topology, 9);
+  const auto counters = halo.performance_counters();
+  HUNDUN_CHECK(counters.completed_exchanges == 1U);
+  HUNDUN_CHECK(counters.send_payload_bytes == 0U);
+  HUNDUN_CHECK(counters.receive_payload_bytes == 0U);
+  HUNDUN_CHECK(counters.send_messages == 0U);
+  HUNDUN_CHECK(counters.receive_messages == 0U);
+  HUNDUN_CHECK(counters.completed_wait_seconds == 0.0);
+}
+
 void run_full(const MpiContext& world) {
+  run_zero_neighbour_collective_case();
   run_exchange_case(world, {true, true, true});
   run_exchange_case(world, {false, false, false});
 
@@ -665,6 +768,7 @@ void run_mismatch(const MpiContext& world) {
   }
   GhostedVector wrong_layout_vector(
       execution, VectorLayout(layout.owned_count(), std::move(wrong_ids)));
+  const auto counters_before_layout_failures = halo.performance_counters();
   const std::string layout_message = expect_collective_error(
       world, [&] { halo.exchange(world.rank() == 1 ? wrong_layout_vector
                                                    : vector); });
@@ -687,9 +791,12 @@ void run_mismatch(const MpiContext& world) {
       world, [&] { halo.exchange(world.rank() == 1 ? alternate_vector
                                                    : vector); });
   HUNDUN_CHECK(backend_message.find("backend") != std::string::npos);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_layout_failures, halo.performance_counters()));
 
   fill_vector(vector, topology, 2, -2.0);
   halo.begin(vector);
+  const auto counters_before_target_failure = halo.performance_counters();
   expect_collective_error(world, [&] { halo.begin(vector); });
 
   GhostedVector target(execution, layout);
@@ -697,6 +804,8 @@ void run_mismatch(const MpiContext& world) {
       world,
       [&] { halo.wait(world.rank() == 1 ? target : vector); });
   HUNDUN_CHECK(target_message.find("target") != std::string::npos);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_target_failure, halo.performance_counters()));
   halo.wait(vector);
   check_vector(vector, topology, 2);
 
@@ -780,12 +889,17 @@ void run_failure(const MpiContext& world) {
       world.rank() == 0 ? 1 : 2;
   hundun::linear::detail::set_vector_halo_test_options(mismatched_options);
   hundun::linear::detail::reset_vector_halo_test_observation();
+  const auto counters_before_mismatched_completion =
+      mismatch_halo.performance_counters();
   mismatch_message = expect_collective_error(
       world, [&] { mismatch_halo.wait(mismatch_vector); });
   HUNDUN_CHECK(mismatch_message.find("differs across ranks") !=
                std::string::npos);
   mismatch_snapshot = hundun::linear::detail::vector_halo_test_snapshot();
   HUNDUN_CHECK(mismatch_snapshot.runtime_completion_prefix == 0U);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_mismatched_completion,
+      mismatch_halo.performance_counters()));
   hundun::linear::detail::set_vector_halo_test_options({});
   mismatch_halo.wait(mismatch_vector);
 
@@ -871,8 +985,12 @@ void run_failure(const MpiContext& world) {
   hundun::linear::detail::set_vector_halo_test_options(options);
   fill_vector(vector, topology, 1, -1.0);
   const auto before_post_failure = copy_values(vector);
+  const auto counters_before_post_failure = halo.performance_counters();
   const std::string post_message =
       expect_collective_error(world, [&] { halo.begin(vector); });
+  const auto counters_after_post_failure = halo.performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_post_failure, counters_after_post_failure));
   check_values_unchanged(vector, before_post_failure);
   snapshot = hundun::linear::detail::vector_halo_test_snapshot();
   HUNDUN_CHECK(collective_max(world, snapshot.runtime_posts_before_failure) >=
@@ -891,8 +1009,14 @@ void run_failure(const MpiContext& world) {
   fill_vector(vector, topology, 2, -2.0);
   const auto before_completion_failure = copy_values(vector);
   halo.begin(vector);
+  const auto counters_before_completion_failure =
+      halo.performance_counters();
   const std::string completion_message =
       expect_collective_error(world, [&] { halo.wait(vector); });
+  const auto counters_after_completion_failure =
+      halo.performance_counters();
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_completion_failure, counters_after_completion_failure));
   check_values_unchanged(vector, before_completion_failure);
   snapshot = hundun::linear::detail::vector_halo_test_snapshot();
   HUNDUN_CHECK(collective_max(world, snapshot.runtime_completion_prefix) >=
@@ -905,6 +1029,24 @@ void run_failure(const MpiContext& world) {
 
   options = {};
   options.chunk_limit = 1U;
+  options.inject_target_copy_failure_rank = 1;
+  options.observe = true;
+  hundun::linear::detail::set_vector_halo_test_options(options);
+  fill_vector(vector, topology, 22, -22.0);
+  const auto before_target_copy_failure = copy_values(vector);
+  halo.begin(vector);
+  const auto counters_before_target_copy_failure =
+      halo.performance_counters();
+  const std::string target_copy_message =
+      expect_collective_error(world, [&] { halo.wait(vector); });
+  HUNDUN_CHECK(target_copy_message.find("target-copy") !=
+               std::string::npos);
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_target_copy_failure, halo.performance_counters()));
+  check_values_unchanged(vector, before_target_copy_failure);
+
+  options = {};
+  options.chunk_limit = 1U;
   options.inject_completion_failure_rank =
       hundun::linear::detail::kInjectAllEligibleRanks;
   options.observe = true;
@@ -912,8 +1054,12 @@ void run_failure(const MpiContext& world) {
   fill_vector(vector, topology, 21, -21.0);
   const auto before_multi_completion_failure = copy_values(vector);
   halo.begin(vector);
+  const auto counters_before_multi_completion_failure =
+      halo.performance_counters();
   const std::string multi_completion_message =
       expect_collective_error(world, [&] { halo.wait(vector); });
+  HUNDUN_CHECK(hundun::test::task25_counters_equal(
+      counters_before_multi_completion_failure, halo.performance_counters()));
   check_values_unchanged(vector, before_multi_completion_failure);
   snapshot = hundun::linear::detail::vector_halo_test_snapshot();
   HUNDUN_CHECK(collective_sum(
@@ -941,6 +1087,7 @@ int run_finalized_idle(int argc, char** argv) {
   std::optional<MpiContext> context;
   std::optional<GhostedVector> vector;
   CpuReferenceContext execution;
+  hundun::runtime::HaloPerformanceCounters expected_counters{};
   int active_result = EXIT_FAILURE;
   {
     MpiEnvironment environment(argc, argv);
@@ -955,6 +1102,9 @@ int run_finalized_idle(int argc, char** argv) {
           GhostedVectorHalo::create(*decomposition, *topology, execution));
       GhostedVectorHalo moved(std::move(*halo));
       expect_local_error([&] { static_cast<void>(halo->path()); });
+      expect_local_error(
+          [&] { static_cast<void>(halo->performance_counters()); });
+      expected_counters = moved.performance_counters();
       halo.emplace(std::move(moved));
       HUNDUN_CHECK(halo->path() == BufferHaloPath::host_direct);
     });
@@ -967,6 +1117,22 @@ int run_finalized_idle(int argc, char** argv) {
     HUNDUN_CHECK(MPI_Finalized(&finalized) == MPI_SUCCESS);
     HUNDUN_CHECK(finalized != 0);
     HUNDUN_CHECK(halo->owned_count() == topology->owned_cell_count());
+    const auto allocation_before =
+        hundun::execution::allocation_counters();
+    std::size_t query_allocations = 0U;
+    hundun::runtime::HaloPerformanceCounters counters{};
+    {
+      AllocationAttemptGuard guard;
+      counters = halo->performance_counters();
+      query_allocations = guard.attempts();
+    }
+    const auto allocation_after =
+        hundun::execution::allocation_counters();
+    HUNDUN_CHECK(query_allocations == 0U);
+    HUNDUN_CHECK(
+        hundun::test::task25_counters_equal(expected_counters, counters));
+    HUNDUN_CHECK(hundun::test::task25_counters_equal(allocation_before,
+                                                     allocation_after));
     halo.reset();
     vector.reset();
     topology.reset();

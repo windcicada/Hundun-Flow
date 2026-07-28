@@ -1476,8 +1476,6 @@ FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create(
     MaterialDensityTransportSpec specification) {
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
-  if (geometry.mapping_kind() != mesh::MappingKind::uniform_box)
-    throw runtime::Error("material flow supports uniform geometry only");
   if (!cell_halo.is_compatible_with(decomposition) ||
       cell_halo.ghost_width() != 2)
     throw runtime::Error("material flow requires a compatible width-two Halo");
@@ -1528,8 +1526,6 @@ FixedStepMaterialDensityFlow FixedStepMaterialDensityFlow::create_open_capable(
 ) {
   validate_host_context(execution_context);
   geometry.require_compatible(topology);
-  if (geometry.mapping_kind() != mesh::MappingKind::uniform_box)
-    throw runtime::Error("closure flow supports uniform geometry only");
   if (!cell_halo.is_compatible_with(decomposition) ||
       cell_halo.ghost_width() != 2)
     throw runtime::Error("closure flow requires a compatible width-two Halo");
@@ -1596,6 +1592,13 @@ FixedStepMaterialDensityFlow::FixedStepMaterialDensityFlow(
     if (impl_->source_generation == 0U)
       impl_->source_generation = 1U;
   }
+}
+
+runtime::HaloPerformanceCounters
+FixedStepMaterialDensityFlow::pressure_halo_performance_counters() const {
+  if (!impl_)
+    throw runtime::Error("material fixed-step flow has been moved from");
+  return impl_->coupler.pressure_halo_performance_counters();
 }
 
 MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
@@ -3134,6 +3137,14 @@ test::MaterialDensityPisoTestAccess::material_pressure_evidence(
   if (!flow.impl_)
     return {};
   return material_pressure_evidence(flow.impl_->coupler);
+}
+
+test::MaterialPressureHaloCountersForTest
+test::MaterialDensityPisoTestAccess::material_pressure_halo_counters(
+    const FixedStepMaterialDensityFlow &flow) {
+  if (!flow.impl_)
+    return {};
+  return material_pressure_halo_counters(flow.impl_->coupler);
 }
 
 test::FacadeCacheSnapshot

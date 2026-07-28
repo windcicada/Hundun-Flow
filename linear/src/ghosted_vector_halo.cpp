@@ -15,6 +15,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -31,6 +32,58 @@ namespace {
 
 constexpr int kMetadataTag = 17;
 constexpr int kPayloadTag = 23;
+
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+thread_local runtime::HaloPerformanceCounters
+    next_initial_performance_counters;
+thread_local bool next_initial_performance_counters_available = false;
+
+runtime::HaloPerformanceCounters
+take_next_initial_performance_counters() noexcept {
+  if (!next_initial_performance_counters_available)
+    return {};
+  next_initial_performance_counters_available = false;
+  return next_initial_performance_counters;
+}
+#endif
+
+std::uint64_t checked_counter_add(std::uint64_t left, std::uint64_t right,
+                                  const char* subject) {
+  if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+    throw runtime::Error(std::string(subject) + " counter overflow");
+  }
+  return left + right;
+}
+
+runtime::HaloPerformanceCounters checked_counter_sum(
+    runtime::HaloPerformanceCounters left,
+    const runtime::HaloPerformanceCounters& right) {
+  left.completed_exchanges = checked_counter_add(
+      left.completed_exchanges, right.completed_exchanges, "completed Halo");
+  left.begin_calls =
+      checked_counter_add(left.begin_calls, right.begin_calls, "begin Halo");
+  left.wait_calls =
+      checked_counter_add(left.wait_calls, right.wait_calls, "wait Halo");
+  left.send_payload_bytes = checked_counter_add(
+      left.send_payload_bytes, right.send_payload_bytes, "send Halo bytes");
+  left.receive_payload_bytes =
+      checked_counter_add(left.receive_payload_bytes,
+                          right.receive_payload_bytes, "receive Halo bytes");
+  left.pack_bytes =
+      checked_counter_add(left.pack_bytes, right.pack_bytes, "pack Halo bytes");
+  left.unpack_bytes = checked_counter_add(
+      left.unpack_bytes, right.unpack_bytes, "unpack Halo bytes");
+  left.send_messages = checked_counter_add(
+      left.send_messages, right.send_messages, "send Halo messages");
+  left.receive_messages = checked_counter_add(
+      left.receive_messages, right.receive_messages, "receive Halo messages");
+  left.completed_wait_seconds += right.completed_wait_seconds;
+  if (!std::isfinite(left.completed_wait_seconds) ||
+      left.completed_wait_seconds < 0.0) {
+    throw runtime::Error("completed Halo wait counter is invalid");
+  }
+  return left;
+}
 
 bool same(runtime::Int3 left, runtime::Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
@@ -97,13 +150,22 @@ static_assert(sizeof(FailureRecord) == 8U * sizeof(std::int64_t));
 bool failed(FailureRecord record) noexcept { return record.category != 0; }
 
 bool converge_failure(const runtime::MpiContext& context,
-                      FailureRecord local, FailureRecord& global) noexcept {
+                      FailureRecord local, FailureRecord& global,
+                      bool* communication_failure_present = nullptr) noexcept {
   const int local_rank = failed(local) ? context.rank() : context.size();
-  int failing_rank = context.size();
-  if (MPI_Allreduce(&local_rank, &failing_rank, 1, MPI_INT, MPI_MIN,
+  const bool local_communication_failure =
+      local.category == 1 || local.category == 2;
+  const std::array<int, 2> local_status{
+      local_rank, local_communication_failure ? 0 : 1};
+  std::array<int, 2> global_status{context.size(), 1};
+  if (MPI_Allreduce(local_status.data(), global_status.data(),
+                    static_cast<int>(local_status.size()), MPI_INT, MPI_MIN,
                     context.comm()) != MPI_SUCCESS) {
     return false;
   }
+  const int failing_rank = global_status[0];
+  if (communication_failure_present != nullptr)
+    *communication_failure_present = global_status[1] == 0;
   if (failing_rank == context.size()) {
     global = FailureRecord{};
     return true;
@@ -231,6 +293,10 @@ void terminate_if_uncertain_post_output(
 }
 
 std::string format_failure(FailureRecord record) {
+  if (record.category == 3) {
+    return "compact Halo performance counter publication failed: rank=" +
+           std::to_string(record.rank);
+  }
   std::string message = "compact Buffer Halo ";
   message += record.category == 1 ? "post" : "completion";
   message += " failure: rank=" + std::to_string(record.rank);
@@ -956,6 +1022,18 @@ std::string_view vector_issue_message(VectorIssue issue,
 
 }  // namespace
 
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+namespace test {
+
+void set_next_halo_performance_counters(
+    runtime::HaloPerformanceCounters counters) noexcept {
+  next_initial_performance_counters = counters;
+  next_initial_performance_counters_available = true;
+}
+
+}  // namespace test
+#endif
+
 class GhostedVectorHalo::Impl final {
  public:
   struct PeerState {
@@ -1002,6 +1080,9 @@ class GhostedVectorHalo::Impl final {
         requests_(std::move(requests)),
         request_descriptors_(std::move(request_descriptors)),
         observation_(std::move(observation)) {
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+    performance_ = take_next_initial_performance_counters();
+#endif
     if (observation_.has_value()) {
       detail::activate_vector_halo_test_observation(&*observation_);
     }
@@ -1026,6 +1107,9 @@ class GhostedVectorHalo::Impl final {
   std::size_t send_value_count() const noexcept { return send_value_count_; }
   std::size_t receive_value_count() const noexcept {
     return receive_value_count_;
+  }
+  runtime::HaloPerformanceCounters performance_counters() const noexcept {
+    return performance_;
   }
 
   void begin(const GhostedVector& vector) {
@@ -1217,7 +1301,47 @@ class GhostedVectorHalo::Impl final {
       local_prepared = false;
       preparation_message = "unknown compact Halo pack failure";
     }
-    require_collective(context_, local_prepared, preparation_message);
+    runtime::HaloPerformanceCounters staged_candidate{};
+    if (local_prepared) {
+      try {
+        staged_candidate.completed_exchanges = 1U;
+        staged_candidate.begin_calls = 1U;
+        staged_candidate.wait_calls = 1U;
+        staged_candidate.send_payload_bytes = checked_counter_add(
+            0U, static_cast<std::uint64_t>(
+                    detail::checked_vector_bytes(send_value_count_)),
+            "staged send Halo bytes");
+        staged_candidate.receive_payload_bytes = checked_counter_add(
+            0U, static_cast<std::uint64_t>(
+                    detail::checked_vector_bytes(receive_value_count_)),
+            "staged receive Halo bytes");
+        staged_candidate.pack_bytes =
+            staged_candidate.send_payload_bytes;
+        staged_candidate.unpack_bytes =
+            staged_candidate.receive_payload_bytes;
+        for (const RequestDescriptor& descriptor : request_descriptors_) {
+          if (descriptor.receive) {
+            staged_candidate.receive_messages = checked_counter_add(
+                staged_candidate.receive_messages, 1U,
+                "staged receive Halo messages");
+          } else {
+            staged_candidate.send_messages = checked_counter_add(
+                staged_candidate.send_messages, 1U,
+                "staged send Halo messages");
+          }
+        }
+        static_cast<void>(
+            checked_counter_sum(performance_, staged_candidate));
+      } catch (...) {
+        local_prepared = false;
+        preparation_message =
+            "compact Halo performance counter preflight failed";
+      }
+    }
+    require_collective(
+        context_, local_prepared, preparation_message);
+    staged_ = staged_candidate;
+    staged_active_ = true;
 
     const InjectionSelection post_injection = validate_injection_selection(
         context_,
@@ -1375,12 +1499,36 @@ class GhostedVectorHalo::Impl final {
             context_, detail::current_vector_halo_test_options()
                           .inject_completion_failure_rank,
             request_descriptors_.size(), InjectionPhase::payload_completion);
-    const FailureRecord local_failure = complete_all(completion_injection);
+    const double wait_start = requests_.empty() ? 0.0 : MPI_Wtime();
+    FailureRecord local_failure = complete_all(completion_injection);
+    const double wait_finish = requests_.empty() ? 0.0 : MPI_Wtime();
+    runtime::HaloPerformanceCounters published_candidate{};
+    if (!failed(local_failure)) {
+      try {
+        staged_.completed_wait_seconds =
+            requests_.empty() ? 0.0 : wait_finish - wait_start;
+        if (!std::isfinite(staged_.completed_wait_seconds) ||
+            staged_.completed_wait_seconds < 0.0) {
+          throw runtime::Error(
+              "compact Halo measured wait time is invalid");
+        }
+        published_candidate = checked_counter_sum(performance_, staged_);
+      } catch (...) {
+        local_failure = FailureRecord{
+            3, context_.rank(), 0, 0, -1, 0, 0, -1};
+      }
+    }
     FailureRecord global_failure;
-    if (!converge_failure(context_, local_failure, global_failure)) {
+    bool communication_failure_present = false;
+    if (!converge_failure(context_, local_failure, global_failure,
+                          &communication_failure_present)) {
       std::terminate();
     }
     if (failed(global_failure)) {
+      if (!communication_failure_present && global_failure.category == 3) {
+        clear_active();
+        throw runtime::Error(format_failure(global_failure));
+      }
       auto& snapshot = detail::mutable_vector_halo_test_snapshot();
       if (detail::current_vector_halo_test_options().observe) {
         snapshot.runtime_non_null_before_cleanup =
@@ -1399,6 +1547,18 @@ class GhostedVectorHalo::Impl final {
       throw runtime::Error(format_failure(global_failure));
     }
 
+#ifdef HUNDUN_LINEAR_ENABLE_TEST_ACCESS
+    const bool target_copy_allowed =
+        context_.rank() != detail::current_vector_halo_test_options()
+                               .inject_target_copy_failure_rank;
+    try {
+      require_collective(context_, target_copy_allowed,
+                         "injected compact Halo target-copy failure");
+    } catch (...) {
+      clear_active();
+      throw;
+    }
+#endif
     auto target = vector.local_view();
     for (PeerState& peer : peers_) {
       const auto source =
@@ -1413,6 +1573,10 @@ class GhostedVectorHalo::Impl final {
         target[local] = source[index];
       }
     }
+    if (!staged_active_) {
+      std::terminate();
+    }
+    performance_ = published_candidate;
     clear_active();
   }
 
@@ -1455,6 +1619,8 @@ class GhostedVectorHalo::Impl final {
     active_ = false;
     pending_allocation_ = 0U;
     pending_epoch_ = 0U;
+    staged_ = runtime::HaloPerformanceCounters{};
+    staged_active_ = false;
   }
 
   runtime::MpiContext context_;
@@ -1469,6 +1635,9 @@ class GhostedVectorHalo::Impl final {
   bool active_{};
   execution::AllocationIdentity pending_allocation_{};
   std::uint64_t pending_epoch_{};
+  runtime::HaloPerformanceCounters performance_{};
+  runtime::HaloPerformanceCounters staged_{};
+  bool staged_active_{};
 };
 
 GhostedVectorHalo GhostedVectorHalo::create(
@@ -1618,6 +1787,14 @@ std::size_t GhostedVectorHalo::receive_value_count() const {
     throw runtime::Error("moved-from compact Buffer Halo has no state");
   }
   return implementation_->receive_value_count();
+}
+
+runtime::HaloPerformanceCounters
+GhostedVectorHalo::performance_counters() const {
+  if (!implementation_) {
+    throw runtime::Error("moved-from compact Buffer Halo has no state");
+  }
+  return implementation_->performance_counters();
 }
 
 void GhostedVectorHalo::exchange(GhostedVector& vector) {

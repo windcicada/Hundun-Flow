@@ -79,7 +79,7 @@ check_normal_log() {
   local step_10='^STEP 10 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
   local step_20='^STEP 20 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$'
   local finished='^FINISHED step=20 time_s=[0-9.eE+-]+$'
-  if test "${lines[0]}" != "HUNDUN-FLOW 0.0.0-stage1"; then
+  if test "${lines[0]}" != "HUNDUN-FLOW 0.1.0-stage2"; then
     echo "normal numerical log line 1 is not the Stage 1 banner" >&2
     return 1
   fi
@@ -180,6 +180,7 @@ require_exact_canonical_vtk_set() {
 require_bounded_diagnostic() {
   local path=$1
   local expected=$2
+  local max_bytes=${3:-256}
   local matches
   matches=$(grep -Fxc -- "${expected}" "${path}" || true)
   if test "${matches}" -ne 1; then
@@ -188,11 +189,19 @@ require_bounded_diagnostic() {
   fi
   local bytes
   bytes=$(wc -c <"${path}")
-  if test "${bytes}" -gt 256; then
-    echo "output failure diagnostic is not bounded" >&2
+  if test "${bytes}" -gt "${max_bytes}"; then
+    printf \
+      'output failure diagnostic is not bounded: path=%s bytes=%s limit=%s\n' \
+      "${path}" "${bytes}" "${max_bytes}" >&2
+    LC_ALL=C head -c 512 -- "${path}" >&2 || true
+    printf '\n' >&2
     return 1
   fi
 }
+
+# MPI launchers may append their own bounded nonzero-exit diagnostics.
+mpi_failure_diagnostic_max_bytes=1024
+mpi_restart_diagnostic_max_records=32
 
 require_single_newline_record() {
   local path=$1
@@ -328,7 +337,7 @@ check_minimum_valid_partition() {
     return 1
   fi
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=minimum_valid_partition ranks=2 cells=4x2x2' \
     'FINISHED step=0 time_s=0' >"${expected_output}"
   cmp --silent "${expected_output}" "${normal_output}"
@@ -438,6 +447,13 @@ require_restart_rejection_result() {
   local output_name=$7
   local restart_name=$8
   local enumerator=$9
+  local max_diagnostic_records=${10:-1}
+
+  if [[ ! ${max_diagnostic_records} =~ ^[0-9]+$ ]] || \
+      test "${max_diagnostic_records}" -lt 1; then
+    echo "${label} diagnostic record limit is invalid" >&2
+    return 1
+  fi
 
   case "${status}" in
   1) ;;
@@ -487,8 +503,14 @@ require_restart_rejection_result() {
     return 1
   fi
   if [[ ! ${diagnostic_newline_count} =~ ^[0-9]+$ ]] || \
-      test "${diagnostic_newline_count}" -ne 1; then
-    echo "${label} diagnostic must contain exactly one record" >&2
+      test "${diagnostic_newline_count}" -lt 1 || \
+      test "${diagnostic_newline_count}" -gt "${max_diagnostic_records}"; then
+    printf \
+      '%s diagnostic record count is outside its bound: path=%s bytes=%s records=%s limit=%s\n' \
+      "${label}" "${stderr_path}" "${diagnostic_bytes}" \
+      "${diagnostic_newline_count}" "${max_diagnostic_records}" >&2
+    LC_ALL=C head -c 1024 -- "${stderr_path}" >&2 || true
+    printf '\n' >&2
     return 1
   fi
 
@@ -551,7 +573,9 @@ require_restart_rejection_result() {
     "${case_directory}" "${output_name}" "${restart_name}" "${enumerator}"
 }
 
-run_restart_rejection_case() {
+run_restart_rejection_case_with_record_limit() {
+  local max_diagnostic_records=$1
+  shift
   local label=$1
   local time_limit=$2
   local kill_after=$3
@@ -573,7 +597,16 @@ run_restart_rejection_case() {
   require_restart_rejection_result \
     "${label}" "${status}" "${stdout_path}" "${stderr_path}" \
     "${expected_diagnostic}" "${case_directory}" "${output_name}" \
-    "${restart_name}" find
+    "${restart_name}" find "${max_diagnostic_records}"
+}
+
+run_restart_rejection_case() {
+  run_restart_rejection_case_with_record_limit 1 "$@"
+}
+
+run_mpi_restart_rejection_case() {
+  run_restart_rejection_case_with_record_limit \
+    "${mpi_restart_diagnostic_max_records}" "$@"
 }
 
 require_no_nonfinite_token() {
@@ -651,7 +684,7 @@ run_fast_shell_contract_fixtures() {
   local extra_stderr="${work_root}/normal-log-extra.stderr"
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
@@ -660,7 +693,7 @@ run_fast_shell_contract_fixtures() {
   check_normal_log "${stdout_path}" "${stderr_path}"
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 10 time_s=0.1 mass=1 relative_mass_error=0' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' >"${no_final_lf}"
@@ -671,7 +704,7 @@ run_fast_shell_contract_fixtures() {
   fi
 
   printf '%s\n' \
-    'HUNDUN-FLOW 0.0.0-stage1' \
+    'HUNDUN-FLOW 0.1.0-stage2' \
     'CASE name=periodic_passive_scalar ranks=2 cells=64x8x8' \
     'STEP 20 time_s=0.2 mass=1 relative_mass_error=0' \
     'FINISHED step=20 time_s=0.2' >"${moved_stdout}"
@@ -748,6 +781,16 @@ run_fast_shell_contract_fixtures() {
       sh -c 'printf "%s\n%s\n" "$1" "unrelated stderr record" >&2; exit 1' \
       sh "${rejection_diagnostic}" >/dev/null 2>&1; then
     echo "restart rejection fixture accepted an extra stderr record" >&2
+    return 1
+  fi
+
+  if ! run_mpi_restart_rejection_case \
+      'MPI launcher restart rejection fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n%s\n" "$1" "bounded launcher diagnostic" >&2; exit 1' \
+      sh "${rejection_diagnostic}"; then
+    echo "restart rejection fixture rejected bounded launcher diagnostics" >&2
     return 1
   fi
 
@@ -1173,7 +1216,7 @@ EOF
 "${cmake_command}" --build "${build_dir}" -j 2
 
 "${build_dir}/hundun" --version >"${work_root}/version.txt"
-printf '%s\n' "HUNDUN-FLOW 0.0.0-stage1" \
+printf '%s\n' "HUNDUN-FLOW 0.1.0-stage2" \
   >"${work_root}/version.expected"
 cmp --silent "${work_root}/version.expected" "${work_root}/version.txt"
 set +e
@@ -1236,7 +1279,7 @@ if test -s "${root_stderr}"; then
   echo "authoritative-root MPMD run emitted stderr" >&2
   exit 1
 fi
-grep -Fx 'HUNDUN-FLOW 0.0.0-stage1' "${root_stdout}" >/dev/null
+grep -Fx 'HUNDUN-FLOW 0.1.0-stage2' "${root_stdout}" >/dev/null
 grep -Fx 'CASE name=rank_zero_authoritative_root ranks=2 cells=4x2x2' \
   "${root_stdout}" >/dev/null
 grep -E '^STEP 1 time_s=[0-9.eE+-]+ mass=[0-9.eE+-]+ relative_mass_error=[0-9.eE+-]+$' \
@@ -1336,7 +1379,8 @@ if test "${validation_output_status}" -eq 124; then
   exit 1
 fi
 require_bounded_diagnostic "${work_root}/validation-output-failure.log" \
-  "unable to write validation output"
+  "unable to write validation output" \
+  "${mpi_failure_diagnostic_max_bytes}"
 
 (
   cd -- "${work_root}/launch-a"
@@ -1389,7 +1433,8 @@ if test "${normal_output_status}" -eq 124; then
   exit 1
 fi
 require_bounded_diagnostic "${work_root}/normal-output-failure.log" \
-  "unable to write Stage 1 output"
+  "unable to write Stage 1 output" \
+  "${mpi_failure_diagnostic_max_bytes}"
 
 check_invalid_local_width_case 'uneven-valid-partition' \
   "${uneven_valid_case_dir}" 'output.uneven-valid' \
@@ -1437,7 +1482,7 @@ check_missing_marker_rejection() {
   local restore_status=0
 
   mv -- "${marker}" "${saved_marker}"
-  run_restart_rejection_case \
+  run_mpi_restart_rejection_case \
     'missing Restart completion marker' 20 2 \
     'Restart v1 completion marker read:' \
     "${case_dir}" output.resumed Restart.resumed \
@@ -1464,7 +1509,7 @@ check_truncated_rank_rejection() {
 
   cp -p -- "${rank_file}" "${saved_rank_file}"
   : >"${rank_file}"
-  run_restart_rejection_case \
+  run_mpi_restart_rejection_case \
     'truncated Restart rank file' 20 2 \
     'Restart v1 rank-file read: Restart v1 rank-file size or CRC does not match manifest' \
     "${case_dir}" output.resumed Restart.resumed \

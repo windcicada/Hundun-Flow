@@ -25,9 +25,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -201,6 +204,10 @@ void run_gradient_case(const MpiContext &mpi, int ranks, bool warped) {
   const std::array<bool, 3> periodic{true, true, true};
   auto decomposition = StructuredDecomposition::create(
       mpi, extent, periodic, DecompositionOptions{process_grid_for(ranks)});
+  const auto fixture_local = decomposition.local_extent();
+  HUNDUN_CHECK(fixture_local.x >= 2);
+  HUNDUN_CHECK(fixture_local.y >= 2);
+  HUNDUN_CHECK(fixture_local.z >= 2);
   MeshTopology topology(decomposition);
   MeshGeometry geometry =
       warped ? MeshGeometry(topology,
@@ -222,6 +229,21 @@ void run_gradient_case(const MpiContext &mpi, int ranks, bool warped) {
       registry.declare_field(cell_descriptor("gradient_velocity", 3, 2));
   const FieldId velocity_gradient = registry.declare_field(
       cell_descriptor("gradient_velocity_gradient", 9, 1));
+  const FieldId mass_flux = declare_face_mass_flux(registry);
+  const FieldId transported_face =
+      registry.declare_field(face_descriptor("free_stream_face", 1));
+  const FieldId momentum_face =
+      registry.declare_field(face_descriptor("free_stream_velocity_face", 3));
+  const FieldId gamma =
+      registry.declare_field(face_descriptor("free_stream_gamma", 1));
+  const FieldId scalar_residual =
+      registry.declare_field(cell_descriptor("free_stream_scalar_r", 1, 0));
+  const FieldId momentum_convective_residual = registry.declare_field(
+      cell_descriptor("free_stream_momentum_convective_r", 3, 0));
+  const FieldId momentum_viscous_residual = registry.declare_field(
+      cell_descriptor("free_stream_momentum_viscous_r", 3, 0));
+  const FieldId scalar_diffusive_residual = registry.declare_field(
+      cell_descriptor("free_stream_scalar_diffusive_r", 1, 0));
   registry.freeze();
   FieldStorage storage(registry, FieldLayoutSet{decomposition.local_extent(),
                                                 topology.local_face_count()});
@@ -331,6 +353,279 @@ void run_gradient_case(const MpiContext &mpi, int ranks, bool warped) {
       }
     }
   }
+  if (!warped)
+    return;
+
+  constexpr Real3 free_stream_velocity{0.125, -0.25, 0.375};
+  for (int k = 0; k < decomposition.local_extent().z; ++k) {
+    for (int j = 0; j < decomposition.local_extent().y; ++j) {
+      for (int i = 0; i < decomposition.local_extent().x; ++i) {
+        q_write(i, j, k, 0) = 1.0;
+        velocity_write(i, j, k, 0) = free_stream_velocity.x;
+        velocity_write(i, j, k, 1) = free_stream_velocity.y;
+        velocity_write(i, j, k, 2) = free_stream_velocity.z;
+      }
+    }
+  }
+  halo.exchange(storage, q);
+  halo.exchange(storage, velocity);
+  operators.compute_gradient(GradientScheme::weighted_least_squares,
+                             FiniteVolumeQuantity::density(), boundaries,
+                             q_read, gradient_write);
+  operators.compute_gradient(GradientScheme::weighted_least_squares,
+                             FiniteVolumeQuantity::velocity(), boundaries,
+                             velocity_read, velocity_gradient_write);
+
+  constexpr PhaseId write_phase = 701U;
+  constexpr PhaseId read_phase = 702U;
+  constexpr ActorId actor = 703U;
+  FieldAccessPlan access(registry);
+  access.declare_access(write_phase, actor, mass_flux, AccessMode::write);
+  access.declare_access(read_phase, actor, mass_flux, AccessMode::read);
+  access.declare_access(read_phase, actor, transported_face,
+                        AccessMode::read_write);
+  access.declare_access(read_phase, actor, momentum_face,
+                        AccessMode::read_write);
+  access.declare_access(read_phase, actor, gamma, AccessMode::read_write);
+  access.freeze();
+  operators.assemble_provisional_mass_flux(
+      boundaries, q_read, velocity_read, registry, storage, access,
+      write_phase, actor, mass_flux);
+  const FieldStorage &free_stream_read_storage = storage;
+  auto flux = FaceMassFlux::acquire(
+      registry, free_stream_read_storage, access, read_phase, actor, mass_flux,
+      topology);
+  auto transported_face_write = storage.acquire_face_write<double>(
+      access, read_phase, actor, transported_face);
+  auto momentum_face_write = storage.acquire_face_write<double>(
+      access, read_phase, actor, momentum_face);
+  auto gamma_write =
+      storage.acquire_face_write<double>(access, read_phase, actor, gamma);
+  operators.reconstruct_momentum_faces(boundaries, flux, velocity_read,
+                                       momentum_face_write);
+
+  const auto flux_read = free_stream_read_storage.acquire_face_read<double>(
+      access, read_phase, actor, mass_flux);
+  const auto momentum_face_read =
+      free_stream_read_storage.acquire_face_read<double>(
+          access, read_phase, actor, momentum_face);
+  const double eps = std::numeric_limits<double>::epsilon();
+  const auto face_tolerance = [&](double scale) {
+    return 512.0 * eps * std::max(1.0, scale);
+  };
+  for (hundun::mesh::LocalFaceId face = 0;
+       face < topology.local_face_count(); ++face) {
+    const auto area =
+        geometry.face_area_vector_m2(face, hundun::mesh::FaceSide::owner);
+    const double expected_flux =
+        free_stream_velocity.x * area.x +
+        free_stream_velocity.y * area.y +
+        free_stream_velocity.z * area.z;
+    HUNDUN_CHECK_NEAR(flux_read(face, 0), expected_flux,
+                      face_tolerance(std::abs(expected_flux)));
+    HUNDUN_CHECK_NEAR(momentum_face_read(face, 0), free_stream_velocity.x,
+                      face_tolerance(std::abs(free_stream_velocity.x)));
+    HUNDUN_CHECK_NEAR(momentum_face_read(face, 1), free_stream_velocity.y,
+                      face_tolerance(std::abs(free_stream_velocity.y)));
+    HUNDUN_CHECK_NEAR(momentum_face_read(face, 2), free_stream_velocity.z,
+                      face_tolerance(std::abs(free_stream_velocity.z)));
+  }
+
+  const std::size_t cells = topology.owned_cell_count();
+  const auto cell_index = [&](LocalCellId cell, std::size_t component,
+                              std::size_t components) {
+    return cell * components + component;
+  };
+  const auto independent_convective_oracle =
+      [&](const std::vector<double> &constant_values) {
+        const std::size_t components = constant_values.size();
+        std::vector<double> residual(cells * components, 0.0);
+        std::vector<double> magnitude(cells * components, 0.0);
+        for (hundun::mesh::LocalFaceId face = 0;
+             face < topology.local_face_count(); ++face) {
+          const auto area = geometry.face_area_vector_m2(
+              face, hundun::mesh::FaceSide::owner);
+          const double analytic_flux =
+              free_stream_velocity.x * area.x +
+              free_stream_velocity.y * area.y +
+              free_stream_velocity.z * area.z;
+          const auto accumulate = [&](LocalCellId cell, double sign) {
+            for (std::size_t component = 0; component < components;
+                 ++component) {
+              const auto index = cell_index(cell, component, components);
+              const double contribution =
+                  sign * analytic_flux * constant_values[component];
+              residual[index] += contribution;
+              magnitude[index] += std::abs(contribution);
+            }
+          };
+          const auto owner = topology.owner(face);
+          if (topology.cell_ownership(owner) ==
+              hundun::mesh::EntityOwnership::owned)
+            accumulate(owner, 1.0);
+          const auto neighbour = topology.neighbour(face);
+          if (!topology.periodic_pair(face).has_value() &&
+              neighbour.has_value() &&
+              topology.cell_ownership(*neighbour) ==
+                  hundun::mesh::EntityOwnership::owned)
+            accumulate(*neighbour, -1.0);
+        }
+        return std::pair{std::move(residual), std::move(magnitude)};
+      };
+  const auto verify_residual =
+      [&](const hundun::runtime::FieldView<double> &product,
+          const std::vector<double> &expected,
+          const std::vector<double> &magnitude, std::size_t components) {
+        std::vector<double> global_signed(components, 0.0);
+        std::vector<double> global_magnitude(components, 0.0);
+        for (LocalCellId cell = 0; cell < cells; ++cell) {
+          const int i = static_cast<int>(
+              cell % static_cast<std::size_t>(decomposition.local_extent().x));
+          const std::size_t yz =
+              cell /
+              static_cast<std::size_t>(decomposition.local_extent().x);
+          const int j = static_cast<int>(
+              yz %
+              static_cast<std::size_t>(decomposition.local_extent().y));
+          const int k = static_cast<int>(
+              yz /
+              static_cast<std::size_t>(decomposition.local_extent().y));
+          for (std::size_t component = 0; component < components;
+               ++component) {
+            const auto index = cell_index(cell, component, components);
+            const double actual =
+                product(i, j, k, static_cast<int>(component));
+            const double tolerance =
+                512.0 * eps * std::max(1.0, magnitude[index]);
+            HUNDUN_CHECK_NEAR(actual, expected[index], tolerance);
+            HUNDUN_CHECK(std::abs(actual) <= tolerance);
+            global_signed[component] += actual;
+            global_magnitude[component] += magnitude[index];
+          }
+        }
+        HUNDUN_CHECK(MPI_Allreduce(
+                         MPI_IN_PLACE, global_signed.data(),
+                         static_cast<int>(components), MPI_DOUBLE, MPI_SUM,
+                         mpi.comm()) == MPI_SUCCESS);
+        HUNDUN_CHECK(MPI_Allreduce(
+                         MPI_IN_PLACE, global_magnitude.data(),
+                         static_cast<int>(components), MPI_DOUBLE, MPI_SUM,
+                         mpi.comm()) == MPI_SUCCESS);
+        for (std::size_t component = 0; component < components; ++component)
+          HUNDUN_CHECK(
+              std::abs(global_signed[component]) <=
+              512.0 * eps * std::max(1.0, global_magnitude[component]));
+      };
+  const auto zero_residual =
+      [&](const hundun::runtime::FieldView<double> &residual,
+          std::size_t components) {
+    for (int k = 0; k < decomposition.local_extent().z; ++k)
+      for (int j = 0; j < decomposition.local_extent().y; ++j)
+        for (int i = 0; i < decomposition.local_extent().x; ++i)
+          for (std::size_t component = 0; component < components; ++component)
+            residual(i, j, k, static_cast<int>(component)) = 0.0;
+  };
+
+  auto scalar_r = storage.view<double>(scalar_residual);
+  const auto run_scalar_convective = [&](double constant_value,
+                                         FiniteVolumeQuantity quantity) {
+    for (int k = 0; k < decomposition.local_extent().z; ++k)
+      for (int j = 0; j < decomposition.local_extent().y; ++j)
+        for (int i = 0; i < decomposition.local_extent().x; ++i)
+          q_write(i, j, k, 0) = constant_value;
+    halo.exchange(storage, q);
+    operators.reconstruct_transport_faces(quantity, boundaries, flux, q_read,
+                                          transported_face_write);
+    zero_residual(scalar_r, 1U);
+    const auto transported_face_read =
+        free_stream_read_storage.acquire_face_read<double>(
+            access, read_phase, actor, transported_face);
+    operators.accumulate_convective_residual(flux, transported_face_read,
+                                             scalar_r);
+    const auto [expected, magnitude] =
+        independent_convective_oracle({constant_value});
+    verify_residual(scalar_r, expected, magnitude, 1U);
+  };
+  run_scalar_convective(2.0, FiniteVolumeQuantity::enthalpy());
+  run_scalar_convective(0.25, FiniteVolumeQuantity::scalar(0U));
+
+  auto momentum_convective_r =
+      storage.view<double>(momentum_convective_residual);
+  zero_residual(momentum_convective_r, 3U);
+  operators.accumulate_convective_residual(flux, momentum_face_read,
+                                           momentum_convective_r);
+  const auto [momentum_expected, momentum_magnitude] =
+      independent_convective_oracle(
+          {free_stream_velocity.x, free_stream_velocity.y,
+           free_stream_velocity.z});
+  verify_residual(momentum_convective_r, momentum_expected,
+                  momentum_magnitude, 3U);
+
+  auto momentum_viscous_r =
+      storage.view<double>(momentum_viscous_residual);
+  zero_residual(momentum_viscous_r, 3U);
+  operators.accumulate_viscous_residual(
+      boundaries, velocity_read,
+      free_stream_read_storage.view<double>(velocity_gradient), 0.01,
+      momentum_viscous_r);
+  verify_residual(momentum_viscous_r, std::vector<double>(cells * 3U, 0.0),
+                  std::vector<double>(cells * 3U, 0.0), 3U);
+
+  for (hundun::mesh::LocalFaceId face = 0;
+       face < topology.local_face_count(); ++face)
+    gamma_write(face, 0) = 0.02;
+  auto scalar_diffusive_r =
+      storage.view<double>(scalar_diffusive_residual);
+  zero_residual(scalar_diffusive_r, 1U);
+  const auto gamma_read = free_stream_read_storage.acquire_face_read<double>(
+      access, read_phase, actor, gamma);
+  operators.compute_gradient(GradientScheme::weighted_least_squares,
+                             FiniteVolumeQuantity::scalar(0U), boundaries,
+                             q_read, gradient_write);
+  operators.accumulate_scalar_diffusive_residual(
+      FiniteVolumeQuantity::scalar(0U), boundaries, q_read,
+      free_stream_read_storage.view<double>(gradient), gamma_read,
+      scalar_diffusive_r);
+  verify_residual(scalar_diffusive_r, std::vector<double>(cells, 0.0),
+                  std::vector<double>(cells, 0.0), 1U);
+
+  std::vector<std::array<double, 3>> closure(cells);
+  std::vector<double> closure_scale(cells, 0.0);
+  for (hundun::mesh::LocalFaceId face = 0;
+       face < topology.local_face_count(); ++face) {
+    const auto area =
+        geometry.face_area_vector_m2(face, hundun::mesh::FaceSide::owner);
+    const double norm = std::sqrt(area.x * area.x + area.y * area.y +
+                                  area.z * area.z);
+    const auto accumulate = [&](LocalCellId cell, double sign) {
+      closure[cell][0] += sign * area.x;
+      closure[cell][1] += sign * area.y;
+      closure[cell][2] += sign * area.z;
+      closure_scale[cell] += norm;
+    };
+    const auto owner = topology.owner(face);
+    if (topology.cell_ownership(owner) ==
+        hundun::mesh::EntityOwnership::owned)
+      accumulate(owner, 1.0);
+    const auto neighbour = topology.neighbour(face);
+    if (!topology.periodic_pair(face).has_value() && neighbour.has_value() &&
+        topology.cell_ownership(*neighbour) ==
+            hundun::mesh::EntityOwnership::owned)
+      accumulate(*neighbour, -1.0);
+  }
+  for (LocalCellId cell = 0; cell < cells; ++cell) {
+    const double bound = 256.0 * eps * closure_scale[cell];
+    for (const double component : closure[cell])
+      HUNDUN_CHECK(std::abs(component) <= bound);
+  }
+  auto mutated_closure = closure;
+  HUNDUN_CHECK(!mutated_closure.empty());
+  mutated_closure[0][0] += 1.0;
+  HUNDUN_CHECK(std::abs(mutated_closure[0][0]) >
+               256.0 * eps * closure_scale[0]);
+  if (mpi.rank() == 0)
+    std::cout << "TASK25_WARPED_FREE_STREAM_FVM ranks=" << mpi.size()
+              << " mutation_delta=1" << '\n';
 }
 
 void run_gradient_failure_contracts(const MpiContext &mpi, int ranks) {
@@ -1391,7 +1686,17 @@ void run_uniform_quadratic_diffusion_case(const MpiContext &mpi, int ranks) {
   HUNDUN_CHECK(checked_int == 1);
 }
 
-double warped_diffusion_error(const MpiContext &mpi, int ranks, int n) {
+struct WarpedDiffusionResult {
+  double error{};
+  double integral_defect{};
+  std::vector<double> physical_laplacian;
+  std::vector<hundun::mesh::GlobalCellId> global_ids;
+};
+
+WarpedDiffusionResult warped_diffusion_error(const MpiContext &mpi, int ranks,
+                                             int n,
+                                             bool reverse_nonorthogonal =
+                                                 false) {
   const Int3 extent{n, n, n};
   const std::array<bool, 3> periodic{true, true, true};
   auto decomposition = StructuredDecomposition::create(
@@ -1431,15 +1736,20 @@ double warped_diffusion_error(const MpiContext &mpi, int ranks, int n) {
         yz / static_cast<std::size_t>(decomposition.local_extent().y));
     const Real3 center = geometry.cell_center_m(cell);
     q_write(i, j, k, 0) = std::sin(two_pi * center.x);
-    gradient_write(i, j, k, 0) = two_pi * std::cos(two_pi * center.x);
-    gradient_write(i, j, k, 1) = 0.0;
-    gradient_write(i, j, k, 2) = 0.0;
+    gradient_write(i, j, k, 0) = -999.0;
+    gradient_write(i, j, k, 1) = -999.0;
+    gradient_write(i, j, k, 2) = -999.0;
     residual_write(i, j, k, 0) = 0.0;
   }
   auto q_halo = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 2));
   q_halo.exchange(storage, q);
+  const FieldStorage &gradient_source_storage = storage;
+  operators.compute_gradient(
+      GradientScheme::weighted_least_squares,
+      FiniteVolumeQuantity::density(), boundaries,
+      gradient_source_storage.view<double>(q), gradient_write);
   auto gradient_halo = HaloExchange::create(
       decomposition,
       ExchangePlan::create(decomposition, decomposition.local_extent(), 1));
@@ -1459,11 +1769,33 @@ double warped_diffusion_error(const MpiContext &mpi, int ranks, int n) {
   const auto gradient_read = read_storage.view<double>(gradient);
   const auto gamma_read =
       read_storage.acquire_face_read<double>(access, phase, actor, gamma);
+  struct NonorthogonalSignGuard final {
+    explicit NonorthogonalSignGuard(bool reverse) : active(reverse) {
+      if (active) {
+        hundun::finite_volume::test::
+            reverse_scalar_diffusion_nonorthogonal_contribution_for_test(true);
+      }
+    }
+    ~NonorthogonalSignGuard() {
+      if (active) {
+        hundun::finite_volume::test::
+            reverse_scalar_diffusion_nonorthogonal_contribution_for_test(
+                false);
+      }
+    }
+    bool active;
+  } sign_guard(reverse_nonorthogonal);
   operators.accumulate_scalar_diffusive_residual(
       FiniteVolumeQuantity::density(), boundaries, q_read, gradient_read,
       gamma_read, residual_write);
   double local_error = 0.0;
   double local_volume = 0.0;
+  double local_signed_residual = 0.0;
+  double local_absolute_residual = 0.0;
+  std::vector<double> physical_laplacian;
+  std::vector<hundun::mesh::GlobalCellId> global_ids;
+  physical_laplacian.reserve(topology.owned_cell_count());
+  global_ids.reserve(topology.owned_cell_count());
   for (LocalCellId cell = 0; cell < topology.owned_cell_count(); ++cell) {
     const int i = static_cast<int>(
         cell % static_cast<std::size_t>(decomposition.local_extent().x));
@@ -1475,15 +1807,52 @@ double warped_diffusion_error(const MpiContext &mpi, int ranks, int n) {
         yz / static_cast<std::size_t>(decomposition.local_extent().y));
     const Real3 center = geometry.cell_center_m(cell);
     const double volume = geometry.cell_volume_m3(cell);
-    const double exact = two_pi * two_pi * std::sin(two_pi * center.x);
-    const double error = residual_write(i, j, k, 0) / volume - exact;
+    const double analytic_negative_laplacian =
+        two_pi * two_pi * std::sin(two_pi * center.x);
+    const double analytic_physical_laplacian =
+        -two_pi * two_pi * std::sin(two_pi * center.x);
+    const double discrete_negative_laplacian =
+        residual_write(i, j, k, 0) / volume;
+    const double discrete_physical_laplacian =
+        -residual_write(i, j, k, 0) / volume;
+    const double error =
+        discrete_negative_laplacian - analytic_negative_laplacian;
+    const double physical_error =
+        discrete_physical_laplacian - analytic_physical_laplacian;
+    HUNDUN_CHECK_NEAR(
+        error, -physical_error,
+        64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(error), std::abs(physical_error)}));
     local_error += error * error * volume;
     local_volume += volume;
+    const double integrated = residual_write(i, j, k, 0);
+    physical_laplacian.push_back(discrete_physical_laplacian);
+    global_ids.push_back(topology.global_cell_id(cell));
+    local_signed_residual += integrated;
+    local_absolute_residual += std::abs(integrated);
   }
-  double values[2]{local_error, local_volume};
-  HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, values, 2, MPI_DOUBLE, MPI_SUM,
+  double values[4]{local_error, local_volume, local_signed_residual,
+                   local_absolute_residual};
+  HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, values, 4, MPI_DOUBLE, MPI_SUM,
                              mpi.comm()) == MPI_SUCCESS);
-  return std::sqrt(values[0] / values[1]);
+  const double defect = std::abs(values[2]);
+  HUNDUN_CHECK(
+      defect <= 512.0 * std::numeric_limits<double>::epsilon() *
+                    std::max(1.0, values[3]));
+  return {std::sqrt(values[0] / values[1]), defect,
+          std::move(physical_laplacian), std::move(global_ids)};
+}
+
+double reject_reversed_nonorthogonal_diffusion(
+    const MpiContext &mpi, int ranks,
+    const WarpedDiffusionResult &normal_error16) {
+  const auto reversed16 = warped_diffusion_error(mpi, ranks, 16, true);
+  const auto reversed32 = warped_diffusion_error(mpi, ranks, 32, true);
+  const double reversed_order =
+      std::log(reversed16.error / reversed32.error) / std::log(2.0);
+  HUNDUN_CHECK(reversed_order < 1.8);
+  HUNDUN_CHECK(reversed16.error > normal_error16.error);
+  return reversed_order;
 }
 
 void run_physical_boundary_case(const MpiContext &mpi, int ranks, bool warped) {
@@ -2478,6 +2847,23 @@ int main(int argc, char **argv) {
   return hundun::test::run([&] {
     MpiContext mpi = MpiContext::duplicate(MPI_COMM_WORLD);
     HUNDUN_CHECK(mpi.size() == 1 || mpi.size() == 2 || mpi.size() == 4);
+    const std::string_view mode =
+        argc == 1 ? "full" : (argv[1] == nullptr ? "" : argv[1]);
+    HUNDUN_CHECK(
+        argc == 1 ||
+        (argc == 2 &&
+         (mode == "task25-warped-free-stream" ||
+          mode == "task25-warped-diffusion-mutation")));
+    if (mode == "task25-warped-free-stream") {
+      run_gradient_case(mpi, mpi.size(), true);
+      return;
+    }
+    if (mode == "task25-warped-diffusion-mutation") {
+      const auto normal16 = warped_diffusion_error(mpi, mpi.size(), 16);
+      static_cast<void>(
+          reject_reversed_nonorthogonal_diffusion(mpi, mpi.size(), normal16));
+      return;
+    }
     check_limiter();
     run_gradient_case(mpi, mpi.size(), false);
     run_gradient_case(mpi, mpi.size(), true);
@@ -2496,10 +2882,67 @@ int main(int argc, char **argv) {
     run_physical_boundary_case(mpi, mpi.size(), false);
     run_physical_boundary_case(mpi, mpi.size(), true);
     run_extent_one_periodic_case(mpi, mpi.size());
-    const double error8 = warped_diffusion_error(mpi, mpi.size(), 8);
-    const double error16 = warped_diffusion_error(mpi, mpi.size(), 16);
-    const double error32 = warped_diffusion_error(mpi, mpi.size(), 32);
-    HUNDUN_CHECK(std::log(error8 / error16) / std::log(2.0) >= 1.8);
-    HUNDUN_CHECK(std::log(error16 / error32) / std::log(2.0) >= 1.8);
+    const auto error16 = warped_diffusion_error(mpi, mpi.size(), 16);
+    const auto error32 = warped_diffusion_error(mpi, mpi.size(), 32);
+    const auto error64 = warped_diffusion_error(mpi, mpi.size(), 64);
+    const double order16_32 =
+        std::log(error16.error / error32.error) / std::log(2.0);
+    const double order32_64 =
+        std::log(error32.error / error64.error) / std::log(2.0);
+    HUNDUN_CHECK(order16_32 >= 1.8);
+    HUNDUN_CHECK(order32_64 >= 1.8);
+    std::array<double, 3> decomposition_differences{};
+    if (mpi.size() > 1) {
+      auto self = MpiContext::duplicate(MPI_COMM_SELF);
+      const std::array<WarpedDiffusionResult, 3> references{
+          warped_diffusion_error(self, 1, 16),
+          warped_diffusion_error(self, 1, 32),
+          warped_diffusion_error(self, 1, 64)};
+      const std::array<const WarpedDiffusionResult *, 3> distributed{
+          &error16, &error32, &error64};
+      for (std::size_t level = 0; level < distributed.size(); ++level) {
+        double local_max = 0.0;
+        double local_reference_max = 0.0;
+        for (std::size_t cell = 0;
+             cell < distributed[level]->global_ids.size(); ++cell) {
+          const auto global = static_cast<std::size_t>(
+              distributed[level]->global_ids[cell]);
+          HUNDUN_CHECK(global <
+                       references[level].physical_laplacian.size());
+          local_max = std::max(
+              local_max,
+              std::abs(distributed[level]->physical_laplacian[cell] -
+                       references[level].physical_laplacian[global]));
+          local_reference_max =
+              std::max(local_reference_max,
+                       std::abs(
+                           references[level].physical_laplacian[global]));
+        }
+        double comparison[2]{local_max, local_reference_max};
+        HUNDUN_CHECK(MPI_Allreduce(MPI_IN_PLACE, comparison, 2, MPI_DOUBLE,
+                                   MPI_MAX, mpi.comm()) == MPI_SUCCESS);
+        decomposition_differences[level] = comparison[0];
+        HUNDUN_CHECK(comparison[0] <=
+                     5.0e-12 * std::max(1.0, comparison[1]));
+      }
+    }
+    const double reversed_order =
+        reject_reversed_nonorthogonal_diffusion(mpi, mpi.size(), error16);
+    if (mpi.rank() == 0) {
+      std::cout << std::setprecision(std::numeric_limits<double>::max_digits10)
+                << "TASK25_WARPED_DIFFUSION ranks=" << mpi.size()
+                << " error16=" << error16.error
+                << " error32=" << error32.error
+                << " error64=" << error64.error
+                << " order16_32=" << order16_32
+                << " order32_64=" << order32_64
+                << " integral_defect16=" << error16.integral_defect
+                << " integral_defect32=" << error32.integral_defect
+                << " integral_defect64=" << error64.integral_defect
+                << " decomposition16=" << decomposition_differences[0]
+                << " decomposition32=" << decomposition_differences[1]
+                << " decomposition64=" << decomposition_differences[2]
+                << " reversed_nonorth_order=" << reversed_order << '\n';
+    }
   });
 }

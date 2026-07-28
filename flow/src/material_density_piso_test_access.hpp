@@ -5,6 +5,8 @@
 #error "material-density PISO test access requires tests-on build"
 #endif
 
+#include "hundun/runtime/halo_performance_counters.hpp"
+
 #include <cmath>
 #include <array>
 #include <atomic>
@@ -73,6 +75,13 @@ struct MaterialPressureEvidenceForTest final {
   bool token_available{};
   bool final_operator_available{};
   std::uint64_t final_operator_revision{};
+};
+
+struct MaterialPressureHaloCountersForTest final {
+  bool ordinary_available{};
+  runtime::HaloPerformanceCounters ordinary;
+  bool material_final_available{};
+  runtime::HaloPerformanceCounters material_final;
 };
 
 struct FacadeCacheSnapshot final {
@@ -241,6 +250,13 @@ public:
                                                  int lowest_failing_rank);
   static MaterialPressureEvidenceForTest
   material_pressure_evidence(const FixedStepMaterialDensityFlow &);
+  static MaterialPressureHaloCountersForTest
+  material_pressure_halo_counters(const FixedStepMaterialDensityFlow &);
+  static MaterialPressureHaloCountersForTest
+  material_pressure_halo_counters(const PisoCoupler &);
+  static runtime::HaloPerformanceCounters combine_pressure_halo_counters(
+      runtime::HaloPerformanceCounters,
+      const runtime::HaloPerformanceCounters &);
   static FacadeCacheSnapshot
   facade_cache_snapshot(const FixedStepMaterialDensityFlow &);
   static MaterialPressureEvidenceForTest

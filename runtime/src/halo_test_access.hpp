@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "hundun/runtime/halo_performance_counters.hpp"
+
 #include <climits>
 #include <cstddef>
 
@@ -15,6 +17,11 @@ struct HaloTestOptions {
   int inject_cleanup_wait_error_rank{-1};
   int inject_plan_width_first_collective_error_rank{-1};
   int inject_wire_first_collective_error_rank{-1};
+#ifdef HUNDUN_RUNTIME_ENABLE_TEST_ACCESS
+  bool use_initial_performance_counters{};
+  HaloPerformanceCounters initial_performance_counters{};
+  int inject_unpack_failure_rank{-1};
+#endif
 };
 
 struct HaloTestSnapshot {

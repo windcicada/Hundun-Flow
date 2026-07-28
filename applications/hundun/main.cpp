@@ -4,6 +4,7 @@
 #include "applications/hundun/cli_options.hpp"
 #include "applications/hundun/detail/dispatch_order.hpp"
 #include "applications/hundun/stage1_driver.hpp"
+#include "applications/hundun/stage2_driver.hpp"
 
 #include "hundun/config/resolved_case_loader.hpp"
 #include "hundun/runtime/collective_status.hpp"
@@ -157,8 +158,9 @@ int run_case(const hundun::application::CliOptions& options,
           context.barrier();
           return EXIT_SUCCESS;
         }
-        throw Error(
-            "Stage 2 variable-density flow driver is not implemented before Task 24");
+        return hundun::application::run_stage2_case(
+            options, context, std::get<hundun::config::FlowCaseConfig>(resolved),
+            authoritative_case_root);
       });
 }
 

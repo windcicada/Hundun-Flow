@@ -132,6 +132,8 @@ public:
       FlowState &state, const MomentumTimeStencil &stencil,
       const runtime::FieldView<const double> &actual_momentum_diagonal,
       const linear::SolveControl &control) const;
+  [[nodiscard]] runtime::HaloPerformanceCounters
+  pressure_halo_performance_counters() const;
 
 private:
   struct MaterialPressureAssessment final {
@@ -200,6 +202,8 @@ public:
                             const MomentumTimeStencil &stencil,
                             const linear::SolveControl &momentum_control,
                             const linear::SolveControl &pressure_control) const;
+  [[nodiscard]] runtime::HaloPerformanceCounters
+  pressure_halo_performance_counters() const;
 
 private:
   struct Impl;

@@ -168,6 +168,8 @@ public:
   MaterialDensityFlowDiagnosticSource
   diagnostic_source(const FlowState &,
                     const MaterialDensityStepAttemptReport &) const;
+  [[nodiscard]] runtime::HaloPerformanceCounters
+  pressure_halo_performance_counters() const;
 
 private:
   static FixedStepMaterialDensityFlow create_open_capable(

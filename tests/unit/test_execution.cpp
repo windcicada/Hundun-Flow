@@ -20,6 +20,7 @@
 namespace {
 
 using hundun::execution::AllocationIdentity;
+using hundun::execution::AllocationCounters;
 using hundun::execution::BackendIdentity;
 using hundun::execution::Buffer;
 using hundun::execution::CpuReferenceContext;
@@ -29,6 +30,7 @@ using hundun::execution::ExecutionEvent;
 using hundun::execution::ExecutionSpace;
 using hundun::execution::ScalarFormat;
 using hundun::execution::VectorView;
+using hundun::execution::allocation_counters;
 using hundun::execution::test::ExecutionTestAccess;
 using hundun::execution::test::MetadataOnlyViewFixture;
 using hundun::execution::test::TestViewMetadata;
@@ -51,6 +53,16 @@ void expect_error_containing(Function&& function, const std::string& text) {
     throw std::runtime_error("expected error containing '" + text +
                              "', got '" + message + "'");
   }
+}
+
+bool counters_equal(const AllocationCounters& left,
+                    const AllocationCounters& right) noexcept {
+  return left.allocation_events == right.allocation_events &&
+         left.allocated_bytes == right.allocated_bytes &&
+         left.deallocation_events == right.deallocation_events &&
+         left.deallocated_bytes == right.deallocated_bytes &&
+         left.live_bytes == right.live_bytes &&
+         left.peak_live_bytes == right.peak_live_bytes;
 }
 
 enum class JoinFailureInjection { none, once_after_finished };
@@ -249,6 +261,19 @@ void test_buffers_and_views() {
   Buffer first(context, 6 * sizeof(double));
   Buffer second(context, sizeof(double));
   HUNDUN_CHECK(first.allocation_identity() != second.allocation_identity());
+  const auto before_unsupported_construction = allocation_counters();
+  const auto identity_before_unsupported_construction =
+      ExecutionTestAccess::next_allocation_identity();
+  expect_error_containing(
+      [&] {
+        Buffer rejected(context, std::numeric_limits<std::size_t>::max());
+        static_cast<void>(rejected);
+      },
+      "byte size");
+  HUNDUN_CHECK(counters_equal(before_unsupported_construction,
+                              allocation_counters()));
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_unsupported_construction);
   auto all = first.view(0, 6);
   HUNDUN_CHECK(reinterpret_cast<std::uintptr_t>(all.data()) % alignof(double) ==
                0);
@@ -334,17 +359,28 @@ void test_buffers_and_views() {
   current[1] = 41.0;
   const auto stable_identity = destination.allocation_identity();
   const auto stable_epoch = destination.epoch();
+  const auto identity_before_injected_failure =
+      ExecutionTestAccess::next_allocation_identity();
   ExecutionTestAccess::fail_next_allocation();
   expect_error_containing(
       [&] { destination.reallocate(4 * sizeof(double)); }, "allocation");
   HUNDUN_CHECK(destination.allocation_identity() == stable_identity);
   HUNDUN_CHECK(destination.epoch() == stable_epoch);
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_injected_failure);
   check_values(destination.view(0, 2), {31.0, 41.0});
+  const auto before_unsupported_reallocation = allocation_counters();
+  const auto identity_before_unsupported_reallocation =
+      ExecutionTestAccess::next_allocation_identity();
   expect_error_containing(
       [&] {
         destination.reallocate(std::numeric_limits<std::size_t>::max());
       },
       "byte size");
+  HUNDUN_CHECK(counters_equal(before_unsupported_reallocation,
+                              allocation_counters()));
+  HUNDUN_CHECK(ExecutionTestAccess::next_allocation_identity() ==
+               identity_before_unsupported_reallocation);
   HUNDUN_CHECK(destination.allocation_identity() == stable_identity);
   HUNDUN_CHECK(destination.epoch() == stable_epoch);
   check_values(destination.view(0, 2), {31.0, 41.0});

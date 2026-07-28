@@ -38,14 +38,25 @@ fi
 "${hundun}" "${resolved_path}" --print-resolved >"${second_path}"
 cmp "${resolved_path}" "${second_path}"
 
-if "${hundun}" "${case_path}" >"${work_root}/normal.stdout" \
+if ! "${hundun}" "${case_path}" >"${work_root}/normal.stdout" \
     2>"${work_root}/normal.stderr"; then
-  echo "schema-v2 normal execution unexpectedly succeeded" >&2
+  echo "schema-v2 normal execution failed" >&2
+  cat "${work_root}/normal.stdout" >&2
+  cat "${work_root}/normal.stderr" >&2
   exit 1
 fi
-test ! -s "${work_root}/normal.stdout"
-test "$(cat "${work_root}/normal.stderr")" = \
-  "Stage 2 variable-density flow driver is not implemented before Task 24"
+test ! -s "${work_root}/normal.stderr"
+grep -Fxq 'HUNDUN-FLOW 0.0.0-stage2' "${work_root}/normal.stdout"
+grep -Fxq \
+  'CASE name=dispatch_only ranks=1 cells=8x8x4 density_model=constant' \
+  "${work_root}/normal.stdout"
+test "$(grep -c '^STEP ' "${work_root}/normal.stdout")" -eq 10
+grep -Fq 'FINISHED step=10 ' "${work_root}/normal.stdout"
+test -f "${work_root}/diagnostics/meshdiag.v2.rank-000000.bin"
+test -f \
+  "${work_root}/diagnostics/diagnostics.v1.rank-000000.step-00000000000000000010.jsonl"
+test -f \
+  "${work_root}/checkpoints/step00000000000000000010/COMPLETED"
 
 mkdir -p "${work_root}/rank-zero" "${work_root}/rank-one"
 cat >"${work_root}/rank-zero/invalid-v1.json" <<'JSON'

@@ -15,6 +15,17 @@ namespace hundun::execution {
 using BackendIdentity = std::uint64_t;
 using AllocationIdentity = std::uint64_t;
 
+struct AllocationCounters final {
+  std::uint64_t allocation_events{};
+  std::uint64_t allocated_bytes{};
+  std::uint64_t deallocation_events{};
+  std::uint64_t deallocated_bytes{};
+  std::uint64_t live_bytes{};
+  std::uint64_t peak_live_bytes{};
+};
+
+[[nodiscard]] AllocationCounters allocation_counters() noexcept;
+
 enum class ExecutionSpace { host, device };
 enum class ScalarFormat { float64 };
 enum class ExecutionCapability {

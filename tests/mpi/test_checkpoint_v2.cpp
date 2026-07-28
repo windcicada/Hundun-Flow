@@ -2,6 +2,7 @@
 
 #include "checkpoint_v2_protocol.hpp"
 #include "checkpoint_v2_test_access.hpp"
+#include "ideal_gas_closure_test_access.hpp"
 #include "hundun/boundary/basic_boundary.hpp"
 #include "hundun/diagnostics/checkpoint_v2_diagnostics.hpp"
 #include "hundun/execution/execution.hpp"
@@ -1183,6 +1184,41 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
   using CheckpointAccess = hundun::flow::test::CheckpointV2TestAccess;
   HUNDUN_CHECK(hundun::test::
                    checkpoint_v2_state_equality_oracle_is_mutation_sensitive());
+  {
+    using hundun::flow::test::
+        checkpoint_v2_path_code_observation_for_test;
+    constexpr int maximum = std::numeric_limits<int>::max();
+    constexpr int half = maximum / 2;
+    for (const auto size : {half, half + 1, maximum})
+      for (const auto rank : {0, size - 1})
+        for (const auto reason : {0, 1}) {
+          const auto encoded = checkpoint_v2_path_code_observation_for_test(
+              size, rank, reason, false, 0U);
+          HUNDUN_CHECK(encoded.success_code ==
+                       2U * static_cast<std::uint64_t>(size));
+          HUNDUN_CHECK(
+              encoded.candidate_code ==
+              2U * static_cast<std::uint64_t>(rank) +
+                  static_cast<std::uint64_t>(reason));
+          const auto decoded = checkpoint_v2_path_code_observation_for_test(
+              size, rank, reason, false, encoded.candidate_code);
+          HUNDUN_CHECK(decoded.decoded);
+          HUNDUN_CHECK(!decoded.success);
+          HUNDUN_CHECK(decoded.rank == rank);
+          HUNDUN_CHECK(decoded.reason == reason);
+        }
+    const auto success = checkpoint_v2_path_code_observation_for_test(
+        maximum, maximum - 1, 1, true,
+        2U * static_cast<std::uint64_t>(maximum));
+    HUNDUN_CHECK(success.decoded);
+    HUNDUN_CHECK(success.success);
+    HUNDUN_CHECK(success.rank == -1);
+    HUNDUN_CHECK(success.reason == -1);
+    const auto invalid = checkpoint_v2_path_code_observation_for_test(
+        maximum, maximum - 1, 1, true,
+        2U * static_cast<std::uint64_t>(maximum) + 1U);
+    HUNDUN_CHECK(!invalid.decoded);
+  }
   auto config = make_case(mpi.size());
   auto decomposition = hundun::runtime::StructuredDecomposition::create(
       mpi, config.mesh.cells, {true, true, true},
@@ -2668,11 +2704,11 @@ void run(const hundun::runtime::MpiContext &mpi, bool acceptance) {
             ideal_fields, ideal_state, ideal_spec, persisted_closure));
       } catch (const hundun::runtime::Error &error) {
         exact_failure =
-            std::string_view(error.what())
-                    .find("ideal-gas closure restore snapshot preparation "
-                          "failed") != std::string_view::npos &&
-            std::string_view(error.what()).find(std::to_string(failure_rank)) !=
-                std::string_view::npos;
+            hundun::flow::test::IdealGasClosureTestAccess::
+                preflight_failure_rank(error) == failure_rank &&
+            hundun::flow::test::IdealGasClosureTestAccess::
+                    create_validation_failure_reason(error) ==
+                hundun::flow::IdealGasClosureFailureReason::none;
       }
       HUNDUN_CHECK(exact_failure);
       HUNDUN_CHECK(hundun::flow::test::checkpoint_v2_deep_snapshot_equal(

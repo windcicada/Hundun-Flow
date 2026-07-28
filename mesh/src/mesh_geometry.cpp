@@ -1171,7 +1171,11 @@ std::optional<runtime::Real3> MeshGeometry::uniform_spacing_m() const noexcept {
   return impl_->spacing;
 }
 
-bool MeshGeometry::compatible(const MeshTopology& topology) const {
+std::size_t MeshGeometry::local_face_count() const noexcept {
+  return impl_->faces.size();
+}
+
+bool MeshGeometry::compatible(const MeshTopology &topology) const {
   if (!same(impl_->extent, topology.global_extent()) ||
       !same(impl_->owned_box, topology.owned_global_box()) ||
       impl_->owned_cell_count != topology.owned_cell_count() ||

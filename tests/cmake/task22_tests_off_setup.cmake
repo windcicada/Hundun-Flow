@@ -154,7 +154,8 @@ set(configure_command
     -B "${HUNDUN_NESTED_BINARY_DIR}"
     -G "${outer_CMAKE_GENERATOR}"
     "-DHUNDUN_BUILD_TESTS:BOOL=OFF"
-    "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY:PATH=${HUNDUN_ARCHIVE_DIR}")
+    "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY:PATH=${HUNDUN_ARCHIVE_DIR}"
+    "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY:PATH=${HUNDUN_ARCHIVE_DIR}")
 
 if(outer_CMAKE_GENERATOR_PLATFORM)
   list(APPEND configure_command -A "${outer_CMAKE_GENERATOR_PLATFORM}")
@@ -236,7 +237,8 @@ if(HUNDUN_NESTED_CONFIG)
        "-DCMAKE_BUILD_TYPE:STRING=${HUNDUN_NESTED_CONFIG}")
   string(TOUPPER "${HUNDUN_NESTED_CONFIG}" config_upper)
   list(APPEND configure_command
-       "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config_upper}:PATH=${HUNDUN_ARCHIVE_DIR}")
+       "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config_upper}:PATH=${HUNDUN_ARCHIVE_DIR}"
+       "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_${config_upper}:PATH=${HUNDUN_ARCHIVE_DIR}")
 elseif(outer_CMAKE_BUILD_TYPE)
   list(APPEND configure_command
        "-DCMAKE_BUILD_TYPE:STRING=${outer_CMAKE_BUILD_TYPE}")
@@ -258,7 +260,7 @@ endif()
 set(build_command
     "${CMAKE_COMMAND}"
     --build "${HUNDUN_NESTED_BINARY_DIR}"
-    --target hundun_flow hundun_linear hundun_material_diagnostics
+    --target hundun hundun_flow hundun_linear hundun_material_diagnostics
     --parallel 2)
 if(HUNDUN_NESTED_CONFIG)
   list(APPEND build_command --config "${HUNDUN_NESTED_CONFIG}")
