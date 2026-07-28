@@ -1,5 +1,10 @@
 # HUNDUN-FLOW
 
+> **Project status: Under Development / 项目状态：开发中。**
+>
+> Stage 2 is the current verified public baseline, but HUNDUN-FLOW as a whole
+> remains under active development and is not yet a completed production solver.
+
 HUNDUN-FLOW is a clean-room C++17/MPI-3 research CFD solver for
 low-Mach-number variable-density flow. The current public baseline is
 **0.1.0-stage2**.
@@ -18,6 +23,8 @@ Stage 2 is the current implementation baseline. It delivers a CPU-reference
 solver path and an evidence-led verification suite for structured,
 low-Mach-number flow. The implementation and its accepted test matrix are
 indexed in the [Stage 2 capability ledger](docs/numerics/stage2-capability-ledger.md).
+Development continues beyond this baseline; the repository should be treated
+as active research software rather than a completed solver product.
 
 The repository remains an early research release. It is intended for
 reproducible numerical research and software development, not as a

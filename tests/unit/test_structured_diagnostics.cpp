@@ -4,6 +4,7 @@
 #include "hundun/diagnostics/structured_diagnostics.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
