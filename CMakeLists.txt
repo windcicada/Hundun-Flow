@@ -856,6 +856,12 @@ if(HUNDUN_BUILD_TESTS)
     COMMAND "$<TARGET_FILE:task25_performance_oracle>" --self-test)
   set_tests_properties(test_task25_performance_oracle_self PROPERTIES
     LABELS "unit;task25;performance" TIMEOUT 30)
+  if(HUNDUN_ENABLE_ASAN)
+    # Open MPI retains process-global allocations after MPI_Finalize. Keep
+    # AddressSanitizer enabled, but disable LSan for this MPI runtime smoke test.
+    set_tests_properties(test_task25_performance_oracle_self PROPERTIES
+      ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+  endif()
 
   hundun_add_test(test_task25_diagnostic_branch
     tests/unit/test_task25_diagnostic_branch.cpp)
@@ -1303,6 +1309,12 @@ if(HUNDUN_BUILD_TESTS)
     "${PROJECT_SOURCE_DIR}")
   target_link_libraries(test_momentum_predictor PRIVATE hundun_flow)
   set_tests_properties(test_momentum_predictor PROPERTIES TIMEOUT 30)
+  if(HUNDUN_ENABLE_ASAN)
+    # This serial unit test also initializes Open MPI and observes the same
+    # process-global allocations after MPI_Finalize.
+    set_tests_properties(test_momentum_predictor PROPERTIES
+      ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+  endif()
   add_test(NAME test_momentum_predictor_source_policy
     COMMAND "${CMAKE_COMMAND}"
             "-DHUNDUN_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
