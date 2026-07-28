@@ -201,6 +201,7 @@ require_bounded_diagnostic() {
 
 # MPI launchers may append their own bounded nonzero-exit diagnostics.
 mpi_failure_diagnostic_max_bytes=1024
+mpi_restart_diagnostic_max_records=32
 
 require_single_newline_record() {
   local path=$1
@@ -446,6 +447,13 @@ require_restart_rejection_result() {
   local output_name=$7
   local restart_name=$8
   local enumerator=$9
+  local max_diagnostic_records=${10:-1}
+
+  if [[ ! ${max_diagnostic_records} =~ ^[0-9]+$ ]] || \
+      test "${max_diagnostic_records}" -lt 1; then
+    echo "${label} diagnostic record limit is invalid" >&2
+    return 1
+  fi
 
   case "${status}" in
   1) ;;
@@ -495,11 +503,12 @@ require_restart_rejection_result() {
     return 1
   fi
   if [[ ! ${diagnostic_newline_count} =~ ^[0-9]+$ ]] || \
-      test "${diagnostic_newline_count}" -ne 1; then
+      test "${diagnostic_newline_count}" -lt 1 || \
+      test "${diagnostic_newline_count}" -gt "${max_diagnostic_records}"; then
     printf \
-      '%s diagnostic must contain exactly one record: path=%s bytes=%s records=%s\n' \
+      '%s diagnostic record count is outside its bound: path=%s bytes=%s records=%s limit=%s\n' \
       "${label}" "${stderr_path}" "${diagnostic_bytes}" \
-      "${diagnostic_newline_count}" >&2
+      "${diagnostic_newline_count}" "${max_diagnostic_records}" >&2
     LC_ALL=C head -c 1024 -- "${stderr_path}" >&2 || true
     printf '\n' >&2
     return 1
@@ -564,7 +573,9 @@ require_restart_rejection_result() {
     "${case_directory}" "${output_name}" "${restart_name}" "${enumerator}"
 }
 
-run_restart_rejection_case() {
+run_restart_rejection_case_with_record_limit() {
+  local max_diagnostic_records=$1
+  shift
   local label=$1
   local time_limit=$2
   local kill_after=$3
@@ -586,7 +597,16 @@ run_restart_rejection_case() {
   require_restart_rejection_result \
     "${label}" "${status}" "${stdout_path}" "${stderr_path}" \
     "${expected_diagnostic}" "${case_directory}" "${output_name}" \
-    "${restart_name}" find
+    "${restart_name}" find "${max_diagnostic_records}"
+}
+
+run_restart_rejection_case() {
+  run_restart_rejection_case_with_record_limit 1 "$@"
+}
+
+run_mpi_restart_rejection_case() {
+  run_restart_rejection_case_with_record_limit \
+    "${mpi_restart_diagnostic_max_records}" "$@"
 }
 
 require_no_nonfinite_token() {
@@ -761,6 +781,16 @@ run_fast_shell_contract_fixtures() {
       sh -c 'printf "%s\n%s\n" "$1" "unrelated stderr record" >&2; exit 1' \
       sh "${rejection_diagnostic}" >/dev/null 2>&1; then
     echo "restart rejection fixture accepted an extra stderr record" >&2
+    return 1
+  fi
+
+  if ! run_mpi_restart_rejection_case \
+      'MPI launcher restart rejection fixture' 1 1 \
+      "${rejection_diagnostic}" "${rejection_root}" output.resumed \
+      Restart.resumed "${rejection_stdout}" "${rejection_stderr}" \
+      sh -c 'printf "%s\n%s\n" "$1" "bounded launcher diagnostic" >&2; exit 1' \
+      sh "${rejection_diagnostic}"; then
+    echo "restart rejection fixture rejected bounded launcher diagnostics" >&2
     return 1
   fi
 
@@ -1452,7 +1482,7 @@ check_missing_marker_rejection() {
   local restore_status=0
 
   mv -- "${marker}" "${saved_marker}"
-  run_restart_rejection_case \
+  run_mpi_restart_rejection_case \
     'missing Restart completion marker' 20 2 \
     'Restart v1 completion marker read:' \
     "${case_dir}" output.resumed Restart.resumed \
@@ -1479,7 +1509,7 @@ check_truncated_rank_rejection() {
 
   cp -p -- "${rank_file}" "${saved_rank_file}"
   : >"${rank_file}"
-  run_restart_rejection_case \
+  run_mpi_restart_rejection_case \
     'truncated Restart rank file' 20 2 \
     'Restart v1 rank-file read: Restart v1 rank-file size or CRC does not match manifest' \
     "${case_dir}" output.resumed Restart.resumed \
