@@ -496,7 +496,12 @@ require_restart_rejection_result() {
   fi
   if [[ ! ${diagnostic_newline_count} =~ ^[0-9]+$ ]] || \
       test "${diagnostic_newline_count}" -ne 1; then
-    echo "${label} diagnostic must contain exactly one record" >&2
+    printf \
+      '%s diagnostic must contain exactly one record: path=%s bytes=%s records=%s\n' \
+      "${label}" "${stderr_path}" "${diagnostic_bytes}" \
+      "${diagnostic_newline_count}" >&2
+    LC_ALL=C head -c 1024 -- "${stderr_path}" >&2 || true
+    printf '\n' >&2
     return 1
   fi
 
