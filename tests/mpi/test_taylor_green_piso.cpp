@@ -20,6 +20,7 @@
 #include "tests/support/flow_state_equality.hpp"
 #include "tests/support/test_main.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
