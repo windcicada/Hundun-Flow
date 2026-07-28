@@ -3,6 +3,17 @@
 
 set -euo pipefail
 
+report_failure() {
+  status=$1
+  line=$2
+  command=$3
+  trap - ERR
+  printf 'Task 25 performance acceptance failed at line %s: %s (exit %s)\n' \
+    "${line}" "${command}" "${status}" >&2
+  exit "${status}"
+}
+trap 'report_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 if test "$#" -ne 3; then
   echo "usage: task25_performance.sh <hundun> <mpiexec> <ranks>" >&2
   exit 2
