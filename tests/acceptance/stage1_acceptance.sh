@@ -180,6 +180,7 @@ require_exact_canonical_vtk_set() {
 require_bounded_diagnostic() {
   local path=$1
   local expected=$2
+  local max_bytes=${3:-256}
   local matches
   matches=$(grep -Fxc -- "${expected}" "${path}" || true)
   if test "${matches}" -ne 1; then
@@ -188,14 +189,18 @@ require_bounded_diagnostic() {
   fi
   local bytes
   bytes=$(wc -c <"${path}")
-  if test "${bytes}" -gt 256; then
-    printf 'output failure diagnostic is not bounded: path=%s bytes=%s\n' \
-      "${path}" "${bytes}" >&2
+  if test "${bytes}" -gt "${max_bytes}"; then
+    printf \
+      'output failure diagnostic is not bounded: path=%s bytes=%s limit=%s\n' \
+      "${path}" "${bytes}" "${max_bytes}" >&2
     LC_ALL=C head -c 512 -- "${path}" >&2 || true
     printf '\n' >&2
     return 1
   fi
 }
+
+# MPI launchers may append their own bounded nonzero-exit diagnostics.
+mpi_failure_diagnostic_max_bytes=1024
 
 require_single_newline_record() {
   local path=$1
@@ -1339,7 +1344,8 @@ if test "${validation_output_status}" -eq 124; then
   exit 1
 fi
 require_bounded_diagnostic "${work_root}/validation-output-failure.log" \
-  "unable to write validation output"
+  "unable to write validation output" \
+  "${mpi_failure_diagnostic_max_bytes}"
 
 (
   cd -- "${work_root}/launch-a"
@@ -1392,7 +1398,8 @@ if test "${normal_output_status}" -eq 124; then
   exit 1
 fi
 require_bounded_diagnostic "${work_root}/normal-output-failure.log" \
-  "unable to write Stage 1 output"
+  "unable to write Stage 1 output" \
+  "${mpi_failure_diagnostic_max_bytes}"
 
 check_invalid_local_width_case 'uneven-valid-partition' \
   "${uneven_valid_case_dir}" 'output.uneven-valid' \
