@@ -47,8 +47,8 @@ jobs:
         if: matrix.preset == 'release'
         run: bash tests/acceptance/stage1_acceptance.sh
       - name: Stage 2 acceptance
-        if: matrix.preset == 'release'
-        run: HUNDUN_STAGE2_BUILD_DIR=build/release bash tests/acceptance/stage2_acceptance.sh
+        if: matrix.preset == 'debug'
+        run: HUNDUN_STAGE2_BUILD_DIR=build/debug bash tests/acceptance/stage2_acceptance.sh
       - name: Configure ASan
         if: matrix.compiler == 'gcc' && matrix.preset == 'debug'
         run: cmake --preset asan
