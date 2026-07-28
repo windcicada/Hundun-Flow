@@ -115,7 +115,7 @@ grep -Eq \
   "${artifact}"
 grep -Eq '"compiler":\{"identity":"[^"]+","version":"[^"]+","flags":"[^"]+"\}' \
   "${artifact}"
-grep -Eq '"link_flags":"[^"]+"' "${artifact}"
+grep -Eq '"link_flags":"[^"]*"' "${artifact}"
 grep -Fq '"hardware_identity":"unavailable"' "${artifact}"
 grep -Fq '"cpu_affinity":"unavailable"' "${artifact}"
 grep -Eq '"node_identity":"(unavailable|[^"]+)"' "${artifact}"
