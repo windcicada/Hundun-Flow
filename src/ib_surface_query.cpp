@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -388,6 +389,22 @@ bool require_consistent_parity(const std::array<bool, 3> &votes) {
 
 namespace hundun::immersed {
 
+namespace {
+
+void increment(std::atomic<std::uint64_t> &counter) {
+  auto value = counter.load(std::memory_order_relaxed);
+  for (;;) {
+    if (value == std::numeric_limits<std::uint64_t>::max())
+      throw runtime::Error("surface query performance counter would overflow");
+    if (counter.compare_exchange_weak(value, value + 1U,
+                                      std::memory_order_relaxed,
+                                      std::memory_order_relaxed))
+      return;
+  }
+}
+
+} // namespace
+
 SurfaceQuery SurfaceQuery::create(const ImmersedSurface &surface) {
   return SurfaceQuery(detail::build_surface_query(surface.storage_));
 }
@@ -396,6 +413,7 @@ ClosestPointResult SurfaceQuery::closest_point(runtime::Real3 point_m) const {
   if (!detail::finite(point_m)) {
     throw runtime::Error("surface query: closest-point input is non-finite");
   }
+  increment(storage_->closest_calls);
 
   struct PendingNode final {
     double distance_squared{};
@@ -460,6 +478,7 @@ SurfaceQuery::segment_intersections(runtime::Real3 a_m,
   if (!detail::finite(a_m) || !detail::finite(b_m)) {
     throw runtime::Error("surface query: segment input is non-finite");
   }
+  increment(storage_->segment_calls);
   const runtime::Real3 direction = detail::subtract(b_m, a_m);
   const double length = detail::norm(direction);
   if (!std::isfinite(length) ||
@@ -579,6 +598,16 @@ CellRegion SurfaceQuery::classify(runtime::Real3 point_m,
 
 std::uint64_t SurfaceQuery::fingerprint() const noexcept {
   return storage_->fingerprint;
+}
+
+diagnostics::Stage3PerformanceCounters
+SurfaceQuery::performance_counters() const noexcept {
+  diagnostics::Stage3PerformanceCounters result;
+  result.init_query_closest_calls =
+      storage_->closest_calls.load(std::memory_order_relaxed);
+  result.init_query_segment_calls =
+      storage_->segment_calls.load(std::memory_order_relaxed);
+  return result;
 }
 
 } // namespace hundun::immersed

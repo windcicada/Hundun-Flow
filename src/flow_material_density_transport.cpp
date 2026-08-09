@@ -6,6 +6,7 @@
 
 #include "hundun/bc_basic_boundary.hpp"
 #include "hundun/flow_state.hpp"
+#include "hundun/ib_domain.hpp"
 #include "hundun/mesh_geometry.hpp"
 #include "hundun/rt_error.hpp"
 #include "hundun/rt_field_access_plan.hpp"
@@ -464,12 +465,14 @@ struct MaterialDensityTransport::Impl final {
        const boundary::BoundaryRegistry &supplied_boundaries,
        const runtime::MpiContext &supplied_mpi,
        runtime::HaloExchange &supplied_halo, FlowFieldIds supplied_fields,
-       MaterialDensityTransportSpec supplied_specification)
+       MaterialDensityTransportSpec supplied_specification,
+       const immersed::ImmersedDomain *supplied_domain = nullptr)
       : registry(&supplied_registry), decomposition(&supplied_decomposition),
         topology(&supplied_topology), geometry(&supplied_geometry),
         boundaries(&supplied_boundaries), mpi(&supplied_mpi),
         halo(&supplied_halo), fields(std::move(supplied_fields)),
         specification(std::move(supplied_specification)),
+        domain(supplied_domain),
         access(supplied_registry),
         operators(finite_volume::CellCenteredFvmOperators::create(
             supplied_topology, supplied_geometry)) {
@@ -479,14 +482,15 @@ struct MaterialDensityTransport::Impl final {
     global_layout_fingerprint =
         global_cell_layout_fingerprint(supplied_topology.global_extent());
     owned_layout_fingerprint = owned_cell_layout_fingerprint(box);
-    scratch_intensive_n =
-        scratch_registry.declare_field(scratch_cell("material_q_n", 1U, 2));
+    const int transport_ghost_width = supplied_halo.ghost_width();
+    scratch_intensive_n = scratch_registry.declare_field(
+        scratch_cell("material_q_n", 1U, transport_ghost_width));
     scratch_intensive_h = scratch_registry.declare_field(
-        scratch_cell("material_q_history", 1U, 2));
-    scratch_gradient_n =
-        scratch_registry.declare_field(scratch_cell("material_grad_n", 3U, 2));
+        scratch_cell("material_q_history", 1U, transport_ghost_width));
+    scratch_gradient_n = scratch_registry.declare_field(
+        scratch_cell("material_grad_n", 3U, transport_ghost_width));
     scratch_gradient_h = scratch_registry.declare_field(
-        scratch_cell("material_grad_history", 3U, 2));
+        scratch_cell("material_grad_history", 3U, transport_ghost_width));
     scratch_face_n =
         scratch_registry.declare_field(scratch_face("material_face_n"));
     scratch_face_h =
@@ -537,6 +541,19 @@ struct MaterialDensityTransport::Impl final {
                                specification.scalar_densities.end());
     const std::size_t field_count = transport_field_ids.size();
     const std::size_t cell_count = supplied_topology.owned_cell_count();
+    active_owned_cells.assign(cell_count, 1U);
+    if (domain != nullptr) {
+      std::size_t active_count = 0U;
+      for (mesh::LocalCellId cell = 0U; cell < cell_count; ++cell) {
+        const bool is_active =
+            domain->region(cell) == immersed::CellRegion::fluid;
+        active_owned_cells[cell] = is_active ? 1U : 0U;
+        active_count += is_active ? 1U : 0U;
+      }
+      if (active_count != domain->active_cells().owned_active_count())
+        throw runtime::Error(
+            "immersed material transport active layout is invalid");
+    }
     candidate_density.resize(cell_count);
     candidate_fields.assign(field_count, std::vector<double>(cell_count));
     residual_current.assign(field_count, std::vector<double>(cell_count));
@@ -553,6 +570,20 @@ struct MaterialDensityTransport::Impl final {
     reduced_sums.resize(local_sums.size());
   }
 
+  template <class Function>
+  void for_each_active_owned_cell(Function &&function) const {
+    for_each_owned_cell(
+        *topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+          if (active_owned_cells[cell] != 0U)
+            function(cell, index);
+        });
+  }
+
+  bool cell_active(mesh::LocalCellId cell) const {
+    return domain == nullptr ||
+           domain->region(cell) == immersed::CellRegion::fluid;
+  }
+
   const runtime::FieldRegistry *registry;
   const runtime::StructuredDecomposition *decomposition;
   const mesh::MeshTopology *topology;
@@ -562,6 +593,8 @@ struct MaterialDensityTransport::Impl final {
   runtime::HaloExchange *halo;
   FlowFieldIds fields;
   MaterialDensityTransportSpec specification;
+  const immersed::ImmersedDomain *domain{};
+  std::vector<std::uint8_t> active_owned_cells;
   runtime::FieldAccessPlan access;
   finite_volume::CellCenteredFvmOperators operators;
   runtime::Int3 local_extent{};
@@ -732,8 +765,15 @@ TransportResidual compute_transport_residual(
   MaterialTransportFailureReason local_failure =
       MaterialTransportFailureReason::none;
   try {
-    for_each_owned_cell(*impl.topology, [&](mesh::LocalCellId,
-                                            runtime::Int3 index) {
+    const auto extent = qn.interior_extent();
+    for (int k = 0; k < extent.z; ++k)
+      for (int j = 0; j < extent.y; ++j)
+        for (int i = 0; i < extent.x; ++i) {
+          qn(i, j, k, 0) = 0.0;
+          qh(i, j, k, 0) = 0.0;
+        }
+    impl.for_each_active_owned_cell([&](mesh::LocalCellId,
+                                        runtime::Int3 index) {
       const double density_n = rho_n(index.x, index.y, index.z, 0);
       const double density_h = rho_h(index.x, index.y, index.z, 0);
       const double value_n = conserved_n(index.x, index.y, index.z, 0);
@@ -799,8 +839,21 @@ TransportResidual compute_transport_residual(
       quantity(field_index), *impl.boundaries, mass_flux, qh_read, face_h);
   auto gamma = scratch.template acquire_face_write<double>(
       *impl.scratch_access, kScratchPhase, kScratchActor, impl.scratch_gamma);
-  for (std::size_t face = 0; face < impl.topology->local_face_count(); ++face)
-    gamma(face, 0) = diffusivity(impl, field_index);
+  for (mesh::LocalFaceId face = 0U;
+       face < impl.topology->local_face_count(); ++face) {
+    double value = diffusivity(impl, field_index);
+    const auto neighbour = impl.topology->neighbour(face);
+    if (impl.domain != nullptr) {
+      const bool owner_active =
+          impl.cell_active(impl.topology->owner(face));
+      const bool neighbour_active =
+          neighbour.has_value() && impl.cell_active(*neighbour);
+      if (!owner_active ||
+          (neighbour.has_value() && !neighbour_active))
+        value = 0.0;
+    }
+    gamma(face, 0) = value;
+  }
 
   const auto grad_n_read = std::as_const(scratch).template acquire_read<double>(
       *impl.scratch_access, kScratchPhase, kScratchActor,
@@ -845,8 +898,8 @@ TransportResidual compute_transport_residual(
 
   TransportResidual result;
   std::size_t owned = 0U;
-  for_each_owned_cell(
-      *impl.topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+  impl.for_each_active_owned_cell(
+      [&](mesh::LocalCellId, runtime::Int3 index) {
         impl.residual_current[field_index][owned] =
             residual_n(index.x, index.y, index.z, 0);
         impl.residual_history[field_index][owned] =
@@ -865,13 +918,26 @@ TransportResidual compute_transport_residual(
   CompensatedSum boundary_history;
   CompensatedSum boundary_abs_current;
   CompensatedSum boundary_abs_history;
+  const auto active_boundary = [&](mesh::GlobalFaceId global_face) {
+    if (impl.domain == nullptr)
+      return true;
+    const auto face = impl.topology->find_local_face(global_face);
+    if (!face.has_value())
+      throw runtime::Error(
+          "immersed material physical boundary face is unavailable");
+    return impl.cell_active(impl.topology->owner(*face));
+  };
   for (const auto &entry : impl.boundary_current) {
+    if (!active_boundary(entry.global_face_id))
+      continue;
     const double term = entry.convective + entry.diffusive;
     boundary_current.add(term);
     boundary_abs_current.add(std::abs(entry.convective) +
                              std::abs(entry.diffusive));
   }
   for (const auto &entry : impl.boundary_history) {
+    if (!active_boundary(entry.global_face_id))
+      continue;
     const double term = entry.convective + entry.diffusive;
     boundary_history.add(term);
     boundary_abs_history.add(std::abs(entry.convective) +
@@ -919,6 +985,44 @@ MaterialDensityTransport MaterialDensityTransport::create(
       registry, decomposition, topology, geometry, boundaries, mpi, halo,
       std::move(expected_fields), std::move(specification)));
 }
+
+MaterialDensityTransport detail::DensityClosureBridge::create_immersed_transport(
+    const runtime::FieldRegistry &registry,
+    const runtime::StructuredDecomposition &decomposition,
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const immersed::ImmersedDomain &domain, const runtime::MpiContext &mpi,
+    runtime::HaloExchange &halo, FlowFieldIds expected_fields,
+    MaterialDensityTransportSpec specification) {
+  validate_specification(registry, specification, boundaries);
+  require_conserved_cell(registry, expected_fields.density, "kg/m3",
+                         "density");
+  finite_volume::require_face_mass_flux_field(registry,
+                                              expected_fields.face_mass_flux);
+  if (expected_fields.transported_cell_fields.size() !=
+          1U + specification.scalar_densities.size() ||
+      expected_fields.transported_cell_fields.front() !=
+          specification.enthalpy_density ||
+      !std::equal(specification.scalar_densities.begin(),
+                  specification.scalar_densities.end(),
+                  expected_fields.transported_cell_fields.begin() + 1U))
+    throw runtime::Error("immersed material transport field order is invalid");
+  std::vector<runtime::FieldId> conserved{expected_fields.density,
+                                          specification.enthalpy_density};
+  conserved.insert(conserved.end(), specification.scalar_densities.begin(),
+                   specification.scalar_densities.end());
+  if (std::set<runtime::FieldId>(conserved.begin(), conserved.end()).size() !=
+      conserved.size())
+    throw runtime::Error("immersed material transport fields must be unique");
+  geometry.require_compatible(topology);
+  if (!halo.is_compatible_with(decomposition) || halo.ghost_width() < 2)
+    throw runtime::Error("immersed material transport Halo is incompatible");
+  return MaterialDensityTransport(
+      std::make_unique<MaterialDensityTransport::Impl>(
+          registry, decomposition, topology, geometry, boundaries, mpi, halo,
+          std::move(expected_fields), std::move(specification), &domain));
+}
+
 MaterialDensityTransport::MaterialDensityTransport(
     std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
@@ -956,6 +1060,11 @@ void MaterialDensityTransport::prepare_attempt() const {
   impl_->prepared_post_closure_report.emplace(std::move(post));
   impl_->post_next_integrals.assign(count, 0.0);
   impl_->post_boundary_terms.assign(count, std::array<double, 3>{});
+}
+
+void detail::DensityClosureBridge::prepare_material_transport(
+    MaterialDensityTransport &transport) {
+  transport.prepare_attempt();
 }
 
 MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
@@ -1059,8 +1168,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
                                 state.fields().density);
   bool finite_state = true;
   bool positive_density = true;
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+  impl_->for_each_active_owned_cell(
+      [&](mesh::LocalCellId, runtime::Int3 index) {
         const double current = rho_n(index.x, index.y, index.z, 0);
         const double history = rho_h(index.x, index.y, index.z, 0);
         finite_state =
@@ -1076,8 +1185,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
         state.layer(FlowLayer::history)
             .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
                                   field);
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId, runtime::Int3 index) {
           finite_state = finite_state &&
                          std::isfinite(current(index.x, index.y, index.z, 0)) &&
                          std::isfinite(history(index.x, index.y, index.z, 0));
@@ -1109,8 +1218,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
     impl_->operators.accumulate_mass_residual(mass_flux.impl_->handle,
                                               mass_residual);
     std::size_t owned = 0U;
-    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                              runtime::Int3 index) {
+    impl_->for_each_active_owned_cell([&](mesh::LocalCellId cell,
+                                          runtime::Int3 index) {
       const double volume = impl_->geometry->cell_volume_m3(cell);
       const double candidate =
           -(stencil.alpha1 * rho_n(index.x, index.y, index.z, 0) +
@@ -1159,8 +1268,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
                                                  kMaterialActor, fields[field]);
       auto &candidate_values = impl_->candidate_fields[field];
       std::size_t owned = 0U;
-      for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                                runtime::Int3 index) {
+      impl_->for_each_active_owned_cell([&](mesh::LocalCellId cell,
+                                            runtime::Int3 index) {
         const double spatial =
             stencil.order == MomentumTimeOrder::backward_euler
                 ? impl_->residual_current[field][owned]
@@ -1201,8 +1310,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
   auto trial_rho = state.trial_layer().acquire_write<double>(
       impl_->access, kMaterialPhase, kMaterialActor, state.fields().density);
   std::size_t owned = 0U;
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+  impl_->for_each_active_owned_cell(
+      [&](mesh::LocalCellId, runtime::Int3 index) {
         trial_rho(index.x, index.y, index.z, 0) =
             impl_->candidate_density[owned++];
       });
@@ -1210,8 +1319,8 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
     auto trial = state.trial_layer().acquire_write<double>(
         impl_->access, kMaterialPhase, kMaterialActor, fields[field]);
     owned = 0U;
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId, runtime::Int3 index) {
           trial(index.x, index.y, index.z, 0) =
               impl_->candidate_fields[field][owned++];
         });
@@ -1228,10 +1337,42 @@ MaterialDensityTransport::StagingResult MaterialDensityTransport::stage_trial(
   return result;
 }
 
+detail::MaterialDensityStageResult
+detail::DensityClosureBridge::stage_material_transport(
+    MaterialDensityTransport &transport, FlowState &state,
+    const MaterialFaceMassFlux &flux, const MomentumTimeStencil &stencil) {
+  const auto result = transport.stage_trial(state, flux, stencil);
+  return {result.reason, result.lowest_failing_rank};
+}
+
 MaterialDensityTransportReport MaterialDensityTransport::finalize_trial(
     FlowState &state, const MaterialFaceMassFlux &final_mass_flux,
     const MomentumTimeStencil &stencil) const {
   return finalize_trial_with_source(state, final_mass_flux, stencil, 0.0);
+}
+
+MaterialDensityTransportReport
+detail::DensityClosureBridge::finalize_material_transport(
+    MaterialDensityTransport &transport, FlowState &state,
+    const MaterialFaceMassFlux &flux, const MomentumTimeStencil &stencil) {
+  return transport.finalize_trial(state, flux, stencil);
+}
+
+MaterialDensityTransportReport
+detail::DensityClosureBridge::assess_material_after_closure(
+    MaterialDensityTransport &transport, FlowState &state,
+    const MaterialFaceMassFlux &flux, const MomentumTimeStencil &stencil,
+    double enthalpy_rate_J_per_kg_s) {
+  return transport.assess_trial_after_closure(
+      state, flux, stencil, enthalpy_rate_J_per_kg_s);
+}
+
+void detail::DensityClosureBridge::rebind_material_report_attempt_identity(
+    MaterialDensityTransportReport &report, std::uint64_t attempt_identity) {
+  if (attempt_identity == 0U)
+    throw runtime::Error("immersed material attempt identity is invalid");
+  report.attempt_identity_ = attempt_identity;
+  report.seal();
 }
 
 MaterialDensityTransportReport
@@ -1361,8 +1502,8 @@ MaterialDensityTransport::finalize_trial_with_source(
                                 state.fields().density);
   bool finite_state = true;
   bool positive_density = true;
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+  impl_->for_each_active_owned_cell(
+      [&](mesh::LocalCellId, runtime::Int3 index) {
         const double current = rho_n(index.x, index.y, index.z, 0);
         const double history = rho_h(index.x, index.y, index.z, 0);
         finite_state =
@@ -1378,8 +1519,8 @@ MaterialDensityTransport::finalize_trial_with_source(
         state.layer(FlowLayer::history)
             .acquire_read<double>(impl_->access, kMaterialPhase, kMaterialActor,
                                   field);
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId, runtime::Int3 index) {
           finite_state = finite_state &&
                          std::isfinite(current(index.x, index.y, index.z, 0)) &&
                          std::isfinite(history(index.x, index.y, index.z, 0));
@@ -1412,8 +1553,8 @@ MaterialDensityTransport::finalize_trial_with_source(
     impl_->operators.accumulate_mass_residual(final_mass_flux.impl_->handle,
                                               mass_residual);
     std::size_t owned_index = 0U;
-    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                              runtime::Int3 index) {
+    impl_->for_each_active_owned_cell([&](mesh::LocalCellId cell,
+                                          runtime::Int3 index) {
       const double volume = impl_->geometry->cell_volume_m3(cell);
       const double candidate =
           -(stencil.alpha1 * rho_n(index.x, index.y, index.z, 0) +
@@ -1462,8 +1603,8 @@ MaterialDensityTransport::finalize_trial_with_source(
                                                  kMaterialActor, fields[field]);
       auto &candidate_values = impl_->candidate_fields[field];
       std::size_t owned = 0U;
-      for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                                runtime::Int3 index) {
+      impl_->for_each_active_owned_cell([&](mesh::LocalCellId cell,
+                                            runtime::Int3 index) {
         const double spatial =
             stencil.order == MomentumTimeOrder::backward_euler
                 ? impl_->residual_current[field][owned]
@@ -1504,8 +1645,8 @@ MaterialDensityTransport::finalize_trial_with_source(
   auto trial_rho = state.trial_layer().acquire_write<double>(
       impl_->access, kMaterialPhase, kMaterialActor, state.fields().density);
   std::size_t owned = 0U;
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+  impl_->for_each_active_owned_cell(
+      [&](mesh::LocalCellId, runtime::Int3 index) {
         trial_rho(index.x, index.y, index.z, 0) =
             impl_->candidate_density[owned++];
       });
@@ -1513,8 +1654,8 @@ MaterialDensityTransport::finalize_trial_with_source(
     auto trial = state.trial_layer().acquire_write<double>(
         impl_->access, kMaterialPhase, kMaterialActor, fields[field]);
     owned = 0U;
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId, runtime::Int3 index) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId, runtime::Int3 index) {
           trial(index.x, index.y, index.z, 0) =
               impl_->candidate_fields[field][owned++];
         });
@@ -1532,8 +1673,8 @@ MaterialDensityTransport::finalize_trial_with_source(
   double local_min = std::numeric_limits<double>::infinity();
   mesh::GlobalCellId local_min_id = 0U;
   owned = 0U;
-  for_each_owned_cell(
-      *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+  impl_->for_each_active_owned_cell(
+      [&](mesh::LocalCellId cell, runtime::Int3 index) {
         const double volume = impl_->geometry->cell_volume_m3(cell);
         const double rn = rho_n(index.x, index.y, index.z, 0);
         const double rh = rho_h(index.x, index.y, index.z, 0);
@@ -1566,7 +1707,9 @@ MaterialDensityTransport::finalize_trial_with_source(
         impl_->boundaries->patch(*patch).kind() ==
             boundary::BoundaryKind::periodic ||
         impl_->topology->cell_ownership(impl_->topology->owner(face)) !=
-            mesh::EntityOwnership::owned)
+            mesh::EntityOwnership::owned ||
+        (impl_->domain != nullptr &&
+         !impl_->cell_active(impl_->topology->owner(face))))
       continue;
     const double value = final_mass_flux.impl_->view(face, 0);
     boundary_mass.add(value);
@@ -1582,8 +1725,8 @@ MaterialDensityTransport::finalize_trial_with_source(
                                               kMaterialActor, fields[field]);
     owned = 0U;
     const std::size_t offset = mass_terms + field_terms * field;
-    for_each_owned_cell(*impl_->topology, [&](mesh::LocalCellId cell,
-                                              runtime::Int3 index) {
+    impl_->for_each_active_owned_cell([&](mesh::LocalCellId cell,
+                                          runtime::Int3 index) {
       const double volume = impl_->geometry->cell_volume_m3(cell);
       const double spatial = stencil.order == MomentumTimeOrder::backward_euler
                                  ? impl_->residual_current[field][owned]
@@ -1650,8 +1793,8 @@ MaterialDensityTransport::finalize_trial_with_source(
     report.transport_residual_available_[field] = 1U;
     CompensatedSum next_integral_sum;
     owned = 0U;
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId cell, runtime::Int3) {
           next_integral_sum.add(impl_->geometry->cell_volume_m3(cell) *
                                 impl_->candidate_fields[field][owned++]);
         });
@@ -1884,8 +2027,8 @@ MaterialDensityTransport::assess_trial_after_closure(
         post_assessment_fault_kind == 3)
       throw runtime::Error("injected post-closure geometry failure");
 #endif
-    for_each_owned_cell(
-        *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+    impl_->for_each_active_owned_cell(
+        [&](mesh::LocalCellId cell, runtime::Int3 index) {
           const double volume = impl_->geometry->cell_volume_m3(cell);
           const double rn = rho_n(index.x, index.y, index.z, 0);
           const double rh = rho_h(index.x, index.y, index.z, 0);
@@ -1949,8 +2092,8 @@ MaterialDensityTransport::assess_trial_after_closure(
       CompensatedSum next_integral;
       std::size_t owned = 0U;
       const std::size_t offset = mass_terms + field_terms * field;
-      for_each_owned_cell(
-          *impl_->topology, [&](mesh::LocalCellId cell, runtime::Int3 index) {
+      impl_->for_each_active_owned_cell(
+          [&](mesh::LocalCellId cell, runtime::Int3 index) {
             const double volume = impl_->geometry->cell_volume_m3(cell);
             const double spatial =
                 stencil.order == MomentumTimeOrder::backward_euler

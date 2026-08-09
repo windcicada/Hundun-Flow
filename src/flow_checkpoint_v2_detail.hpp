@@ -5,6 +5,10 @@
 #include "hundun/rt_field_access_plan.hpp"
 #include "hundun/rt_field_registry.hpp"
 
+#include <cstdint>
+#include <utility>
+#include <vector>
+
 namespace hundun::flow {
 
 struct FlowState::Impl final {
@@ -30,6 +34,14 @@ struct FlowState::Impl final {
 };
 
 namespace detail {
+
+std::vector<std::uint8_t>
+encode_checkpoint_flow_state_rank_payload(const FlowState &,
+                                          std::uint64_t &logical_bytes);
+std::pair<FlowLayerValues, FlowLayerValues>
+decode_checkpoint_flow_state_rank_payload(
+    const std::vector<std::uint8_t> &, const FlowState &,
+    std::uint64_t &logical_bytes);
 
 bool validate_preflighted_ideal_gas_restore_state(
     const runtime::MpiContext &, const mesh::MeshTopology &,

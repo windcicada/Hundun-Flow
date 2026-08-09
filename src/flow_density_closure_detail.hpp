@@ -9,11 +9,13 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 namespace hundun::flow {
 
 class IdealGasClosure;
 class IdealGasClosureDiagnosticSource;
+class IdealGasStepAttemptReport;
 
 namespace detail {
 
@@ -43,6 +45,11 @@ struct DensityClosureEvaluation final {
   int lowest_failing_rank{-1};
 };
 
+struct MaterialDensityStageResult final {
+  MaterialTransportFailureReason reason{MaterialTransportFailureReason::none};
+  int lowest_failing_rank{-1};
+};
+
 struct DensityClosureHooks final {
   void *object{};
   runtime::FieldId enthalpy_density{};
@@ -69,6 +76,25 @@ struct DensityClosureHooks final {
 };
 
 struct DensityClosureBridge final {
+  static MaterialDensityTransport create_immersed_transport(
+      const runtime::FieldRegistry &,
+      const runtime::StructuredDecomposition &, const mesh::MeshTopology &,
+      const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
+      const immersed::ImmersedDomain &, const runtime::MpiContext &,
+      runtime::HaloExchange &, FlowFieldIds, MaterialDensityTransportSpec);
+  static void prepare_material_transport(MaterialDensityTransport &);
+  static MaterialDensityStageResult stage_material_transport(
+      MaterialDensityTransport &, FlowState &, const MaterialFaceMassFlux &,
+      const MomentumTimeStencil &);
+  static MaterialDensityTransportReport finalize_material_transport(
+      MaterialDensityTransport &, FlowState &, const MaterialFaceMassFlux &,
+      const MomentumTimeStencil &);
+  static MaterialDensityTransportReport assess_material_after_closure(
+      MaterialDensityTransport &, FlowState &, const MaterialFaceMassFlux &,
+      const MomentumTimeStencil &, double enthalpy_rate_J_per_kg_s);
+  static void rebind_material_report_attempt_identity(
+      MaterialDensityTransportReport &, std::uint64_t);
+
   static FixedStepMaterialDensityFlow create_open_capable(
       const runtime::StructuredDecomposition &, const mesh::MeshTopology &,
       const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
@@ -88,11 +114,39 @@ struct DensityClosureBridge final {
           const MomentumTimeStencil &, const linear::SolveControl &,
           const linear::SolveControl &, const DensityClosureHooks &);
 
+  static MaterialDensityStepAttemptReport attempt_with_optional_wale(
+      const FixedStepMaterialDensityFlow &, FlowState &, double molecular_mu,
+      const MomentumTimeStencil &, const linear::SolveControl &,
+      const linear::SolveControl &, const DensityClosureHooks *,
+      const les::WaleModel *, les::WaleSummary *);
+  static std::uint64_t
+  wale_evaluation_count(const FixedStepMaterialDensityFlow &) noexcept;
+
   static bool
   report_authenticated(const MaterialDensityStepAttemptReport &) noexcept;
   static std::uint64_t
   report_seal(const MaterialDensityStepAttemptReport &) noexcept;
   static MaterialDensityStepAttemptReport make_report();
+  static MaterialDensityStepAttemptReport make_material_report(
+      StepAttemptReport,
+      std::optional<MaterialDensityTransportReport>,
+      MaterialTransportFailureReason, std::uint64_t material_field_count,
+      runtime::FieldId shared_face_mass_flux_field,
+      std::uint64_t attempt_identity);
+  static MaterialDensityStepAttemptReport make_material_closure_report(
+      StepAttemptReport,
+      std::optional<MaterialDensityTransportReport> pre_closure,
+      std::optional<MaterialDensityTransportReport> post_closure,
+      MaterialTransportFailureReason, std::uint64_t material_field_count,
+      runtime::FieldId shared_face_mass_flux_field,
+      std::uint64_t attempt_identity);
+  static MaterialDensityStepAttemptReport make_material_report_impl(
+      StepAttemptReport,
+      std::optional<MaterialDensityTransportReport> pre_closure,
+      std::optional<MaterialDensityTransportReport> post_closure,
+      MaterialTransportFailureReason, std::uint64_t material_field_count,
+      runtime::FieldId shared_face_mass_flux_field,
+      std::uint64_t attempt_identity, bool closure_origin);
   static bool post_eos_evidence_authenticated(
       const MaterialDensityStepAttemptReport &) noexcept;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -347,8 +401,31 @@ struct DensityClosureBridge final {
 };
 
 struct DensityClosureAdapter final {
+  static IdealGasClosure create_immersed(
+      const mesh::MeshTopology &, const mesh::MeshGeometry &,
+      const boundary::BoundaryRegistry &, const immersed::ImmersedDomain &,
+      const runtime::MpiContext &, const runtime::FieldRegistry &,
+      const FlowFieldIds &, const FlowState &, IdealGasClosureSpec);
+  static bool matches_immersed(
+      const IdealGasClosure &, const mesh::MeshTopology &,
+      const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
+      const immersed::ImmersedDomain &, const runtime::MpiContext &,
+      const runtime::FieldRegistry &, const FlowFieldIds &) noexcept;
+  static bool matches_body_fitted(
+      const IdealGasClosure &, const mesh::MeshTopology &,
+      const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
+      const runtime::MpiContext &, const runtime::FieldRegistry &,
+      const FlowFieldIds &) noexcept;
+  static IdealGasClosureReport latest_report(const IdealGasClosure &);
   static DensityClosureHooks bind(IdealGasClosure &, runtime::FieldId,
                                   double enthalpy_rate_J_per_kg_s);
+  static IdealGasStepAttemptReport make_ideal_report(
+      MaterialDensityStepAttemptReport,
+      std::optional<IdealGasClosureReport>, std::uint64_t attempt_identity);
+  static bool report_authenticated(
+      const IdealGasStepAttemptReport &) noexcept;
+  static std::uint64_t report_seal(
+      const IdealGasStepAttemptReport &) noexcept;
   static void begin(void *, const FlowState &, std::uint64_t);
   static DensityClosureEvaluation evaluate(void *, FlowState &,
                                            DensityClosureStage);
@@ -368,6 +445,7 @@ struct DensityClosureAdapter final {
   static void rollback(void *) noexcept;
   static double gas_constant_J_per_kg_K(const IdealGasClosure &) noexcept;
   static double cp_J_per_kg_K(const IdealGasClosure &) noexcept;
+  static double configured_pressure_pa(const IdealGasClosure &) noexcept;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   static bool same_rank_reason_precedence_raw() noexcept;
   static bool post_store_rank_marker_collision_free_raw(int) noexcept;
@@ -418,6 +496,35 @@ struct DensityClosureAdapter final {
       const IdealGasClosure &) noexcept;
   static void consume_attempt_preparation_fault_raw(IdealGasClosure &);
 #endif
+};
+
+struct IdealGasClosureCheckpointPreparedRestore final {
+  IdealGasClosureCheckpointPreparedRestore(
+      IdealGasClosureCheckpointPreparedRestore &&) noexcept = default;
+  IdealGasClosureCheckpointPreparedRestore &operator=(
+      IdealGasClosureCheckpointPreparedRestore &&) = delete;
+  IdealGasClosureCheckpointPreparedRestore(
+      const IdealGasClosureCheckpointPreparedRestore &) = delete;
+  IdealGasClosureCheckpointPreparedRestore &operator=(
+      const IdealGasClosureCheckpointPreparedRestore &) = delete;
+
+private:
+  explicit IdealGasClosureCheckpointPreparedRestore(
+      IdealGasClosureState state) noexcept
+      : state_(std::move(state)) {}
+
+  IdealGasClosureState state_;
+  friend struct IdealGasClosureCheckpointAccess;
+};
+
+struct IdealGasClosureCheckpointAccess final {
+  static IdealGasClosureState snapshot(const IdealGasClosure &);
+  static IdealGasClosureCheckpointPreparedRestore
+  prepare_restore(const IdealGasClosure &, const FlowState &restored_state,
+                  IdealGasClosureState);
+  static void publish_restore(
+      IdealGasClosure &,
+      IdealGasClosureCheckpointPreparedRestore &&) noexcept;
 };
 
 struct DensityClosureReadSession final {

@@ -14,8 +14,7 @@ int dispatch_in_root_config_rank_order(
     RankAndDispatchPhase&& rank_and_dispatch_phase) {
   const std::filesystem::path authoritative_root =
       std::forward<RootPhase>(root_phase)();
-  const config::ResolvedCase resolved =
-      std::forward<ConfigPhase>(config_phase)();
+  const auto resolved = std::forward<ConfigPhase>(config_phase)();
   return std::forward<RankAndDispatchPhase>(rank_and_dispatch_phase)(
       resolved, authoritative_root);
 }

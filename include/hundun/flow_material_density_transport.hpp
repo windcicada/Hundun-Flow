@@ -18,6 +18,9 @@ class BoundaryRegistry;
 namespace hundun::mesh {
 class MeshGeometry;
 }
+namespace hundun::immersed {
+class ImmersedDomain;
+}
 namespace hundun::runtime {
 class FieldAccessPlan;
 class FieldRegistry;

@@ -4,6 +4,7 @@
 
 #include "flow_checkpoint_v2_detail.hpp"
 #include "flow_density_closure_detail.hpp"
+#include "hundun/ib_domain.hpp"
 #include "hundun/bc_basic_boundary.hpp"
 #include "hundun/rt_collective_status.hpp"
 #include "hundun/rt_error.hpp"
@@ -594,6 +595,7 @@ struct IdealGasClosure::Impl final {
   const mesh::MeshTopology *topology{};
   const mesh::MeshGeometry *geometry{};
   const boundary::BoundaryRegistry *boundaries{};
+  const immersed::ImmersedDomain *immersed_domain{};
   const runtime::MpiContext *mpi{};
   const runtime::FieldRegistry *registry{};
   FlowFieldIds fields;
@@ -608,6 +610,8 @@ struct IdealGasClosure::Impl final {
   std::uint64_t attempt_identity{};
   std::uint64_t source_generation{1U};
   std::array<std::vector<double>, 6> cell_workspace;
+  std::vector<mesh::LocalCellId> active_owned_cells;
+  std::vector<std::uint8_t> active_owned_mask;
   std::vector<PreflightWire> preflight_workspace;
   std::uint64_t preflight_wire_exchange_count{};
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -831,7 +835,7 @@ IdealGasClosure IdealGasClosure::create(
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec) {
   return create_internal(topology, geometry, boundaries, mpi, registry, fields,
-                         state, spec, nullptr
+                         state, spec, nullptr, nullptr
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
                          ,
                          -1, -1
@@ -846,7 +850,7 @@ IdealGasClosure IdealGasClosure::restore(
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec, IdealGasClosureState restored) {
   return create_internal(topology, geometry, boundaries, mpi, registry, fields,
-                         state, spec, &restored
+                         state, spec, &restored, nullptr
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
                          ,
                          -1, -1
@@ -867,7 +871,8 @@ IdealGasClosure IdealGasClosure::create_internal(
     const boundary::BoundaryRegistry &boundaries,
     const runtime::MpiContext &mpi, const runtime::FieldRegistry &registry,
     const FlowFieldIds &fields, const FlowState &state, IdealGasClosureSpec spec,
-    const IdealGasClosureState *restored_authority
+    const IdealGasClosureState *restored_authority,
+    const immersed::ImmersedDomain *immersed_domain
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     ,
     int create_fault_kind, int create_fault_rank
@@ -1037,6 +1042,7 @@ IdealGasClosure IdealGasClosure::create_internal(
   FlowLayerValues history;
   std::array<CompensatedSum, 4> local_sums{};
   std::size_t owned_cell_count{};
+  std::vector<mesh::LocalCellId> active_owned_cells;
   std::unique_ptr<Impl> impl;
   try {
     valid = valid && !state.attempt_active() &&
@@ -1103,6 +1109,36 @@ IdealGasClosure IdealGasClosure::create_internal(
                 owned_cell_count &&
             history.transported_cell_fields[enthalpy_index].size() ==
                 owned_cell_count;
+    active_owned_cells.reserve(
+        immersed_domain == nullptr
+            ? owned_cell_count
+            : immersed_domain->active_cells().owned_active_count());
+    for (mesh::LocalCellId cell = 0U; cell < owned_cell_count; ++cell) {
+      if (immersed_domain == nullptr ||
+          immersed_domain->region(cell) == immersed::CellRegion::fluid)
+        active_owned_cells.push_back(cell);
+    }
+    valid = valid &&
+            (immersed_domain == nullptr ||
+             active_owned_cells.size() ==
+                 immersed_domain->active_cells().owned_active_count());
+    if (valid && immersed_domain != nullptr) {
+      for (mesh::LocalCellId cell = 0U; cell < owned_cell_count; ++cell) {
+        if (immersed_domain->region(cell) == immersed::CellRegion::fluid)
+          continue;
+        if (fp_bits(committed.density[cell]) != fp_bits(0.0) ||
+            fp_bits(history.density[cell]) != fp_bits(0.0) ||
+            fp_bits(committed.transported_cell_fields[enthalpy_index][cell]) !=
+                fp_bits(0.0) ||
+            fp_bits(history.transported_cell_fields[enthalpy_index][cell]) !=
+                fp_bits(0.0)) {
+          local_validation_failure = lower_failure(
+              local_validation_failure,
+              IdealGasClosureFailureReason::invalid_input);
+          valid = false;
+        }
+      }
+    }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (create_fault(create_fault_kind, create_fault_rank,
                      kCreateConstructionAllocation,
@@ -1113,16 +1149,21 @@ IdealGasClosure IdealGasClosure::create_internal(
     impl->topology = &topology;
     impl->geometry = &geometry;
     impl->boundaries = &boundaries;
+    impl->immersed_domain = immersed_domain;
     impl->mpi = &mpi;
     impl->registry = &registry;
     impl->fields = fields;
     impl->spec = spec;
+    impl->active_owned_cells = active_owned_cells;
+    impl->active_owned_mask.assign(owned_cell_count, 0U);
+    for (const auto cell : active_owned_cells)
+      impl->active_owned_mask[cell] = 1U;
     impl->preflight_workspace = std::move(preflight_workspace);
     impl->preflight_wire_exchange_count = preflight_wire_exchange_count;
     for (auto &workspace : impl->cell_workspace)
       workspace.assign(owned_cell_count, 0.0);
     if (valid) {
-      for (std::size_t cell = 0; cell < owned_cell_count; ++cell) {
+      for (const auto cell : active_owned_cells) {
         const double volume = geometry.cell_volume_m3(cell);
         const double rho = committed.density[cell];
         const double rho_history = history.density[cell];
@@ -1236,7 +1277,7 @@ IdealGasClosure IdealGasClosure::create_internal(
   }
   std::array<double, 10> maxima{};
   std::fill_n(maxima.begin(), 6U, -std::numeric_limits<double>::infinity());
-  for (std::size_t cell = 0; cell < owned_cell_count; ++cell) {
+  for (const auto cell : active_owned_cells) {
     const double rho = committed.density[cell];
     const double rho_history = history.density[cell];
     const double h = committed.transported_cell_fields[0][cell] / rho;
@@ -1300,6 +1341,210 @@ IdealGasClosureState IdealGasClosure::state() const {
   if (!impl_)
     throw runtime::Error("ideal-gas closure has been moved from");
   return impl_->committed;
+}
+
+IdealGasClosureState detail::IdealGasClosureCheckpointAccess::snapshot(
+    const IdealGasClosure &closure) {
+  return closure.state();
+}
+
+detail::IdealGasClosureCheckpointPreparedRestore
+detail::IdealGasClosureCheckpointAccess::prepare_restore(
+    const IdealGasClosure &closure, const FlowState &restored_state,
+    IdealGasClosureState restored) {
+  if (!closure.impl_ || !closure.impl_->topology || !closure.impl_->geometry ||
+      !closure.impl_->boundaries || !closure.impl_->mpi ||
+      !closure.impl_->registry) {
+    throw runtime::Error(
+        "Checkpoint v3 ideal-gas closure restore input is invalid");
+  }
+
+  const bool open = closure.impl_->boundaries->open_domain();
+  bool preparation_ready = true;
+  bool valid = false;
+  FlowLayerValues history;
+  FlowLayerValues committed;
+  const auto owned_cells = closure.impl_->topology->owned_cell_count();
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+  if (restore_snapshot_preparation_fault_rank == closure.impl_->mpi->rank()) {
+    restore_snapshot_preparation_fault_rank = -1;
+    preparation_ready = false;
+  }
+#endif
+  try {
+    if (!preparation_ready) {
+      throw std::bad_alloc();
+    }
+    valid = !closure.impl_->active && !closure.impl_->prepared_valid &&
+            !detail::FlowStateCheckpointAccess::attempt_active(restored_state) &&
+            &detail::FlowStateCheckpointAccess::registry(restored_state) ==
+                closure.impl_->registry &&
+            restored_state.fields().density == closure.impl_->fields.density &&
+            restored_state.fields().face_mass_flux ==
+                closure.impl_->fields.face_mass_flux &&
+            restored_state.fields().transported_cell_fields ==
+                closure.impl_->fields.transported_cell_fields &&
+            !closure.impl_->fields.transported_cell_fields.empty() &&
+            closure.impl_->fields.transported_cell_fields.front() ==
+                closure.impl_->spec.enthalpy_density &&
+            restored.mode == (open ? IdealGasPressureMode::open_fixed
+                                   : IdealGasPressureMode::closed_dynamic) &&
+            restored.thermodynamic_pressure_pa > 0.0 &&
+            std::isfinite(restored.thermodynamic_pressure_pa) &&
+            restored.revision != std::numeric_limits<std::uint64_t>::max() &&
+            restored.target_mass_kg.has_value() == !open &&
+            (open || (*restored.target_mass_kg > 0.0 &&
+                      std::isfinite(*restored.target_mass_kg))) &&
+            (!open ||
+             fp_bits(restored.thermodynamic_pressure_pa) ==
+                 fp_bits(closure.impl_->spec
+                             .configured_thermodynamic_pressure_pa));
+    history = restored_state.snapshot(FlowLayer::history);
+    committed = restored_state.snapshot(FlowLayer::committed);
+    valid = valid && history.density.size() == owned_cells &&
+            committed.density.size() == owned_cells &&
+            !history.transported_cell_fields.empty() &&
+            !committed.transported_cell_fields.empty() &&
+            history.transported_cell_fields.front().size() == owned_cells &&
+            committed.transported_cell_fields.front().size() == owned_cells;
+  } catch (...) {
+    preparation_ready = false;
+  }
+  const auto preparation = runtime::collective_status(
+      *closure.impl_->mpi, preparation_ready,
+      "Checkpoint v3 ideal-gas closure snapshot preparation");
+  if (!preparation.ok) {
+    throw detail::DensityClosurePreflightFailure(preparation.failing_rank);
+  }
+
+  std::array<double, 3> sums{};
+  try {
+    if (valid) {
+      for (const auto cell : closure.impl_->active_owned_cells) {
+        const double volume = closure.impl_->geometry->cell_volume_m3(cell);
+        const double history_rho = history.density[cell];
+        const double committed_rho = committed.density[cell];
+        const double history_q =
+            history.transported_cell_fields.front()[cell];
+        const double committed_q =
+            committed.transported_cell_fields.front()[cell];
+        const double history_temperature =
+            (history_q / history_rho) / closure.impl_->spec.cp_J_per_kg_K;
+        const double committed_temperature =
+            (committed_q / committed_rho) / closure.impl_->spec.cp_J_per_kg_K;
+        if (!(volume > 0.0) || !(history_rho > 0.0) ||
+            !(committed_rho > 0.0) || !(history_q > 0.0) ||
+            !(committed_q > 0.0) || !(history_temperature > 0.0) ||
+            !(committed_temperature > 0.0) || !std::isfinite(volume) ||
+            !std::isfinite(history_rho) || !std::isfinite(committed_rho) ||
+            !std::isfinite(history_q) || !std::isfinite(committed_q) ||
+            !std::isfinite(history_temperature) ||
+            !std::isfinite(committed_temperature)) {
+          valid = false;
+          continue;
+        }
+        sums[0] += volume * history_rho;
+        sums[1] += volume * committed_rho;
+        if (!open) {
+          sums[2] += volume / history_temperature;
+        }
+      }
+      if (closure.impl_->immersed_domain != nullptr) {
+        for (mesh::LocalCellId cell = 0U; cell < owned_cells; ++cell) {
+          if (closure.impl_->active_owned_mask[cell] != 0U) {
+            continue;
+          }
+          if (fp_bits(history.density[cell]) != fp_bits(0.0) ||
+              fp_bits(committed.density[cell]) != fp_bits(0.0) ||
+              fp_bits(history.transported_cell_fields.front()[cell]) !=
+                  fp_bits(0.0) ||
+              fp_bits(committed.transported_cell_fields.front()[cell]) !=
+                  fp_bits(0.0)) {
+            valid = false;
+          }
+        }
+      }
+    }
+  } catch (...) {
+    valid = false;
+  }
+
+  if (!open) {
+    closure.impl_->mpi->allreduce_fp64_in_place(
+        sums.data(), sums.size(), runtime::Fp64ReductionOperation::sum);
+  }
+  const double target_mass = restored.target_mass_kg.value_or(0.0);
+  const double history_pressure =
+      open ? restored.thermodynamic_pressure_pa
+           : sums[2] > 0.0
+                 ? target_mass *
+                       closure.impl_->spec.gas_constant_J_per_kg_K / sums[2]
+                 : 0.0;
+  valid = valid &&
+          (open ||
+           (sums[2] > 0.0 && std::isfinite(sums[2]) &&
+            relative_error(sums[0], target_mass) <= 5.0e-12 &&
+            relative_error(sums[1], target_mass) <= 5.0e-12));
+  if (valid) {
+    for (const auto cell : closure.impl_->active_owned_cells) {
+      const double history_rho = history.density[cell];
+      const double committed_rho = committed.density[cell];
+      const double history_temperature =
+          (history.transported_cell_fields.front()[cell] / history_rho) /
+          closure.impl_->spec.cp_J_per_kg_K;
+      const double committed_temperature =
+          (committed.transported_cell_fields.front()[cell] / committed_rho) /
+          closure.impl_->spec.cp_J_per_kg_K;
+      if (relative_product_error(
+              history_rho, closure.impl_->spec.gas_constant_J_per_kg_K,
+              history_temperature, history_pressure) > 1.0e-12 ||
+          relative_product_error(
+              committed_rho, closure.impl_->spec.gas_constant_J_per_kg_K,
+              committed_temperature, restored.thermodynamic_pressure_pa) >
+              1.0e-12) {
+        valid = false;
+      }
+    }
+  }
+  if (!valid) {
+    throw runtime::Error(
+        "Checkpoint v3 ideal-gas closure restore state is invalid");
+  }
+  return IdealGasClosureCheckpointPreparedRestore(std::move(restored));
+}
+
+void detail::IdealGasClosureCheckpointAccess::publish_restore(
+    IdealGasClosure &closure,
+    IdealGasClosureCheckpointPreparedRestore &&prepared) noexcept {
+  closure.impl_->committed = prepared.state_;
+  closure.impl_->trial = prepared.state_;
+  closure.impl_->prepared = prepared.state_;
+  closure.impl_->active = false;
+  closure.impl_->prepared_valid = false;
+  closure.impl_->latest_available = false;
+  closure.impl_->attempt_identity = 0U;
+  if (closure.impl_->source_generation ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    closure.impl_->source_generation = 0U;
+  } else {
+    ++closure.impl_->source_generation;
+  }
+}
+
+IdealGasClosure detail::DensityClosureAdapter::create_immersed(
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const immersed::ImmersedDomain &domain, const runtime::MpiContext &mpi,
+    const runtime::FieldRegistry &registry, const FlowFieldIds &fields,
+    const FlowState &state, IdealGasClosureSpec spec) {
+  return IdealGasClosure::create_internal(
+      topology, geometry, boundaries, mpi, registry, fields, state, spec,
+      nullptr, &domain
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      ,
+      -1, -1
+#endif
+  );
 }
 
 void IdealGasClosure::begin_attempt(const FlowState &state,
@@ -1415,6 +1660,10 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
   auto &temperature = impl_->cell_workspace[3];
   auto &rho_eos = impl_->cell_workspace[4];
   auto &q_eos = impl_->cell_workspace[5];
+  std::fill(h.begin(), h.end(), 0.0);
+  std::fill(temperature.begin(), temperature.end(), 0.0);
+  std::fill(rho_eos.begin(), rho_eos.end(), 0.0);
+  std::fill(q_eos.begin(), q_eos.end(), 0.0);
   std::optional<runtime::FieldView<double>> rho_write;
   std::optional<runtime::FieldView<double>> q_write;
   CompensatedSum denominator;
@@ -1481,6 +1730,13 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
     for_each_cell(extent, [&](int i, int j, int k, std::size_t offset) {
       rho_tilde[offset] = rho_read(i, j, k, 0);
       q_tilde[offset] = q_read(i, j, k, 0);
+      if (impl_->active_owned_mask[offset] == 0U) {
+        if (fp_bits(rho_tilde[offset]) != fp_bits(0.0) ||
+            fp_bits(q_tilde[offset]) != fp_bits(0.0))
+          local = lower_failure(local,
+                                IdealGasClosureFailureReason::invalid_input);
+        return;
+      }
       const auto cell_failure = first_state_failure(
           rho_tilde[offset], q_tilde[offset], impl_->spec.cp_J_per_kg_K);
       local = lower_failure(local, cell_failure);
@@ -1523,7 +1779,7 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
       local = IdealGasClosureFailureReason::non_positive_pressure;
   }
   if (local == IdealGasClosureFailureReason::none) {
-    for (std::size_t cell = 0; cell < count; ++cell) {
+    for (const auto cell : impl_->active_owned_cells) {
       IdealGasClosureFailureReason cell_failure =
           IdealGasClosureFailureReason::none;
       try {
@@ -1562,7 +1818,7 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
   std::array<double, 8> maxima{};
   std::fill_n(maxima.begin(), 3U, -std::numeric_limits<double>::infinity());
   if (local == IdealGasClosureFailureReason::none) {
-    for (std::size_t cell = 0; cell < count; ++cell) {
+    for (const auto cell : impl_->active_owned_cells) {
       const double volume = impl_->geometry->cell_volume_m3(cell);
       const double drho = rho_eos[cell] - rho_tilde[cell];
       const double dq = q_eos[cell] - q_tilde[cell];
@@ -1622,7 +1878,8 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
   std::transform(local_sums.begin(), local_sums.end(), local_values.begin(),
                  [](const auto &sum) { return sum.value(); });
   if (local == IdealGasClosureFailureReason::none) {
-    if (!std::all_of(maxima.begin(), maxima.end(),
+    if (!impl_->active_owned_cells.empty() &&
+        !std::all_of(maxima.begin(), maxima.end(),
                      [](double value) { return std::isfinite(value); }))
       local = IdealGasClosureFailureReason::eos_residual;
     else if (!std::all_of(local_values.begin(), local_values.end(),
@@ -1813,8 +2070,21 @@ IdealGasClosure::evaluate(FlowState &state, IdealGasClosureStage stage) {
       const auto stored_q = trial.acquire_read<double>(
           access, kStatePhase, kStateActor, impl_->spec.enthalpy_density);
       for_each_cell(extent, [&](int i, int j, int k, std::size_t) {
+        const auto offset =
+            static_cast<std::size_t>(i) +
+            static_cast<std::size_t>(extent.x) *
+                (static_cast<std::size_t>(j) +
+                 static_cast<std::size_t>(extent.y) *
+                     static_cast<std::size_t>(k));
         const double rho = stored_rho(i, j, k, 0);
         const double q = stored_q(i, j, k, 0);
+        if (impl_->active_owned_mask[offset] == 0U) {
+          if (fp_bits(rho) != fp_bits(0.0) || fp_bits(q) != fp_bits(0.0)) {
+            independent[0] = std::max(independent[0], 1.0);
+            independent[1] = std::max(independent[1], 1.0);
+          }
+          return;
+        }
         const auto failure = first_state_failure(
             rho, q, impl_->spec.cp_J_per_kg_K);
         if (failure != IdealGasClosureFailureReason::none) {
@@ -2008,12 +2278,58 @@ bool IdealGasClosure::matches(const mesh::MeshTopology &topology,
              fields.transported_cell_fields;
 }
 
+bool IdealGasClosure::matches_immersed(
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const immersed::ImmersedDomain &domain, const runtime::MpiContext &mpi,
+    const runtime::FieldRegistry &registry,
+    const FlowFieldIds &fields) const noexcept {
+  return matches(topology, geometry, boundaries, mpi, registry, fields) &&
+         impl_->immersed_domain == &domain &&
+         impl_->active_owned_cells.size() ==
+             domain.active_cells().owned_active_count();
+}
+
+bool detail::DensityClosureAdapter::matches_immersed(
+    const IdealGasClosure &closure, const mesh::MeshTopology &topology,
+    const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const immersed::ImmersedDomain &domain, const runtime::MpiContext &mpi,
+    const runtime::FieldRegistry &registry,
+    const FlowFieldIds &fields) noexcept {
+  return closure.matches_immersed(topology, geometry, boundaries, domain, mpi,
+                                  registry, fields);
+}
+
+bool detail::DensityClosureAdapter::matches_body_fitted(
+    const IdealGasClosure &closure, const mesh::MeshTopology &topology,
+    const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::MpiContext &mpi,
+    const runtime::FieldRegistry &registry,
+    const FlowFieldIds &fields) noexcept {
+  return closure.matches(topology, geometry, boundaries, mpi, registry,
+                         fields) &&
+         closure.impl_->immersed_domain == nullptr &&
+         closure.impl_->active_owned_cells.size() ==
+             topology.owned_cell_count();
+}
+
+IdealGasClosureReport detail::DensityClosureAdapter::latest_report(
+    const IdealGasClosure &closure) {
+  return closure.latest_report();
+}
+
 double IdealGasClosure::cp_J_per_kg_K() const noexcept {
   return impl_ ? impl_->spec.cp_J_per_kg_K : 0.0;
 }
 
 double IdealGasClosure::gas_constant_J_per_kg_K() const noexcept {
   return impl_ ? impl_->spec.gas_constant_J_per_kg_K : 0.0;
+}
+
+double IdealGasClosure::configured_thermodynamic_pressure_pa() const noexcept {
+  return impl_ ? impl_->spec.configured_thermodynamic_pressure_pa : 0.0;
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -2092,7 +2408,8 @@ IdealGasClosure detail::DensityClosureAdapter::create_raw(
     const FlowFieldIds &fields, const FlowState &state,
     IdealGasClosureSpec spec, std::uint8_t fault, int rank) {
   return IdealGasClosure::create_internal(topology, geometry, boundaries, mpi,
-                                          registry, fields, state, spec, nullptr,
+                                          registry, fields, state, spec,
+                                          nullptr, nullptr,
                                           static_cast<int>(fault), rank);
 }
 

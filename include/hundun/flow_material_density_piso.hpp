@@ -189,7 +189,8 @@ private:
   attempt_common(FlowState &, double mu, const MomentumTimeStencil &,
                  const linear::SolveControl &momentum_control,
                  const linear::SolveControl &pressure_control,
-                 const detail::DensityClosureHooks *) const;
+                 const detail::DensityClosureHooks *, const les::WaleModel *,
+                 les::WaleSummary *) const;
   struct Impl;
   explicit FixedStepMaterialDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;

@@ -1079,6 +1079,22 @@ double reconstruct_mc(const runtime::FieldView<const double> &values,
   return result;
 }
 
+double reconstruct_uniform_cell_average_fourth_order(
+    const runtime::FieldView<const double> &values, const FaceStencil &face,
+    const CanonicalFace &canonical, int component) {
+  const StructuredIndex pm1 = shifted(canonical.p, face.axis, -canonical.step);
+  const StructuredIndex np1 = shifted(canonical.n, face.axis, canonical.step);
+  const double q_pm1 = value_at(values, pm1, component);
+  const double q_p = value_at(values, canonical.p, component);
+  const double q_n = value_at(values, canonical.n, component);
+  const double q_np1 = value_at(values, np1, component);
+  const double result =
+      (7.0 * (q_p + q_n) - (q_pm1 + q_np1)) / 12.0;
+  if (!std::isfinite(result))
+    throw Error("uniform cell-average reconstruction is non-finite");
+  return result;
+}
+
 } // namespace
 
 struct FaceMassFlux::State final {
@@ -1120,6 +1136,7 @@ struct FaceMassFlux::PreparedState final {
 struct CellCenteredFvmOperators::Impl final {
   TopologySignature signature;
   Int3 local_extent{};
+  bool uniform_spacing{};
   bool needs_remote_or_periodic{};
   std::vector<FaceStencil> faces;
   std::vector<std::array<CellFaceRef, 6>> cell_faces;
@@ -1366,6 +1383,7 @@ CellCenteredFvmOperators::create(const mesh::MeshTopology &topology,
     geometry.require_compatible(topology);
     auto impl = std::make_unique<Impl>();
     impl->signature = make_signature(topology);
+    impl->uniform_spacing = geometry.uniform_spacing_m().has_value();
     const auto box = topology.owned_global_box();
     impl->local_extent = Int3{box.end.x - box.begin.x, box.end.y - box.begin.y,
                               box.end.z - box.begin.z};
@@ -1842,6 +1860,9 @@ void CellCenteredFvmOperators::reconstruct_momentum_faces(
       if (use_mc) {
         reconstructed = reconstruct_mc(velocity, face, canonical, component,
                                        canonical_mass_flux);
+      } else if (impl_->uniform_spacing) {
+        reconstructed = reconstruct_uniform_cell_average_fourth_order(
+            velocity, face, canonical, component);
       } else {
         const double p = value_at(velocity, canonical.p, component);
         const double n = value_at(velocity, canonical.n, component);
@@ -1866,6 +1887,65 @@ void CellCenteredFvmOperators::reconstruct_momentum_faces(
                               static_cast<std::size_t>(component)];
     }
   }
+}
+
+void CellCenteredFvmOperators::interpolate_cell_scalar_to_faces(
+    const runtime::FieldView<const double> &cell_values,
+    const runtime::FaceFieldView<double> &face_values) const {
+  OperationGuard operation(require_impl().active);
+  const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
+  if (!same(cell_values.interior_extent(), impl_->local_extent) ||
+      cell_values.components() != 1U ||
+      cell_values.ghost_width() < required_ghost ||
+      face_values.face_count() != impl_->faces.size() ||
+      face_values.components() != 1U)
+    throw Error("cell-to-face scalar interpolation layout is invalid");
+  for (const auto &face : impl_->faces) {
+    double interpolated = 0.0;
+    if (is_physical_nonperiodic(face)) {
+      interpolated = value_at(cell_values, face.owner, 0);
+    } else {
+      const CanonicalFace canonical = canonical_face(face);
+      const double p = value_at(cell_values, canonical.p, 0);
+      const double n = value_at(cell_values, canonical.n, 0);
+      if (face.periodic_pair.has_value()) {
+        // Both boundary representations of one periodic face must consume the
+        // same symmetric value. Raw face-center distances live in different
+        // periodic images and are not a shared authority.
+        interpolated = 0.5 * p + 0.5 * n;
+      } else {
+        const Real3 owner_to_face =
+            subtract(face.face_center, face.owner_center);
+        double a = safe_norm(owner_to_face);
+        double b = safe_norm(subtract(face.displacement, owner_to_face));
+        if (canonical.reversed)
+          std::swap(a, b);
+        const double denominator = a + b;
+        if (!(denominator > 0.0) || !std::isfinite(denominator))
+          throw Error(
+              "cell-to-face scalar interpolation distance is invalid");
+        interpolated = (b / denominator) * p + (a / denominator) * n;
+      }
+    }
+    if (!std::isfinite(interpolated))
+      throw Error("cell-to-face scalar interpolation is non-finite");
+    impl_->face_scratch[face.local_face * 3U] = interpolated;
+  }
+  for (const auto &face : impl_->faces) {
+    if (!face.periodic_pair.has_value() ||
+        face.global_face < *face.periodic_pair)
+      continue;
+    const auto authority = std::find_if(
+        impl_->faces.begin(), impl_->faces.end(), [&](const auto &candidate) {
+          return candidate.global_face == *face.periodic_pair;
+        });
+    if (authority != impl_->faces.end())
+      impl_->face_scratch[face.local_face * 3U] =
+          impl_->face_scratch[authority->local_face * 3U];
+  }
+  for (const auto &face : impl_->faces)
+    face_values(face.local_face, 0) =
+        impl_->face_scratch[face.local_face * 3U];
 }
 
 void CellCenteredFvmOperators::assemble_provisional_mass_flux(
@@ -2237,6 +2317,29 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
     const runtime::FieldView<const double> &velocity_gradients,
     double dynamic_viscosity_pa_s,
     const runtime::FieldView<double> &raw_momentum_residual) const {
+  accumulate_viscous_residual_impl(boundaries, velocity, velocity_gradients,
+                                   nullptr, dynamic_viscosity_pa_s,
+                                   raw_momentum_residual);
+}
+
+void CellCenteredFvmOperators::accumulate_viscous_residual(
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    const runtime::FaceFieldView<const double> &dynamic_viscosity_by_face,
+    const runtime::FieldView<double> &raw_momentum_residual) const {
+  accumulate_viscous_residual_impl(boundaries, velocity, velocity_gradients,
+                                   &dynamic_viscosity_by_face, 0.0,
+                                   raw_momentum_residual);
+}
+
+void CellCenteredFvmOperators::accumulate_viscous_residual_impl(
+    const boundary::BoundaryRegistry &boundaries,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    const runtime::FaceFieldView<const double> *dynamic_viscosity_by_face,
+    double uniform_dynamic_viscosity_pa_s,
+    const runtime::FieldView<double> &raw_momentum_residual) const {
   OperationGuard operation(require_impl().active);
   const int required_ghost = impl_->needs_remote_or_periodic ? 1 : 0;
   int required_velocity_ghost = required_ghost;
@@ -2249,8 +2352,13 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
                    face.physical_wall_gradient->halo_reach);
     }
   }
-  if (!(dynamic_viscosity_pa_s >= 0.0) ||
-      !std::isfinite(dynamic_viscosity_pa_s) ||
+  const bool variable_viscosity = dynamic_viscosity_by_face != nullptr;
+  if ((!variable_viscosity &&
+       (!(uniform_dynamic_viscosity_pa_s >= 0.0) ||
+        !std::isfinite(uniform_dynamic_viscosity_pa_s))) ||
+      (variable_viscosity &&
+       (dynamic_viscosity_by_face->face_count() != impl_->faces.size() ||
+        dynamic_viscosity_by_face->components() != 1U)) ||
       !same(velocity.interior_extent(), impl_->local_extent) ||
       velocity.components() != 3U ||
       velocity.ghost_width() < required_velocity_ghost ||
@@ -2261,6 +2369,14 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
       raw_momentum_residual.components() != 3U ||
       raw_momentum_residual.ghost_width() < 0) {
     throw Error("viscous residual field layout is invalid");
+  }
+  if (variable_viscosity) {
+    for (const auto &face : impl_->faces) {
+      const double value =
+          (*dynamic_viscosity_by_face)(face.local_face, 0);
+      if (!(value >= 0.0) || !std::isfinite(value))
+        throw Error("viscous face viscosity is invalid");
+    }
   }
   for (std::size_t cell = 0; cell < impl_->cell_faces.size(); ++cell) {
     const int i = static_cast<int>(
@@ -2281,6 +2397,10 @@ void CellCenteredFvmOperators::accumulate_viscous_residual(
     }
   }
   for (const auto &face : impl_->faces) {
+    const double dynamic_viscosity_pa_s =
+        variable_viscosity
+            ? (*dynamic_viscosity_by_face)(face.local_face, 0)
+            : uniform_dynamic_viscosity_pa_s;
     const bool physical = is_physical_nonperiodic(face);
     std::array<double, 3> traction{};
     if (physical) {
@@ -2408,6 +2528,34 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
     const runtime::FieldView<const double> &velocity_gradients,
     double dynamic_viscosity_pa_s,
     std::vector<PhysicalBoundaryMomentumContribution> &output) const {
+  physical_boundary_momentum_contributions_impl(
+      boundaries, mass_flux, face_velocity, velocity, velocity_gradients,
+      nullptr, dynamic_viscosity_pa_s, output);
+}
+
+void
+CellCenteredFvmOperators::physical_boundary_momentum_contributions(
+    const boundary::BoundaryRegistry &boundaries,
+    const FaceMassFlux &mass_flux,
+    const runtime::FaceFieldView<const double> &face_velocity,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    const runtime::FaceFieldView<const double> &dynamic_viscosity_by_face,
+    std::vector<PhysicalBoundaryMomentumContribution> &output) const {
+  physical_boundary_momentum_contributions_impl(
+      boundaries, mass_flux, face_velocity, velocity, velocity_gradients,
+      &dynamic_viscosity_by_face, 0.0, output);
+}
+
+void CellCenteredFvmOperators::physical_boundary_momentum_contributions_impl(
+    const boundary::BoundaryRegistry &boundaries,
+    const FaceMassFlux &mass_flux,
+    const runtime::FaceFieldView<const double> &face_velocity,
+    const runtime::FieldView<const double> &velocity,
+    const runtime::FieldView<const double> &velocity_gradients,
+    const runtime::FaceFieldView<const double> *dynamic_viscosity_by_face,
+    double uniform_dynamic_viscosity_pa_s,
+    std::vector<PhysicalBoundaryMomentumContribution> &output) const {
   OperationGuard operation(require_impl().active);
   if (!mass_flux.state_) {
     throw Error("face mass flux handle has been moved from");
@@ -2423,6 +2571,7 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
                    face.physical_wall_gradient->halo_reach);
     }
   }
+  const bool variable_viscosity = dynamic_viscosity_by_face != nullptr;
   if (!same_signature(impl_->signature, *mass_flux.state_->signature) ||
       face_velocity.face_count() != impl_->faces.size() ||
       face_velocity.components() != 3U ||
@@ -2432,9 +2581,21 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
       !same(velocity_gradients.interior_extent(), impl_->local_extent) ||
       velocity_gradients.components() != 9U ||
       velocity_gradients.ghost_width() < required_ghost ||
-      !(dynamic_viscosity_pa_s >= 0.0) ||
-      !std::isfinite(dynamic_viscosity_pa_s)) {
+      (!variable_viscosity &&
+       (!(uniform_dynamic_viscosity_pa_s >= 0.0) ||
+        !std::isfinite(uniform_dynamic_viscosity_pa_s))) ||
+      (variable_viscosity &&
+       (dynamic_viscosity_by_face->face_count() != impl_->faces.size() ||
+        dynamic_viscosity_by_face->components() != 1U))) {
     throw Error("physical momentum contribution layout is invalid");
+  }
+  if (variable_viscosity) {
+    for (const auto &face : impl_->faces) {
+      const double value =
+          (*dynamic_viscosity_by_face)(face.local_face, 0);
+      if (!(value >= 0.0) || !std::isfinite(value))
+        throw Error("physical momentum face viscosity is invalid");
+    }
   }
   output.clear();
   for (const auto &face : impl_->faces) {
@@ -2444,6 +2605,10 @@ CellCenteredFvmOperators::physical_boundary_momentum_contributions(
       throw Error("physical momentum contribution face is not owner-owned");
     }
     const double mass = mass_flux.state_->view(face.local_face, 0);
+    const double dynamic_viscosity_pa_s =
+        variable_viscosity
+            ? (*dynamic_viscosity_by_face)(face.local_face, 0)
+            : uniform_dynamic_viscosity_pa_s;
     const auto traction = physical_viscous_traction(
         face, boundaries, velocity, velocity_gradients,
         dynamic_viscosity_pa_s);

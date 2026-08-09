@@ -1,7 +1,7 @@
 # 当前版本能力
 
-当前产品投影提供低马赫数有限体积求解的 CPU/MPI 基础框架。0.1.0 的命令行运行路径覆盖结构化网格、三种密度闭合、五类外边界、固定与自适应时间推进、并行 Checkpoint 和结构化诊断。
+当前源码是 `0.2.0 candidate`。命令行运行路径覆盖结构化网格、三种密度闭合、五类外边界、固定与自适应时间推进、静止 STL IBM、WALE、并行 Checkpoint 和结构化诊断。
 
-源码中的静止 STL 浸入流动数值核心采用两次 PISO pressure corrector，并统一压力、算子、最终通量和力诊断的数据权威。其小规模 1/2/4 rank 分解和异常回退已接受，但 schema 3 driver、IBM Checkpoint v3 和组合诊断尚未接入 0.1.0 可执行程序。
+profile-1、profile-2、profile-3 是 body-fitted density profiles；profile-4、profile-5、profile-6 加 static IBM；profile-7、profile-8、profile-9 再分别组合 WALE。浸入路径采用两次 PISO pressure corrector，并统一压力、算子、最终通量和力诊断的数据权威。Checkpoint v3 presence 1--9 与这张表一致。
 
-生产级 LES、反应流、喷雾、颗粒、移动壁面、GPU、大网格性能和任意复杂几何精度不在当前能力声明内。
+九个 profiles 的实现和小规模测试为 `implemented-and-accepted`。正式 0.2.0 发布仍取决于 S3-V1；生产级 LES、反应流、喷雾、颗粒、移动壁面、GPU、大网格性能和任意复杂几何精度不在当前能力声明内。

@@ -1,13 +1,8 @@
 # 已接受能力
 
-本页记录当前公开投影的能力边界。对应的已接受源码版本为：
-
-```text
-source_commit=66080e324089599711fdb26082af9b330bfdb5ce
-source_tree=ab071a61f00eba9ec973beb0fe600066a33ef74f
-source_diff_sha256=e98f97ffae590778ac6ff37c4220fb843a4f168c7c8afb9c82ebbc85a25ca2dd
-evidence_record_sha256=ba9c32eacf01380a9b656cf81a645231d44d5ff78a267f48761f440359a4c307
-```
+本页记录 `0.2.0 candidate` 的公开边界。精确 task commit、test 和 owner 以
+[Stage 3 capability ledger](../numerics/stage3-capability-ledger.md)为准；冻结候选 HEAD 与
+formal evidence 只写入治理验收报告，不在候选冻结后回写本页。
 
 已接受范围：
 
@@ -21,8 +16,10 @@ evidence_record_sha256=ba9c32eacf01380a9b656cf81a645231d44d5ff78a267f48761f44035
 - 压力、算子、最终通量和壁面力的统一权威链；
 - signed-force 四字段语义；
 - 1/2/4 rank 小规模分解一致性；
-- Checkpoint v2、rollback、collective failure 和结构化 diagnostics。
+- Checkpoint v2/v3、rollback、collective failure 和结构化 diagnostics；
+- profile-1 至 profile-9 的同一 executable dispatch；
+- performance artifact schema v2 的 17 个 exact algorithmic work counters。
 
-这里的浸入边界条目是数值核心和公开 C++ 接口的接受结论，不表示 0.1.0 已经提供完整的 schema 3 命令行 driver。Checkpoint v2 和现有 diagnostics 适用于已集成的 schema 2 流动路径；IBM 专用 driver、Checkpoint v3 和组合诊断仍未发布。
+这些条目表示产品源码已接通 schema 3 driver。发布结论仍需 S3-V1 对同一个 clean HEAD 执行 formal scientific/performance rows。
 
 未列出的能力不能从本页推定。具体限制见[适用范围与限制](../numerics/applicability-and-limitations.md)。

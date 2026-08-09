@@ -63,6 +63,30 @@ detail::DensityClosureAdapter::bind(IdealGasClosure &closure,
   return hooks;
 }
 
+IdealGasStepAttemptReport detail::DensityClosureAdapter::make_ideal_report(
+    MaterialDensityStepAttemptReport flow,
+    std::optional<IdealGasClosureReport> closure,
+    std::uint64_t attempt_identity) {
+  IdealGasStepAttemptReport result;
+  result.flow_ = std::move(flow);
+  result.closure_report_ = std::move(closure);
+  result.attempt_identity_ = attempt_identity;
+  result.seal();
+  if (!result.authenticated())
+    throw runtime::Error("ideal-gas report bridge authority is invalid");
+  return result;
+}
+
+bool detail::DensityClosureAdapter::report_authenticated(
+    const IdealGasStepAttemptReport &report) noexcept {
+  return report.authenticated();
+}
+
+std::uint64_t detail::DensityClosureAdapter::report_seal(
+    const IdealGasStepAttemptReport &report) noexcept {
+  return report.seal_;
+}
+
 void detail::DensityClosureAdapter::begin(void *object, const FlowState &state,
                                           std::uint64_t identity) {
   static_cast<IdealGasClosure *>(object)->begin_attempt(state, identity);
@@ -149,6 +173,10 @@ double detail::DensityClosureAdapter::gas_constant_J_per_kg_K(
 double detail::DensityClosureAdapter::cp_J_per_kg_K(
     const IdealGasClosure &closure) noexcept {
   return closure.cp_J_per_kg_K();
+}
+double detail::DensityClosureAdapter::configured_pressure_pa(
+    const IdealGasClosure &closure) noexcept {
+  return closure.configured_thermodynamic_pressure_pa();
 }
 
 IdealGasStepAttemptReport::IdealGasStepAttemptReport()

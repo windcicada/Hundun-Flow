@@ -2,6 +2,7 @@
 #pragma once
 
 #include "hundun/ib_surface.hpp"
+#include "hundun/diag_stage3_performance.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -43,6 +44,8 @@ public:
   CellRegion classify(runtime::Real3 point_m,
                       config::ImmersedFluidSide fluid_side) const;
   std::uint64_t fingerprint() const noexcept;
+  diagnostics::Stage3PerformanceCounters
+  performance_counters() const noexcept;
 
 private:
   friend class test::ImmersedTestAccess;

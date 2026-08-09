@@ -102,6 +102,12 @@ struct ArtifactMetadata {
   bool clean{true};
   std::string dirty_summary;
   CompatibilityMetadata compatibility;
+  std::string tree_fingerprint;
+  std::string binary_fingerprint;
+  std::string profile;
+  std::string geometry_fingerprint;
+  std::string cpuset;
+  int thread_budget{};
 };
 
 ComparisonResult compare_artifact_metadata(const ArtifactMetadata& baseline,
@@ -124,6 +130,7 @@ struct ExactCounterMaps {
   CounterMap matvec;
   CounterMap preconditioner_applications;
   CounterMap logical_io_bytes;
+  CounterMap algorithmic_work;
 };
 
 struct Artifact {

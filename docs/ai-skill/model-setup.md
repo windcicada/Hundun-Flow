@@ -10,6 +10,6 @@
 6. 为 Restart、diagnostics 和性能输出使用互不冲突的目录；
 7. 运行校验和规范化输出。
 
-schema 3 的浸入边界只使用封闭、静止 STL，壁面速度必须严格为零。0.1.0 只提供 schema 3 的解析、规范化和校验，尚未提供命令行运行、Checkpoint 和组合诊断；自动化工具不得因为 `--validate` 成功就启动该配置。当前公开能力也不应自动启用 `les.model=wale`。
+schema 3 的浸入边界只使用封闭、静止 STL，壁面速度必须严格为零。当前 `0.2.0 candidate` 已接入 schema 3 driver、Checkpoint v3、组合诊断和 `les.model=wale`。自动化工具仍不得因为 `--validate` 成功就直接启动计算；先把输入映射到 capability ledger 的 profile-1 至 profile-9，并核对 rank、process grid、STL 路径和适用范围。
 
 工具必须把用户给定的物性、边界和误差标准视为受控输入。发现矛盾时应报告，不得靠经验值悄悄替换。

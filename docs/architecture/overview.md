@@ -9,3 +9,5 @@ HUNDUN-FLOW 把配置、运行时、网格、离散算子、流动求解和诊�
 3. 派生量只认一个权威来源。压力修正、最终通量、浸入边界重构和力诊断共享同一条产品数据路径。
 
 当前实现以 CPU 参考路径为准，不提供生产级 GPU 后端。
+
+schema 3 driver 按 profile 构造可选对象：mesh/boundary、静止 IBM plans、ideal-gas closure、WALE、flow facade，随后才读取 Checkpoint v3。九个合法 profile 共用一个 `hundun` executable；缺少任一 profile 所需对象会在首个时间步前集体拒绝。

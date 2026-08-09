@@ -56,6 +56,8 @@ public:
   const QuadraticReconstruction &reconstruction(ImmersedLinkId) const;
   std::uint32_t maximum_halo_reach() const noexcept;
   std::uint64_t fingerprint() const noexcept;
+  diagnostics::Stage3PerformanceCounters
+  performance_counters() const noexcept;
 
 private:
   std::size_t immersed_operator_link_count() const noexcept;
@@ -93,6 +95,8 @@ public:
   const std::vector<WallQuadraturePoint> &local_points() const noexcept;
   std::uint32_t maximum_halo_reach() const noexcept;
   std::uint64_t fingerprint() const noexcept;
+  diagnostics::Stage3PerformanceCounters
+  performance_counters() const noexcept;
 
 private:
   explicit WallQuadraturePlan(

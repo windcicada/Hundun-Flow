@@ -34,7 +34,12 @@ enum class DiagnosticModuleKind : std::uint16_t {
   time_control,
   checkpoint,
   flow_driver,
-  performance
+  performance,
+  immersed_surface = 18,
+  ghost_stencil = 19,
+  local_flow_pattern = 20,
+  wall_force = 21,
+  les = 22
 };
 
 enum class DiagnosticLevel : std::uint8_t {

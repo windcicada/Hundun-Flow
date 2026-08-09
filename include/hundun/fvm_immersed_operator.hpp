@@ -42,6 +42,10 @@ struct ImmersedOperatorReport final {
   std::uint64_t active_row_count{};
   std::uint64_t replacement_group_count{};
   std::uint64_t simultaneous_substitution_count{};
+  std::uint64_t row_fingerprint{};
+  std::uint64_t algebraic_occurrence_count{};
+  double replacement_coefficient_l2{};
+  std::uint64_t limiting_case_status{};
   ImmersedResidualParts budget_reaction_N{};
 };
 

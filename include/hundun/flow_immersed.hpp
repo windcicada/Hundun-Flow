@@ -2,8 +2,10 @@
 #pragma once
 
 #include "hundun/cfg_resolved_case.hpp"
+#include "hundun/diag_stage3_performance.hpp"
 #include "hundun/flow_adaptive_time_control.hpp"
 #include "hundun/ib_wall_force.hpp"
+#include "hundun/les_wale.hpp"
 
 #include <array>
 #include <memory>
@@ -26,11 +28,14 @@ class WaleModel;
 
 namespace hundun::flow {
 
-#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+class ImmersedFlowDiagnosticSource;
+
 namespace detail {
+struct ImmersedFlowCheckpointAccess;
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 struct ImmersedFlowAccess;
-}
 #endif
+}
 
 struct ForceAttemptReport final {
   immersed::ForceComponents operator_force;
@@ -42,6 +47,8 @@ struct ForceAttemptReport final {
 struct ImmersedFlowStepAttemptReport final {
   DensityStepAttemptReport base;
   std::optional<ForceAttemptReport> force;
+  // Present only after the same-attempt WALE authority commits successfully.
+  std::optional<les::WaleSummary> wale;
 };
 
 struct ImmersedFlowPhysics final {
@@ -51,6 +58,14 @@ struct ImmersedFlowPhysics final {
   std::optional<double> cp_J_per_kg_K;
   std::optional<double> gas_constant_J_per_kg_K;
   std::optional<double> thermodynamic_pressure_pa;
+};
+
+struct ImmersedFlowDensitySetup final {
+  config::DensityModel model{config::DensityModel::constant};
+  const runtime::FieldRegistry *registry{};
+  FlowFieldIds fields{};
+  std::optional<MaterialDensityTransportSpec> material_transport;
+  IdealGasClosure *ideal_gas_closure{};
 };
 
 class FixedStepImmersedFlow final {
@@ -66,6 +81,18 @@ public:
          std::array<linear::Preconditioner *, 3>, const linear::LinearSolver &,
          linear::Preconditioner &);
 
+  static FixedStepImmersedFlow
+  create(const runtime::StructuredDecomposition &, const mesh::MeshTopology &,
+         const mesh::MeshGeometry &, const boundary::BoundaryRegistry &,
+         const immersed::ImmersedDomain *, const immersed::GhostStencilPlan *,
+         const immersed::WallQuadraturePlan *,
+         const immersed::LocalFlowPatternTransform *, const les::WaleModel *,
+         ImmersedFlowDensitySetup, const runtime::MpiContext &,
+         execution::ExecutionContext &, runtime::HaloExchange &,
+         const linear::LinearSolver &,
+         std::array<linear::Preconditioner *, 3>, const linear::LinearSolver &,
+         linear::Preconditioner &);
+
   ~FixedStepImmersedFlow() noexcept;
   FixedStepImmersedFlow(FixedStepImmersedFlow &&) noexcept;
   FixedStepImmersedFlow &operator=(FixedStepImmersedFlow &&) = delete;
@@ -77,10 +104,20 @@ public:
                                   const linear::SolveControl &,
                                   const linear::SolveControl &) const;
 
+  // The returned source borrows this flow and is valid only until the next
+  // attempt or checkpoint restore. No diagnostic sampling occurs otherwise.
+  ImmersedFlowDiagnosticSource
+  diagnostic_source(const FlowState &,
+                    const ImmersedFlowStepAttemptReport &) const;
+  diagnostics::Stage3PerformanceCounters
+  performance_counters() const noexcept;
+
 private:
   struct Impl;
   explicit FixedStepImmersedFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;
+
+  friend struct detail::ImmersedFlowCheckpointAccess;
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend struct detail::ImmersedFlowAccess;

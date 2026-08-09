@@ -3,10 +3,12 @@
 #include "hundun/flow_constant_density_piso.hpp"
 
 #include "flow_adaptive_time_control_detail.hpp"
+#include "flow_body_fitted_wale_detail.hpp"
 #include "flow_fixed_step_detail.hpp"
 
 #include "hundun/fvm_matrix_free_poisson.hpp"
 #include "hundun/fvm_poisson_boundary_adapter.hpp"
+#include "hundun/les_wale.hpp"
 #include "hundun/lin_ghosted_vector.hpp"
 #include "hundun/rt_collective_status.hpp"
 #include "hundun/rt_error.hpp"
@@ -297,6 +299,8 @@ runtime::FieldDescriptor face_scratch(std::string name,
 class ScratchFields final {
 public:
   explicit ScratchFields(runtime::FieldLayoutSet layout) {
+    lagged_velocity =
+        registry.declare_field(cell_scratch("lagged_velocity", 3U, 2));
     velocity_gradient =
         registry.declare_field(cell_scratch("velocity_gradient", 9U, 2));
     pressure_gradient =
@@ -310,6 +314,12 @@ public:
         registry.declare_field(cell_scratch("scalar_gradient", 3U, 2));
     scalar_face = registry.declare_field(face_scratch("scalar_face", 1U));
     scalar_gamma = registry.declare_field(face_scratch("scalar_gamma", 1U));
+    sgs_dynamic_viscosity_cell = registry.declare_field(
+        cell_scratch("sgs_dynamic_viscosity_cell", 1U, 2));
+    sgs_dynamic_viscosity =
+        registry.declare_field(face_scratch("sgs_dynamic_viscosity", 1U));
+    effective_dynamic_viscosity = registry.declare_field(
+        face_scratch("effective_dynamic_viscosity", 1U));
     scalar_residual =
         registry.declare_field(cell_scratch("scalar_residual", 1U, 0));
     pressure_correction =
@@ -330,6 +340,7 @@ public:
   runtime::FieldRegistry registry;
   std::unique_ptr<runtime::FieldAccessPlan> access;
   std::unique_ptr<runtime::FieldStorage> storage;
+  runtime::FieldId lagged_velocity{};
   runtime::FieldId velocity_gradient{};
   runtime::FieldId pressure_gradient{};
   runtime::FieldId momentum_face{};
@@ -338,6 +349,9 @@ public:
   runtime::FieldId scalar_gradient{};
   runtime::FieldId scalar_face{};
   runtime::FieldId scalar_gamma{};
+  runtime::FieldId sgs_dynamic_viscosity_cell{};
+  runtime::FieldId sgs_dynamic_viscosity{};
+  runtime::FieldId effective_dynamic_viscosity{};
   runtime::FieldId scalar_residual{};
   runtime::FieldId pressure_correction{};
   runtime::FieldId mass_residual{};
@@ -2063,6 +2077,7 @@ void assemble_spatial_residual(
     FlowImplementation &impl, const runtime::FieldRegistry &registry,
     const runtime::FieldAccessPlan &state_access,
     runtime::FieldStorage &accepted, const FlowFieldIds &fields, double mu,
+    const runtime::FaceFieldView<const double> *dynamic_viscosity_by_face,
     MomentumSpatialResidual &values,
     runtime::FieldStorage *flux_storage = nullptr) {
   synchronized_local_phase(
@@ -2120,8 +2135,14 @@ void assemble_spatial_residual(
           }
         }
         zero_cell(residual);
-        impl.fvm.accumulate_viscous_residual(*impl.boundaries, velocity,
-                                             gradient_read, mu, residual);
+        if (dynamic_viscosity_by_face == nullptr) {
+          impl.fvm.accumulate_viscous_residual(*impl.boundaries, velocity,
+                                               gradient_read, mu, residual);
+        } else {
+          impl.fvm.accumulate_viscous_residual(
+              *impl.boundaries, velocity, gradient_read,
+              *dynamic_viscosity_by_face, residual);
+        }
         for (LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
              ++cell) {
           const StructuredIndex index =
@@ -2134,9 +2155,15 @@ void assemble_spatial_residual(
                 residual(index.i, index.j, index.k, component_index);
           }
         }
-        impl.fvm.physical_boundary_momentum_contributions(
-            *impl.boundaries, flux, face_read, velocity, gradient_read, mu,
-            values.boundary);
+        if (dynamic_viscosity_by_face == nullptr) {
+          impl.fvm.physical_boundary_momentum_contributions(
+              *impl.boundaries, flux, face_read, velocity, gradient_read, mu,
+              values.boundary);
+        } else {
+          impl.fvm.physical_boundary_momentum_contributions(
+              *impl.boundaries, flux, face_read, velocity, gradient_read,
+              *dynamic_viscosity_by_face, values.boundary);
+        }
       });
 }
 
@@ -2158,6 +2185,8 @@ void assemble_transport_spatial_residual(
     FlowImplementation &impl, FlowState &state,
     runtime::FieldStorage &accepted,
     const ConstantDensityTransportSpec &item,
+    const runtime::FaceFieldView<const double> *sgs_viscosity_by_face,
+    const les::WaleControl *wale_control,
     TransportSpatialResidual &spatial) {
   auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
   const auto &registry = detail::FlowStateSolverAccess::registry(state);
@@ -2195,9 +2224,27 @@ void assemble_transport_spatial_residual(
         auto gamma = impl.scratch.storage->template acquire_face_write<double>(
             *impl.scratch.access, kScratchPhase, kScratchActor,
             impl.scratch.scalar_gamma);
+        const double turbulent_divisor =
+            item.quantity.kind ==
+                    finite_volume::FiniteVolumeQuantityKind::enthalpy
+                ? (wale_control == nullptr
+                       ? 1.0
+                       : wale_control->turbulent_prandtl)
+                : (wale_control == nullptr
+                       ? 1.0
+                       : wale_control->turbulent_schmidt);
         for (LocalFaceId local_face = 0;
              local_face < impl.topology->local_face_count(); ++local_face) {
-          gamma(local_face, 0) = item.diffusivity_kg_per_m_s;
+          gamma(local_face, 0) =
+              item.diffusivity_kg_per_m_s +
+              (sgs_viscosity_by_face == nullptr
+                   ? 0.0
+                   : (*sgs_viscosity_by_face)(local_face, 0) /
+                         turbulent_divisor);
+          if (!(gamma(local_face, 0) >= 0.0) ||
+              !std::isfinite(gamma(local_face, 0)))
+            throw runtime::Error(
+                "WALE transport diffusion coefficient is invalid");
         }
         const auto face_values =
             impl.scratch.storage->template acquire_face_read<double>(
@@ -2240,6 +2287,9 @@ void assemble_transport_spatial_residual(
 template <class FlowImplementation>
 void recompute_transport(FlowImplementation &impl, FlowState &state,
                          double rho_ref, const MomentumTimeStencil &stencil,
+                         const runtime::FaceFieldView<const double> *
+                             sgs_viscosity_by_face,
+                         const les::WaleControl *wale_control,
                          bool final_call) {
   if (impl.transport.empty())
     return;
@@ -2254,11 +2304,13 @@ void recompute_transport(FlowImplementation &impl, FlowState &state,
     const auto &item = impl.transport[transport_index];
     auto &spatial_n = impl.transport_n[transport_index];
     auto &spatial_nm1 = impl.transport_nm1[transport_index];
-    assemble_transport_spatial_residual(impl, state, committed, item,
-                                        spatial_n);
+    assemble_transport_spatial_residual(
+        impl, state, committed, item, sgs_viscosity_by_face, wale_control,
+        spatial_n);
     if (stencil.order == MomentumTimeOrder::bdf2) {
-      assemble_transport_spatial_residual(impl, state, history, item,
-                                          spatial_nm1);
+      assemble_transport_spatial_residual(
+          impl, state, history, item, sgs_viscosity_by_face, wale_control,
+          spatial_nm1);
     }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (final_call &&
@@ -2529,6 +2581,7 @@ ConservationDiagnosticValues make_conservation_diagnostic(
 template <class FlowImplementation>
 runtime::CollectiveStatus assess_final_momentum(
     FlowImplementation &impl, FlowState &state, double rho_ref, double mu,
+    const runtime::FaceFieldView<const double> *dynamic_viscosity_by_face,
     const MomentumTimeStencil &stencil, StepAttemptReport &report) {
   auto &committed =
       detail::FlowStateSolverAccess::layer(state, FlowLayer::committed);
@@ -2541,10 +2594,10 @@ runtime::CollectiveStatus assess_final_momentum(
   auto &residual_n = impl.momentum_n;
   auto &residual_nm1 = impl.momentum_nm1;
   assemble_spatial_residual(impl, registry, access, committed, fields, mu,
-                            residual_n);
+                            dynamic_viscosity_by_face, residual_n);
   if (stencil.order == MomentumTimeOrder::bdf2) {
     assemble_spatial_residual(impl, registry, access, history, fields, mu,
-                              residual_nm1);
+                              dynamic_viscosity_by_face, residual_nm1);
   }
   impl.halo->exchange(trial, fields.mechanical_pressure);
 
@@ -2782,6 +2835,8 @@ runtime::CollectiveStatus assess_final_momentum(
 template <class FlowImplementation>
 runtime::CollectiveStatus assess_final_transport(
     FlowImplementation &impl, FlowState &state, double rho_ref,
+    const runtime::FaceFieldView<const double> *sgs_viscosity_by_face,
+    const les::WaleControl *wale_control,
     const MomentumTimeStencil &stencil, StepAttemptReport &report) {
   auto &committed =
       detail::FlowStateSolverAccess::layer(state, FlowLayer::committed);
@@ -2801,11 +2856,13 @@ runtime::CollectiveStatus assess_final_transport(
     const auto &item = impl.transport[transport_index];
     auto &spatial_n = impl.transport_n[transport_index];
     auto &spatial_nm1 = impl.transport_nm1[transport_index];
-    assemble_transport_spatial_residual(impl, state, committed, item,
-                                        spatial_n);
+    assemble_transport_spatial_residual(
+        impl, state, committed, item, sgs_viscosity_by_face, wale_control,
+        spatial_n);
     if (stencil.order == MomentumTimeOrder::bdf2) {
-      assemble_transport_spatial_residual(impl, state, history, item,
-                                          spatial_nm1);
+      assemble_transport_spatial_residual(
+          impl, state, history, item, sgs_viscosity_by_face, wale_control,
+          spatial_nm1);
     }
     double norm_sums[2]{};
     ConservationParts conservation;
@@ -3076,6 +3133,27 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     const MomentumTimeStencil &stencil,
     const linear::SolveControl &momentum_control,
     const linear::SolveControl &pressure_control) const {
+  return attempt_impl(state, rho_ref, mu, stencil, momentum_control,
+                      pressure_control, nullptr, nullptr);
+}
+
+StepAttemptReport FixedStepConstantDensityFlow::attempt_with_wale(
+    FlowState &state, double rho_ref, double molecular_mu,
+    const MomentumTimeStencil &stencil,
+    const linear::SolveControl &momentum_control,
+    const linear::SolveControl &pressure_control, const les::WaleModel &wale,
+    les::WaleSummary &summary) const {
+  summary = {};
+  return attempt_impl(state, rho_ref, molecular_mu, stencil, momentum_control,
+                      pressure_control, &wale, &summary);
+}
+
+StepAttemptReport FixedStepConstantDensityFlow::attempt_impl(
+    FlowState &state, double rho_ref, double mu,
+    const MomentumTimeStencil &stencil,
+    const linear::SolveControl &momentum_control,
+    const linear::SolveControl &pressure_control,
+    const les::WaleModel *wale, les::WaleSummary *wale_summary) const {
   StepAttemptReport report = base_report(stencil.dt_s);
   bool active = false;
   try {
@@ -3090,6 +3168,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
       local_valid =
           rho_ref > 0.0 && std::isfinite(rho_ref) && mu >= 0.0 &&
           std::isfinite(mu) &&
+          ((wale == nullptr && wale_summary == nullptr) ||
+           (wale != nullptr && wale_summary != nullptr)) &&
           impl_->transport_specs_valid &&
           !state.attempt_active() &&
           layout.cell_interior_extent.x == local_extent.x &&
@@ -3144,9 +3224,15 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
                            validation.failing_rank);
     }
     const auto metadata = state.metadata();
-    const std::array<double, 14> core_inputs{
+    const auto wale_control =
+        wale == nullptr ? les::WaleControl{} : wale->control();
+    const std::array<double, 18> core_inputs{
         rho_ref,
         mu,
+        wale == nullptr ? 0.0 : 1.0,
+        wale_control.coefficient,
+        wale_control.turbulent_prandtl,
+        wale_control.turbulent_schmidt,
         static_cast<double>(static_cast<std::uint8_t>(stencil.order)),
         stencil.dt_s,
         stencil.previous_dt_s,
@@ -3241,10 +3327,33 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     const auto &registry = state.solver_registry();
     const auto &access = state.solver_access_plan();
     const auto fields = state.fields();
+    std::optional<detail::BodyFittedWaleAttemptData> wale_data;
+    std::uint64_t wale_evaluation_count{};
+    synchronized_local_phase(
+        *impl_->mpi, StepFailureReason::non_finite_trial, true,
+        "WALE attempt preparation failed", [&] {
+          if (wale != nullptr) {
+            const auto rho_attempt = committed.acquire_read<double>(
+                access, kStatePhase, kStateActor, fields.density);
+            wale_data.emplace(detail::prepare_body_fitted_wale_attempt(
+                *impl_, state, *wale, mu, stencil, rho_attempt,
+                wale_evaluation_count, kStatePhase, kStateActor,
+                kScratchPhase, kScratchActor));
+          }
+        });
+    const runtime::FaceFieldView<const double> *effective_viscosity =
+        wale_data.has_value()
+            ? &*wale_data->effective_dynamic_viscosity_by_face
+            : nullptr;
+    const runtime::FaceFieldView<const double> *sgs_viscosity =
+        wale_data.has_value() ? &*wale_data->sgs_dynamic_viscosity_by_face
+                              : nullptr;
+    const les::WaleControl *active_wale_control =
+        wale_data.has_value() ? &wale_control : nullptr;
     auto &residual_n = impl_->momentum_n;
     auto &residual_nm1 = impl_->momentum_nm1;
     assemble_spatial_residual(*impl_, registry, access, committed, fields, mu,
-                              residual_n);
+                              effective_viscosity, residual_n);
     runtime::FieldStorage *history_flux_storage = nullptr;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (momentum_assembly_mutation.load(std::memory_order_relaxed) ==
@@ -3254,7 +3363,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
 #endif
     if (stencil.order == MomentumTimeOrder::bdf2) {
       assemble_spatial_residual(*impl_, registry, access, history, fields, mu,
-                                residual_nm1, history_flux_storage);
+                                effective_viscosity, residual_nm1,
+                                history_flux_storage);
     }
     std::optional<runtime::FieldView<const double>> velocity_n;
     std::optional<runtime::FieldView<const double>> velocity_nm1;
@@ -3530,7 +3640,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
           }
         });
 #endif
-    recompute_transport(*impl_, state, rho_ref, stencil, false);
+    recompute_transport(*impl_, state, rho_ref, stencil, sgs_viscosity,
+                        active_wale_control, false);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     synchronized_local_phase(
         *impl_->mpi, StepFailureReason::transport_failure, true,
@@ -3629,7 +3740,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
           });
     }
 #endif
-    recompute_transport(*impl_, state, rho_ref, stencil, true);
+    recompute_transport(*impl_, state, rho_ref, stencil, sgs_viscosity,
+                        active_wale_control, true);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     if (!authoritative_final_flux.empty()) {
       synchronized_local_phase(
@@ -3722,7 +3834,7 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
                                continuity_status.failing_rank);
     }
     const auto momentum_status = assess_final_momentum(
-        *impl_, state, rho_ref, mu, stencil, report);
+        *impl_, state, rho_ref, mu, effective_viscosity, stencil, report);
     if (!momentum_status.ok) {
       state.rollback_attempt();
       active = false;
@@ -3730,8 +3842,9 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
                                StepFailureReason::final_momentum_residual,
                                momentum_status.failing_rank);
     }
-    const auto transport_status =
-        assess_final_transport(*impl_, state, rho_ref, stencil, report);
+    const auto transport_status = assess_final_transport(
+        *impl_, state, rho_ref, sgs_viscosity, active_wale_control, stencil,
+        report);
     if (!transport_status.ok) {
       state.rollback_attempt();
       active = false;
@@ -3796,6 +3909,8 @@ StepAttemptReport FixedStepConstantDensityFlow::attempt(
     report.reason = StepFailureReason::none;
     report.lowest_failing_rank = -1;
     report.suggested_dt_s = 0.0;
+    if (wale_summary != nullptr)
+      *wale_summary = wale_data->summary;
     return report;
   } catch (const SynchronizedAttemptFailure &failure) {
     if (active)

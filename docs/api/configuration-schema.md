@@ -26,12 +26,12 @@
 
 `density_model` 可取 `constant`、`material`、`ideal_gas`。`mesh.mapping` 可取 `uniform_box` 或 `analytic_warped_box`。`time.mode` 可取 `fixed` 或 `adaptive`。
 
-## schema 3（0.1.0 仅解析与校验）
+## schema 3
 
 在 schema 2 的共同流动字段上增加：
 
 - `immersed_boundary`：`model` 为 `none` 或 `local_flow_pattern_ghost_cell`；启用后必须提供 STL `geometry` 和静止 `wall`；
-- `les`：格式接受 `none` 或 `wale`，但当前公开验收能力仅覆盖 `none`。
+- `les`：`model` 为 `none` 或 `wale`；WALE 参数为 `coefficient`、`turbulent_prandtl` 和 `turbulent_schmidt`。
 
 当前静止壁面要求：
 
@@ -45,6 +45,8 @@
 
 `geometry.format` 必须是 `stl`，`length_scale_to_m` 必须为有限正数，`fluid_side` 为 `inside` 或 `outside`。
 
-0.1.0 的配置库可以读取、规范化和广播 schema 3，但 `hundun` 命令行 driver 尚未装配该运行路径。使用 `--validate` 或 `--print-resolved` 成功，只证明输入符合 schema，不表示 IBM 算例能够由当前可执行程序推进或 Restart。
+schema 3 由同一个 `hundun` driver 运行。它接受 body-fitted + WALE，或 static IBM + optional WALE；三种 `density_model` 均可组合。合法组合对应 Checkpoint v3 presence 1--9。输入通过 `--validate` 只证明 schema 合法，仍需用 acceptance 对应的 profile 检查数值适用性。
+
+例如 ideal-gas IBM + WALE 同时要求 `simulation.density_model=ideal_gas`、`immersed_boundary.model=local_flow_pattern_ghost_cell` 和 `les.model=wale`。静止壁面和 WALE 参数范围由 [Stage 3 contracts](../numerics/stage3-contracts.md) 冻结。
 
 最可靠的字段检查方式是运行 `hundun case.json --print-resolved`，并把输出与输入一同存档。

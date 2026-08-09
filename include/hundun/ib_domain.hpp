@@ -92,6 +92,8 @@ public:
   const ActiveBoundaryLayout &active_boundaries() const noexcept;
   std::uint64_t classification_fingerprint() const noexcept;
   std::uint64_t surface_coverage_fingerprint() const noexcept;
+  diagnostics::Stage3PerformanceCounters
+  performance_counters() const noexcept;
 
 private:
   explicit ImmersedDomain(

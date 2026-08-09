@@ -69,6 +69,65 @@ struct CandidateReconstruction final {
   std::vector<runtime::Int3> donor_cells;
 };
 
+struct PlanningWork final {
+  std::atomic<std::uint64_t> qr_plans{};
+  std::atomic<std::uint64_t> rejected_plans{};
+};
+
+thread_local PlanningWork *active_planning_work{};
+
+class PlanningWorkScope final {
+public:
+  explicit PlanningWorkScope(PlanningWork &work) noexcept
+      : previous_(active_planning_work) {
+    active_planning_work = &work;
+  }
+  ~PlanningWorkScope() noexcept { active_planning_work = previous_; }
+
+private:
+  PlanningWork *previous_{};
+};
+
+void increment(std::atomic<std::uint64_t> &counter,
+               std::uint64_t amount = 1U) {
+  auto value = counter.load(std::memory_order_relaxed);
+  for (;;) {
+    if (amount > std::numeric_limits<std::uint64_t>::max() - value)
+      throw runtime::Error("ghost planning work counter would overflow");
+    if (counter.compare_exchange_weak(value, value + amount,
+                                      std::memory_order_relaxed,
+                                      std::memory_order_relaxed))
+      return;
+  }
+}
+
+void checked_accumulate(std::uint64_t &counter, std::size_t amount) {
+  if (amount > std::numeric_limits<std::uint64_t>::max() ||
+      counter > std::numeric_limits<std::uint64_t>::max() -
+                    static_cast<std::uint64_t>(amount))
+    throw runtime::Error("ghost stored-work counter would overflow");
+  counter += static_cast<std::uint64_t>(amount);
+}
+
+void record_qr_plan() {
+  if (active_planning_work != nullptr)
+    increment(active_planning_work->qr_plans);
+}
+
+void record_rejected_plan() {
+  if (active_planning_work != nullptr)
+    increment(active_planning_work->rejected_plans);
+}
+
+void record_rejected_plans(std::size_t count) {
+  if (active_planning_work == nullptr)
+    return;
+  if (count > std::numeric_limits<std::uint64_t>::max())
+    throw runtime::Error("ghost rejected-plan count would overflow");
+  increment(active_planning_work->rejected_plans,
+            static_cast<std::uint64_t>(count));
+}
+
 struct GhostFunctionalTarget final {
   runtime::Real3 point_m{};
   runtime::Int3 logical{};
@@ -960,6 +1019,7 @@ CandidateReconstruction build_reconstruction(
   std::string last_error = "ghost plan has no accepted donor prefix";
   std::optional<CandidateReconstruction> best;
   std::optional<detail::ReconstructionFunctionalScore> best_score;
+  std::size_t successful_plans = 0U;
   std::vector<std::size_t> prefix_counts;
   prefix_counts.reserve(maximum - kMinimumDonors + 1U);
   if (selection == ReconstructionSelection::widest_accepted_nearest_prefix ||
@@ -981,9 +1041,11 @@ CandidateReconstruction build_reconstruction(
       donors.push_back(selected[index].logical);
     }
     try {
+      record_qr_plan();
       auto reconstruction = QuadraticReconstruction::create(
           point_m, frame.normal, frame.tangent1, frame.tangent2, scale,
           anchor.logical, donors, topology, geometry);
+      ++successful_plans;
       if (selection ==
               ReconstructionSelection::widest_accepted_nearest_prefix ||
           selection ==
@@ -1064,10 +1126,12 @@ CandidateReconstruction build_reconstruction(
                                              std::move(donors)});
       }
     } catch (const runtime::Error &error) {
+      record_rejected_plan();
       last_error = error.what();
     }
   }
   if (best.has_value()) {
+    record_rejected_plans(successful_plans - 1U);
     return std::move(*best);
   }
   throw ReconstructionSelectionError(
@@ -1116,9 +1180,17 @@ CandidateReconstruction rebuild_authority_at_point(
   std::optional<detail::BoundaryAuthorityCoverageScope> coverage_scope;
   if (allow_tangent_plane_crossing)
     coverage_scope.emplace();
-  auto reconstruction = QuadraticReconstruction::create(
-      point_m, frame.normal, frame.tangent1, frame.tangent2, scale,
-      anchor.logical, authoritative_donors, topology, geometry);
+  record_qr_plan();
+  QuadraticReconstruction reconstruction = [&] {
+    try {
+      return QuadraticReconstruction::create(
+          point_m, frame.normal, frame.tangent1, frame.tangent2, scale,
+          anchor.logical, authoritative_donors, topology, geometry);
+    } catch (...) {
+      record_rejected_plan();
+      throw;
+    }
+  }();
   return {std::move(reconstruction), authoritative_donors};
 }
 
@@ -1303,11 +1375,13 @@ struct GhostStencilPlanStorage final {
   std::vector<GhostEntry> entries;
   std::uint32_t maximum_halo_reach{};
   std::uint64_t fingerprint{};
+  diagnostics::Stage3PerformanceCounters performance;
 };
 
 struct WallQuadraturePlanStorage final {
   std::vector<WallQuadraturePoint> local_points;
   std::uint64_t fingerprint{};
+  diagnostics::Stage3PerformanceCounters performance;
 };
 
 } // namespace detail
@@ -1405,6 +1479,7 @@ GhostStencilPlan GhostStencilPlan::create(
       detail::GhostEntry entry;
       std::uint32_t required_reach{};
     };
+    PlanningWork planning_work;
     const auto build_link = [&](std::size_t link_index) {
     const auto &link = links[link_index].record;
     const auto &solid = cells[static_cast<std::size_t>(link.solid_cell)];
@@ -1416,8 +1491,8 @@ GhostStencilPlan GhostStencilPlan::create(
       throw runtime::Error("ghost plan link surface measure is non-finite");
     if (!finite(surface_centroid))
       throw runtime::Error("ghost plan link surface centroid is non-finite");
-      auto candidate = build_pressure_authority_reconstruction(
-          link, cells, topology, geometry);
+    auto candidate = build_pressure_authority_reconstruction(
+        link, cells, topology, geometry);
       const auto value_at_ghost =
           detail::QuadraticReconstructionWeights::value_weights(
               candidate.reconstruction, solid.center_m);
@@ -1505,6 +1580,7 @@ GhostStencilPlan GhostStencilPlan::create(
             if (link_index >= links.size())
               return;
             try {
+              PlanningWorkScope work_scope(planning_work);
               detail::ValidatedGeometryScope validated_geometry(topology,
                                                                 geometry);
               planned[link_index].emplace(build_link(link_index));
@@ -1522,6 +1598,10 @@ GhostStencilPlan GhostStencilPlan::create(
     }
     for (auto &worker : workers)
       worker.join();
+    storage->performance.init_ghost_qr_plans =
+        planning_work.qr_plans.load(std::memory_order_relaxed);
+    storage->performance.init_ghost_rejected_plans =
+        planning_work.rejected_plans.load(std::memory_order_relaxed);
     for (std::size_t link_index = 0U; link_index < links.size(); ++link_index) {
       if (errors[link_index])
         std::rethrow_exception(errors[link_index]);
@@ -1531,6 +1611,16 @@ GhostStencilPlan GhostStencilPlan::create(
     }
     hash_u64(fingerprint, storage->maximum_halo_reach);
     storage->fingerprint = fingerprint;
+    for (const auto &entry : storage->entries) {
+      for (const auto &constraint : entry.velocity)
+        checked_accumulate(
+            storage->performance.init_ghost_donor_references,
+            constraint.donors.size());
+      checked_accumulate(storage->performance.init_ghost_donor_references,
+                         entry.zero_normal.donors.size());
+      checked_accumulate(storage->performance.init_ghost_donor_references,
+                         entry.density.donors.size());
+    }
   } catch (const std::exception &error) {
     local_ok = false;
     local_message = error.what();
@@ -1586,6 +1676,11 @@ std::uint32_t GhostStencilPlan::maximum_halo_reach() const noexcept {
 
 std::uint64_t GhostStencilPlan::fingerprint() const noexcept {
   return storage_->fingerprint;
+}
+
+diagnostics::Stage3PerformanceCounters
+GhostStencilPlan::performance_counters() const noexcept {
+  return storage_->performance;
 }
 
 std::size_t GhostStencilPlan::immersed_operator_link_count() const noexcept {
@@ -1986,6 +2081,11 @@ WallQuadraturePlan WallQuadraturePlan::create(
               {triangle_id, static_cast<std::uint32_t>(point_index),
                point.point, point.normal, point.weight, point.owner,
                std::move(reconstruction)});
+          checked_accumulate(
+              storage->performance.init_ghost_donor_references,
+              detail::QuadraticReconstructionWeights::donor_global_ids(
+                  storage->local_points.back().reconstruction)
+                  .size());
         }
       }
     };
@@ -2038,6 +2138,7 @@ WallQuadraturePlan WallQuadraturePlan::create(
       consume_triangle(triangle, *planned[triangle]);
     }
     storage->fingerprint = fingerprint;
+    storage->performance.init_wall_points = storage->local_points.size();
   } catch (const std::exception &error) {
     local_ok = false;
     local_message = error.what();
@@ -2122,6 +2223,11 @@ bool detail::functional_score_less(const ReconstructionFunctionalScore &left,
 
 std::uint64_t WallQuadraturePlan::fingerprint() const noexcept {
   return storage_->fingerprint;
+}
+
+diagnostics::Stage3PerformanceCounters
+WallQuadraturePlan::performance_counters() const noexcept {
+  return storage_->performance;
 }
 
 } // namespace hundun::immersed

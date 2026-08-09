@@ -2085,6 +2085,10 @@ ImmersedOperatorAdapter ImmersedOperatorAdapter::create(
          surface_centroid, background, transformed, local_sample_points});
     row_links[*fluid].push_back(index);
   }
+  impl->last_report.row_fingerprint = UINT64_C(1469598103934665603);
+  hash_u64(impl->last_report.row_fingerprint,
+           UINT64_C(0x48554e444c465031));
+  double replacement_coefficient_square_sum = 0.0;
   for (LocalCellId cell = 0U; cell < topology.owned_cell_count(); ++cell) {
     if (impl->local_active[cell] == 0U)
       continue;
@@ -2116,6 +2120,19 @@ ImmersedOperatorAdapter ImmersedOperatorAdapter::create(
       for (std::size_t slot = 0U; slot < links.size(); ++slot) {
         const auto &link = impl->wall_links[links[slot]];
         link_ids.push_back(link.id);
+        for (std::size_t occurrence = 0U; occurrence < 6U; ++occurrence) {
+          const double difference =
+              link.transformed_row.neighbour[occurrence] -
+              link.background_row.neighbour[occurrence];
+          replacement_coefficient_square_sum += difference * difference;
+        }
+        const double diagonal_difference =
+            link.transformed_row.diagonal - link.background_row.diagonal;
+        const double source_difference =
+            link.transformed_row.source - link.background_row.source;
+        replacement_coefficient_square_sum +=
+            diagonal_difference * diagonal_difference +
+            source_difference * source_difference;
         const double area[3]{link.area_from_fluid.x,
                              link.area_from_fluid.y,
                              link.area_from_fluid.z};
@@ -2251,6 +2268,11 @@ ImmersedOperatorAdapter ImmersedOperatorAdapter::create(
                                     affine_fingerprint);
       impl->last_report.replacement_group_count +=
           static_cast<std::uint64_t>(evaluation_groups.size());
+      impl->last_report.algebraic_occurrence_count +=
+          static_cast<std::uint64_t>(replacement_terms.size());
+      hash_u64(impl->last_report.row_fingerprint,
+               topology.global_cell_id(cell));
+      hash_u64(impl->last_report.row_fingerprint, fingerprint);
       ++impl->last_report.simultaneous_substitution_count;
     }
     impl->active_rows.push_back({cell, links, std::move(row_reconstruction),
@@ -2284,6 +2306,18 @@ ImmersedOperatorAdapter ImmersedOperatorAdapter::create(
     }
   }
   impl->last_report.active_row_count = impl->active_rows.size();
+  impl->last_report.replacement_coefficient_l2 =
+      std::sqrt(replacement_coefficient_square_sum);
+  impl->last_report.limiting_case_status =
+      std::isfinite(impl->last_report.replacement_coefficient_l2) &&
+              ((impl->last_report.replacement_group_count == 0U &&
+                impl->last_report.algebraic_occurrence_count == 0U) ||
+               (impl->last_report.replacement_group_count > 0U &&
+                impl->last_report.algebraic_occurrence_count > 0U))
+          ? 1U
+          : 0U;
+  if (impl->last_report.row_fingerprint == 0U)
+    impl->last_report.row_fingerprint = 1U;
   impl->scratch.resize(topology.owned_cell_count() * 3U, 0.0);
   std::size_t max_affine_input_count = 0U;
   for (const auto &row : impl->active_rows)

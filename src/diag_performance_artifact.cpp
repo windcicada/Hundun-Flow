@@ -2,6 +2,8 @@
 
 #include "hundun/diag_performance_artifact.hpp"
 
+#include "hundun/diag_stage3_performance.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -548,6 +550,18 @@ ComparisonResult compare_artifact_metadata(const ArtifactMetadata& baseline,
   } else if (baseline.dirty_summary != candidate.dirty_summary) {
     add("source.dirty-summary.mismatch");
   }
+  if (baseline.tree_fingerprint != candidate.tree_fingerprint)
+    add("source.tree-fingerprint.mismatch");
+  if (baseline.binary_fingerprint != candidate.binary_fingerprint)
+    add("build.binary-fingerprint.mismatch");
+  if (baseline.profile != candidate.profile)
+    add("case.profile.mismatch");
+  if (baseline.geometry_fingerprint != candidate.geometry_fingerprint)
+    add("case.geometry-fingerprint.mismatch");
+  if (baseline.cpuset != candidate.cpuset)
+    add("platform.cpuset.mismatch");
+  if (baseline.thread_budget != candidate.thread_budget)
+    add("platform.thread-budget.mismatch");
   const auto required_unavailable = [unavailable](
                                         const CompatibilityMetadata& value) {
     return value.hardware_identity == unavailable ||
@@ -601,14 +615,43 @@ double weak_scaling_efficiency(double single_rank_step_seconds,
 }
 
 std::string to_json(const Artifact &artifact) {
-  if (artifact.schema_version != 1) {
+  if (artifact.schema_version != 1 && artifact.schema_version != 2) {
     throw std::invalid_argument(
-        "performance artifact schema_version must be 1");
+        "performance artifact schema_version must be 1 or 2");
   }
   require_nonempty(artifact.metadata.commit, "commit");
   if ((artifact.metadata.clean && !artifact.metadata.dirty_summary.empty()) ||
       (!artifact.metadata.clean && artifact.metadata.dirty_summary.empty())) {
     throw std::invalid_argument("clean/dirty metadata is inconsistent");
+  }
+  if (artifact.schema_version == 1) {
+    if (!artifact.metadata.tree_fingerprint.empty() ||
+        !artifact.metadata.binary_fingerprint.empty() ||
+        !artifact.metadata.profile.empty() ||
+        !artifact.metadata.geometry_fingerprint.empty() ||
+        !artifact.metadata.cpuset.empty() ||
+        artifact.metadata.thread_budget != 0 ||
+        !artifact.counters.algorithmic_work.empty())
+      throw std::invalid_argument(
+          "schema-v1 Stage 3 performance fields must be empty");
+  } else {
+    require_nonempty(artifact.metadata.tree_fingerprint, "tree_fingerprint");
+    require_nonempty(artifact.metadata.binary_fingerprint,
+                     "binary_fingerprint");
+    require_nonempty(artifact.metadata.profile, "profile");
+    require_nonempty(artifact.metadata.geometry_fingerprint,
+                     "geometry_fingerprint");
+    require_nonempty(artifact.metadata.cpuset, "cpuset");
+    if (artifact.metadata.thread_budget <= 0)
+      throw std::invalid_argument("thread_budget must be positive");
+    if (artifact.counters.algorithmic_work.size() !=
+        kStage3PerformanceCounterIds.size())
+      throw std::invalid_argument(
+          "schema-v2 algorithmic work inventory is incomplete");
+    for (const auto id : kStage3PerformanceCounterIds)
+      if (artifact.counters.algorithmic_work.count(std::string(id)) != 1U)
+        throw std::invalid_argument(
+            "schema-v2 algorithmic work inventory is invalid");
   }
   validate_compatibility(artifact.metadata.compatibility);
   if (artifact.correctness.summary.empty()) {
@@ -634,19 +677,35 @@ std::string to_json(const Artifact &artifact) {
         &artifact.counters.collective_logical_payload_bytes,
         &artifact.counters.matvec,
         &artifact.counters.preconditioner_applications,
-        &artifact.counters.logical_io_bytes}) {
+        &artifact.counters.logical_io_bytes,
+        &artifact.counters.algorithmic_work}) {
     validate_counter_map(*counters);
   }
 
   const CompatibilityMetadata &metadata = artifact.metadata.compatibility;
   std::string output;
   output.reserve(2048U + artifact.aggregation.raw_samples.size() * 96U);
-  output += "{\"schema_version\":1,\"commit\":";
+  output += "{\"schema_version\":" +
+            std::to_string(artifact.schema_version) + ",\"commit\":";
   append_json_string(output, artifact.metadata.commit);
   output += ",\"working_tree\":{\"clean\":";
   output += artifact.metadata.clean ? "true" : "false";
   output += ",\"dirty_summary\":";
   append_json_string(output, artifact.metadata.dirty_summary);
+  if (artifact.schema_version == 2) {
+    output += "},\"stage3_identity\":{\"tree_fingerprint\":";
+    append_json_string(output, artifact.metadata.tree_fingerprint);
+    output += ",\"binary_fingerprint\":";
+    append_json_string(output, artifact.metadata.binary_fingerprint);
+    output += ",\"profile\":";
+    append_json_string(output, artifact.metadata.profile);
+    output += ",\"geometry_fingerprint\":";
+    append_json_string(output, artifact.metadata.geometry_fingerprint);
+    output += ",\"cpuset\":";
+    append_json_string(output, artifact.metadata.cpuset);
+    output += ",\"thread_budget\":" +
+              std::to_string(artifact.metadata.thread_budget);
+  }
   output += "},\"case_fingerprint\":";
   append_json_string(output, metadata.problem_fingerprint);
   output += ",\"compiler\":{\"identity\":";
@@ -751,6 +810,10 @@ std::string to_json(const Artifact &artifact) {
   append_counter_map(output, artifact.counters.preconditioner_applications);
   output += ",\"logical_io_bytes\":";
   append_counter_map(output, artifact.counters.logical_io_bytes);
+  if (artifact.schema_version == 2) {
+    output += ",\"algorithmic_work\":";
+    append_counter_map(output, artifact.counters.algorithmic_work);
+  }
   output += "}}";
   return output;
 }

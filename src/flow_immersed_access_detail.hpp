@@ -60,6 +60,8 @@ struct ImmersedFlowOutletPredictorValue final {
 struct ImmersedFlowWallPredictorValue final {
   std::uint64_t link{};
   double predictor_mass_flux_kg_per_s{};
+  double wall_density_kg_per_m3{};
+  double wall_density_normal_derivative_kg_per_m4{};
 };
 
 struct ImmersedFlowFinalPressureResidualData final {
@@ -195,6 +197,13 @@ struct ImmersedFlowAccess final {
   pressure_apply_schedule(const FixedStepImmersedFlow &) noexcept;
   static std::uint32_t
   last_corrector_count(const FixedStepImmersedFlow &) noexcept;
+  static std::uint64_t
+  wale_evaluation_count(const FixedStepImmersedFlow &) noexcept;
+  static les::WaleCoefficientIdentity
+  wale_coefficient_identity(const FixedStepImmersedFlow &) noexcept;
+  static std::uint64_t
+  wall_effective_viscosity_fingerprint(
+      const FixedStepImmersedFlow &) noexcept;
   static double last_wall_pressure_gradient_application_norm(
       const FixedStepImmersedFlow &) noexcept;
   static std::vector<ImmersedFlowWallMeasure>

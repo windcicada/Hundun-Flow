@@ -18,6 +18,11 @@
 #include <optional>
 #include <vector>
 
+namespace hundun::les {
+class WaleModel;
+struct WaleSummary;
+}
+
 namespace hundun::flow {
 
 namespace detail {
@@ -203,10 +208,20 @@ public:
                             const MomentumTimeStencil &stencil,
                             const linear::SolveControl &momentum_control,
                             const linear::SolveControl &pressure_control) const;
+  StepAttemptReport attempt_with_wale(
+      FlowState &state, double rho_ref, double molecular_mu,
+      const MomentumTimeStencil &stencil,
+      const linear::SolveControl &momentum_control,
+      const linear::SolveControl &pressure_control,
+      const les::WaleModel &, les::WaleSummary &) const;
   [[nodiscard]] runtime::HaloPerformanceCounters
   pressure_halo_performance_counters() const;
 
 private:
+  StepAttemptReport attempt_impl(
+      FlowState &, double, double, const MomentumTimeStencil &,
+      const linear::SolveControl &, const linear::SolveControl &,
+      const les::WaleModel *, les::WaleSummary *) const;
   struct Impl;
   explicit FixedStepConstantDensityFlow(std::unique_ptr<Impl>) noexcept;
   std::unique_ptr<Impl> impl_;

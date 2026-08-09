@@ -1439,6 +1439,19 @@ runtime::checkpoint_v2::CompletedMarker decode_authenticated_completed_marker(
 
 } // namespace
 
+std::vector<std::uint8_t>
+detail::encode_checkpoint_flow_state_rank_payload(
+    const FlowState &state, std::uint64_t &logical_bytes) {
+  return encode_rank_payload(state, logical_bytes);
+}
+
+std::pair<FlowLayerValues, FlowLayerValues>
+detail::decode_checkpoint_flow_state_rank_payload(
+    const std::vector<std::uint8_t> &bytes, const FlowState &state,
+    std::uint64_t &logical_bytes) {
+  return decode_rank_payload(bytes, state, logical_bytes);
+}
+
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 namespace detail {
 void checkpoint_v2_set_preparation_fault_raw(

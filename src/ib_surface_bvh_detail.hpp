@@ -6,6 +6,7 @@
 #include "ib_stl_reader_detail.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,6 +34,8 @@ struct SurfaceQueryStorage final {
   std::vector<TriangleId> triangle_order;
   std::vector<BvhNode> nodes;
   std::uint64_t fingerprint{};
+  mutable std::atomic<std::uint64_t> closest_calls{};
+  mutable std::atomic<std::uint64_t> segment_calls{};
 };
 
 std::shared_ptr<const SurfaceQueryStorage>

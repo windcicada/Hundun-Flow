@@ -2273,7 +2273,7 @@ diagnostics::ArtifactMetadata performance_metadata(
         std::string(detail::performance_source_commit),
         detail::performance_source_clean,
         std::string(detail::performance_source_dirty_summary),
-        std::move(compatibility)};
+        std::move(compatibility), {}, {}, {}, {}, {}, 0};
   });
   return std::move(*result);
 }

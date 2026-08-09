@@ -2,7 +2,10 @@
 
 #include "hundun/flow_material_density_piso.hpp"
 
+#include "hundun/les_wale.hpp"
+
 #include "flow_adaptive_time_control_detail.hpp"
+#include "flow_body_fitted_wale_detail.hpp"
 #include "flow_density_closure_detail.hpp"
 #include "flow_fixed_step_detail.hpp"
 #include "hundun/fvm_cell_centered.hpp"
@@ -322,6 +325,8 @@ runtime::FieldDescriptor scratch_face(std::string name,
 class MaterialScratch final {
 public:
   explicit MaterialScratch(runtime::FieldLayoutSet layout) {
+    lagged_velocity = registry.declare_field(
+        scratch_cell("material_lagged_velocity", 3U, 2));
     velocity_gradient = registry.declare_field(
         scratch_cell("material_velocity_gradient", 9U, 2));
     pressure_gradient = registry.declare_field(
@@ -332,6 +337,12 @@ public:
         scratch_cell("material_momentum_residual", 3U, 0));
     actual_diagonal = registry.declare_field(
         scratch_cell("material_actual_diagonal", 3U, 2));
+    sgs_dynamic_viscosity_cell = registry.declare_field(
+        scratch_cell("material_sgs_dynamic_viscosity_cell", 1U, 2));
+    sgs_dynamic_viscosity = registry.declare_field(
+        scratch_face("material_sgs_dynamic_viscosity", 1U));
+    effective_dynamic_viscosity = registry.declare_field(
+        scratch_face("material_effective_dynamic_viscosity", 1U));
     face_density_n =
         registry.declare_field(scratch_face("material_face_density_n", 1U));
     face_density_nm1 = registry.declare_field(
@@ -353,11 +364,15 @@ public:
   runtime::FieldRegistry registry;
   std::unique_ptr<runtime::FieldAccessPlan> access;
   std::unique_ptr<runtime::FieldStorage> storage;
+  runtime::FieldId lagged_velocity{};
   runtime::FieldId velocity_gradient{};
   runtime::FieldId pressure_gradient{};
   runtime::FieldId momentum_face{};
   runtime::FieldId momentum_residual{};
   runtime::FieldId actual_diagonal{};
+  runtime::FieldId sgs_dynamic_viscosity_cell{};
+  runtime::FieldId sgs_dynamic_viscosity{};
+  runtime::FieldId effective_dynamic_viscosity{};
   runtime::FieldId face_density_n{};
   runtime::FieldId face_density_nm1{};
   runtime::FieldId face_density_trial{};
@@ -766,6 +781,7 @@ struct FixedStepMaterialDensityFlow::Impl final {
       pressure_boundary;
   std::uint64_t material_field_count{};
   std::uint64_t attempt_identity{};
+  std::uint64_t last_wale_evaluation_count{};
   std::uint64_t source_generation{1U};
   const FlowState *last_state{};
   std::uint64_t last_report_seal{};
@@ -815,7 +831,10 @@ template <class Implementation, class FluxBinder>
 void assemble_spatial(Implementation &impl,
                       const runtime::FieldAccessPlan &access,
                       runtime::FieldStorage &storage, const FlowFieldIds &fields,
-                      double mu, MomentumResidual &output,
+                      double mu,
+                      const runtime::FaceFieldView<const double>
+                          *dynamic_viscosity_by_face,
+                      MomentumResidual &output,
                       FluxBinder &&bind_flux) {
   synchronized_local_phase(*impl.mpi, StepFailureReason::invalid_input, false,
                            [&] {
@@ -865,8 +884,14 @@ void assemble_spatial(Implementation &impl,
             residual(index.i, index.j, index.k, direction);
     }
     zero(residual);
-    impl.fvm.accumulate_viscous_residual(*impl.boundaries, velocity,
-                                         gradient_read, mu, residual);
+    if (dynamic_viscosity_by_face == nullptr) {
+      impl.fvm.accumulate_viscous_residual(*impl.boundaries, velocity,
+                                           gradient_read, mu, residual);
+    } else {
+      impl.fvm.accumulate_viscous_residual(
+          *impl.boundaries, velocity, gradient_read,
+          *dynamic_viscosity_by_face, residual);
+    }
     for (mesh::LocalCellId cell = 0; cell < impl.topology->owned_cell_count();
          ++cell) {
       const auto index = map_cell(impl.topology->global_cell(cell), owned,
@@ -876,9 +901,15 @@ void assemble_spatial(Implementation &impl,
                          static_cast<std::size_t>(direction)] =
             residual(index.i, index.j, index.k, direction);
     }
-    impl.fvm.physical_boundary_momentum_contributions(
-        *impl.boundaries, flux, face_read, velocity, gradient_read, mu,
-        output.boundary);
+    if (dynamic_viscosity_by_face == nullptr) {
+      impl.fvm.physical_boundary_momentum_contributions(
+          *impl.boundaries, flux, face_read, velocity, gradient_read, mu,
+          output.boundary);
+    } else {
+      impl.fvm.physical_boundary_momentum_contributions(
+          *impl.boundaries, flux, face_read, velocity, gradient_read,
+          *dynamic_viscosity_by_face, output.boundary);
+    }
   });
 }
 
@@ -1719,7 +1750,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt(
     const linear::SolveControl &momentum_control,
     const linear::SolveControl &pressure_control) const {
   return attempt_common(state, mu, stencil, momentum_control,
-                        pressure_control, nullptr);
+                        pressure_control, nullptr, nullptr, nullptr);
 }
 
 MaterialDensityStepAttemptReport
@@ -1729,20 +1760,43 @@ detail::DensityClosureBridge::attempt(
     const linear::SolveControl &momentum_control,
     const linear::SolveControl &pressure_control,
     const DensityClosureHooks &hooks) {
-  return flow.attempt_common(state, mu, stencil, momentum_control,
-                             pressure_control, &hooks);
+  return attempt_with_optional_wale(
+      flow, state, mu, stencil, momentum_control, pressure_control, &hooks,
+      nullptr, nullptr);
+}
+
+MaterialDensityStepAttemptReport
+detail::DensityClosureBridge::attempt_with_optional_wale(
+    const FixedStepMaterialDensityFlow &flow, FlowState &state,
+    double molecular_mu, const MomentumTimeStencil &stencil,
+    const linear::SolveControl &momentum_control,
+    const linear::SolveControl &pressure_control,
+    const DensityClosureHooks *hooks, const les::WaleModel *wale_model,
+    les::WaleSummary *wale_summary) {
+  return flow.attempt_common(state, molecular_mu, stencil, momentum_control,
+                             pressure_control, hooks, wale_model,
+                             wale_summary);
+}
+
+std::uint64_t detail::DensityClosureBridge::wale_evaluation_count(
+    const FixedStepMaterialDensityFlow &flow) noexcept {
+  return flow.impl_ ? flow.impl_->last_wale_evaluation_count : 0U;
 }
 
 MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     FlowState &state, double mu, const MomentumTimeStencil &stencil,
     const linear::SolveControl &momentum_control,
     const linear::SolveControl &pressure_control,
-    const detail::DensityClosureHooks *closure) const {
+    const detail::DensityClosureHooks *closure,
+    const les::WaleModel *wale_model, les::WaleSummary *wale_summary) const {
   if (!impl_)
     throw runtime::Error("material flow object has been moved from");
   impl_->last_state = nullptr;
   impl_->last_report_seal = 0U;
   impl_->last_state_identity = 0U;
+  impl_->last_wale_evaluation_count = 0U;
+  if (wale_summary != nullptr)
+    *wale_summary = {};
   if (impl_->attempt_identity == std::numeric_limits<std::uint64_t>::max())
     throw runtime::Error("material flow attempt identity would wrap");
   ++impl_->attempt_identity;
@@ -1835,6 +1889,7 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       const auto metadata = state.metadata();
       const auto layout = state.layer(FlowLayer::committed).layout_set();
       valid = mu >= 0.0 && std::isfinite(mu) && !state.attempt_active() &&
+              ((wale_model == nullptr) == (wale_summary == nullptr)) &&
               &detail::FlowStateSolverAccess::registry(state) ==
                   impl_->registry &&
               state.fields().density == impl_->fields.density &&
@@ -1888,6 +1943,8 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     auto &trial = detail::FlowStateSolverAccess::layer(state, FlowLayer::trial);
     const auto &access = detail::FlowStateSolverAccess::access(state);
     const auto &fields = state.fields();
+    std::optional<detail::BodyFittedWaleAttemptData> wale_data;
+    std::uint64_t wale_evaluation_count{};
     const auto bind_face_flux = [&](const runtime::FieldStorage &storage) {
       return finite_volume::FaceMassFlux::bind_prepared(
           *impl_->prepared_face_flux, *impl_->registry, storage, access,
@@ -1969,10 +2026,27 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       impl_->halo->exchange(trial, fields.density);
     }
 
-    assemble_spatial(*impl_, access, committed, fields, mu, impl_->momentum_n,
-                     bind_face_flux);
+    synchronized_local_phase(*impl_->mpi, StepFailureReason::non_finite_trial,
+                             true, [&] {
+      if (wale_model != nullptr) {
+        const auto rho_attempt = trial.acquire_read<double>(
+            access, kStatePhase, kStateActor, fields.density);
+        wale_data.emplace(detail::prepare_body_fitted_wale_attempt(
+            *impl_, state, *wale_model, mu, stencil, rho_attempt,
+            wale_evaluation_count, kStatePhase, kStateActor, kScratchPhase,
+            kScratchActor));
+      }
+    });
+    const runtime::FaceFieldView<const double> *effective_viscosity =
+        wale_data.has_value()
+            ? &*wale_data->effective_dynamic_viscosity_by_face
+            : nullptr;
+
+    assemble_spatial(*impl_, access, committed, fields, mu,
+                     effective_viscosity, impl_->momentum_n, bind_face_flux);
     if (stencil.order == MomentumTimeOrder::bdf2)
-      assemble_spatial(*impl_, access, history, fields, mu, impl_->momentum_nm1,
+      assemble_spatial(*impl_, access, history, fields, mu,
+                       effective_viscosity, impl_->momentum_nm1,
                        bind_face_flux);
 
     const auto rho_trial = trial.acquire_read<double>(
@@ -2736,6 +2810,16 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
       return fail(StepFailureReason::final_conservation_defect,
                   conservation_status.failing_rank, true);
 
+    const bool wale_evaluation_valid =
+        (wale_model == nullptr && wale_evaluation_count == 0U) ||
+        (wale_model != nullptr && wale_evaluation_count == 1U);
+    const auto wale_evaluation_status = runtime::collective_status(
+        *impl_->mpi, wale_evaluation_valid,
+        "material WALE evaluation count is invalid");
+    if (!wale_evaluation_status.ok)
+      return fail(StepFailureReason::invalid_input,
+                  wale_evaluation_status.failing_rank, false);
+
     const auto old = state.metadata();
     const AcceptedStepMetadata accepted{old.step + 1U,
                                         old.time_s + stencil.dt_s,
@@ -2757,6 +2841,9 @@ MaterialDensityStepAttemptReport FixedStepMaterialDensityFlow::attempt_common(
     state.publish_commit_attempt();
     if (closure != nullptr)
       closure->publish(closure->object);
+    if (wale_summary != nullptr)
+      *wale_summary = wale_data->summary;
+    impl_->last_wale_evaluation_count = wale_evaluation_count;
     active = false;
     result.flow_.disposition = StepAttemptDisposition::committed;
     result.flow_.reason = StepFailureReason::none;
@@ -2799,6 +2886,160 @@ std::uint64_t detail::DensityClosureBridge::report_seal(
 
 MaterialDensityStepAttemptReport detail::DensityClosureBridge::make_report() {
   return MaterialDensityStepAttemptReport{};
+}
+
+MaterialDensityStepAttemptReport
+detail::DensityClosureBridge::make_material_report(
+    StepAttemptReport flow,
+    std::optional<MaterialDensityTransportReport> material,
+    MaterialTransportFailureReason failure,
+    std::uint64_t material_field_count,
+    runtime::FieldId shared_face_mass_flux_field,
+    std::uint64_t attempt_identity) {
+  return make_material_report_impl(
+      std::move(flow), std::move(material), std::nullopt, failure,
+      material_field_count, shared_face_mass_flux_field, attempt_identity,
+      false);
+}
+
+MaterialDensityStepAttemptReport
+detail::DensityClosureBridge::make_material_closure_report(
+    StepAttemptReport flow,
+    std::optional<MaterialDensityTransportReport> pre_closure,
+    std::optional<MaterialDensityTransportReport> post_closure,
+    MaterialTransportFailureReason failure,
+    std::uint64_t material_field_count,
+    runtime::FieldId shared_face_mass_flux_field,
+    std::uint64_t attempt_identity) {
+  return make_material_report_impl(
+      std::move(flow), std::move(pre_closure), std::move(post_closure),
+      failure, material_field_count, shared_face_mass_flux_field,
+      attempt_identity, true);
+}
+
+MaterialDensityStepAttemptReport
+detail::DensityClosureBridge::make_material_report_impl(
+    StepAttemptReport flow,
+    std::optional<MaterialDensityTransportReport> material,
+    std::optional<MaterialDensityTransportReport> post_closure,
+    MaterialTransportFailureReason failure,
+    std::uint64_t material_field_count,
+    runtime::FieldId shared_face_mass_flux_field,
+    std::uint64_t attempt_identity, bool closure_origin) {
+  if (material_field_count == 0U || attempt_identity == 0U)
+    throw runtime::Error("material report bridge identity is invalid");
+  MaterialDensityStepAttemptReport result;
+  result.flow_ = std::move(flow);
+  result.material_failure_reason_ = failure;
+  result.material_field_count_ = material_field_count;
+  result.shared_face_mass_flux_field_ = shared_face_mass_flux_field;
+  result.attempt_identity_ = attempt_identity;
+  result.closure_origin_ = closure_origin;
+  const auto fields = static_cast<std::size_t>(material_field_count);
+  if (result.flow_.final_transport_normalized_l2.size() != fields)
+    result.flow_.final_transport_normalized_l2.assign(fields, 0.0);
+  if (result.flow_.final_transport_relative_conservation_defect.size() !=
+      fields)
+    result.flow_.final_transport_relative_conservation_defect.assign(fields,
+                                                                      0.0);
+  if (material.has_value()) {
+    if (!material->authenticated() ||
+        material->attempt_identity() != attempt_identity ||
+        material->shared_face_mass_flux_field() !=
+            shared_face_mass_flux_field ||
+        material->transport_residual_availability().size() != fields ||
+        material->transport_normalized_l2().size() != fields ||
+        material->transport_conservation_availability().size() != fields ||
+        material->transport_relative_conservation_defect().size() != fields ||
+        material->reason() != failure)
+      throw runtime::Error("material report bridge authority is invalid");
+    result.material_attempt_identity_ = material->attempt_identity();
+    result.material_finalization_identity_ =
+        material->finalization_identity();
+    result.flux_provenance_ = material->flux_provenance();
+    result.flow_.final_transport_normalized_l2 =
+        material->transport_normalized_l2();
+    result.flow_.final_transport_relative_conservation_defect =
+        material->transport_relative_conservation_defect();
+    result.flow_.final_mass_relative_conservation_defect =
+        material->mass_relative_conservation_defect();
+    result.mass_conservation_available_ =
+        material->mass_conservation_available();
+    result.material_report_ = std::move(material);
+  }
+  const bool committed =
+      result.flow_.disposition == StepAttemptDisposition::committed;
+  if (!committed) {
+    const bool non_retryable =
+        result.flow_.reason == StepFailureReason::invalid_input ||
+        result.flow_.reason == StepFailureReason::collective_operation;
+    result.flow_.suggested_dt_s =
+        non_retryable ? result.flow_.attempted_dt_s
+                      : 0.5 * result.flow_.attempted_dt_s;
+  }
+  if (!result.material_report_.has_value()) {
+    result.flow_.final_continuity_normalized_l2 = 0.0;
+    result.flow_.final_pressure_residual_l2 = 0.0;
+    result.flow_.final_momentum_normalized_l2.fill(0.0);
+    result.flow_.final_mass_relative_conservation_defect = 0.0;
+    result.flow_.final_momentum_relative_conservation_defect.fill(0.0);
+    result.flow_.final_transport_normalized_l2.assign(fields, 0.0);
+    result.flow_.final_transport_relative_conservation_defect.assign(fields,
+                                                                      0.0);
+  }
+  const bool final_pressure_assessed =
+      committed || result.flow_.reason == StepFailureReason::boundary_backflow ||
+      result.flow_.reason == StepFailureReason::final_conservation_defect;
+  result.final_continuity_residual_available_ = final_pressure_assessed;
+  result.final_pressure_residual_available_ = final_pressure_assessed;
+  result.final_pressure_normalized_residual_ =
+      final_pressure_assessed ? result.flow_.final_pressure_residual_l2 : 0.0;
+  const bool post_closure_transport_complete =
+      closure_origin && post_closure &&
+      post_closure->disposition() ==
+          MaterialTransportDisposition::finalized &&
+      post_closure->reason() == MaterialTransportFailureReason::none;
+  result.final_momentum_residual_available_.fill(
+      committed || post_closure_transport_complete ? 1U : 0U);
+  result.momentum_conservation_available_.fill(
+      committed || post_closure_transport_complete ? 1U : 0U);
+  if (closure_origin && result.material_report_) {
+    result.pre_closure_authority_ = *result.material_report_;
+    result.pre_closure_report_seal_authority_ =
+        result.material_report_->compute_seal();
+  }
+  if (closure_origin && post_closure) {
+    if (!post_closure->authenticated() || !result.material_report_ ||
+        post_closure->attempt_identity() != result.attempt_identity_ ||
+        post_closure->shared_face_mass_flux_field() !=
+            result.shared_face_mass_flux_field_ ||
+        post_closure->flux_provenance() !=
+            MaterialFluxProvenance::final_corrected ||
+        post_closure->finalization_identity() <=
+            result.material_finalization_identity_)
+      throw runtime::Error(
+          "material post-closure report authority is invalid");
+    result.post_closure_evidence_available_ = true;
+    result.post_closure_report_ = std::move(post_closure);
+    result.post_closure_authority_ = *result.post_closure_report_;
+    result.post_closure_report_seal_authority_ =
+        result.post_closure_report_->compute_seal();
+    result.flow_.final_transport_normalized_l2 =
+        result.post_closure_report_->transport_normalized_l2();
+    result.flow_.final_transport_relative_conservation_defect =
+        result.post_closure_report_->transport_relative_conservation_defect();
+    result.flow_.final_mass_relative_conservation_defect =
+        result.post_closure_report_->mass_relative_conservation_defect();
+    result.mass_conservation_available_ =
+        result.post_closure_report_->mass_conservation_available();
+    if (result.post_closure_report_->reason() !=
+        MaterialTransportFailureReason::none)
+      result.material_failure_reason_ = result.post_closure_report_->reason();
+  }
+  result.seal();
+  if (!result.authenticated())
+    throw runtime::Error("material report bridge could not authenticate");
+  return result;
 }
 
 bool detail::DensityClosureBridge::post_eos_evidence_authenticated(

@@ -1,6 +1,8 @@
 # HUNDUN-FLOW
 
-HUNDUN-FLOW 是一个使用 C++17 和 MPI 实现的低马赫数有限体积求解程序。目前 `hundun` 命令行程序可运行结构化网格上的常密度与变密度流动，支持固定或自适应时间推进、同分区 Restart 和结构化诊断输出。源码还提供已验收的静止 STL 浸入边界数值核心；0.1.0 尚未把它接入可运行、可 Restart 的 schema 3 命令行流程。
+HUNDUN-FLOW 是一个使用 C++17 和 MPI 实现的低马赫数有限体积求解程序。`hundun` 可运行结构化网格上的三种密度闭合，并组合静止 STL 浸入边界和 WALE LES；时间推进、Checkpoint 和诊断使用同一条产品路径。
+
+当前源码是 `0.2.0 candidate`。九个 Stage 3 profiles 已完成实现和小规模验收，但 0.2.0 只有在冻结 HEAD 的 S3-V1 24/48-cubed formal matrix 返回 ACCEPT 后才可发布。当前 `VERSION` 在 product projection 前仍保持 0.1.0。
 
 本仓库是可发布的产品源码。设计记录、测试程序和原始验收日志不随产品分发；公开文档只陈述已经具备且有证据支持的能力。
 
@@ -33,6 +35,7 @@ mpiexec -n 1 build/release/src/hundun examples/minimal/case.json
 - [配置格式](docs/api/configuration-schema.md)
 - [数值方法](docs/numerics/discretization.md)
 - [当前能力与验证边界](docs/verification/accepted-capabilities.md)
+- [Stage 3 capability ledger](docs/numerics/stage3-capability-ledger.md)
 - [面向外部自动化工具的操作说明](docs/ai-skill/index.md)
 - [源码目录与命名规范](docs/development/naming-and-style.md)
 

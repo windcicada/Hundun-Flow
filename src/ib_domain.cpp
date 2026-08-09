@@ -48,12 +48,15 @@ struct ImmersedDomainStorage final {
                         ActiveCellLayout active_cells_value,
                         ActiveBoundaryLayout active_boundaries_value,
                         std::uint64_t classification_fingerprint_value,
-                        std::uint64_t surface_coverage_fingerprint_value)
+                        std::uint64_t surface_coverage_fingerprint_value,
+                        std::uint64_t classified_cells_value)
       : regions(std::move(regions_value)), links(std::move(links_value)),
         active_cells(std::move(active_cells_value)),
         active_boundaries(std::move(active_boundaries_value)),
         classification_fingerprint(classification_fingerprint_value),
-        surface_coverage_fingerprint(surface_coverage_fingerprint_value) {}
+        surface_coverage_fingerprint(surface_coverage_fingerprint_value) {
+    performance.init_classification_cells = classified_cells_value;
+  }
 
   std::vector<CellRegion> regions;
   std::vector<ImmersedLink> links;
@@ -61,6 +64,7 @@ struct ImmersedDomainStorage final {
   ActiveBoundaryLayout active_boundaries;
   std::uint64_t classification_fingerprint{};
   std::uint64_t surface_coverage_fingerprint{};
+  diagnostics::Stage3PerformanceCounters performance;
 };
 
 } // namespace hundun::immersed::detail
@@ -1129,7 +1133,8 @@ ImmersedDomain ImmersedDomain::create(
   try {
     storage = std::make_shared<detail::ImmersedDomainStorage>(
         std::move(regions), std::move(local_links), active_cells,
-        active_boundaries, classification, coverage);
+        active_boundaries, classification, coverage,
+        static_cast<std::uint64_t>(topology.local_cell_count()));
   } catch (...) {
     publication_ok = false;
   }
@@ -1222,6 +1227,11 @@ std::uint64_t ImmersedDomain::classification_fingerprint() const noexcept {
 
 std::uint64_t ImmersedDomain::surface_coverage_fingerprint() const noexcept {
   return storage_->surface_coverage_fingerprint;
+}
+
+diagnostics::Stage3PerformanceCounters
+ImmersedDomain::performance_counters() const noexcept {
+  return storage_->performance;
 }
 
 } // namespace hundun::immersed

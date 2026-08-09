@@ -82,10 +82,10 @@ void require_id(std::string_view value, const char *kind,
 }
 
 bool valid_unit(std::string_view unit) noexcept {
-  constexpr std::array<std::string_view, 19> units{
+  constexpr std::array<std::string_view, 22> units{
       "1",    "s",     "m",      "m2",     "m3",   "m/s", "m2/s",
-      "kg",   "kg/m3", "kg/s",   "kg*m/s", "Pa",   "J",   "J/m3",
-      "J/kg", "K",     "degree", "byte",   "count"};
+      "kg",   "kg/m3", "kg/s",   "kg*m/s", "N",    "Pa",  "J",   "J/m3",
+      "J/kg", "K",     "degree", "byte",   "count", "cell", "N*m"};
   return std::find(units.begin(), units.end(), unit) != units.end();
 }
 
@@ -177,6 +177,16 @@ std::string_view module_kind_name(DiagnosticModuleKind value) {
     return "flow_driver";
   case DiagnosticModuleKind::performance:
     return "performance";
+  case DiagnosticModuleKind::immersed_surface:
+    return "immersed_surface";
+  case DiagnosticModuleKind::ghost_stencil:
+    return "ghost_stencil";
+  case DiagnosticModuleKind::local_flow_pattern:
+    return "local_flow_pattern";
+  case DiagnosticModuleKind::wall_force:
+    return "wall_force";
+  case DiagnosticModuleKind::les:
+    return "les";
   }
   fail(DiagnosticFailureClass::invalid_input, "diagnostics.enum.module-kind",
        "invalid module kind");

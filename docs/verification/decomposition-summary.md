@@ -4,6 +4,8 @@
 
 这项证据覆盖 1/2/4 rank 的基础一致性和共享浸入边界行的全局 donor 语义。它不等同于强扩展测试，也不说明更大 rank 数下的性能。
 
+Stage 3 fast matrix 还覆盖九个 profiles、Checkpoint v3 continuation 和 diagnostics 的 1/2 rank，并选取 4 rank decomposition rows。正式 24-cubed 1/2/4 rank 是 S3-V1 gate，不是这里的小规模证据。
+
 对应日志摘要 SHA-256：
 
 ```text

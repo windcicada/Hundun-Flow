@@ -25,6 +25,8 @@ endif()
 
 add_library(hundun_diagnostics STATIC
   diag_performance_artifact.cpp
+  diag_stage3_evidence_manifest.cpp
+  diag_stage3_performance.cpp
   diag_performance_correctness.cpp)
 target_include_directories(hundun_diagnostics
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
@@ -212,6 +214,7 @@ endif()
 
 add_library(hundun_flow STATIC
   flow_checkpoint_v2.cpp
+  flow_checkpoint_v3.cpp
   flow_adaptive_time_control.cpp
   flow_constant_density_piso.cpp
   flow_state.cpp
@@ -239,6 +242,20 @@ if(HUNDUN_BUILD_TESTS)
     HUNDUN_FLOW_ENABLE_TEST_ACCESS=1)
 endif()
 
+add_library(hundun_les STATIC
+  les_wale.cpp)
+target_include_directories(hundun_les
+  PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+  PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(hundun_les
+  PRIVATE hundun_warnings
+  PUBLIC hundun_execution hundun_mesh hundun_runtime hundun_options)
+if(HUNDUN_BUILD_TESTS)
+  target_compile_definitions(hundun_les PRIVATE
+    HUNDUN_LES_ENABLE_TEST_ACCESS=1)
+endif()
+target_link_libraries(hundun_flow PUBLIC hundun_les)
+
 add_library(hundun_material_diagnostics STATIC
   diag_ideal_gas_closure.cpp
   diag_material_density_piso.cpp
@@ -261,7 +278,8 @@ if(HUNDUN_BUILD_TESTS)
 endif()
 
 add_library(hundun_checkpoint_diagnostics STATIC
-  diag_checkpoint_v2.cpp)
+  diag_checkpoint_v2.cpp
+  diag_checkpoint_v3.cpp)
 target_include_directories(hundun_checkpoint_diagnostics
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
   PRIVATE "${PROJECT_SOURCE_DIR}/src")
@@ -281,7 +299,10 @@ endif()
 add_library(hundun_session_diagnostics STATIC
   diag_session.cpp
   diag_mesh_v2.cpp
-  diag_module.cpp)
+  diag_module.cpp
+  diag_immersed_module.cpp
+  diag_immersed_static.cpp
+  diag_les_wale.cpp)
 target_include_directories(hundun_session_diagnostics
   PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
   PRIVATE "${PROJECT_SOURCE_DIR}/src")
@@ -292,6 +313,7 @@ target_link_libraries(hundun_session_diagnostics
     hundun_boundary
     hundun_fvm
     hundun_flow
+    hundun_checkpoint_diagnostics
     hundun_linear
     hundun_mesh
     hundun_runtime
@@ -391,7 +413,8 @@ configure_file(
 add_executable(hundun
   app_main.cpp
   app_passive_scalar_driver.cpp
-  app_flow_driver.cpp)
+  app_flow_driver.cpp
+  app_immersed_flow_driver.cpp)
 target_include_directories(hundun PRIVATE
   "${PROJECT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -436,6 +459,7 @@ set(HUNDUN_PRODUCT_STATIC_LIBRARIES
   hundun_linear
   hundun_fvm
   hundun_flow
+  hundun_les
   hundun_material_diagnostics
   hundun_checkpoint_diagnostics
   hundun_session_diagnostics

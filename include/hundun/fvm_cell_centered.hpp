@@ -172,6 +172,10 @@ public:
       const runtime::FieldView<const double> &velocity,
       const runtime::FaceFieldView<double> &face_velocity) const;
 
+  void interpolate_cell_scalar_to_faces(
+      const runtime::FieldView<const double> &cell_values,
+      const runtime::FaceFieldView<double> &face_values) const;
+
   void assemble_provisional_mass_flux(
       const boundary::BoundaryRegistry &boundaries,
       const runtime::FieldView<const double> &density,
@@ -204,6 +208,13 @@ public:
       double dynamic_viscosity_pa_s,
       const runtime::FieldView<double> &raw_momentum_residual) const;
 
+  void accumulate_viscous_residual(
+      const boundary::BoundaryRegistry &boundaries,
+      const runtime::FieldView<const double> &velocity,
+      const runtime::FieldView<const double> &velocity_gradients,
+      const runtime::FaceFieldView<const double> &dynamic_viscosity_by_face,
+      const runtime::FieldView<double> &raw_momentum_residual) const;
+
   // `output` is cleared and refilled; callers may retain its capacity for
   // repeated, non-overlapping calls on this non-concurrent operator object.
   void physical_boundary_momentum_contributions(
@@ -213,6 +224,15 @@ public:
       const runtime::FieldView<const double> &velocity,
       const runtime::FieldView<const double> &velocity_gradients,
       double dynamic_viscosity_pa_s,
+      std::vector<PhysicalBoundaryMomentumContribution> &output) const;
+
+  void physical_boundary_momentum_contributions(
+      const boundary::BoundaryRegistry &boundaries,
+      const FaceMassFlux &mass_flux,
+      const runtime::FaceFieldView<const double> &face_velocity,
+      const runtime::FieldView<const double> &velocity,
+      const runtime::FieldView<const double> &velocity_gradients,
+      const runtime::FaceFieldView<const double> &dynamic_viscosity_by_face,
       std::vector<PhysicalBoundaryMomentumContribution> &output) const;
 
   void physical_boundary_pressure_contributions(
@@ -231,6 +251,19 @@ public:
       std::vector<PhysicalBoundaryTransportContribution> &output) const;
 
 private:
+  void accumulate_viscous_residual_impl(
+      const boundary::BoundaryRegistry &,
+      const runtime::FieldView<const double> &,
+      const runtime::FieldView<const double> &,
+      const runtime::FaceFieldView<const double> *, double,
+      const runtime::FieldView<double> &) const;
+  void physical_boundary_momentum_contributions_impl(
+      const boundary::BoundaryRegistry &, const FaceMassFlux &,
+      const runtime::FaceFieldView<const double> &,
+      const runtime::FieldView<const double> &,
+      const runtime::FieldView<const double> &,
+      const runtime::FaceFieldView<const double> *, double,
+      std::vector<PhysicalBoundaryMomentumContribution> &) const;
   struct Impl;
   explicit CellCenteredFvmOperators(std::unique_ptr<Impl>) noexcept;
   Impl &require_impl() const;

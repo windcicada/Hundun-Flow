@@ -2,9 +2,14 @@
 
 #include "hundun/flow_immersed.hpp"
 
+#include "hundun/diag_immersed_module.hpp"
+
 #include "flow_fixed_step_detail.hpp"
+#include "flow_checkpoint_v3_detail.hpp"
+#include "flow_immersed_density_detail.hpp"
 #include "rt_mpi_error_detail.hpp"
 #include "flow_immersed_piso_detail.hpp"
+#include "flow_immersed_wale_detail.hpp"
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
 #include "flow_immersed_access_detail.hpp"
 #endif
@@ -65,6 +70,154 @@ std::uint64_t hash_u64(std::uint64_t hash, std::uint64_t value) noexcept {
     hash *= kFnvPrime;
   }
   return hash;
+}
+
+std::uint64_t fp64_bits(double value) noexcept;
+
+std::uint64_t diagnostic_report_seal(
+    const ImmersedFlowStepAttemptReport &attempt) noexcept {
+  std::uint64_t hash = kFnvOffset;
+  if (const auto *ideal =
+          std::get_if<IdealGasStepAttemptReport>(&attempt.base)) {
+    if (!detail::DensityClosureAdapter::report_authenticated(*ideal))
+      return 0U;
+    hash = hash_u64(hash, 0x494445414c474153ULL);
+    hash = hash_u64(hash,
+                    detail::DensityClosureAdapter::report_seal(*ideal));
+  } else if (const auto *material =
+          std::get_if<MaterialDensityStepAttemptReport>(&attempt.base)) {
+    if (!detail::DensityClosureBridge::report_authenticated(*material))
+      return 0U;
+    hash = hash_u64(hash, 0x4d4154455249414cULL);
+    hash = hash_u64(hash,
+                    detail::DensityClosureBridge::report_seal(*material));
+  } else {
+    if (!std::holds_alternative<StepAttemptReport>(attempt.base))
+      return 0U;
+    const auto &report = std::get<StepAttemptReport>(attempt.base);
+    hash = hash_u64(hash, static_cast<std::uint64_t>(report.disposition));
+    hash = hash_u64(hash, static_cast<std::uint64_t>(report.reason));
+    hash = hash_u64(
+        hash, static_cast<std::uint64_t>(report.lowest_failing_rank + 1));
+    hash = hash_u64(hash, report.pressure_corrector_count);
+    hash = hash_u64(hash, fp64_bits(report.attempted_dt_s));
+    hash = hash_u64(hash, fp64_bits(report.suggested_dt_s));
+    const auto add_solve = [&](const linear::SolveReport &solve) {
+      hash = hash_u64(hash, static_cast<std::uint64_t>(solve.reason));
+      hash = hash_u64(hash, solve.iterations);
+      hash = hash_u64(hash, fp64_bits(solve.initial_residual));
+      hash = hash_u64(hash, fp64_bits(solve.recursive_residual));
+      hash = hash_u64(hash, fp64_bits(solve.final_residual));
+      hash = hash_u64(hash, solve.matvec_count);
+      hash = hash_u64(hash, solve.preconditioner_apply_count);
+      hash = hash_u64(hash, solve.global_reduction_count);
+      hash = hash_u64(
+          hash, static_cast<std::uint64_t>(solve.lowest_failing_rank + 1));
+    };
+    for (const auto &solve : report.momentum.components)
+      add_solve(solve);
+    for (const auto &solve : report.pressure)
+      add_solve(solve);
+    hash = hash_u64(hash, fp64_bits(report.final_continuity_normalized_l2));
+    hash = hash_u64(hash, fp64_bits(report.final_pressure_residual_l2));
+    for (const auto value : report.final_momentum_normalized_l2)
+      hash = hash_u64(hash, fp64_bits(value));
+    hash = hash_u64(hash, report.final_transport_normalized_l2.size());
+    for (const auto value : report.final_transport_normalized_l2)
+      hash = hash_u64(hash, fp64_bits(value));
+    hash = hash_u64(
+        hash, fp64_bits(report.final_mass_relative_conservation_defect));
+    for (const auto value : report.final_momentum_relative_conservation_defect)
+      hash = hash_u64(hash, fp64_bits(value));
+    hash = hash_u64(
+        hash, report.final_transport_relative_conservation_defect.size());
+    for (const auto value : report.final_transport_relative_conservation_defect)
+      hash = hash_u64(hash, fp64_bits(value));
+    hash =
+        hash_u64(hash, report.final_backflow_evidence.has_value() ? 1U : 0U);
+    if (report.final_backflow_evidence.has_value()) {
+      const auto &evidence = *report.final_backflow_evidence;
+      hash = hash_u64(hash, evidence.patch_id);
+      hash = hash_u64(hash, evidence.step);
+      hash = hash_u64(hash, fp64_bits(evidence.time_s));
+      hash = hash_u64(
+          hash, fp64_bits(evidence.minimum_outward_mass_flux_kg_per_s));
+      hash = hash_u64(hash, evidence.global_face_id);
+      hash = hash_u64(
+          hash, static_cast<std::uint64_t>(evidence.lowest_failing_rank + 1));
+    }
+  }
+  hash = hash_u64(hash, attempt.force.has_value() ? 1U : 0U);
+  if (attempt.force.has_value()) {
+    const auto add = [&](const immersed::ForceComponents &force) {
+      for (const auto value : {force.pressure_N, force.total_N,
+                               force.viscous_N}) {
+        hash = hash_u64(hash, fp64_bits(value.x));
+        hash = hash_u64(hash, fp64_bits(value.y));
+        hash = hash_u64(hash, fp64_bits(value.z));
+      }
+    };
+    add(attempt.force->operator_force);
+    add(attempt.force->budget_reaction);
+    add(attempt.force->surface_traction);
+    add(attempt.force->consistency);
+  }
+  hash = hash_u64(hash, attempt.wale.has_value() ? 1U : 0U);
+  if (attempt.wale.has_value()) {
+    hash = hash_u64(hash, attempt.wale->identity.value);
+    hash = hash_u64(hash,
+                    fp64_bits(attempt.wale->minimum_nu_t_m2_per_s));
+    hash = hash_u64(hash,
+                    fp64_bits(attempt.wale->maximum_nu_t_m2_per_s));
+    hash = hash_u64(hash, fp64_bits(attempt.wale->l2_nu_t_m2_per_s));
+    hash = hash_u64(hash, attempt.wale->exact_zero_count);
+    hash = hash_u64(hash, attempt.wale->owned_active_count);
+  }
+  return hash == 0U ? 1U : hash;
+}
+
+std::uint64_t diagnostic_snapshot_seal(
+    const ImmersedFlowStepAttemptReport &attempt,
+    config::DensityModel density_model,
+    const std::optional<immersed::WallForceSample> &wall_force,
+    const std::optional<finite_volume::ImmersedOperatorReport>
+        &local_flow_pattern) noexcept {
+  std::uint64_t hash = diagnostic_report_seal(attempt);
+  if (hash == 0U)
+    return 0U;
+  hash = hash_u64(hash, static_cast<std::uint64_t>(density_model));
+  hash = hash_u64(hash, wall_force.has_value() ? 1U : 0U);
+  if (wall_force.has_value()) {
+    const auto add_real3 = [&](runtime::Real3 value) {
+      hash = hash_u64(hash, fp64_bits(value.x));
+      hash = hash_u64(hash, fp64_bits(value.y));
+      hash = hash_u64(hash, fp64_bits(value.z));
+    };
+    for (const auto value : {
+             wall_force->surface_traction.pressure_N,
+             wall_force->surface_traction.total_N,
+             wall_force->surface_traction.viscous_N,
+             wall_force->moment_about_global_origin.pressure_N_m,
+             wall_force->moment_about_global_origin.total_N_m,
+             wall_force->moment_about_global_origin.viscous_N_m,
+             wall_force->area_vector_closure_m2,
+         })
+      add_real3(value);
+    hash = hash_u64(hash, wall_force->quadrature_point_count);
+    hash = hash_u64(
+        hash, static_cast<std::uint64_t>(wall_force->lowest_failing_rank + 1));
+  }
+  hash = hash_u64(hash, local_flow_pattern.has_value() ? 1U : 0U);
+  if (local_flow_pattern.has_value()) {
+    hash = hash_u64(hash, local_flow_pattern->row_fingerprint);
+    hash = hash_u64(hash, local_flow_pattern->replacement_group_count);
+    hash = hash_u64(hash,
+                    local_flow_pattern->algebraic_occurrence_count);
+    hash = hash_u64(
+        hash, fp64_bits(local_flow_pattern->replacement_coefficient_l2));
+    hash = hash_u64(hash, local_flow_pattern->limiting_case_status);
+  }
+  return hash == 0U ? 1U : hash;
 }
 
 bool finite(runtime::Real3 value) noexcept {
@@ -177,6 +330,9 @@ struct ExactPredictorResponse final {
   std::vector<double> face_mass_flux_increment;
   std::vector<double> face_velocity_increment;
 };
+static_assert(
+    std::is_nothrow_copy_assignable_v<ExactPredictorResponse::Work>);
+static_assert(std::is_nothrow_copy_assignable_v<les::WaleSummary>);
 
 std::uint64_t checked_exact_predictor_work_sum(std::uint64_t left,
                                                std::uint64_t right) {
@@ -307,18 +463,37 @@ public:
   void prepare_face_coefficients(
       double rho_ref,
       const std::array<std::vector<double>, 3> &momentum_diagonal) {
-    const bool local_layout_ok =
-        momentum_diagonal[0].size() == owned_ids_.size() &&
-        momentum_diagonal[1].size() == owned_ids_.size() &&
-        momentum_diagonal[2].size() == owned_ids_.size();
-    const auto layout_status = runtime::collective_status(
-        *mpi_, local_layout_ok,
-        "immersed-flow pressure mobility diagonal layout is invalid");
-    if (!layout_status.ok || !(rho_ref > 0.0) || !std::isfinite(rho_ref))
+    if (!(rho_ref > 0.0) || !std::isfinite(rho_ref))
       throw runtime::Error("immersed-flow pressure mobility input is invalid");
+    prepare_face_coefficients_impl(nullptr, rho_ref, momentum_diagonal);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     test_density_ = rho_ref;
 #endif
+  }
+
+  void prepare_face_coefficients(
+      const std::vector<double> &face_density,
+      const std::array<std::vector<double>, 3> &momentum_diagonal) {
+    prepare_face_coefficients_impl(&face_density, 0.0, momentum_diagonal);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+    test_density_ = 0.0;
+#endif
+  }
+
+  void prepare_face_coefficients_impl(
+      const std::vector<double> *face_density, double rho_ref,
+      const std::array<std::vector<double>, 3> &momentum_diagonal) {
+    const bool local_layout_ok =
+        momentum_diagonal[0].size() == owned_ids_.size() &&
+        momentum_diagonal[1].size() == owned_ids_.size() &&
+        momentum_diagonal[2].size() == owned_ids_.size() &&
+        (face_density == nullptr ||
+         face_density->size() == topology_->local_face_count());
+    const auto layout_status = runtime::collective_status(
+        *mpi_, local_layout_ok,
+        "immersed-flow pressure mobility diagonal layout is invalid");
+    if (!layout_status.ok)
+      throw runtime::Error("immersed-flow pressure mobility input is invalid");
     const int local_count = static_cast<int>(owned_ids_.size());
     for (std::size_t component_index = 0U; component_index < 3U;
          ++component_index) {
@@ -400,7 +575,9 @@ public:
         const double normal_component = component(unit_normal, component_index);
         normal_mobility += normal_component * normal_component * mobility;
       }
-      const double coefficient = rho_ref * normal_mobility;
+      const double rho_face =
+          face_density == nullptr ? rho_ref : (*face_density)[face];
+      const double coefficient = rho_face * normal_mobility;
       if (!(coefficient > 0.0) || !std::isfinite(coefficient))
         throw runtime::Error("immersed-flow pressure face coefficient is invalid");
       face_mass_flux_coefficient_[face] = coefficient;
@@ -1163,13 +1340,20 @@ detail::ImmersedFlowPressureFluxIdentityData make_pressure_flux_identity_report(
 struct ActiveViscousConnection final {
   std::size_t row{};
   mesh::GlobalCellId neighbour{};
+  mesh::LocalFaceId face{};
   double coefficient_per_viscosity{};
+  double effective_dynamic_viscosity_pa_s{};
   bool local_neighbour{};
   std::size_t value_offset{std::numeric_limits<std::size_t>::max()};
 };
 
 struct ActiveWallViscousCoefficient final {
   mesh::GlobalCellId cell{};
+  double coefficient_per_viscosity{};
+};
+
+struct ActiveWallViscousContribution final {
+  std::size_t row{};
   double coefficient_per_viscosity{};
 };
 
@@ -1182,9 +1366,14 @@ public:
       const runtime::MpiContext &mpi, execution::ExecutionContext &context)
       : mpi_(&mpi), context_(&context),
         layout_(active.owned_active_count(), active.ordered_global_ids()),
+        active_count_(active.ordered_global_ids().size()),
+        face_count_(topology.local_face_count()),
         time_diagonal_(active.owned_active_count(), 1.0),
-        spatial_diagonal_per_viscosity_(active.owned_active_count(), 0.0),
+        spatial_diagonal_(active.owned_active_count(), 0.0),
+        candidate_spatial_diagonal_(active.owned_active_count(), 0.0),
         diagonal_(active.owned_active_count(), 1.0),
+        uniform_active_viscosity_(active.ordered_global_ids().size(), 0.0),
+        uniform_face_viscosity_(topology.local_face_count(), 0.0),
         owned_ids_(
             active.ordered_global_ids().begin(),
             active.ordered_global_ids().begin() +
@@ -1197,55 +1386,36 @@ public:
       const auto found = owned_index_.find(wall.cell);
       if (found == owned_index_.end() ||
           !(wall.coefficient_per_viscosity > 0.0) ||
-          !std::isfinite(wall.coefficient_per_viscosity) ||
-          !std::isfinite(spatial_diagonal_per_viscosity_[found->second] +
-                         wall.coefficient_per_viscosity))
+          !std::isfinite(wall.coefficient_per_viscosity))
         throw runtime::Error(
             "immersed-flow wall viscous reference coefficient is invalid");
-      spatial_diagonal_per_viscosity_[found->second] +=
-          wall.coefficient_per_viscosity;
+      wall_coefficients_.push_back(
+          {found->second, wall.coefficient_per_viscosity});
     }
-    for (const auto &connection : connections_)
-      spatial_diagonal_per_viscosity_[connection.row] +=
-          connection.coefficient_per_viscosity;
-    if (std::any_of(spatial_diagonal_per_viscosity_.begin(),
-                    spatial_diagonal_per_viscosity_.end(), [](double value) {
-                      return !(value >= 0.0) || !std::isfinite(value);
-                    }))
-      throw runtime::Error("immersed-flow viscous reference diagonal is invalid");
+    candidate_connection_viscosity_.resize(connections_.size(), 0.0);
     gather_layout();
     bind_connections();
   }
 
   void replace(const std::vector<double> &time_diagonal,
                double dynamic_viscosity_pa_s) {
-    if (time_diagonal.size() != diagonal_.size() ||
-        !(dynamic_viscosity_pa_s >= 0.0) ||
-        !std::isfinite(dynamic_viscosity_pa_s) ||
-        std::any_of(time_diagonal.begin(), time_diagonal.end(),
-                    [](double value) {
-                      return !(value > 0.0) || !std::isfinite(value);
-                    }))
+    if (!(dynamic_viscosity_pa_s >= 0.0) ||
+        !std::isfinite(dynamic_viscosity_pa_s))
       throw runtime::Error("immersed-flow momentum diagonal is invalid");
-    if (revision_ == std::numeric_limits<std::uint64_t>::max())
-      throw runtime::Error("immersed-flow momentum revision would wrap");
-    // Validate the complete replacement before changing the active operator.
-    for (std::size_t row = 0U; row < diagonal_.size(); ++row) {
-      const double viscous_diagonal =
-          dynamic_viscosity_pa_s * spatial_diagonal_per_viscosity_[row];
-      const double assembled = time_diagonal[row] + viscous_diagonal;
-      if (!(viscous_diagonal >= 0.0) || !std::isfinite(viscous_diagonal) ||
-          !(assembled > 0.0) || !std::isfinite(assembled))
-        throw runtime::Error("immersed-flow momentum diagonal is invalid");
-    }
-    time_diagonal_ = time_diagonal;
-    dynamic_viscosity_pa_s_ = dynamic_viscosity_pa_s;
-    for (std::size_t row = 0U; row < diagonal_.size(); ++row) {
-      diagonal_[row] =
-          time_diagonal_[row] +
-          dynamic_viscosity_pa_s_ * spatial_diagonal_per_viscosity_[row];
-    }
-    ++revision_;
+    std::fill(uniform_active_viscosity_.begin(),
+              uniform_active_viscosity_.end(), dynamic_viscosity_pa_s);
+    std::fill(uniform_face_viscosity_.begin(), uniform_face_viscosity_.end(),
+              dynamic_viscosity_pa_s);
+    replace_impl(time_diagonal, uniform_active_viscosity_,
+                 uniform_face_viscosity_, dynamic_viscosity_pa_s > 0.0);
+  }
+
+  void replace(
+      const std::vector<double> &time_diagonal,
+      const std::vector<double> &effective_dynamic_viscosity_by_active_cell,
+      const std::vector<double> &effective_dynamic_viscosity_by_face) {
+    replace_impl(time_diagonal, effective_dynamic_viscosity_by_active_cell,
+                 effective_dynamic_viscosity_by_face, true);
   }
 
   linear::VectorLayout domain_layout() const override { return layout_; }
@@ -1282,6 +1452,75 @@ public:
   }
 
 private:
+  void replace_impl(
+      const std::vector<double> &time_diagonal,
+      const std::vector<double> &effective_dynamic_viscosity_by_active_cell,
+      const std::vector<double> &effective_dynamic_viscosity_by_face,
+      bool viscous_exchange_required) {
+    if (time_diagonal.size() != diagonal_.size() ||
+        effective_dynamic_viscosity_by_active_cell.size() != active_count_ ||
+        effective_dynamic_viscosity_by_face.size() != face_count_ ||
+        std::any_of(time_diagonal.begin(), time_diagonal.end(),
+                    [](double value) {
+                      return !(value > 0.0) || !std::isfinite(value);
+                    }) ||
+        std::any_of(effective_dynamic_viscosity_by_active_cell.begin(),
+                    effective_dynamic_viscosity_by_active_cell.end(),
+                    [](double value) {
+                      return !(value >= 0.0) || !std::isfinite(value);
+                    }) ||
+        std::any_of(effective_dynamic_viscosity_by_face.begin(),
+                    effective_dynamic_viscosity_by_face.end(),
+                    [](double value) {
+                      return !(value >= 0.0) || !std::isfinite(value);
+                    }))
+      throw runtime::Error("immersed-flow momentum diagonal is invalid");
+    if (revision_ == std::numeric_limits<std::uint64_t>::max())
+      throw runtime::Error("immersed-flow momentum revision would wrap");
+
+    std::fill(candidate_spatial_diagonal_.begin(),
+              candidate_spatial_diagonal_.end(), 0.0);
+    for (std::size_t index = 0U; index < connections_.size(); ++index) {
+      const auto &connection = connections_[index];
+      const double viscosity =
+          effective_dynamic_viscosity_by_face[connection.face];
+      const double contribution =
+          viscosity * connection.coefficient_per_viscosity;
+      if (!(viscosity >= 0.0) || !std::isfinite(viscosity) ||
+          !(contribution >= 0.0) || !std::isfinite(contribution) ||
+          !std::isfinite(candidate_spatial_diagonal_[connection.row] +
+                         contribution))
+        throw runtime::Error("immersed-flow momentum diagonal is invalid");
+      candidate_connection_viscosity_[index] = viscosity;
+      candidate_spatial_diagonal_[connection.row] += contribution;
+    }
+    for (const auto &wall : wall_coefficients_) {
+      const double contribution =
+          effective_dynamic_viscosity_by_active_cell[wall.row] *
+          wall.coefficient_per_viscosity;
+      if (!(contribution >= 0.0) || !std::isfinite(contribution) ||
+          !std::isfinite(candidate_spatial_diagonal_[wall.row] +
+                         contribution))
+        throw runtime::Error("immersed-flow momentum diagonal is invalid");
+      candidate_spatial_diagonal_[wall.row] += contribution;
+    }
+    for (std::size_t row = 0U; row < diagonal_.size(); ++row) {
+      const double assembled =
+          time_diagonal[row] + candidate_spatial_diagonal_[row];
+      if (!(assembled > 0.0) || !std::isfinite(assembled))
+        throw runtime::Error("immersed-flow momentum diagonal is invalid");
+    }
+
+    time_diagonal_ = time_diagonal;
+    spatial_diagonal_.swap(candidate_spatial_diagonal_);
+    for (std::size_t index = 0U; index < connections_.size(); ++index)
+      connections_[index].effective_dynamic_viscosity_pa_s =
+          candidate_connection_viscosity_[index];
+    for (std::size_t row = 0U; row < diagonal_.size(); ++row)
+      diagonal_[row] = time_diagonal_[row] + spatial_diagonal_[row];
+    viscous_exchange_required_ = viscous_exchange_required;
+    ++revision_;
+  }
   execution::ExecutionEvent apply_impl(execution::VectorView<const double> x,
                                        execution::VectorView<double> y,
                                        bool spatial_only) const {
@@ -1294,12 +1533,11 @@ private:
       bool *active_;
     } guard(active_);
     for (std::size_t row = 0U; row < diagonal_.size(); ++row) {
-      const double coefficient =
-          dynamic_viscosity_pa_s_ * spatial_diagonal_per_viscosity_[row] +
-          (spatial_only ? 0.0 : time_diagonal_[row]);
+      const double coefficient = spatial_diagonal_[row] +
+                                 (spatial_only ? 0.0 : time_diagonal_[row]);
       y[row] = coefficient * x[row];
     }
-    if (dynamic_viscosity_pa_s_ == 0.0)
+    if (!viscous_exchange_required_)
       return execution::ExecutionEvent::completed();
     MPI_Request request = MPI_REQUEST_NULL;
     const int local_count = static_cast<int>(x.size());
@@ -1311,8 +1549,8 @@ private:
         "MPI_Iallgatherv(immersed-flow momentum reference exchange)");
     const auto subtract_neighbour = [&](const ActiveViscousConnection &item,
                                         double value) {
-      y[item.row] -=
-          dynamic_viscosity_pa_s_ * item.coefficient_per_viscosity * value;
+      y[item.row] -= item.effective_dynamic_viscosity_pa_s *
+                     item.coefficient_per_viscosity * value;
     };
     for (const auto &connection : connections_)
       if (connection.local_neighbour)
@@ -1366,8 +1604,9 @@ private:
           !std::isfinite(coefficient))
         throw runtime::Error(
             "immersed-flow viscous reference face metric is invalid");
-      connections.push_back({*row, topology.global_cell_id(other), coefficient,
-                             false, kMissingGlobalOffset});
+      connections.push_back({*row, topology.global_cell_id(other), face,
+                             coefficient, 0.0, false,
+                             kMissingGlobalOffset});
     };
     for (mesh::LocalFaceId face = 0U; face < topology.local_face_count();
          ++face) {
@@ -1380,9 +1619,9 @@ private:
     }
     std::sort(connections.begin(), connections.end(),
               [](const auto &left, const auto &right) {
-                return std::tuple{left.row, left.neighbour,
+                return std::tuple{left.row, left.neighbour, left.face,
                                   left.coefficient_per_viscosity} <
-                       std::tuple{right.row, right.neighbour,
+                       std::tuple{right.row, right.neighbour, right.face,
                                   right.coefficient_per_viscosity};
               });
     return connections;
@@ -1448,10 +1687,17 @@ private:
   const runtime::MpiContext *mpi_;
   execution::ExecutionContext *context_;
   linear::VectorLayout layout_;
+  std::size_t active_count_{};
+  std::size_t face_count_{};
   std::vector<ActiveViscousConnection> connections_;
+  std::vector<ActiveWallViscousContribution> wall_coefficients_;
   std::vector<double> time_diagonal_;
-  std::vector<double> spatial_diagonal_per_viscosity_;
+  std::vector<double> spatial_diagonal_;
+  std::vector<double> candidate_spatial_diagonal_;
+  std::vector<double> candidate_connection_viscosity_;
   std::vector<double> diagonal_;
+  std::vector<double> uniform_active_viscosity_;
+  std::vector<double> uniform_face_viscosity_;
   std::vector<mesh::GlobalCellId> owned_ids_;
   std::unordered_map<mesh::GlobalCellId, std::size_t> owned_index_;
   std::vector<int> counts_;
@@ -1459,7 +1705,7 @@ private:
   std::vector<mesh::GlobalCellId> global_ids_;
   mutable std::vector<double> global_values_buffer_;
   std::unordered_map<mesh::GlobalCellId, std::size_t> global_offsets_;
-  double dynamic_viscosity_pa_s_{};
+  bool viscous_exchange_required_{};
   mutable bool active_{};
   std::uint64_t revision_{1U};
 };
@@ -1520,6 +1766,8 @@ runtime::FieldDescriptor scratch_face(std::string name,
 class ImmersedFlowScratch final {
 public:
   ImmersedFlowScratch(runtime::FieldLayoutSet layout, int ghost_width) {
+    lagged_velocity = registry.declare_field(
+        scratch_cell("stage3_lagged_velocity", 3U, ghost_width));
     velocity_gradient = registry.declare_field(
         scratch_cell("stage3_velocity_gradient", 9U, ghost_width));
     pressure_gradient = registry.declare_field(
@@ -1546,6 +1794,7 @@ public:
   runtime::FieldRegistry registry;
   std::unique_ptr<runtime::FieldAccessPlan> access;
   std::unique_ptr<runtime::FieldStorage> storage;
+  runtime::FieldId lagged_velocity{};
   runtime::FieldId velocity_gradient{};
   runtime::FieldId pressure_gradient{};
   runtime::FieldId momentum_face{};
@@ -1650,7 +1899,8 @@ struct FixedStepImmersedFlow::Impl final {
        const immersed::GhostStencilPlan *ghost_plan,
        const immersed::WallQuadraturePlan *wall_quadrature,
        const immersed::LocalFlowPatternTransform *transform,
-       const les::WaleModel *wale, const runtime::MpiContext &mpi,
+       const les::WaleModel *wale, ImmersedFlowDensitySetup density_setup,
+       const runtime::MpiContext &mpi,
        execution::ExecutionContext &execution_context,
        runtime::HaloExchange &halo, const linear::LinearSolver &momentum_solver,
        std::array<linear::Preconditioner *, 3> momentum_preconditioners,
@@ -1658,12 +1908,45 @@ struct FixedStepImmersedFlow::Impl final {
        linear::Preconditioner &pressure_preconditioner)
       : mpi(&mpi), domain(domain), ghost_plan(ghost_plan),
         wall_quadrature(wall_quadrature), transform(transform), wale(wale),
+        density_setup(std::move(density_setup)),
         topology(&topology), geometry(&geometry), boundaries(&boundaries),
         halo(&halo), execution(&execution_context),
         momentum_solver(&momentum_solver), pressure_solver(&pressure_solver),
         momentum_preconditioners(momentum_preconditioners),
         pressure_preconditioner(&pressure_preconditioner),
         geometry_fingerprint(geometry_identity(topology, geometry)) {
+    const FlowFieldIds canonical_fields{};
+    const bool canonical_field_identity =
+        this->density_setup.fields.density == canonical_fields.density &&
+        this->density_setup.fields.velocity == canonical_fields.velocity &&
+        this->density_setup.fields.mechanical_pressure ==
+            canonical_fields.mechanical_pressure &&
+        this->density_setup.fields.face_velocity ==
+            canonical_fields.face_velocity &&
+        this->density_setup.fields.face_mass_flux ==
+            canonical_fields.face_mass_flux &&
+        this->density_setup.fields.transported_cell_fields.empty();
+    const bool density_setup_valid =
+        (this->density_setup.model == config::DensityModel::constant &&
+         this->density_setup.registry == nullptr && canonical_field_identity &&
+         !this->density_setup.material_transport.has_value() &&
+         this->density_setup.ideal_gas_closure == nullptr) ||
+        (this->density_setup.model == config::DensityModel::material &&
+         this->density_setup.registry != nullptr &&
+         this->density_setup.material_transport.has_value() &&
+         this->density_setup.ideal_gas_closure == nullptr) ||
+        (this->density_setup.model == config::DensityModel::ideal_gas &&
+         this->density_setup.registry != nullptr &&
+         this->density_setup.material_transport.has_value() &&
+         this->density_setup.ideal_gas_closure != nullptr);
+    const auto density_setup_status = runtime::collective_status(
+        mpi, density_setup_valid,
+        "immersed-flow density setup is invalid");
+    if (!density_setup_status.ok)
+      throw runtime::Error(density_setup_status.message +
+                           " (lowest failing rank " +
+                           std::to_string(density_setup_status.failing_rank) +
+                           ")");
     const bool any_immersed = domain != nullptr || ghost_plan != nullptr ||
                               wall_quadrature != nullptr ||
                               transform != nullptr;
@@ -1701,15 +1984,64 @@ struct FixedStepImmersedFlow::Impl final {
       initialize_wall_links();
       initialize_pressure_authority_storage();
       initialize_active_algebra();
+      if (this->density_setup.model == config::DensityModel::material) {
+        density_adapter.emplace<detail::ImmersedMaterialDensityAdapter>(
+            detail::ImmersedMaterialDensityAdapter::create(
+                *this->density_setup.registry, decomposition, topology,
+                geometry, boundaries, *domain, mpi, halo,
+                this->density_setup.fields,
+                *this->density_setup.material_transport));
+      } else if (this->density_setup.model ==
+                 config::DensityModel::ideal_gas) {
+        density_adapter.emplace<detail::ImmersedIdealGasDensityAdapter>(
+            detail::ImmersedIdealGasDensityAdapter::create(
+                *this->density_setup.registry, decomposition, topology,
+                geometry, boundaries, *domain, mpi, halo,
+                this->density_setup.fields,
+                *this->density_setup.material_transport,
+                *this->density_setup.ideal_gas_closure));
+      }
       if (wall_quadrature != nullptr) {
         wall_force_integrator.emplace(
             immersed::WallForceIntegrator::create(*wall_quadrature, mpi));
       }
     } else {
-      body_fitted.emplace(FixedStepConstantDensityFlow::create(
-          decomposition, topology, geometry, boundaries, mpi, execution_context,
-          halo, momentum_solver, momentum_preconditioners, pressure_solver,
-          pressure_preconditioner));
+      if (this->density_setup.model != config::DensityModel::constant) {
+        if (this->density_setup.model == config::DensityModel::ideal_gas) {
+          const bool closure_matches =
+              detail::DensityClosureAdapter::matches_body_fitted(
+                  *this->density_setup.ideal_gas_closure, topology, geometry,
+                  boundaries, mpi, *this->density_setup.registry,
+                  this->density_setup.fields);
+          const auto closure_status = runtime::collective_status(
+              mpi, closure_matches,
+              "body-fitted ideal-gas closure collaborator does not match");
+          if (!closure_status.ok)
+            throw runtime::Error(
+                closure_status.message + " (lowest failing rank " +
+                std::to_string(closure_status.failing_rank) + ")");
+        }
+        body_fitted_material.emplace(FixedStepMaterialDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi,
+            execution_context, halo, momentum_solver,
+            momentum_preconditioners, pressure_solver,
+            pressure_preconditioner, *this->density_setup.registry,
+            this->density_setup.fields,
+            *this->density_setup.material_transport));
+        if (this->density_setup.model == config::DensityModel::ideal_gas) {
+          body_fitted_closure_hooks.emplace(
+              detail::DensityClosureAdapter::bind(
+                  *this->density_setup.ideal_gas_closure,
+                  this->density_setup.material_transport->enthalpy_density,
+                  0.0));
+        }
+      } else {
+        body_fitted.emplace(FixedStepConstantDensityFlow::create(
+            decomposition, topology, geometry, boundaries, mpi,
+            execution_context, halo, momentum_solver,
+            momentum_preconditioners, pressure_solver,
+            pressure_preconditioner));
+      }
     }
   }
 
@@ -1983,9 +2315,378 @@ struct FixedStepImmersedFlow::Impl final {
             axis(global.z, box.begin.z, box.end.z, extent.z, local.z)};
   }
 
+  template <class Function>
+  detail::MaterialDensityStageResult
+  prepare_density_authority_collectively(Function &&function) const {
+    MaterialTransportFailureReason local_failure{
+        MaterialTransportFailureReason::none};
+    try {
+      function();
+    } catch (const runtime::detail::MpiOperationError &) {
+      throw;
+    } catch (const detail::ImmersedDensityAuthorityFailure &failure) {
+      local_failure = failure.reason;
+    } catch (...) {
+      local_failure = MaterialTransportFailureReason::invalid_input;
+    }
+    const auto status = runtime::collective_status(
+        *mpi, local_failure == MaterialTransportFailureReason::none,
+        "immersed material density authority is invalid");
+    if (status.ok)
+      return {};
+    int payload{};
+    if (mpi->rank() == status.failing_rank)
+      payload = static_cast<int>(local_failure);
+    runtime::detail::check_mpi(
+        MPI_Bcast(&payload, 1, MPI_INT, status.failing_rank, mpi->comm()),
+        "MPI_Bcast(immersed material density failure)");
+    if (payload < static_cast<int>(MaterialTransportFailureReason::none) ||
+        payload > static_cast<int>(
+                      MaterialTransportFailureReason::collective_operation))
+      throw runtime::Error(
+          "immersed material density failure reason is invalid");
+    const auto selected =
+        static_cast<MaterialTransportFailureReason>(payload);
+    if (selected == MaterialTransportFailureReason::invalid_input)
+      throw runtime::Error(
+          "immersed material density authority construction failed");
+    if (selected != MaterialTransportFailureReason::non_finite_state &&
+        selected != MaterialTransportFailureReason::non_positive_density)
+      throw runtime::Error(
+          "immersed material density failure is not recoverable");
+    return {selected, status.failing_rank};
+  }
+
+  detail::ImmersedDensityAttemptAuthority density_authority(
+      FlowState &state, runtime::FieldStorage &layer) const {
+    if (domain == nullptr || ghost_plan == nullptr)
+      throw runtime::Error("immersed density authority is unavailable");
+    const auto density = layer.acquire_read<double>(
+        state.solver_access_plan(), kStatePhase, kStateActor,
+        state.fields().density);
+    detail::ImmersedDensityAttemptAuthority result;
+    const auto &active = domain->active_cells();
+    result.owned_active_density.resize(active.owned_active_count());
+    result.face_density.assign(topology->local_face_count(), 0.0);
+    result.wall_density.reserve(wall_links.size());
+    result.fingerprint = kFnvOffset;
+    for (std::size_t row = 0U; row < active.owned_active_count(); ++row) {
+      const auto local =
+          topology->find_local_cell(active.ordered_global_ids()[row]);
+      if (!local.has_value())
+        throw runtime::Error("immersed active density cell is unavailable");
+      const auto index = field_index(*local);
+      const double value = density(index.i, index.j, index.k, 0);
+      if (!std::isfinite(value))
+        throw detail::ImmersedDensityAuthorityFailure{
+            MaterialTransportFailureReason::non_finite_state};
+      if (!(value > 0.0))
+        throw detail::ImmersedDensityAuthorityFailure{
+            MaterialTransportFailureReason::non_positive_density};
+      result.owned_active_density[row] = value;
+      result.fingerprint = hash_u64(result.fingerprint, fp64_bits(value));
+    }
+    for (const auto &wall : wall_links) {
+      auto value = detail::reconstruct_immersed_wall_density(
+          wall.link, ghost_plan->reconstruction(wall.link.id), density);
+#ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
+      if (mpi->rank() ==
+          injected_wall_failure_rank.load(std::memory_order_relaxed)) {
+        const auto failure =
+            injected_wall_failure.load(std::memory_order_relaxed);
+        if (failure == WallInputFault::non_positive_density)
+          value.rho_wall_kg_per_m3 = 0.0;
+        else if (failure == WallInputFault::non_finite_density)
+          value.rho_wall_kg_per_m3 =
+              std::numeric_limits<double>::quiet_NaN();
+      }
+#endif
+      result.wall_density.push_back(value);
+      result.fingerprint =
+          hash_u64(result.fingerprint, fp64_bits(value.rho_wall_kg_per_m3));
+      result.fingerprint = hash_u64(
+          result.fingerprint,
+          fp64_bits(value.normal_derivative_kg_per_m4));
+    }
+    for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
+         ++face) {
+      const auto owner = topology->owner(face);
+      const auto neighbour = topology->neighbour(face);
+      const bool owner_active =
+          domain->region(owner) == immersed::CellRegion::fluid;
+      const bool neighbour_active =
+          neighbour.has_value() &&
+          domain->region(*neighbour) == immersed::CellRegion::fluid;
+      double value = 0.0;
+      if (owner_active && neighbour_active) {
+        const auto owner_index = field_index(owner);
+        const auto neighbour_index = field_index(*neighbour);
+        const auto owner_to_face = subtract(geometry->face_center_m(face),
+                                            geometry->cell_center_m(owner));
+        const auto face_to_neighbour =
+            subtract(geometry->face_displacement_m(face), owner_to_face);
+        const double owner_distance = std::sqrt(norm_squared(owner_to_face));
+        const double neighbour_distance =
+            std::sqrt(norm_squared(face_to_neighbour));
+        const double total_distance = owner_distance + neighbour_distance;
+        if (!(total_distance > 0.0) || !std::isfinite(total_distance))
+          throw runtime::Error("immersed face density metric is invalid");
+        value = (neighbour_distance *
+                     density(owner_index.i, owner_index.j, owner_index.k, 0) +
+                 owner_distance * density(neighbour_index.i,
+                                          neighbour_index.j,
+                                          neighbour_index.k, 0)) /
+                total_distance;
+      } else if (!neighbour.has_value() && owner_active) {
+        const auto owner_index = field_index(owner);
+        value = density(owner_index.i, owner_index.j, owner_index.k, 0);
+      } else if (owner_active != neighbour_active) {
+        const auto wall = std::find_if(
+            wall_links.begin(), wall_links.end(),
+            [face](const WallRuntime &candidate) {
+              return candidate.face == face;
+            });
+        if (wall == wall_links.end())
+          throw runtime::Error(
+              "immersed interface face has no density authority row");
+        const auto offset =
+            static_cast<std::size_t>(std::distance(wall_links.begin(), wall));
+        value = result.wall_density[offset].rho_wall_kg_per_m3;
+      }
+      if ((owner_active || neighbour_active) && !std::isfinite(value))
+        throw detail::ImmersedDensityAuthorityFailure{
+            MaterialTransportFailureReason::non_finite_state};
+      if ((owner_active || neighbour_active) && !(value > 0.0))
+        throw detail::ImmersedDensityAuthorityFailure{
+            MaterialTransportFailureReason::non_positive_density};
+      result.face_density[face] = value;
+      result.fingerprint = hash_u64(result.fingerprint, fp64_bits(value));
+    }
+    if (result.fingerprint == 0U)
+      result.fingerprint = 1U;
+    return result;
+  }
+
+  detail::ImmersedWaleAttemptAuthority prepare_wale_authority(
+      FlowState &state, double molecular_dynamic_viscosity_pa_s,
+      const MomentumTimeStencil &stencil,
+      runtime::FieldView<const double> rho_attempt) {
+    if (wale == nullptr || domain == nullptr || reconstruction == std::nullopt ||
+        physical_boundary_fvm == std::nullopt || scratch == nullptr)
+      throw runtime::Error("immersed-flow WALE authority is unavailable");
+    if (pending_wale_evaluation_count != 0U)
+      throw runtime::Error(
+          "immersed-flow WALE was evaluated more than once in one attempt");
+    ++pending_wale_evaluation_count;
+    const auto &active = domain->active_cells();
+    const auto &access = state.solver_access_plan();
+    const auto fields = state.fields();
+    auto &committed = state.solver_layer(FlowLayer::committed);
+    auto &history = state.solver_layer(FlowLayer::history);
+    const auto velocity_n = committed.acquire_read<double>(
+        access, kStatePhase, kStateActor, fields.velocity);
+    const auto velocity_nm1 = history.acquire_read<double>(
+        access, kStatePhase, kStateActor, fields.velocity);
+
+    auto lagged = scratch->storage->acquire_write<double>(
+        *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
+        scratch->lagged_velocity);
+    const auto extent = lagged.interior_extent();
+    const int ghost = lagged.ghost_width();
+    for (int k = -ghost; k < extent.z + ghost; ++k)
+      for (int j = -ghost; j < extent.y + ghost; ++j)
+        for (int i = -ghost; i < extent.x + ghost; ++i)
+          for (int component = 0; component < 3; ++component)
+            lagged(i, j, k, component) =
+                std::numeric_limits<double>::quiet_NaN();
+    const double ratio = stencil.order == MomentumTimeOrder::bdf2
+                             ? stencil.dt_s / stencil.previous_dt_s
+                             : 0.0;
+    for (const auto global_cell : active.ordered_global_ids()) {
+      const auto local = topology->find_local_cell(global_cell);
+      if (!local.has_value() ||
+          domain->region(*local) != immersed::CellRegion::fluid)
+        throw runtime::Error(
+            "immersed-flow WALE active cell is unavailable");
+      const auto index = field_index(*local);
+      for (int component = 0; component < 3; ++component) {
+        const double current =
+            velocity_n(index.i, index.j, index.k, component);
+        const double previous =
+            velocity_nm1(index.i, index.j, index.k, component);
+        const double value = stencil.order == MomentumTimeOrder::bdf2
+                                 ? current + ratio * (current - previous)
+                                 : current;
+        if (!std::isfinite(value))
+          throw runtime::Error(
+              "immersed-flow WALE lagged velocity is non-finite");
+        lagged(index.i, index.j, index.k, component) = value;
+      }
+    }
+
+    const finite_volume::ReconstructionFieldBinding lagged_binding{
+        *scratch->storage, *scratch->access, kImmersedFlowScratchPhase,
+        kImmersedFlowScratchActor, scratch->lagged_velocity};
+    const finite_volume::ReconstructionFieldBinding gradient_binding{
+        *scratch->storage, *scratch->access, kImmersedFlowScratchPhase,
+        kImmersedFlowScratchActor, scratch->velocity_gradient};
+    reconstruction->compute_gradient(
+        finite_volume::GradientScheme::weighted_least_squares,
+        finite_volume::FiniteVolumeQuantity::velocity(), lagged_binding,
+        gradient_binding);
+    halo->exchange(*scratch->storage, scratch->velocity_gradient);
+    const auto gradient = scratch->storage->acquire_read<double>(
+        *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
+        scratch->velocity_gradient);
+    std::uint64_t committed_hash = kFnvOffset;
+    std::uint64_t history_hash = kFnvOffset;
+    std::uint64_t gradient_hash = kFnvOffset;
+    std::uint64_t density_hash = kFnvOffset;
+    for (const auto global_cell : active.ordered_global_ids()) {
+      const auto local = topology->find_local_cell(global_cell);
+      if (!local.has_value())
+        throw runtime::Error(
+            "immersed-flow WALE fingerprint cell is unavailable");
+      const auto index = field_index(*local);
+      for (int component = 0; component < 3; ++component) {
+        committed_hash = hash_u64(
+            committed_hash,
+            fp64_bits(velocity_n(index.i, index.j, index.k, component)));
+        history_hash = hash_u64(
+            history_hash,
+            fp64_bits(velocity_nm1(index.i, index.j, index.k, component)));
+      }
+      for (int component = 0; component < 9; ++component)
+        gradient_hash = hash_u64(
+            gradient_hash,
+            fp64_bits(gradient(index.i, index.j, index.k, component)));
+      density_hash = hash_u64(
+          density_hash,
+          fp64_bits(rho_attempt(index.i, index.j, index.k, 0)));
+    }
+
+    auto coefficients = wale->evaluate(
+        {state.metadata().step + 1U,
+         stencil.dt_s,
+         stencil.order == MomentumTimeOrder::bdf2
+             ? les::WaleTimeOrder::bdf2
+             : les::WaleTimeOrder::backward_euler,
+         committed_hash,
+         history_hash,
+         gradient_hash,
+         density_hash,
+         gradient,
+         rho_attempt});
+    if (coefficients.owned_active_count() != active.owned_active_count() ||
+        coefficients.local_active_count() !=
+            active.ordered_global_ids().size())
+      throw runtime::Error(
+          "immersed-flow WALE coefficient layout is not active-cell order");
+
+    const auto mu_sgs = coefficients.mu_sgs_pa_s();
+    std::vector<double> effective_by_active(mu_sgs.size());
+    auto cell_viscosity = scratch->storage->acquire_write<double>(
+        *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
+        scratch->dynamic_viscosity_cell);
+    const auto cell_extent = cell_viscosity.interior_extent();
+    const int cell_ghost = cell_viscosity.ghost_width();
+    for (int k = -cell_ghost; k < cell_extent.z + cell_ghost; ++k)
+      for (int j = -cell_ghost; j < cell_extent.y + cell_ghost; ++j)
+        for (int i = -cell_ghost; i < cell_extent.x + cell_ghost; ++i)
+          cell_viscosity(i, j, k, 0) = molecular_dynamic_viscosity_pa_s;
+    for (std::size_t row = 0U; row < effective_by_active.size(); ++row) {
+      const double effective =
+          molecular_dynamic_viscosity_pa_s + mu_sgs[row];
+      if (!(effective >= molecular_dynamic_viscosity_pa_s) ||
+          !std::isfinite(effective))
+        throw runtime::Error(
+            "immersed-flow WALE effective viscosity is invalid");
+      effective_by_active[row] = effective;
+      const auto local =
+          topology->find_local_cell(active.ordered_global_ids()[row]);
+      if (!local.has_value())
+        throw runtime::Error(
+            "immersed-flow WALE viscosity cell is unavailable");
+      const auto index = field_index(*local);
+      cell_viscosity(index.i, index.j, index.k, 0) = effective;
+    }
+
+    const auto cell_viscosity_read = scratch->storage->acquire_read<double>(
+        *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
+        scratch->dynamic_viscosity_cell);
+    auto face_viscosity = scratch->storage->acquire_face_write<double>(
+        *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
+        scratch->dynamic_viscosity);
+    physical_boundary_fvm->interpolate_cell_scalar_to_faces(
+        cell_viscosity_read, face_viscosity);
+    for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
+         ++face) {
+      const auto owner = active.active_index(topology->owner(face));
+      const auto neighbour_cell = topology->neighbour(face);
+      const auto neighbour = neighbour_cell.has_value()
+                                 ? active.active_index(*neighbour_cell)
+                                 : std::optional<std::size_t>{};
+      if (neighbour_cell.has_value() &&
+          owner.has_value() != neighbour.has_value()) {
+        face_viscosity(face, 0) =
+            effective_by_active[owner.has_value() ? *owner : *neighbour];
+      } else if (!neighbour_cell.has_value() &&
+                 !topology->periodic_pair(face).has_value() &&
+                 owner.has_value()) {
+        face_viscosity(face, 0) = effective_by_active[*owner];
+      }
+      if (!(face_viscosity(face, 0) >= 0.0) ||
+          !std::isfinite(face_viscosity(face, 0)))
+        throw runtime::Error(
+            "immersed-flow WALE face viscosity is invalid");
+    }
+    std::vector<double> effective_by_face(topology->local_face_count());
+    for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
+         ++face)
+      effective_by_face[face] = face_viscosity(face, 0);
+
+    std::uint64_t wall_fingerprint = kFnvOffset;
+    for (const auto &wall : wall_links) {
+      const auto row = active.active_index(wall.fluid);
+      if (!row.has_value())
+        throw runtime::Error(
+            "immersed-flow WALE wall viscosity row is unavailable");
+      wall_fingerprint = hash_u64(wall_fingerprint, wall.link.id);
+      wall_fingerprint =
+          hash_u64(wall_fingerprint, fp64_bits(effective_by_active[*row]));
+    }
+    if (wall_fingerprint == 0U)
+      wall_fingerprint = 1U;
+    return detail::ImmersedWaleAttemptAuthority(
+        std::move(coefficients), std::move(effective_by_active),
+        std::move(effective_by_face), wall_fingerprint);
+  }
+
   static bool solve_succeeded(linear::SolveTerminationReason reason) noexcept {
     return reason == linear::SolveTerminationReason::converged ||
            reason == linear::SolveTerminationReason::zero_right_hand_side;
+  }
+
+  static StepFailureReason material_step_failure(
+      MaterialTransportFailureReason reason) noexcept {
+    switch (reason) {
+    case MaterialTransportFailureReason::none:
+      return StepFailureReason::none;
+    case MaterialTransportFailureReason::invalid_input:
+      return StepFailureReason::invalid_input;
+    case MaterialTransportFailureReason::collective_operation:
+      return StepFailureReason::collective_operation;
+    case MaterialTransportFailureReason::non_finite_state:
+    case MaterialTransportFailureReason::non_positive_density:
+      return StepFailureReason::transport_failure;
+    case MaterialTransportFailureReason::final_density_residual:
+      return StepFailureReason::final_continuity_residual;
+    case MaterialTransportFailureReason::final_transport_residual:
+      return StepFailureReason::final_transport_residual;
+    case MaterialTransportFailureReason::final_conservation_defect:
+      return StepFailureReason::final_conservation_defect;
+    }
+    return StepFailureReason::invalid_input;
   }
 
   static runtime::Real3 add(runtime::Real3 left,
@@ -2071,23 +2772,50 @@ struct FixedStepImmersedFlow::Impl final {
         access, kStatePhase, kStateActor, fields.velocity);
     const auto velocity_nm1 = history.acquire_read<double>(
         access, kStatePhase, kStateActor, fields.velocity);
+    const auto density = trial.acquire_read<double>(
+        access, kStatePhase, kStateActor, fields.density);
+    const auto density_n = committed.acquire_read<double>(
+        access, kStatePhase, kStateActor, fields.density);
+    const auto density_nm1 = history.acquire_read<double>(
+        access, kStatePhase, kStateActor, fields.density);
+    const bool variable_density =
+        density_setup.model != config::DensityModel::constant;
     std::array<double, 9> norm_sums{};
+    std::array<double, 6> conservation_sums{};
     for (std::size_t row = 0U; row < owned_active_cells.size(); ++row) {
       const auto cell = owned_active_cells[row];
       const auto index = field_index(cell);
-      const double time_scale =
-          rho_ref * geometry->cell_volume_m3(cell) / stencil.dt_s;
+      const double volume_over_dt =
+          geometry->cell_volume_m3(cell) / stencil.dt_s;
+      const double rho_trial =
+          variable_density
+              ? density(index.i, index.j, index.k, 0)
+              : rho_ref;
+      const double rho_current =
+          variable_density
+              ? density_n(index.i, index.j, index.k, 0)
+              : rho_ref;
+      const double rho_history =
+          variable_density
+              ? density_nm1(index.i, index.j, index.k, 0)
+              : rho_ref;
+      if (!(rho_trial > 0.0) || !(rho_current > 0.0) ||
+          !(rho_history > 0.0) || !std::isfinite(rho_trial) ||
+          !std::isfinite(rho_current) || !std::isfinite(rho_history))
+        throw runtime::Error(
+            "immersed final momentum density authority is invalid");
       for (std::size_t component_index = 0U; component_index < 3U;
            ++component_index) {
-        const double trial_term = time_scale * stencil.alpha0 *
-                                  velocity(index.i, index.j, index.k,
-                                           static_cast<int>(component_index));
+        const double trial_term =
+            volume_over_dt * stencil.alpha0 * rho_trial *
+            velocity(index.i, index.j, index.k,
+                     static_cast<int>(component_index));
         const double current_term =
-            time_scale * stencil.alpha1 *
+            volume_over_dt * stencil.alpha1 * rho_current *
             velocity_n(index.i, index.j, index.k,
                        static_cast<int>(component_index));
         const double history_term =
-            time_scale * stencil.alpha2 *
+            volume_over_dt * stencil.alpha2 * rho_history *
             velocity_nm1(index.i, index.j, index.k,
                          static_cast<int>(component_index));
         const auto offset = row * 3U + component_index;
@@ -2126,10 +2854,18 @@ struct FixedStepImmersedFlow::Impl final {
         norm_sums[component_index * 3U + 1U] += scale * scale;
         norm_sums[component_index * 3U + 2U] +=
             cancellation_reference * cancellation_reference;
+        if (variable_density) {
+          conservation_sums[component_index * 2U] += raw;
+          conservation_sums[component_index * 2U + 1U] += scale;
+        }
       }
     }
     mpi->allreduce_fp64_in_place(norm_sums.data(), norm_sums.size(),
                                  runtime::Fp64ReductionOperation::sum);
+    if (variable_density)
+      mpi->allreduce_fp64_in_place(
+          conservation_sums.data(), conservation_sums.size(),
+          runtime::Fp64ReductionOperation::sum);
     bool accepted = true;
     for (std::size_t component_index = 0U; component_index < 3U;
          ++component_index) {
@@ -2150,6 +2886,21 @@ struct FixedStepImmersedFlow::Impl final {
                             ? 0.0
                             : std::numeric_limits<double>::infinity()));
       report.final_momentum_normalized_l2[component_index] = normalized;
+      if (variable_density) {
+        const double conservation_numerator =
+            std::abs(conservation_sums[component_index * 2U]);
+        const double conservation_denominator =
+            conservation_sums[component_index * 2U + 1U];
+        const double conservation_roundoff =
+            512.0 * std::numeric_limits<double>::epsilon() *
+            conservation_denominator;
+        report.final_momentum_relative_conservation_defect[component_index] =
+            conservation_numerator <= conservation_roundoff
+                ? 0.0
+                : conservation_numerator /
+                      std::max(conservation_denominator,
+                               std::numeric_limits<double>::min());
+      }
       accepted = accepted && std::isfinite(normalized) && normalized <= 1.0e-9;
     }
     return accepted;
@@ -2213,9 +2964,15 @@ struct FixedStepImmersedFlow::Impl final {
          ++cell) {
       const auto index = field_index(cell);
       if (domain->region(cell) == immersed::CellRegion::fluid) {
-        if (density(index.i, index.j, index.k, 0) != rho_ref)
+        if (density_setup.model == config::DensityModel::constant &&
+            density(index.i, index.j, index.k, 0) != rho_ref)
           throw runtime::Error(
               "immersed-flow active constant density does not match physics");
+        if (density_setup.model != config::DensityModel::constant &&
+            (!(density(index.i, index.j, index.k, 0) > 0.0) ||
+             !std::isfinite(density(index.i, index.j, index.k, 0))))
+          throw runtime::Error(
+              "immersed-flow active material density is invalid");
         continue;
       }
       if (!positive_zero(density(index.i, index.j, index.k, 0)) ||
@@ -2227,6 +2984,13 @@ struct FixedStepImmersedFlow::Impl final {
                 velocity(index.i, index.j, index.k, component_index)))
           throw runtime::Error(
               "immersed-flow inactive velocity slot is not canonical positive zero");
+      for (const auto field : fields.transported_cell_fields) {
+        const auto transported = layer.acquire_read<double>(
+            access, kStatePhase, kStateActor, field);
+        if (!positive_zero(transported(index.i, index.j, index.k, 0)))
+          throw runtime::Error(
+              "immersed-flow inactive transport slot is not canonical positive zero");
+      }
     }
     const auto face_velocity = layer.acquire_face_read<double>(
         access, kStatePhase, kStateActor, fields.face_velocity);
@@ -2285,9 +3049,20 @@ struct FixedStepImmersedFlow::Impl final {
     auto viscosity = scratch->storage->acquire_face_write<double>(
         *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
         scratch->dynamic_viscosity);
-    for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
-         ++face)
-      viscosity(face, 0) = dynamic_viscosity;
+    if (active_wale_authority != nullptr) {
+      const auto &effective =
+          active_wale_authority->effective_dynamic_viscosity_by_face();
+      if (effective.size() != topology->local_face_count())
+        throw runtime::Error(
+            "immersed-flow WALE face-viscosity layout is invalid");
+      for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
+           ++face)
+        viscosity(face, 0) = effective[face];
+    } else {
+      for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
+           ++face)
+        viscosity(face, 0) = dynamic_viscosity;
+    }
     auto residual = scratch->storage->acquire_write<double>(
         *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
         scratch->momentum_residual);
@@ -2327,7 +3102,7 @@ struct FixedStepImmersedFlow::Impl final {
     }
     physical_boundary_fvm->physical_boundary_momentum_contributions(
         *boundaries, mass_flux, face_velocity, velocity, gradient,
-        dynamic_viscosity, physical_boundary_momentum);
+        viscosity_read, physical_boundary_momentum);
     physical_boundary_fvm->physical_boundary_pressure_contributions(
         *boundaries, pressure, physical_boundary_pressure);
     if (physical_boundary_momentum.size() != physical_boundary_pressure.size())
@@ -2400,12 +3175,18 @@ struct FixedStepImmersedFlow::Impl final {
     return result;
   }
 
-  std::pair<std::optional<ForceAttemptReport>, int> collect_final_force(
+  struct FinalForceEvidence final {
+    std::optional<ForceAttemptReport> report;
+    std::optional<immersed::WallForceSample> sample;
+    int failing_rank{-1};
+  };
+
+  FinalForceEvidence collect_final_force(
       FlowState &state, double dynamic_viscosity,
       const std::vector<finite_volume::detail::ImmersedWallNormalGradient>
           &final_wall_gradients) const {
     if (!wall_force_integrator.has_value())
-      return {std::nullopt, -1};
+      return {};
 
     const auto &access = state.solver_access_plan();
     const auto fields = state.fields();
@@ -2433,7 +3214,8 @@ struct FixedStepImmersedFlow::Impl final {
         *mpi, local_budget_reaction_ok,
         "immersed-flow final immersed budget reaction is non-finite");
     if (!budget_reaction_status.ok)
-      return {std::nullopt, budget_reaction_status.failing_rank};
+      return {std::nullopt, std::nullopt,
+              budget_reaction_status.failing_rank};
     runtime::detail::check_mpi(
         MPI_Allreduce(MPI_IN_PLACE, reduced_budget_reaction.data(),
                       static_cast<int>(reduced_budget_reaction.size()),
@@ -2449,6 +3231,23 @@ struct FixedStepImmersedFlow::Impl final {
       for (int j = -ghost; j < extent.y + ghost; ++j)
         for (int i = -ghost; i < extent.x + ghost; ++i)
           cell_viscosity(i, j, k, 0) = dynamic_viscosity;
+    if (active_wale_authority != nullptr) {
+      const auto &active = domain->active_cells();
+      const auto &effective =
+          active_wale_authority->effective_dynamic_viscosity_by_active_cell();
+      if (effective.size() != active.ordered_global_ids().size())
+        throw runtime::Error(
+            "immersed-flow WALE wall-viscosity layout is invalid");
+      for (std::size_t row = 0U; row < effective.size(); ++row) {
+        const auto local =
+            topology->find_local_cell(active.ordered_global_ids()[row]);
+        if (!local.has_value())
+          throw runtime::Error(
+              "immersed-flow WALE wall-viscosity cell is unavailable");
+        const auto index = field_index(*local);
+        cell_viscosity(index.i, index.j, index.k, 0) = effective[row];
+      }
+    }
 
     const auto pressure = trial.acquire_read<double>(
         access, kStatePhase, kStateActor, fields.mechanical_pressure);
@@ -2460,6 +3259,29 @@ struct FixedStepImmersedFlow::Impl final {
     const auto viscosity = scratch->storage->acquire_read<double>(
         *scratch->access, kImmersedFlowScratchPhase, kImmersedFlowScratchActor,
         scratch->dynamic_viscosity_cell);
+    if (active_wale_authority != nullptr) {
+      std::uint64_t actual_wall_fingerprint = kFnvOffset;
+      for (const auto &wall : wall_links) {
+        const auto index = field_index(wall.fluid);
+        const double value = viscosity(index.i, index.j, index.k, 0);
+        actual_wall_fingerprint =
+            hash_u64(actual_wall_fingerprint, wall.link.id);
+        actual_wall_fingerprint =
+            hash_u64(actual_wall_fingerprint, fp64_bits(value));
+      }
+      if (actual_wall_fingerprint == 0U)
+        actual_wall_fingerprint = 1U;
+      const auto wall_viscosity_status = runtime::collective_status(
+          *mpi,
+          actual_wall_fingerprint ==
+              active_wale_authority
+                  ->wall_effective_viscosity_fingerprint(),
+          "immersed-flow WALE wall viscosity lost attempt authority");
+      if (!wall_viscosity_status.ok)
+        return {std::nullopt, std::nullopt,
+                wall_viscosity_status.failing_rank};
+      pending_wall_effective_viscosity_fingerprint = actual_wall_fingerprint;
+    }
     std::vector<immersed::detail::WallPressureNormalGradient> force_gradients;
     force_gradients.reserve(final_wall_gradients.size());
     for (const auto &wall_gradient : final_wall_gradients)
@@ -2469,7 +3291,7 @@ struct FixedStepImmersedFlow::Impl final {
             *wall_force_integrator, pressure, velocity, gradient, viscosity,
             force_gradients);
     if (surface.lowest_failing_rank >= 0)
-      return {std::nullopt, surface.lowest_failing_rank};
+      return {std::nullopt, std::nullopt, surface.lowest_failing_rank};
 
     immersed::ForceComponents budget_reaction;
     budget_reaction.pressure_N = {
@@ -2490,8 +3312,8 @@ struct FixedStepImmersedFlow::Impl final {
         *mpi, local_result_ok,
         "immersed-flow final immersed force evidence is non-finite");
     if (!result_status.ok)
-      return {std::nullopt, result_status.failing_rank};
-    return {result, -1};
+      return {std::nullopt, std::nullopt, result_status.failing_rank};
+    return {result, surface, -1};
   }
 
   void compute_immersed_pressure_gradient(
@@ -2679,7 +3501,40 @@ struct FixedStepImmersedFlow::Impl final {
       FlowState &state, double rho_ref, const MomentumTimeStencil &stencil,
       const std::array<std::vector<double>, 3> &diagonal,
       const std::vector<finite_volume::detail::ImmersedWallNormalGradient>
-          *current_wall_pressure_gradients = nullptr) const {
+          *current_wall_pressure_gradients = nullptr,
+      const detail::ImmersedDensityAttemptAuthority *attempt_density = nullptr,
+      const detail::ImmersedDensityAttemptAuthority *committed_density = nullptr,
+      const detail::ImmersedDensityAttemptAuthority *history_density = nullptr)
+      const {
+    const bool variable_density = attempt_density != nullptr;
+    if (variable_density != (committed_density != nullptr) ||
+        variable_density != (history_density != nullptr))
+      throw runtime::Error(
+          "immersed predictor density authorities are incomplete");
+    if (variable_density) {
+      for (const auto *authority :
+           {attempt_density, committed_density, history_density}) {
+        if (authority->face_density.size() != topology->local_face_count() ||
+            authority->wall_density.size() != wall_links.size() ||
+            authority->owned_active_density.size() !=
+                owned_active_cells.size())
+          throw runtime::Error(
+              "immersed predictor density authority layout is invalid");
+        for (std::size_t index = 0U; index < wall_links.size(); ++index)
+          if (authority->wall_density[index].link != wall_links[index].link.id)
+            throw runtime::Error(
+                "immersed predictor wall-density ordering is invalid");
+      }
+    }
+    const auto rho_face = [&](const auto *authority,
+                              mesh::LocalFaceId face) {
+      return authority == nullptr ? rho_ref : authority->face_density[face];
+    };
+    const auto rho_wall = [&](const auto *authority, std::size_t wall) {
+      return authority == nullptr
+                 ? rho_ref
+                 : authority->wall_density[wall].rho_wall_kg_per_m3;
+    };
     if (current_wall_pressure_gradients != nullptr) {
       if (current_wall_pressure_gradients->size() != wall_links.size())
         throw runtime::Error(
@@ -2791,9 +3646,11 @@ struct FixedStepImmersedFlow::Impl final {
             const double history_contribution =
                 pressure_operator->face_velocity_mobility(face,
                                                           component_index) *
-                (rho_ref / stencil.dt_s) *
-                ((-stencil.alpha1) * discrepancy_n +
-                 (-stencil.alpha2) * discrepancy_nm1);
+                (((-stencil.alpha1) * rho_face(committed_density, face) *
+                  discrepancy_n) +
+                 ((-stencil.alpha2) * rho_face(history_density, face) *
+                  discrepancy_nm1)) /
+                stencil.dt_s;
             if (component_index == 0U)
               candidate.x += history_contribution;
             else if (component_index == 1U)
@@ -2820,7 +3677,8 @@ struct FixedStepImmersedFlow::Impl final {
           face_flux(face, 0) = 0.0;
         } else if (rule == boundary::MassFluxRule::prescribed_inlet_state ||
                    rule == boundary::MassFluxRule::outflow_only) {
-          const double value = rho_ref * dot(candidate, area);
+          const double value =
+              rho_face(attempt_density, face) * dot(candidate, area);
           if (!std::isfinite(value))
             throw runtime::Error(
                 "immersed-flow physical boundary mass flux is non-finite");
@@ -2900,9 +3758,14 @@ struct FixedStepImmersedFlow::Impl final {
         const double value = predictor +
                              (-mobility * pressure_defect *
                               component(unit_normal, component_index)) +
-                             mobility * (rho_ref / stencil.dt_s) *
-                                 ((-stencil.alpha1) * discrepancy_n +
-                                  (-stencil.alpha2) * discrepancy_nm1);
+                             mobility *
+                                 (((-stencil.alpha1) *
+                                   rho_face(committed_density, face) *
+                                   discrepancy_n) +
+                                  ((-stencil.alpha2) *
+                                   rho_face(history_density, face) *
+                                   discrepancy_nm1)) /
+                                 stencil.dt_s;
         if (component_index == 0U)
           candidate.x = value;
         else if (component_index == 1U)
@@ -2911,7 +3774,7 @@ struct FixedStepImmersedFlow::Impl final {
           candidate.z = value;
         face_velocity(face, static_cast<int>(component_index)) = value;
       }
-      double flux = rho_ref * dot(candidate, area);
+      double flux = rho_face(attempt_density, face) * dot(candidate, area);
       if (flux == 0.0)
         flux = 0.0;
       face_flux(face, 0) = flux;
@@ -2998,9 +3861,12 @@ struct FixedStepImmersedFlow::Impl final {
         const double mobility = geometry->cell_volume_m3(wall.fluid) /
                                 diagonal[component_index][*active_index];
         const double history_contribution =
-            mobility * (rho_ref / stencil.dt_s) *
-            ((-stencil.alpha1) * discrepancy_n +
-             (-stencil.alpha2) * discrepancy_nm1);
+            mobility *
+            (((-stencil.alpha1) * rho_wall(committed_density, wall_index) *
+              discrepancy_n) +
+             ((-stencil.alpha2) * rho_wall(history_density, wall_index) *
+              discrepancy_nm1)) /
+            stencil.dt_s;
         value += history_contribution;
         const double wall_pressure =
             -mobility * wall_normal_gradient * normal_component;
@@ -3016,10 +3882,11 @@ struct FixedStepImmersedFlow::Impl final {
           correction.z = mobility;
         }
       }
-      const double mdot_star = rho_ref * wall.effective_measure_m2 *
+      const double wall_density = rho_wall(attempt_density, wall_index);
+      const double mdot_star = wall_density * wall.effective_measure_m2 *
                                dot(predictor, wall.link.solid_to_fluid_normal);
       detail::ImmersedWallPressureInput input{wall.link.id,
-                                              rho_ref,
+                                              wall_density,
                                               wall.effective_measure_m2,
                                               wall.link.solid_to_fluid_normal,
                                               correction,
@@ -3092,6 +3959,10 @@ struct FixedStepImmersedFlow::Impl final {
     zeros.mechanical_pressure.resize(topology->owned_cell_count(), 0.0);
     zeros.face_velocity.resize(topology->local_face_count() * 3U, 0.0);
     zeros.face_mass_flux.resize(topology->local_face_count(), 0.0);
+    zeros.transported_cell_fields.resize(
+        template_state.fields().transported_cell_fields.size());
+    for (auto &transported : zeros.transported_cell_fields)
+      transported.resize(topology->owned_cell_count(), 0.0);
     ExactPredictorResponse candidate_response;
     resize_exact_predictor_response(candidate_response,
                                     owned_active_cells.size(),
@@ -3122,7 +3993,12 @@ struct FixedStepImmersedFlow::Impl final {
       const std::vector<double> &owned_pressure_pa,
       const std::vector<finite_volume::detail::ImmersedWallNormalGradient>
           &wall_gradients,
-      const linear::SolveControl &momentum_control) {
+      const linear::SolveControl &momentum_control,
+      const detail::ImmersedDensityAttemptAuthority *attempt_density = nullptr,
+      const detail::ImmersedDensityAttemptAuthority *committed_density =
+          nullptr,
+      const detail::ImmersedDensityAttemptAuthority *history_density =
+          nullptr) {
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
     const auto allocation_events_before =
         execution::allocation_counters().allocation_events;
@@ -3237,7 +4113,8 @@ struct FixedStepImmersedFlow::Impl final {
     }
     halo->exchange(trial, exact_predictor_fields.velocity);
     static_cast<void>(assemble_face_predictor(
-        probe_state, rho_ref, stencil, diagonal, &wall_gradients));
+        probe_state, rho_ref, stencil, diagonal, &wall_gradients,
+        attempt_density, committed_density, history_density));
     const auto face_flux = trial.acquire_face_read<double>(
         access, kStatePhase, kStateActor,
         exact_predictor_fields.face_mass_flux);
@@ -3799,9 +4676,28 @@ struct FixedStepImmersedFlow::Impl final {
       const std::array<std::vector<double>, 3> &diagonal,
       const std::vector<detail::ImmersedWallPressureCondition> &walls,
       const linear::SolveControl &control,
-      const linear::SolveControl &momentum_control) {
+      const linear::SolveControl &momentum_control,
+      const detail::ImmersedDensityAttemptAuthority *attempt_density = nullptr,
+      const detail::ImmersedDensityAttemptAuthority *committed_density =
+          nullptr,
+      const detail::ImmersedDensityAttemptAuthority *history_density =
+          nullptr) {
     PressureCorrectionReport report{};
     const std::size_t count = owned_active_cells.size();
+    const bool variable_density = attempt_density != nullptr;
+    if (variable_density != (committed_density != nullptr) ||
+        variable_density != (history_density != nullptr))
+      throw runtime::Error(
+          "immersed pressure density authorities are incomplete");
+    if (variable_density) {
+      for (const auto *authority :
+           {attempt_density, committed_density, history_density})
+        if (authority->owned_active_density.size() != count ||
+            authority->face_density.size() != topology->local_face_count() ||
+            authority->wall_density.size() != wall_links.size())
+          throw runtime::Error(
+              "immersed pressure density authority layout is invalid");
+    }
     auto rhs = pressure_rhs->view(0U, count);
     auto correction = pressure_solution->view(0U, count);
     if (count != 0U) {
@@ -3813,6 +4709,21 @@ struct FixedStepImmersedFlow::Impl final {
     auto &trial = state.solver_layer(FlowLayer::trial);
     const auto flux = trial.acquire_face_read<double>(
         access, kStatePhase, kStateActor, fields.face_mass_flux);
+    if (variable_density) {
+      for (std::size_t row = 0U; row < count; ++row) {
+        const double temporal =
+            (stencil.alpha0 * attempt_density->owned_active_density[row] +
+             stencil.alpha1 * committed_density->owned_active_density[row] +
+             stencil.alpha2 * history_density->owned_active_density[row]) /
+            stencil.dt_s;
+        const double volume =
+            geometry->cell_volume_m3(owned_active_cells[row]);
+        if (!std::isfinite(temporal))
+          throw runtime::Error(
+              "immersed material pressure temporal residual is non-finite");
+        rhs[row] -= temporal * std::sqrt(volume);
+      }
+    }
     for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
          ++face) {
       const auto neighbour = topology->neighbour(face);
@@ -3881,9 +4792,12 @@ struct FixedStepImmersedFlow::Impl final {
                       &wall_condition_fingerprint, 1, MPI_UINT64_T, MPI_BXOR,
                       mpi->comm()),
         "MPI_Allreduce(immersed-flow wall-condition fingerprint)");
+    const std::uint64_t density_fingerprint =
+        variable_density ? attempt_density->fingerprint : fp64_bits(rho_ref);
     const std::uint64_t next_dependency_identity =
         detail::make_immersed_pressure_revision(
-            0U, fp64_bits(rho_ref), diagonal_fingerprint, geometry_fingerprint,
+            0U, density_fingerprint, diagonal_fingerprint,
+            geometry_fingerprint,
             domain->active_cells().fingerprint(), wall_condition_fingerprint);
     double dependency_changed =
         next_dependency_identity != pressure_dependency_identity ? 1.0 : 0.0;
@@ -3905,16 +4819,19 @@ struct FixedStepImmersedFlow::Impl final {
     exact_pressure_operator->replace(
         pressure_revision,
         [this, rho_ref, stencil, diagonal, zero_wall_gradients,
-         momentum_control](const std::vector<double> &pressure)
+         momentum_control, attempt_density, committed_density,
+         history_density](const std::vector<double> &pressure)
             -> const ExactPredictorResponse & {
           return exact_predictor_response(
               rho_ref, stencil, diagonal, pressure, zero_wall_gradients,
-              momentum_control);
+              momentum_control, attempt_density, committed_density,
+              history_density);
         });
     std::vector<double> zero_pressure(count, 0.0);
     const auto &evaluated_affine_response = exact_predictor_response(
         rho_ref, stencil, diagonal, zero_pressure, wall_gradient_increments,
-        momentum_control);
+        momentum_control, attempt_density, committed_density,
+        history_density);
     copy_exact_predictor_response(evaluated_affine_response,
                                   exact_affine_response_workspace);
     const auto &exact_affine_response = exact_affine_response_workspace;
@@ -4252,9 +5169,74 @@ struct FixedStepImmersedFlow::Impl final {
                    const MomentumTimeStencil &stencil,
                    const linear::SolveControl &momentum_control,
                    const linear::SolveControl &pressure_control,
-                   std::optional<ForceAttemptReport> *accepted_force) {
+                   std::optional<ForceAttemptReport> *accepted_force,
+                   std::optional<les::WaleSummary> *accepted_wale,
+                   std::optional<MaterialDensityTransportReport>
+                       *accepted_material,
+                   std::optional<MaterialDensityTransportReport>
+                       *accepted_post_closure_material,
+                   std::optional<IdealGasClosureReport> *accepted_closure,
+                   MaterialTransportFailureReason *material_failure,
+                   std::uint64_t *material_attempt_identity) {
     StepAttemptReport report{};
     report.attempted_dt_s = stencil.dt_s;
+    if (accepted_force != nullptr)
+      accepted_force->reset();
+    if (accepted_wale != nullptr)
+      accepted_wale->reset();
+    if (accepted_material != nullptr)
+      accepted_material->reset();
+    if (accepted_post_closure_material != nullptr)
+      accepted_post_closure_material->reset();
+    if (accepted_closure != nullptr)
+      accepted_closure->reset();
+    struct AcceptedMaterialGuard final {
+      std::optional<MaterialDensityTransportReport> *output{};
+      ~AcceptedMaterialGuard() noexcept {
+        if (output != nullptr)
+          output->reset();
+      }
+    } accepted_material_guard{accepted_material};
+    if (material_failure != nullptr)
+      *material_failure = MaterialTransportFailureReason::none;
+    if (material_attempt_identity != nullptr)
+      *material_attempt_identity = 0U;
+    auto *material_adapter =
+        std::get_if<detail::ImmersedMaterialDensityAdapter>(&density_adapter);
+    auto *ideal_adapter =
+        std::get_if<detail::ImmersedIdealGasDensityAdapter>(&density_adapter);
+    const bool variable_density_adapter =
+        material_adapter != nullptr || ideal_adapter != nullptr;
+    const auto material_field_count = [&] {
+      return material_adapter != nullptr
+                 ? material_adapter->material_field_count()
+                 : ideal_adapter != nullptr
+                       ? ideal_adapter->material_field_count()
+                       : 0U;
+    };
+    if (variable_density_adapter) {
+      const auto fields = static_cast<std::size_t>(
+          material_field_count());
+      report.final_transport_normalized_l2.assign(fields, 0.0);
+      report.final_transport_relative_conservation_defect.assign(fields, 0.0);
+    }
+    struct DensityAdapterGuard final {
+      detail::ImmersedMaterialDensityAdapter *material{};
+      detail::ImmersedIdealGasDensityAdapter *ideal{};
+      ~DensityAdapterGuard() noexcept {
+        if (material != nullptr)
+          material->rollback();
+        if (ideal != nullptr)
+          ideal->rollback();
+      }
+    } density_adapter_guard{material_adapter, ideal_adapter};
+    last_wale_evaluation_count = 0U;
+    last_wale_coefficient_identity = {};
+    last_wall_effective_viscosity_fingerprint = 0U;
+    pending_diagnostic_wall_force_sample.reset();
+    pending_diagnostic_local_flow_pattern.reset();
+    pending_wale_evaluation_count = 0U;
+    pending_wall_effective_viscosity_fingerprint = 0U;
     std::fill(attempt_continuity_divergence.begin(),
               attempt_continuity_divergence.end(), 0.0);
     pending_exact_predictor_work = {};
@@ -4272,22 +5254,71 @@ struct FixedStepImmersedFlow::Impl final {
 #endif
     bool attempt_active = false;
     try {
+      if (variable_density_adapter) {
+        bool local_prepare_ok = true;
+        try {
+          if (material_adapter != nullptr)
+            material_adapter->prepare_attempt();
+          else
+            ideal_adapter->prepare_attempt();
+        } catch (...) {
+          local_prepare_ok = false;
+        }
+        if (material_attempt_identity != nullptr)
+          *material_attempt_identity =
+              material_adapter != nullptr
+                  ? material_adapter->attempt_identity()
+                  : ideal_adapter->attempt_identity();
+        const auto prepare_status = runtime::collective_status(
+            *mpi, local_prepare_ok,
+            "immersed variable-density workspace preparation failed");
+        if (!prepare_status.ok) {
+          report.disposition =
+              StepAttemptDisposition::non_retryable_failure;
+          report.reason = StepFailureReason::invalid_input;
+          report.lowest_failing_rank = prepare_status.failing_rank;
+          report.suggested_dt_s = stencil.dt_s;
+          return report;
+        }
+      }
       bool local_input_ok = true;
       try {
         const auto expected = make_momentum_time_stencil(
             stencil.order, stencil.dt_s, stencil.previous_dt_s);
+        const bool ordinary_density_contract =
+            density_setup.model != config::DensityModel::ideal_gas &&
+            !physics.cp_J_per_kg_K.has_value() &&
+            !physics.gas_constant_J_per_kg_K.has_value() &&
+            !physics.thermodynamic_pressure_pa.has_value();
+        const bool ideal_density_contract =
+            density_setup.model == config::DensityModel::ideal_gas &&
+            ideal_adapter != nullptr && physics.cp_J_per_kg_K.has_value() &&
+            physics.gas_constant_J_per_kg_K.has_value() &&
+            physics.thermodynamic_pressure_pa.has_value() &&
+            fp64_bits(*physics.cp_J_per_kg_K) ==
+                fp64_bits(ideal_adapter->cp_J_per_kg_K()) &&
+            fp64_bits(*physics.gas_constant_J_per_kg_K) ==
+                fp64_bits(ideal_adapter->gas_constant_J_per_kg_K()) &&
+            fp64_bits(*physics.thermodynamic_pressure_pa) ==
+                fp64_bits(ideal_adapter->configured_pressure_pa()) &&
+            *physics.thermodynamic_pressure_pa > 0.0 &&
+            std::isfinite(*physics.thermodynamic_pressure_pa);
         local_input_ok =
             expected.alpha0 == stencil.alpha0 &&
             expected.alpha1 == stencil.alpha1 &&
             expected.alpha2 == stencil.alpha2 &&
-            physics.density_model == config::DensityModel::constant &&
-            !physics.cp_J_per_kg_K.has_value() &&
-            !physics.gas_constant_J_per_kg_K.has_value() &&
-            !physics.thermodynamic_pressure_pa.has_value() &&
+            physics.density_model == density_setup.model &&
+            (density_setup.model == config::DensityModel::constant ||
+             (density_setup.model == config::DensityModel::material &&
+              domain != nullptr) ||
+             (density_setup.model == config::DensityModel::ideal_gas &&
+              domain != nullptr)) &&
+            (ordinary_density_contract || ideal_density_contract) &&
             physics.rho_ref_kg_per_m3 > 0.0 &&
             std::isfinite(physics.rho_ref_kg_per_m3) &&
             physics.dynamic_viscosity_pa_s >= 0.0 &&
             std::isfinite(physics.dynamic_viscosity_pa_s) &&
+            active_wale_authority == nullptr &&
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
             (manufactured_body_source.empty() ||
              (manufactured_body_source.size() ==
@@ -4337,6 +5368,43 @@ struct FixedStepImmersedFlow::Impl final {
         report.suggested_dt_s = 0.0;
         return report;
       }
+      if (ideal_adapter != nullptr) {
+        bool local_closure_begin_ok = true;
+        int preflight_failure_rank = -1;
+        try {
+          ideal_adapter->begin_closure(state);
+        } catch (const detail::DensityClosurePreflightFailure &failure) {
+          local_closure_begin_ok = false;
+          preflight_failure_rank = failure.failing_rank();
+        } catch (const runtime::detail::MpiOperationError &) {
+          throw;
+        } catch (...) {
+          local_closure_begin_ok = false;
+        }
+        if (preflight_failure_rank >= 0) {
+          state.rollback_attempt();
+          attempt_active = false;
+          report.disposition =
+              StepAttemptDisposition::non_retryable_failure;
+          report.reason = StepFailureReason::invalid_input;
+          report.lowest_failing_rank = preflight_failure_rank;
+          report.suggested_dt_s = stencil.dt_s;
+          return report;
+        }
+        const auto closure_begin_status = runtime::collective_status(
+            *mpi, local_closure_begin_ok,
+            "immersed ideal-gas closure transaction could not begin");
+        if (!closure_begin_status.ok) {
+          state.rollback_attempt();
+          attempt_active = false;
+          report.disposition =
+              StepAttemptDisposition::non_retryable_failure;
+          report.reason = StepFailureReason::invalid_input;
+          report.lowest_failing_rank = closure_begin_status.failing_rank;
+          report.suggested_dt_s = stencil.dt_s;
+          return report;
+        }
+      }
       const auto &access = state.solver_access_plan();
       const auto fields = state.fields();
       auto &trial = state.solver_layer(FlowLayer::trial);
@@ -4365,6 +5433,131 @@ struct FixedStepImmersedFlow::Impl final {
         halo->exchange(*accepted, fields.density);
         halo->exchange(*accepted, fields.velocity);
         halo->exchange(*accepted, fields.mechanical_pressure);
+        for (const auto field : fields.transported_cell_fields)
+          halo->exchange(*accepted, field);
+      }
+      if (variable_density_adapter) {
+        {
+          const auto current = committed.acquire_face_read<double>(
+              access, kStatePhase, kStateActor, fields.face_mass_flux);
+          const auto previous = history.acquire_face_read<double>(
+              access, kStatePhase, kStateActor, fields.face_mass_flux);
+          auto predictor = trial.acquire_face_write<double>(
+              access, kStatePhase, kStateActor, fields.face_mass_flux);
+          for (mesh::LocalFaceId face = 0U;
+               face < topology->local_face_count(); ++face) {
+            const auto neighbour = topology->neighbour(face);
+            const bool owner_active =
+                domain->region(topology->owner(face)) ==
+                immersed::CellRegion::fluid;
+            const bool neighbour_active =
+                neighbour.has_value() &&
+                domain->region(*neighbour) == immersed::CellRegion::fluid;
+            const bool physical_active =
+                !neighbour.has_value() && owner_active;
+            double value = 0.0;
+            if ((owner_active && neighbour_active) || physical_active) {
+              value = stencil.order == MomentumTimeOrder::backward_euler
+                          ? current(face, 0)
+                          : 2.0 * current(face, 0) - previous(face, 0);
+            }
+            if (!std::isfinite(value))
+              throw runtime::Error(
+                  "immersed material predictor mass flux is non-finite");
+            predictor(face, 0) = value == 0.0 ? 0.0 : value;
+          }
+        }
+        const auto stage = material_adapter != nullptr
+                               ? material_adapter->stage_predictor_transport(
+                                     state, stencil)
+                               : ideal_adapter->stage_predictor_transport(
+                                     state, stencil);
+        if (stage.reason != MaterialTransportFailureReason::none) {
+          if (material_failure != nullptr)
+            *material_failure = stage.reason;
+          state.rollback_attempt();
+          attempt_active = false;
+          report.reason = material_step_failure(stage.reason);
+          report.lowest_failing_rank = stage.lowest_failing_rank;
+          const bool non_retryable =
+              stage.reason == MaterialTransportFailureReason::invalid_input ||
+              stage.reason ==
+                  MaterialTransportFailureReason::collective_operation;
+          report.disposition =
+              non_retryable
+                  ? StepAttemptDisposition::non_retryable_failure
+                  : StepAttemptDisposition::recoverable_failure;
+          report.suggested_dt_s =
+              non_retryable ? stencil.dt_s : 0.5 * stencil.dt_s;
+          return report;
+        }
+        if (ideal_adapter != nullptr) {
+          const auto closure_stage = ideal_adapter->evaluate(
+              state, detail::DensityClosureStage::predictor);
+          if (accepted_closure != nullptr)
+            *accepted_closure = ideal_adapter->take_closure_report();
+          if (!closure_stage.accepted) {
+            state.rollback_attempt();
+            attempt_active = false;
+            report.reason = StepFailureReason::density_closure_failure;
+            report.lowest_failing_rank =
+                closure_stage.lowest_failing_rank;
+            report.disposition =
+                closure_stage.recoverable
+                    ? StepAttemptDisposition::recoverable_failure
+                    : StepAttemptDisposition::non_retryable_failure;
+            report.suggested_dt_s = closure_stage.recoverable
+                                        ? 0.5 * stencil.dt_s
+                                        : stencil.dt_s;
+            return report;
+          }
+        }
+        halo->exchange(trial, fields.density);
+        for (const auto field : fields.transported_cell_fields)
+          halo->exchange(trial, field);
+        if (ideal_adapter != nullptr)
+          ideal_adapter->after_halo(
+              detail::DensityClosureStage::predictor);
+      }
+      std::optional<detail::ImmersedDensityAttemptAuthority>
+          material_density_trial;
+      std::optional<detail::ImmersedDensityAttemptAuthority>
+          material_density_committed;
+      std::optional<detail::ImmersedDensityAttemptAuthority>
+          material_density_history;
+      const auto require_density_authority = [&](auto &&function) {
+        const auto density_stage = prepare_density_authority_collectively(
+            std::forward<decltype(function)>(function));
+        if (density_stage.reason == MaterialTransportFailureReason::none)
+          return;
+        if (material_failure != nullptr)
+          *material_failure = density_stage.reason;
+        throw std::pair{density_stage.lowest_failing_rank,
+                        material_step_failure(density_stage.reason)};
+      };
+      if (variable_density_adapter) {
+        require_density_authority([&] {
+          material_density_trial.emplace(density_authority(state, trial));
+          material_density_committed.emplace(
+              density_authority(state, committed));
+          material_density_history.emplace(density_authority(state, history));
+        });
+      }
+      std::optional<detail::ImmersedWaleAttemptAuthority> wale_authority;
+      struct WaleAuthorityBindingGuard final {
+        Impl *flow;
+        ~WaleAuthorityBindingGuard() noexcept {
+          flow->active_wale_authority = nullptr;
+        }
+      } wale_authority_binding_guard{this};
+      if (wale != nullptr) {
+        const auto rho_attempt =
+            (!variable_density_adapter ? committed : trial)
+                .acquire_read<double>(access, kStatePhase, kStateActor,
+                                      fields.density);
+        wale_authority.emplace(prepare_wale_authority(
+            state, physics.dynamic_viscosity_pa_s, stencil, rho_attempt));
+        active_wale_authority = &*wale_authority;
       }
       const std::size_t count = owned_active_cells.size();
       std::array<std::vector<double>, 3> diagonal;
@@ -4385,12 +5578,25 @@ struct FixedStepImmersedFlow::Impl final {
               throw runtime::Error(
                   "immersed-flow momentum diagonal test scale is invalid");
 #endif
-            diagonal[component_index][row] = diagonal_scale * stencil.alpha0 *
-                                             physics.rho_ref_kg_per_m3 *
-                                             volume / stencil.dt_s;
+            const double rho_attempt =
+                material_density_trial.has_value()
+                    ? material_density_trial->owned_active_density[row]
+                    : physics.rho_ref_kg_per_m3;
+            diagonal[component_index][row] =
+                diagonal_scale * stencil.alpha0 * rho_attempt * volume /
+                stencil.dt_s;
           }
-          momentum_operators[component_index]->replace(
-              diagonal[component_index], physics.dynamic_viscosity_pa_s);
+          if (active_wale_authority == nullptr) {
+            momentum_operators[component_index]->replace(
+                diagonal[component_index], physics.dynamic_viscosity_pa_s);
+          } else {
+            momentum_operators[component_index]->replace(
+                diagonal[component_index],
+                active_wale_authority
+                    ->effective_dynamic_viscosity_by_active_cell(),
+                active_wale_authority
+                    ->effective_dynamic_viscosity_by_face());
+          }
           diagonal[component_index] =
               momentum_operators[component_index]->assembled_diagonal();
         }
@@ -4513,13 +5719,22 @@ struct FixedStepImmersedFlow::Impl final {
                         (residual_nm1[offset] - pressure_nm1[offset] -
                          implicit_reference_nm1[offset]) +
                         pressure_n[offset];
-          rhs[row] = -(physics.rho_ref_kg_per_m3 * volume / stencil.dt_s) *
-                         (stencil.alpha1 *
-                              velocity_n(index.i, index.j, index.k,
-                                         static_cast<int>(component_index)) +
-                          stencil.alpha2 *
-                              velocity_nm1(index.i, index.j, index.k,
-                                           static_cast<int>(component_index))) -
+          const double rho_n =
+              material_density_committed.has_value()
+                  ? material_density_committed->owned_active_density[row]
+                  : physics.rho_ref_kg_per_m3;
+          const double rho_nm1 =
+              material_density_history.has_value()
+                  ? material_density_history->owned_active_density[row]
+                  : physics.rho_ref_kg_per_m3;
+          rhs[row] =
+              -(volume / stencil.dt_s) *
+                  (stencil.alpha1 * rho_n *
+                       velocity_n(index.i, index.j, index.k,
+                                  static_cast<int>(component_index)) +
+                   stencil.alpha2 * rho_nm1 *
+                       velocity_nm1(index.i, index.j, index.k,
+                                    static_cast<int>(component_index))) -
                      predictor_spatial_residual;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
           if (!manufactured_body_source.empty())
@@ -4569,15 +5784,31 @@ struct FixedStepImmersedFlow::Impl final {
               momentum_solution[component_index]->view(0U, count)[row];
       }
       halo->exchange(trial, fields.velocity);
-      pressure_operator->prepare_face_coefficients(physics.rho_ref_kg_per_m3,
-                                                   diagonal);
+      const auto prepare_pressure_density = [&]() {
+        if (material_density_trial.has_value())
+          pressure_operator->prepare_face_coefficients(
+              material_density_trial->face_density, diagonal);
+        else
+          pressure_operator->prepare_face_coefficients(
+              physics.rho_ref_kg_per_m3, diagonal);
+      };
+      prepare_pressure_density();
 
       std::vector<detail::ImmersedWallPressureCondition> walls;
       const auto assemble_walls_collectively = [&](const auto *current) {
         bool local_ok = true;
         try {
           walls = assemble_face_predictor(state, physics.rho_ref_kg_per_m3,
-                                          stencil, diagonal, current);
+                                          stencil, diagonal, current,
+                                          material_density_trial
+                                              ? &*material_density_trial
+                                              : nullptr,
+                                          material_density_committed
+                                              ? &*material_density_committed
+                                              : nullptr,
+                                          material_density_history
+                                              ? &*material_density_history
+                                              : nullptr);
         } catch (...) {
           local_ok = false;
         }
@@ -4592,7 +5823,16 @@ struct FixedStepImmersedFlow::Impl final {
       const auto first =
           correct_active_pressure(state, physics.rho_ref_kg_per_m3, stencil,
                                   diagonal, walls, pressure_control,
-                                  momentum_control);
+                                  momentum_control,
+                                  material_density_trial
+                                      ? &*material_density_trial
+                                      : nullptr,
+                                  material_density_committed
+                                      ? &*material_density_committed
+                                      : nullptr,
+                                  material_density_history
+                                      ? &*material_density_history
+                                      : nullptr);
       report.pressure[0] = first.solve;
       if (!first.accepted) {
         state.rollback_attempt();
@@ -4613,13 +5853,90 @@ struct FixedStepImmersedFlow::Impl final {
         throw std::pair{failure_one.failing_rank,
                         StepFailureReason::non_finite_trial};
 
+      if (variable_density_adapter) {
+        const auto provisional =
+            material_adapter != nullptr
+                ? material_adapter->stage_after_corrector_one(state, stencil)
+                : ideal_adapter->stage_after_corrector_one(state, stencil);
+        if (provisional.reason != MaterialTransportFailureReason::none) {
+          if (material_failure != nullptr)
+            *material_failure = provisional.reason;
+          throw std::pair{provisional.lowest_failing_rank,
+                          material_step_failure(provisional.reason)};
+        }
+        if (ideal_adapter != nullptr) {
+          const auto closure_stage = ideal_adapter->evaluate(
+              state, detail::DensityClosureStage::provisional);
+          if (accepted_closure != nullptr)
+            *accepted_closure = ideal_adapter->take_closure_report();
+          if (!closure_stage.accepted) {
+            state.rollback_attempt();
+            attempt_active = false;
+            report.reason = StepFailureReason::density_closure_failure;
+            report.lowest_failing_rank =
+                closure_stage.lowest_failing_rank;
+            report.disposition =
+                closure_stage.recoverable
+                    ? StepAttemptDisposition::recoverable_failure
+                    : StepAttemptDisposition::non_retryable_failure;
+            report.suggested_dt_s = closure_stage.recoverable
+                                        ? 0.5 * stencil.dt_s
+                                        : stencil.dt_s;
+            return report;
+          }
+        }
+        halo->exchange(trial, fields.density);
+        for (const auto field : fields.transported_cell_fields)
+          halo->exchange(trial, field);
+        if (ideal_adapter != nullptr)
+          ideal_adapter->after_halo(
+              detail::DensityClosureStage::provisional);
+        require_density_authority([&] {
+          material_density_trial.emplace(density_authority(state, trial));
+        });
+        for (std::size_t component_index = 0U; component_index < 3U;
+             ++component_index) {
+          for (std::size_t row = 0U; row < count; ++row) {
+            const double volume =
+                geometry->cell_volume_m3(owned_active_cells[row]);
+            diagonal[component_index][row] =
+                stencil.alpha0 *
+                material_density_trial->owned_active_density[row] * volume /
+                stencil.dt_s;
+          }
+          if (active_wale_authority == nullptr) {
+            momentum_operators[component_index]->replace(
+                diagonal[component_index], physics.dynamic_viscosity_pa_s);
+          } else {
+            momentum_operators[component_index]->replace(
+                diagonal[component_index],
+                active_wale_authority
+                    ->effective_dynamic_viscosity_by_active_cell(),
+                active_wale_authority
+                    ->effective_dynamic_viscosity_by_face());
+          }
+          diagonal[component_index] =
+              momentum_operators[component_index]->assembled_diagonal();
+        }
+        prepare_pressure_density();
+      }
+
       const auto first_corrected_wall_gradients =
           wall_pressure_gradients(walls, WallPressureGradientState::corrected);
       assemble_walls_collectively(&first_corrected_wall_gradients);
       const auto second =
           correct_active_pressure(state, physics.rho_ref_kg_per_m3, stencil,
                                   diagonal, walls, pressure_control,
-                                  momentum_control);
+                                  momentum_control,
+                                  material_density_trial
+                                      ? &*material_density_trial
+                                      : nullptr,
+                                  material_density_committed
+                                      ? &*material_density_committed
+                                      : nullptr,
+                                  material_density_history
+                                      ? &*material_density_history
+                                      : nullptr);
       report.pressure[1] = second.solve;
       if (!second.accepted) {
         state.rollback_attempt();
@@ -4640,6 +5957,81 @@ struct FixedStepImmersedFlow::Impl final {
       if (!failure_two.ok)
         throw std::pair{failure_two.failing_rank,
                         StepFailureReason::non_finite_trial};
+      if (variable_density_adapter) {
+        const auto final =
+            material_adapter != nullptr
+                ? material_adapter->finalize_from_corrector_two_flux(state,
+                                                                      stencil)
+                : ideal_adapter->finalize_from_corrector_two_flux(state,
+                                                                   stencil);
+        if (material_failure != nullptr)
+          *material_failure = final.reason;
+        if (final.reason != MaterialTransportFailureReason::none)
+          throw std::pair{final.lowest_failing_rank,
+                          material_step_failure(final.reason)};
+        const auto final_report =
+            material_adapter != nullptr
+                ? material_adapter->take_final_report()
+                : ideal_adapter->take_final_report();
+        if (!final_report.has_value())
+          throw runtime::Error(
+              "immersed material final report is unavailable");
+        report.final_transport_normalized_l2 =
+            final_report->transport_normalized_l2();
+        report.final_transport_relative_conservation_defect =
+            final_report->transport_relative_conservation_defect();
+        report.final_mass_relative_conservation_defect =
+            final_report->mass_relative_conservation_defect();
+        if (accepted_material != nullptr)
+          *accepted_material = *final_report;
+        if (ideal_adapter != nullptr)
+          accepted_material_guard.output = nullptr;
+        if (ideal_adapter != nullptr) {
+          const auto closure_stage = ideal_adapter->evaluate(
+              state, detail::DensityClosureStage::final);
+          if (accepted_closure != nullptr)
+            *accepted_closure = ideal_adapter->take_closure_report();
+          if (!closure_stage.accepted) {
+            state.rollback_attempt();
+            attempt_active = false;
+            report.reason = StepFailureReason::density_closure_failure;
+            report.lowest_failing_rank =
+                closure_stage.lowest_failing_rank;
+            report.disposition =
+                closure_stage.recoverable
+                    ? StepAttemptDisposition::recoverable_failure
+                    : StepAttemptDisposition::non_retryable_failure;
+            report.suggested_dt_s = closure_stage.recoverable
+                                        ? 0.5 * stencil.dt_s
+                                        : stencil.dt_s;
+            return report;
+          }
+        }
+        halo->exchange(trial, fields.density);
+        for (const auto field : fields.transported_cell_fields)
+          halo->exchange(trial, field);
+        if (ideal_adapter != nullptr) {
+          ideal_adapter->after_halo(detail::DensityClosureStage::final);
+          const auto post =
+              ideal_adapter->assess_after_closure(state, stencil);
+          const auto post_report =
+              ideal_adapter->take_post_closure_report();
+          if (!post_report)
+            throw runtime::Error(
+                "immersed ideal-gas post-closure report is unavailable");
+          if (accepted_post_closure_material != nullptr)
+            *accepted_post_closure_material = *post_report;
+          report.final_transport_normalized_l2 =
+              post_report->transport_normalized_l2();
+          report.final_transport_relative_conservation_defect =
+              post_report->transport_relative_conservation_defect();
+          report.final_mass_relative_conservation_defect =
+              post_report->mass_relative_conservation_defect();
+          if (post.reason != MaterialTransportFailureReason::none)
+            throw std::pair{post.lowest_failing_rank,
+                            material_step_failure(post.reason)};
+        }
+      }
       const auto implicit_reference_trial =
           apply_implicit_viscous_reference(state, trial);
       const auto final_wall_gradients =
@@ -4657,9 +6049,22 @@ struct FixedStepImmersedFlow::Impl final {
                         StepFailureReason::final_momentum_residual};
       const auto failure_transport =
           injected_status(AttemptFailureStage::after_final_transport);
-      if (!failure_transport.ok)
+      if (!failure_transport.ok) {
+        if (ideal_adapter != nullptr) {
+          state.rollback_attempt();
+          attempt_active = false;
+          report.disposition =
+              StepAttemptDisposition::non_retryable_failure;
+          report.reason = StepFailureReason::invalid_input;
+          report.lowest_failing_rank = failure_transport.failing_rank;
+          report.suggested_dt_s = stencil.dt_s;
+          return report;
+        }
+        if (material_adapter != nullptr && material_failure != nullptr)
+          *material_failure = MaterialTransportFailureReason::non_finite_state;
         throw std::pair{failure_transport.failing_rank,
                         StepFailureReason::transport_failure};
+      }
 
       bool final_wall_ok = assess_final_wall_penetration(state, walls);
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -4685,35 +6090,89 @@ struct FixedStepImmersedFlow::Impl final {
           access, kStatePhase, kStateActor, fields.face_mass_flux);
       std::fill(attempt_continuity_divergence.begin(),
                 attempt_continuity_divergence.end(), 0.0);
+      std::vector<double> continuity_absolute;
+      if (variable_density_adapter)
+        continuity_absolute.assign(count, 0.0);
       for (mesh::LocalFaceId face = 0U; face < topology->local_face_count();
            ++face) {
         const double value = final_flux(face, 0);
         const auto owner_index =
             domain->active_cells().active_index(topology->owner(face));
-        if (owner_index.has_value() && *owner_index < count)
+        if (owner_index.has_value() && *owner_index < count) {
           attempt_continuity_divergence[*owner_index] += value;
+          if (variable_density_adapter)
+            continuity_absolute[*owner_index] += std::abs(value);
+        }
         const auto neighbour = topology->neighbour(face);
         if (!neighbour.has_value() || topology->periodic_pair(face).has_value())
           continue;
         const auto neighbour_index =
             domain->active_cells().active_index(*neighbour);
-        if (neighbour_index.has_value() && *neighbour_index < count)
+        if (neighbour_index.has_value() && *neighbour_index < count) {
           attempt_continuity_divergence[*neighbour_index] -= value;
+          if (variable_density_adapter)
+            continuity_absolute[*neighbour_index] += std::abs(value);
+        }
       }
-      double continuity_square = 0.0;
-      double volume_sum = 0.0;
-      for (std::size_t row = 0U; row < count; ++row) {
-        const auto cell = owned_active_cells[row];
-        const double volume = geometry->cell_volume_m3(cell);
-        const double normalized = attempt_continuity_divergence[row] / volume;
-        continuity_square += normalized * normalized * volume;
-        volume_sum += volume;
+      double continuity_parts[2]{};
+      if (variable_density_adapter) {
+        const auto rho_final = trial.acquire_read<double>(
+            access, kStatePhase, kStateActor, fields.density);
+        const auto rho_n = committed.acquire_read<double>(
+            access, kStatePhase, kStateActor, fields.density);
+        const auto rho_nm1 = history.acquire_read<double>(
+            access, kStatePhase, kStateActor, fields.density);
+        for (std::size_t row = 0U; row < count; ++row) {
+          const auto cell = owned_active_cells[row];
+          const auto index = field_index(cell);
+          const double volume = geometry->cell_volume_m3(cell);
+          const double temporal =
+              (stencil.alpha0 * rho_final(index.i, index.j, index.k, 0) +
+               stencil.alpha1 * rho_n(index.i, index.j, index.k, 0) +
+               stencil.alpha2 * rho_nm1(index.i, index.j, index.k, 0)) *
+              volume / stencil.dt_s;
+          const double raw =
+              temporal + attempt_continuity_divergence[row];
+          const double scale =
+              (std::abs(stencil.alpha0 *
+                        rho_final(index.i, index.j, index.k, 0)) +
+               std::abs(stencil.alpha1 *
+                        rho_n(index.i, index.j, index.k, 0)) +
+               std::abs(stencil.alpha2 *
+                        rho_nm1(index.i, index.j, index.k, 0))) *
+                  volume / stencil.dt_s +
+              continuity_absolute[row];
+          if (!std::isfinite(raw) || !std::isfinite(scale))
+            throw runtime::Error(
+                "immersed material final continuity authority is invalid");
+          continuity_parts[0] += raw * raw;
+          continuity_parts[1] += scale * scale;
+        }
+      } else {
+        for (std::size_t row = 0U; row < count; ++row) {
+          const auto cell = owned_active_cells[row];
+          const double volume = geometry->cell_volume_m3(cell);
+          const double normalized =
+              attempt_continuity_divergence[row] / volume;
+          continuity_parts[0] += normalized * normalized * volume;
+          continuity_parts[1] += volume;
+        }
       }
-      double continuity_parts[2]{continuity_square, volume_sum};
       mpi->allreduce_fp64_in_place(continuity_parts, 2U,
                                    runtime::Fp64ReductionOperation::sum);
-      report.final_continuity_normalized_l2 =
-          std::sqrt(continuity_parts[0] / continuity_parts[1]);
+      if (variable_density_adapter) {
+        const double numerator = std::sqrt(continuity_parts[0]);
+        const double denominator = std::sqrt(continuity_parts[1]);
+        report.final_continuity_normalized_l2 =
+            denominator == 0.0
+                ? (numerator == 0.0
+                       ? 0.0
+                       : std::numeric_limits<double>::infinity())
+                : numerator / denominator;
+      } else {
+        report.final_continuity_normalized_l2 =
+            std::sqrt(continuity_parts[0] / continuity_parts[1]);
+      }
       report.final_pressure_residual_l2 = second.independent_residual_l2;
       const auto forced_continuity =
           injected_status(AttemptFailureStage::final_continuity_residual);
@@ -4735,6 +6194,8 @@ struct FixedStepImmersedFlow::Impl final {
       if (report.final_pressure_residual_l2 > final_pressure_limit)
         throw std::pair{0, StepFailureReason::final_pressure_residual};
       const auto metadata = state.metadata();
+      if (ideal_adapter != nullptr && boundaries->open_domain())
+        ideal_adapter->before_outlet(state);
       const auto backflow = boundaries->assess_final_pressure_outlet_flux(
           *topology, *mpi, final_flux, metadata.step + 1U,
           metadata.time_s + stencil.dt_s);
@@ -4748,16 +6209,18 @@ struct FixedStepImmersedFlow::Impl final {
       if (wall_force_integrator.has_value()) {
         auto force = collect_final_force(state, physics.dynamic_viscosity_pa_s,
                                          final_wall_gradients);
-        if (!force.first.has_value())
-          throw std::pair{force.second,
+        if (!force.report.has_value() || !force.sample.has_value())
+          throw std::pair{force.failing_rank,
                           StepFailureReason::final_conservation_defect};
         const auto forced_force =
             injected_status(AttemptFailureStage::final_force_reconstruction);
         if (!forced_force.ok)
           throw std::pair{forced_force.failing_rank,
                           StepFailureReason::final_conservation_defect};
+        pending_diagnostic_wall_force_sample = *force.sample;
+        pending_diagnostic_local_flow_pattern = immersed_operator->report();
         if (accepted_force != nullptr)
-          *accepted_force = std::move(*force.first);
+          *accepted_force = std::move(*force.report);
       }
       bool local_commit_preparation_ok = true;
       try {
@@ -4772,9 +6235,33 @@ struct FixedStepImmersedFlow::Impl final {
             throw runtime::Error(
                 "immersed-flow final pressure authority ordering is invalid");
         }
-        state.prepare_commit_attempt(
-            {metadata.step + 1U, metadata.time_s + stencil.dt_s, stencil.dt_s,
-             metadata.dt_s, stencil.order});
+        if (active_wale_authority != nullptr &&
+            pending_wale_evaluation_count !=
+                active_wale_authority->evaluation_count())
+          throw runtime::Error(
+              "immersed-flow WALE evaluation count lost attempt authority");
+        const AcceptedStepMetadata accepted_metadata{
+            metadata.step + 1U, metadata.time_s + stencil.dt_s, stencil.dt_s,
+            metadata.dt_s, stencil.order};
+        if (material_adapter != nullptr) {
+          material_adapter->prepare_commit();
+          state.prepare_commit_attempt(accepted_metadata);
+        } else if (ideal_adapter != nullptr) {
+          const int before_prepare_rank =
+              ideal_adapter->before_prepare(state, accepted_metadata);
+          if (before_prepare_rank >= 0 &&
+              mpi->rank() == before_prepare_rank)
+            throw runtime::Error(
+                "immersed ideal-gas pre-commit hook failed");
+          state.prepare_commit_attempt(accepted_metadata);
+          const int closure_prepare_rank = ideal_adapter->prepare_commit();
+          if (closure_prepare_rank >= 0 &&
+              mpi->rank() == closure_prepare_rank)
+            throw runtime::Error(
+                "immersed ideal-gas closure preparation failed");
+        } else {
+          state.prepare_commit_attempt(accepted_metadata);
+        }
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
         if (injected_failure_stage.load(std::memory_order_relaxed) ==
             AttemptFailureStage::before_commit) {
@@ -4798,18 +6285,35 @@ struct FixedStepImmersedFlow::Impl final {
       if (!commit_preparation_status.ok) {
         state.rollback_attempt();
         attempt_active = false;
+        report.final_continuity_normalized_l2 = 0.0;
+        report.final_pressure_residual_l2 = 0.0;
+        if (material_adapter != nullptr) {
+          report.final_momentum_normalized_l2.fill(0.0);
+          report.final_momentum_relative_conservation_defect.fill(0.0);
+        }
         report.disposition = StepAttemptDisposition::non_retryable_failure;
         report.reason = StepFailureReason::invalid_input;
         report.lowest_failing_rank =
             commit_preparation_status.failing_rank;
-        report.suggested_dt_s = 0.0;
+        report.suggested_dt_s = stencil.dt_s;
         return report;
       }
       for (std::size_t index = 0U; index < final_wall_gradients.size();
            ++index)
         pending_pressure_wall_gradients[index].value =
             final_wall_gradients[index].value;
+      // The collective-ready boundary is above.  Everything below is a
+      // no-throw publication of already prepared storage or scalar authority.
       state.publish_commit_attempt();
+      if (material_adapter != nullptr) {
+        material_adapter->publish();
+        density_adapter_guard.material = nullptr;
+        accepted_material_guard.output = nullptr;
+      } else if (ideal_adapter != nullptr) {
+        ideal_adapter->publish();
+        density_adapter_guard.ideal = nullptr;
+        accepted_material_guard.output = nullptr;
+      }
       static_assert(noexcept(history_pressure_wall_gradients.swap(
           committed_pressure_wall_gradients)));
       static_assert(noexcept(committed_pressure_wall_gradients.swap(
@@ -4835,6 +6339,26 @@ struct FixedStepImmersedFlow::Impl final {
       committed_final_momentum_pressure_residual_step = metadata.step + 1U;
 #endif
       committed_exact_predictor_work = pending_exact_predictor_work;
+      if (active_wale_authority != nullptr) {
+        last_wale_evaluation_count = pending_wale_evaluation_count;
+        last_wale_coefficient_identity =
+            active_wale_authority->summary().identity;
+        last_wall_effective_viscosity_fingerprint =
+            pending_wall_effective_viscosity_fingerprint == 0U
+                ? active_wale_authority
+                      ->wall_effective_viscosity_fingerprint()
+                : pending_wall_effective_viscosity_fingerprint;
+        if (accepted_wale != nullptr)
+          *accepted_wale = active_wale_authority->summary();
+      }
+      static_assert(std::is_nothrow_copy_assignable_v<
+                    std::optional<immersed::WallForceSample>>);
+      committed_diagnostic_wall_force_sample =
+          pending_diagnostic_wall_force_sample;
+      static_assert(std::is_nothrow_copy_assignable_v<std::optional<
+                    finite_volume::ImmersedOperatorReport>>);
+      committed_diagnostic_local_flow_pattern =
+          pending_diagnostic_local_flow_pattern;
       attempt_active = false;
       report.disposition = StepAttemptDisposition::committed;
       report.reason = StepFailureReason::none;
@@ -4852,6 +6376,8 @@ struct FixedStepImmersedFlow::Impl final {
     } catch (const runtime::detail::MpiOperationError &) {
       if (attempt_active)
         state.rollback_attempt();
+      if (variable_density_adapter)
+        throw;
       report.disposition = StepAttemptDisposition::non_retryable_failure;
       report.reason = StepFailureReason::collective_operation;
       report.lowest_failing_rank = -1;
@@ -4860,6 +6386,8 @@ struct FixedStepImmersedFlow::Impl final {
       static_cast<void>(error);
       if (attempt_active)
         state.rollback_attempt();
+      if (variable_density_adapter)
+        throw;
       report.disposition = StepAttemptDisposition::non_retryable_failure;
       report.reason = StepFailureReason::invalid_input;
       report.lowest_failing_rank = -1;
@@ -4867,6 +6395,8 @@ struct FixedStepImmersedFlow::Impl final {
     } catch (...) {
       if (attempt_active)
         state.rollback_attempt();
+      if (variable_density_adapter)
+        throw;
       report.disposition = StepAttemptDisposition::non_retryable_failure;
       report.reason = StepFailureReason::invalid_input;
       report.lowest_failing_rank = -1;
@@ -4917,6 +6447,8 @@ struct FixedStepImmersedFlow::Impl final {
   const immersed::WallQuadraturePlan *wall_quadrature{};
   const immersed::LocalFlowPatternTransform *transform{};
   const les::WaleModel *wale{};
+  ImmersedFlowDensitySetup density_setup;
+  detail::ImmersedDensityAdapter density_adapter;
   const mesh::MeshTopology *topology{};
   const mesh::MeshGeometry *geometry{};
   const boundary::BoundaryRegistry *boundaries{};
@@ -4927,7 +6459,10 @@ struct FixedStepImmersedFlow::Impl final {
   std::array<linear::Preconditioner *, 3> momentum_preconditioners{};
   linear::Preconditioner *pressure_preconditioner{};
   std::uint64_t geometry_fingerprint{};
+  mutable diagnostics::Stage3PerformanceCounters performance;
   std::optional<FixedStepConstantDensityFlow> body_fitted;
+  std::optional<FixedStepMaterialDensityFlow> body_fitted_material;
+  std::optional<detail::DensityClosureHooks> body_fitted_closure_hooks;
   std::optional<finite_volume::CellCenteredFvmOperators> physical_boundary_fvm;
   std::optional<finite_volume::ImmersedReconstruction> reconstruction;
   std::optional<immersed::WallForceIntegrator> wall_force_integrator;
@@ -4960,6 +6495,27 @@ struct FixedStepImmersedFlow::Impl final {
   std::uint64_t pressure_revision{};
   std::uint64_t pressure_dependency_identity{};
   std::uint32_t last_corrector_count{};
+  const detail::ImmersedWaleAttemptAuthority *active_wale_authority{};
+  std::uint64_t pending_wale_evaluation_count{};
+  mutable std::uint64_t pending_wall_effective_viscosity_fingerprint{};
+  std::uint64_t last_wale_evaluation_count{};
+  les::WaleCoefficientIdentity last_wale_coefficient_identity{};
+  std::uint64_t last_wall_effective_viscosity_fingerprint{};
+  const FlowState *last_diagnostic_state{};
+  std::uint64_t last_diagnostic_state_identity{};
+  std::uint64_t last_diagnostic_report_seal{};
+  std::uint64_t diagnostic_attempt_generation{};
+  double last_diagnostic_rho_ref_kg_per_m3{};
+  config::DensityModel last_diagnostic_density_model{
+      config::DensityModel::constant};
+  std::optional<immersed::WallForceSample>
+      pending_diagnostic_wall_force_sample;
+  std::optional<immersed::WallForceSample>
+      committed_diagnostic_wall_force_sample;
+  std::optional<finite_volume::ImmersedOperatorReport>
+      pending_diagnostic_local_flow_pattern;
+  std::optional<finite_volume::ImmersedOperatorReport>
+      committed_diagnostic_local_flow_pattern;
   std::vector<finite_volume::detail::ImmersedWallNormalGradient>
       history_pressure_wall_gradients;
   std::vector<finite_volume::detail::ImmersedWallNormalGradient>
@@ -5014,9 +6570,32 @@ FixedStepImmersedFlow FixedStepImmersedFlow::create(
     std::array<linear::Preconditioner *, 3> momentum_preconditioners,
     const linear::LinearSolver &pressure_solver,
     linear::Preconditioner &pressure_preconditioner) {
+  return create(decomposition, topology, geometry, boundaries, domain,
+                ghost_plan, wall_quadrature, transform, wale,
+                ImmersedFlowDensitySetup{}, mpi, execution_context, halo,
+                momentum_solver, momentum_preconditioners, pressure_solver,
+                pressure_preconditioner);
+}
+
+FixedStepImmersedFlow FixedStepImmersedFlow::create(
+    const runtime::StructuredDecomposition &decomposition,
+    const mesh::MeshTopology &topology, const mesh::MeshGeometry &geometry,
+    const boundary::BoundaryRegistry &boundaries,
+    const immersed::ImmersedDomain *domain,
+    const immersed::GhostStencilPlan *ghost_plan,
+    const immersed::WallQuadraturePlan *wall_quadrature,
+    const immersed::LocalFlowPatternTransform *transform,
+    const les::WaleModel *wale, ImmersedFlowDensitySetup density_setup,
+    const runtime::MpiContext &mpi,
+    execution::ExecutionContext &execution_context, runtime::HaloExchange &halo,
+    const linear::LinearSolver &momentum_solver,
+    std::array<linear::Preconditioner *, 3> momentum_preconditioners,
+    const linear::LinearSolver &pressure_solver,
+    linear::Preconditioner &pressure_preconditioner) {
   return FixedStepImmersedFlow(std::make_unique<Impl>(
       decomposition, topology, geometry, boundaries, domain, ghost_plan,
-      wall_quadrature, transform, wale, mpi, execution_context, halo,
+      wall_quadrature, transform, wale, std::move(density_setup), mpi,
+      execution_context, halo,
       momentum_solver, momentum_preconditioners, pressure_solver,
       pressure_preconditioner));
 }
@@ -5026,6 +6605,132 @@ FixedStepImmersedFlow::FixedStepImmersedFlow(std::unique_ptr<Impl> impl) noexcep
 FixedStepImmersedFlow::~FixedStepImmersedFlow() noexcept = default;
 FixedStepImmersedFlow::FixedStepImmersedFlow(FixedStepImmersedFlow &&) noexcept =
     default;
+
+struct detail::ImmersedFlowCheckpointPreparedRestore::Impl final {
+  std::vector<finite_volume::detail::ImmersedWallNormalGradient> history;
+  std::vector<finite_volume::detail::ImmersedWallNormalGradient> committed;
+  std::vector<finite_volume::detail::ImmersedWallNormalGradient> pending;
+  bool history_available{};
+  bool committed_available{};
+};
+
+detail::ImmersedFlowCheckpointPreparedRestore::
+    ImmersedFlowCheckpointPreparedRestore(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+detail::ImmersedFlowCheckpointPreparedRestore::
+    ~ImmersedFlowCheckpointPreparedRestore() noexcept = default;
+detail::ImmersedFlowCheckpointPreparedRestore::
+    ImmersedFlowCheckpointPreparedRestore(
+        ImmersedFlowCheckpointPreparedRestore &&) noexcept = default;
+
+detail::CheckpointV3RankAuthority detail::ImmersedFlowCheckpointAccess::snapshot(
+    const FixedStepImmersedFlow &flow, std::int32_t rank,
+    runtime::Box3 owned_box) {
+  if (!flow.impl_ || !flow.impl_->domain) {
+    throw runtime::Error("immersed-flow checkpoint source is unavailable");
+  }
+  const auto encode = [](bool available, const auto &gradients) {
+    std::vector<detail::CheckpointV3AuthorityGradient> result;
+    if (!available) {
+      return result;
+    }
+    result.reserve(gradients.size());
+    for (const auto &gradient : gradients) {
+      result.push_back({gradient.link, gradient.value});
+    }
+    return result;
+  };
+  return {rank,
+          owned_box,
+          {},
+          {},
+          0U,
+          0U,
+          0U,
+          flow.impl_->history_pressure_authority_available,
+          flow.impl_->committed_pressure_authority_available,
+          encode(flow.impl_->history_pressure_authority_available,
+                 flow.impl_->history_pressure_wall_gradients),
+          encode(flow.impl_->committed_pressure_authority_available,
+                 flow.impl_->committed_pressure_wall_gradients)};
+}
+
+detail::ImmersedFlowCheckpointPreparedRestore
+detail::ImmersedFlowCheckpointAccess::prepare_restore(
+    const FixedStepImmersedFlow &flow,
+    const CheckpointV3RankAuthority &authority) {
+  if (!flow.impl_ || !flow.impl_->domain) {
+    throw runtime::Error("immersed-flow checkpoint target is unavailable");
+  }
+  const auto &links = flow.impl_->wall_links;
+  const auto validate = [&links](bool available, const auto &rows) {
+    if (!available) {
+      return rows.empty();
+    }
+    if (rows.size() != links.size()) {
+      return false;
+    }
+    for (std::size_t index = 0U; index < links.size(); ++index) {
+      if (rows[index].link != links[index].link.id ||
+          !std::isfinite(rows[index].value)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!validate(authority.history_available, authority.history) ||
+      !validate(authority.committed_available, authority.committed)) {
+    throw runtime::Error(
+        "immersed-flow checkpoint authority layout is incompatible");
+  }
+  auto prepared = std::make_unique<ImmersedFlowCheckpointPreparedRestore::Impl>();
+  const auto materialize = [&links](bool available, const auto &rows) {
+    std::vector<finite_volume::detail::ImmersedWallNormalGradient> result;
+    result.reserve(links.size());
+    for (std::size_t index = 0U; index < links.size(); ++index) {
+      result.push_back(
+          {links[index].link.id, available ? rows[index].value : 0.0});
+    }
+    return result;
+  };
+  prepared->history = materialize(authority.history_available, authority.history);
+  prepared->committed =
+      materialize(authority.committed_available, authority.committed);
+  prepared->pending = materialize(false, authority.history);
+  prepared->history_available = authority.history_available;
+  prepared->committed_available = authority.committed_available;
+  return ImmersedFlowCheckpointPreparedRestore(std::move(prepared));
+}
+
+void detail::ImmersedFlowCheckpointAccess::publish_restore(
+    FixedStepImmersedFlow &flow,
+    ImmersedFlowCheckpointPreparedRestore &&prepared,
+    const FlowState &state) noexcept {
+  if (!flow.impl_ || !prepared.impl_) {
+    return;
+  }
+  static_assert(noexcept(flow.impl_->history_pressure_wall_gradients.swap(
+      prepared.impl_->history)));
+  flow.impl_->history_pressure_wall_gradients.swap(prepared.impl_->history);
+  flow.impl_->committed_pressure_wall_gradients.swap(
+      prepared.impl_->committed);
+  flow.impl_->pending_pressure_wall_gradients.swap(prepared.impl_->pending);
+  flow.impl_->history_pressure_authority_available =
+      prepared.impl_->history_available;
+  flow.impl_->committed_pressure_authority_available =
+      prepared.impl_->committed_available;
+  flow.impl_->pressure_revision = 0U;
+  flow.impl_->pressure_dependency_identity = 0U;
+  flow.impl_->last_diagnostic_state = nullptr;
+  flow.impl_->last_diagnostic_state_identity = 0U;
+  flow.impl_->last_diagnostic_report_seal = 0U;
+  flow.impl_->pending_diagnostic_wall_force_sample.reset();
+  flow.impl_->committed_diagnostic_wall_force_sample.reset();
+  flow.impl_->pending_diagnostic_local_flow_pattern.reset();
+  flow.impl_->committed_diagnostic_local_flow_pattern.reset();
+  ++flow.impl_->diagnostic_attempt_generation;
+  flow.impl_->refresh_pressure_authority_binding(state);
+}
 
 ImmersedFlowStepAttemptReport FixedStepImmersedFlow::attempt(
     FlowState &state, const ImmersedFlowPhysics &physics,
@@ -5040,11 +6745,54 @@ ImmersedFlowStepAttemptReport FixedStepImmersedFlow::attempt(
     result.base = failure;
     return result;
   }
-  const bool local_supported =
-      physics.density_model == config::DensityModel::constant &&
+  if (impl_->domain != nullptr) {
+    impl_->last_diagnostic_state = nullptr;
+    impl_->last_diagnostic_state_identity = 0U;
+    impl_->last_diagnostic_report_seal = 0U;
+    impl_->pending_diagnostic_wall_force_sample.reset();
+    impl_->committed_diagnostic_wall_force_sample.reset();
+    impl_->pending_diagnostic_local_flow_pattern.reset();
+    impl_->committed_diagnostic_local_flow_pattern.reset();
+    ++impl_->diagnostic_attempt_generation;
+  }
+  const auto record_diagnostic_attempt = [&](const auto &attempt_report) {
+    if (impl_->domain == nullptr)
+      return;
+    impl_->last_diagnostic_state = &state;
+    impl_->last_diagnostic_state_identity =
+        state.diagnostic_mutation_identity();
+    impl_->last_diagnostic_report_seal =
+        diagnostic_snapshot_seal(
+            attempt_report, physics.density_model,
+            impl_->committed_diagnostic_wall_force_sample,
+            impl_->committed_diagnostic_local_flow_pattern);
+    impl_->last_diagnostic_rho_ref_kg_per_m3 = physics.rho_ref_kg_per_m3;
+    impl_->last_diagnostic_density_model = physics.density_model;
+  };
+  const bool ordinary_density =
+      (physics.density_model == config::DensityModel::constant ||
+       physics.density_model == config::DensityModel::material) &&
       !physics.cp_J_per_kg_K.has_value() &&
       !physics.gas_constant_J_per_kg_K.has_value() &&
-      !physics.thermodynamic_pressure_pa.has_value() && impl_->wale == nullptr;
+      !physics.thermodynamic_pressure_pa.has_value();
+  const bool ideal_density =
+      physics.density_model == config::DensityModel::ideal_gas &&
+      impl_->density_setup.ideal_gas_closure != nullptr &&
+      physics.cp_J_per_kg_K.has_value() &&
+      physics.gas_constant_J_per_kg_K.has_value() &&
+      physics.thermodynamic_pressure_pa.has_value() &&
+      fp64_bits(*physics.cp_J_per_kg_K) ==
+          fp64_bits(detail::DensityClosureAdapter::cp_J_per_kg_K(
+              *impl_->density_setup.ideal_gas_closure)) &&
+      fp64_bits(*physics.gas_constant_J_per_kg_K) ==
+          fp64_bits(detail::DensityClosureAdapter::gas_constant_J_per_kg_K(
+              *impl_->density_setup.ideal_gas_closure)) &&
+      fp64_bits(*physics.thermodynamic_pressure_pa) ==
+          fp64_bits(detail::DensityClosureAdapter::configured_pressure_pa(
+              *impl_->density_setup.ideal_gas_closure));
+  const bool local_supported =
+      physics.density_model == impl_->density_setup.model &&
+      (ordinary_density || ideal_density);
   runtime::CollectiveStatus supported{};
   try {
     supported = runtime::collective_status(
@@ -5056,6 +6804,7 @@ ImmersedFlowStepAttemptReport FixedStepImmersedFlow::attempt(
     failure.reason = StepFailureReason::collective_operation;
     failure.lowest_failing_rank = -1;
     result.base = failure;
+    record_diagnostic_attempt(result);
     return result;
   }
   if (!supported.ok) {
@@ -5064,15 +6813,152 @@ ImmersedFlowStepAttemptReport FixedStepImmersedFlow::attempt(
     failure.reason = StepFailureReason::invalid_input;
     failure.lowest_failing_rank = supported.failing_rank;
     result.base = failure;
+    record_diagnostic_attempt(result);
     return result;
   }
   if (impl_->domain != nullptr) {
-    result.base =
-        impl_->attempt_immersed(state, physics, stencil, momentum_control,
-                                pressure_control, &result.force);
-    if (std::get<StepAttemptReport>(result.base).disposition !=
-        StepAttemptDisposition::committed)
+    std::optional<MaterialDensityTransportReport> material_report;
+    std::optional<MaterialDensityTransportReport> post_closure_report;
+    std::optional<IdealGasClosureReport> closure_report;
+    MaterialTransportFailureReason material_failure{
+        MaterialTransportFailureReason::none};
+    std::uint64_t material_attempt_identity{};
+    auto report = impl_->attempt_immersed(
+        state, physics, stencil, momentum_control, pressure_control,
+        &result.force, &result.wale, &material_report,
+        &post_closure_report, &closure_report, &material_failure,
+        &material_attempt_identity);
+    diagnostics::Stage3PerformanceCounters increment;
+    const auto operator_work = impl_->immersed_operator->report();
+    increment.step_ghost_constraints =
+        operator_work.algebraic_occurrence_count;
+    increment.step_lfp_transforms = operator_work.replacement_group_count;
+    increment.step_immersed_rows = operator_work.algebraic_occurrence_count;
+    if (report.pressure_corrector_count != 0U) {
+      if (impl_->wall_links.size() >
+          std::numeric_limits<std::uint64_t>::max() /
+              report.pressure_corrector_count)
+        throw runtime::Error(
+            "immersed pressure wall work counter would overflow");
+      increment.step_pressure_wall_constraints =
+          static_cast<std::uint64_t>(impl_->wall_links.size()) *
+          report.pressure_corrector_count;
+    }
+    if (result.force.has_value()) {
+      increment.step_wall_quadrature_evaluations =
+          impl_->wall_quadrature->local_points().size();
+      increment.step_force_reductions = 3U;
+    }
+    const auto add_work = [](std::uint64_t &target, std::uint64_t value) {
+      if (value > std::numeric_limits<std::uint64_t>::max() - target)
+        throw runtime::Error(
+            "immersed-flow performance counter would overflow");
+      target += value;
+    };
+    add_work(impl_->performance.step_ghost_constraints,
+             increment.step_ghost_constraints);
+    add_work(impl_->performance.step_lfp_transforms,
+             increment.step_lfp_transforms);
+    add_work(impl_->performance.step_immersed_rows,
+             increment.step_immersed_rows);
+    add_work(impl_->performance.step_pressure_wall_constraints,
+             increment.step_pressure_wall_constraints);
+    add_work(impl_->performance.step_wall_quadrature_evaluations,
+             increment.step_wall_quadrature_evaluations);
+    add_work(impl_->performance.step_force_reductions,
+             increment.step_force_reductions);
+    if (impl_->density_setup.model == config::DensityModel::material) {
+      const auto *adapter =
+          std::get_if<detail::ImmersedMaterialDensityAdapter>(
+              &impl_->density_adapter);
+      if (adapter == nullptr)
+        throw runtime::Error("immersed material adapter is unavailable");
+      result.base = detail::DensityClosureBridge::make_material_report(
+          std::move(report), std::move(material_report), material_failure,
+          adapter->material_field_count(),
+          adapter->shared_face_mass_flux_field(), material_attempt_identity);
+    } else if (impl_->density_setup.model ==
+               config::DensityModel::ideal_gas) {
+      const auto *adapter =
+          std::get_if<detail::ImmersedIdealGasDensityAdapter>(
+              &impl_->density_adapter);
+      if (adapter == nullptr)
+        throw runtime::Error("immersed ideal-gas adapter is unavailable");
+      auto material =
+          detail::DensityClosureBridge::make_material_closure_report(
+              std::move(report), std::move(material_report),
+              std::move(post_closure_report), material_failure,
+              adapter->material_field_count(),
+              adapter->shared_face_mass_flux_field(),
+              material_attempt_identity);
+      result.base = detail::DensityClosureAdapter::make_ideal_report(
+          std::move(material), std::move(closure_report),
+          material_attempt_identity);
+    } else {
+      result.base = std::move(report);
+    }
+    const auto committed = std::visit(
+        [](const auto &base) {
+          using Base = std::decay_t<decltype(base)>;
+          if constexpr (std::is_same_v<Base, StepAttemptReport>)
+            return base.disposition == StepAttemptDisposition::committed;
+          else if constexpr (
+              std::is_same_v<Base, MaterialDensityStepAttemptReport>)
+            return base.flow().disposition ==
+                   StepAttemptDisposition::committed;
+          else
+            return base.flow().flow().disposition ==
+                   StepAttemptDisposition::committed;
+        },
+        result.base);
+    if (!committed) {
       result.force.reset();
+      result.wale.reset();
+    }
+    record_diagnostic_attempt(result);
+    return result;
+  }
+  if (impl_->density_setup.model != config::DensityModel::constant) {
+    if (!impl_->body_fitted_material.has_value()) {
+      StepAttemptReport failure{};
+      failure.disposition = StepAttemptDisposition::non_retryable_failure;
+      failure.reason = StepFailureReason::invalid_input;
+      result.base = failure;
+      return result;
+    }
+    impl_->last_wale_evaluation_count = 0U;
+    impl_->last_wale_coefficient_identity = {};
+    les::WaleSummary wale_summary;
+    auto report = detail::DensityClosureBridge::attempt_with_optional_wale(
+        *impl_->body_fitted_material, state,
+        physics.dynamic_viscosity_pa_s, stencil, momentum_control,
+        pressure_control,
+        impl_->density_setup.model == config::DensityModel::ideal_gas
+            ? &*impl_->body_fitted_closure_hooks
+            : nullptr,
+        impl_->wale,
+        impl_->wale == nullptr ? nullptr : &wale_summary);
+    impl_->last_wale_evaluation_count =
+        detail::DensityClosureBridge::wale_evaluation_count(
+            *impl_->body_fitted_material);
+    impl_->last_corrector_count = report.flow().pressure_corrector_count;
+    if (report.flow().disposition == StepAttemptDisposition::committed &&
+        impl_->wale != nullptr) {
+      result.wale = wale_summary;
+      impl_->last_wale_coefficient_identity = wale_summary.identity;
+    }
+    if (impl_->density_setup.model == config::DensityModel::ideal_gas) {
+      const auto attempt_identity = report.attempt_identity();
+      std::optional<IdealGasClosureReport> closure_report;
+      auto latest = detail::DensityClosureAdapter::latest_report(
+          *impl_->density_setup.ideal_gas_closure);
+      if (latest.attempt_identity() == attempt_identity)
+        closure_report = std::move(latest);
+      result.base = detail::DensityClosureAdapter::make_ideal_report(
+          std::move(report), std::move(closure_report), attempt_identity);
+    } else {
+      result.base = std::move(report);
+    }
     return result;
   }
   if (!impl_->body_fitted.has_value()) {
@@ -5082,12 +6968,258 @@ ImmersedFlowStepAttemptReport FixedStepImmersedFlow::attempt(
     result.base = failure;
     return result;
   }
-  StepAttemptReport report = impl_->body_fitted->attempt(
-      state, physics.rho_ref_kg_per_m3, physics.dynamic_viscosity_pa_s, stencil,
-      momentum_control, pressure_control);
+  impl_->last_wale_evaluation_count = 0U;
+  impl_->last_wale_coefficient_identity = {};
+  StepAttemptReport report;
+  if (impl_->wale == nullptr) {
+    report = impl_->body_fitted->attempt(
+        state, physics.rho_ref_kg_per_m3, physics.dynamic_viscosity_pa_s,
+        stencil, momentum_control, pressure_control);
+  } else {
+    les::WaleSummary wale_summary;
+    report = impl_->body_fitted->attempt_with_wale(
+        state, physics.rho_ref_kg_per_m3, physics.dynamic_viscosity_pa_s,
+        stencil, momentum_control, pressure_control, *impl_->wale,
+        wale_summary);
+    if (report.disposition == StepAttemptDisposition::committed) {
+      result.wale = wale_summary;
+      impl_->last_wale_evaluation_count = 1U;
+      impl_->last_wale_coefficient_identity = wale_summary.identity;
+    }
+  }
   impl_->last_corrector_count = report.pressure_corrector_count;
   result.base = std::move(report);
   return result;
+}
+
+ImmersedFlowDiagnosticSource
+FixedStepImmersedFlow::diagnostic_source(
+    const FlowState &state,
+    const ImmersedFlowStepAttemptReport &report) const {
+  if (!impl_ || !impl_->domain || !impl_->ghost_plan ||
+      impl_->last_diagnostic_state != &state || state.attempt_active() ||
+      state.diagnostic_mutation_identity() == 0U ||
+      state.diagnostic_mutation_identity() !=
+          impl_->last_diagnostic_state_identity ||
+      diagnostic_snapshot_seal(
+          report, impl_->last_diagnostic_density_model,
+          impl_->committed_diagnostic_wall_force_sample,
+          impl_->committed_diagnostic_local_flow_pattern) == 0U ||
+      diagnostic_snapshot_seal(
+          report, impl_->last_diagnostic_density_model,
+          impl_->committed_diagnostic_wall_force_sample,
+          impl_->committed_diagnostic_local_flow_pattern) !=
+          impl_->last_diagnostic_report_seal) {
+    throw runtime::Error("immersed-flow diagnostic source is stale");
+  }
+  ImmersedFlowDiagnosticSource source;
+  source.attempt_generation_ = &impl_->diagnostic_attempt_generation;
+  source.expected_attempt_generation_ = impl_->diagnostic_attempt_generation;
+  source.report_ = report;
+  source.rank_ = impl_->mpi->rank();
+  source.step_ = state.metadata().step;
+  source.time_s_ = state.metadata().time_s;
+
+  const auto &access = state.solver_access_plan();
+  const auto &committed = state.layer(FlowLayer::committed);
+  const auto flux = committed.acquire_face_read<double>(
+      access, kStatePhase, kStateActor, state.fields().face_mass_flux);
+  double penetration_sum = 0.0;
+  for (const auto &wall : impl_->wall_links) {
+    const double denominator =
+        impl_->last_diagnostic_rho_ref_kg_per_m3 * wall.effective_measure_m2;
+    if (!(denominator > 0.0) || !std::isfinite(denominator)) {
+      source.maximum_wall_penetration_m_per_s_ =
+          std::numeric_limits<double>::quiet_NaN();
+      source.mean_wall_penetration_m_per_s_ =
+          std::numeric_limits<double>::quiet_NaN();
+      break;
+    }
+    const double penetration = std::abs(flux(wall.face, 0) / denominator);
+    if (!std::isfinite(penetration)) {
+      source.maximum_wall_penetration_m_per_s_ =
+          std::numeric_limits<double>::quiet_NaN();
+      source.mean_wall_penetration_m_per_s_ =
+          std::numeric_limits<double>::quiet_NaN();
+      break;
+    }
+    source.maximum_wall_penetration_m_per_s_ =
+        std::max(source.maximum_wall_penetration_m_per_s_, penetration);
+    penetration_sum += penetration;
+  }
+  if (!impl_->wall_links.empty() &&
+      std::isfinite(source.maximum_wall_penetration_m_per_s_))
+    source.mean_wall_penetration_m_per_s_ =
+        penetration_sum / static_cast<double>(impl_->wall_links.size());
+  source.classified_cell_count_ = impl_->topology->owned_cell_count();
+  source.active_cell_count_ = impl_->domain->active_cells().owned_active_count();
+  source.immersed_link_count_ = impl_->wall_links.size();
+  for (const auto &wall : impl_->wall_links) {
+    source.donor_reference_count_ +=
+        impl_->ghost_plan->velocity_constraint(wall.link.id, 0U).donors.size();
+    source.donor_reference_count_ +=
+        impl_->ghost_plan->zero_normal_constraint(wall.link.id).donors.size();
+    source.donor_reference_count_ +=
+        impl_->ghost_plan->density_extrapolation(wall.link.id).donors.size();
+  }
+  source.wall_quadrature_point_count_ =
+      impl_->wall_quadrature == nullptr
+          ? 0U
+          : impl_->wall_quadrature->local_points().size();
+  source.density_model_ = impl_->last_diagnostic_density_model;
+  source.wall_force_available_ =
+      impl_->committed_diagnostic_wall_force_sample.has_value() &&
+      report.force.has_value();
+  if (source.wall_force_available_)
+    source.wall_force_sample_ = *impl_->committed_diagnostic_wall_force_sample;
+  source.local_flow_pattern_available_ =
+      impl_->committed_diagnostic_local_flow_pattern.has_value();
+  if (source.local_flow_pattern_available_) {
+    const auto &snapshot = *impl_->committed_diagnostic_local_flow_pattern;
+    source.local_flow_pattern_algorithm_fingerprint_ =
+        impl_->transform->algorithm_fingerprint();
+    source.local_flow_pattern_row_fingerprint_ = snapshot.row_fingerprint;
+    source.local_flow_pattern_replacement_group_count_ =
+        snapshot.replacement_group_count;
+    source.local_flow_pattern_algebraic_occurrence_count_ =
+        snapshot.algebraic_occurrence_count;
+    source.local_flow_pattern_replacement_coefficient_l2_ =
+        snapshot.replacement_coefficient_l2;
+    source.local_flow_pattern_limiting_case_status_ =
+        snapshot.limiting_case_status;
+  }
+  source.snapshot_seal_ = impl_->last_diagnostic_report_seal;
+  source.reduction_counters_ = impl_->mpi->fp64_reduction_counters();
+  source.halo_counters_ = impl_->halo->performance_counters();
+  source.allocation_counters_ = execution::allocation_counters();
+  return source;
+}
+
+diagnostics::Stage3PerformanceCounters
+FixedStepImmersedFlow::performance_counters() const noexcept {
+  return impl_ ? impl_->performance
+               : diagnostics::Stage3PerformanceCounters{};
+}
+
+void ImmersedFlowDiagnosticSource::validate() const {
+  if (attempt_generation_ == nullptr ||
+      *attempt_generation_ != expected_attempt_generation_)
+    throw runtime::Error("immersed-flow diagnostic source is stale");
+}
+
+const ImmersedFlowStepAttemptReport &
+ImmersedFlowDiagnosticSource::report() const {
+  validate();
+  return report_;
+}
+int ImmersedFlowDiagnosticSource::rank() const {
+  validate();
+  return rank_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::committed_step() const {
+  validate();
+  return step_;
+}
+double ImmersedFlowDiagnosticSource::committed_time_s() const {
+  validate();
+  return time_s_;
+}
+double ImmersedFlowDiagnosticSource::maximum_wall_penetration_m_per_s() const {
+  validate();
+  return maximum_wall_penetration_m_per_s_;
+}
+double ImmersedFlowDiagnosticSource::mean_wall_penetration_m_per_s() const {
+  validate();
+  return mean_wall_penetration_m_per_s_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::classified_cell_count() const {
+  validate();
+  return classified_cell_count_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::active_cell_count() const {
+  validate();
+  return active_cell_count_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::immersed_link_count() const {
+  validate();
+  return immersed_link_count_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::donor_reference_count() const {
+  validate();
+  return donor_reference_count_;
+}
+std::uint64_t
+ImmersedFlowDiagnosticSource::wall_quadrature_point_count() const {
+  validate();
+  return wall_quadrature_point_count_;
+}
+config::DensityModel ImmersedFlowDiagnosticSource::density_model() const {
+  validate();
+  return density_model_;
+}
+bool ImmersedFlowDiagnosticSource::wall_force_available() const {
+  validate();
+  return wall_force_available_;
+}
+const immersed::WallForceSample &
+ImmersedFlowDiagnosticSource::wall_force_sample() const {
+  validate();
+  if (!wall_force_available_)
+    throw runtime::Error("immersed-flow wall-force snapshot is unavailable");
+  return wall_force_sample_;
+}
+bool ImmersedFlowDiagnosticSource::local_flow_pattern_available() const {
+  validate();
+  return local_flow_pattern_available_;
+}
+std::uint64_t
+ImmersedFlowDiagnosticSource::local_flow_pattern_algorithm_fingerprint() const {
+  validate();
+  return local_flow_pattern_algorithm_fingerprint_;
+}
+std::uint64_t
+ImmersedFlowDiagnosticSource::local_flow_pattern_row_fingerprint() const {
+  validate();
+  return local_flow_pattern_row_fingerprint_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::
+    local_flow_pattern_replacement_group_count() const {
+  validate();
+  return local_flow_pattern_replacement_group_count_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::
+    local_flow_pattern_algebraic_occurrence_count() const {
+  validate();
+  return local_flow_pattern_algebraic_occurrence_count_;
+}
+double ImmersedFlowDiagnosticSource::
+    local_flow_pattern_replacement_coefficient_l2() const {
+  validate();
+  return local_flow_pattern_replacement_coefficient_l2_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::
+    local_flow_pattern_limiting_case_status() const {
+  validate();
+  return local_flow_pattern_limiting_case_status_;
+}
+std::uint64_t ImmersedFlowDiagnosticSource::snapshot_seal() const {
+  validate();
+  return snapshot_seal_;
+}
+runtime::Fp64ReductionCounters
+ImmersedFlowDiagnosticSource::reduction_counters() const {
+  validate();
+  return reduction_counters_;
+}
+runtime::HaloPerformanceCounters
+ImmersedFlowDiagnosticSource::halo_counters() const {
+  validate();
+  return halo_counters_;
+}
+execution::AllocationCounters
+ImmersedFlowDiagnosticSource::allocation_counters() const {
+  validate();
+  return allocation_counters_;
 }
 
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
@@ -5168,6 +7300,25 @@ std::uint64_t detail::ImmersedFlowAccess::pressure_apply_schedule(
 std::uint32_t detail::ImmersedFlowAccess::last_corrector_count(
     const FixedStepImmersedFlow &flow) noexcept {
   return flow.impl_ ? flow.impl_->last_corrector_count : 0U;
+}
+
+std::uint64_t detail::ImmersedFlowAccess::wale_evaluation_count(
+    const FixedStepImmersedFlow &flow) noexcept {
+  return flow.impl_ ? flow.impl_->last_wale_evaluation_count : 0U;
+}
+
+les::WaleCoefficientIdentity
+detail::ImmersedFlowAccess::wale_coefficient_identity(
+    const FixedStepImmersedFlow &flow) noexcept {
+  return flow.impl_ ? flow.impl_->last_wale_coefficient_identity
+                    : les::WaleCoefficientIdentity{};
+}
+
+std::uint64_t
+detail::ImmersedFlowAccess::wall_effective_viscosity_fingerprint(
+    const FixedStepImmersedFlow &flow) noexcept {
+  return flow.impl_ ? flow.impl_->last_wall_effective_viscosity_fingerprint
+                    : 0U;
 }
 
 double detail::ImmersedFlowAccess::last_wall_pressure_gradient_application_norm(
@@ -6346,20 +8497,63 @@ detail::ImmersedFlowAccess::wall_predictor_values(
     flow.impl_->halo->exchange(storage, fields.velocity);
     flow.impl_->halo->exchange(storage, fields.mechanical_pressure);
   }
+  std::optional<detail::ImmersedDensityAttemptAuthority> trial_density;
+  std::optional<detail::ImmersedDensityAttemptAuthority> committed_density;
+  std::optional<detail::ImmersedDensityAttemptAuthority> history_density;
+  if (flow.impl_->density_setup.model == config::DensityModel::material) {
+    for (auto layer : {FlowLayer::trial, FlowLayer::committed,
+                       FlowLayer::history}) {
+      auto &storage = detail::FlowStateSolverAccess::layer(state, layer);
+      flow.impl_->halo->exchange(storage, fields.density);
+    }
+    const auto density_stage =
+        flow.impl_->prepare_density_authority_collectively([&] {
+          trial_density.emplace(flow.impl_->density_authority(
+              state, detail::FlowStateSolverAccess::layer(state,
+                                                          FlowLayer::trial)));
+          committed_density.emplace(flow.impl_->density_authority(
+              state, detail::FlowStateSolverAccess::layer(
+                         state, FlowLayer::committed)));
+          history_density.emplace(flow.impl_->density_authority(
+              state, detail::FlowStateSolverAccess::layer(
+                         state, FlowLayer::history)));
+        });
+    if (density_stage.reason != MaterialTransportFailureReason::none)
+      throw runtime::Error(
+          "immersed-flow wall predictor density probe is invalid");
+  }
   const std::size_t count =
       flow.impl_->domain->active_cells().owned_active_count();
   std::array<std::vector<double>, 3> diagonal{
       std::vector<double>(count, momentum_diagonal),
       std::vector<double>(count, momentum_diagonal),
       std::vector<double>(count, momentum_diagonal)};
-  flow.impl_->pressure_operator->prepare_face_coefficients(rho_ref_kg_per_m3,
-                                                           diagonal);
+  if (trial_density.has_value())
+    flow.impl_->pressure_operator->prepare_face_coefficients(
+        trial_density->face_density, diagonal);
+  else
+    flow.impl_->pressure_operator->prepare_face_coefficients(rho_ref_kg_per_m3,
+                                                             diagonal);
   const auto conditions = flow.impl_->assemble_face_predictor(
-      state, rho_ref_kg_per_m3, stencil, diagonal);
+      state, rho_ref_kg_per_m3, stencil, diagonal, nullptr,
+      trial_density ? &*trial_density : nullptr,
+      committed_density ? &*committed_density : nullptr,
+      history_density ? &*history_density : nullptr);
   std::vector<detail::ImmersedFlowWallPredictorValue> result;
   result.reserve(conditions.size());
-  for (const auto &condition : conditions)
-    result.push_back({condition.link, condition.predictor_mass_flux_kg_per_s});
+  for (std::size_t index = 0U; index < conditions.size(); ++index) {
+    const auto &condition = conditions[index];
+    const double wall_density =
+        trial_density ? trial_density->wall_density[index].rho_wall_kg_per_m3
+                      : rho_ref_kg_per_m3;
+    const double wall_density_normal_derivative =
+        trial_density
+            ? trial_density->wall_density[index]
+                  .normal_derivative_kg_per_m4
+            : 0.0;
+    result.push_back({condition.link, condition.predictor_mass_flux_kg_per_s,
+                      wall_density, wall_density_normal_derivative});
+  }
   std::sort(result.begin(), result.end(),
             [](const auto &left, const auto &right) {
               return left.link < right.link;

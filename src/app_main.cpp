@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "app_case_config_broadcast_detail.hpp"
 #include "app_cli_options_detail.hpp"
 #include "app_dispatch_order_detail.hpp"
-#include "app_passive_scalar_driver_detail.hpp"
 #include "app_flow_driver_detail.hpp"
+#include "app_immersed_flow_driver_detail.hpp"
+#include "app_passive_scalar_driver_detail.hpp"
+#include "app_resolved_case_v3_broadcast_detail.hpp"
 #include "app_version.hpp"
 
-#include "hundun/cfg_resolved_case_loader.hpp"
+#include "hundun/cfg_resolved_case_v3_loader.hpp"
 #include "hundun/rt_collective_status.hpp"
 #include "hundun/rt_error.hpp"
 #include "hundun/rt_mpi_context.hpp"
@@ -64,27 +65,28 @@ void require_run_mode_agreement(const MpiContext& context, RunMode mode) {
   const int local_mode = static_cast<int>(mode);
   int minimum_mode = local_mode;
   int maximum_mode = local_mode;
-  hundun::runtime::detail::check_mpi(
-      MPI_Allreduce(&local_mode, &minimum_mode, 1, MPI_INT, MPI_MIN,
-                    context.comm()),
-      "MPI_Allreduce run-mode minimum");
-  hundun::runtime::detail::check_mpi(
-      MPI_Allreduce(&local_mode, &maximum_mode, 1, MPI_INT, MPI_MAX,
-                    context.comm()),
-      "MPI_Allreduce run-mode maximum");
+  hundun::runtime::detail::check_mpi(MPI_Allreduce(&local_mode, &minimum_mode,
+                                                   1, MPI_INT, MPI_MIN,
+                                                   context.comm()),
+                                     "MPI_Allreduce run-mode minimum");
+  hundun::runtime::detail::check_mpi(MPI_Allreduce(&local_mode, &maximum_mode,
+                                                   1, MPI_INT, MPI_MAX,
+                                                   context.comm()),
+                                     "MPI_Allreduce run-mode maximum");
   if (minimum_mode != maximum_mode) {
     throw Error("MPI run mode differs across communicator ranks");
   }
 }
 
-hundun::config::ResolvedCase load_and_broadcast_resolved_case(
-    const MpiContext& context, const std::filesystem::path& path) {
-  std::optional<hundun::config::ResolvedCase> root_case;
+hundun::config::ResolvedCaseV3
+load_and_broadcast_resolved_case(const MpiContext& context,
+                                 const std::filesystem::path& path) {
+  std::optional<hundun::config::ResolvedCaseV3> root_case;
   bool local_ok = true;
   std::string local_message;
   if (context.rank() == 0) {
     try {
-      root_case = hundun::config::load_resolved_case(path);
+      root_case = hundun::config::load_resolved_case_v3(path);
     } catch (const std::exception& error) {
       local_ok = false;
       local_message =
@@ -95,7 +97,7 @@ hundun::config::ResolvedCase load_and_broadcast_resolved_case(
     }
   }
   require_collective_success(context, local_ok, local_message);
-  return hundun::application::broadcast_resolved_case(
+  return hundun::config::broadcast_resolved_case_v3(
       context.comm(), 0, context.rank() == 0 ? &root_case.value() : nullptr);
 }
 
@@ -135,7 +137,7 @@ int run_case(const hundun::application::CliOptions& options,
       [&] {
         return load_and_broadcast_resolved_case(context, options.case_path);
       },
-      [&](const hundun::config::ResolvedCase& resolved,
+      [&](const hundun::config::ResolvedCaseV3& resolved,
           const std::filesystem::path& authoritative_case_root) -> int {
         if (const auto* passive_scalar =
                 std::get_if<hundun::config::CaseConfig>(&resolved)) {
@@ -153,14 +155,20 @@ int run_case(const hundun::application::CliOptions& options,
           write_root_output(
               context, "unable to write resolved case configuration",
               [&resolved] {
-                std::cout << hundun::config::to_resolved_json(resolved)
+                std::cout << hundun::config::to_resolved_json_v3(resolved)
                           << '\n';
               });
           context.barrier();
           return EXIT_SUCCESS;
         }
-        return hundun::application::run_flow_case(
-            options, context, std::get<hundun::config::FlowCaseConfig>(resolved),
+        if (const auto* flow =
+                std::get_if<hundun::config::FlowCaseConfig>(&resolved)) {
+          return hundun::application::run_flow_case(options, context, *flow,
+                                                    authoritative_case_root);
+        }
+        return hundun::application::run_immersed_flow_case(
+            options, context,
+            std::get<hundun::config::ImmersedFlowCaseConfig>(resolved),
             authoritative_case_root);
       });
 }

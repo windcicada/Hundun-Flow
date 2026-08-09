@@ -51,6 +51,7 @@ private:
   friend class FixedStepIdealGasFlow;
   friend class TimeAdvanceReport;
   friend class IdealGasClosureDiagnosticSource;
+  friend struct detail::DensityClosureAdapter;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif

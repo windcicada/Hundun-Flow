@@ -19,10 +19,15 @@ namespace hundun::boundary {
 class BoundaryRegistry;
 }
 
+namespace hundun::immersed {
+class ImmersedDomain;
+}
+
 namespace hundun::flow {
 
 namespace detail {
 struct DensityClosureAdapter;
+struct IdealGasClosureCheckpointAccess;
 }
 
 class FixedStepMaterialDensityFlow;
@@ -194,7 +199,8 @@ private:
                   const boundary::BoundaryRegistry &,
                   const runtime::MpiContext &, const runtime::FieldRegistry &,
                   const FlowFieldIds &, const FlowState &, IdealGasClosureSpec,
-                  const IdealGasClosureState *
+                  const IdealGasClosureState *,
+                  const immersed::ImmersedDomain *
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
                   ,
                   int, int
@@ -212,8 +218,16 @@ private:
                const boundary::BoundaryRegistry &, const runtime::MpiContext &,
                const runtime::FieldRegistry &,
                const FlowFieldIds &) const noexcept;
+  bool matches_immersed(const mesh::MeshTopology &,
+                        const mesh::MeshGeometry &,
+                        const boundary::BoundaryRegistry &,
+                        const immersed::ImmersedDomain &,
+                        const runtime::MpiContext &,
+                        const runtime::FieldRegistry &,
+                        const FlowFieldIds &) const noexcept;
   double cp_J_per_kg_K() const noexcept;
   double gas_constant_J_per_kg_K() const noexcept;
+  double configured_thermodynamic_pressure_pa() const noexcept;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   void set_post_store_corruption_for_test(int rank, bool enthalpy_density);
   void set_candidate_precedence_fault_for_test(int rank);
@@ -239,6 +253,7 @@ private:
   friend class IdealGasStepAttemptReport;
   friend class IdealGasClosureDiagnosticSource;
   friend struct detail::DensityClosureAdapter;
+  friend struct detail::IdealGasClosureCheckpointAccess;
 #ifdef HUNDUN_FLOW_ENABLE_TEST_ACCESS
   friend class test::IdealGasClosureTestAccess;
 #endif
