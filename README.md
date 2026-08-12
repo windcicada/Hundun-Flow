@@ -1,43 +1,42 @@
 # HUNDUN-FLOW
 
-HUNDUN-FLOW 是一个使用 C++17 和 MPI 实现的低马赫数有限体积求解程序。`hundun` 可运行结构化网格上的三种密度闭合，并组合静止 STL 浸入边界和 WALE LES；时间推进、Checkpoint 和诊断使用同一条产品路径。
+HUNDUN-FLOW 是一个使用 C++17 实现的低马赫数有限体积求解程序。当前默认源码线是正在独立实现的 v0.4 Cartesian 架构；冻结的 v0.3 产品源码保存在 `versions/v0.3`，可通过同一根构建入口显式选择。
 
-当前源码是 `0.2.0 candidate`。九个 Stage 3 profiles 已完成实现和小规模验收，但 0.2.0 只有在冻结 HEAD 的 S3-V1 24/48-cubed formal matrix 返回 ACCEPT 后才可发布。当前 `VERSION` 在 product projection 前仍保持 0.1.0。
-
-本仓库是可发布的产品源码。设计记录、测试程序和原始验收日志不随产品分发；公开文档只陈述已经具备且有证据支持的能力。
+根构建默认选择 `HUNDUN_SOURCE_VERSION=v0.4`，只接受 `v0.4` 或 `v0.3`。两个版本目录各自拥有独立的 CMake project 和依赖发现逻辑，不会混合链接源码。
 
 ## 构建
 
-需要 CMake 3.21 或更新版本、支持 C++17 的编译器，以及 MPI 3 实现。
+v0.4 骨架需要 CMake 3.21 或更新版本和支持 C++17 的编译器：
 
 ```sh
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release -j 2
-build/release/src/hundun --version
+cmake -S . -B build/v04-release \
+  -DHUNDUN_SOURCE_VERSION=v0.4 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/v04-release -j 2
+build/v04-release/versions/v0.4/hundun --version
 ```
 
-构建过程不需要网络，也没有 Python 运行时依赖。
+冻结 v0.3 仍保留其原有 MPI 3 和其他构建要求：
+
+```sh
+cmake -S . -B build/v03-release \
+  -DHUNDUN_SOURCE_VERSION=v0.3 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/v03-release -j 2 --target hundun
+```
+
+两个源码线也都可以直接将各自的 `versions/v0.x` 目录作为 CMake 源目录配置。构建过程不需要网络，也没有 Python 运行时依赖。
 
 ## 运行
 
-先检查配置，再启动计算：
-
-```sh
-build/release/src/hundun examples/minimal/case.json --validate
-mpiexec -n 1 build/release/src/hundun examples/minimal/case.json
-```
-
-`examples/minimal` 只是输入和运行方式示例，不是科学验证算例。开始正式计算前，请阅读[适用范围与限制](docs/numerics/applicability-and-limitations.md)。
+v0.4 当前只提供稳定公开基础类型、状态消息和 `--version` 命令；数值求解与运行接口将在后续任务中实现。需要运行既有求解器时请选择冻结的 v0.3 源码线，并阅读其中的用户指南和适用范围说明。
 
 ## 文档入口
 
-- [安装、配置和运行](docs/user-guide/quick-start.md)
-- [配置格式](docs/api/configuration-schema.md)
-- [数值方法](docs/numerics/discretization.md)
-- [当前能力与验证边界](docs/verification/accepted-capabilities.md)
-- [Stage 3 capability ledger](docs/numerics/stage3-capability-ledger.md)
-- [面向外部自动化工具的操作说明](docs/ai-skill/index.md)
-- [源码目录与命名规范](docs/development/naming-and-style.md)
+- [v0.4 Cartesian 架构实施计划](docs/superpowers/plans/2026-08-12-hundun-flow-v0.4-cartesian-performance-architecture.md)
+- [v0.4 公开生命周期调研](docs/references/2026-08-13-hundun-v04-public-lifecycle-survey.md)
+- [v0.4 目标热循环](docs/architecture/v0.4-target-hot-loop.md)
+- [冻结 v0.3 用户指南](versions/v0.3/docs/user-guide/quick-start.md)
+- [冻结 v0.3 配置格式](versions/v0.3/docs/api/configuration-schema.md)
+- [冻结 v0.3 适用范围与限制](versions/v0.3/docs/numerics/applicability-and-limitations.md)
 
 ## 许可证
 

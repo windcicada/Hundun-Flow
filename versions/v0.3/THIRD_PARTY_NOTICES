@@ -1,0 +1,22 @@
+Cantera 3.2.0
+===============
+
+HUNDUN can optionally use a separately packaged Cantera 3.2.0 shared library.
+Cantera is copyright California Institute of Technology, Sandia Corporation,
+the Cantera Developers, and other contributors. Its BSD-3-Clause terms are in
+LICENSES/cantera-BSD-3-Clause.txt. Licensor and contributor names may not be
+used to endorse or promote HUNDUN-derived products without prior permission.
+
+The verified package also carries notices for its compiled fmt, yaml-cpp,
+SUNDIALS, Eigen, and Boost header closure. Those notices are installed from the
+package's audited `licenses/` directory; Cantera's BSD license does not cover
+those dependencies.
+
+Chemical mechanisms and thermophysical datasets are separate copyright
+objects. HUNDUN does not bundle a mechanism under the Cantera license, and no
+mechanism is implied to be redistributable merely because Cantera can read it.
+
+The Stage 4 Linux package prototype installs the complete audited license
+directory beside one pinned shared-library generation. Its ABI manifest binds
+that whole generation; replacing an individual shared object without replacing
+the manifest and notices is unsupported.

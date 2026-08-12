@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "case": {"name": "minimal_runtime_template"},
+  "resources": {
+    "expected_ranks": 1,
+    "process_grid": [1, 1, 1]
+  },
+  "mesh": {
+    "cells": [8, 4, 4],
+    "origin_m": [0.0, 0.0, 0.0],
+    "length_m": [1.0, 0.5, 0.5],
+    "periodic": [true, true, true]
+  },
+  "time": {"dt_s": 0.001, "steps": 1},
+  "transport": {
+    "velocity_m_per_s": [0.1, 0.0, 0.0],
+    "diffusivity_m2_per_s": 0.0
+  },
+  "initial_condition": {"type": "sine_x"},
+  "restart": {
+    "read": false,
+    "write_directory": "Restart"
+  },
+  "output": {
+    "directory": "output",
+    "write_interval": 1,
+    "restart_interval": 1
+  }
+}

@@ -1,0 +1,692 @@
+{
+  "schema": "hundun.stage4_p0.artifact.v1",
+  "result": "PREFLIGHT_PASS",
+  "result_scope": "cantera_3_2_0_gcc11_release_artifact_candidate_only",
+  "stage4_product_accepted": false,
+  "product_changes": "none",
+  "recorded_at": "2026-08-09T23:05:51+08:00",
+  "main_reviewed_at": "2026-08-09T23:20:29+08:00",
+  "path_base": "EXTERNAL_ROOT",
+  "governance": {
+    "parent_head": "3ef96dde43d3ea1a86aa050fd5f470b9ec80b037",
+    "parent_head_role": "governance_head_bound_to_build_projection_and_audit",
+    "input_manifest_sha256": "32622f5986e97903b9b07110d091c993a3c85e9b3a78ab160493050f38f1361e",
+    "governance_path_policy": "governance_paths_are_referenced_by_commit_and_sha_only; all filesystem_paths_below_are_external_root_relative"
+  },
+  "target": {
+    "os": "Ubuntu 22.04",
+    "glibc_floor": "2.35",
+    "architecture": "x86_64",
+    "compiler": "GCC 11",
+    "stdlib": "libstdc++",
+    "cxx_standard": 17,
+    "glibcxx_cxx11_abi": 1,
+    "isa": "x86-64",
+    "build_type": "Release",
+    "threads": "SCons -j16",
+    "python_runtime_policy": "builder_only; no artifact or runtime Python"
+  },
+  "builder": {
+    "cantera_commit": "4a8358eb80cfeb50474386b5f9ec0b3a83519889",
+    "cantera_source_sha256": "a94682ef3cb60dc57c8d14fc4cccd94e8f6bb74cab9c3f5465ee90832859360b",
+    "local_patches": [],
+    "parallel_jobs": 16,
+    "rootfs_image": {
+      "path": "inputs/ubuntu/ubuntu-22.04-minimal-cloudimg-amd64-root.tar.xz",
+      "sha256": "1bd7959194d3fa7b9660b169f010ff222109a885559108028c79e244d649234a"
+    },
+    "outer_script": {
+      "path": "manifests/p0-2-run-cantera-build-retry8.sh",
+      "sha256": "b8c68cb2d623caeb2169f3b116ce1f06d22e2d2948420da9284ec13128fe0ca3"
+    },
+    "inner_script": {
+      "path": "manifests/doxygen-builder-v1/build-retry8-inner.sh",
+      "sha256": "67c83fa3abd7fd14d2ab4ac5d10ce81a336457f5a38a8157b63895d3953491bf"
+    },
+    "build_log": {
+      "path": "logs/p0-2-cantera-build-install-retry8.log",
+      "sha256": "d9667c01580d9da019933f44893ee30272e19726f3460dc5dd26fb374cd49dce"
+    },
+    "build_result": 0,
+    "build_status": {
+      "path": "logs/p0-2-cantera-build-install-retry8.status",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "exit_code": 0
+    },
+    "build_time": {
+      "path": "logs/p0-2-cantera-build-install-retry8.time",
+      "sha256": "e6300bb66f08536b01726e2caefa39c9734389fcf16a1794d4c51e8de44f9dc9",
+      "wall_seconds": 65.04,
+      "maximum_rss_kib_observed": 5240,
+      "rss_scope": "outer_bwrap_wrapper_observation_not_recursive_builder_peak"
+    },
+    "scons_profile": {
+      "path_base": "builder_mount:/p0",
+      "python_package": "n",
+      "f90_interface": "n",
+      "example_data": "n",
+      "googletest": "none",
+      "hdf_support": "n",
+      "system_blas_lapack": "n",
+      "system_eigen": "n",
+      "system_fmt": "n",
+      "system_sundials": "n",
+      "system_yamlcpp": "n",
+      "renamed_shared_libraries": "yes",
+      "versioned_shared_library": "yes",
+      "layout": "standard",
+      "package_build": "yes",
+      "use_rpath_linkage": "n",
+      "cxx": "g++-11",
+      "cc": "gcc-11",
+      "boost_inc_dir": "build/cantera-3.2.0-gcc11-release/boost-system-include-root",
+      "cxx_flags": "-std=c++17 -D_GLIBCXX_USE_CXX11_ABI=1 -DEIGEN_MPL2_ONLY -march=x86-64 -mtune=generic",
+      "optimize": "yes",
+      "prefix": "install/cantera-3.2.0-gcc11-release"
+    },
+    "network_policy": "share_net_preserved_for_codex; canonical_build_and_consumer_commands_contain_no_online_fetch_or_host_install",
+    "network_policy_evidence": {
+      "script_path": "manifests/p0-2-consumer-fetch-policy-scan-v1.sh",
+      "script_sha256": "17b16377d2e18f9ddef77284420e81bd21bec90ec704351bbb6c45cf2bb14fc4",
+      "scan_log_path": "logs/p0-2-consumer-fetch-policy-scan-v1.log",
+      "scan_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run_log_path": "logs/p0-2-consumer-fetch-policy-scan-v1-run.log",
+      "run_log_sha256": "1ccc15244dd5d3faf1f362c6c9ecc91ab850b269f9aabb0e2fc11bb4d094e696",
+      "status_path": "logs/p0-2-consumer-fetch-policy-scan-v1.status",
+      "status_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "exit_code": 0
+    },
+    "source_overlay": {
+      "path": "build/cantera-3.2.0-gcc11-release/canonical-source-overlay-retry8",
+      "manifest_path": "manifests/p0-2-canonical-build-overlay-retry8-nondata.sha256",
+      "manifest_sha256": "fa450a5ff9d489cf99ac166f7c67ea1734f5b679a38bbf2163cb97cede04f6f4"
+    },
+    "builder_only_inputs": {
+      "boost": {
+        "package": "libboost1.74-dev",
+        "version": "1.74.0-14ubuntu3",
+        "archive_path": "inputs/dependencies/boost/libboost1.74-dev_1.74.0-14ubuntu3_amd64.deb",
+        "archive_sha256": "4d9c90e43f0d25db6280d1ee326771cbb76462f73b9430f06bac1de8d05b7a78",
+        "role": "builder_header_only"
+      },
+      "typing_extensions": {
+        "version": "4.15.0",
+        "wheel_path": "inputs/dependencies/typing-extensions-4.15.0/typing_extensions-4.15.0-py3-none-any.whl",
+        "wheel_sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+        "role": "builder_pythonpath_only"
+      },
+      "ruamel_yaml": {
+        "version": "0.17.21",
+        "tree_path": "inputs/dependencies/ruamel-yaml-0.17.21/wheel-extract",
+        "tree_manifest_sha256": "ce5fef34f3fb24dd65ee21902b0d5c2b33123333c3ed95b6bd6241644702460f",
+        "role": "builder_pythonpath_only"
+      },
+      "ruamel_yaml_clib": {
+        "version": "0.2.6",
+        "tree_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/wheel-extract",
+        "tree_manifest_sha256": "e1d31c44b7d6e12418793fcf1340f39b1a020efd7c095a381b9c77202415ff8a",
+        "role": "builder_pythonpath_only"
+      }
+    }
+  },
+  "artifact": {
+    "path": "artifact/cantera-3.2.0-gcc11-release-v4",
+    "projection_script": {
+      "path": "manifests/p0-2-project-cantera-artifact-v4.sh",
+      "sha256": "c9d3c11c64ddb29c218eb7b5c13f87ca5b102482f96c2b7a2390f2378fefee26"
+    },
+    "projection_log": {
+      "path": "logs/p0-2-project-cantera-artifact-v4.log",
+      "sha256": "119ad1836baeb7383875d8f70e233e29c8046d4f66df070ba88f8bf2c46a9090"
+    },
+    "projection_result": 0,
+    "projection_status": {
+      "path": "logs/p0-2-project-cantera-artifact-v4.status",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "exit_code": 0
+    },
+    "projection_time": {
+      "path": "logs/p0-2-project-cantera-artifact-v4.time",
+      "sha256": "88ed0ad9b25338a772dc4c9520e450e4fada638c43624a3b3c1662a0194a91ed",
+      "wall_seconds": 2.08,
+      "maximum_rss_kib": 194640
+    },
+    "regular_file_count": 653,
+    "symlink_count": 2,
+    "bytes_du_sb": 21627465,
+    "public_cantera_header_count": 194,
+    "generated_dependency_header_count": 442,
+    "license_file_count": 15,
+    "bundled_data_file_count": 1,
+    "bundled_mechanism_count": 0,
+    "symlinks": [
+      {
+        "path": "lib/libcantera_shared.so",
+        "target": "libcantera_shared.so.3.2.0"
+      },
+      {
+        "path": "lib/libcantera_shared.so.3",
+        "target": "libcantera_shared.so.3.2.0"
+      }
+    ],
+    "file_manifest": {
+      "path": "manifests/p0-2-artifact-v4-audit-v2-files.sha256",
+      "sha256": "5fd187220f23d11af133f43f4c1208f9744943bc793e89bc7543171363fa3004"
+    },
+    "symlink_manifest": {
+      "path": "manifests/p0-2-artifact-v4-audit-v2-symlinks.tsv",
+      "sha256": "624d5d9488efc7bf8231d19ca6861e5118adada82b3cee4b1faaa512fa8b0269"
+    },
+    "size_manifest": {
+      "path": "manifests/p0-2-artifact-v4-audit-v2-size.tsv",
+      "sha256": "ddb5507d1dd6f29428aa4b5d1f4444ddf55006fff7414199ec685e5d9d7b3fa7"
+    },
+    "audit": {
+      "script": {
+        "path": "manifests/p0-2-audit-cantera-artifact-v4-v2.sh",
+        "sha256": "e677358c7e24c210764ef5c93d4a54d5519a3abce1aae2045a9a90f7bf5f95e8"
+      },
+      "log": {
+        "path": "logs/p0-2-audit-cantera-artifact-v4-v2.log",
+        "sha256": "d964cdd5ada3b6222c7680b46e22c053b97c01ba23d9fbb1f145ca5753cc452b"
+      },
+      "status": {
+        "path": "logs/p0-2-audit-cantera-artifact-v4-v2.status",
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "exit_code": 0
+      },
+      "time": {
+        "path": "logs/p0-2-audit-cantera-artifact-v4-v2.time",
+        "sha256": "3d887a7a3738af29c8d593883683483e59ef5b05449f0433d0081be3bb490787",
+        "wall_seconds": 4.78,
+        "maximum_rss_kib": 53012
+      }
+    }
+  },
+  "binary": {
+    "path": "artifact/cantera-3.2.0-gcc11-release-v4/lib/libcantera_shared.so.3.2.0",
+    "sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+    "bytes": 10164736,
+    "build_id": "ff123ec43dc02b7a2452eab03f049d8a4347a0ba",
+    "soname": "libcantera_shared.so.3",
+    "needed": [
+      "libc.so.6",
+      "libgcc_s.so.1",
+      "libm.so.6",
+      "libstdc++.so.6"
+    ],
+    "rpath": null,
+    "runpath": null,
+    "rpath_present": false,
+    "runpath_present": false,
+    "strip": {
+      "tool": "GNU strip (GNU Binutils for Ubuntu) 2.38",
+      "mode": "--strip-debug",
+      "unstripped_path": "install/cantera-3.2.0-gcc11-release/lib/libcantera_shared.so.3.2.0",
+      "unstripped_sha256": "54cdd1ffda2f1e0ba42c683c6c795d7dd1f96b40313fad5dbc94abf54589a38b",
+      "unstripped_bytes": 229858632,
+      "build_id_preserved": true
+    },
+    "version_requirements": {
+      "glibc_max": "GLIBC_2.34",
+      "glibcxx_max": "GLIBCXX_3.4.29",
+      "cxxabi_max": "CXXABI_1.3.9"
+    },
+    "build_identity": {
+      "cxx_standard": "C++17",
+      "glibcxx_cxx11_abi": 1,
+      "eigen_mpl2_only": true,
+      "isa": "x86-64",
+      "tuning": "generic",
+      "exceptions": true,
+      "rtti": true
+    },
+    "readelf": {
+      "dynamic_log": "logs/p0-2-artifact-v4-audit-v2-readelf-dynamic.log",
+      "versions_log": "logs/p0-2-artifact-v4-audit-v2-readelf-versions.log",
+      "notes_log": "logs/p0-2-artifact-v4-audit-v2-readelf-notes.log",
+      "symbols_log": "logs/p0-2-artifact-v4-audit-v2-symbol-summary.tsv",
+      "symbol_counts": {
+        "std_cxx11": 4388,
+        "cxa_throw": 4,
+        "typeinfo": 1218
+      }
+    },
+    "runtime_resolution": {
+      "ldd_log": "logs/p0-2-artifact-v4-audit-v2-ldd-r-rootfs.log",
+      "ldd_status": "logs/p0-2-artifact-v4-audit-v2-ldd-r-rootfs.status",
+      "ldd_exit_code": 0,
+      "unresolved_symbols": 0
+    }
+  },
+  "payload": {
+    "summary_path": "logs/p0-2-artifact-v4-audit-v2-payload-summary.tsv",
+    "summary_sha256": "7a2b08b702a2f4cfe295cdfc87c395feb020ea043c28596e602984fc392e0a72",
+    "boost_payload_file_count": 0,
+    "boost_runtime_needed_count": 0,
+    "doxygen_payload_file_count": 0,
+    "clang_payload_file_count": 0,
+    "llvm_payload_file_count": 0,
+    "xapian_payload_file_count": 0,
+    "libxml2_payload_file_count": 0,
+    "libxml2_runtime_needed_count": 0,
+    "typing_extensions_payload_file_count": 0,
+    "python_payload_file_count": 0,
+    "libpython_runtime_needed_count": 0,
+    "static_library_file_count": 0,
+    "pkgconfig_file_count": 0,
+    "bundled_data_file_count": 1,
+    "bundled_mechanism_count": 0,
+    "compiled_install_prefix_fragment_count": 1,
+    "compiled_install_prefix_fragment_disposition": "string_merged_runtime_nonconsumption_check_required_p0_3"
+  },
+  "data": {
+    "directory": "artifact/cantera-3.2.0-gcc11-release-v4/share/cantera/data",
+    "files": [
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/share/cantera/data/README.md",
+        "sha256": "067c221d01413542325424c7b9c6708674e67c4b5a346c58dfdea891ea81754f"
+      }
+    ],
+    "bundled_data_file_count": 1,
+    "bundled_mechanism_count": 0,
+    "mechanism_policy": "mechanisms_not_bundled; independent_P0_3_synthetic_input_required"
+  },
+  "licenses": {
+    "summary_path": "logs/p0-2-artifact-v4-audit-v2-license-summary.tsv",
+    "summary_sha256": "3a501dae29fa587d36bdb89a53a660a80b36c8a25d4947799f2cd657fa17067e",
+    "inventory": [
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Cantera/License.txt",
+        "sha256": "e92980b9712ce20e73898a97b0116889e84e07f548d6be8591e87dcad79c41bb",
+        "spdx": "BSD-3-Clause"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/UPSTREAM-COMBINED-LICENSES.txt",
+        "sha256": "25bacb1e19380fc7beaff24973da5386c44fdb414188970b6d8fd0681135dca2",
+        "spdx": "upstream_combined_license_inventory"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Boost/LICENSE_1_0.txt",
+        "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "spdx": "BSL-1.0"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Boost/ubuntu-package-copyright",
+        "sha256": "17369eeac3938acb31085c8a1d4f1a40dc88a518a9389958a12c0592bb2d5766",
+        "spdx": "NOASSERTION"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.APACHE",
+        "sha256": "03379001a7b12a2ec997a25554247d985270b353c10d5bafee9ac8d6519820b7",
+        "spdx": "Apache-2.0"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.BSD",
+        "sha256": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+        "spdx": "BSD-3-Clause"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.GPL",
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "spdx": "GPL-3.0-only"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.LGPL",
+        "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+        "spdx": "LGPL-2.1-only OR LGPL-2.1-or-later"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.MINPACK",
+        "sha256": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+        "spdx": "LicenseRef-Eigen-MINPACK"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.MPL2",
+        "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+        "spdx": "MPL-2.0"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Eigen/COPYING.README",
+        "sha256": "c83230b770f17ef1386ea1fd3681271dd98aa93646bdbfb5bff3a1b7050fff9d",
+        "spdx": "LicenseRef-Eigen-License-Guide"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/SUNDIALS/LICENSE",
+        "sha256": "fe9b98949f9ac131af1130eb3301b8433d23145367ccebaf23204f2322c4d882",
+        "spdx": "BSD-3-Clause"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/SUNDIALS/NOTICE",
+        "sha256": "5cb9c6b0ca7c09b26fe2d1f9ef45231086c9ea2cdb32eb5f9dce7012e2364bc2",
+        "spdx": "LicenseRef-SUNDIALS-NOTICE"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/fmt/LICENSE.rst",
+        "sha256": "825c9324e70f8c839c8ba910543dd4a7daee243b86ef960594c11381a19980b8",
+        "spdx": "MIT"
+      },
+      {
+        "path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/yaml-cpp/LICENSE",
+        "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b",
+        "spdx": "MIT"
+      }
+    ],
+    "eigen_restricted_license_text_present": true,
+    "eigen_restricted_consumed_files": 0,
+    "source_file_scope_audit": "consumed_file_scope_recorded_below"
+  },
+  "consumed_input_audit": {
+    "summary_path": "manifests/p0-2-consumed-input-audit/summary.tsv",
+    "summary_sha256": "ec5ba3a3bb2acc45dcc69e2519f4bfdffef1fd71675c340bfc0682e37e7dba1c",
+    "aggregate_manifest_path": "manifests/p0-2-consumed-input-audit/audit-output-sha256.tsv",
+    "aggregate_manifest_sha256": "afb65aa79948a2eed9c624d9a4cef8cff1fae0d6274a610d0da674e947e1a7ea",
+    "translation_units": 207,
+    "dependency_pairs": 150402,
+    "boost_consumed_headers": 886,
+    "eigen_consumed_headers": 251,
+    "eigen_restricted_files": 3,
+    "ext_compiled_sources": 80,
+    "all_returncodes": 0,
+    "eigen_mpl2_only": "all C++ compile commands",
+    "restricted_eigen_consumed": 0,
+    "final_output_paths": {
+      "boost_headers": "manifests/p0-2-consumed-input-audit/boost-consumed-headers.tsv",
+      "eigen_headers": "manifests/p0-2-consumed-input-audit/eigen-consumed-headers.tsv",
+      "eigen_restricted": "manifests/p0-2-consumed-input-audit/eigen-restricted-files.tsv",
+      "compiled_extensions": "manifests/p0-2-consumed-input-audit/ext-compiled-sources.tsv",
+      "compile_commands": "manifests/p0-2-consumed-input-audit/cpp-compile-commands.tsv",
+      "preprocess_status": "manifests/p0-2-consumed-input-audit/cpp-preprocess-status.tsv",
+      "preprocessed_dependencies": "manifests/p0-2-consumed-input-audit/cpp-preprocessed-dependencies.tsv"
+    },
+    "license_conclusion": "verified_complete_build_dependency_closure_with_full_upstream_and_package_license_inventory"
+  },
+  "header_link_smoke": {
+    "consumer_source": "spikes/artifact-header-link-red-v1/main.cpp",
+    "consumer_source_sha256": "7f62d9fe76b3ce9a87a093072cc41b928981463b3d13aea187b4643145193b99",
+    "compile_log": "logs/p0-2-artifact-v4-header-link-green-compile.log",
+    "compile_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "compile_status": 0,
+    "run_log": "logs/p0-2-artifact-v4-header-link-green-run.log",
+    "run_log_sha256": "33bdaf9e2d6bcbde2e4e613e865e403f8fe21fc621078d34c30b0bdc7f68d903",
+    "run_status": 0,
+    "run_output": "3.2.0",
+    "binary_path": "spikes/artifact-header-link-red-v1/v4-consumer",
+    "binary_sha256": "2317fa9f78470fe61696ed8ca942a2252e54671a1f75b6440bf47174eb157274"
+  },
+  "path_and_payload_scans": {
+    "path_leakage_log": "logs/p0-2-artifact-v4-audit-v2-path-leakage.log",
+    "path_leakage_log_sha256": "318fa2833e3fd44a3e02b85bd6030abf5b30b143b212179eaf2a8ba0b433eb93",
+    "forbidden_payload_counts": "all_zero_as_recorded_in_payload_summary",
+    "compiled_prefix_disposition": "string_merged_runtime_nonconsumption_check_required_p0_3"
+  },
+  "retained_noncandidate_evidence": {
+    "audit_v1_failure": {
+      "script_path": "manifests/p0-2-audit-cantera-artifact-v4.sh",
+      "evidence_manifest_path": "manifests/p0-2-artifact-v4-audit-v1-failed-evidence.sha256",
+      "evidence_manifest_sha256": "b6136408e536c75ea6148ce680b62f52af948f6b576b069cc582db15765e45bd",
+      "audit_status": 1,
+      "audit_log_path": "logs/p0-2-audit-cantera-artifact-v4.log",
+      "audit_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reason": "exact_full_default_data_path_assertion_was_invalid_under_merged_string_literals; prefix_fragment_is_retained_and_runtime_nonconsumption_is_required_in_P0_3"
+    },
+    "rejected_projections": [
+      {
+        "path": "artifact/rejected-cantera-3.2.0-gcc11-release-v1-exclude-pattern",
+        "projection_script": "manifests/p0-2-project-cantera-artifact-v1.sh",
+        "projection_script_sha256": "728d3e8088bdfaa55137af5cb3a29c051d3bc6fe0f304b2a577d29d4cf932cd3",
+        "reason": "incorrect_tar_exclude_member_prefix_left_cantera_python_test_and_cython_headers_in_projection",
+        "candidate": false
+      },
+      {
+        "path": "artifact/rejected-cantera-3.2.0-gcc11-release-v2-missing-generated-sundials-header",
+        "projection_script": "manifests/p0-2-project-cantera-artifact-v2.sh",
+        "projection_script_sha256": "360c6a60beefd9f349e479ba8eb1cb1ec7b9c27e0fefb7a3afa966078c8a345d",
+        "reason": "projected_include_layout_omitted_generated_sundials_config_header_required_by_public_headers",
+        "candidate": false
+      },
+      {
+        "path": "artifact/rejected-cantera-3.2.0-gcc11-release-v3-license-mislabel",
+        "projection_script": "manifests/p0-2-project-cantera-artifact-v3.sh",
+        "projection_script_sha256": "96c02ffbfff935c42e69c1375ae9cdc649c3ef28edd9b86ac61b45c38d4813f1",
+        "reason": "upstream_combined_license_inventory_was_mislabeled_as_the_pure_Cantera_BSD_license",
+        "candidate": false
+      }
+    ],
+    "rejected_manifests": {
+      "v1": {
+        "path": "manifests/p0-2-artifact-v1-rejected-files.sha256",
+        "sha256": "849159de889189370c900c8e983e6a4a0730c253e43cf69bcacda39b763e5f63"
+      },
+      "v2": {
+        "path": "manifests/p0-2-artifact-v2-rejected-files.sha256",
+        "sha256": "10264943faaabd5ebe4a687030d6d9bda92285af0388487b825cb4335df3ff0a"
+      },
+      "v3": {
+        "path": "manifests/p0-2-artifact-v3-rejected-files.sha256",
+        "sha256": "82b2b1f8cee141ada054908225fb69df53a9af8fa89707a414712e7dd30a2311"
+      }
+    }
+  },
+  "evidence": [
+    {"path": "inputs/ubuntu/ubuntu-22.04-minimal-cloudimg-amd64-root.tar.xz", "sha256": "1bd7959194d3fa7b9660b169f010ff222109a885559108028c79e244d649234a"},
+    {"path": "manifests/p0-2-run-cantera-build-retry8.sh", "sha256": "b8c68cb2d623caeb2169f3b116ce1f06d22e2d2948420da9284ec13128fe0ca3"},
+    {"path": "manifests/doxygen-builder-v1/build-retry8-inner.sh", "sha256": "67c83fa3abd7fd14d2ab4ac5d10ce81a336457f5a38a8157b63895d3953491bf"},
+    {"path": "logs/p0-2-cantera-build-install-retry8.log", "sha256": "d9667c01580d9da019933f44893ee30272e19726f3460dc5dd26fb374cd49dce"},
+    {"path": "logs/p0-2-cantera-build-install-retry8.time", "sha256": "e6300bb66f08536b01726e2caefa39c9734389fcf16a1794d4c51e8de44f9dc9"},
+    {"path": "logs/p0-2-cantera-build-install-retry8.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "manifests/p0-2-canonical-build-overlay-retry8-nondata.sha256", "sha256": "fa450a5ff9d489cf99ac166f7c67ea1734f5b679a38bbf2163cb97cede04f6f4"},
+    {"path": "manifests/p0-2-project-cantera-artifact-v4.sh", "sha256": "c9d3c11c64ddb29c218eb7b5c13f87ca5b102482f96c2b7a2390f2378fefee26"},
+    {"path": "logs/p0-2-project-cantera-artifact-v4.log", "sha256": "119ad1836baeb7383875d8f70e233e29c8046d4f66df070ba88f8bf2c46a9090"},
+    {"path": "logs/p0-2-project-cantera-artifact-v4.time", "sha256": "88ed0ad9b25338a772dc4c9520e450e4fada638c43624a3b3c1662a0194a91ed"},
+    {"path": "logs/p0-2-project-cantera-artifact-v4.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "manifests/p0-2-audit-cantera-artifact-v4-v2.sh", "sha256": "e677358c7e24c210764ef5c93d4a54d5519a3abce1aae2045a9a90f7bf5f95e8"},
+    {"path": "logs/p0-2-audit-cantera-artifact-v4-v2.log", "sha256": "d964cdd5ada3b6222c7680b46e22c053b97c01ba23d9fbb1f145ca5753cc452b"},
+    {"path": "logs/p0-2-audit-cantera-artifact-v4-v2.time", "sha256": "3d887a7a3738af29c8d593883683483e59ef5b05449f0433d0081be3bb490787"},
+    {"path": "logs/p0-2-audit-cantera-artifact-v4-v2.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-files.sha256", "sha256": "5fd187220f23d11af133f43f4c1208f9744943bc793e89bc7543171363fa3004"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-symlinks.tsv", "sha256": "624d5d9488efc7bf8231d19ca6861e5118adada82b3cee4b1faaa512fa8b0269"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-size.tsv", "sha256": "ddb5507d1dd6f29428aa4b5d1f4444ddf55006fff7414199ec685e5d9d7b3fa7"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-source-cantera-headers.sha256", "sha256": "f9b6242471396803f4dda58a5270db12fc0d0e3d6dbd9e389793e7582284bad3"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-cantera-headers.sha256", "sha256": "f9b6242471396803f4dda58a5270db12fc0d0e3d6dbd9e389793e7582284bad3"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-source-generated-ext.sha256", "sha256": "5454b93287db726805dc1e9a6f690de08cdaf693944323fedc1f941b42be7925"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v2-generated-ext.sha256", "sha256": "5454b93287db726805dc1e9a6f690de08cdaf693944323fedc1f941b42be7925"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-readelf-dynamic.log", "sha256": "c95c4df951fbd702219db33332e30535c0112a8b6faeaf81ae724e90b908fded"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-readelf-versions.log", "sha256": "7f54aa1f23d94f1471bd05007852a15ca523841290778ded1d1f800a2c83ba02"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-readelf-notes.log", "sha256": "257855e8eec221b8c42d4b622122349e911ed90d4297f190874bf9a87f6cc4bd"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-symbol-summary.tsv", "sha256": "c4a489b1f1b7a348c1866a5696da02adb1d5c66fb735d3de7a8a4bd142ad0dee"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-ldd-r-rootfs.log", "sha256": "78eb2b458dd306f4bd252854da5471dbfefd026892621958deca7a9b2a65376d"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-ldd-r-rootfs.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-path-leakage.log", "sha256": "318fa2833e3fd44a3e02b85bd6030abf5b30b143b212179eaf2a8ba0b433eb93"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-payload-summary.tsv", "sha256": "7a2b08b702a2f4cfe295cdfc87c395feb020ea043c28596e602984fc392e0a72"},
+    {"path": "logs/p0-2-artifact-v4-audit-v2-license-summary.tsv", "sha256": "3a501dae29fa587d36bdb89a53a660a80b36c8a25d4947799f2cd657fa17067e"},
+    {"path": "manifests/p0-2-consumed-input-audit/audit-output-sha256.tsv", "sha256": "afb65aa79948a2eed9c624d9a4cef8cff1fae0d6274a610d0da674e947e1a7ea"},
+    {"path": "manifests/p0-2-consumed-input-audit/summary.tsv", "sha256": "ec5ba3a3bb2acc45dcc69e2519f4bfdffef1fd71675c340bfc0682e37e7dba1c"},
+    {"path": "spikes/artifact-header-link-red-v1/main.cpp", "sha256": "7f62d9fe76b3ce9a87a093072cc41b928981463b3d13aea187b4643145193b99"},
+    {"path": "spikes/artifact-header-link-red-v1/v4-consumer", "sha256": "2317fa9f78470fe61696ed8ca942a2252e54671a1f75b6440bf47174eb157274"},
+    {"path": "logs/p0-2-artifact-v4-header-link-green-compile.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "logs/p0-2-artifact-v4-header-link-green-compile.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "logs/p0-2-artifact-v4-header-link-green-run.log", "sha256": "33bdaf9e2d6bcbde2e4e613e865e403f8fe21fc621078d34c30b0bdc7f68d903"},
+    {"path": "logs/p0-2-artifact-v4-header-link-green-run.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "artifact/cantera-3.2.0-gcc11-release-v4/share/cantera/data/README.md", "sha256": "067c221d01413542325424c7b9c6708674e67c4b5a346c58dfdea891ea81754f"},
+    {"path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/Cantera/License.txt", "sha256": "e92980b9712ce20e73898a97b0116889e84e07f548d6be8591e87dcad79c41bb"},
+    {"path": "artifact/cantera-3.2.0-gcc11-release-v4/licenses/UPSTREAM-COMBINED-LICENSES.txt", "sha256": "25bacb1e19380fc7beaff24973da5386c44fdb414188970b6d8fd0681135dca2"},
+    {"path": "manifests/p0-2-artifact-v1-rejected-files.sha256", "sha256": "849159de889189370c900c8e983e6a4a0730c253e43cf69bcacda39b763e5f63"},
+    {"path": "manifests/p0-2-artifact-v2-rejected-files.sha256", "sha256": "10264943faaabd5ebe4a687030d6d9bda92285af0388487b825cb4335df3ff0a"},
+    {"path": "manifests/p0-2-artifact-v3-rejected-files.sha256", "sha256": "82b2b1f8cee141ada054908225fb69df53a9af8fa89707a414712e7dd30a2311"},
+    {"path": "manifests/p0-2-artifact-v4-audit-v1-failed-evidence.sha256", "sha256": "b6136408e536c75ea6148ce680b62f52af948f6b576b069cc582db15765e45bd"},
+    {"path": "manifests/p0-2-consumer-fetch-policy-scan-v1.sh", "sha256": "17b16377d2e18f9ddef77284420e81bd21bec90ec704351bbb6c45cf2bb14fc4"},
+    {"path": "logs/p0-2-consumer-fetch-policy-scan-v1.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "logs/p0-2-consumer-fetch-policy-scan-v1-run.log", "sha256": "1ccc15244dd5d3faf1f362c6c9ecc91ab850b269f9aabb0e2fc11bb4d094e696"},
+    {"path": "logs/p0-2-consumer-fetch-policy-scan-v1.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"}
+  ],
+  "relocation_status": "pending_p0_3",
+  "claims": {
+    "hundun_cmake_integration": "not_proved",
+    "chemistry_backend": "not_proved",
+    "reacting_flow": "not_proved",
+    "scientific_acceptance": "not_proved"
+  },
+  "review": {
+    "artifact_status": "PREFLIGHT_PASS",
+    "relocation_status": "pending_p0_3_runtime_spike",
+    "header_and_link_status": "pass_for_v4_smoke",
+    "provenance_status": "verified_for_p0_2_artifact_scope",
+    "next_gate": "P0-3",
+    "unresolved_claims": [
+      "compiled_install_prefix_fragment_must_be_tested_for_runtime_nonconsumption_and_relocation_in_P0_3"
+    ]
+  },
+  "p0_3_linkage": {
+    "schema": "hundun.stage4_p0.cantera_linkage_evidence.v1",
+    "recorded_at": "2026-08-09T23:58:09+08:00",
+    "result": "PREFLIGHT_PASS",
+    "result_scope": "standalone_cantera_cxx_thread_mpi_abi_and_relocation_boundary_only",
+    "stage4_product_accepted": false,
+    "product_changes": "none",
+    "governance_parent_head": "8923015c3e489d45d66fbff9cc44bc4967b553a9",
+    "artifact_identity_unchanged": true,
+    "mpi_toolchain": {
+      "rootfs": "source/rootfs-jammy-attempt-2-openmpi-fontconfig-postinst-recovery",
+      "compiler": "GCC 11.4.0",
+      "mpi": "Open MPI 4.1.2",
+      "audit_script": {"path": "manifests/p0-3-audit-mpi-toolchain-v2.sh", "sha256": "ceed60e9272141e019fe8c309b8eefdb31659c5206bdcdc0e1232abf253de0ad"},
+      "audit_log": {"path": "logs/p0-3-audit-mpi-toolchain-v2-run.log", "sha256": "7d8a55b70b6af075614e96fc1f251538392e6ff0c484616e57b1b29ad5eca900"},
+      "audit_status": {"path": "logs/p0-3-audit-mpi-toolchain-v2-run.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0},
+      "package_inventory": {"path": "manifests/p0-3-mpi-toolchain-packages-v2.tsv", "sha256": "f83a19e7d5ee5912afb60a7f79ff4829434eb724a5bc623f8f3d06d6c62635fe"}
+    },
+    "spike": {
+      "source": {"path": "spikes/cantera-cxx-v1/main.cpp", "sha256": "d1f7890d6846643d2adc6aebf104b811b541225ed023b239ce33f68eeaadde10"},
+      "output_schema": "hundun.stage4_p0.cantera_spike.v1",
+      "hash_algorithm": "FNV-1a-64 over binary64 bit patterns in fixed big-endian byte order; deterministic interface summary, not cryptographic evidence",
+      "mechanism": {
+        "path": "spikes/cantera-cxx-v1/synthetic-mechanism-v2.yaml",
+        "sha256": "c518a07cada5f1bddcdb308f0a2f695d92cc6373e173ffd87e96312530b52aee",
+        "provenance_path": "spikes/cantera-cxx-v1/fixture-provenance.md",
+        "provenance_sha256": "59b6d08311e82115b1f3d125ba745e10056f74e8ad9f12d7274c9a0c79fdecaa",
+        "license_scope": "independently_authored_HUNDUN_preflight_fixture",
+        "scientific_scope": "synthetic_two_state_interface_fixture_only"
+      },
+      "release_binary": {"path": "spikes/cantera-cxx-v1/cantera-spike-release-final", "sha256": "9083224db30c2f750e9365fcae20e1bace39a2bd92ed09c7d2077d9061d5385a"},
+      "debug_binary": {"path": "spikes/cantera-cxx-v1/cantera-spike-debug-final", "sha256": "a5fadbb62929e4f400b3d935b915d5d8949b249cec6f4f8bfa4825769583bd0c"},
+      "build_script": {"path": "spikes/cantera-cxx-v1/build-spikes-v1.sh", "sha256": "0e5779c2e8a48a19eea66c8ddd744aa7aea109463c9d8805d2d6bd2cbc5ac466"},
+      "build_log": {"path": "logs/p0-3-final-build-v1.log", "sha256": "bd23e6ee0d2a66ab3c179fd7f944cab2ad30d6904d5413f3f916902438a4d830"},
+      "build_status": {"path": "logs/p0-3-final-build-v1.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0}
+    },
+    "numeric_summary": {
+      "temperature_K": "1.00000000000000000e+03",
+      "pressure_Pa": "1.01325000000000000e+05",
+      "density_kg_m3": "1.22840891457018497e-02",
+      "cp_mass_J_kg_K": "2.10336107899709968e+04",
+      "viscosity_Pa_s": "1.57224613101764864e-05",
+      "net_production_rate_hash": "6c9b671f67e0611d",
+      "reactor_final_state_hash": "d82f7aa6bc186c8e",
+      "workspace_alias_count": 0
+    },
+    "matrix": {
+      "profiles": ["release_t1_r1_repeat2", "release_t2_r1_repeat2", "release_t1_r2_repeat2", "release_t2_r2_repeat2", "debug_t1_r1"],
+      "all_exit_zero": true,
+      "fixed_lane_order_hashes_equal": true,
+      "rank_summaries_equal": true,
+      "workspace_alias_count_zero": true,
+      "runner": {"path": "spikes/cantera-cxx-v1/run-matrix-v1.sh", "sha256": "d58adcde9ed22884fbd8988616f29a709d1ada7b6e9ace4efc769392d1d28c5d"},
+      "run_log": {"path": "logs/p0-3-matrix-v1-run.log", "sha256": "7c798626be22a3aa8dfac49d64dc1b035effee4f2bbb05cd28063650e6285492"},
+      "status": {"path": "logs/p0-3-matrix-v1-run.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0},
+      "evidence_manifest": {"path": "logs/p0-3-matrix-v1/evidence.sha256", "sha256": "df6d6875bd35a8eaf0923e072e64666ee8c0521c083da713adc66679fce52241"}
+    },
+    "output_validator": {
+      "validator": {"path": "spikes/cantera-cxx-v1/validate-output-v2.sh", "sha256": "457ae8171eb91ff0a4b5fab6f14c62594daa79103d3363b3804814e8a905da34"},
+      "mutation_runner": {"path": "spikes/cantera-cxx-v1/run-output-validator-mutations-v2.sh", "sha256": "a7d81ba8ae8ebc7b3020369434e9b3ea441928b17d406be959f605dcfc114b42"},
+      "mutation_summary": {"path": "logs/p0-3-output-validator-mutations-v2/summary.tsv", "sha256": "e462f8c3311867ec61d56cd7ead553655616eda335e2b3b2c28a5e1339147977"},
+      "mutation_status": {"path": "logs/p0-3-output-validator-mutations-v2-run.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0},
+      "expected_rejects": 6,
+      "unexpected_passes": 0
+    },
+    "abi_policy": {
+      "release_artifact_consumed_by_ordinary_debug_abi1": true,
+      "glibcxx_debug_present": false,
+      "clang_or_libcxx_present": false,
+      "validator": {"path": "spikes/cantera-cxx-v1/validate-consumer-policy-v2.sh", "sha256": "fc81e27f4cb785ca20af90bb0ae61d9aa9ae45f08459c2c51c133675f4a1e905"},
+      "canonical_exit_code": 0,
+      "abi0_mutation_exit_code": 65,
+      "abi0_mutation_status_sha256": "979b894f2d91bf199766571d58024f020d1a44a417da5f48e1fa1cdf554a14f5"
+    },
+    "runtime_process_boundary": {
+      "python_or_conda_exec_count": 0,
+      "libpython_or_site_packages_reference_count": 0,
+      "mpi2_exec_trace": {"path": "logs/p0-3-runtime-exec-trace-mpi2-v1.log", "sha256": "8ade95d07cf07233c17929e6d221234207cbd11eca9bf479bb883fe278a195ce"},
+      "trace_status": {"path": "logs/p0-3-runtime-exec-trace-mpi2-v1.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0}
+    },
+    "relocation": {
+      "status": "pass",
+      "path": "install/relocated/cantera-3.2.0-gcc11-release-v4-p0-3-v1",
+      "regular_file_count": 656,
+      "symlink_count": 2,
+      "bytes_du_sb": 21691508,
+      "runpath": "$ORIGIN/../lib",
+      "relocated_binary_sha256": "0b409c6124a435250e5851f8f92f80ae68a6e2966643fbe906bb35fe0aa93c58",
+      "original_and_copied_artifact_file_manifest_sha256": "5fd187220f23d11af133f43f4c1208f9744943bc793e89bc7543171363fa3004",
+      "final_file_manifest": {"path": "manifests/p0-3-relocation-v2-validation/final-files.sha256", "sha256": "cdb052cf3f31b8866b57840d08f88b90766ce87f9548ffcb475098a500017fcb"},
+      "final_symlink_manifest": {"path": "manifests/p0-3-relocation-v2-validation/final-symlinks.tsv", "sha256": "d4ee842a8a8c77a316478232b6c078f453fd4ad71052e6f859988a0fe0a94781"},
+      "readelf_log": {"path": "logs/p0-3-relocation-v1/readelf-dynamic.log", "sha256": "b37a0c589af52a46d35e814060c5c974b630a21d3ecc8a94a2ced15b4a36ab9a"},
+      "ldd_log": {"path": "logs/p0-3-relocation-v1/ldd.log", "sha256": "c1e1758ec5043b275a1d8e2dbf08c11b65acec7d0e5fcdc342a767717d196fa3"},
+      "validation_script": {"path": "spikes/cantera-cxx-v1/validate-relocation-v2.sh", "sha256": "7155067c27fb19dbeff83e33aeb8c1126782e610918ea5fb36c1428770976e9a"},
+      "validation_log": {"path": "logs/p0-3-relocation-v2-validation-run.log", "sha256": "835bc7f469fc380f561938207e3df8d6e660728ec94d2a2e4d3d93e226af4f4d"},
+      "validation_status": {"path": "logs/p0-3-relocation-v2-validation-run.status", "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa", "exit_code": 0},
+      "runtime_after_exec_trace": {"path": "logs/p0-3-relocation-v2-validation/runtime-after-spike-exec.log", "sha256": "bd371d494fa2d78d2fbeed471bd6bdae65a8715804c1b22fdd05f86464b16ca5"},
+      "original_artifact_build_source_runtime_reference_count": 0,
+      "compiled_prefix_fragment_runtime_consumed": false
+    },
+    "retained_failures": [
+      "release_build_v1_openmpi_wrapper_missing_unversioned_gxx",
+      "release_build_v2_werror_applied_to_upstream_headers",
+      "synthetic_mechanism_v1_constant_cp_zero_temperature_initialization",
+      "consumer_policy_validator_v1_returned_generic_missing_abi_status",
+      "relocation_validator_v1_rejected_equivalent_bin_dotdot_lib_resolution",
+      "output_validator_mutation_v1_failed_to_reject_nan"
+    ],
+    "claims": {
+      "standalone_cxx_linkage": "proved_for_frozen_linux_profile",
+      "thread_workspace_isolation": "proved_for_one_and_two_threads",
+      "mpi_lifecycle": "proved_for_one_and_two_ranks",
+      "moved_prefix_runtime": "proved_for_complete_candidate_bundle_plus_synthetic_fixture",
+      "hundun_cmake_integration": "not_proved",
+      "chemistry_backend": "not_proved",
+      "reacting_flow": "not_proved",
+      "checkpoint_or_diagnostics": "not_proved",
+      "scientific_chemistry_or_fuel_validity": "not_proved"
+    }
+  },
+  "p0_final": {
+    "schema": "hundun.stage4_p0.final_result.v1",
+    "result": "PREFLIGHT_PASS",
+    "result_scope": "pre_stage4_non_product_public_input_artifact_boundary_and_oracle_preflight_only",
+    "sealed_candidate_head": "401a5ff285aa1a6283d68a241155bbfab405b9e4",
+    "sealed_candidate_tree": "3e0819270bc8542a7f9b72b2e0c3103e496e167f",
+    "artifact_identity_unchanged": true,
+    "manifest_before_final_append_sha256": "62962ba6217c52d0b12fa6b27c3b5da0e7d55c5443ea95222614f5f84706521b",
+    "stage4_product_accepted": false,
+    "product_changes": "none",
+    "stage3_intake_status": "deferred_until_formal_stage3_acceptance_and_explicit_stage4_start",
+    "fuel_candidate_chain_status": "PREFLIGHT_PARTIAL_no_bundle_ready_mechanism_transport_property_chain",
+    "revalidation": {
+      "runner_path": "manifests/p0-7-revalidate-candidate-v2.sh",
+      "runner_sha256": "e725ee14ef7d9fe3cb0425f1d2bb1c28bddff0ac9c7a7a01e2b0f950f08c0e83",
+      "primary_manifest_path": "manifests/p0-7-revalidation-v2/primary.sha256",
+      "primary_manifest_sha256": "2af6bb03a03cf1a315cf47805373eff928836141e1cf39f1631a796c25f663f0",
+      "logs_manifest_path": "manifests/p0-7-revalidation-v2/logs.sha256",
+      "logs_manifest_sha256": "f83622eddb63a901d5ade48a66a8e7c2d933a880ca675742c6c5ec7289023cb0",
+      "status_path": "logs/p0-7-revalidate-candidate-v2.status",
+      "status_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "exit_code": 0
+    },
+    "retained_python_cache_recovery": {
+      "cause": "maintainer_only_python_import_created_unmanifested_cpython310_cache_files_in_frozen_extract_trees",
+      "action": "moved_exact_unmanifested_pyc_files_to_retained_external_evidence_and_restored_manifested_trees",
+      "preserved_file_count": 657,
+      "evidence_path": "logs/p0-7-retained-python-cache-contamination-v1/evidence.sha256",
+      "evidence_sha256": "3fad3b5a32a33a797175c2a095e50de035d63bb79aa2bf24abb26c30eebe9ab9",
+      "immutable_wheel_and_source_hashes_changed": false
+    }
+  }
+}

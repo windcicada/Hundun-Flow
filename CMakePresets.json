@@ -17,6 +17,7 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "HUNDUN_SOURCE_VERSION": "v0.4",
         "HUNDUN_BUILD_TESTS": "OFF"
       }
     },
@@ -26,6 +27,7 @@
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "HUNDUN_SOURCE_VERSION": "v0.4",
         "HUNDUN_BUILD_TESTS": "OFF"
       }
     },
@@ -35,6 +37,7 @@
       "binaryDir": "${sourceDir}/build/asan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "HUNDUN_SOURCE_VERSION": "v0.4",
         "HUNDUN_BUILD_TESTS": "OFF",
         "HUNDUN_ENABLE_ASAN": "ON"
       }
@@ -45,6 +48,7 @@
       "binaryDir": "${sourceDir}/build/ubsan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "HUNDUN_SOURCE_VERSION": "v0.4",
         "HUNDUN_BUILD_TESTS": "OFF",
         "HUNDUN_ENABLE_UBSAN": "ON"
       }

@@ -1,0 +1,670 @@
+{
+  "schema": "hundun.stage4_p0.inputs.v1",
+  "result": "PREFLIGHT_PASS",
+  "result_scope": "official_input_identity_lock_only",
+  "stage4_product_accepted": false,
+  "product_changes": "none",
+  "recorded_at": "2026-08-09T17:45:43+08:00",
+  "last_amended_at": "2026-08-09T21:38:48+08:00",
+  "last_amendment_scope": "p0_2_sourcegen_builder_python_dependency",
+  "path_base": "EXTERNAL_ROOT",
+  "target": {
+    "os": "Ubuntu 22.04",
+    "glibc_floor": "2.35",
+    "arch": "x86_64",
+    "compiler": "GCC 11",
+    "stdlib": "libstdc++",
+    "cxx_standard": 17,
+    "glibcxx_cxx11_abi": 1,
+    "isa": "x86-64"
+  },
+  "ubuntu_rootfs": {
+    "base_url": "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/",
+    "image_name": "ubuntu-22.04-minimal-cloudimg-amd64-root.tar.xz",
+    "image_path": "inputs/ubuntu/ubuntu-22.04-minimal-cloudimg-amd64-root.tar.xz",
+    "image_sha256": "1bd7959194d3fa7b9660b169f010ff222109a885559108028c79e244d649234a",
+    "signed_sums_path": "inputs/ubuntu/SHA256SUMS",
+    "signed_sums_sha256": "58e962350c29fcec5f75dcd4b2f1da44c69a155526eecad4c12d5af2b75da8c1",
+    "signature_path": "inputs/ubuntu/SHA256SUMS.gpg",
+    "signature_sha256": "13d142a3675f07698752ce50bef280ebde455b9e296b1af9bd99f5a823532315",
+    "metadata_last_modified_utc": "2026-08-07T02:44:02Z",
+    "signature_status": "verified_gpgv",
+    "signing_key_fingerprint": "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81",
+    "keyring_path": "/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg",
+    "keyring_sha256": "2ddbc33fdd3acfa0715914e3970b6a033faade0de25985eb17995b3aa85f455e",
+    "use_status": "verified_builder_input"
+  },
+  "cantera": {
+    "repository": "https://github.com/Cantera/cantera.git",
+    "tag": "v3.2.0",
+    "tag_kind": "annotated",
+    "tag_object": "3f552702cbcc1f74b473ff8543e4da2939342217",
+    "tag_signature_status": "not_present_tag_identity_verified_by_official_git_ref",
+    "commit": "4a8358eb80cfeb50474386b5f9ec0b3a83519889",
+    "source_url": "https://github.com/Cantera/cantera/releases/download/v3.2.0/cantera-3.2.0.tar.gz",
+    "source_path": "inputs/cantera/cantera-3.2.0.tar.gz",
+    "source_sha256": "a94682ef3cb60dc57c8d14fc4cccd94e8f6bb74cab9c3f5465ee90832859360b",
+    "rejected_generated_archive_url": "https://github.com/Cantera/cantera/archive/refs/tags/v3.2.0.tar.gz",
+    "rejected_generated_archive_sha256": "f01e25e33f9d5e37db7ababe5af36b60caabff52dba04bb221d53e44735f60ec",
+    "local_patches": [],
+    "license": {
+      "spdx": "BSD-3-Clause",
+      "copyright_holder": "California Institute of Technology; Sandia Corporation; Cantera Developers",
+      "url": "https://github.com/Cantera/cantera/blob/4a8358eb80cfeb50474386b5f9ec0b3a83519889/License.txt",
+      "path": "inputs/dependencies/cantera/License.txt",
+      "sha256": "e92980b9712ce20e73898a97b0116889e84e07f548d6be8591e87dcad79c41bb",
+      "status": "verified_redistributable",
+      "obligations": [
+        "retain copyright, conditions, and disclaimer in source redistribution",
+        "reproduce copyright, conditions, and disclaimer with binary redistribution",
+        "do not use licensor or contributor names for endorsement"
+      ]
+    }
+  },
+  "dependencies": [
+    {
+      "name": "fmt",
+      "cantera_path": "ext/fmt",
+      "repository": "https://github.com/fmtlib/fmt.git",
+      "version": "9.1.0",
+      "tag": "9.1.0",
+      "commit": "a33701196adfad74917046096bf5a2aa0ab0bb50",
+      "archive_url": "https://github.com/fmtlib/fmt/archive/refs/tags/9.1.0.tar.gz",
+      "archive_path": "inputs/dependencies/fmt/fmt-9.1.0-a33701196adfad74917046096bf5a2aa0ab0bb50.tar.gz",
+      "archive_sha256": "5dea48d1fcddc3ec571ce2058e13910a0d4a6bab4cc09a809d8b1dd1c88ae6f2",
+      "archive_status": "verified_exact_tag_archive",
+      "copyright_holder": "Victor Zverovich",
+      "license_status": "verified_redistributable",
+      "licenses": [
+        {
+          "spdx": "MIT",
+          "url": "https://github.com/fmtlib/fmt/blob/a33701196adfad74917046096bf5a2aa0ab0bb50/LICENSE.rst",
+          "path": "inputs/dependencies/fmt/LICENSE.rst",
+          "sha256": "825c9324e70f8c839c8ba910543dd4a7daee243b86ef960594c11381a19980b8",
+          "status": "verified"
+        }
+      ],
+      "obligations": [
+        "include copyright and permission notice in copies or substantial portions; compiled-object exception is upstream-specific"
+      ],
+      "consumption_status": "required_source_candidate_for_p0_2",
+      "bundle_status": "pending_p0_2_binary_inventory",
+      "local_patches": []
+    },
+    {
+      "name": "yaml-cpp",
+      "cantera_path": "ext/yaml-cpp",
+      "repository": "https://github.com/jbeder/yaml-cpp.git",
+      "version": "0.7.0",
+      "tag": "yaml-cpp-0.7.0",
+      "commit": "0579ae3d976091d7d664aa9d2527e0d0cff25763",
+      "archive_url": "https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz",
+      "archive_path": "inputs/dependencies/yaml-cpp/yaml-cpp-0.7.0-0579ae3d976091d7d664aa9d2527e0d0cff25763.tar.gz",
+      "archive_sha256": "43e6a9fcb146ad871515f0d0873947e5d497a1c9c60c58cb102a97b47208b7c3",
+      "archive_status": "verified_exact_tag_archive",
+      "copyright_holder": "Jesse Beder",
+      "license_status": "verified_redistributable",
+      "licenses": [
+        {
+          "spdx": "MIT",
+          "url": "https://github.com/jbeder/yaml-cpp/blob/0579ae3d976091d7d664aa9d2527e0d0cff25763/LICENSE",
+          "path": "inputs/dependencies/yaml-cpp/LICENSE",
+          "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b",
+          "status": "verified"
+        }
+      ],
+      "obligations": [
+        "include copyright and permission notice in copies or substantial portions"
+      ],
+      "consumption_status": "required_source_candidate_for_p0_2",
+      "bundle_status": "pending_p0_2_binary_inventory",
+      "local_patches": []
+    },
+    {
+      "name": "sundials",
+      "cantera_path": "ext/sundials",
+      "repository": "https://github.com/LLNL/sundials",
+      "version": "5.3.0 archive layout",
+      "tag": "archive-v5.3.0",
+      "commit": "887af4374af2271db9310d31eaa9b5aeff49e829",
+      "related_release_tag": "v5.3.0",
+      "related_release_tag_commit": "cfaae739076128ad8a34f1d18cf480ecf256e24a",
+      "archive_url": "https://github.com/LLNL/sundials/archive/refs/tags/archive-v5.3.0.tar.gz",
+      "archive_path": "inputs/dependencies/sundials/sundials-archive-v5.3.0-887af4374af2271db9310d31eaa9b5aeff49e829.tar.gz",
+      "archive_sha256": "fa9ed1c3751714fccd262f8d088261a54790ec89ae5a524399b6f06b950fe80a",
+      "archive_status": "verified_exact_cantera_gitlink_tag_archive",
+      "copyright_holder": "Lawrence Livermore National Security and Southern Methodist University",
+      "license_status": "verified_redistributable",
+      "licenses": [
+        {
+          "spdx": "BSD-3-Clause",
+          "url": "https://github.com/LLNL/sundials/blob/887af4374af2271db9310d31eaa9b5aeff49e829/LICENSE",
+          "path": "inputs/dependencies/sundials/LICENSE",
+          "sha256": "fe9b98949f9ac131af1130eb3301b8433d23145367ccebaf23204f2322c4d882",
+          "status": "verified"
+        },
+        {
+          "spdx": "LicenseRef-SUNDIALS-NOTICE",
+          "url": "https://github.com/LLNL/sundials/blob/887af4374af2271db9310d31eaa9b5aeff49e829/NOTICE",
+          "path": "inputs/dependencies/sundials/NOTICE",
+          "sha256": "5cb9c6b0ca7c09b26fe2d1f9ef45231086c9ea2cdb32eb5f9dce7012e2364bc2",
+          "status": "verified_notice"
+        }
+      ],
+      "obligations": [
+        "retain or reproduce copyright, conditions, and disclaimer",
+        "do not use copyright holder or contributor names for endorsement",
+        "preserve the upstream notice in redistributed materials"
+      ],
+      "consumption_status": "required_source_candidate_for_p0_2",
+      "bundle_status": "pending_p0_2_binary_inventory",
+      "local_patches": []
+    },
+    {
+      "name": "eigen",
+      "cantera_path": "ext/eigen",
+      "repository": "https://gitlab.com/libeigen/eigen.git/",
+      "version": "3.4.0",
+      "tag": "3.4.0",
+      "commit": "3147391d946bb4b6c68edd901f2add6ac1f31f8c",
+      "archive_url": "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
+      "archive_path": "inputs/dependencies/eigen/eigen-3.4.0-3147391d946bb4b6c68edd901f2add6ac1f31f8c.tar.gz",
+      "archive_sha256": "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72",
+      "archive_status": "verified_exact_tag_archive",
+      "copyright_holder": "Eigen contributors and file-specific third-party holders",
+      "license_status": "candidate_consumed_file_scope_audit_required",
+      "licenses": [
+        {
+          "spdx": "LicenseRef-Eigen-License-Guide",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.README",
+          "path": "inputs/dependencies/eigen/COPYING.README",
+          "sha256": "c83230b770f17ef1386ea1fd3681271dd98aa93646bdbfb5bff3a1b7050fff9d",
+          "status": "verified_scope_guide"
+        },
+        {
+          "spdx": "MPL-2.0",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.MPL2",
+          "path": "inputs/dependencies/eigen/COPYING.MPL2",
+          "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+          "status": "verified_primary"
+        },
+        {
+          "spdx": "BSD-3-Clause",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.BSD",
+          "path": "inputs/dependencies/eigen/COPYING.BSD",
+          "sha256": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+          "status": "verified_file_scoped"
+        },
+        {
+          "spdx": "LicenseRef-Eigen-MINPACK",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.MINPACK",
+          "path": "inputs/dependencies/eigen/COPYING.MINPACK",
+          "sha256": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+          "status": "verified_file_scoped"
+        },
+        {
+          "spdx": "Apache-2.0",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.APACHE",
+          "path": "inputs/dependencies/eigen/COPYING.APACHE",
+          "sha256": "03379001a7b12a2ec997a25554247d985270b353c10d5bafee9ac8d6519820b7",
+          "status": "verified_file_scoped"
+        },
+        {
+          "spdx": "GPL-3.0-only",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.GPL",
+          "path": "inputs/dependencies/eigen/COPYING.GPL",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "status": "license_text_present_consumption_unproven"
+        },
+        {
+          "spdx": "LGPL-2.1-only OR LGPL-2.1-or-later",
+          "url": "https://gitlab.com/libeigen/eigen/-/blob/3147391d946bb4b6c68edd901f2add6ac1f31f8c/COPYING.LGPL",
+          "path": "inputs/dependencies/eigen/COPYING.LGPL",
+          "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+          "status": "license_text_present_consumption_unproven"
+        }
+      ],
+      "obligations": [
+        "preserve file-level notices",
+        "for MPL-covered executable distribution make the corresponding covered source available",
+        "compile P0-2 with EIGEN_MPL2_ONLY and treat any NonMPL2.h failure as a design blocker",
+        "P0-2 must inventory actually included or compiled Eigen files before binary acceptance"
+      ],
+      "consumption_status": "required_source_candidate_for_p0_2",
+      "bundle_status": "candidate_pending_p0_2_consumed_file_audit",
+      "local_patches": []
+    }
+  ],
+  "builder_header_dependencies": [
+    {
+      "name": "boost",
+      "role": "builder_header_only",
+      "package": "libboost1.74-dev",
+      "source_package": "boost1.74",
+      "version": "1.74.0-14ubuntu3",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy main",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/main/b/boost1.74/libboost1.74-dev_1.74.0-14ubuntu3_amd64.deb",
+      "archive_path": "inputs/dependencies/boost/libboost1.74-dev_1.74.0-14ubuntu3_amd64.deb",
+      "archive_sha256": "4d9c90e43f0d25db6280d1ee326771cbb76462f73b9430f06bac1de8d05b7a78",
+      "archive_bytes": 9608510,
+      "copyright_holder": "Boost project contributors and file-specific copyright holders",
+      "license_status": "candidate_consumed_header_scope_audit_required",
+      "licenses": [
+        {
+          "spdx": "NOASSERTION",
+          "url": "http://archive.ubuntu.com/ubuntu/pool/main/b/boost1.74/libboost1.74-dev_1.74.0-14ubuntu3_amd64.deb",
+          "source_member": "./usr/share/doc/libboost1.74-dev/copyright",
+          "path": "inputs/dependencies/boost/copyright",
+          "sha256": "17369eeac3938acb31085c8a1d4f1a40dc88a518a9389958a12c0592bb2d5766",
+          "status": "verified_package_license_inventory"
+        },
+        {
+          "spdx": "BSL-1.0",
+          "url": "https://www.boost.org/LICENSE_1_0.txt",
+          "path": "inputs/dependencies/boost/LICENSE_1_0.txt",
+          "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+          "status": "verified_primary_license"
+        }
+      ],
+      "obligations": [
+        "preserve the exact Ubuntu package copyright inventory and official Boost Software License 1.0 evidence",
+        "audit the actual Boost headers included or compiled before accepting the P0 artifact",
+        "treat Boost as a builder-only header input and reject Boost headers from the P0 artifact install",
+        "reject a Boost runtime dependency in the P0 artifact"
+      ],
+      "consumption_status": "required_builder_header_only_for_p0_2",
+      "consumed_header_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    }
+  ],
+  "builder_tool_dependencies": [
+    {
+      "name": "doxygen",
+      "role": "builder_tool_only",
+      "package": "doxygen",
+      "source_package": "doxygen",
+      "version": "1.9.1-2ubuntu2",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy universe",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/universe/d/doxygen/doxygen_1.9.1-2ubuntu2_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/doxygen_1.9.1-2ubuntu2_amd64.deb",
+      "archive_sha256": "d3fe7f77f505262db0872ba810b691feb4a607887ceb368e17a1da66ee0387f7",
+      "archive_bytes": 4620198,
+      "copyright_holder": "Doxygen contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/doxygen/copyright",
+        "path": "logs/doxygen-builder-v1/extract/doxygen/usr/share/doc/doxygen/copyright",
+        "sha256": "286b6aadd5b010bb3df2e226dc67fa8cf5819af8870b3ac093442370214c50b9",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "libclang-cpp14",
+      "role": "builder_tool_only",
+      "package": "libclang-cpp14",
+      "source_package": "llvm-toolchain-14",
+      "version": "1:14.0.0-1ubuntu1.1",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy updates universe",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/universe/l/llvm-toolchain-14/libclang-cpp14_14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/libclang-cpp14_1%3a14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_sha256": "462546f6149fbef99b47f3e1e01e0743d256ae279337c7f89a80a976dfd02175",
+      "archive_bytes": 12053266,
+      "copyright_holder": "LLVM contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/libclang-cpp14/copyright",
+        "path": "logs/doxygen-builder-v1/extract/libclang-cpp14/usr/share/doc/libclang-cpp14/copyright",
+        "sha256": "dc2a171c75ca72818f7f4312602f27cb0e4bf6d010a86e7073a3797cb228ddff",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "libclang1-14",
+      "role": "builder_tool_only",
+      "package": "libclang1-14",
+      "source_package": "llvm-toolchain-14",
+      "version": "1:14.0.0-1ubuntu1.1",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy updates universe",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/universe/l/llvm-toolchain-14/libclang1-14_14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/libclang1-14_1%3a14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_sha256": "b75b743f5d5effaab97790c1379fb1855d1a20bd5432a2387bf4dc82d86d45e3",
+      "archive_bytes": 6792182,
+      "copyright_holder": "LLVM contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/libclang1-14/copyright",
+        "path": "logs/doxygen-builder-v1/extract/libclang1-14/usr/share/doc/libclang1-14/copyright",
+        "sha256": "dc2a171c75ca72818f7f4312602f27cb0e4bf6d010a86e7073a3797cb228ddff",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "libllvm14",
+      "role": "builder_tool_only",
+      "package": "libllvm14",
+      "source_package": "llvm-toolchain-14",
+      "version": "1:14.0.0-1ubuntu1.1",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy updates main",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/main/l/llvm-toolchain-14/libllvm14_14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/libllvm14_1%3a14.0.0-1ubuntu1.1_amd64.deb",
+      "archive_sha256": "9044b614a6c7fb6262e7cbeb13dc731fc0c92bed96281c1a3920dd706442ee8e",
+      "archive_bytes": 23967046,
+      "copyright_holder": "LLVM contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/libllvm14/copyright",
+        "path": "logs/doxygen-builder-v1/extract/libllvm14/usr/share/doc/libllvm14/copyright",
+        "sha256": "dc2a171c75ca72818f7f4312602f27cb0e4bf6d010a86e7073a3797cb228ddff",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "libxapian30",
+      "role": "builder_tool_only",
+      "package": "libxapian30",
+      "source_package": "xapian-core",
+      "version": "1.4.18-4",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy universe",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/universe/x/xapian-core/libxapian30_1.4.18-4_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/libxapian30_1.4.18-4_amd64.deb",
+      "archive_sha256": "5cfe52f4ca570e85efa828efda6d6831ceb0f667a32faf5438887cfaf528b7c2",
+      "archive_bytes": 700928,
+      "copyright_holder": "Xapian contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/libxapian30/copyright",
+        "path": "logs/doxygen-builder-v1/extract/libxapian30/usr/share/doc/libxapian30/copyright",
+        "sha256": "d530c1aa427b7e55f170f48b43f3657f847255438496847796eb8a0496bdd5d6",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "libxml2",
+      "role": "builder_tool_only",
+      "package": "libxml2",
+      "source_package": "libxml2",
+      "version": "2.9.13+dfsg-1ubuntu0.12",
+      "architecture": "amd64",
+      "repository": "Canonical Ubuntu Jammy updates main",
+      "archive_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.13%2bdfsg-1ubuntu0.12_amd64.deb",
+      "archive_path": "inputs/dependencies/doxygen-builder-v1/libxml2_2.9.13+dfsg-1ubuntu0.12_amd64.deb",
+      "archive_sha256": "b3678e6e4b166bc0e4226fb118d489ab51802c772914421397c9dcb2dd0e0d2b",
+      "archive_bytes": 764660,
+      "copyright_holder": "libxml2 contributors and package file-specific copyright holders",
+      "license_status": "verified_package_multi_license_inventory",
+      "copyright_inventory": {
+        "spdx": "NOASSERTION",
+        "source_member": "./usr/share/doc/libxml2/copyright",
+        "path": "logs/doxygen-builder-v1/extract/libxml2/usr/share/doc/libxml2/copyright",
+        "sha256": "ee746b96cfa5be73c3ea3e4cfb1285e9b315d4c9267f99b2ee9c5d911d9fe3f4",
+        "status": "verified_package_license_inventory"
+      },
+      "consumption_status": "required_builder_tool_only_for_p0_2",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "audit_pending_p0_2",
+      "local_patches": []
+    }
+  ],
+  "builder_python_dependencies": [
+    {
+      "name": "typing_extensions",
+      "distribution": "typing-extensions",
+      "role": "builder_pythonpath_only",
+      "version": "4.15.0",
+      "repository": "Python Package Index",
+      "project_url": "https://pypi.org/project/typing-extensions/4.15.0/",
+      "metadata_url": "https://pypi.org/pypi/typing-extensions/4.15.0/json",
+      "metadata_path": "inputs/dependencies/typing-extensions-4.15.0/pypi-metadata.json",
+      "metadata_sha256": "e97e0b1087254aa1c7e8b2074c3796124dfd7d26e0f54ffcdc3a975b53047938",
+      "wheel_url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+      "wheel_path": "inputs/dependencies/typing-extensions-4.15.0/typing_extensions-4.15.0-py3-none-any.whl",
+      "wheel_sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+      "wheel_bytes": 44614,
+      "sdist_url": "https://files.pythonhosted.org/packages/72/94/1a15dd82efb362ac84269196e94cf00f187f7ed21c242792a923cdb1c61f/typing_extensions-4.15.0.tar.gz",
+      "sdist_path": "inputs/dependencies/typing-extensions-4.15.0/typing_extensions-4.15.0.tar.gz",
+      "sdist_sha256": "0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466",
+      "sdist_bytes": 109391,
+      "python_requires": ">=3.9",
+      "copyright_holder": "Python Software Foundation and historical licensors named in LICENSE",
+      "api_evidence": {
+        "path": "inputs/dependencies/typing-extensions-4.15.0/sdist-extract/typing_extensions-4.15.0/CHANGELOG.md",
+        "sha256": "f61a6f3540b43f1545d42866718b3dc19b674afa4745d873d7e2827152409c8b",
+        "status": "self_runtime_support_added_in_4_0_0"
+      },
+      "license": {
+        "spdx": "PSF-2.0",
+        "wheel_path": "inputs/dependencies/typing-extensions-4.15.0/wheel-extract/typing_extensions-4.15.0.dist-info/licenses/LICENSE",
+        "wheel_sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+        "sdist_path": "inputs/dependencies/typing-extensions-4.15.0/sdist-extract/typing_extensions-4.15.0/LICENSE",
+        "sdist_sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+        "status": "verified_matching_wheel_and_sdist"
+      },
+      "consumption_status": "required_cantera_sourcegen_python310_for_p0_2",
+      "injection": "exact_wheel_via_pythonpath",
+      "rootfs_install_status": "forbidden",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "ruamel.yaml",
+      "distribution": "ruamel.yaml",
+      "role": "builder_pythonpath_only",
+      "version": "0.17.21",
+      "repository": "Python Package Index",
+      "project_url": "https://pypi.org/project/ruamel.yaml/0.17.21/",
+      "metadata_url": "https://pypi.org/pypi/ruamel.yaml/0.17.21/json",
+      "metadata_path": "inputs/dependencies/ruamel-yaml-0.17.21/pypi-metadata.json",
+      "metadata_sha256": "e140839f8da85e5ba08ae2ce1d875bca7b4797a780dbf85c4319633ad33540c3",
+      "metadata_bytes": 15193,
+      "wheel_url": "https://files.pythonhosted.org/packages/9e/cb/938214ac358fbef7058343b3765c79a1b7ed0c366f7f992ce7ff38335652/ruamel.yaml-0.17.21-py3-none-any.whl",
+      "wheel_path": "inputs/dependencies/ruamel-yaml-0.17.21/ruamel.yaml-0.17.21-py3-none-any.whl",
+      "wheel_sha256": "742b35d3d665023981bd6d16b3d24248ce5df75fdb4e2924e93a05c1f8b61ca7",
+      "wheel_bytes": 109478,
+      "wheel_tag": "py3-none-any",
+      "wheel_metadata_path": "inputs/dependencies/ruamel-yaml-0.17.21/wheel-extract/ruamel.yaml-0.17.21.dist-info/METADATA",
+      "wheel_metadata_sha256": "10efd31d77a2b726f57cfc35ac1e2c85db47f49b5adb9f2f290da9f55d99f0ad",
+      "wheel_tree_path": "inputs/dependencies/ruamel-yaml-0.17.21/wheel-extract",
+      "wheel_tree_manifest_path": "manifests/ruamel-yaml-0.17.21-wheel-extract.sha256",
+      "wheel_tree_manifest_sha256": "ce5fef34f3fb24dd65ee21902b0d5c2b33123333c3ed95b6bd6241644702460f",
+      "wheel_tree_file_count": 36,
+      "sdist_url": "https://files.pythonhosted.org/packages/46/a9/6ed24832095b692a8cecc323230ce2ec3480015fbfa4b79941bd41b23a3c/ruamel.yaml-0.17.21.tar.gz",
+      "sdist_path": "inputs/dependencies/ruamel-yaml-0.17.21/ruamel.yaml-0.17.21.tar.gz",
+      "sdist_sha256": "8b7ce697a2f212752a35c1ac414471dc16c424c9573be4926b56ff3f5d23b7af",
+      "sdist_bytes": 128123,
+      "python_requires": ">=3",
+      "requires_dist": "ruamel.yaml.clib (>=0.2.6) ; platform_python_implementation==\"CPython\" and python_version<\"3.11\"",
+      "copyright_holder": "Anthon van der Neut, Ruamel bvba",
+      "license": {
+        "spdx": "MIT",
+        "wheel_path": "inputs/dependencies/ruamel-yaml-0.17.21/wheel-extract/ruamel.yaml-0.17.21.dist-info/LICENSE",
+        "wheel_sha256": "ab837b032c5aae84503fc0c733a116a26fd272e90dc4402fa68d3c9e51aed3b0",
+        "sdist_path": "inputs/dependencies/ruamel-yaml-0.17.21/sdist-extract/ruamel.yaml-0.17.21/LICENSE",
+        "sdist_sha256": "ab837b032c5aae84503fc0c733a116a26fd272e90dc4402fa68d3c9e51aed3b0",
+        "status": "verified_matching_wheel_and_sdist"
+      },
+      "consumption_status": "required_cantera_clib_sourcegen_safe_yaml_for_p0_2",
+      "injection": "exact_wheel_extract_via_pythonpath",
+      "rootfs_install_status": "forbidden",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    },
+    {
+      "name": "ruamel.yaml.clib",
+      "distribution": "ruamel.yaml.clib",
+      "role": "builder_pythonpath_only",
+      "version": "0.2.6",
+      "repository": "Python Package Index",
+      "project_url": "https://pypi.org/project/ruamel.yaml.clib/0.2.6/",
+      "metadata_url": "https://pypi.org/pypi/ruamel.yaml.clib/0.2.6/json",
+      "metadata_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/pypi-metadata.json",
+      "metadata_sha256": "677b9e08e0143864232cccc1122275d0bf33f79af9aaf464ba19fc6789953c88",
+      "metadata_bytes": 28289,
+      "wheel_url": "https://files.pythonhosted.org/packages/e1/c6/a8ed2b252c9a1018ea1758bbfa6bcd1b4965009e4f9040e1d0456417d7ef/ruamel.yaml.clib-0.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_24_x86_64.whl",
+      "wheel_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/ruamel.yaml.clib-0.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_24_x86_64.whl",
+      "wheel_sha256": "221eca6f35076c6ae472a531afa1c223b9c29377e62936f61bc8e6e8bdc5f9e7",
+      "wheel_bytes": 519289,
+      "wheel_tag": "cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_24_x86_64",
+      "wheel_metadata_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/wheel-extract/ruamel.yaml.clib-0.2.6.dist-info/METADATA",
+      "wheel_metadata_sha256": "ee7c146559d808531a6b8729460ba7bc62140e8dc7fe9279ef6001ea32ede75c",
+      "wheel_tree_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/wheel-extract",
+      "wheel_tree_manifest_path": "manifests/ruamel-yaml-clib-0.2.6-wheel-extract.sha256",
+      "wheel_tree_manifest_sha256": "e1d31c44b7d6e12418793fcf1340f39b1a020efd7c095a381b9c77202415ff8a",
+      "wheel_tree_file_count": 7,
+      "sdist_url": "https://files.pythonhosted.org/packages/8b/25/08e5ad2431a028d0723ca5540b3af6a32f58f25e83c6dda4d0fcef7288a3/ruamel.yaml.clib-0.2.6.tar.gz",
+      "sdist_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/ruamel.yaml.clib-0.2.6.tar.gz",
+      "sdist_sha256": "4ff604ce439abb20794f05613c374759ce10e3595d1867764dd1ae675b85acbd",
+      "sdist_bytes": 180695,
+      "python_requires": ">=3.5",
+      "requires_dist": "none",
+      "copyright_holder": "Anthon van der Neut, Ruamel bvba",
+      "license": {
+        "spdx": "MIT",
+        "wheel_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/wheel-extract/ruamel.yaml.clib-0.2.6.dist-info/LICENSE",
+        "wheel_sha256": "16174d2cf8c2ee4b900bf8573106bc61c1ce0092da4fa781cc0ee81047a46539",
+        "sdist_path": "inputs/dependencies/ruamel-yaml-clib-0.2.6/sdist-extract/ruamel.yaml.clib-0.2.6/LICENSE",
+        "sdist_sha256": "16174d2cf8c2ee4b900bf8573106bc61c1ce0092da4fa781cc0ee81047a46539",
+        "status": "verified_matching_wheel_and_sdist"
+      },
+      "abi": {
+        "python": "CPython 3.10",
+        "architecture": "x86_64",
+        "manylinux_floor": "glibc 2.17",
+        "needed": "libpthread.so.0,libc.so.6",
+        "maximum_glibc_symbol": "GLIBC_2.14"
+      },
+      "consumption_status": "required_ruamel_yaml_declared_closure_for_python310_p0_2",
+      "injection": "exact_wheel_extract_via_pythonpath",
+      "rootfs_install_status": "forbidden",
+      "artifact_audit_status": "pending_p0_2",
+      "bundle_status": "forbidden_from_artifact_install",
+      "runtime_status": "forbidden_runtime_dependency",
+      "local_patches": []
+    }
+  ],
+  "excluded_submodules": [
+    {
+      "name": "googletest",
+      "cantera_path": "ext/googletest",
+      "repository": "https://github.com/google/googletest.git",
+      "commit": "e2239ee6043f73722e7aa812a459f54a28552929",
+      "status": "excluded_unless_p0_2_proves_consumed"
+    },
+    {
+      "name": "HighFive",
+      "cantera_path": "ext/HighFive",
+      "repository": "https://github.com/highfive-devs/highfive",
+      "commit": "5513f28dcced33872a3e40a63e28d49272da20fc",
+      "status": "excluded_unless_p0_2_proves_consumed"
+    },
+    {
+      "name": "cantera-example-data",
+      "cantera_path": "data/example_data",
+      "repository": "https://github.com/cantera/cantera-example-data",
+      "commit": "b9e0731611bc6e8d33b021332c7ade094bec1196",
+      "status": "excluded_unless_p0_2_proves_consumed"
+    },
+    {
+      "name": "doxygen-awesome-css",
+      "cantera_path": "ext/doxygen-awesome-css",
+      "repository": "https://github.com/jothepro/doxygen-awesome-css.git",
+      "commit": "df83fbf22cfff76b875c13d324baf584c74e96d0",
+      "status": "excluded_documentation_only"
+    }
+  ],
+  "mechanisms": [
+    {
+      "name": "h2o2.yaml",
+      "asset_role": "standalone_spike_mechanism_candidate",
+      "source_url": "https://github.com/Cantera/cantera/blob/4a8358eb80cfeb50474386b5f9ec0b3a83519889/data/h2o2.yaml",
+      "source_container": "cantera-3.2.0.tar.gz:data/h2o2.yaml",
+      "path": "inputs/dependencies/mechanisms/h2o2/h2o2.yaml",
+      "sha256": "0efc6c52862741a29e0c29b65d979c7d8cb409db5282bca83b9c5437b3d8c8d4",
+      "phase": "ohmech",
+      "description_origin": "Hydrogen-Oxygen submechanism derived from GRI-Mech 3.0 and modified to include N2",
+      "spdx": "NOASSERTION",
+      "copyright_holder": "not established by the asset",
+      "license_path": "",
+      "license_sha256": "",
+      "terms_evidence_path": "inputs/dependencies/mechanisms/h2o2/Cantera-data-README.md",
+      "terms_evidence_sha256": "067c221d01413542325424c7b9c6708674e67c4b5a346c58dfdea891ea81754f",
+      "license_status": "candidate_user_supplied",
+      "consumption_status": "blocked_until_asset_specific_redistribution_permission",
+      "licensing_conclusion": "Cantera's code license is not inherited; no asset-specific redistribution grant was found in the mechanism or data disclaimer"
+    }
+  ],
+  "p0_final": {
+    "schema": "hundun.stage4_p0.final_result.v1",
+    "result": "PREFLIGHT_PASS",
+    "result_scope": "pre_stage4_non_product_public_input_artifact_boundary_and_oracle_preflight_only",
+    "sealed_candidate_head": "401a5ff285aa1a6283d68a241155bbfab405b9e4",
+    "sealed_candidate_tree": "3e0819270bc8542a7f9b72b2e0c3103e496e167f",
+    "immutable_input_identity_unchanged": true,
+    "manifest_before_final_append_sha256": "32622f5986e97903b9b07110d091c993a3c85e9b3a78ab160493050f38f1361e",
+    "stage4_product_accepted": false,
+    "product_changes": "none",
+    "stage3_intake_status": "deferred_until_formal_stage3_acceptance_and_explicit_stage4_start",
+    "fuel_candidate_chain_status": "PREFLIGHT_PARTIAL_no_bundle_ready_mechanism_transport_property_chain",
+    "revalidation": {
+      "runner_path": "manifests/p0-7-revalidate-candidate-v2.sh",
+      "runner_sha256": "e725ee14ef7d9fe3cb0425f1d2bb1c28bddff0ac9c7a7a01e2b0f950f08c0e83",
+      "primary_manifest_path": "manifests/p0-7-revalidation-v2/primary.sha256",
+      "primary_manifest_sha256": "2af6bb03a03cf1a315cf47805373eff928836141e1cf39f1631a796c25f663f0",
+      "logs_manifest_path": "manifests/p0-7-revalidation-v2/logs.sha256",
+      "logs_manifest_sha256": "f83622eddb63a901d5ade48a66a8e7c2d933a880ca675742c6c5ec7289023cb0",
+      "status_path": "logs/p0-7-revalidate-candidate-v2.status",
+      "status_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "exit_code": 0
+    },
+    "retained_python_cache_recovery": {
+      "cause": "maintainer_only_python_import_created_unmanifested_cpython310_cache_files_in_frozen_extract_trees",
+      "action": "moved_exact_unmanifested_pyc_files_to_retained_external_evidence_and_restored_manifested_trees",
+      "preserved_file_count": 657,
+      "evidence_path": "logs/p0-7-retained-python-cache-contamination-v1/evidence.sha256",
+      "evidence_sha256": "3fad3b5a32a33a797175c2a095e50de035d63bb79aa2bf24abb26c30eebe9ab9",
+      "immutable_wheel_and_source_hashes_changed": false
+    }
+  }
+}

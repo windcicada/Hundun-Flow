@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <string_view>
+
+namespace hundun::application {
+
+inline constexpr std::string_view kHundunVersion =
+    "HUNDUN-FLOW @HUNDUN_PROJECT_VERSION@";
+
+}  // namespace hundun::application

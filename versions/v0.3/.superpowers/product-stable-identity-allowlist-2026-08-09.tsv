@@ -1,0 +1,13 @@
+# HUNDUN-FLOW governance-only stable identity allowlist
+# SPDX-License-Identifier: Apache-2.0
+# path	literal	reason
+src/app_flow_driver.cpp	stage2-flow-driver	field ownership identity; changing it would alter runtime field authority
+src/app_flow_driver.cpp	stage2-default-v1	numerical tolerance fingerprint contract
+src/flow_immersed.cpp	stage3_flow	field ownership identity used by existing diagnostics and compatibility evidence
+src/flow_immersed.cpp	stage3_velocity_gradient	registered field identity
+src/flow_immersed.cpp	stage3_pressure_gradient	registered field identity
+src/flow_immersed.cpp	stage3_momentum_face	registered field identity
+src/flow_immersed.cpp	stage3_dynamic_viscosity	registered field identity
+src/flow_immersed.cpp	stage3_dynamic_viscosity_cell	registered field identity
+src/flow_immersed.cpp	stage3_momentum_residual	registered field identity
+src/rt_vtk_legacy.cpp	HUNDUN-FLOW Stage 1	legacy VTK title retained for file-format compatibility

@@ -1,0 +1,1874 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include "tests/support/diag_material_density_transport_test_access.hpp"
+#include "tests/support/flow_material_density_transport_test_access.hpp"
+#include "hundun/bc_basic_boundary.hpp"
+#include "hundun/cfg_resolved_case.hpp"
+#include "hundun/diag_material_density_transport.hpp"
+#include "hundun/fvm_cell_centered.hpp"
+#include "hundun/flow_state.hpp"
+#include "hundun/flow_material_density_transport.hpp"
+#include "hundun/mesh_geometry.hpp"
+#include "hundun/mesh_topology.hpp"
+#include "hundun/rt_exchange_plan.hpp"
+#include "hundun/rt_field_access_plan.hpp"
+#include "hundun/rt_field_registry.hpp"
+#include "hundun/rt_halo_exchange.hpp"
+#include "hundun/rt_mpi_context.hpp"
+#include "hundun/rt_mpi_environment.hpp"
+#include "hundun/rt_structured_decomposition.hpp"
+#include "tests/support/flow_state_equality.hpp"
+#include "tests/support/test_main.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
+
+namespace {
+
+hundun::runtime::Int3 process_grid(int ranks) {
+  if (ranks == 1)
+    return {1, 1, 1};
+  if (ranks == 2)
+    return {2, 1, 1};
+  if (ranks == 4)
+    return {4, 1, 1};
+  throw hundun::runtime::Error("unsupported diagnostic rank count");
+}
+
+hundun::config::FlowCaseConfig periodic_case() {
+  hundun::config::FlowCaseConfig config{};
+  config.schema_version = 2;
+  config.simulation_type =
+      hundun::config::SimulationType::variable_density_flow;
+  config.density_model = hundun::config::DensityModel::material;
+  config.physics.rho_ref_kg_per_m3 = 1.0;
+  config.physics.inlet_consistency_rtol = 1.0e-12;
+  config.scalars.push_back({"alpha", 0.0});
+  config.scalars.push_back({"beta", 0.0});
+  constexpr std::array<hundun::config::PatchName, 6> names{
+      hundun::config::PatchName::x_min, hundun::config::PatchName::x_max,
+      hundun::config::PatchName::y_min, hundun::config::PatchName::y_max,
+      hundun::config::PatchName::z_min, hundun::config::PatchName::z_max};
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    config.boundaries[i].patch = names[i];
+    config.boundaries[i].type = hundun::config::BoundaryType::periodic;
+  }
+  return config;
+}
+
+hundun::runtime::FieldDescriptor cell(const char *name, const char *unit,
+                                      std::uint32_t components = 1U,
+                                      bool conservative = true) {
+  return {name,
+          unit,
+          "material-density-diagnostics",
+          hundun::runtime::FunctionSpace::cell_average,
+          hundun::runtime::ScalarType::float64,
+          components,
+          2,
+          conservative,
+          hundun::runtime::RestartPolicy::persistent,
+          hundun::runtime::OutputPolicy::never};
+}
+
+hundun::runtime::FieldDescriptor face(const char *name,
+                                      std::uint32_t components) {
+  return {name,
+          "1",
+          "material-density-diagnostics",
+          hundun::runtime::FunctionSpace::face_value,
+          hundun::runtime::ScalarType::float64,
+          components,
+          0,
+          false,
+          hundun::runtime::RestartPolicy::persistent,
+          hundun::runtime::OutputPolicy::never};
+}
+
+class CaptureSink final : public hundun::diagnostics::DiagnosticSink {
+public:
+  void submit(const hundun::diagnostics::DiagnosticRecord &record) override {
+    ++calls;
+    value = record;
+    if (throw_classified)
+      throw hundun::diagnostics::DiagnosticCollectionError(
+          hundun::diagnostics::DiagnosticFailureClass::conservation,
+          "sink.chosen-class", 42, "sink classified fixture");
+    if (throw_after_copy)
+      throw std::runtime_error("sink fixture");
+  }
+  std::size_t calls{};
+  bool throw_after_copy{};
+  bool throw_classified{};
+  hundun::diagnostics::DiagnosticRecord value;
+};
+
+const hundun::diagnostics::DiagnosticMetric &
+find_metric(const hundun::diagnostics::DiagnosticRecord &record,
+            std::string_view id) {
+  const auto found =
+      std::find_if(record.metrics.begin(), record.metrics.end(),
+                   [&](const auto &value) { return value.id == id; });
+  HUNDUN_CHECK(found != record.metrics.end());
+  return *found;
+}
+
+const hundun::diagnostics::DiagnosticInvariant &
+find_invariant(const hundun::diagnostics::DiagnosticRecord &record,
+               std::string_view id) {
+  const auto found =
+      std::find_if(record.invariants.begin(), record.invariants.end(),
+                   [&](const auto &value) { return value.id == id; });
+  HUNDUN_CHECK(found != record.invariants.end());
+  return *found;
+}
+
+const hundun::diagnostics::DiagnosticCounter &
+find_counter(const hundun::diagnostics::DiagnosticRecord &record,
+             std::string_view id) {
+  const auto found =
+      std::find_if(record.counters.begin(), record.counters.end(),
+                   [&](const auto &value) { return value.id == id; });
+  HUNDUN_CHECK(found != record.counters.end());
+  return *found;
+}
+
+struct ExpectedSampleSet final {
+  std::uint64_t eligible_count{};
+  bool truncated{};
+  std::vector<hundun::diagnostics::DiagnosticSample> samples;
+};
+
+ExpectedSampleSet
+expected_samples(const std::vector<std::string_view> &field_ids,
+                 const std::vector<std::uint64_t> &global_ids, bool narrowed,
+                 std::size_t budget) {
+  using namespace hundun::diagnostics;
+  constexpr std::array<double, 4> values{1.0, 3.0, 0.4, 0.7};
+  ExpectedSampleSet result;
+  for (std::size_t field = 0; field < field_ids.size(); ++field) {
+    if (narrowed && field_ids[field] != "rho_h")
+      continue;
+    const std::string_view unit =
+        field == 0U ? "kg/m3" : (field == 1U ? "J/m3" : "kg/m3");
+    for (const auto global : global_ids) {
+      result.samples.push_back({std::string(field_ids[field]), global, 0U,
+                                std::string(unit),
+                                describe_fp64(values[field])});
+    }
+  }
+  std::sort(result.samples.begin(), result.samples.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+  result.eligible_count = static_cast<std::uint64_t>(result.samples.size());
+  if (result.samples.size() > budget)
+    result.samples.resize(budget);
+  result.truncated = result.eligible_count > result.samples.size();
+  return result;
+}
+
+bool exact_samples_equal(
+    const std::vector<hundun::diagnostics::DiagnosticSample> &left,
+    const std::vector<hundun::diagnostics::DiagnosticSample> &right) {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (left[index].field_id != right[index].field_id ||
+        left[index].global_id != right[index].global_id ||
+        left[index].component != right[index].component ||
+        left[index].unit != right[index].unit ||
+        left[index].value.status != right[index].value.status ||
+        left[index].value.bits != right[index].value.bits)
+      return false;
+  }
+  return true;
+}
+
+void require_expected_samples(
+    const hundun::diagnostics::DiagnosticRecord &record,
+    const ExpectedSampleSet &expected) {
+  HUNDUN_CHECK(record.eligible_sample_count == expected.eligible_count);
+  HUNDUN_CHECK(record.samples_truncated == expected.truncated);
+  HUNDUN_CHECK(exact_samples_equal(record.samples, expected.samples));
+}
+
+std::string owned_layout(const hundun::runtime::Box3 &box) {
+  return "cell.f64.c1.g2plus.owned." + std::to_string(box.begin.x) + "." +
+         std::to_string(box.begin.y) + "." + std::to_string(box.begin.z) + "." +
+         std::to_string(box.end.x) + "." + std::to_string(box.end.y) + "." +
+         std::to_string(box.end.z);
+}
+
+std::string global_layout(hundun::runtime::Int3 extent) {
+  return "cell.f64.c1.g2plus.global." + std::to_string(extent.x) + "." +
+         std::to_string(extent.y) + "." + std::to_string(extent.z);
+}
+
+void require_identities(const hundun::diagnostics::DiagnosticRecord &record,
+                        const std::vector<std::string_view> &field_ids,
+                        std::string_view expected_layout,
+                        std::uint64_t expected_attempt_identity,
+                        std::uint64_t expected_finalization_identity) {
+  const std::size_t expected_count = field_ids.size() + 3U;
+  HUNDUN_CHECK(record.identities.size() == expected_count);
+  for (std::size_t field = 0; field < field_ids.size(); ++field) {
+    const auto &identity = record.identities[field];
+    HUNDUN_CHECK(identity.subject_id ==
+                 std::string("field.") + std::string(field_ids[field]));
+    HUNDUN_CHECK(identity.layout_fingerprint.has_value());
+    HUNDUN_CHECK(*identity.layout_fingerprint == expected_layout);
+    HUNDUN_CHECK(!identity.revision.has_value());
+    HUNDUN_CHECK(!identity.generation.has_value());
+    HUNDUN_CHECK(!identity.allocation_identity.has_value());
+  }
+  const auto &attempt = record.identities[field_ids.size()];
+  HUNDUN_CHECK(attempt.subject_id == "flow_state.attempt");
+  HUNDUN_CHECK(!attempt.layout_fingerprint.has_value());
+  HUNDUN_CHECK(attempt.revision == expected_attempt_identity);
+  HUNDUN_CHECK(!attempt.generation.has_value());
+  HUNDUN_CHECK(!attempt.allocation_identity.has_value());
+  const auto &layout = record.identities[field_ids.size() + 1U];
+  HUNDUN_CHECK(layout.subject_id == "layout.cells");
+  HUNDUN_CHECK(layout.layout_fingerprint.has_value());
+  HUNDUN_CHECK(*layout.layout_fingerprint == expected_layout);
+  HUNDUN_CHECK(!layout.revision.has_value());
+  HUNDUN_CHECK(!layout.generation.has_value());
+  HUNDUN_CHECK(!layout.allocation_identity.has_value());
+  const auto &finalization = record.identities[field_ids.size() + 2U];
+  HUNDUN_CHECK(finalization.subject_id == "material.finalization");
+  HUNDUN_CHECK(!finalization.layout_fingerprint.has_value());
+  HUNDUN_CHECK(finalization.revision == expected_finalization_identity);
+  HUNDUN_CHECK(!finalization.generation.has_value());
+  HUNDUN_CHECK(!finalization.allocation_identity.has_value());
+}
+
+bool identities_equal(
+    const std::vector<hundun::diagnostics::DiagnosticIdentitySummary> &left,
+    const std::vector<hundun::diagnostics::DiagnosticIdentitySummary> &right) {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (left[index].subject_id != right[index].subject_id ||
+        left[index].layout_fingerprint != right[index].layout_fingerprint ||
+        left[index].revision != right[index].revision ||
+        left[index].generation != right[index].generation ||
+        left[index].allocation_identity != right[index].allocation_identity)
+      return false;
+  }
+  return true;
+}
+
+std::vector<unsigned char>
+identity_bytes(const std::vector<hundun::diagnostics::DiagnosticIdentitySummary>
+                   &identities) {
+  std::vector<unsigned char> bytes;
+  const auto append_u8 = [&](std::uint8_t value) { bytes.push_back(value); };
+  const auto append_u64 = [&](std::uint64_t value) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U)
+      bytes.push_back(static_cast<unsigned char>(value >> shift));
+  };
+  const auto append_text = [&](std::string_view value) {
+    append_u64(static_cast<std::uint64_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+  };
+  const auto append_optional_text = [&](const std::optional<std::string> &v) {
+    append_u8(v ? 1U : 0U);
+    if (v)
+      append_text(*v);
+  };
+  const auto append_optional_u64 = [&](const std::optional<std::uint64_t> &v) {
+    append_u8(v ? 1U : 0U);
+    if (v)
+      append_u64(*v);
+  };
+  append_u64(static_cast<std::uint64_t>(identities.size()));
+  for (const auto &identity : identities) {
+    append_text(identity.subject_id);
+    append_optional_text(identity.layout_fingerprint);
+    append_optional_u64(identity.revision);
+    append_optional_u64(identity.generation);
+    append_optional_u64(identity.allocation_identity);
+  }
+  return bytes;
+}
+
+void require_collective_identities_equal(
+    const hundun::diagnostics::DiagnosticRecord &record,
+    const hundun::runtime::MpiContext &mpi) {
+  const auto exact_copy = record.identities;
+  HUNDUN_CHECK(identities_equal(record.identities, exact_copy));
+  auto ordinary_mutant = exact_copy;
+  ordinary_mutant.front().subject_id += ".mutant";
+  HUNDUN_CHECK(!identities_equal(record.identities, ordinary_mutant));
+  auto nested_mutant = exact_copy;
+  HUNDUN_CHECK(nested_mutant.front().layout_fingerprint.has_value());
+  *nested_mutant.front().layout_fingerprint += ".mutant";
+  HUNDUN_CHECK(!identities_equal(record.identities, nested_mutant));
+
+  const auto local = identity_bytes(record.identities);
+  HUNDUN_CHECK(local.size() <=
+               static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  const int local_size = static_cast<int>(local.size());
+  std::vector<int> sizes(static_cast<std::size_t>(mpi.size()));
+  HUNDUN_CHECK(MPI_Allgather(&local_size, 1, MPI_INT, sizes.data(), 1, MPI_INT,
+                             mpi.comm()) == MPI_SUCCESS);
+  for (const auto size : sizes)
+    HUNDUN_CHECK(size == local_size);
+  std::vector<unsigned char> all(local.size() *
+                                 static_cast<std::size_t>(mpi.size()));
+  HUNDUN_CHECK(MPI_Allgather(local.data(), local_size, MPI_BYTE, all.data(),
+                             local_size, MPI_BYTE, mpi.comm()) == MPI_SUCCESS);
+  for (int rank = 0; rank < mpi.size(); ++rank) {
+    const auto begin =
+        all.begin() + static_cast<std::ptrdiff_t>(rank) * local_size;
+    HUNDUN_CHECK(std::equal(local.begin(), local.end(), begin));
+  }
+}
+
+class ProviderKeyReader final {
+public:
+  explicit ProviderKeyReader(const std::vector<unsigned char> &bytes)
+      : bytes_(&bytes) {}
+
+  std::uint8_t read_u8() { return read_integer<std::uint8_t>(); }
+  std::uint16_t read_u16() { return read_integer<std::uint16_t>(); }
+  std::uint32_t read_u32() { return read_integer<std::uint32_t>(); }
+  std::uint64_t read_u64() { return read_integer<std::uint64_t>(); }
+
+  std::string read_text() {
+    const auto size = read_u64();
+    if (size > static_cast<std::uint64_t>(bytes_->size() - offset_))
+      throw std::runtime_error("provider key text is truncated");
+    const auto count = static_cast<std::size_t>(size);
+    const auto first = bytes_->begin() + static_cast<std::ptrdiff_t>(offset_);
+    offset_ += count;
+    return std::string(first, first + static_cast<std::ptrdiff_t>(count));
+  }
+
+  bool finished() const noexcept { return offset_ == bytes_->size(); }
+
+private:
+  template <class Integer> Integer read_integer() {
+    if (sizeof(Integer) > bytes_->size() - offset_)
+      throw std::runtime_error("provider key integer is truncated");
+    std::uint64_t value{};
+    for (std::size_t byte = 0; byte < sizeof(Integer); ++byte)
+      value |= static_cast<std::uint64_t>((*bytes_)[offset_ + byte])
+               << (8U * byte);
+    offset_ += sizeof(Integer);
+    return static_cast<Integer>(value);
+  }
+
+  const std::vector<unsigned char> *bytes_{};
+  std::size_t offset_{};
+};
+
+bool provider_key_matches(
+    const std::vector<unsigned char> &bytes,
+    const hundun::flow::MaterialDensityDiagnosticSource &source,
+    const std::vector<std::string_view> &field_ids,
+    std::string_view expected_global_layout,
+    const hundun::flow::MaterialDensityTransportReport &report) {
+  using namespace hundun;
+  try {
+    ProviderKeyReader reader(bytes);
+    if (reader.read_u32() != 1U ||
+        reader.read_u32() != diagnostics::kDiagnosticRecordSchemaV1 ||
+        reader.read_u16() !=
+            static_cast<std::uint16_t>(
+                diagnostics::DiagnosticModuleKind::density_transport) ||
+        reader.read_text() != "hundun.flow.material_density_transport" ||
+        reader.read_text() != "primary")
+      return false;
+    const auto expected_capabilities =
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::summary) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::invariants) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::counters) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::bounded_state_sample) |
+        static_cast<diagnostics::DiagnosticCapabilityFlags>(
+            diagnostics::DiagnosticCapability::collective);
+    if (reader.read_u32() != expected_capabilities ||
+        reader.read_u64() != static_cast<std::uint64_t>(field_ids.size()))
+      return false;
+    for (std::size_t field = 0; field < field_ids.size(); ++field) {
+      if (reader.read_text() != field_ids[field] ||
+          reader.read_text() != source.field_unit(field))
+        return false;
+    }
+    if (reader.read_text() != expected_global_layout ||
+        reader.read_u8() != static_cast<std::uint8_t>(report.disposition()) ||
+        reader.read_u8() != static_cast<std::uint8_t>(report.reason()) ||
+        reader.read_u32() !=
+            static_cast<std::uint32_t>(report.lowest_failing_rank()) ||
+        reader.read_u64() != report.attempt_identity() ||
+        reader.read_u64() != report.finalization_identity() ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.flux_provenance()) ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.density_residual_available()) ||
+        reader.read_u64() !=
+            diagnostics::describe_fp64(report.density_normalized_l2()).bits ||
+        reader.read_u8() !=
+            static_cast<std::uint8_t>(report.mass_conservation_available()) ||
+        reader.read_u64() != diagnostics::describe_fp64(
+                                 report.mass_relative_conservation_defect())
+                                 .bits)
+      return false;
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_residual_availability().size()))
+      return false;
+    for (const auto available : report.transport_residual_availability()) {
+      if (reader.read_u8() != available)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(report.transport_normalized_l2().size()))
+      return false;
+    for (const auto value : report.transport_normalized_l2()) {
+      if (reader.read_u64() != diagnostics::describe_fp64(value).bits)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_conservation_availability().size()))
+      return false;
+    for (const auto available : report.transport_conservation_availability()) {
+      if (reader.read_u8() != available)
+        return false;
+    }
+    if (reader.read_u64() !=
+        static_cast<std::uint64_t>(
+            report.transport_relative_conservation_defect().size()))
+      return false;
+    for (const auto value : report.transport_relative_conservation_defect()) {
+      if (reader.read_u64() != diagnostics::describe_fp64(value).bits)
+        return false;
+    }
+    return reader.finished();
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+std::vector<unsigned char> exact_request_wire_oracle() {
+  return {0x01, 0x00, 0x00, 0x00, // schema v1
+          0x03, 0x01,             // bounded sample, collective
+          0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // step
+          0x00,                                           // finite
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // -0.0 bits
+          0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 'p',  0x01,
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 'r',  'h',  'o',  '_',  'h',
+          0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+}
+
+std::vector<unsigned char> exact_sample_wire_oracle() {
+  return {0x01, 0x00, 0x00, 0x00, // schema v1
+          0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 'r',  'h',  'o',  '_',  'h',  0x08,
+          0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x44, 0x33, 0x22, 0x11,
+          0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 'k',  'g',  '/',
+          'm',  '3',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f};
+}
+
+void require_portable_wire_oracles() {
+  using Access =
+      hundun::diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess;
+  using namespace hundun::diagnostics;
+  DiagnosticRequest request;
+  request.level = DiagnosticLevel::bounded_state_sample;
+  request.scope = DiagnosticScope::collective;
+  request.frame = {7, UINT64_C(0x0102030405060708), -0.0, "p"};
+  request.selected_fields = {"rho_h"};
+  request.sample_budget = 2U;
+  const auto request_bytes = Access::request_wire_bytes(request);
+  HUNDUN_CHECK(request_bytes == exact_request_wire_oracle());
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_bytes));
+  HUNDUN_CHECK(Access::request_wire_round_trip(request_bytes) == request_bytes);
+
+  auto request_step_mutant = request_bytes;
+  request_step_mutant[9] ^= 0x40U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_step_mutant));
+  HUNDUN_CHECK(request_step_mutant != request_bytes);
+  auto request_time_mutant = request_bytes;
+  request_time_mutant[22] ^= 0x80U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_time_mutant));
+  HUNDUN_CHECK(request_time_mutant != request_bytes);
+  auto request_budget_mutant = request_bytes;
+  request_budget_mutant[53] = 3U;
+  HUNDUN_CHECK(Access::request_wire_is_valid(request_budget_mutant));
+  HUNDUN_CHECK(request_budget_mutant != request_bytes);
+
+  auto malformed_request = request_bytes;
+  malformed_request[0] = 2U;
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request[14] =
+      static_cast<unsigned char>(DiagnosticValueStatus::unavailable);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request.resize(27U);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request.push_back(0U);
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+  malformed_request = request_bytes;
+  malformed_request[23] = 129U;
+  HUNDUN_CHECK(!Access::request_wire_is_valid(malformed_request));
+
+  const DiagnosticSample sample{"rho_h", UINT64_C(0x0102030405060708),
+                                UINT32_C(0x11223344), "kg/m3",
+                                describe_fp64(1.0)};
+  const auto sample_bytes = Access::sample_wire_bytes(sample);
+  HUNDUN_CHECK(sample_bytes == exact_sample_wire_oracle());
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_bytes));
+  const auto decoded = Access::decode_single_sample_wire(sample_bytes);
+  HUNDUN_CHECK(exact_samples_equal({sample}, {decoded}));
+  HUNDUN_CHECK(Access::sample_wire_bytes(decoded) == sample_bytes);
+  auto sample_global_mutant = sample_bytes;
+  sample_global_mutant[27] ^= 0x40U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_global_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_global_mutant).global_id !=
+      sample.global_id);
+  auto sample_component_mutant = sample_bytes;
+  sample_component_mutant[35] ^= 0x40U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_component_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_component_mutant).component !=
+      sample.component);
+  auto sample_fp64_mutant = sample_bytes;
+  sample_fp64_mutant[53] ^= 0x01U;
+  HUNDUN_CHECK(Access::sample_wire_is_valid(sample_fp64_mutant));
+  HUNDUN_CHECK(
+      Access::decode_single_sample_wire(sample_fp64_mutant).value.bits !=
+      sample.value.bits);
+
+  auto malformed_sample = sample_bytes;
+  malformed_sample[0] = 2U;
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample[50] =
+      static_cast<unsigned char>(DiagnosticValueStatus::unavailable);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample.resize(18U);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample.push_back(0U);
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+  malformed_sample = sample_bytes;
+  malformed_sample[12] = 129U;
+  HUNDUN_CHECK(!Access::sample_wire_is_valid(malformed_sample));
+}
+
+std::vector<std::uint64_t>
+owned_global_ids_for_rank(hundun::runtime::Int3 extent, int ranks, int rank) {
+  const int quotient = extent.x / ranks;
+  const int remainder = extent.x % ranks;
+  const int begin = rank * quotient + std::min(rank, remainder);
+  const int width = quotient + (rank < remainder ? 1 : 0);
+  std::vector<std::uint64_t> result;
+  result.reserve(static_cast<std::size_t>(width * extent.y * extent.z));
+  for (int k = 0; k < extent.z; ++k) {
+    for (int j = 0; j < extent.y; ++j) {
+      for (int i = begin; i < begin + width; ++i) {
+        result.push_back(
+            static_cast<std::uint64_t>((k * extent.y + j) * extent.x + i));
+      }
+    }
+  }
+  return result;
+}
+
+void require_larger_extent_ownership_proof(
+    const hundun::runtime::MpiContext &mpi) {
+  using namespace hundun;
+  constexpr runtime::Int3 extent{16, 4, 4};
+  auto decomposition = runtime::StructuredDecomposition::create(
+      mpi, extent, {true, true, true},
+      runtime::DecompositionOptions{process_grid(mpi.size())});
+  mesh::MeshTopology topology(decomposition);
+  mesh::MeshGeometry geometry(
+      topology, mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  auto boundaries =
+      boundary::BoundaryRegistry::create(periodic_case(), topology);
+  runtime::FieldRegistry registry;
+  flow::FlowFieldIds fields;
+  fields.density = registry.declare_field(cell("rho", "kg/m3"));
+  fields.velocity = registry.declare_field(cell("velocity", "1", 3U, false));
+  fields.mechanical_pressure =
+      registry.declare_field(cell("pi", "Pa", 1U, false));
+  fields.face_velocity = registry.declare_field(face("u_face", 3U));
+  fields.face_mass_flux = finite_volume::declare_face_mass_flux(registry);
+  const auto rho_h = registry.declare_field(cell("rho_h", "J/m3"));
+  const auto rho_phi = registry.declare_field(cell("rho_phi", "kg/m3"));
+  const auto rho_beta = registry.declare_field(cell("rho_beta", "kg/m3"));
+  fields.transported_cell_fields = {rho_h, rho_phi, rho_beta};
+  registry.freeze();
+  const auto box = decomposition.owned_box();
+  const runtime::Int3 local{box.end.x - box.begin.x, box.end.y - box.begin.y,
+                            box.end.z - box.begin.z};
+  auto state = flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+  flow::FlowLayerValues initial;
+  initial.density.assign(topology.owned_cell_count(), 1.0);
+  initial.velocity.assign(topology.owned_cell_count() * 3U, 0.0);
+  initial.mechanical_pressure.assign(topology.owned_cell_count(), 0.0);
+  initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
+  initial.face_mass_flux.assign(topology.local_face_count(), 0.0);
+  initial.transported_cell_fields = {
+      std::vector<double>(topology.owned_cell_count(), 3.0),
+      std::vector<double>(topology.owned_cell_count(), 0.4),
+      std::vector<double>(topology.owned_cell_count(), 0.7)};
+  state.seed_accepted_layers(initial, initial);
+  runtime::FieldStorage flux_storage(
+      registry, runtime::FieldLayoutSet{local, topology.local_face_count()});
+  constexpr runtime::PhaseId phase = 1940U;
+  constexpr runtime::ActorId actor = 1940U;
+  runtime::FieldAccessPlan access(registry);
+  access.declare_access(phase, actor, fields.face_mass_flux,
+                        runtime::AccessMode::read_write);
+  access.freeze();
+  auto flux_write = flux_storage.acquire_face_write<double>(
+      access, phase, actor, fields.face_mass_flux);
+  for (std::size_t face_id = 0; face_id < topology.local_face_count();
+       ++face_id)
+    flux_write(face_id, 0) = 0.0;
+  auto halo = runtime::HaloExchange::create(
+      decomposition, runtime::ExchangePlan::create(decomposition, local, 2));
+  flow::MaterialDensityTransportSpec spec;
+  spec.enthalpy_density = rho_h;
+  spec.scalar_densities = {rho_phi, rho_beta};
+  spec.scalar_diffusivities_kg_per_m_s = {0.0, 0.0};
+  auto transport = flow::MaterialDensityTransport::create(
+      registry, decomposition, topology, geometry, boundaries, mpi, halo,
+      fields, spec);
+  state.begin_attempt();
+  auto flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto report = transport.finalize_trial(
+      state, flux,
+      flow::make_momentum_time_stencil(flow::MomentumTimeOrder::backward_euler,
+                                       0.01, 0.0));
+  HUNDUN_CHECK(report.disposition() ==
+               flow::MaterialTransportDisposition::finalized);
+  auto source = transport.diagnostic_source(state, report);
+  diagnostics::DiagnosticRequest request;
+  request.level = diagnostics::DiagnosticLevel::bounded_state_sample;
+  request.scope = diagnostics::DiagnosticScope::collective;
+  request.frame = {mpi.rank(), 0U, 0.0, "material.finalized-trial"};
+  request.sample_budget = 2U;
+  CaptureSink sink;
+  diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+  diagnostics::collect_diagnostics(source, mpi, request, sink);
+  const auto work = diagnostics::test::
+      MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+  HUNDUN_CHECK(work.raw_collectives == 27U);
+  const auto ids = diagnostics::diagnostic_fingerprint_field_ids(source);
+  std::vector<std::uint64_t> global_ids;
+  const auto cell_count =
+      static_cast<std::uint64_t>(extent.x * extent.y * extent.z);
+  global_ids.reserve(static_cast<std::size_t>(cell_count));
+  for (std::uint64_t id = 0; id < cell_count; ++id)
+    global_ids.push_back(id);
+  require_expected_samples(sink.value,
+                           expected_samples(ids, global_ids, false, 2U));
+  diagnostics::DiagnosticFingerprintAccumulator expected_fingerprint;
+  constexpr std::array<double, 4> values{1.0, 3.0, 0.4, 0.7};
+  for (std::size_t field = 0; field < ids.size(); ++field) {
+    for (const auto global : global_ids)
+      expected_fingerprint.add(ids[field], global, 0U,
+                               diagnostics::describe_fp64(values[field]));
+  }
+  HUNDUN_CHECK(sink.value.state_fingerprint.hex ==
+               expected_fingerprint.finish().hex);
+  state.rollback_attempt();
+}
+
+void run(const hundun::runtime::MpiContext &mpi) {
+  using namespace hundun;
+  require_portable_wire_oracles();
+  constexpr runtime::Int3 extent{8, 4, 4};
+  auto decomposition = runtime::StructuredDecomposition::create(
+      mpi, extent, {true, true, true},
+      runtime::DecompositionOptions{process_grid(mpi.size())});
+  mesh::MeshTopology topology(decomposition);
+  mesh::MeshGeometry geometry(
+      topology, mesh::UniformBoxMapping({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}));
+  auto boundaries =
+      boundary::BoundaryRegistry::create(periodic_case(), topology);
+
+  runtime::FieldRegistry registry;
+  flow::FlowFieldIds fields;
+  fields.density = registry.declare_field(cell("rho", "kg/m3"));
+  fields.velocity = registry.declare_field(cell("velocity", "1", 3U, false));
+  fields.mechanical_pressure =
+      registry.declare_field(cell("pi", "Pa", 1U, false));
+  fields.face_velocity = registry.declare_field(face("u_face", 3U));
+  fields.face_mass_flux = finite_volume::declare_face_mass_flux(registry);
+  const auto rho_h = registry.declare_field(cell("rho_h", "J/m3"));
+  const auto rho_phi = registry.declare_field(cell("rho_phi", "kg/m3"));
+  const auto rho_phi_beta =
+      registry.declare_field(cell("rho_phi_beta", "kg/m3"));
+  fields.transported_cell_fields = {rho_h, rho_phi, rho_phi_beta};
+  registry.freeze();
+  const auto box = decomposition.owned_box();
+  const runtime::Int3 local{box.end.x - box.begin.x, box.end.y - box.begin.y,
+                            box.end.z - box.begin.z};
+  auto state = flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+  flow::FlowLayerValues initial;
+  initial.density.assign(topology.owned_cell_count(), 1.0);
+  initial.velocity.assign(topology.owned_cell_count() * 3U, 0.0);
+  initial.mechanical_pressure.assign(topology.owned_cell_count(), 0.0);
+  initial.face_velocity.assign(topology.local_face_count() * 3U, 0.0);
+  initial.face_mass_flux.assign(topology.local_face_count(), 99.0);
+  initial.transported_cell_fields = {
+      std::vector<double>(topology.owned_cell_count(), 3.0),
+      std::vector<double>(topology.owned_cell_count(), 0.4),
+      std::vector<double>(topology.owned_cell_count(), 0.7)};
+  state.seed_accepted_layers(initial, initial);
+
+  runtime::FieldStorage flux_storage(
+      registry, runtime::FieldLayoutSet{local, topology.local_face_count()});
+  constexpr runtime::PhaseId phase = 1910U;
+  constexpr runtime::ActorId actor = 1910U;
+  runtime::FieldAccessPlan access(registry);
+  access.declare_access(phase, actor, fields.face_mass_flux,
+                        runtime::AccessMode::read_write);
+  access.freeze();
+  auto flux_write = flux_storage.acquire_face_write<double>(
+      access, phase, actor, fields.face_mass_flux);
+  for (std::size_t face_id = 0; face_id < topology.local_face_count();
+       ++face_id)
+    flux_write(face_id, 0) = 0.0;
+  auto halo = runtime::HaloExchange::create(
+      decomposition, runtime::ExchangePlan::create(decomposition, local, 2));
+  flow::MaterialDensityTransportSpec spec;
+  spec.enthalpy_density = rho_h;
+  spec.scalar_densities = {rho_phi, rho_phi_beta};
+  spec.scalar_diffusivities_kg_per_m_s = {0.0, 0.0};
+  auto transport = flow::MaterialDensityTransport::create(
+      registry, decomposition, topology, geometry, boundaries, mpi, halo,
+      fields, spec);
+  const auto stencil = flow::make_momentum_time_stencil(
+      flow::MomentumTimeOrder::backward_euler, 0.01, 0.0);
+
+  if (mpi.size() > 1) {
+    auto disagreement_state = flow::FlowState::create(
+        registry, {local, topology.local_face_count()}, fields,
+        {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+    disagreement_state.seed_accepted_layers(initial, initial);
+    auto disagreement_transport = flow::MaterialDensityTransport::create(
+        registry, decomposition, topology, geometry, boundaries, mpi, halo,
+        fields, spec);
+    if (mpi.rank() == 1) {
+      disagreement_state.begin_attempt();
+      disagreement_state.rollback_attempt();
+    }
+    disagreement_state.begin_attempt();
+    auto disagreement_flux = flow::MaterialFaceMassFlux::acquire(
+        registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+        topology, flow::MaterialFluxProvenance::final_corrected);
+    const auto disagreement_report = disagreement_transport.finalize_trial(
+        disagreement_state, disagreement_flux, stencil);
+    HUNDUN_CHECK(disagreement_report.disposition() ==
+                 flow::MaterialTransportDisposition::finalized);
+    HUNDUN_CHECK(disagreement_report.attempt_identity() ==
+                 (mpi.rank() == 1 ? 2U : 1U));
+    HUNDUN_CHECK(disagreement_report.finalization_identity() == 1U);
+    auto disagreement_source = disagreement_transport.diagnostic_source(
+        disagreement_state, disagreement_report);
+
+    runtime::FieldAccessPlan disagreement_read_access(registry);
+    constexpr runtime::PhaseId disagreement_read_phase = 1920U;
+    constexpr runtime::ActorId disagreement_read_actor = 1920U;
+    disagreement_read_access.declare_access(
+        disagreement_read_phase, disagreement_read_actor, fields.density,
+        runtime::AccessMode::read);
+    disagreement_read_access.freeze();
+    auto disagreement_density =
+        disagreement_state.trial_layer().acquire_read<double>(
+            disagreement_read_access, disagreement_read_phase,
+            disagreement_read_actor, fields.density);
+    const double disagreement_density_before = disagreement_density(0, 0, 0, 0);
+    const auto disagreement_history_before =
+        disagreement_state.snapshot(flow::FlowLayer::history);
+    const auto disagreement_committed_before =
+        disagreement_state.snapshot(flow::FlowLayer::committed);
+    const auto disagreement_trial_before =
+        disagreement_state.snapshot(flow::FlowLayer::trial);
+    const auto disagreement_metadata_before = disagreement_state.metadata();
+    const auto disagreement_counters_before = mpi.fp64_reduction_counters();
+    const auto disagreement_attempt_before =
+        disagreement_report.attempt_identity();
+    const auto disagreement_finalization_before =
+        disagreement_report.finalization_identity();
+
+    diagnostics::DiagnosticRequest disagreement_request;
+    disagreement_request.level = diagnostics::DiagnosticLevel::counters;
+    disagreement_request.scope = diagnostics::DiagnosticScope::collective;
+    disagreement_request.frame = {mpi.rank(), 0U, -0.0,
+                                  "material.finalized-trial"};
+    CaptureSink disagreement_sink;
+    bool provider_rejected = false;
+    diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+    try {
+      diagnostics::collect_diagnostics(disagreement_source, mpi,
+                                       disagreement_request, disagreement_sink);
+    } catch (const diagnostics::DiagnosticCollectionError &error) {
+      provider_rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   diagnostics::DiagnosticFailureClass::collective_operation);
+      HUNDUN_CHECK(error.code() == "material.diagnostics.provider-agreement");
+      HUNDUN_CHECK(error.lowest_failing_rank() == 1);
+    }
+    HUNDUN_CHECK(provider_rejected);
+    HUNDUN_CHECK(disagreement_sink.calls == 0U);
+    const auto disagreement_work = diagnostics::test::
+        MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+    HUNDUN_CHECK(disagreement_work.field_reads == 0U);
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_history_before,
+        disagreement_state.snapshot(flow::FlowLayer::history)));
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_committed_before,
+        disagreement_state.snapshot(flow::FlowLayer::committed)));
+    HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+        disagreement_trial_before,
+        disagreement_state.snapshot(flow::FlowLayer::trial)));
+    HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(
+        disagreement_metadata_before, disagreement_state.metadata()));
+    HUNDUN_CHECK(disagreement_report.attempt_identity() ==
+                 disagreement_attempt_before);
+    HUNDUN_CHECK(disagreement_report.finalization_identity() ==
+                 disagreement_finalization_before);
+    HUNDUN_CHECK(disagreement_source.report().attempt_identity() ==
+                 disagreement_attempt_before);
+    HUNDUN_CHECK(disagreement_source.report().finalization_identity() ==
+                 disagreement_finalization_before);
+    HUNDUN_CHECK(disagreement_density(0, 0, 0, 0) ==
+                 disagreement_density_before);
+    HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+                 disagreement_counters_before.collective_calls);
+    disagreement_state.rollback_attempt();
+  }
+
+  state.begin_attempt();
+  auto flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto report = transport.finalize_trial(state, flux, stencil);
+  HUNDUN_CHECK(report.disposition() ==
+               flow::MaterialTransportDisposition::finalized);
+  auto source = [&]() {
+    const auto transient_copy = report;
+    return transport.diagnostic_source(state, transient_copy);
+  }();
+  const auto descriptor = diagnostics::describe_diagnostics(source);
+  diagnostics::validate(descriptor);
+  const auto ids = diagnostics::diagnostic_fingerprint_field_ids(source);
+  HUNDUN_CHECK(ids.size() == 4U);
+  HUNDUN_CHECK(ids[0] == "rho");
+  HUNDUN_CHECK(ids[1] == "rho_h");
+  HUNDUN_CHECK(ids[2] == "rho_phi.s00000000000000000000");
+  HUNDUN_CHECK(ids[3] == "rho_phi.s00000000000000000001");
+  const std::string expected_owned_layout = owned_layout(box);
+  const std::string expected_global_layout = global_layout(extent);
+  HUNDUN_CHECK(source.owned_cell_layout_fingerprint() == expected_owned_layout);
+  HUNDUN_CHECK(source.global_cell_layout_fingerprint() ==
+               expected_global_layout);
+  const auto source_extent = source.global_cell_extent();
+  HUNDUN_CHECK(source_extent.x == extent.x && source_extent.y == extent.y &&
+               source_extent.z == extent.z);
+  const auto source_box = source.owned_global_box();
+  HUNDUN_CHECK(
+      source_box.begin.x == box.begin.x && source_box.begin.y == box.begin.y &&
+      source_box.begin.z == box.begin.z && source_box.end.x == box.end.x &&
+      source_box.end.y == box.end.y && source_box.end.z == box.end.z);
+  const auto provider_key = diagnostics::test::
+      MaterialDensityTransportDiagnosticsTestAccess::provider_key_bytes(source);
+  HUNDUN_CHECK(provider_key_matches(provider_key, source, ids,
+                                    expected_global_layout, report));
+  auto provider_key_mutant = provider_key;
+  HUNDUN_CHECK(!provider_key_mutant.empty());
+  provider_key_mutant.front() ^= 1U;
+  HUNDUN_CHECK(!provider_key_matches(provider_key_mutant, source, ids,
+                                     expected_global_layout, report));
+  std::vector<std::uint64_t> local_global_ids;
+  local_global_ids.reserve(topology.owned_cell_count());
+  for (std::size_t cell_id = 0; cell_id < topology.owned_cell_count();
+       ++cell_id)
+    local_global_ids.push_back(topology.global_cell_id(cell_id));
+  std::vector<std::uint64_t> all_global_ids;
+  all_global_ids.reserve(
+      static_cast<std::size_t>(extent.x * extent.y * extent.z));
+  for (std::uint64_t global_id = 0U;
+       global_id < static_cast<std::uint64_t>(extent.x * extent.y * extent.z);
+       ++global_id)
+    all_global_ids.push_back(global_id);
+  const auto history_state_before = state.snapshot(flow::FlowLayer::history);
+  const auto committed_state_before =
+      state.snapshot(flow::FlowLayer::committed);
+  const auto state_before = state.snapshot(flow::FlowLayer::trial);
+  const auto metadata_before = state.metadata();
+  require_larger_extent_ownership_proof(mpi);
+  const auto counters_before = mpi.fp64_reduction_counters();
+  std::string fingerprint;
+  for (const auto level :
+       {diagnostics::DiagnosticLevel::summary,
+        diagnostics::DiagnosticLevel::invariants,
+        diagnostics::DiagnosticLevel::counters,
+        diagnostics::DiagnosticLevel::bounded_state_sample}) {
+    diagnostics::DiagnosticRequest request;
+    request.level = level;
+    request.scope = diagnostics::DiagnosticScope::local;
+    request.frame = {mpi.rank(), 0U, -0.0, "material.finalized-trial"};
+    if (level == diagnostics::DiagnosticLevel::bounded_state_sample)
+      request.sample_budget = 2U;
+    CaptureSink sink;
+    diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+    diagnostics::collect_diagnostics(source, request, sink);
+    const auto work = diagnostics::test::
+        MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+    HUNDUN_CHECK(sink.calls == 1U);
+    HUNDUN_CHECK(sink.value.status == diagnostics::DiagnosticStatus::ok);
+    require_identities(sink.value, ids, expected_owned_layout, 1U, 1U);
+    HUNDUN_CHECK(sink.value.metrics.empty() ==
+                 (level != diagnostics::DiagnosticLevel::summary));
+    HUNDUN_CHECK(sink.value.invariants.empty() ==
+                 (level != diagnostics::DiagnosticLevel::invariants));
+    HUNDUN_CHECK(sink.value.counters.empty() ==
+                 (level != diagnostics::DiagnosticLevel::counters));
+    if (fingerprint.empty())
+      fingerprint = sink.value.state_fingerprint.hex;
+    HUNDUN_CHECK(sink.value.state_fingerprint.hex == fingerprint);
+    HUNDUN_CHECK(work.fingerprint_items ==
+                 source.fingerprint_field_count() * source.owned_cell_count());
+    HUNDUN_CHECK(work.raw_collectives == 0U);
+    if (level == diagnostics::DiagnosticLevel::counters) {
+      HUNDUN_CHECK(work.summary_accumulations == 0U);
+      HUNDUN_CHECK(work.sample_candidates == 0U);
+      HUNDUN_CHECK(work.volume_reads == 0U);
+    } else if (level == diagnostics::DiagnosticLevel::bounded_state_sample) {
+      HUNDUN_CHECK(work.summary_accumulations == 0U);
+      HUNDUN_CHECK(work.sample_candidates > 0U);
+      HUNDUN_CHECK(work.volume_reads == 0U);
+    } else if (level == diagnostics::DiagnosticLevel::summary) {
+      HUNDUN_CHECK(work.summary_accumulations > 0U);
+      HUNDUN_CHECK(work.sample_candidates == 0U);
+      HUNDUN_CHECK(work.volume_reads > 0U);
+    } else {
+      HUNDUN_CHECK(work.summary_accumulations > 0U);
+      HUNDUN_CHECK(work.sample_candidates == 0U);
+      HUNDUN_CHECK(work.volume_reads == 0U);
+    }
+    diagnostics::validate(sink.value, descriptor, request);
+  }
+
+  for (const std::size_t budget : {1U, 256U}) {
+    for (const bool narrowed : {false, true}) {
+      diagnostics::DiagnosticRequest request;
+      request.level = diagnostics::DiagnosticLevel::bounded_state_sample;
+      request.scope = diagnostics::DiagnosticScope::local;
+      request.frame = {mpi.rank(), 0U, -0.0, "material.finalized-trial"};
+      request.sample_budget = budget;
+      if (narrowed)
+        request.selected_fields = {"rho_h"};
+      CaptureSink sink;
+      diagnostics::collect_diagnostics(source, request, sink);
+      const auto expected =
+          expected_samples(ids, local_global_ids, narrowed, budget);
+      require_expected_samples(sink.value, expected);
+      require_identities(sink.value, ids, expected_owned_layout, 1U, 1U);
+      if (budget == 1U && !narrowed) {
+        auto tuple_mutant = expected.samples;
+        tuple_mutant.front().global_id += 1U;
+        HUNDUN_CHECK(!exact_samples_equal(expected.samples, tuple_mutant));
+
+        std::vector<diagnostics::DiagnosticSample> per_field_budget_mutant;
+        const auto all_local_samples = expected_samples(
+            ids, local_global_ids, false, ids.size() * local_global_ids.size());
+        for (const auto field : ids) {
+          const auto first = std::find_if(
+              all_local_samples.samples.begin(),
+              all_local_samples.samples.end(),
+              [&](const auto &sample) { return sample.field_id == field; });
+          HUNDUN_CHECK(first != all_local_samples.samples.end());
+          per_field_budget_mutant.push_back(*first);
+        }
+        std::sort(
+            per_field_budget_mutant.begin(), per_field_budget_mutant.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+        HUNDUN_CHECK(
+            !exact_samples_equal(expected.samples, per_field_budget_mutant));
+      }
+    }
+  }
+  HUNDUN_CHECK(
+      runtime::Fp64ReductionCounters{counters_before}.collective_calls ==
+      mpi.fp64_reduction_counters().collective_calls);
+  HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+      state_before, state.snapshot(flow::FlowLayer::trial)));
+  HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(metadata_before,
+                                                          state.metadata()));
+
+  diagnostics::DiagnosticRequest collective;
+  collective.level = diagnostics::DiagnosticLevel::bounded_state_sample;
+  collective.scope = diagnostics::DiagnosticScope::collective;
+  collective.frame = {mpi.rank(), 0U, -0.0, "material.finalized-trial"};
+  collective.selected_fields = {"rho_h"};
+  collective.sample_budget = 2U;
+  CaptureSink collective_sink;
+  diagnostics::collect_diagnostics(source, mpi, collective, collective_sink);
+  HUNDUN_CHECK(collective_sink.calls == 1U);
+  HUNDUN_CHECK(collective_sink.value.samples.size() == 2U);
+  require_identities(collective_sink.value, ids, expected_global_layout, 1U,
+                     1U);
+  require_collective_identities_equal(collective_sink.value, mpi);
+  for (const auto &sample : collective_sink.value.samples)
+    HUNDUN_CHECK(sample.field_id == "rho_h");
+  HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+               counters_before.collective_calls);
+
+  std::string collective_fingerprint;
+  std::string repeated_collective_json;
+  for (const std::size_t budget : {1U, 256U}) {
+    for (const bool narrowed : {false, true}) {
+      auto sampled = collective;
+      sampled.sample_budget = budget;
+      sampled.selected_fields = narrowed
+                                    ? std::vector<std::string_view>{"rho_h"}
+                                    : std::vector<std::string_view>{};
+      CaptureSink sampled_sink;
+      diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+      diagnostics::collect_diagnostics(source, mpi, sampled, sampled_sink);
+      const auto sampled_work = diagnostics::test::
+          MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+      const auto expected =
+          expected_samples(ids, all_global_ids, narrowed, budget);
+      require_expected_samples(sampled_sink.value, expected);
+      require_identities(sampled_sink.value, ids, expected_global_layout, 1U,
+                         1U);
+      require_collective_identities_equal(sampled_sink.value, mpi);
+      HUNDUN_CHECK(sampled_work.summary_accumulations == 0U);
+      HUNDUN_CHECK(sampled_work.volume_reads == 0U);
+      HUNDUN_CHECK(sampled_work.sample_candidates > 0U);
+      HUNDUN_CHECK(sampled_work.raw_collectives == 27U);
+      if (collective_fingerprint.empty())
+        collective_fingerprint = sampled_sink.value.state_fingerprint.hex;
+      HUNDUN_CHECK(sampled_sink.value.state_fingerprint.hex ==
+                   collective_fingerprint);
+      if (budget == 1U && narrowed) {
+        repeated_collective_json =
+            diagnostics::to_canonical_json(sampled_sink.value);
+        CaptureSink repeated_sink;
+        diagnostics::collect_diagnostics(source, mpi, sampled, repeated_sink);
+        HUNDUN_CHECK(diagnostics::to_canonical_json(repeated_sink.value) ==
+                     repeated_collective_json);
+      }
+      if (budget == 1U && !narrowed && mpi.size() > 1) {
+        std::vector<diagnostics::DiagnosticSample> per_rank_budget_mutant;
+        for (int rank = 0; rank < mpi.size(); ++rank) {
+          const auto rank_expected = expected_samples(
+              ids, owned_global_ids_for_rank(extent, mpi.size(), rank), false,
+              budget);
+          per_rank_budget_mutant.insert(per_rank_budget_mutant.end(),
+                                        rank_expected.samples.begin(),
+                                        rank_expected.samples.end());
+        }
+        std::sort(
+            per_rank_budget_mutant.begin(), per_rank_budget_mutant.end(),
+            [](const auto &left, const auto &right) {
+              return std::tie(left.field_id, left.global_id, left.component) <
+                     std::tie(right.field_id, right.global_id, right.component);
+            });
+        HUNDUN_CHECK(
+            !exact_samples_equal(expected.samples, per_rank_budget_mutant));
+      }
+    }
+  }
+  diagnostics::DiagnosticFingerprintAccumulator expected_fingerprint;
+  const std::array<double, 4> expected_values{1.0, 3.0, 0.4, 0.7};
+  for (std::size_t field = 0; field < ids.size(); ++field) {
+    for (std::uint64_t global = 0U;
+         global < static_cast<std::uint64_t>(extent.x * extent.y * extent.z);
+         ++global)
+      expected_fingerprint.add(
+          ids[field], global, 0U,
+          diagnostics::describe_fp64(expected_values[field]));
+  }
+  HUNDUN_CHECK(collective_fingerprint == expected_fingerprint.finish().hex);
+
+  runtime::FieldAccessPlan mutation_access(registry);
+  constexpr runtime::PhaseId mutation_phase = 1918U;
+  constexpr runtime::ActorId mutation_actor = 1918U;
+  mutation_access.declare_access(mutation_phase, mutation_actor, rho_phi_beta,
+                                 runtime::AccessMode::read_write);
+  mutation_access.freeze();
+  auto beta_write = state.trial_layer().acquire_write<double>(
+      mutation_access, mutation_phase, mutation_actor, rho_phi_beta);
+  const double authoritative_before = beta_write(0, 0, 0, 0);
+  if (mpi.rank() == 0)
+    beta_write(0, 0, 0, 0) = std::nextafter(authoritative_before, 1.0);
+  auto narrow_prefix = collective;
+  narrow_prefix.sample_budget = 1U;
+  narrow_prefix.selected_fields = {"rho_h"};
+  CaptureSink changed_fingerprint_sink;
+  diagnostics::collect_diagnostics(source, mpi, narrow_prefix,
+                                   changed_fingerprint_sink);
+  HUNDUN_CHECK(changed_fingerprint_sink.value.state_fingerprint.hex !=
+               collective_fingerprint);
+  if (mpi.rank() == 0)
+    beta_write(0, 0, 0, 0) = authoritative_before;
+  const double ghost_before = beta_write(-1, 0, 0, 0);
+  if (mpi.rank() == 0)
+    beta_write(-1, 0, 0, 0) = std::nextafter(ghost_before, 1.0);
+  auto external_flux_write = flux_storage.acquire_face_write<double>(
+      access, phase, actor, fields.face_mass_flux);
+  const double external_flux_before = external_flux_write(0U, 0);
+  external_flux_write(0U, 0) = 77.0;
+  CaptureSink excluded_state_sink;
+  diagnostics::collect_diagnostics(source, mpi, narrow_prefix,
+                                   excluded_state_sink);
+  HUNDUN_CHECK(excluded_state_sink.value.state_fingerprint.hex ==
+               collective_fingerprint);
+  if (mpi.rank() == 0)
+    beta_write(-1, 0, 0, 0) = ghost_before;
+  external_flux_write(0U, 0) = external_flux_before;
+
+  for (const auto level : {diagnostics::DiagnosticLevel::summary,
+                           diagnostics::DiagnosticLevel::invariants,
+                           diagnostics::DiagnosticLevel::counters}) {
+    auto level_request = collective;
+    level_request.level = level;
+    level_request.selected_fields.clear();
+    level_request.sample_budget = 0U;
+    CaptureSink level_sink;
+    diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::reset();
+    diagnostics::collect_diagnostics(source, mpi, level_request, level_sink);
+    const auto work = diagnostics::test::
+        MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+    HUNDUN_CHECK(work.sample_candidates == 0U);
+    require_identities(level_sink.value, ids, expected_global_layout, 1U, 1U);
+    require_collective_identities_equal(level_sink.value, mpi);
+    if (level == diagnostics::DiagnosticLevel::counters) {
+      HUNDUN_CHECK(work.summary_accumulations == 0U);
+      HUNDUN_CHECK(work.volume_reads == 0U);
+    } else if (level == diagnostics::DiagnosticLevel::summary) {
+      HUNDUN_CHECK(work.summary_accumulations > 0U);
+      HUNDUN_CHECK(work.volume_reads > 0U);
+    } else {
+      HUNDUN_CHECK(work.summary_accumulations > 0U);
+      HUNDUN_CHECK(work.volume_reads == 0U);
+    }
+  }
+
+  if (mpi.size() > 1) {
+    for (int dimension = 0; dimension < 7; ++dimension) {
+      auto disagreement = collective;
+      if (mpi.rank() == 1) {
+        switch (dimension) {
+        case 0:
+          disagreement.frame.rank = 0;
+          break;
+        case 1:
+          disagreement.level = diagnostics::DiagnosticLevel::summary;
+          disagreement.selected_fields.clear();
+          disagreement.sample_budget = 0U;
+          break;
+        case 2:
+          ++disagreement.frame.step;
+          break;
+        case 3:
+          disagreement.frame.time_s = 0.0;
+          break;
+        case 4:
+          disagreement.frame.phase = "material.other";
+          break;
+        case 5:
+          disagreement.selected_fields = {"rho"};
+          break;
+        default:
+          disagreement.sample_budget = 1U;
+          break;
+        }
+      }
+      CaptureSink disagreement_sink;
+      bool mismatch_rejected = false;
+      try {
+        diagnostics::collect_diagnostics(source, mpi, disagreement,
+                                         disagreement_sink);
+      } catch (const diagnostics::DiagnosticCollectionError &error) {
+        mismatch_rejected = true;
+        HUNDUN_CHECK(error.classification() ==
+                     diagnostics::DiagnosticFailureClass::invalid_request);
+        HUNDUN_CHECK(error.lowest_failing_rank() == 1);
+      }
+      HUNDUN_CHECK(mismatch_rejected);
+      HUNDUN_CHECK(disagreement_sink.calls == 0U);
+    }
+  }
+
+  diagnostics::DiagnosticRequest sink_request;
+  sink_request.level = diagnostics::DiagnosticLevel::summary;
+  sink_request.scope = diagnostics::DiagnosticScope::collective;
+  sink_request.frame = {mpi.rank(), 0U, -0.0, "material.finalized-trial"};
+  CaptureSink failing_sink;
+  const int sink_failure_rank = mpi.size() > 1 ? 1 : 0;
+  failing_sink.throw_after_copy = mpi.rank() == sink_failure_rank;
+  bool sink_rejected = false;
+  try {
+    diagnostics::collect_diagnostics(source, mpi, sink_request, failing_sink);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    sink_rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::sink_failure);
+    HUNDUN_CHECK(error.lowest_failing_rank() == sink_failure_rank);
+  }
+  HUNDUN_CHECK(sink_rejected);
+  HUNDUN_CHECK(failing_sink.calls == 1U);
+
+  diagnostics::DiagnosticRequest local_sink_request = sink_request;
+  local_sink_request.scope = diagnostics::DiagnosticScope::local;
+  for (const bool classified : {false, true}) {
+    CaptureSink local_failing_sink;
+    local_failing_sink.throw_after_copy = !classified;
+    local_failing_sink.throw_classified = classified;
+    bool local_sink_rejected = false;
+    try {
+      diagnostics::collect_diagnostics(source, local_sink_request,
+                                       local_failing_sink);
+    } catch (const diagnostics::DiagnosticCollectionError &error) {
+      local_sink_rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   diagnostics::DiagnosticFailureClass::sink_failure);
+      HUNDUN_CHECK(error.code() == "diagnostics.sink.submit");
+      HUNDUN_CHECK(error.lowest_failing_rank() == -1);
+    }
+    HUNDUN_CHECK(local_sink_rejected);
+    HUNDUN_CHECK(local_failing_sink.calls == 1U);
+  }
+
+  CaptureSink classified_collective_sink;
+  classified_collective_sink.throw_classified = mpi.rank() == sink_failure_rank;
+  sink_rejected = false;
+  try {
+    diagnostics::collect_diagnostics(source, mpi, sink_request,
+                                     classified_collective_sink);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    sink_rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::sink_failure);
+    HUNDUN_CHECK(error.code() == "diagnostics.sink.submit");
+    HUNDUN_CHECK(error.lowest_failing_rank() == sink_failure_rank);
+  }
+  HUNDUN_CHECK(sink_rejected);
+
+  runtime::FieldAccessPlan checked_read_access(registry);
+  constexpr runtime::PhaseId checked_read_phase = 1919U;
+  constexpr runtime::ActorId checked_read_actor = 1919U;
+  checked_read_access.declare_access(checked_read_phase, checked_read_actor,
+                                     fields.density, runtime::AccessMode::read);
+  checked_read_access.freeze();
+  auto checked_density = state.trial_layer().acquire_read<double>(
+      checked_read_access, checked_read_phase, checked_read_actor,
+      fields.density);
+  const double checked_density_before = checked_density(0, 0, 0, 0);
+
+  auto require_injected_failure =
+      [&](const diagnostics::DiagnosticRequest &request, auto arm,
+          diagnostics::DiagnosticFailureClass klass, std::string_view code,
+          int expected_rank,
+          std::optional<diagnostics::test::MaterialDiagnosticRawCollectivePoint>
+              expected_last = std::nullopt,
+          std::optional<std::uint64_t> expected_collectives = std::nullopt,
+          std::optional<std::uint64_t> expected_field_reads = std::nullopt) {
+        const auto history_before = state.snapshot(flow::FlowLayer::history);
+        const auto committed_before =
+            state.snapshot(flow::FlowLayer::committed);
+        const auto trial_before = state.snapshot(flow::FlowLayer::trial);
+        const auto metadata_before_each = state.metadata();
+        const auto counters_before_each = mpi.fp64_reduction_counters();
+        const auto attempt_before = report.attempt_identity();
+        const auto finalization_before = report.finalization_identity();
+        const auto source_attempt_before = source.report().attempt_identity();
+        const auto source_finalization_before =
+            source.report().finalization_identity();
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            reset();
+        arm();
+        CaptureSink injected_sink;
+        bool injected_rejected = false;
+        try {
+          diagnostics::collect_diagnostics(source, mpi, request, injected_sink);
+        } catch (const diagnostics::DiagnosticCollectionError &error) {
+          injected_rejected = true;
+          HUNDUN_CHECK(error.classification() == klass);
+          HUNDUN_CHECK(error.code() == code);
+          HUNDUN_CHECK(error.lowest_failing_rank() == expected_rank);
+        }
+        HUNDUN_CHECK(injected_rejected);
+        HUNDUN_CHECK(injected_sink.calls == 0U);
+        const auto work = diagnostics::test::
+            MaterialDensityTransportDiagnosticsTestAccess::work_counts();
+        if (expected_last)
+          HUNDUN_CHECK(work.last_raw_collective == *expected_last);
+        if (expected_collectives)
+          HUNDUN_CHECK(work.raw_collectives == *expected_collectives);
+        if (expected_field_reads)
+          HUNDUN_CHECK(work.field_reads == *expected_field_reads);
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            history_before, state.snapshot(flow::FlowLayer::history)));
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            committed_before, state.snapshot(flow::FlowLayer::committed)));
+        HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+            trial_before, state.snapshot(flow::FlowLayer::trial)));
+        HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(
+            metadata_before_each, state.metadata()));
+        HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+                     counters_before_each.collective_calls);
+        HUNDUN_CHECK(report.attempt_identity() == attempt_before);
+        HUNDUN_CHECK(report.finalization_identity() == finalization_before);
+        HUNDUN_CHECK(source.report().attempt_identity() ==
+                     source_attempt_before);
+        HUNDUN_CHECK(source.report().finalization_identity() ==
+                     source_finalization_before);
+        HUNDUN_CHECK(checked_density(0, 0, 0, 0) == checked_density_before);
+      };
+  const auto first_global_id = source.global_cell_id(0U);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            override_global_id(1U, first_global_id, 0);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.duplicate-owned-sample", 0);
+  const auto outside_global_id = source.global_cell_id(9U);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            override_global_id(10U, outside_global_id, 0);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.duplicate-owned-sample", 0);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            override_global_id(
+                0U, std::numeric_limits<std::uint64_t>::max() - 1U, 0);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.duplicate-owned-sample", 0, std::nullopt, 16U);
+  if (mpi.size() > 1) {
+    require_injected_failure(
+        collective,
+        [&] {
+          auto overlapping = box;
+          --overlapping.begin.x;
+          --overlapping.end.x;
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              override_owned_global_box(overlapping, 1);
+        },
+        diagnostics::DiagnosticFailureClass::layout,
+        "material.diagnostics.duplicate-owned-sample", 1, std::nullopt, 18U);
+  }
+  const int injection_rank = mpi.size() > 1 ? 1 : 0;
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_provider_failure(injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.injected-provider", injection_rank);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_record_failure(injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.injected-record", injection_rank);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_request_size_overflow(injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::invalid_request,
+      "material.diagnostics.request-size", injection_rank);
+
+  using DiagnosticAccess =
+      diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess;
+  const auto request_wire = DiagnosticAccess::request_wire_bytes(collective);
+  if (mpi.size() > 1) {
+    const std::array<std::pair<std::size_t, unsigned char>, 3> changes{
+        std::pair<std::size_t, unsigned char>{9U, 1U},
+        std::pair<std::size_t, unsigned char>{22U, 0x80U},
+        std::pair<std::size_t, unsigned char>{request_wire.size() - 8U, 1U}};
+    for (const auto &[byte, mask] : changes) {
+      auto changed = request_wire;
+      changed[byte] ^= mask;
+      HUNDUN_CHECK(DiagnosticAccess::request_wire_is_valid(changed));
+      require_injected_failure(
+          collective,
+          [&] {
+            DiagnosticAccess::override_request_wire_bytes(
+                changed.data(), changed.size(), injection_rank);
+          },
+          diagnostics::DiagnosticFailureClass::invalid_request,
+          "material.diagnostics.request-agreement", injection_rank);
+    }
+  }
+  std::vector<std::vector<unsigned char>> malformed_requests;
+  auto malformed_request = request_wire;
+  malformed_request[0] = 2U;
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request[14] = static_cast<unsigned char>(
+      diagnostics::DiagnosticValueStatus::unavailable);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request.resize(27U);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request.push_back(0U);
+  malformed_requests.push_back(malformed_request);
+  malformed_request = request_wire;
+  malformed_request[23] = 129U;
+  malformed_requests.push_back(malformed_request);
+  for (const auto &malformed : malformed_requests) {
+    HUNDUN_CHECK(!DiagnosticAccess::request_wire_is_valid(malformed));
+    require_injected_failure(
+        collective,
+        [&] {
+          DiagnosticAccess::override_request_wire_bytes(
+              malformed.data(), malformed.size(), injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.request-serialization", injection_rank);
+  }
+
+  const diagnostics::DiagnosticSample wire_sample{
+      "rho_h", source.global_cell_id(0U), 0U, "J/m3",
+      diagnostics::describe_fp64(3.0)};
+  const auto sample_wire = DiagnosticAccess::sample_wire_bytes(wire_sample);
+  std::vector<std::vector<unsigned char>> malformed_samples;
+  auto malformed_sample = sample_wire;
+  malformed_sample[0] = 2U;
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample[malformed_sample.size() - 9U] = static_cast<unsigned char>(
+      diagnostics::DiagnosticValueStatus::unavailable);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample.resize(18U);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample.push_back(0U);
+  malformed_samples.push_back(malformed_sample);
+  malformed_sample = sample_wire;
+  malformed_sample[12] = 129U;
+  malformed_samples.push_back(malformed_sample);
+  for (const auto &malformed : malformed_samples) {
+    HUNDUN_CHECK(!DiagnosticAccess::sample_wire_is_valid(malformed));
+    require_injected_failure(
+        collective,
+        [&] {
+          DiagnosticAccess::override_sample_wire_bytes(
+              malformed.data(), malformed.size(), injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::layout,
+        "material.diagnostics.sample-wire-malformed", injection_rank);
+  }
+
+  require_injected_failure(
+      sink_request,
+      [&] {
+        DiagnosticAccess::inject_transport_total_count_overflow(injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::invalid_input,
+      "material.diagnostics.transport-total-count", injection_rank,
+      diagnostics::test::MaterialDiagnosticRawCollectivePoint::other, 17U);
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_sample_wire_overflow(injection_rank);
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.sample-wire-size", injection_rank,
+      diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+          sample_size_exchange,
+      22U);
+
+  if (mpi.size() > 1) {
+    require_injected_failure(
+        collective,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_provider_key_value_difference(1);
+        },
+        diagnostics::DiagnosticFailureClass::collective_operation,
+        "material.diagnostics.provider-agreement", 1, std::nullopt,
+        std::nullopt, 0U);
+  }
+
+  require_injected_failure(
+      collective,
+      [&] {
+        diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+            inject_sample_wire_prefix_overflow();
+      },
+      diagnostics::DiagnosticFailureClass::layout,
+      "material.diagnostics.sample-wire-size", mpi.size() > 1 ? 1 : 0,
+      mpi.size() > 1 ? diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+                           sample_size_exchange
+                     : diagnostics::test::MaterialDiagnosticRawCollectivePoint::
+                           preparation_local_sample_wire_and_size_counts,
+      mpi.size() > 1 ? 22U : 21U);
+
+  using AllocationPoint = diagnostics::test::MaterialDiagnosticAllocationPoint;
+  using RawPoint = diagnostics::test::MaterialDiagnosticRawCollectivePoint;
+  struct AllocationFailureCase final {
+    AllocationPoint point;
+    RawPoint raw_point;
+    std::uint64_t raw_collectives;
+    bool summary_request;
+    bool required_distributed;
+  };
+  const std::array provider_allocation_failures{
+      AllocationFailureCase{AllocationPoint::provider_key,
+                            RawPoint::preparation_provider_key, 8U, false,
+                            true},
+      AllocationFailureCase{AllocationPoint::provider_reference,
+                            RawPoint::preparation_provider_reference, 10U,
+                            false, true}};
+  for (const auto &failure : provider_allocation_failures) {
+    require_injected_failure(
+        collective,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_allocation_failure(failure.point, injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.provider-agreement-preparation", injection_rank,
+        failure.raw_point, failure.raw_collectives, 0U);
+  }
+  const std::array allocation_failures{
+      AllocationFailureCase{AllocationPoint::summary_gather,
+                            RawPoint::preparation_summary_gather, 14U, true,
+                            true},
+      AllocationFailureCase{AllocationPoint::transport_totals,
+                            RawPoint::preparation_transport_totals, 16U, true,
+                            true},
+      AllocationFailureCase{AllocationPoint::ownership_box_proof,
+                            RawPoint::preparation_ownership_box_proof, 17U,
+                            false, true},
+      AllocationFailureCase{AllocationPoint::eligible_counts,
+                            RawPoint::preparation_eligible_counts, 19U, false,
+                            false},
+      AllocationFailureCase{
+          AllocationPoint::local_sample_wire_and_size_counts,
+          RawPoint::preparation_local_sample_wire_and_size_counts, 21U, false,
+          true},
+      AllocationFailureCase{AllocationPoint::sample_exchange_buffers,
+                            RawPoint::preparation_sample_exchange_buffers, 23U,
+                            false, true},
+      AllocationFailureCase{AllocationPoint::decoded_and_retained_samples,
+                            RawPoint::preparation_decoded_and_retained_samples,
+                            25U, false, true}};
+  for (const auto &failure : allocation_failures) {
+    if (mpi.size() > 1 && !failure.required_distributed)
+      continue;
+    const auto &request = failure.summary_request ? sink_request : collective;
+    require_injected_failure(
+        request,
+        [&] {
+          diagnostics::test::MaterialDensityTransportDiagnosticsTestAccess::
+              inject_allocation_failure(failure.point, injection_rank);
+        },
+        diagnostics::DiagnosticFailureClass::invalid_input,
+        "material.diagnostics.aggregation-preparation", injection_rank,
+        failure.raw_point, failure.raw_collectives);
+  }
+
+  for (const auto scope : {diagnostics::DiagnosticScope::local,
+                           diagnostics::DiagnosticScope::collective}) {
+    auto wrong_phase = sink_request;
+    wrong_phase.scope = scope;
+    wrong_phase.frame.phase = "material.other";
+    CaptureSink phase_sink;
+    bool phase_rejected = false;
+    try {
+      if (scope == diagnostics::DiagnosticScope::local)
+        diagnostics::collect_diagnostics(source, wrong_phase, phase_sink);
+      else
+        diagnostics::collect_diagnostics(source, mpi, wrong_phase, phase_sink);
+    } catch (const diagnostics::DiagnosticCollectionError &error) {
+      phase_rejected = true;
+      HUNDUN_CHECK(error.classification() ==
+                   diagnostics::DiagnosticFailureClass::invalid_request);
+      HUNDUN_CHECK(error.code() == "material.diagnostics.phase");
+    }
+    HUNDUN_CHECK(phase_rejected);
+    HUNDUN_CHECK(phase_sink.calls == 0U);
+  }
+  HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+      history_state_before, state.snapshot(flow::FlowLayer::history)));
+  HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+      committed_state_before, state.snapshot(flow::FlowLayer::committed)));
+  HUNDUN_CHECK(test::flow_layer_values_bitwise_equal(
+      state_before, state.snapshot(flow::FlowLayer::trial)));
+  HUNDUN_CHECK(test::accepted_step_metadata_bitwise_equal(metadata_before,
+                                                          state.metadata()));
+  HUNDUN_CHECK(mpi.fp64_reduction_counters().collective_calls ==
+               counters_before.collective_calls);
+
+  auto bad = collective;
+  bad.selected_fields = {"unknown"};
+  CaptureSink no_submit;
+  bool rejected = false;
+  try {
+    diagnostics::collect_diagnostics(source, mpi, bad, no_submit);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::invalid_request);
+    HUNDUN_CHECK(error.code() == "material.diagnostics.unknown-field");
+    HUNDUN_CHECK(error.lowest_failing_rank() == 0);
+  }
+  HUNDUN_CHECK(rejected);
+  HUNDUN_CHECK(no_submit.calls == 0U);
+
+  for (const auto corruption :
+       {flow::test::MaterialReportCorruption::scalar,
+        flow::test::MaterialReportCorruption::vector_size,
+        flow::test::MaterialReportCorruption::vector_element,
+        flow::test::MaterialReportCorruption::availability,
+        flow::test::MaterialReportCorruption::seal}) {
+    auto mismatched_report = report;
+    flow::test::MaterialDensityTransportTestAccess::corrupt_report(
+        mismatched_report, corruption);
+    rejected = false;
+    try {
+      static_cast<void>(transport.diagnostic_source(state, mismatched_report));
+    } catch (const runtime::Error &) {
+      rejected = true;
+    }
+    HUNDUN_CHECK(rejected);
+  }
+
+  auto later_flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto later_report =
+      transport.finalize_trial(state, later_flux, stencil);
+  HUNDUN_CHECK(later_report.disposition() ==
+               flow::MaterialTransportDisposition::finalized);
+  auto later_source = transport.diagnostic_source(state, later_report);
+  CaptureSink superseded_sink;
+  diagnostics::DiagnosticRequest stale;
+  stale.level = diagnostics::DiagnosticLevel::summary;
+  stale.scope = diagnostics::DiagnosticScope::local;
+  stale.frame = {mpi.rank(), 0U, 0.0, "material.finalized-trial"};
+  rejected = false;
+  try {
+    diagnostics::collect_diagnostics(source, stale, superseded_sink);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::invalid_input);
+    HUNDUN_CHECK(error.code() == "material.diagnostics.provider");
+  }
+  HUNDUN_CHECK(rejected);
+  HUNDUN_CHECK(superseded_sink.calls == 0U);
+
+  auto other_state = flow::FlowState::create(
+      registry, {local, topology.local_face_count()}, fields,
+      {0U, 0.0, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+  other_state.seed_accepted_layers(initial, initial);
+  other_state.begin_attempt();
+  rejected = false;
+  try {
+    static_cast<void>(transport.diagnostic_source(other_state, later_report));
+  } catch (const runtime::Error &) {
+    rejected = true;
+  }
+  HUNDUN_CHECK(rejected);
+  other_state.rollback_attempt();
+
+  state.rollback_attempt();
+  CaptureSink stale_sink;
+  rejected = false;
+  try {
+    diagnostics::collect_diagnostics(later_source, stale, stale_sink);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::invalid_input);
+    HUNDUN_CHECK(error.code() == "material.diagnostics.provider");
+  }
+  HUNDUN_CHECK(rejected);
+  HUNDUN_CHECK(stale_sink.calls == 0U);
+
+  state.begin_attempt();
+  auto commit_flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto commit_report =
+      transport.finalize_trial(state, commit_flux, stencil);
+  HUNDUN_CHECK(commit_report.disposition() ==
+               flow::MaterialTransportDisposition::finalized);
+  auto commit_source = transport.diagnostic_source(state, commit_report);
+  state.commit_attempt(
+      {1U, 0.01, 0.01, 0.0, flow::MomentumTimeOrder::backward_euler});
+  CaptureSink committed_sink;
+  rejected = false;
+  try {
+    diagnostics::collect_diagnostics(commit_source, stale, committed_sink);
+  } catch (const diagnostics::DiagnosticCollectionError &error) {
+    rejected = true;
+    HUNDUN_CHECK(error.classification() ==
+                 diagnostics::DiagnosticFailureClass::invalid_input);
+    HUNDUN_CHECK(error.code() == "material.diagnostics.provider");
+  }
+  HUNDUN_CHECK(rejected);
+  HUNDUN_CHECK(committed_sink.calls == 0U);
+
+  const auto check_failed_record_levels =
+      [&](const flow::MaterialDensityTransportReport &failed_report,
+          diagnostics::DiagnosticFailureClass expected_class,
+          bool assessments_available) {
+        auto failed_source = transport.diagnostic_source(state, failed_report);
+        for (const auto scope : {diagnostics::DiagnosticScope::local,
+                                 diagnostics::DiagnosticScope::collective}) {
+          for (const auto level :
+               {diagnostics::DiagnosticLevel::summary,
+                diagnostics::DiagnosticLevel::invariants,
+                diagnostics::DiagnosticLevel::counters,
+                diagnostics::DiagnosticLevel::bounded_state_sample}) {
+            diagnostics::DiagnosticRequest request;
+            request.level = level;
+            request.scope = scope;
+            request.frame = {mpi.rank(), 0U, 0.0, "material.finalized-trial"};
+            if (level == diagnostics::DiagnosticLevel::bounded_state_sample)
+              request.sample_budget = 1U;
+            CaptureSink failed_sink;
+            if (scope == diagnostics::DiagnosticScope::local)
+              diagnostics::collect_diagnostics(failed_source, request,
+                                               failed_sink);
+            else
+              diagnostics::collect_diagnostics(failed_source, mpi, request,
+                                               failed_sink);
+            HUNDUN_CHECK(failed_sink.value.status ==
+                         diagnostics::DiagnosticStatus::failed);
+            HUNDUN_CHECK(failed_sink.value.failure.classification ==
+                         expected_class);
+            if (level == diagnostics::DiagnosticLevel::summary) {
+              const auto &density_residual =
+                  find_metric(failed_sink.value, "density.residual");
+              HUNDUN_CHECK((density_residual.value.status !=
+                            diagnostics::DiagnosticValueStatus::unavailable) ==
+                           assessments_available);
+              const auto &last_transport =
+                  find_metric(failed_sink.value,
+                              "transport.s00000000000000000002.residual");
+              HUNDUN_CHECK((last_transport.value.status !=
+                            diagnostics::DiagnosticValueStatus::unavailable) ==
+                           assessments_available);
+            } else if (level == diagnostics::DiagnosticLevel::invariants) {
+              const auto &availability = find_invariant(
+                  failed_sink.value, "density.residual.available");
+              HUNDUN_CHECK(availability.passed == assessments_available);
+              const auto &last_availability = find_invariant(
+                  failed_sink.value,
+                  "transport.s00000000000000000002.residual.available");
+              HUNDUN_CHECK(last_availability.passed == assessments_available);
+            } else if (level == diagnostics::DiagnosticLevel::counters) {
+              HUNDUN_CHECK(
+                  find_counter(failed_sink.value, "transport.fields").value ==
+                  3U);
+            }
+          }
+        }
+      };
+
+  state.seed_accepted_layers(initial, initial);
+  state.begin_attempt();
+  auto predictor_failure_flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::predictor);
+  const auto predictor_failure_report =
+      transport.finalize_trial(state, predictor_failure_flux, stencil);
+  check_failed_record_levels(predictor_failure_report,
+                             diagnostics::DiagnosticFailureClass::invalid_input,
+                             false);
+  state.rollback_attempt();
+
+  auto invalid_initial = initial;
+  if (mpi.rank() == 0)
+    invalid_initial.density.front() = -1.0;
+  state.seed_accepted_layers(invalid_initial, invalid_initial);
+  state.begin_attempt();
+  auto state_failure_flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto state_failure_report =
+      transport.finalize_trial(state, state_failure_flux, stencil);
+  check_failed_record_levels(
+      state_failure_report,
+      diagnostics::DiagnosticFailureClass::non_positive_state, false);
+  state.rollback_attempt();
+
+  state.seed_accepted_layers(initial, initial);
+  state.begin_attempt();
+  flow::test::MaterialDensityTransportTestAccess::set_density_residual(2.0e-10);
+  auto final_gate_flux = flow::MaterialFaceMassFlux::acquire(
+      registry, flux_storage, access, phase, actor, fields.face_mass_flux,
+      topology, flow::MaterialFluxProvenance::final_corrected);
+  const auto final_gate_report =
+      transport.finalize_trial(state, final_gate_flux, stencil);
+  check_failed_record_levels(
+      final_gate_report, diagnostics::DiagnosticFailureClass::non_convergence,
+      true);
+  state.rollback_attempt();
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  hundun::runtime::MpiEnvironment environment(argc, argv);
+  return hundun::test::run([&] {
+    auto mpi = hundun::runtime::MpiContext::duplicate(MPI_COMM_WORLD);
+    run(mpi);
+  });
+}

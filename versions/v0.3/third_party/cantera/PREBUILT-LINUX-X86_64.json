@@ -1,0 +1,44 @@
+{
+  "schema": "hundun.cantera.prebuilt.linux-x86_64.v1",
+  "version": "3.2.0",
+  "build_type": "Release",
+  "builder": "Ubuntu 22.04; GCC 11; libstdc++; C++17",
+  "abi": {
+    "architecture": "x86_64",
+    "isa": "x86-64",
+    "glibc_floor": "2.35",
+    "glibcxx_cxx11_abi": 1,
+    "maximum_glibc": "GLIBC_2.34",
+    "maximum_glibcxx": "GLIBCXX_3.4.29",
+    "maximum_cxxabi": "CXXABI_1.3.9",
+    "soname": "libcantera_shared.so.3"
+  },
+  "library": {
+    "path": "lib/libcantera_shared.so.3.2.0",
+    "sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+    "bytes": 10164736,
+    "needed": ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6"],
+    "rpath": "absent",
+    "runpath": "absent"
+  },
+  "layout": {
+    "include": "include",
+    "data": "share/cantera/data",
+    "licenses": "licenses",
+    "mechanism_count": 0,
+    "python_file_count": 0,
+    "static_library_count": 0
+  },
+  "license_files": [
+    "licenses/Cantera/License.txt",
+    "licenses/UPSTREAM-COMBINED-LICENSES.txt",
+    "licenses/Boost/LICENSE_1_0.txt",
+    "licenses/Boost/ubuntu-package-copyright",
+    "licenses/Eigen/COPYING.MPL2",
+    "licenses/SUNDIALS/LICENSE",
+    "licenses/SUNDIALS/NOTICE",
+    "licenses/fmt/LICENSE.rst",
+    "licenses/yaml-cpp/LICENSE"
+  ],
+  "p0_artifact_manifest_sha256": "efd2fbbc9f497b7b0f7212104497591464a5e0ae76d84527528e9586f8338296"
+}

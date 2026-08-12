@@ -1,0 +1,93 @@
+{
+  "schema_version": 3,
+  "case": {"name": "cylinder_re3900_periodic_fast"},
+  "simulation": {
+    "type": "variable_density_flow",
+    "density_model": "constant"
+  },
+  "resources": {
+    "expected_ranks": 64,
+    "process_grid": [4, 4, 4]
+  },
+  "mesh": {
+    "cells": [48, 48, 48],
+    "origin_m": [-1.0, -1.0, 0.0],
+    "length_m": [2.0, 2.0, 3.141592653589793],
+    "mapping": "uniform_box"
+  },
+  "time": {
+    "mode": "fixed",
+    "steps": 1,
+    "initial_dt_s": 0.006,
+    "min_dt_s": 0.006,
+    "max_dt_s": 0.006,
+    "cfl_target": 0.5,
+    "diffusion_number_target": 0.25,
+    "growth_factor": 1.25,
+    "retry_factor": 0.5,
+    "max_retries": 8
+  },
+  "physics": {
+    "rho_ref_kg_per_m3": 1.0,
+    "dynamic_viscosity_pa_s": 0.0002564102564102564,
+    "inlet_consistency_rtol": 1.0e-12
+  },
+  "scalars": [],
+  "boundaries": [
+    {
+      "patch": "x_min",
+      "type": "velocity_inlet",
+      "velocity_m_per_s": [1.0, 0.0, 0.0],
+      "thermal_authority": "enthalpy",
+      "enthalpy_J_per_kg": 0.0,
+      "density_kg_per_m3": 1.0,
+      "scalar_values": []
+    },
+    {
+      "patch": "x_max",
+      "type": "pressure_outlet",
+      "pressure_perturbation_pa": 0.0
+    },
+    {"patch": "y_min", "type": "periodic"},
+    {"patch": "y_max", "type": "periodic"},
+    {"patch": "z_min", "type": "periodic"},
+    {"patch": "z_max", "type": "periodic"}
+  ],
+  "restart": {
+    "read": false,
+    "write_directory": "checkpoints",
+    "write_interval": 100
+  },
+  "diagnostics": {
+    "directory": "diagnostics",
+    "write_interval": 1,
+    "write_mesh": false
+  },
+  "performance": {
+    "enabled": false,
+    "directory": "performance",
+    "warmup_steps": 1,
+    "measured_steps": 1,
+    "repetitions": 1
+  },
+  "immersed_boundary": {
+    "model": "local_flow_pattern_ghost_cell",
+    "geometry": {
+      "format": "stl",
+      "file": "geometry/cylinder_re3900.stl",
+      "length_scale_to_m": 1.0,
+      "fluid_side": "outside"
+    },
+    "wall": {
+      "velocity_m_per_s": [0.0, 0.0, 0.0],
+      "enthalpy": "zero_normal_diffusive_flux",
+      "scalars": "zero_normal_diffusive_flux"
+    }
+  },
+  "les": {
+    "model": "wale",
+    "wale": {"coefficient": 0.5},
+    "turbulent_prandtl": 0.9,
+    "turbulent_schmidt": 0.7
+  }
+}

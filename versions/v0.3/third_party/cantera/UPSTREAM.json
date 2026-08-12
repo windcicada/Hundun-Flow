@@ -1,0 +1,90 @@
+{
+  "schema": "hundun.cantera.upstream.v1",
+  "source": {
+    "repository": "https://github.com/Cantera/cantera.git",
+    "tag": "v3.2.0",
+    "commit": "4a8358eb80cfeb50474386b5f9ec0b3a83519889",
+    "archive_url": "https://github.com/Cantera/cantera/releases/download/v3.2.0/cantera-3.2.0.tar.gz",
+    "archive_sha256": "a94682ef3cb60dc57c8d14fc4cccd94e8f6bb74cab9c3f5465ee90832859360b",
+    "license": "BSD-3-Clause",
+    "license_file": "LICENSES/cantera-BSD-3-Clause.txt",
+    "local_patches": 0
+  },
+  "artifact": {
+    "profile": "Ubuntu 22.04; GCC 11; libstdc++; C++17; _GLIBCXX_USE_CXX11_ABI=1; x86-64",
+    "artifact_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+    "soname": "libcantera_shared.so.3",
+    "runtime_needed": ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6"],
+    "mechanisms_bundled": false,
+    "p0_artifact_manifest_sha256": "efd2fbbc9f497b7b0f7212104497591464a5e0ae76d84527528e9586f8338296"
+  },
+  "dependencies": [
+    {
+      "name": "fmt",
+      "version": "9.1.0",
+      "url": "https://github.com/fmtlib/fmt/archive/refs/tags/9.1.0.tar.gz",
+      "source_sha256": "5dea48d1fcddc3ec571ce2058e13910a0d4a6bab4cc09a809d8b1dd1c88ae6f2",
+      "binary_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+      "license": "MIT",
+      "abi": "embedded-private; C++17; ABI=1; x86-64",
+      "bundled": true
+    },
+    {
+      "name": "yaml-cpp",
+      "version": "0.7.0",
+      "url": "https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz",
+      "source_sha256": "43e6a9fcb146ad871515f0d0873947e5d497a1c9c60c58cb102a97b47208b7c3",
+      "binary_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+      "license": "MIT",
+      "abi": "embedded-private; C++17; ABI=1; x86-64",
+      "bundled": true
+    },
+    {
+      "name": "sundials",
+      "version": "archive-v5.3.0",
+      "url": "https://github.com/LLNL/sundials/archive/refs/tags/archive-v5.3.0.tar.gz",
+      "source_sha256": "fa9ed1c3751714fccd262f8d088261a54790ec89ae5a524399b6f06b950fe80a",
+      "binary_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+      "license": "BSD-3-Clause plus NOTICE",
+      "abi": "embedded-private; double precision; C++17; ABI=1; x86-64",
+      "bundled": true
+    },
+    {
+      "name": "eigen",
+      "version": "3.4.0",
+      "url": "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
+      "source_sha256": "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72",
+      "binary_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+      "license": "MPL-2.0 and verified file-scoped notices",
+      "abi": "header-only; EIGEN_MPL2_ONLY; C++17; ABI=1; x86-64",
+      "bundled": true
+    },
+    {
+      "name": "boost",
+      "version": "1.74.0-14ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/b/boost1.74/libboost1.74-dev_1.74.0-14ubuntu3_amd64.deb",
+      "source_sha256": "4d9c90e43f0d25db6280d1ee326771cbb76462f73b9430f06bac1de8d05b7a78",
+      "binary_sha256": "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760",
+      "license": "BSL-1.0 plus Ubuntu package copyright inventory",
+      "abi": "builder-header-only; absent from package and runtime",
+      "bundled": false
+    }
+  ],
+  "builder_closure": {
+    "p0_input_manifest_sha256": "32622f5986e97903b9b07110d091c993a3c85e9b3a78ab160493050f38f1361e",
+    "tools": [
+      "doxygen=1.9.1-2ubuntu2@d3fe7f77f505262db0872ba810b691feb4a607887ceb368e17a1da66ee0387f7",
+      "libclang-cpp14=1:14.0.0-1ubuntu1.1@462546f6149fbef99b47f3e1e01e0743d256ae279337c7f89a80a976dfd02175",
+      "libclang1-14=1:14.0.0-1ubuntu1.1@b75b743f5d5effaab97790c1379fb1855d1a20bd5432a2387bf4dc82d86d45e3",
+      "libllvm14=1:14.0.0-1ubuntu1.1@9044b614a6c7fb6262e7cbeb13dc731fc0c92bed96281c1a3920dd706442ee8e",
+      "libxapian30=1.4.18-4@5cfe52f4ca570e85efa828efda6d6831ceb0f667a32faf5438887cfaf528b7c2",
+      "libxml2=2.9.13+dfsg-1ubuntu0.12@b3678e6e4b166bc0e4226fb118d489ab51802c772914421397c9dcb2dd0e0d2b"
+    ],
+    "python_build_only": [
+      "typing_extensions=4.15.0@f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+      "ruamel.yaml=0.17.21@742b35d3d665023981bd6d16b3d24248ce5df75fdb4e2924e93a05c1f8b61ca7",
+      "ruamel.yaml.clib=0.2.6@221eca6f35076c6ae472a531afa1c223b9c29377e62936f61bc8e6e8bdc5f9e7"
+    ],
+    "bundle_status": "all builder-only entries forbidden from artifact and runtime"
+  }
+}
