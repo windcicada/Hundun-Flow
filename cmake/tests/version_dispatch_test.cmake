@@ -78,10 +78,75 @@ function(check_invalid_selection)
   endif()
 endfunction()
 
+function(check_sanitizer_configuration case_name option_name sanitizer_flag)
+  set(build_dir "${TEST_ROOT}/${case_name}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      -G "Unix Makefiles"
+      -S "${HUNDUN_ROOT}"
+      -B "${build_dir}"
+      -DCMAKE_BUILD_TYPE=Debug
+      -DHUNDUN_BUILD_TESTS=OFF
+      -DHUNDUN_SOURCE_VERSION=v0.4
+      "-D${option_name}=ON"
+    RESULT_VARIABLE configure_result
+    OUTPUT_VARIABLE configure_stdout
+    ERROR_VARIABLE configure_stderr)
+  set(configure_output "${configure_stdout}\n${configure_stderr}")
+
+  if(NOT configure_result EQUAL 0)
+    record_failure(
+      "${case_name}: configure failed (${configure_result})\n"
+      "${configure_output}")
+    return()
+  endif()
+
+  if(configure_output MATCHES
+     "Manually-specified variables were not used")
+    record_failure(
+      "${case_name}: configure reported manually-specified unused variables\n"
+      "${configure_output}")
+  endif()
+
+  set(core_flags_file
+    "${build_dir}/versions/v0.4/CMakeFiles/hundun_v04_core.dir/flags.make")
+  if(NOT EXISTS "${core_flags_file}")
+    record_failure(
+      "${case_name}: core compile flags were not generated at "
+      "${core_flags_file}")
+  else()
+    file(READ "${core_flags_file}" core_flags)
+    if(NOT core_flags MATCHES "(^|[ =])${sanitizer_flag}([ \n]|$)")
+      record_failure(
+        "${case_name}: core compile flags do not contain "
+        "${sanitizer_flag}\n${core_flags}")
+    endif()
+  endif()
+
+  set(hundun_link_file
+    "${build_dir}/versions/v0.4/CMakeFiles/hundun.dir/link.txt")
+  if(NOT EXISTS "${hundun_link_file}")
+    record_failure(
+      "${case_name}: hundun link flags were not generated at "
+      "${hundun_link_file}")
+  else()
+    file(READ "${hundun_link_file}" hundun_link)
+    if(NOT hundun_link MATCHES "(^|[ ])${sanitizer_flag}([ \n]|$)")
+      record_failure(
+        "${case_name}: hundun link flags do not contain "
+        "${sanitizer_flag}\n${hundun_link}")
+    endif()
+  endif()
+endfunction()
+
 check_successful_selection(default v0.4)
 check_successful_selection(explicit-v0.4 v0.4 v0.4)
 check_successful_selection(explicit-v0.3 v0.3 v0.3)
 check_invalid_selection()
+check_sanitizer_configuration(
+  v0.4-asan HUNDUN_ENABLE_ASAN -fsanitize=address)
+check_sanitizer_configuration(
+  v0.4-ubsan HUNDUN_ENABLE_UBSAN -fsanitize=undefined)
 
 get_property(failures GLOBAL PROPERTY HUNDUN_DISPATCH_FAILURES)
 if(NOT failures STREQUAL "")
