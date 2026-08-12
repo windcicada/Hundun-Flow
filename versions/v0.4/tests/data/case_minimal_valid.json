@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "mesh": {
+    "kind": "uniform",
+    "data_files": [],
+    "stl_file": null
+  },
+  "flow": {
+    "model": "single_phase_low_mach_compressible",
+    "pressure_closure": "local_absolute_pressure_drho_dp",
+    "reacting": false
+  },
+  "solver": {
+    "coupling": "PISO",
+    "pressure_correctors": 2
+  },
+  "turbulence": {
+    "model": "none"
+  },
+  "time": {
+    "control": "fixed"
+  }
+}
