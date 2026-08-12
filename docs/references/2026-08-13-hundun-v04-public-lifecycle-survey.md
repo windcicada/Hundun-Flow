@@ -74,19 +74,22 @@ used as a reason to rebuild the resource.
 
 | Resource and owner | Identity tuple | Lifetime | Only legal rebuild causes |
 | --- | --- | --- | --- |
-| `EBTopology`, `mesh_eb` | `(geometry_content_revision, CartesianGeometryPlan revision, MeshPatch partition revision, EB classification-policy revision, compact-index-layout revision)` | Initialization through case shutdown because v0.4 geometry is static | Geometry content/transform, Cartesian coordinates, partition, EB classification policy, or compact-index layout changes. Time, field values, and solver coefficients never rebuild it. |
+| `EBTopology`, `mesh_eb` | `(geometry_content_revision,geometry_transform_revision,cartesian_mesh_coordinates_revision,partition_revision,classification_policy_revision,compact_index_layout_revision)` | initialization through case shutdown for static geometry | geometry content, geometry transform, Cartesian mesh/coordinates, partition, classification policy, or compact-index layout revision changes; requested ghost extent, field values, time steps, and solver coefficients do not rebuild EBTopology |
 | `BoundaryStencilPlan`, `mesh_eb`/`bc_plan` | `(EBTopology identity, BoundaryPlan revision, reconstruction-plan revision, donor-policy revision, required ghost extent, field-layout revision)` | Initialization through case shutdown | Any member of that tuple changes. A current field value, residual, retry, or time-step change cannot trigger donor search or stencil rebuild. |
 | `SurfaceQuadraturePlan`, `mesh_eb` | `(EBTopology identity, surface-set revision, quadrature-family/order revision, compact-interface-index revision)` | Initialization through case shutdown | EB topology, selected surface, quadrature family/order, or compact interface mapping changes. Thermodynamic and flow-state changes do not rebuild it. |
 
 For all three resources, borrowed views expire when their owning plan is replaced. No STL/BVH
 query, donor search, quadratic-weight generation, or surface-quadrature construction is legal
-inside the production hot loop.
+inside the production hot loop. Requested ghost extent belongs to the factory/stencil or
+communication capacity that consumes the topology; changing it does not change `EBTopology`.
 
 ## 4. Halo and linear-system lifetimes
 
 | Resource and owner | Identity tuple | Lifetime | Only legal rebuild/refill/replacement causes |
 | --- | --- | --- | --- |
-| Persistent halo metadata, buffers, and MPI requests, `parallel_communication` | `(communicator generation, partition revision, field-schema revision, stage ghost-set revision, periodicity, peer map, pack-span layout, allocated capacity)` | Built after all stage ghost sets are registered; retained across time steps and attempts; one operation is single-in-flight | Rebuild metadata/requests only for communicator, partition, schema, ghost-set, periodicity, peer, or pack-layout change. Grow/replace buffers only when a registered maximum capacity is exceeded. Numeric field changes only invalidate ghost revisions. A ghost revision is published after `finish`, never at `begin`. |
+| Persistent halo metadata (`HALO_METADATA`), `parallel_communication` | `(partition_revision,field_schema_revision,stage_ghost_set_revision,periodicity,peer_map,pack_span_layout)` | case execution after all stage ghost sets freeze | partition, field schema, registered stage ghost set, periodicity, peer map, or pack-span layout changes; buffer/request replacement and field numeric revisions do not rebuild metadata |
+| Persistent halo buffers (`HALO_BUFFERS`), `parallel_communication` | `(send_capacity,receive_capacity,memory_kind,numa_placement,alignment)` | case execution at registered maximum capacity | replace only when required send/receive capacity exceeds allocation or memory kind, NUMA placement, or alignment plan changes; metadata/request replacement and new field values do not replace buffers |
+| Persistent MPI requests (`HALO_REQUESTS`), `parallel_communication` | `(communicator_generation,peer_ranks,message_tags,message_counts,mpi_datatypes,registered_buffer_bindings)` | case execution; persistent requests survive time steps; one registered exchange instance is single-in-flight | recreate only when communicator, peer ranks, tags, counts, MPI datatypes, or registered buffer bindings change; metadata/buffer replacement alone does not recreate requests unless one of those request dependencies changes; field numeric revisions only invalidate ghost revisions, which publish after finish |
 | `SymbolicPlan`, `solver_linear` | `(operator kind, scalar/face location, mesh topology, partition, EB interface pattern, boundary position/type pattern, stencil pattern, backend)` | Across all assemblies and solves with the same structural identity | Rebuild only when a structural identity member changes. Coefficients, RHS, tolerances, iteration count, time step, retry, and residual do not rebuild it. |
 | `NumericState`, `solver_linear` | `(SymbolicPlan identity, diagonal revision, off-diagonal revision, time-coefficient revision, material/transport revision, numeric boundary-coefficient revision, constraint revision)` | Across solves while its full coefficient tuple is unchanged | Refill only when a coefficient tuple member changes. RHS or initial-guess changes do not refill. A structural change first replaces `SymbolicPlan`, which necessarily creates a new `NumericState`. |
 | `HierarchyState`, `solver_linear` | `(SymbolicPlan identity, coarsening-plan revision, transfer/smoother revision, coefficient-policy epoch, backend)` | Across solves and time steps under the registered coefficient-change policy | Structural identity, coarsening, transfer/smoother, backend, or policy change rebuilds it. A coefficient change rebuilds it only when the pre-registered policy says the change crosses its threshold; otherwise coefficients are refreshed without changing hierarchy identity. RHS, tolerance, and iteration history never rebuild it. |
@@ -94,7 +97,9 @@ inside the production hot loop.
 
 The four linear layers must remain separately measurable. “Rebuild solver” is not a valid
 event name: counters must distinguish symbolic rebuild, numeric refill, hierarchy rebuild, and
-workspace replacement.
+workspace replacement. Halo dependencies are likewise non-transitive: buffer replacement never
+rebuilds metadata, and it rebuilds a persistent request only if the request's registered buffer
+binding or another request identity member actually changes.
 
 ## 5. COAST replacement capability trace
 
