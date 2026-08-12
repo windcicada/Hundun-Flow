@@ -51,8 +51,11 @@ endif()
 
 add_library(hundun_v04_core STATIC
   src/app_case.cpp
+  src/core_arena.cpp
   src/core_field_registry.cpp
+  src/core_revision.cpp
   src/core_status.cpp
+  src/core_transaction.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
