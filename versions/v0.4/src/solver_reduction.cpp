@@ -491,10 +491,11 @@ Status ReductionEngine::compile(MPI_Comm communicator, ReductionMode mode,
   std::uint64_t maximums[2]{local_capacity, local_mode};
   std::uint64_t global_minimums[2]{};
   std::uint64_t global_maximums[2]{};
-  if (MPI_Allreduce(minimums, global_minimums, 2, MPI_UINT64_T, MPI_MIN,
-                    duplicate) != MPI_SUCCESS ||
-      MPI_Allreduce(maximums, global_maximums, 2, MPI_UINT64_T, MPI_MAX,
-                    duplicate) != MPI_SUCCESS) {
+  const int minimum_status = MPI_Allreduce(
+      minimums, global_minimums, 2, MPI_UINT64_T, MPI_MIN, duplicate);
+  const int maximum_status = MPI_Allreduce(
+      maximums, global_maximums, 2, MPI_UINT64_T, MPI_MAX, duplicate);
+  if (minimum_status != MPI_SUCCESS || maximum_status != MPI_SUCCESS) {
     (void)MPI_Comm_free(&duplicate);
     return {StatusCode::mpi_failure, kCompileCollective};
   }
@@ -608,17 +609,54 @@ Status ReductionEngine::consensus_contract(
     return {StatusCode::invalid_plan, kInvalidEngine};
   }
   const std::uint64_t local = local_fingerprint;
+  std::uint64_t reference = local;
+  if (MPI_Bcast(&reference, 1, MPI_UINT64_T, 0,
+                implementation_->communicator) != MPI_SUCCESS) {
+    implementation_->lowest_failing_rank = -1;
+    return {StatusCode::mpi_failure, kCollectiveFailure};
+  }
   std::uint64_t minimum = 0U;
   std::uint64_t maximum = 0U;
-  if (MPI_Allreduce(&local, &minimum, 1, MPI_UINT64_T, MPI_MIN,
-                    implementation_->communicator) != MPI_SUCCESS ||
-      MPI_Allreduce(&local, &maximum, 1, MPI_UINT64_T, MPI_MAX,
+  const int minimum_status = MPI_Allreduce(
+      &local, &minimum, 1, MPI_UINT64_T, MPI_MIN,
+      implementation_->communicator);
+  const int maximum_status = MPI_Allreduce(
+      &local, &maximum, 1, MPI_UINT64_T, MPI_MAX,
+      implementation_->communicator);
+  if (minimum_status != MPI_SUCCESS || maximum_status != MPI_SUCCESS) {
+    implementation_->lowest_failing_rank = -1;
+    return {StatusCode::mpi_failure, kCollectiveFailure};
+  }
+  if (local_fingerprint != 0U && minimum == maximum) {
+    implementation_->lowest_failing_rank = -1;
+    return {};
+  }
+  const int candidate = local_fingerprint == reference
+                            ? implementation_->size
+                            : implementation_->rank;
+  int first_mismatch = implementation_->size;
+  if (MPI_Allreduce(&candidate, &first_mismatch, 1, MPI_INT, MPI_MIN,
                     implementation_->communicator) != MPI_SUCCESS) {
     implementation_->lowest_failing_rank = -1;
     return {StatusCode::mpi_failure, kCollectiveFailure};
   }
-  implementation_->lowest_failing_rank = -1;
-  return local_fingerprint != 0U && minimum == maximum
+  implementation_->lowest_failing_rank =
+      first_mismatch < implementation_->size ? first_mismatch : 0;
+  return {StatusCode::invalid_plan, kContractMismatch};
+}
+
+Status ReductionEngine::validate_communicator(
+    MPI_Comm communicator) const noexcept {
+  if (!mpi_is_live() || implementation_ == nullptr ||
+      communicator == MPI_COMM_NULL) {
+    return {StatusCode::invalid_plan, kInvalidEngine};
+  }
+  int relation = MPI_UNEQUAL;
+  if (MPI_Comm_compare(implementation_->communicator, communicator,
+                       &relation) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kCompileCollective};
+  }
+  return relation == MPI_IDENT || relation == MPI_CONGRUENT
              ? Status{}
              : Status{StatusCode::invalid_plan, kContractMismatch};
 }

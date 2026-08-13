@@ -42,6 +42,10 @@ void clear_halo_failure_for_test() noexcept;
 void set_halo_maximum_chunk_doubles_for_test(
     std::uint64_t maximum) noexcept;
 void clear_halo_maximum_chunk_doubles_for_test() noexcept;
+// A negative value simulates a successful MPI_Comm_get_attr call whose
+// predefined MPI_TAG_UB attribute is unavailable (flag == 0/null pointer).
+void set_halo_tag_upper_bound_for_test(int upper_bound) noexcept;
+void clear_halo_tag_upper_bound_for_test() noexcept;
 
 #endif
 

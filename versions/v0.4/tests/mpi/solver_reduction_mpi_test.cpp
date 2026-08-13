@@ -81,6 +81,30 @@ void* operator new[](std::size_t size, std::align_val_t alignment) {
       size, static_cast<std::size_t>(alignment));
 }
 
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void operator delete(void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+
 void operator delete(void* pointer) noexcept { std::free(pointer); }
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
@@ -759,6 +783,64 @@ bool test_move_ownership(int rank, int size) {
   return all_true(passed);
 }
 
+bool test_communicator_compatibility_is_local_and_read_only(int rank,
+                                                            int size) {
+  ReductionEngine engine;
+  bool passed = expect(
+      static_cast<bool>(ReductionEngine::compile(
+          MPI_COMM_WORLD, ReductionMode::mpi_allreduce, kCapacity, engine)),
+      rank, "communicator-contract reduction engine compiles");
+  passed = all_true(passed);
+  if (!passed) {
+    return false;
+  }
+
+  MPI_Comm congruent = MPI_COMM_NULL;
+  MPI_Comm reversed = MPI_COMM_NULL;
+  passed &= expect(MPI_Comm_dup(MPI_COMM_WORLD, &congruent) == MPI_SUCCESS &&
+                       MPI_Comm_split(MPI_COMM_WORLD, 0, size - 1 - rank,
+                                      &reversed) == MPI_SUCCESS,
+                   rank, "comparison communicators compile");
+  if (!all_true(passed)) {
+    if (congruent != MPI_COMM_NULL) (void)MPI_Comm_free(&congruent);
+    if (reversed != MPI_COMM_NULL) (void)MPI_Comm_free(&reversed);
+    return false;
+  }
+
+  const LinearReductionCounters before = engine.counters();
+  const std::uintptr_t send = engine.send_storage_address();
+  const std::uintptr_t receive = engine.receive_storage_address();
+  const Status identical = engine.validate_communicator(MPI_COMM_WORLD);
+  const Status compatible = engine.validate_communicator(congruent);
+  const Status similar = engine.validate_communicator(reversed);
+  const Status null = engine.validate_communicator(MPI_COMM_NULL);
+  passed &= expect(static_cast<bool>(identical) &&
+                       static_cast<bool>(compatible) &&
+                       (size == 1 ? static_cast<bool>(similar)
+                                  : similar.code == StatusCode::invalid_plan) &&
+                       null.code == StatusCode::invalid_plan &&
+                       same(engine.counters(), before) &&
+                       engine.send_storage_address() == send &&
+                       engine.receive_storage_address() == receive,
+                   rank,
+                   "CONGRUENT is accepted, multi-rank SIMILAR and null reject without mutation");
+
+  const std::array<double, 1U> local{static_cast<double>(rank + 1)};
+  std::array<double, 1U> global{-1.0};
+  const Status recovered = engine.checked_sum(
+      Span<const double>{local.data(), local.size()},
+      Span<double>{global.data(), global.size()});
+  passed &= expect(static_cast<bool>(recovered) &&
+                       global[0] == 0.5 * static_cast<double>(size) *
+                                        static_cast<double>(size + 1),
+                   rank,
+                   "rejected communicator query leaves reductions operational");
+
+  (void)MPI_Comm_free(&reversed);
+  (void)MPI_Comm_free(&congruent);
+  return all_true(passed);
+}
+
 bool run_mode(ReductionMode mode, int rank, int size) {
   bool passed = test_compile_contract_and_atomic_replacement(mode, rank);
   passed &= test_packed_hand_oracles(mode, rank, size);
@@ -786,6 +868,7 @@ int main(int argc, char** argv) {
   passed &= test_allreduce_roundoff_tolerance(rank, size);
   passed &= test_fixed_tree_bitwise_repetition(rank, size);
   passed &= test_move_ownership(rank, size);
+  passed &= test_communicator_compatibility_is_local_and_read_only(rank, size);
   passed = all_true(passed);
   if (rank == 0 && !passed) {
     std::cerr << "v0.4 solver reduction MPI test failed for " << size

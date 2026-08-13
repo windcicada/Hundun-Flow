@@ -587,6 +587,58 @@ bool same(WorkspaceSnapshot left, WorkspaceSnapshot right) noexcept {
          left.scalars == right.scalars;
 }
 
+bool test_workspace_internal_overlap_is_rejected_atomically() {
+  WorkspaceFixture fixture;
+  bool passed = expect(
+      make_workspace_fixture(fixture),
+      "workspace-overlap fixture allocates two non-overlapping arena fields");
+  if (!passed) {
+    return false;
+  }
+
+  FieldView exact_overlap = fixture.scalar_buffer;
+  exact_overlap.base = fixture.vector_bundle.base;
+  SolverWorkspace exact_workspace;
+  LinearLifecycleCounters exact_counters{};
+  exact_counters.workspace_bindings = 7U;
+  const WorkspaceSnapshot exact_before = snapshot(exact_workspace);
+  const LinearLifecycleCounters exact_counters_before = exact_counters;
+  const Status exact = SolverWorkspace::bind(
+      fixture.requirements, fixture.vector_bundle, exact_overlap,
+      exact_workspace, &exact_counters);
+  passed &= expect(exact.code == StatusCode::invalid_plan &&
+                       same(snapshot(exact_workspace), exact_before) &&
+                       same(exact_counters, exact_counters_before),
+                   "an exactly overlapping scalar/vector binding is rejected atomically");
+
+  FieldView shifted_overlap = fixture.scalar_buffer;
+  shifted_overlap.base = fixture.vector_bundle.base + 1U;
+  SolverWorkspace shifted_workspace;
+  LinearLifecycleCounters shifted_counters{};
+  shifted_counters.workspace_bindings = 11U;
+  const WorkspaceSnapshot shifted_before = snapshot(shifted_workspace);
+  const LinearLifecycleCounters shifted_counters_before = shifted_counters;
+  const Status shifted = SolverWorkspace::bind(
+      fixture.requirements, fixture.vector_bundle, shifted_overlap,
+      shifted_workspace, &shifted_counters);
+  passed &= expect(shifted.code == StatusCode::invalid_plan &&
+                       same(snapshot(shifted_workspace), shifted_before) &&
+                       same(shifted_counters, shifted_counters_before),
+                   "a shifted partial scalar/vector overlap is rejected atomically");
+
+  SolverWorkspace valid_workspace;
+  passed &= expect(
+      static_cast<bool>(SolverWorkspace::bind(
+          fixture.requirements, fixture.vector_bundle, fixture.scalar_buffer,
+          valid_workspace)) &&
+          valid_workspace.vector_storage_address() ==
+              reinterpret_cast<std::uintptr_t>(fixture.vector_bundle.base) &&
+          valid_workspace.scalar_storage_address() ==
+              reinterpret_cast<std::uintptr_t>(fixture.scalar_buffer.base),
+      "non-overlapping workspace fields in the same arena remain valid");
+  return passed;
+}
+
 bool test_arena_workspace_binding_and_borrowing() {
   WorkspaceFixture fixture;
   bool passed = expect(make_workspace_fixture(fixture),
@@ -849,6 +901,7 @@ int main() {
   passed &= test_workspace_requirement_contracts();
   passed &= test_runtime_lifetime_views();
   passed &= test_symbolic_and_numeric_lifecycle();
+  passed &= test_workspace_internal_overlap_is_rejected_atomically();
   passed &= test_arena_workspace_binding_and_borrowing();
   passed &= test_composed_identity_and_hot_noops();
   return passed ? 0 : 1;

@@ -150,11 +150,15 @@ bool run_failure_case(const FailureCase& scenario, int rank, int size) {
   const std::array specs{HaloFieldSpec{kField, 1U, 1U}};
   std::array views{field.view};
   HaloEngine engine;
-  bool passed = expect(static_cast<bool>(engine.reserve(
+  bool passed = expect(!engine.ready(), rank,
+                       "default halo engine is not ready");
+  passed &= expect(static_cast<bool>(engine.reserve(
                            MPI_COMM_WORLD, patch_for(rank, size),
                            Span<const HaloFieldSpec>{specs.data(), specs.size()},
                            HaloTopology{true, false, false})),
                        rank, "failure fixture reserves a periodic halo plan");
+  passed &= expect(engine.ready(), rank,
+                   "reserved halo engine reports ready");
   passed &= expect(engine.ghost_revision(kField) == 0U, rank,
                    "failure fixture begins without a certificate");
 
@@ -202,6 +206,8 @@ bool run_failure_case(const FailureCase& scenario, int rank, int size) {
                    "failed exchange publishes no ghost certificate");
   passed &= expect(field.storage == snapshot, rank,
                    "failed exchange mutates no interior or ghost cell");
+  passed &= expect(engine.ready(), rank,
+                   "recoverable exchange failure preserves ready state");
 
   HaloTicket recovery_ticket;
   const Status recovery_begin = engine.begin(

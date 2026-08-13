@@ -23,6 +23,130 @@ target_link_libraries(v04_solver_linear_lifecycle_test PRIVATE
 add_test(NAME v04_solver_linear_lifecycle
   COMMAND v04_solver_linear_lifecycle_test)
 
+add_executable(v04_solver_mg_reuse_test
+  unit/solver_mg_reuse_test.cpp)
+target_link_libraries(v04_solver_mg_reuse_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+target_include_directories(v04_solver_mg_reuse_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_solver_mg_reuse_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
+add_test(NAME v04_solver_mg_reuse COMMAND v04_solver_mg_reuse_test)
+
+add_executable(v04_solver_mg_convergence_test
+  numerical/solver_mg_convergence_test.cpp)
+target_link_libraries(v04_solver_mg_convergence_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_mg_convergence
+  COMMAND v04_solver_mg_convergence_test)
+set_tests_properties(v04_solver_mg_convergence PROPERTIES TIMEOUT 120)
+
+add_executable(v04_solver_mg_coarse_use_test
+  numerical/solver_mg_coarse_use_test.cpp)
+target_link_libraries(v04_solver_mg_coarse_use_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_mg_coarse_use
+  COMMAND v04_solver_mg_coarse_use_test)
+set_tests_properties(v04_solver_mg_coarse_use PROPERTIES TIMEOUT 120)
+
+add_executable(v04_solver_mg_line_relaxation_test
+  numerical/solver_mg_line_relaxation_test.cpp)
+target_link_libraries(v04_solver_mg_line_relaxation_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_mg_line_relaxation
+  COMMAND v04_solver_mg_line_relaxation_test)
+set_tests_properties(v04_solver_mg_line_relaxation PROPERTIES TIMEOUT 120)
+
+add_executable(v04_solver_mg_krylov_isolation_test
+  integration/solver_mg_krylov_isolation_test.cpp)
+target_link_libraries(v04_solver_mg_krylov_isolation_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_mg_krylov_isolation
+  COMMAND v04_solver_mg_krylov_isolation_test)
+
+add_executable(v04_solver_hypre_isolation_test
+  integration/solver_hypre_isolation_test.cpp)
+target_link_libraries(v04_solver_hypre_isolation_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+target_include_directories(v04_solver_hypre_isolation_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_solver_hypre_isolation_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
+if(HUNDUN_ENABLE_HYPRE)
+  target_compile_definitions(v04_solver_hypre_isolation_test PRIVATE
+    HUNDUN_V04_TEST_HAVE_HYPRE=1)
+  target_link_libraries(v04_solver_hypre_isolation_test PRIVATE HYPRE::HYPRE)
+endif()
+add_test(NAME v04_solver_hypre_isolation
+  COMMAND v04_solver_hypre_isolation_test)
+foreach(rank_count IN ITEMS 2 4)
+  add_test(NAME v04_solver_hypre_communicator_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_hypre_isolation_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_hypre_communicator_mpi_${rank_count}
+    PROPERTIES
+      PROCESSORS "${rank_count}"
+      TIMEOUT 60)
+endforeach()
+
+add_executable(v04_solver_mg_mpi_test
+  mpi/solver_mg_mpi_test.cpp)
+target_link_libraries(v04_solver_mg_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_mg_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_mg_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_mg_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 120)
+endforeach()
+
+add_executable(v04_solver_mg_update_contract_mpi_test
+  mpi/solver_mg_update_contract_mpi_test.cpp)
+target_link_libraries(v04_solver_mg_update_contract_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 2 4)
+  add_test(NAME v04_solver_mg_update_contract_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_mg_update_contract_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_mg_update_contract_mpi_${rank_count}
+    PROPERTIES
+      PROCESSORS "${rank_count}"
+      TIMEOUT 60)
+endforeach()
+
+add_executable(v04_solver_mg_odd_partition_mpi_test
+  mpi/solver_mg_odd_partition_mpi_test.cpp)
+target_link_libraries(v04_solver_mg_odd_partition_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 2 4)
+  add_test(NAME v04_solver_mg_odd_partition_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_mg_odd_partition_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_mg_odd_partition_mpi_${rank_count}
+    PROPERTIES
+      PROCESSORS "${rank_count}"
+      TIMEOUT 120)
+endforeach()
+
 add_executable(v04_solver_krylov_mpi_test
   mpi/solver_krylov_mpi_test.cpp)
 target_link_libraries(v04_solver_krylov_mpi_test PRIVATE

@@ -109,6 +109,7 @@ std::atomic<detail::HaloFailurePoint> g_failure_point{
 std::atomic<int> g_failure_rank{-1};
 std::atomic<std::uint64_t> g_test_maximum_chunk_doubles{
     kMaximumChunkDoubles};
+std::atomic<int> g_test_tag_upper_bound{std::numeric_limits<int>::min()};
 #endif
 
 bool checked_add(std::uint64_t left, std::uint64_t right,
@@ -239,6 +240,18 @@ std::uint64_t configured_maximum_chunk_doubles() noexcept {
   return kMaximumChunkDoubles;
 #endif
 }
+
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+bool configured_tag_upper_bound(int& upper_bound) noexcept {
+  const int configured =
+      g_test_tag_upper_bound.load(std::memory_order_relaxed);
+  if (configured == std::numeric_limits<int>::min()) {
+    return false;
+  }
+  upper_bound = configured;
+  return true;
+}
+#endif
 
 void invalidate_certificates(HaloImplData& implementation) noexcept {
   for (FieldSlot& field : implementation.fields) {
@@ -891,6 +904,15 @@ void clear_halo_maximum_chunk_doubles_for_test() noexcept {
   g_test_maximum_chunk_doubles.store(kMaximumChunkDoubles,
                                      std::memory_order_relaxed);
 }
+
+void set_halo_tag_upper_bound_for_test(int upper_bound) noexcept {
+  g_test_tag_upper_bound.store(upper_bound, std::memory_order_relaxed);
+}
+
+void clear_halo_tag_upper_bound_for_test() noexcept {
+  g_test_tag_upper_bound.store(std::numeric_limits<int>::min(),
+                               std::memory_order_relaxed);
+}
 #endif
 
 }  // namespace detail
@@ -1021,17 +1043,47 @@ Status HaloEngine::reserve(MPI_Comm communicator, const MeshPatch& patch,
   }
   int* maximum_tag_pointer = nullptr;
   int maximum_tag_available = 0;
-  local = MPI_Comm_get_attr(candidate->transport, MPI_TAG_UB,
-                            &maximum_tag_pointer,
-                            &maximum_tag_available) == MPI_SUCCESS &&
-                  maximum_tag_available != 0 &&
-                  maximum_tag_pointer != nullptr &&
-                  *maximum_tag_pointer >= 0
+  const int tag_query = MPI_Comm_get_attr(candidate->transport, MPI_TAG_UB,
+                                          &maximum_tag_pointer,
+                                          &maximum_tag_available);
+  local = tag_query == MPI_SUCCESS
               ? Status{}
               : Status{StatusCode::mpi_failure,
                        detail::halo_detail_collective};
+  int injected_tag_upper_bound = 0;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  if (configured_tag_upper_bound(injected_tag_upper_bound)) {
+    if (injected_tag_upper_bound < 0) {
+      maximum_tag_pointer = nullptr;
+      maximum_tag_available = 0;
+    } else {
+      maximum_tag_pointer = &injected_tag_upper_bound;
+      maximum_tag_available = 1;
+    }
+  }
+#else
+  (void)injected_tag_upper_bound;
+#endif
+  // MPI guarantees tags through 32767.  Some older MPI builds lose this
+  // predefined attribute on a duplicated communicator, so a successful query
+  // without a value falls back to that portable bound.  Valid reported bounds
+  // are globally minimized before entering the plan contract or requests.
+  constexpr int kMinimumTagUpperBound = 32767;
+  const int local_maximum_tag =
+      maximum_tag_available != 0 && maximum_tag_pointer != nullptr &&
+              *maximum_tag_pointer >= 0
+          ? *maximum_tag_pointer
+          : kMinimumTagUpperBound;
+  int global_maximum_tag = kMinimumTagUpperBound;
+  const int tag_reduce = MPI_Allreduce(
+      &local_maximum_tag, &global_maximum_tag, 1, MPI_INT, MPI_MIN,
+      candidate->control);
+  if (tag_reduce != MPI_SUCCESS && local) {
+    local = {StatusCode::mpi_failure, detail::halo_detail_collective};
+  }
   if (local) {
-    candidate->maximum_tag = *maximum_tag_pointer;
+    candidate->maximum_tag = global_maximum_tag;
+    candidate->stats.maximum_tag = global_maximum_tag;
     candidate->maximum_chunk_doubles = configured_maximum_chunk_doubles();
     if (candidate->maximum_chunk_doubles == 0U ||
         candidate->maximum_chunk_doubles > kMaximumChunkDoubles) {
@@ -1308,6 +1360,57 @@ Status HaloEngine::finish(HaloTicket& ticket,
   return {};
 }
 
+Status HaloEngine::validate_contract(
+    MPI_Comm communicator, const MeshPatch& patch,
+    Span<const HaloFieldSpec> fields, HaloTopology topology) const noexcept {
+  if (implementation_ == nullptr || communicator == MPI_COMM_NULL ||
+      fields.data == nullptr || fields.size != implementation_->fields.size()) {
+    return {StatusCode::invalid_plan, detail::halo_detail_input};
+  }
+  int initialized = 0;
+  int finalized = 0;
+  if (MPI_Initialized(&initialized) != MPI_SUCCESS || initialized == 0 ||
+      MPI_Finalized(&finalized) != MPI_SUCCESS || finalized != 0) {
+    return {StatusCode::invalid_plan, detail::halo_detail_state};
+  }
+  int relation = MPI_UNEQUAL;
+  if (MPI_Comm_compare(implementation_->control, communicator, &relation) !=
+      MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, detail::halo_detail_collective};
+  }
+  if (relation != MPI_IDENT && relation != MPI_CONGRUENT) {
+    return {StatusCode::invalid_plan, detail::halo_detail_topology};
+  }
+  const MeshPatch& expected = implementation_->patch;
+  if (patch.begin.x != expected.begin.x || patch.begin.y != expected.begin.y ||
+      patch.begin.z != expected.begin.z || patch.cells.x != expected.cells.x ||
+      patch.cells.y != expected.cells.y || patch.cells.z != expected.cells.z ||
+      patch.process_grid.x != expected.process_grid.x ||
+      patch.process_grid.y != expected.process_grid.y ||
+      patch.process_grid.z != expected.process_grid.z ||
+      patch.process_coord.x != expected.process_coord.x ||
+      patch.process_coord.y != expected.process_coord.y ||
+      patch.process_coord.z != expected.process_coord.z) {
+    return {StatusCode::invalid_plan, detail::halo_detail_topology};
+  }
+  const HaloTopology expected_topology = implementation_->topology;
+  if (topology.periodic_x != expected_topology.periodic_x ||
+      topology.periodic_y != expected_topology.periodic_y ||
+      topology.periodic_z != expected_topology.periodic_z) {
+    return {StatusCode::invalid_plan, detail::halo_detail_topology};
+  }
+  for (std::size_t index = 0U; index < fields.size; ++index) {
+    const HaloFieldSpec actual = fields.data[index];
+    const HaloFieldSpec expected_field = implementation_->fields[index].spec;
+    if (actual.field != expected_field.field ||
+        actual.width != expected_field.width ||
+        actual.components != expected_field.components) {
+      return {StatusCode::invalid_plan, detail::halo_detail_field};
+    }
+  }
+  return {};
+}
+
 RevisionToken HaloEngine::ghost_revision(FieldId field) const noexcept {
   if (implementation_ == nullptr) {
     return RevisionToken{0U};
@@ -1327,6 +1430,10 @@ int HaloEngine::lowest_failing_rank() const noexcept {
 
 bool HaloEngine::active() const noexcept {
   return implementation_ != nullptr && implementation_->exchange_active;
+}
+
+bool HaloEngine::ready() const noexcept {
+  return implementation_ != nullptr && !implementation_->poisoned;
 }
 
 HaloPlanStats HaloEngine::plan_stats() const noexcept {

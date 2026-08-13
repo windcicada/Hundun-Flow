@@ -2,6 +2,8 @@
 
 #include "hundun/v04_linear.hpp"
 
+#include "field_view_interval_detail.hpp"
+
 #include "solver_linear_state_detail.hpp"
 
 #include <cstddef>
@@ -108,6 +110,8 @@ bool sufficient_workspace_views(
     const LinearWorkspaceRequirements& requirements, FieldView vector_bundle,
     FieldView scalar_buffer) noexcept {
   if (!valid_view_shape(vector_bundle) || !valid_view_shape(scalar_buffer) ||
+      detail::field_views_overlap(as_const(vector_bundle),
+                                  as_const(scalar_buffer)) ||
       vector_bundle.storage_identity != scalar_buffer.storage_identity ||
       vector_bundle.revision_domain != scalar_buffer.revision_domain ||
       vector_bundle.field == scalar_buffer.field ||
@@ -658,42 +662,8 @@ bool SolverWorkspace::overlaps_storage(ConstFieldView view) const noexcept {
   if (fingerprint_ == 0U || view.base == nullptr) {
     return false;
   }
-  const auto overlaps = [](const double* left, std::size_t left_values,
-                           const double* right,
-                           std::size_t right_values) noexcept {
-    if (left == nullptr || right == nullptr || left_values == 0U ||
-        right_values == 0U ||
-        left_values > std::numeric_limits<std::uintptr_t>::max() /
-                          sizeof(double) ||
-        right_values > std::numeric_limits<std::uintptr_t>::max() /
-                           sizeof(double)) {
-      return left != nullptr && right != nullptr;
-    }
-    const auto left_begin = reinterpret_cast<std::uintptr_t>(left);
-    const auto right_begin = reinterpret_cast<std::uintptr_t>(right);
-    const auto left_bytes = left_values * sizeof(double);
-    const auto right_bytes = right_values * sizeof(double);
-    if (left_begin > std::numeric_limits<std::uintptr_t>::max() - left_bytes ||
-        right_begin >
-            std::numeric_limits<std::uintptr_t>::max() - right_bytes) {
-      return true;
-    }
-    return left_begin < right_begin + right_bytes &&
-           right_begin < left_begin + left_bytes;
-  };
-  std::size_t view_values = view.component_stride;
-  if (view.components > 1U) {
-    if (view.component_stride >
-        std::numeric_limits<std::size_t>::max() / view.components) {
-      return true;
-    }
-    view_values *= view.components;
-  }
-  const std::size_t vector_values =
-      vector_bundle_.component_stride * requirements_.vector_slots;
-  const std::size_t scalar_values = scalar_buffer_.component_stride;
-  return overlaps(view.base, view_values, vector_bundle_.base, vector_values) ||
-         overlaps(view.base, view_values, scalar_buffer_.base, scalar_values);
+  return detail::field_views_overlap(view, as_const(vector_bundle_)) ||
+         detail::field_views_overlap(view, as_const(scalar_buffer_));
 }
 
 bool SolverWorkspace::overlaps_storage(FieldView view) const noexcept {

@@ -75,6 +75,26 @@ void* operator new[](std::size_t size, std::align_val_t alignment) {
   return allocation_observer::allocate_aligned(
       size, static_cast<std::size_t>(alignment));
 }
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void operator delete(void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
 void operator delete(void* pointer) noexcept { std::free(pointer); }
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
@@ -818,6 +838,25 @@ bool test_rejections_are_transactional(MPI_Comm communicator, int rank,
                        same_solution(fixture.solution.view, before),
                    rank,
                    "PCG rejects a non-SPD operator before callbacks or publishing x");
+
+  TridiagonalOperator alias_operator(communicator, fixture.local,
+                                     fixture.expected, -1.0, 2.0, -1.0,
+                                     true);
+  ScalingPreconditioner alias_preconditioner(fixture.expected, 0.5, true);
+  LinearSolveInvocation shifted_alias = invocation(fixture, control());
+  shifted_alias.rhs = as_const(fixture.solution.view);
+  ++shifted_alias.rhs.base;
+  shifted_alias.rhs.storage_identity =
+      fixture.solution.view.storage_identity + 100000U;
+  const LinearSolveResult alias_result = solve_pcg(
+      alias_operator, alias_preconditioner, shifted_alias, fixture.workspace,
+      fixture.reductions);
+  passed &= expect(
+      alias_result.status.code == StatusCode::invalid_plan &&
+          alias_operator.calls() == 0U && alias_preconditioner.calls() == 0U &&
+          same_solution(fixture.solution.view, before),
+      rank,
+      "shifted overlapping caller views are rejected by address, independent of identity");
 
   LinearIdentity rank_local_identity = fixture.expected;
   if (rank == size - 1) {

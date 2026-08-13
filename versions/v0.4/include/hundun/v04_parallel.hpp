@@ -122,6 +122,7 @@ struct HaloPlanStats {
   std::uintptr_t request_storage_address{};
   std::uintptr_t send_storage_address{};
   std::uintptr_t receive_storage_address{};
+  int maximum_tag{};
 };
 
 struct HaloRuntimeCounters {
@@ -149,9 +150,16 @@ class HaloEngine {
   Status begin(StageId stage, Span<const FieldView> fields,
                HaloTicket& ticket) noexcept;
   Status finish(HaloTicket& ticket, Span<FieldView> fields) noexcept;
+  Status validate_contract(MPI_Comm communicator, const MeshPatch& patch,
+                           Span<const HaloFieldSpec> fields,
+                           HaloTopology topology) const noexcept;
 
   RevisionToken ghost_revision(FieldId field) const noexcept;
   int lowest_failing_rank() const noexcept;
+  std::uintptr_t instance_identity() const noexcept {
+    return reinterpret_cast<std::uintptr_t>(implementation_);
+  }
+  bool ready() const noexcept;
   bool active() const noexcept;
   HaloPlanStats plan_stats() const noexcept;
   HaloRuntimeCounters runtime_counters() const noexcept;

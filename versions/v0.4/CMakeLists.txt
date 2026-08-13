@@ -11,9 +11,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(HUNDUN_BUILD_TESTS "Build HUNDUN-FLOW tests" OFF)
 option(HUNDUN_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(HUNDUN_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(HUNDUN_ENABLE_HYPRE "Enable the isolated HYPRE Struct adapter" OFF)
 
 find_package(MPI 3 REQUIRED COMPONENTS C)
 find_package(Threads REQUIRED)
+
+if(HUNDUN_ENABLE_HYPRE)
+  find_package(HYPRE REQUIRED)
+endif()
 
 get_filename_component(hundun_repository_root
   "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
@@ -77,8 +82,11 @@ add_library(hundun_v04_core STATIC
   src/solver_cartesian.cpp
   src/solver_diffusion.cpp
   src/solver_face_flux.cpp
+  src/solver_hypre.cpp
   src/solver_krylov.cpp
   src/solver_linear_state.cpp
+  src/solver_mg.cpp
+  src/solver_mg_workspace.cpp
   src/solver_reduction.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
@@ -90,6 +98,10 @@ target_link_libraries(hundun_v04_core PUBLIC
   MPI::MPI_C)
 target_link_libraries(hundun_v04_core PRIVATE
   Threads::Threads)
+if(HUNDUN_ENABLE_HYPRE)
+  target_compile_definitions(hundun_v04_core PRIVATE HUNDUN_V04_HAVE_HYPRE=1)
+  target_link_libraries(hundun_v04_core PRIVATE HYPRE::HYPRE)
+endif()
 if(HUNDUN_BUILD_TESTS)
   target_compile_definitions(hundun_v04_core PRIVATE
     HUNDUN_V04_ENABLE_TEST_ACCESS=1)

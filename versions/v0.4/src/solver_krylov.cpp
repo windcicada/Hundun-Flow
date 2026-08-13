@@ -2,6 +2,8 @@
 
 #include "hundun/v04_linear.hpp"
 
+#include "field_view_interval_detail.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -36,40 +38,7 @@ bool same_identity(LinearIdentity left, LinearIdentity right) noexcept {
 template <class Left, class Right>
 bool views_overlap(const BasicFieldView<Left>& left,
                    const BasicFieldView<Right>& right) noexcept {
-  if (left.base == nullptr || right.base == nullptr ||
-      left.storage_identity == 0U ||
-      left.storage_identity != right.storage_identity) {
-    return false;
-  }
-  const auto left_begin = reinterpret_cast<std::uintptr_t>(left.base);
-  const auto right_begin = reinterpret_cast<std::uintptr_t>(right.base);
-  std::size_t left_values = left.component_stride;
-  std::size_t right_values = right.component_stride;
-  if (left.components > 1U &&
-      left.component_stride <=
-          std::numeric_limits<std::size_t>::max() / left.components) {
-    left_values *= left.components;
-  }
-  if (right.components > 1U &&
-      right.component_stride <=
-          std::numeric_limits<std::size_t>::max() / right.components) {
-    right_values *= right.components;
-  }
-  if (left_values > std::numeric_limits<std::uintptr_t>::max() /
-                        sizeof(double) ||
-      right_values > std::numeric_limits<std::uintptr_t>::max() /
-                         sizeof(double)) {
-    return true;
-  }
-  const std::uintptr_t left_bytes = left_values * sizeof(double);
-  const std::uintptr_t right_bytes = right_values * sizeof(double);
-  if (left_begin > std::numeric_limits<std::uintptr_t>::max() - left_bytes ||
-      right_begin >
-          std::numeric_limits<std::uintptr_t>::max() - right_bytes) {
-    return true;
-  }
-  return left_begin < right_begin + right_bytes &&
-         right_begin < left_begin + left_bytes;
+  return detail::field_views_overlap(left, right);
 }
 
 bool valid_identity(LinearIdentity identity) noexcept {

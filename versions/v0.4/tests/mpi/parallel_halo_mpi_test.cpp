@@ -78,6 +78,48 @@ void* operator new[](std::size_t size, std::align_val_t alignment) {
       size, static_cast<std::size_t>(alignment));
 }
 
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate(size);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void* operator new(std::size_t size, std::align_val_t alignment,
+                   const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate_aligned(
+        size, static_cast<std::size_t>(alignment));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void* operator new[](std::size_t size, std::align_val_t alignment,
+                     const std::nothrow_t&) noexcept {
+  try {
+    return allocation_observer::allocate_aligned(
+        size, static_cast<std::size_t>(alignment));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void operator delete(void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
 void operator delete(void* pointer) noexcept { std::free(pointer); }
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
@@ -95,6 +137,14 @@ void operator delete(void* pointer, std::size_t, std::align_val_t) noexcept {
 }
 void operator delete[](void* pointer, std::size_t,
                        std::align_val_t) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::align_val_t,
+                     const std::nothrow_t&) noexcept {
+  std::free(pointer);
+}
+void operator delete[](void* pointer, std::align_val_t,
+                       const std::nothrow_t&) noexcept {
   std::free(pointer);
 }
 
@@ -400,6 +450,187 @@ bool test_forced_chunking(int rank, int size) {
   return all_true(passed);
 }
 
+bool test_tag_upper_bound_normalization(int rank, int size) {
+  const auto specs = field_specs();
+  const auto reserve_with_bound = [&](int injected_bound,
+                                      int expected_bound,
+                                      std::string_view description) {
+    detail::set_halo_tag_upper_bound_for_test(injected_bound);
+    HaloEngine engine;
+    const Status reserved = engine.reserve(
+        MPI_COMM_WORLD, patch_for(rank, size),
+        Span<const HaloFieldSpec>{specs.data(), specs.size()},
+        HaloTopology{true, false, false});
+    detail::clear_halo_tag_upper_bound_for_test();
+    return expect(static_cast<bool>(reserved) && engine.ready() &&
+                      engine.plan_stats().maximum_tag == expected_bound,
+                  rank, description);
+  };
+
+  bool passed = reserve_with_bound(
+      -1, 32767,
+      "missing MPI_TAG_UB attribute falls back to the guaranteed bound");
+  const int different_bound =
+      size == 1 ? 41001 : (rank == size - 1 ? 35001 : 41001);
+  passed &= reserve_with_bound(
+      different_bound, size == 1 ? 41001 : 35001,
+      "rank-local MPI_TAG_UB values use one collective minimum");
+  const int anomalous_bound = rank == size - 1 ? 17 : 41001;
+  passed &= reserve_with_bound(
+      anomalous_bound, 17,
+      "anomalously low MPI_TAG_UB values use one conservative collective minimum");
+  return all_true(passed);
+}
+
+bool test_contract_query_is_exact_local_and_read_only(int rank, int size) {
+  OwnedField velocity = make_field(kVelocity, kVelocityComponents, 17U);
+  OwnedField pressure = make_field(kPressure, 1U, 23U);
+  fill_interior(velocity, rank);
+  fill_interior(pressure, rank);
+  reset_ghosts(velocity, -525252.0);
+  reset_ghosts(pressure, -525252.0);
+  const auto specs = field_specs();
+  constexpr HaloTopology topology{true, false, false};
+  HaloEngine engine;
+  bool passed = expect(
+      static_cast<bool>(engine.reserve(
+          MPI_COMM_WORLD, patch_for(rank, size),
+          Span<const HaloFieldSpec>{specs.data(), specs.size()},
+          topology)),
+      rank, "contract-query halo plan reserves");
+  passed = all_true(passed);
+  if (!passed) {
+    return false;
+  }
+
+  MPI_Comm congruent = MPI_COMM_NULL;
+  MPI_Comm reversed = MPI_COMM_NULL;
+  passed &= expect(MPI_Comm_dup(MPI_COMM_WORLD, &congruent) == MPI_SUCCESS &&
+                       MPI_Comm_split(MPI_COMM_WORLD, 0, size - 1 - rank,
+                                      &reversed) == MPI_SUCCESS,
+                   rank, "halo comparison communicators compile");
+  if (!all_true(passed)) {
+    if (congruent != MPI_COMM_NULL) (void)MPI_Comm_free(&congruent);
+    if (reversed != MPI_COMM_NULL) (void)MPI_Comm_free(&reversed);
+    return false;
+  }
+
+  const HaloPlanStats plan_before = engine.plan_stats();
+  const HaloRuntimeCounters counters_before = engine.runtime_counters();
+  MeshPatch wrong_patch = patch_for(rank, size);
+  ++wrong_patch.begin.x;
+  auto wrong_fields = specs;
+  ++wrong_fields[0].components;
+  const std::array<HaloFieldSpec, 2U> reversed_fields{
+      specs[1], specs[0]};
+  const Status identical = engine.validate_contract(
+      MPI_COMM_WORLD, patch_for(rank, size),
+      Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  const Status compatible = engine.validate_contract(
+      congruent, patch_for(rank, size),
+      Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  const Status similar = engine.validate_contract(
+      reversed, patch_for(rank, size),
+      Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  const Status patch_mismatch = engine.validate_contract(
+      MPI_COMM_WORLD, wrong_patch,
+      Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  const Status field_mismatch = engine.validate_contract(
+      MPI_COMM_WORLD, patch_for(rank, size),
+      Span<const HaloFieldSpec>{wrong_fields.data(), wrong_fields.size()},
+      topology);
+  const Status order_mismatch = engine.validate_contract(
+      MPI_COMM_WORLD, patch_for(rank, size),
+      Span<const HaloFieldSpec>{reversed_fields.data(),
+                                reversed_fields.size()},
+      topology);
+  const Status null = engine.validate_contract(
+      MPI_COMM_NULL, patch_for(rank, size),
+      Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  const HaloPlanStats plan_after = engine.plan_stats();
+  const HaloRuntimeCounters counters_after = engine.runtime_counters();
+  passed &= expect(static_cast<bool>(identical) &&
+                       static_cast<bool>(compatible) &&
+                       (size == 1 ? static_cast<bool>(similar)
+                                  : similar.code == StatusCode::invalid_plan) &&
+                       patch_mismatch.code == StatusCode::invalid_plan &&
+                       field_mismatch.code == StatusCode::invalid_plan &&
+                       order_mismatch.code == StatusCode::invalid_plan &&
+                       null.code == StatusCode::invalid_plan &&
+                       plan_after.request_storage_address ==
+                           plan_before.request_storage_address &&
+                       plan_after.send_storage_address ==
+                           plan_before.send_storage_address &&
+                       plan_after.receive_storage_address ==
+                           plan_before.receive_storage_address &&
+                       counters_after.begin_calls == counters_before.begin_calls &&
+                       counters_after.finish_calls == counters_before.finish_calls &&
+                       !engine.active(),
+                   rank,
+                   "canonical fields and CONGRUENT pass; SIMILAR/wrong/order contracts reject without mutation");
+
+  auto views = field_views(velocity, pressure);
+  passed &= exchange(engine, 66U, views, rank, true);
+  (void)MPI_Comm_free(&reversed);
+  (void)MPI_Comm_free(&congruent);
+  return all_true(passed);
+}
+
+bool test_contract_query_rejects_bidirectional_topology_mutation(int rank,
+                                                                 int size) {
+  const auto specs = field_specs();
+  const MeshPatch patch = patch_for(rank, size);
+  constexpr HaloTopology forward{true, false, true};
+  constexpr HaloTopology reverse{false, true, false};
+  HaloEngine forward_engine;
+  HaloEngine reverse_engine;
+  bool passed = expect(
+      static_cast<bool>(forward_engine.reserve(
+          MPI_COMM_WORLD, patch,
+          Span<const HaloFieldSpec>{specs.data(), specs.size()}, forward)) &&
+          static_cast<bool>(reverse_engine.reserve(
+              MPI_COMM_WORLD, patch,
+              Span<const HaloFieldSpec>{specs.data(), specs.size()}, reverse)),
+      rank, "opposite halo topology plans reserve");
+  passed = all_true(passed);
+  if (!passed) {
+    return false;
+  }
+
+  const auto validate = [&](const HaloEngine& engine,
+                            HaloTopology topology) noexcept {
+    return engine.validate_contract(
+        MPI_COMM_WORLD, patch,
+        Span<const HaloFieldSpec>{specs.data(), specs.size()}, topology);
+  };
+  const Status forward_exact = validate(forward_engine, forward);
+  const Status reverse_exact = validate(reverse_engine, reverse);
+  const Status forward_x_mutation =
+      validate(forward_engine, HaloTopology{false, false, true});
+  const Status forward_y_mutation =
+      validate(forward_engine, HaloTopology{true, true, true});
+  const Status forward_z_mutation =
+      validate(forward_engine, HaloTopology{true, false, false});
+  const Status reverse_x_mutation =
+      validate(reverse_engine, HaloTopology{true, true, false});
+  const Status reverse_y_mutation =
+      validate(reverse_engine, HaloTopology{false, false, false});
+  const Status reverse_z_mutation =
+      validate(reverse_engine, HaloTopology{false, true, true});
+
+  const auto rejects = [](Status status) noexcept {
+    return status.code == StatusCode::invalid_plan;
+  };
+  passed &= expect(
+      static_cast<bool>(forward_exact) && static_cast<bool>(reverse_exact) &&
+          rejects(forward_x_mutation) && rejects(forward_y_mutation) &&
+          rejects(forward_z_mutation) && rejects(reverse_x_mutation) &&
+          rejects(reverse_y_mutation) && rejects(reverse_z_mutation),
+      rank,
+      "halo contract compares every periodic axis in both mutation directions");
+  return all_true(passed);
+}
+
 bool test_nonperiodic(int rank, int size) {
   OwnedField velocity = make_field(kVelocity, kVelocityComponents, 17U);
   OwnedField pressure = make_field(kPressure, 1U, 23U);
@@ -557,6 +788,15 @@ bool test_periodic_and_hot_path(int rank, int size) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const auto uninitialized_specs = field_specs();
+  const Status uninitialized = HaloEngine{}.validate_contract(
+      MPI_COMM_WORLD, MeshPatch{},
+      Span<const HaloFieldSpec>{uninitialized_specs.data(),
+                                uninitialized_specs.size()},
+      HaloTopology{});
+  if (uninitialized.code != StatusCode::invalid_plan) {
+    return 3;
+  }
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
@@ -569,10 +809,31 @@ int main(int argc, char** argv) {
   passed &= test_periodic_and_hot_path(rank, size);
   passed &= test_begin_atomicity(rank, size);
   passed &= test_forced_chunking(rank, size);
+  passed &= test_tag_upper_bound_normalization(rank, size);
+  passed &= test_contract_query_is_exact_local_and_read_only(rank, size);
+  passed &=
+      test_contract_query_rejects_bidirectional_topology_mutation(rank, size);
+
+  const auto finalized_specs = field_specs();
+  const MeshPatch finalized_patch = patch_for(rank, size);
+  constexpr HaloTopology finalized_topology{true, false, false};
+  HaloEngine finalized_engine;
+  passed &= static_cast<bool>(finalized_engine.reserve(
+      MPI_COMM_WORLD, finalized_patch,
+      Span<const HaloFieldSpec>{finalized_specs.data(), finalized_specs.size()},
+      finalized_topology));
   passed = all_true(passed);
   if (rank == 0 && !passed) {
     std::cerr << "v0.4 halo MPI test failed for " << size << " ranks\n";
   }
   MPI_Finalize();
+  const Status finalized = finalized_engine.validate_contract(
+      MPI_COMM_WORLD, finalized_patch,
+      Span<const HaloFieldSpec>{finalized_specs.data(), finalized_specs.size()},
+      finalized_topology);
+  passed &= finalized.code == StatusCode::invalid_plan;
+  if (rank == 0 && finalized.code != StatusCode::invalid_plan) {
+    std::cerr << "v0.4 halo finalized contract query did not reject\n";
+  }
   return passed ? 0 : 1;
 }
