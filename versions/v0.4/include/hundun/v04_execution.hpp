@@ -759,6 +759,12 @@ class StateLayers {
   static Status allocate(const ArenaLayout& layout, StateLayers& out);
   Status view(StateRole role, FieldId field, FieldView& out) noexcept;
   Status view(StateRole role, FieldId field, ConstFieldView& out) const noexcept;
+  Status runtime_view(FieldLifetime lifetime, FieldId field,
+                      FieldView& out) noexcept;
+  Status runtime_view(FieldLifetime lifetime, FieldId field,
+                      ConstFieldView& out) const noexcept;
+  RevisionToken runtime_revision(FieldLifetime lifetime,
+                                 FieldId field) const noexcept;
   std::size_t handle(StateRole role) const noexcept;
   RevisionToken revision(StateRole role, FieldId field) const noexcept;
   RevisionToken state_revision(StateRole role) const noexcept;

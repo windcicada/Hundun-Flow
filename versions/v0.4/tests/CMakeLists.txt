@@ -16,6 +16,45 @@ add_executable(v04_core_resource_contract_test
 target_link_libraries(v04_core_resource_contract_test PRIVATE hundun_v04_core)
 add_test(NAME v04_core_resource_contract COMMAND v04_core_resource_contract_test)
 
+add_executable(v04_solver_linear_lifecycle_test
+  unit/solver_linear_lifecycle_test.cpp)
+target_link_libraries(v04_solver_linear_lifecycle_test PRIVATE
+  hundun_v04_core)
+add_test(NAME v04_solver_linear_lifecycle
+  COMMAND v04_solver_linear_lifecycle_test)
+
+add_executable(v04_solver_krylov_mpi_test
+  mpi/solver_krylov_mpi_test.cpp)
+target_link_libraries(v04_solver_krylov_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+add_executable(v04_solver_reduction_mpi_test
+  mpi/solver_reduction_mpi_test.cpp)
+target_link_libraries(v04_solver_reduction_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_krylov_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_krylov_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_krylov_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 90)
+
+  add_test(NAME v04_solver_reduction_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_reduction_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_reduction_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 60)
+endforeach()
+
 add_executable(v04_physics_thermo_test
   unit/physics_thermo_test.cpp)
 target_link_libraries(v04_physics_thermo_test PRIVATE hundun_v04_core)

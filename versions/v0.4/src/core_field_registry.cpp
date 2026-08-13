@@ -9,7 +9,6 @@ namespace hundun::v04 {
 
 namespace {
 
-constexpr std::uint8_t kMaxFieldComponents = 64U;
 constexpr std::uint8_t kMaxGhostWidth = 16U;
 
 std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
@@ -23,8 +22,7 @@ std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
 Status FieldRegistry::declare_field(std::string_view stable_name,
                                     std::uint8_t components,
                                     std::uint8_t ghost_width, FieldId& out) {
-  if (frozen_ || stable_name.empty() ||
-      components == 0 || components > kMaxFieldComponents ||
+  if (frozen_ || stable_name.empty() || components == 0U ||
       ghost_width > kMaxGhostWidth ||
       fields_.size() > std::numeric_limits<FieldId>::max()) {
     return {StatusCode::invalid_plan, 1};
@@ -58,7 +56,6 @@ Status FieldRegistry::require_field(std::string_view stable_name,
                                     std::uint8_t minimum_ghost_width,
                                     FieldId& out) {
   if (frozen_ || stable_name.empty() || components == 0U ||
-      components > kMaxFieldComponents ||
       minimum_ghost_width > kMaxGhostWidth) {
     return {StatusCode::invalid_plan, 1};
   }

@@ -604,6 +604,13 @@ Status StateLayers::allocate(const ArenaLayout& layout, StateLayers& out) {
               issued;
           candidate.state_revisions_[replica] = issued;
         }
+      } else {
+        if (field.replicas != 1U ||
+            candidate.next_revision_ ==
+                std::numeric_limits<RevisionToken>::max()) {
+          return {StatusCode::invalid_plan, kArenaSchema};
+        }
+        candidate.revisions_[index] = candidate.next_revision_++;
       }
     }
     if (state_field_count == 0U) {
@@ -630,7 +637,8 @@ std::size_t StateLayers::handle(StateRole role) const noexcept {
 RevisionToken StateLayers::revision(StateRole role, FieldId field) const noexcept {
   const std::size_t id = static_cast<std::size_t>(field);
   const std::size_t replica = handle(role);
-  if (id >= field_count_ || replica >= kRoleCount) {
+  if (id >= field_count_ || id >= state_fields_.size() ||
+      state_fields_[id] == 0U || replica >= kRoleCount) {
     return RevisionToken{0U};
   }
   return revisions_[replica * field_count_ + id];
@@ -657,6 +665,34 @@ Status StateLayers::view(StateRole role, FieldId field,
              ? Status{StatusCode::invalid_plan, kArenaView}
              : storage_.view(field, handle(role), token, storage_.identity_,
                              out);
+}
+
+RevisionToken StateLayers::runtime_revision(FieldLifetime lifetime,
+                                            FieldId field) const noexcept {
+  const ArenaFieldLayout* const layout = storage_.field_layout(field);
+  const std::size_t id = static_cast<std::size_t>(field);
+  if (lifetime == FieldLifetime::state_layer || layout == nullptr ||
+      layout->lifetime != lifetime || layout->replicas != 1U ||
+      id >= field_count_ || id >= revisions_.size()) {
+    return RevisionToken{0U};
+  }
+  return revisions_[id];
+}
+
+Status StateLayers::runtime_view(FieldLifetime lifetime, FieldId field,
+                                 FieldView& out) noexcept {
+  const RevisionToken token = runtime_revision(lifetime, field);
+  return token == 0U
+             ? Status{StatusCode::invalid_plan, kArenaView}
+             : storage_.view(field, 0U, token, storage_.identity_, out);
+}
+
+Status StateLayers::runtime_view(FieldLifetime lifetime, FieldId field,
+                                 ConstFieldView& out) const noexcept {
+  const RevisionToken token = runtime_revision(lifetime, field);
+  return token == 0U
+             ? Status{StatusCode::invalid_plan, kArenaView}
+             : storage_.view(field, 0U, token, storage_.identity_, out);
 }
 
 double* StateLayers::checked_ptr(StateRole role, const FieldView& view,

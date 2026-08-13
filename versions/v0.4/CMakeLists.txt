@@ -77,6 +77,9 @@ add_library(hundun_v04_core STATIC
   src/solver_cartesian.cpp
   src/solver_diffusion.cpp
   src/solver_face_flux.cpp
+  src/solver_krylov.cpp
+  src/solver_linear_state.cpp
+  src/solver_reduction.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
