@@ -61,6 +61,8 @@ add_library(hundun_v04_core STATIC
   src/mesh_decomposition.cpp
   src/mesh_focus.cpp
   src/mesh_stl_scan.cpp
+  src/parallel_cpu.cpp
+  src/parallel_halo.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")

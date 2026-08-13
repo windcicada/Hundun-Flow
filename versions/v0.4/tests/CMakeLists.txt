@@ -6,6 +6,22 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_parallel_cpu_test
+  unit/parallel_cpu_test.cpp)
+target_link_libraries(v04_parallel_cpu_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_parallel_cpu_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_parallel_cpu_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_parallel_cpu_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}")
+endforeach()
+
 add_executable(v04_core_arena_test
   unit/core_arena_test.cpp)
 target_link_libraries(v04_core_arena_test PRIVATE hundun_v04_core)
@@ -149,5 +165,43 @@ foreach(rank_count IN ITEMS 1 2 4)
             "$<TARGET_FILE:v04_app_case_broadcast_test>"
             ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_app_case_broadcast_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}")
+endforeach()
+
+add_executable(v04_parallel_halo_mpi_test
+  mpi/parallel_halo_mpi_test.cpp)
+target_include_directories(v04_parallel_halo_mpi_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_parallel_halo_mpi_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
+target_link_libraries(v04_parallel_halo_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+add_executable(v04_parallel_halo_failure_test
+  mpi/parallel_halo_failure_test.cpp)
+target_include_directories(v04_parallel_halo_failure_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_parallel_halo_failure_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
+target_link_libraries(v04_parallel_halo_failure_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_parallel_halo_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_parallel_halo_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_parallel_halo_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}")
+
+  add_test(NAME v04_parallel_halo_failure_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_parallel_halo_failure_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_parallel_halo_failure_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}")
 endforeach()
