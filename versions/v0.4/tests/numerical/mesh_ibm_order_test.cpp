@@ -1,0 +1,409 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include "hundun/v04_ibm.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <limits>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+using namespace hundun::v04;
+
+constexpr std::int32_t kReach = 4;
+constexpr std::size_t kAxisCellCount =
+    static_cast<std::size_t>(2 * kReach + 1);
+constexpr std::size_t kDonorCount = 32U;
+
+bool expect(bool condition, std::string_view description) {
+  if (!condition) {
+    std::cerr << "FAIL: " << description << '\n';
+  }
+  return condition;
+}
+
+double dot(Real3 left, Real3 right) {
+  return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+Real3 add(Real3 left, Real3 right) {
+  return {left.x + right.x, left.y + right.y, left.z + right.z};
+}
+
+Real3 subtract(Real3 left, Real3 right) {
+  return {left.x - right.x, left.y - right.y, left.z - right.z};
+}
+
+Real3 multiply(double scalar, Real3 value) {
+  return {scalar * value.x, scalar * value.y, scalar * value.z};
+}
+
+Real3 cross(Real3 left, Real3 right) {
+  return {left.y * right.z - left.z * right.y,
+          left.z * right.x - left.x * right.z,
+          left.x * right.y - left.y * right.x};
+}
+
+double magnitude(Real3 value) { return std::sqrt(dot(value, value)); }
+
+Real3 normalized(Real3 value) {
+  return multiply(1.0 / magnitude(value), value);
+}
+
+enum class GeometryKind : std::uint8_t { plane, sphere, cylinder };
+
+struct Geometry {
+  std::string_view name;
+  GeometryKind kind{};
+  Real3 origin{};
+  Real3 normal{};
+  Real3 centre{};
+  Real3 axis{};
+  double radius{};
+
+  double signed_distance(Real3 point) const {
+    if (kind == GeometryKind::plane) {
+      return dot(subtract(point, origin), normal);
+    }
+    const Real3 from_centre = subtract(point, centre);
+    if (kind == GeometryKind::sphere) {
+      return magnitude(from_centre) - radius;
+    }
+    const Real3 radial =
+        subtract(from_centre, multiply(dot(from_centre, axis), axis));
+    return magnitude(radial) - radius;
+  }
+};
+
+Geometry plane_geometry() {
+  Geometry result;
+  result.name = "translated/rotated plane";
+  result.kind = GeometryKind::plane;
+  result.origin = {0.173, -0.091, 0.237};
+  result.normal = normalized({2.0, -1.0, 3.0});
+  return result;
+}
+
+Geometry sphere_geometry() {
+  Geometry result;
+  result.name = "translated/rotated sphere";
+  result.kind = GeometryKind::sphere;
+  result.centre = {-0.219, 0.143, -0.087};
+  result.radius = 0.71;
+  result.normal = normalized({-2.0, 3.0, 1.0});
+  result.origin = add(result.centre, multiply(result.radius, result.normal));
+  return result;
+}
+
+Geometry cylinder_geometry() {
+  Geometry result;
+  result.name = "translated/rotated cylinder";
+  result.kind = GeometryKind::cylinder;
+  result.centre = {0.119, -0.227, 0.181};
+  // Curvature is intentionally resolved already on the coarsest member of
+  // the order triplet; this is an asymptotic spatial-order gate, not a
+  // coarse-grid geometry stress test.
+  result.radius = 1.26;
+  result.axis = normalized({1.0, 2.0, -2.0});
+  result.normal = normalized(cross(result.axis, {0.0, 0.0, 1.0}));
+  result.origin = add(add(result.centre,
+                          multiply(result.radius, result.normal)),
+                      multiply(0.137, result.axis));
+  return result;
+}
+
+QuadraticFrame frame_for(const Geometry& geometry, double scale) {
+  // Choose the reference axis least parallel to the wall normal.  The frame
+  // remains right-handed after arbitrary rigid translation and rotation.
+  const std::array<Real3, 3U> reference{{{1.0, 0.0, 0.0},
+                                         {0.0, 1.0, 0.0},
+                                         {0.0, 0.0, 1.0}}};
+  std::size_t selected = 0U;
+  for (std::size_t index = 1U; index < reference.size(); ++index) {
+    if (std::abs(dot(reference[index], geometry.normal)) <
+        std::abs(dot(reference[selected], geometry.normal))) {
+      selected = index;
+    }
+  }
+  QuadraticFrame result;
+  result.origin = geometry.origin;
+  result.normal = geometry.normal;
+  result.tangent1 = normalized(cross(reference[selected], result.normal));
+  result.tangent2 = cross(result.normal, result.tangent1);
+  result.scale = scale;
+  result.anchor_global_cell = {101, 103, 107};
+  return result;
+}
+
+struct AxisCells {
+  std::array<double, kAxisCellCount> centre{};
+  std::array<double, kAxisCellCount> width{};
+};
+
+AxisCells make_axis(double origin, double h, std::size_t axis,
+                    bool stretched) {
+  constexpr std::array<double, 3U> phase{0.37, 0.29, 0.43};
+  constexpr std::array<double, 3U> base{1.08, 0.91, 1.21};
+  constexpr std::array<double, 3U> slope{0.035, -0.028, 0.022};
+  const auto factor = [&](std::int32_t offset) {
+    if (!stretched) {
+      return 1.0;
+    }
+    return base[axis] *
+           (1.0 + slope[axis] * static_cast<double>(offset));
+  };
+
+  // Faces are generated by one cumulative one-dimensional coordinate map,
+  // i.e. this is a genuine tensor-product Cartesian grid rather than a cloud
+  // of independently perturbed donor boxes.  Keeping the dimensionless map
+  // fixed under h-refinement isolates the spatial truncation order.
+  std::array<double, kAxisCellCount + 1U> face{};
+  const std::size_t anchor = static_cast<std::size_t>(kReach);
+  face[anchor] = -phase[axis] * factor(0);
+  for (std::int32_t offset = 0; offset <= kReach; ++offset) {
+    const std::size_t index =
+        static_cast<std::size_t>(offset + kReach);
+    face[index + 1U] = face[index] + factor(offset);
+  }
+  for (std::int32_t offset = -1; offset >= -kReach; --offset) {
+    const std::size_t index =
+        static_cast<std::size_t>(offset + kReach);
+    face[index] = face[index + 1U] - factor(offset);
+  }
+
+  AxisCells result;
+  for (std::size_t index = 0U; index < result.centre.size(); ++index) {
+    result.centre[index] =
+        origin + 0.5 * h * (face[index] + face[index + 1U]);
+    result.width[index] = h * (face[index + 1U] - face[index]);
+  }
+  return result;
+}
+
+struct Candidate {
+  QuadraticDonorCell donor{};
+  double scaled_distance_squared{};
+};
+
+std::vector<QuadraticDonorCell> geometry_donors(
+    const Geometry& geometry, const QuadraticFrame& local_frame, double h,
+    bool stretched) {
+  const std::array<AxisCells, 3U> axes{
+      make_axis(geometry.origin.x, h, 0U, stretched),
+      make_axis(geometry.origin.y, h, 1U, stretched),
+      make_axis(geometry.origin.z, h, 2U, stretched)};
+  std::vector<Candidate> candidates;
+  candidates.reserve(kAxisCellCount * kAxisCellCount * kAxisCellCount);
+  for (std::int32_t k = -kReach; k <= kReach; ++k) {
+    for (std::int32_t j = -kReach; j <= kReach; ++j) {
+      for (std::int32_t i = -kReach; i <= kReach; ++i) {
+        const std::size_t ix = static_cast<std::size_t>(i + kReach);
+        const std::size_t iy = static_cast<std::size_t>(j + kReach);
+        const std::size_t iz = static_cast<std::size_t>(k + kReach);
+        const Real3 centre{axes[0U].centre[ix], axes[1U].centre[iy],
+                           axes[2U].centre[iz]};
+        const Real3 widths{axes[0U].width[ix], axes[1U].width[iy],
+                           axes[2U].width[iz]};
+        const Real3 offset = subtract(centre, geometry.origin);
+        // The implementation's positive-normal donor contract is tested in
+        // addition to the actual plane/sphere/cylinder fluid classification.
+        if (!(dot(offset, geometry.normal) > 0.20 * h) ||
+            !(geometry.signed_distance(centre) > 0.0)) {
+          continue;
+        }
+        const double scaled_distance_squared = dot(offset, offset) / (h * h);
+        const std::uint64_t encoded =
+            static_cast<std::uint64_t>(ix * kAxisCellCount * kAxisCellCount +
+                                       iy * kAxisCellCount + iz + 1U);
+        candidates.push_back({
+            {encoded,
+             {local_frame.anchor_global_cell.x + i,
+              local_frame.anchor_global_cell.y + j,
+              local_frame.anchor_global_cell.z + k},
+             {}, centre, widths},
+            scaled_distance_squared});
+      }
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& left, const Candidate& right) {
+              if (left.scaled_distance_squared !=
+                  right.scaled_distance_squared) {
+                return left.scaled_distance_squared <
+                       right.scaled_distance_squared;
+              }
+              return left.donor.global_cell < right.donor.global_cell;
+            });
+  if (candidates.size() > kDonorCount) {
+    candidates.resize(kDonorCount);
+  }
+  std::vector<QuadraticDonorCell> result;
+  result.reserve(candidates.size());
+  for (std::size_t index = 0U; index < candidates.size(); ++index) {
+    candidates[index].donor.local_index =
+        {static_cast<std::int32_t>(index), 0, 0};
+    result.push_back(candidates[index].donor);
+  }
+  return result;
+}
+
+struct SmoothField {
+  static constexpr Real3 exponent{0.35, -0.21, 0.17};
+
+  double value(Real3 point) const {
+    return std::exp(dot(exponent, point)) +
+           0.08 * point.x * point.y * point.z;
+  }
+
+  Real3 gradient(Real3 point) const {
+    const double exponential = std::exp(dot(exponent, point));
+    return {exponent.x * exponential + 0.08 * point.y * point.z,
+            exponent.y * exponential + 0.08 * point.x * point.z,
+            exponent.z * exponential + 0.08 * point.x * point.y};
+  }
+
+  double cell_average(Real3 centre, Real3 widths) const {
+    const auto average_factor = [](double coefficient, double width) {
+      const double argument = 0.5 * coefficient * width;
+      if (std::abs(argument) < 1.0e-8) {
+        return 1.0 + argument * argument / 6.0;
+      }
+      return std::sinh(argument) / argument;
+    };
+    const double exponential =
+        std::exp(dot(exponent, centre)) *
+        average_factor(exponent.x, widths.x) *
+        average_factor(exponent.y, widths.y) *
+        average_factor(exponent.z, widths.z);
+    // The average of xyz over an axis-aligned cell equals its centre value.
+    return exponential + 0.08 * centre.x * centre.y * centre.z;
+  }
+};
+
+struct ErrorMetrics {
+  double wall_value{};
+  double near_wall_value{};
+  double normal_gradient{};
+};
+
+ErrorMetrics error_at(const Geometry& geometry, int cells, bool stretched) {
+  const double h = 1.0 / static_cast<double>(cells);
+  const std::array<double, 3U> anchor_width{
+      make_axis(geometry.origin.x, h, 0U, stretched)
+          .width[static_cast<std::size_t>(kReach)],
+      make_axis(geometry.origin.y, h, 1U, stretched)
+          .width[static_cast<std::size_t>(kReach)],
+      make_axis(geometry.origin.z, h, 2U, stretched)
+          .width[static_cast<std::size_t>(kReach)]};
+  const QuadraticFrame local_frame =
+      frame_for(geometry, std::cbrt(anchor_width[0U] * anchor_width[1U] *
+                                    anchor_width[2U]));
+  const std::vector<QuadraticDonorCell> donors =
+      geometry_donors(geometry, local_frame, h, stretched);
+  if (donors.size() < 14U) {
+    return {std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::infinity()};
+  }
+
+  const Real3 near_wall_point =
+      add(geometry.origin, multiply(0.35 * h, geometry.normal));
+  const std::array<QuadraticFunctionalRequest, 3U> functionals{{
+      {QuadraticFunctionalKind::value, QuadraticConstraint::none,
+       geometry.origin, {}},
+      {QuadraticFunctionalKind::value, QuadraticConstraint::none,
+       near_wall_point, {}},
+      {QuadraticFunctionalKind::directional_derivative,
+       QuadraticConstraint::none, geometry.origin, geometry.normal},
+  }};
+  const QuadraticStencilRequest request{
+      local_frame, {donors.data(), donors.size()},
+      {functionals.data(), functionals.size()}};
+  QuadraticStencilPlan plan;
+  if (!QuadraticStencilCompiler::compile({&request, 1U}, {}, plan)) {
+    return {std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::infinity()};
+  }
+
+  SmoothField field;
+  std::vector<double> storage(donors.size());
+  for (std::size_t index = 0U; index < donors.size(); ++index) {
+    storage[index] = field.cell_average(donors[index].centre,
+                                        donors[index].widths);
+  }
+  ConstFieldView view;
+  view.base = storage.data();
+  view.interior = {static_cast<std::int32_t>(storage.size()), 1, 1};
+  view.ghosts = {0, 0, 0};
+  view.components = 1U;
+  view.stride_y = storage.size();
+  view.stride_z = storage.size();
+  view.component_stride = storage.size();
+  view.field = 1U;
+  view.revision = 1U;
+  view.storage_identity = 1U;
+  view.revision_domain = 1U;
+  double value = 0.0;
+  double near_wall = 0.0;
+  double derivative = 0.0;
+  if (!evaluate_quadratic_row(plan, 0U, view, 0U, 0.0, 0.0, value) ||
+      !evaluate_quadratic_row(plan, 1U, view, 0U, 0.0, 0.0, near_wall) ||
+      !evaluate_quadratic_row(plan, 2U, view, 0U, 0.0, 0.0, derivative)) {
+    return {std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::infinity()};
+  }
+  return {std::abs(value - field.value(geometry.origin)),
+          std::abs(near_wall - field.value(near_wall_point)),
+          std::abs(derivative -
+                   dot(field.gradient(geometry.origin), geometry.normal))};
+}
+
+double observed_order(double coarse, double fine) {
+  return std::log(coarse / fine) / std::log(2.0);
+}
+
+bool check_sequence(const Geometry& geometry, bool stretched) {
+  const std::array<ErrorMetrics, 3U> errors{
+      error_at(geometry, 16, stretched), error_at(geometry, 32, stretched),
+      error_at(geometry, 64, stretched)};
+  const auto check = [&](double ErrorMetrics::*member, std::string_view name) {
+    const double coarse = errors[0].*member;
+    const double medium = errors[1].*member;
+    const double fine = errors[2].*member;
+    const double first = observed_order(coarse, medium);
+    const double second = observed_order(medium, fine);
+    std::cout << geometry.name << ' '
+              << (stretched ? "stretched" : "uniform") << ' ' << name
+              << " errors=" << coarse << ',' << medium << ',' << fine
+              << " orders=" << first << ',' << second << '\n';
+    const bool accepted =
+        std::isfinite(first) && std::isfinite(second) && coarse > medium &&
+        medium > fine && fine > 1.0e-14 && first >= 1.8 && second >= 1.8;
+    return expect(accepted, name);
+  };
+  bool passed = true;
+  passed &= check(&ErrorMetrics::wall_value, "wall value order >= 1.8");
+  passed &= check(&ErrorMetrics::near_wall_value,
+                  "near-wall value/penetration order >= 1.8");
+  passed &= check(&ErrorMetrics::normal_gradient,
+                  "wall normal-gradient order >= 1.8");
+  return passed;
+}
+
+}  // namespace
+
+int main() {
+  const std::array<Geometry, 3U> geometry{
+      plane_geometry(), sphere_geometry(), cylinder_geometry()};
+  bool passed = true;
+  for (const Geometry& shape : geometry) {
+    passed &= check_sequence(shape, false);
+    passed &= check_sequence(shape, true);
+  }
+  return passed ? 0 : 1;
+}

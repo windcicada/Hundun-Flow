@@ -39,7 +39,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint8_t kWireVersion = 6U;
+constexpr std::uint8_t kWireVersion = 7U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -47,7 +47,7 @@ constexpr std::size_t kMaxScalarsPerFace = 64U;
 constexpr std::size_t kMaxTransportedScalars = 64U;
 constexpr std::size_t kMaxStableNameBytes = 255U;
 constexpr std::string_view kSemanticContract =
-    "HUNDUN-FLOW-v0.4-case-wire-v6|input-schema=1|units=SI|"
+    "HUNDUN-FLOW-v0.4-case-wire-v7|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
     "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
     "coupling=PISO|pressure_correctors=2|transported-scalars=typed-catalog|"
@@ -342,6 +342,19 @@ bool root_has_case_keys(yyjson_val* root) {
   const bool has_turbulence = yyjson_obj_get(root, "turbulence") != nullptr;
   return yyjson_obj_size(root) == required.size() +
                                          (has_turbulence ? 1U : 0U);
+}
+
+bool parse_immersed_fluid_side(std::string_view value,
+                               ImmersedFluidSide& out) noexcept {
+  if (value == "outside") {
+    out = ImmersedFluidSide::outside;
+    return true;
+  }
+  if (value == "inside") {
+    out = ImmersedFluidSide::inside;
+    return true;
+  }
+  return false;
 }
 
 std::optional<std::string_view> string_value(yyjson_val* object,
@@ -1489,7 +1502,7 @@ bool unique_reference_paths(const ValidatedModel& model) {
         return false;
       }
     }
-    return !model.stl_file.has_value() || insert(*model.stl_file);
+    return !model.immersed_boundary.has_value() || insert(model.immersed_boundary->stl_file);
   } catch (...) {
     return false;
   }
@@ -1507,7 +1520,7 @@ Status serialize_model(const ValidatedModel& model,
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
-        model.data_files.size() + (model.stl_file.has_value() ? 1U : 0U) +
+        model.data_files.size() + (model.immersed_boundary.has_value() ? 1U : 0U) +
                 1U >
             detail::kMaxReferencedFiles ||
         model.data_files.size() > std::numeric_limits<std::uint16_t>::max() ||
@@ -1561,14 +1574,18 @@ Status serialize_model(const ValidatedModel& model,
     write_time(writer, model.time);
     write_thermophysics(writer, model.thermophysics);
     writer.u16(static_cast<std::uint16_t>(model.data_files.size()));
-    writer.byte(model.stl_file.has_value() ? 1U : 0U);
+    writer.byte(model.immersed_boundary.has_value() ? 1U : 0U);
+    writer.byte(model.immersed_boundary.has_value()
+                    ? static_cast<std::uint8_t>(
+                          model.immersed_boundary->fluid_side)
+                    : 0U);
     for (const fs::path& path : model.data_files) {
       if (!writer.text(path.generic_string())) {
         return invalid_case(detail_wire);
       }
     }
-    if (model.stl_file.has_value() &&
-        !writer.text(model.stl_file->generic_string())) {
+    if (model.immersed_boundary.has_value() &&
+        !writer.text(model.immersed_boundary->stl_file.generic_string())) {
       return invalid_case(detail_wire);
     }
     writer.u64(model.fingerprint);
@@ -1595,6 +1612,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint16_t focus_count = 0U;
     std::uint16_t data_count = 0U;
     std::uint8_t has_stl = 0U;
+    std::uint8_t fluid_side = 0U;
     if (!reader.byte(version) || version != kWireVersion ||
         !reader.byte(geometry) ||
         geometry > static_cast<std::uint8_t>(GeometryKind::tensor_stretched) ||
@@ -1686,6 +1704,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !read_thermophysics(reader, model.thermophysics) ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
         !reader.byte(has_stl) || has_stl > 1U ||
+        !reader.byte(fluid_side) ||
+        fluid_side > static_cast<std::uint8_t>(ImmersedFluidSide::inside) ||
+        (has_stl == 0U && fluid_side != 0U) ||
         static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) +
                 1U >
             detail::kMaxReferencedFiles) {
@@ -1712,7 +1733,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       if (!reader.text(path) || !valid_direct_name(path, ".stl", parsed)) {
         return invalid_case(detail_wire);
       }
-      model.stl_file = std::move(parsed);
+      model.immersed_boundary = ImmersedBoundarySpec{
+          std::move(parsed), static_cast<ImmersedFluidSide>(fluid_side)};
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
         !unique_reference_paths(model) ||
@@ -1800,7 +1822,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     if (!object_has_exact_keys(
             mesh, {"kind", "domain", "exact_cells", "base_spacing",
                    "minimum_spacing", "max_growth_ratio", "focus_regions",
-                   "limits", "data_files", "stl_file"}) ||
+                   "limits", "data_files", "immersed_boundary"}) ||
         !object_has_exact_keys(flow,
                                {"model", "pressure_reference", "reacting"}) ||
         !object_has_exact_keys(solver,
@@ -1967,12 +1989,27 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
 
     yyjson_val* data_files = yyjson_obj_get(mesh, "data_files");
-    yyjson_val* stl_file = yyjson_obj_get(mesh, "stl_file");
+    yyjson_val* immersed_boundary =
+        yyjson_obj_get(mesh, "immersed_boundary");
+    yyjson_val* stl_file = nullptr;
+    ImmersedFluidSide immersed_fluid_side{ImmersedFluidSide::outside};
+    if (!yyjson_is_null(immersed_boundary)) {
+      if (!object_has_exact_keys(immersed_boundary,
+                                 {"stl_file", "fluid_side"})) {
+        return invalid_case(detail_json_schema);
+      }
+      stl_file = yyjson_obj_get(immersed_boundary, "stl_file");
+      const auto fluid_side = string_value(immersed_boundary, "fluid_side");
+      if (!yyjson_is_str(stl_file) || !fluid_side.has_value() ||
+          !parse_immersed_fluid_side(*fluid_side, immersed_fluid_side)) {
+        return invalid_case(detail_json_value);
+      }
+    }
     const auto thermophysical_file =
         string_value(thermophysics, "data_file");
     if (!yyjson_is_arr(data_files) ||
         !thermophysical_file.has_value() ||
-        (!yyjson_is_null(stl_file) && !yyjson_is_str(stl_file))) {
+        (!yyjson_is_null(immersed_boundary) && !yyjson_is_str(stl_file))) {
       return invalid_case(detail_reference_count);
     }
     const std::size_t data_file_count = yyjson_arr_size(data_files);
@@ -2098,9 +2135,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
       if (!hashed) {
         return hashed;
       }
-      model.stl_file = std::move(relative);
+      model.immersed_boundary =
+          ImmersedBoundarySpec{std::move(relative), immersed_fluid_side};
+      hash.integer(static_cast<std::uint8_t>(immersed_fluid_side));
     } else {
-      hash.text("no-stl");
+      hash.text("no-immersed-boundary");
     }
 
     model.fingerprint = hash.finish();

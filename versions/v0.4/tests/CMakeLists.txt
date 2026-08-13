@@ -6,6 +6,53 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_mesh_ibm_quadratic_test
+  unit/mesh_ibm_quadratic_test.cpp)
+target_link_libraries(v04_mesh_ibm_quadratic_test PRIVATE hundun_v04_core)
+add_test(NAME v04_mesh_ibm_quadratic COMMAND v04_mesh_ibm_quadratic_test)
+
+add_executable(v04_mesh_ibm_surface_test
+  unit/mesh_ibm_surface_test.cpp)
+target_link_libraries(v04_mesh_ibm_surface_test PRIVATE hundun_v04_core)
+add_test(NAME v04_mesh_ibm_surface COMMAND v04_mesh_ibm_surface_test)
+
+add_executable(v04_mesh_ibm_order_test
+  numerical/mesh_ibm_order_test.cpp)
+target_link_libraries(v04_mesh_ibm_order_test PRIVATE hundun_v04_core)
+add_test(NAME v04_mesh_ibm_order COMMAND v04_mesh_ibm_order_test)
+
+add_executable(v04_mesh_ibm_stencil_mpi_test
+  mpi/mesh_ibm_stencil_mpi_test.cpp)
+target_link_libraries(v04_mesh_ibm_stencil_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_mesh_ibm_stencil_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_mesh_ibm_stencil_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_mesh_ibm_stencil_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 120)
+endforeach()
+
+add_executable(v04_mesh_ibm_plan_test
+  integration/mesh_ibm_plan_test.cpp)
+target_link_libraries(v04_mesh_ibm_plan_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_mesh_ibm_plan_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_mesh_ibm_plan_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_mesh_ibm_plan_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 120)
+endforeach()
+
 add_executable(v04_core_execution_graph_test
   unit/core_execution_graph_test.cpp)
 target_link_libraries(v04_core_execution_graph_test PRIVATE hundun_v04_core)

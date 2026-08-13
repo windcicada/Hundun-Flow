@@ -865,11 +865,11 @@ struct EBTopology {
 
 - [ ] **Step 5: Add true h-refinement order tests.**
 
-  Run 12/24/48 or 16/32/64 sequences for translated plane, sphere, and cylinder on uniform and stretched grids. Measure wall value, normal gradient, near-wall pressure, penetration, traction, and integrated force. Require decreasing errors and both adjacent observed orders at least 1.8 for metrics whose analytic truncation is above the floor. Run registered selectors at 1/2/4 ranks.
+  Run 12/24/48 or 16/32/64 sequences for translated plane, sphere, and cylinder on uniform and stretched grids. Task 13 measures the quantities its static reconstruction API owns: wall value, wall-normal gradient, and near-wall value/penetration reconstruction. Task 17 adds the independent final-state traction and integrated-force oracle/order gates after the pressure/operator/final-state APIs exist; those gates may not be fabricated or silently treated as already passed here. Require decreasing errors and both adjacent observed orders at least 1.8 for metrics whose analytic truncation is above the floor. Run the static-plan decomposition selectors at 1/2/4 ranks.
 
 - [ ] **Step 6: Verify and commit.**
 
-  Run all `^v04_mesh_ibm_(quadratic|stencil_mpi_[124]|order_)` tests. Inspect every failure path to ensure it rejects instead of lowering order. Commit with `git commit -s -m "feat(v0.4): compile static quadratic IBM plans"`.
+  Run all `^v04_mesh_ibm_(quadratic|stencil_mpi_[124]|order|plan_[124])$` tests. Inspect every failure path to ensure it rejects instead of lowering order. Commit with `git commit -s -m "feat(v0.4): compile static quadratic IBM plans"`.
 
 ### Task 14: Implement Unified Momentum, Enthalpy, Species, and Scalar Equations
 

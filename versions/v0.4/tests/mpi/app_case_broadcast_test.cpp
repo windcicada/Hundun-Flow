@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
           "max_memory_bytes_per_rank": 134217728
         },
         "data_files": ["profile.d"],
-        "stl_file": "shape.stl"
+        "immersed_boundary": {"stl_file": "shape.stl", "fluid_side": "inside"}
       },
       "flow": {
         "model": "single_phase_low_mach_compressible",
@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
       (static_cast<std::uint64_t>(first.time.control) << 8U) |
       (static_cast<std::uint64_t>(first.pressure_reference) << 48U) |
       static_cast<std::uint64_t>(first.data_files.size()) |
-      (first.stl_file.has_value() ? (1ULL << 40U) : 0U);
+      (first.immersed_boundary.has_value() ? (1ULL << 40U) : 0U);
   passed &= expect(same_u64(model_signature, MPI_COMM_WORLD), rank,
                    "typed model is identical");
   passed &= expect(first.mesh.kind == hundun::v04::GeometryKind::tensor_stretched &&
@@ -246,7 +246,11 @@ int main(int argc, char** argv) {
                        first.thermophysics.data_file ==
                            fs::path("thermophysics.d") &&
                        first.thermophysics.species.size() == 2U &&
-                       first.stl_file == fs::path("shape.stl"),
+                       first.immersed_boundary.has_value() &&
+                       first.immersed_boundary->stl_file ==
+                           fs::path("shape.stl") &&
+                       first.immersed_boundary->fluid_side ==
+                           hundun::v04::ImmersedFluidSide::inside,
                    rank, "relative references survive the wire");
   passed &= expect(rank == 0 ? g_open_count == 4 : g_open_count == 0, rank,
                    "only rank zero opens JSON/data/STL");

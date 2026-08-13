@@ -71,6 +71,10 @@ add_library(hundun_v04_core STATIC
   src/mesh_cartesian.cpp
   src/mesh_decomposition.cpp
   src/mesh_focus.cpp
+  src/mesh_ibm_plan.cpp
+  src/mesh_ibm_reconstruction.cpp
+  src/mesh_ibm_surface.cpp
+  src/mesh_ibm_topology.cpp
   src/mesh_stl_scan.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp

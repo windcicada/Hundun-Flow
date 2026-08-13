@@ -62,7 +62,7 @@ required boundary, scheme, and time-control field are explicit.
       "max_memory_bytes_per_rank": 67108864
     },
     "data_files": [],
-    "stl_file": null
+    "immersed_boundary": null
   },
   "flow": {
     "model": "single_phase_low_mach_compressible",
@@ -222,7 +222,7 @@ required boundary, scheme, and time-control field are explicit.
 
 The `mesh` object has exactly `kind`, `domain`, `exact_cells`,
 `base_spacing`, `minimum_spacing`, `max_growth_ratio`, `focus_regions`,
-`limits`, `data_files`, and `stl_file`. `domain` has exactly `lower` and
+`limits`, `data_files`, and `immersed_boundary`. `domain` has exactly `lower` and
 `upper`; `limits` has exactly `max_global_cells` and
 `max_memory_bytes_per_rank`; each focus-region object has exactly `lower`,
 `upper`, and `target_spacing`.
@@ -466,7 +466,7 @@ bounds remain explicit for every control kind.
 | `units` | `SI` |
 | `thermophysics.data_file` | unique direct-root name ending in `.d` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
-| `mesh.stl_file` | `null` or a unique direct-root name ending in `.stl` |
+| `mesh.immersed_boundary` | `null` or exactly `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`; the STL remains a unique direct-root `.stl` file |
 
 The closed case input rejects body-fitted, multiblock, AMR/nonmatching
 refinement, constant-density flow, SIMPLE/PIMPLE, reacting physics, other

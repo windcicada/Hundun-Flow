@@ -17,7 +17,7 @@
       "max_memory_bytes_per_rank": 67108864
     },
     "data_files": [],
-    "stl_file": null
+    "immersed_boundary": null
   },
   "flow": {
     "model": "single_phase_low_mach_compressible",

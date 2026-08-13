@@ -48,7 +48,7 @@ constexpr std::string_view kUniformMesh = R"json({
   "focus_regions":[],
   "limits":{"max_global_cells":4096,
             "max_memory_bytes_per_rank":67108864},
-  "data_files":[],"stl_file":null
+  "data_files":[],"immersed_boundary":null
 })json";
 
 constexpr std::string_view kTensorMesh = R"json({
@@ -68,7 +68,7 @@ constexpr std::string_view kTensorMesh = R"json({
   ],
   "limits":{"max_global_cells":100000,
             "max_memory_bytes_per_rank":134217728},
-  "data_files":[],"stl_file":null
+  "data_files":[],"immersed_boundary":null
 })json";
 
 constexpr std::string_view kPlaceholderThermophysics = R"data(
@@ -346,7 +346,7 @@ bool test_tensor_normalization_and_fingerprint() {
       {"lower":[0.6,0.1,0.1],"upper":[1.2,0.5,0.5],"target_spacing":[0.2,0.15,0.12]}
     ],
     "limits":{"max_global_cells":100000,"max_memory_bytes_per_rank":134217728},
-    "data_files":[],"stl_file":null
+    "data_files":[],"immersed_boundary":null
   })json";
   ScratchCase second_case("tensor-second");
   second_case.write("case.json", case_json(reordered));
@@ -365,7 +365,7 @@ bool test_tensor_normalization_and_fingerprint() {
     "minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,
     "focus_regions":[],
     "limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},
-    "data_files":[],"stl_file":null
+    "data_files":[],"immersed_boundary":null
   })json";
   ScratchCase exact_case("tensor-exact");
   exact_case.write("case.json", case_json(exact_tensor));
@@ -390,22 +390,22 @@ bool test_every_typed_mesh_field_affects_fingerprint() {
     "focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],
                       "target_spacing":[0.1,0.1,0.1]}],
     "limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},
-    "data_files":[],"stl_file":null
+    "data_files":[],"immersed_boundary":null
   })json";
   constexpr std::string_view variants[] = {
-      R"json({"kind":"tensor_stretched","domain":{"lower":[-0.1,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1.1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":null,"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,11,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.21,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.04,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.15,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.11,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.41,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.11,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10001,"max_memory_bytes_per_rank":67108864},"data_files":[],"stl_file":null})json",
-      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108865},"data_files":[],"stl_file":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[-0.1,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1.1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":null,"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,11,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.21,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.04,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.15,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.11,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.41,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.11,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10001,"max_memory_bytes_per_rank":67108864},"data_files":[],"immersed_boundary":null})json",
+      R"json({"kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[12,10,8],"base_spacing":[0.2,0.2,0.2],"minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.1,"focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.1,0.1,0.1]}],"limits":{"max_global_cells":10000,"max_memory_bytes_per_rank":67108865},"data_files":[],"immersed_boundary":null})json",
   };
 
   std::uint64_t baseline_fingerprint = 0U;
@@ -684,82 +684,82 @@ bool test_mesh_rejections() {
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null,"extra":0})json"));
+    "data_files":[],"immersed_boundary":null,"extra":0})json"));
   passed &= rejects("unordered domain", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,1],"upper":[1,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("non-finite mesh value", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1e999,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("non-finite derived domain span", case_json(R"json({
     "kind":"uniform","domain":{"lower":[-1.7e308,0,0],"upper":[1.7e308,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("uniform requires exact cells", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":null,"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("uniform rejects base spacing", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":[4,4,4],"base_spacing":[0.25,0.25,0.25],
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("uniform minimum exceeds width", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.3,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("uniform requires unit growth", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1.1,
     "focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("exact cell limit", case_json(R"json({
     "kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":[4,4,4],"base_spacing":null,
     "minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,
     "focus_regions":[],"limits":{"max_global_cells":63,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("tensor requires base spacing", case_json(R"json({
     "kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":null,"base_spacing":null,
     "minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.2,
     "focus_regions":[],"limits":{"max_global_cells":100,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("focus target below minimum", case_json(R"json({
     "kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":null,"base_spacing":[0.2,0.2,0.2],
     "minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.2,
     "focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.04,0.1,0.1]}],
     "limits":{"max_global_cells":1000,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("focus target exceeds base", case_json(R"json({
     "kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":null,"base_spacing":[0.2,0.2,0.2],
     "minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.2,
     "focus_regions":[{"lower":[0.1,0.1,0.1],"upper":[0.4,0.4,0.4],"target_spacing":[0.21,0.1,0.1]}],
     "limits":{"max_global_cells":1000,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   passed &= rejects("focus wholly outside domain", case_json(R"json({
     "kind":"tensor_stretched","domain":{"lower":[0,0,0],"upper":[1,1,1]},
     "exact_cells":null,"base_spacing":[0.2,0.2,0.2],
     "minimum_spacing":[0.05,0.05,0.05],"max_growth_ratio":1.2,
     "focus_regions":[{"lower":[2,2,2],"upper":[3,3,3],"target_spacing":[0.1,0.1,0.1]}],
     "limits":{"max_global_cells":1000,"max_memory_bytes_per_rank":1},
-    "data_files":[],"stl_file":null})json"));
+    "data_files":[],"immersed_boundary":null})json"));
   return passed;
 }
 
@@ -807,14 +807,33 @@ bool test_case_and_reference_security() {
       R"json({"coupling":"PISO","pressure_correctors":2})json",
       R"json({"model":"smagorinsky"})json"));
 
-  const auto reference_mesh = [](std::string_view data, std::string_view stl) {
+  const auto reference_mesh = [](std::string_view data,
+                                 std::string_view immersed) {
     return std::string{R"json({"kind":"uniform","domain":{"lower":[0,0,0],"upper":[1,1,1]},"exact_cells":[4,4,4],"base_spacing":null,"minimum_spacing":[0.1,0.1,0.1],"max_growth_ratio":1,"focus_regions":[],"limits":{"max_global_cells":64,"max_memory_bytes_per_rank":1},"data_files":)json"} +
-           std::string(data) + ",\"stl_file\":" + std::string(stl) + "}";
+           std::string(data) + ",\"immersed_boundary\":" +
+           std::string(immersed) + "}";
   };
   passed &= rejects("parent path", case_json(reference_mesh("[\"../table.d\"]", "null")));
   passed &= rejects("absolute data path", case_json(reference_mesh("[\"/tmp/table.d\"]", "null")));
   passed &= rejects("nested data path", case_json(reference_mesh("[\"data/table.d\"]", "null")));
-  passed &= rejects("nested STL", case_json(reference_mesh("[]", "\"geometry/body.stl\"")));
+  passed &= rejects(
+      "nested STL",
+      case_json(reference_mesh(
+          "[]",
+          R"json({"stl_file":"geometry/body.stl","fluid_side":"outside"})json")));
+  passed &= rejects(
+      "invalid immersed fluid side",
+      case_json(reference_mesh(
+          "[]",
+          R"json({"stl_file":"body.stl","fluid_side":"middle"})json")));
+  passed &= rejects(
+      "immersed boundary requires fluid side",
+      case_json(reference_mesh("[]", R"json({"stl_file":"body.stl"})json")));
+  passed &= rejects(
+      "immersed boundary rejects unknown key",
+      case_json(reference_mesh(
+          "[]",
+          R"json({"stl_file":"body.stl","fluid_side":"outside","extra":0})json")));
   passed &= rejects("wrong data suffix", case_json(reference_mesh("[\"table.txt\"]", "null")));
   passed &= rejects("missing data file", case_json(reference_mesh("[\"missing.d\"]", "null")));
 

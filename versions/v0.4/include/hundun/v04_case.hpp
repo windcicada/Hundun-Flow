@@ -71,6 +71,7 @@ enum class ConvectionScheme : std::uint8_t {
 enum class DiffusionScheme : std::uint8_t { central2 };
 enum class TimeScheme : std::uint8_t { backward_euler, variable_bdf2 };
 enum class TransportLaw : std::uint8_t { constant, sutherland };
+enum class ImmersedFluidSide : std::uint8_t { outside, inside };
 
 struct CaseSpec {
   std::filesystem::path root;
@@ -99,6 +100,11 @@ struct CartesianMeshSpec {
   double max_growth_ratio{1.0};
   std::vector<FocusRegionSpec> focus_regions;
   MeshLimits limits{};
+};
+
+struct ImmersedBoundarySpec {
+  std::filesystem::path stl_file;
+  ImmersedFluidSide fluid_side{ImmersedFluidSide::outside};
 };
 
 struct ScalarBoundarySpec {
@@ -200,7 +206,7 @@ struct ValidatedModel {
   ThermophysicalSpec thermophysics;
   std::vector<TransportedScalarSpec> transported_scalars;
   std::vector<std::filesystem::path> data_files;
-  std::optional<std::filesystem::path> stl_file;
+  std::optional<ImmersedBoundarySpec> immersed_boundary;
   PlanFingerprint fingerprint{};
 };
 
