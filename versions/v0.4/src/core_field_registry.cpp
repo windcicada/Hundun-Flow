@@ -78,7 +78,7 @@ Status FieldRegistry::require_field(std::string_view stable_name,
   return declare_field(stable_name, components, minimum_ghost_width, out);
 }
 
-Status FieldRegistry::freeze_for_test(FieldSchema& out) {
+Status FieldRegistry::freeze(FieldSchema& out) {
   if (frozen_) {
     return {StatusCode::invalid_plan, 3};
   }

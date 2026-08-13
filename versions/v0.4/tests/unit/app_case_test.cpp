@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -18,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace {
 
@@ -69,6 +71,22 @@ constexpr std::string_view kTensorMesh = R"json({
   "data_files":[],"stl_file":null
 })json";
 
+constexpr std::string_view kPlaceholderThermophysics = R"data(
+HUNDUN_THERMOPHYSICS_V1
+temperature_bounds 200 3000
+temperature_inversion 1e-12 32
+closed_mass_newton 1e-12 24 0.25
+species_count 1
+species air
+molecular_weight 28.96546
+temperature_switch 1000
+nasa7_low 3.5 0 0 0 0 0 0
+nasa7_high 3.5 0 0 0 0 0 0
+transport_sutherland 1.716e-5 273.15 110.4 0.71
+end_species
+end
+)data";
+
 std::string case_json(std::string_view mesh,
                       std::string_view flow = R"json({
   "model":"single_phase_low_mach_compressible",
@@ -97,6 +115,7 @@ std::string case_json(std::string_view mesh,
          (turbulence.empty()
               ? std::string{}
               : ",\"turbulence\":" + std::string(turbulence)) +
+         ",\"thermophysics\":{\"data_file\":\"thermophysics.d\"}" +
          ",\"transported_scalars\":[]" +
          ",\"boundaries\":" + std::string(boundaries) +
          ",\"schemes\":" + std::string(schemes) +
@@ -169,6 +188,7 @@ bool compile_json_fingerprint(std::string_view label, std::string_view json,
                               std::uint64_t& out) {
   ScratchCase scratch(label);
   scratch.write("case.json", json);
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   const Status status = compile(scratch.root(), model);
   if (!expect(static_cast<bool>(status), label)) {
@@ -182,6 +202,7 @@ bool rejects(std::string_view label, std::string_view json,
              StatusCode expected = StatusCode::invalid_case) {
   ScratchCase scratch(label);
   scratch.write("case.json", json);
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   model.fingerprint = 987654321U;
   const Status status = compile(scratch.root(), model);
@@ -235,6 +256,7 @@ bool compile_fingerprint(std::string_view label, std::string_view mesh,
                          std::uint64_t& out) {
   ScratchCase scratch(label);
   scratch.write("case.json", case_json(mesh));
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   const Status status = compile(scratch.root(), model);
   if (!expect(static_cast<bool>(status), label)) {
@@ -255,6 +277,11 @@ bool test_valid_fixture() {
                          std::istreambuf_iterator<char>()};
   ScratchCase scratch("valid-fixture");
   scratch.write("case.json", json);
+  std::ifstream thermo_input(fs::path(data_root) / "thermophysics.d",
+                             std::ios::binary);
+  const std::string thermo{std::istreambuf_iterator<char>(thermo_input),
+                           std::istreambuf_iterator<char>()};
+  scratch.write("thermophysics.d", thermo);
   ValidatedModel model;
   const Status status = compile(scratch.root(), model);
   bool passed = expect(static_cast<bool>(status), "minimal fixture compiles");
@@ -269,6 +296,17 @@ bool test_valid_fixture() {
                        model.mesh.minimum_spacing.x == 0.125 &&
                        model.mesh.max_growth_ratio == 1.0,
                    "fixture publishes uniform spacing controls");
+  passed &= expect(model.thermophysics.data_file ==
+                           fs::path("thermophysics.d") &&
+                       model.thermophysics.minimum_temperature == 200.0 &&
+                       model.thermophysics.maximum_temperature == 3000.0 &&
+                       model.thermophysics.species.size() == 1U &&
+                       model.thermophysics.species[0].stable_name == "air" &&
+                       model.thermophysics.species[0].molecular_weight ==
+                           28.96546 &&
+                       model.thermophysics.species[0].transport_law ==
+                           hundun::v04::TransportLaw::sutherland,
+                   "fixture publishes compact typed thermophysical data");
   passed &= expect(model.mesh.limits.max_global_cells == 4096 &&
                        model.mesh.limits.max_memory_bytes_per_rank == 67108864,
                    "fixture publishes hard limits");
@@ -281,6 +319,7 @@ bool test_valid_fixture() {
 bool test_tensor_normalization_and_fingerprint() {
   ScratchCase first_case("tensor-first");
   first_case.write("case.json", case_json(kTensorMesh));
+  first_case.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel first;
   const Status first_status = compile(first_case.root(), first);
   bool passed = expect(static_cast<bool>(first_status),
@@ -311,6 +350,7 @@ bool test_tensor_normalization_and_fingerprint() {
   })json";
   ScratchCase second_case("tensor-second");
   second_case.write("case.json", case_json(reordered));
+  second_case.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel second;
   const Status second_status = compile(second_case.root(), second);
   passed &= expect(static_cast<bool>(second_status) && same_mesh(first, second),
@@ -329,6 +369,7 @@ bool test_tensor_normalization_and_fingerprint() {
   })json";
   ScratchCase exact_case("tensor-exact");
   exact_case.write("case.json", case_json(exact_tensor));
+  exact_case.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel exact;
   const Status exact_status = compile(exact_case.root(), exact);
   passed &= expect(static_cast<bool>(exact_status) && exact.mesh.has_exact_cells &&
@@ -435,6 +476,7 @@ bool test_typed_case_fields_and_fingerprint() {
                        "\"scalars\":[{\"stable_name\":\"mixture_fraction\",\"kind\":\"normal_flux\",\"value\":0.125,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]"),
                    "typed scalar fixture mutation");
   typed.write("case.json", typed_json);
+  typed.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   passed &= expect(static_cast<bool>(compile(typed.root(), model)) &&
                        model.boundaries[0].velocity.x == 1.0 &&
@@ -460,6 +502,7 @@ bool test_transported_scalar_catalog() {
       "catalog valid fixture mutation");
   ScratchCase valid_case("transported-scalars-valid");
   valid_case.write("case.json", valid);
+  valid_case.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   passed &= expect(
       static_cast<bool>(compile(valid_case.root(), model)) &&
@@ -593,6 +636,44 @@ bool test_typed_case_rejections() {
   passed &= reject_variant(
       "invalid BDF ratio interval", "\"minimum_bdf_ratio\":0.2",
       "\"minimum_bdf_ratio\":6.0");
+  return passed;
+}
+
+bool test_thermophysics_schema() {
+  const std::string baseline = case_json(kUniformMesh);
+  bool passed = true;
+
+  std::string missing_root = baseline;
+  passed &= expect(
+      replace_once(
+          missing_root,
+          ",\"thermophysics\":{\"data_file\":\"thermophysics.d\"}", ""),
+      "missing thermophysics root fixture mutation") &&
+            rejects("missing thermophysics root key", missing_root);
+
+  std::string missing_data_file = baseline;
+  passed &= expect(
+      replace_once(
+          missing_data_file,
+          "\"thermophysics\":{\"data_file\":\"thermophysics.d\"}",
+          "\"thermophysics\":{}"),
+      "missing thermophysics data_file fixture mutation") &&
+            rejects("missing thermophysics data_file key", missing_data_file);
+
+  std::string unknown = baseline;
+  passed &= expect(
+      replace_once(
+          unknown,
+          "\"thermophysics\":{\"data_file\":\"thermophysics.d\"}",
+          "\"thermophysics\":{\"data_file\":\"thermophysics.d\",\"units\":\"SI\"}"),
+      "unknown thermophysics key fixture mutation") &&
+            rejects("unknown thermophysics key", unknown);
+
+  std::string wrong_suffix = baseline;
+  passed &= expect(replace_once(wrong_suffix, "\"thermophysics.d\"",
+                                "\"thermophysics.txt\""),
+                   "wrong thermophysics suffix fixture mutation") &&
+            rejects("wrong thermophysics suffix", wrong_suffix);
   return passed;
 }
 
@@ -744,6 +825,7 @@ bool test_case_and_reference_security() {
   fs::create_symlink(outside.root() / "profile.d",
                      inside.root() / "profile.d", error);
   inside.write("case.json", case_json(reference_mesh("[\"profile.d\"]", "null")));
+  inside.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel model;
   passed &= expect(!error && compile(inside.root(), model).code ==
                                 StatusCode::invalid_case,
@@ -752,6 +834,7 @@ bool test_case_and_reference_security() {
   ScratchCase outside_json("outside-json");
   ScratchCase inside_json("inside-json");
   outside_json.write("case.json", case_json(kUniformMesh));
+  outside_json.write("thermophysics.d", kPlaceholderThermophysics);
   error.clear();
   fs::create_symlink(outside_json.root() / "case.json",
                      inside_json.root() / "case.json", error);
@@ -765,6 +848,7 @@ bool test_case_and_reference_security() {
   swap_inside.write("profile.d", "inside bytes\n");
   swap_inside.write("case.json", case_json(reference_mesh(
                                    "[\"profile.d\"]", "null")));
+  swap_inside.write("thermophysics.d", kPlaceholderThermophysics);
   g_swap_target = swap_inside.root() / "profile.d";
   g_swap_source = swap_outside.root() / "escaped.d";
   g_swap_open_count = 0;
@@ -782,16 +866,75 @@ bool test_case_and_reference_security() {
                        hardlinks.root() / "second.d", error);
   hardlinks.write("case.json", case_json(reference_mesh(
                                   "[\"first.d\",\"second.d\"]", "null")));
+  hardlinks.write("thermophysics.d", kPlaceholderThermophysics);
   passed &= expect(!error && compile(hardlinks.root(), model).code ==
                                 StatusCode::invalid_case,
                    "hard-link aliases are rejected");
+
+  ScratchCase thermophysics_alias("thermophysics-alias");
+  thermophysics_alias.write("thermophysics.d", kPlaceholderThermophysics);
+  error.clear();
+  fs::create_hard_link(thermophysics_alias.root() / "thermophysics.d",
+                       thermophysics_alias.root() / "profile.d", error);
+  thermophysics_alias.write(
+      "case.json", case_json(reference_mesh("[\"profile.d\"]", "null")));
+  passed &= expect(
+      !error && compile(thermophysics_alias.root(), model).code ==
+                    StatusCode::invalid_case,
+      "thermophysics and generic-data hard-link aliases are rejected");
   return passed;
+}
+
+bool test_wire_rejects_duplicate_data_paths() {
+  ScratchCase scratch("wire-duplicate-data-path");
+  scratch.write("case.json", case_json(kUniformMesh));
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel model;
+  if (!expect(static_cast<bool>(compile(scratch.root(), model)),
+              "wire mutation fixture compiles")) {
+    return false;
+  }
+
+  // The encoder must reject duplicate references too, so construct the
+  // malformed payload by serializing two distinct same-length names and
+  // mutating the second name in-place. This reaches the independent decoder
+  // invariant without relying on filesystem parsing.
+  model.data_files = {"first.d", "other.d"};
+  std::vector<std::uint8_t> payload;
+  if (!expect(static_cast<bool>(
+                  hundun::v04::detail::serialize_model_for_test(model,
+                                                               payload)),
+              "wire mutation seed serializes")) {
+    return false;
+  }
+  constexpr std::string_view first{"first.d"};
+  constexpr std::string_view other{"other.d"};
+  const auto occurrence = [&](std::string_view text) {
+    return std::search(payload.begin(), payload.end(), text.begin(),
+                       text.end());
+  };
+  const auto first_path = occurrence(first);
+  const auto second_path = occurrence(other);
+  if (!expect(first_path != payload.end() && second_path != payload.end(),
+              "wire mutation locates both typed path records")) {
+    return false;
+  }
+  std::copy(first.begin(), first.end(), second_path);
+
+  ValidatedModel decoded;
+  decoded.fingerprint = UINT64_C(987654321);
+  const Status status =
+      hundun::v04::detail::deserialize_model_for_test(payload, decoded);
+  return expect(status.code == StatusCode::invalid_case &&
+                    decoded.fingerprint == UINT64_C(987654321),
+                "wire decoder rejects duplicate data paths transactionally");
 }
 
 bool test_defaults_and_enums() {
   ScratchCase defaults("defaults");
   defaults.write("case.json", case_json(kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
                                          R"json({"coupling":"PISO","pressure_correctors":2})json", ""));
+  defaults.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel default_model;
   bool passed = expect(static_cast<bool>(compile(defaults.root(), default_model)) &&
                            default_model.turbulence ==
@@ -802,6 +945,7 @@ bool test_defaults_and_enums() {
                                       R"json({"coupling":"PISO","pressure_correctors":2})json",
                                       R"json({"model":"wale"})json",
                                       R"json({"control":"adaptive_acoustic","scheme":"variable_bdf2","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.25,"retry_factor":0.5,"maximum_retries":8,"minimum_bdf_ratio":0.2,"maximum_bdf_ratio":5.0})json"));
+  enums.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel enum_model;
   passed &= expect(static_cast<bool>(compile(enums.root(), enum_model)) &&
                        enum_model.turbulence == TurbulenceKind::wale &&
@@ -836,7 +980,7 @@ bool test_field_registry() {
                        StatusCode::invalid_plan,
                    "unsupported ghost width is rejected");
   FieldSchema schema;
-  passed &= expect(static_cast<bool>(registry.freeze_for_test(schema)) &&
+  passed &= expect(static_cast<bool>(registry.freeze(schema)) &&
                        schema.size() == 2U && schema[0].id == 0U &&
                        schema[0].stable_name == "alpha" &&
                        schema[0].components == 1U &&
@@ -880,8 +1024,10 @@ int main(int argc, char** argv) {
   passed &= test_typed_case_fields_and_fingerprint();
   passed &= test_transported_scalar_catalog();
   passed &= test_typed_case_rejections();
+  passed &= test_thermophysics_schema();
   passed &= test_mesh_rejections();
   passed &= test_case_and_reference_security();
+  passed &= test_wire_rejects_duplicate_data_paths();
   passed &= test_defaults_and_enums();
   passed &= test_field_registry();
   passed &= test_field_id_overflow();

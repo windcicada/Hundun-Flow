@@ -78,7 +78,7 @@ bool make_schema(FieldSchema& schema, FieldId& velocity, FieldId& pressure,
                        registry.declare_field("operator_workspace", 2U, 0U,
                                               workspace)),
                    "workspace field declaration succeeds");
-  passed &= expect(static_cast<bool>(registry.freeze_for_test(schema)),
+  passed &= expect(static_cast<bool>(registry.freeze(schema)),
                    "synthetic schema freezes");
   return passed;
 }

@@ -64,7 +64,7 @@ bool make_layers(StateLayers& layers, FieldId& field) {
   FieldRegistry registry;
   FieldSchema schema;
   if (!registry.declare_field("state", 1U, 1U, field) ||
-      !registry.freeze_for_test(schema)) {
+      !registry.freeze(schema)) {
     return false;
   }
   const std::array requests{

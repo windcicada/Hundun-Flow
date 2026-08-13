@@ -3,6 +3,7 @@
 #include "hundun/v04_case.hpp"
 
 #include "app_case_detail.hpp"
+#include "physics_input_detail.hpp"
 #include "yyjson.h"
 
 #include <mpi.h>
@@ -38,7 +39,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint8_t kWireVersion = 5U;
+constexpr std::uint8_t kWireVersion = 6U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -46,11 +47,11 @@ constexpr std::size_t kMaxScalarsPerFace = 64U;
 constexpr std::size_t kMaxTransportedScalars = 64U;
 constexpr std::size_t kMaxStableNameBytes = 255U;
 constexpr std::string_view kSemanticContract =
-    "HUNDUN-FLOW-v0.4-case-wire-v5|input-schema=1|units=SI|"
+    "HUNDUN-FLOW-v0.4-case-wire-v6|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
     "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
     "coupling=PISO|pressure_correctors=2|transported-scalars=typed-catalog|"
-    "boundaries=typed-six-face|"
+    "thermophysics=typed-direct-root-data|boundaries=typed-six-face|"
     "schemes=typed|time=typed";
 
 static_assert(std::is_nothrow_move_assignable_v<ValidatedModel>,
@@ -330,9 +331,9 @@ bool root_has_case_keys(yyjson_val* root) {
   if (!yyjson_is_obj(root)) {
     return false;
   }
-  constexpr std::array<std::string_view, 9U> required{
+  constexpr std::array<std::string_view, 10U> required{
       "schema_version", "units", "mesh", "flow", "solver", "boundaries",
-      "schemes", "time", "transported_scalars"};
+      "schemes", "time", "transported_scalars", "thermophysics"};
   for (const std::string_view key : required) {
     if (yyjson_obj_getn(root, key.data(), key.size()) == nullptr) {
       return false;
@@ -1371,6 +1372,86 @@ void write_time(WireWriter& writer, const TimeControlSpec& value) {
   writer.real(value.maximum_bdf_ratio);
 }
 
+void write_thermophysics(WireWriter& writer,
+                         const ThermophysicalSpec& value) {
+  static_cast<void>(writer.text(value.data_file.generic_string()));
+  writer.real(value.minimum_temperature);
+  writer.real(value.maximum_temperature);
+  writer.real(value.temperature_relative_tolerance);
+  writer.u32(value.maximum_temperature_iterations);
+  writer.real(value.closed_mass_relative_tolerance);
+  writer.u32(value.maximum_closed_mass_iterations);
+  writer.real(value.maximum_closed_mass_relative_step);
+  writer.u16(static_cast<std::uint16_t>(value.species.size()));
+  for (const SpeciesThermophysicalSpec& species : value.species) {
+    static_cast<void>(writer.text(species.stable_name));
+    writer.real(species.molecular_weight);
+    writer.real(species.temperature_switch);
+    for (const double coefficient : species.nasa7_low) {
+      writer.real(coefficient);
+    }
+    for (const double coefficient : species.nasa7_high) {
+      writer.real(coefficient);
+    }
+    writer.byte(static_cast<std::uint8_t>(species.transport_law));
+    writer.real(species.viscosity_reference);
+    writer.real(species.transport_reference_temperature);
+    writer.real(species.sutherland_temperature);
+    writer.real(species.prandtl);
+    writer.real(species.conductivity);
+  }
+}
+
+bool read_thermophysics(WireReader& reader,
+                        ThermophysicalSpec& value) {
+  std::string path;
+  std::uint16_t species_count = 0U;
+  if (!reader.text(path) ||
+      !valid_direct_name(path, ".d", value.data_file) ||
+      !reader.real(value.minimum_temperature) ||
+      !reader.real(value.maximum_temperature) ||
+      !reader.real(value.temperature_relative_tolerance) ||
+      !reader.u32(value.maximum_temperature_iterations) ||
+      !reader.real(value.closed_mass_relative_tolerance) ||
+      !reader.u32(value.maximum_closed_mass_iterations) ||
+      !reader.real(value.maximum_closed_mass_relative_step) ||
+      !reader.u16(species_count) || species_count == 0U ||
+      species_count > 65U) {
+    return false;
+  }
+  value.species.reserve(species_count);
+  for (std::uint16_t index = 0U; index < species_count; ++index) {
+    SpeciesThermophysicalSpec species;
+    std::uint8_t law = 0U;
+    if (!reader.text(species.stable_name) ||
+        !reader.real(species.molecular_weight) ||
+        !reader.real(species.temperature_switch)) {
+      return false;
+    }
+    for (double& coefficient : species.nasa7_low) {
+      if (!reader.real(coefficient)) {
+        return false;
+      }
+    }
+    for (double& coefficient : species.nasa7_high) {
+      if (!reader.real(coefficient)) {
+        return false;
+      }
+    }
+    if (!reader.byte(law) || law > 1U ||
+        !reader.real(species.viscosity_reference) ||
+        !reader.real(species.transport_reference_temperature) ||
+        !reader.real(species.sutherland_temperature) ||
+        !reader.real(species.prandtl) ||
+        !reader.real(species.conductivity)) {
+      return false;
+    }
+    species.transport_law = static_cast<TransportLaw>(law);
+    value.species.push_back(std::move(species));
+  }
+  return detail::valid_thermophysical_spec(value);
+}
+
 bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
   std::uint8_t control = 0U;
   std::uint8_t scheme = 0U;
@@ -1393,6 +1474,27 @@ bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
   return valid_time(value);
 }
 
+bool unique_reference_paths(const ValidatedModel& model) {
+  try {
+    std::set<std::string> paths;
+    const auto insert = [&](const fs::path& path) {
+      const std::string name = path.generic_string();
+      return !name.empty() && paths.insert(name).second;
+    };
+    if (!insert(model.thermophysics.data_file)) {
+      return false;
+    }
+    for (const fs::path& path : model.data_files) {
+      if (!insert(path)) {
+        return false;
+      }
+    }
+    return !model.stl_file.has_value() || insert(*model.stl_file);
+  } catch (...) {
+    return false;
+  }
+}
+
 Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
@@ -1405,9 +1507,18 @@ Status serialize_model(const ValidatedModel& model,
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
-        model.data_files.size() + (model.stl_file.has_value() ? 1U : 0U) >
+        model.data_files.size() + (model.stl_file.has_value() ? 1U : 0U) +
+                1U >
             detail::kMaxReferencedFiles ||
-        model.data_files.size() > std::numeric_limits<std::uint16_t>::max()) {
+        model.data_files.size() > std::numeric_limits<std::uint16_t>::max() ||
+        !unique_reference_paths(model)) {
+      return invalid_case(detail_wire);
+    }
+    fs::path thermophysical_path;
+    if (!valid_direct_name(model.thermophysics.data_file.generic_string(),
+                           ".d", thermophysical_path) ||
+        !detail::valid_thermophysical_spec(model.thermophysics) ||
+        detail::thermophysical_spec_fingerprint(model.thermophysics) == 0U) {
       return invalid_case(detail_wire);
     }
     for (const BoundaryFaceSpec& face : model.boundaries) {
@@ -1448,6 +1559,7 @@ Status serialize_model(const ValidatedModel& model,
     write_transported_scalars(writer, model.transported_scalars);
     write_schemes(writer, model.schemes);
     write_time(writer, model.time);
+    write_thermophysics(writer, model.thermophysics);
     writer.u16(static_cast<std::uint16_t>(model.data_files.size()));
     writer.byte(model.stl_file.has_value() ? 1U : 0U);
     for (const fs::path& path : model.data_files) {
@@ -1571,9 +1683,11 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     if (!read_transported_scalars(reader, model.transported_scalars) ||
         !read_schemes(reader, model.schemes) ||
         !read_time(reader, model.time) ||
+        !read_thermophysics(reader, model.thermophysics) ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
         !reader.byte(has_stl) || has_stl > 1U ||
-        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) >
+        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) +
+                1U >
             detail::kMaxReferencedFiles) {
       return invalid_case(detail_wire);
     }
@@ -1601,6 +1715,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       model.stl_file = std::move(parsed);
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
+        !unique_reference_paths(model) ||
         !reader.finished()) {
       return invalid_case(detail_wire);
     }
@@ -1681,6 +1796,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* time = yyjson_obj_get(root, "time");
     yyjson_val* transported_scalars =
         yyjson_obj_get(root, "transported_scalars");
+    yyjson_val* thermophysics = yyjson_obj_get(root, "thermophysics");
     if (!object_has_exact_keys(
             mesh, {"kind", "domain", "exact_cells", "base_spacing",
                    "minimum_spacing", "max_growth_ratio", "focus_regions",
@@ -1692,6 +1808,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
         !object_has_exact_keys(boundaries,
                                {"x_min", "x_max", "y_min", "y_max",
                                 "z_min", "z_max"}) ||
+        !object_has_exact_keys(thermophysics, {"data_file"}) ||
         !yyjson_is_arr(transported_scalars) ||
         yyjson_arr_size(transported_scalars) > kMaxTransportedScalars ||
         (turbulence != nullptr &&
@@ -1851,13 +1968,16 @@ Status compile_on_root(const fs::path& case_root, int rank,
 
     yyjson_val* data_files = yyjson_obj_get(mesh, "data_files");
     yyjson_val* stl_file = yyjson_obj_get(mesh, "stl_file");
+    const auto thermophysical_file =
+        string_value(thermophysics, "data_file");
     if (!yyjson_is_arr(data_files) ||
+        !thermophysical_file.has_value() ||
         (!yyjson_is_null(stl_file) && !yyjson_is_str(stl_file))) {
       return invalid_case(detail_reference_count);
     }
     const std::size_t data_file_count = yyjson_arr_size(data_files);
     const std::size_t total_reference_count =
-        data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U);
+        data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U) + 1U;
     if (data_file_count > detail::kMaxReferencedFiles ||
         total_reference_count > detail::kMaxReferencedFiles) {
       return invalid_case(detail_reference_count);
@@ -1878,6 +1998,51 @@ Status compile_on_root(const fs::path& case_root, int rank,
 
     model.data_files.reserve(data_file_count);
     std::set<std::pair<dev_t, ino_t>> referenced_targets;
+    {
+      fs::path relative;
+      UniqueFd descriptor;
+      struct stat metadata {};
+      const Status opened = open_direct_file(
+          root_descriptor.get(), *thermophysical_file, ".d", rank, relative,
+          descriptor, metadata);
+      if (!opened) {
+        return opened;
+      }
+      if (!referenced_targets
+               .insert(std::make_pair(metadata.st_dev, metadata.st_ino))
+               .second) {
+        return invalid_case(detail_reference_path);
+      }
+      hash.text("thermophysics");
+      hash.text(relative.generic_string());
+      std::string data;
+      const Status read = read_bounded_text(
+          descriptor, metadata, detail::kMaxThermophysicalFileBytes,
+          detail_reference_missing, detail_reference_too_large, data);
+      if (!read) {
+        return read;
+      }
+      hash.integer(static_cast<std::uint64_t>(data.size()));
+      hash.bytes(data.data(), data.size());
+      ThermophysicalSpec thermophysics;
+      const Status parsed =
+          detail::parse_thermophysical_text(data, thermophysics);
+      if (!parsed) {
+        return invalid_case(detail_json_value);
+      }
+      thermophysics.data_file = std::move(relative);
+      if (!detail::valid_thermophysical_spec(thermophysics)) {
+        return invalid_case(detail_json_value);
+      }
+      const PlanFingerprint thermophysical_fingerprint =
+          detail::thermophysical_spec_fingerprint(thermophysics);
+      if (thermophysical_fingerprint == 0U) {
+        return invalid_case(detail_json_value);
+      }
+      hash.text("typed-thermophysics");
+      hash.integer(thermophysical_fingerprint);
+      model.thermophysics = std::move(thermophysics);
+    }
     std::size_t index = 0U;
     std::size_t maximum = 0U;
     yyjson_val* file_value = nullptr;
@@ -1966,6 +2131,16 @@ void set_file_open_observer_for_test(FileOpenObserver observer) noexcept {
 
 int last_lowest_failing_rank_for_test() noexcept {
   return g_last_lowest_failing_rank.load(std::memory_order_relaxed);
+}
+
+Status serialize_model_for_test(const ValidatedModel& model,
+                                std::vector<std::uint8_t>& out) {
+  return serialize_model(model, out);
+}
+
+Status deserialize_model_for_test(const std::vector<std::uint8_t>& bytes,
+                                  ValidatedModel& out) {
+  return deserialize_model(bytes, out);
 }
 #endif
 

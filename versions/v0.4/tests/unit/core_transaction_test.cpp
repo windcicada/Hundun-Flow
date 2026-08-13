@@ -179,7 +179,7 @@ bool make_layers(StateLayers& layers, FieldId& velocity, FieldId& pressure) {
   passed &= expect(
       static_cast<bool>(registry.declare_field("pressure", 1U, 1U, pressure)),
       "pressure declaration succeeds");
-  passed &= expect(static_cast<bool>(registry.freeze_for_test(schema)),
+  passed &= expect(static_cast<bool>(registry.freeze(schema)),
                    "transaction schema freezes");
   const std::array requests{
       ArenaFieldRequest{velocity, Int3{7, 4, 3}, FieldPlacement{0U},

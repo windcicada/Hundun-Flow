@@ -31,6 +31,9 @@
   "turbulence": {
     "model": "none"
   },
+  "thermophysics": {
+    "data_file": "thermophysics.d"
+  },
   "transported_scalars": [],
   "boundaries": {
     "x_min": {

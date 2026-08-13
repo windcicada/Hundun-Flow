@@ -67,6 +67,11 @@ add_library(hundun_v04_core STATIC
   src/mesh_stl_scan.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp
+  src/physics_contribution.cpp
+  src/physics_derived.cpp
+  src/physics_input.cpp
+  src/physics_thermo.cpp
+  src/physics_transport.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")

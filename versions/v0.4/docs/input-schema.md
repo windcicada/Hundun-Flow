@@ -2,33 +2,36 @@
 
 # HUNDUN-FLOW v0.4 case-input schema
 
-Status: Task 7 closed boundary, scheme, and time-control schema, 2026-08-13
+Status: Task 8 typed thermophysics and wire-v6 schema, 2026-08-13
 
 ## Authority and directory layout
 
-`case.json` is the only configuration authority. Referenced `.d` tables and STL
-geometry are bytes-only inputs; they cannot override JSON. Every referenced file
-must be a unique, regular direct child of the case root. Absolute paths, parent
-traversal, nested paths, incorrect suffixes, missing files, symbolic links, and
-hard-link aliases are rejected.
+`case.json` is the only configuration authority: it selects every input and no
+referenced file may add or override JSON structure. Referenced `.d` files carry
+typed table data and STL carries geometry bytes. Every referenced file must be a
+unique, regular direct child of the case root. Absolute paths, parent traversal,
+nested paths, incorrect suffixes, missing files, symbolic links, and hard-link
+aliases are rejected.
 
 Rank 0 alone opens the case-root descriptor, `case.json`, `.d`, and STL files. It
-parses and normalizes the closed schema, hashes the complete typed model and
-referenced bytes, and broadcasts a bounded wire-v5 model. Other ranks never
-inspect the filesystem or parse JSON. Failed compilation leaves the caller's
-output model unchanged on every rank.
+reads and parses the thermophysical `.d` file exactly once, normalizes the closed
+schema, hashes the complete typed model and referenced bytes, and broadcasts a
+bounded wire-v6 model. The runtime model retains compact typed thermophysical
+data, never the source text. Other ranks never inspect the filesystem or parse
+JSON or `.d` text. Failed compilation leaves the caller's output model unchanged
+on every rank.
 
 ## Complete closed schema
 
 Every object is closed. Unknown, duplicate, missing, or incorrectly typed keys
 are errors. The root has exactly these required keys:
 
-`schema_version`, `units`, `mesh`, `flow`, `solver`, `transported_scalars`,
-`boundaries`, `schemes`, and `time`.
+`schema_version`, `units`, `mesh`, `flow`, `solver`, `thermophysics`,
+`transported_scalars`, `boundaries`, `schemes`, and `time`.
 
 `turbulence` is the only optional key anywhere in the root schema. Omitting it
 selects `vreman_wall_function`. JSON `schema_version` remains `1`; wire version
-`4` is an internal typed-model format.
+`6` is an internal typed-model format.
 
 `CaseCompiler` closes and types the JSON, checks local enum, finite-number, and
 range constraints, canonicalizes the mesh, and publishes the typed model. It
@@ -72,6 +75,9 @@ required boundary, scheme, and time-control field are explicit.
   },
   "turbulence": {
     "model": "none"
+  },
+  "thermophysics": {
+    "data_file": "thermophysics.d"
   },
   "transported_scalars": [],
   "boundaries": {
@@ -272,6 +278,56 @@ therefore not, by itself, an absolute-pressure authority. The later
 thermodynamics plan supplies the global mass closure for a valid closed-mass
 boundary plan.
 
+## Thermophysics
+
+`thermophysics` is required and closed, with exactly one key:
+
+```json
+"thermophysics": {"data_file": "thermophysics.d"}
+```
+
+`data_file` is a unique direct-root filename ending in `.d`. Rank 0 reads that
+file once and parses the strict `HUNDUN_THERMOPHYSICS_V1` token format. Whitespace
+separates tokens and `#` begins a line comment. A minimal one-species file is:
+
+```text
+HUNDUN_THERMOPHYSICS_V1
+temperature_bounds 200 3000
+temperature_inversion 1e-12 32
+closed_mass_newton 1e-12 24 0.25
+species_count 1
+species air
+molecular_weight 28.96546
+temperature_switch 1000
+nasa7_low 3.5 0 0 0 0 0 0
+nasa7_high 3.5 0 0 0 0 0 0
+transport_sutherland 1.716e-5 273.15 110.4 0.71
+end_species
+end
+```
+
+The three global records respectively define the inclusive temperature interval,
+bounded enthalpy-to-temperature inversion tolerance/iteration count, and closed
+mass pressure-correction tolerance/iteration count/maximum relative step. The
+file declares 1 to 65 uniquely named species. Each species supplies molecular
+weight, an interior NASA-7 switch temperature, low/high seven-coefficient
+records, and exactly one transport record:
+
+- `transport_constant <mu> <k>`; or
+- `transport_sutherland <mu_ref> <T_ref> <S> <Pr>`.
+
+All numbers are finite and the physical scales and tolerances are positive.
+Iteration counts are bounded by 256. Validation proves `cp/R > 1` throughout
+both coefficient intervals and requires continuous `cp` at the switch. An
+input `h` jump within the strict acceptance tolerance is removed during cold
+compilation by replacing only the high-interval NASA integration constant;
+larger jumps are rejected. The canonical typed model is then shared by the
+thermodynamics and transport plans. The same validator guards root
+serialization and wire-v6 decoding, so a
+structurally or scientifically invalid typed thermophysical payload is never
+published. Only the compact typed records and source filename survive in
+`ValidatedModel`; source text is discarded after compilation.
+
 ## Transported-scalar catalog
 
 `transported_scalars` is a required closed array and may be empty. It is the
@@ -408,6 +464,7 @@ bounds remain explicit for every control kind.
 | Key | Accepted value |
 | --- | --- |
 | `units` | `SI` |
+| `thermophysics.data_file` | unique direct-root name ending in `.d` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
 | `mesh.stl_file` | `null` or a unique direct-root name ending in `.stl` |
 
@@ -430,18 +487,19 @@ shock/supersonic settings; those are not cross-field decisions made by
 | referenced files | 256 |
 | direct-root filename | 255 bytes |
 | each referenced file | 64 MiB |
-| typed MPI wire payload | 128 KiB |
+| thermophysical `.d` file | 4 MiB |
+| typed MPI wire payload | 256 KiB |
 
 The deterministic nonzero fingerprint hashes a versioned semantic contract
 followed by the complete canonical typed model: mesh geometry and normalized
 focus regions; limits; turbulence and pressure-reference kinds; all six faces
 and all scalar entries in face order; all schemes; every time-control field;
-normalized reference kinds/names; and exact referenced file bytes plus byte
-counts. Floating-point values are hashed by their canonical IEEE-754 binary64
-bit patterns. JSON whitespace, object-key order, normalization-equivalent focus
-input, and `-0.0` therefore do not affect identity, while any typed setting or
-referenced-byte change does.
+the validated typed thermophysical model; normalized reference kinds/names; and
+exact referenced file bytes plus byte counts. Floating-point values are hashed
+by their canonical IEEE-754 binary64 bit patterns. JSON whitespace, object-key
+order, normalization-equivalent focus input, and `-0.0` therefore do not affect
+identity, while any typed setting or referenced-byte change does.
 
-`FieldRegistry::freeze_for_test()` remains a synthetic-test mechanism only. No
-production case compile freezes the field schema; all capabilities must
-register before the single production freeze.
+`FieldRegistry::freeze()` publishes one immutable field schema after all
+capabilities register. No case-input compilation freezes this registry early;
+the production bundle compiler owns the single freeze point.

@@ -250,7 +250,7 @@ The plan deliberately keeps public headers coarse and implementation files focus
 
 **Interfaces:**
 - Consumes: `Status`, `Int3`, `Real3` from Task 2 and bundled yyjson.
-- Produces: `CaseSpec`, `ValidatedModel`, `CaseCompiler::load_and_compile(MPI_Comm, const std::filesystem::path&)`, `FieldRegistry::declare_field`, and a reusable `FieldRegistry::freeze_for_test()` mechanism; it does not freeze the production schema.
+- Produces: `CaseSpec`, `ValidatedModel`, `CaseCompiler::load_and_compile(MPI_Comm, const std::filesystem::path&)`, `FieldRegistry::declare_field`, and a reusable `FieldRegistry::freeze()` mechanism; it does not freeze the production schema.
 
 ```cpp
 enum class GeometryKind : std::uint8_t { uniform, tensor_stretched };
@@ -269,7 +269,7 @@ class FieldRegistry {
  public:
   Status declare_field(std::string_view stable_name, std::uint8_t components,
                        std::uint8_t ghost_width, FieldId& out);
-  Status freeze_for_test(FieldSchema& out);
+  Status freeze(FieldSchema& out);
 };
 ```
 
@@ -294,7 +294,7 @@ class FieldRegistry {
 
 - [ ] **Step 4: Implement registration without production freeze.**
 
-  `declare_field` assigns deterministic stable IDs by registration order, rejects duplicates and post-freeze mutation, and stores component/ghost requirements. `freeze_for_test` exists only to verify the mechanism on a synthetic registry; product code cannot call it before Task 18.
+  `declare_field` assigns deterministic stable IDs by registration order, rejects duplicates and post-freeze mutation, and stores component/ghost requirements. `freeze` publishes the immutable schema; product code does not call it before Task 18's single bundle freeze.
 
 - [ ] **Step 5: Verify MPI identity and root-only I/O.**
 

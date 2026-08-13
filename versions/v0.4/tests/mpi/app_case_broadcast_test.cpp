@@ -24,6 +24,29 @@ using hundun::v04::Status;
 using hundun::v04::StatusCode;
 using hundun::v04::ValidatedModel;
 
+constexpr std::string_view kThermophysics = R"data(
+HUNDUN_THERMOPHYSICS_V1
+temperature_bounds 200 3000
+temperature_inversion 1e-12 32
+closed_mass_newton 1e-12 24 0.25
+species_count 2
+species O2
+molecular_weight 31.9988
+temperature_switch 1000
+nasa7_low 3.5 0 0 0 0 0 0
+nasa7_high 3.5 0 0 0 0 0 0
+transport_sutherland 1.919e-5 273.15 139 0.72
+end_species
+species N2
+molecular_weight 28.0134
+temperature_switch 1000
+nasa7_low 3.5 0 0 0 0 0 0
+nasa7_high 3.5 0 0 0 0 0 0
+transport_sutherland 1.663e-5 273.15 107 0.72
+end_species
+end
+)data";
+
 int g_open_count = 0;
 int g_observed_rank = -1;
 
@@ -96,6 +119,7 @@ int main(int argc, char** argv) {
     fs::remove_all(root, error);
     fs::create_directories(root);
     write_file(root / "profile.d", "0 1\n1 2\n");
+    write_file(root / "thermophysics.d", kThermophysics);
     write_file(root / "shape.stl", "solid shape\nendsolid shape\n");
     write_file(root / "case.json", R"json({
       "schema_version": 1,
@@ -127,6 +151,7 @@ int main(int argc, char** argv) {
       },
       "solver": {"coupling": "PISO", "pressure_correctors": 2},
       "turbulence": {"model": "vreman_wall_function"},
+      "thermophysics": {"data_file": "thermophysics.d"},
       "transported_scalars": [
         {"stable_name":"O2","role":"species"},
         {"stable_name":"mixture_fraction","role":"passive_scalar"}
@@ -218,9 +243,12 @@ int main(int argc, char** argv) {
       rank, "wire publishes typed schemes and time control");
   passed &= expect(first.data_files.size() == 1U &&
                        first.data_files[0] == "profile.d" &&
+                       first.thermophysics.data_file ==
+                           fs::path("thermophysics.d") &&
+                       first.thermophysics.species.size() == 2U &&
                        first.stl_file == fs::path("shape.stl"),
                    rank, "relative references survive the wire");
-  passed &= expect(rank == 0 ? g_open_count == 3 : g_open_count == 0, rank,
+  passed &= expect(rank == 0 ? g_open_count == 4 : g_open_count == 0, rank,
                    "only rank zero opens JSON/data/STL");
   passed &= expect(rank == 0 ? g_observed_rank == 0 : g_observed_rank == -1,
                    rank, "observer records only rank zero");
@@ -240,8 +268,47 @@ int main(int argc, char** argv) {
                    "mutated fingerprint is identical");
   passed &= expect(mutated.fingerprint != first_fingerprint, rank,
                    "referenced bytes affect fingerprint");
-  passed &= expect(rank == 0 ? g_open_count == 3 : g_open_count == 0, rank,
+  passed &= expect(rank == 0 ? g_open_count == 4 : g_open_count == 0, rank,
                    "recompile remains root-only I/O");
+
+  if (rank == 0) {
+    write_file(root / "profile.d", "0 1\n1 2\n");
+    std::string changed_thermophysics{kThermophysics};
+    const std::string original_viscosity{"1.919e-5"};
+    const std::size_t viscosity =
+        changed_thermophysics.find(original_viscosity);
+    if (viscosity != std::string::npos) {
+      changed_thermophysics.replace(viscosity, original_viscosity.size(),
+                                    "2.019e-5");
+    }
+    write_file(root / "thermophysics.d", changed_thermophysics);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  reset_observer();
+  ValidatedModel thermophysics_mutated;
+  const Status thermophysics_mutated_status = CaseCompiler::load_and_compile(
+      MPI_COMM_WORLD, rank == 0 ? root : nonroot_poison,
+      thermophysics_mutated);
+  passed &= expect(static_cast<bool>(thermophysics_mutated_status), rank,
+                   "mutated thermophysics recompiles");
+  passed &= expect(
+      same_u64(thermophysics_mutated.fingerprint, MPI_COMM_WORLD), rank,
+      "thermophysics-mutated fingerprint is identical");
+  passed &= expect(thermophysics_mutated.fingerprint != first_fingerprint &&
+                       thermophysics_mutated.thermophysics.species.size() ==
+                           2U &&
+                       thermophysics_mutated.thermophysics.species[0]
+                               .viscosity_reference ==
+                           2.019e-5,
+                   rank,
+                   "thermophysics bytes and typed values affect fingerprint");
+  passed &= expect(rank == 0 ? g_open_count == 4 : g_open_count == 0, rank,
+                   "thermophysics is opened exactly once on rank zero");
+
+  if (rank == 0) {
+    write_file(root / "thermophysics.d", kThermophysics);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
 
   if (rank == 0) {
     write_file(root / "case.json", "{ invalid json");

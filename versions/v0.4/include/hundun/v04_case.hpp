@@ -70,6 +70,7 @@ enum class ConvectionScheme : std::uint8_t {
 };
 enum class DiffusionScheme : std::uint8_t { central2 };
 enum class TimeScheme : std::uint8_t { backward_euler, variable_bdf2 };
+enum class TransportLaw : std::uint8_t { constant, sutherland };
 
 struct CaseSpec {
   std::filesystem::path root;
@@ -162,6 +163,32 @@ struct TimeControlSpec {
   double maximum_bdf_ratio{5.0};
 };
 
+struct SpeciesThermophysicalSpec {
+  std::string stable_name;
+  double molecular_weight{};
+  double temperature_switch{};
+  std::array<double, 7U> nasa7_low{};
+  std::array<double, 7U> nasa7_high{};
+  TransportLaw transport_law{TransportLaw::constant};
+  double viscosity_reference{};
+  double transport_reference_temperature{};
+  double sutherland_temperature{};
+  double prandtl{};
+  double conductivity{};
+};
+
+struct ThermophysicalSpec {
+  std::filesystem::path data_file;
+  double minimum_temperature{};
+  double maximum_temperature{};
+  double temperature_relative_tolerance{};
+  std::uint32_t maximum_temperature_iterations{};
+  double closed_mass_relative_tolerance{};
+  std::uint32_t maximum_closed_mass_iterations{};
+  double maximum_closed_mass_relative_step{};
+  std::vector<SpeciesThermophysicalSpec> species;
+};
+
 struct ValidatedModel {
   CartesianMeshSpec mesh;
   TurbulenceKind turbulence{TurbulenceKind::vreman_wall_function};
@@ -170,6 +197,7 @@ struct ValidatedModel {
   std::array<BoundaryFaceSpec, 6U> boundaries;
   SchemeSpec schemes;
   TimeControlSpec time;
+  ThermophysicalSpec thermophysics;
   std::vector<TransportedScalarSpec> transported_scalars;
   std::vector<std::filesystem::path> data_files;
   std::optional<std::filesystem::path> stl_file;

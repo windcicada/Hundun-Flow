@@ -282,7 +282,12 @@ class AttemptTransaction {
   Status collective_finish(MPI_Comm communicator,
                            Status local_status) noexcept;
 
+  bool active() const noexcept { return active_; }
+  bool finished() const noexcept { return finished_; }
   bool committed() const noexcept { return committed_; }
+  std::uint64_t attempt_identity() const noexcept {
+    return attempt_identity_;
+  }
   int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
   bool pending_cache_valid(RevisionSlotId slot) const noexcept;
   RevisionToken pending_cache(RevisionSlotId slot) const noexcept;
@@ -302,7 +307,9 @@ class AttemptTransaction {
   std::vector<std::uint8_t> revised_fields_;
   StorageIdentity bound_layers_identity_{};
   Status attempt_status_{};
+  std::uint64_t attempt_identity_{};
   bool active_{};
+  bool finished_{};
   bool committed_{};
   int lowest_failing_rank_{-1};
 };

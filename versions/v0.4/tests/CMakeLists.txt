@@ -6,6 +6,59 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_physics_thermo_test
+  unit/physics_thermo_test.cpp)
+target_link_libraries(v04_physics_thermo_test PRIVATE hundun_v04_core)
+add_test(NAME v04_physics_thermo COMMAND v04_physics_thermo_test)
+
+add_executable(v04_physics_thermophysical_compiler_test
+  mpi/physics_thermophysical_compiler_test.cpp)
+target_include_directories(v04_physics_thermophysical_compiler_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_physics_thermophysical_compiler_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_physics_thermophysical_compiler_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_physics_thermophysical_compiler_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_physics_thermophysical_compiler_${rank_count}
+    PROPERTIES
+      PROCESSORS "${rank_count}"
+      TIMEOUT 30)
+endforeach()
+
+add_executable(v04_physics_transport_test
+  unit/physics_transport_test.cpp)
+target_link_libraries(v04_physics_transport_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_physics_transport COMMAND v04_physics_transport_test)
+set_tests_properties(v04_physics_transport PROPERTIES TIMEOUT 30)
+
+add_executable(v04_physics_contribution_test
+  unit/physics_contribution_test.cpp)
+target_link_libraries(v04_physics_contribution_test PRIVATE hundun_v04_core)
+add_test(NAME v04_physics_contribution COMMAND v04_physics_contribution_test)
+
+add_executable(v04_physics_closed_mass_test
+  numerical/physics_closed_mass_test.cpp)
+target_link_libraries(v04_physics_closed_mass_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_physics_closed_mass_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_physics_closed_mass_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_physics_closed_mass_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 30)
+endforeach()
+
 add_executable(v04_bc_compile_test
   unit/bc_compile_test.cpp)
 target_link_libraries(v04_bc_compile_test PRIVATE

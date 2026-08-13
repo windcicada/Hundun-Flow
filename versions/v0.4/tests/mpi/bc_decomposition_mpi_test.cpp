@@ -235,7 +235,7 @@ std::uint64_t registry_observable(const FieldRegistry& registry,
                                   bool& ok) {
   FieldRegistry copy = registry;
   FieldSchema schema;
-  const Status status = copy.freeze_for_test(schema);
+  const Status status = copy.freeze(schema);
   ok = static_cast<bool>(status);
   std::uint64_t hash = 1469598103934665603ULL;
   if (!status) {

@@ -2,6 +2,8 @@
 
 #include "hundun/v04_execution.hpp"
 
+#include "core_arena_detail.hpp"
+
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -97,6 +99,8 @@ Status AttemptTransaction::create(std::size_t field_capacity,
     out.committed_ = false;
     out.lowest_failing_rank_ = -1;
     out.attempt_status_ = {};
+    out.attempt_identity_ = 0U;
+    out.finished_ = false;
     return {};
   } catch (const std::bad_alloc&) {
     return {StatusCode::allocation_failure, 0U};
@@ -110,6 +114,11 @@ Status AttemptTransaction::begin(StateLayers& layers) noexcept {
     attempt_status_ = {StatusCode::invalid_plan, kTransactionState};
     return attempt_status_;
   }
+  const std::uint64_t candidate_attempt_identity = detail::issue_identity();
+  if (candidate_attempt_identity == 0U) {
+    attempt_status_ = {StatusCode::invalid_plan, kTransactionState};
+    return attempt_status_;
+  }
   for (std::size_t slot = 0U; slot < pending_caches_.size(); ++slot) {
     pending_caches_[slot] = RevisionToken{0U};
     pending_cache_dependency_counts_[slot] = 0U;
@@ -120,7 +129,9 @@ Status AttemptTransaction::begin(StateLayers& layers) noexcept {
   dependency_count_ = 0U;
   layers_ = &layers;
   active_ = true;
+  finished_ = false;
   committed_ = false;
+  attempt_identity_ = candidate_attempt_identity;
   lowest_failing_rank_ = -1;
   attempt_status_ = {};
   if (revised_fields_.size() != layers.field_count_) {
@@ -382,6 +393,7 @@ Status AttemptTransaction::collective_finish(MPI_Comm communicator,
     layers_->rotate_commit();
     active_ = false;
     layers_ = nullptr;
+    finished_ = true;
     committed_ = true;
     lowest_failing_rank_ = -1;
     return {};
@@ -420,6 +432,7 @@ void AttemptTransaction::discard_attempt() noexcept {
   }
   active_ = false;
   layers_ = nullptr;
+  finished_ = true;
   committed_ = false;
 }
 
