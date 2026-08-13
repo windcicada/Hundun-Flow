@@ -39,9 +39,18 @@ class FieldSchema {
 
 class FieldRegistry {
  public:
+  FieldRegistry() = default;
+  FieldRegistry(const FieldRegistry&) = default;
+  FieldRegistry& operator=(const FieldRegistry&) = default;
+  FieldRegistry(FieldRegistry&&) noexcept = default;
+  FieldRegistry& operator=(FieldRegistry&&) noexcept = default;
+
   Status declare_field(std::string_view stable_name, std::uint8_t components,
                        std::uint8_t ghost_width, FieldId& out);
+  Status require_field(std::string_view stable_name, std::uint8_t components,
+                       std::uint8_t minimum_ghost_width, FieldId& out);
   Status freeze_for_test(FieldSchema& out);
+  PlanFingerprint fingerprint() const noexcept;
 
  private:
   std::vector<FieldDescriptor> fields_;

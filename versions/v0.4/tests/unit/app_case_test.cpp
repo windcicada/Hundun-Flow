@@ -7,6 +7,8 @@
 
 #include <mpi.h>
 
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -25,9 +27,12 @@ using hundun::v04::FieldId;
 using hundun::v04::FieldRegistry;
 using hundun::v04::FieldSchema;
 using hundun::v04::GeometryKind;
+using hundun::v04::PressureReferenceKind;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
 using hundun::v04::TimeControlKind;
+using hundun::v04::TimeScheme;
+using hundun::v04::TransportedScalarRole;
 using hundun::v04::TurbulenceKind;
 using hundun::v04::ValidatedModel;
 
@@ -67,7 +72,7 @@ constexpr std::string_view kTensorMesh = R"json({
 std::string case_json(std::string_view mesh,
                       std::string_view flow = R"json({
   "model":"single_phase_low_mach_compressible",
-  "pressure_closure":"local_absolute_pressure_drho_dp",
+  "pressure_reference":"boundary_absolute",
   "reacting":false
 })json",
                       std::string_view solver = R"json({
@@ -76,13 +81,25 @@ std::string case_json(std::string_view mesh,
                       std::string_view turbulence =
                           R"json({"model":"none"})json",
                       std::string_view time =
-                          R"json({"control":"fixed"})json") {
+                          R"json({"control":"fixed","scheme":"backward_euler","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.25,"retry_factor":0.5,"maximum_retries":8,"minimum_bdf_ratio":0.2,"maximum_bdf_ratio":5.0})json") {
+  constexpr std::string_view boundaries = R"json({
+    "x_min":{"flow_kind":"velocity_inlet","thermal_kind":"none","velocity":[1,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "x_max":{"flow_kind":"pressure_outlet","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[-1,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":true,"scalars":[]},
+    "y_min":{"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "y_max":{"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "z_min":{"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "z_max":{"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]}
+  })json";
+  constexpr std::string_view schemes = R"json({"momentum":"limited_central2","enthalpy":"limited_central2","species":"tvd2","passive_scalar":"tvd2","diffusion":"central2","limiter":1.0})json";
   return std::string{"{\"schema_version\":1,\"units\":\"SI\",\"mesh\":"} +
          std::string(mesh) + ",\"flow\":" + std::string(flow) +
          ",\"solver\":" + std::string(solver) +
          (turbulence.empty()
               ? std::string{}
               : ",\"turbulence\":" + std::string(turbulence)) +
+         ",\"transported_scalars\":[]" +
+         ",\"boundaries\":" + std::string(boundaries) +
+         ",\"schemes\":" + std::string(schemes) +
          ",\"time\":" + std::string(time) + "}";
 }
 
@@ -91,7 +108,8 @@ class ScratchCase {
   explicit ScratchCase(std::string_view label) {
     static std::uint64_t sequence = 0;
     root_ = fs::temp_directory_path() /
-            ("hundun-v04-case-" + std::string(label) + "-" +
+            ("hundun-v04-case-" + std::to_string(::getpid()) + "-" +
+             std::string(label) + "-" +
              std::to_string(++sequence));
     std::error_code error;
     fs::remove_all(root_, error);
@@ -135,6 +153,29 @@ bool expect(bool condition, std::string_view description) {
 
 Status compile(const fs::path& root, ValidatedModel& model) {
   return CaseCompiler::load_and_compile(MPI_COMM_SELF, root, model);
+}
+
+bool replace_once(std::string& text, std::string_view from,
+                  std::string_view to) {
+  const std::size_t position = text.find(from);
+  if (position == std::string::npos) {
+    return false;
+  }
+  text.replace(position, from.size(), to);
+  return true;
+}
+
+bool compile_json_fingerprint(std::string_view label, std::string_view json,
+                              std::uint64_t& out) {
+  ScratchCase scratch(label);
+  scratch.write("case.json", json);
+  ValidatedModel model;
+  const Status status = compile(scratch.root(), model);
+  if (!expect(static_cast<bool>(status), label)) {
+    return false;
+  }
+  out = model.fingerprint;
+  return true;
 }
 
 bool rejects(std::string_view label, std::string_view json,
@@ -231,6 +272,8 @@ bool test_valid_fixture() {
   passed &= expect(model.mesh.limits.max_global_cells == 4096 &&
                        model.mesh.limits.max_memory_bytes_per_rank == 67108864,
                    "fixture publishes hard limits");
+  passed &= expect(model.transported_scalars.empty(),
+                   "fixture publishes an explicit empty scalar catalog");
   passed &= expect(model.fingerprint != 0U, "fixture has fingerprint");
   return passed;
 }
@@ -337,6 +380,222 @@ bool test_every_typed_mesh_field_affects_fingerprint() {
   return passed;
 }
 
+bool test_typed_case_fields_and_fingerprint() {
+  const std::string baseline = case_json(kUniformMesh);
+  std::uint64_t baseline_fingerprint = 0U;
+  bool passed = compile_json_fingerprint(
+      "typed-fingerprint-baseline", baseline, baseline_fingerprint);
+  const auto fingerprint_variant = [&](std::string_view label,
+                                       std::string_view from,
+                                       std::string_view to) {
+    std::string variant = baseline;
+    bool local = expect(replace_once(variant, from, to), label);
+    std::uint64_t fingerprint = 0U;
+    local &= compile_json_fingerprint(label, variant, fingerprint);
+    local &= expect(fingerprint != baseline_fingerprint, label);
+    return local;
+  };
+  passed &= fingerprint_variant(
+      "transported scalar catalog affects fingerprint",
+      "\"transported_scalars\":[]",
+      "\"transported_scalars\":[{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\"}]");
+  passed &= fingerprint_variant(
+      "pressure reference affects fingerprint",
+      "\"pressure_reference\":\"boundary_absolute\"",
+      "\"pressure_reference\":\"closed_mass\"");
+  passed &= fingerprint_variant(
+      "boundary vector affects fingerprint", "\"velocity\":[1,0,0]",
+      "\"velocity\":[2,0,0]");
+  passed &= fingerprint_variant(
+      "boundary enum affects fingerprint", "\"flow_kind\":\"velocity_inlet\"",
+      "\"flow_kind\":\"static_state_inlet\"");
+  passed &= fingerprint_variant(
+      "boundary scalar data affects fingerprint", "\"scalars\":[]",
+      "\"scalars\":[{\"stable_name\":\"mixture_fraction\",\"kind\":\"dirichlet\",\"value\":1,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]");
+  passed &= fingerprint_variant(
+      "boundary backflow flag affects fingerprint", "\"allow_backflow\":false",
+      "\"allow_backflow\":true");
+  passed &= fingerprint_variant(
+      "scheme affects fingerprint", "\"enthalpy\":\"limited_central2\"",
+      "\"enthalpy\":\"central2\"");
+  passed &= fingerprint_variant(
+      "scheme limiter affects fingerprint", "\"limiter\":1.0",
+      "\"limiter\":0.5");
+  passed &= fingerprint_variant(
+      "time scheme affects fingerprint", "\"scheme\":\"backward_euler\"",
+      "\"scheme\":\"variable_bdf2\"");
+  passed &= fingerprint_variant(
+      "time retry count affects fingerprint", "\"maximum_retries\":8",
+      "\"maximum_retries\":9");
+
+  ScratchCase typed("typed-publication");
+  std::string typed_json = baseline;
+  passed &= expect(replace_once(
+                       typed_json, "\"scalars\":[]",
+                       "\"scalars\":[{\"stable_name\":\"mixture_fraction\",\"kind\":\"normal_flux\",\"value\":0.125,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]"),
+                   "typed scalar fixture mutation");
+  typed.write("case.json", typed_json);
+  ValidatedModel model;
+  passed &= expect(static_cast<bool>(compile(typed.root(), model)) &&
+                       model.boundaries[0].velocity.x == 1.0 &&
+                       model.boundaries[0].scalars.size() == 1U &&
+                       model.boundaries[0].scalars[0].stable_name ==
+                           "mixture_fraction" &&
+                       model.boundaries[1].allow_backflow &&
+                       model.schemes.momentum ==
+                           hundun::v04::ConvectionScheme::limited_central2 &&
+                       model.time.initial_dt == 0.001 &&
+                       model.time.maximum_retries == 8U,
+                   "all typed case sections are published");
+  return passed;
+}
+
+bool test_transported_scalar_catalog() {
+  const std::string baseline = case_json(kUniformMesh);
+  std::string valid = baseline;
+  bool passed = expect(
+      replace_once(
+          valid, "\"transported_scalars\":[]",
+          "\"transported_scalars\":[{\"stable_name\":\"O2\",\"role\":\"species\"},{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\"}]"),
+      "catalog valid fixture mutation");
+  ScratchCase valid_case("transported-scalars-valid");
+  valid_case.write("case.json", valid);
+  ValidatedModel model;
+  passed &= expect(
+      static_cast<bool>(compile(valid_case.root(), model)) &&
+          model.transported_scalars.size() == 2U &&
+          model.transported_scalars[0].stable_name == "O2" &&
+          model.transported_scalars[0].role == TransportedScalarRole::species &&
+          model.transported_scalars[1].stable_name == "mixture_fraction" &&
+          model.transported_scalars[1].role ==
+              TransportedScalarRole::passive_scalar,
+      "catalog is retained in declared stable order");
+
+  const auto reject_catalog = [&](std::string_view label,
+                                  std::string_view catalog) {
+    std::string json = baseline;
+    return expect(replace_once(json, "\"transported_scalars\":[]", catalog),
+                  label) &&
+           rejects(label, json);
+  };
+  std::string missing = baseline;
+  passed &= expect(replace_once(missing, "\"transported_scalars\":[],", ""),
+                   "missing transported scalar catalog mutation") &&
+            rejects("missing transported scalar catalog", missing);
+  passed &= reject_catalog("transported scalar catalog must be an array",
+                            "\"transported_scalars\":{}");
+  passed &= reject_catalog(
+      "duplicate transported scalar names",
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\"},{\"stable_name\":\"z\",\"role\":\"passive_scalar\"}]");
+  passed &= reject_catalog(
+      "reserved transported scalar U",
+      "\"transported_scalars\":[{\"stable_name\":\"U\",\"role\":\"species\"}]");
+  passed &= reject_catalog(
+      "reserved transported scalar pi",
+      "\"transported_scalars\":[{\"stable_name\":\"pi\",\"role\":\"species\"}]");
+  passed &= reject_catalog(
+      "reserved transported scalar h",
+      "\"transported_scalars\":[{\"stable_name\":\"h\",\"role\":\"passive_scalar\"}]");
+  passed &= reject_catalog(
+      "unknown transported scalar role",
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"temperature\"}]");
+  passed &= reject_catalog(
+      "unknown transported scalar key",
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\",\"units\":\"1\"}]");
+  passed &= reject_catalog(
+      "invalid transported scalar name",
+      "\"transported_scalars\":[{\"stable_name\":\"bad/name\",\"role\":\"species\"}]");
+
+  std::string oversized = "\"transported_scalars\":[";
+  for (std::size_t index = 0U; index < 65U; ++index) {
+    if (index != 0U) {
+      oversized += ',';
+    }
+    oversized += "{\"stable_name\":\"s_" + std::to_string(index) +
+                 "\",\"role\":\"species\"}";
+  }
+  oversized += ']';
+  passed &= reject_catalog("transported scalar catalog limit", oversized);
+
+  std::string species = baseline;
+  std::string passive = baseline;
+  passed &= expect(
+      replace_once(species, "\"transported_scalars\":[]",
+                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\"}]"),
+      "species fingerprint fixture mutation");
+  passed &= expect(
+      replace_once(passive, "\"transported_scalars\":[]",
+                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\"}]"),
+      "passive scalar fingerprint fixture mutation");
+  std::uint64_t species_fingerprint = 0U;
+  std::uint64_t passive_fingerprint = 0U;
+  passed &= compile_json_fingerprint("species catalog fingerprint", species,
+                                     species_fingerprint);
+  passed &= compile_json_fingerprint("passive catalog fingerprint", passive,
+                                     passive_fingerprint);
+  passed &= expect(species_fingerprint != passive_fingerprint,
+                   "transported scalar role affects fingerprint");
+  return passed;
+}
+
+bool test_typed_case_rejections() {
+  const std::string baseline = case_json(kUniformMesh);
+  const auto reject_variant = [&](std::string_view label,
+                                  std::string_view from,
+                                  std::string_view to) {
+    std::string variant = baseline;
+    return expect(replace_once(variant, from, to), label) &&
+           rejects(label, variant);
+  };
+  bool passed = true;
+  passed &= reject_variant(
+      "missing boundary field", "\"flow_kind\":\"velocity_inlet\",", "");
+  passed &= reject_variant(
+      "unknown boundary field", "\"flow_kind\":\"velocity_inlet\"",
+      "\"flow_kind\":\"velocity_inlet\",\"unknown\":0");
+  passed &= reject_variant(
+      "unknown boundary enum", "\"flow_kind\":\"velocity_inlet\"",
+      "\"flow_kind\":\"farfield\"");
+  passed &= reject_variant(
+      "invalid boundary Mach limit", "\"mach_limit\":0.95",
+      "\"mach_limit\":1.0");
+  passed &= reject_variant(
+      "negative boundary relaxation", "\"relaxation\":1",
+      "\"relaxation\":-0.1");
+  passed &= reject_variant(
+      "duplicate scalar names", "\"scalars\":[]",
+      "\"scalars\":[{\"stable_name\":\"z\",\"kind\":\"dirichlet\",\"value\":0,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0},{\"stable_name\":\"z\",\"kind\":\"zero_gradient\",\"value\":1,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]");
+  passed &= reject_variant(
+      "invalid scalar stable name", "\"scalars\":[]",
+      "\"scalars\":[{\"stable_name\":\"bad/name\",\"kind\":\"dirichlet\",\"value\":0,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]");
+  passed &= reject_variant(
+      "unknown scalar enum", "\"scalars\":[]",
+      "\"scalars\":[{\"stable_name\":\"z\",\"kind\":\"fixed_value\",\"value\":0,\"backflow_kind\":\"zero_gradient\",\"backflow_value\":0}]");
+  passed &= reject_variant(
+      "missing scheme field", "\"diffusion\":\"central2\",", "");
+  passed &= reject_variant(
+      "unknown convection scheme", "\"momentum\":\"limited_central2\"",
+      "\"momentum\":\"upwind1\"");
+  passed &= reject_variant(
+      "scheme limiter out of range", "\"limiter\":1.0",
+      "\"limiter\":1.1");
+  passed &= reject_variant(
+      "missing time field", "\"maximum_retries\":8,", "");
+  passed &= reject_variant(
+      "unknown time scheme", "\"scheme\":\"backward_euler\"",
+      "\"scheme\":\"crank_nicolson\"");
+  passed &= reject_variant(
+      "time step outside limits", "\"initial_dt\":0.001",
+      "\"initial_dt\":1.0");
+  passed &= reject_variant(
+      "zero retry count", "\"maximum_retries\":8",
+      "\"maximum_retries\":0");
+  passed &= reject_variant(
+      "invalid BDF ratio interval", "\"minimum_bdf_ratio\":0.2",
+      "\"minimum_bdf_ratio\":6.0");
+  return passed;
+}
+
 bool test_mesh_rejections() {
   bool passed = true;
   passed &= rejects("unknown mesh key", case_json(R"json({
@@ -433,36 +692,37 @@ bool test_case_and_reference_security() {
                      "missing case.json is rejected");
   }
   passed &= rejects("recursive duplicate keys",
-                    std::string{"{\"schema_version\":1,\"units\":\"SI\",\"mesh\":"} +
-                        std::string(kUniformMesh) +
-                        ",\"flow\":{\"model\":\"single_phase_low_mach_compressible\",\"model\":\"constant_density\",\"pressure_closure\":\"local_absolute_pressure_drho_dp\",\"reacting\":false},\"solver\":{\"coupling\":\"PISO\",\"pressure_correctors\":2},\"turbulence\":{\"model\":\"none\"},\"time\":{\"control\":\"fixed\"}}");
-  passed &= rejects("unknown units", std::string{"{\"schema_version\":1,\"units\":\"CGS\",\"mesh\":"} +
-                        std::string(kUniformMesh) +
-                        ",\"flow\":{\"model\":\"single_phase_low_mach_compressible\",\"pressure_closure\":\"local_absolute_pressure_drho_dp\",\"reacting\":false},\"solver\":{\"coupling\":\"PISO\",\"pressure_correctors\":2},\"turbulence\":{\"model\":\"none\"},\"time\":{\"control\":\"fixed\"}}");
+                    case_json(kUniformMesh).replace(
+                        case_json(kUniformMesh).find("\"model\":"),
+                        std::string{"\"model\":"}.size(),
+                        "\"model\":\"single_phase_low_mach_compressible\",\"model\":"));
+  std::string unknown_units = case_json(kUniformMesh);
+  unknown_units.replace(unknown_units.find("\"SI\""), 4U, "\"CGS\"");
+  passed &= rejects("unknown units", unknown_units);
+  std::string unknown_top = case_json(kUniformMesh);
+  unknown_top.insert(unknown_top.find("\"mesh\""), "\"extra\":0,");
   passed &= rejects("unknown top-level key",
-                    std::string{"{\"schema_version\":1,\"units\":\"SI\",\"extra\":0,\"mesh\":"} +
-                        std::string(kUniformMesh) +
-                        ",\"flow\":{\"model\":\"single_phase_low_mach_compressible\",\"pressure_closure\":\"local_absolute_pressure_drho_dp\",\"reacting\":false},\"solver\":{\"coupling\":\"PISO\",\"pressure_correctors\":2},\"turbulence\":{\"model\":\"none\"},\"time\":{\"control\":\"fixed\"}}");
+                    unknown_top);
   passed &= rejects("constant density flow", case_json(
       kUniformMesh,
-      R"json({"model":"constant_density","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json"));
-  passed &= rejects("missing pressure closure", case_json(
+      R"json({"model":"constant_density","pressure_reference":"boundary_absolute","reacting":false})json"));
+  passed &= rejects("missing pressure reference", case_json(
       kUniformMesh,
       R"json({"model":"single_phase_low_mach_compressible","reacting":false})json"));
   passed &= rejects("reacting flow", case_json(
       kUniformMesh,
-      R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":true})json"));
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":true})json"));
   passed &= rejects("SIMPLE coupling", case_json(
-      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"SIMPLE","pressure_correctors":2})json"));
   passed &= rejects("PIMPLE coupling", case_json(
-      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PIMPLE","pressure_correctors":2})json"));
   passed &= rejects("wrong corrector count", case_json(
-      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PISO","pressure_correctors":3})json"));
   passed &= rejects("unsupported turbulence", case_json(
-      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PISO","pressure_correctors":2})json",
       R"json({"model":"smagorinsky"})json"));
 
@@ -530,7 +790,7 @@ bool test_case_and_reference_security() {
 
 bool test_defaults_and_enums() {
   ScratchCase defaults("defaults");
-  defaults.write("case.json", case_json(kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+  defaults.write("case.json", case_json(kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
                                          R"json({"coupling":"PISO","pressure_correctors":2})json", ""));
   ValidatedModel default_model;
   bool passed = expect(static_cast<bool>(compile(defaults.root(), default_model)) &&
@@ -538,14 +798,18 @@ bool test_defaults_and_enums() {
                                TurbulenceKind::vreman_wall_function,
                        "omitted turbulence selects the production default");
   ScratchCase enums("enums");
-  enums.write("case.json", case_json(kTensorMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_closure":"local_absolute_pressure_drho_dp","reacting":false})json",
+  enums.write("case.json", case_json(kTensorMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"closed_mass","reacting":false})json",
                                       R"json({"coupling":"PISO","pressure_correctors":2})json",
                                       R"json({"model":"wale"})json",
-                                      R"json({"control":"adaptive_acoustic"})json"));
+                                      R"json({"control":"adaptive_acoustic","scheme":"variable_bdf2","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.25,"retry_factor":0.5,"maximum_retries":8,"minimum_bdf_ratio":0.2,"maximum_bdf_ratio":5.0})json"));
   ValidatedModel enum_model;
   passed &= expect(static_cast<bool>(compile(enums.root(), enum_model)) &&
                        enum_model.turbulence == TurbulenceKind::wale &&
-                       enum_model.time_control == TimeControlKind::adaptive_acoustic,
+                       enum_model.pressure_reference ==
+                           PressureReferenceKind::closed_mass &&
+                       enum_model.time.control ==
+                           TimeControlKind::adaptive_acoustic &&
+                       enum_model.time.scheme == TimeScheme::variable_bdf2,
                    "supported turbulence and time enums compile");
   return passed;
 }
@@ -613,6 +877,9 @@ int main(int argc, char** argv) {
   passed &= test_valid_fixture();
   passed &= test_tensor_normalization_and_fingerprint();
   passed &= test_every_typed_mesh_field_affects_fingerprint();
+  passed &= test_typed_case_fields_and_fingerprint();
+  passed &= test_transported_scalar_catalog();
+  passed &= test_typed_case_rejections();
   passed &= test_mesh_rejections();
   passed &= test_case_and_reference_security();
   passed &= test_defaults_and_enums();

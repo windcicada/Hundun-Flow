@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -37,15 +38,20 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint8_t kWireVersion = 2U;
+constexpr std::uint8_t kWireVersion = 5U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
+constexpr std::size_t kMaxScalarsPerFace = 64U;
+constexpr std::size_t kMaxTransportedScalars = 64U;
+constexpr std::size_t kMaxStableNameBytes = 255U;
 constexpr std::string_view kSemanticContract =
-    "HUNDUN-FLOW-v0.4-case-wire-v2|input-schema=1|units=SI|"
+    "HUNDUN-FLOW-v0.4-case-wire-v5|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
-    "pressure_closure=local_absolute_pressure_drho_dp|reacting=false|"
-    "coupling=PISO|pressure_correctors=2";
+    "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
+    "coupling=PISO|pressure_correctors=2|transported-scalars=typed-catalog|"
+    "boundaries=typed-six-face|"
+    "schemes=typed|time=typed";
 
 static_assert(std::is_nothrow_move_assignable_v<ValidatedModel>,
               "ValidatedModel publication must not allocate or throw");
@@ -324,8 +330,9 @@ bool root_has_case_keys(yyjson_val* root) {
   if (!yyjson_is_obj(root)) {
     return false;
   }
-  constexpr std::array<std::string_view, 6U> required{
-      "schema_version", "units", "mesh", "flow", "solver", "time"};
+  constexpr std::array<std::string_view, 9U> required{
+      "schema_version", "units", "mesh", "flow", "solver", "boundaries",
+      "schemes", "time", "transported_scalars"};
   for (const std::string_view key : required) {
     if (yyjson_obj_getn(root, key.data(), key.size()) == nullptr) {
       return false;
@@ -349,6 +356,13 @@ bool equals(std::optional<std::string_view> value,
             std::string_view expected) noexcept {
   return value.has_value() && *value == expected;
 }
+
+bool finite_real(yyjson_val* value, double& out) noexcept;
+bool parse_real3(yyjson_val* value, Real3& out) noexcept;
+bool valid_name(std::string_view value) noexcept;
+bool valid_boundary(const BoundaryFaceSpec& face) noexcept;
+bool valid_schemes(const SchemeSpec& schemes) noexcept;
+bool valid_time(const TimeControlSpec& time) noexcept;
 
 bool parse_geometry(std::string_view value, GeometryKind& out) noexcept {
   if (value == "uniform") {
@@ -393,6 +407,240 @@ bool parse_time_control(std::string_view value,
     return true;
   }
   return false;
+}
+
+bool parse_pressure_reference(std::string_view value,
+                              PressureReferenceKind& out) noexcept {
+  if (value == "boundary_absolute") {
+    out = PressureReferenceKind::boundary_absolute;
+    return true;
+  }
+  if (value == "closed_mass") {
+    out = PressureReferenceKind::closed_mass;
+    return true;
+  }
+  return false;
+}
+
+bool parse_boundary_kind(std::string_view value, BoundaryKind& out) noexcept {
+  constexpr std::array<std::pair<std::string_view, BoundaryKind>, 16U> values{{
+      {"none", BoundaryKind::none},
+      {"velocity_inlet", BoundaryKind::velocity_inlet},
+      {"mass_flow_inlet", BoundaryKind::mass_flow_inlet},
+      {"static_state_inlet", BoundaryKind::static_state_inlet},
+      {"total_state_inlet", BoundaryKind::total_state_inlet},
+      {"pressure_outlet", BoundaryKind::pressure_outlet},
+      {"nscbc_inlet", BoundaryKind::nscbc_inlet},
+      {"nscbc_outlet", BoundaryKind::nscbc_outlet},
+      {"no_slip_wall", BoundaryKind::no_slip_wall},
+      {"moving_wall", BoundaryKind::moving_wall},
+      {"slip", BoundaryKind::slip},
+      {"symmetry", BoundaryKind::symmetry},
+      {"periodic", BoundaryKind::periodic},
+      {"adiabatic_wall", BoundaryKind::adiabatic_wall},
+      {"isothermal_wall", BoundaryKind::isothermal_wall},
+      {"heat_flux_wall", BoundaryKind::heat_flux_wall},
+  }};
+  for (const auto& candidate : values) {
+    if (candidate.first == value) {
+      out = candidate.second;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool parse_scalar_boundary_kind(std::string_view value,
+                                ScalarBoundaryKind& out) noexcept {
+  if (value == "dirichlet") {
+    out = ScalarBoundaryKind::dirichlet;
+  } else if (value == "normal_flux") {
+    out = ScalarBoundaryKind::normal_flux;
+  } else if (value == "zero_gradient") {
+    out = ScalarBoundaryKind::zero_gradient;
+  } else if (value == "convective") {
+    out = ScalarBoundaryKind::convective;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+bool parse_transported_scalar_role(std::string_view value,
+                                   TransportedScalarRole& out) noexcept {
+  if (value == "species") {
+    out = TransportedScalarRole::species;
+  } else if (value == "passive_scalar") {
+    out = TransportedScalarRole::passive_scalar;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+bool parse_convection(std::string_view value, ConvectionScheme& out) noexcept {
+  if (value == "central2") {
+    out = ConvectionScheme::central2;
+  } else if (value == "limited_central2") {
+    out = ConvectionScheme::limited_central2;
+  } else if (value == "tvd2") {
+    out = ConvectionScheme::tvd2;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+bool parse_diffusion(std::string_view value, DiffusionScheme& out) noexcept {
+  if (value != "central2") {
+    return false;
+  }
+  out = DiffusionScheme::central2;
+  return true;
+}
+
+bool parse_time_scheme(std::string_view value, TimeScheme& out) noexcept {
+  if (value == "backward_euler") {
+    out = TimeScheme::backward_euler;
+  } else if (value == "variable_bdf2") {
+    out = TimeScheme::variable_bdf2;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+bool parse_uint32(yyjson_val* value, std::uint32_t& out) noexcept {
+  if (!yyjson_is_uint(value)) {
+    return false;
+  }
+  const std::uint64_t parsed = yyjson_get_uint(value);
+  if (parsed > std::numeric_limits<std::uint32_t>::max()) {
+    return false;
+  }
+  out = static_cast<std::uint32_t>(parsed);
+  return true;
+}
+
+bool parse_boundary_face(yyjson_val* value, BoundaryFaceSpec& out) {
+  if (!object_has_exact_keys(
+          value, {"flow_kind", "thermal_kind", "velocity", "direction",
+                  "backflow_velocity", "mass_flow_rate", "pressure",
+                  "temperature", "total_pressure", "total_temperature",
+                  "backflow_temperature", "heat_flux", "relaxation",
+                  "mach_limit", "allow_backflow", "scalars"})) {
+    return false;
+  }
+  const auto flow = string_value(value, "flow_kind");
+  const auto thermal = string_value(value, "thermal_kind");
+  yyjson_val* allow_backflow = yyjson_obj_get(value, "allow_backflow");
+  yyjson_val* scalars = yyjson_obj_get(value, "scalars");
+  if (!flow || !thermal || !parse_boundary_kind(*flow, out.flow_kind) ||
+      !parse_boundary_kind(*thermal, out.thermal_kind) ||
+      !parse_real3(yyjson_obj_get(value, "velocity"), out.velocity) ||
+      !parse_real3(yyjson_obj_get(value, "direction"), out.direction) ||
+      !parse_real3(yyjson_obj_get(value, "backflow_velocity"),
+                   out.backflow_velocity) ||
+      !finite_real(yyjson_obj_get(value, "mass_flow_rate"),
+                   out.mass_flow_rate) ||
+      !finite_real(yyjson_obj_get(value, "pressure"), out.pressure) ||
+      !finite_real(yyjson_obj_get(value, "temperature"), out.temperature) ||
+      !finite_real(yyjson_obj_get(value, "total_pressure"),
+                   out.total_pressure) ||
+      !finite_real(yyjson_obj_get(value, "total_temperature"),
+                   out.total_temperature) ||
+      !finite_real(yyjson_obj_get(value, "backflow_temperature"),
+                   out.backflow_temperature) ||
+      !finite_real(yyjson_obj_get(value, "heat_flux"), out.heat_flux) ||
+      !finite_real(yyjson_obj_get(value, "relaxation"), out.relaxation) ||
+      !finite_real(yyjson_obj_get(value, "mach_limit"), out.mach_limit) ||
+      !yyjson_is_bool(allow_backflow) || !yyjson_is_arr(scalars) ||
+      yyjson_arr_size(scalars) > kMaxScalarsPerFace) {
+    return false;
+  }
+  out.allow_backflow = yyjson_get_bool(allow_backflow);
+  out.scalars.reserve(yyjson_arr_size(scalars));
+  std::size_t index = 0U;
+  std::size_t maximum = 0U;
+  yyjson_val* scalar_value = nullptr;
+  yyjson_arr_foreach(scalars, index, maximum, scalar_value) {
+    if (!object_has_exact_keys(
+            scalar_value,
+            {"stable_name", "kind", "value", "backflow_kind",
+             "backflow_value"})) {
+      return false;
+    }
+    const auto name = string_value(scalar_value, "stable_name");
+    const auto kind = string_value(scalar_value, "kind");
+    const auto backflow_kind = string_value(scalar_value, "backflow_kind");
+    ScalarBoundarySpec scalar;
+    if (!name || !kind || !backflow_kind || !valid_name(*name) ||
+        !parse_scalar_boundary_kind(*kind, scalar.kind) ||
+        !finite_real(yyjson_obj_get(scalar_value, "value"), scalar.value) ||
+        !parse_scalar_boundary_kind(*backflow_kind, scalar.backflow_kind) ||
+        !finite_real(yyjson_obj_get(scalar_value, "backflow_value"),
+                     scalar.backflow_value)) {
+      return false;
+    }
+    scalar.stable_name.assign(name->data(), name->size());
+    out.scalars.push_back(std::move(scalar));
+  }
+  return valid_boundary(out);
+}
+
+bool parse_schemes_object(yyjson_val* value, SchemeSpec& out) noexcept {
+  if (!object_has_exact_keys(
+          value, {"momentum", "enthalpy", "species", "passive_scalar",
+                  "diffusion", "limiter"})) {
+    return false;
+  }
+  const auto momentum = string_value(value, "momentum");
+  const auto enthalpy = string_value(value, "enthalpy");
+  const auto species = string_value(value, "species");
+  const auto passive = string_value(value, "passive_scalar");
+  const auto diffusion = string_value(value, "diffusion");
+  return momentum && enthalpy && species && passive && diffusion &&
+         parse_convection(*momentum, out.momentum) &&
+         parse_convection(*enthalpy, out.enthalpy) &&
+         parse_convection(*species, out.species) &&
+         parse_convection(*passive, out.passive_scalar) &&
+         parse_diffusion(*diffusion, out.diffusion) &&
+         finite_real(yyjson_obj_get(value, "limiter"), out.limiter) &&
+         valid_schemes(out);
+}
+
+bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
+  if (!object_has_exact_keys(
+          value, {"control", "scheme", "initial_dt", "minimum_dt",
+                  "maximum_dt", "convective_cfl", "viscous_cfl",
+                  "thermal_cfl", "species_cfl", "acoustic_cfl",
+                  "maximum_growth", "retry_factor", "maximum_retries",
+                  "minimum_bdf_ratio", "maximum_bdf_ratio"})) {
+    return false;
+  }
+  const auto control = string_value(value, "control");
+  const auto scheme = string_value(value, "scheme");
+  return control && scheme && parse_time_control(*control, out.control) &&
+         parse_time_scheme(*scheme, out.scheme) &&
+         finite_real(yyjson_obj_get(value, "initial_dt"), out.initial_dt) &&
+         finite_real(yyjson_obj_get(value, "minimum_dt"), out.minimum_dt) &&
+         finite_real(yyjson_obj_get(value, "maximum_dt"), out.maximum_dt) &&
+         finite_real(yyjson_obj_get(value, "convective_cfl"),
+                     out.convective_cfl) &&
+         finite_real(yyjson_obj_get(value, "viscous_cfl"), out.viscous_cfl) &&
+         finite_real(yyjson_obj_get(value, "thermal_cfl"), out.thermal_cfl) &&
+         finite_real(yyjson_obj_get(value, "species_cfl"), out.species_cfl) &&
+         finite_real(yyjson_obj_get(value, "acoustic_cfl"), out.acoustic_cfl) &&
+         finite_real(yyjson_obj_get(value, "maximum_growth"),
+                     out.maximum_growth) &&
+         finite_real(yyjson_obj_get(value, "retry_factor"), out.retry_factor) &&
+         parse_uint32(yyjson_obj_get(value, "maximum_retries"),
+                      out.maximum_retries) &&
+         finite_real(yyjson_obj_get(value, "minimum_bdf_ratio"),
+                     out.minimum_bdf_ratio) &&
+         finite_real(yyjson_obj_get(value, "maximum_bdf_ratio"),
+                     out.maximum_bdf_ratio) &&
+         valid_time(out);
 }
 
 bool finite_real(yyjson_val* value, double& out) noexcept {
@@ -611,6 +859,181 @@ void hash_mesh(Hash64& hash, const CartesianMeshSpec& mesh) noexcept {
   hash.integer(mesh.limits.max_memory_bytes_per_rank);
 }
 
+bool valid_name(std::string_view value) noexcept {
+  if (value.empty() || value.size() > kMaxStableNameBytes) {
+    return false;
+  }
+  for (const unsigned char character : value) {
+    if (!(std::isalnum(character) != 0 || character == '_' ||
+          character == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool valid_boundary(const BoundaryFaceSpec& face) noexcept {
+  const auto finite3 = [](Real3 value) noexcept {
+    return std::isfinite(value.x) && std::isfinite(value.y) &&
+           std::isfinite(value.z);
+  };
+  if (static_cast<std::uint8_t>(face.flow_kind) >
+          static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+      static_cast<std::uint8_t>(face.thermal_kind) >
+          static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+      !finite3(face.velocity) || !finite3(face.direction) ||
+      !finite3(face.backflow_velocity) ||
+      !std::isfinite(face.mass_flow_rate) || !std::isfinite(face.pressure) ||
+      !std::isfinite(face.temperature) ||
+      !std::isfinite(face.total_pressure) ||
+      !std::isfinite(face.total_temperature) ||
+      !std::isfinite(face.backflow_temperature) ||
+      !std::isfinite(face.heat_flux) || !std::isfinite(face.relaxation) ||
+      !std::isfinite(face.mach_limit) || face.relaxation < 0.0 ||
+      face.mach_limit <= 0.0 || face.mach_limit >= 1.0 ||
+      face.scalars.size() > kMaxScalarsPerFace) {
+    return false;
+  }
+  std::unordered_set<std::string_view> names;
+  names.reserve(face.scalars.size());
+  for (const ScalarBoundarySpec& scalar : face.scalars) {
+    if (!valid_name(scalar.stable_name) || !std::isfinite(scalar.value) ||
+        !std::isfinite(scalar.backflow_value) ||
+        static_cast<std::uint8_t>(scalar.kind) >
+            static_cast<std::uint8_t>(ScalarBoundaryKind::convective) ||
+        static_cast<std::uint8_t>(scalar.backflow_kind) >
+            static_cast<std::uint8_t>(ScalarBoundaryKind::convective) ||
+        !names.insert(scalar.stable_name).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool valid_transported_scalars(
+    const std::vector<TransportedScalarSpec>& scalars) {
+  if (scalars.size() > kMaxTransportedScalars) {
+    return false;
+  }
+  std::unordered_set<std::string_view> names;
+  names.reserve(scalars.size());
+  for (const TransportedScalarSpec& scalar : scalars) {
+    if (!valid_name(scalar.stable_name) || scalar.stable_name == "U" ||
+        scalar.stable_name == "pi" || scalar.stable_name == "h" ||
+        static_cast<std::uint8_t>(scalar.role) >
+            static_cast<std::uint8_t>(
+                TransportedScalarRole::passive_scalar) ||
+        !names.insert(scalar.stable_name).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void hash_transported_scalars(
+    Hash64& hash,
+    const std::vector<TransportedScalarSpec>& scalars) noexcept {
+  hash.integer(static_cast<std::uint16_t>(scalars.size()));
+  for (const TransportedScalarSpec& scalar : scalars) {
+    hash.text(scalar.stable_name);
+    hash.integer(static_cast<std::uint8_t>(scalar.role));
+  }
+}
+
+bool valid_schemes(const SchemeSpec& schemes) noexcept {
+  return static_cast<std::uint8_t>(schemes.momentum) <=
+             static_cast<std::uint8_t>(ConvectionScheme::tvd2) &&
+         static_cast<std::uint8_t>(schemes.enthalpy) <=
+             static_cast<std::uint8_t>(ConvectionScheme::tvd2) &&
+         static_cast<std::uint8_t>(schemes.species) <=
+             static_cast<std::uint8_t>(ConvectionScheme::tvd2) &&
+         static_cast<std::uint8_t>(schemes.passive_scalar) <=
+             static_cast<std::uint8_t>(ConvectionScheme::tvd2) &&
+         schemes.diffusion == DiffusionScheme::central2 &&
+         std::isfinite(schemes.limiter) && schemes.limiter >= 0.0 &&
+         schemes.limiter <= 1.0;
+}
+
+bool valid_time(const TimeControlSpec& time) noexcept {
+  const bool finite_values =
+      std::isfinite(time.initial_dt) && std::isfinite(time.minimum_dt) &&
+      std::isfinite(time.maximum_dt) &&
+      std::isfinite(time.convective_cfl) &&
+      std::isfinite(time.viscous_cfl) && std::isfinite(time.thermal_cfl) &&
+      std::isfinite(time.species_cfl) && std::isfinite(time.acoustic_cfl) &&
+      std::isfinite(time.maximum_growth) &&
+      std::isfinite(time.retry_factor) &&
+      std::isfinite(time.minimum_bdf_ratio) &&
+      std::isfinite(time.maximum_bdf_ratio);
+  return finite_values && time.initial_dt > 0.0 && time.minimum_dt > 0.0 &&
+         time.maximum_dt >= time.minimum_dt &&
+         time.initial_dt >= time.minimum_dt &&
+         time.initial_dt <= time.maximum_dt && time.convective_cfl > 0.0 &&
+         time.viscous_cfl > 0.0 && time.thermal_cfl > 0.0 &&
+         time.species_cfl > 0.0 && time.acoustic_cfl > 0.0 &&
+         time.maximum_growth >= 1.0 && time.retry_factor > 0.0 &&
+         time.retry_factor < 1.0 && time.maximum_retries > 0U &&
+         time.minimum_bdf_ratio > 0.0 &&
+         time.maximum_bdf_ratio >= time.minimum_bdf_ratio &&
+         static_cast<std::uint8_t>(time.control) <=
+             static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) &&
+         static_cast<std::uint8_t>(time.scheme) <=
+             static_cast<std::uint8_t>(TimeScheme::variable_bdf2);
+}
+
+void hash_boundary(Hash64& hash, const BoundaryFaceSpec& face) noexcept {
+  hash.integer(static_cast<std::uint8_t>(face.flow_kind));
+  hash.integer(static_cast<std::uint8_t>(face.thermal_kind));
+  hash_real3(hash, face.velocity);
+  hash_real3(hash, face.direction);
+  hash_real3(hash, face.backflow_velocity);
+  hash.real(face.mass_flow_rate);
+  hash.real(face.pressure);
+  hash.real(face.temperature);
+  hash.real(face.total_pressure);
+  hash.real(face.total_temperature);
+  hash.real(face.backflow_temperature);
+  hash.real(face.heat_flux);
+  hash.real(face.relaxation);
+  hash.real(face.mach_limit);
+  hash.integer(static_cast<std::uint8_t>(face.allow_backflow ? 1U : 0U));
+  hash.integer(static_cast<std::uint16_t>(face.scalars.size()));
+  for (const ScalarBoundarySpec& scalar : face.scalars) {
+    hash.text(scalar.stable_name);
+    hash.integer(static_cast<std::uint8_t>(scalar.kind));
+    hash.real(scalar.value);
+    hash.integer(static_cast<std::uint8_t>(scalar.backflow_kind));
+    hash.real(scalar.backflow_value);
+  }
+}
+
+void hash_schemes(Hash64& hash, const SchemeSpec& value) noexcept {
+  hash.integer(static_cast<std::uint8_t>(value.momentum));
+  hash.integer(static_cast<std::uint8_t>(value.enthalpy));
+  hash.integer(static_cast<std::uint8_t>(value.species));
+  hash.integer(static_cast<std::uint8_t>(value.passive_scalar));
+  hash.integer(static_cast<std::uint8_t>(value.diffusion));
+  hash.real(value.limiter);
+}
+
+void hash_time(Hash64& hash, const TimeControlSpec& value) noexcept {
+  hash.integer(static_cast<std::uint8_t>(value.control));
+  hash.integer(static_cast<std::uint8_t>(value.scheme));
+  hash.real(value.initial_dt);
+  hash.real(value.minimum_dt);
+  hash.real(value.maximum_dt);
+  hash.real(value.convective_cfl);
+  hash.real(value.viscous_cfl);
+  hash.real(value.thermal_cfl);
+  hash.real(value.species_cfl);
+  hash.real(value.acoustic_cfl);
+  hash.real(value.maximum_growth);
+  hash.real(value.retry_factor);
+  hash.integer(value.maximum_retries);
+  hash.real(value.minimum_bdf_ratio);
+  hash.real(value.maximum_bdf_ratio);
+}
+
 bool valid_direct_name(std::string_view text, std::string_view extension,
                        fs::path& out) {
   if (text.empty() || text.size() > detail::kMaxRelativePathBytes ||
@@ -792,10 +1215,192 @@ class WireReader {
   std::size_t position_{};
 };
 
+void write_boundary(WireWriter& writer, const BoundaryFaceSpec& face) {
+  writer.byte(static_cast<std::uint8_t>(face.flow_kind));
+  writer.byte(static_cast<std::uint8_t>(face.thermal_kind));
+  writer.real3(face.velocity);
+  writer.real3(face.direction);
+  writer.real3(face.backflow_velocity);
+  writer.real(face.mass_flow_rate);
+  writer.real(face.pressure);
+  writer.real(face.temperature);
+  writer.real(face.total_pressure);
+  writer.real(face.total_temperature);
+  writer.real(face.backflow_temperature);
+  writer.real(face.heat_flux);
+  writer.real(face.relaxation);
+  writer.real(face.mach_limit);
+  writer.byte(face.allow_backflow ? 1U : 0U);
+  writer.u16(static_cast<std::uint16_t>(face.scalars.size()));
+  for (const ScalarBoundarySpec& scalar : face.scalars) {
+    static_cast<void>(writer.text(scalar.stable_name));
+    writer.byte(static_cast<std::uint8_t>(scalar.kind));
+    writer.real(scalar.value);
+    writer.byte(static_cast<std::uint8_t>(scalar.backflow_kind));
+    writer.real(scalar.backflow_value);
+  }
+}
+
+void write_transported_scalars(
+    WireWriter& writer,
+    const std::vector<TransportedScalarSpec>& scalars) {
+  writer.u16(static_cast<std::uint16_t>(scalars.size()));
+  for (const TransportedScalarSpec& scalar : scalars) {
+    static_cast<void>(writer.text(scalar.stable_name));
+    writer.byte(static_cast<std::uint8_t>(scalar.role));
+  }
+}
+
+bool read_transported_scalars(
+    WireReader& reader,
+    std::vector<TransportedScalarSpec>& scalars) {
+  std::uint16_t count = 0U;
+  if (!reader.u16(count) || count > kMaxTransportedScalars) {
+    return false;
+  }
+  scalars.reserve(count);
+  for (std::uint16_t index = 0U; index < count; ++index) {
+    TransportedScalarSpec scalar;
+    std::uint8_t role = 0U;
+    if (!reader.text(scalar.stable_name) || !reader.byte(role) ||
+        role > static_cast<std::uint8_t>(
+                   TransportedScalarRole::passive_scalar)) {
+      return false;
+    }
+    scalar.role = static_cast<TransportedScalarRole>(role);
+    scalars.push_back(std::move(scalar));
+  }
+  return valid_transported_scalars(scalars);
+}
+
+bool read_boundary(WireReader& reader, BoundaryFaceSpec& face) {
+  std::uint8_t flow = 0U;
+  std::uint8_t thermal = 0U;
+  std::uint8_t allow_backflow = 0U;
+  std::uint16_t scalar_count = 0U;
+  if (!reader.byte(flow) ||
+      flow > static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+      !reader.byte(thermal) ||
+      thermal > static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+      !reader.real3(face.velocity) || !reader.real3(face.direction) ||
+      !reader.real3(face.backflow_velocity) ||
+      !reader.real(face.mass_flow_rate) || !reader.real(face.pressure) ||
+      !reader.real(face.temperature) || !reader.real(face.total_pressure) ||
+      !reader.real(face.total_temperature) ||
+      !reader.real(face.backflow_temperature) || !reader.real(face.heat_flux) ||
+      !reader.real(face.relaxation) || !reader.real(face.mach_limit) ||
+      !reader.byte(allow_backflow) || allow_backflow > 1U ||
+      !reader.u16(scalar_count) || scalar_count > kMaxScalarsPerFace) {
+    return false;
+  }
+  face.flow_kind = static_cast<BoundaryKind>(flow);
+  face.thermal_kind = static_cast<BoundaryKind>(thermal);
+  face.allow_backflow = allow_backflow != 0U;
+  face.scalars.reserve(scalar_count);
+  for (std::uint16_t index = 0U; index < scalar_count; ++index) {
+    ScalarBoundarySpec scalar;
+    std::uint8_t kind = 0U;
+    std::uint8_t backflow_kind = 0U;
+    if (!reader.text(scalar.stable_name) || !reader.byte(kind) ||
+        kind > static_cast<std::uint8_t>(ScalarBoundaryKind::convective) ||
+        !reader.real(scalar.value) || !reader.byte(backflow_kind) ||
+        backflow_kind >
+            static_cast<std::uint8_t>(ScalarBoundaryKind::convective) ||
+        !reader.real(scalar.backflow_value)) {
+      return false;
+    }
+    scalar.kind = static_cast<ScalarBoundaryKind>(kind);
+    scalar.backflow_kind =
+        static_cast<ScalarBoundaryKind>(backflow_kind);
+    face.scalars.push_back(std::move(scalar));
+  }
+  return valid_boundary(face);
+}
+
+void write_schemes(WireWriter& writer, const SchemeSpec& value) {
+  writer.byte(static_cast<std::uint8_t>(value.momentum));
+  writer.byte(static_cast<std::uint8_t>(value.enthalpy));
+  writer.byte(static_cast<std::uint8_t>(value.species));
+  writer.byte(static_cast<std::uint8_t>(value.passive_scalar));
+  writer.byte(static_cast<std::uint8_t>(value.diffusion));
+  writer.real(value.limiter);
+}
+
+bool read_schemes(WireReader& reader, SchemeSpec& value) noexcept {
+  std::uint8_t momentum = 0U;
+  std::uint8_t enthalpy = 0U;
+  std::uint8_t species = 0U;
+  std::uint8_t passive = 0U;
+  std::uint8_t diffusion = 0U;
+  if (!reader.byte(momentum) ||
+      momentum > static_cast<std::uint8_t>(ConvectionScheme::tvd2) ||
+      !reader.byte(enthalpy) ||
+      enthalpy > static_cast<std::uint8_t>(ConvectionScheme::tvd2) ||
+      !reader.byte(species) ||
+      species > static_cast<std::uint8_t>(ConvectionScheme::tvd2) ||
+      !reader.byte(passive) ||
+      passive > static_cast<std::uint8_t>(ConvectionScheme::tvd2) ||
+      !reader.byte(diffusion) ||
+      diffusion != static_cast<std::uint8_t>(DiffusionScheme::central2) ||
+      !reader.real(value.limiter)) {
+    return false;
+  }
+  value.momentum = static_cast<ConvectionScheme>(momentum);
+  value.enthalpy = static_cast<ConvectionScheme>(enthalpy);
+  value.species = static_cast<ConvectionScheme>(species);
+  value.passive_scalar = static_cast<ConvectionScheme>(passive);
+  value.diffusion = static_cast<DiffusionScheme>(diffusion);
+  return valid_schemes(value);
+}
+
+void write_time(WireWriter& writer, const TimeControlSpec& value) {
+  writer.byte(static_cast<std::uint8_t>(value.control));
+  writer.byte(static_cast<std::uint8_t>(value.scheme));
+  writer.real(value.initial_dt);
+  writer.real(value.minimum_dt);
+  writer.real(value.maximum_dt);
+  writer.real(value.convective_cfl);
+  writer.real(value.viscous_cfl);
+  writer.real(value.thermal_cfl);
+  writer.real(value.species_cfl);
+  writer.real(value.acoustic_cfl);
+  writer.real(value.maximum_growth);
+  writer.real(value.retry_factor);
+  writer.u32(value.maximum_retries);
+  writer.real(value.minimum_bdf_ratio);
+  writer.real(value.maximum_bdf_ratio);
+}
+
+bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
+  std::uint8_t control = 0U;
+  std::uint8_t scheme = 0U;
+  if (!reader.byte(control) ||
+      control > static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) ||
+      !reader.byte(scheme) ||
+      scheme > static_cast<std::uint8_t>(TimeScheme::variable_bdf2) ||
+      !reader.real(value.initial_dt) || !reader.real(value.minimum_dt) ||
+      !reader.real(value.maximum_dt) || !reader.real(value.convective_cfl) ||
+      !reader.real(value.viscous_cfl) || !reader.real(value.thermal_cfl) ||
+      !reader.real(value.species_cfl) || !reader.real(value.acoustic_cfl) ||
+      !reader.real(value.maximum_growth) || !reader.real(value.retry_factor) ||
+      !reader.u32(value.maximum_retries) ||
+      !reader.real(value.minimum_bdf_ratio) ||
+      !reader.real(value.maximum_bdf_ratio)) {
+    return false;
+  }
+  value.control = static_cast<TimeControlKind>(control);
+  value.scheme = static_cast<TimeScheme>(scheme);
+  return valid_time(value);
+}
+
 Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
     if (!valid_canonical_mesh(model.mesh) ||
+        static_cast<std::uint8_t>(model.pressure_reference) >
+            static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
+        !valid_schemes(model.schemes) || !valid_time(model.time) ||
+        !valid_transported_scalars(model.transported_scalars) ||
         model.mesh.focus_regions.size() > detail::kMaxFocusRegions ||
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
@@ -805,11 +1410,16 @@ Status serialize_model(const ValidatedModel& model,
         model.data_files.size() > std::numeric_limits<std::uint16_t>::max()) {
       return invalid_case(detail_wire);
     }
+    for (const BoundaryFaceSpec& face : model.boundaries) {
+      if (!valid_boundary(face)) {
+        return invalid_case(detail_wire);
+      }
+    }
     WireWriter writer;
     writer.byte(kWireVersion);
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
-    writer.byte(static_cast<std::uint8_t>(model.time_control));
+    writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
     writer.real3(model.mesh.lower);
     writer.real3(model.mesh.upper);
     writer.byte(model.mesh.has_exact_cells ? 1U : 0U);
@@ -832,6 +1442,12 @@ Status serialize_model(const ValidatedModel& model,
     }
     writer.u64(model.mesh.limits.max_global_cells);
     writer.u64(model.mesh.limits.max_memory_bytes_per_rank);
+    for (const BoundaryFaceSpec& face : model.boundaries) {
+      write_boundary(writer, face);
+    }
+    write_transported_scalars(writer, model.transported_scalars);
+    write_schemes(writer, model.schemes);
+    write_time(writer, model.time);
     writer.u16(static_cast<std::uint16_t>(model.data_files.size()));
     writer.byte(model.stl_file.has_value() ? 1U : 0U);
     for (const fs::path& path : model.data_files) {
@@ -861,7 +1477,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t version = 0U;
     std::uint8_t geometry = 0U;
     std::uint8_t turbulence = 0U;
-    std::uint8_t time_control = 0U;
+    std::uint8_t pressure_reference = 0U;
     std::uint8_t has_exact_cells = 0U;
     std::uint8_t has_base_spacing = 0U;
     std::uint16_t focus_count = 0U;
@@ -873,16 +1489,17 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !reader.byte(turbulence) ||
         turbulence >
             static_cast<std::uint8_t>(TurbulenceKind::vreman_wall_function) ||
-        !reader.byte(time_control) ||
-        time_control >
-            static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic)) {
+        !reader.byte(pressure_reference) ||
+        pressure_reference >
+            static_cast<std::uint8_t>(PressureReferenceKind::closed_mass)) {
       return invalid_case(detail_wire);
     }
 
     ValidatedModel model;
     model.mesh.kind = static_cast<GeometryKind>(geometry);
     model.turbulence = static_cast<TurbulenceKind>(turbulence);
-    model.time_control = static_cast<TimeControlKind>(time_control);
+    model.pressure_reference =
+        static_cast<PressureReferenceKind>(pressure_reference);
     if (!reader.real3(model.mesh.lower) || !reader.real3(model.mesh.upper) ||
         !ordered_domain(model.mesh.lower, model.mesh.upper) ||
         !reader.byte(has_exact_cells) || has_exact_cells > 1U) {
@@ -943,7 +1560,17 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !reader.u64(model.mesh.limits.max_global_cells) ||
         !reader.u64(model.mesh.limits.max_memory_bytes_per_rank) ||
         model.mesh.limits.max_global_cells == 0U ||
-        model.mesh.limits.max_memory_bytes_per_rank == 0U ||
+        model.mesh.limits.max_memory_bytes_per_rank == 0U) {
+      return invalid_case(detail_wire);
+    }
+    for (BoundaryFaceSpec& face : model.boundaries) {
+      if (!read_boundary(reader, face)) {
+        return invalid_case(detail_wire);
+      }
+    }
+    if (!read_transported_scalars(reader, model.transported_scalars) ||
+        !read_schemes(reader, model.schemes) ||
+        !read_time(reader, model.time) ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
         !reader.byte(has_stl) || has_stl > 1U ||
         static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) >
@@ -1048,19 +1675,27 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* mesh = yyjson_obj_get(root, "mesh");
     yyjson_val* flow = yyjson_obj_get(root, "flow");
     yyjson_val* solver = yyjson_obj_get(root, "solver");
+    yyjson_val* boundaries = yyjson_obj_get(root, "boundaries");
+    yyjson_val* schemes = yyjson_obj_get(root, "schemes");
     yyjson_val* turbulence = yyjson_obj_get(root, "turbulence");
     yyjson_val* time = yyjson_obj_get(root, "time");
+    yyjson_val* transported_scalars =
+        yyjson_obj_get(root, "transported_scalars");
     if (!object_has_exact_keys(
             mesh, {"kind", "domain", "exact_cells", "base_spacing",
                    "minimum_spacing", "max_growth_ratio", "focus_regions",
                    "limits", "data_files", "stl_file"}) ||
         !object_has_exact_keys(flow,
-                               {"model", "pressure_closure", "reacting"}) ||
+                               {"model", "pressure_reference", "reacting"}) ||
         !object_has_exact_keys(solver,
                                {"coupling", "pressure_correctors"}) ||
+        !object_has_exact_keys(boundaries,
+                               {"x_min", "x_max", "y_min", "y_max",
+                                "z_min", "z_max"}) ||
+        !yyjson_is_arr(transported_scalars) ||
+        yyjson_arr_size(transported_scalars) > kMaxTransportedScalars ||
         (turbulence != nullptr &&
-         !object_has_exact_keys(turbulence, {"model"})) ||
-        !object_has_exact_keys(time, {"control"})) {
+         !object_has_exact_keys(turbulence, {"model"}))) {
       return invalid_case(detail_json_schema);
     }
 
@@ -1080,16 +1715,54 @@ Status compile_on_root(const fs::path& case_root, int rank,
         turbulence == nullptr
             ? std::optional<std::string_view>{"vreman_wall_function"}
             : string_value(turbulence, "model");
-    const auto time_text = string_value(time, "control");
-    if (!geometry_text || !turbulence_text || !time_text ||
+    const auto pressure_reference_text =
+        string_value(flow, "pressure_reference");
+    if (!geometry_text || !turbulence_text || !pressure_reference_text ||
         !parse_geometry(*geometry_text, model.mesh.kind) ||
         !parse_turbulence(*turbulence_text, model.turbulence) ||
-        !parse_time_control(*time_text, model.time_control) ||
+        !parse_pressure_reference(*pressure_reference_text,
+                                  model.pressure_reference) ||
         !equals(string_value(flow, "model"),
                 "single_phase_low_mach_compressible") ||
-        !equals(string_value(flow, "pressure_closure"),
-                "local_absolute_pressure_drho_dp") ||
         !equals(string_value(solver, "coupling"), "PISO")) {
+      return invalid_case(detail_json_value);
+    }
+    constexpr std::array<std::string_view, 6U> face_names{
+        "x_min", "x_max", "y_min", "y_max", "z_min", "z_max"};
+    for (std::size_t face = 0U; face < face_names.size(); ++face) {
+      if (!parse_boundary_face(
+              yyjson_obj_getn(boundaries, face_names[face].data(),
+                              face_names[face].size()),
+              model.boundaries[face])) {
+        return invalid_case(detail_json_value);
+      }
+    }
+    if (!parse_schemes_object(schemes, model.schemes) ||
+        !parse_time_object(time, model.time)) {
+      return invalid_case(detail_json_value);
+    }
+
+    model.transported_scalars.reserve(
+        yyjson_arr_size(transported_scalars));
+    std::size_t scalar_index = 0U;
+    std::size_t scalar_maximum = 0U;
+    yyjson_val* scalar_value = nullptr;
+    yyjson_arr_foreach(transported_scalars, scalar_index, scalar_maximum,
+                       scalar_value) {
+      if (!object_has_exact_keys(scalar_value, {"stable_name", "role"})) {
+        return invalid_case(detail_json_schema);
+      }
+      const auto stable_name = string_value(scalar_value, "stable_name");
+      const auto role = string_value(scalar_value, "role");
+      TransportedScalarSpec scalar;
+      if (!stable_name || !role || !valid_name(*stable_name) ||
+          !parse_transported_scalar_role(*role, scalar.role)) {
+        return invalid_case(detail_json_value);
+      }
+      scalar.stable_name.assign(stable_name->data(), stable_name->size());
+      model.transported_scalars.push_back(std::move(scalar));
+    }
+    if (!valid_transported_scalars(model.transported_scalars)) {
       return invalid_case(detail_json_value);
     }
 
@@ -1194,7 +1867,13 @@ Status compile_on_root(const fs::path& case_root, int rank,
     hash.text(kSemanticContract);
     hash_mesh(hash, model.mesh);
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
-    hash.integer(static_cast<std::uint8_t>(model.time_control));
+    hash.integer(static_cast<std::uint8_t>(model.pressure_reference));
+    hash_transported_scalars(hash, model.transported_scalars);
+    for (const BoundaryFaceSpec& face : model.boundaries) {
+      hash_boundary(hash, face);
+    }
+    hash_schemes(hash, model.schemes);
+    hash_time(hash, model.time);
     hash.integer(static_cast<std::uint16_t>(data_file_count));
 
     model.data_files.reserve(data_file_count);

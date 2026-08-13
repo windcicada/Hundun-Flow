@@ -52,6 +52,10 @@ endif()
 
 add_library(hundun_v04_core STATIC
   src/app_case.cpp
+  src/bc_apply.cpp
+  src/bc_compile.cpp
+  src/bc_nscbc.cpp
+  src/bc_time.cpp
   src/core_arena.cpp
   src/core_field_registry.cpp
   src/core_revision.cpp

@@ -2,6 +2,7 @@
 
 #include "hundun/v04_field.hpp"
 
+#include <cstdint>
 #include <limits>
 
 namespace hundun::v04 {
@@ -10,6 +11,12 @@ namespace {
 
 constexpr std::uint8_t kMaxFieldComponents = 64U;
 constexpr std::uint8_t kMaxGhostWidth = 16U;
+
+std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
+  hash ^= value;
+  hash *= UINT64_C(1099511628211);
+  return hash;
+}
 
 }  // namespace
 
@@ -46,6 +53,31 @@ Status FieldRegistry::declare_field(std::string_view stable_name,
   return {};
 }
 
+Status FieldRegistry::require_field(std::string_view stable_name,
+                                    std::uint8_t components,
+                                    std::uint8_t minimum_ghost_width,
+                                    FieldId& out) {
+  if (frozen_ || stable_name.empty() || components == 0U ||
+      components > kMaxFieldComponents ||
+      minimum_ghost_width > kMaxGhostWidth) {
+    return {StatusCode::invalid_plan, 1};
+  }
+  for (FieldDescriptor& field : fields_) {
+    if (field.stable_name != stable_name) {
+      continue;
+    }
+    if (field.components != components) {
+      return {StatusCode::invalid_plan, 4};
+    }
+    if (field.ghost_width < minimum_ghost_width) {
+      field.ghost_width = minimum_ghost_width;
+    }
+    out = field.id;
+    return {};
+  }
+  return declare_field(stable_name, components, minimum_ghost_width, out);
+}
+
 Status FieldRegistry::freeze_for_test(FieldSchema& out) {
   if (frozen_) {
     return {StatusCode::invalid_plan, 3};
@@ -59,6 +91,22 @@ Status FieldRegistry::freeze_for_test(FieldSchema& out) {
   }
   frozen_ = true;
   return {};
+}
+
+PlanFingerprint FieldRegistry::fingerprint() const noexcept {
+  std::uint64_t hash = UINT64_C(1469598103934665603);
+  hash = hash_mix(hash, fields_.size());
+  for (const FieldDescriptor& field : fields_) {
+    hash = hash_mix(hash, field.id);
+    hash = hash_mix(hash, field.components);
+    hash = hash_mix(hash, field.ghost_width);
+    hash = hash_mix(hash, field.stable_name.size());
+    for (const unsigned char character : field.stable_name) {
+      hash = hash_mix(hash, character);
+    }
+  }
+  hash = hash_mix(hash, frozen_ ? 1U : 0U);
+  return hash == 0U ? 1U : hash;
 }
 
 }  // namespace hundun::v04

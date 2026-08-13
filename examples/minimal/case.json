@@ -1,29 +1,170 @@
 {
   "schema_version": 1,
-  "case": {"name": "minimal_runtime_template"},
-  "resources": {
-    "expected_ranks": 1,
-    "process_grid": [1, 1, 1]
-  },
+  "units": "SI",
   "mesh": {
-    "cells": [8, 4, 4],
-    "origin_m": [0.0, 0.0, 0.0],
-    "length_m": [1.0, 0.5, 0.5],
-    "periodic": [true, true, true]
+    "kind": "uniform",
+    "domain": {
+      "lower": [0.0, 0.0, 0.0],
+      "upper": [1.0, 0.5, 0.5]
+    },
+    "exact_cells": [8, 4, 4],
+    "base_spacing": null,
+    "minimum_spacing": [0.125, 0.125, 0.125],
+    "max_growth_ratio": 1.0,
+    "focus_regions": [],
+    "limits": {
+      "max_global_cells": 4096,
+      "max_memory_bytes_per_rank": 67108864
+    },
+    "data_files": [],
+    "stl_file": null
   },
-  "time": {"dt_s": 0.001, "steps": 1},
-  "transport": {
-    "velocity_m_per_s": [0.1, 0.0, 0.0],
-    "diffusivity_m2_per_s": 0.0
+  "flow": {
+    "model": "single_phase_low_mach_compressible",
+    "pressure_reference": "boundary_absolute",
+    "reacting": false
   },
-  "initial_condition": {"type": "sine_x"},
-  "restart": {
-    "read": false,
-    "write_directory": "Restart"
+  "solver": {
+    "coupling": "PISO",
+    "pressure_correctors": 2
   },
-  "output": {
-    "directory": "output",
-    "write_interval": 1,
-    "restart_interval": 1
+  "turbulence": {
+    "model": "none"
+  },
+  "transported_scalars": [],
+  "boundaries": {
+    "x_min": {
+      "flow_kind": "velocity_inlet",
+      "thermal_kind": "none",
+      "velocity": [0.1, 0.0, 0.0],
+      "direction": [1.0, 0.0, 0.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 0.0,
+      "temperature": 300.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 0.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    },
+    "x_max": {
+      "flow_kind": "pressure_outlet",
+      "thermal_kind": "none",
+      "velocity": [0.0, 0.0, 0.0],
+      "direction": [1.0, 0.0, 0.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 101325.0,
+      "temperature": 300.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 300.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    },
+    "y_min": {
+      "flow_kind": "symmetry",
+      "thermal_kind": "none",
+      "velocity": [0.0, 0.0, 0.0],
+      "direction": [0.0, -1.0, 0.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 0.0,
+      "temperature": 0.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 0.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    },
+    "y_max": {
+      "flow_kind": "symmetry",
+      "thermal_kind": "none",
+      "velocity": [0.0, 0.0, 0.0],
+      "direction": [0.0, 1.0, 0.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 0.0,
+      "temperature": 0.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 0.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    },
+    "z_min": {
+      "flow_kind": "symmetry",
+      "thermal_kind": "none",
+      "velocity": [0.0, 0.0, 0.0],
+      "direction": [0.0, 0.0, -1.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 0.0,
+      "temperature": 0.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 0.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    },
+    "z_max": {
+      "flow_kind": "symmetry",
+      "thermal_kind": "none",
+      "velocity": [0.0, 0.0, 0.0],
+      "direction": [0.0, 0.0, 1.0],
+      "backflow_velocity": [0.0, 0.0, 0.0],
+      "mass_flow_rate": 0.0,
+      "pressure": 0.0,
+      "temperature": 0.0,
+      "total_pressure": 0.0,
+      "total_temperature": 0.0,
+      "backflow_temperature": 0.0,
+      "heat_flux": 0.0,
+      "relaxation": 0.0,
+      "mach_limit": 0.95,
+      "allow_backflow": false,
+      "scalars": []
+    }
+  },
+  "schemes": {
+    "momentum": "limited_central2",
+    "enthalpy": "limited_central2",
+    "species": "tvd2",
+    "passive_scalar": "tvd2",
+    "diffusion": "central2",
+    "limiter": 1.0
+  },
+  "time": {
+    "control": "adaptive_flow",
+    "scheme": "variable_bdf2",
+    "initial_dt": 0.0001,
+    "minimum_dt": 1e-10,
+    "maximum_dt": 0.01,
+    "convective_cfl": 0.8,
+    "viscous_cfl": 0.5,
+    "thermal_cfl": 0.5,
+    "species_cfl": 0.5,
+    "acoustic_cfl": 0.8,
+    "maximum_growth": 1.25,
+    "retry_factor": 0.5,
+    "maximum_retries": 8,
+    "minimum_bdf_ratio": 0.2,
+    "maximum_bdf_ratio": 5.0
   }
 }

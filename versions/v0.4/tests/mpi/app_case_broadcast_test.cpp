@@ -6,6 +6,8 @@
 
 #include <mpi.h>
 
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -88,7 +90,8 @@ int main(int argc, char** argv) {
   if (rank == 0) {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     root = fs::temp_directory_path() /
-           ("hundun-v04-case-broadcast-" + std::to_string(stamp));
+           ("hundun-v04-case-broadcast-" + std::to_string(::getpid()) +
+            "-" + std::to_string(stamp));
     std::error_code error;
     fs::remove_all(root, error);
     fs::create_directories(root);
@@ -119,12 +122,25 @@ int main(int argc, char** argv) {
       },
       "flow": {
         "model": "single_phase_low_mach_compressible",
-        "pressure_closure": "local_absolute_pressure_drho_dp",
+        "pressure_reference": "boundary_absolute",
         "reacting": false
       },
       "solver": {"coupling": "PISO", "pressure_correctors": 2},
       "turbulence": {"model": "vreman_wall_function"},
-      "time": {"control": "adaptive_flow"}
+      "transported_scalars": [
+        {"stable_name":"O2","role":"species"},
+        {"stable_name":"mixture_fraction","role":"passive_scalar"}
+      ],
+      "boundaries": {
+        "x_min": {"flow_kind":"velocity_inlet","thermal_kind":"none","velocity":[1,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"dirichlet","value":0.21,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"dirichlet","value":1,"backflow_kind":"zero_gradient","backflow_value":0}]},
+        "x_max": {"flow_kind":"pressure_outlet","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[-1,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":0.8,"mach_limit":0.9,"allow_backflow":true,"scalars":[{"stable_name":"O2","kind":"convective","value":0,"backflow_kind":"dirichlet","backflow_value":0.21},{"stable_name":"mixture_fraction","kind":"convective","value":0,"backflow_kind":"dirichlet","backflow_value":0}]},
+        "y_min": {"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0}]},
+        "y_max": {"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0}]},
+        "z_min": {"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0}]},
+        "z_max": {"flow_kind":"symmetry","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0}]}
+      },
+      "schemes": {"momentum":"limited_central2","enthalpy":"central2","species":"tvd2","passive_scalar":"tvd2","diffusion":"central2","limiter":0.75},
+      "time": {"control":"adaptive_flow","scheme":"variable_bdf2","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.4,"acoustic_cfl":0.9,"maximum_growth":1.2,"retry_factor":0.5,"maximum_retries":6,"minimum_bdf_ratio":0.25,"maximum_bdf_ratio":4.0}
     })json");
   }
   MPI_Barrier(MPI_COMM_WORLD);
@@ -146,7 +162,8 @@ int main(int argc, char** argv) {
   const std::uint64_t model_signature =
       (static_cast<std::uint64_t>(first.mesh.kind) << 24U) |
       (static_cast<std::uint64_t>(first.turbulence) << 16U) |
-      (static_cast<std::uint64_t>(first.time_control) << 8U) |
+      (static_cast<std::uint64_t>(first.time.control) << 8U) |
+      (static_cast<std::uint64_t>(first.pressure_reference) << 48U) |
       static_cast<std::uint64_t>(first.data_files.size()) |
       (first.stl_file.has_value() ? (1ULL << 40U) : 0U);
   passed &= expect(same_u64(model_signature, MPI_COMM_WORLD), rank,
@@ -169,6 +186,36 @@ int main(int argc, char** argv) {
                        first.mesh.focus_regions[0].upper.x == 0.5 &&
                        first.mesh.focus_regions[0].target_spacing.x == 0.1,
                    rank, "wire publishes canonical clipped focus regions");
+  passed &= expect(
+      first.pressure_reference ==
+              hundun::v04::PressureReferenceKind::boundary_absolute &&
+          first.transported_scalars.size() == 2U &&
+          first.transported_scalars[0].stable_name == "O2" &&
+          first.transported_scalars[0].role ==
+              hundun::v04::TransportedScalarRole::species &&
+          first.transported_scalars[1].stable_name == "mixture_fraction" &&
+          first.transported_scalars[1].role ==
+              hundun::v04::TransportedScalarRole::passive_scalar &&
+          first.boundaries[0].flow_kind ==
+              hundun::v04::BoundaryKind::velocity_inlet &&
+          first.boundaries[0].scalars.size() == 2U &&
+          first.boundaries[0].scalars[0].stable_name == "O2" &&
+          first.boundaries[0].scalars[1].stable_name == "mixture_fraction" &&
+          first.boundaries[1].scalars[0].backflow_kind ==
+              hundun::v04::ScalarBoundaryKind::dirichlet &&
+          first.boundaries[1].scalars[0].backflow_value == 0.21 &&
+          first.boundaries[1].allow_backflow &&
+          first.boundaries[1].relaxation == 0.8,
+      rank, "wire publishes scalar catalog pressure reference and boundaries");
+  passed &= expect(
+      first.schemes.momentum ==
+              hundun::v04::ConvectionScheme::limited_central2 &&
+          first.schemes.enthalpy == hundun::v04::ConvectionScheme::central2 &&
+          first.schemes.limiter == 0.75 &&
+          first.time.scheme == hundun::v04::TimeScheme::variable_bdf2 &&
+          first.time.maximum_retries == 6U &&
+          first.time.minimum_bdf_ratio == 0.25,
+      rank, "wire publishes typed schemes and time control");
   passed &= expect(first.data_files.size() == 1U &&
                        first.data_files[0] == "profile.d" &&
                        first.stl_file == fs::path("shape.stl"),

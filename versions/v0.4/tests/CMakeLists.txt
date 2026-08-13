@@ -6,6 +6,54 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_bc_compile_test
+  unit/bc_compile_test.cpp)
+target_link_libraries(v04_bc_compile_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_bc_compile COMMAND v04_bc_compile_test)
+
+add_executable(v04_bc_apply_test
+  unit/bc_apply_test.cpp)
+target_link_libraries(v04_bc_apply_test PRIVATE hundun_v04_core)
+add_test(NAME v04_bc_apply COMMAND v04_bc_apply_test)
+
+add_executable(v04_bc_nscbc_test
+  unit/bc_nscbc_test.cpp)
+target_link_libraries(v04_bc_nscbc_test PRIVATE hundun_v04_core)
+add_test(NAME v04_bc_nscbc COMMAND v04_bc_nscbc_test)
+
+add_executable(v04_bc_time_test
+  unit/bc_time_test.cpp)
+target_link_libraries(v04_bc_time_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_bc_time_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_bc_time_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_bc_time_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}")
+endforeach()
+
+add_executable(v04_bc_decomposition_mpi_test
+  mpi/bc_decomposition_mpi_test.cpp)
+target_link_libraries(v04_bc_decomposition_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_bc_decomposition_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_bc_decomposition_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_bc_decomposition_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}")
+endforeach()
+
 add_executable(v04_parallel_cpu_test
   unit/parallel_cpu_test.cpp)
 target_link_libraries(v04_parallel_cpu_test PRIVATE
