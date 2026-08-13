@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <string_view>
 #include <vector>
@@ -921,6 +922,186 @@ bool test_final_flux_authority(const CartesianKernelPlan& plan) {
   return passed;
 }
 
+enum class LifetimeObject : std::uint8_t {
+  transaction,
+  writer,
+  storage,
+};
+
+constexpr std::array<std::array<LifetimeObject, 3U>, 6U>
+    kLifetimeDestructionOrders{{
+        {LifetimeObject::transaction, LifetimeObject::writer,
+         LifetimeObject::storage},
+        {LifetimeObject::transaction, LifetimeObject::storage,
+         LifetimeObject::writer},
+        {LifetimeObject::writer, LifetimeObject::transaction,
+         LifetimeObject::storage},
+        {LifetimeObject::writer, LifetimeObject::storage,
+         LifetimeObject::transaction},
+        {LifetimeObject::storage, LifetimeObject::transaction,
+         LifetimeObject::writer},
+        {LifetimeObject::storage, LifetimeObject::writer,
+         LifetimeObject::transaction},
+    }};
+
+struct LifetimeFixture {
+  FieldId state{};
+  StateLayers layers;
+  std::unique_ptr<AttemptTransaction> transaction;
+  std::unique_ptr<FinalFaceFluxWriter> writer;
+  std::unique_ptr<FaceFluxStorage> storage;
+};
+
+bool make_lifetime_fixture(LifetimeFixture& fixture) {
+  FieldRegistry registry;
+  FieldSchema schema;
+  if (!registry.declare_field("lifetime_state", 1U, 0U, fixture.state) ||
+      !registry.freeze(schema)) {
+    return false;
+  }
+  const std::array requests{
+      ArenaFieldRequest{fixture.state, {2, 1, 1}, {0U},
+                        FieldLifetime::state_layer}};
+  ArenaLayout layout;
+  if (!ArenaLayout::compile(
+          schema,
+          Span<const ArenaFieldRequest>{requests.data(), requests.size()},
+          layout) ||
+      !StateLayers::allocate(layout, fixture.layers)) {
+    return false;
+  }
+
+  fixture.transaction = std::make_unique<AttemptTransaction>();
+  fixture.writer = std::make_unique<FinalFaceFluxWriter>();
+  fixture.storage = std::make_unique<FaceFluxStorage>();
+  if (!AttemptTransaction::create(fixture.layers.field_count(), 1U,
+                                  fixture.layers.field_count(),
+                                  *fixture.transaction) ||
+      !FaceFluxStorage::allocate_final(kCells, *fixture.storage)) {
+    return false;
+  }
+  FinalFaceFluxAuthority authority;
+  return static_cast<bool>(authority.claim(73U, 0U, *fixture.transaction,
+                                           *fixture.writer));
+}
+
+std::array<std::size_t, 3U> state_handles(const LifetimeFixture& fixture) {
+  return {fixture.layers.handle(StateRole::accepted_n),
+          fixture.layers.handle(StateRole::accepted_n_minus_one),
+          fixture.layers.handle(StateRole::trial)};
+}
+
+bool begin_lifetime_attempt(LifetimeFixture& fixture,
+                            const CartesianKernelPlan& plan,
+                            PendingFaceFluxView& pending,
+                            bool publish) {
+  if (!fixture.transaction->begin(fixture.layers) ||
+      !fixture.transaction->revise_trial(fixture.state)) {
+    return false;
+  }
+  const RevisionDependency dependency{
+      AttemptTransaction::field_revision_source(fixture.state),
+      fixture.transaction->trial_revision(fixture.state)};
+  if (dependency.revision == 0U ||
+      !fixture.writer->begin_pending(*fixture.transaction, *fixture.storage,
+                                     pending) ||
+      !reconstruct_pending(plan, pending, publish ? 6.0 : -6.0)) {
+    return false;
+  }
+  if (!publish) {
+    return true;
+  }
+  const std::array dependencies{dependency};
+  return static_cast<bool>(fixture.writer->publish_pending(
+             Span<const RevisionDependency>{dependencies.data(),
+                                             dependencies.size()},
+             pending)) &&
+         !pending.valid();
+}
+
+void destroy_lifetime_object(LifetimeFixture& fixture,
+                             LifetimeObject object) {
+  switch (object) {
+    case LifetimeObject::transaction:
+      fixture.transaction.reset();
+      break;
+    case LifetimeObject::writer:
+      fixture.writer.reset();
+      break;
+    case LifetimeObject::storage:
+      fixture.storage.reset();
+      break;
+  }
+}
+
+bool run_lifetime_destruction_order(
+    const CartesianKernelPlan& plan,
+    const std::array<LifetimeObject, 3U>& order, bool publish) {
+  LifetimeFixture fixture;
+  PendingFaceFluxView pending;
+  if (!make_lifetime_fixture(fixture) ||
+      !begin_lifetime_attempt(fixture, plan, pending, publish)) {
+    return false;
+  }
+  const std::array<std::size_t, 3U> handles_before =
+      state_handles(fixture);
+
+  destroy_lifetime_object(fixture, order[0U]);
+  bool passed = state_handles(fixture) == handles_before;
+  if (order[0U] != LifetimeObject::transaction) {
+    const Status finished =
+        fixture.transaction->collective_finish(MPI_COMM_SELF, Status{});
+    passed = passed && finished.code == StatusCode::invalid_plan &&
+             !fixture.transaction->active() &&
+             state_handles(fixture) == handles_before;
+  }
+  destroy_lifetime_object(fixture, order[1U]);
+  passed = passed && state_handles(fixture) == handles_before;
+  destroy_lifetime_object(fixture, order[2U]);
+  passed = passed && state_handles(fixture) == handles_before &&
+           !pending.valid();
+  return passed;
+}
+
+bool test_final_flux_lifetime_fail_closed(
+    const CartesianKernelPlan& plan) {
+  bool unpublished_passed = true;
+  bool published_passed = true;
+  for (const auto& order : kLifetimeDestructionOrders) {
+    unpublished_passed =
+        run_lifetime_destruction_order(plan, order, false) &&
+        unpublished_passed;
+    published_passed = run_lifetime_destruction_order(plan, order, true) &&
+                       published_passed;
+  }
+  bool passed = expect(
+      unpublished_passed,
+      "all 3! active-unpublished transaction/writer/storage destruction orders fail closed");
+  passed &= expect(
+      published_passed,
+      "all 3! published-pending transaction/writer/storage destruction orders fail closed");
+
+  LifetimeFixture fixture;
+  passed &= expect(make_lifetime_fixture(fixture),
+                   "pending-view lifetime fixture initializes");
+  if (!fixture.transaction || !fixture.writer || !fixture.storage) {
+    return false;
+  }
+  const std::array<std::size_t, 3U> handles_before =
+      state_handles(fixture);
+  auto pending = std::make_unique<PendingFaceFluxView>();
+  passed &= expect(begin_lifetime_attempt(fixture, plan, *pending, false),
+                   "unpublished pending view acquires an active lease");
+  pending.reset();
+  const Status finished =
+      fixture.transaction->collective_finish(MPI_COMM_SELF, Status{});
+  passed &= expect(finished.code == StatusCode::invalid_plan &&
+                       !fixture.transaction->active() &&
+                       state_handles(fixture) == handles_before,
+                   "destroying an unpublished pending view forces rollback without handle rotation");
+  return passed;
+}
+
 bool test_exact_kernel_counters_and_allocations(
     const CartesianKernelPlan& plan, FaceFluxView flux) {
   constexpr std::uint8_t kComponents = 2U;
@@ -1343,6 +1524,7 @@ int main(int argc, char** argv) {
     passed &= test_convection_revision_and_hot_counters(fixture.kernels,
                                                         raw_flux);
     passed &= test_final_flux_authority(fixture.kernels);
+    passed &= test_final_flux_lifetime_fail_closed(fixture.kernels);
   }
   if (passed) {
     std::cout << "v0.4 conservative face-flux tests passed\n";

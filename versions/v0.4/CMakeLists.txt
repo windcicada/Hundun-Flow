@@ -57,7 +57,9 @@ add_library(hundun_v04_core STATIC
   src/bc_nscbc.cpp
   src/bc_time.cpp
   src/core_arena.cpp
+  src/core_execution_graph.cpp
   src/core_field_registry.cpp
+  src/core_resource_contract.cpp
   src/core_revision.cpp
   src/core_status.cpp
   src/core_transaction.cpp

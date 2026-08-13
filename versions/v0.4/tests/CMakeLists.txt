@@ -6,6 +6,16 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_core_execution_graph_test
+  unit/core_execution_graph_test.cpp)
+target_link_libraries(v04_core_execution_graph_test PRIVATE hundun_v04_core)
+add_test(NAME v04_core_execution_graph COMMAND v04_core_execution_graph_test)
+
+add_executable(v04_core_resource_contract_test
+  unit/core_resource_contract_test.cpp)
+target_link_libraries(v04_core_resource_contract_test PRIVATE hundun_v04_core)
+add_test(NAME v04_core_resource_contract COMMAND v04_core_resource_contract_test)
+
 add_executable(v04_physics_thermo_test
   unit/physics_thermo_test.cpp)
 target_link_libraries(v04_physics_thermo_test PRIVATE hundun_v04_core)

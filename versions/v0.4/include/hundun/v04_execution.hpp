@@ -252,6 +252,7 @@ struct ConstFaceFluxView {
 class PendingFaceFluxView {
  public:
   PendingFaceFluxView() noexcept = default;
+  ~PendingFaceFluxView() noexcept;
   PendingFaceFluxView(const PendingFaceFluxView&) = delete;
   PendingFaceFluxView& operator=(const PendingFaceFluxView&) = delete;
   PendingFaceFluxView(PendingFaceFluxView&&) = delete;
@@ -271,6 +272,7 @@ class PendingFaceFluxView {
   std::uint64_t writer_identity_{};
   std::uint64_t attempt_identity_{};
   FaceFluxStorage* storage_{};
+  FinalFaceFluxWriter* writer_{};
 };
 
 ConstFaceFieldView as_const(FaceFieldView view) noexcept;
@@ -332,6 +334,7 @@ class FaceFluxStorage {
   PlanFingerprint authority_identity_{};
   std::uint64_t pending_writer_identity_{};
   std::uint64_t pending_attempt_identity_{};
+  FinalFaceFluxWriter* pending_writer_{};
   bool final_storage_{};
 };
 
@@ -378,6 +381,12 @@ struct CartesianMetricPacket {
 
 class CartesianKernelPlan {
  public:
+  CartesianKernelPlan() noexcept = default;
+  CartesianKernelPlan(const CartesianKernelPlan&) = delete;
+  CartesianKernelPlan& operator=(const CartesianKernelPlan&) = delete;
+  CartesianKernelPlan(CartesianKernelPlan&& other) noexcept;
+  CartesianKernelPlan& operator=(CartesianKernelPlan&& other) noexcept;
+
   static Status compile(const SchemePlan& schemes,
                         const CartesianGeometryPlan& geometry,
                         const MeshPatch& patch,
@@ -409,6 +418,9 @@ class CartesianKernelPlan {
   friend Status cartesian_diffusion(const CartesianKernelPlan&,
                                     ConstFieldView,
                                     const KernelInvocation&) noexcept;
+  void reset() noexcept;
+  void move_from(CartesianKernelPlan&& other) noexcept;
+  void rebind_metrics() noexcept;
   Int3 patch_begin_{};
   Int3 cells_{};
   Int3 process_grid_{};
@@ -419,6 +431,10 @@ class CartesianKernelPlan {
   GeometryKind geometry_kind_{};
   double limiter_{1.0};
   std::uint8_t reach_{};
+  std::vector<double> metric_faces_[3];
+  std::vector<double> metric_centres_[3];
+  std::vector<double> metric_widths_[3];
+  std::vector<double> metric_inverse_widths_[3];
   detail::CartesianMetricPacket metrics_[3]{};
 };
 
@@ -445,6 +461,213 @@ Status cartesian_provisional_convection(
 Status cartesian_diffusion(const CartesianKernelPlan& plan,
                            ConstFieldView diffusivity,
                            const KernelInvocation& invocation) noexcept;
+
+enum class StateVisibility : std::uint8_t {
+  accepted,
+  trial,
+  pending,
+  committed_snapshot,
+  workspace
+};
+
+enum class StageKind : std::uint8_t { compute, service, commit };
+
+enum class GraphNodeKind : std::uint8_t {
+  compute,
+  halo_begin,
+  compute_interior,
+  halo_finish,
+  compute_boundary,
+  service,
+  collective_consensus,
+  commit
+};
+
+struct FieldAccessSpec {
+  FieldId field{};
+  StateVisibility visibility{StateVisibility::accepted};
+  friend bool operator==(FieldAccessSpec left,
+                         FieldAccessSpec right) noexcept {
+    return left.field == right.field &&
+           left.visibility == right.visibility;
+  }
+};
+
+struct GraphFieldSpec {
+  FieldAccessSpec access{};
+  std::uint8_t ghost_capacity{};
+  bool initially_available{};
+};
+
+struct StageResourceSpec {
+  std::uint64_t merged_halo_messages{};
+  std::uint64_t merged_halo_bytes{};
+  std::uint64_t numeric_refills{};
+  std::uint64_t hierarchy_rebuilds{};
+  std::uint64_t cache_publishes{};
+  std::uint64_t linear_iterations{};
+  std::uint64_t stage_wall_nanoseconds{};
+};
+
+struct StageSpec {
+  StageId id{};
+  Span<const FieldAccessSpec> reads{};
+  Span<const FieldAccessSpec> writes{};
+  Span<const FieldAccessSpec> ghosts{};
+  Span<const std::uint8_t> ghost_widths{};
+  Span<const FieldAccessSpec> invalidates{};
+  std::size_t workspace_bytes{};
+  std::size_t workspace_alignment{64U};
+  StageId workspace_live_through{};
+  std::size_t fixed_workspace_offset{};
+  StageResourceSpec resources{};
+  StageKind kind{StageKind::compute};
+  bool has_fixed_workspace_offset{};
+  bool collective_consensus{};
+};
+
+struct ResourceContract {
+  std::uint64_t max_live_workspace_bytes{};
+  std::uint64_t allocation_allowance{};
+  std::uint64_t merged_halo_messages{};
+  std::uint64_t merged_halo_bytes{};
+  std::uint64_t numeric_refills{};
+  std::uint64_t hierarchy_rebuilds{};
+  std::uint64_t cache_publishes{};
+  std::uint64_t linear_iterations{};
+  std::uint64_t stage_wall_nanoseconds{};
+};
+
+struct ResourceCounters {
+  std::uint64_t peak_workspace_bytes{};
+  std::uint64_t allocations{};
+  std::uint64_t merged_halo_messages{};
+  std::uint64_t merged_halo_bytes{};
+  std::uint64_t numeric_refills{};
+  std::uint64_t hierarchy_rebuilds{};
+  std::uint64_t cache_publishes{};
+  std::uint64_t linear_iterations{};
+  std::uint64_t stage_wall_nanoseconds{};
+};
+
+Status add_resource_counters(ResourceCounters& counters,
+                             ResourceCounters increment) noexcept;
+Status validate_resource_counters(const ResourceContract& contract,
+                                  const ResourceCounters& counters) noexcept;
+
+struct FrozenStage {
+  StageId id{};
+  StageKind kind{StageKind::compute};
+  std::uint32_t registration_ordinal{};
+  std::uint32_t node_begin{};
+  std::uint16_t node_count{};
+  std::uint32_t read_begin{};
+  std::uint16_t read_count{};
+  std::uint32_t write_begin{};
+  std::uint16_t write_count{};
+  std::uint32_t ghost_begin{};
+  std::uint16_t ghost_count{};
+  std::uint32_t invalidation_begin{};
+  std::uint16_t invalidation_count{};
+  std::size_t workspace_offset{};
+  std::size_t workspace_bytes{};
+  std::size_t workspace_alignment{64U};
+  StageId workspace_live_through{};
+  StageResourceSpec resources{};
+  bool collective_consensus{};
+};
+
+struct GraphNode {
+  StageId stage{};
+  GraphNodeKind kind{GraphNodeKind::compute};
+  std::uint32_t ordinal{};
+};
+
+struct GraphEdge {
+  std::uint32_t from{};
+  std::uint32_t to{};
+  friend bool operator==(GraphEdge left, GraphEdge right) noexcept {
+    return left.from == right.from && left.to == right.to;
+  }
+};
+
+class FrozenExecutionGraph {
+ public:
+  FrozenExecutionGraph() noexcept = default;
+  FrozenExecutionGraph(const FrozenExecutionGraph&) = delete;
+  FrozenExecutionGraph& operator=(const FrozenExecutionGraph&) = delete;
+  FrozenExecutionGraph(FrozenExecutionGraph&&) noexcept = default;
+  FrozenExecutionGraph& operator=(FrozenExecutionGraph&&) noexcept = default;
+
+  Span<const FrozenStage> stages() const noexcept {
+    return {stages_.data(), stages_.size()};
+  }
+  Span<const GraphNode> nodes() const noexcept {
+    return {nodes_.data(), nodes_.size()};
+  }
+  Span<const GraphEdge> edges() const noexcept {
+    return {edges_.data(), edges_.size()};
+  }
+  Span<const FieldAccessSpec> reads(StageId stage) const noexcept;
+  Span<const FieldAccessSpec> writes(StageId stage) const noexcept;
+  Span<const FieldAccessSpec> ghosts(StageId stage) const noexcept;
+  Span<const std::uint8_t> ghost_widths(StageId stage) const noexcept;
+  Span<const FieldAccessSpec> invalidations(StageId stage) const noexcept;
+  const FrozenStage* stage(StageId id) const noexcept;
+  const ResourceContract& resources() const noexcept { return resources_; }
+  PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+
+ private:
+  friend class ExecutionGraphCompiler;
+  std::vector<FrozenStage> stages_;
+  std::vector<GraphNode> nodes_;
+  std::vector<GraphEdge> edges_;
+  std::vector<FieldAccessSpec> reads_;
+  std::vector<FieldAccessSpec> writes_;
+  std::vector<FieldAccessSpec> ghosts_;
+  std::vector<std::uint8_t> ghost_widths_;
+  std::vector<FieldAccessSpec> invalidations_;
+  ResourceContract resources_{};
+  PlanFingerprint fingerprint_{};
+};
+
+class ExecutionGraphCompiler {
+ public:
+  ExecutionGraphCompiler() noexcept = default;
+  ExecutionGraphCompiler(const ExecutionGraphCompiler&) = delete;
+  ExecutionGraphCompiler& operator=(const ExecutionGraphCompiler&) = delete;
+  ExecutionGraphCompiler(ExecutionGraphCompiler&&) noexcept = default;
+  ExecutionGraphCompiler& operator=(ExecutionGraphCompiler&&) noexcept =
+      default;
+
+  Status configure(Span<const GraphFieldSpec> fields) noexcept;
+  Status register_stage(const StageSpec& stage) noexcept;
+  Status freeze_for_test(FrozenExecutionGraph& out) noexcept;
+  bool frozen() const noexcept { return frozen_; }
+
+ private:
+  struct OwnedStageSpec {
+    StageId id{};
+    std::vector<FieldAccessSpec> reads;
+    std::vector<FieldAccessSpec> writes;
+    std::vector<FieldAccessSpec> ghosts;
+    std::vector<std::uint8_t> ghost_widths;
+    std::vector<FieldAccessSpec> invalidates;
+    std::size_t workspace_bytes{};
+    std::size_t workspace_alignment{64U};
+    StageId workspace_live_through{};
+    std::size_t fixed_workspace_offset{};
+    StageResourceSpec resources{};
+    StageKind kind{StageKind::compute};
+    bool has_fixed_workspace_offset{};
+    bool collective_consensus{};
+  };
+
+  std::vector<GraphFieldSpec> fields_;
+  std::vector<OwnedStageSpec> stages_;
+  bool configured_{};
+  bool frozen_{};
+};
 
 struct ExecutionCounters {
   std::uint64_t aligned_payload_allocations{};
@@ -569,6 +792,7 @@ class StateLayers {
 class AttemptTransaction {
  public:
   AttemptTransaction() noexcept = default;
+  ~AttemptTransaction() noexcept;
   AttemptTransaction(const AttemptTransaction&) = delete;
   AttemptTransaction& operator=(const AttemptTransaction&) = delete;
   AttemptTransaction(AttemptTransaction&&) = delete;
@@ -613,6 +837,10 @@ class AttemptTransaction {
   Status publish_pending_cache_impl(
       RevisionSlotId slot, Span<const RevisionDependency> dependencies,
       PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept;
+  void detach_final_face_flux_writer(FinalFaceFluxWriter& writer,
+                                     bool fail_active) noexcept;
+  void invalidate_final_face_flux_writer(
+      const FinalFaceFluxWriter& writer) noexcept;
   void discard_attempt() noexcept;
   StateLayers* layers_{};
   std::vector<RevisionToken> active_caches_;
@@ -641,6 +869,7 @@ class AttemptTransaction {
 class FinalFaceFluxWriter {
  public:
   FinalFaceFluxWriter() noexcept = default;
+  ~FinalFaceFluxWriter() noexcept;
   FinalFaceFluxWriter(const FinalFaceFluxWriter&) = delete;
   FinalFaceFluxWriter& operator=(const FinalFaceFluxWriter&) = delete;
 
@@ -655,10 +884,17 @@ class FinalFaceFluxWriter {
  private:
   friend class AttemptTransaction;
   friend class FinalFaceFluxAuthority;
+  friend class FaceFluxStorage;
+  friend class PendingFaceFluxView;
   bool ready_for_collective(const AttemptTransaction& transaction) const
       noexcept;
   void complete_from_transaction(const AttemptTransaction& transaction,
                                  bool committed) noexcept;
+  void detach_from_transaction(AttemptTransaction& transaction) noexcept;
+  void detach_from_storage(FaceFluxStorage& storage) noexcept;
+  void abandon_pending_view(PendingFaceFluxView& pending) noexcept;
+  void invalidate_pending_view() noexcept;
+  void clear_storage_lease() noexcept;
   StageId stage_{};
   RevisionSlotId cache_slot_{};
   PlanFingerprint authority_fingerprint_{};
@@ -670,6 +906,7 @@ class FinalFaceFluxWriter {
   AttemptTransaction* authority_transaction_{};
   AttemptTransaction* transaction_{};
   FaceFluxStorage* storage_{};
+  PendingFaceFluxView* pending_view_{};
   StorageIdentity bound_storage_identity_{};
   RevisionDomainIdentity bound_revision_domain_{};
   Int3 bound_cells_{};

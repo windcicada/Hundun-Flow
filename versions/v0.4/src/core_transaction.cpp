@@ -41,6 +41,16 @@ std::uint64_t failing_rank_key(int rank, bool failed) noexcept {
 
 }  // namespace
 
+AttemptTransaction::~AttemptTransaction() noexcept {
+  if (final_face_flux_writer_ != nullptr) {
+    final_face_flux_writer_->detach_from_transaction(*this);
+  }
+  final_face_flux_writer_ = nullptr;
+  final_face_flux_writer_identity_ = 0U;
+  layers_ = nullptr;
+  active_ = false;
+}
+
 Status AttemptTransaction::create(std::size_t field_capacity,
                                   std::size_t revision_slot_capacity,
                                   std::size_t revision_source_capacity,
@@ -274,6 +284,31 @@ Status AttemptTransaction::claim_final_face_flux_writer(
   final_face_flux_writer_identity_ = writer_identity;
   final_face_flux_writer_ = &writer;
   return {};
+}
+
+void AttemptTransaction::detach_final_face_flux_writer(
+    FinalFaceFluxWriter& writer, bool fail_active) noexcept {
+  if (final_face_flux_writer_ != &writer) {
+    return;
+  }
+  if (fail_active && active_ && attempt_status_.code == StatusCode::ok) {
+    attempt_status_ = {StatusCode::invalid_plan,
+                       kTransactionIncompleteState};
+  }
+  writer.detach_from_transaction(*this);
+  // Preserve the mandatory slot and writer identity. A destroyed authority
+  // permanently fails closed; it must not turn a required final-flux cache
+  // back into an optional generic cache on a later attempt.
+  final_face_flux_writer_ = nullptr;
+}
+
+void AttemptTransaction::invalidate_final_face_flux_writer(
+    const FinalFaceFluxWriter& writer) noexcept {
+  if (final_face_flux_writer_ == &writer && active_ &&
+      attempt_status_.code == StatusCode::ok) {
+    attempt_status_ = {StatusCode::invalid_plan,
+                       kTransactionIncompleteState};
+  }
 }
 
 Status AttemptTransaction::publish_pending_cache(

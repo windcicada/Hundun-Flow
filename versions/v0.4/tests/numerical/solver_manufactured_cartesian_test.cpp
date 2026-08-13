@@ -13,6 +13,8 @@
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -106,6 +108,16 @@ bool make_fixture(
          CartesianKernelPlan::compile(
              fixture.schemes, fixture.geometry, fixture.patch,
              fixture.boundary, fixture.kernels);
+}
+
+bool make_detached_stretched_plan(CartesianKernelPlan& out) {
+  KernelFixture fixture;
+  if (!make_fixture(17, true, fixture,
+                    ConvectionScheme::limited_central2)) {
+    return false;
+  }
+  out = std::move(fixture.kernels);
+  return out.fingerprint() != 0U;
 }
 
 struct OwnedField {
@@ -687,9 +699,76 @@ bool test_stretched_affine_and_harmonic_mutation() {
   return passed;
 }
 
+bool test_kernel_plan_owns_and_rebinds_metrics() {
+  CartesianKernelPlan plan;
+  bool passed = expect(make_detached_stretched_plan(plan),
+                       "stretched kernel plan survives its geometry owner");
+  const double* const original_faces = plan.metric(0U).faces;
+  CartesianKernelPlan moved(std::move(plan));
+  passed &= expect(plan.fingerprint() == 0U && moved.fingerprint() != 0U &&
+                       moved.metric(0U).faces != nullptr &&
+                       moved.metric(0U).faces == original_faces,
+                   "move construction rebinds self-owned metric packets");
+  CartesianKernelPlan assigned;
+  assigned = std::move(moved);
+  passed &= expect(moved.fingerprint() == 0U &&
+                       assigned.fingerprint() != 0U &&
+                       assigned.metric(0U).faces != nullptr,
+                   "move assignment transfers metric ownership atomically");
+
+  const Int3 cells = assigned.cells();
+  OwnedField q = make_field(90U, cells, 1U, 1U, 901U);
+  OwnedField gradient = make_field(91U, cells, 3U, 0U, 902U);
+  const auto centre = [&assigned](std::size_t axis,
+                                  std::int32_t local) noexcept {
+    const detail::CartesianMetricPacket& metric = assigned.metric(axis);
+    const std::int32_t index = metric.global_begin + local;
+    if (index < 0) {
+      return metric.centres[0U] +
+             static_cast<double>(index) * metric.widths[0U];
+    }
+    if (static_cast<std::size_t>(index) >= metric.cells) {
+      const auto last = static_cast<std::int32_t>(metric.cells - 1U);
+      return metric.centres[metric.cells - 1U] +
+             static_cast<double>(index - last) *
+                 metric.widths[metric.cells - 1U];
+    }
+    return metric.centres[static_cast<std::size_t>(index)];
+  };
+  for (std::int32_t z = -1; z <= cells.z; ++z) {
+    for (std::int32_t y = -1; y <= cells.y; ++y) {
+      for (std::int32_t x = -1; x <= cells.x; ++x) {
+        q.view.unchecked({x, y, z}, 0U) =
+            centre(0U, x) + 2.0 * centre(1U, y) - 3.0 * centre(2U, z);
+      }
+    }
+  }
+  const std::array<ConstFieldView, 1U> reads{as_const(q.view)};
+  const std::array<FieldView, 1U> writes{gradient.view};
+  const KernelInvocation call{{reads.data(), reads.size()},
+                              {writes.data(), writes.size()},
+                              {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr};
+  passed &= expect(static_cast<bool>(cartesian_gradient(assigned, call)),
+                   "detached moved plan executes a stretched kernel");
+  const Int3 probe{cells.x / 2, cells.y / 2, cells.z / 2};
+  passed &= expect(std::abs(gradient.view.unchecked(probe, 0U) - 1.0) <
+                           2.0e-12 &&
+                       std::abs(gradient.view.unchecked(probe, 1U) - 2.0) <
+                           2.0e-12 &&
+                       std::abs(gradient.view.unchecked(probe, 2U) + 3.0) <
+                           2.0e-12,
+                   "self-owned metrics retain affine-exact derivatives");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  static_assert(!std::is_copy_constructible_v<CartesianKernelPlan> &&
+                    !std::is_copy_assignable_v<CartesianKernelPlan> &&
+                    std::is_nothrow_move_constructible_v<CartesianKernelPlan> &&
+                    std::is_nothrow_move_assignable_v<CartesianKernelPlan>,
+                "kernel plans own metric memory and move without throwing");
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
@@ -714,6 +793,7 @@ int main(int argc, char** argv) {
   passed &= test_noncentral_rejects_one_ghost(
       ConvectionScheme::tvd2, "TVD rejects a one-ghost transported field");
   passed &= test_stretched_affine_and_harmonic_mutation();
+  passed &= test_kernel_plan_owns_and_rebinds_metrics();
   MPI_Finalize();
   if (!passed) {
     return 1;

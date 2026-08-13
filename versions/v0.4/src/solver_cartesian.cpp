@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
+#include <utility>
 
 namespace hundun::v04 {
 namespace {
@@ -443,6 +445,70 @@ Status gradient_kernel(const CartesianKernelPlan& plan,
 
 }  // namespace
 
+CartesianKernelPlan::CartesianKernelPlan(CartesianKernelPlan&& other) noexcept {
+  move_from(std::move(other));
+}
+
+CartesianKernelPlan& CartesianKernelPlan::operator=(
+    CartesianKernelPlan&& other) noexcept {
+  if (this != &other) {
+    reset();
+    move_from(std::move(other));
+  }
+  return *this;
+}
+
+void CartesianKernelPlan::reset() noexcept {
+  patch_begin_ = {};
+  cells_ = {};
+  process_grid_ = {};
+  process_coord_ = {};
+  boundary_identity_ = 0U;
+  scheme_identity_ = 0U;
+  fingerprint_ = 0U;
+  limiter_ = 1.0;
+  reach_ = 0U;
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    metric_faces_[axis].clear();
+    metric_centres_[axis].clear();
+    metric_widths_[axis].clear();
+    metric_inverse_widths_[axis].clear();
+    metrics_[axis] = {};
+  }
+}
+
+void CartesianKernelPlan::rebind_metrics() noexcept {
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    metrics_[axis].faces = metric_faces_[axis].data();
+    metrics_[axis].centres = metric_centres_[axis].data();
+    metrics_[axis].widths = metric_widths_[axis].data();
+    metrics_[axis].inverse_widths = metric_inverse_widths_[axis].data();
+  }
+}
+
+void CartesianKernelPlan::move_from(CartesianKernelPlan&& other) noexcept {
+  patch_begin_ = other.patch_begin_;
+  cells_ = other.cells_;
+  process_grid_ = other.process_grid_;
+  process_coord_ = other.process_coord_;
+  boundary_identity_ = other.boundary_identity_;
+  scheme_identity_ = other.scheme_identity_;
+  fingerprint_ = other.fingerprint_;
+  geometry_kind_ = other.geometry_kind_;
+  limiter_ = other.limiter_;
+  reach_ = other.reach_;
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    metric_faces_[axis] = std::move(other.metric_faces_[axis]);
+    metric_centres_[axis] = std::move(other.metric_centres_[axis]);
+    metric_widths_[axis] = std::move(other.metric_widths_[axis]);
+    metric_inverse_widths_[axis] =
+        std::move(other.metric_inverse_widths_[axis]);
+    metrics_[axis] = other.metrics_[axis];
+  }
+  rebind_metrics();
+  other.reset();
+}
+
 Status CartesianKernelPlan::compile(const SchemePlan& schemes,
                                     const CartesianGeometryPlan& geometry,
                                     const MeshPatch& patch,
@@ -479,47 +545,81 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
   fingerprint = hash_mix(fingerprint, static_cast<std::uint64_t>(patch.cells.y));
   fingerprint = hash_mix(fingerprint, static_cast<std::uint64_t>(patch.cells.z));
   fingerprint = hash_mix(fingerprint, reach);
-  CartesianKernelPlan candidate;
-  candidate.patch_begin_ = patch.begin;
-  candidate.cells_ = patch.cells;
-  candidate.process_grid_ = patch.process_grid;
-  candidate.process_coord_ = patch.process_coord;
-  candidate.boundary_identity_ = boundary.local_layout_fingerprint();
-  candidate.scheme_identity_ = schemes.fingerprint();
-  candidate.fingerprint_ = fingerprint == 0U ? 1U : fingerprint;
-  candidate.geometry_kind_ = geometry.kind();
-  candidate.limiter_ = schemes.limiter();
-  candidate.reach_ = reach;
-  const AxisMetrics* const source[3]{&geometry.x(), &geometry.y(),
-                                     &geometry.z()};
-  const std::int32_t begins[3]{patch.begin.x, patch.begin.y, patch.begin.z};
-  for (std::size_t axis = 0U; axis < 3U; ++axis) {
-    const AxisMetrics& metric = *source[axis];
-    const Span<const double> faces = metric.faces();
-    const Span<const double> centres = metric.centres();
-    const Span<const double> widths = metric.widths();
-    const Span<const double> inverse_widths = metric.inverse_widths();
-    if (faces.data == nullptr || centres.data == nullptr ||
-        widths.data == nullptr || inverse_widths.data == nullptr ||
-        centres.size == 0U || faces.size != centres.size + 1U ||
-        widths.size != centres.size || inverse_widths.size != centres.size ||
-        static_cast<std::size_t>(begins[axis]) >= centres.size) {
-      return {StatusCode::invalid_plan, kKernelPlan};
+  try {
+    CartesianKernelPlan candidate;
+    candidate.patch_begin_ = patch.begin;
+    candidate.cells_ = patch.cells;
+    candidate.process_grid_ = patch.process_grid;
+    candidate.process_coord_ = patch.process_coord;
+    candidate.boundary_identity_ = boundary.local_layout_fingerprint();
+    candidate.scheme_identity_ = schemes.fingerprint();
+    candidate.fingerprint_ = fingerprint == 0U ? 1U : fingerprint;
+    candidate.geometry_kind_ = geometry.kind();
+    candidate.limiter_ = schemes.limiter();
+    candidate.reach_ = reach;
+    const AxisMetrics* const source[3]{&geometry.x(), &geometry.y(),
+                                       &geometry.z()};
+    const std::int32_t begins[3]{patch.begin.x, patch.begin.y,
+                                 patch.begin.z};
+    const std::int32_t local_cells[3]{patch.cells.x, patch.cells.y,
+                                      patch.cells.z};
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+      const AxisMetrics& metric = *source[axis];
+      const Span<const double> faces = metric.faces();
+      const Span<const double> centres = metric.centres();
+      const Span<const double> widths = metric.widths();
+      const Span<const double> inverse_widths = metric.inverse_widths();
+      if (faces.data == nullptr || centres.data == nullptr ||
+          widths.data == nullptr || inverse_widths.data == nullptr ||
+          centres.size == 0U || faces.size != centres.size + 1U ||
+          widths.size != centres.size ||
+          inverse_widths.size != centres.size ||
+          static_cast<std::size_t>(begins[axis]) >= centres.size) {
+        return {StatusCode::invalid_plan, kKernelPlan};
+      }
+      const std::int64_t requested_begin =
+          static_cast<std::int64_t>(begins[axis]) - reach;
+      const std::int64_t requested_end =
+          static_cast<std::int64_t>(begins[axis]) + local_cells[axis] + reach;
+      const std::size_t slice_begin = static_cast<std::size_t>(
+          std::max<std::int64_t>(0, requested_begin));
+      const std::size_t slice_end = static_cast<std::size_t>(
+          std::min<std::int64_t>(static_cast<std::int64_t>(centres.size),
+                                 requested_end));
+      if (slice_begin >= slice_end ||
+          static_cast<std::size_t>(begins[axis]) < slice_begin) {
+        return {StatusCode::invalid_plan, kKernelPlan};
+      }
+      candidate.metric_faces_[axis].assign(faces.data + slice_begin,
+                                            faces.data + slice_end + 1U);
+      candidate.metric_centres_[axis].assign(centres.data + slice_begin,
+                                              centres.data + slice_end);
+      candidate.metric_widths_[axis].assign(widths.data + slice_begin,
+                                             widths.data + slice_end);
+      candidate.metric_inverse_widths_[axis].assign(
+          inverse_widths.data + slice_begin,
+          inverse_widths.data + slice_end);
+      candidate.metrics_[axis] = {
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          slice_end - slice_begin,
+          static_cast<std::int32_t>(
+              static_cast<std::size_t>(begins[axis]) - slice_begin),
+          faces.data[static_cast<std::size_t>(begins[axis])],
+          centres.data[static_cast<std::size_t>(begins[axis])],
+          metric.uniform_width(),
+          metric.uniform_inverse_width()};
     }
-    candidate.metrics_[axis] = {
-        faces.data,
-        centres.data,
-        widths.data,
-        inverse_widths.data,
-        centres.size,
-        begins[axis],
-        faces.data[static_cast<std::size_t>(begins[axis])],
-        centres.data[static_cast<std::size_t>(begins[axis])],
-        metric.uniform_width(),
-        metric.uniform_inverse_width()};
+    candidate.rebind_metrics();
+    out = std::move(candidate);
+    return {};
+  } catch (const std::bad_alloc&) {
+    return {StatusCode::allocation_failure, 0U};
+  } catch (...) {
+    return {StatusCode::invalid_plan, kKernelPlan};
   }
-  out = candidate;
-  return {};
 }
 
 Status cartesian_gradient(const CartesianKernelPlan& plan,

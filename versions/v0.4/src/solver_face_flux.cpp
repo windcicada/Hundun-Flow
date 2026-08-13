@@ -253,6 +253,12 @@ struct PendingFaceFluxAccess {
 
 }  // namespace detail
 
+PendingFaceFluxView::~PendingFaceFluxView() noexcept {
+  if (writer_ != nullptr) {
+    writer_->abandon_pending_view(*this);
+  }
+}
+
 FaceFluxStorage::~FaceFluxStorage() noexcept { release(); }
 
 void FaceFluxStorage::swap(FaceFluxStorage& other) noexcept {
@@ -273,10 +279,14 @@ void FaceFluxStorage::swap(FaceFluxStorage& other) noexcept {
   swap(authority_identity_, other.authority_identity_);
   swap(pending_writer_identity_, other.pending_writer_identity_);
   swap(pending_attempt_identity_, other.pending_attempt_identity_);
+  swap(pending_writer_, other.pending_writer_);
   swap(final_storage_, other.final_storage_);
 }
 
 void FaceFluxStorage::release() noexcept {
+  if (pending_writer_ != nullptr) {
+    pending_writer_->detach_from_storage(*this);
+  }
   ::operator delete(data_, std::align_val_t{detail::kCacheLineBytes});
   data_ = nullptr;
   cells_ = {};
@@ -294,6 +304,7 @@ void FaceFluxStorage::release() noexcept {
   authority_identity_ = 0U;
   pending_writer_identity_ = 0U;
   pending_attempt_identity_ = 0U;
+  pending_writer_ = nullptr;
   final_storage_ = false;
 }
 
@@ -522,10 +533,13 @@ Status FinalFaceFluxWriter::begin_pending(AttemptTransaction& transaction,
   }
   storage.pending_writer_identity_ = authority_fingerprint_;
   storage.pending_attempt_identity_ = transaction.attempt_identity();
+  storage.pending_writer_ = this;
+  out.writer_ = this;
   pending_revision_ = candidate;
   pending_attempt_identity_ = transaction.attempt_identity();
   transaction_ = &transaction;
   storage_ = &storage;
+  pending_view_ = &out;
   if (bound_storage_identity_ == 0U) {
     bound_storage_identity_ = storage.identity_;
     bound_revision_domain_ = storage.revision_domain_;
@@ -563,6 +577,8 @@ Status FinalFaceFluxWriter::publish_pending(
     pending.writer_identity_ = 0U;
     pending.attempt_identity_ = 0U;
     pending.storage_ = nullptr;
+    pending.writer_ = nullptr;
+    pending_view_ = nullptr;
   }
   return published;
 }
@@ -580,28 +596,121 @@ bool FinalFaceFluxWriter::ready_for_collective(
 
 void FinalFaceFluxWriter::complete_from_transaction(
     const AttemptTransaction& transaction, bool committed) noexcept {
-  if (!pending_ || transaction_ != &transaction) {
+  if (transaction_ != &transaction) {
     return;
   }
-  if (committed) {
+  if (pending_ && committed) {
     std::swap(active_replica_, pending_replica_);
     active_revision_ = pending_revision_;
-  } else {
+  } else if (pending_) {
     // Reuse the rejected pending replica. Its bytes are never reachable from
     // the committed handle, so rollback needs no whole-field clear.
     pending_replica_ = active_replica_ == 0U ? 1U : 0U;
   }
-  FaceFluxStorage* const completed_storage = storage_;
+  clear_storage_lease();
+  invalidate_pending_view();
   pending_revision_ = 0U;
   pending_attempt_identity_ = 0U;
   transaction_ = nullptr;
   storage_ = nullptr;
   pending_ = false;
   pending_published_ = false;
-  if (completed_storage != nullptr) {
-    completed_storage->pending_writer_identity_ = 0U;
-    completed_storage->pending_attempt_identity_ = 0U;
+}
+
+FinalFaceFluxWriter::~FinalFaceFluxWriter() noexcept {
+  AttemptTransaction* const transaction = authority_transaction_;
+  if (transaction != nullptr) {
+    transaction->detach_final_face_flux_writer(*this, true);
+  } else {
+    clear_storage_lease();
+    invalidate_pending_view();
+    transaction_ = nullptr;
+    storage_ = nullptr;
+    pending_ = false;
+    pending_published_ = false;
   }
+}
+
+void FinalFaceFluxWriter::clear_storage_lease() noexcept {
+  if (storage_ != nullptr && storage_->pending_writer_ == this) {
+    storage_->pending_writer_identity_ = 0U;
+    storage_->pending_attempt_identity_ = 0U;
+    storage_->pending_writer_ = nullptr;
+  }
+}
+
+void FinalFaceFluxWriter::invalidate_pending_view() noexcept {
+  if (pending_view_ != nullptr) {
+    pending_view_->x_ = {};
+    pending_view_->y_ = {};
+    pending_view_->z_ = {};
+    pending_view_->revision_ = 0U;
+    pending_view_->writer_identity_ = 0U;
+    pending_view_->attempt_identity_ = 0U;
+    pending_view_->storage_ = nullptr;
+    pending_view_->writer_ = nullptr;
+    pending_view_ = nullptr;
+  }
+}
+
+void FinalFaceFluxWriter::detach_from_transaction(
+    AttemptTransaction& transaction) noexcept {
+  if (transaction_ == &transaction) {
+    clear_storage_lease();
+    invalidate_pending_view();
+    pending_revision_ = 0U;
+    pending_attempt_identity_ = 0U;
+    transaction_ = nullptr;
+    storage_ = nullptr;
+    pending_ = false;
+    pending_published_ = false;
+  }
+  if (authority_transaction_ == &transaction) {
+    authority_transaction_ = nullptr;
+  }
+}
+
+void FinalFaceFluxWriter::detach_from_storage(
+    FaceFluxStorage& storage) noexcept {
+  if (storage_ != &storage) {
+    return;
+  }
+  if (transaction_ != nullptr) {
+    transaction_->invalidate_final_face_flux_writer(*this);
+  }
+  clear_storage_lease();
+  invalidate_pending_view();
+  pending_revision_ = 0U;
+  pending_attempt_identity_ = 0U;
+  storage_ = nullptr;
+  pending_ = false;
+  pending_published_ = false;
+}
+
+void FinalFaceFluxWriter::abandon_pending_view(
+    PendingFaceFluxView& pending) noexcept {
+  if (pending_view_ != &pending) {
+    return;
+  }
+  if (transaction_ != nullptr) {
+    transaction_->invalidate_final_face_flux_writer(*this);
+  }
+  clear_storage_lease();
+  pending_view_ = nullptr;
+  pending_revision_ = 0U;
+  pending_attempt_identity_ = 0U;
+  transaction_ = nullptr;
+  storage_ = nullptr;
+  pending_ = false;
+  pending_published_ = false;
+  pending.x_ = {};
+  pending.y_ = {};
+  pending.z_ = {};
+  pending.revision_ = 0U;
+  pending.writer_identity_ = 0U;
+  pending.attempt_identity_ = 0U;
+  pending.storage_ = nullptr;
+  pending.writer_ = nullptr;
 }
 
 Status FinalFaceFluxWriter::committed(const FaceFluxStorage& storage,
