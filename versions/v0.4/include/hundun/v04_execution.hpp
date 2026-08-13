@@ -13,6 +13,16 @@
 
 namespace hundun::v04 {
 
+enum class CartesianAxis : std::uint8_t;
+enum class ConvectionScheme : std::uint8_t;
+enum class GeometryKind : std::uint8_t;
+class BoundaryPlan;
+class CartesianGeometryPlan;
+class FaceFluxStorage;
+class FinalFaceFluxWriter;
+class SchemePlan;
+struct MeshPatch;
+
 using ArenaOwnerId = std::uint16_t;
 using RevisionSlotId = std::uint16_t;
 using StorageIdentity = std::uint64_t;
@@ -136,6 +146,305 @@ using FieldView = BasicFieldView<double>;
 using ConstFieldView = BasicFieldView<const double>;
 
 ConstFieldView as_const(FieldView view) noexcept;
+
+template <class T>
+struct BasicFaceFieldView {
+  static_assert(std::is_same_v<T, double> ||
+                    std::is_same_v<T, const double>,
+                "BasicFaceFieldView supports FP64 fields only");
+
+  T* base{};
+  Int3 extents{};
+  std::size_t stride_y{};
+  std::size_t stride_z{};
+  CartesianAxis axis{};
+  StorageIdentity storage_identity{};
+  RevisionDomainIdentity revision_domain{};
+
+  T& unchecked(Int3 index) const noexcept {
+    const auto x = static_cast<std::ptrdiff_t>(index.x);
+    const auto y = static_cast<std::ptrdiff_t>(index.y);
+    const auto z = static_cast<std::ptrdiff_t>(index.z);
+    const auto sy = static_cast<std::ptrdiff_t>(stride_y);
+    const auto sz = static_cast<std::ptrdiff_t>(stride_z);
+    return base[x + y * sy + z * sz];
+  }
+};
+
+using FaceFieldView = BasicFaceFieldView<double>;
+using ConstFaceFieldView = BasicFaceFieldView<const double>;
+
+namespace detail {
+struct PendingFaceFluxAccess;
+}
+
+struct ConstFaceFluxView;
+
+class FaceFluxCertificate {
+ public:
+  bool valid() const noexcept {
+    return revision_ != 0U && authority_ != 0U && storage_ != 0U &&
+           revision_domain_ != 0U && x_base_ != nullptr &&
+           y_base_ != nullptr && z_base_ != nullptr && cells_.x > 0 &&
+           cells_.y > 0 && cells_.z > 0;
+  }
+  RevisionToken revision() const noexcept { return revision_; }
+  PlanFingerprint authority() const noexcept { return authority_; }
+  StorageIdentity storage() const noexcept { return storage_; }
+  RevisionDomainIdentity revision_domain() const noexcept {
+    return revision_domain_;
+  }
+  bool matches(ConstFaceFluxView flux) const noexcept;
+  friend bool operator==(FaceFluxCertificate left,
+                         FaceFluxCertificate right) noexcept {
+    return left.revision_ == right.revision_ &&
+           left.authority_ == right.authority_ &&
+           left.storage_ == right.storage_ &&
+           left.revision_domain_ == right.revision_domain_ &&
+           left.x_base_ == right.x_base_ && left.y_base_ == right.y_base_ &&
+           left.z_base_ == right.z_base_ &&
+           left.x_stride_y_ == right.x_stride_y_ &&
+           left.x_stride_z_ == right.x_stride_z_ &&
+           left.y_stride_y_ == right.y_stride_y_ &&
+           left.y_stride_z_ == right.y_stride_z_ &&
+           left.z_stride_y_ == right.z_stride_y_ &&
+           left.z_stride_z_ == right.z_stride_z_ &&
+           left.cells_.x == right.cells_.x &&
+           left.cells_.y == right.cells_.y &&
+           left.cells_.z == right.cells_.z;
+  }
+
+ private:
+  friend class FaceFluxConsumer;
+  friend class FinalFaceFluxWriter;
+  RevisionToken revision_{};
+  PlanFingerprint authority_{};
+  StorageIdentity storage_{};
+  RevisionDomainIdentity revision_domain_{};
+  const double* x_base_{};
+  const double* y_base_{};
+  const double* z_base_{};
+  std::size_t x_stride_y_{};
+  std::size_t x_stride_z_{};
+  std::size_t y_stride_y_{};
+  std::size_t y_stride_z_{};
+  std::size_t z_stride_y_{};
+  std::size_t z_stride_z_{};
+  Int3 cells_{};
+};
+
+struct FaceFluxView {
+  FaceFieldView x{};
+  FaceFieldView y{};
+  FaceFieldView z{};
+  RevisionToken revision{};
+  FaceFluxCertificate certificate{};
+};
+
+struct ConstFaceFluxView {
+  ConstFaceFieldView x{};
+  ConstFaceFieldView y{};
+  ConstFaceFieldView z{};
+  RevisionToken revision{};
+  FaceFluxCertificate certificate{};
+};
+
+class PendingFaceFluxView {
+ public:
+  PendingFaceFluxView() noexcept = default;
+  PendingFaceFluxView(const PendingFaceFluxView&) = delete;
+  PendingFaceFluxView& operator=(const PendingFaceFluxView&) = delete;
+  PendingFaceFluxView(PendingFaceFluxView&&) = delete;
+  PendingFaceFluxView& operator=(PendingFaceFluxView&&) = delete;
+
+  RevisionToken revision() const noexcept { return revision_; }
+  bool valid() const noexcept { return revision_ != 0U; }
+
+ private:
+  friend struct detail::PendingFaceFluxAccess;
+  friend class FaceFluxStorage;
+  friend class FinalFaceFluxWriter;
+  FaceFieldView x_{};
+  FaceFieldView y_{};
+  FaceFieldView z_{};
+  RevisionToken revision_{};
+  std::uint64_t writer_identity_{};
+  std::uint64_t attempt_identity_{};
+  FaceFluxStorage* storage_{};
+};
+
+ConstFaceFieldView as_const(FaceFieldView view) noexcept;
+ConstFaceFluxView as_const(FaceFluxView view) noexcept;
+
+struct FaceFluxStorageCounters {
+  std::uint64_t aligned_payload_allocations{};
+  std::uint64_t aligned_payload_bytes{};
+  std::uint64_t replicas{};
+  std::uint64_t directional_blocks{};
+};
+
+class CartesianKernelPlan;
+
+class FaceFluxStorage {
+ public:
+  FaceFluxStorage() noexcept = default;
+  ~FaceFluxStorage() noexcept;
+  FaceFluxStorage(const FaceFluxStorage&) = delete;
+  FaceFluxStorage& operator=(const FaceFluxStorage&) = delete;
+  FaceFluxStorage(FaceFluxStorage&& other) = delete;
+  FaceFluxStorage& operator=(FaceFluxStorage&& other) = delete;
+
+  static Status allocate_workspace(Int3 cells, std::size_t replicas,
+                                   FaceFluxStorage& out);
+  static Status allocate_final(Int3 cells, FaceFluxStorage& out);
+  Status workspace_view(std::size_t replica, RevisionToken revision,
+                        FaceFluxView& out) noexcept;
+  Status view(std::size_t replica, RevisionToken revision,
+              ConstFaceFluxView& out) const noexcept;
+  FaceFluxStorageCounters counters() const noexcept { return counters_; }
+
+ private:
+  friend struct detail::PendingFaceFluxAccess;
+  friend class FinalFaceFluxWriter;
+  static Status allocate_impl(Int3 cells, std::size_t replicas,
+                              bool final_storage, FaceFluxStorage& out);
+  void release() noexcept;
+  void swap(FaceFluxStorage& other) noexcept;
+  Status view_impl(std::size_t replica, RevisionToken revision,
+                   FaceFluxView& out) noexcept;
+  Status pending_view_impl(std::size_t replica, RevisionToken revision,
+                           std::uint64_t writer_identity,
+                           std::uint64_t attempt_identity,
+                           PendingFaceFluxView& out) noexcept;
+  Status view_impl(std::size_t replica, RevisionToken revision,
+                   ConstFaceFluxView& out) const noexcept;
+  double* data_{};
+  Int3 cells_{};
+  Int3 extents_[3]{};
+  std::size_t stride_y_[3]{};
+  std::size_t stride_z_[3]{};
+  std::size_t offsets_[3]{};
+  std::size_t replica_stride_{};
+  std::size_t replicas_{};
+  StorageIdentity identity_{};
+  RevisionDomainIdentity revision_domain_{};
+  FaceFluxStorageCounters counters_{};
+  PlanFingerprint authority_identity_{};
+  std::uint64_t pending_writer_identity_{};
+  std::uint64_t pending_attempt_identity_{};
+  bool final_storage_{};
+};
+
+struct KernelBox {
+  Int3 begin{};
+  Int3 cells{};
+};
+
+struct KernelCounters {
+  std::uint64_t invocations{};
+  std::uint64_t cells{};
+  std::uint64_t faces{};
+  std::uint64_t logical_bytes_read{};
+  std::uint64_t logical_bytes_written{};
+};
+
+struct KernelInvocation {
+  Span<const ConstFieldView> reads{};
+  Span<const FieldView> writes{};
+  KernelBox box{};
+  std::uint8_t read_component_begin{};
+  std::uint8_t write_component_begin{};
+  std::uint8_t component_count{1U};
+  RevisionToken required_face_flux_revision{};
+  KernelCounters* counters{};
+};
+
+namespace detail {
+
+struct CartesianMetricPacket {
+  const double* faces{};
+  const double* centres{};
+  const double* widths{};
+  const double* inverse_widths{};
+  std::size_t cells{};
+  std::int32_t global_begin{};
+  double local_face_origin{};
+  double local_centre_origin{};
+  double uniform_width{};
+  double uniform_inverse_width{};
+};
+
+}  // namespace detail
+
+class CartesianKernelPlan {
+ public:
+  static Status compile(const SchemePlan& schemes,
+                        const CartesianGeometryPlan& geometry,
+                        const MeshPatch& patch,
+                        const BoundaryPlan& boundary,
+                        CartesianKernelPlan& out) noexcept;
+
+  GeometryKind geometry_kind() const noexcept { return geometry_kind_; }
+  Int3 cells() const noexcept { return cells_; }
+  std::uint8_t reach() const noexcept { return reach_; }
+  double limiter() const noexcept { return limiter_; }
+  PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+  const detail::CartesianMetricPacket& metric(
+      std::size_t axis) const noexcept {
+    return metrics_[axis];
+  }
+
+ private:
+  friend Status cartesian_gradient(const CartesianKernelPlan&,
+                                   const KernelInvocation&) noexcept;
+  friend Status reconstruct_mass_flux(const CartesianKernelPlan&,
+                                      const KernelInvocation&,
+                                      FaceFluxView&) noexcept;
+  friend Status cartesian_face_divergence(const CartesianKernelPlan&,
+                                          ConstFaceFluxView,
+                                          const KernelInvocation&) noexcept;
+  friend Status cartesian_convection(const CartesianKernelPlan&,
+                                     ConvectionScheme, ConstFaceFluxView,
+                                     const KernelInvocation&) noexcept;
+  friend Status cartesian_diffusion(const CartesianKernelPlan&,
+                                    ConstFieldView,
+                                    const KernelInvocation&) noexcept;
+  Int3 patch_begin_{};
+  Int3 cells_{};
+  Int3 process_grid_{};
+  Int3 process_coord_{};
+  PlanFingerprint boundary_identity_{};
+  PlanFingerprint scheme_identity_{};
+  PlanFingerprint fingerprint_{};
+  GeometryKind geometry_kind_{};
+  double limiter_{1.0};
+  std::uint8_t reach_{};
+  detail::CartesianMetricPacket metrics_[3]{};
+};
+
+Status cartesian_gradient(const CartesianKernelPlan& plan,
+                          const KernelInvocation& invocation) noexcept;
+Status reconstruct_mass_flux(const CartesianKernelPlan& plan,
+                             const KernelInvocation& invocation,
+                             FaceFluxView& flux) noexcept;
+Status reconstruct_mass_flux(const CartesianKernelPlan& plan,
+                             const KernelInvocation& invocation,
+                             PendingFaceFluxView& flux) noexcept;
+Status cartesian_face_divergence(const CartesianKernelPlan& plan,
+                                 ConstFaceFluxView flux,
+                                 const KernelInvocation& invocation) noexcept;
+Status cartesian_provisional_face_divergence(
+    const CartesianKernelPlan& plan, ConstFaceFluxView flux,
+    const KernelInvocation& invocation) noexcept;
+Status cartesian_convection(const CartesianKernelPlan& plan,
+                            ConvectionScheme scheme, ConstFaceFluxView flux,
+                            const KernelInvocation& invocation) noexcept;
+Status cartesian_provisional_convection(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept;
+Status cartesian_diffusion(const CartesianKernelPlan& plan,
+                           ConstFieldView diffusivity,
+                           const KernelInvocation& invocation) noexcept;
 
 struct ExecutionCounters {
   std::uint64_t aligned_payload_allocations{};
@@ -293,6 +602,17 @@ class AttemptTransaction {
   RevisionToken pending_cache(RevisionSlotId slot) const noexcept;
 
  private:
+  friend class FinalFaceFluxAuthority;
+  friend class FinalFaceFluxWriter;
+  Status claim_final_face_flux_writer(RevisionSlotId slot,
+                                      std::uint64_t writer_identity,
+                                      FinalFaceFluxWriter& writer) noexcept;
+  Status publish_final_face_flux_cache(
+      RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+      PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept;
+  Status publish_pending_cache_impl(
+      RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+      PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept;
   void discard_attempt() noexcept;
   StateLayers* layers_{};
   std::vector<RevisionToken> active_caches_;
@@ -304,14 +624,83 @@ class AttemptTransaction {
   std::size_t dependency_count_{};
   std::size_t dependency_capacity_per_slot_{};
   std::vector<RevisionToken> cache_commit_buffer_;
+  std::vector<std::uint8_t> required_pending_caches_;
+  std::vector<std::uint64_t> pending_cache_writer_identities_;
   std::vector<std::uint8_t> revised_fields_;
   StorageIdentity bound_layers_identity_{};
   Status attempt_status_{};
   std::uint64_t attempt_identity_{};
+  std::uint64_t final_face_flux_writer_identity_{};
+  FinalFaceFluxWriter* final_face_flux_writer_{};
   bool active_{};
   bool finished_{};
   bool committed_{};
   int lowest_failing_rank_{-1};
+};
+
+class FinalFaceFluxWriter {
+ public:
+  FinalFaceFluxWriter() noexcept = default;
+  FinalFaceFluxWriter(const FinalFaceFluxWriter&) = delete;
+  FinalFaceFluxWriter& operator=(const FinalFaceFluxWriter&) = delete;
+
+  Status begin_pending(AttemptTransaction& transaction,
+                       FaceFluxStorage& storage,
+                       PendingFaceFluxView& out) noexcept;
+  Status publish_pending(Span<const RevisionDependency> dependencies,
+                         PendingFaceFluxView& pending) noexcept;
+  Status committed(const FaceFluxStorage& storage,
+                   ConstFaceFluxView& out) const noexcept;
+
+ private:
+  friend class AttemptTransaction;
+  friend class FinalFaceFluxAuthority;
+  bool ready_for_collective(const AttemptTransaction& transaction) const
+      noexcept;
+  void complete_from_transaction(const AttemptTransaction& transaction,
+                                 bool committed) noexcept;
+  StageId stage_{};
+  RevisionSlotId cache_slot_{};
+  PlanFingerprint authority_fingerprint_{};
+  RevisionToken active_revision_{};
+  RevisionToken pending_revision_{};
+  std::uint64_t pending_attempt_identity_{};
+  std::size_t active_replica_{};
+  std::size_t pending_replica_{1U};
+  AttemptTransaction* authority_transaction_{};
+  AttemptTransaction* transaction_{};
+  FaceFluxStorage* storage_{};
+  StorageIdentity bound_storage_identity_{};
+  RevisionDomainIdentity bound_revision_domain_{};
+  Int3 bound_cells_{};
+  bool issued_{};
+  bool pending_{};
+  bool pending_published_{};
+};
+
+class FinalFaceFluxAuthority {
+ public:
+  Status claim(StageId stage, RevisionSlotId cache_slot,
+               AttemptTransaction& transaction,
+               FinalFaceFluxWriter& out) noexcept;
+  bool claimed() const noexcept { return claimed_; }
+
+ private:
+  PlanFingerprint fingerprint_{};
+  bool claimed_{};
+};
+
+class FaceFluxConsumer {
+ public:
+  Status bind(FaceFluxCertificate certificate) noexcept;
+  Status consume(ConstFaceFluxView flux) noexcept;
+  RevisionToken consumed_revision() const noexcept {
+    return consumed_revision_;
+  }
+
+ private:
+  FaceFluxCertificate required_certificate_{};
+  RevisionToken consumed_revision_{};
 };
 
 }  // namespace hundun::v04

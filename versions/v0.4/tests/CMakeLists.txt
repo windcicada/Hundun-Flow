@@ -43,6 +43,39 @@ add_executable(v04_physics_contribution_test
 target_link_libraries(v04_physics_contribution_test PRIVATE hundun_v04_core)
 add_test(NAME v04_physics_contribution COMMAND v04_physics_contribution_test)
 
+add_executable(v04_solver_manufactured_cartesian_test
+  numerical/solver_manufactured_cartesian_test.cpp)
+target_link_libraries(v04_solver_manufactured_cartesian_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_manufactured_cartesian
+  COMMAND v04_solver_manufactured_cartesian_test)
+set_tests_properties(v04_solver_manufactured_cartesian PROPERTIES TIMEOUT 60)
+
+add_executable(v04_solver_conservation_test
+  numerical/solver_conservation_test.cpp)
+target_link_libraries(v04_solver_conservation_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+add_test(NAME v04_solver_conservation COMMAND v04_solver_conservation_test)
+set_tests_properties(v04_solver_conservation PROPERTIES TIMEOUT 60)
+
+add_executable(v04_solver_decomposition_mpi_test
+  mpi/solver_decomposition_mpi_test.cpp)
+target_link_libraries(v04_solver_decomposition_mpi_test PRIVATE
+  hundun_v04_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_decomposition_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_decomposition_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_decomposition_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 60)
+endforeach()
+
 add_executable(v04_physics_closed_mass_test
   numerical/physics_closed_mass_test.cpp)
 target_link_libraries(v04_physics_closed_mass_test PRIVATE

@@ -79,8 +79,13 @@ Status AttemptTransaction::create(std::size_t field_capacity,
         revision_source_capacity);
     std::vector<RevisionToken> commit_buffer(revision_slot_capacity,
                                              RevisionToken{0U});
+    std::vector<std::uint8_t> required_pending(revision_slot_capacity,
+                                                std::uint8_t{0U});
+    std::vector<std::uint64_t> writer_identities(revision_slot_capacity,
+                                                 std::uint64_t{0U});
     std::vector<std::uint8_t> revised(field_capacity, std::uint8_t{0U});
-    if (out.active_) {
+    if (out.active_ || out.final_face_flux_writer_ != nullptr ||
+        out.final_face_flux_writer_identity_ != 0U) {
       return {StatusCode::invalid_plan, kTransactionState};
     }
     out.active_caches_.swap(active);
@@ -92,6 +97,8 @@ Status AttemptTransaction::create(std::size_t field_capacity,
     out.dependency_count_ = 0U;
     out.dependency_capacity_per_slot_ = revision_source_capacity;
     out.cache_commit_buffer_.swap(commit_buffer);
+    out.required_pending_caches_.swap(required_pending);
+    out.pending_cache_writer_identities_.swap(writer_identities);
     out.revised_fields_.swap(revised);
     out.layers_ = nullptr;
     out.bound_layers_identity_ = 0U;
@@ -100,6 +107,8 @@ Status AttemptTransaction::create(std::size_t field_capacity,
     out.lowest_failing_rank_ = -1;
     out.attempt_status_ = {};
     out.attempt_identity_ = 0U;
+    out.final_face_flux_writer_identity_ = 0U;
+    out.final_face_flux_writer_ = nullptr;
     out.finished_ = false;
     return {};
   } catch (const std::bad_alloc&) {
@@ -249,9 +258,43 @@ Status AttemptTransaction::bind_dependency(
   return {};
 }
 
+Status AttemptTransaction::claim_final_face_flux_writer(
+    RevisionSlotId slot, std::uint64_t writer_identity,
+    FinalFaceFluxWriter& writer) noexcept {
+  const std::size_t index = static_cast<std::size_t>(slot);
+  if (active_ || writer_identity == 0U ||
+      index >= required_pending_caches_.size() ||
+      pending_cache_writer_identities_[index] != 0U ||
+      final_face_flux_writer_identity_ != 0U ||
+      final_face_flux_writer_ != nullptr) {
+    return {StatusCode::invalid_plan, kTransactionCacheSlot};
+  }
+  required_pending_caches_[index] = 1U;
+  pending_cache_writer_identities_[index] = writer_identity;
+  final_face_flux_writer_identity_ = writer_identity;
+  final_face_flux_writer_ = &writer;
+  return {};
+}
+
 Status AttemptTransaction::publish_pending_cache(
     RevisionSlotId slot, Span<const RevisionDependency> dependencies,
     PendingCacheStamp stamp) noexcept {
+  return publish_pending_cache_impl(slot, dependencies, stamp, 0U);
+}
+
+Status AttemptTransaction::publish_final_face_flux_cache(
+    RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+    PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept {
+  if (writer_identity == 0U) {
+    return {StatusCode::invalid_plan, kTransactionCacheSlot};
+  }
+  return publish_pending_cache_impl(slot, dependencies, stamp,
+                                    writer_identity);
+}
+
+Status AttemptTransaction::publish_pending_cache_impl(
+    RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+    PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept {
   const std::size_t index = static_cast<std::size_t>(slot);
   if (!active_ || layers_ == nullptr) {
     return {StatusCode::invalid_plan, kTransactionState};
@@ -263,7 +306,8 @@ Status AttemptTransaction::publish_pending_cache(
     attempt_status_ = {StatusCode::invalid_plan, kTransactionCacheSlot};
     return attempt_status_;
   }
-  if (stamp.cache_revision == 0U || dependencies.data == nullptr ||
+  if (pending_cache_writer_identities_[index] != writer_identity ||
+      stamp.cache_revision == 0U || dependencies.data == nullptr ||
       dependencies.size == 0U ||
       dependencies.size > dependency_capacity_per_slot_ ||
       pending_caches_[index] != 0U) {
@@ -315,7 +359,22 @@ Status AttemptTransaction::collective_finish(MPI_Comm communicator,
   }
   if (locally_active && attempt_status_.code != StatusCode::ok) {
     local_status = attempt_status_;
+  } else if (locally_active && local_status.code == StatusCode::ok &&
+             final_face_flux_writer_ != nullptr &&
+             !final_face_flux_writer_->ready_for_collective(*this)) {
+    local_status = {StatusCode::invalid_plan, kTransactionIncompleteState};
   } else if (locally_active && local_status.code == StatusCode::ok) {
+    for (std::size_t slot = 0U; slot < required_pending_caches_.size();
+         ++slot) {
+      if (required_pending_caches_[slot] != 0U &&
+          pending_caches_[slot] == 0U) {
+        local_status = {StatusCode::invalid_plan,
+                        kTransactionIncompleteState};
+        break;
+      }
+    }
+  }
+  if (locally_active && local_status.code == StatusCode::ok) {
     for (std::size_t field = 0U; field < revised_fields_.size(); ++field) {
       if (layers_->state_fields_[field] != 0U && revised_fields_[field] == 0U) {
         local_status = {StatusCode::invalid_plan,
@@ -390,6 +449,9 @@ Status AttemptTransaction::collective_finish(MPI_Comm communicator,
       lowest_failing_rank_ = -1;
       return {StatusCode::invalid_plan, kTransactionState};
     }
+    if (final_face_flux_writer_ != nullptr) {
+      final_face_flux_writer_->complete_from_transaction(*this, true);
+    }
     layers_->rotate_commit();
     active_ = false;
     layers_ = nullptr;
@@ -426,6 +488,9 @@ Status AttemptTransaction::collective_finish(MPI_Comm communicator,
 }
 
 void AttemptTransaction::discard_attempt() noexcept {
+  if (final_face_flux_writer_ != nullptr) {
+    final_face_flux_writer_->complete_from_transaction(*this, false);
+  }
   for (std::size_t slot = 0U; slot < pending_caches_.size(); ++slot) {
     pending_caches_[slot] = RevisionToken{0U};
     pending_cache_dependency_counts_[slot] = 0U;

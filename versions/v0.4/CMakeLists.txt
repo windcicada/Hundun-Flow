@@ -72,6 +72,9 @@ add_library(hundun_v04_core STATIC
   src/physics_input.cpp
   src/physics_thermo.cpp
   src/physics_transport.cpp
+  src/solver_cartesian.cpp
+  src/solver_diffusion.cpp
+  src/solver_face_flux.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
