@@ -13,6 +13,7 @@ option(HUNDUN_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(HUNDUN_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 
 find_package(MPI 3 REQUIRED COMPONENTS C)
+find_package(Threads REQUIRED)
 
 get_filename_component(hundun_repository_root
   "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
@@ -56,6 +57,10 @@ add_library(hundun_v04_core STATIC
   src/core_revision.cpp
   src/core_status.cpp
   src/core_transaction.cpp
+  src/mesh_cartesian.cpp
+  src/mesh_decomposition.cpp
+  src/mesh_focus.cpp
+  src/mesh_stl_scan.cpp
   "${hundun_v04_yyjson_root}/yyjson.c")
 target_include_directories(hundun_v04_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -64,6 +69,8 @@ target_include_directories(hundun_v04_core PRIVATE
 target_link_libraries(hundun_v04_core PUBLIC
   hundun_v04_build_options
   MPI::MPI_C)
+target_link_libraries(hundun_v04_core PRIVATE
+  Threads::Threads)
 if(HUNDUN_BUILD_TESTS)
   target_compile_definitions(hundun_v04_core PRIVATE
     HUNDUN_V04_ENABLE_TEST_ACCESS=1)

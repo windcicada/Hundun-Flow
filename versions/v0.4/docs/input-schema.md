@@ -2,47 +2,53 @@
 
 # HUNDUN-FLOW v0.4 case-input schema
 
-Status: Task 3 cold-path schema, 2026-08-13
+Status: Task 5 closed cold-path schema, 2026-08-13
 
 ## Authority and directory layout
 
-`case.json` is the only configuration authority. A case is a flat directory:
+`case.json` is the only configuration authority. Referenced `.d` tables and STL geometry
+are bytes-only inputs; they cannot override JSON. Every referenced file must be a unique,
+regular direct child of the case root. Absolute paths, parent traversal, nested paths,
+incorrect suffixes, missing files, symbolic links, and hard-link aliases are rejected.
 
-```text
-case-root/
-  case.json
-  mesh-focus.d
-  inlet-profile.d
-  body.stl
-```
+Rank 0 alone opens the case-root descriptor, `case.json`, `.d`, and STL files. It parses and
+normalizes the closed schema, hashes the typed mesh and referenced bytes, and broadcasts a
+bounded wire-v2 typed model. Other ranks never inspect the filesystem or parse JSON. Failed
+compilation leaves the caller's output model unchanged on every rank.
 
-Referenced `.d` and STL files must be direct children of the case root. Absolute paths,
-parent traversal, nested paths, missing files, non-regular files, wrong suffixes, duplicate
-references (including hard-link aliases), and symbolic links are rejected. Rank 0 opens every
-file relative to one case-root directory descriptor, verifies the opened descriptor with
-`fstat`, and reads or hashes through that same descriptor. A `.d`
-file contains bulk arrays or tables only; it cannot override JSON configuration.
+## Complete closed schema
 
-Rank 0 alone canonicalizes the case root, opens `case.json`, validates the schema, and reads
-referenced bytes. It broadcasts a bounded typed model. Other ranks neither parse JSON nor
-touch case files. `CaseCompiler::load_and_compile` requires an initialized MPI runtime and a
-valid communicator.
-
-## Complete Task 3 schema
-
-Every object is closed: unknown, duplicate, missing, or incorrectly typed keys are errors.
-The sole optional block is `turbulence`; omitting it selects
-`vreman_wall_function`. The schema is deliberately small until later capability tasks add
-their own registered input.
+Every object below is closed. Unknown, duplicate, missing, or incorrectly typed keys are
+errors. Only `turbulence` is optional; omission selects `vreman_wall_function`. JSON
+`schema_version` remains `1`; wire version `2` is an internal typed-model format.
 
 ```json
 {
   "schema_version": 1,
   "units": "SI",
   "mesh": {
-    "kind": "uniform",
-    "data_files": [],
-    "stl_file": null
+    "kind": "tensor_stretched",
+    "domain": {
+      "lower": [0.0, 0.0, 0.0],
+      "upper": [2.0, 1.0, 1.0]
+    },
+    "exact_cells": [64, 32, 32],
+    "base_spacing": [0.05, 0.05, 0.05],
+    "minimum_spacing": [0.01, 0.01, 0.01],
+    "max_growth_ratio": 1.2,
+    "focus_regions": [
+      {
+        "lower": [0.2, 0.2, 0.2],
+        "upper": [0.8, 0.8, 0.8],
+        "target_spacing": [0.02, 0.02, 0.02]
+      }
+    ],
+    "limits": {
+      "max_global_cells": 1000000,
+      "max_memory_bytes_per_rank": 1073741824
+    },
+    "data_files": ["profile.d"],
+    "stl_file": "body.stl"
   },
   "flow": {
     "model": "single_phase_low_mach_compressible",
@@ -53,84 +59,83 @@ their own registered input.
     "coupling": "PISO",
     "pressure_correctors": 2
   },
-  "turbulence": {
-    "model": "vreman_wall_function"
-  },
-  "time": {
-    "control": "adaptive_flow"
-  }
+  "turbulence": {"model": "vreman_wall_function"},
+  "time": {"control": "adaptive_flow"}
 }
 ```
 
-Accepted values are:
+All mesh numbers must be finite IEEE-754 values. Each domain upper coordinate must be greater
+than its lower coordinate. Every spacing is positive, `max_growth_ratio >= 1`, every cell
+count is a positive signed-32-bit representable integer, and both limits are positive.
+When `exact_cells` is present, its checked product cannot exceed `max_global_cells`.
+
+### Uniform Cartesian mesh
+
+For `kind: "uniform"`:
+
+- `exact_cells` is a required three-integer vector;
+- `base_spacing` is `null`;
+- `focus_regions` is empty;
+- `max_growth_ratio` is exactly `1.0`; and
+- each `minimum_spacing` component is no greater than the corresponding domain span divided
+  by the exact cell count.
+
+### Tensor-stretched Cartesian mesh
+
+For `kind: "tensor_stretched"`, `base_spacing` is a required positive vector and each
+component is at least `minimum_spacing`. `exact_cells` may be `null` or a three-integer vector;
+when present it fixes the global counts while base spacing and focus regions define the target
+distribution. Each focus region is a closed object with `lower`, `upper`, and
+`target_spacing` three-vectors. Target spacing must be component-wise within
+`[minimum_spacing, base_spacing]`.
+
+A focus box must overlap the domain with positive extent in all three axes. Partly external
+boxes are clipped to the domain; wholly external or merely touching boxes are rejected.
+After clipping, regions are sorted lexicographically by lower bound, upper bound, and target
+spacing, then exact duplicates are removed. Negative zero is normalized to positive zero.
+Consequently JSON focus order, duplicate entries, equivalent clipped bounds, and `-0.0` do
+not change the typed model or fingerprint.
+
+## Remaining accepted values
 
 | Key | Accepted value |
 | --- | --- |
-| `schema_version` | unsigned integer `1` |
 | `units` | `SI` |
-| `mesh.kind` | `uniform`, `tensor_stretched` |
-| `mesh.data_files[]` | unique direct-root filenames ending in `.d` |
-| `mesh.stl_file` | `null` or one unique direct-root filename ending in `.stl` |
+| `mesh.data_files[]` | unique direct-root names ending in `.d` |
+| `mesh.stl_file` | `null` or a unique direct-root name ending in `.stl` |
 | `flow.model` | `single_phase_low_mach_compressible` |
 | `flow.pressure_closure` | `local_absolute_pressure_drho_dp` |
 | `flow.reacting` | `false` |
 | `solver.coupling` | `PISO` |
 | `solver.pressure_correctors` | unsigned integer `2` |
-| `turbulence.model` | optional block; default `vreman_wall_function`; explicit `vreman_wall_function`, `wale`, `none` |
-| `time.control` | `fixed`, `adaptive_flow`, `adaptive_acoustic` |
+| `turbulence.model` | optional block; `vreman_wall_function`, `wale`, or `none` |
+| `time.control` | `fixed`, `adaptive_flow`, or `adaptive_acoustic` |
 
-`vreman_wall_function` is the production default chosen by generated examples and case
-templates. Verification cases may explicitly select `none`; retained WALE cases explicitly
-select `wale`. When the optional turbulence block is absent, the compiler resolves and hashes
-the versioned `vreman_wall_function` default as part of the typed model.
+Body-fitted, multiblock, AMR/nonmatching refinement, constant-density flow, SIMPLE/PIMPLE,
+reacting physics, other corrector counts, and unlisted turbulence or time controls are
+rejected.
 
-The following selections are rejected in v0.4: constant density, body-fitted or multiblock
-geometry, AMR/nonmatching refinement, SIMPLE, PIMPLE, a pressure-corrector count other than
-two, reacting flow, shock physics, and turbulence models outside the three values above.
-
-## Cold-path limits
-
-Limits are checked before an unbounded allocation or collective transfer:
+## Cold-path bounds and fingerprint
 
 | Resource | Limit |
 | --- | ---: |
-| `case.json` bytes | 1 MiB |
+| `case.json` | 1 MiB |
 | JSON nesting depth | 32 |
+| focus regions before normalization | 1024 |
 | referenced files | 256 |
-| direct-root relative filename | 255 bytes |
-| each referenced `.d` or STL file | 64 MiB |
-| canonical typed MPI wire payload | 128 KiB |
+| direct-root filename | 255 bytes |
+| each referenced file | 64 MiB |
+| typed MPI wire payload | 128 KiB |
 
-Referenced files are hashed through a fixed-size streaming buffer; their contents are not
-placed in the model wire. Exceeding a limit returns a deterministic rejected input status on
-all ranks.
+The deterministic nonzero fingerprint hashes a versioned semantic contract followed by the
+complete canonical typed mesh: kind; domain bounds; exact/base presence flags and values;
+minimum spacing; growth ratio; normalized focus count and every focus bound/target; both
+limits; turbulence and time enums; normalized reference kinds/names; and exact referenced
+file bytes plus byte counts. Floating-point values are hashed by their canonical IEEE-754
+binary64 bit patterns. JSON whitespace, object-key order, and normalization-equivalent focus
+input therefore do not affect identity, while any typed mesh or referenced-byte change does.
 
-## Canonical model and fingerprint
-
-The broadcast model contains only typed enum values, normalized relative filenames, an
-optional normalized STL filename, and a nonzero 64-bit plan fingerprint. The fingerprint is
-computed in declared order from:
-
-1. a versioned semantic-contract identifier covering schema version, SI units, low-Mach flow,
-   local-absolute-pressure EOS closure, nonreacting physics, PISO coupling, and two pressure
-   correctors;
-2. geometry, turbulence, and time-control enum values;
-3. normalized reference type and direct-root name; and
-4. the exact bytes and byte count of every referenced `.d` and STL file.
-
-Changing referenced data therefore changes the fingerprint without broadcasting the data.
-JSON formatting and object-key order do not affect it because only the validated typed model
-is hashed. Every rank validates the bounded wire before publishing its `ValidatedModel`.
-
-## Field registration boundary
-
-`FieldRegistry::declare_field` assigns deterministic IDs in registration order and rejects
-empty names, duplicate names, unsupported component/ghost counts, ID exhaustion, and mutation
-after freeze. `freeze_for_test()` exists only to test snapshot mechanics on a synthetic
-registry. Task 3 does not freeze the production `FieldSchema`; IBM, turbulence, equation,
-solver, workspace, and diagnostic capabilities must register first. Task 18 performs the one
-production freeze.
-
-No case name, geometry name, measurement station, or benchmark-specific field is compiled
-into product source. New runtime cases use this input contract and capability registration,
-not source edits.
+`FieldRegistry::freeze_for_test()` remains a synthetic-test mechanism only. No production
+case compile freezes the field schema; all capabilities must register before Task 18 performs
+the single production freeze. Product code contains no source-case names or benchmark-specific
+field declarations.

@@ -8,10 +8,13 @@
 #include <mpi.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fcntl.h>
 #include <initializer_list>
@@ -34,18 +37,21 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint8_t kWireVersion = 1U;
+constexpr std::uint8_t kWireVersion = 2U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
 constexpr std::string_view kSemanticContract =
-    "HUNDUN-FLOW-v0.4-case-schema-v1|units=SI|"
+    "HUNDUN-FLOW-v0.4-case-wire-v2|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
     "pressure_closure=local_absolute_pressure_drho_dp|reacting=false|"
     "coupling=PISO|pressure_correctors=2";
 
 static_assert(std::is_nothrow_move_assignable_v<ValidatedModel>,
               "ValidatedModel publication must not allocate or throw");
+static_assert(sizeof(double) == sizeof(std::uint64_t) &&
+                  std::numeric_limits<double>::is_iec559,
+              "case wire requires IEEE-754 binary64 doubles");
 
 enum Detail : std::uint32_t {
   detail_none = 0,
@@ -117,6 +123,15 @@ class Hash64 {
           static_cast<unsigned char>((bits >> (byte * 8U)) & 0xffU);
       bytes(&part, 1U);
     }
+  }
+
+  void real(double value) noexcept {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &value, sizeof(bits));
+    integer(bits);
   }
 
   PlanFingerprint finish() const noexcept {
@@ -380,6 +395,222 @@ bool parse_time_control(std::string_view value,
   return false;
 }
 
+bool finite_real(yyjson_val* value, double& out) noexcept {
+  if (!yyjson_is_num(value)) {
+    return false;
+  }
+  out = yyjson_get_num(value);
+  if (!std::isfinite(out)) {
+    return false;
+  }
+  if (out == 0.0) {
+    out = 0.0;
+  }
+  return true;
+}
+
+bool parse_real3(yyjson_val* value, Real3& out) noexcept {
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3U) {
+    return false;
+  }
+  return finite_real(yyjson_arr_get(value, 0U), out.x) &&
+         finite_real(yyjson_arr_get(value, 1U), out.y) &&
+         finite_real(yyjson_arr_get(value, 2U), out.z);
+}
+
+bool parse_positive_real3(yyjson_val* value, Real3& out) noexcept {
+  return parse_real3(value, out) && out.x > 0.0 && out.y > 0.0 && out.z > 0.0;
+}
+
+bool parse_optional_positive_real3(yyjson_val* value, bool& present,
+                                   Real3& out) noexcept {
+  if (yyjson_is_null(value)) {
+    present = false;
+    out = {};
+    return true;
+  }
+  present = true;
+  return parse_positive_real3(value, out);
+}
+
+bool parse_optional_cells(yyjson_val* value, bool& present,
+                          Int3& out) noexcept {
+  if (yyjson_is_null(value)) {
+    present = false;
+    out = {};
+    return true;
+  }
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3U) {
+    return false;
+  }
+  const auto parse_component = [](yyjson_val* component,
+                                  std::int32_t& parsed) noexcept {
+    if (!yyjson_is_uint(component)) {
+      return false;
+    }
+    const std::uint64_t value = yyjson_get_uint(component);
+    if (value == 0U ||
+        value > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
+      return false;
+    }
+    parsed = static_cast<std::int32_t>(value);
+    return true;
+  };
+  present = true;
+  return parse_component(yyjson_arr_get(value, 0U), out.x) &&
+         parse_component(yyjson_arr_get(value, 1U), out.y) &&
+         parse_component(yyjson_arr_get(value, 2U), out.z);
+}
+
+bool ordered_domain(const Real3& lower, const Real3& upper) noexcept {
+  return lower.x < upper.x && lower.y < upper.y && lower.z < upper.z &&
+         std::isfinite(upper.x - lower.x) &&
+         std::isfinite(upper.y - lower.y) &&
+         std::isfinite(upper.z - lower.z);
+}
+
+bool componentwise_at_least(const Real3& value,
+                            const Real3& minimum) noexcept {
+  return value.x >= minimum.x && value.y >= minimum.y &&
+         value.z >= minimum.z;
+}
+
+bool componentwise_at_most(const Real3& value,
+                           const Real3& maximum) noexcept {
+  return value.x <= maximum.x && value.y <= maximum.y &&
+         value.z <= maximum.z;
+}
+
+bool same_real3(const Real3& left, const Real3& right) noexcept {
+  return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+bool focus_less(const FocusRegionSpec& left,
+                const FocusRegionSpec& right) noexcept {
+  const std::array<double, 9U> lhs{left.lower.x, left.lower.y, left.lower.z,
+                                  left.upper.x, left.upper.y, left.upper.z,
+                                  left.target_spacing.x,
+                                  left.target_spacing.y,
+                                  left.target_spacing.z};
+  const std::array<double, 9U> rhs{right.lower.x, right.lower.y, right.lower.z,
+                                  right.upper.x, right.upper.y, right.upper.z,
+                                  right.target_spacing.x,
+                                  right.target_spacing.y,
+                                  right.target_spacing.z};
+  return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(),
+                                      rhs.end());
+}
+
+bool same_focus(const FocusRegionSpec& left,
+                const FocusRegionSpec& right) noexcept {
+  return same_real3(left.lower, right.lower) &&
+         same_real3(left.upper, right.upper) &&
+         same_real3(left.target_spacing, right.target_spacing);
+}
+
+void hash_real3(Hash64& hash, const Real3& value) noexcept {
+  hash.real(value.x);
+  hash.real(value.y);
+  hash.real(value.z);
+}
+
+bool exact_cell_count_within_limit(const CartesianMeshSpec& mesh) noexcept {
+  if (!mesh.has_exact_cells) {
+    return true;
+  }
+  if (mesh.exact_cells.x <= 0 || mesh.exact_cells.y <= 0 ||
+      mesh.exact_cells.z <= 0) {
+    return false;
+  }
+  const auto x = static_cast<std::uint64_t>(mesh.exact_cells.x);
+  const auto y = static_cast<std::uint64_t>(mesh.exact_cells.y);
+  const auto z = static_cast<std::uint64_t>(mesh.exact_cells.z);
+  if (x == 0U || y == 0U || z == 0U ||
+      x > std::numeric_limits<std::uint64_t>::max() / y) {
+    return false;
+  }
+  const std::uint64_t xy = x * y;
+  return xy <= std::numeric_limits<std::uint64_t>::max() / z &&
+         xy * z <= mesh.limits.max_global_cells;
+}
+
+bool valid_canonical_mesh(const CartesianMeshSpec& mesh) noexcept {
+  if (!ordered_domain(mesh.lower, mesh.upper) ||
+      mesh.minimum_spacing.x <= 0.0 || mesh.minimum_spacing.y <= 0.0 ||
+      mesh.minimum_spacing.z <= 0.0 ||
+      !std::isfinite(mesh.max_growth_ratio) ||
+      mesh.max_growth_ratio < 1.0 || mesh.limits.max_global_cells == 0U ||
+      mesh.limits.max_memory_bytes_per_rank == 0U ||
+      !exact_cell_count_within_limit(mesh) ||
+      mesh.focus_regions.size() > detail::kMaxFocusRegions) {
+    return false;
+  }
+  if (mesh.kind == GeometryKind::uniform) {
+    if (!mesh.has_exact_cells || mesh.has_base_spacing ||
+        !mesh.focus_regions.empty() || mesh.max_growth_ratio != 1.0) {
+      return false;
+    }
+    const Real3 widths{
+        (mesh.upper.x - mesh.lower.x) /
+            static_cast<double>(mesh.exact_cells.x),
+        (mesh.upper.y - mesh.lower.y) /
+            static_cast<double>(mesh.exact_cells.y),
+        (mesh.upper.z - mesh.lower.z) /
+            static_cast<double>(mesh.exact_cells.z)};
+    return std::isfinite(widths.x) && std::isfinite(widths.y) &&
+           std::isfinite(widths.z) &&
+           componentwise_at_most(mesh.minimum_spacing, widths);
+  }
+  if (mesh.kind != GeometryKind::tensor_stretched ||
+      !mesh.has_base_spacing ||
+      !componentwise_at_least(mesh.base_spacing, mesh.minimum_spacing)) {
+    return false;
+  }
+  for (const FocusRegionSpec& focus : mesh.focus_regions) {
+    if (!ordered_domain(focus.lower, focus.upper) ||
+        !componentwise_at_least(focus.lower, mesh.lower) ||
+        !componentwise_at_most(focus.upper, mesh.upper) ||
+        focus.target_spacing.x <= 0.0 || focus.target_spacing.y <= 0.0 ||
+        focus.target_spacing.z <= 0.0 ||
+        !componentwise_at_least(focus.target_spacing,
+                                mesh.minimum_spacing) ||
+        !componentwise_at_most(focus.target_spacing, mesh.base_spacing)) {
+      return false;
+    }
+  }
+  return std::is_sorted(mesh.focus_regions.begin(), mesh.focus_regions.end(),
+                        focus_less) &&
+         std::adjacent_find(mesh.focus_regions.begin(),
+                            mesh.focus_regions.end(), same_focus) ==
+             mesh.focus_regions.end();
+}
+
+void hash_mesh(Hash64& hash, const CartesianMeshSpec& mesh) noexcept {
+  hash.integer(static_cast<std::uint8_t>(mesh.kind));
+  hash_real3(hash, mesh.lower);
+  hash_real3(hash, mesh.upper);
+  hash.integer(static_cast<std::uint8_t>(mesh.has_exact_cells ? 1U : 0U));
+  if (mesh.has_exact_cells) {
+    hash.integer(mesh.exact_cells.x);
+    hash.integer(mesh.exact_cells.y);
+    hash.integer(mesh.exact_cells.z);
+  }
+  hash.integer(static_cast<std::uint8_t>(mesh.has_base_spacing ? 1U : 0U));
+  if (mesh.has_base_spacing) {
+    hash_real3(hash, mesh.base_spacing);
+  }
+  hash_real3(hash, mesh.minimum_spacing);
+  hash.real(mesh.max_growth_ratio);
+  hash.integer(static_cast<std::uint16_t>(mesh.focus_regions.size()));
+  for (const FocusRegionSpec& focus : mesh.focus_regions) {
+    hash_real3(hash, focus.lower);
+    hash_real3(hash, focus.upper);
+    hash_real3(hash, focus.target_spacing);
+  }
+  hash.integer(mesh.limits.max_global_cells);
+  hash.integer(mesh.limits.max_memory_bytes_per_rank);
+}
+
 bool valid_direct_name(std::string_view text, std::string_view extension,
                        fs::path& out) {
   if (text.empty() || text.size() > detail::kMaxRelativePathBytes ||
@@ -419,10 +650,35 @@ class WireWriter {
     byte(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
   }
 
+  void u32(std::uint32_t value) {
+    for (unsigned int shift = 0U; shift < 32U; shift += 8U) {
+      byte(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+    }
+  }
+
   void u64(std::uint64_t value) {
     for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
       byte(static_cast<std::uint8_t>((value >> shift) & 0xffU));
     }
+  }
+
+  void i32(std::int32_t value) {
+    u32(static_cast<std::uint32_t>(value));
+  }
+
+  void real(double value) {
+    if (value == 0.0) {
+      value = 0.0;
+    }
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &value, sizeof(bits));
+    u64(bits);
+  }
+
+  void real3(const Real3& value) {
+    real(value.x);
+    real(value.y);
+    real(value.z);
   }
 
   bool text(std::string_view value) {
@@ -464,6 +720,18 @@ class WireReader {
     return true;
   }
 
+  bool u32(std::uint32_t& out) noexcept {
+    out = 0U;
+    for (unsigned int shift = 0U; shift < 32U; shift += 8U) {
+      std::uint8_t part = 0U;
+      if (!byte(part)) {
+        return false;
+      }
+      out |= static_cast<std::uint32_t>(part) << shift;
+    }
+    return true;
+  }
+
   bool u64(std::uint64_t& out) noexcept {
     out = 0U;
     for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
@@ -474,6 +742,36 @@ class WireReader {
       out |= static_cast<std::uint64_t>(part) << shift;
     }
     return true;
+  }
+
+  bool i32(std::int32_t& out) noexcept {
+    std::uint32_t bits = 0U;
+    if (!u32(bits) ||
+        bits > static_cast<std::uint32_t>(
+                   std::numeric_limits<std::int32_t>::max())) {
+      return false;
+    }
+    out = static_cast<std::int32_t>(bits);
+    return true;
+  }
+
+  bool real(double& out) noexcept {
+    std::uint64_t bits = 0U;
+    if (!u64(bits)) {
+      return false;
+    }
+    std::memcpy(&out, &bits, sizeof(out));
+    if (!std::isfinite(out)) {
+      return false;
+    }
+    if (out == 0.0) {
+      out = 0.0;
+    }
+    return true;
+  }
+
+  bool real3(Real3& out) noexcept {
+    return real(out.x) && real(out.y) && real(out.z);
   }
 
   bool text(std::string& out) {
@@ -497,7 +795,11 @@ class WireReader {
 Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
-    if (model.data_files.size() > detail::kMaxReferencedFiles ||
+    if (!valid_canonical_mesh(model.mesh) ||
+        model.mesh.focus_regions.size() > detail::kMaxFocusRegions ||
+        model.mesh.focus_regions.size() >
+            std::numeric_limits<std::uint16_t>::max() ||
+        model.data_files.size() > detail::kMaxReferencedFiles ||
         model.data_files.size() + (model.stl_file.has_value() ? 1U : 0U) >
             detail::kMaxReferencedFiles ||
         model.data_files.size() > std::numeric_limits<std::uint16_t>::max()) {
@@ -505,9 +807,31 @@ Status serialize_model(const ValidatedModel& model,
     }
     WireWriter writer;
     writer.byte(kWireVersion);
-    writer.byte(static_cast<std::uint8_t>(model.geometry));
+    writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.time_control));
+    writer.real3(model.mesh.lower);
+    writer.real3(model.mesh.upper);
+    writer.byte(model.mesh.has_exact_cells ? 1U : 0U);
+    if (model.mesh.has_exact_cells) {
+      writer.i32(model.mesh.exact_cells.x);
+      writer.i32(model.mesh.exact_cells.y);
+      writer.i32(model.mesh.exact_cells.z);
+    }
+    writer.byte(model.mesh.has_base_spacing ? 1U : 0U);
+    if (model.mesh.has_base_spacing) {
+      writer.real3(model.mesh.base_spacing);
+    }
+    writer.real3(model.mesh.minimum_spacing);
+    writer.real(model.mesh.max_growth_ratio);
+    writer.u16(static_cast<std::uint16_t>(model.mesh.focus_regions.size()));
+    for (const FocusRegionSpec& focus : model.mesh.focus_regions) {
+      writer.real3(focus.lower);
+      writer.real3(focus.upper);
+      writer.real3(focus.target_spacing);
+    }
+    writer.u64(model.mesh.limits.max_global_cells);
+    writer.u64(model.mesh.limits.max_memory_bytes_per_rank);
     writer.u16(static_cast<std::uint16_t>(model.data_files.size()));
     writer.byte(model.stl_file.has_value() ? 1U : 0U);
     for (const fs::path& path : model.data_files) {
@@ -538,6 +862,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t geometry = 0U;
     std::uint8_t turbulence = 0U;
     std::uint8_t time_control = 0U;
+    std::uint8_t has_exact_cells = 0U;
+    std::uint8_t has_base_spacing = 0U;
+    std::uint16_t focus_count = 0U;
     std::uint16_t data_count = 0U;
     std::uint8_t has_stl = 0U;
     if (!reader.byte(version) || version != kWireVersion ||
@@ -548,18 +875,84 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
             static_cast<std::uint8_t>(TurbulenceKind::vreman_wall_function) ||
         !reader.byte(time_control) ||
         time_control >
-            static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) ||
+            static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic)) {
+      return invalid_case(detail_wire);
+    }
+
+    ValidatedModel model;
+    model.mesh.kind = static_cast<GeometryKind>(geometry);
+    model.turbulence = static_cast<TurbulenceKind>(turbulence);
+    model.time_control = static_cast<TimeControlKind>(time_control);
+    if (!reader.real3(model.mesh.lower) || !reader.real3(model.mesh.upper) ||
+        !ordered_domain(model.mesh.lower, model.mesh.upper) ||
+        !reader.byte(has_exact_cells) || has_exact_cells > 1U) {
+      return invalid_case(detail_wire);
+    }
+    model.mesh.has_exact_cells = has_exact_cells != 0U;
+    if (model.mesh.has_exact_cells &&
+        (!reader.i32(model.mesh.exact_cells.x) ||
+         !reader.i32(model.mesh.exact_cells.y) ||
+         !reader.i32(model.mesh.exact_cells.z) ||
+         model.mesh.exact_cells.x <= 0 || model.mesh.exact_cells.y <= 0 ||
+         model.mesh.exact_cells.z <= 0)) {
+      return invalid_case(detail_wire);
+    }
+    if (!reader.byte(has_base_spacing) || has_base_spacing > 1U) {
+      return invalid_case(detail_wire);
+    }
+    model.mesh.has_base_spacing = has_base_spacing != 0U;
+    if (model.mesh.has_base_spacing &&
+        (!reader.real3(model.mesh.base_spacing) ||
+         model.mesh.base_spacing.x <= 0.0 || model.mesh.base_spacing.y <= 0.0 ||
+         model.mesh.base_spacing.z <= 0.0)) {
+      return invalid_case(detail_wire);
+    }
+    if (!reader.real3(model.mesh.minimum_spacing) ||
+        model.mesh.minimum_spacing.x <= 0.0 ||
+        model.mesh.minimum_spacing.y <= 0.0 ||
+        model.mesh.minimum_spacing.z <= 0.0 ||
+        !reader.real(model.mesh.max_growth_ratio) ||
+        model.mesh.max_growth_ratio < 1.0 || !reader.u16(focus_count) ||
+        focus_count > detail::kMaxFocusRegions) {
+      return invalid_case(detail_wire);
+    }
+    model.mesh.focus_regions.reserve(focus_count);
+    for (std::uint16_t index = 0U; index < focus_count; ++index) {
+      FocusRegionSpec focus;
+      if (!reader.real3(focus.lower) || !reader.real3(focus.upper) ||
+          !reader.real3(focus.target_spacing) ||
+          !ordered_domain(focus.lower, focus.upper) ||
+          !componentwise_at_least(focus.lower, model.mesh.lower) ||
+          !componentwise_at_most(focus.upper, model.mesh.upper) ||
+          focus.target_spacing.x <= 0.0 || focus.target_spacing.y <= 0.0 ||
+          focus.target_spacing.z <= 0.0 ||
+          !componentwise_at_least(focus.target_spacing,
+                                  model.mesh.minimum_spacing) ||
+          (model.mesh.has_base_spacing &&
+           !componentwise_at_most(focus.target_spacing,
+                                  model.mesh.base_spacing))) {
+        return invalid_case(detail_wire);
+      }
+      model.mesh.focus_regions.push_back(focus);
+    }
+    if (!std::is_sorted(model.mesh.focus_regions.begin(),
+                        model.mesh.focus_regions.end(), focus_less) ||
+        std::adjacent_find(model.mesh.focus_regions.begin(),
+                           model.mesh.focus_regions.end(), same_focus) !=
+            model.mesh.focus_regions.end() ||
+        !reader.u64(model.mesh.limits.max_global_cells) ||
+        !reader.u64(model.mesh.limits.max_memory_bytes_per_rank) ||
+        model.mesh.limits.max_global_cells == 0U ||
+        model.mesh.limits.max_memory_bytes_per_rank == 0U ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
         !reader.byte(has_stl) || has_stl > 1U ||
         static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) >
             detail::kMaxReferencedFiles) {
       return invalid_case(detail_wire);
     }
-
-    ValidatedModel model;
-    model.geometry = static_cast<GeometryKind>(geometry);
-    model.turbulence = static_cast<TurbulenceKind>(turbulence);
-    model.time_control = static_cast<TimeControlKind>(time_control);
+    if (!valid_canonical_mesh(model.mesh)) {
+      return invalid_case(detail_wire);
+    }
     model.data_files.reserve(data_count);
     for (std::uint16_t index = 0U; index < data_count; ++index) {
       std::string path;
@@ -657,7 +1050,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* solver = yyjson_obj_get(root, "solver");
     yyjson_val* turbulence = yyjson_obj_get(root, "turbulence");
     yyjson_val* time = yyjson_obj_get(root, "time");
-    if (!object_has_exact_keys(mesh, {"kind", "data_files", "stl_file"}) ||
+    if (!object_has_exact_keys(
+            mesh, {"kind", "domain", "exact_cells", "base_spacing",
+                   "minimum_spacing", "max_growth_ratio", "focus_regions",
+                   "limits", "data_files", "stl_file"}) ||
         !object_has_exact_keys(flow,
                                {"model", "pressure_closure", "reacting"}) ||
         !object_has_exact_keys(solver,
@@ -668,6 +1064,17 @@ Status compile_on_root(const fs::path& case_root, int rank,
       return invalid_case(detail_json_schema);
     }
 
+    yyjson_val* domain = yyjson_obj_get(mesh, "domain");
+    yyjson_val* limits = yyjson_obj_get(mesh, "limits");
+    yyjson_val* focus_regions = yyjson_obj_get(mesh, "focus_regions");
+    if (!object_has_exact_keys(domain, {"lower", "upper"}) ||
+        !object_has_exact_keys(
+            limits, {"max_global_cells", "max_memory_bytes_per_rank"}) ||
+        !yyjson_is_arr(focus_regions) ||
+        yyjson_arr_size(focus_regions) > detail::kMaxFocusRegions) {
+      return invalid_case(detail_json_schema);
+    }
+
     const auto geometry_text = string_value(mesh, "kind");
     const auto turbulence_text =
         turbulence == nullptr
@@ -675,7 +1082,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
             : string_value(turbulence, "model");
     const auto time_text = string_value(time, "control");
     if (!geometry_text || !turbulence_text || !time_text ||
-        !parse_geometry(*geometry_text, model.geometry) ||
+        !parse_geometry(*geometry_text, model.mesh.kind) ||
         !parse_turbulence(*turbulence_text, model.turbulence) ||
         !parse_time_control(*time_text, model.time_control) ||
         !equals(string_value(flow, "model"),
@@ -683,6 +1090,80 @@ Status compile_on_root(const fs::path& case_root, int rank,
         !equals(string_value(flow, "pressure_closure"),
                 "local_absolute_pressure_drho_dp") ||
         !equals(string_value(solver, "coupling"), "PISO")) {
+      return invalid_case(detail_json_value);
+    }
+
+    if (!parse_real3(yyjson_obj_get(domain, "lower"), model.mesh.lower) ||
+        !parse_real3(yyjson_obj_get(domain, "upper"), model.mesh.upper) ||
+        !ordered_domain(model.mesh.lower, model.mesh.upper) ||
+        !parse_optional_cells(yyjson_obj_get(mesh, "exact_cells"),
+                              model.mesh.has_exact_cells,
+                              model.mesh.exact_cells) ||
+        !parse_optional_positive_real3(yyjson_obj_get(mesh, "base_spacing"),
+                                       model.mesh.has_base_spacing,
+                                       model.mesh.base_spacing) ||
+        !parse_positive_real3(yyjson_obj_get(mesh, "minimum_spacing"),
+                              model.mesh.minimum_spacing) ||
+        !finite_real(yyjson_obj_get(mesh, "max_growth_ratio"),
+                     model.mesh.max_growth_ratio) ||
+        model.mesh.max_growth_ratio < 1.0) {
+      return invalid_case(detail_json_value);
+    }
+
+    yyjson_val* max_global_cells = yyjson_obj_get(limits, "max_global_cells");
+    yyjson_val* max_memory_bytes =
+        yyjson_obj_get(limits, "max_memory_bytes_per_rank");
+    if (!yyjson_is_uint(max_global_cells) ||
+        !yyjson_is_uint(max_memory_bytes) ||
+        yyjson_get_uint(max_global_cells) == 0U ||
+        yyjson_get_uint(max_memory_bytes) == 0U) {
+      return invalid_case(detail_json_value);
+    }
+    model.mesh.limits.max_global_cells = yyjson_get_uint(max_global_cells);
+    model.mesh.limits.max_memory_bytes_per_rank =
+        yyjson_get_uint(max_memory_bytes);
+
+    model.mesh.focus_regions.reserve(yyjson_arr_size(focus_regions));
+    std::size_t focus_index = 0U;
+    std::size_t focus_maximum = 0U;
+    yyjson_val* focus_value = nullptr;
+    yyjson_arr_foreach(focus_regions, focus_index, focus_maximum, focus_value) {
+      if (!object_has_exact_keys(
+              focus_value, {"lower", "upper", "target_spacing"})) {
+        return invalid_case(detail_json_schema);
+      }
+      FocusRegionSpec focus;
+      if (!parse_real3(yyjson_obj_get(focus_value, "lower"), focus.lower) ||
+          !parse_real3(yyjson_obj_get(focus_value, "upper"), focus.upper) ||
+          !ordered_domain(focus.lower, focus.upper) ||
+          !parse_positive_real3(yyjson_obj_get(focus_value, "target_spacing"),
+                                focus.target_spacing) ||
+          !componentwise_at_least(focus.target_spacing,
+                                  model.mesh.minimum_spacing)) {
+        return invalid_case(detail_json_value);
+      }
+      const Real3 clipped_lower{
+          std::max(focus.lower.x, model.mesh.lower.x),
+          std::max(focus.lower.y, model.mesh.lower.y),
+          std::max(focus.lower.z, model.mesh.lower.z)};
+      const Real3 clipped_upper{
+          std::min(focus.upper.x, model.mesh.upper.x),
+          std::min(focus.upper.y, model.mesh.upper.y),
+          std::min(focus.upper.z, model.mesh.upper.z)};
+      if (!ordered_domain(clipped_lower, clipped_upper)) {
+        return invalid_case(detail_json_value);
+      }
+      focus.lower = clipped_lower;
+      focus.upper = clipped_upper;
+      model.mesh.focus_regions.push_back(focus);
+    }
+    std::sort(model.mesh.focus_regions.begin(), model.mesh.focus_regions.end(),
+              focus_less);
+    model.mesh.focus_regions.erase(
+        std::unique(model.mesh.focus_regions.begin(),
+                    model.mesh.focus_regions.end(), same_focus),
+        model.mesh.focus_regions.end());
+    if (!valid_canonical_mesh(model.mesh)) {
       return invalid_case(detail_json_value);
     }
 
@@ -711,7 +1192,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
 
     Hash64 hash;
     hash.text(kSemanticContract);
-    hash.integer(static_cast<std::uint8_t>(model.geometry));
+    hash_mesh(hash, model.mesh);
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
     hash.integer(static_cast<std::uint8_t>(model.time_control));
     hash.integer(static_cast<std::uint16_t>(data_file_count));

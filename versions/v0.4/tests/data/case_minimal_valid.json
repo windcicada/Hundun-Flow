@@ -3,6 +3,19 @@
   "units": "SI",
   "mesh": {
     "kind": "uniform",
+    "domain": {
+      "lower": [0.0, 0.0, 0.0],
+      "upper": [1.0, 1.0, 1.0]
+    },
+    "exact_cells": [8, 8, 8],
+    "base_spacing": null,
+    "minimum_spacing": [0.125, 0.125, 0.125],
+    "max_growth_ratio": 1.0,
+    "focus_regions": [],
+    "limits": {
+      "max_global_cells": 4096,
+      "max_memory_bytes_per_rank": 67108864
+    },
     "data_files": [],
     "stl_file": null
   },

@@ -99,6 +99,21 @@ int main(int argc, char** argv) {
       "units": "SI",
       "mesh": {
         "kind": "tensor_stretched",
+        "domain": {"lower": [0, 0, 0], "upper": [2, 1, 1]},
+        "exact_cells": [16, 10, 8],
+        "base_spacing": [0.25, 0.2, 0.2],
+        "minimum_spacing": [0.05, 0.05, 0.05],
+        "max_growth_ratio": 1.2,
+        "focus_regions": [
+          {"lower": [-1, 0.2, 0.2], "upper": [0.5, 0.8, 0.8],
+           "target_spacing": [0.1, 0.1, 0.1]},
+          {"lower": [-2, 0.2, 0.2], "upper": [0.5, 0.8, 0.8],
+           "target_spacing": [0.1, 0.1, 0.1]}
+        ],
+        "limits": {
+          "max_global_cells": 100000,
+          "max_memory_bytes_per_rank": 134217728
+        },
         "data_files": ["profile.d"],
         "stl_file": "shape.stl"
       },
@@ -129,13 +144,31 @@ int main(int argc, char** argv) {
   passed &= expect(same_u64(first.fingerprint, MPI_COMM_WORLD), rank,
                    "fingerprint is identical");
   const std::uint64_t model_signature =
-      (static_cast<std::uint64_t>(first.geometry) << 24U) |
+      (static_cast<std::uint64_t>(first.mesh.kind) << 24U) |
       (static_cast<std::uint64_t>(first.turbulence) << 16U) |
       (static_cast<std::uint64_t>(first.time_control) << 8U) |
       static_cast<std::uint64_t>(first.data_files.size()) |
       (first.stl_file.has_value() ? (1ULL << 40U) : 0U);
   passed &= expect(same_u64(model_signature, MPI_COMM_WORLD), rank,
                    "typed model is identical");
+  passed &= expect(first.mesh.kind == hundun::v04::GeometryKind::tensor_stretched &&
+                       first.mesh.lower.x == 0.0 && first.mesh.upper.x == 2.0 &&
+                       first.mesh.has_exact_cells &&
+                       first.mesh.exact_cells.x == 16 &&
+                       first.mesh.exact_cells.y == 10 &&
+                       first.mesh.exact_cells.z == 8 &&
+                       first.mesh.has_base_spacing &&
+                       first.mesh.base_spacing.x == 0.25 &&
+                       first.mesh.minimum_spacing.x == 0.05 &&
+                       first.mesh.max_growth_ratio == 1.2 &&
+                       first.mesh.limits.max_global_cells == 100000 &&
+                       first.mesh.limits.max_memory_bytes_per_rank == 134217728,
+                   rank, "wire publishes the complete typed mesh");
+  passed &= expect(first.mesh.focus_regions.size() == 1U &&
+                       first.mesh.focus_regions[0].lower.x == 0.0 &&
+                       first.mesh.focus_regions[0].upper.x == 0.5 &&
+                       first.mesh.focus_regions[0].target_spacing.x == 0.1,
+                   rank, "wire publishes canonical clipped focus regions");
   passed &= expect(first.data_files.size() == 1U &&
                        first.data_files[0] == "profile.d" &&
                        first.stl_file == fs::path("shape.stl"),
