@@ -314,32 +314,39 @@ int main(int argc, char* argv[]) {
                   << report.predictor_low_order_halo_exchanges << '\n';
       if (!status && rank == 0 && report.failed_stage != 0U) {
         std::cerr << "failed_stage=" << report.failed_stage
-                  << " attempts=" << report.attempts
-                  << " eos=" << report.piso.eos_residual
-                  << " continuity=" << report.piso.continuity_residual;
-        if (report.piso.continuity_witness.valid)
-          std::cerr << " continuity_witness="
-                  << report.piso.continuity_witness.global_index.x << ','
-                  << report.piso.continuity_witness.global_index.y << ','
-                  << report.piso.continuity_witness.global_index.z << '/'
-                  << report.piso.continuity_witness.rank << '/'
-                  << report.piso.continuity_witness.raw_balance << '/'
-                  << report.piso.continuity_witness.unsteady << '/'
-                  << report.piso.continuity_witness.flux_divergence << '/'
-                  << report.piso.continuity_witness.scale << '/'
-                  << report.piso.continuity_witness.global_domain_edge << '/'
-                  << report.piso.continuity_witness.density << '/'
-                  << report.piso.continuity_witness.accepted_density << '/'
-                  << report.piso.continuity_witness.face_fluxes[0U] << ','
-                  << report.piso.continuity_witness.face_fluxes[1U] << ','
-                  << report.piso.continuity_witness.face_fluxes[2U] << ','
-                  << report.piso.continuity_witness.face_fluxes[3U] << ','
-                  << report.piso.continuity_witness.face_fluxes[4U] << ','
-                  << report.piso.continuity_witness.face_fluxes[5U];
-        std::cerr << " energy=" << report.piso.energy_residual
-                  << " closed_mass=" << report.piso.closed_mass_residual
-                  << " gauge=" << report.piso.gauge_residual
-                  << " pressure_calls="
+                  << " attempts=" << report.attempts;
+        const bool terminal_physical_audit_present =
+            report.piso.final_flux_revision != 0U;
+        if (terminal_physical_audit_present) {
+          std::cerr << " terminal_audit=available"
+                    << " eos=" << report.piso.eos_residual
+                    << " continuity=" << report.piso.continuity_residual;
+          if (report.piso.continuity_witness.valid)
+            std::cerr << " continuity_witness="
+                      << report.piso.continuity_witness.global_index.x << ','
+                      << report.piso.continuity_witness.global_index.y << ','
+                      << report.piso.continuity_witness.global_index.z << '/'
+                      << report.piso.continuity_witness.rank << '/'
+                      << report.piso.continuity_witness.raw_balance << '/'
+                      << report.piso.continuity_witness.unsteady << '/'
+                      << report.piso.continuity_witness.flux_divergence << '/'
+                      << report.piso.continuity_witness.scale << '/'
+                      << report.piso.continuity_witness.global_domain_edge
+                      << '/' << report.piso.continuity_witness.density << '/'
+                      << report.piso.continuity_witness.accepted_density << '/'
+                      << report.piso.continuity_witness.face_fluxes[0U] << ','
+                      << report.piso.continuity_witness.face_fluxes[1U] << ','
+                      << report.piso.continuity_witness.face_fluxes[2U] << ','
+                      << report.piso.continuity_witness.face_fluxes[3U] << ','
+                      << report.piso.continuity_witness.face_fluxes[4U] << ','
+                      << report.piso.continuity_witness.face_fluxes[5U];
+          std::cerr << " energy=" << report.piso.energy_residual
+                    << " closed_mass=" << report.piso.closed_mass_residual
+                    << " gauge=" << report.piso.gauge_residual;
+        } else {
+          std::cerr << " terminal_audit=unavailable";
+        }
+        std::cerr << " pressure_calls="
                   << static_cast<unsigned>(report.piso.pressure_solve_calls)
                   << " pe_refinement_calls="
                   << static_cast<unsigned>(

@@ -25,7 +25,8 @@ configure_file("${THERMOPHYSICS}"
 # Make the public CLI take a deterministic non-continuity failure path: the
 # isothermal wall gives the first pressure solve a nontrivial RHS, while one
 # allowed Krylov iteration is deliberately insufficient.  No terminal
-# continuity audit has run, so the report's witness is invalid by contract.
+# physical audit has run, so terminal residuals are unavailable and the
+# report's continuity witness is invalid by contract.
 file(READ "${PROBE_ROOT}/case/case.json" case_json)
 set(original_case_json "${case_json}")
 string(REPLACE
@@ -67,14 +68,19 @@ if(run_status EQUAL 0)
     "CLI failure fixture unexpectedly completed: ${run_output}${run_error}")
 endif()
 if(NOT run_error MATCHES "failed_stage=44" OR
-   NOT run_error MATCHES "continuity=0" OR
+   NOT run_error MATCHES "terminal_audit=unavailable" OR
    NOT run_error MATCHES "pressure_calls=1" OR
    NOT run_error MATCHES "p1_iterations=1" OR
    NOT run_error MATCHES "rejected step detail=604")
   message(FATAL_ERROR
     "CLI did not reach the intended pressure-solve failure: ${run_error}")
 endif()
-if(run_error MATCHES "continuity_witness=")
+if(run_error MATCHES " eos=" OR
+   run_error MATCHES " continuity=" OR
+   run_error MATCHES " energy=" OR
+   run_error MATCHES " closed_mass=" OR
+   run_error MATCHES " gauge=" OR
+   run_error MATCHES "continuity_witness=")
   message(FATAL_ERROR
-    "CLI exposed an invalid continuity witness: ${run_error}")
+    "CLI exposed unavailable terminal audit data: ${run_error}")
 endif()
