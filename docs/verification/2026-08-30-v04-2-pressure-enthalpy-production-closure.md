@@ -26,8 +26,8 @@ equivalence/full2/full20、完整文献 authority、长程稳定性/统计和最
 - rank layout：64 ranks，`ppr:32:socket:PE=1`，slot rank，core binding，
   `OMP/OPENBLAS/MKL_NUM_THREADS=1`
 
-该数值提交由 `WANG YUDONG <wangyudong@buaa.edu.cn>` 作者签署。原 209-commit 开发历史
-仍保存在备份分支，没有机械补签；可融合链从既有 DCO-clean squash 继续叠加 signed commit。
+该数值提交由 `WANG YUDONG <wangyudong@buaa.edu.cn>` 作者签署。原始长开发历史仍保存在
+pre-DCO 备份分支，没有机械补签；可融合链从既有 DCO-clean squash 继续叠加 signed commit。
 
 ## 3. Pressure–enthalpy 主闭环
 
@@ -115,14 +115,18 @@ continuity witness 还要求 `valid=true`。真实 CLI fixture 保留失败阶�
 另通过：
 
 - `v04_core_product_freeze_mpi_test --mass-flow-only`，2 ranks；
+- 当前 AFC v2/V5 契约直接修改的
+  `v04_product_pressure_energy_temporal_convergence` 与
+  `v04_restart_rank_change_continue`，定向复核 2/2；
 - `python3 tools/v04_evidence_validate.py self-test`；
 - tests-off 增量构建；
 - 独立最终 P0/P1 只读审计，结论为无剩余确定 P0/P1。
 
 定向集合第一次运行时，旧 PISO test fixture 用 `dt=1/a0` 构造 BDF2，按新契约被正确
 拒绝；fixture 改为项目既有 `time_step_for_bdf()` 后最终 12/12 通过。生产校验没有放宽。
-既有 MMS、PISO temporal order、product pressure–energy temporal convergence、Restart 和
-未受影响的 pressure–enthalpy focused 证据直接复用，没有扩大为完整 CTest。
+只有未与本轮 AFC/CFL/authority 契约重叠的既有 MMS、PISO temporal order 和
+pressure–enthalpy/refinement 证据直接复用。被本轮改写的 temporal-convergence 与 Restart
+检查使用当前版本重新运行；没有扩大为完整 CTest。
 
 ## 8. 最终 no-IBM control
 

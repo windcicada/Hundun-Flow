@@ -64,14 +64,18 @@ quasi-Newton，没有冒充完整 nonlinear IBM donor-gradient Jacobian。
 
 1. 12 项定向 focused 集合：CLI、V4/V5 validator、I/O、app-driver、pressure-storage、
    Schur/globalization、PISO authority、solver-equations 1/2-rank、refinement/retry 1/2-rank；
-2. `v04_core_product_freeze_mpi_test --mass-flow-only`，2 ranks；
-3. Evidence V5 Python self-test；
-4. tests-off Release/Clang/libc++/MPI 增量构建；
-5. 64-rank、两步 no-IBM control；
-6. 64-rank、两步 IBM Re3900 `case-full, dt=0.006`。
+2. 当前 AFC v2/V5 契约直接修改的
+   `v04_product_pressure_energy_temporal_convergence` 与
+   `v04_restart_rank_change_continue`，定向复核 2/2；
+3. `v04_core_product_freeze_mpi_test --mass-flow-only`，2 ranks；
+4. Evidence V5 Python self-test；
+5. tests-off Release/Clang/libc++/MPI 增量构建；
+6. 64-rank、两步 no-IBM control；
+7. 64-rank、两步 IBM Re3900 `case-full, dt=0.006`。
 
-未受本轮 AFC/CFL/authority 修改影响的既有 focused 9/9、MMS、PISO temporal order、
-product pressure–energy temporal convergence、Restart 和 refinement 证据直接复用。
+只有未与本轮 AFC/CFL/authority 契约重叠的既有 MMS、PISO temporal order 和
+pressure–enthalpy/refinement 证据直接复用；被本轮改写的 temporal-convergence 与 Restart
+检查使用当前版本重新运行，不以旧结果替代。
 
 ## 候选与最终工件
 
