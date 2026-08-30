@@ -220,6 +220,22 @@ struct RuntimeTerminalPhysicalAudit {
   double closed_mass_tolerance{};
   double gauge_residual{};
   double gauge_tolerance{};
+  double committed_convective_cfl_out_max{};
+  double committed_convective_cfl_abs_max{};
+  double committed_convective_cfl_limit{};
+};
+
+struct RuntimeAdvectiveCflAudit {
+  bool present{};
+  PlanFingerprint plan{};
+  RevisionToken time_revision{};
+  RevisionToken density_revision{};
+  RevisionToken face_flux_revision{};
+  PlanFingerprint activity_collective{};
+  double dt{};
+  double out_max{};
+  double abs_max{};
+  double limit{};
 };
 
 struct RuntimeEvidenceRecord {
@@ -274,6 +290,7 @@ struct RuntimeEvidenceRecord {
   double momentum_predictor_theta{1.0};
   std::uint32_t momentum_predictor_activations{};
   bool momentum_predictor_limited{};
+  RuntimeAdvectiveCflAudit momentum_advective_cfl{};
   double predictor_theta{1.0};
   double predictor_mass_flux_scale{1.0};
   double predictor_low_margin{};

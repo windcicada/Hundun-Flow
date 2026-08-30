@@ -440,6 +440,12 @@ double cell_volume(const Fixture& fixture, Int3 cell) {
          cell_width(fixture, CartesianAxis::z, cell.z);
 }
 
+double time_step_for_bdf(BdfCoefficients bdf) {
+  if (bdf.order == 1U) return 1.0 / bdf.a0;
+  const double ratio = 1.0 / (std::sqrt(-bdf.a1 / bdf.a2) - 1.0);
+  return (1.0 + ratio) / -bdf.a1;
+}
+
 double face_area(const Fixture& fixture, CartesianAxis axis, Int3 cell) {
   if (axis == CartesianAxis::x) {
     return cell_width(fixture, CartesianAxis::y, cell.y) *
@@ -836,7 +842,8 @@ bool test_coupler_lifecycle_and_mutations() {
                     1701U,
                     fixture.geometry.topology_revision(),
                     1702U,
-                    1703U};
+                    1703U,
+                    time_step_for_bdf({10.0, -15.0, 5.0, 2U})};
   input.predictor.plan =
       fixture.equations.thermophysical_predictor().fingerprint();
   input.predictor.time = 1701U;
@@ -3524,6 +3531,8 @@ bool test_coupler_lifecycle_and_mutations() {
   audit_input.pressure_perturbation = as_const(final_pressure);
   audit_input.drho_dp_h_y = c2_candidate.pressure_compressibility;
   audit_input.bdf = input.bdf;
+  audit_input.step_dt = time_step_for_bdf(input.bdf);
+  audit_input.convective_cfl_limit = 1.0e6;
   audit_input.closed_mass_target = 0.0;
   for (std::int32_t zc = 0; zc < cells.z; ++zc)
     for (std::int32_t yc = 0; yc < cells.y; ++yc)
@@ -4191,7 +4200,8 @@ bool test_open_boundary_terminal_authority() {
       3040U,
       fixture.geometry.topology_revision(),
       paired_flux.revision,
-      3041U};
+      3041U,
+      time_step_for_bdf(boundary_bdf)};
   boundary_input.predictor.plan =
       fixture.equations.thermophysical_predictor().fingerprint();
   boundary_input.predictor.time = boundary_input.momentum.time;
@@ -5012,8 +5022,11 @@ bool test_open_boundary_terminal_authority() {
   audit.density = as_const(density.view);
   audit.eos_density = as_const(density.view);
   audit.density_accepted = as_const(accepted.view);
+  audit.density_previous = as_const(previous.view);
   audit.pressure_perturbation = as_const(boundary_pressure.view);
-  audit.bdf = {1.0, -1.0, 0.0, 1U};
+  audit.bdf = boundary_bdf;
+  audit.step_dt = time_step_for_bdf(audit.bdf);
+  audit.convective_cfl_limit = 1.0e6;
   audit.closed_mass_target = 0.0;
   audit.boundary_closure_residual = 0.0;
   audit.boundary_closure_samples = 1U;
@@ -5023,7 +5036,7 @@ bool test_open_boundary_terminal_authority() {
        as_const(boundary_enthalpy.view), {}, as_const(density.view)}};
   ReductionEngine reductions;
   passed &= expect(static_cast<bool>(ReductionEngine::compile(
-                       MPI_COMM_SELF, ReductionMode::mpi_allreduce, 5U,
+                       MPI_COMM_SELF, ReductionMode::mpi_allreduce, 7U,
                        reductions)),
                    "open-boundary audit reductions compile");
   PisoTerminalAuditInput arbitrary_c2_authority = audit;
@@ -5061,6 +5074,19 @@ bool test_open_boundary_terminal_authority() {
       "C2 physical-ghost certificate cannot enter terminal audit");
   audit.thermophysical_boundary.certificate =
       boundary_terminal_thermophysics;
+  PisoTerminalAuditInput invalid_cfl_audit = audit;
+  invalid_cfl_audit.step_dt *= 2.0;
+  PisoAttemptReport invalid_cfl_report;
+  PisoTerminalCertificate invalid_cfl_terminal;
+  passed &= expect(
+      coupler.audit_pending_final(invalid_cfl_audit, pending, reductions,
+                                  invalid_cfl_report,
+                                  invalid_cfl_terminal)
+                  .code == StatusCode::invalid_plan &&
+          invalid_cfl_report.final_flux_revision == 0U &&
+          !invalid_cfl_terminal.valid(),
+      "terminal CFL audit rejects a positive time step inconsistent with "
+      "the frozen BDF target and remains unavailable");
   PisoAttemptReport report;
   PisoTerminalCertificate terminal;
   passed &= expect(
@@ -5071,6 +5097,9 @@ bool test_open_boundary_terminal_authority() {
           report.energy_residual == 0.0 &&
           report.closed_mass_residual == 0.0 &&
           report.gauge_residual == 0.0 &&
+          report.committed_convective_cfl_out_max == 0.0 &&
+          report.committed_convective_cfl_abs_max == 0.0 &&
+          report.committed_convective_cfl_limit == 1.0e6 &&
           !report.continuity_witness.valid,
       "open-boundary audit uses boundary closure, ignores mass target, and "
       "does not build a success-path continuity witness");
@@ -5631,7 +5660,8 @@ bool build_full_refresh_sample(const Fixture& fixture, const PisoPlan& piso,
                     kFullRefreshTime,
                     fixture.geometry.topology_revision(),
                     sample.c1_trial_flux.revision,
-                    seed + 44U};
+                    seed + 44U,
+                    time_step_for_bdf(kFullRefreshBdf)};
   input.predictor.plan =
       fixture.equations.thermophysical_predictor().fingerprint();
   input.predictor.time = kFullRefreshTime;
@@ -5779,7 +5809,7 @@ bool build_full_refresh_sample(const Fixture& fixture, const PisoPlan& piso,
   material.pressure_compressibility =
       as_const(sample.pressure_compressibility.view);
   EquationAssemblyContext context;
-  context.dt = 1.0 / kFullRefreshBdf.a0;
+  context.dt = time_step_for_bdf(kFullRefreshBdf);
   context.bdf = kFullRefreshBdf;
   context.time = kFullRefreshTime;
   context.geometry = fixture.geometry.topology_revision();

@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Set
 
 
 SCHEMA = "HUNDUN_V04_CANDIDATE_V1"
-RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V4"
+RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V5"
+V4_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V4"
 V3_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V3"
 V2_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V2"
 LEGACY_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V1"
@@ -130,6 +131,16 @@ V3_TERMINAL_FIELDS = (
     "gauge_residual", "gauge_tolerance",
 )
 V3_MOMENTUM_LIMITER_FIELDS = ("limited", "theta", "activations")
+V5_MOMENTUM_LIMITER_FIELDS = (
+    "scheme", "limited", "retained_correction_l1_ratio", "limited_faces",
+    "advective_cfl",
+)
+V5_COMMITTED_CONVECTIVE_CFL_FIELDS = ("out_max", "abs_max", "limit")
+V5_ADVECTIVE_CONVECTIVE_CFL_FIELDS = (
+    "present", "plan", "time_revision", "density_revision",
+    "face_flux_revision", "activity_collective", "dt", "out_max",
+    "abs_max", "limit",
+)
 V3_THERMOPHYSICAL_PREDICTOR_FIELDS = (
     "limited", "theta", "low_state", "mass_flux_scale", "constraint",
     "limiting_rank", "limiting_global_cell", "low_margin", "high_margin",
@@ -677,6 +688,120 @@ def validate_v4_refinement(record: Dict[str, Any], line_number: int) -> None:
             f"{prefix}.linear_iterations omits refinement solve work")
 
 
+def validate_v5_runtime_record(record: Dict[str, Any],
+                               line_number: int) -> str:
+    """Validate V5 additions, then reuse the frozen V3/V4 base contracts."""
+    prefix = f"line {line_number}: V5 runtime"
+    record = require_object_fields(record, V3_REQUIRED_FIELDS, prefix)
+    terminal = require_object_fields(
+        record["terminal_physical_audit"],
+        V3_TERMINAL_FIELDS + ("committed_convective_cfl",),
+        f"{prefix}.terminal_physical_audit")
+    cfl = require_object_fields(
+        terminal["committed_convective_cfl"],
+        V5_COMMITTED_CONVECTIVE_CFL_FIELDS,
+        f"{prefix}.terminal_physical_audit.committed_convective_cfl")
+    out_max = require_nonnegative_finite_number(
+        cfl["out_max"], f"{prefix}.committed CFL.out_max")
+    require_nonnegative_finite_number(
+        cfl["abs_max"], f"{prefix}.committed CFL.abs_max")
+    limit = require_nonnegative_finite_number(
+        cfl["limit"], f"{prefix}.committed CFL.limit")
+    if limit == 0.0:
+        raise EvidenceError(f"{prefix}.committed CFL.limit must be positive")
+    if out_max > limit * (1.0 + 64.0 * float.fromhex("0x1.0p-52")):
+        raise EvidenceError(f"{prefix}.committed CFL exceeds its limit")
+
+    limiter = require_object_fields(
+        record["momentum_predictor_limiter"],
+        V5_MOMENTUM_LIMITER_FIELDS,
+        f"{prefix}.momentum_predictor_limiter")
+    if limiter["scheme"] != "common_face_afc_v2":
+        raise EvidenceError(f"{prefix}.momentum limiter scheme is invalid")
+    limited = require_boolean(
+        limiter["limited"], f"{prefix}.momentum limiter.limited")
+    ratio = require_finite_number(
+        limiter["retained_correction_l1_ratio"],
+        f"{prefix}.momentum limiter.retained_correction_l1_ratio")
+    faces = require_integer(
+        limiter["limited_faces"], f"{prefix}.momentum limiter.limited_faces",
+        0, UINT32_MAX)
+    if (ratio <= 0.0 or ratio > 1.0 or
+            (limited and (faces == 0 or ratio >= 1.0)) or
+            (not limited and (faces != 0 or ratio != 1.0))):
+        raise EvidenceError(f"{prefix} has invalid common-face AFC evidence")
+    advective = require_object_fields(
+        limiter["advective_cfl"], V5_ADVECTIVE_CONVECTIVE_CFL_FIELDS,
+        f"{prefix}.momentum_predictor_limiter.advective_cfl")
+    if not require_boolean(
+            advective["present"], f"{prefix}.advective CFL.present"):
+        raise EvidenceError(f"{prefix}.advective CFL must be present")
+    for field in ("plan", "time_revision", "density_revision",
+                  "face_flux_revision"):
+        require_integer(advective[field], f"{prefix}.advective CFL.{field}",
+                        1, UINT64_MAX)
+    require_integer(advective["activity_collective"],
+                    f"{prefix}.advective CFL.activity_collective",
+                    0, UINT64_MAX)
+    if ((record["stl"] == 0) !=
+            (advective["activity_collective"] == 0)):
+        raise EvidenceError(
+            f"{prefix}.advective CFL IBM activity disagrees with stl")
+    if advective["face_flux_revision"] == terminal["final_flux_revision"]:
+        raise EvidenceError(
+            f"{prefix}.advective and committed CFL revisions are identical")
+    dt = require_nonnegative_finite_number(
+        advective["dt"], f"{prefix}.advective CFL.dt")
+    advective_out = require_nonnegative_finite_number(
+        advective["out_max"], f"{prefix}.advective CFL.out_max")
+    require_nonnegative_finite_number(
+        advective["abs_max"], f"{prefix}.advective CFL.abs_max")
+    advective_limit = require_nonnegative_finite_number(
+        advective["limit"], f"{prefix}.advective CFL.limit")
+    if dt == 0.0 or advective_limit == 0.0:
+        raise EvidenceError(
+            f"{prefix}.advective CFL dt and limit must be positive")
+    if advective_limit != terminal["committed_convective_cfl"]["limit"]:
+        raise EvidenceError(
+            f"{prefix}.advective and committed CFL limits differ")
+    if advective_out > advective_limit * (
+            1.0 + 64.0 * float.fromhex("0x1.0p-52")):
+        raise EvidenceError(f"{prefix}.advective CFL exceeds its limit")
+    if "theta" in limiter or "activations" in limiter:
+        raise EvidenceError(f"{prefix} carries legacy V4 limiter fields")
+
+    # The pressure, thermophysical predictor, solver, timing and terminal
+    # metric contracts are unchanged.  Project only the renamed limiter for
+    # the frozen V3 validator; validate the actual face count above.
+    legacy_projection = dict(record)
+    legacy_projection["terminal_physical_audit"] = dict(terminal)
+    legacy_projection["terminal_physical_audit"].pop(
+        "committed_convective_cfl")
+    legacy_projection["momentum_predictor_limiter"] = {
+        "limited": limited,
+        "theta": ratio,
+        "activations": 1 if limited else 0,
+    }
+    return validate_v3_runtime_record(legacy_projection, line_number)
+
+
+def reject_v5_fields_in_pre_v5(record: Dict[str, Any],
+                               line_number: int) -> None:
+    schema = record.get("schema")
+    terminal = record.get("terminal_physical_audit")
+    if isinstance(terminal, dict) and "committed_convective_cfl" in terminal:
+        raise EvidenceError(
+            f"line {line_number}: {schema} runtime carries V5 committed CFL")
+    limiter = record.get("momentum_predictor_limiter")
+    if isinstance(limiter, dict):
+        for field in ("scheme", "retained_correction_l1_ratio",
+                      "limited_faces", "advective_cfl"):
+            if field in limiter:
+                raise EvidenceError(
+                    f"line {line_number}: {schema} runtime carries V5 limiter "
+                    f"field {field}")
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False).encode("utf-8")
@@ -1208,6 +1333,8 @@ def advance(manifest_path: Path, gate_name: str, receipt_path: Path) -> None:
 
 def validate_runtime(path: Path) -> None:
     prior_step = 0
+    run_schema = None
+    prior_v5_record = None
     seen = 0
     with path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -1219,17 +1346,33 @@ def validate_runtime(path: Path) -> None:
                 raise EvidenceError(
                     f"line {line_number}: runtime record must be an object")
             schema = record.get("schema")
-            if schema not in (RUNTIME_SCHEMA, V3_RUNTIME_SCHEMA,
-                              V2_RUNTIME_SCHEMA, LEGACY_RUNTIME_SCHEMA):
+            if schema not in (RUNTIME_SCHEMA, V4_RUNTIME_SCHEMA,
+                              V3_RUNTIME_SCHEMA, V2_RUNTIME_SCHEMA,
+                              LEGACY_RUNTIME_SCHEMA):
                 raise EvidenceError(f"line {line_number}: wrong runtime schema")
-            is_v4 = schema == RUNTIME_SCHEMA
+            if run_schema is None:
+                run_schema = schema
+            elif schema != run_schema:
+                raise EvidenceError(
+                    f"line {line_number}: runtime schema changed within one file")
+            is_v5 = schema == RUNTIME_SCHEMA
+            is_v4 = schema == V4_RUNTIME_SCHEMA
             is_v3 = schema == V3_RUNTIME_SCHEMA
             is_v2 = schema == V2_RUNTIME_SCHEMA
-            requires_pressure = is_v4 or is_v3 or is_v2
-            pressure_contract = (
-                validate_v3_runtime_record(record, line_number)
-                if is_v4 or is_v3 else None)
-            if is_v4:
+            if not is_v5:
+                reject_v5_fields_in_pre_v5(record, line_number)
+            requires_pressure = is_v5 or is_v4 or is_v3 or is_v2
+            if is_v5:
+                pressure_contract = validate_v5_runtime_record(
+                    record, line_number)
+            elif is_v4 or is_v3:
+                pressure_contract = validate_v3_runtime_record(
+                    record, line_number)
+            else:
+                pressure_contract = None
+            if is_v5:
+                validate_v4_refinement(record, line_number)
+            elif is_v4:
                 validate_v4_refinement(record, line_number)
             elif is_v3:
                 reject_v4_fields_in_v3(record, line_number)
@@ -1240,6 +1383,40 @@ def validate_runtime(path: Path) -> None:
             if not isinstance(step, int) or step <= prior_step:
                 raise EvidenceError(f"line {line_number}: steps not strictly increasing")
             prior_step = step
+            if is_v5:
+                if prior_v5_record is not None:
+                    for field in ("build", "binary", "case", "stl",
+                                  "product", "cpu_plan"):
+                        if record[field] != prior_v5_record[field]:
+                            raise EvidenceError(
+                                f"line {line_number}: V5 run identity "
+                                f"field {field} changed")
+                    if step != prior_v5_record["step"] + 1:
+                        raise EvidenceError(
+                            f"line {line_number}: V5 steps are not contiguous")
+                    current_advective = record[
+                        "momentum_predictor_limiter"]["advective_cfl"]
+                    prior_advective = prior_v5_record[
+                        "momentum_predictor_limiter"]["advective_cfl"]
+                    for field in ("plan", "activity_collective", "limit"):
+                        if current_advective[field] != prior_advective[field]:
+                            raise EvidenceError(
+                                f"line {line_number}: V5 static advective "
+                                f"authority field {field} changed")
+                    observed_dt = record["time"] - prior_v5_record["time"]
+                    certified_dt = record["momentum_predictor_limiter"][
+                        "advective_cfl"]["dt"]
+                    scale = max(1.0, abs(observed_dt), abs(certified_dt))
+                    if (not math.isfinite(observed_dt) or
+                            observed_dt <= 0.0 or
+                            abs(observed_dt - certified_dt) >
+                            128.0 * float.fromhex("0x1.0p-52") * scale):
+                        raise EvidenceError(
+                            f"line {line_number}: V5 advective CFL dt "
+                            "disagrees with the adjacent committed time delta")
+                prior_v5_record = record
+            else:
+                prior_v5_record = None
             if ((record.get("startup") or record.get("retry") or
                  record.get("restart_recovery")) and
                     record.get("statistics_eligible")):
@@ -1282,7 +1459,7 @@ def validate_runtime(path: Path) -> None:
                     raise EvidenceError(
                         f"line {line_number}: invalid two-PISO pressure evidence")
                 extension_enabled = False
-                if is_v2 or is_v3 or is_v4:
+                if is_v2 or is_v3 or is_v4 or is_v5:
                     extension_fields = set(PRESSURE_EXTENSION_FIELDS)
                     extension_presence = []
                     for solve in pressure:
@@ -1298,7 +1475,7 @@ def validate_runtime(path: Path) -> None:
                         raise EvidenceError(
                             f"line {line_number}: inconsistent pressure extension presence")
                     extension_enabled = extension_presence[0]
-                    if (is_v3 or is_v4) and not extension_enabled:
+                    if (is_v3 or is_v4 or is_v5) and not extension_enabled:
                         raise EvidenceError(
                             f"line {line_number}: V3 lacks pressure extension")
                 for corrector, solve in enumerate(pressure, 1):
@@ -1418,7 +1595,7 @@ def validate_runtime(path: Path) -> None:
                     audits = solve["convergence_audits"]
                     rejections = solve["convergence_rejections"]
                     coupled_contract = (
-                        (is_v3 or is_v4) and
+                        (is_v3 or is_v4 or is_v5) and
                         pressure_contract == "continuity_energy_coupled")
                     if corrector == 1 or coupled_contract:
                         if audits != 0 or rejections != 0:
@@ -1674,7 +1851,7 @@ def self_test() -> None:
         }
         runtime = {
             # Frozen historical V3 fixture.  This remains a literal validator
-            # oracle and is not regenerated through the current V4 writer.
+            # oracle and is not regenerated through the current V5 writer.
             "schema": V3_RUNTIME_SCHEMA,
             "build": 1, "binary": 2, "case": 3, "product": 4,
             "stl": 0, "cpu_plan": 5, "step": 1, "time": 0.1,
@@ -1747,13 +1924,51 @@ def self_test() -> None:
             except EvidenceError:
                 pass
 
+        def reject_runtime_rows(rows, message):
+            runtime_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8")
+            try:
+                validate_runtime(runtime_path)
+                raise AssertionError(message)
+            except EvidenceError:
+                pass
+
+        def reject_v5_contamination(fixture, schema_name):
+            contaminated_cfl = json.loads(json.dumps(fixture))
+            contaminated_cfl.setdefault("terminal_physical_audit", {})[
+                "committed_convective_cfl"] = {
+                    "out_max": 0.5, "abs_max": 0.375, "limit": 0.5,
+                }
+            reject_runtime(
+                contaminated_cfl,
+                f"{schema_name} record carrying V5 committed CFL accepted")
+            for field, value in (
+                    ("scheme", "common_face_afc_v2"),
+                    ("retained_correction_l1_ratio", 1.0),
+                    ("limited_faces", 0),
+                    ("advective_cfl", {
+                        "present": True, "plan": 31, "time_revision": 32,
+                        "density_revision": 33, "face_flux_revision": 34,
+                        "activity_collective": 0,
+                        "dt": 0.006, "out_max": 0.5, "abs_max": 0.375,
+                        "limit": 0.8,
+                    })):
+                contaminated_limiter = json.loads(json.dumps(fixture))
+                contaminated_limiter.setdefault(
+                    "momentum_predictor_limiter", {})[field] = value
+                reject_runtime(
+                    contaminated_limiter,
+                    f"{schema_name} record carrying V5 limiter field "
+                    f"{field} accepted")
+
         runtime_path.write_text(json.dumps(runtime) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
         reject_runtime([], "non-object runtime row accepted")
 
         runtime_v4 = json.loads(json.dumps(runtime))
         runtime_v4.update({
-            "schema": RUNTIME_SCHEMA,
+            "schema": V4_RUNTIME_SCHEMA,
             "pressure_energy_refinement_solve_calls": 0,
             "pressure_energy_refinement_termination":
                 "component_residuals_converged",
@@ -1762,6 +1977,239 @@ def self_test() -> None:
         runtime_path.write_text(json.dumps(runtime_v4) + "\n",
                                 encoding="utf-8")
         validate_runtime(runtime_path)
+
+        # Preserve the historical V4 global-theta oracle, including its
+        # formerly legal full-collapse value.  V5 deliberately rejects that
+        # state under the common-face AFC contract.
+        frozen_v4_theta_zero = json.loads(json.dumps(runtime_v4))
+        frozen_v4_theta_zero["momentum_predictor_limiter"].update({
+            "limited": True, "theta": 0.0, "activations": 1,
+        })
+        runtime_path.write_text(json.dumps(frozen_v4_theta_zero) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        runtime_v5 = json.loads(json.dumps(runtime_v4))
+        runtime_v5["schema"] = RUNTIME_SCHEMA
+        runtime_v5["terminal_physical_audit"][
+            "committed_convective_cfl"] = {
+                "out_max": 0.5, "abs_max": 0.375, "limit": 0.5,
+            }
+        runtime_v5["momentum_predictor_limiter"] = {
+            "scheme": "common_face_afc_v2",
+            "limited": False,
+            "retained_correction_l1_ratio": 1.0,
+            "limited_faces": 0,
+            "advective_cfl": {
+                "present": True,
+                "plan": 31,
+                "time_revision": 32,
+                "density_revision": 33,
+                "face_flux_revision": 34,
+                "activity_collective": 0,
+                "dt": 0.006,
+                "out_max": 0.5,
+                "abs_max": 0.375,
+                "limit": 0.5,
+            },
+        }
+        runtime_path.write_text(json.dumps(runtime_v5) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        cfl_limit = runtime_v5["terminal_physical_audit"][
+            "committed_convective_cfl"]["limit"]
+        cfl_edge = cfl_limit * (
+            1.0 + 64.0 * float.fromhex("0x1.0p-52"))
+        roundoff_edge_v5 = json.loads(json.dumps(runtime_v5))
+        roundoff_edge_v5["terminal_physical_audit"][
+            "committed_convective_cfl"]["out_max"] = cfl_edge
+        runtime_path.write_text(json.dumps(roundoff_edge_v5) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+        beyond_roundoff_v5 = json.loads(json.dumps(roundoff_edge_v5))
+        beyond_roundoff_v5["terminal_physical_audit"][
+            "committed_convective_cfl"]["out_max"] = (
+                cfl_edge + float.fromhex("0x1.0p-52"))
+        reject_runtime(beyond_roundoff_v5,
+                       "V5 committed CFL beyond 64-epsilon slack accepted")
+
+        valid_limited_v5 = json.loads(json.dumps(runtime_v5))
+        valid_limited_v5["momentum_predictor_limiter"].update({
+            "limited": True,
+            "retained_correction_l1_ratio": 0.5,
+            "limited_faces": 7,
+        })
+        runtime_path.write_text(json.dumps(valid_limited_v5) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        for field in V5_COMMITTED_CONVECTIVE_CFL_FIELDS:
+            missing_v5_cfl = json.loads(json.dumps(runtime_v5))
+            missing_v5_cfl["terminal_physical_audit"][
+                "committed_convective_cfl"].pop(field)
+            reject_runtime(missing_v5_cfl,
+                           f"V5 committed CFL missing field {field}")
+        for field, value in (
+                ("out_max", -1.0), ("out_max", math.nan),
+                ("abs_max", -1.0), ("abs_max", math.inf),
+                ("limit", 0.0), ("limit", math.nan)):
+            invalid_v5_cfl = json.loads(json.dumps(runtime_v5))
+            invalid_v5_cfl["terminal_physical_audit"][
+                "committed_convective_cfl"][field] = value
+            reject_runtime(invalid_v5_cfl,
+                           f"V5 invalid committed CFL {field} accepted")
+        over_limit_v5_cfl = json.loads(json.dumps(runtime_v5))
+        over_limit_v5_cfl["terminal_physical_audit"][
+            "committed_convective_cfl"]["out_max"] = 0.5000000001
+        reject_runtime(over_limit_v5_cfl,
+                       "V5 over-limit committed CFL accepted")
+
+        for field in V5_ADVECTIVE_CONVECTIVE_CFL_FIELDS:
+            missing_advective = json.loads(json.dumps(runtime_v5))
+            missing_advective["momentum_predictor_limiter"][
+                "advective_cfl"].pop(field)
+            reject_runtime(missing_advective,
+                           f"V5 advective CFL missing field {field}")
+        for field, value in (
+                ("present", False), ("plan", 0), ("time_revision", 0),
+                ("density_revision", 0), ("face_flux_revision", 0),
+                ("activity_collective", -1),
+                ("dt", 0.0), ("out_max", -1.0), ("abs_max", math.inf),
+                ("limit", 0.0)):
+            invalid_advective = json.loads(json.dumps(runtime_v5))
+            invalid_advective["momentum_predictor_limiter"][
+                "advective_cfl"][field] = value
+            reject_runtime(invalid_advective,
+                           f"V5 invalid advective CFL {field} accepted")
+        same_revision_advective = json.loads(json.dumps(runtime_v5))
+        same_revision_advective["momentum_predictor_limiter"][
+            "advective_cfl"]["face_flux_revision"] = runtime_v5[
+                "terminal_physical_audit"]["final_flux_revision"]
+        reject_runtime(same_revision_advective,
+                       "V5 identical advective/final revision accepted")
+        mismatched_limit_advective = json.loads(json.dumps(runtime_v5))
+        mismatched_limit_advective["momentum_predictor_limiter"][
+            "advective_cfl"]["limit"] = 0.75
+        reject_runtime(mismatched_limit_advective,
+                       "V5 mismatched provisional/final CFL limits accepted")
+        missing_ibm_activity = json.loads(json.dumps(runtime_v5))
+        missing_ibm_activity["stl"] = 1
+        reject_runtime(missing_ibm_activity,
+                       "V5 IBM row without an activity collective accepted")
+        fabricated_ibm_activity = json.loads(json.dumps(runtime_v5))
+        fabricated_ibm_activity["momentum_predictor_limiter"][
+            "advective_cfl"]["activity_collective"] = 1
+        reject_runtime(fabricated_ibm_activity,
+                       "V5 no-IBM row with an activity collective accepted")
+        over_limit_advective = json.loads(json.dumps(runtime_v5))
+        over_limit_advective["momentum_predictor_limiter"][
+            "advective_cfl"]["out_max"] = 0.5000000001
+        reject_runtime(over_limit_advective,
+                       "V5 over-limit advective CFL accepted")
+
+        second_v5 = json.loads(json.dumps(runtime_v5))
+        second_v5["step"] = runtime_v5["step"] + 1
+        second_v5["time"] = runtime_v5["time"] + 0.006
+        second_v5["startup"] = False
+        second_v5["momentum_predictor_limiter"]["advective_cfl"].update({
+            "time_revision": 132,
+            "density_revision": 133,
+            "face_flux_revision": 134,
+        })
+        second_v5["terminal_physical_audit"]["final_flux_revision"] = 135
+        runtime_path.write_text(
+            json.dumps(runtime_v5) + "\n" + json.dumps(second_v5) + "\n",
+            encoding="utf-8")
+        validate_runtime(runtime_path)
+        wrong_adjacent_dt = json.loads(json.dumps(second_v5))
+        wrong_adjacent_dt["momentum_predictor_limiter"]["advective_cfl"][
+            "dt"] = 0.003
+        reject_runtime_rows(
+            [runtime_v5, wrong_adjacent_dt],
+            "V5 adjacent time delta/advective CFL dt mismatch accepted")
+        changed_identity_v5 = json.loads(json.dumps(second_v5))
+        changed_identity_v5["binary"] += 1
+        reject_runtime_rows(
+            [runtime_v5, changed_identity_v5],
+            "V5 cross-binary row concatenation accepted")
+        changed_cfl_plan_v5 = json.loads(json.dumps(second_v5))
+        changed_cfl_plan_v5["momentum_predictor_limiter"]["advective_cfl"][
+            "plan"] += 1
+        reject_runtime_rows(
+            [runtime_v5, changed_cfl_plan_v5],
+            "V5 momentum CFL plan changed within one run")
+        changed_cfl_limit_v5 = json.loads(json.dumps(second_v5))
+        changed_cfl_limit_v5["momentum_predictor_limiter"]["advective_cfl"][
+            "limit"] = 0.75
+        changed_cfl_limit_v5["terminal_physical_audit"][
+            "committed_convective_cfl"]["limit"] = 0.75
+        reject_runtime_rows(
+            [runtime_v5, changed_cfl_limit_v5],
+            "V5 configured CFL ceiling changed within one run")
+        ibm_first_v5 = json.loads(json.dumps(runtime_v5))
+        ibm_first_v5["stl"] = 1
+        ibm_first_v5["momentum_predictor_limiter"]["advective_cfl"][
+            "activity_collective"] = 41
+        ibm_second_v5 = json.loads(json.dumps(second_v5))
+        ibm_second_v5["stl"] = 1
+        ibm_second_v5["momentum_predictor_limiter"]["advective_cfl"][
+            "activity_collective"] = 41
+        runtime_path.write_text(
+            json.dumps(ibm_first_v5) + "\n" +
+            json.dumps(ibm_second_v5) + "\n", encoding="utf-8")
+        validate_runtime(runtime_path)
+        changed_activity_v5 = json.loads(json.dumps(ibm_second_v5))
+        changed_activity_v5["momentum_predictor_limiter"]["advective_cfl"][
+            "activity_collective"] = 42
+        reject_runtime_rows(
+            [ibm_first_v5, changed_activity_v5],
+            "V5 IBM activity authority changed within one run")
+        nonmonotone_time_v5 = json.loads(json.dumps(second_v5))
+        nonmonotone_time_v5["time"] = runtime_v5["time"]
+        reject_runtime_rows(
+            [runtime_v5, nonmonotone_time_v5],
+            "V5 non-increasing committed time accepted")
+        skipped_step_v5 = json.loads(json.dumps(second_v5))
+        skipped_step_v5["step"] += 1
+        reject_runtime_rows(
+            [runtime_v5, skipped_step_v5],
+            "V5 non-contiguous committed steps accepted")
+        interleaved_v4 = json.loads(json.dumps(runtime_v4))
+        interleaved_v4["step"] = runtime_v5["step"] + 1
+        interleaved_v4["time"] = runtime_v5["time"] + 0.006
+        third_v5 = json.loads(json.dumps(second_v5))
+        third_v5["step"] = runtime_v5["step"] + 2
+        third_v5["time"] = runtime_v5["time"] + 0.012
+        third_v5["binary"] += 1
+        reject_runtime_rows(
+            [runtime_v5, interleaved_v4, third_v5],
+            "mixed-schema rows bypassed the V5 run identity contract")
+
+        for field in V5_MOMENTUM_LIMITER_FIELDS:
+            missing_v5_limiter = json.loads(json.dumps(runtime_v5))
+            missing_v5_limiter["momentum_predictor_limiter"].pop(field)
+            reject_runtime(missing_v5_limiter,
+                           f"V5 momentum limiter missing field {field}")
+        for limiter_update in (
+                {"scheme": "global_theta_v1"},
+                {"retained_correction_l1_ratio": 0.0},
+                {"retained_correction_l1_ratio": 0.5},
+                {"limited": True},
+                {"limited_faces": 1}):
+            invalid_v5_limiter = json.loads(json.dumps(runtime_v5))
+            invalid_v5_limiter["momentum_predictor_limiter"].update(
+                limiter_update)
+            reject_runtime(invalid_v5_limiter,
+                           f"V5 invalid common-face limiter accepted: "
+                           f"{limiter_update}")
+
+        v5_with_legacy_limiter = json.loads(json.dumps(runtime_v5))
+        v5_with_legacy_limiter["momentum_predictor_limiter"]["theta"] = 1.0
+        reject_runtime(v5_with_legacy_limiter,
+                       "V5 record carrying V4 limiter field accepted")
+        reject_v5_contamination(runtime_v4, "V4")
+        reject_v5_contamination(runtime, "V3")
 
         one_refinement = json.loads(json.dumps(runtime_v4))
         one_refinement["linear_iterations"] = 1
@@ -2250,6 +2698,7 @@ def self_test() -> None:
         runtime_path.write_text(json.dumps(historical_v2) + "\n",
                                 encoding="utf-8")
         validate_runtime(runtime_path)
+        reject_v5_contamination(historical_v2, "V2")
 
         historical_v2_extended = json.loads(json.dumps(runtime))
         historical_v2_extended["schema"] = V2_RUNTIME_SCHEMA
@@ -2495,6 +2944,7 @@ def self_test() -> None:
         legacy = dict(missing_pressure, schema=LEGACY_RUNTIME_SCHEMA)
         runtime_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
+        reject_v5_contamination(legacy, "V1")
 
         invalid_pressure = json.loads(json.dumps(runtime))
         invalid_pressure["pressure"][1]["final_convergence_metric"] = 2.0e-6

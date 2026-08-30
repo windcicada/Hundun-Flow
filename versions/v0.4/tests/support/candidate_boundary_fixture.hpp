@@ -573,7 +573,8 @@ class CandidateBoundaryFixture {
     input.momentum = {equations.momentum().fingerprint(),
                       EquationAssemblyScope::momentum_predictor,
                       target_time, geometry.topology_revision(),
-                      trial_flux.revision, 1843U};
+                      trial_flux.revision, 1843U,
+                      fixture_time_step_for_bdf(bdf)};
     input.predictor.plan =
         equations.thermophysical_predictor().fingerprint();
     input.predictor.time = target_time;

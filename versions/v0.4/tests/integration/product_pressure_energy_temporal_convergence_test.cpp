@@ -1237,33 +1237,29 @@ void dump_gate_summaries(const std::array<Trajectory, 3U>& trajectories) {
   }
 }
 
-bool consistent_smooth_extremum_limiter(
+bool coherent_face_local_limiter(
     const std::array<Trajectory, 3U>& trajectories) {
   for (const Trajectory& trajectory : trajectories) {
     const auto consistent = [](const std::vector<StepAudit>& steps) {
       return std::all_of(steps.begin(), steps.end(), [](const StepAudit& step) {
         // The thermophysical IDP path must remain wholly inactive.  The
-        // momentum path is expected to select its one-shot monotone envelope
-        // at the translating acoustic extrema: at the coarse BE cell (2,0,0)
-        // low defines the new upper bound and high-low=9.958955e-6 is clipped
-        // to theta=0. Requiring this same mode on every refinement prevents a
-        // changing limiter branch from masquerading as temporal convergence.
+        // face-local momentum limiter may become inactive as dt is refined,
+        // but it must never collapse the complete anti-diffusive correction.
+        // The independent U/phi convergence gates below prove that this
+        // smooth-extremum transition preserves the intended temporal order.
         return !step.thermophysical_limited &&
                step.thermophysical_theta == 1.0 &&
                step.thermophysical_low_order_substeps == 0U &&
-               step.momentum_limited &&
-               step.momentum_limiter_activations == 1U &&
                std::isfinite(step.momentum_theta) &&
-               step.momentum_theta >= 0.0 && step.momentum_theta < 1.0;
+               step.momentum_theta > 0.0 && step.momentum_theta <= 1.0 &&
+               step.momentum_limited ==
+                   (step.momentum_limiter_activations != 0U) &&
+               (step.momentum_limited ? step.momentum_theta < 1.0
+                                      : step.momentum_theta == 1.0);
       });
     };
-    double minimum_theta = 1.0;
-    for (const StepAudit& step : trajectory.common_steps)
-      minimum_theta = std::min(minimum_theta, step.momentum_theta);
-    for (const StepAudit& step : trajectory.production_steps)
-      minimum_theta = std::min(minimum_theta, step.momentum_theta);
     if (!consistent(trajectory.common_steps) ||
-        !consistent(trajectory.production_steps) || minimum_theta != 0.0)
+        !consistent(trajectory.production_steps))
       return false;
   }
   return true;
@@ -1280,8 +1276,8 @@ bool test_product_pressure_energy_temporal_convergence() {
   if (!passed) return false;
   dump_gate_summaries(trajectories);
   passed &= expect(
-      consistent_smooth_extremum_limiter(trajectories),
-      "all levels retain the same smooth-acoustic-extremum limiter mode");
+      coherent_face_local_limiter(trajectories),
+      "face-local limiter reports remain coherent without global collapse");
 
   // The physical Restart fields are bitwise identical.  Only the Restart dt
   // metadata differs, so every level performs its own one-step BE recovery

@@ -62,6 +62,14 @@ bool finite_positive(double value) noexcept {
   return std::isfinite(value) && value > 0.0;
 }
 
+bool same_bdf_coefficients(BdfCoefficients left,
+                           BdfCoefficients right) noexcept {
+  return left.order == right.order &&
+         double_bits(left.a0) == double_bits(right.a0) &&
+         double_bits(left.a1) == double_bits(right.a1) &&
+         double_bits(left.a2) == double_bits(right.a2);
+}
+
 PressureCorrectionFaceKind pressure_correction_kind(
     BoundaryKind kind) noexcept {
   if (kind == BoundaryKind::periodic) {
@@ -8070,6 +8078,13 @@ Status PressureVelocityCoupler::audit_pending_final(
   }
   Impl& impl = *implementation_;
   impl.terminal = {};
+  Status reduction_binding =
+      reductions.validate_communicator(impl.communicator);
+  int reduction_binding_lowest = -1;
+  reduction_binding = collective_status(
+      impl.communicator, reduction_binding, impl.rank, impl.size,
+      reduction_binding_lowest);
+  if (!reduction_binding) return reduction_binding;
   const Int3 cells = impl.cells;
   ConstFaceFluxView flux;
   flux.x = as_const(pending_flux.x_);
@@ -8226,12 +8241,24 @@ Status PressureVelocityCoupler::audit_pending_final(
       std::isfinite(input.boundary_closure_residual) &&
       input.boundary_closure_residual >= 0.0 &&
       std::isfinite(input.energy_residual) && input.energy_residual >= 0.0 &&
+      std::isfinite(input.step_dt) && input.step_dt > 0.0 &&
+      same_bdf_coefficients(input.bdf, impl.frozen_candidate_bdf) &&
+      detail::bdf_matches_time_step(input.bdf, input.step_dt) &&
+      std::isfinite(input.convective_cfl_limit) &&
+      input.convective_cfl_limit > 0.0 &&
       valid_active &&
       valid_thermophysical_boundary &&
       valid_terminal_composition &&
       (!closed || (std::isfinite(input.closed_mass_target) &&
                    input.closed_mass_target > 0.0));
-  double local_max[5]{};
+  const auto face_offset = [](Int3 shape, Int3 face) noexcept {
+    return static_cast<std::size_t>(face.x) +
+           static_cast<std::size_t>(shape.x) *
+               (static_cast<std::size_t>(face.y) +
+                static_cast<std::size_t>(shape.y) *
+                    static_cast<std::size_t>(face.z));
+  };
+  double local_max[7]{};
   double local_sum[5]{};
   Int3 local_continuity_cell{};
   bool local_continuity_location_valid = false;
@@ -8280,6 +8307,69 @@ Status PressureVelocityCoupler::audit_pending_final(
           double absolute_pi = 0.0;
           double compressibility_moment = 0.0;
           double compressibility_weight = 0.0;
+          const bool inactive_xm =
+              impl.continuity_activity.x_faces.size != 0U &&
+              impl.continuity_activity.x_faces
+                      .data[face_offset(flux.x.extents, cell)] == 0U;
+          const bool inactive_xp =
+              impl.continuity_activity.x_faces.size != 0U &&
+              impl.continuity_activity.x_faces
+                      .data[face_offset(flux.x.extents,
+                                        {ix + 1, iy, iz})] == 0U;
+          const bool inactive_ym =
+              impl.continuity_activity.y_faces.size != 0U &&
+              impl.continuity_activity.y_faces
+                      .data[face_offset(flux.y.extents, cell)] == 0U;
+          const bool inactive_yp =
+              impl.continuity_activity.y_faces.size != 0U &&
+              impl.continuity_activity.y_faces
+                      .data[face_offset(flux.y.extents,
+                                        {ix, iy + 1, iz})] == 0U;
+          const bool inactive_zm =
+              impl.continuity_activity.z_faces.size != 0U &&
+              impl.continuity_activity.z_faces
+                      .data[face_offset(flux.z.extents, cell)] == 0U;
+          const bool inactive_zp =
+              impl.continuity_activity.z_faces.size != 0U &&
+              impl.continuity_activity.z_faces
+                      .data[face_offset(flux.z.extents,
+                                        {ix, iy, iz + 1})] == 0U;
+          if (!std::isfinite(rho) || !(rho > 0.0) ||
+              !std::isfinite(volume) || !(volume > 0.0) ||
+              !std::isfinite(fxm) || !std::isfinite(fxp) ||
+              !std::isfinite(fym) || !std::isfinite(fyp) ||
+              !std::isfinite(fzm) || !std::isfinite(fzp)) {
+            local = {StatusCode::numerical_failure, kPisoNumerical};
+            continue;
+          }
+          // The IBM activity authority excludes solid cells and seals every
+          // inactive fluid/solid control face to zero mass flux.  A non-zero
+          // value there is an authority violation, not a flux that may be
+          // silently omitted from the CFL reconstruction.
+          if ((inactive_xm && fxm != 0.0) ||
+              (inactive_xp && fxp != 0.0) ||
+              (inactive_ym && fym != 0.0) ||
+              (inactive_yp && fyp != 0.0) ||
+              (inactive_zm && fzm != 0.0) ||
+              (inactive_zp && fzp != 0.0)) {
+            local = {StatusCode::invalid_plan, kPisoCoupler};
+            continue;
+          }
+          const double outgoing_mass_flow =
+              std::max(-fxm, 0.0) + std::max(fxp, 0.0) +
+              std::max(-fym, 0.0) + std::max(fyp, 0.0) +
+              std::max(-fzm, 0.0) + std::max(fzp, 0.0);
+          const double absolute_mass_flow =
+              0.5 * (std::abs(fxm) + std::abs(fxp) + std::abs(fym) +
+                     std::abs(fyp) + std::abs(fzm) + std::abs(fzp));
+          const double cfl_scale = input.step_dt / (rho * volume);
+          const double cfl_out = cfl_scale * outgoing_mass_flow;
+          const double cfl_abs = cfl_scale * absolute_mass_flow;
+          if (!std::isfinite(cfl_out) || cfl_out < 0.0 ||
+              !std::isfinite(cfl_abs) || cfl_abs < 0.0) {
+            local = {StatusCode::numerical_failure, kPisoNumerical};
+            continue;
+          }
           if (hf_coast_common_terminal_cell_v1(
                   rho, eos, rho_n, rho_nm1, volume, input.bdf.a0,
                   input.bdf.a1, input.bdf.a2, fxm, fxp, fym, fyp, fzm, fzp,
@@ -8301,6 +8391,8 @@ Status PressureVelocityCoupler::audit_pending_final(
           local_max[0U] = std::max(local_max[0U], eos_residual);
           local_max[1U] = std::max(local_max[1U], continuity_residual);
           local_max[2U] = std::max(local_max[2U], absolute_pi);
+          local_max[5U] = std::max(local_max[5U], cfl_out);
+          local_max[6U] = std::max(local_max[6U], cfl_abs);
           local_sum[0U] += mass_contribution;
           local_sum[1U] += volume_contribution;
           local_sum[2U] += compressibility_moment;
@@ -8309,9 +8401,9 @@ Status PressureVelocityCoupler::audit_pending_final(
       }
     }
   }
-  double global_max[5]{};
-  Status status = reductions.checked_max({local_max, 5U},
-                                         {global_max, 5U}, local);
+  double global_max[7]{};
+  Status status = reductions.checked_max({local_max, 7U},
+                                         {global_max, 7U}, local);
   if (!status) {
     return status;
   }
@@ -8417,6 +8509,10 @@ Status PressureVelocityCoupler::audit_pending_final(
   candidate_report.energy_residual = global_max[4U];
   candidate_report.closed_mass_residual = mass_residual;
   candidate_report.gauge_residual = gauge_residual;
+  candidate_report.committed_convective_cfl_out_max = global_max[5U];
+  candidate_report.committed_convective_cfl_abs_max = global_max[6U];
+  candidate_report.committed_convective_cfl_limit =
+      input.convective_cfl_limit;
   candidate_report.final_flux_revision = pending_flux.revision_;
   candidate_report.continuity_witness = global_continuity_witness;
   report = candidate_report;
@@ -8441,6 +8537,10 @@ Status PressureVelocityCoupler::audit_pending_final(
   audit = hash_mix(audit, double_bits(global_max[4U]));
   audit = hash_mix(audit, double_bits(mass_residual));
   audit = hash_mix(audit, double_bits(gauge_residual));
+  audit = hash_mix(audit, double_bits(input.step_dt));
+  audit = hash_mix(audit, double_bits(global_max[5U]));
+  audit = hash_mix(audit, double_bits(global_max[6U]));
+  audit = hash_mix(audit, double_bits(input.convective_cfl_limit));
   audit = hash_mix(audit, thermophysical_boundary.semantics);
   audit = hash_mix(audit, thermophysical_boundary.target);
   audit = hash_mix(audit, thermophysical_boundary.rank_local_binding);

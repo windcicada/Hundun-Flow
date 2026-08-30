@@ -70,6 +70,37 @@ inline bool valid_bdf_coefficients(BdfCoefficients bdf) noexcept {
                          : bdf.a1 < 0.0 && bdf.a2 > 0.0;
 }
 
+inline bool bdf_matches_time_step(BdfCoefficients bdf,
+                                  double dt) noexcept {
+  if (!std::isfinite(dt) || dt <= 0.0 || !valid_bdf_coefficients(bdf)) {
+    return false;
+  }
+  const auto close = [](double observed, double expected) noexcept {
+    if (!std::isfinite(observed) || !std::isfinite(expected)) {
+      return false;
+    }
+    const double scale =
+        std::max({1.0, std::abs(observed), std::abs(expected)});
+    return std::abs(observed - expected) <=
+           128.0 * std::numeric_limits<double>::epsilon() * scale;
+  };
+  if (bdf.order == 1U) {
+    return close(bdf.a0 * dt, 1.0) && close(bdf.a1 * dt, -1.0) &&
+           bdf.a2 == 0.0;
+  }
+  if (bdf.order != 2U) {
+    return false;
+  }
+  const double ratio = -bdf.a1 * dt - 1.0;
+  if (!std::isfinite(ratio) || ratio <= 0.0) {
+    return false;
+  }
+  const double denominator = 1.0 + ratio;
+  return close(bdf.a0 * dt, (1.0 + 2.0 * ratio) / denominator) &&
+         close(bdf.a1 * dt, -denominator) &&
+         close(bdf.a2 * dt, ratio * ratio / denominator);
+}
+
 inline bool finite_field_box(ConstFieldView field, KernelBox box,
                              std::uint8_t component_begin,
                              std::uint8_t component_count) noexcept {

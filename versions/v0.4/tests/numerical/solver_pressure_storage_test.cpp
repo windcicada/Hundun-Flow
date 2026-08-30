@@ -239,7 +239,7 @@ EquationAssemblyContext context_for(const Fixture& fixture,
                                     StageId contribution_stage) {
   EquationAssemblyContext context;
   context.dt = 0.25;
-  context.bdf = {2.75, -3.0, 0.25, 2U};
+  context.bdf = {6.0, -8.0, 2.0, 2U};
   context.time = 4101U;
   context.geometry = fixture.geometry.topology_revision();
   context.boundary = fixture.boundary.revision();
@@ -266,7 +266,7 @@ double volume(const Fixture& fixture, Int3 cell) {
 
 EquationAssemblyCertificate marker_certificate() {
   return {991U, EquationAssemblyScope::momentum_predictor, 992U, 993U,
-          994U, 995U};
+          994U, 995U, 996.0};
 }
 
 PressureReferenceCertificate reference_certificate(
@@ -285,7 +285,8 @@ bool same_certificate(const EquationAssemblyCertificate& left,
                       const EquationAssemblyCertificate& right) {
   return left.plan == right.plan && left.scope == right.scope &&
          left.time == right.time && left.geometry == right.geometry &&
-         left.face_flux == right.face_flux && left.state == right.state;
+         left.face_flux == right.face_flux && left.state == right.state &&
+         left.dt == right.dt;
 }
 
 bool all_equal(const std::vector<double>& values, double expected) {
@@ -411,6 +412,12 @@ bool test_failure_atomicity() {
   bad_stage.contribution_stage = kClosedMassServiceStage + 1U;
   passed &= failure_is_atomic(as_const(psi.view), reference, bad_stage,
                               "closed-mass wrong service stage is atomic");
+
+  EquationAssemblyContext mismatched_bdf_dt = context;
+  mismatched_bdf_dt.dt *= 1.01;
+  passed &= failure_is_atomic(
+      as_const(psi.view), reference, mismatched_bdf_dt,
+      "pressure-storage BDF coefficients mismatched with dt are atomic");
 
   PressureReferenceCertificate wrong_authority = reference;
   ++wrong_authority.plan;

@@ -109,6 +109,24 @@ bool terminal_physical_certificate(ProductDriver& driver,
       !accepted_solve(report.piso.pressure[0U]) ||
       !accepted_solve(report.piso.pressure[1U]) ||
       report.piso.final_flux_revision == 0U ||
+      !report.momentum_predictor_limiter.advective_cfl.valid() ||
+      report.momentum_predictor_limiter.advective_cfl.face_flux ==
+          report.piso.final_flux_revision ||
+      report.momentum_predictor_limiter.advective_cfl.limit !=
+          model.time.convective_cfl ||
+      report.momentum_predictor_limiter.advective_cfl.out_max >
+          report.momentum_predictor_limiter.advective_cfl.limit *
+              (1.0 + 64.0 * std::numeric_limits<double>::epsilon()) ||
+      !std::isfinite(report.piso.committed_convective_cfl_out_max) ||
+      report.piso.committed_convective_cfl_out_max < 0.0 ||
+      !std::isfinite(report.piso.committed_convective_cfl_abs_max) ||
+      report.piso.committed_convective_cfl_abs_max < 0.0 ||
+      !std::isfinite(report.piso.committed_convective_cfl_limit) ||
+      report.piso.committed_convective_cfl_limit !=
+          model.time.convective_cfl ||
+      report.piso.committed_convective_cfl_out_max >
+          report.piso.committed_convective_cfl_limit *
+              (1.0 + 64.0 * std::numeric_limits<double>::epsilon()) ||
       !snapshot.final_mass_flux.certificate.valid() ||
       snapshot.final_mass_flux.revision != report.piso.final_flux_revision ||
       snapshot.step != report.accepted_step ||
@@ -238,6 +256,149 @@ LocalTimeLimits limits_for_exact_dt(const ValidatedModel& model,
                 model.time.thermal_cfl, model.time.species_cfl});
   const double scale = dt / smallest_target;
   return {scale, scale, scale, scale, scale};
+}
+
+struct DriverFieldImage {
+  std::string stable_name;
+  ConstFieldView view{};
+  RevisionToken accepted_revision{};
+  std::vector<double> values;
+};
+
+struct DriverStateImage {
+  const CartesianGeometryPlan* geometry{};
+  MeshPatch patch{};
+  PlanFingerprint plan{};
+  PlanFingerprint schema{};
+  double time{};
+  std::uint64_t step{};
+  std::vector<DriverFieldImage> fields;
+  RevisionToken flux_revision{};
+  FaceFluxCertificate flux_certificate{};
+  std::array<std::vector<double>, 3U> flux_values;
+  double pressure_reference{};
+  double closed_mass{};
+};
+
+bool capture_driver_state(ProductDriver& driver, DriverStateImage& out) {
+  CommittedOutputSnapshot snapshot;
+  ConstFaceFluxView flux;
+  Status status = driver.committed_output_snapshot(snapshot);
+  if (status) status = driver.committed_final_mass_flux_for_test(flux);
+  if (!status || !snapshot.committed || !flux.certificate.valid())
+    return false;
+  DriverStateImage candidate;
+  candidate.geometry = snapshot.geometry;
+  candidate.patch = snapshot.patch;
+  candidate.plan = snapshot.plan;
+  candidate.schema = snapshot.schema;
+  candidate.time = snapshot.time;
+  candidate.step = snapshot.step;
+  candidate.fields.reserve(snapshot.fields.size);
+  for (std::size_t index = 0U; index < snapshot.fields.size; ++index) {
+    const SnapshotFieldView& source = snapshot.fields.data[index];
+    DriverFieldImage field;
+    field.stable_name = source.stable_name;
+    field.view = source.values;
+    field.accepted_revision = source.accepted_revision;
+    const ConstFieldView view = source.values;
+    field.values.reserve(static_cast<std::size_t>(view.interior.x) *
+                         view.interior.y * view.interior.z * view.components);
+    for (std::uint8_t component = 0U; component < view.components; ++component)
+      for (std::int32_t z = 0; z < view.interior.z; ++z)
+        for (std::int32_t y = 0; y < view.interior.y; ++y)
+          for (std::int32_t x = 0; x < view.interior.x; ++x)
+            field.values.push_back(view.unchecked({x, y, z}, component));
+    candidate.fields.push_back(std::move(field));
+  }
+  const std::array<ConstFaceFieldView, 3U> faces{flux.x, flux.y, flux.z};
+  for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
+    const ConstFaceFieldView face = faces[axis];
+    std::vector<double>& values = candidate.flux_values[axis];
+    values.reserve(static_cast<std::size_t>(face.extents.x) * face.extents.y *
+                   face.extents.z);
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          values.push_back(face.unchecked({x, y, z}));
+  }
+  candidate.flux_revision = flux.revision;
+  candidate.flux_certificate = flux.certificate;
+  candidate.pressure_reference = driver.pressure_reference();
+  candidate.closed_mass = driver.closed_mass_target();
+  out = std::move(candidate);
+  return true;
+}
+
+bool exact_double_vector(const std::vector<double>& left,
+                         const std::vector<double>& right) {
+  return left.size() == right.size() &&
+         (left.empty() ||
+          std::memcmp(left.data(), right.data(),
+                      left.size() * sizeof(double)) == 0);
+}
+
+bool same_driver_fields(const DriverStateImage& left,
+                        const DriverStateImage& right) {
+  if (left.fields.size() != right.fields.size()) return false;
+  for (std::size_t index = 0U; index < left.fields.size(); ++index) {
+    const DriverFieldImage& a = left.fields[index];
+    const DriverFieldImage& b = right.fields[index];
+    if (a.stable_name != b.stable_name ||
+        a.view.field != b.view.field ||
+        a.view.components != b.view.components ||
+        a.view.interior.x != b.view.interior.x ||
+        a.view.interior.y != b.view.interior.y ||
+        a.view.interior.z != b.view.interior.z ||
+        !exact_double_vector(a.values, b.values))
+      return false;
+  }
+  for (std::size_t axis = 0U; axis < left.flux_values.size(); ++axis)
+    if (!exact_double_vector(left.flux_values[axis], right.flux_values[axis]))
+      return false;
+  return true;
+}
+
+bool same_patch(MeshPatch left, MeshPatch right) {
+  const auto same = [](Int3 a, Int3 b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+  };
+  return same(left.begin, right.begin) && same(left.cells, right.cells) &&
+         same(left.process_grid, right.process_grid) &&
+         same(left.process_coord, right.process_coord);
+}
+
+bool same_physical_state(const DriverStateImage& left,
+                         const DriverStateImage& right) {
+  return left.time == right.time && left.step == right.step &&
+         left.pressure_reference == right.pressure_reference &&
+         left.closed_mass == right.closed_mass &&
+         same_patch(left.patch, right.patch) && same_driver_fields(left, right);
+}
+
+bool same_exact_state(const DriverStateImage& left,
+                      const DriverStateImage& right) {
+  if (!same_physical_state(left, right) || left.geometry != right.geometry ||
+      left.plan != right.plan || left.schema != right.schema ||
+      left.flux_revision != right.flux_revision ||
+      !(left.flux_certificate == right.flux_certificate))
+    return false;
+  for (std::size_t index = 0U; index < left.fields.size(); ++index) {
+    const DriverFieldImage& a = left.fields[index];
+    const DriverFieldImage& b = right.fields[index];
+    const ConstFieldView& x = a.view;
+    const ConstFieldView& y = b.view;
+    if (a.accepted_revision != b.accepted_revision || x.base != y.base ||
+        x.ghosts.x != y.ghosts.x || x.ghosts.y != y.ghosts.y ||
+        x.ghosts.z != y.ghosts.z || x.stride_y != y.stride_y ||
+        x.stride_z != y.stride_z ||
+        x.component_stride != y.component_stride ||
+        x.replica != y.replica || x.revision != y.revision ||
+        x.storage_identity != y.storage_identity ||
+        x.revision_domain != y.revision_domain)
+      return false;
+  }
+  return true;
 }
 
 bool run() {
@@ -673,7 +834,193 @@ bool run_open_boundary_product() {
   return passed;
 }
 
-bool run_mass_flow_boundary_product() {
+bool fixed_advective_cfl_gate_rolls_back_product() {
+  ValidatedModel model = test::product_model({8, 7, 6});
+  model.pressure_reference = PressureReferenceKind::boundary_absolute;
+  for (BoundaryFaceSpec& face : model.boundaries) {
+    face.flow_kind = BoundaryKind::symmetry;
+    face.thermal_kind = BoundaryKind::none;
+    face.pressure = 98000.0;
+    face.temperature = 315.0;
+  }
+  model.boundaries[0U].flow_kind = BoundaryKind::velocity_inlet;
+  model.boundaries[0U].velocity = {1.0, 0.0, 0.0};
+  model.boundaries[1U].flow_kind = BoundaryKind::pressure_outlet;
+  model.boundaries[1U].allow_backflow = false;
+  model.time.control = TimeControlKind::fixed;
+  model.time.convective_cfl = 1.0e-12;
+
+  CompiledCasePlan plan;
+  Status status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
+  if (!status) {
+    std::cerr << "fixed CFL fixture rejected before ProductDriver="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << '\n';
+    return false;
+  }
+  ProductDriver driver;
+  status = ProductDriver::create(MPI_COMM_SELF, std::move(plan), driver);
+  DriverInitialState initial;
+  initial.pressure_reference = 98000.0;
+  initial.temperature = 315.0;
+  initial.velocity = {1.0, 0.0, 0.0};
+  if (status) status = driver.initialize(initial);
+  if (!status) return false;
+
+  const auto field_bytes = [](ConstFieldView field) {
+    std::vector<double> values;
+    values.reserve(static_cast<std::size_t>(field.interior.x) *
+                   field.interior.y * field.interior.z * field.components);
+    for (std::uint8_t component = 0U; component < field.components;
+         ++component)
+      for (std::int32_t z = 0; z < field.interior.z; ++z)
+        for (std::int32_t y = 0; y < field.interior.y; ++y)
+          for (std::int32_t x = 0; x < field.interior.x; ++x)
+            values.push_back(field.unchecked({x, y, z}, component));
+    return values;
+  };
+  const auto face_bytes = [](ConstFaceFieldView face) {
+    std::vector<double> values;
+    values.reserve(static_cast<std::size_t>(face.extents.x) *
+                   face.extents.y * face.extents.z);
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          values.push_back(face.unchecked({x, y, z}));
+    return values;
+  };
+  const auto exact_values = [](const std::vector<double>& left,
+                               const std::vector<double>& right) {
+    return left.size() == right.size() &&
+           (left.empty() ||
+            std::memcmp(left.data(), right.data(),
+                        left.size() * sizeof(double)) == 0);
+  };
+
+  CommittedOutputSnapshot before;
+  status = driver.committed_output_snapshot(before);
+  ConstFaceFluxView before_flux;
+  if (status) status = driver.committed_final_mass_flux_for_test(before_flux);
+  if (!status || !before.committed || !before_flux.certificate.valid())
+    return false;
+  std::vector<SnapshotFieldView> before_fields(
+      before.fields.data, before.fields.data + before.fields.size);
+  std::vector<std::vector<double>> before_field_values;
+  before_field_values.reserve(before_fields.size());
+  for (const SnapshotFieldView& field : before_fields)
+    before_field_values.push_back(field_bytes(field.values));
+  const std::array<std::vector<double>, 3U> before_flux_values{{
+      face_bytes(before_flux.x), face_bytes(before_flux.y),
+      face_bytes(before_flux.z)}};
+  const double pressure_reference_before = driver.pressure_reference();
+  const double closed_mass_before = driver.closed_mass_target();
+
+  DriverStepReport step;
+  status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+  const MomentumAdvectiveCflCertificate& cfl =
+      step.momentum_predictor_limiter.advective_cfl;
+  const bool advective_audit_completed =
+      cfl.valid() && cfl.out_max > cfl.limit &&
+      cfl.failure_witness.valid && cfl.failure_witness.rank == 0 &&
+      cfl.failure_witness.out == cfl.out_max &&
+      cfl.face_flux != 0U && step.piso.final_flux_revision == 0U;
+  const bool fatal_gate =
+      !status && status.code == StatusCode::invalid_case &&
+      status.detail == 10211U && !step.accepted && step.attempts == 1U &&
+      step.proposal.origin == StepOrigin::fresh_start &&
+      step.proposal.attempt == 0U &&
+      step.failure.code == StatusCode::invalid_case &&
+      step.failure.detail == 10211U && step.failed_stage == 30U;
+
+  CommittedOutputSnapshot after;
+  const Status output_status = driver.committed_output_snapshot(after);
+  ConstFaceFluxView after_flux;
+  const Status flux_status =
+      driver.committed_final_mass_flux_for_test(after_flux);
+  bool exact_state = output_status && after.committed &&
+                     after.time == before.time && after.step == before.step &&
+                     after.plan == before.plan && after.schema == before.schema &&
+                     after.fields.size == before_fields.size();
+  for (std::size_t index = 0U;
+       index < before_fields.size() && exact_state; ++index) {
+    const SnapshotFieldView& expected = before_fields[index];
+    const SnapshotFieldView& actual = after.fields.data[index];
+    const ConstFieldView& left = expected.values;
+    const ConstFieldView& right = actual.values;
+    exact_state = actual.stable_name == expected.stable_name &&
+                  actual.accepted_revision == expected.accepted_revision &&
+                  right.base == left.base && right.interior.x == left.interior.x &&
+                  right.interior.y == left.interior.y &&
+                  right.interior.z == left.interior.z &&
+                  right.ghosts.x == left.ghosts.x &&
+                  right.ghosts.y == left.ghosts.y &&
+                  right.ghosts.z == left.ghosts.z &&
+                  right.components == left.components &&
+                  right.stride_y == left.stride_y &&
+                  right.stride_z == left.stride_z &&
+                  right.component_stride == left.component_stride &&
+                  right.replica == left.replica && right.field == left.field &&
+                  right.revision == left.revision &&
+                  right.storage_identity == left.storage_identity &&
+                  right.revision_domain == left.revision_domain &&
+                  exact_values(before_field_values[index],
+                               field_bytes(right));
+  }
+  const bool exact_flux =
+      flux_status && after_flux.revision == before_flux.revision &&
+      after_flux.certificate == before_flux.certificate &&
+      exact_values(before_flux_values[0U], face_bytes(after_flux.x)) &&
+      exact_values(before_flux_values[1U], face_bytes(after_flux.y)) &&
+      exact_values(before_flux_values[2U], face_bytes(after_flux.z));
+  const bool exact_scalars =
+      driver.pressure_reference() == pressure_reference_before &&
+      driver.closed_mass_target() == closed_mass_before;
+  const bool passed = advective_audit_completed && fatal_gate && exact_state &&
+                      exact_flux && exact_scalars;
+  if (!passed)
+    std::cerr << "fixed advective CFL gate status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " failure=" << static_cast<unsigned>(step.failure.code)
+              << '/' << step.failure.detail << " stage/attempts="
+              << step.failed_stage << '/' << step.attempts << " audit/rev="
+              << advective_audit_completed << '/' << cfl.face_flux
+              << " final=" << step.piso.final_flux_revision << " CFL="
+              << cfl.out_max << '/' << cfl.absolute_max << '/' << cfl.limit
+              << " rollback=" << exact_state << '/' << exact_flux << '/'
+              << exact_scalars << '\n';
+  return passed;
+}
+
+bool convective_cfl_policy_classifies_terminal_failure() {
+  constexpr double limit = 0.8;
+  constexpr double slack =
+      64.0 * std::numeric_limits<double>::epsilon();
+  const double edge = limit * (1.0 + slack);
+  const double over = std::nextafter(
+      edge, std::numeric_limits<double>::infinity());
+  const Status accepted = detail::convective_cfl_acceptance_status_for_test(
+      TimeControlKind::fixed, edge, limit);
+  const Status fixed = detail::convective_cfl_acceptance_status_for_test(
+      TimeControlKind::fixed, over, limit);
+  const Status adaptive_flow =
+      detail::convective_cfl_acceptance_status_for_test(
+          TimeControlKind::adaptive_flow, over, limit);
+  const Status adaptive_acoustic =
+      detail::convective_cfl_acceptance_status_for_test(
+          TimeControlKind::adaptive_acoustic, over, limit);
+  const Status invalid = detail::convective_cfl_acceptance_status_for_test(
+      TimeControlKind::adaptive_flow,
+      std::numeric_limits<double>::infinity(), limit);
+  return accepted && fixed.code == StatusCode::invalid_case &&
+         fixed.detail == 10211U &&
+         adaptive_flow.code == StatusCode::rejected_step &&
+         adaptive_flow.detail == 10211U &&
+         adaptive_acoustic.code == StatusCode::rejected_step &&
+         adaptive_acoustic.detail == 10211U &&
+         invalid.code == StatusCode::invalid_plan && invalid.detail == 10211U;
+}
+
+ValidatedModel mass_flow_boundary_model() {
   ValidatedModel model = test::product_model({8, 7, 6});
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   for (BoundaryFaceSpec& face : model.boundaries) {
@@ -687,6 +1034,167 @@ bool run_mass_flow_boundary_product() {
   model.boundaries[0U].velocity = {1.0, 0.0, 0.0};
   model.boundaries[0U].mass_flow_rate = 1.0;
   model.boundaries[1U].flow_kind = BoundaryKind::pressure_outlet;
+  return model;
+}
+
+bool terminal_committed_cfl_gate_is_transactional() {
+  constexpr double full_dt = 1.0e-3;
+  constexpr double half_dt = 5.0e-4;
+  constexpr double cfl_limit = 3.0e-3;
+  const auto configured_model = [](TimeControlKind control, double initial_dt,
+                                   double minimum_dt, double maximum_dt) {
+    ValidatedModel model = mass_flow_boundary_model();
+    model.time.control = control;
+    model.time.initial_dt = initial_dt;
+    model.time.minimum_dt = minimum_dt;
+    model.time.maximum_dt = maximum_dt;
+    model.time.convective_cfl = cfl_limit;
+    model.time.maximum_growth = 1.0;
+    model.time.retry_factor = 0.5;
+    model.time.maximum_retries = 1U;
+    return model;
+  };
+  const auto initialize = [](const ValidatedModel& model,
+                             ProductDriver& driver) {
+    CompiledCasePlan plan;
+    Status status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
+    if (status)
+      status = ProductDriver::create(MPI_COMM_SELF, std::move(plan), driver);
+    DriverInitialState initial;
+    initial.pressure_reference = 98000.0;
+    initial.temperature = 315.0;
+    if (status) status = driver.initialize(initial);
+    return status;
+  };
+  const auto terminal_components_pass = [](const ValidatedModel& model,
+                                           const DriverStepReport& report) {
+    const auto accepted = [](double value, double limit) {
+      return std::isfinite(value) && value >= 0.0 && value <= limit;
+    };
+    return report.piso.final_flux_revision != 0U &&
+           accepted(report.piso.eos_residual, model.solver.terminal.eos) &&
+           accepted(report.piso.continuity_residual,
+                    model.solver.terminal.continuity) &&
+           accepted(report.piso.energy_residual,
+                    model.solver.terminal.continuity) &&
+           accepted(report.piso.closed_mass_residual,
+                    model.solver.terminal.closed_mass) &&
+           accepted(report.piso.gauge_residual,
+                    model.solver.terminal.gauge);
+  };
+
+  const ValidatedModel fixed_model = configured_model(
+      TimeControlKind::fixed, full_dt, half_dt, full_dt);
+  ProductDriver fixed_driver;
+  Status status = initialize(fixed_model, fixed_driver);
+  DriverStateImage fixed_before;
+  if (!status || !capture_driver_state(fixed_driver, fixed_before))
+    return false;
+  DriverStepReport fixed_report;
+  status = fixed_driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, fixed_report);
+  DriverStateImage fixed_after;
+  const bool fixed_snapshot = capture_driver_state(fixed_driver, fixed_after);
+  const MomentumAdvectiveCflCertificate& fixed_advective =
+      fixed_report.momentum_predictor_limiter.advective_cfl;
+  const bool fixed_passed =
+      !status && status.code == StatusCode::invalid_case &&
+      status.detail == 10211U && !fixed_report.accepted &&
+      fixed_report.attempts == 1U && fixed_report.failed_stage == 60U &&
+      fixed_report.failure.code == StatusCode::invalid_case &&
+      fixed_report.failure.detail == 10211U && fixed_advective.valid() &&
+      fixed_advective.out_max <= fixed_advective.limit &&
+      terminal_components_pass(fixed_model, fixed_report) &&
+      fixed_report.piso.committed_convective_cfl_out_max >
+          fixed_report.piso.committed_convective_cfl_limit &&
+      fixed_snapshot && same_exact_state(fixed_before, fixed_after);
+  if (!fixed_passed) {
+    std::cerr << std::setprecision(17)
+              << "terminal fixed CFL status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " failure/stage/attempts="
+              << static_cast<unsigned>(fixed_report.failure.code) << '/'
+              << fixed_report.failure.detail << '/' << fixed_report.failed_stage
+              << '/' << fixed_report.attempts << " provisional/terminal="
+              << fixed_advective.out_max << '/' << fixed_advective.limit << ' '
+              << fixed_report.piso.committed_convective_cfl_out_max << '/'
+              << fixed_report.piso.committed_convective_cfl_limit
+              << " rollback=" << fixed_snapshot << '/'
+              << (fixed_snapshot && same_exact_state(fixed_before, fixed_after))
+              << '\n';
+    return false;
+  }
+
+  const ValidatedModel retry_model = configured_model(
+      TimeControlKind::adaptive_flow, full_dt, half_dt, full_dt);
+  ProductDriver retry_driver;
+  status = initialize(retry_model, retry_driver);
+  DriverStepReport retry_report;
+  if (status)
+    status = retry_driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, retry_report);
+  DriverStateImage retry_state;
+  const bool retry_snapshot = status &&
+                              capture_driver_state(retry_driver, retry_state);
+  const MomentumAdvectiveCflCertificate& retry_advective =
+      retry_report.momentum_predictor_limiter.advective_cfl;
+  const bool retry_passed =
+      retry_snapshot && retry_report.accepted && retry_report.attempts == 2U &&
+      retry_report.proposal.origin == StepOrigin::retry &&
+      retry_report.proposal.attempt == 1U &&
+      retry_report.proposal.dt == half_dt &&
+      retry_report.failure.code == StatusCode::rejected_step &&
+      retry_report.failure.detail == 10211U &&
+      retry_report.failed_stage == 60U && retry_advective.valid() &&
+      retry_advective.out_max <= retry_advective.limit &&
+      retry_report.piso.committed_convective_cfl_out_max <=
+          retry_report.piso.committed_convective_cfl_limit &&
+      terminal_physical_certificate(retry_driver, retry_model, retry_report);
+  if (!retry_passed) {
+    std::cerr << std::setprecision(17)
+              << "terminal adaptive CFL status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " accepted/attempts/origin=" << retry_report.accepted << '/'
+              << retry_report.attempts << '/'
+              << static_cast<unsigned>(retry_report.proposal.origin)
+              << " failure/stage="
+              << static_cast<unsigned>(retry_report.failure.code) << '/'
+              << retry_report.failure.detail << '/' << retry_report.failed_stage
+              << " dt=" << retry_report.proposal.dt << " CFL="
+              << retry_advective.out_max << '/' << retry_advective.limit << ' '
+              << retry_report.piso.committed_convective_cfl_out_max << '/'
+              << retry_report.piso.committed_convective_cfl_limit << '\n';
+    return false;
+  }
+
+  const ValidatedModel half_model = configured_model(
+      TimeControlKind::adaptive_flow, half_dt, half_dt, half_dt);
+  ProductDriver half_driver;
+  status = initialize(half_model, half_driver);
+  DriverStepReport half_report;
+  if (status)
+    status = half_driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, half_report);
+  DriverStateImage half_state;
+  const bool half_snapshot = status &&
+                             capture_driver_state(half_driver, half_state);
+  const bool half_passed =
+      half_snapshot && half_report.accepted && half_report.attempts == 1U &&
+      half_report.proposal.origin == StepOrigin::fresh_start &&
+      half_report.proposal.dt == half_dt &&
+      terminal_physical_certificate(half_driver, half_model, half_report) &&
+      same_physical_state(retry_state, half_state);
+  if (!half_passed)
+    std::cerr << std::setprecision(17)
+              << "terminal direct-half status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " accepted/attempts/dt=" << half_report.accepted << '/'
+              << half_report.attempts << '/' << half_report.proposal.dt
+              << " retry/direct state="
+              << (half_snapshot && same_physical_state(retry_state, half_state))
+              << '\n';
+  return half_passed;
+}
+
+bool run_mass_flow_boundary_product() {
+  ValidatedModel model = mass_flow_boundary_model();
   CompiledCasePlan plan;
   Status status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
   ProductDriver driver;
@@ -1126,6 +1634,9 @@ int main(int argc, char** argv) {
                       reject_invalid_thermodynamic_restart_atomically() &&
                       restart_preserves_direct_flux_lineage() &&
                       run_open_boundary_product() &&
+                      fixed_advective_cfl_gate_rolls_back_product() &&
+                      convective_cfl_policy_classifies_terminal_failure() &&
+                      terminal_committed_cfl_gate_is_transactional() &&
                       run_mass_flow_boundary_product() &&
                       run_immersed_final_force_product() &&
                       retry_consumes_warm_seed_and_restart_starts_cold() &&

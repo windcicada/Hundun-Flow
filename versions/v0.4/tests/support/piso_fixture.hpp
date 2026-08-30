@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -16,6 +17,12 @@
 #include <vector>
 
 namespace hundun::v04::test {
+
+inline double fixture_time_step_for_bdf(BdfCoefficients bdf) noexcept {
+  if (bdf.order == 1U) return 1.0 / bdf.a0;
+  const double ratio = 1.0 / (std::sqrt(-bdf.a1 / bdf.a2) - 1.0);
+  return (1.0 + ratio) / -bdf.a1;
+}
 
 inline PlanFingerprint exact_composition_identity_for_test(
     PlanFingerprint thermodynamics,
@@ -436,7 +443,8 @@ class PeriodicPisoFixture {
                       time_revision,
                       geometry.topology_revision(),
                       1702U,
-                      1703U};
+                      1703U,
+                      fixture_time_step_for_bdf(bdf)};
     input.predictor.plan =
         equations.thermophysical_predictor().fingerprint();
     input.predictor.time = time_revision;

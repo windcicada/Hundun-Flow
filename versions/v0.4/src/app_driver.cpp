@@ -452,6 +452,8 @@ Status ApplicationService::run(MPI_Comm communicator,
           step.thermophysical_predictor_calls;
       report.temporal_method_fallback = step.temporal_method_fallback;
       report.piso = step.piso;
+      report.momentum_predictor_limiter =
+          step.momentum_predictor_limiter;
       report.momentum_predictor_solve = step.momentum_predictor_solve;
       report.numerical_failure = step.numerical_failure;
       report.thermophysical_predictor = step.thermophysical_predictor;
@@ -465,10 +467,27 @@ Status ApplicationService::run(MPI_Comm communicator,
         step.thermophysical_predictor_calls;
     report.temporal_method_fallback = step.temporal_method_fallback;
     report.piso = step.piso;
+    report.momentum_predictor_limiter = step.momentum_predictor_limiter;
     report.momentum_predictor_solve = step.momentum_predictor_solve;
     report.thermophysical_predictor = step.thermophysical_predictor;
     report.pressure_energy_globalization =
         step.pressure_energy_globalization;
+    report.maximum_advective_convective_cfl_out = std::max(
+        report.maximum_advective_convective_cfl_out,
+        step.momentum_predictor_limiter.advective_cfl.out_max);
+    report.maximum_advective_convective_cfl_abs = std::max(
+        report.maximum_advective_convective_cfl_abs,
+        step.momentum_predictor_limiter.advective_cfl.absolute_max);
+    report.advective_convective_cfl_limit =
+        step.momentum_predictor_limiter.advective_cfl.limit;
+    report.maximum_committed_convective_cfl_out = std::max(
+        report.maximum_committed_convective_cfl_out,
+        step.piso.committed_convective_cfl_out_max);
+    report.maximum_committed_convective_cfl_abs = std::max(
+        report.maximum_committed_convective_cfl_abs,
+        step.piso.committed_convective_cfl_abs_max);
+    report.committed_convective_cfl_limit =
+        step.piso.committed_convective_cfl_limit;
     report.minimum_predictor_theta = std::min(
         report.minimum_predictor_theta,
         step.thermophysical_predictor.theta);
@@ -499,6 +518,18 @@ Status ApplicationService::run(MPI_Comm communicator,
               << " continuity=" << step.piso.continuity_residual
               << " energy=" << step.piso.energy_residual
               << " eos=" << step.piso.eos_residual
+              << " advective_cfl_out="
+              << step.momentum_predictor_limiter.advective_cfl.out_max
+              << " advective_cfl_abs="
+              << step.momentum_predictor_limiter.advective_cfl.absolute_max
+              << " advective_cfl_limit="
+              << step.momentum_predictor_limiter.advective_cfl.limit
+              << " committed_cfl_out="
+              << step.piso.committed_convective_cfl_out_max
+              << " committed_cfl_abs="
+              << step.piso.committed_convective_cfl_abs_max
+              << " committed_cfl_limit="
+              << step.piso.committed_convective_cfl_limit
               << " predictor_limited="
               << (step.thermophysical_predictor.limited ? 1 : 0)
               << " predictor_theta="
@@ -513,6 +544,18 @@ Status ApplicationService::run(MPI_Comm communicator,
               << ",\"continuity\":" << step.piso.continuity_residual
               << ",\"energy\":" << step.piso.energy_residual
               << ",\"eos\":" << step.piso.eos_residual
+              << ",\"advective_convective_cfl_out\":"
+              << step.momentum_predictor_limiter.advective_cfl.out_max
+              << ",\"advective_convective_cfl_abs\":"
+              << step.momentum_predictor_limiter.advective_cfl.absolute_max
+              << ",\"advective_convective_cfl_limit\":"
+              << step.momentum_predictor_limiter.advective_cfl.limit
+              << ",\"committed_convective_cfl_out\":"
+              << step.piso.committed_convective_cfl_out_max
+              << ",\"committed_convective_cfl_abs\":"
+              << step.piso.committed_convective_cfl_abs_max
+              << ",\"committed_convective_cfl_limit\":"
+              << step.piso.committed_convective_cfl_limit
               << ",\"predictor_limited\":"
               << (step.thermophysical_predictor.limited ? "true" : "false")
               << ",\"predictor_theta\":"
@@ -650,6 +693,12 @@ Status ApplicationService::run(MPI_Comm communicator,
           step.piso.gauge_residual;
       evidence.terminal_physical_audit.gauge_tolerance =
           model.solver.terminal.gauge;
+      evidence.terminal_physical_audit.committed_convective_cfl_out_max =
+          step.piso.committed_convective_cfl_out_max;
+      evidence.terminal_physical_audit.committed_convective_cfl_abs_max =
+          step.piso.committed_convective_cfl_abs_max;
+      evidence.terminal_physical_audit.committed_convective_cfl_limit =
+          step.piso.committed_convective_cfl_limit;
       evidence.momentum_predictor = step.momentum_predictor_solve.components;
       evidence.momentum_predictor_solve_calls =
           step.momentum_predictor_solve.solve_calls;
@@ -669,6 +718,17 @@ Status ApplicationService::run(MPI_Comm communicator,
           step.momentum_predictor_limiter.activations;
       evidence.momentum_predictor_limited =
           step.momentum_predictor_limiter.limited;
+      evidence.momentum_advective_cfl = {
+          step.momentum_predictor_limiter.advective_cfl.valid(),
+          step.momentum_predictor_limiter.advective_cfl.plan,
+          step.momentum_predictor_limiter.advective_cfl.time,
+          step.momentum_predictor_limiter.advective_cfl.density,
+          step.momentum_predictor_limiter.advective_cfl.face_flux,
+          step.momentum_predictor_limiter.advective_cfl.activity_collective,
+          step.momentum_predictor_limiter.advective_cfl.dt,
+          step.momentum_predictor_limiter.advective_cfl.out_max,
+          step.momentum_predictor_limiter.advective_cfl.absolute_max,
+          step.momentum_predictor_limiter.advective_cfl.limit};
       evidence.predictor_theta = step.thermophysical_predictor.theta;
       evidence.predictor_mass_flux_scale =
           step.thermophysical_predictor.mass_flux_scale;
@@ -723,6 +783,8 @@ Status ApplicationService::run(MPI_Comm communicator,
   candidate.thermophysical_predictor_calls =
       report.thermophysical_predictor_calls;
   candidate.temporal_method_fallback = report.temporal_method_fallback;
+  candidate.momentum_predictor_limiter =
+      report.momentum_predictor_limiter;
   candidate.thermophysical_predictor = report.thermophysical_predictor;
   candidate.predictor_limiter_activations =
       report.predictor_limiter_activations;
@@ -731,6 +793,18 @@ Status ApplicationService::run(MPI_Comm communicator,
   candidate.predictor_low_order_halo_exchanges =
       report.predictor_low_order_halo_exchanges;
   candidate.minimum_predictor_theta = report.minimum_predictor_theta;
+  candidate.maximum_advective_convective_cfl_out =
+      report.maximum_advective_convective_cfl_out;
+  candidate.maximum_advective_convective_cfl_abs =
+      report.maximum_advective_convective_cfl_abs;
+  candidate.advective_convective_cfl_limit =
+      report.advective_convective_cfl_limit;
+  candidate.maximum_committed_convective_cfl_out =
+      report.maximum_committed_convective_cfl_out;
+  candidate.maximum_committed_convective_cfl_abs =
+      report.maximum_committed_convective_cfl_abs;
+  candidate.committed_convective_cfl_limit =
+      report.committed_convective_cfl_limit;
   report = candidate;
   (void)rank;
   return {};

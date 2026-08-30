@@ -311,7 +311,19 @@ int main(int argc, char* argv[]) {
                   << " predictor_low_order_transport_passes="
                   << report.predictor_low_order_transport_passes
                   << " predictor_low_order_halo_exchanges="
-                  << report.predictor_low_order_halo_exchanges << '\n';
+                  << report.predictor_low_order_halo_exchanges
+                  << " advective_convective_cfl_out_max="
+                  << report.maximum_advective_convective_cfl_out
+                  << " advective_convective_cfl_abs_max="
+                  << report.maximum_advective_convective_cfl_abs
+                  << " advective_convective_cfl_limit="
+                  << report.advective_convective_cfl_limit
+                  << " committed_convective_cfl_out_max="
+                  << report.maximum_committed_convective_cfl_out
+                  << " committed_convective_cfl_abs_max="
+                  << report.maximum_committed_convective_cfl_abs
+                  << " committed_convective_cfl_limit="
+                  << report.committed_convective_cfl_limit << '\n';
       if (!status && rank == 0 && report.failed_stage != 0U) {
         std::cerr << "failed_stage=" << report.failed_stage
                   << " attempts=" << report.attempts;
@@ -342,9 +354,34 @@ int main(int argc, char* argv[]) {
                       << report.piso.continuity_witness.face_fluxes[5U];
           std::cerr << " energy=" << report.piso.energy_residual
                     << " closed_mass=" << report.piso.closed_mass_residual
-                    << " gauge=" << report.piso.gauge_residual;
+                    << " gauge=" << report.piso.gauge_residual
+                    << " committed_cfl_out="
+                    << report.piso.committed_convective_cfl_out_max
+                    << " committed_cfl_abs="
+                    << report.piso.committed_convective_cfl_abs_max
+                    << " committed_cfl_limit="
+                    << report.piso.committed_convective_cfl_limit;
         } else {
           std::cerr << " terminal_audit=unavailable";
+        }
+        if (report.momentum_predictor_limiter.advective_cfl.valid()) {
+          const hundun::v04::MomentumAdvectiveCflCertificate& cfl =
+              report.momentum_predictor_limiter.advective_cfl;
+          std::cerr << " advective_cfl_out=" << cfl.out_max
+                    << " advective_cfl_abs=" << cfl.absolute_max
+                    << " advective_cfl_limit=" << cfl.limit
+                    << " advective_cfl_flux_revision=" << cfl.face_flux;
+          if (cfl.failure_witness.valid)
+            std::cerr << " advective_cfl_witness="
+                      << cfl.failure_witness.global_cell.x << ','
+                      << cfl.failure_witness.global_cell.y << ','
+                      << cfl.failure_witness.global_cell.z << '/'
+                      << cfl.failure_witness.rank << '/'
+                      << cfl.failure_witness.out << '/'
+                      << cfl.failure_witness.absolute << '/'
+                      << cfl.failure_witness.density_volume << '/'
+                      << cfl.failure_witness.outgoing_mass_flow << '/'
+                      << cfl.failure_witness.absolute_mass_flow;
         }
         std::cerr << " pressure_calls="
                   << static_cast<unsigned>(report.piso.pressure_solve_calls)

@@ -182,6 +182,7 @@ struct ApplicationRunReport {
   std::uint8_t thermophysical_predictor_calls{};
   bool temporal_method_fallback{};
   PisoAttemptReport piso{};
+  MomentumPredictorLimiterReport momentum_predictor_limiter{};
   MomentumPredictorSolveReport momentum_predictor_solve{};
   NumericalFailureContext numerical_failure{};
   ThermophysicalPredictorDiagnostics thermophysical_predictor{};
@@ -190,6 +191,12 @@ struct ApplicationRunReport {
   std::uint64_t predictor_low_order_transport_passes{};
   std::uint64_t predictor_low_order_halo_exchanges{};
   double minimum_predictor_theta{1.0};
+  double maximum_advective_convective_cfl_out{};
+  double maximum_advective_convective_cfl_abs{};
+  double advective_convective_cfl_limit{};
+  double maximum_committed_convective_cfl_out{};
+  double maximum_committed_convective_cfl_abs{};
+  double committed_convective_cfl_limit{};
 };
 
 class ApplicationService {

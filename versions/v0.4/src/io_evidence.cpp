@@ -136,6 +136,33 @@ Status validate_record(const IoServicePlan& services,
       RuntimePressureSolveContract::continuity_energy_coupled;
   const RuntimeTerminalPhysicalAudit& terminal =
       record.terminal_physical_audit;
+  constexpr double kConvectiveCflComparisonSlack =
+      1.0 + 64.0 * std::numeric_limits<double>::epsilon();
+  const bool valid_committed_convective_cfl =
+      std::isfinite(terminal.committed_convective_cfl_out_max) &&
+      terminal.committed_convective_cfl_out_max >= 0.0 &&
+      std::isfinite(terminal.committed_convective_cfl_abs_max) &&
+      terminal.committed_convective_cfl_abs_max >= 0.0 &&
+      std::isfinite(terminal.committed_convective_cfl_limit) &&
+      terminal.committed_convective_cfl_limit > 0.0 &&
+      terminal.committed_convective_cfl_out_max <=
+          terminal.committed_convective_cfl_limit *
+              kConvectiveCflComparisonSlack;
+  const RuntimeAdvectiveCflAudit& advective =
+      record.momentum_advective_cfl;
+  const bool valid_advective_convective_cfl =
+      advective.present && advective.plan != 0U &&
+      advective.time_revision != 0U && advective.density_revision != 0U &&
+      advective.face_flux_revision != 0U &&
+      ((record.stl == 0U) == (advective.activity_collective == 0U)) &&
+      advective.face_flux_revision != terminal.final_flux_revision &&
+      std::isfinite(advective.dt) && advective.dt > 0.0 &&
+      std::isfinite(advective.out_max) && advective.out_max >= 0.0 &&
+      std::isfinite(advective.abs_max) && advective.abs_max >= 0.0 &&
+      std::isfinite(advective.limit) && advective.limit > 0.0 &&
+      advective.limit == terminal.committed_convective_cfl_limit &&
+      advective.out_max <=
+          advective.limit * kConvectiveCflComparisonSlack;
   const bool valid_terminal_physical_audit =
       terminal.present && terminal.final_flux_revision != 0U &&
       accepted_terminal_metric(terminal.eos_residual,
@@ -148,7 +175,8 @@ Status validate_record(const IoServicePlan& services,
       accepted_terminal_metric(terminal.closed_mass_residual,
                                terminal.closed_mass_tolerance) &&
       accepted_terminal_metric(terminal.gauge_residual,
-                               terminal.gauge_tolerance);
+                               terminal.gauge_tolerance) &&
+      valid_committed_convective_cfl;
   const bool valid_temporal_method =
       (record.requested_bdf_order == 1U ||
        record.requested_bdf_order == 2U) &&
@@ -201,12 +229,13 @@ Status validate_record(const IoServicePlan& services,
            : record.predictor_source_endpoint_alpha == 1.0);
   const bool valid_momentum_predictor =
       std::isfinite(record.momentum_predictor_theta) &&
-      record.momentum_predictor_theta >= 0.0 &&
+      record.momentum_predictor_theta > 0.0 &&
       record.momentum_predictor_theta <= 1.0 &&
-      record.momentum_predictor_activations ==
-          (record.momentum_predictor_limited ? 1U : 0U) &&
-      record.momentum_predictor_limited ==
-          (record.momentum_predictor_theta < 1.0);
+      (record.momentum_predictor_limited
+           ? record.momentum_predictor_activations > 0U &&
+                 record.momentum_predictor_theta < 1.0
+           : record.momentum_predictor_activations == 0U &&
+                 record.momentum_predictor_theta == 1.0);
   const bool valid_predictor =
       std::isfinite(record.predictor_theta) &&
       record.predictor_theta >= 0.0 && record.predictor_theta <= 1.0 &&
@@ -343,7 +372,8 @@ Status validate_record(const IoServicePlan& services,
       !valid_terminal_physical_audit ||
       record.momentum_predictor_solve_calls != 3U ||
       record.blocking_collectives < record.predictor_blocking_collectives ||
-      !valid_momentum_predictor || !valid_predictor ||
+      !valid_momentum_predictor || !valid_advective_convective_cfl ||
+      !valid_predictor ||
       (record.stages.size != 0U && record.stages.data == nullptr))
     return {StatusCode::invalid_plan, detail::kOutputInput};
   for (std::size_t corrector = 0U; corrector < record.pressure.size();
@@ -490,7 +520,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   std::ostringstream json;
   json.imbue(std::locale::classic());
   json << std::setprecision(17)
-       << "{\"schema\":\"HUNDUN_V04_EVIDENCE_V4\""
+       << "{\"schema\":\"HUNDUN_V04_EVIDENCE_V5\""
        << ",\"build\":" << record.build
        << ",\"binary\":" << record.binary
        << ",\"case\":" << record.case_model
@@ -559,14 +589,38 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"gauge_residual\":"
        << record.terminal_physical_audit.gauge_residual
        << ",\"gauge_tolerance\":"
-       << record.terminal_physical_audit.gauge_tolerance << '}'
+       << record.terminal_physical_audit.gauge_tolerance
+       << ",\"committed_convective_cfl\":{\"out_max\":"
+       << record.terminal_physical_audit.committed_convective_cfl_out_max
+       << ",\"abs_max\":"
+       << record.terminal_physical_audit.committed_convective_cfl_abs_max
+       << ",\"limit\":"
+       << record.terminal_physical_audit.committed_convective_cfl_limit
+       << "}}"
        << ",\"momentum_predictor_solve_calls\":"
        << static_cast<unsigned>(record.momentum_predictor_solve_calls)
-       << ",\"momentum_predictor_limiter\":{\"limited\":"
+       << ",\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v2\",\"limited\":"
        << (record.momentum_predictor_limited ? "true" : "false")
-       << ",\"theta\":" << record.momentum_predictor_theta
-       << ",\"activations\":"
-       << record.momentum_predictor_activations << '}'
+       << ",\"retained_correction_l1_ratio\":"
+       << record.momentum_predictor_theta
+       << ",\"limited_faces\":"
+       << record.momentum_predictor_activations
+       << ",\"advective_cfl\":{\"present\":"
+       << (record.momentum_advective_cfl.present ? "true" : "false")
+       << ",\"plan\":" << record.momentum_advective_cfl.plan
+       << ",\"time_revision\":"
+       << record.momentum_advective_cfl.time_revision
+       << ",\"density_revision\":"
+       << record.momentum_advective_cfl.density_revision
+       << ",\"face_flux_revision\":"
+       << record.momentum_advective_cfl.face_flux_revision
+       << ",\"activity_collective\":"
+       << record.momentum_advective_cfl.activity_collective
+       << ",\"dt\":" << record.momentum_advective_cfl.dt
+       << ",\"out_max\":" << record.momentum_advective_cfl.out_max
+       << ",\"abs_max\":" << record.momentum_advective_cfl.abs_max
+       << ",\"limit\":" << record.momentum_advective_cfl.limit
+       << "}}"
        << ",\"thermophysical_predictor\":{\"limited\":"
        << (record.predictor_limited ? "true" : "false")
        << ",\"theta\":" << record.predictor_theta

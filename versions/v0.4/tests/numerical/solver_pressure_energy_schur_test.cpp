@@ -2425,6 +2425,8 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   constexpr double pressure_reference = 101325.0;
   constexpr double ideal_density_factor = 3.5;
   const BdfCoefficients bdf{2.0, -3.0, 1.0, 2U};
+  const double step_dt =
+      (1.0 + 1.0 / (std::sqrt(-bdf.a1 / bdf.a2) - 1.0)) / -bdf.a1;
   auto wrap = [](std::int32_t value, std::int32_t extent) noexcept {
     const std::int32_t remainder = value % extent;
     return remainder < 0 ? remainder + extent : remainder;
@@ -2643,7 +2645,8 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   PisoIntermediateInput intermediate_input;
   intermediate_input.momentum = {
       equations.momentum().fingerprint(), EquationAssemblyScope::momentum_predictor,
-      9201U, fixture.geometry.topology_revision(), trial_flux.revision, 9202U};
+      9201U, fixture.geometry.topology_revision(), trial_flux.revision, 9202U,
+      step_dt};
   intermediate_input.predictor.plan =
       equations.thermophysical_predictor().fingerprint();
   intermediate_input.predictor.time = 9201U;

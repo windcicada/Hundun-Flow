@@ -1925,11 +1925,53 @@ bool run_mass_flow_product(int rank) {
   };
   const bool physical_terminal_gates =
       terminal_physics(first) && terminal_physics(second);
+  const auto committed_cfl = [&](const DriverStepReport& step) {
+    constexpr double slack =
+        64.0 * std::numeric_limits<double>::epsilon();
+    return step.piso.final_flux_revision != 0U &&
+           std::isfinite(step.piso.committed_convective_cfl_out_max) &&
+           step.piso.committed_convective_cfl_out_max > 0.0 &&
+           std::isfinite(step.piso.committed_convective_cfl_abs_max) &&
+           step.piso.committed_convective_cfl_abs_max > 0.0 &&
+           step.piso.committed_convective_cfl_limit ==
+               model.time.convective_cfl &&
+           step.piso.committed_convective_cfl_out_max <=
+               model.time.convective_cfl * (1.0 + slack) &&
+           same_u64(wire_bits(step.piso.committed_convective_cfl_out_max),
+                    MPI_COMM_WORLD) &&
+           same_u64(wire_bits(step.piso.committed_convective_cfl_abs_max),
+                    MPI_COMM_WORLD) &&
+           same_u64(wire_bits(step.piso.committed_convective_cfl_limit),
+                    MPI_COMM_WORLD);
+  };
+  const bool committed_cfl_role =
+      committed_cfl(first) && committed_cfl(second);
+  const auto advective_cfl = [&](const DriverStepReport& step) {
+    constexpr double slack =
+        64.0 * std::numeric_limits<double>::epsilon();
+    const MomentumAdvectiveCflCertificate& cfl =
+        step.momentum_predictor_limiter.advective_cfl;
+    return cfl.valid() && cfl.dt == step.proposal.dt &&
+           cfl.face_flux != step.piso.final_flux_revision &&
+           cfl.out_max >= 0.0 && cfl.absolute_max >= 0.0 &&
+           cfl.limit == model.time.convective_cfl &&
+           cfl.out_max <= cfl.limit * (1.0 + slack) &&
+           !cfl.failure_witness.valid &&
+           same_u64(cfl.plan, MPI_COMM_WORLD) &&
+           same_u64(cfl.time, MPI_COMM_WORLD) &&
+           same_u64(cfl.density, MPI_COMM_WORLD) &&
+           same_u64(cfl.face_flux, MPI_COMM_WORLD) &&
+           same_u64(wire_bits(cfl.out_max), MPI_COMM_WORLD) &&
+           same_u64(wire_bits(cfl.absolute_max), MPI_COMM_WORLD);
+  };
+  const bool advective_cfl_role =
+      advective_cfl(first) && advective_cfl(second);
   const bool limiter_role =
       !first.momentum_predictor_limiter.limited &&
       first.momentum_predictor_limiter.theta == 1.0 &&
       second.momentum_predictor_limiter.limited &&
-      second.momentum_predictor_limiter.theta == 0.0;
+      second.momentum_predictor_limiter.theta > 0.0 &&
+      second.momentum_predictor_limiter.theta < 1.0;
   const bool momentum_role =
       valid_momentum_solve(first.momentum_predictor_solve,
                            {1U, 0U, 0U}, {3U, 0U, 0U},
@@ -1958,6 +2000,7 @@ bool run_mass_flow_product(int rank) {
               std::max(1.0, std::abs(second.accepted_time));
   if (!accepted_bdf_role || !mass_role_matrix || !bdf_role_matrix ||
                  !bdf_resource_relationship || !physical_terminal_gates ||
+                 !committed_cfl_role || !advective_cfl_role ||
                  !limiter_role || !momentum_role || !final_flux_role ||
                  !inlet_role) {
     std::cerr << std::setprecision(17) << "rank " << rank
@@ -2014,8 +2057,23 @@ bool run_mass_flow_product(int rank) {
               << second.piso.energy_residual << '/'
               << second.piso.closed_mass_residual << '/'
               << second.piso.gauge_residual
+              << " cfl=" << first.piso.committed_convective_cfl_out_max
+              << '/' << first.piso.committed_convective_cfl_abs_max << ';'
+              << second.piso.committed_convective_cfl_out_max << '/'
+              << second.piso.committed_convective_cfl_abs_max << '/'
+              << second.piso.committed_convective_cfl_limit
+              << " advective="
+              << first.momentum_predictor_limiter.advective_cfl.out_max
+              << '/'
+              << first.momentum_predictor_limiter.advective_cfl.absolute_max
+              << ';'
+              << second.momentum_predictor_limiter.advective_cfl.out_max
+              << '/'
+              << second.momentum_predictor_limiter.advective_cfl.absolute_max
               << " final=" << accepted_bdf_role << '/' << limiter_role << '/'
               << momentum_role << '/' << final_flux_role << '/'
+              << committed_cfl_role << '/'
+              << advective_cfl_role << '/'
               << inlet_role << " base="
               << static_cast<unsigned>(status.code) << ':' << status.detail
               << '/' << first.accepted << ':' << first.attempts << ':'
@@ -2054,7 +2112,8 @@ bool run_mass_flow_product(int rank) {
   }
   return accepted_bdf_role && mass_role_matrix &&
          bdf_role_matrix && bdf_resource_relationship &&
-         physical_terminal_gates &&
+         physical_terminal_gates && committed_cfl_role &&
+         advective_cfl_role &&
          limiter_role && momentum_role && final_flux_role && inlet_role;
 }
 
@@ -2753,7 +2812,9 @@ bool run_warm_start_lifecycle_product(int rank) {
       !first.momentum_predictor_limiter.limited &&
       first.momentum_predictor_limiter.theta == 1.0 &&
       second.momentum_predictor_limiter.limited &&
-      second.momentum_predictor_limiter.theta == 0.0 &&
+      second.momentum_predictor_limiter.activations > 0U &&
+      second.momentum_predictor_limiter.theta > 0.0 &&
+      second.momentum_predictor_limiter.theta < 1.0 &&
       momentum_solve_semantic(first.momentum_predictor_solve) &&
       momentum_solve_semantic(second.momentum_predictor_solve);
   if (!passed) {

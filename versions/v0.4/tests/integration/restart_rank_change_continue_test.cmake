@@ -172,7 +172,7 @@ run_mpi("rank-change Restart continuation MPI4" 4
   --steps 2 --output-interval 0 --restart-interval 2)
 
 foreach(branch IN ITEMS control-mpi2 rank-change-mpi4)
-  run_checked("${branch} V4 runtime evidence validation"
+  run_checked("${branch} V5 runtime evidence validation"
     "${PYTHON}" "${VALIDATOR}" runtime
     "${PROBE_ROOT}/${branch}/evidence.jsonl")
 endforeach()
@@ -202,7 +202,7 @@ for path in paths:
             row.get("step"), row.get("requested_bdf_order"),
             row.get("bdf_order"), row.get("restart_recovery"),
         )
-        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V4" or observed != wanted:
+        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V5" or observed != wanted:
             raise SystemExit(f"{path}: row {index} lifecycle {observed} != {wanted}")
         if (row.get("startup") is not False or row.get("retry") is not False or
                 row.get("temporal_method_fallback") is not False or
@@ -244,6 +244,56 @@ for path in paths:
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise SystemExit(f"{path}: step {step} has no final-flux authority")
         revisions.append(revision)
+        limiter = row.get("momentum_predictor_limiter")
+        if (not isinstance(limiter, dict) or
+                limiter.get("scheme") != "common_face_afc_v2" or
+                "theta" in limiter or "activations" in limiter):
+            raise SystemExit(f"{path}: step {step} lost V5 AFC provenance")
+        advective = limiter.get("advective_cfl")
+        if not isinstance(advective, dict) or advective.get("present") is not True:
+            raise SystemExit(f"{path}: step {step} lacks advective CFL evidence")
+        for field in ("plan", "time_revision", "density_revision",
+                      "face_flux_revision"):
+            value = advective.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise SystemExit(
+                    f"{path}: step {step} advective CFL {field} is invalid")
+        activity = advective.get("activity_collective")
+        if (isinstance(activity, bool) or not isinstance(activity, int) or
+                activity < 0):
+            raise SystemExit(
+                f"{path}: step {step} advective CFL activity is invalid")
+        if advective["face_flux_revision"] == revision:
+            raise SystemExit(
+                f"{path}: step {step} advective and final CFL revisions coincide")
+        for field in ("dt", "out_max", "abs_max", "limit"):
+            value = advective.get(field)
+            if (isinstance(value, bool) or
+                    not isinstance(value, (int, float)) or
+                    not math.isfinite(value)):
+                raise SystemExit(
+                    f"{path}: step {step} advective CFL {field} is invalid")
+        if (advective["dt"] <= 0.0 or advective["out_max"] < 0.0 or
+                advective["abs_max"] < 0.0 or advective["limit"] <= 0.0 or
+                advective["out_max"] >
+                    advective["limit"] *
+                        (1.0 + 64.0 * sys.float_info.epsilon)):
+            raise SystemExit(f"{path}: step {step} advective CFL failed")
+        cfl = terminal.get("committed_convective_cfl")
+        if not isinstance(cfl, dict):
+            raise SystemExit(f"{path}: step {step} lacks committed CFL evidence")
+        for field in ("out_max", "abs_max", "limit"):
+            value = cfl.get(field)
+            if (isinstance(value, bool) or
+                    not isinstance(value, (int, float)) or
+                    not math.isfinite(value)):
+                raise SystemExit(
+                    f"{path}: step {step} committed CFL {field} is invalid")
+        if (cfl["out_max"] < 0.0 or cfl["abs_max"] < 0.0 or
+                cfl["limit"] <= 0.0 or
+                cfl["out_max"] >
+                    cfl["limit"] * (1.0 + 64.0 * sys.float_info.epsilon)):
+            raise SystemExit(f"{path}: step {step} committed CFL failed")
         tolerances = {}
         for metric in ("eos", "continuity", "energy", "closed_mass", "gauge"):
             residual = terminal.get(f"{metric}_residual")
@@ -273,6 +323,14 @@ for index, wanted in enumerate(expected):
     if control_revision != changed_revision:
         raise SystemExit(
             f"rank-count branches published different final-flux revisions at step {wanted[0]}")
+    control_advective = control["momentum_predictor_limiter"]["advective_cfl"]
+    changed_advective = changed["momentum_predictor_limiter"]["advective_cfl"]
+    for field in ("plan", "time_revision", "density_revision",
+                  "face_flux_revision", "activity_collective"):
+        if control_advective[field] != changed_advective[field]:
+            raise SystemExit(
+                f"rank-count branches published different advective CFL {field} "
+                f"at step {wanted[0]}")
 ]=])
 run_checked("rank-change coupled lifecycle certificate"
   "${PYTHON}" -c "${assert_evidence}" "${fixed_dt}"

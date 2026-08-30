@@ -44,6 +44,7 @@ constexpr std::uint32_t kProductCommunication = 10207U;
 constexpr std::uint32_t kProductBinding = 10208U;
 constexpr std::uint32_t kProductCollective = 10209U;
 constexpr std::uint32_t kProductPressureEnergy = 10210U;
+constexpr std::uint32_t kProductConvectiveCfl = 10211U;
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
 constexpr StageId kIbmGradientDonorStage = 131U;
 constexpr StageId kIbmPressureCorrectionDonorStage = 150U;
@@ -84,6 +85,23 @@ std::uint64_t product_ulp_distance(double left, double right) noexcept {
   const std::uint64_t lhs = ordered(left);
   const std::uint64_t rhs = ordered(right);
   return lhs >= rhs ? lhs - rhs : rhs - lhs;
+}
+
+Status convective_cfl_acceptance_status(TimeControlKind control,
+                                        double outward_max,
+                                        double limit) noexcept {
+  if (!std::isfinite(outward_max) || outward_max < 0.0 ||
+      !std::isfinite(limit) || !(limit > 0.0) ||
+      (control != TimeControlKind::fixed &&
+       control != TimeControlKind::adaptive_flow &&
+       control != TimeControlKind::adaptive_acoustic))
+    return {StatusCode::invalid_plan, kProductConvectiveCfl};
+  constexpr double kCflRoundoffSlack =
+      64.0 * std::numeric_limits<double>::epsilon();
+  if (outward_max <= limit * (1.0 + kCflRoundoffSlack)) return {};
+  return control == TimeControlKind::fixed
+             ? Status{StatusCode::invalid_case, kProductConvectiveCfl}
+             : Status{StatusCode::rejected_step, kProductConvectiveCfl};
 }
 
 bool product_entirely_periodic(const BoundaryPlan& boundary) noexcept {
@@ -562,6 +580,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   std::size_t thermo_halo_bytes = 0U;
   std::size_t turbulence_halo_bytes = 0U;
   std::size_t momentum_halo_bytes = 0U;
+  std::size_t momentum_limiter_halo_bytes = 0U;
   std::size_t pressure_halo_bytes = 0U;
   std::size_t candidate_correction_halo_bytes = 0U;
   std::size_t candidate_state_full_halo_bytes = 0U;
@@ -583,6 +602,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                                   turbulence_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 15U, ghosts,
                                   momentum_halo_bytes) ||
+      !detail::product_halo_bytes(local_shape, 2U, 1U,
+                                  momentum_limiter_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 5U, ghosts,
                                   pressure_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 1U, 1U,
@@ -984,10 +1005,25 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     momentum.ghosts = {ghost_fields.data(), ghost_fields.size()};
     momentum.ghost_widths = {widths.data(), widths.size()};
     momentum.workspace_bytes = momentum_workspace;
-    momentum.resources.merged_halo_messages =
-        6U + momentum_donors.peer_messages;
-    momentum.resources.merged_halo_bytes =
-        momentum_halo_bytes + momentum_donors.bytes_per_exchange;
+    std::uint64_t limiter_messages = 0U;
+    std::uint64_t limiter_bytes = 0U;
+    std::uint64_t momentum_messages = 0U;
+    std::uint64_t momentum_bytes = 0U;
+    if (!checked_multiply_u64(6U, 3U, limiter_messages) ||
+        !checked_multiply_u64(
+            static_cast<std::uint64_t>(momentum_limiter_halo_bytes), 3U,
+            limiter_bytes) ||
+        !checked_add_u64(6U, momentum_donors.peer_messages,
+                         momentum_messages) ||
+        !checked_add_u64(momentum_messages, limiter_messages,
+                         momentum_messages) ||
+        !checked_add_u64(static_cast<std::uint64_t>(momentum_halo_bytes),
+                         momentum_donors.bytes_per_exchange,
+                         momentum_bytes) ||
+        !checked_add_u64(momentum_bytes, limiter_bytes, momentum_bytes))
+      return {StatusCode::invalid_plan, kProductAnalysis};
+    momentum.resources.merged_halo_messages = momentum_messages;
+    momentum.resources.merged_halo_bytes = momentum_bytes;
     momentum.resources.numeric_refills = 1U;
     momentum.resources.linear_iterations = 192U;
     status = compiler.register_stage(momentum);
@@ -2165,6 +2201,11 @@ int restart_restore_allocation_lowest_failing_rank_for_test() noexcept {
       std::memory_order_acquire);
 }
 
+Status convective_cfl_acceptance_status_for_test(
+    TimeControlKind control, double outward_max, double limit) noexcept {
+  return convective_cfl_acceptance_status(control, outward_max, limit);
+}
+
 }  // namespace detail
 #endif
 
@@ -2215,6 +2256,7 @@ struct CompiledCasePlan::Impl {
   HaloEngine correction_halo;
   HaloEngine candidate_correction_halo;
   HaloEngine pressure_energy_enthalpy_halo;
+  HaloEngine momentum_limiter_halo;
   HaloEngine krylov_halo;
   HaloEngine mg_halo;
   std::vector<HaloEngine> coarse_halos;
@@ -2504,6 +2546,7 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   halo(product.correction_halo);
   halo(product.candidate_correction_halo);
   halo(product.pressure_energy_enthalpy_halo);
+  halo(product.momentum_limiter_halo);
   halo(product.krylov_halo);
   halo(product.mg_halo);
   for (const HaloEngine& engine : product.coarse_halos) halo(engine);
@@ -3269,6 +3312,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         communicator, candidate->patch,
         {pressure_energy_enthalpy_halo.data(),
          pressure_energy_enthalpy_halo.size()},
+        candidate->boundary.halo_topology());
+  const std::array<HaloFieldSpec, 1U> momentum_limiter_halo{{
+      {candidate->fields.h_by_a, 1U, 2U}}};
+  if (status)
+    status = candidate->momentum_limiter_halo.reserve(
+        communicator, candidate->patch,
+        {momentum_limiter_halo.data(), momentum_limiter_halo.size()},
         candidate->boundary.halo_topology());
   const std::array<HaloFieldSpec, 1U> krylov_halo{{
       {candidate->fields.krylov_vectors, 1U, 1U}}};
@@ -7836,12 +7886,60 @@ Status ProductDriver::Impl::execute_attempt(
                 product.pressure_mg_activity_fingerprint,
                 product.pressure_mg_activity_collective}
           : MgDomainActivityView{};
+  FaceFluxView momentum_limiter_faces;
+  FaceFluxView momentum_limiter_alpha;
+  if (status)
+    status = product.phi_workspace.workspace_view(
+        2U, momentum_certificate.state, momentum_limiter_faces);
+  if (status) {
+    RevisionToken alpha_revision =
+        momentum_certificate.state ==
+                std::numeric_limits<RevisionToken>::max()
+            ? momentum_certificate.state - 1U
+            : momentum_certificate.state + 1U;
+    if (alpha_revision == 0U) alpha_revision = 1U;
+    status = product.phi_workspace.workspace_view(
+        3U, alpha_revision, momentum_limiter_alpha);
+  }
   if (status)
     status = limit_momentum_predictor_correction(
-        as_const(trial_velocity), as_const(provisional_flux),
-        momentum_activity, momentum_system,
-        as_const(momentum_low_order_rhs_delta), product.reductions,
+        communicator, product.equations.momentum(), product.boundary,
+        product.patch,
+        momentum_certificate, as_const(trial_velocity),
+        as_const(trial_density), step.dt,
+        product.time.spec().convective_cfl,
+        as_const(provisional_flux), momentum_activity, momentum_system,
+        {momentum_low_order_rhs_delta, momentum_limiter_faces,
+         momentum_limiter_alpha},
+        product.momentum_limiter_halo, product.reductions,
         momentum_predictor_limiter);
+  if (status) {
+    const MomentumAdvectiveCflCertificate& cfl =
+        momentum_predictor_limiter.advective_cfl;
+    if (!cfl.valid() || cfl.plan != momentum_certificate.plan ||
+        cfl.time != momentum_certificate.time ||
+        cfl.density != trial_density.revision ||
+        cfl.density_storage != trial_density.storage_identity ||
+        cfl.density_revision_domain != trial_density.revision_domain ||
+        !cfl.density_view_identity.matches(as_const(trial_density)) ||
+        cfl.face_flux != provisional_flux.revision ||
+        cfl.face_flux_storage != provisional_flux.x.storage_identity ||
+        cfl.face_flux_revision_domain !=
+            provisional_flux.x.revision_domain ||
+        !cfl.face_flux_view_identity.matches(as_const(provisional_flux)) ||
+        cfl.activity_collective !=
+            momentum_activity.collective_fingerprint ||
+        cfl.dt != momentum_certificate.dt ||
+        momentum_certificate.dt != step.dt ||
+        cfl.limit != product.time.spec().convective_cfl) {
+      status = {StatusCode::invalid_plan, kProductConvectiveCfl};
+    } else
+      status = convective_cfl_acceptance_status(
+          product.time.spec().control, cfl.out_max, cfl.limit);
+  }
+  // The certificate carries rank-local storage and revision-domain facts.
+  // Resolve any local mismatch before another rank can enter FGMRES.
+  status = product.reductions.consensus(status);
   if (status) attempt_stage = 31U;
   if (status)
     status = solve_momentum_predictor(
@@ -12552,6 +12650,8 @@ Status ProductDriver::Impl::execute_attempt(
           ? candidate_loop_two.replay.exact.pressure_compressibility
           : as_const(compressibility);
   audit.bdf = effective_bdf;
+  audit.step_dt = step.dt;
+  audit.convective_cfl_limit = product.time.spec().convective_cfl;
   audit.closed_mass_target = closed_mass_target;
   audit.boundary_closure_residual = local_boundary_closure_residual;
   audit.boundary_closure_samples = local_boundary_closure_samples;
@@ -12570,6 +12670,17 @@ Status ProductDriver::Impl::execute_attempt(
   if (terminal_path_active)
     status = product.coupler.audit_pending_final(
         audit, pending_flux, product.reductions, report, terminal, status);
+  // The terminal audit has reconstructed the committed value from the exact
+  // C2 density and final mass flux.  Apply the ceiling before state/flux
+  // publication: fixed scientific cases fail fatally instead of silently
+  // changing dt=0.006, while adaptive cases reject this attempt so the time
+  // controller can retry at its recorded smaller step.
+  if (status) {
+    status = convective_cfl_acceptance_status(
+        product.time.spec().control,
+        report.committed_convective_cfl_out_max,
+        report.committed_convective_cfl_limit);
+  }
   const RevisionSourceId pressure_reference_revision_source =
       static_cast<RevisionSourceId>(product.layers.field_count() + 1U);
   if (status &&

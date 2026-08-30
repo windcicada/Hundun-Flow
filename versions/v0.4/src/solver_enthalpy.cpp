@@ -120,8 +120,8 @@ KernelBox resolved_box(KernelBox requested, Int3 cells) noexcept {
 bool valid_flux_context(const CartesianKernelPlan& kernels,
                         const EquationAssemblyContext& context,
                         KernelBox box) noexcept {
-  if (!std::isfinite(context.dt) || context.dt <= 0.0 ||
-      !finite_bdf(context.bdf) || context.time == 0U ||
+  if (!detail::bdf_matches_time_step(context.bdf, context.dt) ||
+      context.time == 0U ||
       context.geometry == 0U ||
       context.face_flux == 0U ||
       context.face_flux != context.mass_flux.revision ||
@@ -1226,7 +1226,8 @@ Status assemble_enthalpy_impl(
   certificate = {plan.fingerprint_, context.scope, context.time,
                  context.geometry, context.face_flux,
                  state_revision(state, material, velocity_gradient,
-                                contributions)};
+                                contributions),
+                 context.dt};
   return {};
 }
 

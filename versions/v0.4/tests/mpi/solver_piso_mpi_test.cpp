@@ -67,6 +67,12 @@ double cell_volume(const PeriodicPisoFixture& fixture, Int3 local) {
          fixture.geometry.z().widths().data[global.z];
 }
 
+double time_step_for_bdf(BdfCoefficients bdf) {
+  if (bdf.order == 1U) return 1.0 / bdf.a0;
+  const double ratio = 1.0 / (std::sqrt(-bdf.a1 / bdf.a2) - 1.0);
+  return (1.0 + ratio) / -bdf.a1;
+}
+
 struct LinearResources {
   OwnedField vectors;
   OwnedField scalars;
@@ -1356,7 +1362,7 @@ bool test_frozen_momentum_candidate_collective(MPI_Comm world, int rank) {
   fixture.coupler.set_frozen_stationary_tolerances_for_test(1.0e-10,
                                                              1.0e-10);
   ReductionEngine restored_reductions;
-  status = ReductionEngine::compile(world, ReductionMode::mpi_allreduce, 5U,
+  status = ReductionEngine::compile(world, ReductionMode::mpi_allreduce, 7U,
                                     restored_reductions);
   PressureEnergyStationaryCertificate stationary;
   if (status)
@@ -1824,6 +1830,8 @@ bool test_frozen_momentum_candidate_collective(MPI_Comm world, int rank) {
   audit.pressure_perturbation = as_const(base_pressure.view);
   audit.drho_dp_h_y = c2_thermodynamic.pressure_compressibility;
   audit.bdf = bdf;
+  audit.step_dt = time_step_for_bdf(bdf);
+  audit.convective_cfl_limit = 1.0e6;
   audit.thermophysical_boundary.binding.independent_species = {
       publication_species_views.data(), publication_species_views.size()};
   double local_closed_mass = 0.0;
@@ -1836,6 +1844,26 @@ bool test_frozen_momentum_candidate_collective(MPI_Comm world, int rank) {
       }
   MPI_Allreduce(&local_closed_mass, &audit.closed_mass_target, 1, MPI_DOUBLE,
                 MPI_SUM, world);
+
+  if (size > 1) {
+    ReductionEngine foreign_reductions;
+    const Status compiled_foreign = ReductionEngine::compile(
+        MPI_COMM_SELF, ReductionMode::mpi_allreduce, 7U,
+        foreign_reductions);
+    PisoAttemptReport foreign_reduction_report;
+    PisoTerminalCertificate foreign_reduction_terminal;
+    const Status foreign_reduction_status =
+        compiled_foreign
+            ? fixture.coupler.audit_pending_final(
+                  audit, pending, foreign_reductions,
+                  foreign_reduction_report, foreign_reduction_terminal)
+            : compiled_foreign;
+    passed &= expect(
+        foreign_reduction_status.code == StatusCode::invalid_plan &&
+            !foreign_reduction_terminal.valid() && pending.valid(),
+        rank,
+        "terminal audit rejects a ReductionEngine from a foreign communicator before its first reduction");
+  }
 
   std::array<OwnedField, 2U> foreign_species{
       make_field(8U, cells, 1U, 0U, publication_species_views[0U].revision,
@@ -3302,6 +3330,8 @@ bool test_full_distributed_piso(MPI_Comm world, int rank) {
   audit.pressure_perturbation = as_const(pressure.view);
   audit.drho_dp_h_y = c2_candidate.pressure_compressibility;
   audit.bdf = bdf;
+  audit.step_dt = time_step_for_bdf(bdf);
+  audit.convective_cfl_limit = 1.0e6;
   double local_mass = 0.0;
   for (std::int32_t z = 0; z < cells.z; ++z) {
     for (std::int32_t y = 0; y < cells.y; ++y) {

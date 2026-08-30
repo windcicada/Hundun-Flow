@@ -70,7 +70,7 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V4") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V5") != std::string::npos &&
               text.find(
                   "\"pressure_solve_contract\":\"continuity_energy_coupled\"") !=
                   std::string::npos &&
@@ -81,7 +81,14 @@ bool run() {
                   std::string::npos &&
               text.find("\"terminal_physical_audit\":{\"present\":true") !=
                   std::string::npos &&
+              text.find("\"committed_convective_cfl\":{") !=
+                  std::string::npos &&
+              text.find("\"scheme\":\"common_face_afc_v2\"") !=
+                  std::string::npos &&
+              text.find("\"advective_cfl\":{\"present\":true") !=
+                  std::string::npos &&
               text.find("\"final_flux_revision\":0") == std::string::npos &&
+              text.find("\"face_flux_revision\":0") == std::string::npos &&
               text.find("\"max_rank_rss_bytes\":0") == std::string::npos &&
               text.find("\"max_node_rss_bytes\":0") == std::string::npos &&
               text.find("\"stages\":[{\"id\":10") != std::string::npos &&
@@ -107,7 +114,7 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V4") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V5") != std::string::npos &&
               text.find("\"step\":3") != std::string::npos &&
               text.find("\"bdf_order\":1") != std::string::npos &&
               text.find("\"restart_recovery\":true") !=
@@ -119,7 +126,15 @@ bool run() {
                   "\"pressure_energy_refinement_termination\":\"component_residuals_converged\"") !=
                   std::string::npos &&
               text.find("\"terminal_physical_audit\":{\"present\":true") !=
-                  std::string::npos;
+                  std::string::npos &&
+              text.find("\"committed_convective_cfl\":{") !=
+                  std::string::npos &&
+              text.find("\"scheme\":\"common_face_afc_v2\"") !=
+                  std::string::npos &&
+              text.find("\"advective_cfl\":{\"present\":true") !=
+                  std::string::npos &&
+              text.find("\"face_flux_revision\":0") == std::string::npos &&
+              text.find("\"final_flux_revision\":0") == std::string::npos;
   }
   ApplicationRunOptions benchmark_options = run_options;
   benchmark_options.run_directory = root / "run-no-serialized-output";

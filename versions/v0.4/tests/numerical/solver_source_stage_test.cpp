@@ -415,7 +415,8 @@ bool same_certificate(EquationAssemblyCertificate left,
                       EquationAssemblyCertificate right) {
   return left.plan == right.plan && left.scope == right.scope &&
          left.time == right.time && left.geometry == right.geometry &&
-         left.face_flux == right.face_flux && left.state == right.state;
+         left.face_flux == right.face_flux && left.state == right.state &&
+         left.dt == right.dt;
 }
 
 bool unchanged(const OutputSnapshot& before, const OwnedField& diagonal,
@@ -564,7 +565,7 @@ bool test_enthalpy_sources_are_selected_by_stage() {
 
   reset_outputs(diagonal, rhs, residual, x, y, z, -2000.0);
   certificate = {901U, EquationAssemblyScope::momentum_predictor, 902U, 903U,
-                 904U, 905U};
+                 904U, 905U, 906.0};
   const OutputSnapshot before_wrong_stage =
       snapshot(diagonal, rhs, residual, x, y, z, certificate);
   context.contribution_stage = kFirstStage;
@@ -580,7 +581,7 @@ bool test_enthalpy_sources_are_selected_by_stage() {
 
   reset_outputs(diagonal, rhs, residual, x, y, z, -3000.0);
   certificate = {911U, EquationAssemblyScope::momentum_predictor, 912U, 913U,
-                 914U, 915U};
+                 914U, 915U, 916.0};
   const OutputSnapshot before_wrong_descriptor =
       snapshot(diagonal, rhs, residual, x, y, z, certificate);
   EquationContributionView wrong_descriptor = first;

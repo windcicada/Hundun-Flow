@@ -514,7 +514,8 @@ bool same_certificate(const EquationAssemblyCertificate& left,
                       const EquationAssemblyCertificate& right) {
   return left.plan == right.plan && left.scope == right.scope &&
          left.time == right.time && left.geometry == right.geometry &&
-         left.face_flux == right.face_flux && left.state == right.state;
+         left.face_flux == right.face_flux && left.state == right.state &&
+         left.dt == right.dt;
 }
 
 bool test_production_species_and_passive_assembly() {

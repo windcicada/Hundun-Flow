@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -153,6 +154,11 @@ bool run_case(const fs::path& root, bool stretched) {
   evidence.terminal_physical_audit.energy_tolerance = 1.0e-6;
   evidence.terminal_physical_audit.closed_mass_tolerance = 1.0e-6;
   evidence.terminal_physical_audit.gauge_tolerance = 1.0e-6;
+  evidence.terminal_physical_audit.committed_convective_cfl_out_max = 0.25;
+  evidence.terminal_physical_audit.committed_convective_cfl_abs_max = 0.125;
+  evidence.terminal_physical_audit.committed_convective_cfl_limit = 0.5;
+  evidence.momentum_advective_cfl = {
+      true, 41U, 14U, 15U, 16U, 0U, 0.25, 0.125, 0.25, 0.5};
   evidence.momentum_predictor_solve_calls = 3U;
   evidence.predictor_blocking_collectives = 1U;
   evidence.pressure[0U].termination = LinearTermination::converged;
@@ -170,7 +176,7 @@ bool run_case(const fs::path& root, bool stretched) {
       evidence));
   const std::string evidence_text =
       read(root / "evidence" / "runtime.jsonl");
-  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V4") !=
+  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V5") !=
                 std::string::npos &&
             evidence_text.find("\"statistics_eligible\":false") !=
                 std::string::npos &&
@@ -188,7 +194,7 @@ bool run_case(const fs::path& root, bool stretched) {
             evidence_text.find("\"momentum_predictor\":[") !=
                 std::string::npos &&
             evidence_text.find(
-                "\"momentum_predictor_limiter\":{\"limited\":false,\"theta\":1,\"activations\":0}") !=
+                "\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v2\",\"limited\":false,\"retained_correction_l1_ratio\":1,\"limited_faces\":0,\"advective_cfl\":{\"present\":true,\"plan\":41,\"time_revision\":14,\"density_revision\":15,\"face_flux_revision\":16,\"activity_collective\":0,\"dt\":0.25,\"out_max\":0.125,\"abs_max\":0.25,\"limit\":0.5}}") !=
                 std::string::npos &&
             evidence_text.find("\"low_state\":\"none\"") !=
                 std::string::npos &&
@@ -216,6 +222,9 @@ bool run_case(const fs::path& root, bool stretched) {
             evidence_text.find("\"terminal_physical_audit\":{") !=
                 std::string::npos &&
             evidence_text.find("\"final_flux_revision\":17") !=
+                std::string::npos &&
+            evidence_text.find(
+                "\"committed_convective_cfl\":{\"out_max\":0.25,\"abs_max\":0.125,\"limit\":0.5}") !=
                 std::string::npos &&
             evidence_text.find("\"convergence_audits\":1") !=
                 std::string::npos;
@@ -394,6 +403,117 @@ bool run_case(const fs::path& root, bool stretched) {
           services, over_limit_terminal_audit)
               .code == StatusCode::invalid_plan,
       "terminal physical audit rejects a metric above its limit");
+  RuntimeEvidenceRecord missing_committed_cfl_limit = coupled_c2_zero_rhs;
+  missing_committed_cfl_limit.terminal_physical_audit
+      .committed_convective_cfl_limit = 0.0;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "missing-committed-convective-cfl-limit.jsonl",
+          services, missing_committed_cfl_limit)
+              .code == StatusCode::invalid_plan,
+      "terminal physical audit requires a positive committed CFL limit");
+  RuntimeEvidenceRecord nonfinite_committed_cfl = coupled_c2_zero_rhs;
+  nonfinite_committed_cfl.terminal_physical_audit
+      .committed_convective_cfl_abs_max =
+      std::numeric_limits<double>::infinity();
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "nonfinite-committed-convective-cfl.jsonl",
+          services, nonfinite_committed_cfl)
+              .code == StatusCode::invalid_plan,
+      "terminal physical audit rejects non-finite committed CFL");
+  RuntimeEvidenceRecord over_limit_committed_cfl = coupled_c2_zero_rhs;
+  over_limit_committed_cfl.terminal_physical_audit
+      .committed_convective_cfl_out_max = 0.5000000001;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "over-limit-committed-convective-cfl.jsonl",
+          services, over_limit_committed_cfl)
+              .code == StatusCode::invalid_plan,
+      "terminal physical audit rejects committed outward CFL above its limit");
+  constexpr double kCflSlack =
+      1.0 + 64.0 * std::numeric_limits<double>::epsilon();
+  RuntimeEvidenceRecord cfl_roundoff_edge = coupled_c2_zero_rhs;
+  cfl_roundoff_edge.terminal_physical_audit
+      .committed_convective_cfl_out_max =
+      cfl_roundoff_edge.terminal_physical_audit
+          .committed_convective_cfl_limit *
+      kCflSlack;
+  passed &= expect(
+      static_cast<bool>(EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "committed-convective-cfl-roundoff-edge.jsonl",
+          services, cfl_roundoff_edge)),
+      "terminal physical audit accepts the 64-epsilon CFL comparison edge");
+  RuntimeEvidenceRecord cfl_beyond_roundoff = cfl_roundoff_edge;
+  cfl_beyond_roundoff.terminal_physical_audit
+      .committed_convective_cfl_out_max = std::nextafter(
+      cfl_roundoff_edge.terminal_physical_audit
+          .committed_convective_cfl_out_max,
+      std::numeric_limits<double>::infinity());
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "committed-convective-cfl-beyond-roundoff.jsonl",
+          services, cfl_beyond_roundoff)
+              .code == StatusCode::invalid_plan,
+      "terminal physical audit rejects CFL beyond the 64-epsilon edge");
+  RuntimeEvidenceRecord missing_advective_cfl = coupled_c2_zero_rhs;
+  missing_advective_cfl.momentum_advective_cfl.present = false;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "missing-advective-convective-cfl.jsonl",
+          services, missing_advective_cfl)
+              .code == StatusCode::invalid_plan,
+      "momentum limiter requires its advective CFL certificate");
+  RuntimeEvidenceRecord invalid_advective_cfl = coupled_c2_zero_rhs;
+  invalid_advective_cfl.momentum_advective_cfl.out_max = 0.5000000001;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "invalid-advective-convective-cfl.jsonl",
+          services, invalid_advective_cfl)
+              .code == StatusCode::invalid_plan,
+      "momentum limiter rejects an advective CFL above its limit");
+  RuntimeEvidenceRecord same_revision_advective_cfl = coupled_c2_zero_rhs;
+  same_revision_advective_cfl.momentum_advective_cfl.face_flux_revision =
+      same_revision_advective_cfl.terminal_physical_audit.final_flux_revision;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "same-revision-advective-convective-cfl.jsonl",
+          services, same_revision_advective_cfl)
+              .code == StatusCode::invalid_plan,
+      "advective and committed CFL certificates require distinct flux revisions");
+  RuntimeEvidenceRecord mismatched_limit_advective_cfl = coupled_c2_zero_rhs;
+  mismatched_limit_advective_cfl.momentum_advective_cfl.limit = 0.75;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF,
+          root / "evidence" / "mismatched-advective-convective-cfl-limit.jsonl",
+          services, mismatched_limit_advective_cfl)
+              .code == StatusCode::invalid_plan,
+      "advective and committed CFL certificates require one configured limit");
+  RuntimeEvidenceRecord missing_ibm_activity = coupled_c2_zero_rhs;
+  missing_ibm_activity.stl = 18U;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF, root / "evidence" / "missing-ibm-activity.jsonl",
+          services, missing_ibm_activity)
+              .code == StatusCode::invalid_plan,
+      "an IBM evidence row requires a nonzero activity collective");
+  RuntimeEvidenceRecord fabricated_ibm_activity = coupled_c2_zero_rhs;
+  fabricated_ibm_activity.momentum_advective_cfl.activity_collective = 18U;
+  passed &= expect(
+      EvidenceWriter::append(
+          MPI_COMM_SELF, root / "evidence" / "fabricated-ibm-activity.jsonl",
+          services, fabricated_ibm_activity)
+              .code == StatusCode::invalid_plan,
+      "a no-IBM evidence row rejects a fabricated activity collective");
   RuntimeEvidenceRecord wrong_pressure_contract = coupled_c2_zero_rhs;
   wrong_pressure_contract.pressure_solve_contract =
       RuntimePressureSolveContract::pressure_continuity;
@@ -813,6 +933,20 @@ bool run_case(const fs::path& root, bool stretched) {
                 root / "evidence" / "invalid-momentum-limiter.jsonl",
                 services, invalid_momentum_limiter)
                 .code == StatusCode::invalid_plan;
+  RuntimeEvidenceRecord limited_momentum_faces = evidence;
+  limited_momentum_faces.momentum_predictor_limited = true;
+  limited_momentum_faces.momentum_predictor_theta = 0.5;
+  limited_momentum_faces.momentum_predictor_activations = 7U;
+  const fs::path limited_momentum_faces_path =
+      root / "evidence" / "limited-momentum-faces.jsonl";
+  passed &= static_cast<bool>(EvidenceWriter::append(
+      MPI_COMM_SELF, limited_momentum_faces_path, services,
+      limited_momentum_faces));
+  const std::string limited_momentum_faces_text =
+      read(limited_momentum_faces_path);
+  passed &= limited_momentum_faces_text.find(
+                "\"retained_correction_l1_ratio\":0.5,\"limited_faces\":7") !=
+            std::string::npos;
   RuntimeEvidenceRecord projection_without_capture = evidence;
   projection_without_capture.pressure[1U].recycle_offered_directions = 1U;
   passed &= EvidenceWriter::append(

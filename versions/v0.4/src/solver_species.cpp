@@ -60,8 +60,7 @@ bool valid_scalar_context(const CartesianKernelPlan& kernels,
                           const EquationAssemblyContext& context,
                           KernelBox& box) noexcept {
   box = resolved_box(context.box, kernels.cells());
-  if (!finite_positive(context.dt) ||
-      !detail::valid_bdf_coefficients(context.bdf) ||
+  if (!detail::bdf_matches_time_step(context.bdf, context.dt) ||
       context.geometry == 0U ||
       context.time == 0U ||
       context.face_flux == 0U ||
@@ -511,7 +510,8 @@ Status assemble_transport(
                  context.geometry,
                  context.face_flux,
                  scalar_state_revision(state, scalar, diffusivity,
-                                       contributions)};
+                                       contributions),
+                 context.dt};
   return {};
 }
 

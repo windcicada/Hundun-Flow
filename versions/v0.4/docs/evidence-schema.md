@@ -2,11 +2,57 @@
 
 # HUNDUN-FLOW v0.4 runtime evidence schema
 
-`evidence/runtime.jsonl` uses `HUNDUN_V04_EVIDENCE_V4`. Each line is one
+`evidence/runtime.jsonl` uses `HUNDUN_V04_EVIDENCE_V5`. Each line is one
 collectively agreed committed-step record. Writers reject rank-disagreeing
 records and never observe trial state.
 
-V4 retains the V3 pressure lifecycle and terminal physical acceptance, and
+V5 retains the V4 pressure--enthalpy refinement lifecycle and makes two
+accepted-step policies explicit. `momentum_predictor_limiter` identifies
+`scheme:"common_face_afc_v2"`, records the L1 fraction of retained
+anti-diffusive correction as `retained_correction_l1_ratio`, and counts global
+unique limited faces as `limited_faces`. An inactive limiter must report ratio
+one and zero faces; a limited row requires a strictly positive ratio below one
+and at least one limited face. The legacy V4 names `theta` and `activations`
+are not V5 fields.
+
+The limiter embeds the momentum-advection certificate
+`advective_cfl:{present,plan,time_revision,density_revision,face_flux_revision,activity_collective,dt,out_max,abs_max,limit}`.
+`present` must be true; the plan and all three revisions must be nonzero; `dt`
+and `limit` must be positive. Both CFL maxima must be finite and nonnegative,
+and `out_max` must not exceed `limit` apart from a 64-binary64-epsilon
+comparison allowance. Its `limit` must equal the terminal committed CFL
+`limit`; both are the same configured acceptance ceiling. This certificate observes the face flux used by the
+momentum predictor, so its `face_flux_revision` must differ from the committed
+`terminal_physical_audit.final_flux_revision` produced after pressure
+correction. Missing, invalid, or same-revision certificates reject the row.
+The rank-local runtime certificate additionally binds the exact density view
+(base, shape, stride, component, replica, field, revision, storage and
+revision domain) and all three provisional-flux views (base, extents, stride,
+axis, storage and revision domain). These pointers are checked by the product
+driver before FGMRES and are deliberately not serialized into V5.
+
+One V5 JSONL file is one immutable run. Its schema and
+`build,binary,case,stl,product,cpu_plan` identity are frozen by the first row;
+steps must then be contiguous and committed time must increase. For every row
+after the first, the advective-CFL `dt` must equal the adjacent committed-time
+increment within 128 binary64 epsilons. The momentum plan, IBM activity
+collective and configured CFL limit are also static across the file. A zero
+STL requires a zero activity collective, while an IBM case requires a nonzero
+one. Mixed schemas, identity mutation, skipped steps, time reversal, changed
+static authority or time--dt disagreement reject the file.
+
+The terminal audit additionally contains
+`committed_convective_cfl:{out_max,abs_max,limit}`. These are the rank-global
+maximum outward and absolute convective CFL measures computed from the
+committed mass flux, plus the positive configured acceptance limit. All three
+values must be finite; both maxima must be nonnegative, and `out_max` must not
+exceed `limit` apart from a 64-binary64-epsilon comparison allowance. Because
+the values live inside `terminal_physical_audit`, they certify the same
+committed final-flux revision as EOS, continuity, energy, mass and gauge. The
+advective and committed CFL objects therefore form an explicit dual-revision
+record rather than treating predictor and final mass flux as interchangeable.
+
+V4 retained the V3 pressure lifecycle and terminal physical acceptance, and
 adds an explicit same-target nonlinear-refinement record. The ordinary
 `pressure_solve_calls` remains exactly two: refinements are not extra PISO
 correctors. `pressure_energy_refinement_solve_calls` is a prefix count from
@@ -48,11 +94,13 @@ exactly two and `pressure` contains correctors one and two in order. Every
 entry records status, termination, iterations, initial/final FP64 true
 residual, recursive residual and supplemental convergence audit counters. A
 cap, failed termination, contract-incompatible audit, or metric above its
-limit rejects the row. New writers emit V4; immutable historical V1/V2/V3
+limit rejects the row. New writers emit V5; immutable historical V1/V2/V3/V4
 evidence artifacts retain their original schema tag and are never rewritten.
-Consumers dispatch by the explicit schema tag; a newly constructed V4 runtime
+Consumers dispatch by the explicit schema tag; a newly constructed V5 runtime
 record defaults to an invalid pressure contract until its producer supplies
-the contract, terminal audit, and refinement termination.
+the contract, terminal audit, advective and committed CFL certificates, and
+refinement termination. V4 rows keep their original limiter and terminal-audit
+shape; V5-only CFL or limiter fields do not retrofit a V4 row.
 
 Required identity fields are `build`, `binary`, `case`, `stl`, `product`, and
 `cpu_plan`. A zero `stl` value means that the case has no immersed surface.

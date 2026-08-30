@@ -221,10 +221,144 @@ struct EquationSystemView {
   FaceFieldView z_coefficient{};
 };
 
+// "v04mafc2": direction-preserving, common-face scalar AFC with the
+// quadratic smooth-extremum allowance and one-sided physical-outflow
+// budgeting.  This policy identity participates in EquationPlanSet semantic
+// provenance so legacy global-theta and prior face-local plans can never
+// share an authority lineage.
+inline constexpr PlanFingerprint kMomentumPredictorLimiterPolicySchema =
+    UINT64_C(0x7630346d61666332);
+
+struct ConvectiveCflFailureWitness {
+  bool valid{};
+  Int3 global_cell{};
+  int rank{-1};
+  double out{};
+  double absolute{};
+  double density_volume{};
+  double outgoing_mass_flow{};
+  double absolute_mass_flow{};
+};
+
+struct MomentumFieldViewIdentity {
+  ConstFieldView view{};
+
+  bool valid() const noexcept {
+    return view.base != nullptr && view.interior.x > 0 &&
+           view.interior.y > 0 && view.interior.z > 0 &&
+           view.components > 0U && view.revision != 0U &&
+           view.storage_identity != 0U && view.revision_domain != 0U;
+  }
+
+  bool matches(ConstFieldView candidate) const noexcept {
+    return view.base == candidate.base &&
+           view.interior.x == candidate.interior.x &&
+           view.interior.y == candidate.interior.y &&
+           view.interior.z == candidate.interior.z &&
+           view.ghosts.x == candidate.ghosts.x &&
+           view.ghosts.y == candidate.ghosts.y &&
+           view.ghosts.z == candidate.ghosts.z &&
+           view.components == candidate.components &&
+           view.stride_y == candidate.stride_y &&
+           view.stride_z == candidate.stride_z &&
+           view.component_stride == candidate.component_stride &&
+           view.replica == candidate.replica &&
+           view.field == candidate.field &&
+           view.revision == candidate.revision &&
+           view.storage_identity == candidate.storage_identity &&
+           view.revision_domain == candidate.revision_domain;
+  }
+};
+
+struct MomentumFaceFluxViewIdentity {
+  ConstFaceFluxView view{};
+
+  bool valid() const noexcept {
+    const auto valid_face = [](ConstFaceFieldView face) noexcept {
+      return face.base != nullptr && face.extents.x > 0 &&
+             face.extents.y > 0 && face.extents.z > 0 &&
+             face.storage_identity != 0U && face.revision_domain != 0U;
+    };
+    return view.revision != 0U && valid_face(view.x) && valid_face(view.y) &&
+           valid_face(view.z);
+  }
+
+  bool matches(ConstFaceFluxView candidate) const noexcept {
+    const auto same_face = [](ConstFaceFieldView left,
+                              ConstFaceFieldView right) noexcept {
+      return left.base == right.base &&
+             left.extents.x == right.extents.x &&
+             left.extents.y == right.extents.y &&
+             left.extents.z == right.extents.z &&
+             left.stride_y == right.stride_y &&
+             left.stride_z == right.stride_z && left.axis == right.axis &&
+             left.storage_identity == right.storage_identity &&
+             left.revision_domain == right.revision_domain;
+    };
+    return view.revision == candidate.revision &&
+           same_face(view.x, candidate.x) && same_face(view.y, candidate.y) &&
+           same_face(view.z, candidate.z);
+  }
+};
+
+struct MomentumAdvectiveCflCertificate {
+  PlanFingerprint plan{};
+  RevisionToken time{};
+  RevisionToken density{};
+  RevisionToken face_flux{};
+  StorageIdentity density_storage{};
+  RevisionDomainIdentity density_revision_domain{};
+  StorageIdentity face_flux_storage{};
+  RevisionDomainIdentity face_flux_revision_domain{};
+  MomentumFieldViewIdentity density_view_identity{};
+  MomentumFaceFluxViewIdentity face_flux_view_identity{};
+  PlanFingerprint activity_collective{};
+  double dt{};
+  double out_max{};
+  double absolute_max{};
+  double limit{};
+  ConvectiveCflFailureWitness failure_witness{};
+
+  bool valid() const noexcept {
+    return plan != 0U && time != 0U && density != 0U && face_flux != 0U &&
+           density_storage != 0U && density_revision_domain != 0U &&
+           face_flux_storage != 0U && face_flux_revision_domain != 0U &&
+           density_view_identity.valid() &&
+           density_view_identity.view.revision == density &&
+           density_view_identity.view.storage_identity == density_storage &&
+           density_view_identity.view.revision_domain ==
+               density_revision_domain &&
+           face_flux_view_identity.valid() &&
+           face_flux_view_identity.view.revision == face_flux &&
+           face_flux_view_identity.view.x.storage_identity ==
+               face_flux_storage &&
+           face_flux_view_identity.view.x.revision_domain ==
+               face_flux_revision_domain &&
+           std::isfinite(dt) && dt > 0.0 && std::isfinite(out_max) &&
+           out_max >= 0.0 && std::isfinite(absolute_max) &&
+           absolute_max >= 0.0 && std::isfinite(limit) && limit > 0.0;
+  }
+};
+
 struct MomentumPredictorLimiterReport {
+  // L1-weighted fraction of the high-order anti-diffusive face correction
+  // retained by the conservative face-local limiter.  Unlike the legacy
+  // global minimum coefficient, a zero coefficient at one smooth extremum
+  // does not make theta zero unless every candidate face correction is
+  // removed.
   double theta{1.0};
+  // Number of globally unique faces whose common three-component alpha < 1.
   std::uint32_t activations{};
   bool limited{};
+  // Exact provisional mass-flux revision consumed by this momentum
+  // predictor.  This is distinct from the committed terminal CFL.
+  MomentumAdvectiveCflCertificate advective_cfl{};
+};
+
+struct MomentumPredictorLimiterWorkspace {
+  FieldView cell_ratios{};
+  FaceFluxView high_order_faces{};
+  FaceFluxView common_face_alpha{};
 };
 
 struct MomentumPredictorSolveReport {
@@ -239,10 +373,11 @@ struct EquationAssemblyCertificate {
   RevisionToken geometry{};
   RevisionToken face_flux{};
   RevisionToken state{};
+  double dt{};
 
   bool valid() const noexcept {
     return plan != 0U && time != 0U && geometry != 0U && face_flux != 0U &&
-           state != 0U;
+           state != 0U && std::isfinite(dt) && dt > 0.0;
   }
 };
 
@@ -725,6 +860,18 @@ class MomentumEquationPlan {
       Span<const EquationContributionView>, const EquationAssemblyContext&,
       EquationSystemView, FieldView, EquationAssemblyCertificate&,
       bool) noexcept;
+  friend Status limit_momentum_predictor_correction(
+      MPI_Comm, const MomentumEquationPlan&, const BoundaryPlan&, MeshPatch,
+      const EquationAssemblyCertificate&, ConstFieldView, ConstFieldView,
+      double, double, ConstFaceFluxView, MgDomainActivityView, EquationSystemView,
+      MomentumPredictorLimiterWorkspace, HaloEngine&, ReductionEngine&,
+      MomentumPredictorLimiterReport&) noexcept;
+  friend Status solve_momentum_predictor(
+      MPI_Comm, const MomentumEquationPlan&, const BoundaryPlan&, MeshPatch,
+      const EquationAssemblyCertificate&, ConstFaceFluxView,
+      MgDomainActivityView, EquationSystemView, FieldView, HaloEngine&,
+      SolverWorkspace&, ReductionEngine&, ResourceCounters*,
+      MomentumPredictorSolveReport&) noexcept;
   const CartesianKernelPlan* kernels_{};
   Int3 cells_{};
   FieldId density_{};
@@ -1883,6 +2030,12 @@ struct PisoAttemptReport {
   double energy_residual{};
   double closed_mass_residual{};
   double gauge_residual{};
+  // Maximum cell-local convective Courant numbers reconstructed from the
+  // exact C2 terminal density and the certified pending-final mass flux.
+  // These values are valid iff final_flux_revision is non-zero.
+  double committed_convective_cfl_out_max{};
+  double committed_convective_cfl_abs_max{};
+  double committed_convective_cfl_limit{};
   RevisionToken final_flux_revision{};
   std::uint8_t pressure_solve_calls{};
   std::uint8_t pressure_energy_refinement_solve_calls{};
@@ -2276,6 +2429,11 @@ struct PisoTerminalAuditInput {
   // Rank-local normalized energy residual. audit_pending_final takes the
   // collective maximum before applying an enabled energy_tolerance.
   double energy_residual{};
+  // Accepted target time-step and its configured convective CFL ceiling.
+  // audit_pending_final derives the committed CFL in the same cell pass and
+  // collective maximum as the terminal physical residuals.
+  double step_dt{};
+  double convective_cfl_limit{};
   double closed_mass_target{};
   double boundary_closure_residual{};
   std::uint64_t boundary_closure_samples{};
@@ -3792,9 +3950,14 @@ Status assemble_momentum_predictor(
     EquationAssemblyCertificate& certificate) noexcept;
 
 Status limit_momentum_predictor_correction(
-    ConstFieldView velocity, ConstFaceFluxView mass_flux,
-    MgDomainActivityView activity, EquationSystemView system,
-    ConstFieldView low_order_rhs_delta, ReductionEngine& reductions,
+    MPI_Comm communicator, const MomentumEquationPlan& plan,
+    const BoundaryPlan& boundary, MeshPatch patch,
+    const EquationAssemblyCertificate& assembly, ConstFieldView velocity,
+    ConstFieldView density, double step_dt, double convective_cfl_limit,
+    ConstFaceFluxView mass_flux, MgDomainActivityView activity,
+    EquationSystemView system, MomentumPredictorLimiterWorkspace workspace,
+    HaloEngine& limiter_halo,
+    ReductionEngine& reductions,
     MomentumPredictorLimiterReport& report) noexcept;
 
 Status solve_momentum_predictor(

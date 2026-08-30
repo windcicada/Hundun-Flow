@@ -118,6 +118,7 @@ PlanFingerprint compute_semantic_fingerprint(
     const EquationPlanSpec& spec) noexcept {
   std::uint64_t hash = kFnvOffset;
   hash = hash_mix(hash, UINT64_C(0x7630346571756174));
+  hash = hash_mix(hash, kMomentumPredictorLimiterPolicySchema);
   hash = hash_mix(hash, static_cast<std::uint8_t>(geometry.kind()));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().x));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().y));
@@ -266,8 +267,7 @@ bool valid_context(const CartesianKernelPlan& kernels,
                    const EquationAssemblyContext& context,
                    KernelBox& box) noexcept {
   box = resolved_box(context, kernels.cells());
-  if (!std::isfinite(context.dt) || context.dt <= 0.0 ||
-      !detail::valid_bdf_coefficients(context.bdf) ||
+  if (!detail::bdf_matches_time_step(context.bdf, context.dt) ||
       context.time == 0U || context.geometry == 0U ||
       context.face_flux == 0U ||
       context.face_flux != context.mass_flux.revision ||
@@ -318,7 +318,7 @@ EquationAssemblyCertificate make_certificate(
     PlanFingerprint plan, const EquationStateView& state,
     const EquationAssemblyContext& context) noexcept {
   return {plan, context.scope, context.time, context.geometry,
-          context.face_flux, state_revision(state)};
+          context.face_flux, state_revision(state), context.dt};
 }
 
 PlanFingerprint child_fingerprint(PlanFingerprint semantic,
@@ -377,9 +377,9 @@ Status AssemblyEpoch::begin(const EquationAssemblyContext& context,
                          context.box.cells.x == 0 &&
                          context.box.cells.y == 0 &&
                          context.box.cells.z == 0;
-  if (active_ || !empty_box || !std::isfinite(context.dt) ||
-      context.dt <= 0.0 ||
-      !detail::valid_bdf_coefficients(context.bdf) || context.time == 0U ||
+  if (active_ || !empty_box ||
+      !detail::bdf_matches_time_step(context.bdf, context.dt) ||
+      context.time == 0U ||
       context.geometry == 0U || context.face_flux == 0U ||
       context.contribution_stage == 0U ||
       (context.scope != EquationAssemblyScope::momentum_predictor &&
@@ -430,7 +430,8 @@ Status AssemblyEpoch::record(
         candidate_.time == certificate.time &&
         candidate_.geometry == certificate.geometry &&
         candidate_.face_flux == certificate.face_flux &&
-        candidate_.state == certificate.state;
+        candidate_.state == certificate.state &&
+        candidate_.dt == certificate.dt;
     if (!same_cells || !same_certificate) {
       return fail({StatusCode::invalid_plan, kAssemblyEpoch});
     }
@@ -1132,8 +1133,8 @@ Status assemble_pressure_storage(
       (plan.kind_ == PressureReferenceKind::closed_mass
            ? context.contribution_stage != plan.service_stage_
            : plan.service_stage_ != 0U) ||
-      context.time == 0U || context.bdf.a0 <= 0.0 ||
-      !std::isfinite(context.bdf.a0) ||
+      context.time == 0U ||
+      !detail::bdf_matches_time_step(context.bdf, context.dt) ||
       drho_dp_hY.field != plan.compressibility_field_ ||
       drho_dp_hY.revision != context.thermo ||
       !detail::valid_cell_view(drho_dp_hY, plan.cells_, 0U, 1U, 0U) ||
@@ -1181,7 +1182,8 @@ Status assemble_pressure_storage(
   state = hash_mix(state, drho_dp_hY.revision_domain);
   state = hash_mix(state, pressure_reference.pressure_reference);
   certificate = {plan.fingerprint_, context.scope, context.time,
-                 context.geometry, context.face_flux, finish_hash(state)};
+                 context.geometry, context.face_flux, finish_hash(state),
+                 context.dt};
   return {};
 }
 

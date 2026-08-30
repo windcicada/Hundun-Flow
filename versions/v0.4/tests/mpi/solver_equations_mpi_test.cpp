@@ -74,6 +74,37 @@ ValidatedModel model(
   return value;
 }
 
+ValidatedModel open_boundary_model() {
+  CartesianMeshSpec mesh;
+  mesh.kind = GeometryKind::uniform;
+  mesh.lower = {0.0, 0.0, 0.0};
+  mesh.upper = {17.0, 11.0, 7.0};
+  mesh.has_exact_cells = true;
+  mesh.exact_cells = {17, 11, 7};
+  mesh.minimum_spacing = {1.0, 1.0, 1.0};
+  mesh.max_growth_ratio = 1.0;
+  mesh.limits.max_global_cells = 17U * 11U * 7U;
+  mesh.limits.max_memory_bytes_per_rank = 1U << 28U;
+
+  ValidatedModel value = model(mesh, ConvectionScheme::central2);
+  value.fingerprint = UINT64_C(0x6f70656e61666331);
+  value.pressure_reference = PressureReferenceKind::boundary_absolute;
+  BoundaryFaceSpec& inlet = value.boundaries[0U];
+  inlet.flow_kind = BoundaryKind::velocity_inlet;
+  inlet.thermal_kind = BoundaryKind::none;
+  inlet.velocity = {1.0, 0.0, 0.0};
+  inlet.direction = {1.0, 0.0, 0.0};
+  inlet.temperature = 300.0;
+  BoundaryFaceSpec& outlet = value.boundaries[1U];
+  outlet.flow_kind = BoundaryKind::pressure_outlet;
+  outlet.thermal_kind = BoundaryKind::none;
+  outlet.pressure = 101325.0;
+  outlet.backflow_temperature = 300.0;
+  outlet.backflow_velocity = {-3.0, 0.0, 0.0};
+  outlet.allow_backflow = true;
+  return value;
+}
+
 ThermophysicalSpec thermo_spec() {
   ThermophysicalSpec spec;
   spec.data_file = "analytic.d";
@@ -107,11 +138,8 @@ struct Dependencies {
   ContributionRegistry contributions;
 };
 
-bool make_dependencies(
-    MPI_Comm communicator, Dependencies& out,
-    ConvectionScheme momentum = ConvectionScheme::central2) {
-  const CartesianMeshSpec mesh = mesh_spec();
-  const ValidatedModel input = model(mesh, momentum);
+bool make_dependencies(MPI_Comm communicator, Dependencies& out,
+                       const ValidatedModel& input) {
   FieldRegistry registry;
   FieldId density = 0U;
   FieldId velocity = 0U;
@@ -125,8 +153,8 @@ bool make_dependencies(
       !registry.require_field("T", 1U, 2U, temperature) || temperature != 4U) {
     return false;
   }
-  if (!CartesianGeometryCompiler::compile(communicator, mesh, {}, out.geometry,
-                                          out.patch) ||
+  if (!CartesianGeometryCompiler::compile(communicator, input.mesh, {},
+                                          out.geometry, out.patch) ||
       !BoundaryCompiler::compile(communicator, input, out.geometry, out.patch,
                                  registry, out.boundary, out.schemes, out.time)) {
     return false;
@@ -140,6 +168,13 @@ bool make_dependencies(
                                       4U, 5U, 6U, 7U};
   return out.contributions.configure({fields.data(), fields.size()}) &&
          out.contributions.freeze();
+}
+
+bool make_dependencies(
+    MPI_Comm communicator, Dependencies& out,
+    ConvectionScheme momentum = ConvectionScheme::central2) {
+  const CartesianMeshSpec mesh = mesh_spec();
+  return make_dependencies(communicator, out, model(mesh, momentum));
 }
 
 EquationPlanSpec plan_spec() {
@@ -346,6 +381,28 @@ bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
       }
     }
   }
+  const std::vector<double> residual_before_bdf_dt_rejection = residual.bytes;
+  const EquationAssemblyCertificate certificate_before_bdf_dt_rejection =
+      certificate;
+  EquationAssemblyContext mismatched_bdf_dt = context;
+  mismatched_bdf_dt.dt = context.dt * 1.01;
+  const Status mismatched_bdf_dt_status = assemble_continuity(
+      plan.continuity(), state, mismatched_bdf_dt, system, certificate);
+  const bool certificate_unchanged =
+      certificate.plan == certificate_before_bdf_dt_rejection.plan &&
+      certificate.scope == certificate_before_bdf_dt_rejection.scope &&
+      certificate.time == certificate_before_bdf_dt_rejection.time &&
+      certificate.geometry == certificate_before_bdf_dt_rejection.geometry &&
+      certificate.face_flux == certificate_before_bdf_dt_rejection.face_flux &&
+      certificate.state == certificate_before_bdf_dt_rejection.state &&
+      certificate.dt == certificate_before_bdf_dt_rejection.dt;
+  passed &= expect(
+      mismatched_bdf_dt_status.code == StatusCode::invalid_plan &&
+          same_collective_status(world, mismatched_bdf_dt_status) &&
+          residual.bytes == residual_before_bdf_dt_rejection &&
+          certificate_unchanged,
+      rank,
+      "BDF coefficients mismatched with dt fail before assembly mutation");
   return passed;
 }
 
@@ -630,6 +687,30 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
               momentum_requirements.reduction_capacity,
               momentum_reductions)),
       rank, "implicit momentum Krylov resources compile");
+  OwnedField momentum_limiter_cells = make_field(
+      94U, cells, 3U, 1U, 913U, 24000U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_x = make_face(
+      CartesianAxis::x, cells, 25000U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_y = make_face(
+      CartesianAxis::y, cells, 25000U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_z = make_face(
+      CartesianAxis::z, cells, 25000U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_alpha_x = make_face(
+      CartesianAxis::x, cells, 25100U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_alpha_y = make_face(
+      CartesianAxis::y, cells, 25100U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_alpha_z = make_face(
+      CartesianAxis::z, cells, 25100U + static_cast<unsigned>(rank));
+  const std::array<HaloFieldSpec, 1U> momentum_limiter_halo_fields{{
+      {momentum_limiter_cells.view.field, 1U, 2U}}};
+  HaloEngine momentum_limiter_halo;
+  passed &= expect(
+      static_cast<bool>(momentum_limiter_halo.reserve(
+          world, patch,
+          {momentum_limiter_halo_fields.data(),
+           momentum_limiter_halo_fields.size()},
+          dependencies.boundary.halo_topology())),
+      rank, "momentum face-local limiter halo reserves");
   OwnedField momentum_vectors = make_field(
       92U, cells, momentum_requirements.vector_slots, 1U, 911U,
       23000U);
@@ -683,9 +764,15 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
   }
   MomentumPredictorLimiterReport limiter_report;
   Status solve_status = limit_momentum_predictor_correction(
-      as_const(velocity.view), as_const(flux), {}, linear_system,
-      as_const(low_order_rhs_delta.view),
-      momentum_reductions, limiter_report);
+      world, plan.momentum(), dependencies.boundary, patch,
+      linear_certificate, as_const(velocity.view), as_const(rho.view),
+      context.dt, 1.0e9, as_const(flux), {}, linear_system,
+      {momentum_limiter_cells.view,
+       {momentum_limiter_x.view, momentum_limiter_y.view,
+        momentum_limiter_z.view, 914U, {}},
+       {momentum_limiter_alpha_x.view, momentum_limiter_alpha_y.view,
+        momentum_limiter_alpha_z.view, 915U, {}}},
+      momentum_limiter_halo, momentum_reductions, limiter_report);
   MomentumPredictorSolveReport solve_report;
   ResourceCounters solve_resources;
   if (solve_status) {
@@ -733,6 +820,83 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
     }
     std::cerr << '\n';
   }
+  if (!passed) return false;
+
+  const std::vector<double> solve_authority_velocity = velocity.bytes;
+  const std::vector<double> solve_authority_diagonal = linear_diagonal.bytes;
+  const std::vector<double> solve_authority_rhs = linear_rhs.bytes;
+  const std::vector<double> solve_authority_residual = residual.bytes;
+  const std::vector<double> solve_authority_x = linear_x.bytes;
+  const std::vector<double> solve_authority_y = linear_y.bytes;
+  const std::vector<double> solve_authority_z = linear_z.bytes;
+  const LinearReductionCounters solve_authority_counters =
+      momentum_reductions.counters();
+  EquationAssemblyCertificate wrong_solve_geometry = linear_certificate;
+  if (rank == 0) ++wrong_solve_geometry.geometry;
+  MomentumPredictorSolveReport rejected_solve_report;
+  ResourceCounters rejected_solve_resources;
+  const Status rejected_solve = solve_momentum_predictor(
+      world, plan.momentum(), dependencies.boundary, patch,
+      wrong_solve_geometry, as_const(flux), {}, linear_system, velocity.view,
+      momentum_halo, momentum_workspace, momentum_reductions,
+      &rejected_solve_resources, rejected_solve_report);
+  const LinearReductionCounters solve_authority_counters_after =
+      momentum_reductions.counters();
+  passed &= expect(
+      rejected_solve.code == StatusCode::invalid_plan &&
+          same_collective_status(world, rejected_solve) &&
+          rejected_solve_report.solve_calls == 0U &&
+          velocity.bytes == solve_authority_velocity &&
+          linear_diagonal.bytes == solve_authority_diagonal &&
+          linear_rhs.bytes == solve_authority_rhs &&
+          residual.bytes == solve_authority_residual &&
+          linear_x.bytes == solve_authority_x &&
+          linear_y.bytes == solve_authority_y &&
+          linear_z.bytes == solve_authority_z &&
+          solve_authority_counters_after.calls ==
+              solve_authority_counters.calls &&
+          solve_authority_counters_after.blocking_operations ==
+              solve_authority_counters.blocking_operations,
+      rank,
+      "rank-local momentum solve authority failure is collective and atomic");
+  if (!passed) return false;
+
+  const double saved_numerical_probe_rhs =
+      linear_rhs.view.unchecked({0, 0, 0}, 0U);
+  if (rank == 0)
+    linear_rhs.view.unchecked({0, 0, 0}, 0U) =
+        std::numeric_limits<double>::infinity();
+  const std::vector<double> numerical_probe_velocity = velocity.bytes;
+  const std::vector<double> numerical_probe_diagonal = linear_diagonal.bytes;
+  const std::vector<double> numerical_probe_rhs = linear_rhs.bytes;
+  const std::vector<double> numerical_probe_residual = residual.bytes;
+  const LinearReductionCounters numerical_probe_counters =
+      momentum_reductions.counters();
+  MomentumPredictorSolveReport numerical_probe_report;
+  ResourceCounters numerical_probe_resources;
+  const Status numerical_probe = solve_momentum_predictor(
+      world, plan.momentum(), dependencies.boundary, patch,
+      linear_certificate, as_const(flux), {}, linear_system, velocity.view,
+      momentum_halo, momentum_workspace, momentum_reductions,
+      &numerical_probe_resources, numerical_probe_report);
+  const LinearReductionCounters numerical_probe_counters_after =
+      momentum_reductions.counters();
+  passed &= expect(
+      numerical_probe.code == StatusCode::numerical_failure &&
+          same_collective_status(world, numerical_probe) &&
+          numerical_probe_report.solve_calls == 0U &&
+          velocity.bytes == numerical_probe_velocity &&
+          linear_diagonal.bytes == numerical_probe_diagonal &&
+          linear_rhs.bytes == numerical_probe_rhs &&
+          residual.bytes == numerical_probe_residual &&
+          numerical_probe_counters_after.calls ==
+              numerical_probe_counters.calls &&
+          numerical_probe_counters_after.blocking_operations ==
+              numerical_probe_counters.blocking_operations,
+      rank,
+      "rank-local non-finite momentum RHS failure is collective and atomic");
+  if (rank == 0)
+    linear_rhs.view.unchecked({0, 0, 0}, 0U) = saved_numerical_probe_rhs;
   if (!passed) return false;
 
   const std::array<HaloFieldSpec, 1U> verification_halo_fields{{
@@ -990,17 +1154,24 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
 
 bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   Dependencies dependencies;
-  bool passed = expect(make_dependencies(world, dependencies,
-                                          ConvectionScheme::tvd2),
-                       rank, "momentum-limiter dependencies compile");
+  EquationPlanSet plan;
+  bool passed = expect(
+      make_dependencies(world, dependencies, ConvectionScheme::central2) &&
+          static_cast<bool>(
+              compile(world, dependencies, plan_spec(), plan)),
+      rank, "momentum-limiter dependencies compile");
   if (!passed) return false;
 
   const Int3 cells = dependencies.patch.cells;
   const StorageIdentity salt = 26000U + 100U * static_cast<unsigned>(rank);
-  OwnedField velocity = make_field(1U, cells, 3U, 1U, 401U, salt + 1U);
+  OwnedField velocity = make_field(1U, cells, 3U, plan.kernels().reach(),
+                                   401U, salt + 1U);
+  OwnedField density =
+      make_field(0U, cells, 1U, 0U, 410U, salt + 11U);
   OwnedField diagonal = make_field(30U, cells, 3U, 0U, 402U, salt + 2U);
   OwnedField rhs = make_field(31U, cells, 3U, 0U, 403U, salt + 3U);
-  OwnedField low_delta = make_field(41U, cells, 3U, 0U, 404U, salt + 4U);
+  OwnedField limiter_cells =
+      make_field(41U, cells, 3U, 1U, 404U, salt + 4U);
   OwnedField residual = make_field(42U, cells, 3U, 0U, 405U, salt + 5U);
   OwnedFaceField x = make_face(CartesianAxis::x, cells, salt + 5U);
   OwnedFaceField y = make_face(CartesianAxis::y, cells, salt + 5U);
@@ -1011,85 +1182,251 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
       make_face(CartesianAxis::y, cells, salt + 7U);
   OwnedFaceField coefficient_z =
       make_face(CartesianAxis::z, cells, salt + 8U);
+  OwnedFaceField limiter_x =
+      make_face(CartesianAxis::x, cells, salt + 9U);
+  OwnedFaceField limiter_y =
+      make_face(CartesianAxis::y, cells, salt + 9U);
+  OwnedFaceField limiter_z =
+      make_face(CartesianAxis::z, cells, salt + 9U);
+  OwnedFaceField limiter_alpha_x =
+      make_face(CartesianAxis::x, cells, salt + 10U);
+  OwnedFaceField limiter_alpha_y =
+      make_face(CartesianAxis::y, cells, salt + 10U);
+  OwnedFaceField limiter_alpha_z =
+      make_face(CartesianAxis::z, cells, salt + 10U);
   const EquationSystemView limiter_system{
       diagonal.view, rhs.view, residual.view, coefficient_x.view,
       coefficient_y.view, coefficient_z.view};
   fill(velocity, 0.0);
-  fill(diagonal, 1.0);
+  fill(density, 1.0);
+  fill(diagonal, 2.0);
   fill(rhs, 0.0);
-  fill(low_delta, 0.0);
-  std::fill(x.bytes.begin(), x.bytes.end(), 1.0);
+  for (std::int32_t k = 0; k < x.view.extents.z; ++k)
+    for (std::int32_t j = 0; j < x.view.extents.y; ++j)
+      for (std::int32_t i = 0; i < x.view.extents.x; ++i) {
+        const std::int32_t global_face = dependencies.patch.begin.x + i;
+        x.view.unchecked({i, j, k}) =
+            global_face == 0 || global_face == plan.global_cells().x ? 0.0
+                                                                     : 1.0;
+      }
   std::fill(y.bytes.begin(), y.bytes.end(), 0.0);
   std::fill(z.bytes.begin(), z.bytes.end(), 0.0);
 
-  const Int3 upstream{1, 0, 0};
-  const Int3 downstream{2, 0, 0};
-  const bool owns_pair = rank == 0 && cells.x > downstream.x;
-  if (owns_pair) {
-    velocity.view.unchecked(upstream, 0U) = 1.0;
-    rhs.view.unchecked(upstream, 0U) = -1.0;
-    low_delta.view.unchecked(upstream, 0U) = 2.0;
-    rhs.view.unchecked(downstream, 0U) = 2.0;
-    low_delta.view.unchecked(downstream, 0U) = -2.0;
+  // Two globally positioned features exercise the distinction between a
+  // conservative face-local AFC limiter and the removed global minimum
+  // coefficient.  One face of the monotone jump needs alpha=0, while a remote
+  // linear ramp admits alpha=1 on every non-zero correction.  A global theta
+  // would incorrectly discard the ramp as soon as it sees the jump.
+  const std::uint8_t reach = plan.kernels().reach();
+  const auto prescribed_velocity = [](Int3 global) noexcept {
+    if (global.y == 0 && global.z == 0) {
+      if (global.x == 2) return 1.0;
+      if (global.x >= 3) return 3.0;
+    }
+    if (global.y == 2 && global.z == 0) return 0.05 * global.x;
+    return 0.0;
+  };
+  for (std::int32_t k = -static_cast<std::int32_t>(reach);
+       k < cells.z + reach; ++k) {
+    for (std::int32_t j = -static_cast<std::int32_t>(reach);
+         j < cells.y + reach; ++j) {
+      for (std::int32_t i = -static_cast<std::int32_t>(reach);
+           i < cells.x + reach; ++i) {
+        const Int3 global{dependencies.patch.begin.x + i,
+                          dependencies.patch.begin.y + j,
+                          dependencies.patch.begin.z + k};
+        const double streamwise = prescribed_velocity(global);
+        velocity.view.unchecked({i, j, k}, 0U) = streamwise;
+        if (global.y == 0 && global.z == 0)
+          velocity.view.unchecked({i, j, k}, 1U) = 0.5 * streamwise;
+      }
+    }
   }
+  // Deliberately poison only zero-flux physical-boundary ghosts.  Their values
+  // cannot create an AFC correction when the impermeable boundary flux is
+  // exactly zero.
+  if (dependencies.patch.begin.x == 0) {
+    for (std::int32_t k = 0; k < cells.z; ++k)
+      for (std::int32_t j = 0; j < cells.y; ++j)
+        velocity.view.unchecked({-1, j, k}, 0U) = 17.0;
+  }
+  if (dependencies.patch.begin.x + cells.x == plan.global_cells().x) {
+    for (std::int32_t k = 0; k < cells.z; ++k)
+      for (std::int32_t j = 0; j < cells.y; ++j)
+        velocity.view.unchecked({cells.x, j, k}, 0U) = -17.0;
+  }
+  double local_before = 0.0;
+  for (std::int32_t k = 0; k < cells.z; ++k) {
+    for (std::int32_t j = 0; j < cells.y; ++j) {
+      for (std::int32_t i = 0; i < cells.x; ++i) {
+        const Int3 cell{i, j, k};
+        const Int3 global{dependencies.patch.begin.x + i,
+                          dependencies.patch.begin.y + j,
+                          dependencies.patch.begin.z + k};
+        for (std::uint8_t component = 0U; component < 3U; ++component)
+          rhs.view.unchecked(cell, component) =
+              2.0 * velocity.view.unchecked(cell, component);
+        if (global.x == 2 && global.y == 0 && global.z == 0)
+          rhs.view.unchecked(cell, 0U) = -0.5;
+        local_before += rhs.view.unchecked(cell, 0U);
+      }
+    }
+  }
+  const std::vector<double> high_order_rhs = rhs.bytes;
 
   ReductionEngine reductions;
   passed &= expect(
       static_cast<bool>(ReductionEngine::compile(
-          world, ReductionMode::mpi_allreduce, 1U, reductions)),
+          world, ReductionMode::mpi_allreduce, 3U, reductions)),
       rank, "momentum-limiter reduction compiles");
+  const std::array<HaloFieldSpec, 1U> limiter_halo_fields{{
+      {limiter_cells.view.field, 1U, 2U}}};
+  HaloEngine limiter_halo;
+  passed &= expect(
+      static_cast<bool>(limiter_halo.reserve(
+          world, dependencies.patch,
+          {limiter_halo_fields.data(), limiter_halo_fields.size()},
+          dependencies.boundary.halo_topology())),
+      rank, "momentum-limiter ratio halo reserves");
   if (!passed) return false;
 
-  const double local_before = owns_pair
-                                  ? rhs.view.unchecked(upstream, 0U) +
-                                        rhs.view.unchecked(downstream, 0U)
-                                  : 0.0;
+  const EquationAssemblyCertificate assembly{
+      plan.momentum().fingerprint(),
+      EquationAssemblyScope::momentum_predictor,
+      406U,
+      dependencies.geometry.topology_revision(),
+      405U,
+      407U,
+      1.0e-6};
+  FaceFluxView limiter_faces{limiter_x.view, limiter_y.view, limiter_z.view,
+                             408U, {}};
+  FaceFluxView limiter_alpha_faces{limiter_alpha_x.view, limiter_alpha_y.view,
+                                   limiter_alpha_z.view, 409U, {}};
+  const MomentumPredictorLimiterWorkspace limiter_workspace{
+      limiter_cells.view, limiter_faces, limiter_alpha_faces};
+  constexpr double limiter_step_dt = 1.0e-6;
+  constexpr double limiter_cfl_limit = 1.0e9;
+
   const ConstFaceFluxView flux{as_const(x.view), as_const(y.view),
                                as_const(z.view), 405U};
   MomentumPredictorLimiterReport report;
   const Status status = limit_momentum_predictor_correction(
-      as_const(velocity.view), flux, {}, limiter_system,
-      as_const(low_delta.view), reductions, report);
-  const double local_after = owns_pair
-                                 ? rhs.view.unchecked(upstream, 0U) +
-                                       rhs.view.unchecked(downstream, 0U)
-                                 : 0.0;
+      world, plan.momentum(), dependencies.boundary,
+      dependencies.patch, assembly, as_const(velocity.view),
+      as_const(density.view), limiter_step_dt, limiter_cfl_limit, flux, {},
+      limiter_system, limiter_workspace, limiter_halo, reductions, report);
+  double local_after = 0.0;
+  bool local_support_and_bounds = true;
+  bool local_ramp_retained = true;
+  bool local_direction_preserved = true;
+  for (std::int32_t k = 0; k < cells.z; ++k) {
+    for (std::int32_t j = 0; j < cells.y; ++j) {
+      for (std::int32_t i = 0; i < cells.x; ++i) {
+        const Int3 cell{i, j, k};
+        const Int3 global{dependencies.patch.begin.x + i,
+                          dependencies.patch.begin.y + j,
+                          dependencies.patch.begin.z + k};
+        const double actual = rhs.view.unchecked(cell, 0U);
+        const std::size_t packed =
+            static_cast<std::size_t>(i) +
+            static_cast<std::size_t>(j) * rhs.view.stride_y +
+            static_cast<std::size_t>(k) * rhs.view.stride_z;
+        const double high = high_order_rhs[packed];
+        local_after += actual;
+        if (global.y == 2 && global.z == 0)
+          local_ramp_retained =
+              local_ramp_retained &&
+              std::abs(actual - high) <=
+                  5.0e-14 * std::max(1.0, std::abs(high));
+        const bool jump_support = global.y == 0 && global.z == 0 &&
+                                  global.x >= 2 && global.x <= 3;
+        if (!jump_support && !(global.y == 2 && global.z == 0))
+          local_support_and_bounds =
+              local_support_and_bounds && actual == high;
+        if (jump_support)
+          local_support_and_bounds =
+              local_support_and_bounds && actual >= 0.0 && actual <= 6.0;
+        if (jump_support) {
+          const double transverse = rhs.view.unchecked(cell, 1U);
+          const double transverse_high =
+              high_order_rhs[packed + rhs.view.component_stride];
+          local_direction_preserved =
+              local_direction_preserved &&
+              std::abs((transverse - transverse_high) -
+                       0.5 * (actual - high)) <= 5.0e-14;
+        }
+      }
+    }
+  }
+  std::array<double, 2U> local_sums{local_before, local_after};
+  std::array<double, 2U> global_sums{};
+  const int sum_status = MPI_Allreduce(local_sums.data(), global_sums.data(),
+                                       2, MPI_DOUBLE, MPI_SUM, world);
   passed &= expect(static_cast<bool>(status) &&
                        same_collective_status(world, status) &&
                        report.limited && report.activations == 1U &&
-                       report.theta == 0.5,
-                   rank, "paired correction selects one global theta");
-  if (owns_pair) {
-    passed &= expect(rhs.view.unchecked(upstream, 0U) == 0.0 &&
-                         rhs.view.unchecked(downstream, 0U) == 1.0 &&
-                         local_before == local_after,
-                     rank,
-                     "paired correction is bounded and conservative");
-  }
-  fill(low_delta, 0.0);
+                       std::abs(report.theta - 23.0 / 53.0) <= 5.0e-14,
+                   rank,
+                   "face-local report retains the independent ramp correction");
+  passed &= expect(
+      sum_status == MPI_SUCCESS && local_support_and_bounds &&
+          local_ramp_retained && local_direction_preserved &&
+          std::abs(global_sums[1U] - global_sums[0U]) <= 5.0e-13,
+      rank,
+      "limited face pairs are conservative, bounded, spatially local, and direction preserving");
+  fill(velocity, 0.0);
   const std::vector<double> fast_path_rhs = rhs.bytes;
   const LinearReductionCounters counters_before = reductions.counters();
   MomentumPredictorLimiterReport fast_path_report;
   const Status fast_path_status = limit_momentum_predictor_correction(
-      as_const(velocity.view), flux, {}, limiter_system,
-      as_const(low_delta.view), reductions, fast_path_report);
+      world, plan.momentum(), dependencies.boundary,
+      dependencies.patch, assembly, as_const(velocity.view),
+      as_const(density.view), limiter_step_dt, limiter_cfl_limit, flux, {},
+      limiter_system, limiter_workspace, limiter_halo, reductions,
+      fast_path_report);
   const LinearReductionCounters counters_after = reductions.counters();
   passed &= expect(
       static_cast<bool>(fast_path_status) && !fast_path_report.limited &&
           fast_path_report.activations == 0U &&
           fast_path_report.theta == 1.0 && rhs.bytes == fast_path_rhs &&
-          counters_after.calls == counters_before.calls + 1U &&
+          counters_after.calls == counters_before.calls + 2U &&
           counters_after.blocking_operations ==
-              counters_before.blocking_operations + 1U,
-      rank, "theta-one limiter is byte-identical with one global reduction");
+              counters_before.blocking_operations + 2U,
+      rank,
+      "theta-one limiter is byte-identical with CFL and AFC reductions only");
+
+  const std::vector<double> invalid_rhs = rhs.bytes;
+  const std::vector<double> invalid_diagonal = diagonal.bytes;
+  const LinearReductionCounters invalid_counters_before = reductions.counters();
+  const std::array<std::uint8_t, 1U> invalid_cells{{1U}};
+  const MgDomainActivityView invalid_activity{
+      {invalid_cells.data(), invalid_cells.size()}, {}, {}, {}, 409U, 410U};
+  MomentumPredictorLimiterReport invalid_report;
+  const Status invalid_status = limit_momentum_predictor_correction(
+      world, plan.momentum(), dependencies.boundary, dependencies.patch,
+      assembly, as_const(velocity.view), as_const(density.view),
+      limiter_step_dt, limiter_cfl_limit, flux, invalid_activity,
+      limiter_system, limiter_workspace, limiter_halo, reductions,
+      invalid_report);
+  const LinearReductionCounters invalid_counters_after = reductions.counters();
+  passed &= expect(
+      invalid_status.code == StatusCode::invalid_plan &&
+          same_collective_status(world, invalid_status) &&
+          !invalid_report.limited && invalid_report.activations == 0U &&
+          invalid_report.theta == 1.0 && rhs.bytes == invalid_rhs &&
+          diagonal.bytes == invalid_diagonal &&
+          invalid_counters_after.calls == invalid_counters_before.calls &&
+          invalid_counters_after.blocking_operations ==
+              invalid_counters_before.blocking_operations,
+      rank,
+      "invalid IBM activity is rejected before mutation or collectives");
 
   // A bounded point endpoint is not sufficient when the converged implicit
   // row is not an M-matrix. Two strong incoming faces create an exact active
   // neighbour sum of 15 against a unit diagonal.
-  fill(velocity, 0.0);
+  fill(velocity, 2.0);
   fill(diagonal, 1.0);
   fill(rhs, 0.0);
-  fill(low_delta, 0.0);
   std::fill(x.bytes.begin(), x.bytes.end(), 0.0);
   std::fill(y.bytes.begin(), y.bytes.end(), 0.0);
   std::fill(z.bytes.begin(), z.bytes.end(), 0.0);
@@ -1099,7 +1436,6 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
                                     cells.y > convergent_cell.y &&
                                     cells.z > convergent_cell.z;
   if (owns_convergent_cell) {
-    velocity.view.unchecked(convergent_cell, 0U) = 2.0;
     rhs.view.unchecked(convergent_cell, 0U) = 3.0;
     x.view.unchecked(convergent_cell) = 8.0;
     x.view.unchecked(
@@ -1107,9 +1443,11 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   }
   MomentumPredictorLimiterReport majorant_report;
   const Status majorant_status = limit_momentum_predictor_correction(
-      as_const(velocity.view), as_const(FaceFluxView{
-                                   x.view, y.view, z.view, 405U, {}}),
-      {}, limiter_system, as_const(low_delta.view), reductions,
+      world, plan.momentum(), dependencies.boundary,
+      dependencies.patch, assembly, as_const(velocity.view),
+      as_const(density.view), limiter_step_dt, limiter_cfl_limit,
+      as_const(FaceFluxView{x.view, y.view, z.view, 405U, {}}), {},
+      limiter_system, limiter_workspace, limiter_halo, reductions,
       majorant_report);
   passed &= expect(
       majorant_status && !majorant_report.limited &&
@@ -1122,6 +1460,359 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
                 -1.0)),
       rank,
       "high-inflow active row receives residual-preserving exact M-matrix majorant");
+  return passed;
+}
+
+bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
+  Dependencies dependencies;
+  EquationPlanSet plan;
+  const ValidatedModel open = open_boundary_model();
+  bool passed = expect(make_dependencies(world, dependencies, open), rank,
+                       "open-boundary dependencies compile");
+  if (!passed) return false;
+  EquationPlanSpec open_plan_spec = plan_spec();
+  open_plan_spec.pressure_reference =
+      PressureReferenceKind::boundary_absolute;
+  open_plan_spec.closed_mass_service_stage = 0U;
+  const Status plan_status =
+      compile(world, dependencies, open_plan_spec, plan);
+  passed &= expect(static_cast<bool>(plan_status), rank,
+                   "open-boundary momentum equation plan compiles");
+  if (!passed) return false;
+
+  int size = 0;
+  MPI_Comm_size(world, &size);
+  const Int3 cells = dependencies.patch.cells;
+  const StorageIdentity salt = 33000U + 100U * static_cast<unsigned>(rank);
+  OwnedField density = make_field(0U, cells, 1U, 0U, 501U, salt + 1U);
+  OwnedField velocity = make_field(1U, cells, 3U, plan.kernels().reach(),
+                                   502U, salt + 2U);
+  OwnedField diagonal = make_field(30U, cells, 3U, 0U, 503U, salt + 3U);
+  OwnedField rhs = make_field(31U, cells, 3U, 0U, 504U, salt + 4U);
+  OwnedField limiter_cells =
+      make_field(41U, cells, 3U, 1U, 505U, salt + 5U);
+  OwnedField residual = make_field(42U, cells, 3U, 0U, 506U, salt + 6U);
+  OwnedFaceField mass_x = make_face(CartesianAxis::x, cells, salt + 7U);
+  OwnedFaceField mass_y = make_face(CartesianAxis::y, cells, salt + 7U);
+  OwnedFaceField mass_z = make_face(CartesianAxis::z, cells, salt + 7U);
+  OwnedFaceField coefficient_x =
+      make_face(CartesianAxis::x, cells, salt + 10U);
+  OwnedFaceField coefficient_y =
+      make_face(CartesianAxis::y, cells, salt + 11U);
+  OwnedFaceField coefficient_z =
+      make_face(CartesianAxis::z, cells, salt + 12U);
+  OwnedFaceField high_x = make_face(CartesianAxis::x, cells, salt + 13U);
+  OwnedFaceField high_y = make_face(CartesianAxis::y, cells, salt + 13U);
+  OwnedFaceField high_z = make_face(CartesianAxis::z, cells, salt + 13U);
+  OwnedFaceField alpha_x = make_face(CartesianAxis::x, cells, salt + 14U);
+  OwnedFaceField alpha_y = make_face(CartesianAxis::y, cells, salt + 14U);
+  OwnedFaceField alpha_z = make_face(CartesianAxis::z, cells, salt + 14U);
+  const EquationSystemView system{
+      diagonal.view, rhs.view, residual.view, coefficient_x.view,
+      coefficient_y.view, coefficient_z.view};
+  const MomentumPredictorLimiterWorkspace workspace{
+      limiter_cells.view,
+      {high_x.view, high_y.view, high_z.view, 507U, {}},
+      {alpha_x.view, alpha_y.view, alpha_z.view, 508U, {}}};
+
+  ReductionEngine reductions;
+  const std::array<HaloFieldSpec, 1U> halo_fields{{
+      {limiter_cells.view.field, 1U, 2U}}};
+  HaloEngine limiter_halo;
+  passed &= expect(
+      static_cast<bool>(ReductionEngine::compile(
+          world, ReductionMode::mpi_allreduce, 3U, reductions)) &&
+          static_cast<bool>(limiter_halo.reserve(
+              world, dependencies.patch,
+              {halo_fields.data(), halo_fields.size()},
+              dependencies.boundary.halo_topology())),
+      rank, "open-boundary limiter collective resources compile");
+  if (!passed) return false;
+
+  fill(density, 1.0);
+  fill(diagonal, 1.0);
+  fill(rhs, 0.0);
+  fill(residual, 0.0);
+  std::fill(coefficient_x.bytes.begin(), coefficient_x.bytes.end(), 0.0);
+  std::fill(coefficient_y.bytes.begin(), coefficient_y.bytes.end(), 0.0);
+  std::fill(coefficient_z.bytes.begin(), coefficient_z.bytes.end(), 0.0);
+  constexpr double step_dt = 0.25;
+  constexpr double cfl_limit = 0.5;
+  const bool owns_probe =
+      dependencies.patch.begin.x + cells.x == plan.global_cells().x &&
+      dependencies.patch.begin.y == 0 && dependencies.patch.begin.z == 0;
+  const Int3 outlet_face{cells.x, 0, 0};
+  const Int3 outlet_cell{cells.x - 1, 0, 0};
+  const auto packed_rhs = [&](Int3 cell,
+                              std::uint8_t component) noexcept {
+    return static_cast<std::size_t>(cell.x) +
+           static_cast<std::size_t>(cell.y) * rhs.view.stride_y +
+           static_cast<std::size_t>(cell.z) * rhs.view.stride_z +
+           static_cast<std::size_t>(component) * rhs.view.component_stride;
+  };
+  std::vector<Real3> resolved_vector(
+      dependencies.boundary.resolved_vector_count(), Real3{});
+  const auto apply_resolved_outlet = [&](Real3 target) {
+    fill(velocity, 0.0);
+    std::fill(resolved_vector.begin(), resolved_vector.end(), target);
+    const BoundaryResolvedValues values{
+        {}, {resolved_vector.data(), resolved_vector.size()}, {}};
+    return apply_boundary_ghosts(BoundaryStage::momentum,
+                                 dependencies.boundary,
+                                 {&velocity.view, 1U}, values);
+  };
+
+  // Uniform central interpolation of the typed x-max target gives high=2;
+  // the interior upwind donor is low=0.  With phi=1 the one-sided correction
+  // is 2.  Starting from high-order RHS=-1 and diagonal=1 leaves a low-order
+  // RHS of +1, so the adjacent cell's exact negative budget selects alpha=1/2
+  // and the accepted RHS is zero.
+  passed &= expect(static_cast<bool>(apply_resolved_outlet({2.0, 0.0, 0.0})),
+                   rank, "typed pressure-outlet outflow velocity applies");
+  std::fill(mass_x.bytes.begin(), mass_x.bytes.end(), 0.0);
+  std::fill(mass_y.bytes.begin(), mass_y.bytes.end(), 0.0);
+  std::fill(mass_z.bytes.begin(), mass_z.bytes.end(), 0.0);
+  if (owns_probe) {
+    mass_x.view.unchecked(outlet_face) = 1.0;
+    rhs.view.unchecked(outlet_cell, 0U) = -1.0;
+  }
+  const std::vector<double> outflow_high_rhs = rhs.bytes;
+  std::vector<double> expected_outflow_rhs = outflow_high_rhs;
+  if (owns_probe) expected_outflow_rhs[packed_rhs(outlet_cell, 0U)] = 0.0;
+  const FaceFluxView outflow_flux{mass_x.view, mass_y.view, mass_z.view, 509U,
+                                  {}};
+  const EquationAssemblyCertificate outflow_assembly{
+      plan.momentum().fingerprint(),
+      EquationAssemblyScope::momentum_predictor,
+      510U,
+      dependencies.geometry.topology_revision(),
+      outflow_flux.revision,
+      511U,
+      step_dt};
+  MomentumPredictorLimiterReport outflow_report;
+  const Status outflow_status = limit_momentum_predictor_correction(
+      world, plan.momentum(), dependencies.boundary, dependencies.patch,
+      outflow_assembly, as_const(velocity.view), as_const(density.view),
+      step_dt, cfl_limit, as_const(outflow_flux), {}, system, workspace,
+      limiter_halo, reductions, outflow_report);
+  bool local_outflow_oracle = rhs.bytes == expected_outflow_rhs;
+  if (owns_probe) {
+    local_outflow_oracle =
+        local_outflow_oracle &&
+        velocity.view.unchecked({cells.x, 0, 0}, 0U) == 4.0 &&
+        diagonal.view.unchecked(outlet_cell, 0U) == 1.0 &&
+        rhs.view.unchecked(outlet_cell, 0U) >= 0.0 &&
+        rhs.view.unchecked(outlet_cell, 0U) <= 1.0;
+  }
+  const MomentumAdvectiveCflCertificate& outflow_cfl =
+      outflow_report.advective_cfl;
+  passed &= expect(
+      outflow_status && same_collective_status(world, outflow_status) &&
+          local_outflow_oracle && outflow_report.limited &&
+          outflow_report.activations == 1U &&
+          outflow_report.theta == 0.5 && outflow_cfl.valid() &&
+          outflow_cfl.plan == plan.momentum().fingerprint() &&
+          outflow_cfl.time == outflow_assembly.time &&
+          outflow_cfl.density == density.view.revision &&
+          outflow_cfl.face_flux == outflow_flux.revision &&
+          outflow_cfl.dt == step_dt && outflow_cfl.out_max == 0.25 &&
+          outflow_cfl.absolute_max == 0.125 &&
+          outflow_cfl.limit == cfl_limit &&
+          !outflow_cfl.failure_witness.valid,
+      rank,
+      "pressure-outlet outflow uses one adjacent budget and publishes exact provisional CFL");
+
+  // Backflow uses the typed frozen boundary value itself as the low-order face
+  // authority.  Even though its central face value (-3) differs from the
+  // interior donor (0), AFC must not replace or limit that prescribed state.
+  velocity.view.revision = 512U;
+  passed &= expect(
+      static_cast<bool>(apply_resolved_outlet({-3.0, 0.0, 0.0})), rank,
+      "typed pressure-outlet backflow velocity applies");
+  fill(diagonal, 1.0);
+  fill(rhs, 0.0);
+  std::fill(mass_x.bytes.begin(), mass_x.bytes.end(), 0.0);
+  if (owns_probe) {
+    mass_x.view.unchecked(outlet_face) = -1.0;
+    rhs.view.unchecked(outlet_cell, 0U) = 0.25;
+  }
+  const std::vector<double> backflow_rhs = rhs.bytes;
+  const std::vector<double> backflow_diagonal = diagonal.bytes;
+  const FaceFluxView backflow_flux{mass_x.view, mass_y.view, mass_z.view, 513U,
+                                   {}};
+  const EquationAssemblyCertificate backflow_assembly{
+      plan.momentum().fingerprint(),
+      EquationAssemblyScope::momentum_predictor,
+      514U,
+      dependencies.geometry.topology_revision(),
+      backflow_flux.revision,
+      515U,
+      step_dt};
+  MomentumPredictorLimiterReport backflow_report;
+  const Status backflow_status = limit_momentum_predictor_correction(
+      world, plan.momentum(), dependencies.boundary, dependencies.patch,
+      backflow_assembly, as_const(velocity.view), as_const(density.view),
+      step_dt, cfl_limit, as_const(backflow_flux), {}, system, workspace,
+      limiter_halo, reductions, backflow_report);
+  const MomentumAdvectiveCflCertificate& backflow_cfl =
+      backflow_report.advective_cfl;
+  ConstFieldView foreign_density_replica = as_const(density.view);
+  foreign_density_replica.base = velocity.view.base;
+  ++foreign_density_replica.replica;
+  ConstFaceFluxView foreign_flux_replica = as_const(backflow_flux);
+  foreign_flux_replica.x.base = mass_y.view.base;
+  const bool exact_cfl_view_binding =
+      backflow_cfl.density_view_identity.matches(as_const(density.view)) &&
+      backflow_cfl.face_flux_view_identity.matches(as_const(backflow_flux)) &&
+      !backflow_cfl.density_view_identity.matches(foreign_density_replica) &&
+      !backflow_cfl.face_flux_view_identity.matches(foreign_flux_replica);
+  passed &= expect(
+      backflow_status && same_collective_status(world, backflow_status) &&
+          rhs.bytes == backflow_rhs && diagonal.bytes == backflow_diagonal &&
+          (!owns_probe ||
+           velocity.view.unchecked({cells.x, 0, 0}, 0U) == -6.0) &&
+          !backflow_report.limited && backflow_report.activations == 0U &&
+          backflow_report.theta == 1.0 && backflow_cfl.valid() &&
+          backflow_cfl.plan == plan.momentum().fingerprint() &&
+          backflow_cfl.time == backflow_assembly.time &&
+          backflow_cfl.density == density.view.revision &&
+          backflow_cfl.face_flux == backflow_flux.revision &&
+          backflow_cfl.dt == step_dt && backflow_cfl.out_max == 0.0 &&
+          backflow_cfl.absolute_max == 0.125 &&
+          backflow_cfl.limit == cfl_limit && exact_cfl_view_binding &&
+          !backflow_cfl.failure_witness.valid,
+      rank,
+      "pressure-outlet backflow preserves typed exact-replica authority");
+
+  // The limiter consumes the equation plan's velocity, geometry, and
+  // boundary semantics.  Equal-shaped stale inputs must fail collectively
+  // before any equation, workspace, halo, or report publication.
+  const std::vector<double> authority_rhs = rhs.bytes;
+  const std::vector<double> authority_diagonal = diagonal.bytes;
+  const std::vector<double> authority_cells = limiter_cells.bytes;
+  const std::vector<double> authority_high_x = high_x.bytes;
+  const std::vector<double> authority_high_y = high_y.bytes;
+  const std::vector<double> authority_high_z = high_z.bytes;
+  const std::vector<double> authority_alpha_x = alpha_x.bytes;
+  const std::vector<double> authority_alpha_y = alpha_y.bytes;
+  const std::vector<double> authority_alpha_z = alpha_z.bytes;
+  const RevisionToken authority_ghost_revision =
+      limiter_halo.ghost_revision(limiter_cells.view.field);
+  const auto unchanged_after_authority_failure = [&]() {
+    return rhs.bytes == authority_rhs &&
+           diagonal.bytes == authority_diagonal &&
+           limiter_cells.bytes == authority_cells &&
+           high_x.bytes == authority_high_x && high_y.bytes == authority_high_y &&
+           high_z.bytes == authority_high_z &&
+           alpha_x.bytes == authority_alpha_x &&
+           alpha_y.bytes == authority_alpha_y &&
+           alpha_z.bytes == authority_alpha_z &&
+           limiter_halo.ghost_revision(limiter_cells.view.field) ==
+               authority_ghost_revision;
+  };
+  const auto authority_rejected = [&](const BoundaryPlan& selected_boundary,
+                                      EquationAssemblyCertificate selected_assembly,
+                                      ConstFieldView selected_velocity) {
+    const LinearReductionCounters before = reductions.counters();
+    MomentumPredictorLimiterReport rejected_report;
+    const Status rejected = limit_momentum_predictor_correction(
+        world, plan.momentum(), selected_boundary, dependencies.patch,
+        selected_assembly, selected_velocity, as_const(density.view), step_dt,
+        cfl_limit, as_const(backflow_flux), {}, system, workspace, limiter_halo,
+        reductions, rejected_report);
+    const LinearReductionCounters after = reductions.counters();
+    return rejected.code == StatusCode::invalid_plan &&
+           same_collective_status(world, rejected) &&
+           unchanged_after_authority_failure() && !rejected_report.limited &&
+           !rejected_report.advective_cfl.valid() &&
+           after.calls == before.calls &&
+           after.blocking_operations == before.blocking_operations;
+  };
+
+  ConstFieldView wrong_velocity = as_const(velocity.view);
+  wrong_velocity.field = 9U;
+  passed &= expect(authority_rejected(dependencies.boundary, backflow_assembly,
+                                      wrong_velocity),
+                   rank, "wrong velocity field authority fails before mutation");
+
+  EquationAssemblyCertificate wrong_geometry = backflow_assembly;
+  ++wrong_geometry.geometry;
+  passed &= expect(authority_rejected(dependencies.boundary, wrong_geometry,
+                                      as_const(velocity.view)),
+                   rank, "stale geometry authority fails before mutation");
+
+  EquationAssemblyCertificate wrong_dt = backflow_assembly;
+  if (rank == 0)
+    wrong_dt.dt = std::nextafter(step_dt,
+                                 std::numeric_limits<double>::infinity());
+  passed &= expect(authority_rejected(dependencies.boundary, wrong_dt,
+                                      as_const(velocity.view)),
+                   rank, "mismatched step dt authority fails before mutation");
+
+  ValidatedModel stale_boundary_model = open;
+  stale_boundary_model.boundaries[1U].backflow_velocity.x = -4.0;
+  stale_boundary_model.fingerprint ^= UINT64_C(0x100);
+  Dependencies stale_boundary_dependencies;
+  const bool stale_boundary_ready =
+      make_dependencies(world, stale_boundary_dependencies,
+                        stale_boundary_model) &&
+      stale_boundary_dependencies.boundary.revision() !=
+          dependencies.boundary.revision();
+  passed &= expect(
+      stale_boundary_ready &&
+          authority_rejected(stale_boundary_dependencies.boundary,
+                             backflow_assembly, as_const(velocity.view)),
+      rank, "stale boundary authority fails before mutation");
+
+  if (size > 1) {
+    ReductionEngine mismatched_reductions;
+    passed &= expect(
+        static_cast<bool>(ReductionEngine::compile(
+            MPI_COMM_SELF, ReductionMode::mpi_allreduce, 3U,
+            mismatched_reductions)),
+        rank, "mismatched limiter reduction engine compiles on COMM_SELF");
+    const std::vector<double> mismatch_rhs = rhs.bytes;
+    const std::vector<double> mismatch_diagonal = diagonal.bytes;
+    const std::vector<double> mismatch_cells = limiter_cells.bytes;
+    const std::vector<double> mismatch_high_x = high_x.bytes;
+    const std::vector<double> mismatch_high_y = high_y.bytes;
+    const std::vector<double> mismatch_high_z = high_z.bytes;
+    const std::vector<double> mismatch_alpha_x = alpha_x.bytes;
+    const std::vector<double> mismatch_alpha_y = alpha_y.bytes;
+    const std::vector<double> mismatch_alpha_z = alpha_z.bytes;
+    const RevisionToken mismatch_ghost_revision =
+        limiter_halo.ghost_revision(limiter_cells.view.field);
+    const LinearReductionCounters mismatch_before =
+        mismatched_reductions.counters();
+    MomentumPredictorLimiterReport mismatch_report;
+    const Status mismatch_status = limit_momentum_predictor_correction(
+        world, plan.momentum(), dependencies.boundary, dependencies.patch,
+        backflow_assembly, as_const(velocity.view), as_const(density.view),
+        step_dt, cfl_limit, as_const(backflow_flux), {}, system, workspace,
+        limiter_halo, mismatched_reductions, mismatch_report);
+    const LinearReductionCounters mismatch_after =
+        mismatched_reductions.counters();
+    passed &= expect(
+        mismatch_status.code == StatusCode::invalid_plan &&
+            same_collective_status(world, mismatch_status) &&
+            rhs.bytes == mismatch_rhs && diagonal.bytes == mismatch_diagonal &&
+            limiter_cells.bytes == mismatch_cells &&
+            high_x.bytes == mismatch_high_x &&
+            high_y.bytes == mismatch_high_y &&
+            high_z.bytes == mismatch_high_z &&
+            alpha_x.bytes == mismatch_alpha_x &&
+            alpha_y.bytes == mismatch_alpha_y &&
+            alpha_z.bytes == mismatch_alpha_z &&
+            limiter_halo.ghost_revision(limiter_cells.view.field) ==
+                mismatch_ghost_revision &&
+            mismatch_after.calls == mismatch_before.calls &&
+            mismatch_after.blocking_operations ==
+                mismatch_before.blocking_operations &&
+            !mismatch_report.limited &&
+            !mismatch_report.advective_cfl.valid(),
+        rank,
+        "reduction communicator mismatch fails collectively before halo or mutation");
+  }
   return passed;
 }
 
@@ -1324,7 +2015,8 @@ bool test_piso_intermediate_halo_oracle(MPI_Comm world, int rank) {
                     311U,
                     dependencies.geometry.topology_revision(),
                     312U,
-                    313U};
+                    313U,
+                    0.2};
   input.predictor.plan =
       equations.thermophysical_predictor().fingerprint();
   input.predictor.time = 311U;
@@ -1535,10 +2227,13 @@ bool test_collective_compile_and_self_reference(MPI_Comm world, int rank,
   passed &= expect(static_cast<bool>(status) && same_collective_status(world, status),
                    rank, "equation compile succeeds collectively");
   passed &= expect(plan.fingerprint() != 0U &&
+                       kMomentumPredictorLimiterPolicySchema ==
+                           UINT64_C(0x7630346d61666332) &&
                        plan.global_cells().x == 17 &&
                        plan.global_cells().y == 11 &&
                        plan.global_cells().z == 7,
-                   rank, "distributed plan retains global identity");
+                   rank,
+                   "distributed plan retains global and common-face AFC policy identity");
 
   Dependencies reference;
   passed &= expect(make_dependencies(MPI_COMM_SELF, reference), rank,
@@ -1607,6 +2302,8 @@ int main(int argc, char** argv) {
                                                               rank);
   passed &= test_conservative_momentum_predictor_limiter(MPI_COMM_WORLD,
                                                          rank);
+  passed &= test_open_boundary_one_sided_momentum_limiter(MPI_COMM_WORLD,
+                                                          rank);
   passed &= test_piso_intermediate_halo_oracle(MPI_COMM_WORLD, rank);
   MPI_Finalize();
   return passed ? 0 : 1;

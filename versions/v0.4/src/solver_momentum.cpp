@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace hundun::v04 {
@@ -28,6 +29,43 @@ std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
   hash ^= value;
   hash *= kFnvPrime;
   return hash;
+}
+
+std::uint64_t double_bits(double value) noexcept {
+  std::uint64_t bits = 0U;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+Status collective_status(MPI_Comm communicator, Status local) noexcept {
+  if (communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, kMomentumAssembly};
+  int rank = -1;
+  int size = 0;
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || rank < 0 ||
+      rank >= size || size <= 0) {
+    return {StatusCode::mpi_failure, kMomentumAssembly};
+  }
+  const int candidate = local ? size : rank;
+  int lowest = size;
+  if (MPI_Allreduce(&candidate, &lowest, 1, MPI_INT, MPI_MIN,
+                    communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kMomentumAssembly};
+  }
+  if (lowest == size) return {};
+  std::uint64_t encoded = 0U;
+  if (rank == lowest) {
+    encoded = (static_cast<std::uint64_t>(local.code) << 32U) |
+              static_cast<std::uint64_t>(local.detail);
+  }
+  if (MPI_Bcast(&encoded, 1, MPI_UINT64_T, lowest, communicator) !=
+      MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kMomentumAssembly};
+  }
+  return {static_cast<StatusCode>(encoded >> 32U),
+          static_cast<std::uint32_t>(encoded)};
 }
 
 RevisionToken state_revision(
@@ -94,8 +132,7 @@ KernelBox resolved_box(KernelBox requested, Int3 cells) noexcept {
 bool valid_context(const CartesianKernelPlan& kernels,
                    const EquationAssemblyContext& context,
                    KernelBox box) noexcept {
-  if (!std::isfinite(context.dt) || context.dt <= 0.0 ||
-      !detail::valid_bdf_coefficients(context.bdf) ||
+  if (!detail::bdf_matches_time_step(context.bdf, context.dt) ||
       context.time == 0U || context.geometry == 0U ||
       context.face_flux == 0U ||
       context.face_flux != context.mass_flux.revision ||
@@ -1009,7 +1046,8 @@ Status assemble_momentum_impl(
       return {StatusCode::invalid_plan, kMomentumAssembly};
   }
   certificate = {plan.fingerprint_, context.scope, context.time,
-                 context.geometry, context.face_flux, assembled_state};
+                 context.geometry, context.face_flux, assembled_state,
+                 context.dt};
   return {};
 }
 
@@ -1095,10 +1133,19 @@ Status assemble_momentum_predictor(
 }
 
 Status limit_momentum_predictor_correction(
-    ConstFieldView velocity, ConstFaceFluxView mass_flux,
-    MgDomainActivityView activity, EquationSystemView system,
-    ConstFieldView low_order_rhs_delta, ReductionEngine& reductions,
+    MPI_Comm communicator, const MomentumEquationPlan& plan,
+    const BoundaryPlan& boundary, MeshPatch patch,
+    const EquationAssemblyCertificate& assembly, ConstFieldView velocity,
+    ConstFieldView density, double step_dt, double convective_cfl_limit,
+    ConstFaceFluxView mass_flux, MgDomainActivityView activity,
+    EquationSystemView system, MomentumPredictorLimiterWorkspace workspace,
+    HaloEngine& limiter_halo,
+    ReductionEngine& reductions,
     MomentumPredictorLimiterReport& report) noexcept {
+  report = {};
+  FieldView cell_workspace = workspace.cell_ratios;
+  FaceFluxView face_workspace = workspace.high_order_faces;
+  FaceFluxView common_alpha = workspace.common_face_alpha;
   const Int3 cells = system.rhs.interior;
   const std::size_t cell_count =
       cells.x > 0 && cells.y > 0 && cells.z > 0
@@ -1106,25 +1153,112 @@ Status limit_momentum_predictor_correction(
                 static_cast<std::size_t>(cells.y) *
                 static_cast<std::size_t>(cells.z)
           : 0U;
+  const std::array<HaloFieldSpec, 1U> halo_fields{{
+      {cell_workspace.field, 1U, 2U}}};
   bool linear = false;
-  if (cell_count == 0U || !valid_system(system, cells, linear) || !linear ||
+  const auto overlaps_flux = [](ConstFieldView cell,
+                                ConstFaceFluxView flux) noexcept {
+    return detail::cell_face_views_overlap(cell, flux.x) ||
+           detail::cell_face_views_overlap(cell, flux.y) ||
+           detail::cell_face_views_overlap(cell, flux.z);
+  };
+  const ConstFaceFluxView limiter_faces = as_const(face_workspace);
+  const ConstFaceFluxView alpha_faces = as_const(common_alpha);
+  const ConstFaceFluxView equation_faces{
+      as_const(system.x_coefficient), as_const(system.y_coefficient),
+      as_const(system.z_coefficient), 0U, {}};
+  const auto fluxes_overlap = [](ConstFaceFluxView left,
+                                 ConstFaceFluxView right) noexcept {
+    const ConstFaceFieldView left_faces[]{left.x, left.y, left.z};
+    const ConstFaceFieldView right_faces[]{right.x, right.y, right.z};
+    for (ConstFaceFieldView left_face : left_faces)
+      for (ConstFaceFieldView right_face : right_faces)
+        if (detail::face_views_overlap(left_face, right_face)) return true;
+    return false;
+  };
+  Status preflight = reductions.validate_communicator(communicator);
+  if (preflight && (communicator == MPI_COMM_NULL || cell_count == 0U ||
+      plan.kernels_ == nullptr || plan.kernels_->fingerprint() == 0U ||
+      plan.cells().x != cells.x || plan.cells().y != cells.y ||
+      plan.cells().z != cells.z || boundary.local_cells().x != cells.x ||
+      boundary.local_cells().y != cells.y ||
+      boundary.local_cells().z != cells.z || patch.cells.x != cells.x ||
+      patch.cells.y != cells.y || patch.cells.z != cells.z ||
+      !assembly.valid() || assembly.plan != plan.fingerprint() ||
+      assembly.scope != EquationAssemblyScope::momentum_predictor ||
+      assembly.geometry != plan.geometry_revision_ ||
+      boundary.revision() != plan.boundary_revision_ ||
+      assembly.dt != step_dt ||
+      !valid_system(system, cells, linear) || !linear ||
+      velocity.field != plan.velocity_ ||
       !detail::valid_cell_view(velocity, cells, 0U, 3U, 1U) ||
-      !detail::valid_cell_view(low_order_rhs_delta, cells, 0U, 3U, 0U) ||
-      !detail::valid_flux_view(mass_flux, cells, mass_flux.revision) ||
+      density.field != plan.density_ ||
+      !detail::valid_cell_view(density, cells, 0U, 1U, 0U) ||
+      !std::isfinite(step_dt) || !(step_dt > 0.0) ||
+      !std::isfinite(convective_cfl_limit) ||
+      !(convective_cfl_limit > 0.0) ||
+      !detail::valid_cell_view(as_const(cell_workspace), cells, 0U, 3U, 1U) ||
+      !detail::valid_flux_view(mass_flux, cells, assembly.face_flux) ||
+      !detail::valid_flux_view(as_const(face_workspace), cells,
+                               face_workspace.revision) ||
+      !detail::valid_flux_view(as_const(common_alpha), cells,
+                               common_alpha.revision) ||
       !detail::finite_face_flux(mass_flux, {{0, 0, 0}, cells}) ||
       !valid_activity(activity, cells) ||
       detail::field_views_overlap(velocity, as_const(system.diagonal)) ||
       detail::field_views_overlap(velocity, as_const(system.rhs)) ||
       detail::field_views_overlap(velocity, as_const(system.residual)) ||
-      detail::field_views_overlap(velocity, low_order_rhs_delta) ||
+      detail::field_views_overlap(velocity, as_const(cell_workspace)) ||
+      detail::field_views_overlap(density, as_const(system.diagonal)) ||
+      detail::field_views_overlap(density, as_const(system.rhs)) ||
+      detail::field_views_overlap(density, as_const(system.residual)) ||
+      detail::field_views_overlap(density, as_const(cell_workspace)) ||
       detail::field_views_overlap(as_const(system.diagonal),
-                                  low_order_rhs_delta) ||
-      detail::field_views_overlap(as_const(system.rhs), low_order_rhs_delta) ||
+                                  as_const(cell_workspace)) ||
+      detail::field_views_overlap(as_const(system.rhs),
+                                  as_const(cell_workspace)) ||
       detail::field_views_overlap(as_const(system.residual),
-                                  low_order_rhs_delta) ||
-      reductions.capacity() < 1U) {
-    return {StatusCode::invalid_plan, kMomentumAssembly};
-  }
+                                  as_const(cell_workspace)) ||
+      overlaps_flux(velocity, limiter_faces) ||
+      overlaps_flux(as_const(system.diagonal), limiter_faces) ||
+      overlaps_flux(as_const(system.rhs), limiter_faces) ||
+      overlaps_flux(as_const(system.residual), limiter_faces) ||
+      overlaps_flux(as_const(cell_workspace), limiter_faces) ||
+      overlaps_flux(density, limiter_faces) ||
+      overlaps_flux(velocity, alpha_faces) ||
+      overlaps_flux(as_const(system.diagonal), alpha_faces) ||
+      overlaps_flux(as_const(system.rhs), alpha_faces) ||
+      overlaps_flux(as_const(system.residual), alpha_faces) ||
+      overlaps_flux(as_const(cell_workspace), alpha_faces) ||
+      overlaps_flux(density, alpha_faces) ||
+      overlaps_flux(velocity, mass_flux) ||
+      overlaps_flux(as_const(system.diagonal), mass_flux) ||
+      overlaps_flux(as_const(system.rhs), mass_flux) ||
+      overlaps_flux(as_const(system.residual), mass_flux) ||
+      overlaps_flux(as_const(cell_workspace), mass_flux) ||
+      overlaps_flux(density, mass_flux) ||
+      fluxes_overlap(limiter_faces, mass_flux) ||
+      fluxes_overlap(alpha_faces, mass_flux) ||
+      fluxes_overlap(limiter_faces, alpha_faces) ||
+      fluxes_overlap(equation_faces, limiter_faces) ||
+      fluxes_overlap(equation_faces, alpha_faces) ||
+      fluxes_overlap(equation_faces, mass_flux) ||
+      !limiter_halo.ready() ||
+      !limiter_halo.validate_contract(
+          communicator, patch, {halo_fields.data(), halo_fields.size()},
+          boundary.halo_topology()) ||
+      reductions.capacity() < 3U))
+    preflight = {StatusCode::invalid_plan, kMomentumAssembly};
+  preflight = collective_status(communicator, preflight);
+  if (!preflight) return preflight;
+  const CartesianKernelPlan& kernels = *plan.kernels_;
+  const double certified_dt = assembly.dt;
+
+  MomentumBoundaryRelations relations;
+  Status status = resolve_momentum_boundary_relations(
+      boundary, velocity.field, relations);
+  status = collective_status(communicator, status);
+  if (!status) return status;
 
   const auto fluid = [&](Int3 cell) noexcept {
     return fluid_cell(activity.cells, cells, cell);
@@ -1147,147 +1281,613 @@ Status limit_momentum_predictor_correction(
                              : mass_flux.z.unchecked(face));
   };
 
-  Status local_status;
-  double local_max_depletion = 0.0;
-  bool local_majorized = false;
-  for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
-    for (std::int32_t y = 0; y < cells.y && local_status; ++y) {
-      for (std::int32_t x = 0; x < cells.x && local_status; ++x) {
+  const auto physical_face = [&](std::size_t axis, Int3 face) noexcept {
+    const std::int32_t coordinate =
+        axis == 0U ? face.x : (axis == 1U ? face.y : face.z);
+    const std::int32_t extent =
+        axis == 0U ? cells.x : (axis == 1U ? cells.y : cells.z);
+    if (coordinate != 0 && coordinate != extent) return false;
+    const CartesianFace selected = cartesian_face(
+        static_cast<CartesianAxis>(axis), coordinate == extent);
+    return relations.physical[face_index(selected)];
+  };
+  const auto frozen_face = [](const FrozenConvectionFaceField& frozen,
+                              std::size_t axis) noexcept {
+    return axis == 0U ? frozen.x : (axis == 1U ? frozen.y : frozen.z);
+  };
+  const auto alpha_face = [&](std::size_t axis) noexcept {
+    return axis == 0U ? common_alpha.x
+                      : (axis == 1U ? common_alpha.y : common_alpha.z);
+  };
+  const auto inside = [&](Int3 cell) noexcept {
+    return cell.x >= 0 && cell.y >= 0 && cell.z >= 0 &&
+           cell.x < cells.x && cell.y < cells.y && cell.z < cells.z;
+  };
+  const auto anti_diffusive_flux = [&](const FrozenConvectionFaceField& frozen,
+                                       std::size_t axis, Int3 face,
+                                       std::uint8_t component) noexcept {
+    const auto selected_axis = static_cast<CartesianAxis>(axis);
+    if (!active_face(activity, cells, selected_axis, face))
+      return 0.0;
+    const double mass = face_flux(axis, face);
+    const Int3 donor = mass >= 0.0 ? offset(face, axis, -1) : face;
+    // At physical inflow/backflow the frozen face value is the typed
+    // boundary authority.  Replacing it by an upwind ghost would alter the
+    // prescribed boundary state, so there is no anti-diffusive correction
+    // to limit.  Physical outflow has an interior donor and is budgeted
+    // against its one adjacent fluid cell below.
+    if (physical_face(axis, face) && !inside(donor)) return 0.0;
+    const double high = frozen_face(frozen, axis).unchecked(face);
+    const double low = velocity.unchecked(donor, component);
+    return mass * (high - low);
+  };
+  const auto neighbour_sum = [&](Int3 cell, Status& local) noexcept {
+    double sum = 0.0;
+    for (std::size_t axis = 0U; axis < 3U && local; ++axis) {
+      const auto selected_axis = static_cast<CartesianAxis>(axis);
+      for (int direction : {-1, 1}) {
+        const Int3 face = direction < 0 ? cell : offset(cell, axis, 1);
+        if (!active_face(activity, cells, selected_axis, face)) continue;
+        const double coefficient = neighbor_coefficient(
+            system, mass_flux, cell, selected_axis, direction);
+        if (!std::isfinite(coefficient) || coefficient < 0.0 ||
+            !std::isfinite(sum + coefficient)) {
+          local = {StatusCode::numerical_failure, kMomentumNumerical};
+          break;
+        }
+        sum += coefficient;
+      }
+    }
+    return sum;
+  };
+
+  double local_cfl_max[2U]{};
+  Int3 local_cfl_cell{};
+  double local_cfl_rho_volume = 0.0;
+  double local_cfl_outgoing = 0.0;
+  double local_cfl_absolute = 0.0;
+  bool local_cfl_cell_valid = false;
+  Status cfl_status;
+  for (std::int32_t z = 0; z < cells.z && cfl_status; ++z) {
+    for (std::int32_t y = 0; y < cells.y && cfl_status; ++y) {
+      for (std::int32_t x = 0; x < cells.x; ++x) {
         const Int3 cell{x, y, z};
         if (!fluid(cell)) continue;
-        double neighbour_sum = 0.0;
-        for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
-          const auto selected_axis = static_cast<CartesianAxis>(axis);
-          for (int direction : {-1, 1}) {
-            const Int3 face =
-                direction < 0 ? cell : offset(cell, axis, 1);
-            if (!active_face(activity, cells, selected_axis, face)) continue;
-            const double coefficient = neighbor_coefficient(
-                system, mass_flux, cell, selected_axis, direction);
-            if (!std::isfinite(coefficient) || coefficient < 0.0 ||
-                !std::isfinite(neighbour_sum + coefficient)) {
+        const Int3 xp{x + 1, y, z};
+        const Int3 yp{x, y + 1, z};
+        const Int3 zp{x, y, z + 1};
+        const double fxm = mass_flux.x.unchecked(cell);
+        const double fxp = mass_flux.x.unchecked(xp);
+        const double fym = mass_flux.y.unchecked(cell);
+        const double fyp = mass_flux.y.unchecked(yp);
+        const double fzm = mass_flux.z.unchecked(cell);
+        const double fzp = mass_flux.z.unchecked(zp);
+        const bool sealed_nonzero =
+            (!active_face(activity, cells, CartesianAxis::x, cell) &&
+             fxm != 0.0) ||
+            (!active_face(activity, cells, CartesianAxis::x, xp) &&
+             fxp != 0.0) ||
+            (!active_face(activity, cells, CartesianAxis::y, cell) &&
+             fym != 0.0) ||
+            (!active_face(activity, cells, CartesianAxis::y, yp) &&
+             fyp != 0.0) ||
+            (!active_face(activity, cells, CartesianAxis::z, cell) &&
+             fzm != 0.0) ||
+            (!active_face(activity, cells, CartesianAxis::z, zp) &&
+             fzp != 0.0);
+        const double rho = density.unchecked(cell, 0U);
+        const double volume = detail::cell_volume(kernels, cell);
+        if (sealed_nonzero || !std::isfinite(rho) || !(rho > 0.0) ||
+            !std::isfinite(volume) || !(volume > 0.0) ||
+            !std::isfinite(fxm) || !std::isfinite(fxp) ||
+            !std::isfinite(fym) || !std::isfinite(fyp) ||
+            !std::isfinite(fzm) || !std::isfinite(fzp)) {
+          cfl_status = {sealed_nonzero ? StatusCode::invalid_plan
+                                       : StatusCode::numerical_failure,
+                        sealed_nonzero ? kMomentumAssembly
+                                       : kMomentumNumerical};
+          break;
+        }
+        const double outgoing =
+            std::max(-fxm, 0.0) + std::max(fxp, 0.0) +
+            std::max(-fym, 0.0) + std::max(fyp, 0.0) +
+            std::max(-fzm, 0.0) + std::max(fzp, 0.0);
+        const double absolute =
+            0.5 * (std::abs(fxm) + std::abs(fxp) + std::abs(fym) +
+                   std::abs(fyp) + std::abs(fzm) + std::abs(fzp));
+        const double rho_volume = rho * volume;
+        const double scale = certified_dt / rho_volume;
+        const double out = scale * outgoing;
+        const double abs = scale * absolute;
+        if (!std::isfinite(rho_volume) || !(rho_volume > 0.0) ||
+            !std::isfinite(out) || out < 0.0 || !std::isfinite(abs) ||
+            abs < 0.0) {
+          cfl_status = {StatusCode::numerical_failure, kMomentumNumerical};
+          break;
+        }
+        if (!local_cfl_cell_valid || out > local_cfl_max[0U]) {
+          local_cfl_cell_valid = true;
+          local_cfl_cell = cell;
+          local_cfl_rho_volume = rho_volume;
+          local_cfl_outgoing = outgoing;
+          local_cfl_absolute = absolute;
+        }
+        local_cfl_max[0U] = std::max(local_cfl_max[0U], out);
+        local_cfl_max[1U] = std::max(local_cfl_max[1U], abs);
+      }
+    }
+  }
+  double global_cfl_max[2U]{};
+  status = reductions.checked_max({local_cfl_max, 2U},
+                                  {global_cfl_max, 2U}, cfl_status);
+  if (!status) return status;
+  MomentumAdvectiveCflCertificate advective_cfl;
+  advective_cfl.plan = plan.fingerprint();
+  advective_cfl.time = assembly.time;
+  advective_cfl.density = density.revision;
+  advective_cfl.face_flux = mass_flux.revision;
+  advective_cfl.density_storage = density.storage_identity;
+  advective_cfl.density_revision_domain = density.revision_domain;
+  advective_cfl.face_flux_storage = mass_flux.x.storage_identity;
+  advective_cfl.face_flux_revision_domain = mass_flux.x.revision_domain;
+  advective_cfl.density_view_identity = {density};
+  advective_cfl.face_flux_view_identity = {mass_flux};
+  advective_cfl.activity_collective = activity.collective_fingerprint;
+  advective_cfl.dt = certified_dt;
+  advective_cfl.out_max = global_cfl_max[0U];
+  advective_cfl.absolute_max = global_cfl_max[1U];
+  advective_cfl.limit = convective_cfl_limit;
+  constexpr double kCflRoundoffSlack =
+      64.0 * std::numeric_limits<double>::epsilon();
+  if (global_cfl_max[0U] >
+      convective_cfl_limit * (1.0 + kCflRoundoffSlack)) {
+    struct MaxLocation {
+      double value;
+      int rank;
+    } local_location{local_cfl_cell_valid ? local_cfl_max[0U] : -1.0, 0},
+        global_location{};
+    if (MPI_Comm_rank(communicator, &local_location.rank) != MPI_SUCCESS ||
+        MPI_Allreduce(&local_location, &global_location, 1, MPI_DOUBLE_INT,
+                      MPI_MAXLOC, communicator) != MPI_SUCCESS ||
+        global_location.rank < 0) {
+      return {StatusCode::mpi_failure, kMomentumAssembly};
+    }
+    ConvectiveCflFailureWitness witness;
+    if (local_location.rank == global_location.rank &&
+        local_cfl_cell_valid) {
+      witness.valid = true;
+      witness.global_cell = {patch.begin.x + local_cfl_cell.x,
+                             patch.begin.y + local_cfl_cell.y,
+                             patch.begin.z + local_cfl_cell.z};
+      witness.rank = local_location.rank;
+      witness.out = local_cfl_max[0U];
+      witness.absolute = certified_dt * local_cfl_absolute /
+                         local_cfl_rho_volume;
+      witness.density_volume = local_cfl_rho_volume;
+      witness.outgoing_mass_flow = local_cfl_outgoing;
+      witness.absolute_mass_flow = local_cfl_absolute;
+    }
+    if (MPI_Bcast(&witness, static_cast<int>(sizeof(witness)), MPI_BYTE,
+                  global_location.rank, communicator) != MPI_SUCCESS ||
+        !witness.valid) {
+      return {StatusCode::mpi_failure, kMomentumAssembly};
+    }
+    advective_cfl.failure_witness = witness;
+  }
+  if (!advective_cfl.valid())
+    return {StatusCode::numerical_failure, kMomentumNumerical};
+  report.advective_cfl = advective_cfl;
+
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    Int3 extents = cells;
+    if (axis == 0U)
+      ++extents.x;
+    else if (axis == 1U)
+      ++extents.y;
+    else
+      ++extents.z;
+    FaceFieldView alpha = alpha_face(axis);
+    for (std::int32_t z = 0; z < extents.z; ++z)
+      for (std::int32_t y = 0; y < extents.y; ++y)
+        for (std::int32_t x = 0; x < extents.x; ++x)
+          alpha.unchecked({x, y, z}) = 1.0;
+  }
+
+  Status local_status;
+  constexpr StageId kLimiterHaloStage = 33U;
+  const RevisionToken base_workspace_revision = cell_workspace.revision;
+  for (std::uint8_t component = 0U; component < 3U; ++component) {
+    FrozenConvectionFaceField frozen;
+    if (local_status) {
+      const FrozenConvectionContext context{plan.fingerprint(),
+                                            assembly.state};
+      const FrozenConvectionFaceOutput output{
+          face_workspace.x, face_workspace.y, face_workspace.z};
+      local_status = freeze_cartesian_target_convection_faces(
+          kernels, plan.convection_, mass_flux, velocity, component,
+          context, output, frozen);
+    }
+
+    if (local_status) {
+      for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
+        for (std::int32_t y = 0; y < cells.y && local_status; ++y) {
+          for (std::int32_t x = 0; x < cells.x && local_status; ++x) {
+            const Int3 cell{x, y, z};
+            cell_workspace.unchecked(cell, 0U) = 1.0;
+            cell_workspace.unchecked(cell, 1U) = 1.0;
+            if (!fluid(cell)) continue;
+
+            const double a = system.diagonal.unchecked(cell, component);
+            const double high_rhs = system.rhs.unchecked(cell, component);
+            const double centre = velocity.unchecked(cell, component);
+            const double row_neighbour_sum =
+                neighbour_sum(cell, local_status);
+            if (!local_status) break;
+            const double majorant = std::max(a, row_neighbour_sum);
+            const double majorant_rhs = high_rhs + (majorant - a) * centre;
+            double delta = 0.0;
+            double positive = 0.0;
+            double negative = 0.0;
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              const Int3 plus = offset(cell, axis, 1);
+              const double minus_flux = anti_diffusive_flux(
+                  frozen, axis, cell, component);
+              const double plus_flux = anti_diffusive_flux(
+                  frozen, axis, plus, component);
+              delta += plus_flux - minus_flux;
+              const double contributions[2U]{minus_flux, -plus_flux};
+              for (double value : contributions) {
+                if (value > 0.0)
+                  positive += value;
+                else
+                  negative += value;
+              }
+            }
+            const double high = majorant_rhs / majorant;
+            const double low = (majorant_rhs + delta) / majorant;
+            if (!std::isfinite(a) || !(a > 0.0) ||
+                !std::isfinite(high_rhs) || !std::isfinite(centre) ||
+                !std::isfinite(majorant_rhs) || !std::isfinite(delta) ||
+                !std::isfinite(positive) || !std::isfinite(negative) ||
+                !std::isfinite(high) || !std::isfinite(low)) {
               local_status = {StatusCode::numerical_failure,
                               kMomentumNumerical};
               break;
             }
-            neighbour_sum += coefficient;
+
+            double lower = std::min(low, centre);
+            double upper = std::max(low, centre);
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              const Int3 minus = offset(cell, axis, -1);
+              const Int3 plus = offset(cell, axis, 1);
+              const auto include = [&](Int3 neighbour, Int3 face) noexcept {
+                if (!active_face(activity, cells,
+                                 static_cast<CartesianAxis>(axis), face) ||
+                    physical_face(axis, face))
+                  return true;
+                const double value =
+                    velocity.unchecked(neighbour, component);
+                if (!std::isfinite(value)) return false;
+                lower = std::min(lower, value);
+                upper = std::max(upper, value);
+                return true;
+              };
+              if (!include(minus, cell) || !include(plus, plus)) {
+                local_status = {StatusCode::numerical_failure,
+                                kMomentumNumerical};
+                break;
+              }
+            }
+            if (!local_status) break;
+
+            // A strict old-time neighbour envelope clips a translating
+            // smooth extremum by O(dx^2), which makes the limiter branch
+            // change under temporal refinement and destroys BDF2 order.
+            // Extend only the extremum-facing side by the exact quadratic
+            // three-point curvature allowance.  This is an O(dx^2) spatial
+            // truncation allowance (coefficient 1/2 follows from the centred
+            // second difference), not a time-step- or Re3900-tuned floor.
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              const Int3 minus = offset(cell, axis, -1);
+              const Int3 plus = offset(cell, axis, 1);
+              if (!active_face(activity, cells,
+                               static_cast<CartesianAxis>(axis), cell) ||
+                  !active_face(activity, cells,
+                               static_cast<CartesianAxis>(axis), plus) ||
+                  physical_face(axis, cell) || physical_face(axis, plus))
+                continue;
+              const double minus_value =
+                  velocity.unchecked(minus, component);
+              const double plus_value = velocity.unchecked(plus, component);
+              const double scale = std::max(
+                  {1.0, std::abs(centre), std::abs(minus_value),
+                   std::abs(plus_value)});
+              const double roundoff =
+                  64.0 * std::numeric_limits<double>::epsilon() * scale;
+              const double curvature =
+                  minus_value - 2.0 * centre + plus_value;
+              if (!std::isfinite(curvature)) {
+                local_status = {StatusCode::numerical_failure,
+                                kMomentumNumerical};
+                break;
+              }
+              const double allowance = 0.5 * std::abs(curvature);
+              if (curvature < 0.0 &&
+                  centre + roundoff >=
+                      std::max(minus_value, plus_value))
+                upper += allowance;
+              else if (curvature > 0.0 &&
+                       centre - roundoff <=
+                           std::min(minus_value, plus_value))
+                lower -= allowance;
+            }
+            if (!local_status || !std::isfinite(lower) ||
+                !std::isfinite(upper)) {
+              if (local_status)
+                local_status = {StatusCode::numerical_failure,
+                                kMomentumNumerical};
+              break;
+            }
+
+            const double positive_budget =
+                std::max(0.0, majorant * (upper - low));
+            const double negative_budget =
+                std::min(0.0, majorant * (lower - low));
+            double positive_ratio =
+                positive > 0.0 ? positive_budget / positive : 1.0;
+            double negative_ratio =
+                negative < 0.0 ? negative_budget / negative : 1.0;
+            positive_ratio =
+                std::max(0.0, std::min(1.0, positive_ratio));
+            negative_ratio =
+                std::max(0.0, std::min(1.0, negative_ratio));
+            if (!std::isfinite(positive_ratio) ||
+                !std::isfinite(negative_ratio)) {
+              local_status = {StatusCode::numerical_failure,
+                              kMomentumNumerical};
+              break;
+            }
+            cell_workspace.unchecked(cell, 0U) = positive_ratio;
+            cell_workspace.unchecked(cell, 1U) = negative_ratio;
           }
         }
-        if (!local_status) break;
-        for (std::uint8_t component = 0U; component < 3U; ++component) {
-          const double a = system.diagonal.unchecked(cell, component);
-          const double high_rhs = system.rhs.unchecked(cell, component);
-          const double delta = low_order_rhs_delta.unchecked(cell, component);
-          if (!std::isfinite(a) || !(a > 0.0) ||
-              !std::isfinite(high_rhs) || !std::isfinite(delta)) {
-            local_status = {StatusCode::numerical_failure,
-                            kMomentumNumerical};
-            break;
-          }
-          const double centre = velocity.unchecked(cell, component);
-          const double majorant = std::max(a, neighbour_sum);
-          const double majorant_rhs = high_rhs + (majorant - a) * centre;
-          const double high = majorant_rhs / majorant;
-          const double low = (majorant_rhs + delta) / majorant;
-          if (!std::isfinite(high) || !std::isfinite(low) ||
-              !std::isfinite(centre) || !std::isfinite(majorant_rhs)) {
-            local_status = {StatusCode::numerical_failure,
-                            kMomentumNumerical};
-            break;
-          }
-          local_majorized = local_majorized || majorant > a;
-          double lower = std::min(low, centre);
-          double upper = std::max(low, centre);
-          for (std::size_t axis = 0U; axis < 3U; ++axis) {
-            const Int3 minus = offset(cell, axis, -1);
-            const Int3 plus = offset(cell, axis, 1);
-            const double minus_flux = face_flux(axis, cell);
-            const double plus_flux = face_flux(axis, plus);
-            const auto include = [&](Int3 donor, Int3 face) noexcept {
-              if (!active_face(activity, cells,
-                               static_cast<CartesianAxis>(axis), face))
-                return true;
-              const double value = velocity.unchecked(donor, component);
-              if (!std::isfinite(value)) return false;
-              lower = std::min(lower, value);
-              upper = std::max(upper, value);
-              return true;
-            };
-            if ((minus_flux > 0.0 && !include(minus, cell)) ||
-                (plus_flux < 0.0 && !include(plus, plus))) {
+      }
+    }
+
+    FieldView ratio_view = cell_workspace;
+    ratio_view.components = 2U;
+    ratio_view.revision = hash_mix(kFnvOffset, assembly.plan);
+    ratio_view.revision = hash_mix(ratio_view.revision, assembly.time);
+    ratio_view.revision = hash_mix(ratio_view.revision, assembly.geometry);
+    ratio_view.revision = hash_mix(ratio_view.revision, assembly.face_flux);
+    ratio_view.revision = hash_mix(ratio_view.revision, assembly.state);
+    ratio_view.revision =
+        hash_mix(ratio_view.revision, double_bits(assembly.dt));
+    ratio_view.revision =
+        hash_mix(ratio_view.revision, system.diagonal.revision);
+    ratio_view.revision =
+        hash_mix(ratio_view.revision, base_workspace_revision);
+    ratio_view.revision = hash_mix(ratio_view.revision, component + 1U);
+    if (ratio_view.revision == 0U) ratio_view.revision = 1U;
+    std::array<FieldView, 1U> halo_views{ratio_view};
+    HaloTicket ticket;
+    Status halo_status = limiter_halo.begin(
+        kLimiterHaloStage + component,
+        {halo_views.data(), halo_views.size()}, local_status, ticket);
+    if (halo_status)
+      halo_status = limiter_halo.finish(
+          ticket, {halo_views.data(), halo_views.size()});
+    if (!halo_status) return halo_status;
+    if (halo_views[0U].revision != ratio_view.revision ||
+        limiter_halo.ghost_revision(cell_workspace.field) !=
+            ratio_view.revision)
+      return {StatusCode::invalid_plan, kMomentumAssembly};
+
+    for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
+      Int3 extents = cells;
+      if (axis == 0U)
+        ++extents.x;
+      else if (axis == 1U)
+        ++extents.y;
+      else
+        ++extents.z;
+      for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
+        for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
+          for (std::int32_t x = 0; x < extents.x && local_status; ++x) {
+            const Int3 face{x, y, z};
+            const double correction = anti_diffusive_flux(
+                frozen, axis, face, component);
+            if (!std::isfinite(correction)) {
               local_status = {StatusCode::numerical_failure,
                               kMomentumNumerical};
               break;
             }
+            if (correction == 0.0) continue;
+            const Int3 left = offset(face, axis, -1);
+            const Int3 right = face;
+            const double left_contribution = -correction;
+            const double right_contribution = correction;
+            const auto ratio = [&](Int3 cell, double contribution) noexcept {
+              return cell_workspace.unchecked(
+                  cell, contribution > 0.0 ? 0U : 1U);
+            };
+            double alpha = 1.0;
+            if (physical_face(axis, face)) {
+              if (inside(left) && fluid(left))
+                alpha = ratio(left, left_contribution);
+              else if (inside(right) && fluid(right))
+                alpha = ratio(right, right_contribution);
+            } else {
+              alpha = std::min(ratio(left, left_contribution),
+                               ratio(right, right_contribution));
+            }
+            if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+              local_status = {StatusCode::numerical_failure,
+                              kMomentumNumerical};
+              break;
+            }
+            FaceFieldView common = alpha_face(axis);
+            common.unchecked(face) =
+                std::min(common.unchecked(face), alpha);
           }
-          if (!local_status) break;
-          const double correction = high - low;
-          double theta = 1.0;
-          if (correction > 0.0 && high > upper) {
-            theta = (upper - low) / correction;
-          } else if (correction < 0.0 && high < lower) {
-            theta = (lower - low) / correction;
-          }
-          if (!std::isfinite(theta)) {
-            local_status = {StatusCode::numerical_failure,
-                            kMomentumNumerical};
-            break;
-          }
-          theta = std::max(0.0, std::min(1.0, theta));
-          local_max_depletion =
-              std::max(local_max_depletion, 1.0 - theta);
         }
       }
     }
   }
 
-  double global_max_depletion = 0.0;
-  Status status = reductions.checked_max(
-      {&local_max_depletion, 1U}, {&global_max_depletion, 1U}, local_status);
-  if (!status) return status;
-  const double theta = 1.0 - global_max_depletion;
-  if (!std::isfinite(theta) || theta < 0.0 || theta > 1.0) {
-    return {StatusCode::numerical_failure, kMomentumNumerical};
+  // Apply the single synchronized face coefficient to the full momentum
+  // correction vector.  Starting from the high-order equation and adding
+  // only the rejected fraction preserves its direction and retains the
+  // byte-identical high-order fast path when alpha=1 and no majorization is
+  // required.
+  std::array<double, 3U> local_metrics{};
+  for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
+    Int3 extents = cells;
+    if (axis == 0U)
+      ++extents.x;
+    else if (axis == 1U)
+      ++extents.y;
+    else
+      ++extents.z;
+    FaceFieldView common = alpha_face(axis);
+    for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
+      for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
+        for (std::int32_t x = 0; x < extents.x; ++x) {
+          const Int3 face{x, y, z};
+          const double alpha = common.unchecked(face);
+          if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+            local_status = {StatusCode::numerical_failure,
+                            kMomentumNumerical};
+            break;
+          }
+          const Int3 left = offset(face, axis, -1);
+          const Int3 right = face;
+          const Int3 owner =
+              physical_face(axis, face) && !inside(left) ? right : left;
+          if (alpha < 1.0 && inside(owner) && fluid(owner))
+            local_metrics[2U] += 1.0;
+        }
+      }
+    }
   }
-  if (theta < 1.0 || local_majorized) {
-    const double low_weight = 1.0 - theta;
-    for (std::int32_t z = 0; z < cells.z; ++z) {
-      for (std::int32_t y = 0; y < cells.y; ++y) {
-        for (std::int32_t x = 0; x < cells.x; ++x) {
-          const Int3 cell{x, y, z};
-          if (!fluid(cell)) continue;
-          double neighbour_sum = 0.0;
-          // A rank that had no deficient row can retain the old correction
-          // fast path even when another rank selected a global limiter theta.
-          if (local_majorized) {
-            for (std::size_t axis = 0U; axis < 3U; ++axis) {
-              const auto selected_axis = static_cast<CartesianAxis>(axis);
-              for (int direction : {-1, 1}) {
-                const Int3 face =
-                    direction < 0 ? cell : offset(cell, axis, 1);
-                if (!active_face(activity, cells, selected_axis, face))
-                  continue;
-                neighbour_sum += neighbor_coefficient(
-                    system, mass_flux, cell, selected_axis, direction);
-              }
+  for (std::uint8_t component = 0U; component < 3U; ++component) {
+    FrozenConvectionFaceField frozen;
+    if (local_status) {
+      const FrozenConvectionContext context{plan.fingerprint(),
+                                            assembly.state};
+      const FrozenConvectionFaceOutput output{
+          face_workspace.x, face_workspace.y, face_workspace.z};
+      local_status = freeze_cartesian_target_convection_faces(
+          kernels, plan.convection_, mass_flux, velocity, component,
+          context, output, frozen);
+    }
+    if (local_status) {
+      for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
+        for (std::int32_t y = 0; y < cells.y && local_status; ++y) {
+          for (std::int32_t x = 0; x < cells.x; ++x) {
+            const Int3 cell{x, y, z};
+            if (!fluid(cell)) continue;
+            const double a = system.diagonal.unchecked(cell, component);
+            const double row_neighbour_sum =
+                neighbour_sum(cell, local_status);
+            if (!local_status) break;
+            const double majorant = std::max(a, row_neighbour_sum);
+            const double adjusted_rhs =
+                system.rhs.unchecked(cell, component) +
+                (majorant - a) * velocity.unchecked(cell, component);
+            if (!std::isfinite(majorant) || !(majorant > 0.0) ||
+                !std::isfinite(adjusted_rhs)) {
+              local_status = {StatusCode::numerical_failure,
+                              kMomentumNumerical};
+              break;
+            }
+            if (majorant != a) {
+              system.rhs.unchecked(cell, component) = adjusted_rhs;
+              system.diagonal.unchecked(cell, component) = majorant;
             }
           }
-          for (std::uint8_t component = 0U; component < 3U; ++component) {
-            const double diagonal =
-                system.diagonal.unchecked(cell, component);
-            const double majorant = local_majorized
-                                         ? std::max(diagonal, neighbour_sum)
-                                         : diagonal;
-            system.rhs.unchecked(cell, component) +=
-                (majorant - diagonal) * velocity.unchecked(cell, component) +
-                low_weight * low_order_rhs_delta.unchecked(cell, component);
-            system.diagonal.unchecked(cell, component) = majorant;
+        }
+      }
+    }
+    for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
+      Int3 extents = cells;
+      if (axis == 0U)
+        ++extents.x;
+      else if (axis == 1U)
+        ++extents.y;
+      else
+        ++extents.z;
+      FaceFieldView common = alpha_face(axis);
+      for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
+        for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
+          for (std::int32_t x = 0; x < extents.x; ++x) {
+            const Int3 face{x, y, z};
+            const double correction = anti_diffusive_flux(
+                frozen, axis, face, component);
+            const double alpha = common.unchecked(face);
+            if (!std::isfinite(correction) || !std::isfinite(alpha) ||
+                alpha < 0.0 || alpha > 1.0) {
+              local_status = {StatusCode::numerical_failure,
+                              kMomentumNumerical};
+              break;
+            }
+            if (correction == 0.0) continue;
+            const Int3 left = offset(face, axis, -1);
+            const Int3 right = face;
+            if (alpha < 1.0) {
+              const double rejected = (1.0 - alpha) * correction;
+              if (inside(left) && fluid(left))
+                system.rhs.unchecked(left, component) += rejected;
+              if (inside(right) && fluid(right))
+                system.rhs.unchecked(right, component) -= rejected;
+            }
+
+            // The negative-side owner uniquely reports this physical face.
+            // At an MPI face the positive-side rank sees the owner as a
+            // ghost; periodic duplicates are owned by the global high-face
+            // representation.
+            const Int3 owner =
+                physical_face(axis, face) && !inside(left) ? right : left;
+            if (inside(owner) && fluid(owner)) {
+              const double magnitude = std::abs(correction);
+              local_metrics[0U] += magnitude;
+              local_metrics[1U] += alpha * magnitude;
+            }
           }
         }
       }
     }
   }
-  report = {theta, theta < 1.0 ? 1U : 0U, theta < 1.0};
+
+  std::array<double, 3U> global_metrics{};
+  status = reductions.checked_sum(
+      {local_metrics.data(), local_metrics.size()},
+      {global_metrics.data(), global_metrics.size()}, local_status);
+  if (!status) return status;
+  const double total = global_metrics[0U];
+  const double retained = global_metrics[1U];
+  const double count = global_metrics[2U];
+  const double rounded_count = std::nearbyint(count);
+  if (!std::isfinite(total) || !std::isfinite(retained) ||
+      !std::isfinite(count) || total < 0.0 || retained < 0.0 ||
+      retained > total || count < 0.0 || count != rounded_count ||
+      rounded_count > static_cast<double>(UINT32_MAX)) {
+    return {StatusCode::numerical_failure, kMomentumNumerical};
+  }
+  const std::uint32_t activations =
+      static_cast<std::uint32_t>(rounded_count);
+  double theta = total > 0.0 ? retained / total : 1.0;
+  theta = std::max(0.0, std::min(1.0, theta));
+  if (activations == 0U) {
+    theta = 1.0;
+  } else if (theta == 1.0) {
+    theta = std::nextafter(1.0, 0.0);
+  }
+  report.theta = theta;
+  report.activations = activations;
+  report.limited = activations != 0U;
+  if (activations != 0U && total > 0.0 && retained == 0.0)
+    return {StatusCode::rejected_step, kMomentumNumerical};
   return {};
 }
 
@@ -1313,14 +1913,19 @@ Status solve_momentum_predictor(
   const std::array<HaloFieldSpec, 1U> halo_fields{{
       {workspace_probe.field, 1U, 1U}}};
   bool linear = false;
-  if (communicator == MPI_COMM_NULL || count == 0U || !assembly.valid() ||
+  Status preflight = reductions.validate_communicator(communicator);
+  if (preflight &&
+      (communicator == MPI_COMM_NULL || count == 0U || !assembly.valid() ||
       assembly.plan != plan.fingerprint() ||
       assembly.scope != EquationAssemblyScope::momentum_predictor ||
+      assembly.geometry != plan.geometry_revision_ ||
+      boundary.revision() != plan.boundary_revision_ ||
       patch.cells.x != cells.x || patch.cells.y != cells.y ||
       patch.cells.z != cells.z || boundary.local_cells().x != cells.x ||
       boundary.local_cells().y != cells.y ||
       boundary.local_cells().z != cells.z ||
       !valid_system(system, cells, linear) || !linear ||
+      velocity.field != plan.velocity_ ||
       !detail::valid_cell_view(as_const(velocity), cells, 0U, 3U, 1U) ||
       !detail::valid_flux_view(mass_flux, cells, assembly.face_flux) ||
       !valid_activity(activity, cells) ||
@@ -1329,17 +1934,49 @@ Status solve_momentum_predictor(
       !krylov_halo.ready() ||
       !krylov_halo.validate_contract(communicator, patch,
                                      {halo_fields.data(), halo_fields.size()},
-                                     boundary.halo_topology())) {
-    return {StatusCode::invalid_plan, kMomentumSolve};
-  }
+                                     boundary.halo_topology())))
+    preflight = {StatusCode::invalid_plan, kMomentumSolve};
+  preflight = collective_status(communicator, preflight);
+  if (!preflight) return preflight;
   MomentumBoundaryRelations relations;
   Status status = resolve_momentum_boundary_relations(
       boundary, velocity.field, relations);
+  status = collective_status(communicator, status);
   if (!status) return status;
 
+  // The limiter publishes H(U_old).  Remove only the homogeneous neighbour
+  // action to recover the constant RHS of the actual implicit-upwind system;
+  // affine physical-boundary values and the limited high-order correction
+  // remain on the right-hand side.  Validate the complete local transform,
+  // then reach rank consensus before mutating either U or the assembled RHS.
+  Status rhs_status;
+  for (std::int32_t z = 0; z < cells.z && rhs_status; ++z) {
+    for (std::int32_t y = 0; y < cells.y && rhs_status; ++y) {
+      for (std::int32_t x = 0; x < cells.x && rhs_status; ++x) {
+        const Int3 cell{x, y, z};
+        for (std::uint8_t component = 0U; component < 3U; ++component) {
+          const double neighbor =
+              fluid_cell(activity.cells, cells, cell)
+                  ? momentum_neighbor_sum(as_const(velocity), component,
+                                          component, system, mass_flux,
+                                          activity, relations, cell)
+                  : 0.0;
+          const double rhs = system.rhs.unchecked(cell, component) - neighbor;
+          if (!std::isfinite(neighbor) || !std::isfinite(rhs)) {
+            rhs_status = {StatusCode::numerical_failure, kMomentumSolve};
+            break;
+          }
+        }
+      }
+    }
+  }
+  rhs_status = collective_status(communicator, rhs_status);
+  if (!rhs_status) return rhs_status;
+
   // The immersed solid is outside the momentum solve.  Mask the caller's
-  // startup/restart value before forming the constant active-fluid RHS so an
-  // inactive identity row can never seed the Krylov norm or a fluid row.
+  // startup/restart value only after the collective validation above, so an
+  // inactive identity row cannot seed the Krylov norm and a failing rank
+  // cannot publish a partial state.
   if (activity.cells.size != 0U) {
     for (std::int32_t z = 0; z < cells.z; ++z) {
       for (std::int32_t y = 0; y < cells.y; ++y) {
@@ -1353,10 +1990,6 @@ Status solve_momentum_predictor(
     }
   }
 
-  // The limiter publishes H(U_old).  Remove only the homogeneous neighbour
-  // action to recover the constant RHS of the actual implicit-upwind system;
-  // affine physical-boundary values and the limited high-order correction
-  // remain on the right-hand side.
   for (std::int32_t z = 0; z < cells.z; ++z) {
     for (std::int32_t y = 0; y < cells.y; ++y) {
       for (std::int32_t x = 0; x < cells.x; ++x) {
@@ -1369,8 +2002,6 @@ Status solve_momentum_predictor(
                                           activity, relations, cell)
                   : 0.0;
           const double rhs = system.rhs.unchecked(cell, component) - neighbor;
-          if (!std::isfinite(neighbor) || !std::isfinite(rhs))
-            return {StatusCode::numerical_failure, kMomentumSolve};
           system.rhs.unchecked(cell, component) = rhs;
         }
       }
@@ -1394,6 +2025,7 @@ Status solve_momentum_predictor(
     numeric = hash_mix(numeric, assembly.geometry);
     numeric = hash_mix(numeric, assembly.face_flux);
     numeric = hash_mix(numeric, assembly.state);
+    numeric = hash_mix(numeric, double_bits(assembly.dt));
     numeric = hash_mix(numeric, system.diagonal.revision);
     numeric = hash_mix(numeric, activity.local_fingerprint);
     numeric = numeric == 0U ? 1U : numeric;

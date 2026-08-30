@@ -401,6 +401,8 @@ void arm_restart_restore_allocation_failure_once_for_test(
     int failing_rank, RestartRestoreAllocationPoint point) noexcept;
 void clear_restart_restore_allocation_failure_for_test() noexcept;
 int restart_restore_allocation_lowest_failing_rank_for_test() noexcept;
+Status convective_cfl_acceptance_status_for_test(
+    TimeControlKind control, double outward_max, double limit) noexcept;
 
 inline Status validate_product_capabilities_for_test(
     std::uint32_t capabilities, bool immersed) noexcept {
