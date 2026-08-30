@@ -7,14 +7,12 @@
 ## 1. 裁决边界
 
 本回执条件接受 pressure–enthalpy 主闭环、同目标时刻 refinement、失败回滚，以及
-真实产品路径的 BE→BDF2 pressure–enthalpy 终端结果。以下三点不在本裁决中被提升为
+真实产品路径的 BE→BDF2 pressure–enthalpy 终端结果。以下两点不在本裁决中被提升为
 “已完成”或“正式发布”：
 
 - 两步 Re3900 的 momentum predictor limiter 均为
   `limited=true, theta=0, activations=1`，因此高阶 momentum 路径仍有数值质量问题；
-- 长程稳定性、物理统计和正式发布门没有执行；
-- 当前开发历史不 DCO-clean，融合前必须形成 signed squash 或少量逻辑 squash，并
-  验证候选树与本回执验收的树等价。
+- 长程稳定性、物理统计和正式发布门没有执行。
 
 ## 2. 候选身份
 
@@ -24,11 +22,14 @@
 - pressure–enthalpy code commit：`d9006d261dd5247c7a2a8edc67a4fbb173544f15`
 - tests-off `hundun` SHA-256：
   `c4e57d0fbf0f4076437781551fc5db4d3a48f6d8504bbbe4a96acedafbb6c60d`
-- 最终 DCO-clean 候选 commit/tree：待封装和树等价校验后补录；本回执不虚构哈希。
+- DCO-clean code commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
+- 已验收 code tree：`7d172adbb1feb3ad4f692d303ef991d100e26252`
+- 原始开发历史备份：`codex/v04-pressure-enthalpy-c1-production-pre-dco-20260830`
 
-对 `origin/main..candidate` 的 DCO 审计结果为 209 个提交：132 个没有 trailer，
-75 个 `Signed-off-by` 与作者匹配，2 个只有 Codex trailer。因此当前分支历史不是
-DCO-clean；不能因为最后一个提交带 sign-off 就声称整条分支合规。
+原历史审计锚定 `origin/main..2739f36cbb80886585eb5f7b32b625278b78f38b`：209 个提交
+中 132 个没有 trailer，75 个 `Signed-off-by` 与作者匹配，2 个只有 Codex trailer。
+没有替旧作者机械补签；可融合分支改由上述 signed squash 和本回执的 signed 文档提交
+构成。
 
 ## 3. 已证明的 pressure–enthalpy 主闭环
 
@@ -83,8 +84,8 @@ mutation 测试证明旧 provenance 不能验证新联合 L2 policy；没有用�
 
 - `pressure_energy_refinement_solve_calls=2`，trajectory 长度为 4；
 - ordinal 连续，target generation 不变，collective lineage 轮间互异且跨 rank 一致；
-- 每轮 rank-local pressure state、numeric identity、flux provenance 和 linear identity
-  均与已接受临时状态同步刷新；symbolic/hierarchy/workspace 的静态身份保持稳定；
+- 每轮 rank-local pressure state、numeric identity 和 linear identity 均刷新；collective
+  state/flux provenance 同步刷新且跨 rank 一致；symbolic/hierarchy/workspace 保持稳定；
 - 每轮联合 L2 merit 下降，最后一次 refinement 首次同时通过 continuity 与 energy 门；
 - 最终 EOS、continuity、energy、closed mass 和 gauge 五门分别通过，状态有限且正；
 - 1-rank 与 2-rank 运行均通过必要的 collective target/lineage 语义检查。
@@ -172,16 +173,17 @@ evidence schema 或重构 fixed time control，因此回执不虚构该数值。
 
 ## 8. DCO 与可融合提交链
 
-当前开发分支保留全部已有成果，但其 209-commit 历史不满足 DCO。正式交付前应：
+原始开发历史完整保存在
+`codex/v04-pressure-enthalpy-c1-production-pre-dco-20260830`，没有在诊断过程中频繁
+重写，也没有给旧提交机械追加 sign-off。可融合分支从 `origin/main` 形成 signed
+squash `59985dbf2d10dee167eddfdd38ae5c2752051605`；它与封装前候选
+`abfdb7f2cf6f2514af721606ace625ee669c9c0b` 的 tree 均为
+`7d172adbb1feb3ad4f692d303ef991d100e26252`，全树比较无差异。
 
-1. 在明确的融合基线上形成一个 signed squash，或少量按逻辑拆分且每个均有有效
-   `Signed-off-by` 的提交；
-2. 比较封装前后 tree，证明与本回执通过测试和产品运行的代码树等价；
-3. 对新候选范围重新审计全部 commit trailers；
-4. 将最终候选 commit 和 tree 补录到本回执，再进入融合评审。
-
-在这些动作完成前，本回执只给出 `CONDITIONAL ACCEPT`，不把某个末端签名提交当成
-整条历史 DCO-clean 的替代证明。
+回执更新作为第二个独立 signed 文档提交叠加在该 code commit 上。新范围的作者与
+`Signed-off-by: WANG YUDONG <wangyudong@buaa.edu.cn>` 逐提交匹配，因此当前可融合链
+DCO-clean；这项结论来自新范围审计和 tree 等价证书，不是用末端签名反向粉饰原
+209-commit 历史。
 
 ## 9. 未执行项与范围声明
 
@@ -191,5 +193,6 @@ Restart、MMS、PISO temporal order 和 product pressure–energy temporal conve
 证据继续复用，但不在本回执中冒充新运行结果。
 
 因此当前可以封存在 V04-2 task 节点的结论是：pressure–enthalpy 主闭环、真实
-refinement/rollback 和 BE→BDF2 终端门已获证；momentum limiter 质量、长程物理验证、
-正式发布门及 DCO-clean 融合链仍是明确保留条件。
+refinement/rollback 和 BE→BDF2 终端门已获证；momentum limiter 质量、长程物理验证
+和正式发布门仍是明确保留条件。DCO-clean 可融合链已经形成，但不改变这些数值与
+物理上的条件接受边界。

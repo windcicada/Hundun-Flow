@@ -8,14 +8,15 @@
 
 V0.4 的 pressure–enthalpy 主闭环、同目标时刻 refinement、失败回滚和 BE→BDF2
 终端物理门已经得到产品路径证据，可以在 V04-2 节点作条件接受。这里的
-`CONDITIONAL ACCEPT` 不是正式发布裁决，也不表示整条开发分支已经满足 DCO：
+`CONDITIONAL ACCEPT` 不是正式发布裁决；它保留的是数值质量和长期物理门，而非
+提交历史不确定性：
 
 - 两步 Re3900 的 pressure–enthalpy、BDF2 时间层和五个独立终端门已经通过；
 - 两步 momentum predictor limiter 均为 `limited=true, theta=0, activations=1`，因此
   高阶 momentum 路径不能声明为已完全验证，这是明确保留的数值质量问题；
 - 长程稳定性、物理统计和正式发布门没有执行；
-- 当前 209-commit 开发历史不 DCO-clean，融合前还要形成带 sign-off 的 squash 或
-  少量逻辑 squash，并验证候选树与已验收树等价。
+- 原 209-commit 开发历史已保存在备份分支；可融合分支已从 `origin/main` 形成
+  DCO-clean signed squash，并验证其 tree 与已验收树完全等价。
 
 ## 目标与边界
 
@@ -54,7 +55,7 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 | rollback / retry | 完成 | 未接受 full step 精确回滚，half retry、直接 half 和下一 BDF2 语义保持一致 |
 | Re3900 BE→BDF2 | 条件完成 | 唯一两步 `dt=0.006` 运行通过 pressure–enthalpy 五门且无 retry；两步无 refinement |
 | momentum 高阶质量 | 待后续研究 | 两步均触发全局 `theta=0`；不得据此声明高阶 momentum 路径已验证 |
-| DCO-clean 融合链 | 待封装 | 从已验收树形成 signed squash/少量逻辑 squash，验证树等价后补录最终提交身份 |
+| DCO-clean 融合链 | 完成 | 从 `origin/main` 形成 signed squash；保留原历史备份并验证候选 tree 完全等价 |
 | 长程与正式发布门 | 未执行 | 长程稳定性、物理统计和正式发布验收不属于本次短闭环 |
 
 ## 已冻结的接受规则
@@ -64,8 +65,8 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 - `p_abs`、`rho` 和 `T` 必须在每个本地单元有限且严格为正。
 - 普通 `pressure_solve_calls` 必须仍为 2；same-target refinement 使用独立计数，最大 6。
 - refinement 报告必须形成从 1 开始的连续 ordinal，保持同一 target generation；每轮
-  使用刷新后的 rank-local state、flux provenance 和 linear identity，collective lineage
-  跨 rank 一致且轮间互异，未使用 suffix 必须为空。
+  刷新 rank-local pressure/numeric/linear identity，并同步刷新跨 rank 一致的 collective
+  state/flux provenance；collective lineage 跨 rank 一致且轮间互异，未使用 suffix 必须为空。
 - 联合 L2 策略使用新的 policy schema/provenance identity；旧 L∞ 冻结 oracle 不得重生成。
 - continuity witness 只在 `valid=true` 时可作为失败诊断输出，正常成功热路径不增加详细
   witness collective。
@@ -75,8 +76,9 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 
 1. 主闭环证据：原 focused 9/9、PISO temporal order 和 product pressure–energy
    temporal convergence 已通过，未受本次契约修复影响的结果继续复用。
-2. 契约与 refinement 证据：后续安全硬化复核 3/3，覆盖 CLI witness valid gate、
-   L2 policy provenance mutation，以及真实 ProductDriver 成功/回滚和 1/2-rank 语义。
+2. 契约与 refinement 证据：受影响 focused 集合 9/9 覆盖 L2 policy provenance
+   mutation 和真实 ProductDriver 成功/回滚；最后的安全哨兵与 terminal 绑定补强后，
+   CLI 及 ProductDriver 1/2-rank 又复核 3/3。
 3. Re3900 基线证据：独立 `case-full, dt=0.006` 单步 startup 已通过，证明
    `dt=0.003` 只是保守 half-step，而非必要的时间步缩小。
 4. Re3900 时间层证据：唯一一次 64-rank 两步 `dt=0.006` 运行完成真实
@@ -92,11 +94,15 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 - pressure–enthalpy code commit：`d9006d261dd5247c7a2a8edc67a4fbb173544f15`
 - 当前 tests-off `hundun` SHA-256：
   `c4e57d0fbf0f4076437781551fc5db4d3a48f6d8504bbbe4a96acedafbb6c60d`
-- 最终 DCO-clean 候选提交与 tree：待 signed squash/少量逻辑 squash、树等价校验完成后补录。
+- DCO-clean code commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
+- 已验收 code tree：`7d172adbb1feb3ad4f692d303ef991d100e26252`
+- 原始开发历史备份：`codex/v04-pressure-enthalpy-c1-production-pre-dco-20260830`
 
-对 `origin/main..candidate` 的审计共覆盖 209 个提交：132 个没有
-`Signed-off-by` trailer，75 个 trailer 与作者匹配，2 个只有 Codex trailer。故当前历史
-明确不是 DCO-clean；最终一个带 sign-off 的提交不能反向证明此前整条历史合规。
+历史审计锚定 `origin/main..2739f36cbb80886585eb5f7b32b625278b78f38b`：209 个提交
+中 132 个没有 `Signed-off-by` trailer，75 个 trailer 与作者匹配，2 个只有 Codex
+trailer，因此没有机械修改旧作者历史。封装后的 code commit 与封装前候选
+`abfdb7f2cf6f2514af721606ace625ee669c9c0b` 的 tree 均为上述 `7d172a...`；可融合范围只
+保留由 WANG YUDONG 签署的 squash 和随后的签署回执提交。
 
 具体命令、残差、运行代价、工件和条件接受边界见
 `docs/verification/2026-08-30-v04-2-pressure-enthalpy-production-closure.md`。
