@@ -39,7 +39,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint8_t kWireVersion = 7U;
+constexpr std::uint8_t kWireVersion = 9U;
+constexpr std::uint8_t kPressureAlgorithmWireVersion = 10U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -47,10 +48,12 @@ constexpr std::size_t kMaxScalarsPerFace = 64U;
 constexpr std::size_t kMaxTransportedScalars = 64U;
 constexpr std::size_t kMaxStableNameBytes = 255U;
 constexpr std::string_view kSemanticContract =
-    "HUNDUN-FLOW-v0.4-case-wire-v7|input-schema=1|units=SI|"
+    "HUNDUN-FLOW-v0.4-case-wire-v9|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
     "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
-    "coupling=PISO|pressure_correctors=2|transported-scalars=typed-catalog|"
+    "coupling=PISO|pressure_correctors=2|pressure-linear=typed|"
+    "terminal-tolerances=typed|"
+    "transported-scalars=typed-catalog-with-schmidt-closures|"
     "thermophysics=typed-direct-root-data|boundaries=typed-six-face|"
     "schemes=typed|time=typed";
 
@@ -375,6 +378,7 @@ bool finite_real(yyjson_val* value, double& out) noexcept;
 bool parse_real3(yyjson_val* value, Real3& out) noexcept;
 bool valid_name(std::string_view value) noexcept;
 bool valid_boundary(const BoundaryFaceSpec& face) noexcept;
+bool valid_solver(const SolverSpec& solver) noexcept;
 bool valid_schemes(const SchemeSpec& schemes) noexcept;
 bool valid_time(const TimeControlSpec& time) noexcept;
 
@@ -434,6 +438,18 @@ bool parse_pressure_reference(std::string_view value,
     return true;
   }
   return false;
+}
+
+bool parse_linear_algorithm(std::string_view value,
+                            LinearAlgorithm &out) noexcept {
+  if (value == "fgmres") {
+    out = LinearAlgorithm::fgmres;
+  } else if (value == "bicgstab") {
+    out = LinearAlgorithm::bicgstab;
+  } else {
+    return false;
+  }
+  return true;
 }
 
 bool parse_boundary_kind(std::string_view value, BoundaryKind& out) noexcept {
@@ -600,6 +616,54 @@ bool parse_boundary_face(yyjson_val* value, BoundaryFaceSpec& out) {
     out.scalars.push_back(std::move(scalar));
   }
   return valid_boundary(out);
+}
+
+bool parse_solver_controls(yyjson_val* value, SolverSpec& out) noexcept {
+  yyjson_val* pressure = yyjson_obj_get(value, "pressure_linear");
+  yyjson_val* terminal = yyjson_obj_get(value, "terminal_tolerances");
+  const bool has_algorithm = yyjson_obj_get(pressure, "algorithm") != nullptr;
+  const bool pressure_keys =
+      yyjson_is_obj(pressure) &&
+      yyjson_obj_size(pressure) == 5U + (has_algorithm ? 1U : 0U) &&
+      yyjson_obj_get(pressure, "absolute_tolerance") != nullptr &&
+      yyjson_obj_get(pressure, "relative_tolerance") != nullptr &&
+      yyjson_obj_get(pressure, "maximum_iterations") != nullptr &&
+      yyjson_obj_get(pressure, "true_residual_interval") != nullptr &&
+      yyjson_obj_get(pressure, "krylov_restart") != nullptr &&
+      (!has_algorithm || yyjson_is_str(yyjson_obj_get(pressure, "algorithm")));
+  if (!pressure_keys ||
+      !object_has_exact_keys(terminal,
+                             {"eos", "continuity", "closed_mass", "gauge"})) {
+    return false;
+  }
+  const auto algorithm = string_value(pressure, "algorithm");
+  if (has_algorithm &&
+      (!algorithm.has_value() ||
+       !parse_linear_algorithm(*algorithm, out.pressure.algorithm))) {
+    return false;
+  }
+  out.pressure.mg_correction_scaling =
+      out.pressure.algorithm == LinearAlgorithm::bicgstab
+          ? MgCorrectionScaling::unit_linear
+          : MgCorrectionScaling::residual_minimizing;
+  return finite_real(yyjson_obj_get(pressure, "absolute_tolerance"),
+                     out.pressure.absolute_tolerance) &&
+         finite_real(yyjson_obj_get(pressure, "relative_tolerance"),
+                     out.pressure.relative_tolerance) &&
+         parse_uint32(yyjson_obj_get(pressure, "maximum_iterations"),
+                      out.pressure.maximum_iterations) &&
+         parse_uint32(yyjson_obj_get(pressure, "true_residual_interval"),
+                      out.pressure.true_residual_interval) &&
+         parse_uint32(yyjson_obj_get(pressure, "krylov_restart"),
+                      out.pressure.krylov_restart) &&
+         finite_real(yyjson_obj_get(terminal, "eos"), out.terminal.eos) &&
+         finite_real(yyjson_obj_get(terminal, "continuity"),
+                     out.terminal.continuity) &&
+         finite_real(yyjson_obj_get(terminal, "closed_mass"),
+                     out.terminal.closed_mass) &&
+         finite_real(yyjson_obj_get(terminal, "gauge"),
+                     out.terminal.gauge) &&
+         valid_solver(out);
 }
 
 bool parse_schemes_object(yyjson_val* value, SchemeSpec& out) noexcept {
@@ -937,6 +1001,10 @@ bool valid_transported_scalars(
         static_cast<std::uint8_t>(scalar.role) >
             static_cast<std::uint8_t>(
                 TransportedScalarRole::passive_scalar) ||
+        !std::isfinite(scalar.molecular_schmidt) ||
+        !(scalar.molecular_schmidt > 0.0) ||
+        !std::isfinite(scalar.turbulent_schmidt) ||
+        !(scalar.turbulent_schmidt > 0.0) ||
         !names.insert(scalar.stable_name).second) {
       return false;
     }
@@ -951,6 +1019,8 @@ void hash_transported_scalars(
   for (const TransportedScalarSpec& scalar : scalars) {
     hash.text(scalar.stable_name);
     hash.integer(static_cast<std::uint8_t>(scalar.role));
+    hash.real(scalar.molecular_schmidt);
+    hash.real(scalar.turbulent_schmidt);
   }
 }
 
@@ -966,6 +1036,48 @@ bool valid_schemes(const SchemeSpec& schemes) noexcept {
          schemes.diffusion == DiffusionScheme::central2 &&
          std::isfinite(schemes.limiter) && schemes.limiter >= 0.0 &&
          schemes.limiter <= 1.0;
+}
+
+bool valid_solver(const SolverSpec& solver) noexcept {
+  const PressureLinearSolverSpec& pressure = solver.pressure;
+  const SolverToleranceSpec& terminal = solver.terminal;
+  const bool finite = std::isfinite(pressure.absolute_tolerance) &&
+                      std::isfinite(pressure.relative_tolerance) &&
+                      std::isfinite(terminal.eos) &&
+                      std::isfinite(terminal.continuity) &&
+                      std::isfinite(terminal.closed_mass) &&
+                      std::isfinite(terminal.gauge);
+  const bool valid_algorithm = pressure.algorithm == LinearAlgorithm::fgmres ||
+                               pressure.algorithm == LinearAlgorithm::bicgstab;
+  const bool valid_scaling =
+      pressure.mg_correction_scaling ==
+          MgCorrectionScaling::residual_minimizing ||
+      pressure.mg_correction_scaling == MgCorrectionScaling::unit_linear;
+  const bool valid_pair =
+      (pressure.algorithm == LinearAlgorithm::fgmres &&
+       pressure.mg_correction_scaling ==
+           MgCorrectionScaling::residual_minimizing) ||
+      (pressure.algorithm == LinearAlgorithm::bicgstab &&
+       pressure.mg_correction_scaling == MgCorrectionScaling::unit_linear);
+  const bool valid_restart =
+      pressure.algorithm == LinearAlgorithm::fgmres
+          ? pressure.krylov_restart >= 2U && pressure.krylov_restart <= 64U
+          : pressure.krylov_restart == 0U;
+  return finite && valid_algorithm && valid_scaling && valid_pair &&
+         valid_restart && pressure.absolute_tolerance > 0.0 &&
+         pressure.absolute_tolerance < 1.0 &&
+         pressure.relative_tolerance > 0.0 &&
+         pressure.relative_tolerance < 1.0 &&
+         pressure.maximum_iterations > 0U &&
+         pressure.maximum_iterations <= 1000000U &&
+         pressure.true_residual_interval > 0U &&
+         pressure.true_residual_interval <= pressure.maximum_iterations &&
+         terminal.eos > 0.0 && terminal.eos < 1.0 &&
+         terminal.continuity > 0.0 && terminal.continuity < 1.0 &&
+         terminal.closed_mass > 0.0 && terminal.closed_mass < 1.0 &&
+         terminal.gauge > 0.0 && terminal.gauge < 1.0 &&
+         pressure.relative_tolerance <=
+             std::min(terminal.continuity, terminal.gauge);
 }
 
 bool valid_time(const TimeControlSpec& time) noexcept {
@@ -1028,6 +1140,25 @@ void hash_schemes(Hash64& hash, const SchemeSpec& value) noexcept {
   hash.integer(static_cast<std::uint8_t>(value.passive_scalar));
   hash.integer(static_cast<std::uint8_t>(value.diffusion));
   hash.real(value.limiter);
+}
+
+void hash_solver(Hash64& hash, const SolverSpec& value) noexcept {
+  hash.real(value.pressure.absolute_tolerance);
+  hash.real(value.pressure.relative_tolerance);
+  hash.integer(value.pressure.maximum_iterations);
+  hash.integer(value.pressure.true_residual_interval);
+  hash.integer(value.pressure.krylov_restart);
+  if (value.pressure.algorithm != LinearAlgorithm::fgmres ||
+      value.pressure.mg_correction_scaling !=
+          MgCorrectionScaling::residual_minimizing) {
+    hash.integer(static_cast<std::uint8_t>(value.pressure.algorithm));
+    hash.integer(
+        static_cast<std::uint8_t>(value.pressure.mg_correction_scaling));
+  }
+  hash.real(value.terminal.eos);
+  hash.real(value.terminal.continuity);
+  hash.real(value.terminal.closed_mass);
+  hash.real(value.terminal.gauge);
 }
 
 void hash_time(Hash64& hash, const TimeControlSpec& value) noexcept {
@@ -1262,6 +1393,8 @@ void write_transported_scalars(
   for (const TransportedScalarSpec& scalar : scalars) {
     static_cast<void>(writer.text(scalar.stable_name));
     writer.byte(static_cast<std::uint8_t>(scalar.role));
+    writer.real(scalar.molecular_schmidt);
+    writer.real(scalar.turbulent_schmidt);
   }
 }
 
@@ -1278,7 +1411,9 @@ bool read_transported_scalars(
     std::uint8_t role = 0U;
     if (!reader.text(scalar.stable_name) || !reader.byte(role) ||
         role > static_cast<std::uint8_t>(
-                   TransportedScalarRole::passive_scalar)) {
+                   TransportedScalarRole::passive_scalar) ||
+        !reader.real(scalar.molecular_schmidt) ||
+        !reader.real(scalar.turbulent_schmidt)) {
       return false;
     }
     scalar.role = static_cast<TransportedScalarRole>(role);
@@ -1329,6 +1464,48 @@ bool read_boundary(WireReader& reader, BoundaryFaceSpec& face) {
     face.scalars.push_back(std::move(scalar));
   }
   return valid_boundary(face);
+}
+
+void write_solver(WireWriter &writer, const SolverSpec &value, bool extended) {
+  writer.real(value.pressure.absolute_tolerance);
+  writer.real(value.pressure.relative_tolerance);
+  writer.u32(value.pressure.maximum_iterations);
+  writer.u32(value.pressure.true_residual_interval);
+  if (extended) {
+    writer.byte(static_cast<std::uint8_t>(value.pressure.algorithm));
+    writer.byte(
+        static_cast<std::uint8_t>(value.pressure.mg_correction_scaling));
+  }
+  writer.u32(value.pressure.krylov_restart);
+  writer.real(value.terminal.eos);
+  writer.real(value.terminal.continuity);
+  writer.real(value.terminal.closed_mass);
+  writer.real(value.terminal.gauge);
+}
+
+bool read_solver(WireReader &reader, SolverSpec &value,
+                 bool extended) noexcept {
+  std::uint8_t algorithm = 0U;
+  std::uint8_t scaling = 0U;
+  return reader.real(value.pressure.absolute_tolerance) &&
+         reader.real(value.pressure.relative_tolerance) &&
+         reader.u32(value.pressure.maximum_iterations) &&
+         reader.u32(value.pressure.true_residual_interval) &&
+         (!extended ||
+          (reader.byte(algorithm) &&
+           algorithm <= static_cast<std::uint8_t>(LinearAlgorithm::bicgstab) &&
+           reader.byte(scaling) &&
+           scaling <=
+               static_cast<std::uint8_t>(MgCorrectionScaling::unit_linear) &&
+           (value.pressure.algorithm = static_cast<LinearAlgorithm>(algorithm),
+            value.pressure.mg_correction_scaling =
+                static_cast<MgCorrectionScaling>(scaling),
+            true))) &&
+         reader.u32(value.pressure.krylov_restart) &&
+         reader.real(value.terminal.eos) &&
+         reader.real(value.terminal.continuity) &&
+         reader.real(value.terminal.closed_mass) &&
+         reader.real(value.terminal.gauge) && valid_solver(value);
 }
 
 void write_schemes(WireWriter& writer, const SchemeSpec& value) {
@@ -1514,7 +1691,8 @@ Status serialize_model(const ValidatedModel& model,
     if (!valid_canonical_mesh(model.mesh) ||
         static_cast<std::uint8_t>(model.pressure_reference) >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
-        !valid_schemes(model.schemes) || !valid_time(model.time) ||
+        !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
+        !valid_time(model.time) ||
         !valid_transported_scalars(model.transported_scalars) ||
         model.mesh.focus_regions.size() > detail::kMaxFocusRegions ||
         model.mesh.focus_regions.size() >
@@ -1539,8 +1717,12 @@ Status serialize_model(const ValidatedModel& model,
         return invalid_case(detail_wire);
       }
     }
+    const bool extended_solver =
+        model.solver.pressure.algorithm != LinearAlgorithm::fgmres ||
+        model.solver.pressure.mg_correction_scaling !=
+            MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
-    writer.byte(kWireVersion);
+    writer.byte(extended_solver ? kPressureAlgorithmWireVersion : kWireVersion);
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
@@ -1570,6 +1752,7 @@ Status serialize_model(const ValidatedModel& model,
       write_boundary(writer, face);
     }
     write_transported_scalars(writer, model.transported_scalars);
+    write_solver(writer, model.solver, extended_solver);
     write_schemes(writer, model.schemes);
     write_time(writer, model.time);
     write_thermophysics(writer, model.thermophysics);
@@ -1613,7 +1796,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint16_t data_count = 0U;
     std::uint8_t has_stl = 0U;
     std::uint8_t fluid_side = 0U;
-    if (!reader.byte(version) || version != kWireVersion ||
+    if (!reader.byte(version) ||
+        (version != kWireVersion && version != kPressureAlgorithmWireVersion) ||
         !reader.byte(geometry) ||
         geometry > static_cast<std::uint8_t>(GeometryKind::tensor_stretched) ||
         !reader.byte(turbulence) ||
@@ -1699,16 +1883,16 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       }
     }
     if (!read_transported_scalars(reader, model.transported_scalars) ||
+        !read_solver(reader, model.solver,
+                     version == kPressureAlgorithmWireVersion) ||
         !read_schemes(reader, model.schemes) ||
         !read_time(reader, model.time) ||
         !read_thermophysics(reader, model.thermophysics) ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
-        !reader.byte(has_stl) || has_stl > 1U ||
-        !reader.byte(fluid_side) ||
+        !reader.byte(has_stl) || has_stl > 1U || !reader.byte(fluid_side) ||
         fluid_side > static_cast<std::uint8_t>(ImmersedFluidSide::inside) ||
         (has_stl == 0U && fluid_side != 0U) ||
-        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) +
-                1U >
+        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) + 1U >
             detail::kMaxReferencedFiles) {
       return invalid_case(detail_wire);
     }
@@ -1825,8 +2009,12 @@ Status compile_on_root(const fs::path& case_root, int rank,
                    "limits", "data_files", "immersed_boundary"}) ||
         !object_has_exact_keys(flow,
                                {"model", "pressure_reference", "reacting"}) ||
-        !object_has_exact_keys(solver,
-                               {"coupling", "pressure_correctors"}) ||
+        !(object_has_exact_keys(solver,
+                                {"coupling", "pressure_correctors"}) ||
+          object_has_exact_keys(
+              solver,
+              {"coupling", "pressure_correctors", "pressure_linear",
+               "terminal_tolerances"})) ||
         !object_has_exact_keys(boundaries,
                                {"x_min", "x_max", "y_min", "y_max",
                                 "z_min", "z_max"}) ||
@@ -1876,7 +2064,9 @@ Status compile_on_root(const fs::path& case_root, int rank,
         return invalid_case(detail_json_value);
       }
     }
-    if (!parse_schemes_object(schemes, model.schemes) ||
+    if ((yyjson_obj_get(solver, "pressure_linear") != nullptr &&
+         !parse_solver_controls(solver, model.solver)) ||
+        !parse_schemes_object(schemes, model.schemes) ||
         !parse_time_object(time, model.time)) {
       return invalid_case(detail_json_value);
     }
@@ -1888,14 +2078,21 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* scalar_value = nullptr;
     yyjson_arr_foreach(transported_scalars, scalar_index, scalar_maximum,
                        scalar_value) {
-      if (!object_has_exact_keys(scalar_value, {"stable_name", "role"})) {
+      if (!object_has_exact_keys(
+              scalar_value,
+              {"stable_name", "role", "molecular_schmidt",
+               "turbulent_schmidt"})) {
         return invalid_case(detail_json_schema);
       }
       const auto stable_name = string_value(scalar_value, "stable_name");
       const auto role = string_value(scalar_value, "role");
       TransportedScalarSpec scalar;
       if (!stable_name || !role || !valid_name(*stable_name) ||
-          !parse_transported_scalar_role(*role, scalar.role)) {
+          !parse_transported_scalar_role(*role, scalar.role) ||
+          !finite_real(yyjson_obj_get(scalar_value, "molecular_schmidt"),
+                       scalar.molecular_schmidt) ||
+          !finite_real(yyjson_obj_get(scalar_value, "turbulent_schmidt"),
+                       scalar.turbulent_schmidt)) {
         return invalid_case(detail_json_value);
       }
       scalar.stable_name.assign(stable_name->data(), stable_name->size());
@@ -2029,6 +2226,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     for (const BoundaryFaceSpec& face : model.boundaries) {
       hash_boundary(hash, face);
     }
+    hash_solver(hash, model.solver);
     hash_schemes(hash, model.schemes);
     hash_time(hash, model.time);
     hash.integer(static_cast<std::uint16_t>(data_file_count));

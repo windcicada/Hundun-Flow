@@ -173,7 +173,20 @@ bool valid_policy(MgHierarchyPolicy policy) noexcept {
          policy.pre_sweeps != 0U && policy.post_sweeps != 0U &&
          policy.maximum_levels >= 2U &&
          policy.maximum_levels <= kMgMaximumLevels &&
-         policy.minimum_coarse_extent >= 2U;
+         policy.minimum_coarse_extent >= 2U &&
+         (policy.point_smoother == MgPointSmootherKind::red_black ||
+          policy.point_smoother == MgPointSmootherKind::chebyshev_jacobi) &&
+         (policy.cycle == MgCycleKind::v_cycle ||
+          policy.cycle == MgCycleKind::f_cycle) &&
+         std::isfinite(policy.chebyshev_lower_spectrum_fraction) &&
+         policy.chebyshev_lower_spectrum_fraction > 0.0 &&
+         policy.chebyshev_lower_spectrum_fraction < 1.0;
+}
+
+bool valid_operator_class(MgOperatorClass operator_class) noexcept {
+  return operator_class == MgOperatorClass::general ||
+         operator_class ==
+             MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
 }
 
 bool positive_shape(Int3 shape) noexcept {
@@ -360,6 +373,14 @@ PlanFingerprint structural_fingerprint(
   hash = mix(hash, static_cast<std::uint64_t>(spec.boundaries.z_min));
   hash = mix(hash, static_cast<std::uint64_t>(spec.boundaries.z_max));
   hash = mix(hash, static_cast<std::uint64_t>(spec.null_space));
+  hash = mix(hash, static_cast<std::uint64_t>(spec.operator_class));
+  hash = mix(hash, static_cast<std::uint64_t>(spec.policy.point_smoother));
+  hash = mix(hash, static_cast<std::uint64_t>(spec.policy.cycle));
+  std::uint64_t fraction_bits = 0U;
+  std::memcpy(&fraction_bits,
+              &spec.policy.chebyshev_lower_spectrum_fraction,
+              sizeof(fraction_bits));
+  hash = mix(hash, fraction_bits);
   hash = mix(hash, spec.identity.symbolic);
   hash = mix(hash, spec.identity.workspace);
   hash = mix(hash, spec.policy.pre_sweeps);
@@ -405,9 +426,20 @@ Status validate_compile(const NativeCartesianMgSpec& spec,
       !std::isfinite(spec.coefficients.maximum_relative_change) ||
       spec.coefficients.maximum_relative_change < 0.0 ||
       !valid_policy(spec.policy) ||
+      !valid_operator_class(spec.operator_class) ||
       !valid_pair(spec.boundaries.x_min, spec.boundaries.x_max) ||
       !valid_pair(spec.boundaries.y_min, spec.boundaries.y_max) ||
       !valid_pair(spec.boundaries.z_min, spec.boundaries.z_max)) {
+    return {StatusCode::invalid_plan, kHyprePlan};
+  }
+  if (spec.policy.point_smoother == MgPointSmootherKind::chebyshev_jacobi) {
+    // The isolated Struct adapter has no certified native polynomial route;
+    // reject the request instead of silently running its red/black smoother.
+    return {StatusCode::invalid_plan, kHyprePlan};
+  }
+  if (spec.policy.cycle != MgCycleKind::v_cycle) {
+    // The HYPRE adapter has no audited fixed-kappa recursion.  Reject F-cycle
+    // requests instead of silently changing their scientific work.
     return {StatusCode::invalid_plan, kHyprePlan};
   }
   const Int3 global = spec.geometry->global_cells();

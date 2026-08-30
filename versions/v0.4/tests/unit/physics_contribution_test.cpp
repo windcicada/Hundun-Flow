@@ -100,9 +100,18 @@ bool test_effective_viscosity_authority() {
   EffectiveViscosityAuthority competing_instance;
   passed &= expect(!competing_instance.claim(1U, 8U, registry),
                    "a second authority instance cannot claim the registry");
+  passed &= expect(registry.plan() == nullptr,
+                   "mutable registration does not expose a runtime plan");
   passed &= expect(static_cast<bool>(registry.freeze()) &&
                        registry.fingerprint() != 0U,
                    "mu_eff authority participates in production freeze");
+  const ContributionPlan* plan = registry.plan();
+  passed &= expect(plan != nullptr && plan->valid() &&
+                       plan->fingerprint() == registry.fingerprint() &&
+                       plan->contributions().size ==
+                           registry.contributions().size &&
+                       plan->reads().size == registry.reads().size,
+                   "freeze publishes one immutable ContributionPlan seam");
   return passed;
 }
 
@@ -200,6 +209,10 @@ bool test_registration_validation() {
                                   1U);
 
   ContributionSpec candidate = valid;
+  candidate.stage = 0U;
+  passed &= expect(!registry.register_contribution(candidate),
+                   "stage zero cannot enter the frozen execution graph");
+  candidate = valid;
   candidate.conserved_quantity = 20U;
   passed &= expect(!registry.register_contribution(candidate),
                    "an undeclared conserved field is rejected");

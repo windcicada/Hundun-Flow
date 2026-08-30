@@ -15,6 +15,12 @@
 
 namespace hundun::v04 {
 
+enum class LinearAlgorithm : std::uint8_t { pcg, fgmres, bicgstab };
+enum class MgCorrectionScaling : std::uint8_t {
+  residual_minimizing,
+  unit_linear
+};
+
 enum class GeometryKind : std::uint8_t { uniform, tensor_stretched };
 enum class TurbulenceKind : std::uint8_t {
   none,
@@ -121,6 +127,12 @@ struct ScalarBoundarySpec {
 struct TransportedScalarSpec {
   std::string stable_name;
   TransportedScalarRole role{TransportedScalarRole::passive_scalar};
+  // Molecular and turbulent scalar diffusivities are formed from the
+  // corresponding dynamic viscosity divided by these dimensionless
+  // Schmidt numbers.  JSON input requires both values explicitly; the
+  // positive defaults keep programmatic typed fixtures well formed.
+  double molecular_schmidt{1.0};
+  double turbulent_schmidt{1.0};
 };
 
 struct BoundaryFaceSpec {
@@ -149,6 +161,29 @@ struct SchemeSpec {
   ConvectionScheme passive_scalar{ConvectionScheme::tvd2};
   DiffusionScheme diffusion{DiffusionScheme::central2};
   double limiter{1.0};
+};
+
+struct PressureLinearSolverSpec {
+  double absolute_tolerance{1.0e-13};
+  double relative_tolerance{1.0e-13};
+  std::uint32_t maximum_iterations{400U};
+  std::uint32_t true_residual_interval{4U};
+  std::uint32_t krylov_restart{12U};
+  LinearAlgorithm algorithm{LinearAlgorithm::fgmres};
+  MgCorrectionScaling mg_correction_scaling{
+      MgCorrectionScaling::residual_minimizing};
+};
+
+struct SolverToleranceSpec {
+  double eos{1.0e-10};
+  double continuity{1.0e-10};
+  double closed_mass{1.0e-10};
+  double gauge{1.0e-10};
+};
+
+struct SolverSpec {
+  PressureLinearSolverSpec pressure;
+  SolverToleranceSpec terminal;
 };
 
 struct TimeControlSpec {
@@ -201,6 +236,7 @@ struct ValidatedModel {
   PressureReferenceKind pressure_reference{
       PressureReferenceKind::boundary_absolute};
   std::array<BoundaryFaceSpec, 6U> boundaries;
+  SolverSpec solver;
   SchemeSpec schemes;
   TimeControlSpec time;
   ThermophysicalSpec thermophysics;

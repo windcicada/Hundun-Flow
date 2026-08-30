@@ -1,0 +1,71 @@
+{
+  "schema": "HUNDUN_V04_LITERATURE_V1",
+  "source": {
+    "title": "Features of a Reattaching Turbulent Shear Layer in Divergent Channel Flow",
+    "authors": "D. M. Driver, H. L. Seegmiller",
+    "year": 1985,
+    "doi": "10.2514/3.8890",
+    "primary_url": "https://www.grc.nasa.gov/www/wind/valid/backstep/backstep01/backstep01.html",
+    "locator": "AIAA Journal 23(2), 163-171; NASA NPARC Backstep Study #1; alpha=0 degrees"
+  },
+  "experiment": {
+    "configuration": "parallel-wall alpha=0 degree backward-facing step",
+    "step_height_m": 0.0127,
+    "tunnel_exit_height_over_h": 9.0,
+    "tunnel_width_over_h": 12.0,
+    "reynolds_number_h": 36000,
+    "momentum_thickness_reynolds_number": 5000,
+    "reference_velocity_m_per_s": 44.2,
+    "boundary_layer_thickness_over_h": 1.5,
+    "profile_stations_x_over_h": [-4, 1, 4, 6, 10]
+  },
+  "observables": [
+    {
+      "name": "reattachment_length_over_h",
+      "value": 6.26,
+      "units": "1",
+      "definition": "wall Cf=0 interpolation from laser oil-flow interferometer data",
+      "source_locator": "NASA bstepdata.txt, alpha=0 degree BACKSTP.DAT description",
+      "extraction_method": "direct original-data value",
+      "uncertainty": {"status": "reported", "value": 0.10, "kind": "absolute"}
+    },
+    {
+      "name": "step_height",
+      "value": 0.0127,
+      "units": "m",
+      "definition": "backward-facing step height H",
+      "source_locator": "NASA validation geometry",
+      "extraction_method": "direct source value (0.5 inch)",
+      "uncertainty": {"status": "not_reported", "value": null, "kind": "none"}
+    },
+    {
+      "name": "reference_velocity",
+      "value": 44.2,
+      "units": "m/s",
+      "definition": "center-channel reference velocity near x/H=-4",
+      "source_locator": "NASA/TMBWG validation description",
+      "extraction_method": "direct source value",
+      "uncertainty": {"status": "not_reported", "value": null, "kind": "none"}
+    }
+  ],
+  "datasets": [
+    {
+      "name": "bottom_wall_cp",
+      "url": "https://tmbwg.github.io/turbmodels/Backstep_validation/cp.expnew.dat",
+      "sha256_at_freeze": "2b3ec9f8d8025b958d6ddcf6767daaf3c93083d45ef350a8cf9c4b46f93a882a",
+      "convention": "retain both cp and cp_orig; cp is shifted to zero near x/H=40"
+    },
+    {
+      "name": "bottom_wall_cf",
+      "url": "https://tmbwg.github.io/turbmodels/Backstep_validation/cf.exp.dat",
+      "sha256_at_freeze": "cd9b6434b7956bc58e859de6af654cd7f891e25303babf1dd8633d6c58f74276",
+      "convention": "columns x/H, Cf, absolute error"
+    },
+    {
+      "name": "ldv_profiles",
+      "url": "https://tmbwg.github.io/turbmodels/Backstep_validation/profiles.exp.dat",
+      "sha256_at_freeze": "23e8b44db52bfc36c66af6b743a4080c34f0165eb213a3db29c0914e12cf598d",
+      "convention": "u,v normalized by Uref; second moments scaled by 1000/Uref^2; third moments by 10000/Uref^3"
+    }
+  ]
+}

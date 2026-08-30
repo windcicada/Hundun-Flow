@@ -39,6 +39,9 @@ class ThermalState {
   double gas_constant() const noexcept { return gas_constant_; }
   double gamma() const noexcept { return gamma_; }
   double drho_dp_hY() const noexcept { return drho_dp_hY_; }
+  double dpressure_compressibility_dh_hY() const noexcept {
+    return dpressure_compressibility_dh_hY_;
+  }
   double sound_speed() const noexcept { return sound_speed_; }
   ThermalRevisionTuple revisions() const noexcept { return revisions_; }
 
@@ -50,6 +53,7 @@ class ThermalState {
   double gas_constant_{};
   double gamma_{};
   double drho_dp_hY_{};
+  double dpressure_compressibility_dh_hY_{};
   double sound_speed_{};
   PlanFingerprint thermodynamics_{};
   ThermalRevisionTuple revisions_{};
@@ -59,6 +63,7 @@ class ThermalState {
 struct PressureThermoState {
   double rho{};
   double drho_dp_hY{};
+  double drho_dh_pY{};
 };
 
 struct ThermoState {
@@ -68,6 +73,7 @@ struct ThermoState {
   double gas_constant{};
   double gamma{};
   double drho_dp_hY{};
+  double drho_dh_pY{};
   double sound_speed{};
   double mach{};
 };
@@ -106,10 +112,32 @@ class ThermodynamicsPlan {
       ThermoState& out,
       double temperature_hint =
           std::numeric_limits<double>::quiet_NaN()) const noexcept;
+  // Complete one ideal-gas thermophysical state from the predictor's density
+  // authority.  Thermal inversion is performed once at fixed h/Y; p_abs is
+  // then rebased from rho/(drho/dp)|h,Y.
+  Status evaluate_from_density(
+      double density, double h,
+      Span<const double> independent_mass_fractions, Real3 velocity,
+      double& pressure_absolute, ThermoState& out,
+      double temperature_hint =
+          std::numeric_limits<double>::quiet_NaN()) const noexcept;
   Status mixture_enthalpy(double temperature,
                           Span<const double> independent_mass_fractions,
                           double& enthalpy, double& cp,
                           double& gas_constant) const noexcept;
+
+  // Returns the cached absolute NASA enthalpy for one complete species at the
+  // configured temperature endpoints.  The caller intentionally forms the
+  // conserved linear sum from arbitrary rho*Y_s values; no composition
+  // simplex or positivity check belongs in this narrow hot-path interface.
+  // The independent-species companion below applies the compiled catalog
+  // mapping before forwarding to the full-species lookup.
+  Status species_enthalpy_bounds(std::size_t full_species_index,
+                                 double& at_minimum,
+                                 double& at_maximum) const noexcept;
+  Status independent_species_enthalpy_bounds(std::size_t independent_index,
+                                             double& at_minimum,
+                                             double& at_maximum) const noexcept;
 
   std::size_t species_count() const noexcept {
     return inverse_molecular_weight_.size();
@@ -155,6 +183,8 @@ class ThermodynamicsPlan {
   std::array<std::vector<double>, 7U> nasa_low_;
   std::array<std::vector<double>, 7U> nasa_high_;
   std::vector<double> temperature_switch_;
+  std::vector<double> species_enthalpy_minimum_;
+  std::vector<double> species_enthalpy_maximum_;
   std::vector<std::uint16_t> independent_to_species_;
   std::size_t dependent_species_{};
   double minimum_temperature_{};
@@ -316,6 +346,206 @@ class EffectiveViscosityAuthority {
   bool claimed_{};
 };
 
+enum class SubgridKind : std::uint8_t { none, wale, vreman };
+enum class WallTreatmentKind : std::uint8_t {
+  resolved,
+  equilibrium_wall_function
+};
+enum class WallSurfaceKind : std::uint8_t { external, immersed };
+
+struct TurbulencePlanSpec {
+  TurbulenceKind kind{TurbulenceKind::vreman_wall_function};
+  double wale_coefficient{0.325};
+  double vreman_coefficient{0.07};
+  double turbulent_prandtl{0.9};
+  double turbulent_schmidt{0.7};
+};
+
+struct TurbulenceUpdateInput {
+  ConstFieldView density{};
+  ConstFieldView molecular_viscosity{};
+  Span<const VelocityGradient> velocity_gradient{};
+  RevisionToken gradient_revision{};
+  ConstFieldView velocity_gradient_field{};
+};
+
+struct TurbulenceCandidateInput {
+  ConstFieldView density{};
+  ConstFieldView molecular_viscosity{};
+  ConstFieldView velocity_gradient{};
+  RevisionToken gradient_revision{};
+};
+
+struct TurbulenceCandidateFieldBinding {
+  const double* base{};
+  Int3 interior{};
+  Int3 ghosts{};
+  std::uint8_t components{};
+  std::size_t stride_y{};
+  std::size_t stride_z{};
+  std::size_t component_stride{};
+  std::size_t replica{};
+  FieldId field{};
+  RevisionToken revision{};
+  StorageIdentity storage{};
+  RevisionDomainIdentity revision_domain{};
+
+  bool valid() const noexcept {
+    return base != nullptr && interior.x > 0 && interior.y > 0 &&
+           interior.z > 0 && ghosts.x >= 0 && ghosts.y >= 0 &&
+           ghosts.z >= 0 && components != 0U && stride_y != 0U &&
+           stride_z != 0U && component_stride != 0U && revision != 0U &&
+           storage != 0U && revision_domain != 0U;
+  }
+  bool matches(ConstFieldView view) const noexcept {
+    return base == view.base && interior.x == view.interior.x &&
+           interior.y == view.interior.y && interior.z == view.interior.z &&
+           ghosts.x == view.ghosts.x && ghosts.y == view.ghosts.y &&
+           ghosts.z == view.ghosts.z && components == view.components &&
+           stride_y == view.stride_y && stride_z == view.stride_z &&
+           component_stride == view.component_stride &&
+           replica == view.replica && field == view.field &&
+           revision == view.revision && storage == view.storage_identity &&
+           revision_domain == view.revision_domain;
+  }
+};
+
+struct TurbulenceCandidateCertificate {
+  PlanFingerprint plan{};
+  TurbulenceCandidateFieldBinding density{};
+  TurbulenceCandidateFieldBinding molecular_viscosity{};
+  TurbulenceCandidateFieldBinding velocity_gradient{};
+  TurbulenceCandidateFieldBinding effective_viscosity{};
+  FieldId production_effective_viscosity_output{};
+  RevisionToken state{};
+  bool no_state_mutation{};
+  bool allocation_free{};
+  bool two_pass_commit{};
+
+  bool valid() const noexcept {
+    return plan != 0U && density.valid() && molecular_viscosity.valid() &&
+           velocity_gradient.valid() && effective_viscosity.valid() &&
+           velocity_gradient.components == 9U &&
+           effective_viscosity.components == 1U &&
+           effective_viscosity.field != production_effective_viscosity_output &&
+           state != 0U && no_state_mutation && allocation_free &&
+           two_pass_commit;
+  }
+  bool matches(PlanFingerprint expected_plan,
+               const TurbulenceCandidateInput& input,
+               ConstFieldView output) const noexcept {
+    return valid() && plan == expected_plan &&
+           input.gradient_revision == input.velocity_gradient.revision &&
+           density.matches(input.density) &&
+           molecular_viscosity.matches(input.molecular_viscosity) &&
+           velocity_gradient.matches(input.velocity_gradient) &&
+           effective_viscosity.matches(output);
+  }
+};
+
+struct TurbulenceCertificate {
+  PlanFingerprint plan{};
+  RevisionToken density{};
+  RevisionToken molecular_viscosity{};
+  RevisionToken gradient{};
+  RevisionToken effective_viscosity{};
+  RevisionToken state{};
+
+  bool valid() const noexcept {
+    return plan != 0U && density != 0U && molecular_viscosity != 0U &&
+           gradient != 0U && effective_viscosity != 0U && state != 0U;
+  }
+};
+
+struct WallFunctionSample {
+  WallSurfaceKind surface{WallSurfaceKind::external};
+  Real3 solid_to_fluid_normal{};
+  Real3 fluid_velocity{};
+  Real3 wall_velocity{};
+  double wall_distance{};
+  double density{};
+  double molecular_viscosity{};
+  double heat_capacity{};
+  double molecular_conductivity{};
+  double fluid_temperature{};
+  double wall_temperature{};
+  double molecular_mass_diffusivity{};
+  double fluid_scalar{};
+  double wall_scalar{};
+  double roughness_height{};
+};
+
+struct WallFunctionResult {
+  Real3 shear_on_fluid{};
+  double friction_velocity{};
+  double y_plus{};
+  double wall_kinematic_viscosity{};
+  double heat_flux_into_fluid{};
+  double scalar_flux_into_fluid{};
+};
+
+Status wale_kinematic_viscosity(const VelocityGradient& gradient,
+                                double filter_width, double coefficient,
+                                double& out) noexcept;
+Status vreman_kinematic_viscosity(const VelocityGradient& gradient,
+                                  Real3 filter_widths, double coefficient,
+                                  double& out) noexcept;
+
+class TurbulencePlan {
+ public:
+  TurbulencePlan() noexcept = default;
+  TurbulencePlan(const TurbulencePlan&) = delete;
+  TurbulencePlan& operator=(const TurbulencePlan&) = delete;
+  TurbulencePlan(TurbulencePlan&&) noexcept = default;
+  TurbulencePlan& operator=(TurbulencePlan&&) noexcept = default;
+
+  static Status compile(MPI_Comm communicator,
+                        const TurbulencePlanSpec& spec,
+                        const CartesianGeometryPlan& geometry,
+                        const MeshPatch& patch,
+                        FieldId effective_viscosity_output,
+                        StageId update_stage,
+                        ContributionRegistry& contributions,
+                        TurbulencePlan& out) noexcept;
+  Status update(const TurbulenceUpdateInput& input,
+                FieldView effective_viscosity,
+                TurbulenceCertificate& certificate) noexcept;
+  Status evaluate_candidate_effective_viscosity(
+      const TurbulenceCandidateInput& input, FieldView effective_viscosity,
+      TurbulenceCandidateCertificate& certificate) const noexcept;
+  Status evaluate_wall_function(const WallFunctionSample& sample,
+                                WallFunctionResult& result) const noexcept;
+
+  TurbulenceKind kind() const noexcept { return kind_; }
+  SubgridKind subgrid_kind() const noexcept { return subgrid_; }
+  WallTreatmentKind wall_treatment() const noexcept { return wall_; }
+  double turbulent_prandtl() const noexcept { return turbulent_prandtl_; }
+  double turbulent_schmidt() const noexcept { return turbulent_schmidt_; }
+  PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+  std::uint64_t update_count() const noexcept { return update_count_; }
+
+ private:
+  struct FilterMetric {
+    double x{};
+    double y{};
+    double z{};
+    double isotropic{};
+  };
+  std::vector<FilterMetric> filter_metrics_;
+  std::vector<double> pending_effective_viscosity_;
+  TurbulenceCertificate active_{};
+  EffectiveViscosityAuthority authority_{};
+  Int3 cells_{};
+  TurbulenceKind kind_{TurbulenceKind::vreman_wall_function};
+  SubgridKind subgrid_{SubgridKind::vreman};
+  WallTreatmentKind wall_{WallTreatmentKind::equilibrium_wall_function};
+  double coefficient_{0.07};
+  double turbulent_prandtl_{0.9};
+  double turbulent_schmidt_{0.7};
+  PlanFingerprint fingerprint_{};
+  std::uint64_t update_count_{};
+};
+
 struct UnitDimension {
   std::array<std::int8_t, 7U> si_exponents{};
   friend bool operator==(UnitDimension left,
@@ -353,27 +583,54 @@ struct CompiledContribution {
   std::uint32_t registration_ordinal{};
 };
 
-class ContributionRegistry {
+class ContributionPlan {
  public:
-  Status configure(Span<const FieldId> declared_fields) noexcept;
-  Status register_contribution(const ContributionSpec& spec) noexcept;
-  Status freeze() noexcept;
   Span<const CompiledContribution> contributions() const noexcept {
     return {contributions_.data(), contributions_.size()};
   }
   Span<const FieldId> reads() const noexcept {
     return {reads_.data(), reads_.size()};
   }
-  bool frozen() const noexcept { return frozen_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+  bool valid() const noexcept { return fingerprint_ != 0U; }
+
+ private:
+  friend class ContributionRegistry;
+  std::vector<CompiledContribution> contributions_;
+  std::vector<FieldId> reads_;
+  PlanFingerprint fingerprint_{};
+};
+
+class ContributionRegistry {
+ public:
+  Status configure(Span<const FieldId> declared_fields) noexcept;
+  Status register_contribution(const ContributionSpec& spec) noexcept;
+  Status freeze() noexcept;
+  Span<const CompiledContribution> contributions() const noexcept {
+    return frozen_ ? plan_.contributions()
+                   : Span<const CompiledContribution>{contributions_.data(),
+                                                      contributions_.size()};
+  }
+  Span<const FieldId> reads() const noexcept {
+    return frozen_ ? plan_.reads()
+                   : Span<const FieldId>{reads_.data(), reads_.size()};
+  }
+  bool frozen() const noexcept { return frozen_; }
+  PlanFingerprint fingerprint() const noexcept {
+    return frozen_ ? plan_.fingerprint() : 0U;
+  }
+  const ContributionPlan* plan() const noexcept {
+    return frozen_ ? &plan_ : nullptr;
+  }
 
  private:
   friend class EffectiveViscosityAuthority;
+  friend class TurbulencePlan;
   std::vector<CompiledContribution> contributions_;
   std::vector<FieldId> reads_;
   std::vector<FieldId> declared_fields_;
   std::uint32_t next_ordinal_{};
-  PlanFingerprint fingerprint_{};
+  ContributionPlan plan_;
   bool frozen_{};
   bool effective_viscosity_claimed_{};
   FieldId effective_viscosity_output_{};
@@ -387,6 +644,31 @@ struct ClosedMassCellView {
   Span<const double> independent_mass_fractions;
   Span<const double> volume;
   Span<const std::uint8_t> active;
+  // Required by the Task 14 coupling wrapper; direct Task 8 solves may leave
+  // it zero when no predictor authority exists yet.
+  PlanFingerprint predictor_state{};
+};
+
+struct ClosedMassFieldView {
+  ConstFieldView pressure_perturbation{};
+  ConstFieldView enthalpy{};
+  Span<const ConstFieldView> independent_mass_fractions{};
+  const CartesianGeometryPlan* geometry{};
+  MeshPatch patch{};
+  // Empty means every local Cartesian cell is fluid-active.
+  Span<const std::uint8_t> active{};
+  PlanFingerprint predictor_state{};
+};
+
+struct ClosedMassDensityFieldView {
+  ConstFieldView pressure_perturbation{};
+  ConstFieldView density{};
+  ConstFieldView pressure_compressibility{};
+  const CartesianGeometryPlan* geometry{};
+  MeshPatch patch{};
+  // Empty means every local Cartesian cell is fluid-active.
+  Span<const std::uint8_t> active{};
+  PlanFingerprint predictor_state{};
 };
 
 struct ClosedMassResult {
@@ -407,6 +689,15 @@ class ClosedMassPlan {
                const ClosedMassCellView& cells, double target_mass,
                double current_pressure_reference,
                ClosedMassResult& out) const noexcept;
+  Status solve_fields(MPI_Comm communicator,
+                      const ThermodynamicsPlan& thermodynamics,
+                      const ClosedMassFieldView& cells, double target_mass,
+                      double current_pressure_reference,
+                      ClosedMassResult& out) const noexcept;
+  Status certify_density_fields(
+      MPI_Comm communicator, const ClosedMassDensityFieldView& cells,
+      double target_mass, double current_pressure_reference,
+      ClosedMassResult& out) const noexcept;
   PressureReferenceKind authority() const noexcept { return authority_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 

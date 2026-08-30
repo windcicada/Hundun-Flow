@@ -315,6 +315,32 @@ bool test_disconnected_components_use_local_volume_scale(
   return passed;
 }
 
+bool test_shared_stl_vertices_survive_edge_storage_roundtrip(
+    const CartesianGeometryPlan& geometry, const MeshPatch& patch) {
+  // These are exactly representable binary32 STL coordinates promoted to
+  // binary64.  Reconstructing b/c as a + (b/c - a) changes the near-zero x
+  // coordinate, so topology must consume the preserved source vertices.
+  const Real3 a{0.03270156309008598, 0.4989294707775116, -1.0};
+  const Real3 b{3.0616171314629196e-17, 0.5, -1.0};
+  const Real3 c{3.0616171314629196e-17, 0.5, 0.0};
+  const Real3 d{0.1, 0.4, -0.5};
+  const std::vector<TriangleInput> tetrahedron{
+      {a, b, c}, {a, d, b}, {a, c, d}, {b, d, c}};
+  StlScanPlan scan;
+  ImmersedSurfacePlan surface;
+  const bool compiled = compile_scan(geometry, patch, tetrahedron, scan) &&
+                        static_cast<bool>(
+                            ImmersedSurfaceCompiler::compile(scan, surface));
+  bool passed = expect(
+      compiled,
+      "shared STL vertices remain bit-identical through the scan plan");
+  if (compiled) {
+    passed &= expect(surface.triangles().size == tetrahedron.size(),
+                     "roundtrip fixture publishes all closed facets");
+  }
+  return passed;
+}
+
 bool test_topology_rejection_and_atomic_publication(
     const CartesianGeometryPlan& geometry, const MeshPatch& patch,
     ImmersedSurfacePlan& baseline) {
@@ -487,6 +513,8 @@ int main(int argc, char** argv) {
                                                        baseline);
     passed &= test_disconnected_components_use_local_volume_scale(geometry,
                                                                    patch);
+    passed &= test_shared_stl_vertices_survive_edge_storage_roundtrip(geometry,
+                                                                      patch);
     passed &= test_topology_rejection_and_atomic_publication(geometry, patch,
                                                               baseline);
     passed &= test_queries_and_no_hot_allocations(baseline);

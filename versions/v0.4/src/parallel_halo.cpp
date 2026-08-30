@@ -1195,6 +1195,11 @@ Status HaloEngine::reserve(MPI_Comm communicator, const MeshPatch& patch,
 
 Status HaloEngine::begin(StageId stage, Span<const FieldView> fields,
                          HaloTicket& ticket) noexcept {
+  return begin(stage, fields, {}, ticket);
+}
+
+Status HaloEngine::begin(StageId stage, Span<const FieldView> fields,
+                         Status prerequisite, HaloTicket& ticket) noexcept {
   if (implementation_ == nullptr) {
     return {StatusCode::invalid_plan, detail::halo_detail_state};
   }
@@ -1209,7 +1214,7 @@ Status HaloEngine::begin(StageId stage, Span<const FieldView> fields,
   Status local = implementation.exchange_active || ticket.active_
                      ? Status{StatusCode::invalid_plan,
                               detail::halo_detail_state}
-                     : Status{};
+                     : prerequisite;
   if (local && implementation.poisoned) {
     local = recreate_requests(implementation);
   }

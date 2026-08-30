@@ -41,6 +41,10 @@ bool positive(Int3 value) noexcept {
   return value.x > 0 && value.y > 0 && value.z > 0;
 }
 
+bool valid_cycle(MgCycleKind cycle) noexcept {
+  return cycle == MgCycleKind::v_cycle || cycle == MgCycleKind::f_cycle;
+}
+
 bool checked_add(std::size_t left, std::size_t right,
                  std::size_t& out) noexcept {
   if (left > std::numeric_limits<std::size_t>::max() - right) {
@@ -316,7 +320,7 @@ Status make_mg_workspace_requirements(
       std::isfinite(policy.anisotropy_threshold) &&
       policy.anisotropy_threshold > 1.0 && policy.maximum_levels >= 2U &&
       policy.maximum_levels <= kMgMaximumLevels &&
-      policy.minimum_coarse_extent >= 2U;
+      policy.minimum_coarse_extent >= 2U && valid_cycle(policy.cycle);
   if (communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kMgWorkspacePlan};
   }
@@ -334,6 +338,7 @@ Status make_mg_workspace_requirements(
   semantic = mix(semantic, execution_revision);
   semantic = mix(semantic, policy.maximum_levels);
   semantic = mix(semantic, policy.minimum_coarse_extent);
+  semantic = mix(semantic, static_cast<std::uint64_t>(policy.cycle));
   std::uint64_t threshold_bits = 0U;
   static_assert(sizeof(threshold_bits) == sizeof(policy.anisotropy_threshold));
   std::memcpy(&threshold_bits, &policy.anisotropy_threshold,

@@ -679,6 +679,22 @@ RevisionToken StateLayers::runtime_revision(FieldLifetime lifetime,
   return revisions_[id];
 }
 
+Status StateLayers::revise_runtime(FieldLifetime lifetime,
+                                   FieldId field) noexcept {
+  const ArenaFieldLayout* const layout = storage_.field_layout(field);
+  const std::size_t id = static_cast<std::size_t>(field);
+  if (lifetime == FieldLifetime::state_layer || layout == nullptr ||
+      layout->lifetime != lifetime || layout->replicas != 1U ||
+      id >= field_count_ || id >= revisions_.size() ||
+      id >= state_fields_.size() || state_fields_[id] != 0U ||
+      next_revision_ == 0U ||
+      next_revision_ == std::numeric_limits<RevisionToken>::max()) {
+    return {StatusCode::invalid_plan, kArenaRevision};
+  }
+  revisions_[id] = next_revision_++;
+  return {};
+}
+
 Status StateLayers::runtime_view(FieldLifetime lifetime, FieldId field,
                                  FieldView& out) noexcept {
   const RevisionToken token = runtime_revision(lifetime, field);

@@ -312,6 +312,16 @@ bool test_valid_fixture() {
                    "fixture publishes hard limits");
   passed &= expect(model.transported_scalars.empty(),
                    "fixture publishes an explicit empty scalar catalog");
+  passed &= expect(model.solver.pressure.absolute_tolerance == 1.0e-13 &&
+                       model.solver.pressure.relative_tolerance == 1.0e-13 &&
+                       model.solver.pressure.maximum_iterations == 400U &&
+                       model.solver.pressure.true_residual_interval == 4U &&
+                       model.solver.pressure.krylov_restart == 12U &&
+                       model.solver.terminal.eos == 1.0e-10 &&
+                       model.solver.terminal.continuity == 1.0e-10 &&
+                       model.solver.terminal.closed_mass == 1.0e-10 &&
+                       model.solver.terminal.gauge == 1.0e-10,
+                   "fixture publishes explicit solver work and terminal gates");
   passed &= expect(model.fingerprint != 0U, "fixture has fingerprint");
   return passed;
 }
@@ -439,7 +449,7 @@ bool test_typed_case_fields_and_fingerprint() {
   passed &= fingerprint_variant(
       "transported scalar catalog affects fingerprint",
       "\"transported_scalars\":[]",
-      "\"transported_scalars\":[{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
   passed &= fingerprint_variant(
       "pressure reference affects fingerprint",
       "\"pressure_reference\":\"boundary_absolute\"",
@@ -498,7 +508,7 @@ bool test_transported_scalar_catalog() {
   bool passed = expect(
       replace_once(
           valid, "\"transported_scalars\":[]",
-          "\"transported_scalars\":[{\"stable_name\":\"O2\",\"role\":\"species\"},{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\"}]"),
+          "\"transported_scalars\":[{\"stable_name\":\"O2\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9},{\"stable_name\":\"mixture_fraction\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.8,\"turbulent_schmidt\":0.6}]"),
       "catalog valid fixture mutation");
   ScratchCase valid_case("transported-scalars-valid");
   valid_case.write("case.json", valid);
@@ -509,9 +519,13 @@ bool test_transported_scalar_catalog() {
           model.transported_scalars.size() == 2U &&
           model.transported_scalars[0].stable_name == "O2" &&
           model.transported_scalars[0].role == TransportedScalarRole::species &&
+          model.transported_scalars[0].molecular_schmidt == 0.7 &&
+          model.transported_scalars[0].turbulent_schmidt == 0.9 &&
           model.transported_scalars[1].stable_name == "mixture_fraction" &&
           model.transported_scalars[1].role ==
-              TransportedScalarRole::passive_scalar,
+              TransportedScalarRole::passive_scalar &&
+          model.transported_scalars[1].molecular_schmidt == 0.8 &&
+          model.transported_scalars[1].turbulent_schmidt == 0.6,
       "catalog is retained in declared stable order");
 
   const auto reject_catalog = [&](std::string_view label,
@@ -529,25 +543,25 @@ bool test_transported_scalar_catalog() {
                             "\"transported_scalars\":{}");
   passed &= reject_catalog(
       "duplicate transported scalar names",
-      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\"},{\"stable_name\":\"z\",\"role\":\"passive_scalar\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9},{\"stable_name\":\"z\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.8,\"turbulent_schmidt\":0.6}]");
   passed &= reject_catalog(
       "reserved transported scalar U",
-      "\"transported_scalars\":[{\"stable_name\":\"U\",\"role\":\"species\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"U\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
   passed &= reject_catalog(
       "reserved transported scalar pi",
-      "\"transported_scalars\":[{\"stable_name\":\"pi\",\"role\":\"species\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"pi\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
   passed &= reject_catalog(
       "reserved transported scalar h",
-      "\"transported_scalars\":[{\"stable_name\":\"h\",\"role\":\"passive_scalar\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"h\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
   passed &= reject_catalog(
       "unknown transported scalar role",
-      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"temperature\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"temperature\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
   passed &= reject_catalog(
       "unknown transported scalar key",
-      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\",\"units\":\"1\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9,\"units\":\"1\"}]");
   passed &= reject_catalog(
       "invalid transported scalar name",
-      "\"transported_scalars\":[{\"stable_name\":\"bad/name\",\"role\":\"species\"}]");
+      "\"transported_scalars\":[{\"stable_name\":\"bad/name\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]");
 
   std::string oversized = "\"transported_scalars\":[";
   for (std::size_t index = 0U; index < 65U; ++index) {
@@ -555,7 +569,7 @@ bool test_transported_scalar_catalog() {
       oversized += ',';
     }
     oversized += "{\"stable_name\":\"s_" + std::to_string(index) +
-                 "\",\"role\":\"species\"}";
+                 "\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}";
   }
   oversized += ']';
   passed &= reject_catalog("transported scalar catalog limit", oversized);
@@ -564,11 +578,11 @@ bool test_transported_scalar_catalog() {
   std::string passive = baseline;
   passed &= expect(
       replace_once(species, "\"transported_scalars\":[]",
-                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\"}]"),
+                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"species\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]"),
       "species fingerprint fixture mutation");
   passed &= expect(
       replace_once(passive, "\"transported_scalars\":[]",
-                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\"}]"),
+                   "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]"),
       "passive scalar fingerprint fixture mutation");
   std::uint64_t species_fingerprint = 0U;
   std::uint64_t passive_fingerprint = 0U;
@@ -578,6 +592,29 @@ bool test_transported_scalar_catalog() {
                                      passive_fingerprint);
   passed &= expect(species_fingerprint != passive_fingerprint,
                    "transported scalar role affects fingerprint");
+
+  std::string transport_closed = baseline;
+  passed &= expect(
+      replace_once(
+          transport_closed, "\"transported_scalars\":[]",
+          "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0.9}]"),
+      "transport closure fixture mutation");
+  ScratchCase transport_case("transported-scalar-closure");
+  transport_case.write("case.json", transport_closed);
+  transport_case.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel transport_model;
+  passed &= expect(
+      static_cast<bool>(compile(transport_case.root(), transport_model)) &&
+          transport_model.transported_scalars.size() == 1U &&
+          transport_model.transported_scalars[0].molecular_schmidt == 0.7 &&
+          transport_model.transported_scalars[0].turbulent_schmidt == 0.9,
+      "transported scalar publishes both molecular and turbulent closures");
+  passed &= reject_catalog(
+      "nonpositive molecular Schmidt number",
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0,\"turbulent_schmidt\":0.9}]");
+  passed &= reject_catalog(
+      "nonpositive turbulent Schmidt number",
+      "\"transported_scalars\":[{\"stable_name\":\"z\",\"role\":\"passive_scalar\",\"molecular_schmidt\":0.7,\"turbulent_schmidt\":0}]");
   return passed;
 }
 
@@ -802,6 +839,18 @@ bool test_case_and_reference_security() {
   passed &= rejects("wrong corrector count", case_json(
       kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PISO","pressure_correctors":3})json"));
+  passed &= rejects("zero pressure tolerance", case_json(
+      kUniformMesh,
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+      R"json({"coupling":"PISO","pressure_correctors":2,"pressure_linear":{"absolute_tolerance":0,"relative_tolerance":1e-6,"maximum_iterations":500,"true_residual_interval":4,"krylov_restart":12},"terminal_tolerances":{"eos":1e-6,"continuity":1e-6,"closed_mass":1e-6,"gauge":1e-6}})json"));
+  passed &= rejects("pressure tolerance looser than terminal gate", case_json(
+      kUniformMesh,
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+      R"json({"coupling":"PISO","pressure_correctors":2,"pressure_linear":{"absolute_tolerance":1e-8,"relative_tolerance":1e-4,"maximum_iterations":500,"true_residual_interval":4,"krylov_restart":12},"terminal_tolerances":{"eos":1e-6,"continuity":1e-6,"closed_mass":1e-6,"gauge":1e-6}})json"));
+  passed &= rejects("invalid Krylov restart", case_json(
+      kUniformMesh,
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+      R"json({"coupling":"PISO","pressure_correctors":2,"pressure_linear":{"absolute_tolerance":1e-8,"relative_tolerance":1e-6,"maximum_iterations":500,"true_residual_interval":4,"krylov_restart":65},"terminal_tolerances":{"eos":1e-6,"continuity":1e-6,"closed_mass":1e-6,"gauge":1e-6}})json"));
   passed &= rejects("unsupported turbulence", case_json(
       kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PISO","pressure_correctors":2})json",
@@ -974,6 +1023,27 @@ bool test_defaults_and_enums() {
                            TimeControlKind::adaptive_acoustic &&
                        enum_model.time.scheme == TimeScheme::variable_bdf2,
                    "supported turbulence and time enums compile");
+  ScratchCase controls("solver-controls");
+  controls.write(
+      "case.json",
+      case_json(
+          kUniformMesh,
+          R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+          R"json({"coupling":"PISO","pressure_correctors":2,"pressure_linear":{"absolute_tolerance":1e-8,"relative_tolerance":1e-6,"maximum_iterations":500,"true_residual_interval":5,"krylov_restart":16},"terminal_tolerances":{"eos":2e-6,"continuity":3e-6,"closed_mass":4e-6,"gauge":5e-6}})json"));
+  controls.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel controlled_model;
+  passed &= expect(
+      static_cast<bool>(compile(controls.root(), controlled_model)) &&
+          controlled_model.solver.pressure.absolute_tolerance == 1.0e-8 &&
+          controlled_model.solver.pressure.relative_tolerance == 1.0e-6 &&
+          controlled_model.solver.pressure.maximum_iterations == 500U &&
+          controlled_model.solver.pressure.true_residual_interval == 5U &&
+          controlled_model.solver.pressure.krylov_restart == 16U &&
+          controlled_model.solver.terminal.eos == 2.0e-6 &&
+          controlled_model.solver.terminal.continuity == 3.0e-6 &&
+          controlled_model.solver.terminal.closed_mass == 4.0e-6 &&
+          controlled_model.solver.terminal.gauge == 5.0e-6,
+      "typed solver controls compile without product hard-coding");
   return passed;
 }
 

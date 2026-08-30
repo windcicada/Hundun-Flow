@@ -1,0 +1,29 @@
+{
+  "artifacts": [
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-parnaudeau.json",
+      "sha256": "b6e76b12e37bf58ce408b8d61a95981849871ca9d3d25c7217fb1025c5b4c2d9"
+    },
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-norberg.json",
+      "sha256": "6473ec4f6262407cbcf8d72c88520346767c81d9dd04970c39c7c21e61c8ac6d"
+    },
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/hundun-flow/docs/references/backward-step-driver-seegmiller.json",
+      "sha256": "b19ef7a300d8115736f01188e8c481eb5a1b68d98ad15af86d6f055c3e726a5c"
+    },
+    {
+      "kind": "extractor",
+      "path": "/home/wyf/code_dev/hundun-flow/tools/v04_literature_extract.py",
+      "sha256": "8af1fbe9bec225dc183bda055c9c94e922e5d07e5d31890c817e8a9f05359ac7"
+    }
+  ],
+  "complete": false,
+  "incomplete_references": [
+    "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-parnaudeau.json"
+  ],
+  "schema": "HUNDUN_V04_LITERATURE_RECEIPT_V1"
+}

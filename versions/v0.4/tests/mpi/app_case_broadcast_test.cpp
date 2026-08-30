@@ -149,12 +149,28 @@ int main(int argc, char** argv) {
         "pressure_reference": "boundary_absolute",
         "reacting": false
       },
-      "solver": {"coupling": "PISO", "pressure_correctors": 2},
+      "solver": {
+        "coupling": "PISO",
+        "pressure_correctors": 2,
+        "pressure_linear": {
+          "absolute_tolerance": 1e-8,
+          "relative_tolerance": 2e-7,
+          "maximum_iterations": 333,
+          "true_residual_interval": 7,
+          "krylov_restart": 16
+        },
+        "terminal_tolerances": {
+          "eos": 3e-6,
+          "continuity": 4e-6,
+          "closed_mass": 5e-6,
+          "gauge": 6e-6
+        }
+      },
       "turbulence": {"model": "vreman_wall_function"},
       "thermophysics": {"data_file": "thermophysics.d"},
       "transported_scalars": [
-        {"stable_name":"O2","role":"species"},
-        {"stable_name":"mixture_fraction","role":"passive_scalar"}
+        {"stable_name":"O2","role":"species","molecular_schmidt":0.7,"turbulent_schmidt":0.9},
+        {"stable_name":"mixture_fraction","role":"passive_scalar","molecular_schmidt":0.8,"turbulent_schmidt":0.6}
       ],
       "boundaries": {
         "x_min": {"flow_kind":"velocity_inlet","thermal_kind":"none","velocity":[1,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[{"stable_name":"O2","kind":"dirichlet","value":0.21,"backflow_kind":"zero_gradient","backflow_value":0},{"stable_name":"mixture_fraction","kind":"dirichlet","value":1,"backflow_kind":"zero_gradient","backflow_value":0}]},
@@ -218,9 +234,13 @@ int main(int argc, char** argv) {
           first.transported_scalars[0].stable_name == "O2" &&
           first.transported_scalars[0].role ==
               hundun::v04::TransportedScalarRole::species &&
+          first.transported_scalars[0].molecular_schmidt == 0.7 &&
+          first.transported_scalars[0].turbulent_schmidt == 0.9 &&
           first.transported_scalars[1].stable_name == "mixture_fraction" &&
           first.transported_scalars[1].role ==
               hundun::v04::TransportedScalarRole::passive_scalar &&
+          first.transported_scalars[1].molecular_schmidt == 0.8 &&
+          first.transported_scalars[1].turbulent_schmidt == 0.6 &&
           first.boundaries[0].flow_kind ==
               hundun::v04::BoundaryKind::velocity_inlet &&
           first.boundaries[0].scalars.size() == 2U &&
@@ -233,7 +253,16 @@ int main(int argc, char** argv) {
           first.boundaries[1].relaxation == 0.8,
       rank, "wire publishes scalar catalog pressure reference and boundaries");
   passed &= expect(
-      first.schemes.momentum ==
+      first.solver.pressure.absolute_tolerance == 1.0e-8 &&
+          first.solver.pressure.relative_tolerance == 2.0e-7 &&
+          first.solver.pressure.maximum_iterations == 333U &&
+          first.solver.pressure.true_residual_interval == 7U &&
+          first.solver.pressure.krylov_restart == 16U &&
+          first.solver.terminal.eos == 3.0e-6 &&
+          first.solver.terminal.continuity == 4.0e-6 &&
+          first.solver.terminal.closed_mass == 5.0e-6 &&
+          first.solver.terminal.gauge == 6.0e-6 &&
+          first.schemes.momentum ==
               hundun::v04::ConvectionScheme::limited_central2 &&
           first.schemes.enthalpy == hundun::v04::ConvectionScheme::central2 &&
           first.schemes.limiter == 0.75 &&

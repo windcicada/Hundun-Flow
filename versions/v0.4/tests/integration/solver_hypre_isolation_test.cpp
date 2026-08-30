@@ -352,6 +352,29 @@ bool test_available_adapter_reuses_native_handles() {
   MgRuntimeServices services{};
   services.reductions = &reductions;
 
+  NativeCartesianMgSpec chebyshev_spec = spec;
+  chebyshev_spec.operator_class =
+      MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
+  chebyshev_spec.policy.point_smoother =
+      MgPointSmootherKind::chebyshev_jacobi;
+  HypreStructAdapter chebyshev_rejected;
+  const Status chebyshev_status = HypreStructAdapter::compile(
+      chebyshev_spec, services, chebyshev_rejected);
+  passed &= expect(
+      chebyshev_status.code == StatusCode::invalid_plan &&
+          chebyshev_rejected.fingerprint() == 0U,
+      "isolated HYPRE adapter explicitly rejects certified Chebyshev policy");
+
+  NativeCartesianMgSpec f_cycle_spec = spec;
+  f_cycle_spec.policy.cycle = MgCycleKind::f_cycle;
+  HypreStructAdapter f_cycle_rejected;
+  const Status f_cycle_status = HypreStructAdapter::compile(
+      f_cycle_spec, services, f_cycle_rejected);
+  passed &= expect(
+      f_cycle_status.code == StatusCode::invalid_plan &&
+          f_cycle_rejected.fingerprint() == 0U,
+      "isolated HYPRE adapter explicitly rejects native F-cycle policy");
+
 #if defined(HUNDUN_V04_TEST_HAVE_HYPRE)
   detail::set_hypre_failure_for_test(
       detail::HypreFailurePoint::native_objects);
@@ -382,8 +405,12 @@ bool test_available_adapter_reuses_native_handles() {
   passed &= expect(handle_address != 0U && numeric != 0U &&
                        !empty(adapter.certificate()) &&
                        adapter.certificate().preconditioner_class ==
-                           LinearPreconditionerClass::fixed_general,
-                   "numeric setup publishes certificate and native handles");
+                           LinearPreconditionerClass::fixed_general &&
+                       adapter.certificate().status_scope ==
+                           LinearPreconditionerStatusScope::rank_local &&
+                       adapter.certificate().apply_lifecycle ==
+                           LinearPreconditionerApplyLifecycle::per_call_checked,
+                   "numeric setup publishes rank-local certificate and native handles");
   std::fill(correction.storage.begin(), correction.storage.end(), -91.0);
   passed &= expect(static_cast<bool>(adapter.apply(
                        as_const(rhs.view), correction.view, 0U)),

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -141,6 +142,9 @@ struct OwnedView {
     view.stride_z = stride_z;
     view.component_stride = component_stride;
     view.field = field;
+    view.revision = 7001U;
+    view.storage_identity = 8001U + static_cast<StorageIdentity>(field);
+    view.revision_domain = 9001U;
   }
 };
 
@@ -201,28 +205,55 @@ ValidatedModel model() {
   return value;
 }
 
-bool compile_plan(BoundaryPlan& plan) {
+ValidatedModel periodic_x_model() {
+  ValidatedModel value = model();
+  value.pressure_reference = PressureReferenceKind::closed_mass;
+  value.boundaries[0].flow_kind = BoundaryKind::periodic;
+  value.boundaries[0].thermal_kind = BoundaryKind::none;
+  value.boundaries[0].scalars.clear();
+  value.boundaries[1].flow_kind = BoundaryKind::periodic;
+  value.boundaries[1].thermal_kind = BoundaryKind::none;
+  value.boundaries[1].scalars.clear();
+  value.boundaries[4] = wall();
+  value.boundaries[4].scalars.push_back(
+      ScalarBoundarySpec{"mixture_fraction",
+                         ScalarBoundaryKind::zero_gradient, 0.0});
+  value.boundaries[4].scalars.push_back(
+      ScalarBoundarySpec{"progress", ScalarBoundaryKind::zero_gradient,
+                         0.0});
+  return value;
+}
+
+bool compile_plan_with(MPI_Comm communicator, ValidatedModel definition,
+                       Int3 global_cells, BoundaryPlan& plan) {
   CartesianMeshSpec mesh;
   mesh.kind = GeometryKind::uniform;
   mesh.lower = Real3{0.0, 0.0, 0.0};
-  mesh.upper = Real3{4.0, 3.0, 2.0};
+  mesh.upper = Real3{static_cast<double>(global_cells.x),
+                     static_cast<double>(global_cells.y),
+                     static_cast<double>(global_cells.z)};
   mesh.has_exact_cells = true;
-  mesh.exact_cells = kInterior;
+  mesh.exact_cells = global_cells;
   mesh.minimum_spacing = Real3{1.0, 1.0, 1.0};
   mesh.max_growth_ratio = 1.0;
-  mesh.limits.max_global_cells = 1024U;
-  mesh.limits.max_memory_bytes_per_rank = 1U << 20U;
+  mesh.limits.max_global_cells = 1U << 20U;
+  mesh.limits.max_memory_bytes_per_rank = 1U << 24U;
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   if (!CartesianGeometryCompiler::compile(
-          MPI_COMM_SELF, mesh, GeometryBudget{}, geometry, patch)) {
+          communicator, mesh, GeometryBudget{}, geometry, patch)) {
     return false;
   }
   FieldRegistry registry;
   SchemePlan schemes;
   TimeSchemePlan time;
   return static_cast<bool>(BoundaryCompiler::compile(
-      MPI_COMM_SELF, model(), geometry, patch, registry, plan, schemes, time));
+      communicator, definition, geometry, patch, registry, plan, schemes,
+      time));
+}
+
+bool compile_plan(BoundaryPlan& plan) {
+  return compile_plan_with(MPI_COMM_SELF, model(), kInterior, plan);
 }
 
 void initialise_interior(OwnedView& field) {
@@ -241,7 +272,9 @@ void initialise_interior(OwnedView& field) {
 
 bool unchanged(const OwnedView& field,
                const std::vector<double>& before) {
-  return field.storage == before;
+  return field.storage.size() == before.size() &&
+         std::memcmp(field.storage.data(), before.data(),
+                     field.storage.size() * sizeof(double)) == 0;
 }
 
 bool canaries_intact(const OwnedView& field) {
@@ -944,6 +977,325 @@ bool test_two_layer_relations_and_zero_allocations(const BoundaryPlan& plan) {
   return passed;
 }
 
+bool test_homogeneous_scalar_relations_and_reach(const BoundaryPlan& plan) {
+  OwnedView delta_h{plan.enthalpy_field(), 1U};
+  initialise_interior(delta_h);
+  bool passed = expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::enthalpy, plan, plan.enthalpy_field(), delta_h.view,
+          2U)),
+      "homogeneous enthalpy variation closes two physical ghost layers");
+
+  const auto checks_relation = [&](Int3 source, Int3 ghost, double sign,
+                                   std::string_view description) {
+    const double interior = delta_h.view.unchecked(source, 0U);
+    const double boundary = delta_h.view.unchecked(ghost, 0U);
+    passed &= expect(boundary == sign * interior, description);
+  };
+  checks_relation(Int3{0, 1, 1}, Int3{-1, 1, 1}, -1.0,
+                  "Dirichlet x-min variation mirrors with negative sign");
+  checks_relation(Int3{1, 1, 1}, Int3{-2, 1, 1}, -1.0,
+                  "Dirichlet reach two uses the matching interior layer");
+  checks_relation(Int3{kInterior.x - 1, 1, 1},
+                  Int3{kInterior.x, 1, 1}, 1.0,
+                  "zero-gradient variation copies the boundary interior");
+  checks_relation(Int3{1, 0, 1}, Int3{1, -1, 1}, -1.0,
+                  "isothermal enthalpy relation is homogeneous Dirichlet");
+  checks_relation(Int3{1, kInterior.y - 1, 1},
+                  Int3{1, kInterior.y, 1}, 1.0,
+                  "adiabatic enthalpy relation is homogeneous Neumann");
+  passed &= expect(delta_h.view.unchecked(Int3{-1, -1, 0}, 0U) == kSentinel &&
+                       delta_h.view.unchecked(Int3{-1, 0, -1}, 0U) ==
+                           kSentinel &&
+                       delta_h.view.unchecked(Int3{-1, -1, -1}, 0U) ==
+                           kSentinel,
+                   "face-shell closure does not invent edge or corner data");
+  passed &= expect(canaries_intact(delta_h),
+                   "homogeneous two-layer closure preserves canaries");
+
+  OwnedView delta_t{plan.enthalpy_field(), 1U, kInterior, Int3{1, 1, 1}};
+  initialise_interior(delta_t);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::enthalpy, plan, plan.enthalpy_field(), delta_t.view,
+          1U)),
+      "one-layer temperature variation reuses enthalpy boundary relations");
+  passed &= expect(delta_t.view.unchecked(Int3{1, -1, 1}, 0U) ==
+                       -delta_t.view.unchecked(Int3{1, 0, 1}, 0U),
+                   "one-layer isothermal temperature variation is negative") &&
+            expect(delta_t.view.unchecked(Int3{1, kInterior.y, 1}, 0U) ==
+                       delta_t.view.unchecked(
+                           Int3{1, kInterior.y - 1, 1}, 0U),
+                   "one-layer adiabatic temperature variation is copied");
+  passed &= expect(canaries_intact(delta_t),
+                   "one-layer closure preserves canaries");
+
+  OwnedView reach_limited{plan.enthalpy_field(), 1U};
+  initialise_interior(reach_limited);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::enthalpy, plan, plan.enthalpy_field(),
+          reach_limited.view, 1U)),
+      "explicit one-layer reach applies to a deeper workspace");
+  passed &= expect(
+      reach_limited.view.unchecked(Int3{-1, 1, 1}, 0U) != kSentinel &&
+          reach_limited.view.unchecked(Int3{-2, 1, 1}, 0U) == kSentinel,
+      "explicit reach leaves deeper ghost storage untouched");
+
+  OwnedView independent_delta_t{
+      static_cast<FieldId>(plan.enthalpy_field() + 100U), 1U, kInterior,
+      Int3{1, 1, 1}};
+  initialise_interior(independent_delta_t);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::enthalpy, plan, plan.enthalpy_field(),
+          independent_delta_t.view, 1U)),
+      "independent delta-T FieldId reuses the enthalpy relation authority");
+  passed &= expect(
+      independent_delta_t.view.unchecked(Int3{1, -1, 1}, 0U) ==
+          -independent_delta_t.view.unchecked(Int3{1, 0, 1}, 0U),
+      "foreign registered scalar workspace receives the selected relation");
+
+  const FieldId normal_field = scalar_field(
+      plan, CartesianFace::x_min, ScalarBoundaryKind::normal_flux);
+  OwnedView normal_variation{normal_field, 1U};
+  initialise_interior(normal_variation);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::scalar, plan, normal_field, normal_variation.view,
+          2U)),
+      "normal-gradient scalar variation closes homogeneously");
+  passed &= expect(normal_variation.view.unchecked(Int3{-1, 1, 1}, 0U) ==
+                       normal_variation.view.unchecked(Int3{0, 1, 1}, 0U),
+                   "normal-gradient source relation becomes homogeneous Neumann");
+
+  const FieldId convective_field = scalar_field(
+      plan, CartesianFace::x_max, ScalarBoundaryKind::convective);
+  OwnedView convective_variation{convective_field, 1U};
+  initialise_interior(convective_variation);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::scalar, plan, convective_field,
+          convective_variation.view, 2U)),
+      "convective scalar variation closes homogeneously");
+  passed &= expect(
+      convective_variation.view.unchecked(Int3{kInterior.x, 1, 1}, 0U) ==
+          -convective_variation.view.unchecked(
+              Int3{kInterior.x - 1, 1, 1}, 0U),
+      "convective source relation becomes homogeneous Dirichlet");
+
+  OwnedView delta_pressure{plan.pressure_field(), 1U};
+  initialise_interior(delta_pressure);
+  passed &= expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::pressure, plan, plan.pressure_field(),
+          delta_pressure.view, 2U)),
+      "pressure scalar variation reuses the pressure boundary relations");
+  passed &= expect(
+      delta_pressure.view.unchecked(Int3{-1, 1, 1}, 0U) ==
+              delta_pressure.view.unchecked(Int3{0, 1, 1}, 0U) &&
+          delta_pressure.view.unchecked(Int3{kInterior.x, 1, 1}, 0U) ==
+              -delta_pressure.view.unchecked(
+                  Int3{kInterior.x - 1, 1, 1}, 0U),
+      "pressure Neumann and Dirichlet variations use their compiled signs");
+  return passed;
+}
+
+bool test_homogeneous_scalar_preflight_is_atomic(const BoundaryPlan& plan) {
+  bool passed = true;
+  const auto rejects_without_writes = [&](const BoundaryPlan& authority,
+                                          BoundaryStage stage,
+                                          FieldId source_field,
+                                          FieldView malformed,
+                                          std::uint8_t reach,
+                                          OwnedView& owned,
+                                          std::string_view reason) {
+    const std::vector<double> before = owned.storage;
+    const Status status = apply_homogeneous_scalar_boundary_ghosts(
+        stage, authority, source_field, malformed, reach);
+    passed &= expect(status.code == StatusCode::invalid_plan, reason);
+    passed &= expect(unchanged(owned, before),
+                     "homogeneous preflight rejection makes no partial write");
+    passed &= expect(canaries_intact(owned),
+                     "homogeneous preflight rejection preserves canaries");
+  };
+
+  OwnedView variation{plan.enthalpy_field(), 1U};
+  initialise_interior(variation);
+  BoundaryPlan empty;
+  rejects_without_writes(empty, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), variation.view, 2U, variation,
+                         "default BoundaryPlan authority is rejected");
+  BoundaryPlan moved_from;
+  passed &= expect(compile_plan(moved_from),
+                   "moved-from homogeneous authority fixture compiles");
+  BoundaryPlan retained{std::move(moved_from)};
+  (void)retained;
+  rejects_without_writes(moved_from, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), variation.view, 2U, variation,
+                         "moved-from BoundaryPlan authority is rejected");
+  rejects_without_writes(plan, BoundaryStage::scalar, plan.enthalpy_field(),
+                         variation.view, 2U, variation,
+                         "stage and source-field mismatch is rejected");
+
+  FieldView wrong_field = variation.view;
+  wrong_field.field = 0U;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), wrong_field, 2U, variation,
+                         "unregistered zero variation FieldId is rejected");
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), variation.view, 0U, variation,
+                         "zero homogeneous reach is rejected");
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), variation.view, 3U, variation,
+                         "reach beyond the compiled relation is rejected");
+
+  FieldView shallow = variation.view;
+  shallow.ghosts.y = 1;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), shallow, 2U, variation,
+                         "insufficient normal ghost reach is rejected");
+  FieldView wrong_shape = variation.view;
+  --wrong_shape.interior.z;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), wrong_shape, 2U, variation,
+                         "foreign local shape is rejected");
+  FieldView aliased_rows = variation.view;
+  aliased_rows.stride_y = 1U;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), aliased_rows, 2U, variation,
+                         "overlapping row aliases are rejected");
+  FieldView stale_view = variation.view;
+  stale_view.revision = 0U;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), stale_view, 2U, variation,
+                         "unrevisioned variation authority is rejected");
+  FieldView foreign_storage = variation.view;
+  foreign_storage.storage_identity = 0U;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), foreign_storage, 2U,
+                         variation,
+                         "unidentified variation storage is rejected");
+  FieldView foreign_domain = variation.view;
+  foreign_domain.revision_domain = 0U;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), foreign_domain, 2U, variation,
+                         "unidentified variation revision domain is rejected");
+  FieldView missing_storage = variation.view;
+  missing_storage.base = nullptr;
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), missing_storage, 2U, variation,
+                         "missing variation storage is rejected");
+
+  OwnedView vector_variation{plan.enthalpy_field(), 2U};
+  initialise_interior(vector_variation);
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), vector_variation.view, 2U,
+                         vector_variation,
+                         "homogeneous scalar helper rejects vector views");
+
+  OwnedView nonfinite{plan.enthalpy_field(), 1U};
+  initialise_interior(nonfinite);
+  nonfinite.view.unchecked(Int3{1, 1, kInterior.z - 1}, 0U) =
+      std::numeric_limits<double>::quiet_NaN();
+  rejects_without_writes(plan, BoundaryStage::enthalpy,
+                         plan.enthalpy_field(), nonfinite.view, 2U, nonfinite,
+                         "late non-finite interior source is rejected atomically");
+  return passed;
+}
+
+bool test_homogeneous_scalar_hot_path_has_no_allocations(
+    const BoundaryPlan& plan) {
+  OwnedView variation{plan.enthalpy_field(), 1U};
+  initialise_interior(variation);
+  bool passed = expect(
+      static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+          BoundaryStage::enthalpy, plan, plan.enthalpy_field(),
+          variation.view, 2U)),
+      "homogeneous hot-path fixture closes once");
+  std::size_t hot_allocations = std::numeric_limits<std::size_t>::max();
+  {
+    allocation_observer::Guard observe;
+    for (std::size_t iteration = 0U; iteration < 128U; ++iteration) {
+      if (!apply_homogeneous_scalar_boundary_ghosts(
+              BoundaryStage::enthalpy, plan, plan.enthalpy_field(),
+              variation.view, 2U)) {
+        passed = false;
+        break;
+      }
+    }
+    hot_allocations =
+        allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  passed &= expect(hot_allocations == 0U,
+                   "homogeneous preflight and commit allocate no C++ storage");
+  return passed;
+}
+
+bool test_homogeneous_periodic_and_mpi_faces_are_halo_owned(int world_size) {
+  bool passed = true;
+  BoundaryPlan periodic;
+  passed &= expect(compile_plan_with(MPI_COMM_SELF, periodic_x_model(),
+                                    kInterior, periodic),
+                   "periodic homogeneous-boundary fixture compiles");
+  if (periodic.revision() != 0U) {
+    OwnedView variation{periodic.enthalpy_field(), 1U};
+    initialise_interior(variation);
+    passed &= expect(
+        static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+            BoundaryStage::enthalpy, periodic, periodic.enthalpy_field(),
+            variation.view, 2U)),
+        "periodic plan applies only its physical homogeneous faces");
+    passed &= expect(variation.view.unchecked(Int3{-1, 1, 1}, 0U) ==
+                         kSentinel &&
+                         variation.view.unchecked(
+                             Int3{kInterior.x, 1, 1}, 0U) == kSentinel,
+                     "periodic x ghosts remain reserved for halo exchange");
+    passed &= expect(variation.view.unchecked(Int3{1, -1, 1}, 0U) !=
+                         kSentinel,
+                     "non-periodic physical shell is still closed");
+  }
+
+  BoundaryPlan decomposed;
+  const Int3 global{4 * world_size, 3, 2};
+  passed &= expect(compile_plan_with(MPI_COMM_WORLD, model(), global,
+                                    decomposed),
+                   "decomposed homogeneous-boundary fixture compiles");
+  if (decomposed.revision() != 0U) {
+    OwnedView variation{decomposed.enthalpy_field(), 1U,
+                        decomposed.local_cells(), kGhosts};
+    initialise_interior(variation);
+    passed &= expect(
+        static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+            BoundaryStage::enthalpy, decomposed,
+            decomposed.enthalpy_field(), variation.view, 2U)),
+        "decomposed plan closes only rank-owned physical faces");
+    const Int3 cells = decomposed.local_cells();
+    for (std::size_t face_index = 0U; face_index < 6U; ++face_index) {
+      const CartesianFace selected = static_cast<CartesianFace>(face_index);
+      const BoundaryFacePlan* face = nullptr;
+      passed &= expect(static_cast<bool>(decomposed.face(selected, face)) &&
+                           face != nullptr,
+                       "decomposed plan publishes every face authority");
+      if (face == nullptr) {
+        continue;
+      }
+      Int3 ghost{};
+      if (face_index == 0U) ghost = Int3{-1, 0, 0};
+      if (face_index == 1U) ghost = Int3{cells.x, 0, 0};
+      if (face_index == 2U) ghost = Int3{0, -1, 0};
+      if (face_index == 3U) ghost = Int3{0, cells.y, 0};
+      if (face_index == 4U) ghost = Int3{0, 0, -1};
+      if (face_index == 5U) ghost = Int3{0, 0, cells.z};
+      const bool helper_owned = face->local_owner && !face->periodic;
+      passed &= expect((variation.view.unchecked(ghost, 0U) != kSentinel) ==
+                           helper_owned,
+                       "MPI/periodic ghosts are untouched while physical ghosts close");
+    }
+  }
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -951,6 +1303,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   BoundaryPlan plan;
+  int world_size = 0;
+  if (MPI_Comm_size(MPI_COMM_WORLD, &world_size) != MPI_SUCCESS ||
+      world_size <= 0) {
+    MPI_Finalize();
+    return 2;
+  }
   bool passed = test_empty_plan();
   passed &= expect(compile_plan(plan), "non-empty boundary fixture compiles");
   if (plan.semantic_fingerprint() != 0U) {
@@ -961,6 +1319,11 @@ int main(int argc, char** argv) {
     passed &= test_resolved_values_are_face_cell_local(plan);
     passed &= test_stage_local_finite_preflight_is_atomic(plan);
     passed &= test_two_layer_relations_and_zero_allocations(plan);
+    passed &= test_homogeneous_scalar_relations_and_reach(plan);
+    passed &= test_homogeneous_scalar_preflight_is_atomic(plan);
+    passed &= test_homogeneous_scalar_hot_path_has_no_allocations(plan);
+    passed &= test_homogeneous_periodic_and_mpi_faces_are_halo_owned(
+        world_size);
   }
   MPI_Finalize();
   if (!passed) {

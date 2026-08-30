@@ -16,6 +16,7 @@
 #include <new>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace allocation_observer {
 
@@ -104,6 +105,10 @@ namespace {
 using hundun::v04::ArenaFieldRequest;
 using hundun::v04::ArenaLayout;
 using hundun::v04::AttemptTransaction;
+using hundun::v04::AttemptFinishDecision;
+using hundun::v04::ConstFaceFluxView;
+using hundun::v04::FaceFluxStorage;
+using hundun::v04::FaceFluxView;
 using hundun::v04::FieldId;
 using hundun::v04::FieldLifetime;
 using hundun::v04::FieldPlacement;
@@ -112,6 +117,8 @@ using hundun::v04::FieldSchema;
 using hundun::v04::FieldView;
 using hundun::v04::Int3;
 using hundun::v04::PendingCacheStamp;
+using hundun::v04::PendingFaceFluxView;
+using hundun::v04::PreparedAttemptFinish;
 using hundun::v04::RevisionSlotId;
 using hundun::v04::RevisionDependency;
 using hundun::v04::RevisionSourceId;
@@ -121,6 +128,8 @@ using hundun::v04::StateLayers;
 using hundun::v04::StateRole;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
+using hundun::v04::FinalFaceFluxAuthority;
+using hundun::v04::FinalFaceFluxWriter;
 
 bool expect(bool condition, std::string_view description) {
   if (!condition) {
@@ -209,6 +218,32 @@ RevisionDependency depends_on(const AttemptTransaction& transaction,
   return RevisionDependency{
       AttemptTransaction::field_revision_source(field),
       transaction.trial_revision(field)};
+}
+
+bool overwrite_pending_flux(PendingFaceFluxView& pending, double value) {
+  return static_cast<bool>(
+      hundun::v04::detail::overwrite_pending_face_flux_for_test(pending,
+                                                                value));
+}
+
+std::vector<std::uint64_t> flux_bits(ConstFaceFluxView flux) {
+  std::vector<std::uint64_t> bits;
+  const std::array faces{flux.x, flux.y, flux.z};
+  for (const auto face : faces) {
+    const std::size_t count = static_cast<std::size_t>(face.extents.x) *
+                              static_cast<std::size_t>(face.extents.y) *
+                              static_cast<std::size_t>(face.extents.z);
+    bits.reserve(bits.size() + count);
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x) {
+          std::uint64_t value_bits = 0U;
+          const double value = face.unchecked({x, y, z});
+          std::memcpy(&value_bits, &value, sizeof(value_bits));
+          bits.push_back(value_bits);
+        }
+  }
+  return bits;
 }
 
 bool test_commit_rollback_retry_and_hot_allocations() {
@@ -467,6 +502,60 @@ bool test_incomplete_write_set_rolls_back() {
   return passed;
 }
 
+bool test_collective_prepare_failure_discards_attempt() {
+  FieldId velocity{};
+  FieldId pressure{};
+  StateLayers layers;
+  bool passed = make_layers(layers, velocity, pressure);
+  AttemptTransaction transaction;
+  passed &= expect(static_cast<bool>(AttemptTransaction::create(
+                       layers.field_count(), 1U, layers.field_count(),
+                       transaction)),
+                   "prepare-failure transaction preallocates");
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "prepare-failure attempt completes its local write set");
+  const std::array dependencies{depends_on(transaction, pressure)};
+  passed &= expect(static_cast<bool>(transaction.publish_pending_cache(
+                       RevisionSlotId{0U},
+                       Span<const RevisionDependency>{dependencies.data(),
+                                                      dependencies.size()},
+                       PendingCacheStamp{901U})),
+                   "prepare-failure attempt stages side state");
+
+  PreparedAttemptFinish unavailable;
+  const Status failed = transaction.collective_prepare(
+      MPI_COMM_NULL, Status{}, unavailable);
+  passed &= expect(failed.code == StatusCode::invalid_plan &&
+                       !unavailable.valid(),
+                   "invalid communicator cannot mint a commit certificate");
+  passed &= expect(!transaction.active() && transaction.finished() &&
+                       !transaction.committed() &&
+                       transaction.lowest_failing_rank() == -1 &&
+                       !transaction.pending_cache_valid(RevisionSlotId{0U}),
+                   "collective prepare failure closes the attempt and "
+                   "discards staged side state");
+
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "a clean retry begins after collective prepare failure");
+  const std::array retry_dependencies{depends_on(transaction, pressure)};
+  passed &= expect(static_cast<bool>(transaction.publish_pending_cache(
+                       RevisionSlotId{0U},
+                       Span<const RevisionDependency>{
+                           retry_dependencies.data(),
+                           retry_dependencies.size()},
+                       PendingCacheStamp{902U})) &&
+                       static_cast<bool>(transaction.collective_finish(
+                           MPI_COMM_SELF, Status{})) &&
+                       transaction.committed() &&
+                       transaction.pending_cache(RevisionSlotId{0U}) == 902U,
+                   "retry commits only freshly staged side state");
+  return passed;
+}
+
 bool test_ignored_hot_error_is_latched() {
   bool passed = true;
 
@@ -715,6 +804,514 @@ bool test_invalid_state_machine_calls() {
   return passed;
 }
 
+bool test_prepare_then_commit_transaction_and_final_flux() {
+  FieldId velocity{};
+  FieldId pressure{};
+  StateLayers layers;
+  bool passed = make_layers(layers, velocity, pressure);
+  AttemptTransaction transaction;
+  FaceFluxStorage source_storage;
+  FaceFluxStorage final_storage;
+  FaceFluxView source;
+  FinalFaceFluxAuthority authority;
+  FinalFaceFluxWriter writer;
+  constexpr Int3 cells{2, 1, 1};
+  passed &= expect(
+      static_cast<bool>(AttemptTransaction::create(
+          layers.field_count(), 1U, layers.field_count(), transaction)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              cells, 1U, source_storage)) &&
+          static_cast<bool>(source_storage.workspace_view(0U, 41U, source)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_final(cells,
+                                                            final_storage)) &&
+          static_cast<bool>(authority.claim(71U, 0U, transaction, writer)),
+      "two-phase transaction and final-flux authority initialize");
+  passed &= expect(final_storage.counters().replicas == 3U,
+                   "final flux reserves active, previous, and pending replicas");
+  const std::array source_faces{source.x, source.y, source.z};
+  for (std::size_t axis = 0U; axis < source_faces.size(); ++axis) {
+    const auto face = source_faces[axis];
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          face.unchecked({x, y, z}) =
+              10.0 * static_cast<double>(axis + 1U) + x + 0.1 * y + 0.01 * z;
+  }
+  passed &= expect(static_cast<bool>(writer.initialize_committed(
+                       final_storage, hundun::v04::as_const(source))),
+                   "final flux has an accepted baseline");
+  ConstFaceFluxView fresh_active_flux;
+  ConstFaceFluxView fresh_previous_flux;
+  passed &= expect(
+      static_cast<bool>(writer.committed(final_storage,
+                                         fresh_active_flux)) &&
+          static_cast<bool>(writer.committed_previous(
+              final_storage, fresh_previous_flux)) &&
+          fresh_active_flux.revision == fresh_previous_flux.revision &&
+          fresh_active_flux.certificate ==
+              fresh_previous_flux.certificate &&
+          flux_bits(fresh_active_flux) == flux_bits(fresh_previous_flux),
+      "fresh final flux publishes identical accepted and previous history");
+
+  const auto publish_attempt = [&](double value) {
+    if (!transaction.begin(layers) || !transaction.revise_trial(velocity) ||
+        !transaction.revise_trial(pressure)) {
+      return false;
+    }
+    PendingFaceFluxView pending;
+    const std::array dependencies{depends_on(transaction, pressure)};
+    if (!writer.begin_pending(transaction, final_storage, pending) ||
+        !overwrite_pending_flux(pending, value)) {
+      return false;
+    }
+    return static_cast<bool>(writer.publish_pending(
+        Span<const RevisionDependency>{dependencies.data(),
+                                       dependencies.size()},
+        pending));
+  };
+
+  const std::size_t accept_n = layers.handle(StateRole::accepted_n);
+  const std::size_t accept_nm1 =
+      layers.handle(StateRole::accepted_n_minus_one);
+  const std::size_t accept_trial = layers.handle(StateRole::trial);
+  ConstFaceFluxView accepted_flux;
+  passed &= expect(publish_attempt(1000.0) &&
+                       static_cast<bool>(writer.committed(final_storage,
+                                                          accepted_flux)),
+                   "accept candidate and prior committed flux are available");
+  const RevisionToken accepted_flux_revision = accepted_flux.revision;
+  const auto accepted_flux_certificate = accepted_flux.certificate;
+  PreparedAttemptFinish accept;
+  const Status accept_prepared =
+      transaction.collective_prepare(MPI_COMM_SELF, Status{}, accept);
+  ConstFaceFluxView during_accept_prepare;
+  passed &= expect(
+      static_cast<bool>(accept_prepared) && accept.valid() &&
+          accept.decision() == AttemptFinishDecision::accept &&
+          static_cast<bool>(accept.outcome()) &&
+          accept.lowest_failing_rank() == -1 && transaction.active() &&
+          !transaction.finished() && !transaction.committed() &&
+          layers.handle(StateRole::accepted_n) == accept_n &&
+          layers.handle(StateRole::accepted_n_minus_one) == accept_nm1 &&
+          layers.handle(StateRole::trial) == accept_trial &&
+          !transaction.pending_cache_valid(RevisionSlotId{0U}) &&
+          static_cast<bool>(writer.committed(final_storage,
+                                             during_accept_prepare)) &&
+          during_accept_prepare.revision == accepted_flux_revision &&
+          during_accept_prepare.certificate == accepted_flux_certificate,
+      "accept preparation changes no role, cache, or active final flux");
+  transaction.commit_accept(accept);
+  ConstFaceFluxView committed_flux;
+  passed &= expect(!accept.valid() && transaction.finished() &&
+                       transaction.committed() && !transaction.active() &&
+                       layers.handle(StateRole::accepted_n) == accept_trial &&
+                       layers.handle(StateRole::accepted_n_minus_one) == accept_n &&
+                       layers.handle(StateRole::trial) == accept_nm1 &&
+                       transaction.pending_cache_valid(RevisionSlotId{0U}) &&
+                       static_cast<bool>(writer.committed(final_storage,
+                                                          committed_flux)) &&
+                       committed_flux.revision > accepted_flux_revision,
+                   "accept commit alone rotates state, cache, and final flux");
+
+  ConstFaceFluxView committed_previous;
+  passed &= expect(static_cast<bool>(writer.committed_previous(
+                       final_storage, committed_previous)),
+                   "accepted final flux retains the previous time level");
+  const std::vector<std::uint64_t> committed_flux_bits =
+      flux_bits(committed_flux);
+  const std::vector<std::uint64_t> committed_previous_bits =
+      flux_bits(committed_previous);
+  const RevisionToken committed_previous_revision =
+      committed_previous.revision;
+  const auto committed_flux_certificate = committed_flux.certificate;
+  const auto committed_previous_certificate =
+      committed_previous.certificate;
+
+  const std::size_t reject_n = layers.handle(StateRole::accepted_n);
+  const std::size_t reject_nm1 =
+      layers.handle(StateRole::accepted_n_minus_one);
+  const std::size_t reject_trial = layers.handle(StateRole::trial);
+  const RevisionToken reject_flux_revision = committed_flux.revision;
+  passed &= expect(publish_attempt(-1.0e200),
+                   "reject candidate writes poison into pending flux");
+  PreparedAttemptFinish reject;
+  const Status reject_prepared = transaction.collective_prepare(
+      MPI_COMM_SELF, Status{StatusCode::rejected_step, 601U}, reject);
+  ConstFaceFluxView during_reject_prepare;
+  passed &= expect(
+      static_cast<bool>(reject_prepared) && reject.valid() &&
+          reject.decision() == AttemptFinishDecision::reject &&
+          reject.outcome().code == StatusCode::rejected_step &&
+          reject.outcome().detail == 601U &&
+          reject.lowest_failing_rank() == 0 && transaction.active() &&
+          layers.handle(StateRole::accepted_n) == reject_n &&
+          layers.handle(StateRole::accepted_n_minus_one) == reject_nm1 &&
+          layers.handle(StateRole::trial) == reject_trial &&
+          static_cast<bool>(writer.committed(final_storage,
+                                             during_reject_prepare)) &&
+          during_reject_prepare.revision == reject_flux_revision,
+      "reject preparation leaves accepted roles and final flux unchanged");
+  transaction.commit_reject(reject);
+  ConstFaceFluxView after_reject;
+  ConstFaceFluxView previous_after_reject;
+  passed &= expect(!reject.valid() && transaction.finished() &&
+                       !transaction.committed() && !transaction.active() &&
+                       transaction.lowest_failing_rank() == 0 &&
+                       layers.handle(StateRole::accepted_n) == reject_n &&
+                       layers.handle(StateRole::accepted_n_minus_one) == reject_nm1 &&
+                       layers.handle(StateRole::trial) == reject_trial &&
+                       static_cast<bool>(writer.committed(final_storage,
+                                                          after_reject)) &&
+                       static_cast<bool>(writer.committed_previous(
+                           final_storage, previous_after_reject)) &&
+                       after_reject.revision == reject_flux_revision &&
+                       previous_after_reject.revision ==
+                           committed_previous_revision &&
+                       after_reject.certificate ==
+                           committed_flux_certificate &&
+                       previous_after_reject.certificate ==
+                           committed_previous_certificate &&
+                       flux_bits(after_reject) == committed_flux_bits &&
+                       flux_bits(previous_after_reject) ==
+                           committed_previous_bits,
+                   "fresh reject preserves active and previous final-flux "
+                   "bytes, revisions, and certificates bitwise");
+
+  passed &= expect(publish_attempt(-2.0e200),
+                   "abort candidate publishes pending flux");
+  PreparedAttemptFinish abort;
+  passed &= expect(static_cast<bool>(transaction.collective_prepare(
+                       MPI_COMM_SELF, Status{}, abort)) &&
+                       abort.decision() == AttemptFinishDecision::accept,
+                   "an otherwise acceptable attempt can be prepared");
+  transaction.commit_reject(abort);
+  passed &= expect(!abort.valid() && !transaction.committed() &&
+                       layers.handle(StateRole::accepted_n) == reject_n &&
+                       writer.committed(final_storage, after_reject) &&
+                       after_reject.revision == reject_flux_revision,
+                   "a prepared accept can be aborted when a peer module cannot commit");
+  return passed;
+}
+
+bool test_final_flux_publish_preflight_is_read_only_and_allocation_free() {
+  FieldId velocity{};
+  FieldId pressure{};
+  StateLayers layers;
+  bool passed = make_layers(layers, velocity, pressure);
+  AttemptTransaction transaction;
+  FaceFluxStorage source_storage;
+  FaceFluxStorage final_storage;
+  FaceFluxView source;
+  FinalFaceFluxAuthority authority;
+  FinalFaceFluxWriter writer;
+  constexpr Int3 cells{2, 1, 1};
+  passed &= expect(
+      static_cast<bool>(AttemptTransaction::create(
+          layers.field_count(), 1U, layers.field_count(), transaction)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              cells, 1U, source_storage)) &&
+          static_cast<bool>(source_storage.workspace_view(0U, 141U, source)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_final(cells,
+                                                            final_storage)) &&
+          static_cast<bool>(authority.claim(171U, 0U, transaction, writer)),
+      "final-flux preflight fixture initializes");
+  const std::array source_faces{source.x, source.y, source.z};
+  for (std::size_t axis = 0U; axis < source_faces.size(); ++axis) {
+    const auto face = source_faces[axis];
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          face.unchecked({x, y, z}) =
+              10.0 * static_cast<double>(axis + 1U) + x + 0.1 * y;
+  }
+  passed &= expect(static_cast<bool>(writer.initialize_committed(
+                       final_storage, hundun::v04::as_const(source))),
+                   "final-flux preflight fixture initializes baseline");
+  ConstFaceFluxView baseline;
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, baseline)),
+                   "final-flux preflight baseline is observable");
+  const auto baseline_bits = flux_bits(baseline);
+  const RevisionToken baseline_revision = baseline.revision;
+  const auto storage_counters = final_storage.counters();
+
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "final-flux preflight attempt begins");
+  PendingFaceFluxView pending;
+  passed &= expect(static_cast<bool>(writer.begin_pending(
+                       transaction, final_storage, pending)) &&
+                       overwrite_pending_flux(pending, 1700.0),
+                   "final-flux preflight candidate owns writable pending flux");
+  const RevisionToken pending_revision = pending.revision();
+  const RevisionDependency correct = depends_on(transaction, pressure);
+  const std::array stale_dependencies{RevisionDependency{
+      correct.source, static_cast<RevisionToken>(correct.revision + 1U)}};
+  const std::array duplicate_dependencies{correct, correct};
+
+  Status stale_preflight;
+  Status duplicate_preflight;
+  Status correct_preflight;
+  Status published;
+  std::size_t hot_allocations = std::numeric_limits<std::size_t>::max();
+  {
+    allocation_observer::Guard guard;
+    stale_preflight = writer.preflight_publish_pending(
+        Span<const RevisionDependency>{stale_dependencies.data(),
+                                       stale_dependencies.size()},
+        pending);
+    duplicate_preflight = writer.preflight_publish_pending(
+        Span<const RevisionDependency>{duplicate_dependencies.data(),
+                                       duplicate_dependencies.size()},
+        pending);
+    correct_preflight = writer.preflight_publish_pending(
+        Span<const RevisionDependency>{&correct, 1U}, pending);
+    published = writer.publish_pending(
+        Span<const RevisionDependency>{&correct, 1U}, pending);
+    hot_allocations =
+        allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  ConstFaceFluxView after_preflight;
+  passed &= expect(
+      stale_preflight.code == StatusCode::invalid_plan &&
+          duplicate_preflight.code == StatusCode::invalid_plan &&
+          static_cast<bool>(correct_preflight) && static_cast<bool>(published) &&
+          !pending.valid() && transaction.active(),
+      "invalid dependency preflights are retryable and the corrected publish "
+      "succeeds in the same attempt");
+  passed &= expect(
+      static_cast<bool>(writer.committed(final_storage, after_preflight)) &&
+          after_preflight.revision == baseline_revision &&
+          flux_bits(after_preflight) == baseline_bits,
+      "preflight and pending publication write no committed final-flux byte");
+  const auto counters_after = final_storage.counters();
+  passed &= expect(
+      hot_allocations == 0U &&
+          counters_after.aligned_payload_allocations ==
+              storage_counters.aligned_payload_allocations &&
+          counters_after.aligned_payload_bytes ==
+              storage_counters.aligned_payload_bytes &&
+          counters_after.replicas == storage_counters.replicas &&
+          counters_after.directional_blocks ==
+              storage_counters.directional_blocks,
+      "preflight and normal publish allocate no storage or C++ resource");
+  passed &= expect(pending_revision == baseline_revision + 1U,
+                   "preflight preserves the issued pending revision until publish");
+
+  PreparedAttemptFinish accepted;
+  passed &= expect(static_cast<bool>(transaction.collective_prepare(
+                       MPI_COMM_SELF, Status{}, accepted)) &&
+                       accepted.decision() == AttemptFinishDecision::accept,
+                   "corrected final-flux publication prepares accept");
+  transaction.commit_accept(accepted);
+  ConstFaceFluxView committed;
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, committed)) &&
+                       committed.revision == pending_revision,
+                   "corrected final-flux publication commits the pending revision");
+  const auto committed_bits = flux_bits(committed);
+  const auto committed_certificate = committed.certificate;
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "direct-publish fail-closed attempt begins");
+  PendingFaceFluxView rejected_pending;
+  passed &= expect(static_cast<bool>(writer.begin_pending(
+                       transaction, final_storage, rejected_pending)) &&
+                       overwrite_pending_flux(rejected_pending, -1700.0),
+                   "direct-publish fail-closed candidate owns pending flux");
+  const RevisionDependency current = depends_on(transaction, pressure);
+  const std::array invalid_direct_dependencies{RevisionDependency{
+      current.source, static_cast<RevisionToken>(current.revision + 1U)}};
+  const Status invalid_direct = writer.publish_pending(
+      Span<const RevisionDependency>{invalid_direct_dependencies.data(),
+                                     invalid_direct_dependencies.size()},
+      rejected_pending);
+  const std::array current_dependencies{current};
+  const Status ignored_retry = writer.publish_pending(
+      Span<const RevisionDependency>{current_dependencies.data(),
+                                     current_dependencies.size()},
+      rejected_pending);
+  const Status rejected =
+      transaction.collective_finish(MPI_COMM_SELF, Status{});
+  ConstFaceFluxView after_direct_reject;
+  passed &= expect(
+      invalid_direct.code == StatusCode::invalid_plan &&
+          ignored_retry.code == StatusCode::invalid_plan &&
+          rejected.code == StatusCode::invalid_plan &&
+          !transaction.committed() && !rejected_pending.valid() &&
+          static_cast<bool>(writer.committed(final_storage,
+                                             after_direct_reject)) &&
+          after_direct_reject.revision == pending_revision &&
+          after_direct_reject.certificate == committed_certificate &&
+          flux_bits(after_direct_reject) == committed_bits,
+      "direct invalid publication remains fail-closed and rolls back without "
+      "changing committed final flux");
+  return passed;
+}
+
+bool test_restored_final_flux_starts_with_restart_lineage() {
+  FieldId velocity{};
+  FieldId pressure{};
+  StateLayers layers;
+  bool passed = make_layers(layers, velocity, pressure);
+  AttemptTransaction transaction;
+  FaceFluxStorage source_storage;
+  FaceFluxStorage final_storage;
+  FaceFluxView source;
+  FinalFaceFluxAuthority authority;
+  FinalFaceFluxWriter writer;
+  constexpr Int3 cells{2, 2, 1};
+  passed &= expect(
+      static_cast<bool>(AttemptTransaction::create(
+          layers.field_count(), 1U, layers.field_count(), transaction)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              cells, 1U, source_storage)) &&
+          static_cast<bool>(source_storage.workspace_view(0U, 91U, source)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_final(cells,
+                                                            final_storage)) &&
+          static_cast<bool>(authority.claim(81U, 0U, transaction, writer)),
+      "restart final-flux authority initializes without a fresh image");
+  const std::array source_faces{source.x, source.y, source.z};
+  for (std::size_t axis = 0U; axis < source_faces.size(); ++axis) {
+    const auto face = source_faces[axis];
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          face.unchecked({x, y, z}) =
+              100.0 * static_cast<double>(axis + 1U) +
+              10.0 * x + y + 0.01 * z;
+  }
+  const double finite_source = source.x.unchecked({0, 0, 0});
+  source.x.unchecked({0, 0, 0}) =
+      std::numeric_limits<double>::quiet_NaN();
+  ConstFaceFluxView unavailable;
+  passed &= expect(
+      writer.initialize_restored(final_storage, as_const(source)).code ==
+              StatusCode::numerical_failure &&
+          writer.committed(final_storage, unavailable).code ==
+              StatusCode::invalid_plan,
+      "restart flux rejects a non-finite image before publishing lineage");
+  source.x.unchecked({0, 0, 0}) = finite_source;
+  passed &= expect(static_cast<bool>(writer.initialize_restored(
+                       final_storage, as_const(source))),
+                   "restart flux initializes directly from restored bytes");
+
+  ConstFaceFluxView active;
+  ConstFaceFluxView previous;
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, active)) &&
+                       static_cast<bool>(writer.committed_previous(
+                           final_storage, previous)) &&
+                       active.revision == 2U && previous.revision == 2U &&
+                       active.certificate.valid() &&
+                       previous.certificate.valid(),
+                   "restored active and BE history share revision two");
+  const std::array active_faces{active.x, active.y, active.z};
+  const std::array previous_faces{previous.x, previous.y, previous.z};
+  for (std::size_t axis = 0U; axis < source_faces.size(); ++axis) {
+    const auto expected = as_const(source_faces[axis]);
+    for (std::int32_t z = 0; z < expected.extents.z; ++z)
+      for (std::int32_t y = 0; y < expected.extents.y; ++y)
+        for (std::int32_t x = 0; x < expected.extents.x; ++x) {
+          const Int3 face{x, y, z};
+          passed &= expect(active_faces[axis].unchecked(face) ==
+                                   expected.unchecked(face) &&
+                               previous_faces[axis].unchecked(face) ==
+                                   expected.unchecked(face),
+                           "restored active/history flux bytes are exact");
+        }
+  }
+
+  passed &= expect(
+      writer.initialize_restored(final_storage, as_const(source)).code ==
+          StatusCode::invalid_plan,
+      "restart flux lineage is initialized exactly once");
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "post-restart attempt begins");
+  PendingFaceFluxView pending;
+  passed &= expect(static_cast<bool>(writer.begin_pending(
+                       transaction, final_storage, pending)) &&
+                       pending.revision() == 3U,
+                   "first post-restart pending flux advances revision two");
+  passed &= expect(overwrite_pending_flux(pending, 2000.0),
+                   "first post-restart pending bytes are writable");
+  const std::array dependencies{depends_on(transaction, pressure)};
+  passed &= expect(static_cast<bool>(writer.publish_pending(
+                       Span<const RevisionDependency>{dependencies.data(),
+                                                      dependencies.size()},
+                       pending)),
+                   "first post-restart pending flux publishes");
+  PreparedAttemptFinish accepted;
+  passed &= expect(static_cast<bool>(transaction.collective_prepare(
+                       MPI_COMM_SELF, Status{}, accepted)) &&
+                       accepted.decision() == AttemptFinishDecision::accept,
+                   "first post-restart pending flux prepares an accept");
+  transaction.commit_accept(accepted);
+
+  ConstFaceFluxView accepted_active;
+  ConstFaceFluxView accepted_previous;
+  passed &= expect(
+      static_cast<bool>(writer.committed(final_storage, accepted_active)) &&
+          static_cast<bool>(writer.committed_previous(final_storage,
+                                                      accepted_previous)) &&
+          accepted_active.revision == 3U &&
+          accepted_previous.revision == 2U,
+      "post-restart accept establishes distinct active and previous lineage");
+  const std::vector<std::uint64_t> accepted_active_bits =
+      flux_bits(accepted_active);
+  const std::vector<std::uint64_t> accepted_previous_bits =
+      flux_bits(accepted_previous);
+  const auto accepted_active_certificate = accepted_active.certificate;
+  const auto accepted_previous_certificate = accepted_previous.certificate;
+
+  passed &= expect(static_cast<bool>(transaction.begin(layers)) &&
+                       static_cast<bool>(transaction.revise_trial(velocity)) &&
+                       static_cast<bool>(transaction.revise_trial(pressure)),
+                   "second post-restart attempt begins");
+  PendingFaceFluxView poison;
+  passed &= expect(static_cast<bool>(writer.begin_pending(
+                       transaction, final_storage, poison)) &&
+                       poison.revision() == 4U,
+                   "second post-restart pending flux advances revision three");
+  passed &= expect(overwrite_pending_flux(poison, -3.0e200),
+                   "second post-restart pending bytes accept poison");
+  const std::array poison_dependencies{depends_on(transaction, pressure)};
+  passed &= expect(static_cast<bool>(writer.publish_pending(
+                       Span<const RevisionDependency>{
+                           poison_dependencies.data(),
+                           poison_dependencies.size()},
+                       poison)),
+                   "second post-restart attempt publishes poison only to "
+                   "pending flux");
+  PreparedAttemptFinish rejected;
+  passed &= expect(static_cast<bool>(transaction.collective_prepare(
+                       MPI_COMM_SELF,
+                       Status{StatusCode::rejected_step, 602U}, rejected)) &&
+                       rejected.decision() == AttemptFinishDecision::reject,
+                   "post-restart poison prepares a reject");
+  transaction.commit_reject(rejected);
+  ConstFaceFluxView after_reject;
+  ConstFaceFluxView previous_after_reject;
+  passed &= expect(!poison.valid() &&
+                       static_cast<bool>(writer.committed(final_storage,
+                                                          after_reject)) &&
+                       static_cast<bool>(writer.committed_previous(
+                           final_storage, previous_after_reject)) &&
+                       after_reject.revision == 3U &&
+                       previous_after_reject.revision == 2U &&
+                       after_reject.certificate ==
+                           accepted_active_certificate &&
+                       previous_after_reject.certificate ==
+                           accepted_previous_certificate &&
+                       flux_bits(after_reject) == accepted_active_bits &&
+                       flux_bits(previous_after_reject) ==
+                           accepted_previous_bits,
+                   "restart reject preserves active and previous final-flux "
+                   "bytes, revisions, and certificates bitwise");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -730,17 +1327,34 @@ int main(int argc, char** argv) {
           std::declval<RevisionSlotId>(),
           std::declval<Span<const RevisionDependency>>(),
           std::declval<PendingCacheStamp>())));
+  static_assert(noexcept(
+      std::declval<const FinalFaceFluxWriter&>().preflight_publish_pending(
+          std::declval<Span<const RevisionDependency>>(),
+          std::declval<const PendingFaceFluxView&>())));
   static_assert(noexcept(std::declval<AttemptTransaction&>().collective_finish(
       std::declval<MPI_Comm>(), std::declval<Status>())));
+  static_assert(!std::is_copy_constructible_v<PreparedAttemptFinish> &&
+                !std::is_move_constructible_v<PreparedAttemptFinish>);
+  static_assert(noexcept(std::declval<AttemptTransaction&>().collective_prepare(
+      std::declval<MPI_Comm>(), std::declval<Status>(),
+      std::declval<PreparedAttemptFinish&>())));
+  static_assert(noexcept(std::declval<AttemptTransaction&>().commit_accept(
+      std::declval<PreparedAttemptFinish&>())));
+  static_assert(noexcept(std::declval<AttemptTransaction&>().commit_reject(
+      std::declval<PreparedAttemptFinish&>())));
 
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
   bool passed = test_commit_rollback_retry_and_hot_allocations();
   passed &= test_incomplete_write_set_rolls_back();
+  passed &= test_collective_prepare_failure_discards_attempt();
   passed &= test_ignored_hot_error_is_latched();
   passed &= test_cache_stamp_and_layer_binding();
   passed &= test_invalid_state_machine_calls();
+  passed &= test_prepare_then_commit_transaction_and_final_flux();
+  passed &= test_final_flux_publish_preflight_is_read_only_and_allocation_free();
+  passed &= test_restored_final_flux_starts_with_restart_lineage();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

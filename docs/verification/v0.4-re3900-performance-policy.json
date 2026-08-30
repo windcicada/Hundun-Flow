@@ -1,0 +1,14 @@
+{
+  "first_pair_order": "HC",
+  "full20_measured_steps": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+  "full20_warmup_steps": [1, 2, 3, 4, 5],
+  "full2_max_directional_ratio": 1.25,
+  "full2_steps": [1, 2],
+  "grid": [480, 480, 48],
+  "maximum_pairs": 9,
+  "minimum_pairs": 5,
+  "ranks": 64,
+  "schema": "HUNDUN_V04_PERFORMANCE_POLICY_V1",
+  "serialized_output": false,
+  "timing_authority": "max_rank_hot_step_sum"
+}

@@ -67,13 +67,17 @@ bool field_storage_interval(BasicFieldView<T> view,
 
   std::size_t minimum_stride_z = 0U;
   std::size_t minimum_component_stride = 0U;
+  std::size_t storage_span = 0U;
   if (view.stride_y < padded_x ||
       !interval_checked_multiply(view.stride_y, padded_y,
                                  minimum_stride_z) ||
       view.stride_z < minimum_stride_z ||
       !interval_checked_multiply(view.stride_z, padded_z,
                                  minimum_component_stride) ||
-      view.component_stride < minimum_component_stride) {
+      view.component_stride < minimum_component_stride ||
+      !interval_checked_multiply(
+          view.component_stride, static_cast<std::size_t>(view.components),
+          storage_span)) {
     return false;
   }
 
@@ -110,6 +114,14 @@ bool field_storage_interval(BasicFieldView<T> view,
     return false;
   }
 
+  const auto ptrdiff_max =
+      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max());
+  if (view.stride_y > ptrdiff_max || view.stride_z > ptrdiff_max ||
+      view.component_stride > ptrdiff_max || prefix > ptrdiff_max ||
+      maximum_offset > ptrdiff_max || storage_span == 0U) {
+    return false;
+  }
+
   std::size_t prefix_bytes = 0U;
   std::size_t end_bytes = 0U;
   if (!interval_checked_multiply(prefix, sizeof(double), prefix_bytes) ||
@@ -125,6 +137,62 @@ bool field_storage_interval(BasicFieldView<T> view,
   return out.begin < out.end;
 }
 
+template <class T>
+bool face_storage_interval(BasicFaceFieldView<T> view,
+                           FieldStorageInterval& out) noexcept {
+  if (view.base == nullptr || view.extents.x <= 0 || view.extents.y <= 0 ||
+      view.extents.z <= 0 || view.stride_y == 0U || view.stride_z == 0U) {
+    return false;
+  }
+
+  const std::size_t nx = static_cast<std::size_t>(view.extents.x);
+  const std::size_t ny = static_cast<std::size_t>(view.extents.y);
+  const std::size_t nz = static_cast<std::size_t>(view.extents.z);
+  std::size_t minimum_stride_z = 0U;
+  std::size_t storage_span = 0U;
+  if (view.stride_y < nx ||
+      !interval_checked_multiply(view.stride_y, ny, minimum_stride_z) ||
+      view.stride_z < minimum_stride_z ||
+      !interval_checked_multiply(view.stride_z, nz, storage_span)) {
+    return false;
+  }
+
+  std::size_t last_y = 0U;
+  std::size_t last_z = 0U;
+  std::size_t maximum_offset = nx - 1U;
+  std::size_t end_offset = 0U;
+  if (!interval_checked_multiply(ny - 1U, view.stride_y, last_y) ||
+      !interval_checked_multiply(nz - 1U, view.stride_z, last_z) ||
+      !interval_checked_add(maximum_offset, last_y, maximum_offset) ||
+      !interval_checked_add(maximum_offset, last_z, maximum_offset) ||
+      !interval_checked_add(maximum_offset, 1U, end_offset)) {
+    return false;
+  }
+
+  const auto ptrdiff_max =
+      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max());
+  if (view.stride_y > ptrdiff_max || view.stride_z > ptrdiff_max ||
+      maximum_offset > ptrdiff_max || storage_span == 0U) {
+    return false;
+  }
+
+  std::size_t end_bytes = 0U;
+  if (!interval_checked_multiply(end_offset, sizeof(double), end_bytes)) {
+    return false;
+  }
+  const auto base = reinterpret_cast<std::uintptr_t>(view.base);
+  if (end_bytes > std::numeric_limits<std::uintptr_t>::max() - base) {
+    return false;
+  }
+  out = {base, base + end_bytes};
+  return out.begin < out.end;
+}
+
+inline bool storage_intervals_overlap(FieldStorageInterval left,
+                                      FieldStorageInterval right) noexcept {
+  return left.begin < right.end && right.begin < left.end;
+}
+
 template <class Left, class Right>
 bool field_views_overlap(BasicFieldView<Left> left,
                          BasicFieldView<Right> right) noexcept {
@@ -134,8 +202,31 @@ bool field_views_overlap(BasicFieldView<Left> left,
       !field_storage_interval(right, right_interval)) {
     return true;
   }
-  return left_interval.begin < right_interval.end &&
-         right_interval.begin < left_interval.end;
+  return storage_intervals_overlap(left_interval, right_interval);
+}
+
+template <class CellT, class FaceT>
+bool cell_face_views_overlap(BasicFieldView<CellT> cell,
+                             BasicFaceFieldView<FaceT> face) noexcept {
+  FieldStorageInterval cell_interval{};
+  FieldStorageInterval face_interval{};
+  if (!field_storage_interval(cell, cell_interval) ||
+      !face_storage_interval(face, face_interval)) {
+    return true;
+  }
+  return storage_intervals_overlap(cell_interval, face_interval);
+}
+
+template <class Left, class Right>
+bool face_views_overlap(BasicFaceFieldView<Left> left,
+                        BasicFaceFieldView<Right> right) noexcept {
+  FieldStorageInterval left_interval{};
+  FieldStorageInterval right_interval{};
+  if (!face_storage_interval(left, left_interval) ||
+      !face_storage_interval(right, right_interval)) {
+    return true;
+  }
+  return storage_intervals_overlap(left_interval, right_interval);
 }
 
 template <class T>
@@ -156,7 +247,7 @@ bool field_view_overlaps_storage(BasicFieldView<T> view,
     return true;
   }
   const auto end = begin + bytes;
-  return interval.begin < end && begin < interval.end;
+  return storage_intervals_overlap(interval, {begin, end});
 }
 
 }  // namespace hundun::v04::detail

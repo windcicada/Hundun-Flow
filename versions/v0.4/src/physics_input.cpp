@@ -514,18 +514,24 @@ PlanFingerprint fingerprint_scalar_catalog(
   }
   try {
     SpecHash64 hash;
-    hash.text("HUNDUN-FLOW-v0.4-transported-scalar-catalog-v1");
+    hash.text("HUNDUN-FLOW-v0.4-transported-scalar-catalog-v2");
     hash.integer(catalog.size);
     for (std::size_t index = 0U; index < catalog.size; ++index) {
       const TransportedScalarSpec& scalar = catalog.data[index];
       if (!valid_name(scalar.stable_name) ||
           static_cast<std::uint8_t>(scalar.role) >
               static_cast<std::uint8_t>(
-                  TransportedScalarRole::passive_scalar)) {
+                  TransportedScalarRole::passive_scalar) ||
+          !std::isfinite(scalar.molecular_schmidt) ||
+          !(scalar.molecular_schmidt > 0.0) ||
+          !std::isfinite(scalar.turbulent_schmidt) ||
+          !(scalar.turbulent_schmidt > 0.0)) {
         return 0U;
       }
       hash.text(scalar.stable_name);
       hash.integer(static_cast<std::uint64_t>(scalar.role));
+      hash.real(scalar.molecular_schmidt);
+      hash.real(scalar.turbulent_schmidt);
     }
     return hash.finish();
   } catch (...) {

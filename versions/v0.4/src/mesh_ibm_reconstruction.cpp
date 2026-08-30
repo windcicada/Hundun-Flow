@@ -101,6 +101,10 @@ bool valid_frame(const QuadraticFrame& frame) noexcept {
       !std::isfinite(frame.scale) || !(frame.scale > 0.0)) {
     return false;
   }
+  if (frame.required_quadrant_mask == 0U ||
+      (frame.required_quadrant_mask & 0xf0U) != 0U) {
+    return false;
+  }
   constexpr double kFrameTolerance = 512.0 *
                                      std::numeric_limits<double>::epsilon();
   return std::abs(norm(frame.normal) - 1.0) <= kFrameTolerance &&
@@ -569,7 +573,9 @@ Status compile_prefix(const QuadraticStencilRequest& request,
   }
   const std::uint8_t normal_bands =
       count_normal_bands(normal_coordinates, donor_count);
-  if (normal_bands < limits.minimum_normal_bands || quadrant_mask != 0x0fU) {
+  if (normal_bands < limits.minimum_normal_bands ||
+      (quadrant_mask & request.frame.required_quadrant_mask) !=
+          request.frame.required_quadrant_mask) {
     return {StatusCode::invalid_plan, kQuadraticCoverage};
   }
   detail::ibm_qr::Factorization factor;
@@ -628,6 +634,7 @@ Status compile_prefix(const QuadraticStencilRequest& request,
   hash_real3(group_hash, request.frame.tangent2);
   group_hash.real(request.frame.scale);
   hash_int3(group_hash, request.frame.anchor_global_cell);
+  group_hash.integer(request.frame.required_quadrant_mask);
   group_hash.integer(qr_fingerprint);
   group_hash.real(condition_estimate);
 
@@ -726,8 +733,9 @@ Status compile_prefix(const QuadraticStencilRequest& request,
   group.row_count = static_cast<std::uint8_t>(request.functionals.size);
   group.quality = {
       static_cast<std::uint8_t>(donor_count), normal_bands,
-      quadrant_mask, maximum_reach, factor.rank, condition_estimate,
-      maximum_functional_l1, qr_fingerprint};
+      quadrant_mask, request.frame.required_quadrant_mask, maximum_reach,
+      factor.rank, condition_estimate, maximum_functional_l1,
+      qr_fingerprint};
   group.fingerprint = group_hash.finish();
   candidate.groups.push_back(group);
   candidate.maximum_halo_reach =
@@ -956,6 +964,42 @@ Status evaluate_quadratic_row(const QuadraticStencilPlan& plan,
     return {StatusCode::numerical_failure, kQuadraticEvaluation};
   }
   out = candidate;
+  return {};
+}
+
+Status evaluate_positive_bounded_quadratic_row(
+    const QuadraticStencilPlan& plan, std::uint32_t row_index,
+    ConstFieldView field, std::uint8_t component, double& out) noexcept {
+  double candidate = 0.0;
+  Status status = evaluate_quadratic_row(plan, row_index, field, component,
+                                         0.0, 0.0, candidate);
+  if (!status) return status;
+  const Span<const QuadraticAffineRow> rows = plan.rows();
+  const Span<const QuadraticStencilGroup> groups = plan.groups();
+  const Span<const Int3> donors = plan.donor_local_indices();
+  if (row_index >= rows.size || rows.data[row_index].group >= groups.size) {
+    return {StatusCode::invalid_plan, kQuadraticEvaluation};
+  }
+  const QuadraticStencilGroup& group =
+      groups.data[rows.data[row_index].group];
+  const std::size_t begin = group.donor_begin;
+  const std::size_t count = group.quality.donor_count;
+  if (count == 0U || begin > donors.size || count > donors.size - begin) {
+    return {StatusCode::invalid_plan, kQuadraticEvaluation};
+  }
+  double minimum = std::numeric_limits<double>::infinity();
+  double maximum = 0.0;
+  for (std::size_t index = 0U; index < count; ++index) {
+    const Int3 donor = donors.data[begin + index];
+    if (!index_in_view(donor, field))
+      return {StatusCode::invalid_plan, kQuadraticEvaluation};
+    const double value = field.unchecked(donor, component);
+    if (!(value > 0.0) || !std::isfinite(value))
+      return {StatusCode::numerical_failure, kQuadraticEvaluation};
+    minimum = std::min(minimum, value);
+    maximum = std::max(maximum, value);
+  }
+  out = std::clamp(candidate, minimum, maximum);
   return {};
 }
 

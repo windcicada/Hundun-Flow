@@ -1,0 +1,119 @@
+{
+  "schema": "HUNDUN_V04_LITERATURE_V1",
+  "source": {
+    "title": "Experimental investigation of fluctuating forces exerted on a cylindrical tube (Reynolds numbers from 3000 to 30000)",
+    "authors": "H. Tadrist, R. Martin, L. Tadrist, and P. Seguin",
+    "year": 1990,
+    "primary_url": "https://doi.org/10.1063/1.857804",
+    "locator": "Physics of Fluids A 2(12), printed pp. 2176-2182; apparatus pp. 2177-2178; force standard deviation and Fig. 6 p. 2179; span/end/blockage discussion p. 2180"
+  },
+  "source_artifact": {
+    "kind": "user_authorized_complete_primary_pdf",
+    "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/tadrist1990.pdf",
+    "sha256": "e62f0c6bfc2b2bea7e89de6ffb075eee0740bcc1ee393254e44c2bb84ab4e1d3",
+    "bytes": 543517,
+    "pages": 8,
+    "provenance": "user supplied and explicitly authorized the lawful complete PDF for accuracy validation on 2026-08-22"
+  },
+  "observables": [
+    {
+      "name": "direct_global_lift_measurement_re_min",
+      "value": 3000.0,
+      "units": "1",
+      "definition": "minimum Reynolds number of the reported direct global fluctuating-lift measurements",
+      "source_locator": "abstract; printed p. 2179, Section IV.A",
+      "extraction_method": "direct prose value",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "none"
+      }
+    },
+    {
+      "name": "direct_global_lift_measurement_re_max",
+      "value": 30000.0,
+      "units": "1",
+      "definition": "maximum Reynolds number of the reported direct global fluctuating-lift measurements",
+      "source_locator": "abstract; printed p. 2179, Section IV.A",
+      "extraction_method": "direct prose value",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "none"
+      }
+    },
+    {
+      "name": "upstream_turbulence_intensity",
+      "value": 0.05,
+      "units": "1",
+      "definition": "Tu=sigma_u/U for upstream velocities above 4 m/s; reported velocity-independent",
+      "source_locator": "printed p. 2177, Eq. 13 and adjacent prose",
+      "extraction_method": "direct prose value",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "none"
+      }
+    },
+    {
+      "name": "global_lift_coefficient_prose_re3000_endpoint",
+      "value": 0.02,
+      "units": "1",
+      "definition": "approximate lower prose endpoint of the plotted global lift coefficient over Re=3000-7000; not a point-labelled Re=3900 value",
+      "source_locator": "printed p. 2179, Section IV.A and Fig. 6",
+      "extraction_method": "direct approximate prose endpoint; no graph digitization or interpolation",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "pointwise experimental uncertainty not reported"
+      }
+    },
+    {
+      "name": "global_lift_coefficient_prose_re7000_endpoint",
+      "value": 0.08,
+      "units": "1",
+      "definition": "approximate upper prose endpoint of the plotted global lift coefficient over Re=3000-7000; not a point-labelled Re=3900 value",
+      "source_locator": "printed p. 2179, Section IV.A and Fig. 6",
+      "extraction_method": "direct approximate prose endpoint; no graph digitization or interpolation",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "pointwise experimental uncertainty not reported"
+      }
+    },
+    {
+      "name": "force_spectrum_band_choice_relative_difference",
+      "value": 0.07,
+      "units": "1",
+      "definition": "reported approximate difference between lift force evaluated from the full vortex-shedding band and from the midheight band; this is a band-choice sensitivity, not measurement uncertainty",
+      "source_locator": "printed p. 2179, Section III.3 following Eq. 15",
+      "extraction_method": "direct prose value, explicitly excluded from experimental uncertainty",
+      "uncertainty": {
+        "status": "not_reported",
+        "value": null,
+        "kind": "not an uncertainty authority"
+      }
+    },
+    {
+      "name": "adopted_correlation_length_over_d",
+      "value": 4.0,
+      "units": "1",
+      "definition": "lambda_c/D adopted from Surry and Sonneville to derive local lift from the directly measured global coefficient; not measured in the Tadrist experiment",
+      "source_locator": "printed p. 2180, paragraph applying relation 10 to Fig. 8",
+      "extraction_method": "direct source model input; classified as derived/non-measured",
+      "uncertainty": {
+        "status": "derived",
+        "value": null,
+        "kind": "model uncertainty not reported"
+      }
+    }
+  ],
+  "required_observables": [],
+  "excluded_as_release_oracles": [
+    "Fig. 6 has no tabulated or point-labelled Re=3900 global lift value",
+    "the prose 0.02-0.08 range over Re=3000-7000 is an advisory target-neighborhood envelope, not an exact Re=3900 tolerance",
+    "lambda_c=4D is adopted from other studies and does not by itself establish periodic pi-D span equivalence",
+    "the reported 7% band-choice difference is not a measurement uncertainty",
+    "the experiment reports no Tadrist total mean-drag value"
+  ]
+}

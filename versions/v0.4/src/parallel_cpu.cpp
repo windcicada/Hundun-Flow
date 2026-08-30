@@ -775,12 +775,15 @@ Status CpuExecutionPlan::compile(MPI_Comm communicator,
       return status;
     }
     bool shared_warning = false;
-    status = shared_duplicate_warning(
-        communicator, {candidate.core_ids_.data(), candidate.core_ids_.size()},
-        shared_warning);
-    status = consensus_status(communicator, status);
-    if (!status) {
-      return status;
+    if (!candidate.pure_mpi_) {
+      status = shared_duplicate_warning(
+          communicator,
+          {candidate.core_ids_.data(), candidate.core_ids_.size()},
+          shared_warning);
+      status = consensus_status(communicator, status);
+      if (!status) {
+        return status;
+      }
     }
     candidate.diagnostics_.duplicate_core_warning =
         candidate.diagnostics_.duplicate_core_warning || shared_warning;

@@ -20,6 +20,8 @@ class BoundaryPlan;
 class CartesianGeometryPlan;
 class FaceFluxStorage;
 class FinalFaceFluxWriter;
+class PressureVelocityCoupler;
+class ProductDriver;
 class SchemePlan;
 struct MeshPatch;
 
@@ -217,6 +219,7 @@ class FaceFluxCertificate {
  private:
   friend class FaceFluxConsumer;
   friend class FinalFaceFluxWriter;
+  friend class PressureVelocityCoupler;
   RevisionToken revision_{};
   PlanFingerprint authority_{};
   StorageIdentity storage_{};
@@ -265,6 +268,7 @@ class PendingFaceFluxView {
   friend struct detail::PendingFaceFluxAccess;
   friend class FaceFluxStorage;
   friend class FinalFaceFluxWriter;
+  friend class PressureVelocityCoupler;
   FaceFieldView x_{};
   FaceFieldView y_{};
   FaceFieldView z_{};
@@ -274,6 +278,13 @@ class PendingFaceFluxView {
   FaceFluxStorage* storage_{};
   FinalFaceFluxWriter* writer_{};
 };
+
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+namespace detail {
+Status overwrite_pending_face_flux_for_test(PendingFaceFluxView& pending,
+                                            double value) noexcept;
+}  // namespace detail
+#endif
 
 ConstFaceFieldView as_const(FaceFieldView view) noexcept;
 ConstFaceFluxView as_const(FaceFluxView view) noexcept;
@@ -455,9 +466,137 @@ Status cartesian_provisional_face_divergence(
 Status cartesian_convection(const CartesianKernelPlan& plan,
                             ConvectionScheme scheme, ConstFaceFluxView flux,
                             const KernelInvocation& invocation) noexcept;
+// Conservative target-layer divergence using an attempt-local, deliberately
+// uncommitted flux.  This is distinct from both predictor semantics and the
+// final published-flux authority boundary.
+Status cartesian_target_convection(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept;
 Status cartesian_provisional_convection(
     const CartesianKernelPlan& plan, ConvectionScheme scheme,
     ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept;
+
+// Exact face values frozen from the same reconstruction used by
+// cartesian_target_convection.  reconstruction is the rank-invariant semantic
+// token; revision seals the exact numeric target and may be rank-local.
+// local_binding additionally seals the rank-local input and output storage
+// identities used to produce these bytes.
+struct FrozenConvectionFaceField {
+  ConstFaceFieldView x{};
+  ConstFaceFieldView y{};
+  ConstFaceFieldView z{};
+  RevisionToken revision{};
+  PlanFingerprint reconstruction{};
+  PlanFingerprint local_binding{};
+  bool exact_target_reconstruction{};
+
+  bool valid() const noexcept {
+    return x.base != nullptr && y.base != nullptr && z.base != nullptr &&
+           revision != 0U && reconstruction != 0U && local_binding != 0U &&
+           exact_target_reconstruction;
+  }
+};
+
+struct FrozenConvectionContext {
+  // Rank-invariant authority of the equation/scheme/boundary family.
+  PlanFingerprint collective_semantics{};
+  // Exact numeric closure revision for the current target state; this may be
+  // rank-local and therefore never enters a collective contract verbatim.
+  RevisionToken closure{};
+};
+
+struct FrozenConvectionFaceOutput {
+  FaceFieldView x{};
+  FaceFieldView y{};
+  FaceFieldView z{};
+};
+
+// Two-pass and allocation-free: all face values are preflighted before any
+// output byte is changed.  The input flux must be an uncommitted target-layer
+// view, matching cartesian_target_convection semantics.
+Status freeze_cartesian_target_convection_faces(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux, ConstFieldView transported,
+    std::uint8_t component, FrozenConvectionContext context,
+    FrozenConvectionFaceOutput output,
+    FrozenConvectionFaceField& frozen) noexcept;
+
+enum class FrozenConvectionLinearizationPolicy : std::uint8_t {
+  classical_active_branch,
+  semismooth_generalized_zero_slope
+};
+
+// Directional face values obtained by applying one explicit linearization
+// policy to a FrozenConvectionFaceField and a cell-centred variation.
+// reconstruction seals only rank-invariant scheme/context/policy semantics.
+// revision, branch_authority, local_binding, counts, and all views are
+// rank-local.  This certificate intentionally makes no blanket "exact"
+// claim: classical_everywhere identifies the ordinary derivative case, while
+// generalized_face_count records semismooth generalized faces.
+struct FrozenConvectionFaceDirectionalDerivative {
+  ConstFaceFieldView x{};
+  ConstFaceFieldView y{};
+  ConstFaceFieldView z{};
+  RevisionToken revision{};
+  PlanFingerprint reconstruction{};
+  PlanFingerprint branch_authority{};
+  PlanFingerprint local_binding{};
+  FrozenConvectionLinearizationPolicy policy{
+      FrozenConvectionLinearizationPolicy::classical_active_branch};
+  std::uint64_t generalized_face_count{};
+  bool classical_everywhere{};
+
+  bool valid() const noexcept {
+    return x.base != nullptr && y.base != nullptr && z.base != nullptr &&
+           revision != 0U && reconstruction != 0U &&
+           branch_authority != 0U && local_binding != 0U &&
+           classical_everywhere == (generalized_face_count == 0U) &&
+           (policy ==
+                FrozenConvectionLinearizationPolicy::classical_active_branch
+                ? classical_everywhere
+                : policy == FrozenConvectionLinearizationPolicy::
+                                semismooth_generalized_zero_slope);
+  }
+};
+
+// Exactly two face traversals and allocation-free.  The first traversal
+// preflights values, bitwise-compares the nonlinear target reconstruction with
+// frozen, and seals branch authority/counts; the second commits output.  The
+// caller's revision discipline must prevent concurrent raw mutation between
+// traversals because no face-field lease exists at this seam.  A repeated E_h
+// Krylov hot path that cannot afford branch discovery on every application
+// must introduce separately owned, pre-registered branch-mask storage rather
+// than weakening this numeric comparison.
+Status differentiate_frozen_cartesian_target_convection_faces(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux, ConstFieldView target,
+    std::uint8_t target_component, FrozenConvectionContext context,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen, ConstFieldView variation,
+    std::uint8_t variation_component, FrozenConvectionFaceOutput output,
+    FrozenConvectionFaceDirectionalDerivative& derivative) noexcept;
+
+struct ConvectionPointDiagnostic {
+  double divergence{};
+  double mass_divergence{};
+  double maximum_face_envelope_violation{};
+  double selected_face_value{};
+  double selected_donor_minimum{};
+  double selected_donor_maximum{};
+  bool face_envelope_checked{};
+  bool face_envelope_valid{};
+};
+
+// Failure-path observer for one already-computed Cartesian convection cell.
+// It executes no collective and allocates no storage. The returned divergence
+// uses the production reconstruction; its adjacent-cell donor envelope is an
+// independent check on the TVD face value.
+Status diagnose_cartesian_convection_point(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView flux, ConstFieldView transported,
+    std::uint8_t component, Int3 cell,
+    ConvectionPointDiagnostic& diagnostic) noexcept;
+
 Status cartesian_diffusion(const CartesianKernelPlan& plan,
                            ConstFieldView diffusivity,
                            const KernelInvocation& invocation) noexcept;
@@ -642,7 +781,10 @@ class ExecutionGraphCompiler {
 
   Status configure(Span<const GraphFieldSpec> fields) noexcept;
   Status register_stage(const StageSpec& stage) noexcept;
+  Status freeze(FrozenExecutionGraph& out) noexcept;
+#ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
   Status freeze_for_test(FrozenExecutionGraph& out) noexcept;
+#endif
   bool frozen() const noexcept { return frozen_; }
 
  private:
@@ -765,6 +907,7 @@ class StateLayers {
                       ConstFieldView& out) const noexcept;
   RevisionToken runtime_revision(FieldLifetime lifetime,
                                  FieldId field) const noexcept;
+  Status revise_runtime(FieldLifetime lifetime, FieldId field) noexcept;
   std::size_t handle(StateRole role) const noexcept;
   RevisionToken revision(StateRole role, FieldId field) const noexcept;
   RevisionToken state_revision(StateRole role) const noexcept;
@@ -795,6 +938,43 @@ class StateLayers {
   RevisionToken next_revision_{1U};
 };
 
+class AttemptTransaction;
+
+enum class AttemptFinishDecision : std::uint8_t { accept, reject };
+
+// The public default constructor only creates an invalid placeholder.  A
+// consumable certificate can be produced solely by collective_prepare and is
+// bound to one exact transaction attempt and mutation revision.
+class PreparedAttemptFinish {
+ public:
+  PreparedAttemptFinish() noexcept = default;
+  PreparedAttemptFinish(const PreparedAttemptFinish&) = delete;
+  PreparedAttemptFinish& operator=(const PreparedAttemptFinish&) = delete;
+  PreparedAttemptFinish(PreparedAttemptFinish&&) = delete;
+  PreparedAttemptFinish& operator=(PreparedAttemptFinish&&) = delete;
+
+  bool valid() const noexcept { return valid_ && !consumed_; }
+  AttemptFinishDecision decision() const noexcept { return decision_; }
+  Status outcome() const noexcept { return outcome_; }
+  int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
+
+ private:
+  friend class AttemptTransaction;
+  AttemptTransaction* owner_{};
+  StateLayers* layers_{};
+  FinalFaceFluxWriter* final_face_flux_writer_{};
+  StorageIdentity bound_layers_identity_{};
+  std::uint64_t attempt_identity_{};
+  std::uint64_t mutation_revision_{};
+  std::uint64_t final_face_flux_writer_identity_{};
+  Status outcome_{StatusCode::invalid_plan, 0U};
+  int lowest_failing_rank_{-1};
+  AttemptFinishDecision decision_{AttemptFinishDecision::reject};
+  bool locally_active_{};
+  bool valid_{};
+  bool consumed_{};
+};
+
 class AttemptTransaction {
  public:
   AttemptTransaction() noexcept = default;
@@ -818,6 +998,12 @@ class AttemptTransaction {
   Status publish_pending_cache(RevisionSlotId slot,
                                Span<const RevisionDependency> dependencies,
                                PendingCacheStamp stamp) noexcept;
+  Status collective_prepare(MPI_Comm communicator, Status local_status,
+                            PreparedAttemptFinish& out) noexcept;
+  void commit_accept(PreparedAttemptFinish& prepared) noexcept;
+  // commit_reject also accepts a prepared accept certificate.  This is the
+  // no-fail abort path when another module's prepare phase cannot commit.
+  void commit_reject(PreparedAttemptFinish& prepared) noexcept;
   Status collective_finish(MPI_Comm communicator,
                            Status local_status) noexcept;
 
@@ -840,13 +1026,23 @@ class AttemptTransaction {
   Status publish_final_face_flux_cache(
       RevisionSlotId slot, Span<const RevisionDependency> dependencies,
       PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept;
+  Status preflight_final_face_flux_cache(
+      RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+      PendingCacheStamp stamp,
+      std::uint64_t writer_identity) const noexcept;
   Status publish_pending_cache_impl(
       RevisionSlotId slot, Span<const RevisionDependency> dependencies,
       PendingCacheStamp stamp, std::uint64_t writer_identity) noexcept;
+  Status preflight_pending_cache_impl(
+      RevisionSlotId slot, Span<const RevisionDependency> dependencies,
+      PendingCacheStamp stamp,
+      std::uint64_t writer_identity) const noexcept;
   void detach_final_face_flux_writer(FinalFaceFluxWriter& writer,
                                      bool fail_active) noexcept;
   void invalidate_final_face_flux_writer(
       const FinalFaceFluxWriter& writer) noexcept;
+  void advance_mutation_revision() noexcept;
+  bool matches_prepared(const PreparedAttemptFinish& prepared) const noexcept;
   void discard_attempt() noexcept;
   StateLayers* layers_{};
   std::vector<RevisionToken> active_caches_;
@@ -864,6 +1060,7 @@ class AttemptTransaction {
   StorageIdentity bound_layers_identity_{};
   Status attempt_status_{};
   std::uint64_t attempt_identity_{};
+  std::uint64_t mutation_revision_{};
   std::uint64_t final_face_flux_writer_identity_{};
   FinalFaceFluxWriter* final_face_flux_writer_{};
   bool active_{};
@@ -882,16 +1079,35 @@ class FinalFaceFluxWriter {
   Status begin_pending(AttemptTransaction& transaction,
                        FaceFluxStorage& storage,
                        PendingFaceFluxView& out) noexcept;
+  Status initialize_committed(FaceFluxStorage& storage,
+                              ConstFaceFluxView source) noexcept;
+  // Restart images already represent both accepted time levels while the
+  // controller is forced through backward-Euler recovery.  Initialize the
+  // active and previous handles directly from those bytes; no synthetic
+  // fresh-start flux is inserted into the restored lineage.
+  Status initialize_restored(FaceFluxStorage& storage,
+                             ConstFaceFluxView source) noexcept;
+  // Pure, allocation-free validation for a later publish_pending call.  A
+  // failed preflight neither poisons the attempt nor consumes the pending
+  // lease, so callers may first reach WORLD consensus and then publish.
+  Status preflight_publish_pending(
+      Span<const RevisionDependency> dependencies,
+      const PendingFaceFluxView& pending) const noexcept;
   Status publish_pending(Span<const RevisionDependency> dependencies,
                          PendingFaceFluxView& pending) noexcept;
   Status committed(const FaceFluxStorage& storage,
                    ConstFaceFluxView& out) const noexcept;
+  Status committed_previous(const FaceFluxStorage& storage,
+                            ConstFaceFluxView& out) const noexcept;
 
  private:
   friend class AttemptTransaction;
   friend class FinalFaceFluxAuthority;
   friend class FaceFluxStorage;
   friend class PendingFaceFluxView;
+  friend class ProductDriver;
+  Status restore_committed(FaceFluxStorage& storage,
+                           ConstFaceFluxView source) noexcept;
   bool ready_for_collective(const AttemptTransaction& transaction) const
       noexcept;
   void complete_from_transaction(const AttemptTransaction& transaction,
@@ -905,9 +1121,11 @@ class FinalFaceFluxWriter {
   RevisionSlotId cache_slot_{};
   PlanFingerprint authority_fingerprint_{};
   RevisionToken active_revision_{};
+  RevisionToken previous_revision_{};
   RevisionToken pending_revision_{};
   std::uint64_t pending_attempt_identity_{};
   std::size_t active_replica_{};
+  std::size_t previous_replica_{};
   std::size_t pending_replica_{1U};
   AttemptTransaction* authority_transaction_{};
   AttemptTransaction* transaction_{};

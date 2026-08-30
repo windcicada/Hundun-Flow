@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -254,7 +255,10 @@ struct NumericalFixture {
   NativeCartesianMgPlan plan;
 
   bool create(const CartesianMeshSpec& mesh, MgBoundarySet selected,
-              MgNullSpace null_space, bool variable_coefficient) {
+              MgNullSpace null_space, bool variable_coefficient,
+              MgPointSmootherKind smoother = MgPointSmootherKind::red_black,
+              MgOperatorClass operator_kind = MgOperatorClass::general,
+              std::uint32_t smoother_sweeps = 2U) {
     boundaries = selected;
     variable = variable_coefficient;
     if (!CartesianGeometryCompiler::compile(
@@ -285,12 +289,14 @@ struct NumericalFixture {
     spec.null_space = null_space;
     spec.policy.anisotropy_threshold = 4.0;
     spec.policy.coefficient_change_rebuild_ratio = 0.25;
-    spec.policy.pre_sweeps = 2U;
-    spec.policy.post_sweeps = 2U;
+    spec.policy.pre_sweeps = smoother_sweeps;
+    spec.policy.post_sweeps = smoother_sweeps;
     spec.policy.maximum_levels = 20U;
     spec.policy.coarse_sweeps = 32U;
     spec.policy.minimum_coarse_extent = 3U;
     spec.policy.line_relaxation_maximum_extent = 4096U;
+    spec.policy.point_smoother = smoother;
+    spec.operator_class = operator_kind;
     spec.identity = {301U, 302U, 303U, 304U, 305U};
     spec.coefficients = {1U, variable ? 402U : 401U, 0.0};
     if (!make_mg_workspace_requirements(MPI_COMM_SELF, geometry, patch,
@@ -564,8 +570,15 @@ struct NumericalFixture {
     return sum / static_cast<double>(count);
   }
 
-  bool run_cycles(std::uint32_t cycles, double maximum_ratio,
-                  bool require_projection) noexcept {
+  struct CycleReport {
+    bool passed{};
+    double initial{};
+    double final{};
+    double ratio{};
+  };
+
+  CycleReport run_cycles_report(std::uint32_t cycles, double maximum_ratio,
+                                bool require_projection) noexcept {
     double previous = residual_norm();
     const double initial = previous;
     bool passed = std::isfinite(initial) && initial > 0.0;
@@ -595,8 +608,16 @@ struct NumericalFixture {
         previous = current;
       }
     }
-    return passed && previous <= maximum_ratio * initial &&
-           allocation_observer::count.load(std::memory_order_relaxed) == 0U;
+    const double ratio = previous / initial;
+    return {passed && previous <= maximum_ratio * initial &&
+                allocation_observer::count.load(std::memory_order_relaxed) ==
+                    0U,
+            initial, previous, ratio};
+  }
+
+  bool run_cycles(std::uint32_t cycles, double maximum_ratio,
+                  bool require_projection) noexcept {
+    return run_cycles_report(cycles, maximum_ratio, require_projection).passed;
   }
 };
 
@@ -657,6 +678,126 @@ bool test_constant_null_space_projection() {
   return passed;
 }
 
+bool test_chebyshev_uniform_mixed_boundaries() {
+  const MgBoundarySet mixed{
+      MgBoundaryKind::dirichlet, MgBoundaryKind::dirichlet,
+      MgBoundaryKind::neumann,   MgBoundaryKind::neumann,
+      MgBoundaryKind::periodic,  MgBoundaryKind::periodic};
+  NumericalFixture degree_two;
+  NumericalFixture degree_three;
+  bool passed = expect(
+      degree_two.create(
+          uniform_mesh({16, 12, 8}), mixed, MgNullSpace::none, false,
+          MgPointSmootherKind::chebyshev_jacobi,
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 2U) &&
+          degree_three.create(
+              uniform_mesh({16, 12, 8}), mixed, MgNullSpace::none, false,
+              MgPointSmootherKind::chebyshev_jacobi,
+              MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 3U),
+      "uniform mixed-boundary certified Chebyshev degree-two/degree-three hierarchies compile");
+  if (!passed) {
+    return false;
+  }
+  degree_two.make_manufactured_solution(false);
+  degree_three.make_manufactured_solution(false);
+  const NumericalFixture::CycleReport two =
+      degree_two.run_cycles_report(10U, 0.10, false);
+  const NumericalFixture::CycleReport three =
+      degree_three.run_cycles_report(10U, 0.10, false);
+  std::cout << std::setprecision(17)
+            << "chebyshev_degree_compare case=uniform_mixed degree2_initial="
+            << two.initial << " degree2_final=" << two.final
+            << " degree2_ratio=" << two.ratio
+            << " degree3_initial=" << three.initial
+            << " degree3_final=" << three.final
+            << " degree3_ratio=" << three.ratio << '\n';
+  passed &= expect(
+      two.passed && three.passed && two.initial == three.initial &&
+          three.ratio <= two.ratio,
+      "uniform mixed-boundary degree-three Chebyshev remains finite, monotone, bounded, and no worse than degree two");
+  return passed;
+}
+
+bool test_chebyshev_stretched_variable_coefficients() {
+  const MgBoundarySet mixed{
+      MgBoundaryKind::dirichlet, MgBoundaryKind::dirichlet,
+      MgBoundaryKind::neumann,   MgBoundaryKind::neumann,
+      MgBoundaryKind::periodic,  MgBoundaryKind::periodic};
+  NumericalFixture degree_two;
+  NumericalFixture degree_three;
+  bool passed = expect(
+      degree_two.create(
+          stretched_variable_mesh(), mixed, MgNullSpace::none, true,
+          MgPointSmootherKind::chebyshev_jacobi,
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 2U) &&
+          degree_three.create(
+              stretched_variable_mesh(), mixed, MgNullSpace::none, true,
+              MgPointSmootherKind::chebyshev_jacobi,
+              MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 3U),
+      "stretched variable-coefficient certified Chebyshev degree-two/degree-three hierarchies compile");
+  if (!passed) {
+    return false;
+  }
+  degree_two.make_manufactured_solution(false);
+  degree_three.make_manufactured_solution(false);
+  const NumericalFixture::CycleReport two =
+      degree_two.run_cycles_report(12U, 0.20, false);
+  const NumericalFixture::CycleReport three =
+      degree_three.run_cycles_report(12U, 0.20, false);
+  std::cout << std::setprecision(17)
+            << "chebyshev_degree_compare case=stretched_variable degree2_initial="
+            << two.initial << " degree2_final=" << two.final
+            << " degree2_ratio=" << two.ratio
+            << " degree3_initial=" << three.initial
+            << " degree3_final=" << three.final
+            << " degree3_ratio=" << three.ratio << '\n';
+  passed &= expect(
+      two.passed && three.passed && two.initial == three.initial &&
+          three.ratio <= two.ratio,
+      "stretched variable-coefficient degree-three Chebyshev remains finite, monotone, bounded, and no worse than degree two");
+  return passed;
+}
+
+bool test_chebyshev_constant_null_space_projection() {
+  const MgBoundarySet singular{
+      MgBoundaryKind::neumann,  MgBoundaryKind::neumann,
+      MgBoundaryKind::neumann,  MgBoundaryKind::neumann,
+      MgBoundaryKind::periodic, MgBoundaryKind::periodic};
+  NumericalFixture degree_two;
+  NumericalFixture degree_three;
+  bool passed = expect(
+      degree_two.create(
+          uniform_mesh({16, 12, 8}), singular, MgNullSpace::constant, false,
+          MgPointSmootherKind::chebyshev_jacobi,
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 2U) &&
+          degree_three.create(
+              uniform_mesh({16, 12, 8}), singular, MgNullSpace::constant,
+              false, MgPointSmootherKind::chebyshev_jacobi,
+              MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 3U),
+      "singular certified Chebyshev degree-two/degree-three hierarchies compile with constant null space");
+  if (!passed) {
+    return false;
+  }
+  degree_two.make_manufactured_solution(true);
+  degree_three.make_manufactured_solution(true);
+  const NumericalFixture::CycleReport two =
+      degree_two.run_cycles_report(10U, 0.15, true);
+  const NumericalFixture::CycleReport three =
+      degree_three.run_cycles_report(10U, 0.15, true);
+  std::cout << std::setprecision(17)
+            << "chebyshev_degree_compare case=constant_null_space degree2_initial="
+            << two.initial << " degree2_final=" << two.final
+            << " degree2_ratio=" << two.ratio
+            << " degree3_initial=" << three.initial
+            << " degree3_final=" << three.final
+            << " degree3_ratio=" << three.ratio << '\n';
+  passed &= expect(
+      two.passed && three.passed && two.initial == three.initial &&
+          three.ratio <= two.ratio,
+      "constant-null-space degree-three Chebyshev remains finite, monotone, bounded, projected, and no worse than degree two");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -665,6 +806,9 @@ int main(int argc, char** argv) {
   passed &= test_uniform_mixed_boundaries();
   passed &= test_stretched_variable_coefficients();
   passed &= test_constant_null_space_projection();
+  passed &= test_chebyshev_uniform_mixed_boundaries();
+  passed &= test_chebyshev_stretched_variable_coefficients();
+  passed &= test_chebyshev_constant_null_space_projection();
   MPI_Finalize();
   if (!passed) {
     return 1;

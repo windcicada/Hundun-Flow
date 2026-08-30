@@ -283,6 +283,51 @@ bool run_reserve_failure_case(detail::HaloFailurePoint point, int rank,
   return all_true(passed);
 }
 
+bool run_prerequisite_failure_case(int rank, int size) {
+  OwnedField field = make_field(rank);
+  const std::array specs{HaloFieldSpec{kField, 1U, 1U}};
+  std::array views{field.view};
+  HaloEngine engine;
+  bool passed = expect(static_cast<bool>(engine.reserve(
+                           MPI_COMM_WORLD, patch_for(rank, size),
+                           Span<const HaloFieldSpec>{specs.data(), specs.size()},
+                           HaloTopology{true, false, false})),
+                       rank, "prerequisite-failure fixture reserves");
+  constexpr double sentinel = -515151.0;
+  reset_ghosts(field, sentinel);
+  const std::vector<double> snapshot = field.storage;
+  const int failing_rank = size == 1 ? 0 : size - 1;
+  const Status prerequisite =
+      rank == failing_rank
+          ? Status{StatusCode::numerical_failure, 0x505245U}
+          : Status{};
+  HaloTicket ticket;
+  const Status result = engine.begin(
+      81U, Span<const FieldView>{views.data(), views.size()}, prerequisite,
+      ticket);
+  const HaloRuntimeCounters counters = engine.runtime_counters();
+  passed &= expect(result.code == StatusCode::numerical_failure &&
+                       result.detail == 0x505245U && identical_status(result),
+                   rank,
+                   "rank-local prerequisite reaches exact halo consensus");
+  passed &= expect(engine.lowest_failing_rank() == failing_rank &&
+                       !ticket.active() && !engine.active(),
+                   rank,
+                   "prerequisite failure starts no exchange");
+  passed &= expect(counters.begin_calls == 1U &&
+                       counters.finish_calls == 0U &&
+                       counters.messages_started == 0U &&
+                       counters.bytes_packed == 0U &&
+                       counters.bytes_unpacked == 0U,
+                   rank,
+                   "prerequisite failure performs no transport work");
+  passed &= expect(field.storage == snapshot &&
+                       engine.ghost_revision(kField) == 0U,
+                   rank,
+                   "prerequisite failure publishes no field mutation");
+  return all_true(passed);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -317,6 +362,7 @@ int main(int argc, char** argv) {
       detail::HaloFailurePoint::reserve_before_contract, rank, size);
   passed &= run_reserve_failure_case(
       detail::HaloFailurePoint::reserve_before_alltoall, rank, size);
+  passed &= run_prerequisite_failure_case(rank, size);
   passed = all_true(passed);
   if (rank == 0 && !passed) {
     std::cerr << "v0.4 halo failure test failed for " << size << " ranks\n";

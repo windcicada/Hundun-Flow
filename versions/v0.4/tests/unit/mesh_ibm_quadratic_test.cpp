@@ -253,8 +253,10 @@ OwnedField donor_field(const Polynomial& polynomial,
   field.view.revision_domain = 43U;
   for (std::size_t index = 0U; index < donors.size(); ++index) {
     field.storage[index] = donor_average(polynomial, frame, donors[index]);
-    field.storage[donors.size() + index] =
-        3.0 * field.storage[index] - 0.25;
+    if (components > 1U) {
+      field.storage[donors.size() + index] =
+          3.0 * field.storage[index] - 0.25;
+    }
   }
   return field;
 }
@@ -698,6 +700,59 @@ bool test_evaluation_rejects_invalid_views_atomically() {
   return passed;
 }
 
+bool test_positive_bounded_property_reconstruction() {
+  const QuadraticFrame frame = rotated_frame();
+  const auto donors = complete_donors(frame);
+  const auto rows = functionals(frame);
+  QuadraticStencilPlan plan;
+  bool passed = expect(compile_one(frame, donors, rows, plan),
+                       "positive-property reconstruction fixture compiles");
+  if (!passed) {
+    return false;
+  }
+
+  OwnedField field = donor_field(Polynomial{}, frame, donors, 1U);
+  std::fill(field.storage.begin(), field.storage.end(), 1.5);
+  double bounded = -1.0;
+  passed &= expect(static_cast<bool>(evaluate_positive_bounded_quadratic_row(
+                       plan, 0U, field.view, 0U, bounded)) &&
+                       close(bounded, 1.5),
+                   "positive constant is retained exactly");
+
+  const QuadraticStencilGroup& group = plan.groups().data[0U];
+  const QuadraticAffineRow& row = plan.rows().data[0U];
+  bool has_negative_weight = false;
+  for (std::size_t donor = 0U; donor < group.quality.donor_count; ++donor) {
+    const double weight = plan.weights().data[row.weight_begin + donor];
+    const Int3 index =
+        plan.donor_local_indices().data[group.donor_begin + donor];
+    field.storage[static_cast<std::size_t>(index.x)] =
+        weight < 0.0 ? 1.0 : 2.0;
+    has_negative_weight |= weight < 0.0;
+  }
+  double raw = -1.0;
+  passed &= expect(has_negative_weight &&
+                       static_cast<bool>(evaluate_quadratic_row(
+                           plan, 0U, field.view, 0U, 0.0, 0.0, raw)) &&
+                       raw > 2.0,
+                   "unbounded quadratic fixture overshoots its donor envelope");
+  bounded = -1.0;
+  passed &= expect(static_cast<bool>(evaluate_positive_bounded_quadratic_row(
+                       plan, 0U, field.view, 0U, bounded)) &&
+                       close(bounded, 2.0),
+                   "positive-property reconstruction clips overshoot to the "
+                   "donor envelope");
+
+  field.storage[0U] = 0.0;
+  bounded = 12345.0;
+  passed &= expect(!evaluate_positive_bounded_quadratic_row(
+                       plan, 0U, field.view, 0U, bounded) &&
+                       bounded == 12345.0,
+                   "non-positive donor is rejected without publishing a "
+                   "partial output");
+  return passed;
+}
+
 bool test_multiple_groups_keep_offsets_independent() {
   const QuadraticFrame first_frame = rotated_frame();
   QuadraticFrame second_frame = first_frame;
@@ -777,6 +832,7 @@ int main() {
   passed &= test_geometry_mutation_changes_plan_identity();
   passed &= test_hard_quality_gates_and_atomic_publication();
   passed &= test_evaluation_rejects_invalid_views_atomically();
+  passed &= test_positive_bounded_property_reconstruction();
   passed &= test_multiple_groups_keep_offsets_independent();
   if (!passed) {
     return 1;

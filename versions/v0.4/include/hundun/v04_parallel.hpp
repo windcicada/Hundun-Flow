@@ -51,6 +51,25 @@ class CpuExecutionPlan {
   Span<const std::int32_t> core_ids() const noexcept {
     return {core_ids_.data(), core_ids_.size()};
   }
+  PlanFingerprint semantic_fingerprint() const noexcept {
+    if (core_ids_.empty()) return 0U;
+    std::uint64_t hash = UINT64_C(1469598103934665603);
+    const auto mix = [&](std::uint64_t value) {
+      hash ^= value;
+      hash *= UINT64_C(1099511628211);
+    };
+    // Physical core ids are launcher placement evidence, not portable plan
+    // semantics.  The frozen execution identity covers the worker topology
+    // and selected kernel/tile policy.
+    mix(static_cast<std::uint64_t>(core_ids_.size()));
+    mix(pure_mpi_ ? 1U : 0U);
+    mix(bind_threads_ ? 1U : 0U);
+    mix(static_cast<std::uint8_t>(kernel_variant_));
+    mix(static_cast<std::uint32_t>(tile_shape_.x));
+    mix(static_cast<std::uint32_t>(tile_shape_.y));
+    mix(static_cast<std::uint32_t>(tile_shape_.z));
+    return hash == 0U ? 1U : hash;
+  }
 
  private:
   friend class CpuThreadTeam;
@@ -149,6 +168,8 @@ class HaloEngine {
                  HaloTopology topology) noexcept;
   Status begin(StageId stage, Span<const FieldView> fields,
                HaloTicket& ticket) noexcept;
+  Status begin(StageId stage, Span<const FieldView> fields,
+               Status prerequisite, HaloTicket& ticket) noexcept;
   Status finish(HaloTicket& ticket, Span<FieldView> fields) noexcept;
   Status validate_contract(MPI_Comm communicator, const MeshPatch& patch,
                            Span<const HaloFieldSpec> fields,

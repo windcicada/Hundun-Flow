@@ -1,0 +1,79 @@
+{
+  "schema": "HUNDUN_V04_RE3900_CASE_MANIFEST_V1",
+  "status": "FROZEN",
+  "snapshot_root": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/candidates/h53b1075-c3c22e0f-r5",
+  "aggregation": {
+    "algorithm": "from snapshot subtree: find . -type f -printf '%P\\0' | sort -z | xargs -0 sha256sum | sha256sum",
+    "includes_relative_paths": true,
+    "includes_file_contents": true,
+    "sha256sum_version": "GNU coreutils host installation"
+  },
+  "hundun": {
+    "subtree": "hundun_case",
+    "file_count": 3,
+    "total_bytes": 263543,
+    "tree_manifest_sha256": "02da7b80efa60feba2a7d2032ba89851ec965baacfb09d641876ebe67bfd83c9",
+    "case_json": {
+      "path": "hundun_case/case.json",
+      "sha256": "ad2998ef0438d184c82d111697fdca477eb113a4f62efe60054070716ac86cf1"
+    },
+    "thermophysics": {
+      "path": "hundun_case/thermophysics.d",
+      "sha256": "85949346d7b3095d6ebab81a2e439a2bfe0f3ed78d21539b6c85bc71243dc910"
+    },
+    "stl": {
+      "path": "hundun_case/cylinder_re3900.stl",
+      "sha256": "bd264c586543de4ec330f53cb2d3d9dfba550823db69451ac3176c603d248f46"
+    }
+  },
+  "coast": {
+    "subtree": "coast_case",
+    "file_count": 410,
+    "total_bytes": 1882824095,
+    "tree_manifest_sha256": "e79e3062bd4c42e0056420dcd35a35fadb929d3f3f1619710a1351d13f07d2ea",
+    "candidate_binary_present_in_case": false,
+    "input_full2": {
+      "runtime_path": "coast_case/input.d",
+      "frozen_copy": "coast_case/input.full2.d",
+      "sha256": "bbdff76cd9ac2f14da49a544d48e94443164f5bad16dba522d7ac14d8519abd3",
+      "accepted_steps": 2,
+      "end_time_s": 0.012
+    },
+    "input_full20": {
+      "staging_source": "coast_case/input.full20.d",
+      "runtime_destination": "input.d in a fresh run copy",
+      "sha256": "b3a1667d62a872cb2a9cf88bac15b2fa10a67622b5c4981ae09e4e3c0d4b8466",
+      "accepted_steps": 20,
+      "end_time_s": 0.12
+    },
+    "boundary_conditions_sha256": "3422a477fb43571ac2245fa4a5011a43cbf1f695dac7cc5500b8c7f655d2b265",
+    "ibm_mesh_sha256": "d184a3ce917941189559e7ecf1c9d61d8534c06e781fdb0dda897fa7733c5d32",
+    "thermochemistry": {
+      "path": "coast_case/Fuels/air/mechanism/therm.d",
+      "sha256": "38276fdbf29da2bb2c2ae6d7f937ca8d5e986c72e761e3657170094ceec56181",
+      "materialized_regular_file": true,
+      "external_symlink_allowed": false
+    },
+    "stl": {
+      "path": "coast_case/Geometry/cylinder_re3900.stl",
+      "sha256": "bd264c586543de4ec330f53cb2d3d9dfba550823db69451ac3176c603d248f46",
+      "nested_runtime_path": "coast_case/Geometry/Geometry/cylinder_re3900.stl",
+      "nested_runtime_sha256": "bd264c586543de4ec330f53cb2d3d9dfba550823db69451ac3176c603d248f46",
+      "byte_identical_to_hundun": true
+    },
+    "mesh_authority_sha256": "a3cff691ee8b688e1397cc4029314a4359607c100598275273168653b89f090a",
+    "mesh_generator_manifest_sha256": "b29002a813a2e348e3892919c137ba90a8dbeaddd27ee6ba69b183bcafd55018",
+    "group_manifests": {
+      "decomp_grid_vv_64_files_sha256": "8ec3fece9f547d792eec9392b5a9f0cfc3e37e7a314b863a30ad72dc716db9d8",
+      "decomp_non_grid_files_sha256": "b26a23b3a856656a70cad76b9adb644e3a54b8d70a54111b64fed1ed71f3a064",
+      "imbmesh_part_64_files_sha256": "4a83608b2550cbe91246d8fd38754d9c3f744c679242ff27754e71c234f4c4d2",
+      "runtime_mesh_264_files_sha256": "21380cf92dc68e1b3beeaa0c5ce519abc2c2c273de6c21202707f3c6403842d6",
+      "top_level_files_sha256": "261d5e3475974df0db2727e3034756cc72d7a5f6fbc02ac9ea3a74a256540a37"
+    }
+  },
+  "cross_product": {
+    "same_stl_bytes": true,
+    "same_active_cell_mask_sha256": "6709eb3aba7a755aa57a4d1e65899b9f573e78d6ab29c5ebb0a22da64d6d70b1",
+    "same_active_face_mask_sha256": "253e28c90f6749d8f2de22e4c2fcdc25778b6f04018c5e6a1c70b42d0478653b"
+  }
+}

@@ -24,7 +24,7 @@ as the fixed identity.
 
 | Project | Fixed repository/path and revision | Files and symbols inspected | License boundary | Public idea or observed function | HUNDUN destination and decision |
 | --- | --- | --- | --- | --- | --- |
-| OpenFOAM-dev | [`OpenFOAM/OpenFOAM-dev`](https://github.com/OpenFOAM/OpenFOAM-dev/tree/b9da51ab0673423aa2af6a45a72a3fbec9c66f9f), `b9da51ab0673423aa2af6a45a72a3fbec9c66f9f` | `applications/modules/incompressibleFluid/correctPressure.C`: `rAU`, `rAtU`, `HbyA`, `phiHbyA`, pressure-equation flux, final velocity update; `COPYING` | GPL-3.0-or-later; public mathematics and lifecycle are reference-only. No source, expression, control flow, comments, naming arrangement, or translation may enter HUNDUN. | PISO intermediate dependencies and the pressure-solve relationship among pressure flux, face flux, pressure gradient, and velocity | `solver_piso`; clean-room equations, types, schedule, and tests |
+| OpenFOAM-dev | [`OpenFOAM/OpenFOAM-dev`](https://github.com/OpenFOAM/OpenFOAM-dev/tree/b9da51ab0673423aa2af6a45a72a3fbec9c66f9f), `b9da51ab0673423aa2af6a45a72a3fbec9c66f9f` | `applications/modules/incompressibleFluid/correctPressure.C`; `applications/modules/isothermalFluid/{correctPressure.C,isothermalFluid.C}`; `applications/modules/multicomponentFluid/thermophysicalPredictor.C`: reciprocal momentum diagonal, density-weighted pressure coefficient, pressure storage/flux, thermophysical-before-pressure ordering and final velocity update; `COPYING` | GPL-3.0-or-later; public mathematics and lifecycle are reference-only. No source, expression, control flow, comments, naming arrangement, or translation may enter HUNDUN. | PISO intermediate authority plus the compressible dependency of pressure storage/face coefficients on density, EOS derivative and thermophysical state | `solver_piso`; clean-room equations, types, predictor schedule, and tests |
 | AMReX | [`AMReX-Codes/amrex`](https://github.com/AMReX-Codes/amrex/tree/59d066aab774bc388cc6ed944f7beaf645607ed3), `59d066aab774bc388cc6ed944f7beaf645607ed3` | `Src/Base/AMReX_FabArrayBase.H`: `BDKey`, `FB`, `CPC`, `getFB`, `getCPC`; `Src/Base/AMReX_FabArrayCommI.H`: `FillBoundary_nowait`, `FillBoundary_finish`; `Src/AmrCore/AMReX_FillPatcher.H`: `FillPatcher`; `Src/EB/AMReX_EB2_Level.H`: `EB2::Level`; `Src/EB/AMReX_EBFabFactory.H`: `EBFArrayBoxFactory`; `LICENSE` | BSD-3-Clause-style license text. HUNDUN nevertheless independently reimplements the ideas and exposes no AMReX type. | Box-local storage, cached halo metadata with begin/finish, fill-patch metadata, and EB resource ownership | `core_field_storage`, `parallel_communication`, `mesh_eb`; AMR fill-patch, reflux, and average-down are excluded from v0.4 |
 | IncFlo | [`AMReX-Fluids/incflo`](https://github.com/AMReX-Fluids/incflo/tree/7307d8725c2a538f09cafbeacbfeb63e0fb11d22), `7307d8725c2a538f09cafbeacbfeb63e0fb11d22` | `src/incflo_regrid.cpp`: `MakeNewLevelFromCoarse`, `RemakeLevel`, `ClearLevel`; `src/convection/incflo_compute_MAC_projected_velocities.cpp`: `compute_MAC_projected_velocities`; `src/projection/incflo_apply_nodal_projection.cpp`: `ApplyNodalProjection`; `src/embedded_boundaries/eb_stl.cpp`; `LICENSE` | BSD-3-Clause. HUNDUN uses an independent implementation, not IncFlo classes or control flow. | Projection and EB resources are reconstructed at grid/ownership boundaries while current values and coefficients have narrower refresh boundaries. | `solver_projection`, `mesh_eb`; regrid and all AMR mechanisms are excluded |
 | AMReX-Hydro | [`AMReX-Fluids/amrex-hydro`](https://github.com/AMReX-Fluids/amrex-hydro/tree/e49df248aabd2cc11865eb5be734a2f5f2f65ee5), `e49df248aabd2cc11865eb5be734a2f5f2f65ee5` | `Projections/hydro_MacProjector.{H,cpp}`: `MacProjector`, `updateBeta`, `updateCoeffs`, `project`, `m_linop`, `m_mlmg`; `Projections/hydro_NodalProjector.H`: `NodalProjector`, `define`, `m_linop`, `m_mlmg`; `LICENSE` | BSD-3-Clause-style license text. HUNDUN independently implements project-owned operator, hierarchy, and workspace abstractions. | Long-lived projector/operator/solver objects, explicit coefficient refresh, retained solve fields, and multigrid reuse | `solver_linear`; no AMReX-Hydro object or API is a HUNDUN authority |
@@ -39,23 +39,26 @@ This document deliberately contains no source excerpt or line-by-line paraphrase
 The v0.4 dependency chain is exactly:
 
 ```text
-momentum numeric revision -> rAU
-rAU + consistent diagonal revision -> rAtU
-momentum numeric revision + current trial U -> HbyA
-current HbyA + current trial U/phi + time/geometry/BC -> phiHbyA
+momentum diagonal + rho/source/constraint/numeric-BC revision -> rAU
+rAU + consistent diagonal revision -> optional rAtU
+momentum numeric revision + current trial U + pressure convention -> HbyA
+reciprocal diagonal + face-rho/EOS revision -> pressure face coefficient
+current HbyA + pressure face coefficient + trial/committed flux history
+  + BDF/p_ref/gauge/geometry/numeric-BC -> phiHbyA
 pressure equation flux -> only final face-mass-flux writer
 pressure gradient from the same solve -> final U update
 ```
 
 The chain is a HUNDUN contract, not copied implementation structure. Its consequences are:
 
-1. `rAU` is certified by the momentum diagonal, constraint, and boundary-coefficient
+1. `rAU` is certified by the momentum diagonal, density, implicit-source diagonal, constraint, and boundary-coefficient
    revisions. `rAtU` additionally carries the consistent diagonal/time-correction revision.
 2. `HbyA` is not merely a function of `rAU`: it is certified against the complete momentum
    numeric state and the current trial `U` plus applicable constraints.
-3. `phiHbyA` is certified against the current `HbyA`, trial `U/phi`, time discretization,
-   geometry, and boundary revisions.
-4. Corrector 1 changes trial `U/phi`. Corrector 2 must therefore rebuild `HbyA/phiHbyA` or
+3. The density-weighted pressure face coefficient is distinct from cell `rAU/rAtU` and is
+   certified against face-density interpolation, EOS and `drho/dp`. `phiHbyA` additionally
+   carries trial/committed flux history, BDF, `p_ref`/gauge, geometry and numeric BC revisions.
+4. Corrector 1 changes trial `U/phi/rho`. Corrector 2 must therefore rebuild its pressure intermediates or
    prove, using their full dependency tuples, that each remains valid. A shared label such as
    “momentum cache valid” is insufficient.
 5. `rAU/rAtU` alone may be reused across the two correctors when every coefficient revision in
@@ -64,8 +67,10 @@ The chain is a HUNDUN contract, not copied implementation structure. Its consequ
 6. Corrector 1 may write a trial flux. Only the final corrector's pressure-equation flux path
    may publish `final face mass flux`; recomputing it from final cell velocity would create a
    second authority and is forbidden.
-7. Final `U` uses the pressure gradient from that same final pressure solve. Energy, species,
-   and passive scalars consume the published final face mass flux revision.
+7. Final `U` uses the pressure gradient from that same final pressure solve. The second-order
+   thermophysical predictor consumes committed authoritative flux histories before pressure;
+   corrector 2 publishes the sole current-attempt final flux for terminal continuity and the
+   next accepted history. No second flux writer is introduced.
 
 ## 3. Geometry and boundary-plan lifetimes
 
@@ -90,14 +95,15 @@ communication capacity that consumes the topology; changing it does not change `
 | Persistent halo metadata (`HALO_METADATA`), `parallel_communication` | `(partition_revision,field_schema_revision,stage_ghost_set_revision,periodicity,peer_map,pack_span_layout)` | case execution after all stage ghost sets freeze | partition, field schema, registered stage ghost set, periodicity, peer map, or pack-span layout changes; buffer/request replacement and field numeric revisions do not rebuild metadata |
 | Persistent halo buffers (`HALO_BUFFERS`), `parallel_communication` | `(send_capacity,receive_capacity,memory_kind,numa_placement,alignment)` | case execution at registered maximum capacity | replace only when required send/receive capacity exceeds allocation or memory kind, NUMA placement, or alignment plan changes; metadata/request replacement and new field values do not replace buffers |
 | Persistent MPI requests (`HALO_REQUESTS`), `parallel_communication` | `(communicator_generation,peer_ranks,message_tags,message_counts,mpi_datatypes,registered_buffer_bindings)` | case execution; persistent requests survive time steps; one registered exchange instance is single-in-flight | recreate only when communicator, peer ranks, tags, counts, MPI datatypes, or registered buffer bindings change; metadata/buffer replacement alone does not recreate requests unless one of those request dependencies changes; field numeric revisions only invalidate ghost revisions, which publish after finish |
-| `SymbolicPlan`, `solver_linear` | `(operator kind, scalar/face location, mesh topology, partition, EB interface pattern, boundary position/type pattern, stencil pattern, backend)` | Across all assemblies and solves with the same structural identity | Rebuild only when a structural identity member changes. Coefficients, RHS, tolerances, iteration count, time step, retry, and residual do not rebuild it. |
-| `NumericState`, `solver_linear` | `(SymbolicPlan identity, diagonal revision, off-diagonal revision, time-coefficient revision, material/transport revision, numeric boundary-coefficient revision, constraint revision)` | Across solves while its full coefficient tuple is unchanged | Refill only when a coefficient tuple member changes. RHS or initial-guess changes do not refill. A structural change first replaces `SymbolicPlan`, which necessarily creates a new `NumericState`. |
-| `HierarchyState`, `solver_linear` | `(SymbolicPlan identity, coarsening-plan revision, transfer/smoother revision, coefficient-policy epoch, backend)` | Across solves and time steps under the registered coefficient-change policy | Structural identity, coarsening, transfer/smoother, backend, or policy change rebuilds it. A coefficient change rebuilds it only when the pre-registered policy says the change crosses its threshold; otherwise coefficients are refreshed without changing hierarchy identity. RHS, tolerance, and iteration history never rebuild it. |
+| Compact remote-donor exchange (`REMOTE_DONOR_EXCHANGE`), `mesh_eb`/`parallel_communication` | `(partition_revision,EBTopology_identity,QuadraticStencilPlan_identity,remote_global_donor_set,registered_field_groups,peer_map)` | static case execution after donor plans seal | partition, EB topology/stencil, remote donor set, registered fields or peer map changes; field values and time steps only invalidate received donor revisions |
+| `SymbolicPlan/CoarseningPlan`, `solver_linear` | `(operator kind, scalar/face location, mesh topology, partition, EB interface pattern, boundary position/type pattern, stencil pattern, level shapes, transfer sparsity, line/color schedule, backend)` | Across all assemblies and solves with the same structural identity | Rebuild only when a structural identity member changes. Coefficients, RHS, tolerances, iteration count, time step, retry, and residual do not rebuild it. |
+| `ExactNumericState`, `solver_linear` | `(Symbolic/Coarsening identity, diagonal revision, off-diagonal revision, time-coefficient revision, material/transport revision, numeric boundary-coefficient revision, constraint revision, coarse-numeric policy)` | Across solves while its complete fine/coarse coefficient tuple is unchanged | Every changed coefficient tuple refreshes all exact fine/coarse numeric data required by apply/residual before certification. RHS or initial guess does not refill. No magnitude threshold may skip this refresh. |
+| `PreconditionerSetupState`, `solver_linear` | `(Symbolic/Coarsening identity, setup algorithm/backend, smoother/coarse-solver parameters, setup coefficient identity or approved reuse epoch)` | Across solves under the registered setup-reuse policy | setup refresh occurs for structural/setup-policy change, explicit forced refresh or a coefficient change crossing the pre-registered setup threshold; reuse is legal only with the current exact operator and FP64 true-residual gate |
 | `SolverWorkspace`, `solver_linear` | `(solver algorithm, backend, precision policy, execution-plan revision, maximum registered shape, maximum Krylov/subspace capacity, reduction layout)` | Allocated once at registered maximum capacity and reused by all compatible solves | Replace only for algorithm/backend/precision/execution-plan change or a required shape/subspace/reduction capacity beyond the registered maximum. A different operator value, RHS, tolerance, iteration count, or retry does not replace it. |
 
-The four linear layers must remain separately measurable. “Rebuild solver” is not a valid
-event name: counters must distinguish symbolic rebuild, numeric refill, hierarchy rebuild, and
-workspace replacement. Halo dependencies are likewise non-transitive: buffer replacement never
+The four linear resource families must remain separately measurable. “Rebuild solver” is not a valid
+event name: counters must distinguish symbolic/coarsening rebuild, exact numeric refill, coarse
+numeric refresh, preconditioner setup/reuse, and workspace replacement. Halo dependencies are likewise non-transitive: buffer replacement never
 rebuilds metadata, and it rebuilds a persistent request only if the request's registered buffer
 binding or another request identity member actually changes.
 
@@ -119,7 +125,7 @@ specification. The exact observations are:
 | Restart | `SRC.Coast/finish.F90::finish`, `SRC.Coast/app/coast_legacy_driver.F90` restart read/write schedule | Restart read/write and mesh-identity-aware runtime state are part of replacement scope. HUNDUN uses its own validated, transactional accepted-state format and publication. |
 | Visit | `SRC.Coast/vtk.F90::{vtk,vtkblocks}` | VTK pieces and a VisIt index are emitted as scheduled snapshots. HUNDUN owns its own `io_visit` format, staging, and collective decision. |
 | screen | `SRC.Coast/output.F90::output`, `SRC.Coast/coast_screen_summary.F90::coast_screen_write_step_summary` | Human-readable per-step diagnostics, extrema, flow, timing, and solver summaries are replacement requirements, not solver-state authorities. |
-| ICCG lifecycle | `SRC.Coast/cgsol.F90::{cgsol,cgsol_multibrick}`, `SRC.Coast/module_coast_pressure_solver.F90::{coast_pressure_solve,coast_pressure_solve_legacy_iccg}`, `SRC.Coast/numerics/coast_numerics_wrappers.F90::solve_pressure_cg` | COAST assembles the current pressure system, selects/calls a legacy ICCG path, iterates, and records residual/iterations. This is lifecycle evidence only. HUNDUN uses the separate `SymbolicPlan`, `NumericState`, `HierarchyState`, and `SolverWorkspace` contract above. |
+| ICCG lifecycle | `SRC.Coast/cgsol.F90::{cgsol,cgsol_multibrick}`, `SRC.Coast/module_coast_pressure_solver.F90::{coast_pressure_solve,coast_pressure_solve_legacy_iccg}`, `SRC.Coast/numerics/coast_numerics_wrappers.F90::solve_pressure_cg` | COAST assembles the current pressure system, selects/calls a legacy ICCG path, iterates, and records residual/iterations. This is lifecycle evidence only. HUNDUN uses the separate `Symbolic/CoarseningPlan`, `ExactNumericState`, `PreconditionerSetupState`, and `SolverWorkspace` contract above. |
 
 The fixed architecture also records that COAST has no periodic-boundary product capability;
 the inspected legacy boundary tables mark a periodic condition code but do not provide a

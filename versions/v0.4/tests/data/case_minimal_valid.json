@@ -26,7 +26,20 @@
   },
   "solver": {
     "coupling": "PISO",
-    "pressure_correctors": 2
+    "pressure_correctors": 2,
+    "pressure_linear": {
+      "absolute_tolerance": 1e-13,
+      "relative_tolerance": 1e-13,
+      "maximum_iterations": 400,
+      "true_residual_interval": 4,
+      "krylov_restart": 12
+    },
+    "terminal_tolerances": {
+      "eos": 1e-10,
+      "continuity": 1e-10,
+      "closed_mass": 1e-10,
+      "gauge": 1e-10
+    }
   },
   "turbulence": {
     "model": "none"

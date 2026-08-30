@@ -513,6 +513,9 @@ Status ImmersedSurfaceCompiler::compile(const StlScanPlan& scan,
         triangle_count > static_cast<std::size_t>(UINT32_MAX) ||
         !valid_size(source.ax()) || !valid_size(source.ay()) ||
         !valid_size(source.az()) || !valid_size(source.e1x()) ||
+        !valid_size(source.bx()) || !valid_size(source.by()) ||
+        !valid_size(source.bz()) || !valid_size(source.cx()) ||
+        !valid_size(source.cy()) || !valid_size(source.cz()) ||
         !valid_size(source.e1y()) || !valid_size(source.e1z()) ||
         !valid_size(source.e2x()) || !valid_size(source.e2y()) ||
         !valid_size(source.e2z()) || !valid_size(source.nx()) ||
@@ -529,12 +532,12 @@ Status ImmersedSurfaceCompiler::compile(const StlScanPlan& scan,
       const Real3 a = canonical_zero(
           {source.ax().data[index], source.ay().data[index],
            source.az().data[index]});
-      const Real3 edge1{source.e1x().data[index], source.e1y().data[index],
-                        source.e1z().data[index]};
-      const Real3 edge2{source.e2x().data[index], source.e2y().data[index],
-                        source.e2z().data[index]};
-      const Real3 b = canonical_zero(add(a, edge1));
-      const Real3 c = canonical_zero(add(a, edge2));
+      const Real3 b = canonical_zero(
+          {source.bx().data[index], source.by().data[index],
+           source.bz().data[index]});
+      const Real3 c = canonical_zero(
+          {source.cx().data[index], source.cy().data[index],
+           source.cz().data[index]});
       const Real3 stored_normal{source.nx().data[index],
                                 source.ny().data[index],
                                 source.nz().data[index]};
@@ -846,6 +849,10 @@ Status ImmersedSurfaceCompiler::compile(const StlScanPlan& scan,
       triangle.area = 0.5 * magnitude;
       candidate.triangles_.push_back(triangle);
     }
+    for (auto& adjacent : neighbours) {
+      std::sort(adjacent.begin(), adjacent.end());
+    }
+    candidate.triangle_neighbours_ = std::move(neighbours);
     candidate.bounding_box_min_ = global_lower;
     candidate.bounding_box_max_ = global_upper;
     candidate.closed_volume_ = static_cast<double>(total_volume);
@@ -936,6 +943,11 @@ Status ImmersedSurfaceCompiler::compile(const StlScanPlan& scan,
       hash.real3(triangle.geometric_outward_normal);
       hash.real3(triangle.centroid);
       hash.real(triangle.area);
+    }
+    for (const auto& adjacent : candidate.triangle_neighbours_) {
+      hash.integer(adjacent[0U]);
+      hash.integer(adjacent[1U]);
+      hash.integer(adjacent[2U]);
     }
     candidate.fingerprint_ = hash.finish();
     out = std::move(candidate);

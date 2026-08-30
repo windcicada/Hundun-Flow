@@ -12,3 +12,5 @@
 compile_commands.json
 CTestTestfile.cmake
 Testing/
+__pycache__/
+*.pyc

@@ -2,6 +2,7 @@
 
 #include "hundun/v04_physics.hpp"
 
+#include "field_view_interval_detail.hpp"
 #include "physics_input_detail.hpp"
 
 #include <algorithm>
@@ -23,6 +24,7 @@ constexpr std::uint32_t kThermoInput = 801U;
 constexpr std::uint32_t kThermoComposition = 802U;
 constexpr std::uint32_t kThermoRange = 803U;
 constexpr std::uint32_t kThermoInversion = 804U;
+constexpr std::uint32_t kThermoSpeciesBounds = 805U;
 constexpr std::uint32_t kClosedMassInput = 821U;
 constexpr std::uint32_t kClosedMassCollective = 822U;
 constexpr std::uint32_t kClosedMassConvergence = 823U;
@@ -285,6 +287,8 @@ Status ThermodynamicsPlan::compile(
     const std::size_t count = canonical_spec.species.size();
     candidate.inverse_molecular_weight_.resize(count);
     candidate.temperature_switch_.resize(count);
+    candidate.species_enthalpy_minimum_.resize(count);
+    candidate.species_enthalpy_maximum_.resize(count);
     for (std::vector<double>& coefficients : candidate.nasa_low_) {
       coefficients.resize(count);
     }
@@ -347,6 +351,22 @@ Status ThermodynamicsPlan::compile(
             source.nasa7_high[coefficient];
         hash.real(source.nasa7_low[coefficient]);
         hash.real(source.nasa7_high[coefficient]);
+      }
+      candidate.species_enthalpy_minimum_[species] = species_h(
+          candidate.minimum_temperature_,
+          candidate.inverse_molecular_weight_[species],
+          candidate.minimum_temperature_ <= candidate.temperature_switch_[species]
+              ? source.nasa7_low
+              : source.nasa7_high);
+      candidate.species_enthalpy_maximum_[species] = species_h(
+          candidate.maximum_temperature_,
+          candidate.inverse_molecular_weight_[species],
+          candidate.maximum_temperature_ <= candidate.temperature_switch_[species]
+              ? source.nasa7_low
+              : source.nasa7_high);
+      if (!finite(candidate.species_enthalpy_minimum_[species]) ||
+          !finite(candidate.species_enthalpy_maximum_[species])) {
+        return {StatusCode::invalid_plan, kThermoSpeciesBounds};
       }
       for (std::size_t coefficient = 1U; coefficient <= 4U; ++coefficient) {
         constant_cp &= source.nasa7_low[coefficient] == 0.0 &&
@@ -493,6 +513,36 @@ Status ThermodynamicsPlan::mixture_enthalpy(
   return {};
 }
 
+Status ThermodynamicsPlan::species_enthalpy_bounds(
+    std::size_t full_species_index, double& at_minimum,
+    double& at_maximum) const noexcept {
+  if (fingerprint_ == 0U ||
+      full_species_index >= species_enthalpy_minimum_.size() ||
+      species_enthalpy_minimum_.size() !=
+          species_enthalpy_maximum_.size()) {
+    return {StatusCode::invalid_plan, kThermoSpeciesBounds};
+  }
+  const double minimum = species_enthalpy_minimum_[full_species_index];
+  const double maximum = species_enthalpy_maximum_[full_species_index];
+  if (!finite(minimum) || !finite(maximum)) {
+    return {StatusCode::numerical_failure, kThermoSpeciesBounds};
+  }
+  at_minimum = minimum;
+  at_maximum = maximum;
+  return {};
+}
+
+Status ThermodynamicsPlan::independent_species_enthalpy_bounds(
+    std::size_t independent_index, double& at_minimum,
+    double& at_maximum) const noexcept {
+  if (fingerprint_ == 0U ||
+      independent_index >= independent_to_species_.size()) {
+    return {StatusCode::invalid_plan, kThermoSpeciesBounds};
+  }
+  return species_enthalpy_bounds(independent_to_species_[independent_index],
+                                 at_minimum, at_maximum);
+}
+
 Status ThermodynamicsPlan::evaluate(
     double p_abs, double h,
     Span<const double> independent_mass_fractions, Real3 velocity,
@@ -560,8 +610,10 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
       return {StatusCode::numerical_failure, kThermoRange};
     }
     const double psi = 1.0 / (gas * temperature);
+    const double dpsi_dh = -psi / (temperature * cp);
     const double sound_squared = gamma * gas * temperature;
-    if (!finite(psi) || psi <= 0.0 || !finite(sound_squared) ||
+    if (!finite(psi) || psi <= 0.0 || !finite(dpsi_dh) ||
+        dpsi_dh >= 0.0 || !finite(sound_squared) ||
         sound_squared <= 0.0) {
       return {StatusCode::numerical_failure, kThermoRange};
     }
@@ -571,6 +623,7 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
     candidate.gas_constant_ = gas;
     candidate.gamma_ = gamma;
     candidate.drho_dp_hY_ = psi;
+    candidate.dpressure_compressibility_dh_hY_ = dpsi_dh;
     candidate.sound_speed_ = std::sqrt(sound_squared);
     candidate.thermodynamics_ = fingerprint_;
     candidate.revisions_ = revisions;
@@ -661,8 +714,10 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
     return {StatusCode::numerical_failure, kThermoRange};
   }
   const double psi = 1.0 / (gas * temperature);
+  const double dpsi_dh = -psi / (temperature * cp);
   const double sound_squared = gamma * gas * temperature;
-  if (!finite(psi) || psi <= 0.0 || !finite(sound_squared) ||
+  if (!finite(psi) || psi <= 0.0 || !finite(dpsi_dh) ||
+      dpsi_dh >= 0.0 || !finite(sound_squared) ||
       sound_squared <= 0.0) {
     return {StatusCode::numerical_failure, kThermoRange};
   }
@@ -672,6 +727,7 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
   candidate.gas_constant_ = gas;
   candidate.gamma_ = gamma;
   candidate.drho_dp_hY_ = psi;
+  candidate.dpressure_compressibility_dh_hY_ = dpsi_dh;
   candidate.sound_speed_ = std::sqrt(sound_squared);
   candidate.thermodynamics_ = fingerprint_;
   candidate.revisions_ = revisions;
@@ -696,16 +752,21 @@ Status ThermodynamicsPlan::evaluate_pressure_impl(
        (!valid_tuple(revisions) ||
         !same_tuple(thermal.revisions_, revisions))) ||
       !finite(thermal.drho_dp_hY_) || thermal.drho_dp_hY_ <= 0.0 ||
+      !finite(thermal.dpressure_compressibility_dh_hY_) ||
+      thermal.dpressure_compressibility_dh_hY_ >= 0.0 ||
       !finite(thermal.temperature_) ||
       thermal.temperature_ < minimum_temperature_ ||
       thermal.temperature_ > maximum_temperature_) {
     return {StatusCode::numerical_failure, kThermoRange};
   }
   const double density = p_abs * thermal.drho_dp_hY_;
-  if (!finite(density) || density <= 0.0) {
+  const double drho_dh =
+      p_abs * thermal.dpressure_compressibility_dh_hY_;
+  if (!finite(density) || density <= 0.0 || !finite(drho_dh) ||
+      drho_dh >= 0.0) {
     return {StatusCode::numerical_failure, kThermoRange};
   }
-  out = {density, thermal.drho_dp_hY_};
+  out = {density, thermal.drho_dp_hY_, drho_dh};
   return {};
 }
 
@@ -755,9 +816,11 @@ Status ThermodynamicsPlan::complete_state_impl(
   candidate.gas_constant = thermal.gas_constant_;
   candidate.gamma = thermal.gamma_;
   candidate.drho_dp_hY = pressure.drho_dp_hY;
+  candidate.drho_dh_pY = pressure.drho_dh_pY;
   candidate.sound_speed = thermal.sound_speed_;
   candidate.mach = std::sqrt(velocity_squared) / thermal.sound_speed_;
   if (!finite(candidate.drho_dp_hY) || candidate.drho_dp_hY <= 0.0 ||
+      !finite(candidate.drho_dh_pY) || candidate.drho_dh_pY >= 0.0 ||
       !finite(candidate.mach)) {
     return {StatusCode::numerical_failure, kThermoRange};
   }
@@ -776,6 +839,44 @@ Status ThermodynamicsPlan::evaluate_from_reference_pressure(
   }
   return evaluate(absolute_pressure, h, independent_mass_fractions, velocity,
                   out, temperature_hint);
+}
+
+Status ThermodynamicsPlan::evaluate_from_density(
+    double density, double h,
+    Span<const double> independent_mass_fractions, Real3 velocity,
+    double& pressure_absolute, ThermoState& out,
+    double temperature_hint) const noexcept {
+  if (!finite(density) || density <= 0.0) {
+    return {StatusCode::numerical_failure, kThermoInput};
+  }
+  ThermalState thermal;
+  const ThermalRevisionTuple one_shot{};
+  Status status = evaluate_thermal_impl(
+      h, independent_mass_fractions, one_shot, false, thermal,
+      temperature_hint);
+  if (!status) return status;
+  const double p_abs = density / thermal.drho_dp_hY_;
+  if (!finite(p_abs) || p_abs <= 0.0) {
+    return {StatusCode::numerical_failure, kThermoRange};
+  }
+  ThermoState candidate;
+  status = complete_state_impl(p_abs, thermal, one_shot, false, velocity,
+                               candidate);
+  if (!status) return status;
+  const double oracle_density = p_abs * candidate.drho_dp_hY;
+  const double scale = std::max({1.0, density, std::abs(oracle_density)});
+  if (!finite(oracle_density) || oracle_density <= 0.0 ||
+      std::abs(oracle_density - density) >
+          32.0 * std::numeric_limits<double>::epsilon() * scale) {
+    return {StatusCode::numerical_failure, kThermoRange};
+  }
+  // rho* is the predictor authority.  Keep the independently formed EOS
+  // product available to the caller while preventing a divide/multiply
+  // roundoff from silently replacing the conservative state.
+  candidate.rho = density;
+  pressure_absolute = p_abs;
+  out = candidate;
+  return {};
 }
 
 Status ClosedMassPlan::compile(PressureReferenceKind authority,
@@ -990,6 +1091,358 @@ Status ClosedMassPlan::solve(MPI_Comm communicator,
   candidate.iterations = iterations;
   candidate.lowest_failing_rank = -1;
   out = candidate;
+  return {};
+}
+
+Status ClosedMassPlan::solve_fields(
+    MPI_Comm communicator, const ThermodynamicsPlan& thermodynamics,
+    const ClosedMassFieldView& cells, double target_mass,
+    double current_pressure_reference, ClosedMassResult& out) const noexcept {
+  int size = 0;
+  if (communicator == MPI_COMM_NULL ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  const std::size_t independent = thermodynamics.independent_species_count();
+  const Int3 shape = cells.patch.cells;
+  const Int3 global = cells.geometry == nullptr
+                          ? Int3{}
+                          : cells.geometry->global_cells();
+  std::size_t count = 0U;
+  const bool count_valid =
+      shape.x > 0 && shape.y > 0 && shape.z > 0 &&
+      static_cast<std::size_t>(shape.x) <=
+          std::numeric_limits<std::size_t>::max() /
+              static_cast<std::size_t>(shape.y) &&
+      static_cast<std::size_t>(shape.x) *
+              static_cast<std::size_t>(shape.y) <=
+          std::numeric_limits<std::size_t>::max() /
+              static_cast<std::size_t>(shape.z);
+  if (count_valid) {
+    count = static_cast<std::size_t>(shape.x) *
+            static_cast<std::size_t>(shape.y) *
+            static_cast<std::size_t>(shape.z);
+  }
+  const auto valid_scalar_field = [&](ConstFieldView field) {
+    detail::FieldStorageInterval interval{};
+    return field.base != nullptr && field.interior.x == shape.x &&
+           field.interior.y == shape.y && field.interior.z == shape.z &&
+           field.components == 1U && field.revision != 0U &&
+           field.storage_identity != 0U && field.revision_domain != 0U &&
+           detail::field_storage_interval(field, interval);
+  };
+  bool species_valid =
+      cells.independent_mass_fractions.size == independent &&
+      (independent == 0U ||
+       cells.independent_mass_fractions.data != nullptr);
+  for (std::size_t species = 0U;
+       species < cells.independent_mass_fractions.size && species_valid;
+       ++species) {
+    species_valid =
+        valid_scalar_field(cells.independent_mass_fractions.data[species]);
+  }
+  const bool patch_valid =
+      cells.geometry != nullptr && cells.geometry->fingerprint() != 0U &&
+      cells.patch.begin.x >= 0 && cells.patch.begin.y >= 0 &&
+      cells.patch.begin.z >= 0 && cells.patch.begin.x <= global.x - shape.x &&
+      cells.patch.begin.y <= global.y - shape.y &&
+      cells.patch.begin.z <= global.z - shape.z;
+  Status local{};
+  if (authority_ != PressureReferenceKind::closed_mass ||
+      thermodynamics.fingerprint() == 0U || !finite(target_mass) ||
+      target_mass <= 0.0 || !finite(current_pressure_reference) ||
+      current_pressure_reference <= 0.0 || !count_valid || count == 0U ||
+      !patch_valid || !valid_scalar_field(cells.pressure_perturbation) ||
+      !valid_scalar_field(cells.enthalpy) || !species_valid ||
+      (cells.active.size != 0U &&
+       (cells.active.data == nullptr || cells.active.size != count))) {
+    local = {StatusCode::invalid_plan, kClosedMassInput};
+  }
+  int lowest = -1;
+  Status collective = collective_failure(communicator, local, lowest);
+  if (!collective) return collective;
+
+  std::uint64_t target_bits = 0U;
+  std::uint64_t pressure_bits = 0U;
+  std::memcpy(&target_bits, &target_mass, sizeof(target_bits));
+  std::memcpy(&pressure_bits, &current_pressure_reference,
+              sizeof(pressure_bits));
+  const std::array<std::uint64_t, 5U> identity{
+      thermodynamics.fingerprint(), fingerprint_, cells.geometry->fingerprint(),
+      target_bits, pressure_bits};
+  std::array<std::uint64_t, identity.size()> minimum_identity{};
+  std::array<std::uint64_t, identity.size()> maximum_identity{};
+  if (MPI_Allreduce(identity.data(), minimum_identity.data(),
+                    static_cast<int>(identity.size()), MPI_UINT64_T, MPI_MIN,
+                    communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(identity.data(), maximum_identity.data(),
+                    static_cast<int>(identity.size()), MPI_UINT64_T, MPI_MAX,
+                    communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  if (minimum_identity != maximum_identity)
+    return {StatusCode::invalid_plan, kClosedMassCollective};
+
+  CompensatedSum local_slope_sum;
+  CompensatedSum local_intercept_sum;
+  std::array<double, kMaximumSpecies - 1U> composition{};
+  local = {};
+  std::size_t flat = 0U;
+  for (std::int32_t z = 0; z < shape.z && local; ++z) {
+    for (std::int32_t y = 0; y < shape.y && local; ++y) {
+      for (std::int32_t x = 0; x < shape.x; ++x, ++flat) {
+        if (cells.active.size != 0U && cells.active.data[flat] > 1U) {
+          local = {StatusCode::invalid_plan, kClosedMassInput};
+          break;
+        }
+        if (cells.active.size != 0U && cells.active.data[flat] == 0U)
+          continue;
+        const Int3 cell{x, y, z};
+        const double volume =
+            cells.geometry->x().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.x + x)] *
+            cells.geometry->y().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.y + y)] *
+            cells.geometry->z().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.z + z)];
+        const double enthalpy = cells.enthalpy.unchecked(cell, 0U);
+        const double pi = cells.pressure_perturbation.unchecked(cell, 0U);
+        const double initial_absolute_pressure =
+            current_pressure_reference + pi;
+        if (!finite(volume) || volume <= 0.0 || !finite(enthalpy) ||
+            !finite(pi) || !finite(initial_absolute_pressure) ||
+            initial_absolute_pressure <= 0.0) {
+          local = {StatusCode::numerical_failure, kClosedMassInput};
+          break;
+        }
+        for (std::size_t species = 0U; species < independent; ++species) {
+          composition[species] = cells.independent_mass_fractions.data[species]
+                                     .unchecked(cell, 0U);
+        }
+        ThermalState thermal;
+        const Status evaluated = thermodynamics.evaluate_thermal_impl(
+            enthalpy, {composition.data(), independent}, {}, false, thermal,
+            std::numeric_limits<double>::quiet_NaN());
+        if (!evaluated) {
+          local = evaluated;
+          break;
+        }
+        const double slope = volume * thermal.drho_dp_hY_;
+        const double intercept = pi * slope;
+        if (!finite(slope) || slope <= 0.0 || !finite(intercept)) {
+          local = {StatusCode::numerical_failure, kClosedMassInput};
+          break;
+        }
+        local_slope_sum.add(slope);
+        local_intercept_sum.add(intercept);
+      }
+    }
+  }
+  collective = collective_failure(communicator, local, lowest);
+  if (!collective) return collective;
+  const std::array<double, 2U> local_coefficients{
+      local_slope_sum.value(), local_intercept_sum.value()};
+  std::array<double, 2U> global_coefficients{};
+  if (MPI_Allreduce(local_coefficients.data(), global_coefficients.data(), 2,
+                    MPI_DOUBLE, MPI_SUM, communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  const double global_derivative = global_coefficients[0U];
+  const double global_intercept = global_coefficients[1U];
+  if (!finite(global_derivative) || global_derivative <= 0.0 ||
+      !finite(global_intercept)) {
+    return {StatusCode::numerical_failure, kClosedMassInput};
+  }
+
+  double pressure = current_pressure_reference;
+  double global_mass = 0.0;
+  std::uint32_t iterations = 0U;
+  bool converged = false;
+  for (std::uint32_t iteration = 0U; iteration < maximum_iterations_;
+       ++iteration) {
+    global_mass = pressure * global_derivative + global_intercept;
+    const double residual = global_mass - target_mass;
+    iterations = iteration + 1U;
+    if (!finite(global_mass) || global_mass <= 0.0 || !finite(residual))
+      return {StatusCode::numerical_failure, kClosedMassInput};
+    if (std::abs(residual) <= relative_tolerance_ * target_mass) {
+      converged = true;
+      break;
+    }
+    double step = -residual / global_derivative;
+    const double limit = maximum_relative_step_ * pressure;
+    step = std::max(-limit, std::min(limit, step));
+    const double next = pressure + step;
+    if (!finite(next) || next <= 0.0 || step == 0.0)
+      return {StatusCode::numerical_failure, kClosedMassConvergence};
+    pressure = next;
+  }
+  if (!converged)
+    return {StatusCode::numerical_failure, kClosedMassConvergence};
+
+  local = {};
+  flat = 0U;
+  for (std::int32_t z = 0; z < shape.z && local; ++z) {
+    for (std::int32_t y = 0; y < shape.y && local; ++y) {
+      for (std::int32_t x = 0; x < shape.x; ++x, ++flat) {
+        if (cells.active.size != 0U && cells.active.data[flat] == 0U)
+          continue;
+        const double absolute =
+            pressure + cells.pressure_perturbation.unchecked({x, y, z}, 0U);
+        if (!finite(absolute) || absolute <= 0.0) {
+          local = {StatusCode::numerical_failure, kClosedMassConvergence};
+          break;
+        }
+      }
+    }
+  }
+  collective = collective_failure(communicator, local, lowest);
+  if (!collective) return collective;
+  const ClosedMassResult candidate{pressure, global_mass,
+                                   global_mass - target_mass, iterations, -1};
+  out = candidate;
+  return {};
+}
+
+Status ClosedMassPlan::certify_density_fields(
+    MPI_Comm communicator, const ClosedMassDensityFieldView& cells,
+    double target_mass, double current_pressure_reference,
+    ClosedMassResult& out) const noexcept {
+  int size = 0;
+  if (communicator == MPI_COMM_NULL ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  const Int3 shape = cells.patch.cells;
+  const Int3 global = cells.geometry == nullptr
+                          ? Int3{}
+                          : cells.geometry->global_cells();
+  std::size_t count = 0U;
+  const bool count_valid =
+      shape.x > 0 && shape.y > 0 && shape.z > 0 &&
+      static_cast<std::size_t>(shape.x) <=
+          std::numeric_limits<std::size_t>::max() /
+              static_cast<std::size_t>(shape.y) &&
+      static_cast<std::size_t>(shape.x) *
+              static_cast<std::size_t>(shape.y) <=
+          std::numeric_limits<std::size_t>::max() /
+              static_cast<std::size_t>(shape.z);
+  if (count_valid) {
+    count = static_cast<std::size_t>(shape.x) *
+            static_cast<std::size_t>(shape.y) *
+            static_cast<std::size_t>(shape.z);
+  }
+  const auto valid_scalar_field = [&](ConstFieldView field) {
+    detail::FieldStorageInterval interval{};
+    return field.base != nullptr && field.interior.x == shape.x &&
+           field.interior.y == shape.y && field.interior.z == shape.z &&
+           field.components == 1U && field.revision != 0U &&
+           field.storage_identity != 0U && field.revision_domain != 0U &&
+           detail::field_storage_interval(field, interval);
+  };
+  const bool patch_valid =
+      cells.geometry != nullptr && cells.geometry->fingerprint() != 0U &&
+      cells.patch.begin.x >= 0 && cells.patch.begin.y >= 0 &&
+      cells.patch.begin.z >= 0 && cells.patch.begin.x <= global.x - shape.x &&
+      cells.patch.begin.y <= global.y - shape.y &&
+      cells.patch.begin.z <= global.z - shape.z;
+  Status local{};
+  if (authority_ != PressureReferenceKind::closed_mass ||
+      fingerprint_ == 0U || cells.predictor_state == 0U ||
+      !finite(target_mass) || target_mass <= 0.0 ||
+      !finite(current_pressure_reference) ||
+      current_pressure_reference <= 0.0 || !count_valid || count == 0U ||
+      !patch_valid || !valid_scalar_field(cells.pressure_perturbation) ||
+      !valid_scalar_field(cells.density) ||
+      !valid_scalar_field(cells.pressure_compressibility) ||
+      (cells.active.size != 0U &&
+       (cells.active.data == nullptr || cells.active.size != count))) {
+    local = {StatusCode::invalid_plan, kClosedMassInput};
+  }
+  int lowest = -1;
+  Status collective = collective_failure(communicator, local, lowest);
+  if (!collective) return collective;
+
+  std::uint64_t target_bits = 0U;
+  std::uint64_t pressure_bits = 0U;
+  std::memcpy(&target_bits, &target_mass, sizeof(target_bits));
+  std::memcpy(&pressure_bits, &current_pressure_reference,
+              sizeof(pressure_bits));
+  // The predictor certificate is validated locally by the coupling wrapper.
+  // Its state intentionally binds rank-local storage identities, revision
+  // domains, and face addresses, so it is not a collective identity token.
+  // Compare only the semantic inputs that must be identical on every rank.
+  const std::array<std::uint64_t, 4U> identity{
+      fingerprint_, cells.geometry->fingerprint(), target_bits, pressure_bits};
+  std::array<std::uint64_t, identity.size()> minimum_identity{};
+  std::array<std::uint64_t, identity.size()> maximum_identity{};
+  if (MPI_Allreduce(identity.data(), minimum_identity.data(),
+                    static_cast<int>(identity.size()), MPI_UINT64_T, MPI_MIN,
+                    communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(identity.data(), maximum_identity.data(),
+                    static_cast<int>(identity.size()), MPI_UINT64_T, MPI_MAX,
+                    communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  if (minimum_identity != maximum_identity)
+    return {StatusCode::invalid_plan, kClosedMassCollective};
+
+  CompensatedSum local_mass_sum;
+  local = {};
+  std::size_t flat = 0U;
+  for (std::int32_t z = 0; z < shape.z && local; ++z) {
+    for (std::int32_t y = 0; y < shape.y && local; ++y) {
+      for (std::int32_t x = 0; x < shape.x; ++x, ++flat) {
+        if (cells.active.size != 0U && cells.active.data[flat] > 1U) {
+          local = {StatusCode::invalid_plan, kClosedMassInput};
+          break;
+        }
+        if (cells.active.size != 0U && cells.active.data[flat] == 0U)
+          continue;
+        const Int3 cell{x, y, z};
+        const double volume =
+            cells.geometry->x().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.x + x)] *
+            cells.geometry->y().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.y + y)] *
+            cells.geometry->z().widths().data[
+                static_cast<std::size_t>(cells.patch.begin.z + z)];
+        const double pi = cells.pressure_perturbation.unchecked(cell, 0U);
+        const double density = cells.density.unchecked(cell, 0U);
+        const double psi =
+            cells.pressure_compressibility.unchecked(cell, 0U);
+        const double absolute_pressure = current_pressure_reference + pi;
+        const double oracle_density = absolute_pressure * psi;
+        const double scale =
+            std::max({1.0, density, std::abs(oracle_density)});
+        if (!finite(volume) || volume <= 0.0 || !finite(pi) ||
+            !finite(density) || density <= 0.0 || !finite(psi) ||
+            psi <= 0.0 || !finite(absolute_pressure) ||
+            absolute_pressure <= 0.0 || !finite(oracle_density) ||
+            oracle_density <= 0.0 ||
+            std::abs(oracle_density - density) >
+                128.0 * std::numeric_limits<double>::epsilon() * scale) {
+          local = {StatusCode::numerical_failure, kClosedMassInput};
+          break;
+        }
+        local_mass_sum.add(volume * density);
+      }
+    }
+  }
+  collective = collective_failure(communicator, local, lowest);
+  if (!collective) return collective;
+  const double local_mass = local_mass_sum.value();
+  double global_mass = 0.0;
+  if (MPI_Allreduce(&local_mass, &global_mass, 1, MPI_DOUBLE, MPI_SUM,
+                    communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kClosedMassCollective};
+  }
+  const double residual = global_mass - target_mass;
+  if (!finite(global_mass) || global_mass <= 0.0 || !finite(residual) ||
+      std::abs(residual) > relative_tolerance_ * target_mass) {
+    return {StatusCode::numerical_failure, kClosedMassConvergence};
+  }
+  out = {current_pressure_reference, global_mass, residual, 1U, -1};
   return {};
 }
 

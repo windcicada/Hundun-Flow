@@ -115,7 +115,7 @@ Status EffectiveViscosityAuthority::claim(
 Status ContributionRegistry::configure(
     Span<const FieldId> declared_fields) noexcept {
   if (frozen_ || !declared_fields_.empty() || !contributions_.empty() ||
-      !reads_.empty() || next_ordinal_ != 0U || fingerprint_ != 0U) {
+      !reads_.empty() || next_ordinal_ != 0U || plan_.valid()) {
     return {StatusCode::invalid_plan, 1U};
   }
   if (declared_fields.data == nullptr || declared_fields.size == 0U) {
@@ -145,7 +145,8 @@ Status ContributionRegistry::register_contribution(
   if (frozen_ || declared_fields_.empty()) {
     return {StatusCode::invalid_plan, 4U};
   }
-  if (spec.capability != ContributionCapability::inert_source) {
+  if (spec.stage == 0U ||
+      spec.capability != ContributionCapability::inert_source) {
     return {StatusCode::invalid_plan, 5U};
   }
   if (!has_dimensions(spec.units)) {
@@ -256,9 +257,11 @@ Status ContributionRegistry::freeze() noexcept {
     if (candidate_fingerprint == 0U) {
       return {StatusCode::invalid_plan, 15U};
     }
-    contributions_.swap(ordered);
-    reads_.swap(ordered_reads);
-    fingerprint_ = candidate_fingerprint;
+    plan_.contributions_.swap(ordered);
+    plan_.reads_.swap(ordered_reads);
+    plan_.fingerprint_ = candidate_fingerprint;
+    contributions_.clear();
+    reads_.clear();
     frozen_ = true;
   } catch (...) {
     return {StatusCode::allocation_failure, 0U};

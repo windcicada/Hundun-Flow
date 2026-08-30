@@ -1,12 +1,12 @@
 # HUNDUN-FLOW v0.4 Cartesian Low-Mach Architecture Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution:** Implement one bounded task at a time with requirements review, performance/code review and exact evidence receipts. Tool choice is not part of the scientific contract. Steps use checkbox (`- [ ]`) syntax for tracking; accepted tasks also record their commit/tree and focused-test receipt in the status ledger.
 
 **Goal:** Build an independently implemented, CPU-first HUNDUN-FLOW v0.4 single-phase low-Mach Cartesian CFD product and release it only after the Re=3900 cylinder numerical, robustness, full-grid short-performance, literature-accuracy, and provenance gates all accept.
 
-**Architecture:** v0.4 compiles flat case input into immutable geometry, field, boundary, operator, communication, solver, and execution plans. Hot fields use padded x-fast SoA storage; one final face-mass-flux authority drives every conservative equation; static IBM data, halo metadata, linear hierarchies, and workspaces persist until their explicit revision identity changes. All capabilities register before one production freeze, after which exactly two PISO correctors advance a unified local-absolute-pressure EOS/enthalpy system without hot-path allocation or case-specific source branches.
+**Architecture:** v0.4 compiles each flat case into immutable geometry, field, boundary, operator, communication, solver, service, and execution plans. Hot fields use padded x-fast SoA storage; committed face-mass-flux revisions drive the thermophysical predictor and the second pressure correction is the only current-attempt final-flux writer; static IBM data, halo metadata, coarsening plans, exact numeric storage, preconditioner setup, and workspaces persist until their explicit identities change. Each `ValidatedModel` passes one analyze/allocate/bind/seal pipeline, after which exactly two PISO correctors advance a unified local-absolute-pressure EOS/enthalpy system without hot-path allocation or case-specific source branches.
 
-**Tech Stack:** C++17, CMake 3.21+, MPI 3 C++ bindings, POSIX/Linux CPU and NUMA facilities, Threads, yyjson, optional HYPRE Struct adapter, CTest, AddressSanitizer, UndefinedBehaviorSanitizer, VTK XML output.
+**Tech Stack:** C++17, CMake 3.21+, MPI-3 C API called from C++17, POSIX/Linux CPU and NUMA facilities, fixed Threads, yyjson, optional HYPRE Struct adapter, CTest, AddressSanitizer, UndefinedBehaviorSanitizer, VTK XML output.
 
 ## Global Constraints
 
@@ -23,13 +23,43 @@
 - Use static enthalpy as energy authority with full `Dp/Dt`, heat conduction, and viscous dissipation. Use N-1 inert species and optional passive scalars; do not persist `rhoU` or `rhoh` state arrays.
 - `versions/v0.4/src` is flat and uses only `app_`, `core_`, `mesh_`, `parallel_`, `bc_`, `physics_`, `solver_`, and `io_` source prefixes.
 - Keep tests in the source tree but no product `cases/` or `examples/` under `versions/v0.4`. Runtime examples are generated into a user-selected run directory.
-- A production `FieldSchema`, arena layout, merged halo plan, linear lifecycles, and execution graph freeze exactly once after every capability registers and before the first product case.
-- Hot-loop contracts: zero heap allocation, zero string dispatch, zero STL/BVH/donor search, zero implicit MPI, explicit revision-checked caches, one writer per authority, no full-field rollback copy.
+- Each compiled case seals its production `FieldSchema`, arena layout, merged structured halo and compact IBM donor plan, linear lifecycles, service capacities, and execution graph exactly once after complete logical analysis. A different case compiles a different immutable bundle; post-seal mutation is forbidden.
+- Hot-loop contracts: zero heap allocation, zero string dispatch, zero STL/BVH/donor search, zero implicit MPI, `MPI_THREAD_FUNNELED` or stronger with one communication thread, explicit revision-checked caches, one writer per authority, no full-field rollback copy, and no unconditional per-stage barrier/all-reduce.
 - Preserve the standard IBM stencil contract: 14--32 fluid donors, all positive-normal, at least three normal bands, four tangential quadrants, reach at most four, deterministic QR, and no lower-order fallback.
 - Do not accept the current final-gradient/surface-force candidate before an independent final-state force oracle and mutation-sensitive RED pass. Fix the existing WALE positive-normal donor failure by root cause, never by relaxing scientific constraints.
 - Run validation in this order: focused contracts; full `480x480x48/64-rank` two-step HUNDUN/COAST short pairing; candidate freeze; at least five alternating full-grid 20-step pairings; HUNDUN-only literature statistics. Do not use `24^3` for performance and do not start long statistics before the short gate accepts.
 - COAST is a short-performance baseline only because it has no periodic boundary support. HUNDUN literature statistics compare directly with experiments, not COAST long statistics.
 - Every task ends with requirements review, code/performance review, complete-diff inspection, relevant tests, `git diff --check`, and a DCO-signed commit. A failed review returns to the same task.
+- The task status ledger records accepted commit/tree/test receipts. An unchecked historical box may not be interpreted as authoritative progress when a receipt exists, and a green focused test may not close a task without its full acceptance rows.
+
+## Implementation Status after the 2026-08-20 Architecture Revision
+
+This table is the progress authority until Task 20 creates the candidate ledger. Historical
+commits prove the earlier task boundary, but every `REOPENED` row must add focused evidence for
+the revised contract before Task 18 may seal a product case. No historical checkbox is silently
+treated as that new evidence.
+
+| Task | Historical commit | Current status | Required revised closure |
+| ---: | --- | --- | --- |
+| 1 | `930fec10fb82643cc7ce5c34d6c82d0fd900fa57` | `REOPENED_DOCS` | compressible OpenFOAM reference, new lifecycle/adoption records |
+| 2 | `821046004763cf4002b50ff765b79ab3165b83d7` | `COMPLETE` | none |
+| 3 | `58677304629d33bc2d935fa40569d40f0b4f02e3` | `COMPLETE` | none |
+| 4 | `05b25ed30080dc1bf9301a8b519f5ed81c2bdf15` | `REOPENED_AMENDMENT` | production sizing after geometry/analysis, NUMA first-touch/cache-line tests |
+| 5 | `6e684ff8f46d6f49809a5f8094ceb0e764f3aea2` | `REOPENED_AMENDMENT` | deterministic workload/halo-aware decomposition policy |
+| 6 | `ddb6ffd4aea027c9e36ed190b1d623af478e8c38` | `REOPENED` | MPI thread contract, exact edge/corner validity and single-flight requests |
+| 7 | `eaeb173070b3372cc999b8aa5dcbd2a3202d87ca` | `COMPLETE` | none |
+| 8 | `cca10ae4641d3d396af2012bd3591a650227468e` | `REOPENED_AMENDMENT` | predictor-stage closed-mass Newton/gauge invalidations |
+| 9 | `e42c868256556abc8bfeecb9b31dd92733c1336f` | `COMPLETE` | none |
+| 10 | `a321d4e7d32a3e47bf67d0a3cf1d5414856dcb76` | `REOPENED` | logical analysis versus executable binding and collective budgets |
+| 11 | `f754a8efd8c496ad0464dd4793f80322d65268c2` | `REOPENED` | exact/coarse numeric versus preconditioner setup identities/reduction counts |
+| 12 | `844b5c4d9e4699f45be4902e5000768c658b5c63` | `REOPENED` | threshold controls setup only; persistent HYPRE handles/current coarse data |
+| 13 | `3ea708aa941aee8887ac3fb847c8c06bdedf8ee7` | `REOPENED` | compact off-rank IBM donor exchange and edge/corner MPI evidence |
+| 14 | working tree | `LOCALLY_ACCEPTED_UNCOMMITTED` | focused, ASan, UBSan and MPI 1/2/4 pass; preserved uncommitted per worktree constraint |
+| 15--17 | working tree | `LOCALLY_ACCEPTED_UNCOMMITTED` | focused numerical, MPI and lifecycle gates pass; preserve uncommitted per worktree constraint |
+| 18 | working tree | `LOCALLY_ACCEPTED_UNCOMMITTED` | one product seal and 100-step hot-resource contract pass |
+| 19 | working tree | `LOCALLY_ACCEPTED_UNCOMMITTED` | product CLI, committed-state services, Restart rank change and tests-on/off equality pass |
+| 20 | working tree | `IN_PROGRESS` | workflow/focused/candidate/performance policy implemented; primary experimental profile/force authorities remain incomplete |
+| 21--22 | none | `PENDING` | execute only through the immutable gates below |
 
 ## Stable Public Types
 
@@ -125,7 +155,7 @@ The plan deliberately keeps public headers coarse and implementation files focus
 
 - [ ] **Step 3: Record geometry, halo, and linear lifetimes.**
 
-  The survey must distinguish `EBTopology`, `BoundaryStencilPlan`, `SurfaceQuadraturePlan`, persistent halo metadata/buffers/requests, `SymbolicPlan`, `NumericState`, `HierarchyState`, and `SolverWorkspace`. Give each an identity tuple and its only legal rebuild causes.
+  The survey must distinguish `EBTopology`, `BoundaryStencilPlan`, `SurfaceQuadraturePlan`, structured halo metadata/buffers/requests, compact remote-donor exchange, `SymbolicPlan/CoarseningPlan`, `ExactNumericState`, `PreconditionerSetupState`, and `SolverWorkspace`. Give each an identity tuple and its only legal rebuild/refresh/setup causes.
 
 - [ ] **Step 4: Trace COAST functionality without copying source.**
 
@@ -136,9 +166,10 @@ The plan deliberately keeps public headers coarse and implementation files focus
   Put this machine-reviewable stage order in `v0.4-target-hot-loop.md`:
 
   ```text
-  begin attempt -> update thermo/transport -> momentum predictor
-  -> PISO corrector 1 -> PISO corrector 2/final flux
-  -> enthalpy -> inert species/passive scalars
+  begin attempt -> thermophysical predictor from committed flux history
+  -> update thermo/transport and closed-mass pressure reference
+  -> momentum predictor -> PISO corrector 1 -> PISO corrector 2/final flux
+  -> terminal EOS/continuity/mass/gauge audit
   -> diagnostics snapshot decision -> collective commit/rollback
   ```
 
@@ -356,7 +387,7 @@ class AttemptTransaction {
 
 - [ ] **Step 3: Implement deterministic arena planning.**
 
-  Compute every field offset from schema, padded extents, alignment, NUMA node, and lifetime class before allocating one aligned arena per NUMA owner. Build immutable views; do not expose owning vectors in operator interfaces.
+  Compute every field offset from synthetic schema/extents, alignment, NUMA node, and lifetime class before allocating one aligned arena per NUMA owner. Build immutable views; do not expose owning vectors in operator interfaces. Task 4 proves the allocator with synthetic geometry only; the production `ArenaLayout` is computed in Task 18 after real geometry/decomposition and logical graph/resource analysis. First-touch pages in parallel from their final worker/NUMA owner and isolate per-thread counters/scratch by cache line.
 
 - [ ] **Step 4: Implement layer rotation and compact rollback.**
 
@@ -395,7 +426,7 @@ class AttemptTransaction {
 - Modify: `versions/v0.4/tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `ValidatedModel`, `ArenaLayout`, and stable POD types.
+- Consumes: `ValidatedModel` and stable POD types; cold build scratch is not the production arena.
 - Produces: `CartesianGeometryPlan`, `MeshPatch`, `CpuTile`, `TriangleSoA`, and `StlScanPlan`.
 
 ```cpp
@@ -442,7 +473,7 @@ struct StlScanPlan {
 
 - [ ] **Step 6: Implement deterministic decomposition and tiles.**
 
-  Choose one contiguous `MeshPatch` per rank from a process grid; allow unequal patch sizes while preserving exact global coverage. Generate rank-local CPU tiles separately from ownership. Verify 1/2/4 ranks give the same global geometry and classification fingerprints.
+  Choose one contiguous `MeshPatch` per rank from a process grid; allow unequal cuts while preserving exact global coverage. Use a deterministic cold cost model over structured halo surface, maximum fluid-cell work and static IBM interface/donor work, with an explicit manual override. Record policy, weights and result in the case fingerprint. Generate rank-local CPU tiles separately from ownership. Verify 1/2/4 ranks give the same global geometry/classification fingerprints and add an adversarial complex-STL imbalance test against surface-only partitioning.
 
 - [ ] **Step 7: Verify and commit.**
 
@@ -477,7 +508,7 @@ class HaloEngine {
 
 - [ ] **Step 1: Write placement and halo REDs.**
 
-  Test default one-rank-per-NUMA recommendation, fixed-team creation, pure-MPI fallback, duplicate-core warning, direct-neighbor-only messages, periodic and nonperiodic peers, merged same-peer payloads, persistent buffer/request addresses, ghost revision publication only after `finish`, and zero allocation during repeated exchange.
+  Test default one-rank-per-NUMA recommendation, fixed-team creation, `MPI_THREAD_FUNNELED` validation, pure-MPI fallback, duplicate-core warning, exact registered-neighbor messages, periodic and nonperiodic peers, merged same-peer payloads, persistent buffer/request addresses, single-in-flight request rejection, ghost revision publication only after `finish`, and zero allocation during repeated exchange. Face-only regular stages must not claim edge/corner validity; dense grown-box or staged exchanges must prove widths 1--4 including periodic self-neighbor and unequal patches.
 
 - [ ] **Step 2: Inject MPI failures.**
 
@@ -485,11 +516,11 @@ class HaloEngine {
 
 - [ ] **Step 3: Implement cold CPU discovery and finite specialization.**
 
-  Query affinity and NUMA placement only during startup, validate requested rank/thread layout, and bind one persistent thread team. Store a finite ISA/tile selection; never dispatch on CPUID inside kernels.
+  Query affinity and NUMA placement only during startup, validate requested rank/thread layout and `MPI_Query_thread`, and bind one persistent thread team with one communication thread. Reject a provided thread level below `MPI_THREAD_FUNNELED`. Store a finite ISA/tile selection; never dispatch on CPUID inside kernels.
 
 - [ ] **Step 4: Implement reusable halo transport.**
 
-  `reserve` calculates maximum merged peer payloads and constructs persistent requests/buffers. `begin` packs current revisions and starts requests; callers compute interior tiles; `finish` waits, unpacks, and publishes exact ghost revision certificates. The engine has no knowledge of equations or implicit fill-patch behavior.
+  `reserve` calculates maximum merged peer payloads and constructs persistent requests/buffers for registered structured overlaps. `begin` packs current revisions and starts one single-in-flight request set; callers compute interior tiles; `finish` waits, unpacks, and publishes only the exact registered ghost region. The engine has no knowledge of equations or implicit fill-patch behavior. Task 13 separately compiles a compact, deduplicated remote-donor gather for static IBM stencils; Task 18 reserves and binds it with the structured plan instead of filling every field's full 26-neighbor corner volume.
 
 - [ ] **Step 5: Verify and commit.**
 
@@ -666,7 +697,7 @@ Status reconstruct_mass_flux(const SchemePlan&, const CartesianGeometryPlan&,
 
 **Interfaces:**
 - Consumes: field/stage registrations and halo specifications from Tasks 3--9.
-- Produces: `StageSpec`, `ExecutionGraphCompiler`, `FrozenExecutionGraph`, `ResourceCounters`; Task 18 performs the only production freeze.
+- Produces: `StageSpec`, canonical logical stage IR, `GraphResourceAnalysis`, test-only bound `FrozenExecutionGraph`, and `ResourceCounters`; Task 18 performs each compiled case's only production seal.
 
 ```cpp
 struct StageSpec {
@@ -686,15 +717,15 @@ class ExecutionGraphCompiler {
 
 - [ ] **Step 1: Write graph REDs.**
 
-  Reject read-before-produce, two writers, missing ghost production, undeclared invalidation, workspace overlap while live, a commit before collective consensus, a service reading trial state, and registration after freeze.
+  Reject read-before-produce, two writers, missing ghost/donor production, undeclared invalidation, workspace overlap while live, a commit before collective consensus, a service reading trial state, an unconditional stage barrier, and registration after seal. Logical analysis must not require bound arena views or MPI handles; binding must reject any requirement beyond analyzed capacity.
 
 - [ ] **Step 2: Write resource-budget REDs.**
 
-  Compile synthetic stages and assert exact max live workspace, allocation allowance zero, merged peer message/byte ceilings, allowed numeric refill/hierarchy rebuild counts, and counter overflow rejection.
+  Compile synthetic stages and assert exact max live workspace/service snapshot capacity, allocation allowance zero, merged peer message/byte ceilings, blocking/nonblocking collective budget, allowed exact/coarse numeric refresh and preconditioner-setup counts, and counter overflow rejection.
 
 - [ ] **Step 3: Implement deterministic topological compilation.**
 
-  Preserve declared numerical order, add dependency edges, compute liveness/alias intervals, assign preallocated scratch offsets, attach explicit halo begin/finish nodes, and insert only declared collective consensus points. Fingerprint every compiled property.
+  Preserve declared numerical order, add dependency edges, compute liveness/alias intervals, maximum scratch/service capacities and exact structured-overlap/IBM-gather requirements, and emit a logical schedule. Test binding assigns preallocated offsets and attaches halo/gather/collective nodes without changing analyzed capacity. Insert only declared collective epochs and fingerprint analysis plus binding separately.
 
 - [ ] **Step 4: Prove mechanism-only scope.**
 
@@ -720,7 +751,7 @@ class ExecutionGraphCompiler {
 
 **Interfaces:**
 - Consumes: geometry/topology revision, boundary locations, explicit halo engine, persistent arena workspace, resource counters.
-- Produces: `SymbolicPlan`, `NumericState`, `HierarchyState`, `SolverWorkspace`, `LinearOperator`, PCG, right-preconditioned restarted FGMRES, BiCGSTAB, FP64 true-residual checks.
+- Produces: `SymbolicPlan/CoarseningPlan`, `ExactNumericState`, `PreconditionerSetupState`, `SolverWorkspace`, `LinearOperator`, PCG, right-preconditioned restarted FGMRES, BiCGSTAB, FP64 true-residual checks and collective counters.
 
 ```cpp
 struct LinearIdentity {
@@ -741,7 +772,7 @@ struct LinearSolveResult {
 
 - [ ] **Step 1: Write lifecycle REDs.**
 
-  Construct synthetic topology/coefficient revisions and assert: topology change rebuilds all four layers; coefficient change refills numeric state but preserves symbolic state/workspace; hierarchy policy alone decides coarse rebuild; repeated solve reuses stable workspace addresses; stale numeric/hierarchy identities are rejected rather than silently used.
+  Construct synthetic topology/coefficient revisions and assert: topology change replaces symbolic/coarsening identity and invalidates downstream state; every coefficient change refreshes current exact fine/coarse numeric data while preserving symbolic state/workspace; the coefficient policy controls only preconditioner setup reuse; repeated solve reuses stable workspace addresses; stale exact/coarse numeric identities are rejected rather than silently used.
 
 - [ ] **Step 2: Write solver REDs.**
 
@@ -749,7 +780,7 @@ struct LinearSolveResult {
 
 - [ ] **Step 3: Implement persistent vector/reduction workspace.**
 
-  Register the maximum Krylov basis and reduction buffers before schema freeze. Reuse them for every solve. Implement reproducible fixed-tree reduction and performance `MPI_Allreduce` modes selected in the cold plan; both report an FP64 true residual.
+  Register the maximum Krylov basis and reduction buffers before case seal. Reuse them for every solve. Implement reproducible fixed-tree reduction and performance `MPI_Allreduce` modes selected in the cold plan; both report an FP64 true residual plus exact blocking/nonblocking collective counts, payloads and time. Residual printing and diagnostics may not add an unregistered reduction.
 
 - [ ] **Step 4: Implement PCG, FGMRES, and BiCGSTAB.**
 
@@ -787,7 +818,7 @@ struct LinearSolveResult {
 enum class CoarseningKind : std::uint8_t { full_xyz, semi_xy, semi_xz, semi_yz };
 struct MgHierarchyPolicy {
   CoarseningKind coarsening;
-  double coefficient_change_rebuild_ratio;
+  double preconditioner_setup_refresh_ratio;
   std::uint8_t pre_sweeps, post_sweeps;
 };
 ```
@@ -798,15 +829,15 @@ struct MgHierarchyPolicy {
 
 - [ ] **Step 2: Write reuse and semi-coarsening REDs.**
 
-  Verify near-isotropic metrics choose full coarsening; strong stretched directions remain uncoarsened and use line relaxation; unchanged coefficients reuse hierarchy; below-threshold coefficient changes update coarse numeric data without symbolic rebuild; above-threshold changes increment exactly one hierarchy rebuild counter.
+  Verify near-isotropic metrics choose full coarsening; strong stretched directions remain uncoarsened and use line relaxation; unchanged coefficients reuse exact numeric/preconditioner state; every changed coefficient refreshes required coarse numeric data without symbolic rebuild; below-threshold changes may reuse preconditioner setup; above-threshold changes increment exactly one preconditioner-setup counter. No coefficient threshold may rebuild immutable coarsening topology or skip exact/coarse refresh.
 
 - [ ] **Step 3: Implement NativeCartesianMG.**
 
-  Precompute level shapes, metric restriction, transfer spans, halo plans, smoother coloring/lines, null-space projection, and maximum workspace. Implement full weighting/restriction and second-order prolongation consistent with tensor metrics. All levels live in the arena and reuse persistent communication metadata.
+  Precompute immutable level shapes, metric restriction, transfer spans, halo plans, smoother coloring/lines, null-space projection, and maximum workspace. Implement full weighting/restriction and second-order prolongation consistent with tensor metrics. All levels live in the arena and reuse persistent communication metadata. Fine/coarse numeric arrays start uncertified, refresh on every coefficient revision, and publish only after all levels and numeric BC coefficients are current.
 
 - [ ] **Step 4: Implement HYPRE isolation.**
 
-  Make HYPRE optional at configure time. The adapter owns all HYPRE objects and converts from HUNDUN numeric state only when its coefficient identity changes. No HYPRE type appears in installed HUNDUN headers, and disabling HYPRE leaves all native tests/builds intact.
+  Make HYPRE optional at configure time. The adapter persistently owns grid, stencil, matrix, vector and solver handles; it refills/assembles values when exact coefficients change, while a separate policy decides whether solver/preconditioner setup may be reused. No HYPRE type appears in installed HUNDUN headers, IBM irregular rows never become a Struct authority, and disabling HYPRE leaves all native tests/builds intact.
 
 - [ ] **Step 5: Verify and commit.**
 
@@ -820,6 +851,7 @@ struct MgHierarchyPolicy {
 - Create: `versions/v0.4/src/mesh_ibm_reconstruction.cpp`
 - Create: `versions/v0.4/src/mesh_ibm_qr_detail.hpp`
 - Create: `versions/v0.4/src/mesh_ibm_surface.cpp`
+- Create: `versions/v0.4/src/mesh_ibm_donor_exchange.cpp`
 - Create: `versions/v0.4/tests/unit/mesh_ibm_quadratic_test.cpp`
 - Create: `versions/v0.4/tests/mpi/mesh_ibm_stencil_mpi_test.cpp`
 - Create: `versions/v0.4/tests/numerical/mesh_ibm_order_test.cpp`
@@ -831,7 +863,16 @@ struct MgHierarchyPolicy {
 
 **Interfaces:**
 - Consumes: Cartesian geometry and STL scan, halo reach, field registration, boundary plans.
-- Produces: `EBTopology`, `QuadraticStencilPlan`, `BoundaryStencilPlan`, `SurfaceQuadraturePlan`; registers compact interface storage before Task 18.
+- Produces: `EBTopology`, `QuadraticStencilPlan`, `BoundaryStencilPlan`,
+  `IbmEquationInterfacePlan`, `SurfaceQuadraturePlan`, and deduplicated
+  `RemoteDonorExchangePlan`; registers compact interface/remote-donor storage
+  before Task 18. The equation-interface plan owns the one-link/one-face
+  replacement schedule: it masks solid control volumes, forces every
+  fluid--solid mass-flux face to zero, and replaces regular Cartesian
+  momentum/thermal/scalar diffusion contributions with the compiled
+  Dirichlet or Neumann quadratic row. It never writes a shared solid ghost
+  value, because one solid cell can serve several geometrically distinct
+  interface links.
 
 ```cpp
 struct QuadraticStencilQuality {
@@ -857,15 +898,33 @@ struct EBTopology {
 
 - [ ] **Step 3: Implement static topology and deterministic QR.**
 
-  Build region/interface lists from scan output; compute wall points/normals; collect candidates by bounded logical neighborhoods; filter by fluid region and positive normal; score 14--32 donor subsets; solve weights with an independently written deterministic column-pivoted Householder QR; store compact immutable weights and fingerprints.
+  Build region/interface lists from scan output; compute wall points/normals; collect candidates by bounded logical neighborhoods; filter by fluid region and positive normal; score 14--32 donor subsets; solve weights with an independently written deterministic column-pivoted Householder QR; store compact immutable weights and fingerprints. Convert remote global donor IDs into one sorted, deduplicated request/gather plan per peer and registered field group; regular face-only halos may not certify those values.
 
 - [ ] **Step 4: Compile surface quadrature separately.**
 
   Build oriented surface elements, normals, areas, wall points, owner interface cells, and any explicitly declared shared-row donor union. Keep shared quadrature plans distinguishable from standard link stencils so they cannot silently bypass the positive-normal/32-donor contract.
 
+  Clip the immutable STL surface to the open Cartesian domain before building
+  traction quadrature; do not integrate domain-exterior closure facets or
+  facets coincident with an external boundary.  Where an EB intersects a
+  declared `symmetry`/`slip` face, compile a distinct one-sided
+  boundary-intersection quadratic plan.  It retains the 14--32 unique donor,
+  positive-normal, three-band, full-rank and condition gates, and records both
+  the geometrically reachable and actual tangential quadrant masks.  Standard
+  interior links still require all four quadrants.
+
+  Independently compile the equation-interface replacement schedule from
+  `EBTopology` plus `BoundaryStencilPlan`. Precompute link-to-face ownership,
+  solid masks, wall-row selection, metric factors and compact donor groups.
+  Momentum uses the no-slip/moving-wall Dirichlet row; enthalpy and transported
+  scalars use their declared isothermal/adiabatic/flux or value wall row.
+  Interface convection always consumes an exactly zero normal mass flux.
+  Apply replacements per link to the owning fluid equation row; do not fill a
+  shared solid ghost and do not evolve solid cells as fluid equations.
+
 - [ ] **Step 5: Add true h-refinement order tests.**
 
-  Run 12/24/48 or 16/32/64 sequences for translated plane, sphere, and cylinder on uniform and stretched grids. Task 13 measures the quantities its static reconstruction API owns: wall value, wall-normal gradient, and near-wall value/penetration reconstruction. Task 17 adds the independent final-state traction and integrated-force oracle/order gates after the pressure/operator/final-state APIs exist; those gates may not be fabricated or silently treated as already passed here. Require decreasing errors and both adjacent observed orders at least 1.8 for metrics whose analytic truncation is above the floor. Run the static-plan decomposition selectors at 1/2/4 ranks.
+  Run 12/24/48 or 16/32/64 sequences for translated plane, sphere, and cylinder on uniform and stretched grids. Task 13 measures the quantities its static reconstruction API owns: wall value, wall-normal gradient, and near-wall value/penetration reconstruction. Task 17 adds the independent final-state traction and integrated-force oracle/order gates after the pressure/operator/final-state APIs exist; those gates may not be fabricated or silently treated as already passed here. Require decreasing errors and both adjacent observed orders at least 1.8 for metrics whose analytic truncation is above the floor. Run the static-plan decomposition selectors at 1/2/4 ranks, including donors crossing an edge/corner rank boundary and periodic self-neighbor. Require compact gather equality with a full-grown-box oracle and no dense corner traffic for fields that only use regular face stencils.
 
 - [ ] **Step 6: Verify and commit.**
 
@@ -879,16 +938,20 @@ struct EBTopology {
 - Create: `versions/v0.4/src/solver_momentum.cpp`
 - Create: `versions/v0.4/src/solver_enthalpy.cpp`
 - Create: `versions/v0.4/src/solver_species.cpp`
+- Create: `versions/v0.4/src/solver_thermophysical_predictor.cpp`
 - Create: `versions/v0.4/tests/numerical/solver_low_mach_mms_test.cpp`
 - Create: `versions/v0.4/tests/numerical/solver_enthalpy_terms_test.cpp`
 - Create: `versions/v0.4/tests/numerical/solver_species_conservation_test.cpp`
+- Create: `versions/v0.4/tests/numerical/solver_thermophysical_coupling_test.cpp`
 - Create: `versions/v0.4/tests/mpi/solver_equations_mpi_test.cpp`
 - Modify: `versions/v0.4/CMakeLists.txt`
 - Modify: `versions/v0.4/tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: conservative kernels, thermo/transport/contribution plans, boundary/time plans, numeric linear state.
-- Produces: `MomentumEquationPlan`, `EnthalpyEquationPlan`, `SpeciesEquationPlan`, `ScalarEquationPlan`, common `EquationAssemblyContext`.
+- Consumes: conservative kernels, thermo/transport/contribution plans,
+  boundary/time plans, numeric linear state, and the optional compiled
+  `IbmEquationInterfacePlan`.
+- Produces: `MomentumEquationPlan`, `EnthalpyEquationPlan`, `SpeciesEquationPlan`, `ScalarEquationPlan`, `ThermophysicalPredictorPlan`, common `EquationAssemblyContext`, and `AssemblyEpoch` completion/certificate authority.
 
 ```cpp
 struct EquationAssemblyContext {
@@ -896,31 +959,63 @@ struct EquationAssemblyContext {
   RevisionToken time, geometry, boundary, thermo, transport, face_flux;
   Span<const FieldView> accepted, previous, trial;
 };
+class AssemblyEpoch {
+ public:
+  Status begin(const EquationAssemblyContext&, const EquationSystemView&) noexcept;
+  Status assemble_tile(KernelBox) noexcept;
+  Status finalize(EquationAssemblyCertificate&) noexcept;
+};
 ```
 
-- [ ] **Step 1: Write low-Mach manufactured REDs.**
+- [x] **Step 1: Write low-Mach manufactured REDs.**
 
-  Use analytic variable `p_abs`, temperature, density, velocity, and enthalpy with nonzero divergence. Check mass, momentum, enthalpy, and pressure-work residuals on uniform/stretched 16/32/64 grids; require both observed orders at least 1.8.
+  Use analytic independently varying `p_abs`, temperature, composition, density, velocity, and enthalpy with nonzero divergence. Check mass, momentum, enthalpy, pressure-work and thermophysical-predictor residuals on uniform/stretched 16/32/64 grids; require both observed orders at least 1.8. Mutate predictor ordering, density history, `drho/dp`, `p_ref` and flux-history revision separately.
 
-- [ ] **Step 2: Isolate energy-term REDs.**
+- [x] **Step 2: Isolate energy-term REDs.**
 
   Create cases where only one of `Dp/Dt`, conduction, viscous dissipation, unsteady enthalpy, or advective enthalpy is nonzero. Compare each assembled cell integral with an independent analytic oracle and verify signs/units.
 
-- [ ] **Step 3: Write species/scalar conservation REDs.**
+- [x] **Step 3: Write species/scalar conservation REDs.**
 
-  Advect/diffuse N-1 inert species and a passive scalar using a supplied final face flux. Check sum closure, positivity rejection, composition-dependent EOS, global conservation including boundary flux, and no chemistry/source registration.
+  Advect/diffuse N-1 inert species and a passive scalar using an explicitly revisioned supplied face flux. Check committed-history predictor and current-final-residual scopes separately, sum closure, positivity rejection, composition-dependent EOS, global conservation including boundary flux, and no chemistry/source registration.
 
-- [ ] **Step 4: Implement common assembly ownership.**
+  Each transported-scalar catalog entry declares finite positive molecular
+  and turbulent Schmidt numbers.  They are cold-compiled into the scalar
+  equation plan and participate in the case/plan identity; the hot path
+  consumes caller-owned effective diffusivity views and performs no string
+  lookup or case-specific closure.
 
-  Equation plans declare reads/writes/contributions once and use the same Cartesian kernels. Fused loops form `rhoU/rhoh` contributions transiently from primitive and derived views. No PISO-specific duplicate equation implementation and no persistent conservative-product fields are allowed.
+- [x] **Step 4: Implement common assembly ownership.**
 
-- [ ] **Step 5: Implement open/closed pressure reference hooks.**
+  Equation plans declare reads/writes/contributions once and use the same Cartesian kernels. Fused loops form `rhoU/rhoh` contributions transiently from primitive and derived views. No PISO-specific duplicate equation implementation and no persistent conservative-product fields are allowed. Tile kernels are internal and never publish a complete certificate; `AssemblyEpoch::finalize` publishes only after exact local-domain coverage, halo/boundary completion and finite outputs. Validate all cell/cell, face/face and cell/face input-output alias intervals once per epoch; malformed/overflowing metadata rejects conservatively. Certificates include storage identity, revision domain and the complete dependency stamp. Accepted/previous histories request only their actual stencil reach, never the trial reach by default.
 
-  Assemble local compressibility terms with `drho/dp`. Open cases consume absolute-pressure boundary closure; closed cases call the Task 8 mass-Newton service at the declared stage. Keep the pressure solve itself for Task 15.
+  Assembly reports cell-integral coefficients and residuals.  The typed
+  context separates `p_ref` from `pi`, derives local `p_abs`, and distinguishes
+  committed authoritative flux histories used by the second-order thermophysical predictor,
+  a momentum-predictor provisional flux, and the current-attempt certified final flux required
+  by terminal residuals and the next accepted history. Enthalpy uses
+  `Dp_abs/Dt = BDF(p_abs) + U dot grad(p_abs)` and temperature-space conduction;
+  it may not substitute `div(pU)` or a generic `h` diffusion when composition
+  or heat capacity varies.
 
-- [ ] **Step 6: Verify and commit.**
+  For immersed cases the same assembly epoch also owns the precompiled
+  interface replacement: regular Cartesian face terms are replaced per link,
+  solid rows are masked, and the certificate hashes the IBM geometry/boundary
+  authority. A certificate produced before that replacement is incomplete
+  and cannot be consumed by PISO.
 
-  Run all `^v04_solver_(low_mach_mms|enthalpy_terms|species_conservation|equations_mpi_[124])$` tests and inspect field registration to confirm no constant-density or conservative-product field. Commit with `git commit -s -m "feat(v0.4): add unified low-Mach equations"`.
+- [x] **Step 5: Implement open/closed pressure reference hooks.**
+
+  Assemble local compressibility terms with `drho/dp`. Open cases consume absolute-pressure boundary closure; closed cases call the Task 8 mass-Newton service after `h*/Y*` prediction and before any pressure coefficient is certified, then impose the frozen `pi` gauge. A `p_ref` update invalidates EOS, pressure-storage, pressure-face-coefficient and `phiHbyA` identities. Keep the pressure solve itself for Task 15.
+
+  Boundary `heat_flux` and transported-scalar `normal_flux` use the outward
+  physical flux sign.  A resolver converts that flux to the corresponding
+  temperature or scalar normal gradient only after the local conductivity or
+  diffusivity is known.
+
+- [x] **Step 6: Verify; preserve the accepted working tree without committing.**
+
+  Run all `^v04_solver_(low_mach_mms|enthalpy_terms|species_conservation|thermophysical_coupling|equations_mpi_[124])$` tests and inspect field registration to confirm no constant-density or conservative-product field. Require partial-tile calls to remain uncertified until epoch finalization and all alias/coverage mutations to fail. Commit with `git commit -s -m "feat(v0.4): add unified low-Mach equations"`.
 
 ### Task 15: Implement Exactly Two PISO Correctors and Final Flux Publication
 
@@ -939,38 +1034,49 @@ struct EquationAssemblyContext {
 
 **Interfaces:**
 - Consumes: equation plans, `NativeCartesianMG`, Krylov solvers, transaction state, final face-flux writer token.
-- Produces: `PisoPlan`, `MomentumIntermediates`, `PressureCorrectionState`, `advance_piso_attempt`.
+- Produces: opaque `PisoPlan`, `PressureVelocityCoupler`, `PisoAttemptReport`, and `advance_piso_attempt`. Corrector scratch and `rAU/rAtU/HbyA/phiHbyA` are private implementation details exposed only through test inspectors.
 
 ```cpp
-struct MomentumIntermediates {
-  FieldView rAU, rAtU, HbyA;
-  FaceFluxView phiHbyA;
-  RevisionToken rAU_identity, rAtU_identity, HbyA_identity, phiHbyA_identity;
+struct PisoAttemptReport {
+  LinearSolveResult pressure[2];
+  double eos_residual, continuity_residual, closed_mass_residual,
+         gauge_residual;
+  RevisionToken final_flux_revision;
 };
 Status advance_piso_attempt(const PisoPlan&, AttemptTransaction&,
                             const EquationAssemblyContext&,
-                            LinearSolveResult pressure_results[2]) noexcept;
+                            PisoAttemptReport&) noexcept;
 ```
 
 - [ ] **Step 1: Write authority and call-count REDs.**
 
-  Require exactly two pressure solves/corrector calls, one final-flux publication, corrector 1 writes trial only, corrector 2 publishes final `U/face_flux`, enthalpy/species see only final flux, and any configured count other than two is rejected during case compilation.
+  Require one second-order `h*/Y*` predictor from committed flux histories, exactly two pressure solves/corrector calls, one current-attempt final-flux publication, corrector 1 writes trial only, and corrector 2 publishes pending final `U/face_flux`. Terminal audit and commit name that revision; any configured count other than two is rejected during case compilation.
 
 - [ ] **Step 2: Write intermediate-revision mutation REDs.**
 
-  Mutate momentum diagonal, consistent diagonal, trial `U`, trial `phi`, boundary, time, and geometry separately. Assert the exact invalidations: `rAU`; `rAtU`; `HbyA`; and `phiHbyA`. Specifically mutate corrector-1 trial `U/phi` and prove a stale corrector-2 `HbyA/phiHbyA` path fails RED.
+  Mutate momentum diagonal, density, implicit-source diagonal, consistent diagonal, trial `U`, trial/committed flux history, face-density interpolation, EOS/`drho_dp`, `p_ref`/gauge, numeric boundary coefficient, BDF, time, and geometry separately. Assert exact invalidation of `rAU`, optional `rAtU`, `HbyA`, pressure face coefficient and `phiHbyA`. Specifically mutate corrector-1 trial `U/phi/rho` and prove a stale corrector-2 intermediate path fails RED.
 
 - [ ] **Step 3: Write pressure-coupling REDs.**
 
-  Check pressure matrix includes `drho/dp`, Rhie--Chow-like momentum weighting removes checkerboard modes, open/closed null-space handling, final continuity uses pressure-equation flux, and retry/failure publishes neither flux nor intermediate cache.
+  Check pressure matrix includes the full BDF density defect plus `a0*V*drho_dp_hY*delta_pi` without double counting, Rhie--Chow-like momentum weighting removes checkerboard modes, open/closed null-space and gauge handling, final continuity uses pressure-equation flux, and retry/failure publishes neither flux nor intermediate cache. Require separately bounded terminal EOS, continuity, closed-mass and gauge/boundary residuals.
 
 - [ ] **Step 4: Implement momentum/intermediate lifecycle.**
 
-  Assemble or refill momentum numeric state; form `rAU`, optional `rAtU`, `HbyA`, and `phiHbyA` with separate dependency fingerprints. Reuse only certified intermediates. Corrector 2 necessarily rebuilds/revalidates trial-state-dependent quantities after corrector 1.
+  Assemble or refill current exact momentum numeric state; form `rAU`, optional plan-selected `rAtU`, `HbyA`, density-weighted pressure face coefficients and `phiHbyA` with separate dependency fingerprints inside `PressureVelocityCoupler`. Reuse only certified intermediates. Corrector 2 necessarily rebuilds/revalidates trial-state-dependent quantities after corrector 1. If no independently derived consistent-coupling formulation is selected, omit `rAtU` storage and branches entirely.
 
 - [ ] **Step 5: Implement the two pressure corrections.**
 
-  Assemble pressure RHS/operator from `phiHbyA`, time coefficients, EOS derivative, and BCs; solve; correct trial face flux directly from pressure-equation flux; update trial `U` from the same pressure-gradient path. Only the second correction acquires the final-writer token and publishes revisions.
+  Assemble pressure RHS/operator from `phiHbyA`, density histories, BDF coefficients, current EOS derivative, `p_ref`/gauge and numeric BCs; solve; update local EOS with the pressure increment; correct trial face flux directly from pressure-equation flux; update trial `U` from the same pressure-gradient path. Only the second correction acquires the final-writer token. Re-evaluate the four terminal defects before publication becomes commit-eligible; failure uses the registered retry policy and never adds a third pressure solve.
+
+  The current Native Cartesian MG V-cycle is deliberately certified as a
+  flexible preconditioner: it conservatively sums finite-volume residuals onto
+  coarse control volumes, while its independently aggregated coarse operator
+  and coarse smoothing are not claimed to form an SPD preconditioner.
+  Therefore Task 15 freezes right-preconditioned FGMRES with a bounded nonzero
+  restart for pressure; in-cycle FP64 true-residual audits must preserve the
+  active Arnoldi basis and may restart only at the registered restart boundary.
+  Native MG must not be relabelled `fixed_spd` merely to enter PCG. A future PCG
+  path requires a separately verified symmetric/Galerkin MG contract.
 
 - [ ] **Step 6: Verify spatial/temporal/MPI contracts.**
 
@@ -996,11 +1102,13 @@ Status advance_piso_attempt(const PisoPlan&, AttemptTransaction&,
 
 **Interfaces:**
 - Consumes: shared `DerivedFieldPlan`, velocity-gradient cache, wall distance, `EBTopology`, boundary plans, one `mu_eff` authority.
-- Produces: `TurbulencePlan` for `none`, `wale`, and `vreman_wall_function`; no additional model choices.
+- Produces: internal `SubgridPlan {none,wale,vreman}` and `WallTreatmentPlan {resolved,wall_function}` plus a case-level `TurbulencePlan` that exposes only the approved `none`, `wale`, and `vreman_wall_function` combinations; no additional model choices.
 
 ```cpp
 struct TurbulencePlan {
   TurbulenceKind kind;
+  SubgridPlan subgrid;
+  WallTreatmentPlan wall;
   double coefficient, turbulent_prandtl, turbulent_schmidt;
   Status update(const FieldView& rho, const GradientView& grad_u,
                 const WallDistanceView&, FieldView& mu_eff) const noexcept;
@@ -1014,6 +1122,10 @@ struct TurbulencePlan {
 - [ ] **Step 2: Write Vreman and wall-function REDs.**
 
   Use analytic velocity-gradient tensors for zero/nonzero Vreman invariants; test nonnegative finite eddy viscosity, external and IBM wall faces, smooth/log-law transition, rough invalid input rejection, tangential relative velocity for moving walls, heat/scalar wall flux consistency, and single `mu_eff` publication.
+  The IBM RED must exercise the production per-link momentum replacement, not
+  only the standalone wall-law function: bypassing the wall treatment must
+  change the tangential traction while retaining the resolved normal viscous
+  part. A nonzero tangential velocity must produce drag opposing that velocity.
 
 - [ ] **Step 3: Reproduce the positive-normal donor failure as RED.**
 
@@ -1021,7 +1133,16 @@ struct TurbulencePlan {
 
 - [ ] **Step 4: Implement static model binding.**
 
-  Compile a single function-level model selection before the cell loop. `none` copies molecular viscosity into `mu_eff`; WALE and Vreman consume the same gradient view; wall function consumes shared wall distance and boundary/EB surface plans. Do not duplicate gradient or viscosity fields.
+  Compile a single function-level subgrid selection and one wall-treatment selection before their loops. `none` copies molecular viscosity into `mu_eff`; WALE and Vreman consume the same gradient view; wall function consumes shared wall distance and boundary/EB surface plans. Subgrid and wall plans keep separate fingerprints/revisions because wall treatment also owns heat/species wall-flux behavior. Reject every combination outside the three case-level choices. Do not duplicate gradient or viscosity fields.
+
+  For immersed walls, bind the compiled wall treatment into
+  `IbmEquationInterfacePlan`. The default Vreman wall-function path evaluates
+  the smooth-wall law from the owning fluid-cell relative tangential velocity,
+  wall distance, density and molecular viscosity, replaces the tangential
+  traction in the same equation row, and retains the resolved normal viscous
+  traction. WALE remains the resolved-wall path. This follows COAST's public
+  wall-viscosity/coefficient lifecycle idea but is an independent C++
+  traction formulation over v0.4 quadratic link data.
 
 - [ ] **Step 5: Fix donor selection by topology/reach root cause.**
 
@@ -1068,11 +1189,26 @@ Status evaluate_surface_force(const SurfaceQuadraturePlan&,
 
 - [ ] **Step 3: Implement regular-body plus compact-interface pressure apply.**
 
-  The exact operator applies regular Cartesian coefficients plus immutable compact IBM rows. FGMRES always applies this exact operator; Native MG/compact approximation is preconditioner only. Store no duplicate full sparse matrix and rebuild compact rows only on geometry/topology revision.
+  The exact pressure operator applies regular Cartesian coefficients and
+  removes every impermeable fluid-solid face link with the same orientation
+  used by the final face-flux authority; solid rows are isolated identities.
+  Quadratic IBM rows remain authoritative for velocity/diffusion/traction, but
+  may not introduce a pressure mass-flux path that the final flux writer omits.
+  FGMRES always applies the exact pressure operator; Native MG is
+  preconditioner only. Store no duplicate full sparse matrix and rebuild
+  topology activity only on geometry/topology revision.
 
 - [ ] **Step 4: Implement one final-state traction path.**
 
-  Reconstruct final pressure and velocity gradients from the final accepted candidate revision, combine molecular+turbulent stress through the one `mu_eff`, integrate oriented quadrature once, and publish `FinalForceCache` only in the successful transaction commit. Reaction budget and diagnostics read this same result.
+  Reconstruct final pressure and velocity gradients from the final accepted
+  candidate revision, combine molecular+turbulent stress through the one
+  `mu_eff`, integrate oriented quadrature once, and publish `FinalForceCache`
+  only in the successful transaction commit. Positive material properties use
+  the quadratic value inside the strictly-positive donor envelope and project
+  only overshoots to that envelope; non-positive/non-finite donors fail the
+  attempt. The force path performs an all-rank status consensus before any
+  force reduction so a rank-local reconstruction failure cannot diverge
+  collective order. Reaction budget and diagnostics read this same result.
 
 - [ ] **Step 5: Verify order, consistency, failure, and MPI.**
 
@@ -1082,14 +1218,16 @@ Status evaluate_surface_force(const SurfaceQuadraturePlan&,
 
   Inspect that no force path reads `HbyA`, corrector scratch, or provisional flux; no surface normal is recomputed in the hot loop; and no diagnostic has a second force implementation. Commit with `git commit -s -m "feat(v0.4): add exact IBM pressure and final force"`.
 
-### Task 18: Freeze the Complete Production Schema, Halo, Solvers, and Graph Once
+### Task 18: Analyze, Bind, and Seal Each Complete Production Case Once
 
 **Files:**
 - Modify: `versions/v0.4/include/hundun/v04_field.hpp`
 - Modify: `versions/v0.4/include/hundun/v04_parallel.hpp`
 - Modify: `versions/v0.4/include/hundun/v04_execution.hpp`
+- Create: `versions/v0.4/include/hundun/v04_io.hpp`
 - Create: `versions/v0.4/src/core_product_freeze.cpp`
 - Create: `versions/v0.4/src/core_product_freeze_detail.hpp`
+- Create: `versions/v0.4/src/io_service_plan.cpp`
 - Create: `versions/v0.4/tests/integration/core_product_freeze_test.cpp`
 - Create: `versions/v0.4/tests/integration/core_hot_resource_test.cpp`
 - Create: `versions/v0.4/tests/mpi/core_product_freeze_mpi_test.cpp`
@@ -1097,43 +1235,56 @@ Status evaluate_surface_force(const SurfaceQuadraturePlan&,
 - Modify: `versions/v0.4/tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: every registration and plan from Tasks 3--17.
-- Produces: `ProductPlanBundle` containing final `FieldSchema`, `ArenaLayout`, `CommunicationPlan`, boundary/EB/operator/solver plans, `FrozenExecutionGraph`, and exact resource contracts. This is the only production-freeze API.
+- Consumes: `ValidatedModel`, Cartesian geometry/STL/decomposition, every capability registration from Tasks 3--17, and cold Restart/Visit/screen/monitor/evidence service specifications defined in this task.
+- Produces: opaque immutable `CompiledCasePlan` owning final `FieldSchema`, `ArenaLayout`, structured/IBM `CommunicationPlan`, boundary/EB/operator/solver/service plans, bound `FrozenExecutionGraph`, and exact resource contracts. `ProductCompiler::compile` is the only production seal API and runs exactly once per compiled case instance.
 
 ```cpp
-struct ProductPlanBundle {
-  FieldSchema fields;
-  ArenaLayout arena;
-  CommunicationPlan communication;
-  FrozenExecutionGraph graph;
-  PlanFingerprint fingerprint;
+class CompiledCasePlan {
+ public:
+  CompiledCasePlan(CompiledCasePlan&&) noexcept;
+  ~CompiledCasePlan();
+  PlanFingerprint fingerprint() const noexcept;
+  PlanSummary summary() const noexcept;
+ private:
+  struct Impl;
+  std::unique_ptr<const Impl> impl_;
+  friend class ProductCompiler;
 };
-Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
+class ProductCompiler {
+ public:
+  Status compile(const ValidatedModel&, CompiledCasePlan&) noexcept;
+};
 ```
 
 - [ ] **Step 1: Write incomplete-registration REDs.**
 
-  Omit one field, ghost requirement, cache dependency, operator coefficient, solver workspace, service snapshot, or collective point at a time. Require `freeze_product` to reject before allocation. Attempt post-freeze registration and require immutable rejection.
+  Omit one field, structured ghost/IBM donor requirement, cache dependency, operator coefficient, exact/coarse numeric capacity, preconditioner/workspace capacity, service snapshot, or collective epoch at a time. Require logical analysis to reject before allocation. Attempt post-seal registration or external plan mutation and require immutable rejection.
 
 - [ ] **Step 2: Write the exact freeze-order test.**
 
   Instrument and require this order:
 
   ```text
-  complete capability registration -> FieldSchema -> ArenaLayout
-  -> Boundary/EB plans -> Symbolic/Numeric/Hierarchy/Workspace plans
-  -> merged CommunicationPlan -> FrozenExecutionGraph -> resource seal
+  ValidatedModel -> geometry/STL/classification/decomposition
+  -> complete capability and service registration -> canonical logical IR
+  -> graph/resource analysis (liveness, ghost/donor overlap, collective budget,
+     workspace and snapshot capacity)
+  -> FieldSchema/ArenaLayout -> allocate and NUMA first-touch
+  -> Boundary/EB/Symbolic/Coarsening plans
+  -> empty ExactNumeric/PreconditionerSetup/Workspace capacities
+  -> merged structured halo/IBM donor metadata, buffers and requests
+  -> bind field/operator/halo/service/graph views -> validate -> seal
   ```
 
-  Assert every stage and field is registered before the first freeze event and every bundle fingerprint is identical at 1/2/4 ranks.
+  Assert geometry/decomposition precede production sizing, every stage/field/service is registered before logical analysis, binding never changes analyzed capacity, and every bundle fingerprint is identical at 1/2/4 ranks. Numeric/preconditioner storage is allocated but uncertified until driver initialization fills initial fields and numeric BC/operator coefficients.
 
 - [ ] **Step 3: Implement merged production plans.**
 
-  Gather all field/stage specs, compute maximum ghost width/payload/workspace, freeze schema and arena, bind every view, instantiate static EB/boundary/linear plans, reserve peer buffers/requests, compile the complete stage graph, and seal counters. No later task may add a product field or hot stage without reopening Task 18 and invalidating downstream evidence.
+  Implement the exact analyze/allocate/instantiate/bind pipeline above. Service plans declare immutable committed-snapshot schemas and maximum staging capacity here; Task 19 may implement formats/adapters but may not add a product field, hot stage, snapshot capacity or collective. Initialization fills current exact fine/coarse coefficients, runs required preconditioner setup, then publishes numeric certificates before the first attempt. No later task may add a product field or hot stage without reopening Task 18 and invalidating downstream evidence.
 
 - [ ] **Step 4: Prove hot-resource contracts.**
 
-  Execute a synthetic complete step 100 times. Require zero heap events, stable field/workspace/buffer/request addresses, exact two correctors, one final-flux writer, no geometry query, no strings, message/byte counts within seal, and only policy-authorized numeric refill/hierarchy rebuild counts.
+  Execute a synthetic complete step 100 times. Require zero heap events, stable field/workspace/buffer/request addresses, exact two correctors, one current-attempt final-flux writer, no geometry query, no strings, structured/IBM message/byte and collective counts within seal, current exact/coarse numeric data, and only policy-authorized preconditioner setups. A never-filled numeric state, late capacity request or alias/coverage-incomplete assembly epoch must reject.
 
 - [ ] **Step 5: Verify tests-off isolation and commit.**
 
@@ -1142,7 +1293,7 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 ### Task 19: Implement Product Driver, Minimal Restart, and Runtime Output
 
 **Files:**
-- Create: `versions/v0.4/include/hundun/v04_io.hpp`
+- Modify: `versions/v0.4/include/hundun/v04_io.hpp`
 - Create: `versions/v0.4/include/hundun/v04_app.hpp`
 - Create: `versions/v0.4/src/app_driver.cpp`
 - Modify: `versions/v0.4/src/app_main.cpp`
@@ -1160,7 +1311,7 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 - Modify: `versions/v0.4/tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: immutable `ProductPlanBundle`, `AttemptTransaction`, committed snapshots only.
+- Consumes: immutable `CompiledCasePlan`, presealed service plans/staging capacities, `AttemptTransaction`, committed snapshots only.
 - Produces: `hundun validate`, `hundun run`, `hundun init-case`, `RestartWriter/Reader`, VTI/VTR+Visit output, screen/monitor/evidence records.
 
 - [ ] **Step 1: Write driver/CLI REDs.**
@@ -1173,15 +1324,15 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 
 - [ ] **Step 3: Write overwrite/rank-change REDs.**
 
-  With default `keep_last=1`, write pending, fsync/close, validate, atomically switch `current`, then delete the previous generation. Inject failure at every boundary and ensure at least one valid current restart remains. Restart 1->2, 2->4, and 4->1 ranks; first resumed step must use BE and subsequent steps variable BDF2.
+  With default `keep_last=1`, create a pending generation, write and close all rank data/header, `fsync` files and generation directories, collectively validate, atomically rename/switch `current`, `fsync` the parent directory, then delete the previous generation and `fsync` the parent again. Inject failure at every boundary and ensure at least one valid current restart remains. Rank 0 reads/broadcasts canonical metadata before state allocation/publication. Restart 1->2, 2->4, and 4->1 ranks; first resumed step must use BE and subsequent steps variable BDF2.
 
 - [ ] **Step 4: Implement committed-snapshot services.**
 
-  Services receive immutable field views plus accepted revisions only. The driver executes the frozen graph, performs collective attempt finish, and only then schedules Restart/Visit/screen/monitor. VTI handles uniform grids; VTR handles stretched grids; `.visit` indexes rank/time files without full-domain gather.
+  Services receive immutable field views plus accepted revisions only. The driver executes the frozen graph, performs collective attempt finish, and only then schedules Restart/Visit/screen/monitor through the presealed service plan. Synchronous output must complete before its accepted layer becomes writable again; asynchronous output is deferred. VTI handles uniform grids; VTR handles stretched grids; `.visit` indexes rank/time files without full-domain gather.
 
 - [ ] **Step 5: Implement structured evidence and tests-off equality.**
 
-  Record stage wall time, init, hot step, RSS, halo messages/bytes, iterations, refills/rebuilds, allocation count, compiler/build/case/STL/binary fingerprints. Run the same minimal case with tests-on/off products and require numerically identical committed outputs while oracle symbols remain absent tests-off.
+  Record min/mean/max-rank stage wall time without timer barriers, init, launcher/max-rank hot step, max-rank and node RSS, structured/IBM messages/bytes, blocking/nonblocking collectives and reduction time, iterations, exact/coarse refills, preconditioner setups/reuse, allocation count, compiler/build/case/STL/binary/CPU-plan fingerprints. Mark startup, retry and Restart BE recovery steps so they cannot enter long statistics. Run the same minimal case with tests-on/off products and require numerically identical committed outputs while oracle symbols remain absent tests-off.
 
 - [ ] **Step 6: Verify and commit.**
 
@@ -1206,25 +1357,55 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 - Consumes: complete tests-off/on product, all focused selectors, benchmark and literature identities.
 - Produces: immutable gate state `focused -> full2 -> frozen -> full20 -> literature -> final`, candidate manifest validator, pre-registered experimental metrics/tolerances, and exact evidence receipts.
 
-- [ ] **Step 1: Write gate-order mutation REDs.**
+- [x] **Step 1: Write gate-order mutation REDs.**
 
   Attempt to register `full2`, `frozen`, `full20`, or `literature` without the preceding accepted receipt; attempt to change source/case/STL/build after freeze; attempt to overwrite an evidence path. Require `REJECT` and unchanged ledger.
 
-- [ ] **Step 2: Define the focused manifest.**
+- [x] **Step 2: Define the focused manifest.**
 
-  Include EOS/`drho_dp`, enthalpy terms, closed mass, schemes, two-corrector authority/mutations, checkerboard/temporal order, IBM quadratic/order, force oracle/all mutations, positive-normal donor, WALE/Vreman, Restart/rollback/rank-change, public headers, 1/2/4 MPI, ASan, and UBSan. Do not include a small-grid performance test.
+  Include coupled thermophysical predictor/EOS/full-BDF pressure storage/`drho_dp`, terminal EOS/continuity/closed-mass/gauge gates, enthalpy terms, schemes, two-corrector authority/mutations, checkerboard/temporal order, assembly-epoch coverage/alias mutations, structured halo plus remote IBM donor exchange, exact/coarse numeric refresh and setup reuse, IBM quadratic/order, force oracle/all mutations, positive-normal donor, WALE/Vreman, Restart/rollback/rank-change, public headers, 1/2/4 MPI, ASan, and UBSan. Do not include a small-grid performance test.
 
-- [ ] **Step 3: Freeze literature data before simulations.**
+- [x] **Step 3: Freeze available literature data and fail-close missing authorities before the literature simulation.**
 
-  Encode Parnaudeau/Norberg citation/DOI, definitions, units, experimental values/uncertainties, and digitized mean/fluctuation profiles at `x/D=1.06,1.54,2.02`. Store source page/figure/table and extraction uncertainty per datum. Encode Driver--Seegmiller/NASA geometry and reattachment/profile data for later Task 22. Hash the extraction script and source attachments; no threshold may depend on HUNDUN output.
+  Freeze the available direct authorities first: Parnaudeau's direct scalar
+  values, Norberg's direct bracketing Strouhal points and explicitly labelled
+  formula-derived values, and the Driver--Seegmiller/NASA geometry,
+  reattachment and original profile/wall datasets. Parnaudeau Figs. 11--15
+  publish curves at `x/D=1.06,1.54,2.02` but no numeric table or pointwise PIV
+  uncertainty; the paper says the arrays are available from the authors.
+  Therefore the receipt must remain `complete=false` until author arrays or a
+  controlled digitization with explicit extraction error is bound. The 2026
+  INRAE dataset DOI `10.57745/DHJXM6` is a primary supplementary dataset, but
+  may replace those curves only after its experiment, coordinate origin,
+  normalization and station mapping are reconciled. Missing direct total-drag
+  and finite-span lift-RMS authority is treated the same way. Never infer an
+  experimental uncertainty from the paper's LES sampling estimate, use a
+  secondary CFD table as authority, or inspect HUNDUN output while selecting
+  values/tolerances. This incomplete authority does not block focused/full2 or
+  full20 performance work, but it fail-closes Task 21 Step 6 and the
+  `literature` gate.
 
-- [ ] **Step 4: Define exact candidate identity.**
+- [x] **Step 4: Define exact candidate identity.**
 
-  Manifest fields: HEAD/tree, compiler, flags, tests-on/off hashes, case/`.d`/STL hashes, MPI version, rank/process grid, CPU/NUMA/affinity, environment allowlist, command, start/end timestamps, exit, stdout/stderr and evidence SHA-256. Include process inventory before/after without terminating unrelated processes.
+  Manifest fields: HEAD/tree, compiler/linker and flags, tests-on/off hashes, case/`.d`/STL hashes, `CompiledCasePlan`/`CpuExecutionPlan`/optional tune fingerprints, MPI version and provided thread level, rank/process grid, CPU/NUMA/affinity, SMT/frequency governor/turbo when readable, environment allowlist, command, output/checkpoint state, start/end timestamps, exit, stdout/stderr and evidence SHA-256. Include process inventory before/after without terminating unrelated processes.
 
-- [ ] **Step 5: Define performance statistics.**
+- [x] **Step 5: Define performance statistics.**
 
-  Full-grid 2-step is directional only. Formal full20 requires at least five alternating HUNDUN/COAST pairs on frozen resources. Compare hot-step median and report P90, init, RSS, communication, iterations/refills/rebuilds. Release predicate is `HUNDUN median <= COAST median`; `<=1.10x` records `NEAR`, never `ACCEPT`.
+  Full-grid 2-step is directional/resource validation only and cannot establish
+  a hot median. The frozen v1 policy uses steps 1--5 as full20 warmup, steps
+  6--20 as the measured maximum-rank hot region, five alternating pairs
+  starting `HC`, and at most nine pairs if the pre-registered interval is
+  inconclusive. Full2 uses a directional ratio ceiling of 1.25 solely as an
+  early regression screen. Both products must expose the same maximum-rank
+  step boundary; a COAST rank-0-only timer or an old constant-density result is
+  not admissible. Freeze equal local-absolute-pressure/EOS physics, BCs, dt,
+  turbulence/wall treatment and true-residual/scientific work in an equivalence
+  receipt, with Restart/Visit and serialized screen output disabled. Compute
+  each pair's `HUNDUN_hot/COAST_hot`, median paired ratio, both P90 step times
+  and deterministic bootstrap 95% interval. Also report init, max-rank/node
+  RSS, communication, reductions, iterations, numeric refills, setup reuse and
+  rejected attempts. Release requires the interval upper bound `<=1.0`;
+  median `<=1.10` with a larger upper bound records `NEAR`, never `ACCEPT`.
 
 - [ ] **Step 6: Verify tooling without launching cases and commit.**
 
@@ -1252,19 +1433,24 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 
 - [ ] **Step 3: Run paired full-grid two-step.**
 
-  Use `coast_pairing_short`: `20D x 20D x piD`, cylinder at `x=5D`, `480x480x48`, 64 ranks, frozen process grid/affinity, `Re_D=3900`, `dt U/D=0.006`, and nonperiodic slip/symmetry transverse/span boundaries that both products can represent. Run HUNDUN and COAST with equivalent short-test physics and record init, both steps, RSS, communication, and iterations. This is a performance-direction screen, not a final hot-step conclusion.
+  Use `coast_pairing_short`: `20D x 20D x piD`, cylinder at `x=5D`, `480x480x48`, 64 ranks, frozen process grid/affinity, `Re_D=3900`, `dt U/D=0.006`, and nonperiodic slip/symmetry transverse/span boundaries that both products can represent. Freeze an equivalence receipt for physics, turbulence/wall treatment, BCs, initialization, dt, linear true-residual/scientific tolerances and output state. Run HUNDUN and COAST and record init, both max-rank/launcher steps, max-rank/node RSS, point-to-point/collective communication, iterations and refill/setup counters. This is a performance-direction and resource-contract screen, not a hot median or release conclusion.
 
 - [ ] **Step 4: Freeze or return to the owning task.**
 
-  Freeze only if focused correctness accepts, no NaN/deadlock/unhandled failure exists, full2 resource counters match contracts, and the measured direction makes `median <= COAST` credible. Record the exact immutable candidate. Any code/config/build change restarts at Step 1.
+  Freeze only if focused correctness accepts, no NaN/deadlock/unhandled failure exists, full2 resource/collective counters match contracts, both products met the frozen residual/scientific work criteria, and the pre-registered full2 directional rule finds no obvious regression. Do not call two steps a median. Record the exact immutable candidate. Any code/config/build change restarts at Step 1.
 
 - [ ] **Step 5: Run at least five alternating full-grid 20-step pairs.**
 
-  Alternate launch order to reduce drift. Use identical resources, measure post-startup hot steps, and compute median/P90 with the frozen tool. Require HUNDUN median no higher than COAST, no scientific-threshold relaxation, stable continuity/conservation, and no systematic iteration/refill/rebuild regression outside the pre-registered contract.
+  Alternate launch order to reduce drift. Use identical resources and the frozen warmup/measured indices, take external maximum-rank/launcher timing, and compute paired ratios/P90/uncertainty with the frozen tool. Require the accepted paired metric no higher than `1.0`, no scientific/true-residual relaxation, stable terminal EOS/continuity/mass/gauge and energy/species conservation, and no systematic iteration/refill/setup/collective regression outside the pre-registered contract.
 
 - [ ] **Step 6: Run HUNDUN-only literature statistics.**
 
-  Use `literature_statistics`: Parnaudeau `20D x 20D x piD`, cylinder at `x=5D`, transverse/spanwise periodic boundaries, `480x480x48`, `dt U/D=0.006`, `Re_D=3900`, WALE. Develop at least `150D/U`; then collect approximately `2020D/U` (about 420 shedding periods) only from the frozen candidate. Compare `St`, `Lr/D`, `Cd_mean`, `Cl_rms`, centerline mean velocity, and mean/fluctuation profiles at the three registered x stations against pre-frozen experiment data and uncertainty rules.
+  Use `literature_statistics`: Parnaudeau `20D x 20D x piD`, cylinder at `x=5D`, transverse/spanwise periodic boundaries, `480x480x48`, `dt U/D=0.006`, `Re_D=3900`, WALE. Develop at least `150D/U`; then collect approximately `2020D/U` (about 420 shedding periods) only from the frozen candidate. Exclude and record startup/retry/Restart BE recovery steps from statistical accumulators. Compare `St`, `Lr/D`, `Cd_mean`, `Cl_rms`, centerline mean velocity, and mean/fluctuation profiles at the three registered x stations against pre-frozen experiment data and uncertainty rules.
+
+  Before launch, require
+  `v04_literature_extract.py receipt-validate --require-complete`; a partial
+  scalar receipt is an explicit stop, not permission to drop unavailable
+  observables or relax the accuracy gate.
 
 - [ ] **Step 7: Audit provenance and publish one decision.**
 
@@ -1326,14 +1512,14 @@ Status freeze_product(const ValidatedModel&, ProductPlanBundle&) noexcept;
 10 + 15 + 16 + 17 -> 18 -> 19 -> 20 -> 21 -> 22
 ```
 
-Tasks inside braces may run concurrently only when workers own disjoint files and agree on the Stable Public Types. The following edges are hard serial dependencies: version isolation before product code; storage/mesh before actual halo compile; boundary/scheme before operators; linear lifecycle before MG; MG before PISO; final-state PISO plus static IBM plus shared gradient/`mu_eff` before force; all physics stages before the single production freeze; and `18 -> 19 -> 20 -> 21 -> 22`.
+Tasks inside braces may run concurrently only when workers own disjoint files and agree on the Stable Public Types. The following edges are hard serial dependencies: version isolation before product code; real geometry/decomposition before production arena sizing; storage/mesh before actual halo compile; boundary/scheme before operators; linear lifecycle before MG; MG before PISO; final-state PISO plus static IBM plus shared gradient/`mu_eff` before force; all physics and service-capacity registrations before each compiled case's single seal; and `18 -> 19 -> 20 -> 21 -> 22`.
 
 ## Plan Self-Review Checklist
 
-- **Spec coverage:** Tasks 1--3 cover references, version isolation, flat source/input, and registration. Tasks 4--10 cover SoA arenas, transactions, Cartesian/STL, CPU/halo, BC/NSCBC/time, EOS/transport/contributions, conservative kernels, and graph compilation. Tasks 11--17 cover the four linear layers, Native MG/HYPRE, true IBM second-order evidence, unified enthalpy/species equations, exactly two PISO correctors, WALE/Vreman wall functions, and final-state force authority. Tasks 18--20 cover the once-only production freeze, minimal Restart/I/O, tests-off isolation, literature data, and ordered evidence. Tasks 21--22 implement only the approved cylinder and backward-step validation scope.
+- **Spec coverage:** Tasks 1--3 cover references, version isolation, flat source/input, and registration. Tasks 4--10 cover SoA arenas, transactions, Cartesian/STL, CPU/halo, BC/NSCBC/time, EOS/transport/contributions, conservative kernels, and logical graph/resource analysis. Tasks 11--17 cover the four linear resource families, Native MG/HYPRE, true IBM second-order evidence and compact donor exchange, unified thermophysical predictor/equations, exactly two PISO correctors, separated subgrid/wall plans, and final-state force authority. Tasks 18--20 cover per-case analyze/allocate/bind/seal, presealed Restart/I/O services, tests-off isolation, literature data, and ordered evidence. Tasks 21--22 implement only the approved cylinder and backward-step validation scope.
 - **Scope exclusions:** No constant-density fast path, SIMPLE/PIMPLE, body-fitted/AMR, reactions, additional turbulence model, moving EB, product GPU, source-tree cases/examples, small-grid performance gate, or pre-freeze long statistics appears as an implementation deliverable.
-- **Type consistency:** `Status`, `FieldId`, `StageId`, `RevisionToken`, `PlanFingerprint`, `FieldRegistry`, `FieldSchema`, `FieldView`, `CartesianGeometryPlan`, `MeshPatch`, `HaloEngine`, `BoundaryPlan`, `ThermodynamicsPlan`, `FaceFluxView`, the four linear layers, `EBTopology`, `AttemptTransaction`, `PisoPlan`, `ProductPlanBundle`, and committed snapshots are defined before consumption and retain one spelling.
-- **Lifecycle consistency:** Task 3 tests freeze mechanics but cannot freeze production. Task 6 reserves engine resources but Task 18 compiles the complete merged communication plan. Task 10 tests graph compilation but Task 18 performs the only production freeze. `rAU/rAtU/HbyA/phiHbyA` have distinct dependencies. Corrector 2 is the sole final `U/face_flux` publisher.
+- **Type consistency:** `Status`, `FieldId`, `StageId`, `RevisionToken`, `PlanFingerprint`, `FieldRegistry`, `FieldSchema`, `FieldView`, `CartesianGeometryPlan`, `MeshPatch`, `HaloEngine`, `RemoteDonorExchangePlan`, `BoundaryPlan`, `ThermodynamicsPlan`, `ThermophysicalPredictorPlan`, `FaceFluxView`, `GraphResourceAnalysis`, the four linear resource families, `AssemblyEpoch`, `EBTopology`, `AttemptTransaction`, opaque `PisoPlan`, `PressureVelocityCoupler`, `ProductCompiler`, `CompiledCasePlan`, and committed snapshots are defined before consumption and retain one spelling.
+- **Lifecycle consistency:** Task 3 tests freeze mechanics but cannot seal production. Task 6 proves structured transport while Task 13 registers compact IBM donors and Task 18 compiles the complete merged communication plan. Task 10 analyzes logical resources; Task 18 allocates, binds and performs one seal per compiled case. Every coefficient revision refreshes exact/coarse numeric data; thresholds govern only setup reuse. `rAU/optional-rAtU/HbyA/pressure-face-coefficient/phiHbyA` have distinct dependencies. Corrector 2 is the sole current-attempt final `U/face_flux` publisher.
 - **Validation consistency:** COAST is used only for nonperiodic full-grid short performance. Periodic Parnaudeau long statistics are HUNDUN-only and compare directly to pre-frozen experiments. `24^3` is absent as a performance gate. Backward step follows Re3900 and cannot introduce case-specific source.
 - **Placeholder scan:** Before committing this plan, run the command below and treat any match as a plan defect:
 

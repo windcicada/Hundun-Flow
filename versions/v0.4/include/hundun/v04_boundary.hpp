@@ -16,6 +16,9 @@
 
 namespace hundun::v04 {
 
+class ThermodynamicsPlan;
+class TransportPlan;
+
 enum class BoundaryStage : std::uint8_t {
   thermo,
   momentum,
@@ -256,6 +259,9 @@ class BoundaryPlan {
     return required_ghost_width_;
   }
   RevisionToken revision() const noexcept { return revision_; }
+  PlanFingerprint geometry_fingerprint() const noexcept {
+    return geometry_fingerprint_;
+  }
   PlanFingerprint semantic_fingerprint() const noexcept {
     return semantic_fingerprint_;
   }
@@ -318,6 +324,7 @@ class BoundaryPlan {
   std::size_t resolved_normal_gradient_count_{};
   std::uint8_t required_ghost_width_{};
   RevisionToken revision_{};
+  PlanFingerprint geometry_fingerprint_{};
   PlanFingerprint semantic_fingerprint_{};
   PlanFingerprint local_layout_fingerprint_{};
 };
@@ -331,6 +338,210 @@ struct BoundaryResolvedValues {
 Status apply_boundary_ghosts(BoundaryStage stage, const BoundaryPlan& plan,
                              Span<FieldView> fields,
                              BoundaryResolvedValues values) noexcept;
+
+// Close the homogeneous variation of one compiled scalar boundary relation.
+// `source_stage` and `source_field` select the immutable relation authority in
+// `plan`.  The mutable variation may be a different, independently registered
+// scalar workspace (for example delta-T using the enthalpy boundary
+// relation).  Dirichlet and convective relations write
+// -variation(interior), while zero- and normal-gradient relations write
+// +variation(interior).  Periodic and non-owned decomposition faces remain
+// halo-owned and are never written.
+//
+// `reach` is explicit because coupled operators can require different halo
+// depths for variations of h and T.  The operation performs a complete
+// authority/view/finite-value preflight before its first write.
+Status apply_homogeneous_scalar_boundary_ghosts(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, FieldView variation,
+    std::uint8_t reach) noexcept;
+
+Status apply_physical_zero_gradient(const BoundaryPlan& plan,
+                                    Span<FieldView> fields) noexcept;
+
+// Evidence that the physical p/h/Y ghost values consumed by the
+// thermophysical face closure belong to one completed boundary/halo state.
+// Field authorities are ordered [pressure, enthalpy, independent species...].
+struct BoundaryGhostFieldAuthority {
+  FieldId field{};
+  RevisionToken revision{};
+  StorageIdentity storage{};
+  RevisionDomainIdentity revision_domain{};
+  // Exact view identity was appended in v0.4.  Keep the original four-field
+  // aggregate prefix above source compatible for legacy producers.
+  const double* base{};
+  std::size_t replica{};
+};
+
+inline BoundaryGhostFieldAuthority make_boundary_ghost_field_authority(
+    ConstFieldView view) noexcept {
+  return {view.field, view.revision, view.storage_identity,
+          view.revision_domain, view.base, view.replica};
+}
+
+struct BoundaryThermophysicalGhostAuthority {
+  std::uintptr_t producer{};
+  RevisionToken boundary{};
+  PlanFingerprint boundary_layout{};
+  Int3 interior{};
+  Int3 ghosts{};
+  std::uint8_t reach{};
+  Span<const BoundaryGhostFieldAuthority> fields{};
+
+  bool valid() const noexcept {
+    return producer != 0U && boundary != 0U && boundary_layout != 0U &&
+           interior.x > 0 && interior.y > 0 && interior.z > 0 && ghosts.x > 0 &&
+           ghosts.y > 0 && ghosts.z > 0 && reach != 0U &&
+           fields.data != nullptr && fields.size >= 2U;
+  }
+};
+
+struct BoundaryThermophysicalGhostInput {
+  double pressure_reference{};
+  ConstFieldView pressure_perturbation{};
+  ConstFieldView enthalpy{};
+  Span<const ConstFieldView> independent_species{};
+  BoundaryThermophysicalGhostAuthority authority{};
+};
+
+struct BoundaryThermophysicalGhostOutput {
+  FieldView density{};
+  FieldView temperature{};
+  FieldView heat_capacity_cp{};
+  FieldView density_pressure_derivative{};
+  FieldView density_enthalpy_derivative{};
+  FieldView molecular_viscosity{};
+  FieldView thermal_conductivity{};
+  FieldView conductivity_over_cp{};
+};
+
+enum class BoundaryThermophysicalGhostPhase : std::uint8_t {
+  invalid,
+  corrector_one,
+  corrector_two,
+  terminal,
+};
+
+// Identity of the same target time layer at which physical p/h/Y ghosts were
+// closed into rho/T/material ghosts.  The pressure-reference token may be
+// rank local; the certificate keeps it out of its collective target.  The
+// numeric boundary token names the BoundaryPlan revision passed to close().
+struct BoundaryThermophysicalGhostContext {
+  RevisionToken target_time{};
+  PlanFingerprint geometry{};
+  RevisionToken pressure_reference{};
+  RevisionToken numeric_boundary{};
+  BoundaryThermophysicalGhostPhase phase{
+      BoundaryThermophysicalGhostPhase::invalid};
+
+  bool valid() const noexcept {
+    return target_time != 0U && geometry != 0U && pressure_reference != 0U &&
+           numeric_boundary != 0U &&
+           phase != BoundaryThermophysicalGhostPhase::invalid;
+  }
+};
+
+// Call-local views used to revalidate an issued certificate immediately
+// before a consumer reads a physical density ghost.  This binding may contain
+// spans; the persistent certificate below deliberately does not.
+struct BoundaryThermophysicalGhostBinding {
+  double pressure_reference{};
+  ConstFieldView pressure_perturbation{};
+  ConstFieldView enthalpy{};
+  Span<const ConstFieldView> independent_species{};
+  ConstFieldView density{};
+};
+
+class BoundaryThermophysicalGhostCertificate {
+ public:
+  bool valid() const noexcept;
+  bool matches(const BoundaryPlan& boundary,
+               BoundaryThermophysicalGhostContext context,
+               const BoundaryThermophysicalGhostBinding& binding) const
+      noexcept;
+
+  PlanFingerprint collective_semantics() const noexcept {
+    return collective_semantics_;
+  }
+  PlanFingerprint collective_lineage() const noexcept {
+    return collective_lineage_;
+  }
+  RevisionToken collective_target() const noexcept {
+    return collective_target_;
+  }
+  PlanFingerprint rank_local_lineage() const noexcept {
+    return rank_local_lineage_;
+  }
+  PlanFingerprint rank_local_binding() const noexcept {
+    return rank_local_binding_;
+  }
+  PlanFingerprint thermodynamics() const noexcept { return thermodynamics_; }
+  PlanFingerprint transport() const noexcept { return transport_; }
+  RevisionToken target_time() const noexcept { return target_time_; }
+  PlanFingerprint geometry() const noexcept { return geometry_; }
+  RevisionToken pressure_reference() const noexcept {
+    return pressure_reference_;
+  }
+  RevisionToken numeric_boundary() const noexcept {
+    return numeric_boundary_;
+  }
+  BoundaryThermophysicalGhostPhase phase() const noexcept { return phase_; }
+
+ private:
+  friend class BoundaryThermophysicalFaceClosure;
+
+  PlanFingerprint collective_semantics_{};
+  PlanFingerprint collective_lineage_{};
+  RevisionToken collective_target_{};
+  PlanFingerprint rank_local_lineage_{};
+  PlanFingerprint rank_local_binding_{};
+  PlanFingerprint consumer_binding_{};
+  PlanFingerprint boundary_semantic_{};
+  PlanFingerprint boundary_layout_{};
+  PlanFingerprint thermodynamics_{};
+  PlanFingerprint transport_{};
+  RevisionToken boundary_revision_{};
+  RevisionToken target_time_{};
+  PlanFingerprint geometry_{};
+  RevisionToken pressure_reference_{};
+  RevisionToken numeric_boundary_{};
+  std::uint64_t pressure_reference_bits_{};
+  std::uint64_t primitive_digest_{};
+  std::uint64_t density_digest_{};
+  BoundaryThermophysicalGhostPhase phase_{
+      BoundaryThermophysicalGhostPhase::invalid};
+};
+
+struct BoundaryThermophysicalGhostUse {
+  BoundaryThermophysicalGhostCertificate certificate{};
+  BoundaryThermophysicalGhostBinding binding{};
+};
+
+// Rebuilds EOS and molecular-transport quantities only in locally owned,
+// nonperiodic physical ghost cells. The hot call is allocation-free and
+// atomic: invalid authority, shape, aliasing, or any nonphysical p/h/Y state
+// leaves every output unchanged.
+class BoundaryThermophysicalFaceClosure {
+ public:
+  // Compatibility entry point for the original four-field authority.  It
+  // performs the same numeric closure but deliberately publishes no reusable
+  // physical-ghost certificate.
+  static Status close(const BoundaryPlan& boundary,
+                      const ThermodynamicsPlan& thermodynamics,
+                      const TransportPlan& transport,
+                      const BoundaryThermophysicalGhostInput& input,
+                      const BoundaryThermophysicalGhostOutput& output)
+      noexcept;
+
+  static Status close(const BoundaryPlan& boundary,
+                      const ThermodynamicsPlan& thermodynamics,
+                      const TransportPlan& transport,
+                      const BoundaryThermophysicalGhostInput& input,
+                      const BoundaryThermophysicalGhostOutput& output,
+                      BoundaryThermophysicalGhostContext context,
+                      BoundaryThermophysicalGhostCertificate& certificate)
+      noexcept;
+};
 
 enum class TimeLimit : std::uint8_t {
   fixed,
@@ -374,6 +585,41 @@ struct StepTime {
   std::uint64_t generation{};
 };
 
+class TimeControllerState;
+
+enum class TimeFinishDecision : std::uint8_t { accept, retry, fatal };
+
+// A default-constructed value is deliberately invalid.  Only
+// TimeControllerState::prepare_finish can populate a consumable certificate;
+// it is bound to one controller object and one exact active proposal.
+class PreparedTimeFinish {
+ public:
+  PreparedTimeFinish() noexcept = default;
+  PreparedTimeFinish(const PreparedTimeFinish&) = delete;
+  PreparedTimeFinish& operator=(const PreparedTimeFinish&) = delete;
+  PreparedTimeFinish(PreparedTimeFinish&&) = delete;
+  PreparedTimeFinish& operator=(PreparedTimeFinish&&) = delete;
+
+  bool valid() const noexcept { return valid_ && !consumed_; }
+  TimeFinishDecision decision() const noexcept { return decision_; }
+  const StepTime& candidate() const noexcept { return candidate_; }
+  Status outcome() const noexcept { return outcome_; }
+  int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
+
+ private:
+  friend class TimeControllerState;
+  TimeControllerState* owner_{};
+  std::array<std::uint64_t, 29U> identity_{};
+  StepTime proposal_{};
+  StepTime candidate_{};
+  Status outcome_{StatusCode::invalid_plan, 0U};
+  int lowest_failing_rank_{-1};
+  TimeFinishDecision decision_{TimeFinishDecision::fatal};
+  bool commit_ready_{};
+  bool valid_{};
+  bool consumed_{};
+};
+
 class TimeSchemePlan {
  public:
   static Status compile(const TimeControlSpec& spec,
@@ -401,6 +647,16 @@ class TimeControllerState {
                         TimeControllerState& out) noexcept;
   Status propose(MPI_Comm communicator, LocalTimeLimits limits,
                  StepTime& out) noexcept;
+  Status prepare_finish(MPI_Comm communicator, const StepTime& step,
+                        Status local_outcome,
+                        PreparedTimeFinish& out) noexcept;
+  void commit_accept(PreparedTimeFinish& prepared) noexcept;
+  void commit_retry(PreparedTimeFinish& prepared, StepTime& next) noexcept;
+  // Consume a fatal decision only after the caller has rolled back its
+  // attempt-local state. A valid commit leaves accepted-time history
+  // untouched, retires the failed proposal, and arms one fresh BE recovery
+  // proposal. Stale, foreign, and already-consumed certificates are no-ops.
+  void commit_fatal(PreparedTimeFinish& prepared) noexcept;
   Status finish(MPI_Comm communicator, const StepTime& step,
                 Status local_outcome, StepTime& next) noexcept;
 
@@ -415,6 +671,9 @@ class TimeControllerState {
   Status coefficients(double dt, bool force_backward_euler,
                       BdfCoefficients& out) const noexcept;
   bool matches_active(const StepTime& step) const noexcept;
+  std::array<std::uint64_t, 29U> finish_identity(
+      const StepTime& step) const noexcept;
+  bool matches_prepared(const PreparedTimeFinish& prepared) const noexcept;
 
   TimeSchemePlan plan_{};
   StepTime active_step_{};

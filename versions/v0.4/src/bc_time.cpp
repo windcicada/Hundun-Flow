@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -99,12 +100,14 @@ Status collective_status(MPI_Comm communicator, Status local,
 
 Status collective_finish_decision(MPI_Comm communicator, Status local,
                                   std::uint32_t priority,
-                                  int& lowest) noexcept {
+                                  int& lowest,
+                                  std::uint32_t& selected_priority) noexcept {
   int rank = 0;
   int size = 0;
   if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
       MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
     lowest = -1;
+    selected_priority = std::numeric_limits<std::uint32_t>::max();
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   constexpr std::uint64_t kNoDecision =
@@ -118,16 +121,21 @@ Status collective_finish_decision(MPI_Comm communicator, Status local,
   if (MPI_Allreduce(&candidate, &selected, 1, MPI_UINT64_T, MPI_MIN,
                     communicator) != MPI_SUCCESS) {
     lowest = -1;
+    selected_priority = std::numeric_limits<std::uint32_t>::max();
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   if (selected == kNoDecision) {
     lowest = -1;
+    selected_priority = std::numeric_limits<std::uint32_t>::max();
     return {};
   }
+  selected_priority = static_cast<std::uint32_t>(selected >> 32U);
   const std::uint32_t selected_rank =
       static_cast<std::uint32_t>(selected & UINT64_C(0xffffffff));
-  if (selected_rank >= static_cast<std::uint32_t>(size)) {
+  if (selected_priority > 2U ||
+      selected_rank >= static_cast<std::uint32_t>(size)) {
     lowest = -1;
+    selected_priority = std::numeric_limits<std::uint32_t>::max();
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   const int source = static_cast<int>(selected_rank);
@@ -139,6 +147,7 @@ Status collective_finish_decision(MPI_Comm communicator, Status local,
   if (MPI_Bcast(wire, 2, MPI_UINT32_T, source, communicator) != MPI_SUCCESS ||
       wire[0] > static_cast<std::uint32_t>(StatusCode::io_failure)) {
     lowest = -1;
+    selected_priority = std::numeric_limits<std::uint32_t>::max();
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   lowest = source;
@@ -302,10 +311,14 @@ Status TimeControllerState::restart(const TimeSchemePlan& plan, double time,
                                     double last_accepted_dt,
                                     std::uint64_t accepted_step,
                                     TimeControllerState& out) noexcept {
+  const double first_candidate_time = time + last_accepted_dt;
   if (plan.fingerprint() == 0U || !std::isfinite(time) ||
       !finite_positive(last_accepted_dt) ||
       last_accepted_dt < plan.spec().minimum_dt ||
-      last_accepted_dt > plan.spec().maximum_dt) {
+      last_accepted_dt > plan.spec().maximum_dt ||
+      accepted_step == std::numeric_limits<std::uint64_t>::max() ||
+      !std::isfinite(first_candidate_time) ||
+      !(first_candidate_time > time)) {
     return {StatusCode::invalid_plan, kTimeInput};
   }
   TimeControllerState candidate;
@@ -518,52 +531,65 @@ bool TimeControllerState::matches_active(const StepTime& step) const noexcept {
          same_double(step.bdf.a2, active_step_.bdf.a2);
 }
 
-Status TimeControllerState::finish(MPI_Comm communicator,
-                                   const StepTime& step,
-                                   Status local_outcome,
-                                   StepTime& next) noexcept {
+std::array<std::uint64_t, 29U> TimeControllerState::finish_identity(
+    const StepTime& step) const noexcept {
+  return {plan_.fingerprint(),
+          double_bits(time_),
+          double_bits(last_accepted_dt_),
+          accepted_step_,
+          next_generation_,
+          static_cast<std::uint64_t>(retry_count_),
+          static_cast<std::uint64_t>(next_origin_),
+          static_cast<std::uint64_t>(force_backward_euler_),
+          static_cast<std::uint64_t>(active_),
+          double_bits(active_step_.time),
+          double_bits(active_step_.dt),
+          active_step_.accepted_step,
+          static_cast<std::uint64_t>(active_step_.attempt),
+          static_cast<std::uint64_t>(active_step_.origin),
+          double_bits(active_step_.bdf.a0),
+          double_bits(active_step_.bdf.a1),
+          double_bits(active_step_.bdf.a2),
+          static_cast<std::uint64_t>(active_step_.bdf.order),
+          active_step_.generation,
+          double_bits(step.time),
+          double_bits(step.dt),
+          step.accepted_step,
+          static_cast<std::uint64_t>(step.attempt),
+          static_cast<std::uint64_t>(step.origin),
+          double_bits(step.bdf.a0),
+          double_bits(step.bdf.a1),
+          double_bits(step.bdf.a2),
+          static_cast<std::uint64_t>(step.bdf.order),
+          step.generation};
+}
+
+bool TimeControllerState::matches_prepared(
+    const PreparedTimeFinish& prepared) const noexcept {
+  return prepared.valid() && prepared.commit_ready_ &&
+         prepared.owner_ == this &&
+         prepared.identity_ == finish_identity(prepared.proposal_) &&
+         matches_active(prepared.proposal_);
+}
+
+Status TimeControllerState::prepare_finish(
+    MPI_Comm communicator, const StepTime& step, Status local_outcome,
+    PreparedTimeFinish& out) noexcept {
+  assert(!out.valid());
+  if (out.valid()) {
+    return {StatusCode::invalid_plan, kTimeState};
+  }
   if (communicator == MPI_COMM_NULL) {
-    lowest_failing_rank_ = -1;
     return {StatusCode::invalid_plan, kTimeCollective};
   }
 
   // Finalization is one collective transaction.  Rank zero publishes the
   // accepted-state and proposal-ticket identity; every rank checks the exact
   // bits before an outcome is reduced or any local state is mutated.
-  const std::array<std::uint64_t, 29U> identity{
-      plan_.fingerprint(),
-      double_bits(time_),
-      double_bits(last_accepted_dt_),
-      accepted_step_,
-      next_generation_,
-      static_cast<std::uint64_t>(retry_count_),
-      static_cast<std::uint64_t>(next_origin_),
-      static_cast<std::uint64_t>(force_backward_euler_),
-      static_cast<std::uint64_t>(active_),
-      double_bits(active_step_.time),
-      double_bits(active_step_.dt),
-      active_step_.accepted_step,
-      static_cast<std::uint64_t>(active_step_.attempt),
-      static_cast<std::uint64_t>(active_step_.origin),
-      double_bits(active_step_.bdf.a0),
-      double_bits(active_step_.bdf.a1),
-      double_bits(active_step_.bdf.a2),
-      static_cast<std::uint64_t>(active_step_.bdf.order),
-      active_step_.generation,
-      double_bits(step.time),
-      double_bits(step.dt),
-      step.accepted_step,
-      static_cast<std::uint64_t>(step.attempt),
-      static_cast<std::uint64_t>(step.origin),
-      double_bits(step.bdf.a0),
-      double_bits(step.bdf.a1),
-      double_bits(step.bdf.a2),
-      static_cast<std::uint64_t>(step.bdf.order),
-      step.generation};
+  const std::array<std::uint64_t, 29U> identity = finish_identity(step);
   std::array<std::uint64_t, identity.size()> authority = identity;
   if (MPI_Bcast(authority.data(), static_cast<int>(authority.size()),
                 MPI_UINT64_T, 0, communicator) != MPI_SUCCESS) {
-    lowest_failing_rank_ = -1;
     return {StatusCode::mpi_failure, kTimeCollective};
   }
 
@@ -586,17 +612,17 @@ Status TimeControllerState::finish(MPI_Comm communicator,
           : (retryable ? 2U
                        : (local_outcome.code == StatusCode::ok ? 2U : 1U));
   int lowest = -1;
+  std::uint32_t selected_priority =
+      std::numeric_limits<std::uint32_t>::max();
   const Status decision = collective_finish_decision(
-      communicator, local, priority, lowest);
+      communicator, local, priority, lowest, selected_priority);
   if (decision.code == StatusCode::mpi_failure) {
-    lowest_failing_rank_ = -1;
     return decision;
   }
   const int outcome_rank = lowest;
 
   int rank = 0;
   if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS) {
-    lowest_failing_rank_ = -1;
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   const bool accept = outcome_rank < 0;
@@ -605,16 +631,20 @@ Status TimeControllerState::finish(MPI_Comm communicator,
   StepTime candidate;
   Status authority_status = decision;
   if (rank == 0 && accept) {
-    candidate = step;
-    candidate.time = time_ + step.dt;
-    candidate.accepted_step = accepted_step_ + 1U;
-    candidate.generation = next_generation_ + 1U;
     authority_status =
-        std::isfinite(candidate.time) &&
-                accepted_step_ != std::numeric_limits<std::uint64_t>::max() &&
+        accepted_step_ != std::numeric_limits<std::uint64_t>::max() &&
                 next_generation_ != std::numeric_limits<std::uint64_t>::max()
             ? Status{}
             : Status{StatusCode::invalid_plan, kTimeState};
+    if (authority_status) {
+      candidate = step;
+      candidate.time = time_ + step.dt;
+      candidate.accepted_step = accepted_step_ + 1U;
+      candidate.generation = next_generation_ + 1U;
+      if (!std::isfinite(candidate.time) || !(candidate.time > time_)) {
+        authority_status = {StatusCode::invalid_plan, kTimeState};
+      }
+    }
   } else if (rank == 0 && retry) {
     authority_status =
         retry_count_ < plan_.spec().maximum_retries &&
@@ -648,7 +678,6 @@ Status TimeControllerState::finish(MPI_Comm communicator,
   }
   if (MPI_Bcast(publication.data(), static_cast<int>(publication.size()),
                 MPI_UINT64_T, 0, communicator) != MPI_SUCCESS) {
-    lowest_failing_rank_ = -1;
     return {StatusCode::mpi_failure, kTimeCollective};
   }
   if (publication[0] > static_cast<std::uint64_t>(StatusCode::io_failure) ||
@@ -668,7 +697,7 @@ Status TimeControllerState::finish(MPI_Comm communicator,
   if (local && authority_status.code == StatusCode::ok &&
       publication[2] == 1U) {
     const bool valid_accept =
-        std::isfinite(candidate.time) &&
+        std::isfinite(candidate.time) && candidate.time > time_ &&
         same_double(candidate.dt, step.dt) &&
         candidate.accepted_step == accepted_step_ + 1U &&
         candidate.attempt == step.attempt && candidate.origin == step.origin &&
@@ -703,40 +732,154 @@ Status TimeControllerState::finish(MPI_Comm communicator,
   }
   Status publish_status = collective_status(communicator, local, lowest);
   if (!publish_status) {
-    lowest_failing_rank_ = authority_status.code == StatusCode::mpi_failure
-                               ? -1
-                           : authority_status.code != StatusCode::ok
-                               ? (outcome_rank >= 0 ? outcome_rank : 0)
-                               : lowest;
-    return publish_status;
+    if (publish_status.code == StatusCode::mpi_failure) {
+      return publish_status;
+    }
+    out.owner_ = this;
+    out.identity_ = identity;
+    out.proposal_ = step;
+    out.candidate_ = candidate;
+    out.outcome_ = publish_status;
+    out.lowest_failing_rank_ =
+        authority_status.code != StatusCode::ok
+            ? (outcome_rank >= 0 ? outcome_rank : 0)
+            : lowest;
+    out.decision_ = TimeFinishDecision::fatal;
+    out.commit_ready_ =
+        selected_priority != 0U && authority_status.code != StatusCode::ok;
+    out.valid_ = true;
+    out.consumed_ = false;
+    return {};
   }
 
   if (publication[2] == 0U) {
-    lowest_failing_rank_ = outcome_rank;
-    return decision;
-  }
-  if (publication[2] == 1U) {
-    time_ = candidate.time;
-    last_accepted_dt_ = step.dt;
-    accepted_step_ = candidate.accepted_step;
-    next_generation_ = candidate.generation;
-    retry_count_ = 0U;
-    lowest_failing_rank_ = -1;
-    next_origin_ = StepOrigin::accepted;
-    force_backward_euler_ = false;
-    active_ = false;
-    active_step_ = {};
+    out.owner_ = this;
+    out.identity_ = identity;
+    out.proposal_ = step;
+    out.candidate_ = candidate;
+    out.outcome_ = decision;
+    out.lowest_failing_rank_ = outcome_rank;
+    out.decision_ = TimeFinishDecision::fatal;
+    out.commit_ready_ = selected_priority != 0U;
+    out.valid_ = true;
+    out.consumed_ = false;
     return {};
   }
+  if (publication[2] == 1U) {
+    out.owner_ = this;
+    out.identity_ = identity;
+    out.proposal_ = step;
+    out.candidate_ = candidate;
+    out.outcome_ = {};
+    out.lowest_failing_rank_ = -1;
+    out.decision_ = TimeFinishDecision::accept;
+    out.commit_ready_ = true;
+    out.valid_ = true;
+    out.consumed_ = false;
+    return {};
+  }
+  out.owner_ = this;
+  out.identity_ = identity;
+  out.proposal_ = step;
+  out.candidate_ = candidate;
+  out.outcome_ = decision;
+  out.lowest_failing_rank_ = outcome_rank;
+  out.decision_ = TimeFinishDecision::retry;
+  out.commit_ready_ = true;
+  out.valid_ = true;
+  out.consumed_ = false;
+  return {};
+}
+
+void TimeControllerState::commit_accept(
+    PreparedTimeFinish& prepared) noexcept {
+  const bool valid = matches_prepared(prepared) &&
+                     prepared.decision_ == TimeFinishDecision::accept;
+  assert(valid);
+  if (!valid) return;
+  const StepTime proposal = prepared.proposal_;
+  const StepTime candidate = prepared.candidate_;
+  prepared.consumed_ = true;
+  prepared.valid_ = false;
+  time_ = candidate.time;
+  last_accepted_dt_ = proposal.dt;
+  accepted_step_ = candidate.accepted_step;
+  next_generation_ = candidate.generation;
+  retry_count_ = 0U;
+  lowest_failing_rank_ = -1;
+  next_origin_ = StepOrigin::accepted;
+  force_backward_euler_ = false;
+  active_ = false;
+  active_step_ = {};
+}
+
+void TimeControllerState::commit_retry(PreparedTimeFinish& prepared,
+                                       StepTime& next) noexcept {
+  const bool valid = matches_prepared(prepared) &&
+                     prepared.decision_ == TimeFinishDecision::retry;
+  assert(valid);
+  if (!valid) return;
+  const StepTime candidate = prepared.candidate_;
+  const int lowest = prepared.lowest_failing_rank_;
+  prepared.consumed_ = true;
+  prepared.valid_ = false;
   retry_count_ = candidate.attempt;
   next_generation_ = candidate.generation;
-  lowest_failing_rank_ = outcome_rank;
+  lowest_failing_rank_ = lowest;
   next_origin_ = StepOrigin::retry;
   force_backward_euler_ = true;
   active_step_ = candidate;
   active_ = true;
   next = candidate;
-  return {};
+}
+
+void TimeControllerState::commit_fatal(
+    PreparedTimeFinish& prepared) noexcept {
+  const bool valid = matches_prepared(prepared) &&
+                     prepared.decision_ == TimeFinishDecision::fatal;
+  // Unlike accept/retry, fatal finalization is also the recovery seam after a
+  // caller has already rolled back its attempt transaction.  Treat an
+  // unrelated or replayed certificate as a no-op so this cleanup path cannot
+  // introduce a second failure while preserving the valid ticket's one-shot
+  // ownership contract.
+  if (!valid) return;
+  const int lowest = prepared.lowest_failing_rank_;
+  const std::uint64_t retired_generation = prepared.proposal_.generation;
+  prepared.consumed_ = true;
+  prepared.valid_ = false;
+  if (retired_generation != std::numeric_limits<std::uint64_t>::max()) {
+    next_generation_ = retired_generation + 1U;
+  }
+  retry_count_ = 0U;
+  lowest_failing_rank_ = lowest;
+  next_origin_ = StepOrigin::retry;
+  force_backward_euler_ = true;
+  active_step_ = {};
+  active_ = false;
+}
+
+Status TimeControllerState::finish(MPI_Comm communicator,
+                                   const StepTime& step,
+                                   Status local_outcome,
+                                   StepTime& next) noexcept {
+  PreparedTimeFinish prepared;
+  const Status status =
+      prepare_finish(communicator, step, local_outcome, prepared);
+  if (!status) {
+    lowest_failing_rank_ = -1;
+    return status;
+  }
+  if (prepared.decision_ == TimeFinishDecision::accept) {
+    commit_accept(prepared);
+    return {};
+  }
+  if (prepared.decision_ == TimeFinishDecision::retry) {
+    commit_retry(prepared, next);
+    return {};
+  }
+  const Status outcome = prepared.outcome_;
+  commit_fatal(prepared);
+  return outcome;
 }
 
 }  // namespace hundun::v04

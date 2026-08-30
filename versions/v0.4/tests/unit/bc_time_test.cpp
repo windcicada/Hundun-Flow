@@ -17,6 +17,8 @@
 #include <limits>
 #include <new>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace allocation_observer {
 
@@ -440,6 +442,21 @@ bool test_state_and_bdf() {
                        retained_restart.accepted_step() ==
                            restarted.accepted_step(),
                    "restart rejects out-of-plan dt atomically");
+  passed &= expect(
+      TimeControllerState::restart(
+          plan, state.time(), state.last_accepted_dt(),
+          std::numeric_limits<std::uint64_t>::max(), retained_restart)
+              .code == StatusCode::invalid_plan &&
+          retained_restart.accepted_step() == restarted.accepted_step(),
+      "restart rejects an accepted-step counter that cannot advance");
+  passed &= expect(
+      TimeControllerState::restart(plan,
+                                   std::numeric_limits<double>::max(),
+                                   state.last_accepted_dt(),
+                                   state.accepted_step(), retained_restart)
+                  .code == StatusCode::invalid_plan &&
+          retained_restart.accepted_step() == restarted.accepted_step(),
+      "restart rejects a time whose next accepted dt cannot advance it");
 
   TimeControlSpec narrow = valid_spec();
   narrow.minimum_bdf_ratio = 0.9;
@@ -481,6 +498,105 @@ bool test_state_and_bdf() {
   return passed;
 }
 
+bool test_prepare_then_commit_time_finish() {
+  TimeSchemePlan plan;
+  TimeControllerState state;
+  bool passed = expect(static_cast<bool>(TimeSchemePlan::compile(
+                           valid_spec(TimeControlKind::fixed), plan)) &&
+                           static_cast<bool>(TimeControllerState::start(
+                               plan, 4.0, state)),
+                       "two-phase time controller starts");
+  StepTime proposal;
+  passed &= expect(static_cast<bool>(state.propose(
+                       MPI_COMM_WORLD, LocalTimeLimits{}, proposal)),
+                   "two-phase accept proposal publishes");
+
+  const double time_before = state.time();
+  const double dt_before = state.last_accepted_dt();
+  const std::uint64_t step_before = state.accepted_step();
+  const std::uint32_t retry_before = state.retry_count();
+  PreparedTimeFinish accept;
+  const Status accept_prepared =
+      state.prepare_finish(MPI_COMM_WORLD, proposal, Status{}, accept);
+  passed &= expect(
+      static_cast<bool>(accept_prepared) && accept.valid() &&
+          accept.decision() == TimeFinishDecision::accept &&
+          static_cast<bool>(accept.outcome()) && accept.lowest_failing_rank() == -1 &&
+          close(accept.candidate().time, proposal.time + proposal.dt),
+      "accept preparation returns one bound accept certificate");
+  passed &= expect(
+      state.time() == time_before && state.last_accepted_dt() == dt_before &&
+          state.accepted_step() == step_before &&
+          state.retry_count() == retry_before && state.has_active_proposal(),
+      "accept preparation leaves every controller state value unchanged");
+  state.commit_accept(accept);
+  passed &= expect(!accept.valid() && close(state.time(), time_before + proposal.dt) &&
+                       close(state.last_accepted_dt(), proposal.dt) &&
+                       state.accepted_step() == step_before + 1U &&
+                       state.retry_count() == 0U &&
+                       !state.has_active_proposal(),
+                   "accept commit alone advances authoritative time");
+
+  StepTime retry_proposal;
+  passed &= expect(static_cast<bool>(state.propose(
+                       MPI_COMM_WORLD, LocalTimeLimits{}, retry_proposal)),
+                   "two-phase retry proposal publishes");
+  const double retry_time_before = state.time();
+  const std::uint64_t retry_step_before = state.accepted_step();
+  const int rank = [] {
+    int value = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &value);
+    return value;
+  }();
+  int size = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  const int failing_rank = size == 1 ? 0 : size - 1;
+  const Status local = rank == failing_rank
+                           ? Status{StatusCode::numerical_failure, 991U}
+                           : Status{};
+  PreparedTimeFinish retry;
+  const Status retry_prepared =
+      state.prepare_finish(MPI_COMM_WORLD, retry_proposal, local, retry);
+  passed &= expect(
+      static_cast<bool>(retry_prepared) && retry.valid() &&
+          retry.decision() == TimeFinishDecision::retry &&
+          retry.outcome().code == StatusCode::numerical_failure &&
+          retry.outcome().detail == 991U &&
+          retry.lowest_failing_rank() == failing_rank &&
+          collective_status_identical(retry.outcome()) &&
+          collective_step_identical(retry.candidate()),
+      "one-rank numerical failure prepares one identical retry decision");
+  passed &= expect(state.time() == retry_time_before &&
+                       state.accepted_step() == retry_step_before &&
+                       state.retry_count() == 0U &&
+                       state.has_active_proposal(),
+                   "retry preparation leaves the active proposal unchanged");
+  const StepTime expected_retry = retry.candidate();
+  StepTime next = sentinel_step();
+  state.commit_retry(retry, next);
+  passed &= expect(!retry.valid() && state.time() == retry_time_before &&
+                       state.accepted_step() == retry_step_before &&
+                       state.retry_count() == 1U &&
+                       state.has_active_proposal() &&
+                       same_step(next, expected_retry) &&
+                       next.origin == StepOrigin::retry,
+                   "retry commit alone publishes the reduced active proposal");
+
+  PreparedTimeFinish fatal;
+  const Status fatal_prepared = state.prepare_finish(
+      MPI_COMM_WORLD, next,
+      rank == failing_rank ? Status{StatusCode::io_failure, 992U} : Status{},
+      fatal);
+  passed &= expect(static_cast<bool>(fatal_prepared) && fatal.valid() &&
+                       fatal.decision() == TimeFinishDecision::fatal &&
+                       fatal.outcome().code == StatusCode::io_failure &&
+                       fatal.lowest_failing_rank() == failing_rank &&
+                       state.has_active_proposal() &&
+                       state.retry_count() == 1U,
+                   "fatal preparation reports failure without mutation");
+  return passed;
+}
+
 bool test_retry_exhaustion_and_minimum() {
   TimeControlSpec spec = valid_spec();
   spec.minimum_dt = 0.04;
@@ -496,7 +612,6 @@ bool test_retry_exhaustion_and_minimum() {
   limits.convective = 1.0;
   StepTime proposal;
   StepTime retry;
-  StepTime nonretry_output;
   passed &= expect(static_cast<bool>(
                        state.propose(MPI_COMM_SELF, limits, proposal)) &&
                        static_cast<bool>(retry_self(
@@ -504,14 +619,15 @@ bool test_retry_exhaustion_and_minimum() {
                            proposal,
                            Status{StatusCode::rejected_step, 77U}, retry)),
                    "one configured retry is produced");
-  passed &= expect(retry_self(
-                       state,
-                       retry, Status{StatusCode::io_failure, 92U},
-                       nonretry_output)
-                           .code == StatusCode::io_failure &&
+  PreparedTimeFinish nonretry;
+  const Status nonretry_prepared = state.prepare_finish(
+      MPI_COMM_SELF, retry, Status{StatusCode::io_failure, 92U}, nonretry);
+  passed &= expect(static_cast<bool>(nonretry_prepared) && nonretry.valid() &&
+                       nonretry.decision() == TimeFinishDecision::fatal &&
+                       nonretry.outcome().code == StatusCode::io_failure &&
                        state.has_active_proposal() &&
                        state.retry_count() == 1U,
-                   "non-numerical failures propagate without state mutation");
+                   "fatal preparation remains non-mutating until explicit commit");
   StepTime retained = retry;
   const Status exhausted = retry_self(
       state,
@@ -519,9 +635,18 @@ bool test_retry_exhaustion_and_minimum() {
   passed &= expect(exhausted.code == StatusCode::rejected_step &&
                        close(state.time(), 0.0) &&
                        state.accepted_step() == 0U &&
-                       state.has_active_proposal() &&
+                       !state.has_active_proposal() &&
+                       state.retry_count() == 0U &&
                        retained.generation == retry.generation,
-                   "retry exhaustion rejects atomically");
+                   "one-phase retry exhaustion retires the failed proposal");
+  StepTime recovery;
+  passed &= expect(static_cast<bool>(state.propose(MPI_COMM_SELF, limits,
+                                                   recovery)) &&
+                       recovery.origin == StepOrigin::retry &&
+                       recovery.attempt == 0U &&
+                       recovery.bdf.order == 1U &&
+                       recovery.generation > retry.generation,
+                   "one-phase fatal finish remains reusable through a fresh BE proposal");
 
   TimeControlSpec below = valid_spec();
   below.initial_dt = 0.05;
@@ -542,8 +667,161 @@ bool test_retry_exhaustion_and_minimum() {
                            below_proposal,
                            Status{StatusCode::rejected_step, 79U}, below_retry)
                                .code == StatusCode::rejected_step &&
-                       below_state.has_active_proposal(),
-                   "retry below minimum dt fails without unsafe clamping");
+                       !below_state.has_active_proposal() &&
+                       below_state.retry_count() == 0U,
+                   "retry below minimum dt retires the proposal without unsafe clamping");
+  return passed;
+}
+
+bool test_fatal_consume_arms_collective_be_recovery() {
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  const int failing_rank = size - 1;
+
+  TimeControlSpec spec = valid_spec(TimeControlKind::fixed);
+  spec.maximum_retries = 1U;
+  TimeSchemePlan plan;
+  TimeControllerState state;
+  bool passed = expect(static_cast<bool>(TimeSchemePlan::compile(spec, plan)) &&
+                           static_cast<bool>(TimeControllerState::start(
+                               plan, 3.0, state)),
+                       "fatal-recovery controller starts");
+
+  StepTime accepted_proposal;
+  StepTime ignored = sentinel_step();
+  passed &= expect(static_cast<bool>(state.propose(
+                       MPI_COMM_WORLD, LocalTimeLimits{}, accepted_proposal)) &&
+                       static_cast<bool>(state.finish(
+                           MPI_COMM_WORLD, accepted_proposal, Status{},
+                           ignored)),
+                   "fatal-recovery fixture establishes accepted BDF history");
+  const double accepted_time = state.time();
+  const double accepted_dt = state.last_accepted_dt();
+  const std::uint64_t accepted_step = state.accepted_step();
+
+  StepTime bdf2_proposal;
+  StepTime retry;
+  const Status first_failure =
+      rank == failing_rank
+          ? Status{StatusCode::numerical_failure, 881U}
+          : Status{};
+  passed &= expect(static_cast<bool>(state.propose(
+                       MPI_COMM_WORLD, LocalTimeLimits{}, bdf2_proposal)) &&
+                       bdf2_proposal.bdf.order == 2U &&
+                       static_cast<bool>(state.finish(
+                           MPI_COMM_WORLD, bdf2_proposal, first_failure,
+                           retry)) &&
+                       retry.bdf.order == 1U && retry.attempt == 1U,
+                   "one failed BDF2 proposal publishes its allowed BE retry");
+
+  const Status exhausted_failure =
+      rank == failing_rank ? Status{StatusCode::rejected_step, 882U}
+                           : Status{};
+  PreparedTimeFinish fatal;
+  const Status prepared = state.prepare_finish(
+      MPI_COMM_WORLD, retry, exhausted_failure, fatal);
+  passed &= expect(static_cast<bool>(prepared) && fatal.valid() &&
+                       fatal.decision() == TimeFinishDecision::fatal &&
+                       fatal.outcome().code == StatusCode::rejected_step &&
+                       fatal.lowest_failing_rank() == failing_rank &&
+                       collective_status_identical(fatal.outcome()) &&
+                       state.has_active_proposal() &&
+                       state.retry_count() == 1U,
+                   "retry exhaustion prepares one collective fatal ticket without mutation");
+
+  state.commit_fatal(fatal);
+  passed &= expect(!fatal.valid() && !state.has_active_proposal() &&
+                       state.retry_count() == 0U &&
+                       state.time() == accepted_time &&
+                       state.last_accepted_dt() == accepted_dt &&
+                       state.accepted_step() == accepted_step,
+                   "fatal commit retires only attempt-local time state");
+
+  StepTime recovery;
+  passed &= expect(static_cast<bool>(state.propose(
+                       MPI_COMM_WORLD, LocalTimeLimits{}, recovery)) &&
+                       recovery.time == accepted_time &&
+                       recovery.accepted_step == accepted_step &&
+                       recovery.attempt == 0U &&
+                       recovery.origin == StepOrigin::retry &&
+                       recovery.bdf.order == 1U &&
+                       recovery.generation > retry.generation &&
+                       collective_step_identical(recovery),
+                   "the next collective proposal is a fresh non-replayed BE recovery");
+  return passed;
+}
+
+bool test_fatal_ticket_is_owner_bound_and_one_shot() {
+  TimeSchemePlan plan;
+  TimeControllerState owner;
+  TimeControllerState foreign_owner;
+  bool passed = expect(
+      static_cast<bool>(TimeSchemePlan::compile(
+          valid_spec(TimeControlKind::fixed), plan)) &&
+          static_cast<bool>(TimeControllerState::start(plan, 5.0, owner)) &&
+          static_cast<bool>(
+              TimeControllerState::start(plan, 17.0, foreign_owner)),
+      "fatal-ticket owner fixtures start");
+
+  StepTime proposal;
+  StepTime foreign_proposal;
+  passed &= expect(static_cast<bool>(owner.propose(
+                       MPI_COMM_SELF, LocalTimeLimits{}, proposal)) &&
+                       static_cast<bool>(foreign_owner.propose(
+                           MPI_COMM_SELF, LocalTimeLimits{},
+                           foreign_proposal)),
+                   "fatal-ticket owners publish independent proposals");
+
+  PreparedTimeFinish fatal;
+  PreparedTimeFinish stale;
+  passed &= expect(static_cast<bool>(owner.prepare_finish(
+                       MPI_COMM_SELF, proposal,
+                       Status{StatusCode::io_failure, 883U}, fatal)) &&
+                       static_cast<bool>(owner.prepare_finish(
+                           MPI_COMM_SELF, proposal,
+                           Status{StatusCode::io_failure, 883U}, stale)) &&
+                       fatal.valid() && stale.valid() &&
+                       fatal.decision() == TimeFinishDecision::fatal &&
+                       stale.decision() == TimeFinishDecision::fatal,
+                   "one active proposal can issue equivalent bound fatal certificates");
+
+  foreign_owner.commit_fatal(fatal);
+  passed &= expect(fatal.valid() && owner.has_active_proposal() &&
+                       foreign_owner.has_active_proposal() &&
+                       owner.time() == 5.0 && foreign_owner.time() == 17.0,
+                   "a foreign controller cannot consume or apply a fatal certificate");
+
+  owner.commit_fatal(fatal);
+  passed &= expect(!fatal.valid() && !owner.has_active_proposal() &&
+                       owner.time() == 5.0 &&
+                       owner.last_accepted_dt() == 0.0 &&
+                       owner.accepted_step() == 0U &&
+                       owner.retry_count() == 0U,
+                   "the owning controller consumes its fatal certificate exactly once");
+
+  StepTime recovery;
+  passed &= expect(static_cast<bool>(owner.propose(
+                       MPI_COMM_SELF, LocalTimeLimits{}, recovery)) &&
+                       recovery.origin == StepOrigin::retry &&
+                       recovery.bdf.order == 1U &&
+                       recovery.generation > proposal.generation,
+                   "the consumed fatal ticket cannot alias its recovery proposal");
+  owner.commit_fatal(fatal);
+  passed &= expect(owner.has_active_proposal() && !fatal.valid(),
+                   "replaying a consumed fatal certificate is a no-op");
+  owner.commit_fatal(stale);
+  passed &= expect(owner.has_active_proposal() && stale.valid(),
+                   "an unconsumed but stale fatal certificate is a no-op");
+
+  StepTime ignored = sentinel_step();
+  passed &= expect(static_cast<bool>(owner.finish(
+                       MPI_COMM_SELF, recovery, Status{}, ignored)) &&
+                       owner.accepted_step() == 1U &&
+                       static_cast<bool>(foreign_owner.finish(
+                           MPI_COMM_SELF, foreign_proposal, Status{}, ignored)),
+                   "invalid fatal commits leave both owners' live proposals usable");
   return passed;
 }
 
@@ -656,21 +934,22 @@ bool test_collective_finish_consensus() {
   const std::uint64_t retained_step = state.accepted_step();
   const std::uint32_t retained_retry_count = state.retry_count();
   const StepTime retained_active = retry;
-  StepTime nonretry_output = sentinel_step();
   const Status local_nonretry =
       rank == 1 ? Status{StatusCode::io_failure, 702U} : Status{};
-  const Status nonretry_status =
-      state.finish(MPI_COMM_WORLD, retry, local_nonretry, nonretry_output);
-  passed &= expect(nonretry_status.code == StatusCode::io_failure &&
-                       nonretry_status.detail == 702U &&
-                       collective_status_identical(nonretry_status) &&
+  PreparedTimeFinish nonretry;
+  const Status nonretry_status = state.prepare_finish(
+      MPI_COMM_WORLD, retry, local_nonretry, nonretry);
+  passed &= expect(static_cast<bool>(nonretry_status) && nonretry.valid() &&
+                       nonretry.decision() == TimeFinishDecision::fatal &&
+                       nonretry.outcome().code == StatusCode::io_failure &&
+                       nonretry.outcome().detail == 702U &&
+                       collective_status_identical(nonretry.outcome()) &&
                        state.lowest_failing_rank() == 1 &&
                        state.time() == retained_time &&
                        state.accepted_step() == retained_step &&
                        state.retry_count() == retained_retry_count &&
-                       state.has_active_proposal() &&
-                       same_step(nonretry_output, sentinel_step()),
-                   "non-retryable outcome fails collectively without mutation");
+                       state.has_active_proposal(),
+                   "non-retryable outcome prepares collectively without mutation");
 
   StepTime mismatched = retained_active;
   if (rank == 1) {
@@ -688,6 +967,18 @@ bool test_collective_finish_consensus() {
                        state.has_active_proposal() &&
                        same_step(mismatch_output, sentinel_step()),
                    "ticket mismatch fails collectively without mutation");
+
+  state.commit_fatal(nonretry);
+  StepTime recovery;
+  passed &= expect(!nonretry.valid() && !state.has_active_proposal() &&
+                       state.retry_count() == 0U &&
+                       static_cast<bool>(state.propose(
+                           MPI_COMM_WORLD, limits, recovery)) &&
+                       recovery.origin == StepOrigin::retry &&
+                       recovery.attempt == 0U &&
+                       recovery.bdf.order == 1U &&
+                       collective_step_identical(recovery),
+                   "collective fatal commit publishes one reusable BE recovery state");
   return passed;
 }
 
@@ -947,11 +1238,25 @@ bool test_collective_hot_path_no_allocations() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  static_assert(!std::is_copy_constructible_v<PreparedTimeFinish> &&
+                !std::is_move_constructible_v<PreparedTimeFinish>);
+  static_assert(noexcept(std::declval<TimeControllerState&>().prepare_finish(
+      std::declval<MPI_Comm>(), std::declval<const StepTime&>(),
+      std::declval<Status>(), std::declval<PreparedTimeFinish&>())));
+  static_assert(noexcept(std::declval<TimeControllerState&>().commit_accept(
+      std::declval<PreparedTimeFinish&>())));
+  static_assert(noexcept(std::declval<TimeControllerState&>().commit_retry(
+      std::declval<PreparedTimeFinish&>(), std::declval<StepTime&>())));
+  static_assert(noexcept(std::declval<TimeControllerState&>().commit_fatal(
+      std::declval<PreparedTimeFinish&>())));
   MPI_Init(&argc, &argv);
   bool passed = true;
   passed &= test_compile_and_local_limits();
   passed &= test_state_and_bdf();
+  passed &= test_prepare_then_commit_time_finish();
   passed &= test_retry_exhaustion_and_minimum();
+  passed &= test_fatal_consume_arms_collective_be_recovery();
+  passed &= test_fatal_ticket_is_owner_bound_and_one_shot();
   passed &= test_fixed_retry_growth_recovery();
   passed &= test_world_collective();
   passed &= test_collective_finish_consensus();

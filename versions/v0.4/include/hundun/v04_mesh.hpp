@@ -126,6 +126,12 @@ class TriangleSoA {
   Span<const double> ax() const noexcept { return {ax_.data(), ax_.size()}; }
   Span<const double> ay() const noexcept { return {ay_.data(), ay_.size()}; }
   Span<const double> az() const noexcept { return {az_.data(), az_.size()}; }
+  Span<const double> bx() const noexcept { return {bx_.data(), bx_.size()}; }
+  Span<const double> by() const noexcept { return {by_.data(), by_.size()}; }
+  Span<const double> bz() const noexcept { return {bz_.data(), bz_.size()}; }
+  Span<const double> cx() const noexcept { return {cx_.data(), cx_.size()}; }
+  Span<const double> cy() const noexcept { return {cy_.data(), cy_.size()}; }
+  Span<const double> cz() const noexcept { return {cz_.data(), cz_.size()}; }
   Span<const double> e1x() const noexcept { return {e1x_.data(), e1x_.size()}; }
   Span<const double> e1y() const noexcept { return {e1y_.data(), e1y_.size()}; }
   Span<const double> e1z() const noexcept { return {e1z_.data(), e1z_.size()}; }
@@ -157,6 +163,11 @@ class TriangleSoA {
  private:
   friend class StlScanCompiler;
   std::vector<double> ax_, ay_, az_;
+  // Preserve the exact parsed STL vertices for cold topology construction.
+  // Reconstructing b/c from a + edge can change a valid binary32 coordinate
+  // after promotion to binary64 and destroy exact shared-edge identity.
+  std::vector<double> bx_, by_, bz_;
+  std::vector<double> cx_, cy_, cz_;
   std::vector<double> e1x_, e1y_, e1z_;
   std::vector<double> e2x_, e2y_, e2z_;
   std::vector<double> nx_, ny_, nz_;

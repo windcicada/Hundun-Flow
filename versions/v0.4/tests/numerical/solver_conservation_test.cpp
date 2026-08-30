@@ -137,6 +137,12 @@ bool close(double actual, double expected, double scale = 1.0) {
   return std::isfinite(actual) && std::abs(actual - expected) <= tolerance;
 }
 
+bool direction_close(double actual, double expected) {
+  const double scale = std::max({1.0, std::abs(actual), std::abs(expected)});
+  return std::isfinite(actual) && std::isfinite(expected) &&
+         std::abs(actual - expected) <= 5.0e-8 * scale;
+}
+
 CartesianMeshSpec mesh_spec() {
   CartesianMeshSpec value;
   value.kind = GeometryKind::uniform;
@@ -153,7 +159,7 @@ CartesianMeshSpec mesh_spec() {
   return value;
 }
 
-ValidatedModel periodic_model() {
+ValidatedModel periodic_model(double limiter = 1.0) {
   ValidatedModel value;
   value.fingerprint = 0x92a4c731U;
   value.pressure_reference = PressureReferenceKind::closed_mass;
@@ -167,7 +173,7 @@ ValidatedModel periodic_model() {
   value.schemes.species = ConvectionScheme::central2;
   value.schemes.passive_scalar = ConvectionScheme::central2;
   value.schemes.diffusion = DiffusionScheme::central2;
-  value.schemes.limiter = 1.0;
+  value.schemes.limiter = limiter;
   value.time = TimeControlSpec{};
   return value;
 }
@@ -180,18 +186,23 @@ struct KernelFixture {
   CartesianKernelPlan kernels;
 };
 
-bool make_kernel_fixture(KernelFixture& fixture) {
+bool make_kernel_fixture(KernelFixture& fixture,
+                         const CartesianMeshSpec& mesh,
+                         double limiter) {
   FieldRegistry registry;
   TimeSchemePlan time;
-  bool passed = expect(
-      static_cast<bool>(CartesianGeometryCompiler::compile(
-          MPI_COMM_SELF, mesh_spec(), GeometryBudget{}, fixture.geometry,
-          fixture.patch)),
-      "uniform Cartesian geometry compiles");
+  const Status geometry_status = CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, mesh, GeometryBudget{}, fixture.geometry,
+      fixture.patch);
+  if (!geometry_status) {
+    std::cerr << "geometry compile detail=" << geometry_status.detail << '\n';
+  }
+  bool passed = expect(static_cast<bool>(geometry_status),
+                       "Cartesian geometry compiles");
   passed &= expect(
       static_cast<bool>(BoundaryCompiler::compile(
-          MPI_COMM_SELF, periodic_model(), fixture.geometry, fixture.patch,
-          registry, fixture.boundary, fixture.schemes, time)),
+          MPI_COMM_SELF, periodic_model(limiter), fixture.geometry,
+          fixture.patch, registry, fixture.boundary, fixture.schemes, time)),
       "periodic boundary and central schemes compile");
   passed &= expect(
       static_cast<bool>(CartesianKernelPlan::compile(
@@ -199,6 +210,35 @@ bool make_kernel_fixture(KernelFixture& fixture) {
           fixture.kernels)),
       "Cartesian kernel plan compiles once outside the hot path");
   return passed;
+}
+
+bool make_kernel_fixture(KernelFixture& fixture) {
+  return make_kernel_fixture(fixture, mesh_spec(), 1.0);
+}
+
+CartesianMeshSpec stretched_mesh_spec() {
+  CartesianMeshSpec value;
+  value.kind = GeometryKind::tensor_stretched;
+  value.lower = {0.0, 0.0, 0.0};
+  value.upper = {1.0, 1.0, 1.0};
+  value.has_exact_cells = true;
+  value.exact_cells = kCells;
+  value.has_base_spacing = true;
+  value.base_spacing = {1.08 / static_cast<double>(kCells.x),
+                        1.08 / static_cast<double>(kCells.y),
+                        1.08 / static_cast<double>(kCells.z)};
+  value.minimum_spacing = {0.92 / static_cast<double>(kCells.x),
+                           0.92 / static_cast<double>(kCells.y),
+                           0.92 / static_cast<double>(kCells.z)};
+  value.max_growth_ratio = 1.2;
+  value.focus_regions.push_back(
+      {{0.3, 0.3, 0.3}, {0.7, 0.7, 0.7},
+       {1.0 / static_cast<double>(kCells.x),
+        1.0 / static_cast<double>(kCells.y),
+        1.0 / static_cast<double>(kCells.z)}});
+  value.limits.max_global_cells = cell_count(kCells);
+  value.limits.max_memory_bytes_per_rank = 1U << 24U;
+  return value;
 }
 
 struct OwnedField {
@@ -608,6 +648,33 @@ bool reconstruct_pending(const CartesianKernelPlan& plan,
     }
   }
   const std::array<ConstFieldView, 2U> reads{as_const(rho.view),
+                                             as_const(velocity.view)};
+  const KernelInvocation invocation{
+      Span<const ConstFieldView>{reads.data(), reads.size()}, {},
+      {{0, 0, 0}, kCells}, 0U, 0U, 1U, 0U, nullptr};
+  return static_cast<bool>(reconstruct_mass_flux(plan, invocation, pending));
+}
+
+bool reconstruct_diagnostic_pending(const CartesianKernelPlan& plan,
+                                    PendingFaceFluxView& pending) {
+  OwnedField density = make_field(75U, kCells, 1U, 2U, 175U);
+  OwnedField velocity = make_field(76U, kCells, 3U, 2U, 176U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        const Int3 cell{x, y, z};
+        density.view.unchecked(cell, 0U) =
+            1.0 + 0.01 * x - 0.006 * y + 0.004 * z;
+        velocity.view.unchecked(cell, 0U) =
+            -0.4 + 0.13 * x + 0.07 * y - 0.05 * z;
+        velocity.view.unchecked(cell, 1U) =
+            0.3 - 0.08 * x + 0.12 * y + 0.04 * z;
+        velocity.view.unchecked(cell, 2U) =
+            -0.2 + 0.05 * x - 0.1 * y + 0.15 * z;
+      }
+    }
+  }
+  const std::array<ConstFieldView, 2U> reads{as_const(density.view),
                                              as_const(velocity.view)};
   const KernelInvocation invocation{
       Span<const ConstFieldView>{reads.data(), reads.size()}, {},
@@ -1102,6 +1169,136 @@ bool test_final_flux_lifetime_fail_closed(
   return passed;
 }
 
+bool test_point_convection_diagnostic(const CartesianKernelPlan& plan) {
+  LifetimeFixture fixture;
+  bool passed = expect(make_lifetime_fixture(fixture),
+                       "point-diagnostic final-flux fixture initializes");
+  if (!passed || !fixture.transaction || !fixture.writer ||
+      !fixture.storage) {
+    return false;
+  }
+
+  PendingFaceFluxView pending;
+  passed &= expect(fixture.transaction->begin(fixture.layers) &&
+                       fixture.transaction->revise_trial(fixture.state),
+                   "point-diagnostic attempt begins");
+  const RevisionDependency dependency{
+      AttemptTransaction::field_revision_source(fixture.state),
+      fixture.transaction->trial_revision(fixture.state)};
+  passed &= expect(dependency.revision != 0U &&
+                       static_cast<bool>(fixture.writer->begin_pending(
+                           *fixture.transaction, *fixture.storage, pending)) &&
+                       reconstruct_diagnostic_pending(plan, pending),
+                   "point-diagnostic fixture reconstructs varied mass flux");
+  const std::array dependencies{dependency};
+  passed &= expect(static_cast<bool>(fixture.writer->publish_pending(
+                       Span<const RevisionDependency>{dependencies.data(),
+                                                      dependencies.size()},
+                       pending)) &&
+                       !pending.valid(),
+                   "point-diagnostic fixture publishes final mass flux");
+  passed &= expect(static_cast<bool>(fixture.transaction->collective_finish(
+                       MPI_COMM_SELF, Status{})),
+                   "point-diagnostic fixture commits final mass flux");
+
+  ConstFaceFluxView committed;
+  passed &= expect(static_cast<bool>(fixture.writer->committed(
+                       *fixture.storage, committed)) &&
+                       committed.certificate.valid(),
+                   "point-diagnostic fixture exposes a certified flux");
+  if (!passed) {
+    return false;
+  }
+
+  constexpr std::uint8_t kComponents = 2U;
+  constexpr Int3 kProbeCell{2, 2, 2};
+  OwnedField transported =
+      make_field(77U, kCells, kComponents, 2U, 177U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        const double xx = static_cast<double>(x);
+        const double yy = static_cast<double>(y);
+        const double zz = static_cast<double>(z);
+        transported.view.unchecked({x, y, z}, 0U) =
+            2.0 + 0.07 * xx - 0.04 * yy + 0.03 * zz +
+            0.006 * xx * yy - 0.003 * yy * zz;
+        transported.view.unchecked({x, y, z}, 1U) = 1.0;
+      }
+    }
+  }
+  OwnedField production = make_field(78U, kCells, kComponents, 0U, 178U);
+  const std::array<ConstFieldView, 1U> reads{as_const(transported.view)};
+  const std::array<FieldView, 1U> writes{production.view};
+  const KernelInvocation invocation{
+      Span<const ConstFieldView>{reads.data(), reads.size()},
+      Span<const FieldView>{writes.data(), writes.size()},
+      {{0, 0, 0}, kCells}, 0U, 0U, kComponents, committed.revision, nullptr};
+
+  for (const ConvectionScheme scheme :
+       {ConvectionScheme::central2, ConvectionScheme::tvd2}) {
+    std::fill(production.allocation.begin(), production.allocation.end(), 0.0);
+    passed &= expect(static_cast<bool>(cartesian_convection(
+                         plan, scheme, committed, invocation)),
+                     scheme == ConvectionScheme::tvd2
+                         ? "TVD2 production convection evaluates"
+                         : "donor-cell production convection evaluates");
+
+    ConvectionPointDiagnostic scalar_diagnostic;
+    ConvectionPointDiagnostic donor_diagnostic;
+    passed &= expect(static_cast<bool>(diagnose_cartesian_convection_point(
+                         plan, scheme, committed, as_const(transported.view),
+                         0U, kProbeCell, scalar_diagnostic)) &&
+                         static_cast<bool>(diagnose_cartesian_convection_point(
+                             plan, scheme, committed,
+                             as_const(transported.view), 1U, kProbeCell,
+                             donor_diagnostic)),
+                     scheme == ConvectionScheme::tvd2
+                         ? "TVD2 point diagnostics evaluate"
+                         : "donor-cell point diagnostics evaluate");
+    const double production_scalar =
+        production.view.unchecked(kProbeCell, 0U);
+    const double production_mass =
+        production.view.unchecked(kProbeCell, 1U);
+    passed &= expect(close(scalar_diagnostic.divergence, production_scalar,
+                           std::abs(production_scalar)) &&
+                         close(donor_diagnostic.divergence, production_mass,
+                               std::abs(production_mass)) &&
+                         close(scalar_diagnostic.mass_divergence,
+                               donor_diagnostic.mass_divergence,
+                               std::abs(donor_diagnostic.mass_divergence)) &&
+                         close(scalar_diagnostic.mass_divergence,
+                               production_mass,
+                               std::abs(production_mass)),
+                     scheme == ConvectionScheme::tvd2
+                         ? "TVD2 point divergence and mass divergence match the production field"
+                         : "donor-cell point divergence and mass divergence match the production field");
+
+    if (scheme == ConvectionScheme::tvd2) {
+      const double scale = std::max(
+          {1.0, std::abs(scalar_diagnostic.selected_face_value),
+           std::abs(scalar_diagnostic.selected_donor_minimum),
+           std::abs(scalar_diagnostic.selected_donor_maximum)});
+      passed &= expect(scalar_diagnostic.face_envelope_checked &&
+                           scalar_diagnostic.face_envelope_valid,
+                       "TVD2 point diagnostic checks a valid donor envelope");
+      passed &= expect(
+          scalar_diagnostic.maximum_face_envelope_violation <=
+              128.0 * std::numeric_limits<double>::epsilon() * scale,
+          "TVD2 face-envelope violation remains at roundoff");
+      passed &= expect(
+          scalar_diagnostic.selected_face_value >=
+                  scalar_diagnostic.selected_donor_minimum -
+                      128.0 * std::numeric_limits<double>::epsilon() * scale &&
+              scalar_diagnostic.selected_face_value <=
+                  scalar_diagnostic.selected_donor_maximum +
+                      128.0 * std::numeric_limits<double>::epsilon() * scale,
+          "TVD2 selected face remains inside its donor-cell envelope");
+    }
+  }
+  return passed;
+}
+
 bool test_exact_kernel_counters_and_allocations(
     const CartesianKernelPlan& plan, FaceFluxView flux) {
   constexpr std::uint8_t kComponents = 2U;
@@ -1504,6 +1701,1088 @@ bool test_convection_revision_and_hot_counters(
   return passed;
 }
 
+bool test_frozen_target_convection_faces(const CartesianKernelPlan& plan,
+                                         FaceFluxStorage& storage,
+                                         FaceFluxView target_flux) {
+  FaceFluxView frozen_storage;
+  bool passed = expect(
+      static_cast<bool>(storage.workspace_view(1U, 18U, frozen_storage)),
+      "a disjoint preallocated face replica is available for frozen states");
+  OwnedField enthalpy = make_field(95U, kCells, 1U, 2U, 195U);
+  OwnedField convection = make_field(96U, kCells, 1U, 0U, 196U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        enthalpy.view.unchecked({x, y, z}, 0U) =
+            3.0 + 0.2 * x * x - 0.15 * y + 0.07 * z * z +
+            0.03 * x * y;
+      }
+    }
+  }
+  const auto fill_directional_flux = [](FaceFieldView faces,
+                                        double scale) noexcept {
+    for (std::int32_t z = 0; z < faces.extents.z; ++z) {
+      for (std::int32_t y = 0; y < faces.extents.y; ++y) {
+        for (std::int32_t x = 0; x < faces.extents.x; ++x) {
+          const int parity = (x + 2 * y + 3 * z) & 1;
+          faces.unchecked({x, y, z}) =
+              (parity == 0 ? 1.0 : -1.0) *
+              scale * (1.0 + 0.1 * x + 0.05 * y + 0.025 * z);
+        }
+      }
+    }
+  };
+  fill_directional_flux(target_flux.x, 0.19);
+  fill_directional_flux(target_flux.y, 0.13);
+  fill_directional_flux(target_flux.z, 0.11);
+
+  const std::array<ConvectionScheme, 3U> schemes{
+      ConvectionScheme::central2, ConvectionScheme::limited_central2,
+      ConvectionScheme::tvd2};
+  for (ConvectionScheme scheme : schemes) {
+    fill_faces(frozen_storage, -991.0);
+    FrozenConvectionFaceField frozen;
+    std::size_t allocations = std::numeric_limits<std::size_t>::max();
+    Status frozen_status;
+    {
+      allocation_observer::Guard guard;
+      frozen_status = freeze_cartesian_target_convection_faces(
+          plan, scheme, as_const(target_flux), as_const(enthalpy.view), 0U,
+          {UINT64_C(0x8f86d9f314a2c571), 219U},
+          {frozen_storage.x, frozen_storage.y, frozen_storage.z}, frozen);
+      allocations =
+          allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    passed &= expect(static_cast<bool>(frozen_status) && frozen.valid() &&
+                         allocations == 0U,
+                     "target convection freezes one exact allocation-free face state");
+
+    const std::array<ConstFieldView, 1U> reads{as_const(enthalpy.view)};
+    const std::array<FieldView, 1U> writes{convection.view};
+    const KernelInvocation invocation{
+        {reads.data(), reads.size()}, {writes.data(), writes.size()},
+        {{0, 0, 0}, kCells}, 0U, 0U, 1U, target_flux.revision, nullptr};
+    passed &= expect(static_cast<bool>(cartesian_target_convection(
+                         plan, scheme, as_const(target_flux), invocation)),
+                     "target convection residual evaluates against the frozen flux");
+    for (std::int32_t z = 0; z < kCells.z; ++z) {
+      for (std::int32_t y = 0; y < kCells.y; ++y) {
+        for (std::int32_t x = 0; x < kCells.x; ++x) {
+          const Int3 cell{x, y, z};
+          const double reconstructed =
+              target_flux.x.unchecked({x + 1, y, z}) *
+                  frozen.x.unchecked({x + 1, y, z}) -
+              target_flux.x.unchecked({x, y, z}) *
+                  frozen.x.unchecked({x, y, z}) +
+              target_flux.y.unchecked({x, y + 1, z}) *
+                  frozen.y.unchecked({x, y + 1, z}) -
+              target_flux.y.unchecked({x, y, z}) *
+                  frozen.y.unchecked({x, y, z}) +
+              target_flux.z.unchecked({x, y, z + 1}) *
+                  frozen.z.unchecked({x, y, z + 1}) -
+              target_flux.z.unchecked({x, y, z}) *
+                  frozen.z.unchecked({x, y, z});
+          passed &= expect(
+              close(reconstructed,
+                    convection.view.unchecked(cell, 0U), reconstructed),
+              "frozen face products reproduce the production convection residual");
+        }
+      }
+    }
+  }
+
+  fill_faces(frozen_storage, 817.0);
+  const std::uint64_t before = face_checksum(as_const(frozen_storage));
+  const double saved = enthalpy.view.unchecked({0, 0, 0}, 0U);
+  enthalpy.view.unchecked({0, 0, 0}, 0U) =
+      std::numeric_limits<double>::quiet_NaN();
+  FrozenConvectionFaceField rejected;
+  const Status rejected_status = freeze_cartesian_target_convection_faces(
+      plan, ConvectionScheme::limited_central2, as_const(target_flux),
+      as_const(enthalpy.view), 0U,
+      {UINT64_C(0x8f86d9f314a2c571), 219U},
+      {frozen_storage.x, frozen_storage.y, frozen_storage.z}, rejected);
+  passed &= expect(rejected_status.code == StatusCode::numerical_failure &&
+                       !rejected.valid() &&
+                       face_checksum(as_const(frozen_storage)) == before,
+                   "non-finite frozen reconstruction rejects atomically");
+  enthalpy.view.unchecked({0, 0, 0}, 0U) = saved;
+  return passed;
+}
+
+bool test_frozen_target_convection_directional_derivative(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux) {
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxStorage plus_owner;
+  FaceFluxStorage minus_owner;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  FaceFluxView plus_faces;
+  FaceFluxView minus_faces;
+  bool passed = expect(
+      static_cast<bool>(FaceFluxStorage::allocate_workspace(
+          kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, plus_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, minus_owner)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 301U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 302U, derivative_faces)) &&
+          static_cast<bool>(plus_owner.workspace_view(0U, 303U,
+                                                      plus_faces)) &&
+          static_cast<bool>(minus_owner.workspace_view(0U, 304U,
+                                                       minus_faces)),
+      "directional-derivative test owns four disjoint face workspaces");
+  if (!passed) return false;
+
+  bool saw_positive_flux = false;
+  bool saw_negative_flux = false;
+  const auto inspect_flux_signs = [&](ConstFaceFieldView faces) {
+    for (std::int32_t z = 0; z < faces.extents.z; ++z) {
+      for (std::int32_t y = 0; y < faces.extents.y; ++y) {
+        for (std::int32_t x = 0; x < faces.extents.x; ++x) {
+          const double value = faces.unchecked({x, y, z});
+          saw_positive_flux = saw_positive_flux || value > 0.0;
+          saw_negative_flux = saw_negative_flux || value < 0.0;
+        }
+      }
+    }
+  };
+  inspect_flux_signs(target_flux.x);
+  inspect_flux_signs(target_flux.y);
+  inspect_flux_signs(target_flux.z);
+  passed &= expect(saw_positive_flux && saw_negative_flux,
+                   "directional derivative exercises both donor directions");
+
+  OwnedField target = make_field(97U, kCells, 1U, 2U, 401U);
+  OwnedField variation = make_field(98U, kCells, 1U, 2U, 402U);
+  OwnedField plus = make_field(99U, kCells, 1U, 2U, 403U);
+  OwnedField minus = make_field(100U, kCells, 1U, 2U, 404U);
+  constexpr double epsilon = 2.0e-6;
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        const double xd = static_cast<double>(x);
+        const double yd = static_cast<double>(y);
+        const double zd = static_cast<double>(z);
+        const double target_value =
+            7.0 + 0.173 * xd + 0.0191 * xd * xd + 0.00231 * xd * xd * xd +
+            0.127 * yd + 0.0137 * yd * yd + 0.00173 * yd * yd * yd +
+            0.091 * zd + 0.0109 * zd * zd + 0.00137 * zd * zd * zd +
+            0.0047 * xd * yd - 0.0031 * yd * zd + 0.0023 * xd * zd;
+        const double direction =
+            -0.41 + 0.071 * xd * xd - 0.053 * yd + 0.029 * zd * zd +
+            0.017 * xd * yd - 0.011 * xd * zd + 0.007 * yd * zd;
+        target.view.unchecked({x, y, z}, 0U) = target_value;
+        variation.view.unchecked({x, y, z}, 0U) = direction;
+        plus.view.unchecked({x, y, z}, 0U) =
+            target_value + epsilon * direction;
+        minus.view.unchecked({x, y, z}, 0U) =
+            target_value - epsilon * direction;
+      }
+    }
+  }
+
+  const FrozenConvectionContext context{
+      UINT64_C(0x8f86d9f314a2c571), 501U};
+  const std::array<ConvectionScheme, 3U> schemes{
+      ConvectionScheme::central2, ConvectionScheme::limited_central2,
+      ConvectionScheme::tvd2};
+  for (ConvectionScheme scheme : schemes) {
+    FrozenConvectionFaceField frozen;
+    passed &= expect(
+        static_cast<bool>(freeze_cartesian_target_convection_faces(
+            plan, scheme, target_flux, as_const(target.view), 0U, context,
+            {frozen_faces.x, frozen_faces.y, frozen_faces.z}, frozen)),
+        "smooth target reconstruction freezes before differentiation");
+
+    FrozenConvectionFaceDirectionalDerivative derivative;
+    std::size_t allocations = std::numeric_limits<std::size_t>::max();
+    Status differentiated;
+    {
+      allocation_observer::Guard guard;
+      differentiated =
+          differentiate_frozen_cartesian_target_convection_faces(
+              plan, scheme, target_flux, as_const(target.view), 0U, context,
+              FrozenConvectionLinearizationPolicy::classical_active_branch,
+              frozen, as_const(variation.view), 0U,
+              {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+              derivative);
+      allocations =
+          allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    passed &= expect(static_cast<bool>(differentiated) && derivative.valid() &&
+                         derivative.reconstruction != frozen.reconstruction &&
+                         derivative.branch_authority != 0U &&
+                         derivative.policy ==
+                             FrozenConvectionLinearizationPolicy::
+                                 classical_active_branch &&
+                         derivative.classical_everywhere &&
+                         derivative.generalized_face_count == 0U &&
+                         allocations == 0U,
+                     "frozen target branch differentiates allocation-free");
+
+    FrozenConvectionFaceField plus_frozen;
+    FrozenConvectionFaceField minus_frozen;
+    passed &= expect(
+        static_cast<bool>(freeze_cartesian_target_convection_faces(
+            plan, scheme, target_flux, as_const(plus.view), 0U,
+            {context.collective_semantics, 502U},
+            {plus_faces.x, plus_faces.y, plus_faces.z}, plus_frozen)) &&
+            static_cast<bool>(freeze_cartesian_target_convection_faces(
+                plan, scheme, target_flux, as_const(minus.view), 0U,
+                {context.collective_semantics, 503U},
+                {minus_faces.x, minus_faces.y, minus_faces.z}, minus_frozen)),
+        "centered-FD reference evaluates exact target reconstruction twice");
+    passed &= expect(plus_frozen.reconstruction == frozen.reconstruction &&
+                         minus_frozen.reconstruction ==
+                             frozen.reconstruction &&
+                         plus_frozen.revision != frozen.revision &&
+                         plus_frozen.local_binding != frozen.local_binding,
+                     "collective reconstruction identity excludes exact "
+                     "rank-local target and storage revisions");
+
+    const auto compare_axis = [&](ConstFaceFieldView actual,
+                                  ConstFaceFieldView positive,
+                                  ConstFaceFieldView negative) {
+      bool axis_passed = true;
+      for (std::int32_t z = 0; z < actual.extents.z; ++z) {
+        for (std::int32_t y = 0; y < actual.extents.y; ++y) {
+          for (std::int32_t x = 0; x < actual.extents.x; ++x) {
+            const Int3 face{x, y, z};
+            const double expected =
+                (positive.unchecked(face) - negative.unchecked(face)) /
+                (2.0 * epsilon);
+            axis_passed &= direction_close(actual.unchecked(face), expected);
+          }
+        }
+      }
+      return axis_passed;
+    };
+    passed &= expect(
+        compare_axis(derivative.x, plus_frozen.x, minus_frozen.x) &&
+            compare_axis(derivative.y, plus_frozen.y, minus_frozen.y) &&
+            compare_axis(derivative.z, plus_frozen.z, minus_frozen.z),
+        "central2/limited-central2/TVD2 frozen branch derivative matches "
+        "centered FD for positive and negative face flux");
+    FrozenConvectionFaceDirectionalDerivative plus_derivative;
+    passed &= expect(
+        static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+            plan, scheme, target_flux, as_const(plus.view), 0U,
+            {context.collective_semantics, 502U},
+            FrozenConvectionLinearizationPolicy::classical_active_branch,
+            plus_frozen, as_const(variation.view), 0U,
+            {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+            plus_derivative)) &&
+            plus_derivative.reconstruction == derivative.reconstruction &&
+            plus_derivative.branch_authority !=
+                derivative.branch_authority &&
+            plus_derivative.local_binding != derivative.local_binding,
+        "exact target/closure/view identity stays rank-local to branch and "
+        "storage authority");
+    if (scheme != ConvectionScheme::central2) {
+      FrozenConvectionFaceField nonlinear_direction;
+      passed &= expect(
+          static_cast<bool>(freeze_cartesian_target_convection_faces(
+              plan, scheme, target_flux, as_const(variation.view), 0U,
+              {context.collective_semantics, 504U},
+              {plus_faces.x, plus_faces.y, plus_faces.z},
+              nonlinear_direction)),
+          "nonlinear variation reconstruction is available as a negative "
+          "control");
+      bool differs_from_nonlinear_variation = false;
+      const auto find_difference = [&](ConstFaceFieldView actual,
+                                       ConstFaceFieldView nonlinear) {
+        for (std::int32_t z = 0; z < actual.extents.z; ++z) {
+          for (std::int32_t y = 0; y < actual.extents.y; ++y) {
+            for (std::int32_t x = 0; x < actual.extents.x; ++x) {
+              const Int3 face{x, y, z};
+              differs_from_nonlinear_variation =
+                  differs_from_nonlinear_variation ||
+                  !direction_close(actual.unchecked(face),
+                                   nonlinear.unchecked(face));
+            }
+          }
+        }
+      };
+      find_difference(derivative.x, nonlinear_direction.x);
+      find_difference(derivative.y, nonlinear_direction.y);
+      find_difference(derivative.z, nonlinear_direction.z);
+      passed &= expect(
+          differs_from_nonlinear_variation,
+          "variation is not passed through a fresh nonlinear limiter");
+    }
+  }
+  return passed;
+}
+
+bool test_frozen_direction_analytic_branches(
+    const CartesianKernelPlan& plan) {
+  FaceFluxStorage flux_owner;
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxView flux;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  bool passed = expect(
+      static_cast<bool>(FaceFluxStorage::allocate_workspace(
+          kCells, 1U, flux_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(flux_owner.workspace_view(0U, 551U, flux)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 552U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 553U, derivative_faces)),
+      "analytic branch oracle owns disjoint face storage");
+  if (!passed) return false;
+  fill_faces(flux, 1.0);
+  for (std::int32_t z = 0; z < flux.x.extents.z; ++z) {
+    for (std::int32_t y = 0; y < flux.x.extents.y; ++y) {
+      flux.x.unchecked({2, y, z}) = -1.0;
+    }
+  }
+
+  const std::array<double, 9U> x_increments{
+      1.0, -1.0, -1.7, 4.0, 1.0, 1.4, 0.7, 2.0, 0.9};
+  const std::array<double, 8U> y_increments{
+      1.0, 2.0, 0.7, 4.0, 1.1, 0.45, 2.2, 0.8};
+  const std::array<double, 7U> z_increments{
+      1.0, 4.0, 1.2, 0.5, 2.4, 0.9, 1.7};
+  std::array<double, 10U> x_values{};
+  std::array<double, 9U> y_values{};
+  std::array<double, 8U> z_values{};
+  for (std::size_t i = 0U; i < x_increments.size(); ++i)
+    x_values[i + 1U] = x_values[i] + x_increments[i];
+  for (std::size_t i = 0U; i < y_increments.size(); ++i)
+    y_values[i + 1U] = y_values[i] + y_increments[i];
+  for (std::size_t i = 0U; i < z_increments.size(); ++i)
+    z_values[i + 1U] = z_values[i] + z_increments[i];
+
+  OwnedField target = make_field(103U, kCells, 1U, 2U, 751U);
+  OwnedField variation = make_field(104U, kCells, 1U, 2U, 752U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        target.view.unchecked({x, y, z}, 0U) =
+            x_values[static_cast<std::size_t>(x + 2)] +
+            y_values[static_cast<std::size_t>(y + 2)] +
+            z_values[static_cast<std::size_t>(z + 2)];
+        const double xd = static_cast<double>(x);
+        const double yd = static_cast<double>(y);
+        const double zd = static_cast<double>(z);
+        variation.view.unchecked({x, y, z}, 0U) =
+            10.0 + 0.31 * xd * xd - 0.23 * yd * yd +
+            0.41 * zd * zd + 0.07 * xd * yd - 0.05 * yd * zd;
+      }
+    }
+  }
+  const FrozenConvectionContext context{
+      UINT64_C(0x9b715cf2a80634de), 753U};
+  FrozenConvectionFaceField frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, frozen)),
+      "analytic target branch field freezes exactly");
+  FrozenConvectionFaceDirectionalDerivative derivative;
+  passed &= expect(
+      static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          derivative)) &&
+          derivative.valid() && derivative.classical_everywhere,
+      "all analytic target branches have classical derivatives");
+
+  const Int3 x_zero_face{0, 1, 1};
+  const double x_zero_oracle =
+      variation.view.unchecked({-1, 1, 1}, 0U);
+  const Int3 y_centred_face{1, 0, 1};
+  const double y_left = variation.view.unchecked({1, -1, 1}, 0U);
+  const double y_delta_left =
+      y_left - variation.view.unchecked({1, -2, 1}, 0U);
+  const double y_delta_right =
+      variation.view.unchecked({1, 0, 1}, 0U) - y_left;
+  const double y_centred_oracle =
+      y_left + 0.25 * (y_delta_left + y_delta_right);
+  const Int3 z_left_delta_face{1, 1, 0};
+  const double z_left = variation.view.unchecked({1, 1, -1}, 0U);
+  const double z_left_delta_oracle =
+      z_left +
+      (z_left - variation.view.unchecked({1, 1, -2}, 0U));
+  const Int3 x_right_delta_face{2, 1, 1};
+  const double x_right = variation.view.unchecked({2, 1, 1}, 0U);
+  const double x_right_delta_oracle =
+      x_right -
+      (variation.view.unchecked({3, 1, 1}, 0U) - x_right);
+  passed &= expect(
+      close(derivative.x.unchecked(x_zero_face), x_zero_oracle,
+            x_zero_oracle) &&
+          close(derivative.y.unchecked(y_centred_face), y_centred_oracle,
+                y_centred_oracle) &&
+          close(derivative.z.unchecked(z_left_delta_face),
+                z_left_delta_oracle, z_left_delta_oracle) &&
+          close(derivative.x.unchecked(x_right_delta_face),
+                x_right_delta_oracle, x_right_delta_oracle),
+      "independent oracle covers zero/centred/left-delta/right-delta across "
+      "three axes, both donors, and boundary ghosts");
+
+  FrozenConvectionFaceDirectionalDerivative semismooth_on_smooth;
+  passed &= expect(
+      static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::
+              semismooth_generalized_zero_slope,
+          frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          semismooth_on_smooth)) &&
+          semismooth_on_smooth.classical_everywhere &&
+          semismooth_on_smooth.generalized_face_count == 0U &&
+          semismooth_on_smooth.reconstruction != derivative.reconstruction,
+      "linearization policy changes collective semantics even when all "
+      "faces are classical");
+
+  FrozenConvectionFaceField limited_frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, limited_frozen)),
+      "mixed limited-central target branches freeze");
+  FrozenConvectionFaceDirectionalDerivative limited_derivative;
+  passed &= expect(
+      static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          limited_frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          limited_derivative)),
+      "mixed limited-central target branches differentiate");
+  const double mixed_left = variation.view.unchecked({-1, 1, 1}, 0U);
+  const double mixed_right = variation.view.unchecked({0, 1, 1}, 0U);
+  const double mixed_right_delta_left = mixed_right - mixed_left;
+  const double mixed_right_delta_right =
+      variation.view.unchecked({1, 1, 1}, 0U) - mixed_right;
+  const double mixed_right_centred =
+      0.5 * (mixed_right_delta_left + mixed_right_delta_right);
+  const double mixed_limited_oracle =
+      0.5 * (mixed_left + mixed_right - 0.5 * mixed_right_centred);
+  passed &= expect(
+      close(limited_derivative.x.unchecked(x_zero_face),
+            mixed_limited_oracle, mixed_limited_oracle),
+      "limited-central independently combines zero and centred branches");
+  return passed;
+}
+
+bool test_constant_semismooth_and_zero_limiter(
+    const CartesianKernelPlan& classical_plan,
+    const CartesianKernelPlan& zero_limiter_plan) {
+  FaceFluxStorage flux_owner;
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxView flux;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  bool passed = expect(
+      static_cast<bool>(FaceFluxStorage::allocate_workspace(
+          kCells, 1U, flux_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(flux_owner.workspace_view(0U, 561U, flux)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 562U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 563U, derivative_faces)),
+      "constant-policy tests own disjoint face storage");
+  if (!passed) return false;
+  const auto fill_signed_flux = [](FaceFieldView faces, int axis) {
+    for (std::int32_t z = 0; z < faces.extents.z; ++z) {
+      for (std::int32_t y = 0; y < faces.extents.y; ++y) {
+        for (std::int32_t x = 0; x < faces.extents.x; ++x) {
+          faces.unchecked({x, y, z}) =
+              ((x + 2 * y + 3 * z + axis) & 1) == 0 ? 0.7 : -0.9;
+        }
+      }
+    }
+  };
+  fill_signed_flux(flux.x, 0);
+  fill_signed_flux(flux.y, 1);
+  fill_signed_flux(flux.z, 2);
+  OwnedField target = make_field(105U, kCells, 1U, 2U, 761U);
+  OwnedField variation = make_field(106U, kCells, 1U, 2U, 762U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        target.view.unchecked({x, y, z}, 0U) = 7.25;
+        variation.view.unchecked({x, y, z}, 0U) =
+            -0.4 + 0.11 * x - 0.07 * y + 0.13 * z + 0.017 * x * y;
+      }
+    }
+  }
+  const FrozenConvectionContext context{
+      UINT64_C(0x36a19df807c254be), 763U};
+  const std::uint64_t face_count =
+      static_cast<std::uint64_t>(kCells.x + 1) * kCells.y * kCells.z +
+      static_cast<std::uint64_t>(kCells.x) * (kCells.y + 1) * kCells.z +
+      static_cast<std::uint64_t>(kCells.x) * kCells.y * (kCells.z + 1);
+  const auto analytic_faces = [&](ConvectionScheme scheme,
+                                  const FrozenConvectionFaceDirectionalDerivative&
+                                      derivative) {
+    bool correct = true;
+    const auto check_axis = [&](ConstFaceFieldView actual,
+                                ConstFaceFieldView rates,
+                                CartesianAxis axis) {
+      bool axis_correct = true;
+      for (std::int32_t z = 0; z < actual.extents.z; ++z) {
+        for (std::int32_t y = 0; y < actual.extents.y; ++y) {
+          for (std::int32_t x = 0; x < actual.extents.x; ++x) {
+            const Int3 right{x, y, z};
+            Int3 left = right;
+            if (axis == CartesianAxis::x)
+              --left.x;
+            else if (axis == CartesianAxis::y)
+              --left.y;
+            else
+              --left.z;
+            const double left_value =
+                variation.view.unchecked(left, 0U);
+            const double right_value =
+                variation.view.unchecked(right, 0U);
+            const double expected =
+                scheme == ConvectionScheme::limited_central2
+                    ? 0.5 * (left_value + right_value)
+                    : (rates.unchecked(right) >= 0.0 ? left_value
+                                                     : right_value);
+            axis_correct &=
+                close(actual.unchecked(right), expected, expected);
+          }
+        }
+      }
+      return axis_correct;
+    };
+    correct &= check_axis(derivative.x, as_const(flux.x), CartesianAxis::x);
+    correct &= check_axis(derivative.y, as_const(flux.y), CartesianAxis::y);
+    correct &= check_axis(derivative.z, as_const(flux.z), CartesianAxis::z);
+    return correct;
+  };
+
+  const std::array<ConvectionScheme, 2U> schemes{
+      ConvectionScheme::limited_central2, ConvectionScheme::tvd2};
+  for (ConvectionScheme scheme : schemes) {
+    FrozenConvectionFaceField frozen;
+    passed &= expect(
+        static_cast<bool>(freeze_cartesian_target_convection_faces(
+            classical_plan, scheme, as_const(flux), as_const(target.view), 0U,
+            context, {frozen_faces.x, frozen_faces.y, frozen_faces.z},
+            frozen)),
+        "constant target freezes under nonzero limiter");
+    fill_faces(derivative_faces, 919.0);
+    const std::uint64_t before = face_checksum(as_const(derivative_faces));
+    FrozenConvectionFaceDirectionalDerivative classical_rejected;
+    const Status classical_status =
+        differentiate_frozen_cartesian_target_convection_faces(
+            classical_plan, scheme, as_const(flux), as_const(target.view), 0U,
+            context,
+            FrozenConvectionLinearizationPolicy::classical_active_branch,
+            frozen, as_const(variation.view), 0U,
+            {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+            classical_rejected);
+    passed &= expect(classical_status.code == StatusCode::numerical_failure &&
+                         !classical_rejected.valid() &&
+                         face_checksum(as_const(derivative_faces)) == before,
+                     "classical constant limiter kink fails before writes");
+
+    FrozenConvectionFaceDirectionalDerivative generalized;
+    passed &= expect(
+        static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+            classical_plan, scheme, as_const(flux), as_const(target.view), 0U,
+            context,
+            FrozenConvectionLinearizationPolicy::
+                semismooth_generalized_zero_slope,
+            frozen, as_const(variation.view), 0U,
+            {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+            generalized)) &&
+            generalized.valid() && !generalized.classical_everywhere &&
+            generalized.generalized_face_count == face_count &&
+            analytic_faces(scheme, generalized),
+        "semismooth constant field uses zero slope on every face");
+
+    FrozenConvectionFaceField zero_frozen;
+    passed &= expect(
+        static_cast<bool>(freeze_cartesian_target_convection_faces(
+            zero_limiter_plan, scheme, as_const(flux), as_const(target.view),
+            0U, context,
+            {frozen_faces.x, frozen_faces.y, frozen_faces.z}, zero_frozen)),
+        "constant target freezes under limiter zero");
+    FrozenConvectionFaceDirectionalDerivative zero_derivative;
+    passed &= expect(
+        static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+            zero_limiter_plan, scheme, as_const(flux), as_const(target.view),
+            0U, context,
+            FrozenConvectionLinearizationPolicy::classical_active_branch,
+            zero_frozen, as_const(variation.view), 0U,
+            {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+            zero_derivative)) &&
+            zero_derivative.valid() && zero_derivative.classical_everywhere &&
+            zero_derivative.generalized_face_count == 0U &&
+            analytic_faces(scheme, zero_derivative),
+        "limiter zero is globally classical with zero slope derivative");
+  }
+  return passed;
+}
+
+bool test_subnormal_same_sign_limiter(const CartesianKernelPlan& plan) {
+  FaceFluxStorage flux_owner;
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxView flux;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  bool passed = expect(
+      static_cast<bool>(FaceFluxStorage::allocate_workspace(
+          kCells, 1U, flux_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(flux_owner.workspace_view(0U, 571U, flux)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 572U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 573U, derivative_faces)),
+      "subnormal limiter test owns disjoint face storage");
+  if (!passed) return false;
+  fill_faces(flux, 1.0);
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  passed &= expect(denormal > 0.0,
+                   "platform exposes positive binary64 subnormals");
+  OwnedField target = make_field(107U, kCells, 1U, 2U, 771U);
+  OwnedField variation = make_field(108U, kCells, 1U, 2U, 772U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        const double coefficient =
+            static_cast<double>(40 + 2 * x + 4 * y + 8 * z);
+        target.view.unchecked({x, y, z}, 0U) = denormal * coefficient;
+        variation.view.unchecked({x, y, z}, 0U) =
+            3.0 + 0.21 * x * x - 0.17 * y + 0.09 * z * z;
+      }
+    }
+  }
+  const FrozenConvectionContext context{
+      UINT64_C(0x7ca15e2904b863df), 773U};
+  FrozenConvectionFaceField frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, frozen)),
+      "same-sign subnormal TVD target freezes");
+  const Int3 selected_face{1, 1, 1};
+  const double target_left = target.view.unchecked({0, 1, 1}, 0U);
+  const double target_right = target.view.unchecked({1, 1, 1}, 0U);
+  const double target_oracle = 0.5 * (target_left + target_right);
+  passed &= expect(bits(frozen.x.unchecked(selected_face)) ==
+                       bits(target_oracle) &&
+                       bits(target_oracle) != bits(target_left),
+                   "production minmod preserves same-sign subnormal slope");
+
+  FrozenConvectionFaceDirectionalDerivative derivative;
+  const Status derivative_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          derivative);
+  const bool derivative_available =
+      static_cast<bool>(derivative_status) && derivative.valid() &&
+      derivative.classical_everywhere;
+  passed &= expect(
+      derivative_available,
+      "same-sign subnormal target selects a classical centred branch");
+  const double variation_left =
+      variation.view.unchecked({0, 1, 1}, 0U);
+  const double variation_delta_left =
+      variation_left - variation.view.unchecked({-1, 1, 1}, 0U);
+  const double variation_delta_right =
+      variation.view.unchecked({1, 1, 1}, 0U) - variation_left;
+  const double direction_oracle =
+      variation_left +
+      0.25 * (variation_delta_left + variation_delta_right);
+  passed &= expect(derivative_available &&
+                       close(derivative.x.unchecked(selected_face),
+                             direction_oracle, direction_oracle),
+                   "subnormal production value and selected derivative "
+                   "branch share one sign-safe minmod decision");
+  return passed;
+}
+
+bool test_stretched_direction_oracle(const KernelFixture& fixture) {
+  FaceFluxStorage flux_owner;
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxView flux;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  bool passed = expect(
+      fixture.geometry.kind() == GeometryKind::tensor_stretched &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, flux_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(flux_owner.workspace_view(0U, 581U, flux)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 582U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 583U, derivative_faces)),
+      "stretched oracle owns a tensor metric and disjoint face storage");
+  if (!passed) return false;
+  const auto nonuniform = [](Span<const double> widths) {
+    for (std::size_t i = 1U; i < widths.size; ++i) {
+      if (bits(widths.data[i]) != bits(widths.data[0U])) return true;
+    }
+    return false;
+  };
+  passed &= expect(nonuniform(fixture.geometry.x().widths()) ||
+                       nonuniform(fixture.geometry.y().widths()) ||
+                       nonuniform(fixture.geometry.z().widths()),
+                   "tensor metric contains genuinely stretched widths");
+  fill_faces(flux, 0.6);
+  OwnedField target = make_field(109U, kCells, 1U, 2U, 781U);
+  OwnedField variation = make_field(110U, kCells, 1U, 2U, 782U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        target.view.unchecked({x, y, z}, 0U) =
+            2.0 + 0.13 * x - 0.09 * y + 0.07 * z + 0.011 * x * z;
+        variation.view.unchecked({x, y, z}, 0U) =
+            -1.0 + 0.17 * x * x + 0.08 * y - 0.12 * z * z +
+            0.019 * x * y;
+      }
+    }
+  }
+  const FrozenConvectionContext context{
+      UINT64_C(0x51e29ab8047c63df), 783U};
+  FrozenConvectionFaceField frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          fixture.kernels, ConvectionScheme::central2, as_const(flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, frozen)),
+      "stretched central target freezes");
+  FrozenConvectionFaceDirectionalDerivative derivative;
+  passed &= expect(
+      static_cast<bool>(differentiate_frozen_cartesian_target_convection_faces(
+          fixture.kernels, ConvectionScheme::central2, as_const(flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          derivative)) &&
+          derivative.classical_everywhere,
+      "stretched central target differentiates classically");
+
+  const auto interpolate = [](Span<const double> faces,
+                              Span<const double> centres,
+                              std::int32_t face, double left,
+                              double right) {
+    const double face_coordinate = faces.data[face];
+    const double left_distance = face_coordinate - centres.data[face - 1];
+    const double right_distance = centres.data[face] - face_coordinate;
+    return (right_distance * left + left_distance * right) /
+           (left_distance + right_distance);
+  };
+  const Int3 x_face{2, 1, 1};
+  const Int3 y_face{1, 2, 1};
+  const Int3 z_face{1, 1, 2};
+  const double x_oracle = interpolate(
+      fixture.geometry.x().faces(), fixture.geometry.x().centres(), 2,
+      variation.view.unchecked({1, 1, 1}, 0U),
+      variation.view.unchecked({2, 1, 1}, 0U));
+  const double y_oracle = interpolate(
+      fixture.geometry.y().faces(), fixture.geometry.y().centres(), 2,
+      variation.view.unchecked({1, 1, 1}, 0U),
+      variation.view.unchecked({1, 2, 1}, 0U));
+  const double z_oracle = interpolate(
+      fixture.geometry.z().faces(), fixture.geometry.z().centres(), 2,
+      variation.view.unchecked({1, 1, 1}, 0U),
+      variation.view.unchecked({1, 1, 2}, 0U));
+  passed &= expect(
+      close(derivative.x.unchecked(x_face), x_oracle, x_oracle) &&
+          close(derivative.y.unchecked(y_face), y_oracle, y_oracle) &&
+          close(derivative.z.unchecked(z_face), z_oracle, z_oracle),
+      "independent metric-distance oracle covers all stretched axes");
+  return passed;
+}
+
+bool test_frozen_target_direction_fail_closed(
+    const CartesianKernelPlan& plan, FaceFluxView target_flux) {
+  FaceFluxStorage frozen_owner;
+  FaceFluxStorage derivative_owner;
+  FaceFluxView frozen_faces;
+  FaceFluxView derivative_faces;
+  bool passed = expect(
+      static_cast<bool>(FaceFluxStorage::allocate_workspace(
+          kCells, 1U, frozen_owner)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              kCells, 1U, derivative_owner)) &&
+          static_cast<bool>(frozen_owner.workspace_view(0U, 601U,
+                                                        frozen_faces)) &&
+          static_cast<bool>(derivative_owner.workspace_view(
+              0U, 602U, derivative_faces)),
+      "failure tests own disjoint frozen and derivative face storage");
+  if (!passed) return false;
+
+  OwnedField target = make_field(101U, kCells, 1U, 2U, 701U);
+  OwnedField variation = make_field(102U, kCells, 1U, 2U, 702U);
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        const double xd = static_cast<double>(x);
+        const double yd = static_cast<double>(y);
+        const double zd = static_cast<double>(z);
+        target.view.unchecked({x, y, z}, 0U) =
+            4.0 + 0.181 * xd + 0.0217 * xd * xd +
+            0.00213 * xd * xd * xd + 0.119 * yd + 0.0113 * yd * yd +
+            0.00191 * yd * yd * yd + 0.083 * zd + 0.0149 * zd * zd +
+            0.00119 * zd * zd * zd + 0.0037 * xd * yd;
+        variation.view.unchecked({x, y, z}, 0U) =
+            -0.2 + 0.037 * xd * xd - 0.029 * yd + 0.023 * zd * zd +
+            0.013 * xd * zd;
+      }
+    }
+  }
+  const FrozenConvectionContext context{
+      UINT64_C(0xd204e5a6713cb98f), 703U};
+  FrozenConvectionFaceField frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, frozen)),
+      "smooth limited target freezes for failure-path tests");
+
+  fill_faces(derivative_faces, 811.0);
+  const std::uint64_t untouched = face_checksum(as_const(derivative_faces));
+  const auto rejected_without_write =
+      [&](const FrozenConvectionFaceField& authority,
+          ConstFieldView direction,
+          FrozenConvectionFaceOutput output) {
+        FrozenConvectionFaceDirectionalDerivative rejected;
+        const Status status =
+            differentiate_frozen_cartesian_target_convection_faces(
+                plan, ConvectionScheme::limited_central2,
+                as_const(target_flux), as_const(target.view), 0U, context,
+                FrozenConvectionLinearizationPolicy::classical_active_branch,
+                authority, direction, 0U, output, rejected);
+        return status.code == StatusCode::invalid_plan && !rejected.valid() &&
+               face_checksum(as_const(derivative_faces)) == untouched;
+      };
+  FrozenConvectionFaceField stale_revision = frozen;
+  ++stale_revision.revision;
+  FrozenConvectionFaceField stale_local = frozen;
+  ++stale_local.local_binding;
+  passed &= expect(
+      rejected_without_write(
+          stale_revision, as_const(variation.view),
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z}) &&
+          rejected_without_write(
+              stale_local, as_const(variation.view),
+              {derivative_faces.x, derivative_faces.y,
+               derivative_faces.z}),
+      "stale frozen revision/local binding fail closed");
+
+  const double saved_frozen_byte = frozen_faces.z.unchecked(
+      {frozen_faces.z.extents.x - 1, frozen_faces.z.extents.y - 1,
+       frozen_faces.z.extents.z - 1});
+  frozen_faces.z.unchecked(
+      {frozen_faces.z.extents.x - 1, frozen_faces.z.extents.y - 1,
+       frozen_faces.z.extents.z - 1}) = saved_frozen_byte + 0.25;
+  passed &= expect(
+      rejected_without_write(
+          frozen, as_const(variation.view),
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z}),
+      "raw frozen face-byte mutation fails numeric sealing");
+  frozen_faces.z.unchecked(
+      {frozen_faces.z.extents.x - 1, frozen_faces.z.extents.y - 1,
+       frozen_faces.z.extents.z - 1}) = saved_frozen_byte;
+
+  const std::vector<double> saved_target_bytes = target.allocation;
+  for (double& value : target.allocation) value += 0.375;
+  passed &= expect(
+      rejected_without_write(
+          frozen, as_const(variation.view),
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z}),
+      "same-branch raw target shift fails frozen numeric comparison");
+  std::copy(saved_target_bytes.begin(), saved_target_bytes.end(),
+            target.allocation.begin());
+
+  const std::uint64_t flux_before = face_checksum(as_const(target_flux));
+  FrozenConvectionFaceDirectionalDerivative alias_rejected;
+  const Status alias_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch, frozen,
+          as_const(variation.view), 0U,
+          {target_flux.x, target_flux.y, target_flux.z}, alias_rejected);
+  passed &= expect(alias_status.code == StatusCode::invalid_plan &&
+                       !alias_rejected.valid() &&
+                       face_checksum(as_const(target_flux)) == flux_before,
+                   "direction output may not alias target flux storage");
+
+  const double saved_nan = variation.view.unchecked({0, 0, -2}, 0U);
+  variation.view.unchecked({0, 0, -2}, 0U) =
+      std::numeric_limits<double>::quiet_NaN();
+  FrozenConvectionFaceDirectionalDerivative nonfinite_rejected;
+  const Status nonfinite_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch, frozen,
+          as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          nonfinite_rejected);
+  passed &= expect(nonfinite_status.code == StatusCode::numerical_failure &&
+                       !nonfinite_rejected.valid() &&
+                       face_checksum(as_const(derivative_faces)) == untouched,
+                   "z-only non-finite direction rejects before x/y/z writes");
+  variation.view.unchecked({0, 0, -2}, 0U) = saved_nan;
+
+  const std::array<double, 10U> tied_x{
+      0.0, 1.0, 4.0, 8.75, 14.2, 20.9, 28.8, 37.95, 48.4, 60.2};
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        target.view.unchecked({x, y, z}, 0U) =
+            tied_x[static_cast<std::size_t>(x + 2)] + 0.125 * y +
+            0.0625 * z;
+      }
+    }
+  }
+  ++target.view.revision;
+  FrozenConvectionFaceField tied_frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, tied_frozen)),
+      "finite limiter-tie target still has an exact nonlinear reconstruction");
+  FrozenConvectionFaceDirectionalDerivative tie_rejected;
+  const Status tie_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          tied_frozen,
+          as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          tie_rejected);
+  passed &= expect(tie_status.code == StatusCode::numerical_failure &&
+                       !tie_rejected.valid() &&
+                       face_checksum(as_const(derivative_faces)) == untouched,
+                   "limiter active-branch tie has no fabricated Jacobian");
+  FrozenConvectionFaceDirectionalDerivative tie_generalized;
+  const Status tie_generalized_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::limited_central2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::
+              semismooth_generalized_zero_slope,
+          tied_frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          tie_generalized);
+  const double tie_oracle =
+      0.5 * (variation.view.unchecked({-1, 0, 0}, 0U) +
+             variation.view.unchecked({0, 0, 0}, 0U));
+  passed &= expect(
+      static_cast<bool>(tie_generalized_status) &&
+          tie_generalized.valid() && !tie_generalized.classical_everywhere &&
+          tie_generalized.generalized_face_count > 0U &&
+          tie_generalized.policy ==
+              FrozenConvectionLinearizationPolicy::
+                  semismooth_generalized_zero_slope &&
+          close(derivative_faces.x.unchecked({0, 0, 0}), tie_oracle,
+                tie_oracle),
+      "explicit semismooth policy gives limiter tie zero slope derivative");
+  fill_faces(derivative_faces, 811.0);
+
+  const std::array<double, 10U> kinked_x{
+      0.0, 0.0, 1.0, 3.5, 7.2, 12.1, 18.4, 26.0, 34.9, 45.3};
+  for (std::int32_t z = -2; z < kCells.z + 2; ++z) {
+    for (std::int32_t y = -2; y < kCells.y + 2; ++y) {
+      for (std::int32_t x = -2; x < kCells.x + 2; ++x) {
+        target.view.unchecked({x, y, z}, 0U) =
+            kinked_x[static_cast<std::size_t>(x + 2)] + 0.125 * y +
+            0.0625 * z;
+      }
+    }
+  }
+  ++target.view.revision;
+  FrozenConvectionFaceField kinked_frozen;
+  passed &= expect(
+      static_cast<bool>(freeze_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          {frozen_faces.x, frozen_faces.y, frozen_faces.z}, kinked_frozen)),
+      "finite zero-slope kink still has an exact nonlinear reconstruction");
+  FrozenConvectionFaceDirectionalDerivative kink_rejected;
+  const Status kink_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::classical_active_branch,
+          kinked_frozen,
+          as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          kink_rejected);
+  passed &= expect(kink_status.code == StatusCode::numerical_failure &&
+                       !kink_rejected.valid() &&
+                       face_checksum(as_const(derivative_faces)) == untouched,
+                   "zero-slope minmod kink fails closed before writes");
+  FrozenConvectionFaceDirectionalDerivative kink_generalized;
+  const Status kink_generalized_status =
+      differentiate_frozen_cartesian_target_convection_faces(
+          plan, ConvectionScheme::tvd2, as_const(target_flux),
+          as_const(target.view), 0U, context,
+          FrozenConvectionLinearizationPolicy::
+              semismooth_generalized_zero_slope,
+          kinked_frozen, as_const(variation.view), 0U,
+          {derivative_faces.x, derivative_faces.y, derivative_faces.z},
+          kink_generalized);
+  const double kink_oracle =
+      target_flux.x.unchecked({0, 0, 0}) >= 0.0
+          ? variation.view.unchecked({-1, 0, 0}, 0U)
+          : variation.view.unchecked({0, 0, 0}, 0U);
+  passed &= expect(
+      static_cast<bool>(kink_generalized_status) &&
+          kink_generalized.valid() &&
+          kink_generalized.generalized_face_count > 0U &&
+          close(derivative_faces.x.unchecked({0, 0, 0}), kink_oracle,
+                kink_oracle),
+      "explicit semismooth TVD kink keeps only the frozen donor value");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1511,9 +2790,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   KernelFixture fixture;
+  KernelFixture zero_limiter_fixture;
+  KernelFixture stretched_fixture;
   FaceFluxStorage storage;
   FaceFluxView raw_flux;
   bool passed = make_kernel_fixture(fixture);
+  passed &= make_kernel_fixture(zero_limiter_fixture, mesh_spec(), 0.0);
+  passed &= make_kernel_fixture(stretched_fixture, stretched_mesh_spec(), 1.0);
   passed &= test_face_layout(storage, raw_flux);
   if (passed) {
     passed &= test_shared_face_and_global_conservation(fixture.kernels,
@@ -1523,8 +2806,20 @@ int main(int argc, char** argv) {
     passed &= test_alias_mutations(fixture.kernels, raw_flux);
     passed &= test_convection_revision_and_hot_counters(fixture.kernels,
                                                         raw_flux);
+    passed &= test_frozen_target_convection_faces(fixture.kernels, storage,
+                                                   raw_flux);
+    passed &= test_frozen_target_convection_directional_derivative(
+        fixture.kernels, as_const(raw_flux));
+    passed &= test_frozen_direction_analytic_branches(fixture.kernels);
+    passed &= test_constant_semismooth_and_zero_limiter(
+        fixture.kernels, zero_limiter_fixture.kernels);
+    passed &= test_subnormal_same_sign_limiter(fixture.kernels);
+    passed &= test_stretched_direction_oracle(stretched_fixture);
+    passed &= test_frozen_target_direction_fail_closed(fixture.kernels,
+                                                       raw_flux);
     passed &= test_final_flux_authority(fixture.kernels);
     passed &= test_final_flux_lifetime_fail_closed(fixture.kernels);
+    passed &= test_point_convection_diagnostic(fixture.kernels);
   }
   if (passed) {
     std::cout << "v0.4 conservative face-flux tests passed\n";

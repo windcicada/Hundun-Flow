@@ -258,6 +258,67 @@ int main(int argc, char** argv) {
                    rank,
                    "nonuniform T/Y/pi/V reaches 5e-12 mass and the 20-percent "
                    "bound requires four updates plus the convergence check");
+
+  CartesianMeshSpec direct_mesh;
+  direct_mesh.kind = GeometryKind::uniform;
+  direct_mesh.lower = {0.0, 0.0, 0.0};
+  direct_mesh.upper = {static_cast<double>(kLocalCells * size), 1.0, 1.0};
+  direct_mesh.has_exact_cells = true;
+  direct_mesh.exact_cells = {
+      static_cast<std::int32_t>(kLocalCells * size), 1, 1};
+  direct_mesh.minimum_spacing = {1.0, 1.0, 1.0};
+  direct_mesh.max_growth_ratio = 1.0;
+  direct_mesh.limits.max_global_cells = kLocalCells * size;
+  direct_mesh.limits.max_memory_bytes_per_rank = 1U << 24U;
+  CartesianGeometryPlan direct_geometry;
+  MeshPatch direct_patch;
+  passed &= expect(
+      static_cast<bool>(CartesianGeometryCompiler::compile(
+          MPI_COMM_WORLD, direct_mesh, {}, direct_geometry, direct_patch)) &&
+          direct_patch.cells.x == static_cast<std::int32_t>(kLocalCells) &&
+          direct_patch.cells.y == 1 && direct_patch.cells.z == 1,
+      rank, "direct-view closed-mass geometry decomposes without packing");
+  const auto direct_view = [&](const std::vector<double>& values,
+                               FieldId field, RevisionToken revision,
+                               StorageIdentity storage) {
+    return ConstFieldView{values.data(), direct_patch.cells, {0, 0, 0}, 1U,
+                          static_cast<std::size_t>(direct_patch.cells.x),
+                          static_cast<std::size_t>(direct_patch.cells.x),
+                          values.size(), 0U, field, revision, storage, 991U};
+  };
+  const ConstFieldView direct_pi =
+      direct_view(fixture.pressure_perturbation, 20U, 901U, 1901U);
+  const ConstFieldView direct_h =
+      direct_view(fixture.enthalpy, 21U, 902U, 1902U);
+  const ConstFieldView direct_y =
+      direct_view(fixture.independent_mass_fraction, 22U, 903U, 1903U);
+  const std::array<ConstFieldView, 1U> direct_species{direct_y};
+  ClosedMassFieldView direct_cells{
+      direct_pi,
+      direct_h,
+      {direct_species.data(), direct_species.size()},
+      &direct_geometry,
+      direct_patch,
+      {fixture.active.data(), fixture.active.size()},
+      904U};
+  Fixture unit_volume = fixture;
+  std::fill(unit_volume.volume.begin(), unit_volume.volume.end(), 1.0);
+  double direct_target_mass = 0.0;
+  passed &= expect(oracle_global_mass(MPI_COMM_WORLD, unit_volume,
+                                     target_pressure, direct_target_mass),
+                   rank, "direct-view target uses geometry-owned volume");
+  ClosedMassResult direct_result;
+  const Status direct_status = closed.solve_fields(
+      MPI_COMM_WORLD, thermodynamics, direct_cells, direct_target_mass,
+      initial_pressure, direct_result);
+  passed &= expected_collective_status(
+      MPI_COMM_WORLD, direct_status, StatusCode::ok, rank,
+      "strided field-view closed-mass solve succeeds collectively");
+  passed &= expect(
+      near_relative(direct_result.pressure_reference, target_pressure,
+                    5.0e-12) &&
+          near_relative(direct_result.mass, direct_target_mass, 5.0e-12),
+      rank, "field-view solve matches the independent EOS oracle");
   passed &= expect(identical_double(MPI_COMM_WORLD,
                                     result.pressure_reference),
                    rank, "all ranks publish one bitwise pressure result");

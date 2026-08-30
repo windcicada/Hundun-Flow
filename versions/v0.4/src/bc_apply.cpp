@@ -15,6 +15,7 @@ constexpr std::uint32_t kApplyStage = 301U;
 constexpr std::uint32_t kApplyField = 302U;
 constexpr std::uint32_t kApplyView = 303U;
 constexpr std::uint32_t kApplyParameter = 304U;
+constexpr std::uint32_t kApplyHomogeneousAuthority = 305U;
 
 constexpr std::size_t face_index(CartesianFace face) noexcept {
   return static_cast<std::size_t>(face);
@@ -176,6 +177,195 @@ bool finite(double value) noexcept { return std::isfinite(value); }
 
 bool finite(Real3 value) noexcept {
   return finite(value.x) && finite(value.y) && finite(value.z);
+}
+
+bool valid_relation_source(const BoundaryIndexSpan& span) noexcept;
+Int3 interior_index(CartesianFace face, const FieldView& view,
+                    std::int32_t layer, std::int32_t inner,
+                    std::int32_t outer) noexcept;
+Int3 ghost_index(CartesianFace face, const FieldView& view,
+                 std::int32_t layer, std::int32_t inner,
+                 std::int32_t outer) noexcept;
+
+bool declared_scalar_source(BoundaryStage stage, const BoundaryPlan& plan,
+                            FieldId field) noexcept {
+  if (stage == BoundaryStage::pressure) {
+    return field == plan.pressure_field();
+  }
+  if (stage == BoundaryStage::enthalpy) {
+    return field == plan.enthalpy_field();
+  }
+  if (stage != BoundaryStage::scalar) {
+    return false;
+  }
+  const Span<const BoundaryTransportedField> transported =
+      plan.transported_fields();
+  for (std::size_t index = 0U; index < transported.size; ++index) {
+    if (transported.data[index].field == field) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool homogeneous_scalar_relation(BoundaryRelation relation) noexcept {
+  return relation == BoundaryRelation::dirichlet ||
+         relation == BoundaryRelation::zero_gradient ||
+         relation == BoundaryRelation::normal_gradient ||
+         relation == BoundaryRelation::convective;
+}
+
+bool valid_homogeneous_scalar_view(const BoundaryPlan& plan,
+                                   const FieldView& variation,
+                                   std::uint8_t reach) noexcept {
+  const Int3 cells = plan.local_cells();
+  const auto depth = static_cast<std::int32_t>(reach);
+  if (variation.base == nullptr || variation.field == 0U ||
+      variation.components != 1U || variation.revision == 0U ||
+      variation.storage_identity == 0U || variation.revision_domain == 0U ||
+      cells.x <= 0 || cells.y <= 0 || cells.z <= 0 || reach == 0U ||
+      reach > plan.required_ghost_width() || variation.interior.x != cells.x ||
+      variation.interior.y != cells.y || variation.interior.z != cells.z ||
+      variation.interior.x < depth || variation.interior.y < depth ||
+      variation.interior.z < depth || variation.ghosts.x < depth ||
+      variation.ghosts.y < depth || variation.ghosts.z < depth) {
+    return false;
+  }
+  std::size_t extent_x = 0U;
+  std::size_t extent_y = 0U;
+  std::size_t extent_z = 0U;
+  std::size_t minimum_stride_z = 0U;
+  std::size_t minimum_component_stride = 0U;
+  return checked_ghosted_extent(variation.interior.x, variation.ghosts.x,
+                                extent_x) &&
+         checked_ghosted_extent(variation.interior.y, variation.ghosts.y,
+                                extent_y) &&
+         checked_ghosted_extent(variation.interior.z, variation.ghosts.z,
+                                extent_z) &&
+         variation.stride_y >= extent_x &&
+         checked_multiply(variation.stride_y, extent_y, minimum_stride_z) &&
+         variation.stride_z >= minimum_stride_z &&
+         checked_multiply(variation.stride_z, extent_z,
+                          minimum_component_stride) &&
+         variation.component_stride >= minimum_component_stride &&
+         checked_affine_offset(variation, extent_x, extent_y, extent_z);
+}
+
+bool preflight_homogeneous_scalar_boundary(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, const FieldView& variation,
+    std::uint8_t reach) noexcept {
+  if (plan.revision() == 0U || plan.semantic_fingerprint() == 0U ||
+      plan.local_layout_fingerprint() == 0U ||
+      plan.geometry_fingerprint() == 0U ||
+      plan.required_ghost_width() == 0U ||
+      !valid_parameter_storage(plan) ||
+      !declared_scalar_source(source_stage, plan, source_field) ||
+      !valid_homogeneous_scalar_view(plan, variation, reach)) {
+    return false;
+  }
+
+  std::array<std::uint8_t, 6U> physical{};
+  std::array<std::uint8_t, 6U> matched{};
+  for (std::size_t face_number = 0U; face_number < physical.size();
+       ++face_number) {
+    const BoundaryFacePlan* face = nullptr;
+    if (!plan.face(static_cast<CartesianFace>(face_number), face) ||
+        face == nullptr) {
+      return false;
+    }
+    physical[face_number] =
+        static_cast<std::uint8_t>(face->local_owner && !face->periodic);
+  }
+
+  const Span<const BoundaryIndexSpan> spans = plan.spans();
+  for (std::size_t index = 0U; index < spans.size; ++index) {
+    const BoundaryIndexSpan& span = spans.data[index];
+    if (span.stage != source_stage || span.field != source_field) {
+      continue;
+    }
+    const std::size_t selected = face_index(span.face);
+    if (selected >= matched.size() || physical[selected] == 0U ||
+        matched[selected] != 0U ||
+        !homogeneous_scalar_relation(span.relation) ||
+        span.component_begin != 0U || span.component_count != 1U ||
+        span.ghost_layers < reach ||
+        span.parameter >= plan.parameter_count() ||
+        !valid_relation_source(span)) {
+      return false;
+    }
+    const Int3 cells = plan.local_cells();
+    const std::uint32_t expected_inner =
+        selected < 2U ? static_cast<std::uint32_t>(cells.y)
+                      : static_cast<std::uint32_t>(cells.x);
+    const std::uint32_t expected_outer =
+        selected < 4U ? static_cast<std::uint32_t>(cells.z)
+                      : static_cast<std::uint32_t>(cells.y);
+    if (span.tangent_inner_count != expected_inner ||
+        span.tangent_outer_count != expected_outer) {
+      return false;
+    }
+    matched[selected] = 1U;
+
+    const auto inner_count =
+        static_cast<std::int32_t>(span.tangent_inner_count);
+    const auto outer_count =
+        static_cast<std::int32_t>(span.tangent_outer_count);
+    for (std::int32_t outer = 0; outer < outer_count; ++outer) {
+      for (std::int32_t inner = 0; inner < inner_count; ++inner) {
+        for (std::int32_t layer = 1;
+             layer <= static_cast<std::int32_t>(reach); ++layer) {
+          const Int3 source =
+              interior_index(span.face, variation, layer, inner, outer);
+          if (!finite(variation.unchecked(source, 0U))) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  for (std::size_t face_number = 0U; face_number < physical.size();
+       ++face_number) {
+    if (physical[face_number] != matched[face_number]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void commit_homogeneous_scalar_boundary(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, FieldView variation,
+    std::uint8_t reach) noexcept {
+  const Span<const BoundaryIndexSpan> spans = plan.spans();
+  for (std::size_t index = 0U; index < spans.size; ++index) {
+    const BoundaryIndexSpan& span = spans.data[index];
+    if (span.stage != source_stage || span.field != source_field) {
+      continue;
+    }
+    const double sign =
+        span.relation == BoundaryRelation::dirichlet ||
+                span.relation == BoundaryRelation::convective
+            ? -1.0
+            : 1.0;
+    const auto inner_count =
+        static_cast<std::int32_t>(span.tangent_inner_count);
+    const auto outer_count =
+        static_cast<std::int32_t>(span.tangent_outer_count);
+    for (std::int32_t outer = 0; outer < outer_count; ++outer) {
+      for (std::int32_t inner = 0; inner < inner_count; ++inner) {
+        for (std::int32_t layer = 1;
+             layer <= static_cast<std::int32_t>(reach); ++layer) {
+          const Int3 source =
+              interior_index(span.face, variation, layer, inner, outer);
+          const Int3 destination =
+              ghost_index(span.face, variation, layer, inner, outer);
+          variation.unchecked(destination, 0U) =
+              sign * variation.unchecked(source, 0U);
+        }
+      }
+    }
+  }
 }
 
 template <class T, class Finite>
@@ -606,6 +796,84 @@ Status apply_boundary_ghosts(BoundaryStage stage, const BoundaryPlan& plan,
     }
     if (!status) {
       return status;
+    }
+  }
+  return {};
+}
+
+Status apply_homogeneous_scalar_boundary_ghosts(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, FieldView variation,
+    std::uint8_t reach) noexcept {
+  if (!preflight_homogeneous_scalar_boundary(
+          source_stage, plan, source_field, variation, reach)) {
+    return {StatusCode::invalid_plan, kApplyHomogeneousAuthority};
+  }
+  commit_homogeneous_scalar_boundary(source_stage, plan, source_field,
+                                     variation, reach);
+  return {};
+}
+
+Status apply_physical_zero_gradient(const BoundaryPlan& plan,
+                                    Span<FieldView> fields) noexcept {
+  if ((fields.size != 0U && fields.data == nullptr) ||
+      plan.semantic_fingerprint() == 0U) {
+    return {StatusCode::invalid_plan, kApplyView};
+  }
+  const Int3 cells = plan.local_cells();
+  for (std::size_t field_index = 0U; field_index < fields.size;
+       ++field_index) {
+    FieldView field = fields.data[field_index];
+    if (field.base == nullptr || field.interior.x != cells.x ||
+        field.interior.y != cells.y || field.interior.z != cells.z ||
+        field.components == 0U || field.ghosts.x <= 0 ||
+        field.ghosts.y <= 0 || field.ghosts.z <= 0) {
+      return {StatusCode::invalid_plan, kApplyView};
+    }
+    const std::int32_t reach =
+        std::min({field.ghosts.x, field.ghosts.y, field.ghosts.z});
+    for (std::int32_t layer = 1; layer <= reach; ++layer) {
+      for (std::size_t face_index = 0U; face_index < 6U; ++face_index) {
+        const BoundaryFacePlan* face = nullptr;
+        if (!plan.face(static_cast<CartesianFace>(face_index), face) ||
+            face == nullptr) {
+          return {StatusCode::invalid_plan, kApplyView};
+        }
+        if (!face->local_owner || face->periodic) continue;
+        const bool high = (face_index & 1U) != 0U;
+        const CartesianAxis axis =
+            face_index < 2U ? CartesianAxis::x
+                            : (face_index < 4U ? CartesianAxis::y
+                                               : CartesianAxis::z);
+        const std::int32_t inner_count =
+            axis == CartesianAxis::x ? cells.y : cells.x;
+        const std::int32_t outer_count =
+            axis == CartesianAxis::z ? cells.y : cells.z;
+        for (std::int32_t outer = 0; outer < outer_count; ++outer) {
+          for (std::int32_t inner = 0; inner < inner_count; ++inner) {
+            Int3 source{};
+            Int3 destination{};
+            if (axis == CartesianAxis::x) {
+              source = {high ? cells.x - 1 : 0, inner, outer};
+              destination = {high ? cells.x - 1 + layer : -layer, inner,
+                             outer};
+            } else if (axis == CartesianAxis::y) {
+              source = {inner, high ? cells.y - 1 : 0, outer};
+              destination = {inner, high ? cells.y - 1 + layer : -layer,
+                             outer};
+            } else {
+              source = {inner, outer, high ? cells.z - 1 : 0};
+              destination = {inner, outer,
+                             high ? cells.z - 1 + layer : -layer};
+            }
+            for (std::uint8_t component = 0U;
+                 component < field.components; ++component) {
+              field.unchecked(destination, component) =
+                  field.unchecked(source, component);
+            }
+          }
+        }
+      }
     }
   }
   return {};

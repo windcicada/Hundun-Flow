@@ -5,6 +5,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +48,13 @@ constexpr std::uint32_t kPacketFailure = 11017U;
 constexpr std::uint32_t kCountMismatch = 11018U;
 constexpr std::uint32_t kNonFiniteGlobal = 11019U;
 constexpr std::uint32_t kContractMismatch = 11020U;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+constexpr std::uint32_t kCheckedSumFaultForTest = 11021U;
+std::uint64_t g_checked_sum_fault_ordinal = 0U;
+std::uint64_t g_checked_sum_next_ordinal = 0U;
+int g_checked_sum_fault_rank = -1;
+bool g_checked_sum_fault_armed = false;
+#endif
 
 bool valid_mode(ReductionMode mode) noexcept {
   return mode == ReductionMode::reproducible_tree ||
@@ -283,6 +291,7 @@ void initialize_packet(Implementation& implementation,
 template <class Implementation>
 Status packet_collective(Implementation& implementation,
                          bool sum) noexcept {
+  const auto begin = std::chrono::steady_clock::now();
   int mpi_status = MPI_SUCCESS;
   if (implementation.reduction_mode == ReductionMode::mpi_allreduce) {
     mpi_status = MPI_Allreduce(
@@ -327,6 +336,19 @@ Status packet_collective(Implementation& implementation,
       mpi_status = MPI_ERR_OTHER;
     }
   }
+  const auto elapsed = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - begin)
+          .count());
+  LinearReductionCounters& counters = implementation.reduction_counters;
+  counters.blocking_operations =
+      counters.blocking_operations == UINT64_MAX
+          ? UINT64_MAX
+          : counters.blocking_operations + 1U;
+  counters.wall_nanoseconds =
+      elapsed > UINT64_MAX - counters.wall_nanoseconds
+          ? UINT64_MAX
+          : counters.wall_nanoseconds + elapsed;
   if (mpi_status != MPI_SUCCESS) {
     implementation.lowest_failing_rank = -1;
     return {StatusCode::mpi_failure, kCollectiveFailure};
@@ -428,8 +450,10 @@ Status validate_reduction(Implementation& implementation,
   }
 
   std::copy(values, values + local.size, global.data);
-  implementation.reduction_counters =
-      {next_calls, next_scalars, next_bytes, next_messages};
+  implementation.reduction_counters.calls = next_calls;
+  implementation.reduction_counters.scalars = next_scalars;
+  implementation.reduction_counters.logical_bytes = next_bytes;
+  implementation.reduction_counters.tree_messages = next_messages;
   return {};
 }
 
@@ -578,6 +602,18 @@ Status ReductionEngine::checked_sum(Span<const double> local,
   if (implementation_ == nullptr) {
     return {StatusCode::invalid_plan, kInvalidEngine};
   }
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  ++g_checked_sum_next_ordinal;
+  if (g_checked_sum_fault_armed &&
+      g_checked_sum_next_ordinal == g_checked_sum_fault_ordinal) {
+    const bool inject = implementation_->rank == g_checked_sum_fault_rank;
+    g_checked_sum_fault_armed = false;
+    if (inject) {
+      local_status = {StatusCode::numerical_failure,
+                      kCheckedSumFaultForTest};
+    }
+  }
+#endif
   return validate_reduction(*implementation_, local, global, local_status,
                             true);
 }
@@ -608,15 +644,36 @@ Status ReductionEngine::consensus_contract(
   if (implementation_ == nullptr) {
     return {StatusCode::invalid_plan, kInvalidEngine};
   }
+  const auto begin = std::chrono::steady_clock::now();
+  std::uint64_t operations = 0U;
+  const auto record = [&]() noexcept {
+    const auto elapsed = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - begin)
+            .count());
+    LinearReductionCounters& counters =
+        implementation_->reduction_counters;
+    counters.blocking_operations =
+        operations > UINT64_MAX - counters.blocking_operations
+            ? UINT64_MAX
+            : counters.blocking_operations + operations;
+    counters.wall_nanoseconds =
+        elapsed > UINT64_MAX - counters.wall_nanoseconds
+            ? UINT64_MAX
+            : counters.wall_nanoseconds + elapsed;
+  };
   const std::uint64_t local = local_fingerprint;
   std::uint64_t reference = local;
+  ++operations;
   if (MPI_Bcast(&reference, 1, MPI_UINT64_T, 0,
                 implementation_->communicator) != MPI_SUCCESS) {
     implementation_->lowest_failing_rank = -1;
+    record();
     return {StatusCode::mpi_failure, kCollectiveFailure};
   }
   std::uint64_t minimum = 0U;
   std::uint64_t maximum = 0U;
+  operations += 2U;
   const int minimum_status = MPI_Allreduce(
       &local, &minimum, 1, MPI_UINT64_T, MPI_MIN,
       implementation_->communicator);
@@ -625,25 +682,52 @@ Status ReductionEngine::consensus_contract(
       implementation_->communicator);
   if (minimum_status != MPI_SUCCESS || maximum_status != MPI_SUCCESS) {
     implementation_->lowest_failing_rank = -1;
+    record();
     return {StatusCode::mpi_failure, kCollectiveFailure};
   }
   if (local_fingerprint != 0U && minimum == maximum) {
     implementation_->lowest_failing_rank = -1;
+    record();
     return {};
   }
   const int candidate = local_fingerprint == reference
                             ? implementation_->size
                             : implementation_->rank;
   int first_mismatch = implementation_->size;
+  ++operations;
   if (MPI_Allreduce(&candidate, &first_mismatch, 1, MPI_INT, MPI_MIN,
                     implementation_->communicator) != MPI_SUCCESS) {
     implementation_->lowest_failing_rank = -1;
+    record();
     return {StatusCode::mpi_failure, kCollectiveFailure};
   }
   implementation_->lowest_failing_rank =
       first_mismatch < implementation_->size ? first_mismatch : 0;
+  record();
   return {StatusCode::invalid_plan, kContractMismatch};
 }
+
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+Status ReductionEngine::arm_checked_sum_fault_for_test(
+    std::uint64_t ordinal, int rank) noexcept {
+  if (implementation_ == nullptr || ordinal == 0U || rank < 0 ||
+      rank >= implementation_->size) {
+    return {StatusCode::invalid_plan, kCheckedSumFaultForTest};
+  }
+  g_checked_sum_fault_ordinal = ordinal;
+  g_checked_sum_next_ordinal = 0U;
+  g_checked_sum_fault_rank = rank;
+  g_checked_sum_fault_armed = true;
+  return {};
+}
+
+void ReductionEngine::clear_checked_sum_fault_for_test() noexcept {
+  g_checked_sum_fault_ordinal = 0U;
+  g_checked_sum_next_ordinal = 0U;
+  g_checked_sum_fault_rank = -1;
+  g_checked_sum_fault_armed = false;
+}
+#endif
 
 Status ReductionEngine::validate_communicator(
     MPI_Comm communicator) const noexcept {

@@ -385,6 +385,33 @@ bool test_authoritative_patch_and_atomic_outputs(
 bool test_inward_directions(const CartesianGeometryPlan& geometry,
                             const MeshPatch& patch) {
   bool passed = true;
+  ValidatedModel low_velocity = open_model();
+  low_velocity.boundaries[0U].velocity = {};
+  passed &= expect(!compile(low_velocity, geometry, patch),
+                   "low-side velocity inlet rejects zero normal velocity");
+  low_velocity.boundaries[0U].velocity = Real3{-1.0, 0.0, 0.0};
+  passed &= expect(!compile(low_velocity, geometry, patch),
+                   "low-side velocity inlet rejects outward velocity");
+  low_velocity.boundaries[0U].velocity = Real3{1.0, 0.0, 0.0};
+  passed &= expect(static_cast<bool>(compile(low_velocity, geometry, patch)),
+                   "low-side velocity inlet accepts strictly inward velocity");
+
+  ValidatedModel high_velocity = open_model();
+  high_velocity.boundaries[0U] = high_velocity.boundaries[1U];
+  high_velocity.boundaries[1U] = BoundaryFaceSpec{};
+  high_velocity.boundaries[1U].flow_kind = BoundaryKind::velocity_inlet;
+  high_velocity.boundaries[1U].thermal_kind = BoundaryKind::none;
+  high_velocity.boundaries[1U].temperature = 300.0;
+  high_velocity.boundaries[1U].velocity = {};
+  passed &= expect(!compile(high_velocity, geometry, patch),
+                   "high-side velocity inlet rejects zero normal velocity");
+  high_velocity.boundaries[1U].velocity = Real3{1.0, 0.0, 0.0};
+  passed &= expect(!compile(high_velocity, geometry, patch),
+                   "high-side velocity inlet rejects outward velocity");
+  high_velocity.boundaries[1U].velocity = Real3{-1.0, 0.0, 0.0};
+  passed &= expect(static_cast<bool>(compile(high_velocity, geometry, patch)),
+                   "high-side velocity inlet accepts strictly inward velocity");
+
   const std::array<BoundaryKind, 3U> directed{
       BoundaryKind::mass_flow_inlet, BoundaryKind::static_state_inlet,
       BoundaryKind::total_state_inlet};
@@ -435,7 +462,9 @@ bool test_resolver_descriptors(const CartesianGeometryPlan& geometry,
     ValidatedModel candidate = open_model();
     BoundaryFaceSpec& inlet = candidate.boundaries[0U];
     inlet.flow_kind = kind;
-    inlet.velocity = {};
+    inlet.velocity = kind == BoundaryKind::velocity_inlet
+                         ? Real3{1.0, 0.0, 0.0}
+                         : Real3{};
     inlet.direction = Real3{1.0, 0.0, 0.0};
     inlet.mass_flow_rate = 1.0;
     inlet.pressure = 101325.0;

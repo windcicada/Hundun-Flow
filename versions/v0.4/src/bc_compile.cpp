@@ -448,7 +448,8 @@ Status validate_model(const ValidatedModel& model) noexcept {
       return {StatusCode::invalid_plan, kBoundaryClosure};
     }
     if (spec.flow_kind == BoundaryKind::velocity_inlet &&
-        spec.temperature <= 0.0) {
+        (spec.temperature <= 0.0 ||
+         !(outward_component(face, spec.velocity) < 0.0))) {
       return {StatusCode::invalid_plan, kBoundaryClosure};
     }
     if ((spec.flow_kind == BoundaryKind::pressure_outlet ||
@@ -1286,6 +1287,7 @@ Status BoundaryCompiler::compile(MPI_Comm communicator,
     boundary_candidate.required_ghost_width_ =
         boundary_build.required_ghost_width;
     boundary_candidate.revision_ = boundary_build.revision;
+    boundary_candidate.geometry_fingerprint_ = geometry.fingerprint();
     boundary_candidate.semantic_fingerprint_ =
         boundary_build.semantic_fingerprint;
     boundary_candidate.local_layout_fingerprint_ =

@@ -1,0 +1,69 @@
+{
+  "schema": "HUNDUN_V04_LITERATURE_V1",
+  "source": {
+    "title": "Effects of Reynolds Number and a Low-Intensity Freestream Turbulence on the Flow Around a Circular Cylinder",
+    "authors": "C. Norberg",
+    "year": 1987,
+    "primary_url": "https://portal.research.lu.se/en/publications/effect-of-reynolds-number-and-a-low-intensity-freestream-turbulen/",
+    "locator": "Chalmers Publikation 87/2, appendix and Table 3"
+  },
+  "observables": [
+    {
+      "name": "strouhal_direct_re3704_6",
+      "value": 0.2108,
+      "units": "1",
+      "definition": "f_s D / U_o at Re=3704.6 and Tu=0.1%",
+      "source_locator": "1987 report appendix discrete Strouhal table",
+      "extraction_method": "direct table value; -3 dB relative bandwidth is 0.25% and is not treated as measurement uncertainty",
+      "uncertainty": {"status": "not_reported", "value": null, "kind": "none"}
+    },
+    {
+      "name": "strouhal_direct_re4211_1",
+      "value": 0.2104,
+      "units": "1",
+      "definition": "f_s D / U_o at Re=4211.1 and Tu=0.1%",
+      "source_locator": "1987 report appendix discrete Strouhal table",
+      "extraction_method": "direct table value; -3 dB relative bandwidth is 0.21% and is not treated as measurement uncertainty",
+      "uncertainty": {"status": "not_reported", "value": null, "kind": "none"}
+    },
+    {
+      "name": "strouhal_formula_re3900",
+      "value": 0.208884,
+      "units": "1",
+      "definition": "Norberg 2003 Table 4 piecewise fit evaluated at Re=3900",
+      "source_locator": "Norberg 2003, Journal of Fluids and Structures 17, Table 4, DOI 10.1016/S0889-9746(02)00099-3",
+      "extraction_method": "derived from the primary published formula, not a direct Re=3900 measurement",
+      "uncertainty": {"status": "derived", "value": null, "kind": "fit interval not reported for this evaluation"}
+    },
+    {
+      "name": "sectional_lift_rms_formula_re3900",
+      "value": 0.083046,
+      "units": "1",
+      "definition": "sectional RMS lift coefficient fit evaluated at Re=3900; not finite-span total Cl_rms",
+      "source_locator": "Norberg 2003, Table 4",
+      "extraction_method": "derived from the primary published formula",
+      "uncertainty": {"status": "derived", "value": null, "kind": "fit interval not reported for this evaluation"}
+    }
+  ],
+  "required_observables": [
+    "total_mean_drag_coefficient_re3900",
+    "finite_span_lift_rms_coefficient_re3900"
+  ],
+  "pending_observables": [
+    {
+      "name": "total_mean_drag_coefficient_re3900",
+      "status": "pending_direct_primary_authority",
+      "reason": "a directly measured total mean-drag authority applicable at Re=3900 has not yet been acquired, method-audited and frozen"
+    },
+    {
+      "name": "finite_span_lift_rms_coefficient_re3900",
+      "status": "pending_direct_primary_authority_and_span_equivalence",
+      "reason": "a directly measured fluctuating-lift RMS authority and an auditable mapping from its active span to the HUNDUN periodic pi-D span have not yet been acquired and frozen"
+    }
+  ],
+  "excluded_as_release_oracles": [
+    "Cd about 0.98 +/- 0.05 attributed by later LES papers: not a directly tabulated Re=3900 total drag value in the checked 1987 source",
+    "Cl_rms about 0.10 +/- 0.05 attributed by later papers: definition and direct Re=3900 authority unresolved",
+    "1987 Table 3 C_Dp=0.98 at Re=3000: pressure drag, wrong Reynolds number, and not total drag"
+  ]
+}

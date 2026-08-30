@@ -1,0 +1,279 @@
+{
+  "schema": "HUNDUN_V04_COAST_EQUIVALENCE_V2",
+  "rule_status": "FROZEN",
+  "receipt_status": "UNSEALED",
+  "comparison_unit": "one_complete_accepted_physical_time_step",
+  "decision": {
+    "scientific_work_definition": "same_discrete_problem_and_acceptance_obligations_not_equal_native_iteration_counts",
+    "equal_pressure_coupling_iteration_counts_required": false,
+    "native_algorithm_work_is_timed": true,
+    "failed_or_retried_steps_are_statistics_eligible": false,
+    "rule_document": "docs/verification/v0.4-re3900-coast-scientific-work-rule.md",
+    "rule_document_sha256": "7d7a12ebee60b908fdf7d6e16c6db98a3267db1dbf6ca645f0d12bffb1022b10"
+  },
+  "common_input_method_receipt": {
+    "document": "docs/verification/v0.4-re3900-common-input-method-receipt.json",
+    "document_sha256": "aee89713b38e51ab377741f0e240388f47de2d482cc5ad78ff15325783a8e432",
+    "status": "COMPLETE_PRE_IDENTITY"
+  },
+  "inventory": {
+    "status": "REVIEWED_FAIL_CLOSED",
+    "document": "docs/verification/v0.4-re3900-coast-capability-inventory.md",
+    "document_sha256": "55087af3ebf25cf3c184b1b83b01ab5b85d807ef3d1759a1f2a601a95dc5a613",
+    "coast_head": "3c22e0f029db1b2ca045ec9e212a95eacbcfe6a3",
+    "coast_index_tree": "ba449790e4918e7a3fd5c21e71c4e9f980a4691f",
+    "coast_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "remediation_worktree_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "formal_pairing_authorized": false
+  },
+  "common_problem": {
+    "mesh": {
+      "domain": [[-5.0, -10.0, 0.0], [15.0, 10.0, 3.141592653589793]],
+      "cells": [480, 480, 48],
+      "cylinder_center": [0.0, 0.0, 1.5707963267948966],
+      "diameter": 1.0,
+      "active_cell_mask_sha256": "6709eb3aba7a755aa57a4d1e65899b9f573e78d6ab29c5ebb0a22da64d6d70b1",
+      "active_face_mask_sha256": "253e28c90f6749d8f2de22e4c2fcdc25778b6f04018c5e6a1c70b42d0478653b"
+    },
+    "reference_state": {
+      "velocity": [1.0, 0.0, 0.0],
+      "temperature_K": 300.0,
+      "density_kg_per_m3": 1.0,
+      "molecular_weight_kg_per_kmol": 28.845518987341777,
+      "gas_constant_J_per_kg_K": 288.24104783144514,
+      "absolute_pressure_Pa": 86472.31434943354,
+      "cp_J_per_kg_K_at_300K": 1011.6043203330477,
+      "dynamic_viscosity_Pa_s": 0.0002564102564102564,
+      "thermal_conductivity_W_per_m_K": 0.36533200445397174,
+      "prandtl_number": 0.71,
+      "reynolds_number": 3900
+    },
+    "equation_scope": {
+      "transient_continuity": true,
+      "three_momentum_components": true,
+      "sensible_enthalpy": true,
+      "inert_single_species_eos_closure": true,
+      "single_phase_low_mach_compressible": true,
+      "local_absolute_pressure_eos": true,
+      "pressure_storage_drho_dp_at_fixed_hY": true,
+      "full_bdf_density_defect": true,
+      "acoustic_cfl_limited": false,
+      "reacting": false
+    },
+    "time": {
+      "time_step": 0.006,
+      "startup_scheme": "backward_euler",
+      "subsequent_scheme": "bdf2",
+      "full2_steps": [1, 2],
+      "full2_end_time": 0.012,
+      "full20_steps": [1, 20],
+      "full20_end_time": 0.12
+    },
+    "turbulence_and_wall": {
+      "model": "vreman_wall_function",
+      "constants_and_clipping_sha256": "5426084c77fd3d9598a906ffe3d07d6838169b6084d45ded89d8b08e966277ca",
+      "solid_wall_velocity": [0.0, 0.0, 0.0],
+      "wall_thermal_condition": "adiabatic_zero_normal_temperature_diffusion"
+    },
+    "boundaries": {
+      "x_min": "velocity_inlet",
+      "x_max": "absolute_pressure_outlet",
+      "y_min": "symmetry",
+      "y_max": "symmetry",
+      "z_min": "symmetry",
+      "z_max": "symmetry",
+      "resolved_values_sha256": "3df61d025dd6bd48556b1809bb6ce1ae56248ed2e12992bd05bda15be63a465f"
+    },
+    "spatial_discretization": {
+      "momentum_convection": "bounded_second_order",
+      "enthalpy_convection": "bounded_second_order",
+      "diffusion": "second_order_central",
+      "pressure_flux_coupling": "collocated_checkerboard_suppressing",
+      "coast_method_receipt": {
+        "document": "docs/verification/v0.4-re3900-common-input-method-receipt.json",
+        "object": "spatial_method_receipts.coast",
+        "canonical_object_sha256": "7cba57c945a79911b2c6ffa4bba1a2a696cec19335d7233b7c3466cefcdf755f"
+      },
+      "hundun_method_receipt": {
+        "document": "docs/verification/v0.4-re3900-common-input-method-receipt.json",
+        "object": "spatial_method_receipts.hundun",
+        "canonical_object_sha256": "c5e7698a6c0129b92bd5d4c6d7c578d064c19190b98944356dc2e775ad9d334a"
+      }
+    }
+  },
+  "native_algorithms": {
+    "hundun": {
+      "pressure_velocity_coupling": "PISO",
+      "pressure_corrections_per_attempt": 2,
+      "user_adjustable_corrector_count": false,
+      "final_flux_writer": "second_pressure_correction",
+      "pressure_linear_solver": "single_reduction_right_preconditioned_fgmres",
+      "krylov_restart": 30,
+      "restart_selection_authority": "public_bounded_input_using_the_generic_PETSc_GMRES_family_starting_point_frozen_before_HUNDUN_direction_timing",
+      "restart_is_native_timed_work_not_cross_product_iteration_matching": true,
+      "supplemental_convergence_audit": "PISO2_only_after_canonical_FP64_true_residual_passes_rejection_continues_same_capped_linear_solve",
+      "supplemental_audit_is_native_timed_work": true,
+      "supplemental_audit_replaces_common_post_step_terminal_audit": false
+    },
+    "coast": {
+      "pressure_velocity_coupling": "SIMPLE",
+      "outer_iterations_per_attempt": 2,
+      "outer_iteration_selection_authority": "input.d_itnum_must_equal_compile_time_re3900_simple_iterations_else_fail_closed",
+      "fixed_before_timed_pairing": true
+    },
+    "matching_rule": {
+      "pressure_correction_or_outer_iteration_counts_are_not_matched": true,
+      "all_registered_native_iterations_are_inside_the_step_timer": true,
+      "no_iteration_may_be_added_or_removed_after_timing_is_observed": true,
+      "both_products_must_pass_the_common_terminal_audit": true
+    }
+  },
+  "linear_work": {
+    "canonical_true_residual": {
+      "arithmetic": "FP64",
+      "definition": "global_l2_norm_of_b_minus_Ax_on_active_algebraic_rows",
+      "termination_limit": "max(absolute_tolerance,relative_tolerance*global_l2_norm_of_b)",
+      "operator_rhs_and_solution": "current_exact_assembled_system",
+      "recursive_or_preconditioned_residual_alone_may_terminate": false,
+      "true_residual_required_at_termination": true,
+      "equivalent_equation_scaling_requires_documented_pullback": true
+    },
+    "pressure": {
+      "absolute_tolerance": 1e-8,
+      "relative_tolerance": 1e-6,
+      "maximum_iterations_per_linear_solve": 500,
+      "hundun_true_residual_audit_interval": 4,
+      "hundun_supplemental_continuity_audit": "PISO2_candidate_state_global_max_common_terminal_cell_v1_continuity_metric_limit_1e-6_after_true_residual_pass",
+      "hundun_supplemental_rejection_semantics": "continue_same_FGMRES_solve_within_500_iteration_cap_and_report_audits_rejections_metric_limit",
+      "coast_true_residual_audit_interval": "initial_reliable_every_128_iterations_with_replacement_and_terminal",
+      "coast_scaling_pullback": "snapshot_exact_seven_coefficient_physical_operator_before_legacy_ICCG_multiplies_rows_by_abs_ajc;FP64_reliable_and_terminal_b_minus_Ax_use_physical_snapshot_rhs_and_high_plus_low_solution;recursive_residual_replacement_is_physical_residual_times_abs_ajc",
+      "coast_pressure_solution": "double_single_high_plus_low_accumulation_consumed_by_flux_gradient_density_and_terminal_residual"
+    },
+    "other_equations": {
+      "rule": "an_iterative_solve_must_seal_its_true_residual_rule_and_tolerance_a_direct_or_diagonal_update_must_be_marked_not_applicable",
+      "momentum": {
+        "hundun": "not_applicable_registered_diagonal_HbyA_update_no_iterative_linear_solve",
+        "coast": "BiCGStab_each_u_v_w_cap_500_internal_rtol_1e-6_plus_common_FP64_true_residual_atol_1e-8_rtol_1e-6_initial_reliable_every_8_iterations_with_replacement_and_terminal"
+      },
+      "enthalpy": {
+        "hundun": "not_applicable_registered_direct_BE_or_BDF2_predictor_no_iterative_linear_solve",
+        "coast": "BiCGStab_sensible_enthalpy_cap_500_internal_rtol_1e-6_plus_common_FP64_true_residual_atol_1e-8_rtol_1e-6_initial_reliable_every_8_iterations_with_replacement_and_terminal"
+      },
+      "species": {
+        "hundun": "not_applicable_inert_single_species_has_no_independent_transported_species_equation",
+        "coast": "not_applicable_inert_nonreacting_composition_frozen_no_species_transport_solve"
+      }
+    },
+    "evidence_per_step": {
+      "required": [
+        "solve_count_by_equation",
+        "iterations_per_solve",
+        "initial_true_residual_per_solve",
+        "final_true_residual_per_solve",
+        "termination_reason_per_solve",
+        "maximum_iteration_hits"
+      ],
+      "any_maximum_iteration_hit_rejects_the_step": true
+    }
+  },
+  "terminal_work": {
+    "audit_authority": "independent_common_post_step_evaluator_over_candidate_fields_before_commit",
+    "tolerances": {
+      "eos": 1e-6,
+      "continuity": 1e-6,
+      "closed_mass": 1e-6,
+      "gauge": 1e-6
+    },
+    "definitions": {
+      "eos": "max_active_cell(abs(rho-rho_eos)/max(1,abs(rho_eos)))",
+      "continuity": "max_active_cell(abs(V*BDF(rho)+sum_outward_face_mass_flux)/sum_abs_of_the_same_BDF_and_face_flux_terms)",
+      "closed_mass": "zero_for_this_boundary_absolute_case_otherwise_abs(mass-target)/target",
+      "gauge": "absolute_pressure_outlet_closure_for_this_boundary_absolute_case"
+    },
+    "all_four_gates_required": true,
+    "audit_inputs_sha256": "aee89713b38e51ab377741f0e240388f47de2d482cc5ad78ff15325783a8e432",
+    "audit_tool_sha256": "0b70264bbc977447bbc1b2b84dfafc98570f67461fd954802907e5c93a410842"
+  },
+  "timing": {
+    "authority": "max_rank_hot_step_sum",
+    "per_rank_start": "immediately_before_first_native_hot_step_operation",
+    "per_rank_stop": "immediately_after_terminal_audit_and_accepted_state_commit",
+    "rank_reduction": "MPI_MAX_after_local_timer_stop",
+    "includes": [
+      "all_native_pressure_velocity_iterations",
+      "all_equation_assembly_and_linear_solves",
+      "halo_and_collective_communication",
+      "terminal_audit",
+      "accepted_state_commit"
+    ],
+    "excludes": [
+      "process_startup_and_case_compilation",
+      "initialization",
+      "visit_output",
+      "restart_output",
+      "serialized_screen_output",
+      "evidence_serialization",
+      "post_stop_timer_reduction"
+    ],
+    "coast_max_rank_timer_authority": "coast_re3900_begin_step_mpi_wtime_through_terminal_audit_accepted_history_commit_then_local_stop_followed_by_MPI_MAX",
+    "hundun_max_rank_timer_authority": "runtime_evidence.max_rank_step_ns"
+  },
+  "output_state": {
+    "serialized_restart": false,
+    "serialized_visit": false,
+    "serialized_screen": false
+  },
+  "immutable_identity": {
+    "candidate_snapshot_root": null,
+    "hundun_build_identity_path": null,
+    "hundun_binary_path": null,
+    "coast_binary_path": null,
+    "hundun_input_sha256": null,
+    "coast_input_sha256": "bbdff76cd9ac2f14da49a544d48e94443164f5bad16dba522d7ac14d8519abd3",
+    "coast_full20_input_sha256": "b3a1667d62a872cb2a9cf88bac15b2fa10a67622b5c4981ae09e4e3c0d4b8466",
+    "thermophysics_sha256": "85949346d7b3095d6ebab81a2e439a2bfe0f3ed78d21539b6c85bc71243dc910",
+    "stl_sha256": "bd264c586543de4ec330f53cb2d3d9dfba550823db69451ac3176c603d248f46",
+    "hundun_case_manifest_sha256": null,
+    "coast_case_tree_manifest_sha256": "e79e3062bd4c42e0056420dcd35a35fadb929d3f3f1619710a1351d13f07d2ea",
+    "hundun_build_identity_sha256": null,
+    "hundun_binary_sha256": null,
+    "coast_binary_sha256": "c5e483a0442b430e58040a8e04f5adf42b70b3595319c643e9265c87341a9bc4",
+    "hundun_head": null,
+    "hundun_tree": null,
+    "coast_head": "3c22e0f029db1b2ca045ec9e212a95eacbcfe6a3",
+    "coast_tree": "ba449790e4918e7a3fd5c21e71c4e9f980a4691f",
+    "mpi_version": "Open MPI/ORTE/OPAL 2.1.1",
+    "cpu_plan_sha256": "e833b99740acc393066e0312b8e8fbbce16804109f715cc3fb52ab059df7a30a",
+    "affinity_sha256": "6fd2128aac0acd561a1d6d2185f373bae0728cc1f5e74b70aa8b4c2e22ccc6b0",
+    "performance_policy_sha256": "751b464c718c5127c26269fcfe207c613a6dd3e2294dc29f985d500b77400902"
+  },
+  "candidate_validation": {
+    "case_manifest_document": "docs/verification/v0.4-re3900-candidate-case-manifest.json",
+    "case_manifest_sha256": "dabe6d90570a827294f0e2688b654136f9275543885386e13e2950fc0b7d658a",
+    "coast_case_top_level_files_sha256": "261d5e3475974df0db2727e3034756cc72d7a5f6fbc02ac9ea3a74a256540a37",
+    "output_off_full2_evidence_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/diagnostic_coast_frozen_3c22e0f_output_off_02/re3900_evidence.jsonl",
+    "output_off_full2_evidence_sha256": "a6bbc871ae5f8c62792bbdab45081d3ed6e296f2bb560ae86e132055c8b6944e",
+    "accepted_steps": 2,
+    "linear_solve_records": 20,
+    "step_1_bdf_order": 1,
+    "step_2_bdf_order": 2,
+    "maximum_iteration_hits": 0,
+    "scheduled_or_finalizer_output_files": 0,
+    "candidate_case_tree_after_run_sha256": "e79e3062bd4c42e0056420dcd35a35fadb929d3f3f1619710a1351d13f07d2ea",
+    "hundun_case_fingerprint": null,
+    "hundun_product_fingerprint": null,
+    "hundun_cpu_plan_fingerprint": null,
+    "hundun_pressure_restart": 30,
+    "hundun_direction_screen_receipt_sha256": null,
+    "formal_pairing_result": false
+  },
+  "seal_conditions": [
+    "all_null_capability_and_identity_fields_are_resolved",
+    "coast_local_absolute_pressure_eos_and_drho_dp_are_demonstrated",
+    "common_equation_scope_discretization_boundaries_and_initialization_are_demonstrated",
+    "both_products_expose_the_canonical_true_residual_and_common_terminal_audit",
+    "coast_max_rank_timer_boundary_is_demonstrated",
+    "all_bound_files_and_binaries_are_hashed",
+    "receipt_status_is_changed_to_SEALED_before_any_formal_pairing"
+  ]
+}

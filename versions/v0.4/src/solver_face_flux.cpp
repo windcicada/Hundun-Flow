@@ -25,6 +25,7 @@ constexpr std::uint32_t kFaceAuthority = 913U;
 constexpr std::uint32_t kFaceTransaction = 914U;
 constexpr std::uint32_t kFaceKernel = 915U;
 constexpr std::uint32_t kFaceNumerical = 916U;
+constexpr std::size_t kFinalFaceFluxReplicas = 3U;
 
 bool checked_add(std::size_t left, std::size_t right,
                  std::size_t& out) noexcept {
@@ -251,6 +252,24 @@ struct PendingFaceFluxAccess {
   }
 };
 
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+Status overwrite_pending_face_flux_for_test(PendingFaceFluxView& pending,
+                                            double value) noexcept {
+  if (!pending.valid() || !std::isfinite(value) ||
+      !PendingFaceFluxAccess::lease_valid(pending)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const FaceFluxView raw = PendingFaceFluxAccess::raw(pending);
+  const FaceFieldView faces[3]{raw.x, raw.y, raw.z};
+  for (const FaceFieldView face : faces)
+    for (std::int32_t z = 0; z < face.extents.z; ++z)
+      for (std::int32_t y = 0; y < face.extents.y; ++y)
+        for (std::int32_t x = 0; x < face.extents.x; ++x)
+          face.unchecked({x, y, z}) = value;
+  return {};
+}
+#endif
+
 }  // namespace detail
 
 PendingFaceFluxView::~PendingFaceFluxView() noexcept {
@@ -387,7 +406,7 @@ Status FaceFluxStorage::allocate_workspace(Int3 cells, std::size_t replicas,
 }
 
 Status FaceFluxStorage::allocate_final(Int3 cells, FaceFluxStorage& out) {
-  return allocate_impl(cells, 2U, true, out);
+  return allocate_impl(cells, kFinalFaceFluxReplicas, true, out);
 }
 
 Status FaceFluxStorage::view_impl(std::size_t replica,
@@ -509,7 +528,8 @@ Status FinalFaceFluxWriter::begin_pending(AttemptTransaction& transaction,
                                           PendingFaceFluxView& out) noexcept {
   if (!issued_ || pending_ || authority_transaction_ != &transaction ||
       !transaction.active() ||
-      transaction.attempt_identity() == 0U || storage.replicas_ != 2U ||
+      transaction.attempt_identity() == 0U ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
       !storage.final_storage_ ||
       storage_ != nullptr || transaction_ != nullptr ||
       (storage.authority_identity_ != 0U &&
@@ -517,7 +537,11 @@ Status FinalFaceFluxWriter::begin_pending(AttemptTransaction& transaction,
       (bound_storage_identity_ != 0U &&
        (bound_storage_identity_ != storage.identity_ ||
         bound_revision_domain_ != storage.revision_domain_ ||
-       !detail::same_cells(bound_cells_, storage.cells_)))) {
+       !detail::same_cells(bound_cells_, storage.cells_))) ||
+      pending_replica_ >= kFinalFaceFluxReplicas ||
+      pending_replica_ == active_replica_ ||
+      (previous_revision_ != 0U &&
+       pending_replica_ == previous_replica_)) {
     return {StatusCode::invalid_plan, kFaceTransaction};
   }
   const RevisionToken candidate =
@@ -551,19 +575,164 @@ Status FinalFaceFluxWriter::begin_pending(AttemptTransaction& transaction,
   return {};
 }
 
+Status FinalFaceFluxWriter::initialize_committed(
+    FaceFluxStorage& storage, ConstFaceFluxView source) noexcept {
+  if (!issued_ || active_revision_ != 0U || previous_revision_ != 0U ||
+      pending_ ||
+      authority_transaction_ == nullptr || authority_transaction_->active() ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
+      !storage.final_storage_ ||
+      storage.authority_identity_ != 0U || storage.pending_writer_ != nullptr ||
+      storage_ != nullptr || transaction_ != nullptr ||
+      !detail::valid_flux_view(source, storage.cells_, source.revision)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const ConstFaceFieldView inputs[3]{source.x, source.y, source.z};
+  for (const ConstFaceFieldView& input : inputs) {
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          if (!std::isfinite(input.unchecked({x, y, z})))
+            return {StatusCode::numerical_failure, kFaceAuthority};
+  }
+  const RevisionToken initial_revision = 1U;
+  constexpr std::size_t initial_replica = 0U;
+  FaceFluxView destination;
+  Status status =
+      storage.view_impl(initial_replica, initial_revision, destination);
+  if (!status) return status;
+  const FaceFieldView outputs[3]{destination.x, destination.y, destination.z};
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    const ConstFaceFieldView input = inputs[axis];
+    const FaceFieldView output = outputs[axis];
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          output.unchecked({x, y, z}) = input.unchecked({x, y, z});
+  }
+  active_replica_ = initial_replica;
+  previous_replica_ = initial_replica;
+  pending_replica_ = 1U;
+  active_revision_ = initial_revision;
+  // A fresh state has two mathematically identical history levels.  Publish
+  // both authorities at once so BDF history consumers never observe an
+  // address without a corresponding revision/certificate lineage.
+  previous_revision_ = initial_revision;
+  bound_storage_identity_ = storage.identity_;
+  bound_revision_domain_ = storage.revision_domain_;
+  bound_cells_ = storage.cells_;
+  storage.authority_identity_ = authority_fingerprint_;
+  return {};
+}
+
+Status FinalFaceFluxWriter::initialize_restored(
+    FaceFluxStorage& storage, ConstFaceFluxView source) noexcept {
+  if (!issued_ || active_revision_ != 0U || previous_revision_ != 0U ||
+      pending_ || authority_transaction_ == nullptr ||
+      authority_transaction_->active() ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
+      !storage.final_storage_ || storage.authority_identity_ != 0U ||
+      storage.pending_writer_ != nullptr || storage_ != nullptr ||
+      transaction_ != nullptr || bound_storage_identity_ != 0U ||
+      bound_revision_domain_ != 0U ||
+      !detail::valid_flux_view(source, storage.cells_, source.revision)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const ConstFaceFieldView inputs[3]{source.x, source.y, source.z};
+  for (const ConstFaceFieldView input : inputs) {
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          if (!std::isfinite(input.unchecked({x, y, z})))
+            return {StatusCode::numerical_failure, kFaceAuthority};
+  }
+
+  // Revision one is reserved for a genuine fresh-start baseline.  A restart
+  // enters at revision two, matching the lineage previously produced by
+  // initialize_committed()+restore_committed() without materializing that
+  // incompatible intermediate state.
+  constexpr RevisionToken restored_revision = 2U;
+  constexpr std::size_t restored_replica = 0U;
+  FaceFluxView destination;
+  Status status =
+      storage.view_impl(restored_replica, restored_revision, destination);
+  if (!status) return status;
+  const FaceFieldView outputs[3]{destination.x, destination.y, destination.z};
+  for (std::size_t axis = 0U; axis < 3U; ++axis) {
+    const ConstFaceFieldView input = inputs[axis];
+    const FaceFieldView output = outputs[axis];
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          output.unchecked({x, y, z}) = input.unchecked({x, y, z});
+  }
+  active_replica_ = restored_replica;
+  previous_replica_ = restored_replica;
+  pending_replica_ = 1U;
+  active_revision_ = restored_revision;
+  previous_revision_ = restored_revision;
+  bound_storage_identity_ = storage.identity_;
+  bound_revision_domain_ = storage.revision_domain_;
+  bound_cells_ = storage.cells_;
+  storage.authority_identity_ = authority_fingerprint_;
+  return {};
+}
+
+Status FinalFaceFluxWriter::restore_committed(
+    FaceFluxStorage& storage, ConstFaceFluxView source) noexcept {
+  if (!issued_ || active_revision_ == 0U || pending_ ||
+      authority_transaction_ == nullptr || authority_transaction_->active() ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
+      !storage.final_storage_ ||
+      storage.authority_identity_ != authority_fingerprint_ ||
+      storage.pending_writer_ != nullptr || storage_ != nullptr ||
+      transaction_ != nullptr || bound_storage_identity_ != storage.identity_ ||
+      bound_revision_domain_ != storage.revision_domain_ ||
+      !detail::same_cells(bound_cells_, storage.cells_) ||
+      !detail::valid_flux_view(source, storage.cells_, source.revision))
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  const ConstFaceFieldView inputs[3]{source.x, source.y, source.z};
+  for (const ConstFaceFieldView input : inputs)
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          if (!std::isfinite(input.unchecked({x, y, z})))
+            return {StatusCode::numerical_failure, kFaceAuthority};
+  const RevisionToken restored_revision = active_revision_ + 1U;
+  if (restored_revision == 0U)
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  FaceFluxView destination;
+  Status status =
+      storage.view_impl(active_replica_, restored_revision, destination);
+  if (!status) return status;
+  const FaceFieldView outputs[3]{destination.x, destination.y, destination.z};
+  for (std::size_t axis = 0U; axis < 3U; ++axis)
+    for (std::int32_t z = 0; z < inputs[axis].extents.z; ++z)
+      for (std::int32_t y = 0; y < inputs[axis].extents.y; ++y)
+        for (std::int32_t x = 0; x < inputs[axis].extents.x; ++x)
+          outputs[axis].unchecked({x, y, z}) =
+              inputs[axis].unchecked({x, y, z});
+  previous_replica_ = active_replica_;
+  previous_revision_ = restored_revision;
+  active_revision_ = restored_revision;
+  return {};
+}
+
 Status FinalFaceFluxWriter::publish_pending(
     Span<const RevisionDependency> dependencies,
     PendingFaceFluxView& pending) noexcept {
-  if (!pending_ || transaction_ == nullptr || storage_ == nullptr ||
-      !transaction_->active() ||
-      transaction_->attempt_identity() != pending_attempt_identity_ ||
-      pending.writer_identity_ != authority_fingerprint_ ||
-      pending.attempt_identity_ != pending_attempt_identity_ ||
-      pending.storage_ != storage_ ||
-      storage_->pending_writer_identity_ != authority_fingerprint_ ||
-      storage_->pending_attempt_identity_ != pending_attempt_identity_ ||
-      pending.revision_ != pending_revision_) {
-    return {StatusCode::invalid_plan, kFaceTransaction};
+  const Status preflight = preflight_publish_pending(dependencies, pending);
+  if (!preflight) {
+    // Dependency/cache failures historically poison a direct publication.
+    // Re-enter the transaction publisher only for those failures so it can
+    // latch the exact status; writer/view association failures retain their
+    // existing local rejection semantics.
+    if (preflight.detail != kFaceTransaction && transaction_ != nullptr) {
+      return transaction_->publish_final_face_flux_cache(
+          cache_slot_, dependencies, PendingCacheStamp{pending_revision_},
+          authority_fingerprint_);
+    }
+    return preflight;
   }
   const Status published = transaction_->publish_final_face_flux_cache(
       cache_slot_, dependencies, PendingCacheStamp{pending_revision_},
@@ -583,6 +752,40 @@ Status FinalFaceFluxWriter::publish_pending(
   return published;
 }
 
+Status FinalFaceFluxWriter::preflight_publish_pending(
+    Span<const RevisionDependency> dependencies,
+    const PendingFaceFluxView& pending) const noexcept {
+  const FaceFluxView pending_flux{pending.x_, pending.y_, pending.z_,
+                                  pending.revision_, {}};
+  if (!issued_ || !pending_ || pending_published_ || transaction_ == nullptr ||
+      storage_ == nullptr || authority_transaction_ != transaction_ ||
+      pending_view_ != &pending || pending.writer_ != this ||
+      transaction_->final_face_flux_writer_ != this ||
+      transaction_->final_face_flux_writer_identity_ !=
+          authority_fingerprint_ ||
+      !transaction_->active() ||
+      transaction_->attempt_identity() != pending_attempt_identity_ ||
+      pending.writer_identity_ != authority_fingerprint_ ||
+      pending.attempt_identity_ != pending_attempt_identity_ ||
+      pending.storage_ != storage_ ||
+      storage_->pending_writer_ != this ||
+      storage_->pending_writer_identity_ != authority_fingerprint_ ||
+      storage_->pending_attempt_identity_ != pending_attempt_identity_ ||
+      storage_->authority_identity_ != authority_fingerprint_ ||
+      bound_storage_identity_ != storage_->identity_ ||
+      bound_revision_domain_ != storage_->revision_domain_ ||
+      !detail::same_cells(bound_cells_, storage_->cells_) ||
+      pending.revision_ != pending_revision_ || pending_revision_ == 0U ||
+      !detail::valid_flux_view(pending_flux, storage_->cells_) ||
+      pending.x_.storage_identity != storage_->identity_ ||
+      pending.x_.revision_domain != storage_->revision_domain_) {
+    return {StatusCode::invalid_plan, kFaceTransaction};
+  }
+  return transaction_->preflight_final_face_flux_cache(
+      cache_slot_, dependencies, PendingCacheStamp{pending_revision_},
+      authority_fingerprint_);
+}
+
 bool FinalFaceFluxWriter::ready_for_collective(
     const AttemptTransaction& transaction) const noexcept {
   return pending_ && pending_published_ && transaction_ == &transaction &&
@@ -600,12 +803,20 @@ void FinalFaceFluxWriter::complete_from_transaction(
     return;
   }
   if (pending_ && committed) {
-    std::swap(active_replica_, pending_replica_);
+    previous_replica_ = active_replica_;
+    previous_revision_ = active_revision_;
+    active_replica_ = pending_replica_;
     active_revision_ = pending_revision_;
+    for (std::size_t replica = 0U; replica < kFinalFaceFluxReplicas;
+         ++replica) {
+      if (replica != active_replica_ && replica != previous_replica_) {
+        pending_replica_ = replica;
+        break;
+      }
+    }
   } else if (pending_) {
-    // Reuse the rejected pending replica. Its bytes are never reachable from
-    // the committed handle, so rollback needs no whole-field clear.
-    pending_replica_ = active_replica_ == 0U ? 1U : 0U;
+    // The rejected pending replica is already disjoint from both committed
+    // time levels. Reuse it without touching any committed byte or handle.
   }
   clear_storage_lease();
   invalidate_pending_view();
@@ -715,7 +926,8 @@ void FinalFaceFluxWriter::abandon_pending_view(
 
 Status FinalFaceFluxWriter::committed(const FaceFluxStorage& storage,
                                       ConstFaceFluxView& out) const noexcept {
-  if (!issued_ || active_revision_ == 0U || storage.replicas_ != 2U ||
+  if (!issued_ || active_revision_ == 0U ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
       !storage.final_storage_ ||
       bound_storage_identity_ != storage.identity_ ||
       bound_revision_domain_ != storage.revision_domain_ ||
@@ -726,6 +938,37 @@ Status FinalFaceFluxWriter::committed(const FaceFluxStorage& storage,
                                           out);
   if (viewed) {
     out.certificate.revision_ = active_revision_;
+    out.certificate.authority_ = authority_fingerprint_;
+    out.certificate.storage_ = storage.identity_;
+    out.certificate.revision_domain_ = storage.revision_domain_;
+    out.certificate.x_base_ = out.x.base;
+    out.certificate.y_base_ = out.y.base;
+    out.certificate.z_base_ = out.z.base;
+    out.certificate.x_stride_y_ = out.x.stride_y;
+    out.certificate.x_stride_z_ = out.x.stride_z;
+    out.certificate.y_stride_y_ = out.y.stride_y;
+    out.certificate.y_stride_z_ = out.y.stride_z;
+    out.certificate.z_stride_y_ = out.z.stride_y;
+    out.certificate.z_stride_z_ = out.z.stride_z;
+    out.certificate.cells_ = storage.cells_;
+  }
+  return viewed;
+}
+
+Status FinalFaceFluxWriter::committed_previous(
+    const FaceFluxStorage& storage, ConstFaceFluxView& out) const noexcept {
+  if (!issued_ || previous_revision_ == 0U ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
+      !storage.final_storage_ ||
+      bound_storage_identity_ != storage.identity_ ||
+      bound_revision_domain_ != storage.revision_domain_ ||
+      !detail::same_cells(bound_cells_, storage.cells_)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const Status viewed =
+      storage.view_impl(previous_replica_, previous_revision_, out);
+  if (viewed) {
+    out.certificate.revision_ = previous_revision_;
     out.certificate.authority_ = authority_fingerprint_;
     out.certificate.storage_ = storage.identity_;
     out.certificate.revision_domain_ = storage.revision_domain_;

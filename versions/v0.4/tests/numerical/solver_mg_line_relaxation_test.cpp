@@ -2,6 +2,7 @@
 
 #include "hundun/v04_linear.hpp"
 #include "hundun/v04_parallel.hpp"
+#include "solver_mg_detail.hpp"
 
 #include <mpi.h>
 
@@ -274,6 +275,9 @@ bool test_line_relaxation_effect() {
   line_spec.policy.post_sweeps = 1U;
   line_spec.policy.maximum_levels = 12U;
   line_spec.policy.coarse_sweeps = 16U;
+  line_spec.policy.point_smoother = MgPointSmootherKind::chebyshev_jacobi;
+  line_spec.operator_class =
+      MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
 
   Runtime line_runtime;
   Runtime point_runtime;
@@ -309,6 +313,19 @@ bool test_line_relaxation_effect() {
   const double point_residual = post_cycle_residual(
       point_plan, as_const(rhs.view), point_correction.view, applied.view,
       ax, ay, az);
+  const detail::MgMatrixWorkCounters line_work =
+      detail::mg_matrix_work_counters_for_test(line_plan);
+  const detail::MgMatrixWorkCounters point_work =
+      detail::mg_matrix_work_counters_for_test(point_plan);
+  passed &= expect(line_work.chebyshev_stages == 0U &&
+                       point_work.chebyshev_stages > 0U &&
+                       point_work.chebyshev_exchange_actions ==
+                           point_work.chebyshev_stages +
+                               point_work.chebyshev_retained_final_defect_actions &&
+                       point_work.chebyshev_defect_actions ==
+                           point_work.chebyshev_exchange_actions &&
+                       point_work.chebyshev_retained_final_defect_actions > 0U,
+                   "line levels retain red/black while point levels use certified Chebyshev");
   passed &= expect(std::isfinite(line_residual) &&
                        std::isfinite(point_residual) &&
                        line_residual <= 0.10 * initial,

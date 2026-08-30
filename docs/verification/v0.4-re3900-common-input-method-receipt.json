@@ -1,0 +1,186 @@
+{
+  "schema": "HUNDUN_V04_RE3900_COMMON_INPUT_METHOD_V1",
+  "status": "COMPLETE_PRE_IDENTITY",
+  "canonicalization": "UTF-8 JSON; object subhashes use json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)",
+  "geometry": {
+    "domain": [[-5.0, -10.0, 0.0], [15.0, 10.0, 3.141592653589793]],
+    "cells": [480, 480, 48],
+    "cylinder_center": [0.0, 0.0, 1.5707963267948966],
+    "diameter": 1.0,
+    "cell_centres": "uniform_face_midpoints_with_first_centre_min_plus_half_cell",
+    "active_cell_mask": {
+      "layout": "uint8_k_j_i_zero_solid_one_fluid",
+      "fluid_cells": 11037696,
+      "solid_cells": 21504,
+      "sha256": "6709eb3aba7a755aa57a4d1e65899b9f573e78d6ab29c5ebb0a22da64d6d70b1",
+      "coast_authority": "direct_coast_imbmesh_marker_slice",
+      "hundun_authority": "CartesianGeometryCompiler_StlScanCompiler_StlScanPlan_classify",
+      "comparison": "bytewise_equal"
+    },
+    "active_face_mask": {
+      "layout": "concatenated_x_y_z_uint8_face_lattices_each_k_j_i",
+      "rule": "boundary_face_active_iff_adjacent_cell_fluid;internal_face_active_iff_both_adjacent_cells_fluid",
+      "x_active_faces": 11059584,
+      "y_active_faces": 11059584,
+      "z_active_faces": 11267648,
+      "sha256": "253e28c90f6749d8f2de22e4c2fcdc25778b6f04018c5e6a1c70b42d0478653b",
+      "comparison": "bytewise_equal"
+    }
+  },
+  "reference_state": {
+    "velocity_m_per_s": [1.0, 0.0, 0.0],
+    "temperature_K": 300.0,
+    "density_kg_per_m3": 1.0,
+    "molecular_weight_kg_per_kmol": 28.845518987341777,
+    "universal_gas_constant_J_per_kmol_K": 8314.46261815324,
+    "gas_constant_J_per_kg_K": 288.24104783144514,
+    "cp_over_R": 3.509577584260671,
+    "cp_J_per_kg_K": 1011.6043203330477,
+    "absolute_pressure_Pa": 86472.31434943354,
+    "dynamic_viscosity_Pa_s": 0.0002564102564102564,
+    "prandtl_number": 0.71,
+    "thermal_conductivity_W_per_m_K": 0.36533200445397174,
+    "reynolds_number": 3900,
+    "enthalpy_definition": "constant_cp_absolute_sensible_enthalpy_h_equals_cp_times_T",
+    "temperature_lower_bound_K": 200.0
+  },
+  "boundaries": {
+    "x_min": {
+      "kind": "fixed_velocity_inlet",
+      "velocity_m_per_s": [1.0, 0.0, 0.0],
+      "temperature_K": 300.0,
+      "absolute_pressure_Pa": 86472.31434943354
+    },
+    "x_max": {
+      "kind": "absolute_pressure_outlet",
+      "absolute_pressure_Pa": 86472.31434943354,
+      "allow_backflow": false,
+      "backflow_temperature_K": 300.0
+    },
+    "y_min": {"kind": "slip_symmetry"},
+    "y_max": {"kind": "slip_symmetry"},
+    "z_min": {"kind": "slip_symmetry"},
+    "z_max": {"kind": "slip_symmetry"},
+    "immersed_cylinder": {
+      "velocity": "stationary_no_penetration_with_equilibrium_wall_shear",
+      "thermal": "adiabatic_zero_normal_temperature_diffusion"
+    }
+  },
+  "time": {
+    "fixed_dt_s": 0.006,
+    "step_1": "backward_euler",
+    "step_2_and_later": "bdf2",
+    "full2_accepted_steps": 2,
+    "full2_end_time_s": 0.012,
+    "full20_accepted_steps": 20,
+    "full20_end_time_s": 0.12,
+    "density_history": "full_BDF_density_defect",
+    "accepted_history_rotation": "after_terminal_audit_before_local_timer_stop",
+    "accepted_step_commit_authority": "one_terminal_audit_commit_per_accepted_state;output_schedule_must_not_advance_step_or_time"
+  },
+  "turbulence_and_wall": {
+    "model": "Vreman_LES_plus_equilibrium_immersed_wall_shear",
+    "vreman_coefficient": 0.07,
+    "filter_width": "anisotropic_directional_cell_widths_squared_in_beta_ij",
+    "vreman_negative_roundoff_rule": "HUNDUN_clamps_only_invariant_within_128_binary64_eps_scaled;COAST_clamps_nonfinite_or_negative_ratio_to_zero",
+    "wall_kappa": 0.41,
+    "wall_log_E": 9.8,
+    "viscous_log_intersection_y_plus": 11.5301072732,
+    "wall_root_iterations": 64,
+    "wall_velocity_m_per_s": [0.0, 0.0, 0.0],
+    "wall_thermal_condition": "adiabatic_zero_normal_temperature_diffusion"
+  },
+  "spatial_method_receipts": {
+    "hundun": {
+      "momentum_convection": "limited_central2_limiter_1_bounded_second_order",
+      "enthalpy_convection": "limited_central2_limiter_1_bounded_second_order",
+      "diffusion": "central2",
+      "pressure_flux": "collocated_face_flux_with_checkerboard_suppression_and_IBM_interface_flux_zeroing",
+      "momentum_state_update": "assembled_positive_diagonal_and_rhs_then_registered_HbyA_diagonal_update_inside_two_PISO_corrections",
+      "enthalpy_state_update": "registered_BE_or_BDF2_direct_predictor_from_accepted_flux_and_nonadvective_rate_histories",
+      "source_refs": [
+        "versions/v0.4/src/solver_cartesian.cpp",
+        "versions/v0.4/src/solver_momentum.cpp",
+        "versions/v0.4/src/solver_enthalpy.cpp",
+        "versions/v0.4/src/solver_thermophysical_predictor.cpp",
+        "versions/v0.4/src/solver_piso.cpp",
+        "versions/v0.4/src/solver_ibm_equations.cpp"
+      ]
+    },
+    "coast": {
+      "momentum_convection": "legacy_TVD_enabled_for_nvu_nvv_nvw_in_equivalence_mode_bounded_second_order_family",
+      "enthalpy_convection": "legacy_TVD_enabled_by_config_for_nvh_bounded_second_order_family",
+      "diffusion": "cell_centred_second_order_central_with_IBM_operator_hook",
+      "pressure_flux": "collocated_gvctr_gvctr2_gvctr3_pressure_gradient_density_and_TVD_flux_response_with_fixed_flux_faces_suppressed_and_IBM_mass_flux_hook",
+      "momentum_state_update": "BiCGStab_solution_for_each_of_u_v_w_in_each_native_SIMPLE_outer_iteration",
+      "enthalpy_state_update": "BiCGStab_solution_for_sensible_enthalpy_in_each_native_SIMPLE_outer_iteration",
+      "source_refs": [
+        "SRC.Coast/app/config_coast.F90",
+        "SRC.Coast/app/coast_legacy_driver.F90",
+        "SRC.Coast/condif.F90",
+        "SRC.Coast/cgstab.F90",
+        "SRC.Coast/compress.F90"
+      ]
+    }
+  },
+  "native_lifecycle": {
+    "hundun": {
+      "coupling": "PISO",
+      "pressure_solves_per_attempt": 2,
+      "final_flux_writer": "second_pressure_correction",
+      "schedule_mutable": false
+    },
+    "coast": {
+      "coupling": "SIMPLE",
+      "outer_iterations_per_attempt": 2,
+      "selection_authority": "input.d_itnum_must_equal_compile_time_re3900_simple_iterations_else_fail_closed",
+      "solves_per_outer_iteration": {"u": 1, "v": 1, "w": 1, "sensible_enthalpy": 1, "pressure": 1},
+      "total_linear_solves_per_attempt": 10,
+      "pressure_backend": "legacy_iccg",
+      "pressure_fallback": "none",
+      "accepted_step_commit": "terminal_audit_is_sole_step_and_time_authority;output_schedule_does_not_advance_or_relabel"
+    }
+  },
+  "linear_work": {
+    "pressure": {
+      "atol": 1e-8,
+      "rtol": 1e-6,
+      "cap": 500,
+      "hundun_backend": "FGMRES_with_geometric_multigrid_preconditioner",
+      "hundun_true_residual_audit": "initial_periodic_every_4_iterations_and_terminal",
+      "coast_backend": "legacy_ICCG",
+      "coast_true_residual_audit": "initial_reliable_every_128_iterations_with_residual_replacement_and_terminal",
+      "coast_scaling_pullback": "snapshot_the_exact_seven_physical_pressure_coefficients_before_ICCG_multiplies_rows_by_abs_ajc;FP64_reliable_and_terminal_b_minus_Ax_use_that_snapshot_with_physical_rhs_and_high_plus_low_solution;the_recursive_solver_residual_is_replaced_by_physical_residual_times_abs_ajc",
+      "coast_solution_accumulation": "double_single_high_plus_low_pressure_correction;both_parts_are_consumed_by_pressure_flux_gradient_density_and_terminal_residual"
+    },
+    "other_equations": {
+      "hundun_momentum": "not_applicable_registered_diagonal_HbyA_update_no_iterative_linear_solve",
+      "hundun_enthalpy": "not_applicable_registered_direct_BE_or_BDF2_predictor_no_iterative_linear_solve",
+      "hundun_species": "not_applicable_inert_single_species_has_no_independent_transported_species_equation",
+      "coast_momentum": "BiCGStab_each_u_v_w_cap_500_internal_rtol_1e-6_plus_common_FP64_true_residual_atol_1e-8_rtol_1e-6_initial_reliable_every_8_iterations_with_residual_replacement_and_terminal",
+      "coast_enthalpy": "BiCGStab_sensible_enthalpy_cap_500_internal_rtol_1e-6_plus_common_FP64_true_residual_atol_1e-8_rtol_1e-6_initial_reliable_every_8_iterations_with_residual_replacement_and_terminal",
+      "coast_species": "not_applicable_inert_nonreacting_composition_frozen_no_species_transport_solve"
+    }
+  },
+  "common_terminal_evaluator": {
+    "language": "ISO_C_binary64",
+    "source_sha256": "0b70264bbc977447bbc1b2b84dfafc98570f67461fd954802907e5c93a410842",
+    "header_sha256": "b600241dbecc7efea3e83fb5e292e141bb6e02cebe7fc3f2a28f86749de4d465",
+    "source_identity": "byte_for_byte_equal_in_both_product_trees",
+    "functions": [
+      "hf_coast_common_terminal_cell_v1",
+      "hf_coast_common_terminal_outlet_v1",
+      "hf_coast_common_terminal_finalize_v1",
+      "hf_coast_common_terminal_accept_v1"
+    ],
+    "hundun_wrapper": "versions/v0.4/src/core_product_freeze.cpp refreshes terminal pressure ghosts and reconstructs every local pressure-outlet face; versions/v0.4/src/solver_piso.cpp:PressureVelocityCoupler::audit_pending_final reduces sample count and residual",
+    "coast_wrapper": "SRC.Coast/module_coast_re3900_equivalence.F90:coast_re3900_terminal_audit",
+    "mpi_rule": "local_FP64_accumulation_then_matching_MPI_MAX_and_MPI_SUM_reductions_before_common_finalize_and_accept"
+  },
+  "timing": {
+    "hundun_authority": "runtime_evidence.max_rank_step_ns",
+    "coast_authority": "coast_re3900_begin_step_mpi_wtime_through_terminal_audit_accepted_history_commit_then_local_stop_followed_by_MPI_MAX",
+    "serialized_output": false,
+    "output_off_scope": "per_step_schedule_and_finalizer_emit_no_Visit_Restart_Log_Results_or_monitor_artifacts;sealed_evidence_channel_only"
+  }
+}

@@ -87,12 +87,35 @@ std::array<TriangleInput, 12U> cube_triangles() {
   }};
 }
 
-std::array<TriangleInput, 4U> tetrahedron_triangles() {
+std::array<TriangleInput, 64U> tetrahedron_triangles() {
   const Real3 a{-1.0, -1.0, -1.0};
   const Real3 b{1.0, -1.0, -1.0};
   const Real3 c{-1.0, 1.0, -1.0};
   const Real3 d{-1.0, -1.0, 1.0};
-  return {{{a, c, b}, {a, b, d}, {a, d, c}, {b, c, d}}};
+  const std::array<TriangleInput, 4U> coarse{{{a, c, b}, {a, b, d},
+                                              {a, d, c}, {b, c, d}}};
+  const auto midpoint = [](Real3 left, Real3 right) noexcept {
+    return Real3{0.5 * (left.x + right.x), 0.5 * (left.y + right.y),
+                 0.5 * (left.z + right.z)};
+  };
+  const auto subdivide = [&](TriangleInput source,
+                             TriangleInput* output) noexcept {
+    const Real3 ab = midpoint(source.a, source.b);
+    const Real3 bc = midpoint(source.b, source.c);
+    const Real3 ca = midpoint(source.c, source.a);
+    output[0U] = {source.a, ab, ca};
+    output[1U] = {ab, source.b, bc};
+    output[2U] = {ca, bc, source.c};
+    output[3U] = {ab, bc, ca};
+  };
+  std::array<TriangleInput, 16U> first{};
+  for (std::size_t triangle = 0U; triangle < coarse.size(); ++triangle) {
+    subdivide(coarse[triangle], first.data() + 4U * triangle);
+  }
+  std::array<TriangleInput, 64U> refined{};
+  for (std::size_t triangle = 0U; triangle < first.size(); ++triangle)
+    subdivide(first[triangle], refined.data() + 4U * triangle);
+  return refined;
 }
 
 std::size_t flat(Int3 shape, Int3 cell) noexcept {
@@ -239,9 +262,20 @@ bool validate_topology(const CartesianGeometryPlan& geometry,
   std::vector<unsigned int> global_id_owners(
       static_cast<std::size_t>(kGlobal.x * kGlobal.y * kGlobal.z) * 6U, 0U);
   const Span<const ImmersedLink> links = topology.links();
+  const IbmInterfaceMetricPlan& interface_metric =
+      topology.interface_metric();
+  const Span<const IbmInterfaceLinkMetric> physical_links =
+      interface_metric.links();
+  passed &= expect(physical_links.size == links.size &&
+                       interface_metric.fingerprint() != 0U &&
+                       identical(interface_metric.physical_fingerprint()),
+                   rank,
+                   "dual interface metric is aligned and physically rank invariant");
   std::uint64_t local_links = links.size;
+  double local_physical_area = 0.0;
   for (std::size_t link_index = 0U; link_index < links.size; ++link_index) {
     const ImmersedLink& link = links.data[link_index];
+    const IbmInterfaceLinkMetric& physical = physical_links.data[link_index];
     const std::size_t direction = static_cast<std::size_t>(link.direction);
     const Int3 fluid = link.fluid_global_index;
     const Int3 delta = kDelta[direction];
@@ -291,19 +325,35 @@ bool validate_topology(const CartesianGeometryPlan& geometry,
         close(link.surface_patch_centroid.x, link.wall_point.x) &&
             close(link.surface_patch_centroid.y, link.wall_point.y) &&
             close(link.surface_patch_centroid.z, link.wall_point.z) &&
-            close(link.surface_measure_vector.x,
-                  link_face_area * link.solid_to_fluid_normal.x) &&
-            close(link.surface_measure_vector.y,
-                  link_face_area * link.solid_to_fluid_normal.y) &&
-            close(link.surface_measure_vector.z,
-                  link_face_area * link.solid_to_fluid_normal.z),
+            close(link.cartesian_control_face_area, link_face_area),
         rank,
         "link control-face measure and centroid are deterministic geometry");
+    passed &= expect(physical.global_link == link.global_link &&
+                         physical.source_triangle == link.triangle &&
+                         physical.physical_quadrature_area > 0.0,
+                     rank,
+                     "physical quadrature binding follows the stable link key");
+    local_physical_area += physical.physical_quadrature_area;
   }
   passed &= expect(MPI_Allreduce(MPI_IN_PLACE, &local_links, 1, MPI_UINT64_T,
                                  MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS &&
                        local_links == 96U,
                    rank, "cube owns exactly 96 physical-domain fluid-solid links");
+  passed &= expect(MPI_Allreduce(MPI_IN_PLACE, &local_physical_area, 1,
+                                 MPI_DOUBLE, MPI_SUM,
+                                 MPI_COMM_WORLD) == MPI_SUCCESS &&
+                       close(local_physical_area, 24.0, 2.0e-12),
+                   rank, "distributed link metrics preserve cube STL area");
+  const IbmInterfaceMetricResources metric_resources =
+      interface_metric.resources();
+  passed &= expect(metric_resources.persistent_bytes_per_rank >=
+                           physical_links.size *
+                               sizeof(IbmInterfaceLinkMetric) &&
+                       metric_resources.peak_bytes_per_rank >=
+                           metric_resources.persistent_bytes_per_rank &&
+                       metric_resources.collective_doubles_per_rank == 338U,
+                   rank,
+                   "metric cold resource certificate matches 12 triangles");
   bool exact_key_owners =
       MPI_Allreduce(MPI_IN_PLACE, global_id_owners.data(),
                     static_cast<int>(global_id_owners.size()), MPI_UNSIGNED,
@@ -323,8 +373,7 @@ bool validate_topology(const CartesianGeometryPlan& geometry,
 bool validate_partition_independence(
     const CartesianGeometryPlan& geometry, const StlScanPlan& scan,
     const ImmersedSurfacePlan& surface, ImmersedPlanLimits limits,
-    ImmersedFluidSide side, PlanFingerprint distributed_fingerprint,
-    int rank) {
+    ImmersedFluidSide side, const EBTopology& distributed, int rank) {
   MeshPatch full_patch{{0, 0, 0}, kGlobal, {1, 1, 1}, {0, 0, 0}};
   StlScanPlan full_scan;
   const auto triangles = cube_triangles();
@@ -344,9 +393,66 @@ bool validate_partition_independence(
   passed &= expect(static_cast<bool>(EBTopologyCompiler::compile(
                        MPI_COMM_SELF, geometry, full_patch, full_scan,
                        full_surface, side, limits, full)) &&
-                       full.fingerprint() == distributed_fingerprint,
+                       full.fingerprint() == distributed.fingerprint(),
                    rank,
                    "distributed and full-domain topology fingerprints agree");
+  passed &= expect(full.interface_metric().physical_fingerprint() ==
+                       distributed.interface_metric().physical_fingerprint() &&
+                       close(full.interface_metric()
+                                 .conservation()
+                                 .physical_quadrature_area,
+                             24.0, 2.0e-12),
+                   rank,
+                   "distributed and full-domain physical metrics agree");
+  const Span<const ImmersedLink> distributed_links = distributed.links();
+  const Span<const IbmInterfaceLinkMetric> distributed_physical =
+      distributed.interface_metric().links();
+  const Span<const ImmersedLink> full_links = full.links();
+  const Span<const IbmInterfaceLinkMetric> full_physical =
+      full.interface_metric().links();
+  for (std::size_t local = 0U; local < distributed_links.size; ++local) {
+    const std::uint64_t key = distributed_links.data[local].global_link;
+    std::size_t found = 0U;
+    while (found < full_links.size &&
+           full_links.data[found].global_link != key)
+      ++found;
+    bool same_metric = found < full_links.size &&
+                       distributed_physical.data[local].source_triangle ==
+                           full_physical.data[found].source_triangle &&
+                       close(distributed_physical.data[local]
+                                 .physical_quadrature_area,
+                             full_physical.data[found]
+                                 .physical_quadrature_area,
+                             2.0e-13);
+    if (same_metric) {
+      const IbmInterfaceLinkMetric& distributed_metric =
+          distributed_physical.data[local];
+      const IbmInterfaceLinkMetric& full_metric = full_physical.data[found];
+      same_metric &=
+          close(distributed_metric.physical_area_vector.x,
+                full_metric.physical_area_vector.x, 2.0e-13) &&
+          close(distributed_metric.physical_area_vector.y,
+                full_metric.physical_area_vector.y, 2.0e-13) &&
+          close(distributed_metric.physical_area_vector.z,
+                full_metric.physical_area_vector.z, 2.0e-13) &&
+          close(distributed_metric.physical_first_moment.x,
+                full_metric.physical_first_moment.x, 2.0e-13) &&
+          close(distributed_metric.physical_first_moment.y,
+                full_metric.physical_first_moment.y, 2.0e-13) &&
+          close(distributed_metric.physical_first_moment.z,
+                full_metric.physical_first_moment.z, 2.0e-13);
+      for (std::size_t entry = 0U; entry < 9U; ++entry) {
+        same_metric &= close(
+            distributed_metric.normal_first_moment[entry],
+            full_metric.normal_first_moment[entry], 2.0e-13);
+        same_metric &= close(
+            distributed_metric.normal_second_moment[entry],
+            full_metric.normal_second_moment[entry], 2.0e-13);
+      }
+    }
+    passed &= expect(same_metric, rank,
+                     "each link metric is decomposition invariant by global key");
+  }
   const Int3 halo_probe{std::min(kGlobal.x - 1,
                                 full_patch.begin.x + full_patch.cells.x / 2),
                        3, 3};
@@ -382,9 +488,41 @@ bool validate_oblique_surface_normal(const CartesianGeometryPlan& geometry,
   }
   const Span<const SurfaceTriangle> canonical = surface.triangles();
   const Span<const ImmersedLink> links = topology.links();
+  const IbmInterfaceMetricPlan& metric = topology.interface_metric();
+  const Span<const IbmInterfaceLinkMetric> physical = metric.links();
+  passed &= expect(physical.size == links.size &&
+                       identical(metric.physical_fingerprint()) &&
+                       metric.resources().collective_doubles_per_rank == 1690U,
+                   rank,
+                   "oblique physical metric is aligned/rank-invariant/bounded");
   std::uint64_t local_oblique = 0U;
+  double local_control_area = 0.0;
+  double local_physical_area = 0.0;
+  std::array<double, 3U> local_normal{};
+  std::array<double, 3U> local_first_moment{};
+  std::array<double, 9U> local_normal_moment{};
+  std::array<double, 9U> local_normal_second_moment{};
+  std::vector<unsigned int> seeded(canonical.size, 0U);
   for (std::size_t index = 0U; index < links.size; ++index) {
     const ImmersedLink& link = links.data[index];
+    seeded[static_cast<std::size_t>(link.triangle)] = 1U;
+    local_control_area += link.cartesian_control_face_area;
+    local_physical_area += physical.data[index].physical_quadrature_area;
+    local_normal[0U] += physical.data[index].physical_area_vector.x;
+    local_normal[1U] += physical.data[index].physical_area_vector.y;
+    local_normal[2U] += physical.data[index].physical_area_vector.z;
+    local_first_moment[0U] +=
+        physical.data[index].physical_first_moment.x;
+    local_first_moment[1U] +=
+        physical.data[index].physical_first_moment.y;
+    local_first_moment[2U] +=
+        physical.data[index].physical_first_moment.z;
+    for (std::size_t entry = 0U; entry < local_normal_moment.size(); ++entry) {
+      local_normal_moment[entry] +=
+          physical.data[index].normal_first_moment[entry];
+      local_normal_second_moment[entry] +=
+          physical.data[index].normal_second_moment[entry];
+    }
     if (link.triangle >= canonical.size) {
       passed &= expect(false, rank, "topology link references a canonical triangle");
       continue;
@@ -410,6 +548,86 @@ bool validate_oblique_surface_normal(const CartesianGeometryPlan& geometry,
                                  MPI_COMM_WORLD) == MPI_SUCCESS &&
                        global_oblique > 0U,
                    rank, "oblique surface owns at least one Cartesian link");
+  passed &= expect(MPI_Allreduce(MPI_IN_PLACE, seeded.data(),
+                                 static_cast<int>(seeded.size()), MPI_UNSIGNED,
+                                 MPI_MAX, MPI_COMM_WORLD) == MPI_SUCCESS,
+                   rank, "triangle seed ownership reduces collectively");
+  const std::size_t unseeded = static_cast<std::size_t>(std::count(
+      seeded.begin(), seeded.end(), 0U));
+  passed &= expect(unseeded > 0U,
+                   rank,
+                   "refined surface exercises nearest-active triangle BFS");
+  passed &= expect(
+      MPI_Allreduce(MPI_IN_PLACE, &local_control_area, 1, MPI_DOUBLE, MPI_SUM,
+                    MPI_COMM_WORLD) == MPI_SUCCESS &&
+          MPI_Allreduce(MPI_IN_PLACE, &local_physical_area, 1, MPI_DOUBLE,
+                        MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS &&
+          MPI_Allreduce(MPI_IN_PLACE, local_normal.data(), 3, MPI_DOUBLE,
+                        MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS &&
+          MPI_Allreduce(MPI_IN_PLACE, local_first_moment.data(), 3,
+                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS &&
+          MPI_Allreduce(MPI_IN_PLACE, local_normal_moment.data(), 9,
+                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS &&
+          MPI_Allreduce(MPI_IN_PLACE, local_normal_second_moment.data(), 9,
+                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD) == MPI_SUCCESS,
+      rank, "oblique metric reduction succeeds");
+  const double expected_area = 6.0 + 2.0 * std::sqrt(3.0);
+  passed &= expect(close(local_control_area, 9.0, 2.0e-13) &&
+                       close(local_physical_area, expected_area, 2.0e-12) &&
+                       std::abs(local_control_area - local_physical_area) >
+                           0.4,
+                   rank,
+                   "oblique STL area differs from Cartesian control area");
+  passed &= expect(std::abs(local_normal[0U]) <= 2.0e-12 &&
+                       std::abs(local_normal[1U]) <= 2.0e-12 &&
+                       std::abs(local_normal[2U]) <= 2.0e-12,
+                   rank,
+                   "uniform pressure integrates to zero on the closed STL");
+  const double expected_first_moment =
+      -(10.0 + 2.0 * std::sqrt(3.0)) / 3.0;
+  for (const double value : local_first_moment)
+    passed &= expect(close(value, expected_first_moment, 3.0e-12), rank,
+                     "physical first moment is decomposition invariant");
+  constexpr double volume = 4.0 / 3.0;
+  for (std::size_t row = 0U; row < 3U; ++row)
+    for (std::size_t column = 0U; column < 3U; ++column)
+      passed &= expect(
+          close(local_normal_moment[3U * row + column],
+                row == column ? volume : 0.0, 3.0e-12),
+          rank, "linear traction follows the first normal moment");
+  const double oblique_normal_moment = 2.0 * std::sqrt(3.0) / 3.0;
+  for (std::size_t row = 0U; row < 3U; ++row)
+    for (std::size_t column = 0U; column < 3U; ++column)
+      passed &= expect(
+          close(local_normal_second_moment[3U * row + column],
+                row == column ? 2.0 + oblique_normal_moment
+                              : oblique_normal_moment,
+                3.0e-12),
+          rank, "normal second moment is decomposition invariant");
+  const IbmInterfaceMetricConservation& conservation = metric.conservation();
+  bool partition_conserved =
+      close(conservation.cartesian_control_area, local_control_area,
+            2.0e-12) &&
+      close(conservation.physical_quadrature_area, local_physical_area,
+            2.0e-12) &&
+      close(conservation.physical_area_vector.x, local_normal[0U], 2.0e-12) &&
+      close(conservation.physical_area_vector.y, local_normal[1U], 2.0e-12) &&
+      close(conservation.physical_area_vector.z, local_normal[2U], 2.0e-12) &&
+      close(conservation.physical_first_moment.x, local_first_moment[0U],
+            3.0e-12) &&
+      close(conservation.physical_first_moment.y, local_first_moment[1U],
+            3.0e-12) &&
+      close(conservation.physical_first_moment.z, local_first_moment[2U],
+            3.0e-12);
+  for (std::size_t entry = 0U; entry < 9U; ++entry) {
+    partition_conserved &=
+        close(conservation.normal_first_moment[entry],
+              local_normal_moment[entry], 3.0e-12) &&
+        close(conservation.normal_second_moment[entry],
+              local_normal_second_moment[entry], 3.0e-12);
+  }
+  passed &= expect(partition_conserved, rank,
+                   "all physical channels preserve partition of unity");
   return all_true(passed);
 }
 
@@ -505,7 +723,7 @@ bool run(int rank, int size) {
                                 outside, rank);
     passed &= validate_partition_independence(
         geometry, scan, surface, limits, ImmersedFluidSide::outside,
-        outside.fingerprint(), rank);
+        outside, rank);
     passed &= validate_narrow_partition_forwarding(
         geometry, limits, outside.fingerprint(), rank, size);
   }
@@ -521,7 +739,7 @@ bool run(int rank, int size) {
                                 inside, rank);
     passed &= validate_partition_independence(
         geometry, scan, surface, limits, ImmersedFluidSide::inside,
-        inside.fingerprint(), rank);
+        inside, rank);
     passed &= expect(outside.fingerprint() != inside.fingerprint(), rank,
                      "fluid-side selection changes topology identity");
   }

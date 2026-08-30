@@ -26,7 +26,7 @@ constexpr std::uint32_t kTopologyGeometry = 13504U;
 constexpr std::uint32_t kTopologyLinks = 13505U;
 constexpr std::uint32_t kTopologyAllocation = 13506U;
 constexpr std::uint8_t kRegionHalo = 4U;
-constexpr std::uint32_t kTopologySchemaRevision = 1U;
+constexpr std::uint32_t kTopologySchemaRevision = 2U;
 constexpr int kHaloTagBase = 17040;
 constexpr std::uint64_t kFnvOffset = UINT64_C(14695981039346656037);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
@@ -913,10 +913,9 @@ Status EBTopologyCompiler::compile(
             link.triangle = intersection.triangle;
             link.wall_point = intersection.point;
             link.solid_to_fluid_normal = normal;
-            // Cartesian link control-face measure; Task 17 force uses the
-            // independent triangle SurfaceQuadraturePlan authority.
-            link.surface_measure_vector = {normal.x * area, normal.y * area,
-                                           normal.z * area};
+            // Cartesian finite-volume control metric.  The physical STL
+            // quadrature metric is compiled independently below.
+            link.cartesian_control_face_area = area;
             link.surface_patch_centroid = intersection.point;
             candidate.links_.push_back(link);
           }
@@ -952,6 +951,36 @@ Status EBTopologyCompiler::compile(
   candidate.surface_fingerprint_ = surface.fingerprint();
   candidate.fingerprint_ = topology_fingerprint(
       geometry, surface, fluid_side, global_count, global_xor, global_sum);
+  local = IbmInterfaceMetricCompiler::compile_with_resident_storage(
+      communicator, geometry, patch, surface, candidate, limits,
+      full_persistent_bytes, candidate.interface_metric_);
+  agreed = consensus(communicator, rank, size, local, lowest);
+  if (!agreed) {
+    out.lowest_failing_rank_ = lowest;
+    return agreed;
+  }
+  const IbmInterfaceMetricResources metric_resources =
+      candidate.interface_metric_.resources();
+  std::uint64_t combined_persistent = 0U;
+  std::uint64_t combined_peak = 0U;
+  if (!checked_add(full_persistent_bytes,
+                   metric_resources.persistent_bytes_per_rank,
+                   combined_persistent) ||
+      !checked_add(full_persistent_bytes,
+                   metric_resources.peak_bytes_per_rank, combined_peak) ||
+      combined_persistent > limits.maximum_persistent_bytes_per_rank ||
+      combined_peak > limits.maximum_peak_bytes_per_rank) {
+    local = {StatusCode::invalid_plan, kTopologyLinks};
+  }
+  agreed = consensus(communicator, rank, size, local, lowest);
+  if (!agreed) {
+    out.lowest_failing_rank_ = lowest;
+    return agreed;
+  }
+  Hash64 sealed;
+  sealed.integer(candidate.fingerprint_);
+  sealed.integer(candidate.interface_metric_.physical_fingerprint());
+  candidate.fingerprint_ = sealed.finish();
   candidate.lowest_failing_rank_ = -1;
   out = std::move(candidate);
   return {};

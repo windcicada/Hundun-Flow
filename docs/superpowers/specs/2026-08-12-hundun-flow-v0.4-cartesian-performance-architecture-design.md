@@ -167,7 +167,9 @@ v0.4 只有两种静态几何计划：
 JSON 可声明 `focus_regions`、目标尺寸和最大增长率，网格生成器据此生成全局一维坐标。
 硬约束包括最大 cells、内存、最小间距和增长率。验证或配对可使用 `exact_cells`，但
 不得生成局部非匹配 patch。一个 MPI rank 持有一个连续 `MeshPatch`；rank 内 `CpuTile`
-只用于线程调度，不是所有权或通信单位。
+只用于线程调度，不是所有权或通信单位。冷路径的 process-grid 与非均匀切分同时最小化
+规则 halo surface、最大 rank cell work 和静态 IBM interface/donor work；仍允许用户显式
+覆盖。分解策略、权重和结果进入 case fingerprint，不能为某个算例写入产品分支。
 
 ### 5.2 STL 扫描一致性
 
@@ -196,14 +198,18 @@ EOS/transport revision 管理。不存在常密度专用数组或分支。
 
 ### 6.2 Arena、revision 和事务
 
-初始化期按最大需求建立 NUMA-local arenas，划分字段、solver workspace 和 step scratch。
+最终网格、静态几何分类和分解确定后，初始化期按完整 logical graph 的最大需求建立
+NUMA-local arenas，划分字段、solver workspace 和 step scratch。页面由其最终 worker/NUMA
+owner 并行 first-touch；每线程计数和 scratch 按 cache line 隔离。
 时间层通过 handle rotation 推进。每个 attempt 只修改 trial state、pending cache 和紧凑
 事务日志；集体成功才发布 accepted revisions，失败直接丢弃 trial/pending 状态，不复制
 恢复全场。
 
 ### 6.3 CPU 与 MPI
 
-默认每个 NUMA domain 一个 MPI rank，并建立固定线程团队；纯 MPI 保持支持。启动时
+默认每个 NUMA domain 一个 MPI rank，并建立固定线程团队；纯 MPI 保持支持。MPI 只由
+固定 communication thread 调用，v0.4 要求并验证 `MPI_THREAD_FUNNELED` 或更高等级，
+不依赖 `MPI_THREAD_MULTIPLE`。启动时
 选择有限的 ISA、对齐、tile 和 uniform/stretched kernel specialization。正式运行不在
 热循环探测硬件或生成无界模板组合。
 
@@ -213,9 +219,13 @@ EOS/transport revision 管理。不存在常密度专用数组或分支。
 ## 7. Halo 和执行图
 
 `CommunicationEngine` 先提供持久 buffer/request、pack/unpack span 和
-`begin -> interior -> finish -> boundary` 调度。完整 `CommunicationPlan` 只有在所有
-stage 的 field/ghost sets 登记后才编译，按 peer 和 stage 合并消息，并用 ghost revision
-证明数据有效。
+`begin -> interior -> finish -> boundary` 调度。规则 Cartesian 算子默认只交换需要的
+face slabs；静态 IBM 在 donor plan 完成后编译去重的远端 donor gather。只有确实需要
+dense edge/corner ghost 的 stage 才编译完整 grown-box overlap 或固定 staged exchange，
+不得假设六个面消息已经填满角点。完整 `CommunicationPlan` 只有在所有 stage 的
+field/ghost sets 和 IBM donor reach 登记后才编译，按 peer 和 stage 合并消息，并用 ghost
+revision 证明数据有效。每个 persistent request 实例只能 single-in-flight；重叠 stage
+必须拥有不同 request 或由冻结图证明串行。
 
 `FrozenExecutionGraph` 为每个 stage 固定：
 
@@ -223,11 +233,14 @@ stage 的 field/ghost sets 登记后才编译，按 peer 和 stage 合并消息�
 - required/published ghost revisions；
 - cache dependency tuple 和 invalidation；
 - workspace liveness 与别名边界；
-- MPI begin/finish 和 collective consensus 点；
+- MPI begin/finish、collective epoch 和可合并的 failure-status reduction；
 - 允许的 operator refill、hierarchy rebuild 和 cache publish。
 
-资源合同记录每步 allocation 次数、halo bytes/messages、内存峰值、operator refill、MG
-rebuild、linear iterations 和 stage wall time。产品热步必须为零 heap allocation。
+资源合同记录每步 allocation 次数、halo bytes/messages、blocking/nonblocking collective
+次数与时间、Krylov/MG reduction、内存峰值、operator refill、coarse numeric refresh、
+preconditioner setup、linear iterations 和 stage wall time。产品热步必须为零 heap
+allocation。失败状态尽量搭载在不可避免的 solver/closed-mass reduction 上；不得为每个
+stage timer 或本地成功状态无条件增加 barrier/all-reduce。
 
 ## 8. 低速可压缩方程组
 
@@ -288,18 +301,30 @@ NSCBC 适用性。
 第一版 scheme 集只包括二阶中心、limited central、二阶 TVD 和二阶扩散。面重构、
 质量通量和散度尽可能融合。所有 scheme 在初始化期静态绑定，内循环不做字符串分派。
 
+浸没边界不是只作用于压力和表面力的附加诊断。初始化期必须把每条流固 link 编译成
+唯一的界面面所有权和方程替换行：法向质量通量严格为零；动量按 no-slip/moving-wall
+Dirichlet 二次重构替换常规扩散面项；静焓和标量按各自的 value/adiabatic/flux 条件替换；
+固体控制体不参与流体守恒、闭域质量或终态连续性范数。替换逐 link 作用于流体行，禁止
+通过写共享 solid ghost 的方式实现，因为同一 solid cell 可能对应多个不同壁面点。所需
+远程 donor 只用预编译、去重的 compact gather 获取，不扩大常规 face halo。
+
 ## 10. 线性系统生命周期
 
-每个线性系统严格拆为：
+每个线性系统严格拆为四个互不重叠的资源族：
 
-1. `SymbolicPlan`：拓扑、稀疏模式、边界位置和 EB 接口；
-2. `NumericState`：当前系数和 diagonal/off-diagonal revision；
-3. `HierarchyState`：coarse coefficients、restriction/prolongation、smoother；
-4. `SolverWorkspace`：Krylov vectors、归约缓冲和 scratch。
+1. `SymbolicPlan/CoarseningPlan`：拓扑、稀疏模式、边界位置、EB 接口、level shapes、
+   transfer sparsity 和 line/color schedule；
+2. `ExactNumericState`：当前 fine operator、全部必需 coarse numeric coefficients、numeric
+   BC 和 diagonal/off-diagonal revision；
+3. `PreconditionerSetupState`：smoother factor、coarse solver setup 和可选 HYPRE setup；
+4. `SolverWorkspace`：Krylov vectors、MG level vectors、归约缓冲和 scratch。
 
-四层分别拥有 identity 和失效条件。拓扑不变时禁止重建 symbolic plan；系数未变时
-禁止 refill；hierarchy 只按预注册的 coefficient-change policy 重建；workspace 按最大
-shape 持久化。
+四族分别拥有 identity 和失效条件。拓扑不变时禁止重建 symbolic/coarsening plan；每个
+系数 revision 都必须刷新当前 exact fine/coarse numeric data 后才能认证；预注册的
+coefficient-change policy 只能决定 preconditioner setup 是否复用，不能跳过 exact/coarse
+numeric refresh；workspace 按最大 shape 持久化。计数器分别记录 symbolic rebuild、
+exact numeric refill、coarse numeric refresh、preconditioner setup/reuse 和 workspace
+replacement。
 
 规则压力系统默认 `NativeCartesianMG`。近各向同性网格全方向粗化；强拉伸方向采用
 semi-coarsening 与 line relaxation。Krylov 提供 PCG、FGMRES 和 BiCGSTAB。HYPRE
@@ -308,28 +333,39 @@ Struct 是隔离后备，不成为核心数据模型。IBM 非对称接口使用
 
 ## 11. 两次 PISO 与中间量生命周期
 
-v0.4 每个 accepted step 恰好执行两次 pressure corrector，不开放用户修改次数：
+v0.4 每个 accepted step 恰好执行两次 pressure corrector，不开放用户修改次数。为避免
+corrector 2 后再改变 `h/Y` 使 EOS 密度与 continuity 失配，先用 committed face-flux
+history、variable-step 系数和已声明 source/diffusion 形成二阶 thermophysical predictor；
+startup/Restart/retry 使用 BE predictor。`h*/Y*` 在两次压力校正中冻结：
 
 ```text
-assemble/update momentum numeric state
-predict trial U
+predict h*/Y* from committed flux history
+evaluate EOS/transport; closed-domain p_ref Newton and pi gauge
+assemble/update momentum numeric state; predict trial U
 corrector 1: build current intermediates -> pressure solve -> trial flux/U
 corrector 2: rebuild/revalidate intermediates -> pressure solve -> final flux/U
-energy/species/scalars using final mass flux
+terminal EOS/continuity/closed-mass/gauge audit
 collective commit
 ```
 
 中间量不能共享一个笼统 dependency tuple：
 
-- `rAU` 依赖动量 diagonal、约束和 boundary coefficient revisions；
+- `rAU` 依赖动量 diagonal、当前 density、implicit-source diagonal、约束和 boundary
+  coefficient revisions；
 - `rAtU` 依赖 `rAU` 与一致时间/对角修正 revision；
 - `HbyA` 依赖 momentum numeric state、当前 trial `U` 和相关约束；
-- `phiHbyA` 依赖当前 `HbyA`、trial `U/phi`、time、geometry 和 boundary revisions。
+- pressure face coefficient 依赖 reciprocal diagonal、face-density interpolation、EOS 和
+  `drho/dp` revisions；
+- `phiHbyA` 依赖当前 `HbyA`、pressure face coefficient、trial/committed flux history、
+  BDF、`p_ref`/gauge、geometry 和 numeric boundary revisions。
 
 corrector 1 改写 trial `U/phi` 后，corrector 2 必须重新生成或严格重新认证
 `HbyA/phiHbyA`；只有动量系数确实不变时才复用 `rAU/rAtU`。压力修正方程包含局部
-`partial rho / partial p`，最终压力方程 flux 是 final face mass flux 的唯一 writer，最终
-`U` 使用同一压力梯度通路更新。
+`partial rho / partial p`。每次 correction 组装 full BDF density defect 与
+`a0*V*(partial rho/partial p)_(h,Y)*delta_pi`，并在压力更新后重新评估 local EOS；不得把
+`drho/dp` 当作脱离 BDF density residual 的独立附加项。最终压力方程 flux 是 final face
+mass flux 的唯一 writer，最终 `U` 使用同一压力梯度通路更新。提交前分别报告并门控 EOS、
+discrete continuity、闭域 total mass 和 pressure gauge/boundary closure residual。
 
 ## 12. 静态 IBM 与二阶能力
 
@@ -353,6 +389,13 @@ v0.4 只支持静止 EB；geometry revision 改变才整体重建。
 正法向、至少三层 normal bands、覆盖四个 tangential quadrants。共享 quadrature row 若
 需要联合 donor set，必须作为不同 plan 类型明确声明，不能悄悄放宽标准 stencil 合同。
 
+EB 与外部 Cartesian 边界相交时采用显式的 boundary-intersection quadratic plan，而非把
+标准 link 合同全局放宽。它仍要求 14--32 个唯一 fluid donors、正法向、至少三层 normal
+bands、完整十项二次秩与 condition 门；象限证书则必须覆盖该物理域在已声明
+`symmetry`/`slip` 边界内几何可达的全部象限，并把 required/actual mask 纳入 plan
+fingerprint。其他边界上的单侧 stencil 继续拒绝。surface quadrature 先按 Cartesian 开域
+裁剪 STL，域外封口和与外边界共面的面积不属于 immersed traction authority。
+
 v0.3 已证明合法 stencil 上的二次多项式复现，但现有公开 pressure 收敛证据不足以声称
 任意几何全局二阶。v0.4 必须增加 uniform/stretched、平移几何和 1/2/4-rank 的真实
 h-refinement sequence；二阶能力以预注册的 observed-order 门验收，不靠固定网格复现
@@ -360,8 +403,14 @@ h-refinement sequence；二阶能力以预注册的 observed-order 门验收，�
 
 ### 12.3 压力与力 authority
 
-IBM 压力采用规则 Cartesian 主体加紧凑接口修正。pressure operator、momentum reaction、
-final face flux 和 surface force 共享同一 EB topology 和 final-state revision。
+IBM 压力采用规则 Cartesian 主体，并按 EB topology 精确移除不可穿透 fluid-solid face
+link；solid row 为隔离 identity。该压力离散必须与 final face flux 的同一界面零通量定义
+一致，不能在 pressure operator 中另引入 final flux 不会发布的二次 donor mass-flux。
+二次重构继续用于速度、扩散和 surface traction；正值材料属性只在严格正 donor 包络内保留
+二次值，overshoot 投影到包络，非法 donor 使 attempt 失败。pressure operator、momentum
+reaction、final face flux 和 surface force 共享同一 EB topology 和 final-state revision。
+surface-force 在进入力的 Allreduce 前先完成全 rank 状态共识，避免局部重构失败导致 collective
+次序分叉。
 
 当前 final-gradient/surface-force 候选不会因迁移自动接受，必须先满足：
 
@@ -376,13 +425,16 @@ donor 几何约束或科学阈值。
 
 ## 13. 湍流模型
 
-产品只提供三种静态选择：
+case schema 只提供三种批准组合：
 
 - `vreman_wall_function`：默认，作用于外部和 IBM 壁面；
 - `wale`：保留壁面解析 LES，用于 Re=3900 文献长统计；
 - `none`：层流/制造解验证。
 
-WALE 与 Vreman 共享唯一 velocity-gradient cache、wall distance 和 `mu_eff` authority。
+内部仍拆为 `SubgridPlan {none,wale,vreman}` 与
+`WallTreatmentPlan {resolved,wall_function}`，只允许上述组合。wall treatment 与 subgrid
+model 拥有独立 fingerprint/revision，因为前者还控制 heat/species wall flux。WALE 与
+Vreman 共享唯一 velocity-gradient cache、wall distance 和 `mu_eff` authority。
 `mu_eff` revision 同时约束动量扩散、壁面处理、IBM traction 和诊断。不得为 force、IBM
 或不同湍流模型各建一份梯度缓存。
 
@@ -399,10 +451,13 @@ run directory：
 默认 Restart 保存当前 `U、p_ref/pi（或 p_abs）、h、独立组分、final face mass flux` 及
 继续控制所需的最小状态，不保存派生 `rho/T/mu`、长期 `rhoU/rhoh` 或上一 BDF2 历史层。
 重启第一步用 BE，允许该步出现可控时间离散差异，之后恢复 BDF2。协议支持 rank-changing
-重分解；读取必须先在 scratch 验证全部 rank，再一次性发布。
+重分解；读取必须先在 scratch 验证全部 rank，再一次性发布。默认同步 publication 在
+文件与 generation directory `fsync`、原子 current 切换及 parent-directory `fsync` 完成后
+才成功。Restart 后的 BE recovery step 标记在 evidence 中，不进入长期统计样本。
 
-异常热路径只返回紧凑 status；冷路径解释文本。每个约定 stage 做 collective consensus，
-所有 rank 同时 commit、retry 或终止。正式 tests-off 二进制不得链接 full-domain gather、
+异常热路径只返回紧凑 status；冷路径解释文本。冻结图定义少量固定 collective epoch：
+本地 preflight failure 在进入下一项 collective 前合并，已启动的通信先按注册协议完成或
+取消，再统一决定；最终所有 rank 同时 commit、retry 或终止。正式 tests-off 二进制不得链接 full-domain gather、
 mutation seam 或测试 oracle。
 
 ## 15. 实施结构与最终冻结
@@ -412,13 +467,17 @@ mutation seam 或测试 oracle。
 1. 基线与产品骨架：参考、版本隔离、CaseSpec；
 2. 性能底座：arena、Cartesian mesh、CPU/halo、边界、热力学、守恒 kernel、graph compiler；
 3. 求解与 IBM：线性四层、MG、EB plan、统一方程、两次 PISO、湍流和 final force；
-4. 生产冻结与服务：完整 capability registration 后一次冻结 schema、arena、halo、operator
-   和 graph，再接 driver/Restart/I/O；
+4. 生产冻结与服务：先注册 driver/Restart/I/O 的 snapshot schema、容量和 stage，再由
+   每个 `ValidatedModel` 的 `ProductCompiler` 执行 logical analysis、allocation/
+   instantiation、binding 和一次 seal；Task 19 只实现 sealed service adapter 与格式；
 5. 验收：focused、完整网格短测、候选冻结、20-step 性能、文献长统计、后台阶。
 
-首次产品 case 前必须冻结并证明：单写者 authority、每个 cache 的精确 revision tuple、
+每个 compiled case 实例进入首次 attempt 前必须冻结并证明：单写者 authority、每个 cache 的精确 revision tuple、
 accepted/trial 事务、EB plans、persistent halo、四层 solver identity、最大容量 workspace、
-完整 stage liveness、两次 PISO 发布语义，以及 allocation/message/byte/refill/rebuild counters。
+完整 stage liveness、两次 PISO 发布语义，以及 allocation/message/byte/collective/
+refill/refresh/setup counters。freeze 可以分配 numeric/preconditioner capacity，但初始
+field/BC coefficient 填充前必须保持 uncertified；driver initialization 完成 exact/coarse
+numeric refresh 和必要 setup 后才可进入第一次 solve。
 
 ## 16. Re=3900 圆柱唯一发布门
 
@@ -466,7 +525,11 @@ release = numerical_correctness_accept
 - final force oracle 和 mutation RED 接受，positive-normal donor 失败已按根因修复；
 - 正式性能只用 tests-off binary；记录 init、hot-step median/P90、RSS、communication、
   iterations 和 rebuild/refill counters；
-- 至少五组交替运行的 HUNDUN hot-step median 不高于 COAST；`1.10x` 只能记作内部
+- 正式 timed region 在两侧关闭 Restart/Visit/screen serialization，预注册 warmup 与测量
+  steps，以 launcher elapsed 或 max-rank elapsed 为 authority；内部 timer 不引入 barrier；
+- 至少五组交替运行按同一资源/时间块形成 paired ratio
+  `HUNDUN_hot/COAST_hot`，报告 median paired ratio、P90 和预注册 uncertainty interval；
+  接受时 paired ratio 不高于 `1.0` 且 uncertainty rule 通过；`1.10x` 只能记作内部
   `NEAR`，不构成发布；
 - 文献主要指标为 `St、Lr/D、Cd_mean、Cl_rms`、centerline mean velocity，以及
   `x/D=1.06、1.54、2.02` 的 mean/fluctuation profiles；阈值和数字化误差必须在运行

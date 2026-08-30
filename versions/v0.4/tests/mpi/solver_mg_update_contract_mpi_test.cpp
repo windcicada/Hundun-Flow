@@ -106,7 +106,9 @@ bool same(MgPlanCounters left, MgPlanCounters right) noexcept {
   return left.symbolic_builds == right.symbolic_builds &&
          left.numeric_refreshes == right.numeric_refreshes &&
          left.hierarchy_rebuilds == right.hierarchy_rebuilds &&
-         left.applications == right.applications;
+         left.applications == right.applications &&
+         left.blocking_collectives == right.blocking_collectives &&
+         left.collective_logical_bytes == right.collective_logical_bytes;
 }
 
 struct Fixture {

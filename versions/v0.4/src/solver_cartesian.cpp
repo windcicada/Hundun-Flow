@@ -6,6 +6,7 @@
 #include "hundun/v04_mesh.hpp"
 
 #include "core_arena_detail.hpp"
+#include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 
 #include <algorithm>
@@ -40,9 +41,9 @@ bool component_byte_interval(BasicFieldView<T> view,
                              std::uintptr_t& end) noexcept {
   const unsigned component_end = static_cast<unsigned>(component_begin) +
                                  static_cast<unsigned>(component_count);
-  if (view.base == nullptr || view.interior.x <= 0 || view.interior.y <= 0 ||
-      view.interior.z <= 0 || view.ghosts.x < 0 || view.ghosts.y < 0 ||
-      view.ghosts.z < 0 || component_count == 0U ||
+  detail::FieldStorageInterval storage_interval{};
+  if (!detail::field_storage_interval(view, storage_interval) ||
+      component_count == 0U ||
       component_end > view.components || view.stride_y == 0U ||
       view.stride_z == 0U || view.component_stride == 0U) {
     return false;
@@ -163,7 +164,9 @@ bool valid_cell_view(ConstFieldView view, Int3 cells,
                      std::uint8_t required_ghost_width) noexcept {
   const unsigned end = static_cast<unsigned>(component_begin) +
                        static_cast<unsigned>(component_count);
-  return view.base != nullptr && same_cells(view.interior, cells) &&
+  FieldStorageInterval interval{};
+  return field_storage_interval(view, interval) &&
+         same_cells(view.interior, cells) &&
          view.components != 0U && component_count != 0U &&
          end <= view.components && view.stride_y != 0U &&
          view.stride_z != 0U && view.component_stride != 0U &&
@@ -183,15 +186,21 @@ bool valid_cell_view(FieldView view, Int3 cells,
 
 bool valid_face(ConstFaceFieldView view, CartesianAxis expected,
                 Int3 extents) noexcept {
-  return view.base != nullptr && view.axis == expected &&
-         same_cells(view.extents, extents) && view.stride_y != 0U &&
-         view.stride_z != 0U && view.storage_identity != 0U &&
+  FieldStorageInterval interval{};
+  return face_storage_interval(view, interval) && view.axis == expected &&
+         same_cells(view.extents, extents) && view.storage_identity != 0U &&
          view.revision_domain != 0U;
 }
 
 bool valid_flux_view(ConstFaceFluxView flux, Int3 cells,
                      RevisionToken required_revision) noexcept {
-  return valid_cells(cells) && flux.revision != 0U &&
+  if (!valid_cells(cells) ||
+      cells.x == std::numeric_limits<std::int32_t>::max() ||
+      cells.y == std::numeric_limits<std::int32_t>::max() ||
+      cells.z == std::numeric_limits<std::int32_t>::max()) {
+    return false;
+  }
+  return flux.revision != 0U &&
          (required_revision == 0U || flux.revision == required_revision) &&
          valid_face(flux.x, CartesianAxis::x,
                     {cells.x + 1, cells.y, cells.z}) &&
@@ -199,6 +208,9 @@ bool valid_flux_view(ConstFaceFluxView flux, Int3 cells,
                     {cells.x, cells.y + 1, cells.z}) &&
          valid_face(flux.z, CartesianAxis::z,
                     {cells.x, cells.y, cells.z + 1}) &&
+         !face_views_overlap(flux.x, flux.y) &&
+         !face_views_overlap(flux.x, flux.z) &&
+         !face_views_overlap(flux.y, flux.z) &&
          flux.x.storage_identity == flux.y.storage_identity &&
          flux.x.storage_identity == flux.z.storage_identity &&
          flux.x.revision_domain == flux.y.revision_domain &&

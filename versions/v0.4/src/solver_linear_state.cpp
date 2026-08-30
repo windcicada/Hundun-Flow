@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -131,6 +132,51 @@ bool sufficient_workspace_views(
     return false;
   }
   return true;
+}
+
+bool same_shape(Int3 left, Int3 right) noexcept {
+  return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+bool shape_contains(Int3 outer, Int3 inner) noexcept {
+  return valid_shape(inner) && inner.x <= outer.x && inner.y <= outer.y &&
+         inner.z <= outer.z;
+}
+
+Status copy_recycle_field(ConstFieldView source, FieldView destination) noexcept {
+  for (std::int32_t z = 0; z < destination.interior.z; ++z) {
+    for (std::int32_t y = 0; y < destination.interior.y; ++y) {
+      for (std::int32_t x = 0; x < destination.interior.x; ++x) {
+        const double value = source.unchecked({x, y, z}, 0U);
+        if (!std::isfinite(value)) {
+          return {StatusCode::numerical_failure, kLinearWorkspace};
+        }
+        destination.unchecked({x, y, z}, 0U) = value;
+      }
+    }
+  }
+  return {};
+}
+
+Status difference_recycle_field(ConstFieldView solution,
+                                ConstFieldView snapshot,
+                                FieldView destination,
+                                bool& nonzero) noexcept {
+  nonzero = false;
+  for (std::int32_t z = 0; z < destination.interior.z; ++z) {
+    for (std::int32_t y = 0; y < destination.interior.y; ++y) {
+      for (std::int32_t x = 0; x < destination.interior.x; ++x) {
+        const double value = solution.unchecked({x, y, z}, 0U) -
+                             snapshot.unchecked({x, y, z}, 0U);
+        if (!std::isfinite(value)) {
+          return {StatusCode::numerical_failure, kLinearWorkspace};
+        }
+        nonzero = nonzero || value != 0.0;
+        destination.unchecked({x, y, z}, 0U) = value;
+      }
+    }
+  }
+  return {};
 }
 
 }  // namespace
@@ -481,7 +527,7 @@ Status make_linear_workspace_requirements(
   if (algorithm == LinearAlgorithm::fgmres) {
     if (!detail::checked_linear_multiply(
             static_cast<std::size_t>(maximum_restart), 2U, vector_slots) ||
-        !detail::checked_linear_add(vector_slots, 3U, vector_slots) ||
+        !detail::checked_linear_add(vector_slots, 8U, vector_slots) ||
         vector_slots > std::numeric_limits<std::uint8_t>::max()) {
       return {StatusCode::invalid_plan, kLinearWorkspace};
     }
@@ -503,7 +549,10 @@ Status make_linear_workspace_requirements(
                                     scalar_doubles)) {
       return {StatusCode::invalid_plan, kLinearWorkspace};
     }
-    reduction_capacity = restart_plus_one;
+    reduction_capacity =
+        restart_plus_one < kLinearRecycleMaximumDirections
+            ? kLinearRecycleMaximumDirections
+            : restart_plus_one;
   }
   std::size_t maximum_vector_doubles = 0U;
   if (!detail::checked_linear_multiply(local_cells, vector_slots,
@@ -616,6 +665,7 @@ Status SolverWorkspace::bind(
   candidate.fingerprint_ = detail::workspace_fingerprint(
       requirements, vector_bundle, scalar_buffer);
   candidate.binding_identity_ = 1U;
+  candidate.recycle_ = {};
   out = candidate;
   if (counters != nullptr) {
     counters->workspace_bindings = counter;
@@ -680,6 +730,359 @@ Span<double> SolverWorkspace::scalars(std::size_t offset,
   }
   return {scalar_buffer_.base + offset, count};
 }
+
+Status SolverWorkspace::recycle_begin_capture(
+    Int3 shape, PlanFingerprint source_identity) noexcept {
+  if (recycle_.capture_active || recycle_.projection_pending ||
+      requirements_.algorithm != LinearAlgorithm::fgmres ||
+      !valid_shape(shape) || source_identity == 0U ||
+      !shape_contains(requirements_.maximum_shape, shape) ||
+      requirements_.maximum_restart == 0U ||
+      requirements_.vector_slots <
+          2U * static_cast<std::size_t>(requirements_.maximum_restart) +
+              8U) {
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  recycle_ = {};
+  recycle_.capture_active = true;
+  recycle_.shape = shape;
+  recycle_.source_identity = source_identity;
+  recycle_.snapshot_slot = static_cast<std::uint8_t>(
+      2U * static_cast<std::size_t>(requirements_.maximum_restart) + 3U);
+  return {};
+}
+
+Status SolverWorkspace::recycle_begin_projection(
+    Int3 shape, PlanFingerprint current_identity) noexcept {
+  if (!recycle_.capture_active || recycle_.cycle_active ||
+      recycle_.projection_pending ||
+      !valid_shape(shape) || !same_shape(shape, recycle_.shape) ||
+      current_identity == 0U || recycle_.source_identity == 0U) {
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  recycle_.current_identity = current_identity;
+  recycle_.capture_active = false;
+  recycle_.capture_vector_passes = 0U;
+  recycle_.capture_cycle_attempts = 0U;
+  recycle_.capture_reduction_calls = 0U;
+  recycle_.capture_blocking_operations = 0U;
+  recycle_.published_cycle_corrections = 0U;
+  recycle_.projection_pending = true;
+  return {};
+}
+
+void SolverWorkspace::recycle_clear() noexcept { recycle_ = {}; }
+
+std::uint8_t SolverWorkspace::recycle_snapshot_slot() const noexcept {
+  if (requirements_.algorithm != LinearAlgorithm::fgmres ||
+      requirements_.maximum_restart == 0U) {
+    return 0U;
+  }
+  if (recycle_.snapshot_slot != 0U) return recycle_.snapshot_slot;
+  return static_cast<std::uint8_t>(
+      2U * static_cast<std::size_t>(requirements_.maximum_restart) + 3U);
+}
+
+std::uint8_t SolverWorkspace::recycle_pool_slot(std::size_t index) const
+    noexcept {
+  if (index >= kLinearRecycleMaximumDirections + 1U ||
+      requirements_.algorithm != LinearAlgorithm::fgmres ||
+      requirements_.maximum_restart == 0U) {
+    return 0U;
+  }
+  return static_cast<std::uint8_t>(
+      2U * static_cast<std::size_t>(requirements_.maximum_restart) + 3U +
+      index);
+}
+
+std::uint8_t SolverWorkspace::recycle_correction_logical_slot(
+    std::size_t index) const noexcept {
+  if ((!recycle_.capture_active && !recycle_.projection_pending) ||
+      index >= recycle_.correction_count) {
+    return 0U;
+  }
+  const std::size_t logical =
+      (static_cast<std::size_t>(recycle_.oldest_correction) + index) %
+      kLinearRecycleMaximumDirections;
+  return recycle_.correction_order[logical];
+}
+
+FieldView SolverWorkspace::recycle_snapshot(Int3 shape) const noexcept {
+  return vector(recycle_snapshot_slot(), shape);
+}
+
+FieldView SolverWorkspace::recycle_correction_storage(
+    std::size_t index, Int3 shape) const noexcept {
+  if ((!recycle_.capture_active && !recycle_.projection_pending) ||
+      index >= recycle_.correction_count) {
+    return {};
+  }
+  const std::size_t logical =
+      (static_cast<std::size_t>(recycle_.oldest_correction) + index) %
+      kLinearRecycleMaximumDirections;
+  return vector(recycle_.correction_order[logical], shape);
+}
+
+ConstFieldView SolverWorkspace::recycle_correction(
+    std::size_t index, Int3 shape) const noexcept {
+  if ((!recycle_.capture_active && !recycle_.projection_pending) ||
+      index >= recycle_.correction_count) {
+    return {};
+  }
+  const std::size_t logical =
+      (static_cast<std::size_t>(recycle_.oldest_correction) + index) %
+      kLinearRecycleMaximumDirections;
+  return as_const(vector(recycle_.correction_order[logical], shape));
+}
+
+Status SolverWorkspace::recycle_capture_cycle_start(
+    ConstFieldView solution, ReductionEngine& reductions,
+    Status prerequisite) noexcept {
+  Status local_status{};
+  FieldView snapshot{};
+  if (!recycle_.capture_active || recycle_.cycle_active ||
+      !same_shape(solution.interior, recycle_.shape) ||
+      solution.base == nullptr) {
+    local_status = {StatusCode::invalid_plan, kLinearWorkspace};
+  } else {
+    snapshot = recycle_snapshot(recycle_.shape);
+    if (snapshot.base == nullptr ||
+        detail::field_views_overlap(solution, as_const(snapshot))) {
+      local_status = {StatusCode::invalid_plan, kLinearWorkspace};
+    } else {
+      local_status = copy_recycle_field(solution, snapshot);
+      // A finite check can fail after a partial local copy.  Every rank with
+      // the valid session/view still advances the same private slot revision;
+      // otherwise a rank-selective failure would poison the next Halo use of
+      // this workspace even after the session is discarded.
+      const Status revised = revise_vector(recycle_snapshot_slot());
+      if (local_status) local_status = revised;
+    }
+  }
+  if (!prerequisite) local_status = prerequisite;
+  const Status agreed_revised = reductions.consensus(local_status);
+  if (!agreed_revised) {
+    recycle_clear();
+    return agreed_revised;
+  }
+  if (recycle_.capture_blocking_operations ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  ++recycle_.capture_blocking_operations;
+  recycle_.cycle_active = true;
+  return {};
+}
+
+Status SolverWorkspace::recycle_capture_cycle_publish(
+    ConstFieldView solution, ReductionEngine& reductions) noexcept {
+  const std::uint64_t reduction_begin = reductions.counters().calls;
+  auto account_capture_reductions = [&]() noexcept -> Status {
+    const std::uint64_t final_calls = reductions.counters().calls;
+    if (final_calls < reduction_begin ||
+        final_calls - reduction_begin >
+            std::numeric_limits<std::uint64_t>::max() -
+                recycle_.capture_reduction_calls) {
+      return {StatusCode::invalid_plan, kLinearWorkspace};
+    }
+    recycle_.capture_reduction_calls += final_calls - reduction_begin;
+    return {};
+  };
+  if (!recycle_.capture_active || !recycle_.cycle_active ||
+      !same_shape(solution.interior, recycle_.shape) ||
+      solution.base == nullptr || recycle_.capture_vector_passes >
+                                      std::numeric_limits<std::uint64_t>::max() -
+                                          2U) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  FieldView snapshot = recycle_snapshot(recycle_.shape);
+  Status local_status{};
+  if (snapshot.base == nullptr ||
+      detail::field_views_overlap(solution, as_const(snapshot))) {
+    local_status = {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  bool local_nonzero = false;
+  if (local_status) {
+    // The snapshot is also the only free pool slot.  Compute the correction
+    // in place so every publish uses exactly one difference pass, including
+    // a zero correction; the retained ring remains untouched until the
+    // global nonzero decision below.
+    local_status = difference_recycle_field(
+        solution, as_const(snapshot), snapshot, local_nonzero);
+    // As at cycle start, the in-place difference can fail after a partial
+    // write.  Keep the private vector revision progression collective even
+    // when the numerical status is not successful.
+    const Status revised = revise_vector(recycle_.snapshot_slot);
+    if (local_status) local_status = revised;
+  }
+  const double local_nonzero_value = local_nonzero ? 1.0 : 0.0;
+  double global_nonzero = 0.0;
+  const Status nonzero_status = reductions.checked_max(
+      {&local_nonzero_value, 1U}, {&global_nonzero, 1U}, local_status);
+  if (!nonzero_status) {
+    recycle_clear();
+    return nonzero_status;
+  }
+  if (recycle_.capture_cycle_attempts ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  ++recycle_.capture_cycle_attempts;
+  if (recycle_.capture_blocking_operations ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  ++recycle_.capture_blocking_operations;
+  if (recycle_.capture_vector_passes >
+      std::numeric_limits<std::uint64_t>::max() - 2U) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  recycle_.capture_vector_passes += 2U;
+  if (!(global_nonzero > 0.0) || !std::isfinite(global_nonzero)) {
+    recycle_.cycle_active = false;
+    const Status accounted = account_capture_reductions();
+    if (!accounted) recycle_clear();
+    return accounted;
+  }
+  const std::uint8_t published_slot = recycle_.snapshot_slot;
+  std::uint8_t next_snapshot_slot = 0U;
+  if (recycle_.correction_count < kLinearRecycleMaximumDirections) {
+    for (std::size_t pool = 0U; pool < kLinearRecycleMaximumDirections + 1U;
+         ++pool) {
+      const std::uint8_t candidate = recycle_pool_slot(pool);
+      bool used = candidate == published_slot;
+      for (std::size_t index = 0U; index < recycle_.correction_count;
+           ++index) {
+        used = used || recycle_.correction_order[index] == candidate;
+      }
+      if (!used) {
+        next_snapshot_slot = candidate;
+        break;
+      }
+    }
+    if (next_snapshot_slot == 0U) {
+      (void)account_capture_reductions();
+      recycle_clear();
+      return {StatusCode::invalid_plan, kLinearWorkspace};
+    }
+  } else {
+    next_snapshot_slot =
+        recycle_.correction_order[recycle_.oldest_correction];
+  }
+  const Status accounted = account_capture_reductions();
+  if (!accounted) {
+    recycle_clear();
+    return accounted;
+  }
+  if (recycle_.published_cycle_corrections ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    recycle_clear();
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  ++recycle_.published_cycle_corrections;
+  if (recycle_.correction_count < kLinearRecycleMaximumDirections) {
+    recycle_.correction_order[recycle_.correction_count] =
+        published_slot;
+    ++recycle_.correction_count;
+  } else {
+    recycle_.correction_order[recycle_.oldest_correction] =
+        published_slot;
+    recycle_.oldest_correction = static_cast<std::uint8_t>(
+        (static_cast<std::size_t>(recycle_.oldest_correction) + 1U) %
+        kLinearRecycleMaximumDirections);
+  }
+  recycle_.snapshot_slot = next_snapshot_slot;
+  recycle_.cycle_active = false;
+  return {};
+}
+
+void SolverWorkspace::recycle_set_projection_result(
+    LinearSolveResult& result, std::uint64_t offered,
+    std::uint64_t retained, std::uint64_t operator_applies,
+    std::uint64_t reduction_calls, bool attempted, bool accepted,
+    double projected_residual) noexcept {
+  result.recycle_offered_directions = offered;
+  result.recycle_retained_directions = retained;
+  result.recycle_operator_applies = operator_applies;
+  result.recycle_reduction_calls = reduction_calls;
+  result.recycle_projection_attempted = attempted;
+  result.recycle_projection_accepted = accepted;
+  result.recycle_projected_true_residual = projected_residual;
+}
+
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+Status SolverWorkspace::recycle_begin_capture_for_test(
+    Int3 shape, PlanFingerprint source_identity) noexcept {
+  return recycle_begin_capture(shape, source_identity);
+}
+
+Status SolverWorkspace::recycle_begin_projection_for_test(
+    Int3 shape, PlanFingerprint current_identity) noexcept {
+  return recycle_begin_projection(shape, current_identity);
+}
+
+Status SolverWorkspace::recycle_capture_cycle_start_for_test(
+    ConstFieldView solution, ReductionEngine& reductions,
+    Status prerequisite) noexcept {
+  return recycle_capture_cycle_start(solution, reductions, prerequisite);
+}
+
+Status SolverWorkspace::recycle_capture_cycle_publish_for_test(
+    ConstFieldView solution, ReductionEngine& reductions) noexcept {
+  return recycle_capture_cycle_publish(solution, reductions);
+}
+
+void SolverWorkspace::recycle_clear_for_test() noexcept { recycle_clear(); }
+
+std::size_t SolverWorkspace::recycle_correction_count_for_test()
+    const noexcept {
+  return recycle_correction_count();
+}
+
+std::uint64_t SolverWorkspace::recycle_capture_vector_passes_for_test()
+    const noexcept {
+  return recycle_capture_vector_passes();
+}
+
+std::uint64_t SolverWorkspace::recycle_capture_cycle_attempts_for_test()
+    const noexcept {
+  return recycle_capture_cycle_attempts();
+}
+
+std::uint64_t SolverWorkspace::recycle_capture_reduction_calls_for_test()
+    const noexcept {
+  return recycle_capture_reduction_calls();
+}
+
+std::uint64_t SolverWorkspace::recycle_capture_blocking_operations_for_test()
+    const noexcept {
+  return recycle_capture_blocking_operations();
+}
+
+std::uint64_t SolverWorkspace::recycle_capture_cycle_corrections_for_test()
+    const noexcept {
+  return recycle_capture_cycle_corrections();
+}
+
+std::uint8_t SolverWorkspace::recycle_snapshot_slot_for_test() const noexcept {
+  return recycle_snapshot_slot();
+}
+
+std::uint8_t SolverWorkspace::recycle_correction_physical_slot_for_test(
+    std::size_t index) const noexcept {
+  return recycle_correction_logical_slot(index);
+}
+
+ConstFieldView SolverWorkspace::recycle_correction_for_test(
+    std::size_t index, Int3 shape) const noexcept {
+  return recycle_correction(index, shape);
+}
+#endif
 
 LinearIdentity compose_linear_identity(
     const SymbolicPlan& symbolic, const NumericState& numeric,

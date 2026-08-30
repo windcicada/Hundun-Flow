@@ -1,0 +1,67 @@
+{
+  "schema": "HUNDUN_V04_RE3900_CPU_RESOURCE_PLAN_V1",
+  "status": "FROZEN",
+  "host": {
+    "name": "wyf-Super-Server",
+    "kernel": "Linux 5.4.0-150-generic x86_64 GNU/Linux",
+    "processor": "AMD EPYC 7763 64-Core Processor",
+    "sockets": 2,
+    "physical_cores_per_socket": 64,
+    "threads_per_core": 2,
+    "numa_nodes": 2,
+    "numa_balancing": 1,
+    "scaling_governor_socket_0_probe_cpu_0": "ondemand",
+    "scaling_governor_socket_1_probe_cpu_64": "ondemand"
+  },
+  "mpi": {
+    "implementation": "Open MPI",
+    "ompi_version": "2.1.1",
+    "orte_version": "2.1.1",
+    "opal_version": "2.1.1",
+    "rank_count": 64
+  },
+  "launcher": {
+    "prefix": "env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 mpirun -np 64 --map-by ppr:32:socket:PE=1 --rank-by slot --bind-to core",
+    "affinity_document": "docs/verification/v0.4-re3900-affinity-map.json",
+    "affinity_document_sha256": "6fd2128aac0acd561a1d6d2185f373bae0728cc1f5e74b70aa8b4c2e22ccc6b0",
+    "one_rank_per_physical_core": true,
+    "ranks_per_socket": 32,
+    "numa_memory_policy": "launcher_core_binding_plus_default_first_touch_no_explicit_membind",
+    "simultaneous_hundun_and_coast_runs": false
+  },
+  "decomposition": {
+    "hundun_process_grid": [8, 8, 1],
+    "hundun_authority": "deterministic minimum-interface-surface factor search in mesh_decomposition.cpp for cells 480x480x48 and 64 ranks",
+    "coast_process_grid": [64, 1, 1],
+    "coast_authority": "frozen x_slabs mesh_decomposition in ibm_mesh.d",
+    "decomposition_may_differ_between_products": true,
+    "same_rank_hardware_mapping_required": true
+  },
+  "case_snapshot": {
+    "document": "docs/verification/v0.4-re3900-candidate-case-manifest.json",
+    "document_sha256": "dabe6d90570a827294f0e2688b654136f9275543885386e13e2950fc0b7d658a",
+    "root": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/candidates/h53b1075-c3c22e0f-r5"
+  },
+  "commands": {
+    "hundun_full2": "<launcher-prefix> <hundun-tests-off-binary> run <snapshot-root>/hundun_case --output <new-run-dir> --steps 2 --output-interval 0 --restart-interval 0",
+    "hundun_full20": "<launcher-prefix> <hundun-tests-off-binary> run <snapshot-root>/hundun_case --output <new-run-dir> --steps 20 --output-interval 0 --restart-interval 0",
+    "coast_full2": "copy frozen coast_case into <new-run-dir>, verify tree manifest, cd <new-run-dir>, then <launcher-prefix> <coast-binary>",
+    "coast_full20": "copy frozen coast_case into <new-run-dir>, replace only the run copy input.d with the frozen input.full20.d, verify its SHA-256, cd <new-run-dir>, then <launcher-prefix> <coast-binary>"
+  },
+  "prelaunch_requirements": {
+    "fresh_unique_run_directory": true,
+    "source_snapshot_must_remain_unmodified": true,
+    "minimum_available_memory_bytes": 250000000000,
+    "swap_growth_during_run_rejects_sample": true,
+    "no_other_hundun_coast_or_mpi_lane_process": true,
+    "governor_must_equal_frozen_value": true,
+    "affinity_must_match_frozen_map": true,
+    "receipt_must_be_sealed": true,
+    "candidate_identity_must_be_frozen": true
+  },
+  "performance_policy": {
+    "document": "docs/verification/v0.4-re3900-performance-policy.json",
+    "file_sha256": "e52178165b05264762bd989e2896a97a0689f92303eeca1615e133f186f744b7",
+    "canonical_sha256": "751b464c718c5127c26269fcfe207c613a6dd3e2294dc29f985d500b77400902"
+  }
+}

@@ -180,11 +180,21 @@ bool test_workspace_requirement_contracts() {
   LinearWorkspaceRequirements fgmres{};
   passed &= expect(make_requirements(fgmres),
                    "FGMRES workspace requirements compile");
-  passed &= expect(fgmres.vector_slots == 2U * kRestart + 3U &&
+  passed &= expect(fgmres.vector_slots == 2U * kRestart + 8U &&
                        fgmres.maximum_restart == kRestart &&
                        fgmres.scalar_doubles > 0U &&
                        fgmres.reduction_capacity >= kRestart + 1U,
                    "FGMRES reserves x, V, Z, and scalar recurrence storage");
+
+  LinearWorkspaceRequirements minimum_restart{};
+  passed &= expect(
+      static_cast<bool>(make_linear_workspace_requirements(
+          LinearAlgorithm::fgmres, kMaximumShape, kGhostWidth, 1U,
+          ReductionMode::mpi_allreduce, kExecutionRevision,
+          minimum_restart)) &&
+          minimum_restart.reduction_capacity ==
+              kLinearRecycleMaximumDirections,
+      "restart-one FGMRES reserves the full recycle QR packet capacity");
 
   const LinearWorkspaceRequirements preserved = pcg;
   const Status pcg_restart = make_linear_workspace_requirements(
@@ -210,7 +220,7 @@ bool test_workspace_requirement_contracts() {
       "FGMRES rejects a zero restart dimension");
   passed &= expect(
       make_linear_workspace_requirements(
-          LinearAlgorithm::fgmres, kMaximumShape, kGhostWidth, 127U,
+          LinearAlgorithm::fgmres, kMaximumShape, kGhostWidth, 124U,
           ReductionMode::mpi_allreduce, kExecutionRevision, ignored)
               .code == StatusCode::invalid_plan,
       "FGMRES rejects a vector-slot count beyond uint8 field capacity");
@@ -226,19 +236,19 @@ bool test_workspace_requirement_contracts() {
           Int3{std::numeric_limits<std::int32_t>::max(),
                std::numeric_limits<std::int32_t>::max(),
                std::numeric_limits<std::int32_t>::max()},
-          kGhostWidth, 126U, ReductionMode::mpi_allreduce,
+          kGhostWidth, 124U, ReductionMode::mpi_allreduce,
           kExecutionRevision, ignored)
               .code == StatusCode::invalid_plan,
       "workspace planning rejects checked-size overflow");
 
   LinearWorkspaceRequirements maximum{};
   passed &= expect(
-      static_cast<bool>(make_linear_workspace_requirements(
-          LinearAlgorithm::fgmres, Int3{1, 1, 1}, 0U, 126U,
+          static_cast<bool>(make_linear_workspace_requirements(
+          LinearAlgorithm::fgmres, Int3{1, 1, 1}, 0U, 123U,
           ReductionMode::mpi_allreduce, kExecutionRevision, maximum)) &&
           maximum.vector_slots ==
-              std::numeric_limits<std::uint8_t>::max(),
-      "the maximum legal FGMRES restart uses all 255 uint8 components");
+              std::numeric_limits<std::uint8_t>::max() - 1U,
+      "the maximum legal FGMRES restart reserves all recycle slots");
   FieldRegistry maximum_registry;
   LinearWorkspaceFieldIds maximum_ids{};
   FieldSchema maximum_schema;
@@ -247,8 +257,8 @@ bool test_workspace_requirement_contracts() {
           maximum_registry, "maximum_linear", maximum, maximum_ids)) &&
           static_cast<bool>(maximum_registry.freeze(maximum_schema)) &&
           maximum_schema[maximum_ids.vector_bundle].components ==
-              std::numeric_limits<std::uint8_t>::max(),
-      "the field registry preserves the full uint8 component capacity");
+              std::numeric_limits<std::uint8_t>::max() - 1U,
+      "the field registry preserves all recycle components");
 
   FieldRegistry collision_registry;
   FieldId collision{};
@@ -333,6 +343,37 @@ bool test_runtime_lifetime_views() {
   }
   passed &= expect(layers.counters().aligned_payload_allocations == 1U,
                    "runtime fields add no second full-field allocation");
+
+  const RevisionToken persistent_before = layers.runtime_revision(
+      FieldLifetime::persistent_workspace, persistent);
+  FieldView persistent_before_view;
+  passed &= expect(
+      static_cast<bool>(layers.runtime_view(
+          FieldLifetime::persistent_workspace, persistent,
+          persistent_before_view)) &&
+          static_cast<bool>(layers.revise_runtime(
+              FieldLifetime::persistent_workspace, persistent)),
+      "a runtime writer explicitly publishes a new workspace revision");
+  FieldView persistent_after_view;
+  const RevisionToken persistent_after = layers.runtime_revision(
+      FieldLifetime::persistent_workspace, persistent);
+  passed &= expect(
+      persistent_after > persistent_before &&
+          static_cast<bool>(layers.runtime_view(
+              FieldLifetime::persistent_workspace, persistent,
+              persistent_after_view)) &&
+          persistent_after_view.base == persistent_before_view.base &&
+          persistent_after_view.revision == persistent_after &&
+          layers.counters().aligned_payload_allocations == 1U,
+      "runtime revision changes identity without moving or allocating storage");
+  passed &= expect(
+      layers.revise_runtime(FieldLifetime::state_layer, state).code ==
+              StatusCode::invalid_plan &&
+          layers.revise_runtime(FieldLifetime::step_scratch, persistent).code ==
+              StatusCode::invalid_plan &&
+          layers.runtime_revision(FieldLifetime::persistent_workspace,
+                                  persistent) == persistent_after,
+      "runtime revision rejects state and lifetime mismatches atomically");
 
   FieldView sentinel;
   sentinel.base = reinterpret_cast<double*>(std::uintptr_t{1U});

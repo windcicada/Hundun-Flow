@@ -2,7 +2,7 @@
 
 # HUNDUN-FLOW v0.4 case-input schema
 
-Status: Task 8 typed thermophysics and wire-v6 schema, 2026-08-13
+Status: Task 20 production controls and wire-v9 schema, 2026-08-21
 
 ## Authority and directory layout
 
@@ -16,7 +16,7 @@ aliases are rejected.
 Rank 0 alone opens the case-root descriptor, `case.json`, `.d`, and STL files. It
 reads and parses the thermophysical `.d` file exactly once, normalizes the closed
 schema, hashes the complete typed model and referenced bytes, and broadcasts a
-bounded wire-v6 model. The runtime model retains compact typed thermophysical
+bounded wire-v9 model. The runtime model retains compact typed thermophysical
 data, never the source text. Other ranks never inspect the filesystem or parse
 JSON or `.d` text. Failed compilation leaves the caller's output model unchanged
 on every rank.
@@ -31,7 +31,7 @@ are errors. The root has exactly these required keys:
 
 `turbulence` is the only optional key anywhere in the root schema. Omitting it
 selects `vreman_wall_function`. JSON `schema_version` remains `1`; wire version
-`6` is an internal typed-model format.
+`9` is an internal typed-model format.
 
 `CaseCompiler` closes and types the JSON, checks local enum, finite-number, and
 range constraints, canonicalizes the mesh, and publishes the typed model. It
@@ -71,7 +71,20 @@ required boundary, scheme, and time-control field are explicit.
   },
   "solver": {
     "coupling": "PISO",
-    "pressure_correctors": 2
+    "pressure_correctors": 2,
+    "pressure_linear": {
+      "absolute_tolerance": 1e-13,
+      "relative_tolerance": 1e-13,
+      "maximum_iterations": 400,
+      "true_residual_interval": 4,
+      "krylov_restart": 12
+    },
+    "terminal_tolerances": {
+      "eos": 1e-10,
+      "continuity": 1e-10,
+      "closed_mass": 1e-10,
+      "gauge": 1e-10
+    }
   },
   "turbulence": {
     "model": "none"
@@ -265,8 +278,28 @@ These objects are closed and have the following exact fields and values:
 | Object | Exact fields | Accepted values |
 | --- | --- | --- |
 | `flow` | `model`, `pressure_reference`, `reacting` | `model` is `single_phase_low_mach_compressible`; `pressure_reference` is `boundary_absolute` or `closed_mass`; `reacting` is `false` |
-| `solver` | `coupling`, `pressure_correctors` | `coupling` is `PISO`; `pressure_correctors` is unsigned integer `2` |
+| `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `PISO`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
 | `turbulence` | `model` | Optional object; `model` is `vreman_wall_function`, `wale`, or `none` |
+
+`pressure_linear` is closed and has the exact fields
+`absolute_tolerance`, `relative_tolerance`, `maximum_iterations`,
+`true_residual_interval`, and `krylov_restart`. Both tolerances are finite and
+strictly between zero and one. `maximum_iterations` is in `[1, 1000000]`, the
+true-residual interval is in `[1, maximum_iterations]`, and the fixed-workspace
+FGMRES restart is in `[2, 64]`. Residual convergence is always decided from a
+recomputed true residual at the configured interval; the recursive residual is
+not an acceptance authority.
+
+`terminal_tolerances` is closed and has the exact finite positive fields `eos`,
+`continuity`, `closed_mass`, and `gauge`, each less than one. The pressure
+relative tolerance cannot be looser than either the continuity or gauge gate.
+These values are compiled into the immutable product plan and its semantic
+fingerprint, so changing the numerical work budget changes product identity.
+
+For migration only, the compiler also accepts the former two-field `solver`
+object and assigns the strict values shown in the example. Newly generated,
+validated, and performance-candidate cases must use the explicit four-field
+form; there is no runtime environment or command-line tolerance override.
 
 `pressure_closure` is not a schema key. `CaseCompiler` accepts either listed
 `pressure_reference` enum without deriving pressure authority from the faces.
@@ -323,7 +356,7 @@ input `h` jump within the strict acceptance tolerance is removed during cold
 compilation by replacing only the high-interval NASA integration constant;
 larger jumps are rejected. The canonical typed model is then shared by the
 thermodynamics and transport plans. The same validator guards root
-serialization and wire-v6 decoding, so a
+serialization and wire-v9 decoding, so a
 structurally or scientifically invalid typed thermophysical payload is never
 published. Only the compact typed records and source filename survive in
 `ValidatedModel`; source text is discarded after compilation.
@@ -332,13 +365,15 @@ published. Only the compact typed records and source filename survive in
 
 `transported_scalars` is a required closed array and may be empty. It is the
 single canonical declaration-order catalog for inert species and passive
-scalars. A catalog entry is a closed object with exactly `stable_name` and
-`role`:
+scalars. A catalog entry is a closed object with exactly `stable_name`,
+`role`, `molecular_schmidt`, and `turbulent_schmidt`:
 
 ```json
 "transported_scalars": [
-  {"stable_name": "O2", "role": "species"},
-  {"stable_name": "mixture_fraction", "role": "passive_scalar"}
+  {"stable_name": "O2", "role": "species",
+   "molecular_schmidt": 0.7, "turbulent_schmidt": 0.9},
+  {"stable_name": "mixture_fraction", "role": "passive_scalar",
+   "molecular_schmidt": 0.7, "turbulent_schmidt": 0.9}
 ]
 ```
 
@@ -346,7 +381,10 @@ scalars. A catalog entry is a closed object with exactly `stable_name` and
 bytes and contains only letters, digits, `_`, or `-`. Names are globally
 unique within the catalog; `U`, `pi`, and `h` are reserved state-field names
 and cannot be declared. At most 64 transported scalars are accepted. The
-catalog, including declaration order and role, is retained in the typed model,
+two Schmidt numbers are finite, dimensionless, and strictly positive. The
+runtime forms molecular and SGS diffusivity from their corresponding dynamic
+viscosity divided by these compiled constants. The catalog, including
+declaration order, role, and both closures, is retained in the typed model,
 wire payload, and semantic fingerprint.
 
 Boundary scalar arrays are not a second field catalog. Boundary-plan
@@ -370,6 +408,11 @@ The three velocity/direction fields are finite three-number vectors. The nine
 scalar parameters from `mass_flow_rate` through `mach_limit` are finite JSON
 numbers, `allow_backflow` is a Boolean, `relaxation >= 0`, and
 `0 < mach_limit < 1`.
+
+`heat_flux` is the outward heat flux in W/m2: positive removes energy from
+the fluid.  At a `heat_flux_wall`, the runtime converts it to the temperature
+normal gradient using the local conductivity before applying the boundary
+stencil; it is not interpreted as an enthalpy gradient.
 
 Both `flow_kind` and `thermal_kind` use the closed `BoundaryKind` enum:
 
@@ -424,6 +467,11 @@ backflow-enabled outlet, `backflow_kind: "zero_gradient"` and
 scalar entries. Empty scalar arrays remain explicit when the case declares no
 species or passive-scalar boundary data.
 
+For `normal_flux`, `value` is the outward diffusive flux of the conserved
+scalar. Positive values leave the fluid. The boundary resolver converts it to
+`normal_gradient = -value / effective_diffusivity` after the local
+diffusivity is available.
+
 ## Schemes
 
 `schemes` is a closed object with exactly `momentum`, `enthalpy`, `species`,
@@ -467,6 +515,15 @@ bounds remain explicit for every control kind.
 | `thermophysics.data_file` | unique direct-root name ending in `.d` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
 | `mesh.immersed_boundary` | `null` or exactly `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`; the STL remains a unique direct-root `.stl` file |
+
+The STL may extend beyond the Cartesian domain. Cold product compilation
+preserves exact parsed vertices for topology, clips surface quadrature to the
+open Cartesian domain, and discards domain-exterior closure facets. An
+immersed surface may intersect an external face only when that face is
+`symmetry` or `slip`; the compiler then emits an explicit one-sided,
+full-quadratic boundary-intersection stencil. Intersections with inlet,
+outlet, wall, or NSCBC faces are rejected rather than assigned an implicit
+corner model.
 
 The closed case input rejects body-fitted, multiblock, AMR/nonmatching
 refinement, constant-density flow, SIMPLE/PIMPLE, reacting physics, other

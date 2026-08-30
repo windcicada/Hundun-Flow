@@ -1,0 +1,35 @@
+{
+  "schema": "HUNDUN_V04_RE3900_AFFINITY_V1",
+  "status": "VERIFIED",
+  "host": "wyf-Super-Server",
+  "probe": {
+    "program": "/bin/true",
+    "solver_launched": false,
+    "command": "mpirun -np 64 --map-by ppr:32:socket:PE=1 --rank-by slot --bind-to core --report-bindings /bin/true",
+    "mpi": "Open MPI 2.1.1",
+    "result": "PASS"
+  },
+  "topology": {
+    "processor": "AMD EPYC 7763 64-Core Processor",
+    "sockets": 2,
+    "physical_cores_per_socket": 64,
+    "threads_per_core": 2,
+    "online_os_cpus": "0-255",
+    "numa_node_0_os_cpus": "0-63,128-191",
+    "numa_node_1_os_cpus": "64-127,192-255",
+    "lscpu_parse_cpu_core_socket_node_sha256": "a6caadd1c1849cab373d4798ed08e5b20f754569957bf7ed2d3594a5a0ef767e"
+  },
+  "binding": {
+    "rank_count": 64,
+    "mapping": "ppr:32:socket:PE=1",
+    "ranking": "slot",
+    "binding_object": "core",
+    "oversubscription": false,
+    "rank_0_through_31": "socket=0, physical_core=rank, allowed_os_cpus=[rank,rank+128]",
+    "rank_32_through_63": "socket=1, physical_core=rank+32, allowed_os_cpus=[rank+32,rank+160]",
+    "canonical_expanded_mapping_format": "rank=<r> socket=<s> core=<c> allowed=<cpu0>,<cpu1>\\n",
+    "canonical_expanded_mapping_sha256": "719caa557806ceba1196b8dd4a9c8080612caca3de15b0cb5ec3912094587a22",
+    "one_rank_per_physical_core": true,
+    "smt_sibling_has_no_second_rank": true
+  }
+}

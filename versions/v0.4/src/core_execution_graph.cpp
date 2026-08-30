@@ -443,7 +443,7 @@ Status ExecutionGraphCompiler::register_stage(
   }
 }
 
-Status ExecutionGraphCompiler::freeze_for_test(
+Status ExecutionGraphCompiler::freeze(
     FrozenExecutionGraph& out) noexcept {
   if (!configured_ || frozen_ || stages_.empty() ||
       out.fingerprint_ != 0U || !out.stages_.empty() ||
@@ -777,5 +777,12 @@ Status ExecutionGraphCompiler::freeze_for_test(
     return {StatusCode::invalid_plan, kGraphStage};
   }
 }
+
+#ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
+Status ExecutionGraphCompiler::freeze_for_test(
+    FrozenExecutionGraph& out) noexcept {
+  return freeze(out);
+}
+#endif
 
 }  // namespace hundun::v04

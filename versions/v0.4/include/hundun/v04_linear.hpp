@@ -14,11 +14,16 @@
 namespace hundun::v04 {
 
 class HaloEngine;
+class ReductionEngine;
+class PisoPressureSolveEpoch;
+struct LinearSolveResult;
+struct ResourceCounters;
 namespace detail {
 struct NativeMgTestAccess;
 }
 
-enum class LinearAlgorithm : std::uint8_t { pcg, fgmres, bicgstab };
+inline constexpr std::size_t kLinearRecycleMaximumDirections = 4U;
+
 enum class ReductionMode : std::uint8_t {
   reproducible_tree,
   mpi_allreduce
@@ -39,10 +44,34 @@ enum class HierarchyUpdate : std::uint8_t {
   rebuild
 };
 enum class LinearOperatorClass : std::uint8_t { spd, nonsymmetric };
+// Operator validation and arithmetic failures are rank-local by default.
+// A callback that already performed its own collective agreement may attach
+// matching failure provenance so Krylov does not repeat that agreement and
+// erase the callback-owned lowest failing rank.
+enum class LinearOperatorStatusScope : std::uint8_t {
+  rank_local,
+  collective
+};
 enum class LinearPreconditionerClass : std::uint8_t {
   fixed_spd,
   fixed_general,
   flexible
+};
+// The default is deliberately conservative: a preconditioner callback may
+// return a rank-local status, so the Krylov driver must perform its outer
+// status consensus.  `collective` is a stronger callback contract: the
+// callback owns that consensus and returns the same status on every rank.
+enum class LinearPreconditionerStatusScope : std::uint8_t {
+  rank_local,
+  collective
+};
+// A per-call checked callback validates its input/output contract on every
+// application.  A prepared batch callback validates a solver-owned, immutable
+// set of vector slots once before the solve and then returns a collective
+// status from each hot application.
+enum class LinearPreconditionerApplyLifecycle : std::uint8_t {
+  per_call_checked,
+  prepared_batch
 };
 enum class LinearTermination : std::uint8_t {
   converged,
@@ -53,7 +82,8 @@ enum class LinearTermination : std::uint8_t {
   operator_failure,
   preconditioner_failure,
   collective_failure,
-  invalid_plan
+  invalid_plan,
+  convergence_audit_failure
 };
 enum class CoarseningKind : std::uint8_t {
   full_xyz,
@@ -71,6 +101,15 @@ enum class MgBoundaryKind : std::uint8_t {
   periodic
 };
 enum class MgNullSpace : std::uint8_t { none, constant };
+enum class MgPointSmootherKind : std::uint8_t {
+  red_black,
+  chebyshev_jacobi
+};
+enum class MgCycleKind : std::uint8_t { v_cycle, f_cycle };
+enum class MgOperatorClass : std::uint8_t {
+  general,
+  symmetric_diagonally_dominant_m_matrix
+};
 
 struct MgHierarchyPolicy {
   double anisotropy_threshold{4.0};
@@ -81,6 +120,9 @@ struct MgHierarchyPolicy {
   std::uint16_t coarse_sweeps{24U};
   std::uint8_t minimum_coarse_extent{3U};
   std::uint16_t line_relaxation_maximum_extent{4096U};
+  MgPointSmootherKind point_smoother{MgPointSmootherKind::red_black};
+  MgCycleKind cycle{MgCycleKind::v_cycle};
+  double chebyshev_lower_spectrum_fraction{0.3};
 };
 
 struct MgBoundarySet {
@@ -103,6 +145,8 @@ struct MgPlanCounters {
   std::uint64_t numeric_refreshes{};
   std::uint64_t hierarchy_rebuilds{};
   std::uint64_t applications{};
+  std::uint64_t blocking_collectives{};
+  std::uint64_t collective_logical_bytes{};
 };
 
 struct MgLevelView {
@@ -117,6 +161,20 @@ struct MgCoefficientViews {
   ConstFaceFieldView x{};
   ConstFaceFieldView y{};
   ConstFaceFieldView z{};
+};
+
+// Optional immutable activity map for an embedded/internal boundary.  Values
+// are exactly zero for inactive cells/faces and one for active cells/faces;
+// empty spans select the ordinary full Cartesian domain.  The MG hierarchy
+// uses the map only as an approximate preconditioner operator.  The Krylov
+// LinearOperator remains the exact discretization authority.
+struct MgDomainActivityView {
+  Span<const std::uint8_t> cells{};
+  Span<const std::uint8_t> x_faces{};
+  Span<const std::uint8_t> y_faces{};
+  Span<const std::uint8_t> z_faces{};
+  PlanFingerprint local_fingerprint{};
+  PlanFingerprint collective_fingerprint{};
 };
 
 inline constexpr std::size_t kMgMaximumLevels = 32U;
@@ -224,15 +282,49 @@ struct NativeCartesianMgSpec {
   MeshPatch patch{};
   MgBoundarySet boundaries{};
   MgNullSpace null_space{MgNullSpace::none};
+  MgOperatorClass operator_class{MgOperatorClass::general};
   MgHierarchyPolicy policy{};
+  MgCorrectionScaling correction_scaling{
+      MgCorrectionScaling::residual_minimizing};
   LinearIdentity identity{};
   MgCoefficientIdentity coefficients{};
+  MgDomainActivityView activity{};
 };
 
 class NumericState;
 class HierarchyState;
 class SolverWorkspace;
 class MgWorkspace;
+
+struct LinearPreconditionerBatchDescriptor {
+  const SolverWorkspace* workspace{};
+  Int3 shape{};
+  std::uint8_t input_slot_begin{};
+  std::uint8_t output_slot_begin{};
+  std::uint8_t slot_count{};
+  std::uint32_t maximum_applications{};
+};
+
+// The ticket is intentionally opaque to callers.  It is a per-solve value
+// produced by prepare_batch() and accepted only by apply_prepared().
+class LinearPreconditionerBatchTicket {
+ public:
+  LinearPreconditionerBatchTicket() noexcept = default;
+
+ private:
+  friend class LinearPreconditioner;
+  friend class NativeCartesianMgPlan;
+  std::uintptr_t owner{};
+  const SolverWorkspace* workspace{};
+  Int3 shape{};
+  std::uint8_t input_slot_begin{};
+  std::uint8_t output_slot_begin{};
+  std::uint8_t slot_count{};
+  std::uint32_t maximum_applications{};
+  PlanFingerprint preconditioner_fingerprint{};
+  RevisionToken preconditioner_generation{};
+  std::uint64_t preconditioner_application_base{};
+};
 
 struct LinearOperatorCertificate {
   LinearIdentity identity{};
@@ -241,10 +333,24 @@ struct LinearOperatorCertificate {
   LinearOperatorClass operator_class{LinearOperatorClass::nonsymmetric};
 };
 
+// This metadata is valid only for the exact Status returned by the most
+// recent failed apply and remains stable until the next apply.  A default or
+// non-matching record is conservatively treated as rank-local.
+struct LinearOperatorFailureProvenance {
+  Status status{};
+  LinearOperatorStatusScope status_scope{
+      LinearOperatorStatusScope::rank_local};
+  int lowest_failing_rank{-1};
+};
+
 class LinearOperator {
  public:
   virtual LinearOperatorCertificate certificate() const noexcept = 0;
   virtual Status apply(FieldView x, FieldView y) const noexcept = 0;
+  virtual LinearOperatorFailureProvenance failure_provenance() const
+      noexcept {
+    return {};
+  }
   virtual ~LinearOperator() = default;
 };
 
@@ -253,6 +359,10 @@ struct LinearPreconditionerCertificate {
   PlanFingerprint collective_fingerprint{};
   LinearPreconditionerClass preconditioner_class{
       LinearPreconditionerClass::fixed_general};
+  LinearPreconditionerStatusScope status_scope{
+      LinearPreconditionerStatusScope::rank_local};
+  LinearPreconditionerApplyLifecycle apply_lifecycle{
+      LinearPreconditionerApplyLifecycle::per_call_checked};
 };
 
 class LinearPreconditioner {
@@ -260,7 +370,35 @@ class LinearPreconditioner {
   virtual LinearPreconditionerCertificate certificate() const noexcept = 0;
   virtual Status apply(ConstFieldView input, FieldView output,
                        std::uint32_t iteration) noexcept = 0;
+  virtual Status prepare_batch(
+      const LinearPreconditionerBatchDescriptor&,
+      LinearPreconditionerBatchTicket&) noexcept {
+    return {StatusCode::invalid_plan, 603U};
+  }
+  virtual Status apply_prepared(
+      ConstFieldView, FieldView, std::uint32_t,
+      const LinearPreconditionerBatchTicket&) noexcept {
+    return {StatusCode::invalid_plan, 603U};
+  }
   virtual ~LinearPreconditioner() = default;
+
+ protected:
+  static void issue_batch_ticket(
+      LinearPreconditionerBatchTicket& ticket,
+      const LinearPreconditioner* owner,
+      const LinearPreconditionerBatchDescriptor& descriptor,
+      PlanFingerprint preconditioner_fingerprint = 0U,
+      RevisionToken preconditioner_generation = 0U) noexcept {
+    ticket.owner = reinterpret_cast<std::uintptr_t>(owner);
+    ticket.workspace = descriptor.workspace;
+    ticket.shape = descriptor.shape;
+    ticket.input_slot_begin = descriptor.input_slot_begin;
+    ticket.output_slot_begin = descriptor.output_slot_begin;
+    ticket.slot_count = descriptor.slot_count;
+    ticket.maximum_applications = descriptor.maximum_applications;
+    ticket.preconditioner_fingerprint = preconditioner_fingerprint;
+    ticket.preconditioner_generation = preconditioner_generation;
+  }
 };
 
 struct LinearSolveControl {
@@ -271,11 +409,66 @@ struct LinearSolveControl {
   std::uint32_t restart{};
 };
 
+struct LinearConvergenceAuditCertificate {
+  PlanFingerprint collective_fingerprint{};
+};
+
+struct LinearConvergenceFailureProvenance {
+  bool valid{};
+  std::uint64_t global_cell{};
+  Int3 global_index{-1, -1, -1};
+  int owner_rank{-1};
+  std::uint8_t pressure_activity{};
+  double predecessor_application_scale{1.0};
+  double predecessor_maximum_depletion{};
+  double density{};
+  double psi{};
+  double raw_correction{};
+  double depletion{};
+  double bdf_storage{};
+  double flux_divergence{};
+  double reconstructed_rhs{};
+  double sealed_rhs{};
+  double rhs_absolute_mismatch{};
+  double rhs_relative_mismatch{};
+};
+
+struct LinearConvergenceAuditResult {
+  bool accepted{};
+  double metric{};
+  double limit{};
+  double application_scale{1.0};
+  double unscaled_metric{};
+  double maximum_depletion{};
+  double operator_parity_error{};
+  // A rejected supplemental criterion normally asks the Krylov method to
+  // continue.  Set this only when further iterations of the unchanged linear
+  // system cannot alter the application-level decision.
+  bool terminal_rejection{};
+  LinearConvergenceFailureProvenance failure_provenance{};
+};
+
+// Optional native convergence obligation evaluated only after the canonical
+// FP64 true-residual criterion has passed.  The callback owns any reductions
+// needed to return one collective metric/decision on every rank.  It may make
+// a solver continue or terminate an application-level rejection, but it can
+// never replace or relax the true-residual gate.
+class LinearConvergenceAudit {
+ public:
+  virtual LinearConvergenceAuditCertificate certificate() const noexcept = 0;
+  virtual Status evaluate(ConstFieldView solution,
+                          ConstFieldView true_residual,
+                          ReductionEngine& reductions,
+                          LinearConvergenceAuditResult& result) noexcept = 0;
+  virtual ~LinearConvergenceAudit() = default;
+};
+
 struct LinearSolveInvocation {
   ConstFieldView rhs{};
   FieldView solution{};
   LinearIdentity expected_identity{};
   LinearSolveControl control{};
+  LinearConvergenceAudit* convergence_audit{};
 };
 
 struct LinearSolveResult {
@@ -288,7 +481,29 @@ struct LinearSolveResult {
   std::uint64_t reduction_calls{};
   std::uint64_t operator_applies{};
   std::uint64_t preconditioner_applies{};
+  std::uint64_t norm_breakdown_restarts{};
+  std::uint64_t convergence_audits{};
+  std::uint64_t convergence_rejections{};
+  double final_convergence_metric{};
+  double convergence_limit{};
+  double convergence_application_scale{1.0};
+  double convergence_unscaled_metric{};
+  double convergence_maximum_depletion{};
+  double convergence_operator_parity_error{};
+  LinearConvergenceFailureProvenance convergence_failure_provenance{};
   int lowest_failing_rank{-1};
+  std::uint64_t recycle_offered_directions{};
+  std::uint64_t recycle_retained_directions{};
+  std::uint64_t recycle_operator_applies{};
+  std::uint64_t recycle_reduction_calls{};
+  bool recycle_projection_attempted{};
+  bool recycle_projection_accepted{};
+  double recycle_projected_true_residual{};
+  std::uint64_t recycle_cycle_corrections{};
+  std::uint64_t recycle_capture_vector_passes{};
+  std::uint64_t recycle_capture_cycle_attempts{};
+  std::uint64_t recycle_capture_reduction_calls{};
+  std::uint64_t recycle_capture_blocking_operations{};
 };
 
 struct LinearReductionCounters {
@@ -296,6 +511,8 @@ struct LinearReductionCounters {
   std::uint64_t scalars{};
   std::uint64_t logical_bytes{};
   std::uint64_t tree_messages{};
+  std::uint64_t blocking_operations{};
+  std::uint64_t wall_nanoseconds{};
 };
 
 class ReductionEngine {
@@ -316,6 +533,11 @@ class ReductionEngine {
                      Status local_status = {}) noexcept;
   Status consensus(Status local_status) noexcept;
   Status consensus_contract(PlanFingerprint local_fingerprint) noexcept;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  Status arm_checked_sum_fault_for_test(std::uint64_t ordinal,
+                                        int rank) noexcept;
+  void clear_checked_sum_fault_for_test() noexcept;
+#endif
   Status validate_communicator(MPI_Comm communicator) const noexcept;
   int lowest_failing_rank() const noexcept;
   LinearReductionCounters counters() const noexcept;
@@ -429,10 +651,122 @@ class SolverWorkspace {
   bool overlaps_storage(FieldView view) const noexcept;
   Span<double> scalars(std::size_t offset, std::size_t count) const noexcept;
 
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  Status recycle_begin_capture_for_test(
+      Int3 shape, PlanFingerprint source_identity) noexcept;
+  Status recycle_begin_projection_for_test(
+      Int3 shape, PlanFingerprint current_identity) noexcept;
+  Status recycle_capture_cycle_start_for_test(
+      ConstFieldView solution, ReductionEngine& reductions,
+      Status prerequisite = {}) noexcept;
+  Status recycle_capture_cycle_publish_for_test(
+      ConstFieldView solution, ReductionEngine& reductions) noexcept;
+  void recycle_clear_for_test() noexcept;
+  std::size_t recycle_correction_count_for_test() const noexcept;
+  std::uint64_t recycle_capture_vector_passes_for_test() const noexcept;
+  std::uint64_t recycle_capture_cycle_attempts_for_test() const noexcept;
+  std::uint64_t recycle_capture_reduction_calls_for_test() const noexcept;
+  std::uint64_t recycle_capture_blocking_operations_for_test() const noexcept;
+  std::uint64_t recycle_capture_cycle_corrections_for_test() const noexcept;
+  std::uint8_t recycle_snapshot_slot_for_test() const noexcept;
+  std::uint8_t recycle_correction_physical_slot_for_test(
+      std::size_t index) const noexcept;
+  ConstFieldView recycle_correction_for_test(
+      std::size_t index, Int3 shape) const noexcept;
+#endif
+
  private:
+  friend class PisoPressureSolveEpoch;
+  friend LinearSolveResult solve_fgmres(
+      const LinearOperator&, LinearPreconditioner&,
+      const LinearSolveInvocation&, SolverWorkspace&, ReductionEngine&,
+      ResourceCounters*) noexcept;
   friend LinearIdentity compose_linear_identity(
       const SymbolicPlan&, const NumericState&, const HierarchyState&,
       const SolverWorkspace&) noexcept;
+
+  struct RecycleState {
+    bool capture_active{};
+    bool cycle_active{};
+    bool projection_pending{};
+    Int3 shape{};
+    PlanFingerprint source_identity{};
+    PlanFingerprint current_identity{};
+    std::uint8_t snapshot_slot{};
+    std::uint8_t correction_count{};
+    std::uint8_t oldest_correction{};
+    std::array<std::uint8_t, kLinearRecycleMaximumDirections>
+        correction_order{};
+    std::uint64_t capture_vector_passes{};
+    std::uint64_t capture_cycle_attempts{};
+    std::uint64_t capture_reduction_calls{};
+    std::uint64_t capture_blocking_operations{};
+    std::uint64_t published_cycle_corrections{};
+  };
+
+  Status recycle_begin_capture(Int3 shape,
+                               PlanFingerprint source_identity) noexcept;
+  Status recycle_begin_projection(Int3 shape,
+                                  PlanFingerprint current_identity) noexcept;
+  void recycle_clear() noexcept;
+  bool recycle_capture_active() const noexcept {
+    return recycle_.capture_active;
+  }
+  Status recycle_capture_cycle_start(ConstFieldView solution,
+                                     ReductionEngine& reductions,
+                                     Status prerequisite = {}) noexcept;
+  Status recycle_capture_cycle_publish(ConstFieldView solution,
+                                       ReductionEngine& reductions) noexcept;
+  std::size_t recycle_correction_count() const noexcept {
+    return recycle_.correction_count;
+  }
+  std::uint64_t recycle_capture_vector_passes() const noexcept {
+    return recycle_.capture_vector_passes;
+  }
+  std::uint64_t recycle_capture_reduction_calls() const noexcept {
+    return recycle_.capture_reduction_calls;
+  }
+  std::uint64_t recycle_capture_cycle_attempts() const noexcept {
+    return recycle_.capture_cycle_attempts;
+  }
+  std::uint64_t recycle_capture_blocking_operations() const noexcept {
+    return recycle_.capture_blocking_operations;
+  }
+  std::uint64_t recycle_capture_cycle_corrections() const noexcept {
+    return recycle_.published_cycle_corrections;
+  }
+  ConstFieldView recycle_correction(std::size_t index,
+                                    Int3 shape) const noexcept;
+  FieldView recycle_snapshot(Int3 shape) const noexcept;
+  FieldView recycle_correction_storage(std::size_t index,
+                                       Int3 shape) const noexcept;
+  std::uint8_t recycle_pool_slot(std::size_t index) const noexcept;
+  std::uint8_t recycle_snapshot_slot() const noexcept;
+  std::uint8_t recycle_correction_logical_slot(
+      std::size_t index) const noexcept;
+  bool recycle_projection_pending() const noexcept {
+    return recycle_.projection_pending;
+  }
+  void recycle_skip_projection(LinearSolveResult* result = nullptr) noexcept {
+    if (result != nullptr && recycle_.projection_pending) {
+      result->recycle_offered_directions = recycle_.correction_count;
+      result->recycle_retained_directions = 0U;
+      result->recycle_operator_applies = 0U;
+      result->recycle_reduction_calls = 0U;
+      result->recycle_projection_attempted = false;
+      result->recycle_projection_accepted = false;
+      result->recycle_projected_true_residual = 0.0;
+    }
+    recycle_.projection_pending = false;
+  }
+  void recycle_set_projection_result(LinearSolveResult& result,
+                                     std::uint64_t offered,
+                                     std::uint64_t retained,
+                                     std::uint64_t operator_applies,
+                                     std::uint64_t reduction_calls,
+                                     bool attempted, bool accepted,
+                                     double projected_residual) noexcept;
+
   LinearWorkspaceRequirements requirements_{};
   FieldView vector_bundle_{};
   FieldView scalar_buffer_{};
@@ -440,6 +774,7 @@ class SolverWorkspace {
   RevisionToken next_vector_revision_{};
   PlanFingerprint fingerprint_{};
   RevisionToken binding_identity_{};
+  RecycleState recycle_{};
 };
 
 class MgWorkspace {
@@ -509,6 +844,11 @@ class NativeCartesianMgPlan final : public LinearPreconditioner {
   LinearPreconditionerCertificate certificate() const noexcept override;
   Status apply(ConstFieldView residual, FieldView correction,
                std::uint32_t iteration) noexcept override;
+  Status prepare_batch(const LinearPreconditionerBatchDescriptor& descriptor,
+                       LinearPreconditionerBatchTicket& ticket) noexcept override;
+  Status apply_prepared(ConstFieldView residual, FieldView correction,
+                        std::uint32_t iteration,
+                        const LinearPreconditionerBatchTicket& ticket) noexcept override;
   std::size_t level_count() const noexcept;
   Status level(std::size_t index, MgLevelView& out) const noexcept;
   CoarseningKind finest_coarsening() const noexcept;
@@ -528,6 +868,8 @@ class NativeCartesianMgPlan final : public LinearPreconditioner {
  private:
   friend struct detail::NativeMgTestAccess;
   struct Impl;
+  Status apply_impl(ConstFieldView residual, FieldView correction,
+                    bool prepared) noexcept;
   void release() noexcept;
   Impl* implementation_{};
 };

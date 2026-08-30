@@ -207,9 +207,9 @@ Status initial_memory_gate(std::size_t triangles, std::size_t lines,
   std::uint64_t worker_control_bytes{};
   std::uint64_t maximum_span_bytes{};
   const std::uint64_t reference_limit = bin_reference_limit(budget);
-  // TriangleSoA owns 18 double arrays.  Line offsets and at most the configured
+  // TriangleSoA owns 24 double arrays.  Line offsets and at most the configured
   // total span-bound count are persistent upper bounds.
-  if (!checked_u64_product(triangle_count, UINT64_C(18) * sizeof(double),
+  if (!checked_u64_product(triangle_count, UINT64_C(24) * sizeof(double),
                            soa_bytes) ||
       !checked_u64_product(line_count + 1U, sizeof(std::size_t), line_bytes) ||
       !checked_u64_product(triangle_count, sizeof(TriangleInput),
@@ -777,6 +777,12 @@ Status StlScanCompiler::compile_triangles(
     soa.ax_.reserve(triangle_count);
     soa.ay_.reserve(triangle_count);
     soa.az_.reserve(triangle_count);
+    soa.bx_.reserve(triangle_count);
+    soa.by_.reserve(triangle_count);
+    soa.bz_.reserve(triangle_count);
+    soa.cx_.reserve(triangle_count);
+    soa.cy_.reserve(triangle_count);
+    soa.cz_.reserve(triangle_count);
     soa.e1x_.reserve(triangle_count);
     soa.e1y_.reserve(triangle_count);
     soa.e1z_.reserve(triangle_count);
@@ -829,6 +835,12 @@ Status StlScanCompiler::compile_triangles(
       soa.ax_.push_back(triangle.a.x);
       soa.ay_.push_back(triangle.a.y);
       soa.az_.push_back(triangle.a.z);
+      soa.bx_.push_back(triangle.b.x);
+      soa.by_.push_back(triangle.b.y);
+      soa.bz_.push_back(triangle.b.z);
+      soa.cx_.push_back(triangle.c.x);
+      soa.cy_.push_back(triangle.c.y);
+      soa.cz_.push_back(triangle.c.z);
       soa.e1x_.push_back(edge1.x);
       soa.e1y_.push_back(edge1.y);
       soa.e1z_.push_back(edge1.z);

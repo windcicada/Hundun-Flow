@@ -303,6 +303,19 @@ bool test_constant_cp_path() {
                         state.drho_dp_hY, 1.0e-8),
                    "analytic drho/dp matches finite difference at fixed h,Y");
 
+  const double dh = 0.05;
+  passed &= expect(static_cast<bool>(plan.evaluate(
+                       p, h + dh, Span<const double>{y.data(), y.size()}, {},
+                       plus)) &&
+                       static_cast<bool>(plan.evaluate(
+                           p, h - dh,
+                           Span<const double>{y.data(), y.size()}, {}, minus)),
+                   "constant-cp enthalpy derivative states evaluate");
+  passed &= expect(near((plus.rho - minus.rho) / (2.0 * dh),
+                        state.drho_dh_pY, 1.0e-7) &&
+                       state.drho_dh_pY < 0.0,
+                   "analytic drho/dh matches finite difference at fixed p,Y");
+
   ThermophysicalSpec generic_spec = spec;
   constexpr double roundoff_slope = 1.0e-18;
   for (SpeciesThermophysicalSpec& species : generic_spec.species) {
@@ -353,6 +366,187 @@ bool test_constant_cp_path() {
                        repeated.temperature == state.temperature &&
                        repeated.rho == state.rho,
                    "constant-cp hot evaluation is allocation-free");
+  return passed;
+}
+
+bool test_conserved_enthalpy_bounds() {
+  bool passed = true;
+
+  ThermophysicalSpec single_spec = base_spec();
+  single_spec.maximum_temperature = 3200.0;
+  single_spec.species.push_back(constant_species("air", 28.96546, 1005.0));
+  ThermodynamicsPlan single;
+  const Span<const TransportedScalarSpec> empty_catalog{nullptr, 0U};
+  passed &= expect(static_cast<bool>(ThermodynamicsPlan::compile(
+                           single_spec, empty_catalog, single)),
+                   "single-species thermodynamics compiles for bounds");
+  const double single_density = 1.7;
+  double single_lower = 0.0;
+  double single_upper = 0.0;
+  passed &= expect(static_cast<bool>(single.species_enthalpy_bounds(
+                       0U, single_lower, single_upper)),
+                   "single-species endpoint cache is published");
+  for (const double endpoint : {single_spec.minimum_temperature,
+                                single_spec.maximum_temperature}) {
+    double mixture_h = 0.0;
+    double mixture_cp = 0.0;
+    double mixture_r = 0.0;
+    passed &= expect(static_cast<bool>(single.mixture_enthalpy(
+                         endpoint, Span<const double>{nullptr, 0U}, mixture_h,
+                         mixture_cp, mixture_r)),
+                     "single-species endpoint mixture enthalpy evaluates");
+    const double conserved = single_density * mixture_h;
+    passed &= expect(
+        near(single_density *
+                 (endpoint == single_spec.minimum_temperature ? single_lower
+                                                               : single_upper),
+             conserved, 2.0e-14),
+        "single-species bound equals rho times endpoint enthalpy");
+  }
+
+  const PlanFingerprint single_fingerprint = single.fingerprint();
+  ThermodynamicsPlan single_moved = std::move(single);
+  passed &= expect(single_moved.fingerprint() == single_fingerprint,
+                   "moving a thermodynamics plan retains bound identity");
+  ThermodynamicsPlan single_recompiled;
+  passed &= expect(static_cast<bool>(ThermodynamicsPlan::compile(
+                           single_spec, empty_catalog, single_recompiled)) &&
+                       single_recompiled.fingerprint() == single_fingerprint,
+                   "cached endpoint bounds preserve deterministic fingerprint");
+
+  ThermophysicalSpec multi_spec = base_spec();
+  multi_spec.maximum_temperature = 3200.0;
+  multi_spec.species.push_back(varying_species("A", 24.0, 3.2, 4.0e-4));
+  multi_spec.species.push_back(varying_species("B", 32.0, 3.8, 2.0e-4));
+  multi_spec.species.push_back(varying_species("C", 40.0, 4.1, 1.0e-4));
+  std::array<TransportedScalarSpec, 2U> multi_catalog{
+      TransportedScalarSpec{"A", TransportedScalarRole::species},
+      TransportedScalarSpec{"B", TransportedScalarRole::species}};
+  ThermodynamicsPlan multi;
+  passed &= expect(static_cast<bool>(ThermodynamicsPlan::compile(
+                           multi_spec,
+                           Span<const TransportedScalarSpec>{
+                               multi_catalog.data(), multi_catalog.size()},
+                           multi)),
+                   "multi-species thermodynamics compiles for bounds");
+
+  std::array<TransportedScalarSpec, 2U> reordered_catalog{
+      TransportedScalarSpec{"B", TransportedScalarRole::species},
+      TransportedScalarSpec{"A", TransportedScalarRole::species}};
+  ThermodynamicsPlan reordered;
+  passed &= expect(static_cast<bool>(ThermodynamicsPlan::compile(
+                           multi_spec,
+                           Span<const TransportedScalarSpec>{
+                               reordered_catalog.data(),
+                               reordered_catalog.size()},
+                           reordered)),
+                   "reordered species catalog compiles for bounds");
+  double mapped_minimum = 0.0;
+  double mapped_maximum = 0.0;
+  double direct_minimum = 0.0;
+  double direct_maximum = 0.0;
+  passed &= expect(
+      static_cast<bool>(reordered.independent_species_enthalpy_bounds(
+          0U, mapped_minimum, mapped_maximum)) &&
+          static_cast<bool>(reordered.species_enthalpy_bounds(
+              1U, direct_minimum, direct_maximum)) &&
+          mapped_minimum == direct_minimum && mapped_maximum == direct_maximum,
+      "independent endpoint lookup follows the catalog-to-species mapping");
+
+  // This vector is deliberately outside the composition simplex.  The API
+  // is a linear conserved-state operation and must still produce both bounds.
+  const double non_simplex_density = 1.0;
+  const std::array<double, 2U> non_simplex_species{1.2, -0.4};
+  const double non_simplex_dependent =
+      non_simplex_density - non_simplex_species[0U] -
+      non_simplex_species[1U];
+  const std::array<double, 3U> non_simplex_full_species{
+      non_simplex_species[0U], non_simplex_species[1U],
+      non_simplex_dependent};
+  for (const double endpoint : {multi_spec.minimum_temperature,
+                                multi_spec.maximum_temperature}) {
+    double expected = 0.0;
+    double actual = 0.0;
+    for (std::size_t species_index = 0U; species_index < 3U;
+         ++species_index) {
+      double at_minimum = 0.0;
+      double at_maximum = 0.0;
+      passed &= expect(static_cast<bool>(multi.species_enthalpy_bounds(
+                           species_index, at_minimum, at_maximum)),
+                       "multi-species endpoint cache covers every species");
+      actual += non_simplex_full_species[species_index] *
+                (endpoint == multi_spec.minimum_temperature ? at_minimum
+                                                             : at_maximum);
+      const SpeciesThermophysicalSpec& species =
+          multi_spec.species[species_index];
+      const auto& coefficients =
+          endpoint <= species.temperature_switch ? species.nasa7_low
+                                                 : species.nasa7_high;
+      expected += non_simplex_full_species[species_index] *
+                  species_h_oracle(species, coefficients, endpoint);
+    }
+    passed &= expect(near(actual, expected, 3.0e-14),
+                     "multi-species bound is the complete linear species sum");
+  }
+
+  const double physical_density = 2.4;
+  const std::array<double, 2U> physical_species{0.72, 0.48};
+  const std::array<double, 2U> physical_fractions{
+      physical_species[0U] / physical_density,
+      physical_species[1U] / physical_density};
+  const std::array<double, 3U> physical_full_species{
+      physical_species[0U], physical_species[1U],
+      physical_density - physical_species[0U] - physical_species[1U]};
+  for (const double endpoint : {multi_spec.minimum_temperature,
+                                multi_spec.maximum_temperature}) {
+    double mixture_h = 0.0;
+    double mixture_cp = 0.0;
+    double mixture_r = 0.0;
+    passed &= expect(static_cast<bool>(multi.mixture_enthalpy(
+                         endpoint,
+                         Span<const double>{physical_fractions.data(),
+                                             physical_fractions.size()},
+                         mixture_h, mixture_cp, mixture_r)),
+                     "multi-species endpoint mixture enthalpy evaluates");
+    double actual = 0.0;
+    for (std::size_t species_index = 0U; species_index < 3U;
+         ++species_index) {
+      double at_minimum = 0.0;
+      double at_maximum = 0.0;
+      passed &= expect(static_cast<bool>(multi.species_enthalpy_bounds(
+                           species_index, at_minimum, at_maximum)),
+                       "physical endpoint cache lookup succeeds");
+      actual += physical_full_species[species_index] *
+                (endpoint == multi_spec.minimum_temperature ? at_minimum
+                                                             : at_maximum);
+    }
+    passed &= expect(near(actual, physical_density * mixture_h, 3.0e-14),
+                     "multi-species bound equals rho times mixture enthalpy");
+  }
+
+  std::size_t hot_allocations = std::numeric_limits<std::size_t>::max();
+  {
+    allocation_observer::Guard guard;
+    for (std::size_t iteration = 0U; iteration < 1000U; ++iteration) {
+      for (std::size_t species_index = 0U; species_index < 3U;
+           ++species_index) {
+        double lower = 0.0;
+        double upper = 0.0;
+        (void)multi.species_enthalpy_bounds(species_index, lower, upper);
+      }
+    }
+    hot_allocations =
+        allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  passed &= expect(hot_allocations == 0U,
+                   "conserved endpoint bounds are allocation-free");
+
+  double untouched_lower = 17.0;
+  double untouched_upper = 19.0;
+  passed &= expect(!multi.species_enthalpy_bounds(
+                       multi.species_count(), untouched_lower, untouched_upper) &&
+                       untouched_lower == 17.0 && untouched_upper == 19.0,
+                   "out-of-range endpoint lookup is rejected without publication");
   return passed;
 }
 
@@ -409,6 +603,23 @@ bool test_nasa7_inversion_and_validation() {
                        near(state.cp, cp, 2.0e-11) &&
                        near(state.mach, 13.0 / state.sound_speed, 1.0e-13),
                    "NASA7 inversion returns the forward state and |U|/a Mach");
+
+  const double dh = std::max(1.0e-3, std::abs(h) * 2.0e-7);
+  ThermoState plus_h;
+  ThermoState minus_h;
+  passed &= expect(static_cast<bool>(plan.evaluate(
+                       101325.0, h + dh,
+                       Span<const double>{y.data(), y.size()}, {}, plus_h,
+                       1375.0)) &&
+                       static_cast<bool>(plan.evaluate(
+                           101325.0, h - dh,
+                           Span<const double>{y.data(), y.size()}, {}, minus_h,
+                           1375.0)),
+                   "NASA7 enthalpy derivative states evaluate");
+  passed &= expect(near((plus_h.rho - minus_h.rho) / (2.0 * dh),
+                        state.drho_dh_pY, 2.0e-7) &&
+                       state.drho_dh_pY < 0.0,
+                   "NASA7 analytic drho/dh matches finite difference");
 
   Status repeated_status;
   ThermoState repeated;
@@ -748,6 +959,7 @@ bool test_thermophysical_text_contract() {
 
 int main() {
   bool passed = test_constant_cp_path();
+  passed &= test_conserved_enthalpy_bounds();
   passed &= test_nasa7_inversion_and_validation();
   passed &= test_thermophysical_text_contract();
   if (passed) {
