@@ -50,7 +50,7 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 | C2 same-target refinement | 完成 | 每轮从已接受临时状态刷新 thermo、边界/IBM、面通量、残差和线性化 |
 | 原子状态同步 | 完成 | refinement 同步发布 `p/h/rho/T/U` 与物理质量通量，authority 单次消费 |
 | globalization policy identity | 完成 | 联合 L2 使用新 schema/provenance；旧 L∞ 冻结 oracle 保持不变且 mutation 被拒绝 |
-| CLI continuity witness | 完成 | 仅 `valid=true` 时输出 witness；其他失败不再伪装默认零值和 `rank=-1` 为真实诊断 |
+| CLI terminal audit / witness | 完成 | 仅终端审计 present 时输出五残差，审计前失败明确 unavailable；witness 另需 `valid=true` |
 | ProductDriver refinement | 完成 | 成功 fixture：calls=2、trajectory=4、五门通过；失败 fixture：capacity=6 后精确回滚；1/2-rank 通过 |
 | rollback / retry | 完成 | 未接受 full step 精确回滚，half retry、直接 half 和下一 BDF2 语义保持一致 |
 | Re3900 BE→BDF2 | 条件完成 | 唯一两步 `dt=0.006` 运行通过 pressure–enthalpy 五门且无 retry；两步无 refinement |
@@ -68,8 +68,10 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
   刷新 rank-local pressure/numeric/linear identity，并同步刷新跨 rank 一致的 collective
   state/flux provenance；collective lineage 跨 rank 一致且轮间互异，未使用 suffix 必须为空。
 - 联合 L2 策略使用新的 policy schema/provenance identity；旧 L∞ 冻结 oracle 不得重生成。
-- continuity witness 只在 `valid=true` 时可作为失败诊断输出，正常成功热路径不增加详细
-  witness collective。
+- CLI 只在 `final_flux_revision != 0`、即终端物理审计确实完成时输出 EOS、continuity、
+  energy、closed mass 和 gauge；否则必须明确输出 `terminal_audit=unavailable`。
+- continuity witness 还必须满足 `valid=true` 才可作为失败诊断输出，正常成功热路径不增加
+  详细 witness collective。
 - V3 冻结 oracle 保持字面不变，V3 携带任一 V4 refinement 字段必须被拒绝。
 
 ## 验证分层
@@ -79,11 +81,14 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 2. 契约与 refinement 证据：受影响 focused 集合 9/9 覆盖 L2 policy provenance
    mutation 和真实 ProductDriver 成功/回滚；最后的安全哨兵与 terminal 绑定补强后，
    CLI 及 ProductDriver 1/2-rank 又复核 3/3。
-3. Re3900 基线证据：独立 `case-full, dt=0.006` 单步 startup 已通过，证明
+3. CLI 诊断真实性证据：真实 stage 44 fixture 先 RED 捕获五个默认零残差，修复后只输出
+   `terminal_audit=unavailable`；CLI、evidence writer、I/O 和 stage 60 ProductDriver
+   路径定向复核 4/4。
+4. Re3900 基线证据：独立 `case-full, dt=0.006` 单步 startup 已通过，证明
    `dt=0.003` 只是保守 half-step，而非必要的时间步缩小。
-4. Re3900 时间层证据：唯一一次 64-rank 两步 `dt=0.006` 运行完成真实
+5. Re3900 时间层证据：唯一一次 64-rank 两步 `dt=0.006` 运行完成真实
    BE→BDF2，无 temporal fallback、无 retry，第二步五个终端门通过。
-5. 未证明项：实际 maximum convective CFL 未由现有 evidence 暴露；按范围约束不为此
+6. 未证明项：实际 maximum convective CFL 未由现有 evidence 暴露；按范围约束不为此
    扩 schema。长程稳定性、物理统计、正式发布门及 momentum 高阶质量仍是后续门。
 
 ## 候选与 DCO 封装
@@ -93,16 +98,17 @@ IBM donor-gradient 导数仍不作虚假声明，最终物理门继续作为接�
 - reopen snapshot：`2739f36cbb80886585eb5f7b32b625278b78f38b`
 - pressure–enthalpy code commit：`d9006d261dd5247c7a2a8edc67a4fbb173544f15`
 - 当前 tests-off `hundun` SHA-256：
-  `c4e57d0fbf0f4076437781551fc5db4d3a48f6d8504bbbe4a96acedafbb6c60d`
-- DCO-clean code commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
-- 已验收 code tree：`7d172adbb1feb3ad4f692d303ef991d100e26252`
+  `815e7188612bbd54e33f06b755b12c4d97dc5415f60e58c377d20e68d6536f2e`
+- DCO-clean foundation commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
+- CLI terminal-audit code commit：`e7e91acbc078bffec0a856994a0140efead78b5b`
+- 已测试 CLI code tree：`43b1a960dc50c1320a680614412a5407f94a72bd`
 - 原始开发历史备份：`codex/v04-pressure-enthalpy-c1-production-pre-dco-20260830`
 
 历史审计锚定 `origin/main..2739f36cbb80886585eb5f7b32b625278b78f38b`：209 个提交
 中 132 个没有 `Signed-off-by` trailer，75 个 trailer 与作者匹配，2 个只有 Codex
 trailer，因此没有机械修改旧作者历史。封装后的 code commit 与封装前候选
-`abfdb7f2cf6f2514af721606ace625ee669c9c0b` 的 tree 均为上述 `7d172a...`；可融合范围只
-保留由 WANG YUDONG 签署的 squash 和随后的签署回执提交。
+`abfdb7f2cf6f2514af721606ace625ee669c9c0b` 的 tree 均为 `7d172a...`；可融合范围只
+保留由 WANG YUDONG 签署的 squash 及后续回执和诊断真实性提交。
 
 具体命令、残差、运行代价、工件和条件接受边界见
 `docs/verification/2026-08-30-v04-2-pressure-enthalpy-production-closure.md`。

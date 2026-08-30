@@ -21,15 +21,16 @@
 - reopen snapshot：`2739f36cbb80886585eb5f7b32b625278b78f38b`
 - pressure–enthalpy code commit：`d9006d261dd5247c7a2a8edc67a4fbb173544f15`
 - tests-off `hundun` SHA-256：
-  `c4e57d0fbf0f4076437781551fc5db4d3a48f6d8504bbbe4a96acedafbb6c60d`
-- DCO-clean code commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
-- 已验收 code tree：`7d172adbb1feb3ad4f692d303ef991d100e26252`
+  `815e7188612bbd54e33f06b755b12c4d97dc5415f60e58c377d20e68d6536f2e`
+- DCO-clean foundation commit：`59985dbf2d10dee167eddfdd38ae5c2752051605`
+- CLI terminal-audit code commit：`e7e91acbc078bffec0a856994a0140efead78b5b`
+- 已测试 CLI code tree：`43b1a960dc50c1320a680614412a5407f94a72bd`
 - 原始开发历史备份：`codex/v04-pressure-enthalpy-c1-production-pre-dco-20260830`
 
 原历史审计锚定 `origin/main..2739f36cbb80886585eb5f7b32b625278b78f38b`：209 个提交
 中 132 个没有 trailer，75 个 `Signed-off-by` 与作者匹配，2 个只有 Codex trailer。
-没有替旧作者机械补签；可融合分支改由上述 signed squash 和本回执的 signed 文档提交
-构成。
+没有替旧作者机械补签；可融合分支改由上述 signed squash 以及后续 signed 回执和
+诊断真实性提交构成。
 
 ## 3. 已证明的 pressure–enthalpy 主闭环
 
@@ -58,12 +59,19 @@ continuity、energy、mass、gauge 五个分量门分别决定。
 
 ## 4. 本次封存契约修复
 
-### 4.1 Continuity witness valid gate
+### 4.1 Terminal audit presence 与 continuity witness valid gate
 
-CLI 失败输出现在先检查 `continuity_witness.valid`。无有效 witness 时不再把默认
-`continuity=0`、局部索引零值和 `rank=-1` 伪装成真实连续性诊断；真实 CLI fixture
-覆盖非连续性失败并验证 witness 字段被省略。详细 witness 仍只服务失败诊断，未进入
-正常成功热路径。
+CLI 失败输出采用两层有效性。第一层复用 runtime evidence 的既有判据
+`piso.final_flux_revision != 0U`：只有五个全局终端量已经组装完成时，才输出
+`terminal_audit=available` 以及 EOS、continuity、energy、closed mass 和 gauge；审计前
+失败只输出 `terminal_audit=unavailable`，不携带这些残差字段。第二层要求
+`continuity_witness.valid=true` 才输出详细 witness。
+
+真实 CLI fixture 固定在 stage 44 压力求解失败：修复前 RED 精确捕获五个默认零残差；
+修复后仍确认 `failed_stage=44`、`pressure_calls=1`、`p1_iterations=1` 和 detail 604，同时
+验证五个残差字段及 `continuity_witness` 均不存在。stage 60 的终端门拒绝发生在
+`final_flux_revision` 发布之后，仍可输出真实审计残差。没有新增公共 valid 字段，也没有
+扩张 evidence schema。
 
 ### 4.2 联合 L2 globalization provenance
 
@@ -106,6 +114,10 @@ ProductDriver refinement/retry 的 1-rank/2-rank。它覆盖联合 L2 schema/pro
 mutation、真实 refinement 成功与 capacity rollback 等本次改动。最后补入临时目录
 删除哨兵和 trajectory→terminal C/E 位级绑定后，又复核 CLI 与 ProductDriver
 1-rank/2-rank 共 3/3 通过。
+
+本次 CLI 诊断真实性修复使用同一真实 fixture 完成 RED→GREEN，并定向运行
+`v04_app_cli_continuity_witness`、`v04_evidence_v4_product_validator`、
+`v04_io_product_path` 和 `v04_product_pressure_energy_retry_mpi_1`，结果 4/4 通过。
 
 Clang 测试使用了正确的 libc++ `LD_LIBRARY_PATH`，没有把运行库缺失误判为测试失败。
 tests-off 增量构建成功，配置仍为 Release、Clang 15.0.6、libc++、MPI-3，
@@ -155,6 +167,11 @@ tests-off 增量构建成功，配置仍为 Release、Clang 15.0.6、libc++、MP
 已经验证。该运行不负责证明 refinement；refinement 的产品证据由第 5 节的确定性
 fixture 独立提供。
 
+本次后续提交只修改 CLI 失败诊断和相应测试、文档，没有修改 pressure–enthalpy、
+globalization、refinement、rollback 或时间推进数值实现。按约束没有重跑 64-rank；上述
+两步 evidence 对应诊断修复前、数值实现相同的 tests-off 二进制
+`c4e57d0fbf0f4076437781551fc5db4d3a48f6d8504bbbe4a96acedafbb6c60d`。
+
 ### 7.3 Momentum limiter 质量分类
 
 两步的 `momentum_predictor_limiter` 均为：
@@ -180,7 +197,7 @@ squash `59985dbf2d10dee167eddfdd38ae5c2752051605`；它与封装前候选
 `abfdb7f2cf6f2514af721606ace625ee669c9c0b` 的 tree 均为
 `7d172adbb1feb3ad4f692d303ef991d100e26252`，全树比较无差异。
 
-回执更新作为第二个独立 signed 文档提交叠加在该 code commit 上。新范围的作者与
+后续回执与 CLI 诊断真实性修复均作为独立 signed commit 叠加。新范围的作者与
 `Signed-off-by: WANG YUDONG <wangyudong@buaa.edu.cn>` 逐提交匹配，因此当前可融合链
 DCO-clean；这项结论来自新范围审计和 tree 等价证书，不是用末端签名反向粉饰原
 209-commit 历史。
