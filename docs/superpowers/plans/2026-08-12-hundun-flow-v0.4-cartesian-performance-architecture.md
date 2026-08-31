@@ -25,7 +25,7 @@
 - Keep tests in the source tree but no product `cases/` or `examples/` under `versions/v0.4`. Runtime examples are generated into a user-selected run directory.
 - Each compiled case seals its production `FieldSchema`, arena layout, merged structured halo and compact IBM donor plan, linear lifecycles, service capacities, and execution graph exactly once after complete logical analysis. A different case compiles a different immutable bundle; post-seal mutation is forbidden.
 - Hot-loop contracts: zero heap allocation, zero string dispatch, zero STL/BVH/donor search, zero implicit MPI, `MPI_THREAD_FUNNELED` or stronger with one communication thread, explicit revision-checked caches, one writer per authority, no full-field rollback copy, and no unconditional per-stage barrier/all-reduce.
-- Preserve the standard IBM stencil contract: 14--32 fluid donors, all positive-normal, at least three normal bands, four tangential quadrants, reach at most four, deterministic QR, and no lower-order fallback.
+- Preserve the standard `strict_quadratic` IBM stencil contract: 14--32 fluid donors, all positive-normal, at least three normal bands, four tangential quadrants, reach at most four, deterministic QR, and no lower-order fallback. The dated adaptive-order amendment below supersedes the historical no-fallback rule only when the case explicitly selects `adaptive_order`.
 - Do not accept the current final-gradient/surface-force candidate before an independent final-state force oracle and mutation-sensitive RED pass. Fix the existing WALE positive-normal donor failure by root cause, never by relaxing scientific constraints.
 - Run validation in this order: focused contracts; full `480x480x48/64-rank` two-step HUNDUN/COAST short pairing; candidate freeze; at least five alternating full-grid 20-step pairings; HUNDUN-only literature statistics. Do not use `24^3` for performance and do not start long statistics before the short gate accepts.
 - COAST is a short-performance baseline only because it has no periodic boundary support. HUNDUN literature statistics compare directly with experiments, not COAST long statistics.
@@ -844,6 +844,17 @@ struct MgHierarchyPolicy {
   Run all `^v04_solver_mg` tests at 1/2/4 ranks plus `v04_solver_hypre_isolation` with HYPRE off and, when available, on. Record convergence factors and rebuild counters. Commit with `git commit -s -m "feat(v0.4): add native Cartesian multigrid"`.
 
 ### Task 13: Compile Static IBM Topology, Quadratic Stencils, and Surface Plans
+
+> **2026-08-31 adaptive-order amendment:** The original steps below remain the
+> acceptance contract for `strict_quadratic` and for quadratic-order accuracy
+> tests. Engineering cases may explicitly select `adaptive_order`. That policy
+> tries the same full 3-D quadratic at standard reach, expands only the valid
+> fluid/material-side donor search through the existing hard reach bound, and
+> then permits a local full-rank 3-D linear reconstruction with audited order
+> and fallback reason. Linear failure remains fatal; constant/nearest-copy and
+> uncertified reduced-dimensional fallbacks remain prohibited. See
+> `2026-08-31-v04-adaptive-ibm-reconstruction.md` for the bounded implementation
+> and verification plan.
 
 **Files:**
 - Create: `versions/v0.4/include/hundun/v04_ibm.hpp`

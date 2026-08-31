@@ -514,14 +514,36 @@ bounds remain explicit for every control kind.
 | `units` | `SI` |
 | `thermophysics.data_file` | unique direct-root name ending in `.d` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
-| `mesh.immersed_boundary` | `null` or exactly `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`; the STL remains a unique direct-root `.stl` file |
+| `mesh.immersed_boundary` | `null`, the legacy two-key object `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`, or that object plus exactly `"reconstruction_policy": "strict_quadratic" | "adaptive_order"`; the STL remains a unique direct-root `.stl` file |
+
+Omitting `reconstruction_policy` is equivalent to `strict_quadratic` and
+preserves the original fail-closed contract. In `strict_quadratic`, every IBM
+group must compile a full-rank ten-coefficient three-dimensional quadratic
+reconstruction within the registered condition limit.
+
+`adaptive_order` first tries the quadratic reconstruction at the standard
+search reach, expands the geometrically and materially admissible donor search
+up to the hard maximum reach, and only then falls back locally to a full-rank
+four-coefficient three-dimensional linear basis. The linear fallback still
+requires positive-normal fluid-side donors, the reachable tangential coverage,
+at least two normal bands, at least six donors, and the same condition ceiling.
+The selected order and fallback reason are immutable plan data and are included
+in the product audit and fingerprint.
+
+There is no constant or nearest-point-copy fallback. If a stable linear system
+cannot be compiled, case compilation fails. A reduced-dimensional quadratic is
+also not inferred from near-coplanarity: it requires a future explicit
+two-dimensional or axisymmetric geometry certificate and is not an accepted
+v0.4 input mode.
 
 The STL may extend beyond the Cartesian domain. Cold product compilation
 preserves exact parsed vertices for topology, clips surface quadrature to the
 open Cartesian domain, and discards domain-exterior closure facets. An
 immersed surface may intersect an external face only when that face is
 `symmetry` or `slip`; the compiler then emits an explicit one-sided,
-full-quadratic boundary-intersection stencil. Intersections with inlet,
+boundary-intersection stencil under the selected reconstruction policy.
+`strict_quadratic` still requires it to be full quadratic; `adaptive_order`
+uses the same audited hierarchy described above. Intersections with inlet,
 outlet, wall, or NSCBC faces are rejected rather than assigned an implicit
 corner model.
 
