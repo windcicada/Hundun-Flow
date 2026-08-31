@@ -9,13 +9,15 @@ import os
 import random
 import re
 import statistics
+import struct
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
 
 SCHEMA = "HUNDUN_V04_CANDIDATE_V1"
-RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V5"
+RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V6"
+V5_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V5"
 V4_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V4"
 V3_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V3"
 V2_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V2"
@@ -140,6 +142,34 @@ V5_ADVECTIVE_CONVECTIVE_CFL_FIELDS = (
     "present", "plan", "time_revision", "density_revision",
     "face_flux_revision", "activity_collective", "dt", "out_max",
     "abs_max", "limit",
+)
+V6_CANDIDATE_IDENTITY_FIELDS = (
+    "schema", "head", "tree", "build_manifest_sha256",
+    "executable_sha256", "identity_sha256",
+)
+V6_RUN_START_FIELDS = (
+    "kind", "previous_step", "previous_time", "restart_manifest_sha256",
+)
+V6_MOMENTUM_LIMITER_FIELDS = (
+    "scheme", "limited", "correction_metrics_applicability",
+    "retained_correction_l1_ratio", "minimum_face_alpha",
+    "active_correction_faces", "limited_faces", "limited_face_fraction",
+    "advective_cfl",
+)
+V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS = (
+    "present", "plan", "time_revision_collective",
+    "density_view_collective", "face_flux_view_collective",
+    "activity_collective", "dt", "out_max", "abs_max", "limit",
+)
+V6_COMMITTED_CONVECTIVE_CFL_FIELDS = (
+    "valid", "density_revision",
+    "final_flux_revision", "density_view", "face_flux_view",
+    "activity_collective", "dt", "out_max", "abs_max", "limit",
+    "out_winner", "abs_winner",
+)
+V6_CFL_WINNER_FIELDS = (
+    "valid", "global_cell", "rank", "out", "abs", "density_volume",
+    "outgoing_mass_flow", "absolute_mass_flow",
 )
 V3_THERMOPHYSICAL_PREDICTOR_FIELDS = (
     "limited", "theta", "low_state", "mass_flux_scale", "constraint",
@@ -785,6 +815,353 @@ def validate_v5_runtime_record(record: Dict[str, Any],
     return validate_v3_runtime_record(legacy_projection, line_number)
 
 
+def _v6_close(left: float, right: float) -> bool:
+    scale = max(1.0, abs(left), abs(right))
+    return abs(left - right) <= 128.0 * float.fromhex("0x1.0p-52") * scale
+
+
+def validate_v6_cfl_winner(value: Any, dt: float, maximum: float,
+                           maximum_field: str, name: str) -> None:
+    winner = require_object_fields(value, V6_CFL_WINNER_FIELDS, name)
+    if not require_boolean(winner["valid"], f"{name}.valid"):
+        raise EvidenceError(f"{name} must be valid")
+    cell = winner["global_cell"]
+    if (not isinstance(cell, list) or len(cell) != 3 or
+            any(not isinstance(coordinate, int) or isinstance(coordinate, bool)
+                or coordinate < 0 or coordinate > INT32_MAX
+                for coordinate in cell)):
+        raise EvidenceError(f"{name}.global_cell is invalid")
+    require_integer(winner["rank"], f"{name}.rank", 0, INT32_MAX)
+    out = require_nonnegative_finite_number(winner["out"], f"{name}.out")
+    absolute = require_nonnegative_finite_number(
+        winner["abs"], f"{name}.abs")
+    density_volume = require_nonnegative_finite_number(
+        winner["density_volume"], f"{name}.density_volume")
+    outgoing = require_nonnegative_finite_number(
+        winner["outgoing_mass_flow"], f"{name}.outgoing_mass_flow")
+    absolute_flow = require_nonnegative_finite_number(
+        winner["absolute_mass_flow"], f"{name}.absolute_mass_flow")
+    if density_volume == 0.0:
+        raise EvidenceError(f"{name}.density_volume must be positive")
+    predicted_out = dt * outgoing / density_volume
+    predicted_absolute = dt * absolute_flow / (2.0 * density_volume)
+    if (not _v6_close(out, predicted_out) or
+            not _v6_close(absolute, predicted_absolute)):
+        raise EvidenceError(f"{name} violates the cell-CFL formula")
+    observed = out if maximum_field == "out" else absolute
+    if not _v6_close(observed, maximum):
+        raise EvidenceError(f"{name} does not bind {maximum_field}_max")
+
+
+def validate_v6_candidate_identity(record: Dict[str, Any],
+                                   line_number: int) -> None:
+    prefix = f"line {line_number}: V6 candidate_identity"
+    identity = require_object_fields(
+        record.get("candidate_identity"), V6_CANDIDATE_IDENTITY_FIELDS,
+        prefix)
+    if identity["schema"] != "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1":
+        raise EvidenceError(f"{prefix}.schema is invalid")
+    require_git_object(identity["head"], f"{prefix}.head")
+    require_git_object(identity["tree"], f"{prefix}.tree")
+    for field in ("build_manifest_sha256", "executable_sha256",
+                  "identity_sha256"):
+        require_sha256(identity[field], f"{prefix}.{field}")
+        if re.fullmatch(r"[0-9a-f]{64}", identity[field]) is None:
+            raise EvidenceError(f"{prefix}.{field} is not lowercase hex")
+    payload = (
+        "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\n"
+        f"head={identity['head']}\n"
+        f"tree={identity['tree']}\n"
+        f"build_manifest_sha256={identity['build_manifest_sha256']}\n"
+        f"executable_sha256={identity['executable_sha256']}\n")
+    if hashlib.sha256(payload.encode("utf-8")).hexdigest() != \
+            identity["identity_sha256"]:
+        raise EvidenceError(f"{prefix}.identity_sha256 is invalid")
+    if record.get("build") != int(identity["build_manifest_sha256"][:16], 16):
+        raise EvidenceError(f"{prefix} disagrees with build")
+    if record.get("binary") != int(identity["executable_sha256"][:16], 16):
+        raise EvidenceError(f"{prefix} disagrees with binary")
+
+
+def validate_v6_run_start(record: Dict[str, Any],
+                          line_number: int) -> Dict[str, Any]:
+    prefix = f"line {line_number}: V6 run_start"
+    anchor = require_object_fields(record.get("run_start"),
+                                   V6_RUN_START_FIELDS, prefix)
+    previous_step = require_integer(anchor["previous_step"],
+                                    f"{prefix}.previous_step", 0)
+    previous_time = require_nonnegative_finite_number(
+        anchor["previous_time"], f"{prefix}.previous_time")
+    step = require_integer(record.get("step"),
+                           f"line {line_number}: V6 step", 1)
+    if step <= previous_step:
+        raise EvidenceError(f"{prefix} does not precede the current step")
+    first = step == previous_step + 1
+    kind = anchor["kind"]
+    if kind == "fresh":
+        if (previous_step != 0 or previous_time != 0.0 or
+                anchor["restart_manifest_sha256"] is not None or
+                record.get("restart_recovery") is not False or
+                record.get("startup") is not (step == 1)):
+            raise EvidenceError(f"{prefix} has an invalid fresh anchor")
+    elif kind == "restart":
+        require_sha256(anchor["restart_manifest_sha256"],
+                       f"{prefix}.restart_manifest_sha256")
+        if (re.fullmatch(r"[0-9a-f]{64}",
+                         anchor["restart_manifest_sha256"]) is None or
+                int(anchor["restart_manifest_sha256"], 16) == 0 or
+                previous_step == 0 or record.get("startup") is not False or
+                record.get("restart_recovery") is not first):
+            raise EvidenceError(f"{prefix} has an invalid restart anchor")
+    else:
+        raise EvidenceError(f"{prefix}.kind is invalid")
+    if first and not _v6_close(record["previous_committed_time"],
+                               previous_time):
+        raise EvidenceError(
+            f"{prefix} does not bind the first previous committed time")
+    return anchor
+
+
+def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
+    """Read the frozen V0.4 manifest authority needed by a restart run."""
+    data = path.read_bytes()
+    header_format = "<8sIIiiiQQQdddQQI"
+    header_size = struct.calcsize(header_format)
+    if len(data) < header_size + 8:
+        raise EvidenceError(f"restart manifest {path} is truncated")
+    fields = struct.unpack_from(header_format, data)
+    (magic, version, rank_count, cells_x, cells_y, cells_z,
+     plan, schema, geometry, time, dt, pressure_reference,
+     step, controller_state, field_count) = fields
+    expected_size = header_size + 4 * field_count + 40 * rank_count + 8
+    if (magic != b"H4MANI01" or version != 1 or rank_count == 0 or
+            min(cells_x, cells_y, cells_z) <= 0 or
+            min(plan, schema, geometry) == 0 or
+            not math.isfinite(time) or time < 0.0 or
+            not math.isfinite(dt) or dt <= 0.0 or
+            not math.isfinite(pressure_reference) or step == 0 or
+            field_count < 3 or field_count > 64 or
+            len(data) != expected_size):
+        raise EvidenceError(f"restart manifest {path} has an invalid header")
+    offset = 1469598103934665603
+    prime = 1099511628211
+    checksum = offset
+    for value in data[:-8]:
+        checksum = ((checksum ^ value) * prime) & UINT64_MAX
+    stored_checksum = struct.unpack_from("<Q", data, len(data) - 8)[0]
+    if checksum != stored_checksum:
+        raise EvidenceError(f"restart manifest {path} failed integrity")
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "step": step,
+        "time": time,
+    }
+
+
+def validate_v6_runtime_record(record: Dict[str, Any],
+                               line_number: int) -> str:
+    """Validate immutable identity, first-step time, AFC and CFL V6 data."""
+    prefix = f"line {line_number}: V6 runtime"
+    for field in ("candidate_identity", "run_start",
+                  "previous_committed_time"):
+        if field not in record:
+            raise EvidenceError(f"{prefix} missing required field {field}")
+    validate_v6_candidate_identity(record, line_number)
+    validate_v6_run_start(record, line_number)
+
+    terminal = require_object_fields(
+        record.get("terminal_physical_audit"),
+        V3_TERMINAL_FIELDS + ("committed_convective_cfl",),
+        f"{prefix}.terminal_physical_audit")
+    cfl = require_object_fields(
+        terminal["committed_convective_cfl"],
+        V6_COMMITTED_CONVECTIVE_CFL_FIELDS,
+        f"{prefix}.committed_convective_cfl")
+    if not require_boolean(cfl["valid"], f"{prefix}.committed CFL.valid"):
+        raise EvidenceError(f"{prefix}.committed CFL must be valid")
+    for field in ("density_revision",
+                  "final_flux_revision"):
+        require_integer(cfl[field], f"{prefix}.committed CFL.{field}", 1)
+    if cfl["final_flux_revision"] != terminal["final_flux_revision"]:
+        raise EvidenceError(f"{prefix}.committed CFL final flux drifted")
+    density_view = require_object_fields(
+        cfl["density_view"], ("field", "collective"),
+        f"{prefix}.committed CFL.density_view")
+    require_integer(density_view["field"],
+                    f"{prefix}.committed CFL.density_view.field", 0,
+                    UINT32_MAX)
+    require_integer(density_view["collective"],
+                    f"{prefix}.committed CFL.density_view.collective", 1)
+    flux_view = require_object_fields(
+        cfl["face_flux_view"], ("collective",),
+        f"{prefix}.committed CFL.face_flux_view")
+    require_integer(flux_view["collective"],
+                    f"{prefix}.committed CFL.face_flux_view.collective", 1)
+    activity = require_integer(
+        cfl["activity_collective"],
+        f"{prefix}.committed CFL.activity_collective", 0)
+    if ((record["stl"] == 0) != (activity == 0)):
+        raise EvidenceError(f"{prefix}.committed CFL IBM authority drifted")
+    dt = require_nonnegative_finite_number(cfl["dt"],
+                                           f"{prefix}.committed CFL.dt")
+    out_max = require_nonnegative_finite_number(
+        cfl["out_max"], f"{prefix}.committed CFL.out_max")
+    abs_max = require_nonnegative_finite_number(
+        cfl["abs_max"], f"{prefix}.committed CFL.abs_max")
+    limit = require_nonnegative_finite_number(
+        cfl["limit"], f"{prefix}.committed CFL.limit")
+    if dt == 0.0 or limit == 0.0:
+        raise EvidenceError(f"{prefix}.committed CFL dt/limit must be positive")
+    if out_max > limit * (1.0 + 64.0 * float.fromhex("0x1.0p-52")):
+        raise EvidenceError(f"{prefix}.committed CFL exceeds its limit")
+    validate_v6_cfl_winner(cfl["out_winner"], dt, out_max, "out",
+                           f"{prefix}.committed CFL.out_winner")
+    validate_v6_cfl_winner(cfl["abs_winner"], dt, abs_max, "abs",
+                           f"{prefix}.committed CFL.abs_winner")
+
+    limiter = require_object_fields(
+        record.get("momentum_predictor_limiter"),
+        V6_MOMENTUM_LIMITER_FIELDS,
+        f"{prefix}.momentum_predictor_limiter")
+    if limiter["scheme"] != "common_face_afc_v3_owner":
+        raise EvidenceError(f"{prefix}.momentum limiter scheme is invalid")
+    limited = require_boolean(limiter["limited"],
+                              f"{prefix}.momentum limiter.limited")
+    applicability = limiter["correction_metrics_applicability"]
+    active = require_integer(
+        limiter["active_correction_faces"],
+        f"{prefix}.momentum limiter.active_correction_faces", 0, UINT32_MAX)
+    faces = require_integer(
+        limiter["limited_faces"],
+        f"{prefix}.momentum limiter.limited_faces", 0, UINT32_MAX)
+    if applicability == "not_applicable":
+        if (active != 0 or faces != 0 or limited or
+                limiter["retained_correction_l1_ratio"] is not None or
+                limiter["minimum_face_alpha"] is not None or
+                limiter["limited_face_fraction"] is not None):
+            raise EvidenceError(f"{prefix} fabricates inactive AFC metrics")
+        ratio = 1.0
+    elif applicability == "applicable":
+        ratio = require_finite_number(
+            limiter["retained_correction_l1_ratio"],
+            f"{prefix}.momentum limiter.retained_correction_l1_ratio")
+        minimum_alpha = require_finite_number(
+            limiter["minimum_face_alpha"],
+            f"{prefix}.momentum limiter.minimum_face_alpha")
+        fraction = require_finite_number(
+            limiter["limited_face_fraction"],
+            f"{prefix}.momentum limiter.limited_face_fraction")
+        expected_fraction = faces / active if active else math.nan
+        if (active == 0 or faces > active or ratio <= 0.0 or ratio > 1.0 or
+                minimum_alpha < 0.0 or minimum_alpha > 1.0 or
+                not _v6_close(fraction, expected_fraction) or
+                limited != (faces > 0) or
+                (limited and (ratio >= 1.0 or minimum_alpha >= 1.0)) or
+                (not limited and (ratio != 1.0 or minimum_alpha != 1.0))):
+            raise EvidenceError(f"{prefix} has invalid owner-face AFC metrics")
+    else:
+        raise EvidenceError(f"{prefix}.AFC applicability is invalid")
+
+    previous = require_nonnegative_finite_number(
+        record["previous_committed_time"],
+        f"{prefix}.previous_committed_time")
+    current = require_nonnegative_finite_number(record.get("time"),
+                                                f"{prefix}.time")
+    if current <= previous or not _v6_close(current - previous, dt):
+        raise EvidenceError(
+            f"{prefix} first/previous committed time disagrees with CFL dt")
+
+    advective = require_object_fields(
+        limiter["advective_cfl"], V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS,
+        f"{prefix}.momentum_predictor_limiter.advective_cfl")
+    if not require_boolean(advective["present"],
+                           f"{prefix}.advective CFL.present"):
+        raise EvidenceError(f"{prefix}.advective CFL must be present")
+    for field in ("plan", "time_revision_collective",
+                  "density_view_collective", "face_flux_view_collective"):
+        require_integer(advective[field], f"{prefix}.advective CFL.{field}",
+                        1, UINT64_MAX)
+    provisional_activity = require_integer(
+        advective["activity_collective"],
+        f"{prefix}.advective CFL.activity_collective", 0, UINT64_MAX)
+    if ((record["stl"] == 0) != (provisional_activity == 0)):
+        raise EvidenceError(
+            f"{prefix}.advective CFL IBM activity disagrees with stl")
+    if advective["face_flux_view_collective"] == \
+            flux_view["collective"]:
+        raise EvidenceError(
+            f"{prefix}.provisional and committed CFL views are identical")
+    provisional_dt = require_nonnegative_finite_number(
+        advective["dt"], f"{prefix}.advective CFL.dt")
+    provisional_out = require_nonnegative_finite_number(
+        advective["out_max"], f"{prefix}.advective CFL.out_max")
+    require_nonnegative_finite_number(
+        advective["abs_max"], f"{prefix}.advective CFL.abs_max")
+    provisional_limit = require_nonnegative_finite_number(
+        advective["limit"], f"{prefix}.advective CFL.limit")
+    if (provisional_dt == 0.0 or provisional_limit == 0.0 or
+            provisional_out > provisional_limit *
+            (1.0 + 64.0 * float.fromhex("0x1.0p-52"))):
+        raise EvidenceError(f"{prefix}.advective CFL failed")
+
+    # Reuse the frozen V5/V4/V3 contracts through a projection.  This does
+    # not regenerate a historical oracle; it supplies only the legacy names
+    # whose semantics V6 intentionally retains.
+    projection = json.loads(json.dumps(record))
+    projection["schema"] = V5_RUNTIME_SCHEMA
+    projection.pop("candidate_identity")
+    projection.pop("run_start")
+    projection.pop("previous_committed_time")
+    projection["terminal_physical_audit"]["committed_convective_cfl"] = {
+        "out_max": out_max, "abs_max": abs_max, "limit": limit,
+    }
+    legacy_advective = {
+        "present": advective["present"],
+        "plan": advective["plan"],
+        "time_revision": advective["time_revision_collective"],
+        "density_revision": advective["density_view_collective"],
+        "face_flux_revision": advective["face_flux_view_collective"],
+        "activity_collective": advective["activity_collective"],
+        "dt": advective["dt"],
+        "out_max": advective["out_max"],
+        "abs_max": advective["abs_max"],
+        "limit": advective["limit"],
+    }
+    projection["momentum_predictor_limiter"] = {
+        "scheme": "common_face_afc_v2",
+        "limited": limited,
+        "retained_correction_l1_ratio": ratio,
+        "limited_faces": faces,
+        "advective_cfl": legacy_advective,
+    }
+    contract = validate_v5_runtime_record(projection, line_number)
+    validate_v4_refinement(projection, line_number)
+    if (not _v6_close(advective["dt"], dt) or
+            not _v6_close(advective["limit"], limit) or
+            advective["activity_collective"] != activity):
+        raise EvidenceError(f"{prefix}.provisional/committed CFL drifted")
+    return contract
+
+
+def reject_v6_fields_in_pre_v6(record: Dict[str, Any],
+                               line_number: int) -> None:
+    schema = record.get("schema")
+    for field in ("candidate_identity", "run_start",
+                  "previous_committed_time"):
+        if field in record:
+            raise EvidenceError(
+                f"line {line_number}: {schema} runtime carries V6 {field}")
+    limiter = record.get("momentum_predictor_limiter")
+    if isinstance(limiter, dict):
+        for field in ("correction_metrics_applicability",
+                      "minimum_face_alpha", "active_correction_faces",
+                      "limited_face_fraction"):
+            if field in limiter:
+                raise EvidenceError(
+                    f"line {line_number}: {schema} runtime carries V6 "
+                    f"limiter field {field}")
+
+
 def reject_v5_fields_in_pre_v5(record: Dict[str, Any],
                                line_number: int) -> None:
     schema = record.get("schema")
@@ -1331,10 +1708,14 @@ def advance(manifest_path: Path, gate_name: str, receipt_path: Path) -> None:
     replace_atomic(manifest_path, candidate)
 
 
-def validate_runtime(path: Path) -> None:
+def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
     prior_step = 0
     run_schema = None
+    prior_v6_record = None
     prior_v5_record = None
+    restart_authority = (load_v04_restart_manifest(run_start_manifest)
+                         if run_start_manifest is not None else None)
+    restart_authority_used = False
     seen = 0
     with path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -1346,7 +1727,8 @@ def validate_runtime(path: Path) -> None:
                 raise EvidenceError(
                     f"line {line_number}: runtime record must be an object")
             schema = record.get("schema")
-            if schema not in (RUNTIME_SCHEMA, V4_RUNTIME_SCHEMA,
+            if schema not in (RUNTIME_SCHEMA, V5_RUNTIME_SCHEMA,
+                              V4_RUNTIME_SCHEMA,
                               V3_RUNTIME_SCHEMA, V2_RUNTIME_SCHEMA,
                               LEGACY_RUNTIME_SCHEMA):
                 raise EvidenceError(f"line {line_number}: wrong runtime schema")
@@ -1355,14 +1737,20 @@ def validate_runtime(path: Path) -> None:
             elif schema != run_schema:
                 raise EvidenceError(
                     f"line {line_number}: runtime schema changed within one file")
-            is_v5 = schema == RUNTIME_SCHEMA
+            is_v6 = schema == RUNTIME_SCHEMA
+            is_v5 = schema == V5_RUNTIME_SCHEMA
             is_v4 = schema == V4_RUNTIME_SCHEMA
             is_v3 = schema == V3_RUNTIME_SCHEMA
             is_v2 = schema == V2_RUNTIME_SCHEMA
-            if not is_v5:
+            if not is_v6:
+                reject_v6_fields_in_pre_v6(record, line_number)
+            if not (is_v6 or is_v5):
                 reject_v5_fields_in_pre_v5(record, line_number)
-            requires_pressure = is_v5 or is_v4 or is_v3 or is_v2
-            if is_v5:
+            requires_pressure = is_v6 or is_v5 or is_v4 or is_v3 or is_v2
+            if is_v6:
+                pressure_contract = validate_v6_runtime_record(
+                    record, line_number)
+            elif is_v5:
                 pressure_contract = validate_v5_runtime_record(
                     record, line_number)
             elif is_v4 or is_v3:
@@ -1370,7 +1758,9 @@ def validate_runtime(path: Path) -> None:
                     record, line_number)
             else:
                 pressure_contract = None
-            if is_v5:
+            if is_v6:
+                validate_v4_refinement(record, line_number)
+            elif is_v5:
                 validate_v4_refinement(record, line_number)
             elif is_v4:
                 validate_v4_refinement(record, line_number)
@@ -1383,7 +1773,65 @@ def validate_runtime(path: Path) -> None:
             if not isinstance(step, int) or step <= prior_step:
                 raise EvidenceError(f"line {line_number}: steps not strictly increasing")
             prior_step = step
-            if is_v5:
+            if is_v6:
+                if prior_v6_record is None:
+                    anchor = record["run_start"]
+                    if step != anchor["previous_step"] + 1:
+                        raise EvidenceError(
+                            f"line {line_number}: V6 first row is not the "
+                            "successor of its run-start anchor")
+                    if not _v6_close(record["previous_committed_time"],
+                                     anchor["previous_time"]):
+                        raise EvidenceError(
+                            f"line {line_number}: V6 first row disagrees "
+                            "with its run-start time")
+                    if anchor["kind"] == "restart":
+                        if restart_authority is None:
+                            raise EvidenceError(
+                                f"line {line_number}: V6 restart evidence "
+                                "requires --run-start-manifest")
+                        if (anchor["restart_manifest_sha256"] !=
+                                restart_authority["sha256"] or
+                                anchor["previous_step"] !=
+                                restart_authority["step"] or
+                                not _v6_close(anchor["previous_time"],
+                                              restart_authority["time"])):
+                            raise EvidenceError(
+                                f"line {line_number}: V6 run-start anchor "
+                                "disagrees with the frozen restart manifest")
+                        restart_authority_used = True
+                    elif restart_authority is not None:
+                        raise EvidenceError(
+                            f"line {line_number}: fresh V6 evidence was "
+                            "given a restart manifest")
+                else:
+                    for field in ("build", "binary", "candidate_identity",
+                                  "run_start", "case", "stl", "product",
+                                  "cpu_plan"):
+                        if record[field] != prior_v6_record[field]:
+                            raise EvidenceError(
+                                f"line {line_number}: V6 immutable run "
+                                f"identity field {field} changed")
+                    if step != prior_v6_record["step"] + 1:
+                        raise EvidenceError(
+                            f"line {line_number}: V6 steps are not contiguous")
+                    if not _v6_close(record["previous_committed_time"],
+                                     prior_v6_record["time"]):
+                        raise EvidenceError(
+                            f"line {line_number}: V6 previous committed "
+                            "time does not bind the adjacent row")
+                    current_advective = record[
+                        "momentum_predictor_limiter"]["advective_cfl"]
+                    prior_advective = prior_v6_record[
+                        "momentum_predictor_limiter"]["advective_cfl"]
+                    for field in ("plan", "activity_collective", "limit"):
+                        if current_advective[field] != prior_advective[field]:
+                            raise EvidenceError(
+                                f"line {line_number}: V6 static advective "
+                                f"authority field {field} changed")
+                prior_v6_record = record
+                prior_v5_record = None
+            elif is_v5:
                 if prior_v5_record is not None:
                     for field in ("build", "binary", "case", "stl",
                                   "product", "cpu_plan"):
@@ -1415,7 +1863,9 @@ def validate_runtime(path: Path) -> None:
                             f"line {line_number}: V5 advective CFL dt "
                             "disagrees with the adjacent committed time delta")
                 prior_v5_record = record
+                prior_v6_record = None
             else:
+                prior_v6_record = None
                 prior_v5_record = None
             if ((record.get("startup") or record.get("retry") or
                  record.get("restart_recovery")) and
@@ -1459,7 +1909,7 @@ def validate_runtime(path: Path) -> None:
                     raise EvidenceError(
                         f"line {line_number}: invalid two-PISO pressure evidence")
                 extension_enabled = False
-                if is_v2 or is_v3 or is_v4 or is_v5:
+                if is_v2 or is_v3 or is_v4 or is_v5 or is_v6:
                     extension_fields = set(PRESSURE_EXTENSION_FIELDS)
                     extension_presence = []
                     for solve in pressure:
@@ -1475,7 +1925,7 @@ def validate_runtime(path: Path) -> None:
                         raise EvidenceError(
                             f"line {line_number}: inconsistent pressure extension presence")
                     extension_enabled = extension_presence[0]
-                    if (is_v3 or is_v4 or is_v5) and not extension_enabled:
+                    if (is_v3 or is_v4 or is_v5 or is_v6) and not extension_enabled:
                         raise EvidenceError(
                             f"line {line_number}: V3 lacks pressure extension")
                 for corrector, solve in enumerate(pressure, 1):
@@ -1595,7 +2045,7 @@ def validate_runtime(path: Path) -> None:
                     audits = solve["convergence_audits"]
                     rejections = solve["convergence_rejections"]
                     coupled_contract = (
-                        (is_v3 or is_v4 or is_v5) and
+                        (is_v3 or is_v4 or is_v5 or is_v6) and
                         pressure_contract == "continuity_energy_coupled")
                     if corrector == 1 or coupled_contract:
                         if audits != 0 or rejections != 0:
@@ -1623,6 +2073,9 @@ def validate_runtime(path: Path) -> None:
                         f"line {line_number}: eligible record lacks timing authority")
     if seen == 0:
         raise EvidenceError("runtime evidence is empty")
+    if restart_authority is not None and not restart_authority_used:
+        raise EvidenceError(
+            "--run-start-manifest does not authorize this evidence")
 
 
 def percentile(values, probability):
@@ -1915,11 +2368,11 @@ def self_test() -> None:
                                dict(pressure_base, corrector=2)]
         runtime_path = root / "runtime.jsonl"
 
-        def reject_runtime(mutated, message):
+        def reject_runtime(mutated, message, run_start_manifest=None):
             runtime_path.write_text(json.dumps(mutated) + "\n",
                                     encoding="utf-8")
             try:
-                validate_runtime(runtime_path)
+                validate_runtime(runtime_path, run_start_manifest)
                 raise AssertionError(message)
             except EvidenceError:
                 pass
@@ -1990,7 +2443,7 @@ def self_test() -> None:
         validate_runtime(runtime_path)
 
         runtime_v5 = json.loads(json.dumps(runtime_v4))
-        runtime_v5["schema"] = RUNTIME_SCHEMA
+        runtime_v5["schema"] = V5_RUNTIME_SCHEMA
         runtime_v5["terminal_physical_audit"][
             "committed_convective_cfl"] = {
                 "out_max": 0.5, "abs_max": 0.375, "limit": 0.5,
@@ -2210,6 +2663,231 @@ def self_test() -> None:
                        "V5 record carrying V4 limiter field accepted")
         reject_v5_contamination(runtime_v4, "V4")
         reject_v5_contamination(runtime, "V3")
+
+        def make_v6_identity(executable, build_manifest="3" * 64):
+            identity = {
+                "schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1",
+                "head": "1" * 40,
+                "tree": "2" * 40,
+                "build_manifest_sha256": build_manifest,
+                "executable_sha256": executable,
+            }
+            payload = (
+                "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\n"
+                f"head={identity['head']}\n"
+                f"tree={identity['tree']}\n"
+                "build_manifest_sha256="
+                f"{identity['build_manifest_sha256']}\n"
+                f"executable_sha256={identity['executable_sha256']}\n")
+            identity["identity_sha256"] = hashlib.sha256(
+                payload.encode("utf-8")).hexdigest()
+            return identity
+
+        runtime_v6 = json.loads(json.dumps(runtime_v5))
+        runtime_v6.update({
+            "schema": RUNTIME_SCHEMA,
+            "candidate_identity": make_v6_identity("4" * 64),
+            "build": int(("3" * 64)[:16], 16),
+            "binary": int(("4" * 64)[:16], 16),
+            "run_start": {
+                "kind": "fresh", "previous_step": 0,
+                "previous_time": 0.0,
+                "restart_manifest_sha256": None,
+            },
+            "step": 1,
+            "previous_committed_time": 0.0,
+            "time": 0.5,
+            "startup": True,
+            "restart_recovery": False,
+        })
+        runtime_v6["terminal_physical_audit"][
+            "committed_convective_cfl"] = {
+                "valid": True,
+                "density_revision": 33,
+                "final_flux_revision": 17,
+                "density_view": {
+                    "field": 0, "collective": 41,
+                },
+                "face_flux_view": {
+                    "collective": 42,
+                },
+                "activity_collective": 0,
+                "dt": 0.5,
+                "out_max": 0.5,
+                "abs_max": 0.375,
+                "limit": 0.5,
+                "out_winner": {
+                    "valid": True, "global_cell": [0, 0, 0], "rank": 0,
+                    "out": 0.5, "abs": 0.375, "density_volume": 1.0,
+                    "outgoing_mass_flow": 1.0,
+                    "absolute_mass_flow": 1.5,
+                },
+                "abs_winner": {
+                    "valid": True, "global_cell": [0, 0, 0], "rank": 0,
+                    "out": 0.5, "abs": 0.375, "density_volume": 1.0,
+                    "outgoing_mass_flow": 1.0,
+                    "absolute_mass_flow": 1.5,
+                },
+            }
+        runtime_v6["momentum_predictor_limiter"] = {
+            "scheme": "common_face_afc_v3_owner",
+            "limited": False,
+            "correction_metrics_applicability": "not_applicable",
+            "retained_correction_l1_ratio": None,
+            "minimum_face_alpha": None,
+            "active_correction_faces": 0,
+            "limited_faces": 0,
+            "limited_face_fraction": None,
+            "advective_cfl": {
+                "present": True, "plan": 31,
+                "time_revision_collective": 32,
+                "density_view_collective": 33,
+                "face_flux_view_collective": 34,
+                "activity_collective": 0,
+                "dt": 0.5, "out_max": 0.5, "abs_max": 0.375,
+                "limit": 0.5,
+            },
+        }
+        runtime_path.write_text(json.dumps(runtime_v6) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        first_anchor_mismatch = json.loads(json.dumps(runtime_v6))
+        first_anchor_mismatch["time"] = 0.006
+        first_anchor_mismatch["momentum_predictor_limiter"][
+            "advective_cfl"]["dt"] = 0.003
+        first_cfl = first_anchor_mismatch["terminal_physical_audit"][
+            "committed_convective_cfl"]
+        first_cfl.update({"dt": 0.003, "out_max": 0.003,
+                          "abs_max": 0.00225})
+        for winner in (first_cfl["out_winner"], first_cfl["abs_winner"]):
+            winner.update({"out": 0.003, "abs": 0.00225})
+        reject_runtime(
+            first_anchor_mismatch,
+            "V6 first row time=0.006 with dt=0.003 accepted")
+
+        invalid_identity_hash = json.loads(json.dumps(runtime_v6))
+        invalid_identity_hash["candidate_identity"][
+            "identity_sha256"] = "0" * 64
+        reject_runtime(invalid_identity_hash,
+                       "V6 invalid candidate identity hash accepted")
+        invalid_winner_formula = json.loads(json.dumps(runtime_v6))
+        invalid_winner_formula["terminal_physical_audit"][
+            "committed_convective_cfl"]["out_winner"][
+                "outgoing_mass_flow"] = 2.0
+        reject_runtime(invalid_winner_formula,
+                       "V6 invalid committed CFL winner formula accepted")
+        aliased_cfl_view = json.loads(json.dumps(runtime_v6))
+        aliased_cfl_view["momentum_predictor_limiter"]["advective_cfl"][
+            "face_flux_view_collective"] = 42
+        reject_runtime(aliased_cfl_view,
+                       "V6 aliased provisional/committed CFL view accepted")
+        fabricated_inactive_metric = json.loads(json.dumps(runtime_v6))
+        fabricated_inactive_metric["momentum_predictor_limiter"][
+            "minimum_face_alpha"] = 0.0
+        reject_runtime(fabricated_inactive_metric,
+                       "V6 inactive AFC zero metric accepted")
+
+        applicable_v6 = json.loads(json.dumps(runtime_v6))
+        applicable_v6["momentum_predictor_limiter"].update({
+            "limited": True,
+            "correction_metrics_applicability": "applicable",
+            "retained_correction_l1_ratio": 0.5,
+            "minimum_face_alpha": 0.25,
+            "active_correction_faces": 14,
+            "limited_faces": 7,
+            "limited_face_fraction": 0.5,
+        })
+        runtime_path.write_text(json.dumps(applicable_v6) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        second_v6 = json.loads(json.dumps(runtime_v6))
+        second_v6.update({"step": 2, "previous_committed_time": 0.5,
+                          "time": 1.0, "startup": False})
+        second_v6["momentum_predictor_limiter"]["advective_cfl"].update({
+            "time_revision_collective": 132,
+            "density_view_collective": 133,
+            "face_flux_view_collective": 134,
+        })
+        second_v6["terminal_physical_audit"]["final_flux_revision"] = 135
+        second_v6["terminal_physical_audit"]["committed_convective_cfl"].update({
+            "density_revision": 133, "final_flux_revision": 135,
+        })
+        runtime_path.write_text(
+            json.dumps(runtime_v6) + "\n" + json.dumps(second_v6) + "\n",
+            encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        mixed_candidate_v6 = json.loads(json.dumps(second_v6))
+        mixed_candidate_v6["candidate_identity"] = make_v6_identity(
+            "5" * 64, "6" * 64)
+        mixed_candidate_v6["build"] = int(("6" * 64)[:16], 16)
+        mixed_candidate_v6["binary"] = int(("5" * 64)[:16], 16)
+        reject_runtime_rows(
+            [runtime_v6, mixed_candidate_v6],
+            "V6 mixed executable/build candidate identities accepted")
+
+        restart_v6 = json.loads(json.dumps(runtime_v6))
+        restart_v6.update({"step": 10, "previous_committed_time": 4.5,
+                           "time": 5.0, "startup": False,
+                           "restart_recovery": True})
+        restart_manifest_path = root / "restart-manifest.bin"
+        restart_manifest = bytearray(struct.pack(
+            "<8sIIiiiQQQdddQQI", b"H4MANI01", 1, 1, 8, 8, 8,
+            11, 12, 13, 4.5, 0.5, 101325.0, 9, 14, 3))
+        restart_manifest.extend(struct.pack("<BHB", 0, 0, 3))
+        restart_manifest.extend(struct.pack("<BHB", 1, 1, 1))
+        restart_manifest.extend(struct.pack("<BHB", 3, 2, 1))
+        restart_manifest.extend(struct.pack(
+            "<iiiiiiQQ", 0, 0, 0, 8, 8, 8, 16, 1))
+        checksum = 1469598103934665603
+        for value in restart_manifest:
+            checksum = ((checksum ^ value) * 1099511628211) & UINT64_MAX
+        restart_manifest.extend(struct.pack("<Q", checksum))
+        restart_manifest_path.write_bytes(restart_manifest)
+        restart_manifest_sha256 = hashlib.sha256(restart_manifest).hexdigest()
+        restart_v6["run_start"] = {
+            "kind": "restart", "previous_step": 9,
+            "previous_time": 4.5,
+            "restart_manifest_sha256": restart_manifest_sha256,
+        }
+        continuation_v6 = json.loads(json.dumps(second_v6))
+        continuation_v6.update({"step": 11, "previous_committed_time": 5.0,
+                                "time": 5.5, "startup": False,
+                                "restart_recovery": False})
+        continuation_v6["run_start"] = json.loads(json.dumps(
+            restart_v6["run_start"]))
+        runtime_path.write_text(
+            json.dumps(restart_v6) + "\n" +
+            json.dumps(continuation_v6) + "\n", encoding="utf-8")
+        validate_runtime(runtime_path, restart_manifest_path)
+
+        reject_runtime(
+            restart_v6,
+            "V6 restart evidence accepted without its frozen manifest")
+
+        shifted_restart_anchor = json.loads(json.dumps(restart_v6))
+        shifted_restart_anchor["previous_committed_time"] += 100.0
+        shifted_restart_anchor["time"] += 100.0
+        reject_runtime(
+            shifted_restart_anchor,
+            "V6 restart row time and previous time shifted away from the "
+            "snapshot anchor", restart_manifest_path)
+
+        shifted_entire_anchor = json.loads(json.dumps(restart_v6))
+        shifted_entire_anchor["run_start"]["previous_time"] += 100.0
+        shifted_entire_anchor["previous_committed_time"] += 100.0
+        shifted_entire_anchor["time"] += 100.0
+        reject_runtime(
+            shifted_entire_anchor,
+            "V6 restart anchor and row times shifted away from the same "
+            "manifest", restart_manifest_path)
+
+        v5_with_v6_identity = json.loads(json.dumps(runtime_v5))
+        v5_with_v6_identity["candidate_identity"] = make_v6_identity("4" * 64)
+        reject_runtime(v5_with_v6_identity,
+                       "frozen V5 accepted a V6 candidate identity")
 
         one_refinement = json.loads(json.dumps(runtime_v4))
         one_refinement["linear_iterations"] = 1
@@ -3081,6 +3759,7 @@ def main() -> int:
     gate_parser.add_argument("--receipt", type=Path, required=True)
     runtime_parser = subparsers.add_parser("runtime")
     runtime_parser.add_argument("evidence", type=Path)
+    runtime_parser.add_argument("--run-start-manifest", type=Path)
     paired_parser = subparsers.add_parser("paired-stats")
     paired_parser.add_argument("pairs", type=Path)
     policy_parser = subparsers.add_parser("policy")
@@ -3100,7 +3779,8 @@ def main() -> int:
         elif arguments.command == "advance":
             advance(arguments.manifest, arguments.gate, arguments.receipt)
         elif arguments.command == "runtime":
-            validate_runtime(arguments.evidence)
+            validate_runtime(arguments.evidence,
+                             arguments.run_start_manifest)
         elif arguments.command == "paired-stats":
             print(json.dumps(paired_statistics(arguments.pairs), indent=2,
                              sort_keys=True))

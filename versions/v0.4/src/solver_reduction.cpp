@@ -27,6 +27,8 @@ constexpr std::size_t kFailureCode = 4U;
 constexpr std::size_t kFailureDetail = 5U;
 constexpr int kGatherTag = 17041;
 constexpr int kScatterTag = 17042;
+constexpr int kMaximumLocationGatherTag = 17043;
+constexpr int kMaximumLocationScatterTag = 17044;
 
 constexpr std::uint32_t kInvalidEngine = 11001U;
 constexpr std::uint32_t kInvalidCapacity = 11002U;
@@ -181,6 +183,34 @@ void max_packet(void* input, void* inout, int* length,
   }
 }
 
+bool better_maximum_location(const ReductionMaximumLocation& candidate,
+                             const ReductionMaximumLocation& selected) {
+  return candidate.valid &&
+         (!selected.valid || candidate.value > selected.value ||
+          (candidate.value == selected.value &&
+           (candidate.global_location < selected.global_location ||
+            (candidate.global_location == selected.global_location &&
+             candidate.rank < selected.rank))));
+}
+
+void combine_maximum_locations(const ReductionMaximumLocation* input,
+                               ReductionMaximumLocation* inout,
+                               int count) noexcept {
+  if (input == nullptr || inout == nullptr || count <= 0) return;
+  for (int index = 0; index < count; ++index)
+    if (better_maximum_location(input[index], inout[index]))
+      inout[index] = input[index];
+}
+
+void maximum_location_op(void* input, void* inout, int* length,
+                         MPI_Datatype* datatype) noexcept {
+  (void)datatype;
+  if (length != nullptr)
+    combine_maximum_locations(
+        static_cast<const ReductionMaximumLocation*>(input),
+        static_cast<ReductionMaximumLocation*>(inout), *length);
+}
+
 Status raw_consensus(MPI_Comm communicator, int rank, int size, Status local,
                      int& lowest) noexcept {
   if (!valid_status_code(local.code)) {
@@ -231,12 +261,16 @@ struct ReductionEngine::Impl {
   MPI_Datatype packet_type{MPI_DATATYPE_NULL};
   MPI_Op sum_operation{MPI_OP_NULL};
   MPI_Op max_operation{MPI_OP_NULL};
+  MPI_Datatype maximum_location_type{MPI_DATATYPE_NULL};
+  MPI_Op maximum_location_operation{MPI_OP_NULL};
   int rank{};
   int size{};
   ReductionMode reduction_mode{ReductionMode::mpi_allreduce};
   std::size_t maximum_scalars{};
   std::vector<double> send_storage;
   std::vector<double> receive_storage;
+  std::vector<ReductionMaximumLocation> maximum_location_send_storage;
+  std::vector<ReductionMaximumLocation> maximum_location_receive_storage;
   LinearReductionCounters reduction_counters{};
   int lowest_failing_rank{-1};
 };
@@ -254,6 +288,12 @@ void destroy_impl(Implementation* implementation) noexcept {
     }
     if (implementation->max_operation != MPI_OP_NULL) {
       (void)MPI_Op_free(&implementation->max_operation);
+    }
+    if (implementation->maximum_location_operation != MPI_OP_NULL) {
+      (void)MPI_Op_free(&implementation->maximum_location_operation);
+    }
+    if (implementation->maximum_location_type != MPI_DATATYPE_NULL) {
+      (void)MPI_Type_free(&implementation->maximum_location_type);
     }
     if (implementation->packet_type != MPI_DATATYPE_NULL) {
       (void)MPI_Type_free(&implementation->packet_type);
@@ -555,6 +595,8 @@ Status ReductionEngine::compile(MPI_Comm communicator, ReductionMode mode,
   try {
     candidate->send_storage.resize(maximum_scalars + kPacketWords);
     candidate->receive_storage.resize(maximum_scalars + kPacketWords);
+    candidate->maximum_location_send_storage.resize(maximum_scalars);
+    candidate->maximum_location_receive_storage.resize(maximum_scalars);
   } catch (...) {
     local = {StatusCode::allocation_failure, kAllocation};
   }
@@ -568,7 +610,13 @@ Status ReductionEngine::compile(MPI_Comm communicator, ReductionMode mode,
   const int packet_words = static_cast<int>(maximum_scalars + kPacketWords);
   local = MPI_Type_contiguous(packet_words, MPI_DOUBLE,
                               &candidate->packet_type) == MPI_SUCCESS &&
-                  MPI_Type_commit(&candidate->packet_type) == MPI_SUCCESS
+                  MPI_Type_commit(&candidate->packet_type) == MPI_SUCCESS &&
+                  MPI_Type_contiguous(
+                      static_cast<int>(sizeof(ReductionMaximumLocation)),
+                      MPI_BYTE, &candidate->maximum_location_type) ==
+                      MPI_SUCCESS &&
+                  MPI_Type_commit(&candidate->maximum_location_type) ==
+                      MPI_SUCCESS
               ? Status{}
               : Status{StatusCode::mpi_failure, kMpiDatatype};
   consensus = raw_consensus(candidate->communicator, rank, size, local,
@@ -581,7 +629,10 @@ Status ReductionEngine::compile(MPI_Comm communicator, ReductionMode mode,
   local = MPI_Op_create(&sum_packet, 1, &candidate->sum_operation) ==
                       MPI_SUCCESS &&
                   MPI_Op_create(&max_packet, 1,
-                                &candidate->max_operation) == MPI_SUCCESS
+                                &candidate->max_operation) == MPI_SUCCESS &&
+                  MPI_Op_create(&maximum_location_op, 1,
+                                &candidate->maximum_location_operation) ==
+                      MPI_SUCCESS
               ? Status{}
               : Status{StatusCode::mpi_failure, kMpiOperation};
   consensus = raw_consensus(candidate->communicator, rank, size, local,
@@ -626,6 +677,154 @@ Status ReductionEngine::checked_max(Span<const double> local,
   }
   return validate_reduction(*implementation_, local, global, local_status,
                             false);
+}
+
+Status ReductionEngine::checked_max_locations(
+    Span<const ReductionMaximumLocation> local,
+    Span<ReductionMaximumLocation> global, Status local_status) noexcept {
+  if (implementation_ == nullptr)
+    return {StatusCode::invalid_plan, kInvalidEngine};
+  Impl& implementation = *implementation_;
+  if (!valid_status_code(local_status.code))
+    local_status = {StatusCode::invalid_plan, kInvalidStatus};
+  if (local_status) {
+    if (local.data == nullptr || global.data == nullptr || local.size == 0U)
+      local_status = {StatusCode::invalid_plan, kInvalidSpan};
+    else if (local.size != global.size)
+      local_status = {StatusCode::invalid_plan, kSpanMismatch};
+    else if (local.size > implementation.maximum_scalars ||
+             local.size > static_cast<std::size_t>(
+                              std::numeric_limits<int>::max()))
+      local_status = {StatusCode::invalid_plan, kSpanCapacity};
+    else {
+      const std::size_t bytes =
+          local.size * sizeof(ReductionMaximumLocation);
+      const auto input = reinterpret_cast<std::uintptr_t>(local.data);
+      const auto output = reinterpret_cast<std::uintptr_t>(global.data);
+      if (input > std::numeric_limits<std::uintptr_t>::max() - bytes ||
+          output > std::numeric_limits<std::uintptr_t>::max() - bytes ||
+          (input < output + bytes && output < input + bytes))
+        local_status = {StatusCode::invalid_plan, kSpanOverlap};
+    }
+  }
+  for (std::size_t index = 0U; index < local.size && local_status; ++index) {
+    const ReductionMaximumLocation& value = local.data[index];
+    if (!value.valid) continue;
+    if (!std::isfinite(value.value) || value.value < 0.0 ||
+        value.global_location == UINT64_MAX ||
+        value.rank != implementation.rank) {
+      local_status = {StatusCode::numerical_failure, kNonFiniteLocal};
+      break;
+    }
+    for (double payload : value.payload)
+      if (!std::isfinite(payload)) {
+        local_status = {StatusCode::numerical_failure, kNonFiniteLocal};
+        break;
+      }
+  }
+
+  const auto begin = std::chrono::steady_clock::now();
+  int ignored_lowest = -1;
+  const Status agreed = raw_consensus(implementation.communicator,
+                                      implementation.rank,
+                                      implementation.size, local_status,
+                                      ignored_lowest);
+  if (!agreed) return agreed;
+  std::copy(local.data, local.data + local.size,
+            implementation.maximum_location_send_storage.data());
+  int mpi_status = MPI_SUCCESS;
+  const int count = static_cast<int>(local.size);
+  if (implementation.reduction_mode == ReductionMode::mpi_allreduce) {
+    mpi_status = MPI_Allreduce(
+        implementation.maximum_location_send_storage.data(),
+        implementation.maximum_location_receive_storage.data(), count,
+        implementation.maximum_location_type,
+        implementation.maximum_location_operation,
+        implementation.communicator);
+  } else if (implementation.rank == 0) {
+    std::copy(implementation.maximum_location_send_storage.begin(),
+              implementation.maximum_location_send_storage.begin() + count,
+              implementation.maximum_location_receive_storage.begin());
+    for (int source = 1; source < implementation.size; ++source) {
+      if (MPI_Recv(implementation.maximum_location_send_storage.data(), count,
+                   implementation.maximum_location_type, source,
+                   kMaximumLocationGatherTag, implementation.communicator,
+                   MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+        mpi_status = MPI_ERR_OTHER;
+        break;
+      }
+      combine_maximum_locations(
+          implementation.maximum_location_send_storage.data(),
+          implementation.maximum_location_receive_storage.data(), count);
+    }
+    if (mpi_status == MPI_SUCCESS) {
+      for (int destination = 1; destination < implementation.size;
+           ++destination) {
+        if (MPI_Send(
+                implementation.maximum_location_receive_storage.data(), count,
+                implementation.maximum_location_type, destination,
+                kMaximumLocationScatterTag, implementation.communicator) !=
+            MPI_SUCCESS) {
+          mpi_status = MPI_ERR_OTHER;
+          break;
+        }
+      }
+    }
+  } else if (MPI_Send(
+                         implementation.maximum_location_send_storage.data(),
+                         count, implementation.maximum_location_type, 0,
+                         kMaximumLocationGatherTag,
+                         implementation.communicator) != MPI_SUCCESS ||
+             MPI_Recv(
+                 implementation.maximum_location_receive_storage.data(),
+                 count, implementation.maximum_location_type, 0,
+                 kMaximumLocationScatterTag, implementation.communicator,
+                 MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    mpi_status = MPI_ERR_OTHER;
+  }
+  const auto elapsed = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - begin)
+          .count());
+  if (mpi_status != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kCollectiveFailure};
+  for (std::size_t index = 0U; index < local.size; ++index) {
+    const ReductionMaximumLocation& value =
+        implementation.maximum_location_receive_storage[index];
+    if (!value.valid || !std::isfinite(value.value) || value.value < 0.0 ||
+        value.global_location == UINT64_MAX || value.rank < 0 ||
+        value.rank >= implementation.size) {
+      return {StatusCode::numerical_failure, kNonFiniteGlobal};
+    }
+    for (double payload : value.payload)
+      if (!std::isfinite(payload))
+        return {StatusCode::numerical_failure, kNonFiniteGlobal};
+  }
+
+  LinearReductionCounters candidate = implementation.reduction_counters;
+  const std::uint64_t count_u64 = static_cast<std::uint64_t>(local.size);
+  const std::uint64_t bytes = count_u64 * sizeof(ReductionMaximumLocation);
+  const std::uint64_t messages =
+      implementation.reduction_mode == ReductionMode::reproducible_tree
+          ? static_cast<std::uint64_t>(implementation.size - 1) * 2U
+          : 0U;
+  if (!checked_add(candidate.calls, 1U, candidate.calls) ||
+      !checked_add(candidate.scalars, count_u64, candidate.scalars) ||
+      !checked_add(candidate.logical_bytes, bytes, candidate.logical_bytes) ||
+      !checked_add(candidate.tree_messages, messages,
+                   candidate.tree_messages) ||
+      !checked_add(candidate.blocking_operations, 2U,
+                   candidate.blocking_operations) ||
+      !checked_add(candidate.wall_nanoseconds, elapsed,
+                   candidate.wall_nanoseconds)) {
+    return {StatusCode::invalid_plan, kCounterOverflow};
+  }
+  std::copy(implementation.maximum_location_receive_storage.data(),
+            implementation.maximum_location_receive_storage.data() +
+                local.size,
+            global.data);
+  implementation.reduction_counters = candidate;
+  return {};
 }
 
 Status ReductionEngine::consensus(Status local_status) noexcept {

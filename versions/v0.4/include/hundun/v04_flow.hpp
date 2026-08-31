@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace hundun::v04 {
@@ -221,13 +222,14 @@ struct EquationSystemView {
   FaceFieldView z_coefficient{};
 };
 
-// "v04mafc2": direction-preserving, common-face scalar AFC with the
+// "v04mafc3": direction-preserving, owner-published common-face scalar AFC
+// with partition-invariant face metrics, the
 // quadratic smooth-extremum allowance and one-sided physical-outflow
 // budgeting.  This policy identity participates in EquationPlanSet semantic
 // provenance so legacy global-theta and prior face-local plans can never
 // share an authority lineage.
 inline constexpr PlanFingerprint kMomentumPredictorLimiterPolicySchema =
-    UINT64_C(0x7630346d61666332);
+    UINT64_C(0x7630346d61666333);
 
 struct ConvectiveCflFailureWitness {
   bool valid{};
@@ -237,7 +239,27 @@ struct ConvectiveCflFailureWitness {
   double absolute{};
   double density_volume{};
   double outgoing_mass_flow{};
+  // Raw sum of |mass flux| over the six control-volume faces.  Co_abs uses
+  // one half of this sum.
   double absolute_mass_flow{};
+
+  bool formula_valid(double dt) const noexcept {
+    const auto same = [](double left, double right) noexcept {
+      return std::abs(left - right) <=
+             64.0 * std::numeric_limits<double>::epsilon() *
+                 std::max({1.0, std::abs(left), std::abs(right)});
+    };
+    return valid && global_cell.x >= 0 && global_cell.y >= 0 &&
+           global_cell.z >= 0 && rank >= 0 && std::isfinite(dt) && dt > 0.0 &&
+           std::isfinite(out) && out >= 0.0 && std::isfinite(absolute) &&
+           absolute >= 0.0 && std::isfinite(density_volume) &&
+           density_volume > 0.0 && std::isfinite(outgoing_mass_flow) &&
+           outgoing_mass_flow >= 0.0 &&
+           std::isfinite(absolute_mass_flow) && absolute_mass_flow >= 0.0 &&
+           same(out, (dt / density_volume) * outgoing_mass_flow) &&
+           same(absolute,
+                (dt / density_volume) * (0.5 * absolute_mass_flow));
+  }
 };
 
 struct MomentumFieldViewIdentity {
@@ -340,6 +362,84 @@ struct MomentumAdvectiveCflCertificate {
   }
 };
 
+struct CommittedConvectiveCflFailureWitness {
+  bool valid{};
+  ConvectiveCflFailureWitness out_winner{};
+  ConvectiveCflFailureWitness absolute_winner{};
+};
+
+// Typed authority for the CFL reconstructed from the exact terminal density
+// and the still-pending final C2 mass flux.  The view identities are
+// deliberately rank-local capabilities; the two global winners and scalar
+// values are rank-invariant.
+struct CommittedConvectiveCflCertificate {
+  PlanFingerprint plan{};
+  RevisionToken correction_state{};
+  RevisionToken density{};
+  RevisionToken final_flux{};
+  StorageIdentity density_storage{};
+  RevisionDomainIdentity density_revision_domain{};
+  StorageIdentity face_flux_storage{};
+  RevisionDomainIdentity face_flux_revision_domain{};
+  MomentumFieldViewIdentity density_view_identity{};
+  MomentumFaceFluxViewIdentity face_flux_view_identity{};
+  PlanFingerprint activity_collective{};
+  double dt{};
+  double out_max{};
+  double absolute_max{};
+  double limit{};
+  ConvectiveCflFailureWitness out_winner{};
+  ConvectiveCflFailureWitness absolute_winner{};
+  CommittedConvectiveCflFailureWitness failure_witness{};
+
+  bool valid() const noexcept {
+    constexpr double slack =
+        64.0 * std::numeric_limits<double>::epsilon();
+    const bool exceeded =
+        std::isfinite(out_max) && std::isfinite(limit) &&
+        out_max > limit * (1.0 + slack);
+    const auto same_winner = [](const ConvectiveCflFailureWitness& left,
+                                const ConvectiveCflFailureWitness& right) {
+      return left.valid == right.valid &&
+             left.global_cell.x == right.global_cell.x &&
+             left.global_cell.y == right.global_cell.y &&
+             left.global_cell.z == right.global_cell.z &&
+             left.rank == right.rank && left.out == right.out &&
+             left.absolute == right.absolute &&
+             left.density_volume == right.density_volume &&
+             left.outgoing_mass_flow == right.outgoing_mass_flow &&
+             left.absolute_mass_flow == right.absolute_mass_flow;
+    };
+    return plan != 0U && correction_state != 0U && density != 0U &&
+           final_flux != 0U && density_storage != 0U &&
+           density_revision_domain != 0U && face_flux_storage != 0U &&
+           face_flux_revision_domain != 0U &&
+           density_view_identity.valid() &&
+           density_view_identity.view.revision == density &&
+           density_view_identity.view.storage_identity == density_storage &&
+           density_view_identity.view.revision_domain ==
+               density_revision_domain &&
+           face_flux_view_identity.valid() &&
+           face_flux_view_identity.view.revision == final_flux &&
+           face_flux_view_identity.view.x.storage_identity ==
+               face_flux_storage &&
+           face_flux_view_identity.view.x.revision_domain ==
+               face_flux_revision_domain &&
+           std::isfinite(dt) && dt > 0.0 && std::isfinite(out_max) &&
+           out_max >= 0.0 && std::isfinite(absolute_max) &&
+           absolute_max >= 0.0 && std::isfinite(limit) && limit > 0.0 &&
+           out_winner.formula_valid(dt) &&
+           absolute_winner.formula_valid(dt) &&
+           out_winner.out == out_max &&
+           absolute_winner.absolute == absolute_max &&
+           failure_witness.valid == exceeded &&
+           (!failure_witness.valid ||
+            (same_winner(failure_witness.out_winner, out_winner) &&
+             same_winner(failure_witness.absolute_winner,
+                         absolute_winner)));
+  }
+};
+
 struct MomentumPredictorLimiterReport {
   // L1-weighted fraction of the high-order anti-diffusive face correction
   // retained by the conservative face-local limiter.  Unlike the legacy
@@ -349,11 +449,25 @@ struct MomentumPredictorLimiterReport {
   double theta{1.0};
   // Number of globally unique faces whose common three-component alpha < 1.
   std::uint32_t activations{};
+  bool correction_metrics_applicable{};
+  double minimum_face_alpha{};
+  std::uint32_t active_correction_faces{};
+  double limited_face_fraction{};
   bool limited{};
   // Exact provisional mass-flux revision consumed by this momentum
   // predictor.  This is distinct from the committed terminal CFL.
   MomentumAdvectiveCflCertificate advective_cfl{};
 };
+
+namespace detail {
+// Test-core hooks are defined only when HUNDUN_V04_ENABLE_TEST_ACCESS is
+// enabled.  The declarations remain visible so a black-box test executable
+// linked against that core can arm the mutation without inheriting private
+// compile definitions into production headers.
+void arm_momentum_partition_alpha_mutation_for_test(bool armed,
+                                                    double alpha) noexcept;
+void clear_momentum_partition_alpha_mutation_for_test() noexcept;
+}  // namespace detail
 
 struct MomentumPredictorLimiterWorkspace {
   FieldView cell_ratios{};
@@ -2036,6 +2150,7 @@ struct PisoAttemptReport {
   double committed_convective_cfl_out_max{};
   double committed_convective_cfl_abs_max{};
   double committed_convective_cfl_limit{};
+  CommittedConvectiveCflCertificate committed_convective_cfl{};
   RevisionToken final_flux_revision{};
   std::uint8_t pressure_solve_calls{};
   std::uint8_t pressure_energy_refinement_solve_calls{};

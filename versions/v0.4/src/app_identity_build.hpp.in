@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#include <string_view>
+
+namespace hundun::v04::detail {
+
+inline constexpr std::string_view identity_source_commit =
+    "@HUNDUN_SOURCE_COMMIT_ESCAPED@";
+inline constexpr std::string_view identity_source_tree =
+    "@HUNDUN_SOURCE_TREE_ESCAPED@";
+inline constexpr std::string_view identity_build_manifest_sha256 =
+    "@HUNDUN_BUILD_MANIFEST_SHA256_ESCAPED@";
+
+}  // namespace hundun::v04::detail

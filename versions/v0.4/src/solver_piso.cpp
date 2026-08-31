@@ -8260,6 +8260,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   };
   double local_max[7]{};
   double local_sum[5]{};
+  std::array<ReductionMaximumLocation, 2U> local_cfl_winners{};
   Int3 local_continuity_cell{};
   bool local_continuity_location_valid = false;
   local_max[3U] = input.boundary_closure_residual;
@@ -8355,19 +8356,30 @@ Status PressureVelocityCoupler::audit_pending_final(
             local = {StatusCode::invalid_plan, kPisoCoupler};
             continue;
           }
-          const double outgoing_mass_flow =
-              std::max(-fxm, 0.0) + std::max(fxp, 0.0) +
-              std::max(-fym, 0.0) + std::max(fyp, 0.0) +
-              std::max(-fzm, 0.0) + std::max(fzp, 0.0);
-          const double absolute_mass_flow =
-              0.5 * (std::abs(fxm) + std::abs(fxp) + std::abs(fym) +
-                     std::abs(fyp) + std::abs(fzm) + std::abs(fzp));
-          const double cfl_scale = input.step_dt / (rho * volume);
-          const double cfl_out = cfl_scale * outgoing_mass_flow;
-          const double cfl_abs = cfl_scale * absolute_mass_flow;
-          if (!std::isfinite(cfl_out) || cfl_out < 0.0 ||
-              !std::isfinite(cfl_abs) || cfl_abs < 0.0) {
-            local = {StatusCode::numerical_failure, kPisoNumerical};
+          const std::array<double, 6U> cell_flux{{
+              fxm, fxp, fym, fyp, fzm, fzp}};
+          const std::array<std::uint8_t, 6U> cell_active{{
+              static_cast<std::uint8_t>(!inactive_xm),
+              static_cast<std::uint8_t>(!inactive_xp),
+              static_cast<std::uint8_t>(!inactive_ym),
+              static_cast<std::uint8_t>(!inactive_yp),
+              static_cast<std::uint8_t>(!inactive_zm),
+              static_cast<std::uint8_t>(!inactive_zp),
+          }};
+          detail::CellConvectiveCflResult cell_cfl;
+          const detail::CellConvectiveCflStatus cell_cfl_status =
+              detail::evaluate_cell_convective_cfl(
+                  rho, volume, cell_flux, cell_active, input.step_dt,
+                  cell_cfl);
+          if (cell_cfl_status != detail::CellConvectiveCflStatus::success) {
+            const bool authority_failure =
+                cell_cfl_status == detail::CellConvectiveCflStatus::
+                                       inactive_nonzero_flux ||
+                cell_cfl_status ==
+                    detail::CellConvectiveCflStatus::invalid_activity;
+            local = {authority_failure ? StatusCode::invalid_plan
+                                       : StatusCode::numerical_failure,
+                     authority_failure ? kPisoCoupler : kPisoNumerical};
             continue;
           }
           if (hf_coast_common_terminal_cell_v1(
@@ -8391,8 +8403,37 @@ Status PressureVelocityCoupler::audit_pending_final(
           local_max[0U] = std::max(local_max[0U], eos_residual);
           local_max[1U] = std::max(local_max[1U], continuity_residual);
           local_max[2U] = std::max(local_max[2U], absolute_pi);
-          local_max[5U] = std::max(local_max[5U], cfl_out);
-          local_max[6U] = std::max(local_max[6U], cfl_abs);
+          local_max[5U] = std::max(local_max[5U], cell_cfl.out);
+          local_max[6U] =
+              std::max(local_max[6U], cell_cfl.absolute);
+          const Int3 global_cell{impl.patch.begin.x + cell.x,
+                                 impl.patch.begin.y + cell.y,
+                                 impl.patch.begin.z + cell.z};
+          const Int3 global_cells = impl.geometry->global_cells();
+          const std::uint64_t global_linear =
+              static_cast<std::uint64_t>(global_cell.x) +
+              static_cast<std::uint64_t>(global_cells.x) *
+                  (static_cast<std::uint64_t>(global_cell.y) +
+                   static_cast<std::uint64_t>(global_cells.y) *
+                       static_cast<std::uint64_t>(global_cell.z));
+          const std::array<double, 5U> payload{{
+              cell_cfl.out, cell_cfl.absolute, cell_cfl.density_volume,
+              cell_cfl.outgoing_mass_flow, cell_cfl.absolute_mass_flow}};
+          const auto select_winner = [&](std::size_t index,
+                                         double value) noexcept {
+            ReductionMaximumLocation& winner = local_cfl_winners[index];
+            if (!winner.valid || value > winner.value ||
+                (value == winner.value &&
+                 global_linear < winner.global_location)) {
+              winner.valid = true;
+              winner.value = value;
+              winner.global_location = global_linear;
+              winner.rank = impl.rank;
+              winner.payload = payload;
+            }
+          };
+          select_winner(0U, cell_cfl.out);
+          select_winner(1U, cell_cfl.absolute);
           local_sum[0U] += mass_contribution;
           local_sum[1U] += volume_contribution;
           local_sum[2U] += compressibility_moment;
@@ -8406,6 +8447,15 @@ Status PressureVelocityCoupler::audit_pending_final(
                                          {global_max, 7U}, local);
   if (!status) {
     return status;
+  }
+  std::array<ReductionMaximumLocation, 2U> global_cfl_winners{};
+  status = reductions.checked_max_locations(
+      {local_cfl_winners.data(), local_cfl_winners.size()},
+      {global_cfl_winners.data(), global_cfl_winners.size()});
+  if (!status) return status;
+  if (global_cfl_winners[0U].value != global_max[5U] ||
+      global_cfl_winners[1U].value != global_max[6U]) {
+    return {StatusCode::numerical_failure, kPisoNumerical};
   }
   double global_sum[5]{};
   status = reductions.checked_sum({local_sum, 5U}, {global_sum, 5U});
@@ -8503,6 +8553,68 @@ Status PressureVelocityCoupler::audit_pending_final(
       return {StatusCode::mpi_failure, kPisoCollective};
     }
   }
+  const Int3 global_cells = impl.geometry->global_cells();
+  const auto cfl_witness = [&](const ReductionMaximumLocation& winner) {
+    ConvectiveCflFailureWitness witness;
+    if (!winner.valid || global_cells.x <= 0 || global_cells.y <= 0 ||
+        global_cells.z <= 0)
+      return witness;
+    std::uint64_t remainder = winner.global_location;
+    const std::uint64_t plane =
+        static_cast<std::uint64_t>(global_cells.x) *
+        static_cast<std::uint64_t>(global_cells.y);
+    const std::uint64_t z = remainder / plane;
+    remainder -= z * plane;
+    const std::uint64_t y =
+        remainder / static_cast<std::uint64_t>(global_cells.x);
+    const std::uint64_t x =
+        remainder - y * static_cast<std::uint64_t>(global_cells.x);
+    if (x >= static_cast<std::uint64_t>(global_cells.x) ||
+        y >= static_cast<std::uint64_t>(global_cells.y) ||
+        z >= static_cast<std::uint64_t>(global_cells.z))
+      return witness;
+    witness.valid = true;
+    witness.global_cell = {static_cast<std::int32_t>(x),
+                           static_cast<std::int32_t>(y),
+                           static_cast<std::int32_t>(z)};
+    witness.rank = winner.rank;
+    witness.out = winner.payload[0U];
+    witness.absolute = winner.payload[1U];
+    witness.density_volume = winner.payload[2U];
+    witness.outgoing_mass_flow = winner.payload[3U];
+    witness.absolute_mass_flow = winner.payload[4U];
+    return witness;
+  };
+  CommittedConvectiveCflCertificate committed_cfl;
+  committed_cfl.plan = impl.fingerprint;
+  committed_cfl.correction_state = input.correction.state;
+  committed_cfl.density = input.density.revision;
+  committed_cfl.final_flux = pending_flux.revision_;
+  committed_cfl.density_storage = input.density.storage_identity;
+  committed_cfl.density_revision_domain = input.density.revision_domain;
+  committed_cfl.face_flux_storage = flux.x.storage_identity;
+  committed_cfl.face_flux_revision_domain = flux.x.revision_domain;
+  committed_cfl.density_view_identity = {input.density};
+  committed_cfl.face_flux_view_identity = {flux};
+  committed_cfl.activity_collective =
+      impl.continuity_activity.collective_fingerprint;
+  committed_cfl.dt = input.step_dt;
+  committed_cfl.out_max = global_max[5U];
+  committed_cfl.absolute_max = global_max[6U];
+  committed_cfl.limit = input.convective_cfl_limit;
+  committed_cfl.out_winner = cfl_witness(global_cfl_winners[0U]);
+  committed_cfl.absolute_winner = cfl_witness(global_cfl_winners[1U]);
+  constexpr double kCommittedCflRoundoffSlack =
+      64.0 * std::numeric_limits<double>::epsilon();
+  if (committed_cfl.out_max >
+      committed_cfl.limit * (1.0 + kCommittedCflRoundoffSlack)) {
+    committed_cfl.failure_witness.valid = true;
+    committed_cfl.failure_witness.out_winner = committed_cfl.out_winner;
+    committed_cfl.failure_witness.absolute_winner =
+        committed_cfl.absolute_winner;
+  }
+  if (!committed_cfl.valid())
+    return {StatusCode::numerical_failure, kPisoNumerical};
   PisoAttemptReport candidate_report = report;
   candidate_report.eos_residual = global_max[0U];
   candidate_report.continuity_residual = global_max[1U];
@@ -8513,6 +8625,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   candidate_report.committed_convective_cfl_abs_max = global_max[6U];
   candidate_report.committed_convective_cfl_limit =
       input.convective_cfl_limit;
+  candidate_report.committed_convective_cfl = committed_cfl;
   candidate_report.final_flux_revision = pending_flux.revision_;
   candidate_report.continuity_witness = global_continuity_witness;
   report = candidate_report;
@@ -8541,6 +8654,33 @@ Status PressureVelocityCoupler::audit_pending_final(
   audit = hash_mix(audit, double_bits(global_max[5U]));
   audit = hash_mix(audit, double_bits(global_max[6U]));
   audit = hash_mix(audit, double_bits(input.convective_cfl_limit));
+  audit = hash_mix(audit, committed_cfl.density);
+  audit = hash_mix(audit, committed_cfl.final_flux);
+  audit = hash_mix(audit, committed_cfl.density_storage);
+  audit = hash_mix(audit, committed_cfl.density_revision_domain);
+  audit = hash_mix(audit, committed_cfl.face_flux_storage);
+  audit = hash_mix(audit, committed_cfl.face_flux_revision_domain);
+  audit = hash_mix(audit, committed_cfl.activity_collective);
+  audit = hash_mix(audit, global_cfl_winners[0U].global_location);
+  audit = hash_mix(audit, global_cfl_winners[1U].global_location);
+  audit = hash_mix(
+      audit, static_cast<std::uint64_t>(committed_cfl.out_winner.rank));
+  audit = hash_mix(
+      audit, static_cast<std::uint64_t>(committed_cfl.absolute_winner.rank));
+  audit = hash_mix(audit,
+                   double_bits(committed_cfl.out_winner.density_volume));
+  audit = hash_mix(
+      audit, double_bits(committed_cfl.out_winner.outgoing_mass_flow));
+  audit = hash_mix(
+      audit, double_bits(committed_cfl.out_winner.absolute_mass_flow));
+  audit = hash_mix(
+      audit, double_bits(committed_cfl.absolute_winner.density_volume));
+  audit = hash_mix(
+      audit,
+      double_bits(committed_cfl.absolute_winner.outgoing_mass_flow));
+  audit = hash_mix(
+      audit,
+      double_bits(committed_cfl.absolute_winner.absolute_mass_flow));
   audit = hash_mix(audit, thermophysical_boundary.semantics);
   audit = hash_mix(audit, thermophysical_boundary.target);
   audit = hash_mix(audit, thermophysical_boundary.rank_local_binding);

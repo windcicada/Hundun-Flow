@@ -70,7 +70,10 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V5") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V6") != std::string::npos &&
+              text.find("\"candidate_identity\":{") != std::string::npos &&
+              text.find("\"previous_committed_time\":") !=
+                  std::string::npos &&
               text.find(
                   "\"pressure_solve_contract\":\"continuity_energy_coupled\"") !=
                   std::string::npos &&
@@ -83,7 +86,7 @@ bool run() {
                   std::string::npos &&
               text.find("\"committed_convective_cfl\":{") !=
                   std::string::npos &&
-              text.find("\"scheme\":\"common_face_afc_v2\"") !=
+              text.find("\"scheme\":\"common_face_afc_v3_owner\"") !=
                   std::string::npos &&
               text.find("\"advective_cfl\":{\"present\":true") !=
                   std::string::npos &&
@@ -114,7 +117,8 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V5") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V6") != std::string::npos &&
+              text.find("\"candidate_identity\":{") != std::string::npos &&
               text.find("\"step\":3") != std::string::npos &&
               text.find("\"bdf_order\":1") != std::string::npos &&
               text.find("\"restart_recovery\":true") !=
@@ -129,7 +133,7 @@ bool run() {
                   std::string::npos &&
               text.find("\"committed_convective_cfl\":{") !=
                   std::string::npos &&
-              text.find("\"scheme\":\"common_face_afc_v2\"") !=
+              text.find("\"scheme\":\"common_face_afc_v3_owner\"") !=
                   std::string::npos &&
               text.find("\"advective_cfl\":{\"present\":true") !=
                   std::string::npos &&

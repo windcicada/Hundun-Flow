@@ -300,7 +300,7 @@ int main(int argc, char* argv[]) {
       ApplicationRunReport report;
       const Status status =
           ApplicationService::run(MPI_COMM_WORLD, options, report);
-      if (status && rank == 0)
+      if (status && rank == 0) {
         std::cout << "COMPLETED steps=" << report.accepted_steps
                   << " time=" << report.final_time
                   << " product=" << report.product
@@ -323,7 +323,29 @@ int main(int argc, char* argv[]) {
                   << " committed_convective_cfl_abs_max="
                   << report.maximum_committed_convective_cfl_abs
                   << " committed_convective_cfl_limit="
-                  << report.committed_convective_cfl_limit << '\n';
+                  << report.committed_convective_cfl_limit
+                  << " momentum_afc_applicability="
+                  << (report.momentum_predictor_limiter
+                              .correction_metrics_applicable
+                          ? "applicable"
+                          : "not_applicable")
+                  << " momentum_afc_active_faces="
+                  << report.momentum_predictor_limiter
+                         .active_correction_faces
+                  << " momentum_afc_limited_faces="
+                  << report.momentum_predictor_limiter.activations;
+        if (report.momentum_predictor_limiter
+                .correction_metrics_applicable) {
+          std::cout << " momentum_afc_retained_l1="
+                    << report.momentum_predictor_limiter.theta
+                    << " momentum_afc_min_alpha="
+                    << report.momentum_predictor_limiter.minimum_face_alpha
+                    << " momentum_afc_limited_fraction="
+                    << report.momentum_predictor_limiter
+                           .limited_face_fraction;
+        }
+        std::cout << '\n';
+      }
       if (!status && rank == 0 && report.failed_stage != 0U) {
         std::cerr << "failed_stage=" << report.failed_stage
                   << " attempts=" << report.attempts;
@@ -363,6 +385,26 @@ int main(int argc, char* argv[]) {
                     << report.piso.committed_convective_cfl_limit;
         } else {
           std::cerr << " terminal_audit=unavailable";
+        }
+        const hundun::v04::CommittedConvectiveCflCertificate& committed_cfl =
+            report.piso.committed_convective_cfl;
+        if (committed_cfl.failure_witness.valid) {
+          const auto emit_committed_winner = [&](
+              const char* label,
+              const hundun::v04::ConvectiveCflFailureWitness& winner) {
+            std::cerr << ' ' << label << '=' << winner.global_cell.x << ','
+                      << winner.global_cell.y << ',' << winner.global_cell.z
+                      << '/' << winner.rank << '/' << winner.out << '/'
+                      << winner.absolute << '/' << winner.density_volume
+                      << '/' << winner.outgoing_mass_flow << '/'
+                      << winner.absolute_mass_flow;
+          };
+          emit_committed_winner(
+              "committed_cfl_out_winner",
+              committed_cfl.failure_witness.out_winner);
+          emit_committed_winner(
+              "committed_cfl_abs_winner",
+              committed_cfl.failure_witness.absolute_winner);
         }
         if (report.momentum_predictor_limiter.advective_cfl.valid()) {
           const hundun::v04::MomentumAdvectiveCflCertificate& cfl =

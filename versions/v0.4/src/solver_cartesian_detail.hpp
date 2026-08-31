@@ -5,6 +5,7 @@
 #include "hundun/v04_execution.hpp"
 #include "hundun/v04_mesh.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -15,6 +16,29 @@ struct DerivativeWeights {
   double centre{};
   double plus{};
 };
+
+// Shared cell-local authority for both the provisional momentum CFL and the
+// committed C2 terminal CFL.  Flux order is x-, x+, y-, y+, z-, z+; stored
+// face-flux signs are interpreted outward from the selected control volume.
+enum class CellConvectiveCflStatus : std::uint8_t {
+  success,
+  inactive_nonzero_flux,
+  invalid_activity,
+  nonphysical_state,
+};
+
+struct CellConvectiveCflResult {
+  double density_volume{};
+  double outgoing_mass_flow{};
+  double absolute_mass_flow{};
+  double out{};
+  double absolute{};
+};
+
+CellConvectiveCflStatus evaluate_cell_convective_cfl(
+    double density, double volume, const std::array<double, 6U>& face_flux,
+    const std::array<std::uint8_t, 6U>& active, double dt,
+    CellConvectiveCflResult& result) noexcept;
 
 bool valid_cells(Int3 cells) noexcept;
 bool same_cells(Int3 left, Int3 right) noexcept;

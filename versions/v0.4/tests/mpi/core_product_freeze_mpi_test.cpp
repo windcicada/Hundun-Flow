@@ -1667,9 +1667,16 @@ bool run_local_donor_product(int rank) {
   };
   // This family keeps eight x-cells per rank, so increasing the rank count
   // also refines the physical problem.  The finer cases can prove the forced
-  // history flux incompatible during C1 candidate globalization; the coarser
-  // case reaches the final coupled audit.  Both are explicit fail-closed
-  // authorities, and neither may publish a state or final flux.
+  // history flux incompatible at the provisional CFL authority, during C1
+  // candidate globalization, or at the final coupled audit.  All three are
+  // explicit fail-closed authorities, and none may publish state or flux.
+  const MomentumAdvectiveCflCertificate& provisional_cfl =
+      step.momentum_predictor_limiter.advective_cfl;
+  const bool provisional_cfl_rejected =
+      status.detail == 10211U && step.failed_stage == 30U &&
+      step.piso.pressure_solve_calls == 0U && provisional_cfl.valid() &&
+      provisional_cfl.failure_witness.valid &&
+      provisional_cfl.out_max > provisional_cfl.limit;
   const bool candidate_rejected =
       status.detail == 5792U && step.failed_stage == 44U &&
       step.piso.pressure_solve_calls == 1U &&
@@ -1682,7 +1689,7 @@ bool run_local_donor_product(int rank) {
   const bool passed =
       !status && status.code == StatusCode::rejected_step &&
       !step.accepted && step.attempts == 1U && rollback_exact &&
-      (candidate_rejected || terminal_rejected) &&
+      (provisional_cfl_rejected || candidate_rejected || terminal_rejected) &&
       step.thermophysical_predictor.low_state ==
           ThermophysicalLowStateKind::bdf_local_donor_flux &&
       step.thermophysical_predictor.enthalpy_solve_calls == 0U &&
@@ -1928,7 +1935,20 @@ bool run_mass_flow_product(int rank) {
   const auto committed_cfl = [&](const DriverStepReport& step) {
     constexpr double slack =
         64.0 * std::numeric_limits<double>::epsilon();
-    return step.piso.final_flux_revision != 0U &&
+    const CommittedConvectiveCflCertificate& certificate =
+        step.piso.committed_convective_cfl;
+    return step.piso.final_flux_revision != 0U && certificate.valid() &&
+           certificate.final_flux == step.piso.final_flux_revision &&
+           certificate.dt == step.proposal.dt &&
+           certificate.out_max ==
+               step.piso.committed_convective_cfl_out_max &&
+           certificate.absolute_max ==
+               step.piso.committed_convective_cfl_abs_max &&
+           certificate.limit == step.piso.committed_convective_cfl_limit &&
+           certificate.out_winner.out == certificate.out_max &&
+           certificate.absolute_winner.absolute ==
+               certificate.absolute_max &&
+           !certificate.failure_witness.valid &&
            std::isfinite(step.piso.committed_convective_cfl_out_max) &&
            step.piso.committed_convective_cfl_out_max > 0.0 &&
            std::isfinite(step.piso.committed_convective_cfl_abs_max) &&
@@ -1942,6 +1962,28 @@ bool run_mass_flow_product(int rank) {
            same_u64(wire_bits(step.piso.committed_convective_cfl_abs_max),
                     MPI_COMM_WORLD) &&
            same_u64(wire_bits(step.piso.committed_convective_cfl_limit),
+                    MPI_COMM_WORLD) &&
+           same_u64(certificate.density, MPI_COMM_WORLD) &&
+           same_u64(certificate.final_flux, MPI_COMM_WORLD) &&
+           same_u64(certificate.activity_collective, MPI_COMM_WORLD) &&
+           same_u64(static_cast<std::uint64_t>(
+                        certificate.out_winner.global_cell.x),
+                    MPI_COMM_WORLD) &&
+           same_u64(static_cast<std::uint64_t>(
+                        certificate.out_winner.global_cell.y),
+                    MPI_COMM_WORLD) &&
+           same_u64(static_cast<std::uint64_t>(
+                        certificate.out_winner.global_cell.z),
+                    MPI_COMM_WORLD) &&
+           same_u64(static_cast<std::uint64_t>(certificate.out_winner.rank),
+                    MPI_COMM_WORLD) &&
+           same_u64(static_cast<std::uint64_t>(
+                        certificate.absolute_winner.rank),
+                    MPI_COMM_WORLD) &&
+           same_u64(wire_bits(certificate.out_winner.density_volume),
+                    MPI_COMM_WORLD) &&
+           same_u64(wire_bits(
+                        certificate.absolute_winner.density_volume),
                     MPI_COMM_WORLD);
   };
   const bool committed_cfl_role =
@@ -1966,7 +2008,31 @@ bool run_mass_flow_product(int rank) {
   };
   const bool advective_cfl_role =
       advective_cfl(first) && advective_cfl(second);
-  const bool limiter_role =
+  const auto limiter_metrics = [&](const DriverStepReport& step) {
+    const MomentumPredictorLimiterReport& limiter =
+        step.momentum_predictor_limiter;
+    const bool applicable = limiter.correction_metrics_applicable;
+    return (applicable
+                ? limiter.active_correction_faces > 0U &&
+                      limiter.activations <=
+                          limiter.active_correction_faces &&
+                      limiter.minimum_face_alpha >= 0.0 &&
+                      limiter.minimum_face_alpha <= 1.0 &&
+                      limiter.limited_face_fraction ==
+                          static_cast<double>(limiter.activations) /
+                              limiter.active_correction_faces
+                : limiter.active_correction_faces == 0U &&
+                      limiter.activations == 0U &&
+                      limiter.minimum_face_alpha == 0.0 &&
+                      limiter.limited_face_fraction == 0.0 &&
+                      !limiter.limited) &&
+           same_u64(limiter.active_correction_faces, MPI_COMM_WORLD) &&
+           same_u64(limiter.activations, MPI_COMM_WORLD) &&
+           same_u64(wire_bits(limiter.minimum_face_alpha), MPI_COMM_WORLD) &&
+           same_u64(wire_bits(limiter.limited_face_fraction),
+                    MPI_COMM_WORLD);
+  };
+  const bool limiter_role = limiter_metrics(first) && limiter_metrics(second) &&
       !first.momentum_predictor_limiter.limited &&
       first.momentum_predictor_limiter.theta == 1.0 &&
       second.momentum_predictor_limiter.limited &&
@@ -2062,6 +2128,20 @@ bool run_mass_flow_product(int rank) {
               << second.piso.committed_convective_cfl_out_max << '/'
               << second.piso.committed_convective_cfl_abs_max << '/'
               << second.piso.committed_convective_cfl_limit
+              << " cert=" << first.piso.committed_convective_cfl.valid()
+              << ':' << first.piso.committed_convective_cfl.plan << ':'
+              << first.piso.committed_convective_cfl.correction_state
+              << ':' << first.piso.committed_convective_cfl.density << ':'
+              << first.piso.committed_convective_cfl.final_flux << ':'
+              << first.piso.committed_convective_cfl.out_winner.rank << ':'
+              << first.piso.committed_convective_cfl.absolute_winner.rank
+              << ';' << second.piso.committed_convective_cfl.valid() << ':'
+              << second.piso.committed_convective_cfl.plan << ':'
+              << second.piso.committed_convective_cfl.correction_state << ':'
+              << second.piso.committed_convective_cfl.density << ':'
+              << second.piso.committed_convective_cfl.final_flux << ':'
+              << second.piso.committed_convective_cfl.out_winner.rank << ':'
+              << second.piso.committed_convective_cfl.absolute_winner.rank
               << " advective="
               << first.momentum_predictor_limiter.advective_cfl.out_max
               << '/'

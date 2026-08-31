@@ -2,6 +2,7 @@
 
 #include "hundun/v04_io.hpp"
 
+#include "app_identity_detail.hpp"
 #include "io_output_detail.hpp"
 
 #include <mpi.h>
@@ -85,6 +86,70 @@ bool accepted_terminal_metric(double residual, double tolerance,
   return tolerance == 0.0 || residual <= tolerance;
 }
 
+bool valid_runtime_cfl_winner(const RuntimeConvectiveCflWinner& winner,
+                              double dt) noexcept {
+  const auto same = [](double left, double right) noexcept {
+    return std::abs(left - right) <=
+           64.0 * std::numeric_limits<double>::epsilon() *
+               std::max({1.0, std::abs(left), std::abs(right)});
+  };
+  return winner.valid && winner.global_cell.x >= 0 &&
+         winner.global_cell.y >= 0 && winner.global_cell.z >= 0 &&
+         winner.rank >= 0 && std::isfinite(dt) && dt > 0.0 &&
+         std::isfinite(winner.out) && winner.out >= 0.0 &&
+         std::isfinite(winner.absolute) && winner.absolute >= 0.0 &&
+         std::isfinite(winner.density_volume) &&
+         winner.density_volume > 0.0 &&
+         std::isfinite(winner.outgoing_mass_flow) &&
+         winner.outgoing_mass_flow >= 0.0 &&
+         std::isfinite(winner.absolute_mass_flow) &&
+         winner.absolute_mass_flow >= 0.0 &&
+         same(winner.out,
+              (dt / winner.density_volume) *
+                  winner.outgoing_mass_flow) &&
+         same(winner.absolute,
+              (dt / winner.density_volume) *
+                  (0.5 * winner.absolute_mass_flow));
+}
+
+bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
+  const RuntimeRunStartAnchor& anchor = record.run_start;
+  if (!std::isfinite(anchor.previous_time) || anchor.previous_time < 0.0 ||
+      record.step <= anchor.previous_step)
+    return false;
+  const bool empty_manifest = std::all_of(
+      anchor.restart_manifest_sha256.begin(),
+      anchor.restart_manifest_sha256.end(),
+      [](char value) noexcept { return value == '\0'; });
+  const bool zero_manifest = std::all_of(
+      anchor.restart_manifest_sha256.begin(),
+      anchor.restart_manifest_sha256.begin() +
+          kRuntimeSha256HexCharacters,
+      [](char value) noexcept { return value == '0'; });
+  const bool first = record.step == anchor.previous_step + 1U;
+  const auto same_time = [](double left, double right) noexcept {
+    return std::abs(left - right) <=
+           128.0 * std::numeric_limits<double>::epsilon() *
+               std::max({1.0, std::abs(left), std::abs(right)});
+  };
+  if (anchor.kind == RuntimeRunStartKind::fresh) {
+    if (anchor.previous_step != 0U || anchor.previous_time != 0.0 ||
+        !empty_manifest || record.restart_recovery ||
+        ((record.step == 1U) != record.startup))
+      return false;
+  } else if (anchor.kind == RuntimeRunStartKind::restart) {
+    if (anchor.previous_step == 0U || empty_manifest ||
+        !detail::valid_runtime_sha256(anchor.restart_manifest_sha256) ||
+        zero_manifest ||
+        record.startup || record.restart_recovery != first)
+      return false;
+  } else {
+    return false;
+  }
+  return !first ||
+         same_time(record.previous_committed_time, anchor.previous_time);
+}
+
 std::string_view predictor_constraint_name(
     std::uint8_t constraint) noexcept {
   switch (constraint) {
@@ -138,29 +203,40 @@ Status validate_record(const IoServicePlan& services,
       record.terminal_physical_audit;
   constexpr double kConvectiveCflComparisonSlack =
       1.0 + 64.0 * std::numeric_limits<double>::epsilon();
+  const RuntimeCommittedConvectiveCflAudit& committed =
+      record.committed_convective_cfl;
   const bool valid_committed_convective_cfl =
-      std::isfinite(terminal.committed_convective_cfl_out_max) &&
-      terminal.committed_convective_cfl_out_max >= 0.0 &&
-      std::isfinite(terminal.committed_convective_cfl_abs_max) &&
-      terminal.committed_convective_cfl_abs_max >= 0.0 &&
-      std::isfinite(terminal.committed_convective_cfl_limit) &&
-      terminal.committed_convective_cfl_limit > 0.0 &&
-      terminal.committed_convective_cfl_out_max <=
-          terminal.committed_convective_cfl_limit *
-              kConvectiveCflComparisonSlack;
+      committed.valid &&
+      committed.density_revision != 0U &&
+      committed.final_flux_revision == terminal.final_flux_revision &&
+      committed.density_view_collective != 0U &&
+      committed.final_flux_view_collective != 0U &&
+      ((record.stl == 0U) == (committed.activity_collective == 0U)) &&
+      std::isfinite(committed.dt) && committed.dt > 0.0 &&
+      std::isfinite(committed.out_max) && committed.out_max >= 0.0 &&
+      std::isfinite(committed.abs_max) && committed.abs_max >= 0.0 &&
+      std::isfinite(committed.limit) && committed.limit > 0.0 &&
+      committed.out_max <=
+          committed.limit * kConvectiveCflComparisonSlack &&
+      valid_runtime_cfl_winner(committed.out_winner, committed.dt) &&
+      valid_runtime_cfl_winner(committed.abs_winner, committed.dt) &&
+      committed.out_winner.out == committed.out_max &&
+      committed.abs_winner.absolute == committed.abs_max;
   const RuntimeAdvectiveCflAudit& advective =
       record.momentum_advective_cfl;
   const bool valid_advective_convective_cfl =
       advective.present && advective.plan != 0U &&
-      advective.time_revision != 0U && advective.density_revision != 0U &&
-      advective.face_flux_revision != 0U &&
+      advective.time_revision_collective != 0U &&
+      advective.density_view_collective != 0U &&
+      advective.face_flux_view_collective != 0U &&
       ((record.stl == 0U) == (advective.activity_collective == 0U)) &&
-      advective.face_flux_revision != terminal.final_flux_revision &&
+      advective.face_flux_view_collective !=
+          committed.final_flux_view_collective &&
       std::isfinite(advective.dt) && advective.dt > 0.0 &&
       std::isfinite(advective.out_max) && advective.out_max >= 0.0 &&
       std::isfinite(advective.abs_max) && advective.abs_max >= 0.0 &&
       std::isfinite(advective.limit) && advective.limit > 0.0 &&
-      advective.limit == terminal.committed_convective_cfl_limit &&
+      advective.limit == committed.limit && advective.dt == committed.dt &&
       advective.out_max <=
           advective.limit * kConvectiveCflComparisonSlack;
   const bool valid_terminal_physical_audit =
@@ -227,6 +303,24 @@ Status validate_record(const IoServicePlan& services,
       (record.predictor_low_state == 7U
            ? record.predictor_source_endpoint_alpha < 1.0
            : record.predictor_source_endpoint_alpha == 1.0);
+  const bool valid_momentum_correction_metrics =
+      record.momentum_correction_metrics_applicable
+          ? record.momentum_active_correction_faces > 0U &&
+                record.momentum_predictor_activations <=
+                    record.momentum_active_correction_faces &&
+                std::isfinite(record.momentum_minimum_face_alpha) &&
+                record.momentum_minimum_face_alpha >= 0.0 &&
+                record.momentum_minimum_face_alpha <= 1.0 &&
+                std::isfinite(record.momentum_limited_face_fraction) &&
+                record.momentum_limited_face_fraction ==
+                    static_cast<double>(
+                        record.momentum_predictor_activations) /
+                        static_cast<double>(
+                            record.momentum_active_correction_faces)
+          : record.momentum_active_correction_faces == 0U &&
+                record.momentum_predictor_activations == 0U &&
+                record.momentum_minimum_face_alpha == 0.0 &&
+                record.momentum_limited_face_fraction == 0.0;
   const bool valid_momentum_predictor =
       std::isfinite(record.momentum_predictor_theta) &&
       record.momentum_predictor_theta > 0.0 &&
@@ -235,7 +329,10 @@ Status validate_record(const IoServicePlan& services,
            ? record.momentum_predictor_activations > 0U &&
                  record.momentum_predictor_theta < 1.0
            : record.momentum_predictor_activations == 0U &&
-                 record.momentum_predictor_theta == 1.0);
+                 record.momentum_predictor_theta == 1.0) &&
+      valid_momentum_correction_metrics &&
+      (record.momentum_correction_metrics_applicable ||
+       !record.momentum_predictor_limited);
   const bool valid_predictor =
       std::isfinite(record.predictor_theta) &&
       record.predictor_theta >= 0.0 && record.predictor_theta <= 1.0 &&
@@ -361,7 +458,21 @@ Status validate_record(const IoServicePlan& services,
   if (detail::output_service(services, RuntimeServiceKind::evidence) == nullptr ||
       record.build == 0U || record.binary == 0U || record.case_model == 0U ||
       record.product == 0U || record.step == 0U ||
+      !detail::valid_runtime_candidate_identity(record.candidate_identity) ||
+      record.build != detail::runtime_sha256_fingerprint(
+                          record.candidate_identity.build_manifest) ||
+      record.binary != detail::runtime_sha256_fingerprint(
+                           record.candidate_identity.executable) ||
+      !valid_runtime_run_start(record) ||
+      !std::isfinite(record.previous_committed_time) ||
       !std::isfinite(record.time) ||
+      !(record.time > record.previous_committed_time) ||
+      std::abs((record.time - record.previous_committed_time) -
+               record.momentum_advective_cfl.dt) >
+          128.0 * std::numeric_limits<double>::epsilon() *
+              std::max({1.0, std::abs(record.time),
+                        std::abs(record.previous_committed_time),
+                        std::abs(record.momentum_advective_cfl.dt)}) ||
       !valid_temporal_method ||
       ((record.startup || record.retry || record.restart_recovery) &&
        record.statistics_eligible) ||
@@ -520,14 +631,39 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   std::ostringstream json;
   json.imbue(std::locale::classic());
   json << std::setprecision(17)
-       << "{\"schema\":\"HUNDUN_V04_EVIDENCE_V5\""
+       << "{\"schema\":\"HUNDUN_V04_EVIDENCE_V6\""
        << ",\"build\":" << record.build
        << ",\"binary\":" << record.binary
+       << ",\"candidate_identity\":{\"schema\":\"HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\""
+       << ",\"head\":\"" << record.candidate_identity.head.data()
+       << "\",\"tree\":\"" << record.candidate_identity.tree.data()
+       << "\",\"build_manifest_sha256\":\""
+       << record.candidate_identity.build_manifest.data()
+       << "\",\"executable_sha256\":\""
+       << record.candidate_identity.executable.data()
+       << "\",\"identity_sha256\":\""
+       << record.candidate_identity.identity.data() << "\"}"
        << ",\"case\":" << record.case_model
        << ",\"stl\":" << record.stl
        << ",\"product\":" << record.product
        << ",\"cpu_plan\":" << record.cpu_plan
-       << ",\"step\":" << record.step << ",\"time\":" << record.time
+       << ",\"run_start\":{\"kind\":\""
+       << (record.run_start.kind == RuntimeRunStartKind::restart
+               ? "restart"
+               : "fresh")
+       << "\",\"previous_step\":" << record.run_start.previous_step
+       << ",\"previous_time\":" << record.run_start.previous_time
+       << ",\"restart_manifest_sha256\":";
+  if (record.run_start.kind == RuntimeRunStartKind::restart) {
+    json << '\"' << record.run_start.restart_manifest_sha256.data() << '\"';
+  } else {
+    json << "null";
+  }
+  json << '}'
+       << ",\"step\":" << record.step
+       << ",\"previous_committed_time\":"
+       << record.previous_committed_time
+       << ",\"time\":" << record.time
        << ",\"requested_bdf_order\":"
        << static_cast<unsigned>(record.requested_bdf_order)
        << ",\"bdf_order\":" << static_cast<unsigned>(record.bdf_order)
@@ -590,30 +726,78 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << record.terminal_physical_audit.gauge_residual
        << ",\"gauge_tolerance\":"
        << record.terminal_physical_audit.gauge_tolerance
-       << ",\"committed_convective_cfl\":{\"out_max\":"
-       << record.terminal_physical_audit.committed_convective_cfl_out_max
-       << ",\"abs_max\":"
-       << record.terminal_physical_audit.committed_convective_cfl_abs_max
-       << ",\"limit\":"
-       << record.terminal_physical_audit.committed_convective_cfl_limit
-       << "}}"
+       << ",\"committed_convective_cfl\":{\"valid\":"
+       << (record.committed_convective_cfl.valid ? "true" : "false")
+       << ",\"density_revision\":"
+       << record.committed_convective_cfl.density_revision
+       << ",\"final_flux_revision\":"
+       << record.committed_convective_cfl.final_flux_revision
+       << ",\"density_view\":{\"field\":"
+       << record.committed_convective_cfl.density_field
+       << ",\"collective\":"
+       << record.committed_convective_cfl.density_view_collective
+       << "},\"face_flux_view\":{\"collective\":"
+       << record.committed_convective_cfl.final_flux_view_collective
+       << "},\"activity_collective\":"
+       << record.committed_convective_cfl.activity_collective
+       << ",\"dt\":" << record.committed_convective_cfl.dt
+       << ",\"out_max\":" << record.committed_convective_cfl.out_max
+       << ",\"abs_max\":" << record.committed_convective_cfl.abs_max
+       << ",\"limit\":" << record.committed_convective_cfl.limit;
+  const auto encode_cfl_winner = [&](std::string_view name,
+                                     const RuntimeConvectiveCflWinner& winner) {
+    json << ",\"" << name << "\":{\"valid\":"
+         << (winner.valid ? "true" : "false")
+         << ",\"global_cell\":[" << winner.global_cell.x << ','
+         << winner.global_cell.y << ',' << winner.global_cell.z
+         << "],\"rank\":" << winner.rank << ",\"out\":" << winner.out
+         << ",\"abs\":" << winner.absolute
+         << ",\"density_volume\":" << winner.density_volume
+         << ",\"outgoing_mass_flow\":" << winner.outgoing_mass_flow
+         << ",\"absolute_mass_flow\":" << winner.absolute_mass_flow
+         << '}';
+  };
+  encode_cfl_winner("out_winner",
+                    record.committed_convective_cfl.out_winner);
+  encode_cfl_winner("abs_winner",
+                    record.committed_convective_cfl.abs_winner);
+  json << "}}"
        << ",\"momentum_predictor_solve_calls\":"
        << static_cast<unsigned>(record.momentum_predictor_solve_calls)
-       << ",\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v2\",\"limited\":"
+       << ",\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v3_owner\",\"limited\":"
        << (record.momentum_predictor_limited ? "true" : "false")
-       << ",\"retained_correction_l1_ratio\":"
-       << record.momentum_predictor_theta
+       << ",\"correction_metrics_applicability\":\""
+       << (record.momentum_correction_metrics_applicable ? "applicable"
+                                                         : "not_applicable")
+       << "\",\"retained_correction_l1_ratio\":";
+  if (record.momentum_correction_metrics_applicable)
+    json << record.momentum_predictor_theta;
+  else
+    json << "null";
+  json << ",\"minimum_face_alpha\":";
+  if (record.momentum_correction_metrics_applicable)
+    json << record.momentum_minimum_face_alpha;
+  else
+    json << "null";
+  json << ",\"active_correction_faces\":"
+       << record.momentum_active_correction_faces
        << ",\"limited_faces\":"
        << record.momentum_predictor_activations
+       << ",\"limited_face_fraction\":";
+  if (record.momentum_correction_metrics_applicable)
+    json << record.momentum_limited_face_fraction;
+  else
+    json << "null";
+  json
        << ",\"advective_cfl\":{\"present\":"
        << (record.momentum_advective_cfl.present ? "true" : "false")
        << ",\"plan\":" << record.momentum_advective_cfl.plan
-       << ",\"time_revision\":"
-       << record.momentum_advective_cfl.time_revision
-       << ",\"density_revision\":"
-       << record.momentum_advective_cfl.density_revision
-       << ",\"face_flux_revision\":"
-       << record.momentum_advective_cfl.face_flux_revision
+       << ",\"time_revision_collective\":"
+       << record.momentum_advective_cfl.time_revision_collective
+       << ",\"density_view_collective\":"
+       << record.momentum_advective_cfl.density_view_collective
+       << ",\"face_flux_view_collective\":"
+       << record.momentum_advective_cfl.face_flux_view_collective
        << ",\"activity_collective\":"
        << record.momentum_advective_cfl.activity_collective
        << ",\"dt\":" << record.momentum_advective_cfl.dt

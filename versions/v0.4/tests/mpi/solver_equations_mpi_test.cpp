@@ -702,7 +702,7 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
   OwnedFaceField momentum_limiter_alpha_z = make_face(
       CartesianAxis::z, cells, 25100U + static_cast<unsigned>(rank));
   const std::array<HaloFieldSpec, 1U> momentum_limiter_halo_fields{{
-      {momentum_limiter_cells.view.field, 1U, 2U}}};
+      {momentum_limiter_cells.view.field, 1U, 3U}}};
   HaloEngine momentum_limiter_halo;
   passed &= expect(
       static_cast<bool>(momentum_limiter_halo.reserve(
@@ -1153,6 +1153,8 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
 }
 
 bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
+  int size = 0;
+  MPI_Comm_size(world, &size);
   Dependencies dependencies;
   EquationPlanSet plan;
   bool passed = expect(
@@ -1220,8 +1222,8 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   const std::uint8_t reach = plan.kernels().reach();
   const auto prescribed_velocity = [](Int3 global) noexcept {
     if (global.y == 0 && global.z == 0) {
-      if (global.x == 2) return 1.0;
-      if (global.x >= 3) return 3.0;
+      if (global.x == 8) return 1.0;
+      if (global.x >= 9) return 3.0;
     }
     if (global.y == 2 && global.z == 0) return 0.05 * global.x;
     return 0.0;
@@ -1266,7 +1268,7 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
         for (std::uint8_t component = 0U; component < 3U; ++component)
           rhs.view.unchecked(cell, component) =
               2.0 * velocity.view.unchecked(cell, component);
-        if (global.x == 2 && global.y == 0 && global.z == 0)
+        if (global.x == 8 && global.y == 0 && global.z == 0)
           rhs.view.unchecked(cell, 0U) = -0.5;
         local_before += rhs.view.unchecked(cell, 0U);
       }
@@ -1277,10 +1279,10 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   ReductionEngine reductions;
   passed &= expect(
       static_cast<bool>(ReductionEngine::compile(
-          world, ReductionMode::mpi_allreduce, 3U, reductions)),
+          world, ReductionMode::mpi_allreduce, 4U, reductions)),
       rank, "momentum-limiter reduction compiles");
   const std::array<HaloFieldSpec, 1U> limiter_halo_fields{{
-      {limiter_cells.view.field, 1U, 2U}}};
+      {limiter_cells.view.field, 1U, 3U}}};
   HaloEngine limiter_halo;
   passed &= expect(
       static_cast<bool>(limiter_halo.reserve(
@@ -1310,15 +1312,20 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   const ConstFaceFluxView flux{as_const(x.view), as_const(y.view),
                                as_const(z.view), 405U};
   MomentumPredictorLimiterReport report;
+  if (size > 1)
+    detail::arm_momentum_partition_alpha_mutation_for_test(
+        dependencies.patch.begin.x == 9, 0.75);
   const Status status = limit_momentum_predictor_correction(
       world, plan.momentum(), dependencies.boundary,
       dependencies.patch, assembly, as_const(velocity.view),
       as_const(density.view), limiter_step_dt, limiter_cfl_limit, flux, {},
       limiter_system, limiter_workspace, limiter_halo, reductions, report);
+  detail::clear_momentum_partition_alpha_mutation_for_test();
   double local_after = 0.0;
   bool local_support_and_bounds = true;
   bool local_ramp_retained = true;
   bool local_direction_preserved = true;
+  std::array<double, 2U> local_jump_delta{};
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
       for (std::int32_t i = 0; i < cells.x; ++i) {
@@ -1339,7 +1346,7 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
               std::abs(actual - high) <=
                   5.0e-14 * std::max(1.0, std::abs(high));
         const bool jump_support = global.y == 0 && global.z == 0 &&
-                                  global.x >= 2 && global.x <= 3;
+                                  global.x >= 8 && global.x <= 9;
         if (!jump_support && !(global.y == 2 && global.z == 0))
           local_support_and_bounds =
               local_support_and_bounds && actual == high;
@@ -1347,6 +1354,8 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
           local_support_and_bounds =
               local_support_and_bounds && actual >= 0.0 && actual <= 6.0;
         if (jump_support) {
+          local_jump_delta[static_cast<std::size_t>(global.x - 8)] =
+              actual - high;
           const double transverse = rhs.view.unchecked(cell, 1U);
           const double transverse_high =
               high_order_rhs[packed + rhs.view.component_stride];
@@ -1360,20 +1369,78 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   }
   std::array<double, 2U> local_sums{local_before, local_after};
   std::array<double, 2U> global_sums{};
+  std::array<double, 2U> global_jump_delta{};
   const int sum_status = MPI_Allreduce(local_sums.data(), global_sums.data(),
                                        2, MPI_DOUBLE, MPI_SUM, world);
-  passed &= expect(static_cast<bool>(status) &&
-                       same_collective_status(world, status) &&
+  const int jump_status = MPI_Allreduce(
+      local_jump_delta.data(), global_jump_delta.data(), 2, MPI_DOUBLE,
+      MPI_SUM, world);
+  constexpr std::array<double, 2U> expected_global_jump_delta{
+      0x1.ffffffffffff7p-1, -0x1.ffffffffffff8p-1};
+  const bool owns_shared_face_copy =
+      dependencies.patch.begin.y == 0 && dependencies.patch.begin.z == 0 &&
+      dependencies.patch.begin.x <= 9 &&
+      dependencies.patch.begin.x + cells.x >= 9;
+  const double local_shared_alpha = owns_shared_face_copy
+                                        ? limiter_alpha_x.view.unchecked(
+                                              {9 - dependencies.patch.begin.x,
+                                               0, 0})
+                                        : 0.0;
+  const double local_shared_min = owns_shared_face_copy
+                                      ? local_shared_alpha
+                                      : std::numeric_limits<double>::infinity();
+  const double local_shared_max = owns_shared_face_copy
+                                      ? local_shared_alpha
+                                      : -std::numeric_limits<double>::infinity();
+  double shared_min = 0.0;
+  double shared_max = 0.0;
+  const int local_shared_count = owns_shared_face_copy ? 1 : 0;
+  int shared_count = 0;
+  const bool shared_alpha_collective =
+      MPI_Allreduce(&local_shared_min, &shared_min, 1, MPI_DOUBLE, MPI_MIN,
+                    world) == MPI_SUCCESS &&
+      MPI_Allreduce(&local_shared_max, &shared_max, 1, MPI_DOUBLE, MPI_MAX,
+                    world) == MPI_SUCCESS &&
+      MPI_Allreduce(&local_shared_count, &shared_count, 1, MPI_INT, MPI_SUM,
+                    world) == MPI_SUCCESS;
+  const bool report_collective = same_collective_status(world, status);
+  const bool report_valid = static_cast<bool>(status) &&
+                       report_collective &&
                        report.limited && report.activations == 1U &&
-                       std::abs(report.theta - 23.0 / 53.0) <= 5.0e-14,
+                       report.correction_metrics_applicable &&
+                       report.active_correction_faces == 18U &&
+                       report.minimum_face_alpha == shared_min &&
+                       report.limited_face_fraction == 1.0 / 18.0 &&
+                       std::abs(report.theta - 23.0 / 53.0) <= 5.0e-13;
+  if (!report_valid && rank == 0)
+    std::cerr << std::hexfloat
+              << "AFC report status=" << static_cast<unsigned>(status.code)
+              << ':' << status.detail << " theta=" << report.theta
+              << " limited=" << report.activations
+              << " active=" << report.active_correction_faces
+              << " min_alpha=" << report.minimum_face_alpha
+              << " fraction=" << report.limited_face_fraction
+              << " shared_min=" << shared_min
+              << " theta_error=" << report.theta - 23.0 / 53.0
+              << " collective=" << report_collective
+              << " applicable=" << report.correction_metrics_applicable
+              << std::defaultfloat << '\n';
+  passed &= expect(report_valid,
                    rank,
                    "face-local report retains the independent ramp correction");
   passed &= expect(
-      sum_status == MPI_SUCCESS && local_support_and_bounds &&
+      sum_status == MPI_SUCCESS && jump_status == MPI_SUCCESS &&
+          local_support_and_bounds &&
           local_ramp_retained && local_direction_preserved &&
+          shared_alpha_collective && shared_min == shared_max &&
+          shared_min < 1.0 &&
+          shared_count == (size == 1 ? 1 : 2) &&
+          global_jump_delta == expected_global_jump_delta &&
+          std::abs(global_jump_delta[0U] + global_jump_delta[1U]) <=
+              5.0e-13 &&
           std::abs(global_sums[1U] - global_sums[0U]) <= 5.0e-13,
       rank,
-      "limited face pairs are conservative, bounded, spatially local, and direction preserving");
+      "limited partition-face pairs have the decomposition-invariant RHS oracle and are conservative, bounded, spatially local, and direction preserving");
   fill(velocity, 0.0);
   const std::vector<double> fast_path_rhs = rhs.bytes;
   const LinearReductionCounters counters_before = reductions.counters();
@@ -1388,10 +1455,12 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   passed &= expect(
       static_cast<bool>(fast_path_status) && !fast_path_report.limited &&
           fast_path_report.activations == 0U &&
+          !fast_path_report.correction_metrics_applicable &&
+          fast_path_report.active_correction_faces == 0U &&
           fast_path_report.theta == 1.0 && rhs.bytes == fast_path_rhs &&
-          counters_after.calls == counters_before.calls + 2U &&
+          counters_after.calls == counters_before.calls + 3U &&
           counters_after.blocking_operations ==
-              counters_before.blocking_operations + 2U,
+              counters_before.blocking_operations + 3U,
       rank,
       "theta-one limiter is byte-identical with CFL and AFC reductions only");
 
@@ -1517,11 +1586,11 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
 
   ReductionEngine reductions;
   const std::array<HaloFieldSpec, 1U> halo_fields{{
-      {limiter_cells.view.field, 1U, 2U}}};
+      {limiter_cells.view.field, 1U, 3U}}};
   HaloEngine limiter_halo;
   passed &= expect(
       static_cast<bool>(ReductionEngine::compile(
-          world, ReductionMode::mpi_allreduce, 3U, reductions)) &&
+          world, ReductionMode::mpi_allreduce, 4U, reductions)) &&
           static_cast<bool>(limiter_halo.reserve(
               world, dependencies.patch,
               {halo_fields.data(), halo_fields.size()},
@@ -2228,7 +2297,7 @@ bool test_collective_compile_and_self_reference(MPI_Comm world, int rank,
                    rank, "equation compile succeeds collectively");
   passed &= expect(plan.fingerprint() != 0U &&
                        kMomentumPredictorLimiterPolicySchema ==
-                           UINT64_C(0x7630346d61666332) &&
+                           UINT64_C(0x7630346d61666333) &&
                        plan.global_cells().x == 17 &&
                        plan.global_cells().y == 11 &&
                        plan.global_cells().z == 7,

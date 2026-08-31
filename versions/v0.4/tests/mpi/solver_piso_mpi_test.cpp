@@ -3374,6 +3374,27 @@ bool test_full_distributed_piso(MPI_Comm world, int rank) {
   }
   passed &= expect(static_cast<bool>(status) && terminal.valid(), rank,
                    "distributed terminal EOS/continuity/mass/gauge audit passes");
+  const CommittedConvectiveCflCertificate& committed_cfl =
+      report.committed_convective_cfl;
+  passed &= expect(
+      committed_cfl.valid() && committed_cfl.plan == fixture.coupler.fingerprint() &&
+          committed_cfl.correction_state == corrected_two.state &&
+          committed_cfl.density == density.revision &&
+          committed_cfl.final_flux == pending.revision() &&
+          committed_cfl.dt == audit.step_dt &&
+          committed_cfl.out_max ==
+              report.committed_convective_cfl_out_max &&
+          committed_cfl.absolute_max ==
+              report.committed_convective_cfl_abs_max &&
+          committed_cfl.limit == audit.convective_cfl_limit &&
+          committed_cfl.out_winner.formula_valid(audit.step_dt) &&
+          committed_cfl.absolute_winner.formula_valid(audit.step_dt) &&
+          committed_cfl.out_winner.out == committed_cfl.out_max &&
+          committed_cfl.absolute_winner.absolute ==
+              committed_cfl.absolute_max &&
+          !committed_cfl.failure_witness.valid,
+      rank,
+      "terminal audit publishes a typed committed-CFL authority and winners");
   const std::array dependencies{final_dependency};
   if (status) {
     status = fixture.coupler.publish_pending_final(

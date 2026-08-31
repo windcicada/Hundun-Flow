@@ -3,6 +3,7 @@
 #include "hundun/v04_app.hpp"
 
 #include "core_product_freeze_detail.hpp"
+#include "solver_cartesian_detail.hpp"
 
 #include "../support/product_fixture.hpp"
 
@@ -24,6 +25,35 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace hundun::v04;
+
+bool shared_cell_convective_cfl_kernel_has_one_formula() {
+  detail::CellConvectiveCflResult result;
+  const std::array<double, 6U> fluxes{{-2.0, 3.0, -4.0, 5.0, -6.0,
+                                       7.0}};
+  const std::array<std::uint8_t, 6U> active{{1U, 1U, 1U, 1U, 1U, 1U}};
+  const detail::CellConvectiveCflStatus status =
+      detail::evaluate_cell_convective_cfl(2.0, 4.0, fluxes, active, 0.5,
+                                           result);
+  detail::CellConvectiveCflResult sealed_result;
+  auto sealed = active;
+  sealed[0U] = 0U;
+  const detail::CellConvectiveCflStatus sealed_status =
+      detail::evaluate_cell_convective_cfl(2.0, 4.0, fluxes, sealed, 0.5,
+                                           sealed_result);
+  detail::CellConvectiveCflResult nonphysical_result;
+  const detail::CellConvectiveCflStatus nonphysical_status =
+      detail::evaluate_cell_convective_cfl(0.0, 4.0, fluxes, active, 0.5,
+                                           nonphysical_result);
+  return status == detail::CellConvectiveCflStatus::success &&
+         result.density_volume == 8.0 &&
+         result.outgoing_mass_flow == 27.0 &&
+         result.absolute_mass_flow == 27.0 && result.out == 1.6875 &&
+         result.absolute == 0.84375 &&
+         sealed_status ==
+             detail::CellConvectiveCflStatus::inactive_nonzero_flux &&
+         nonphysical_status ==
+             detail::CellConvectiveCflStatus::nonphysical_state;
+}
 
 bool copy_restart_image(const RestartSnapshot& snapshot,
                         const RestartExpected& expected,
@@ -1096,6 +1126,62 @@ bool terminal_committed_cfl_gate_is_transactional() {
   const bool fixed_snapshot = capture_driver_state(fixed_driver, fixed_after);
   const MomentumAdvectiveCflCertificate& fixed_advective =
       fixed_report.momentum_predictor_limiter.advective_cfl;
+  const CommittedConvectiveCflCertificate& fixed_committed =
+      fixed_report.piso.committed_convective_cfl;
+  const bool fixed_committed_authority =
+      fixed_committed.valid() &&
+      fixed_committed.final_flux == fixed_report.piso.final_flux_revision &&
+      fixed_committed.density != 0U &&
+      fixed_committed.density_view_identity.valid() &&
+      fixed_committed.face_flux_view_identity.valid() &&
+      fixed_committed.dt == fixed_report.proposal.dt &&
+      fixed_committed.out_max ==
+          fixed_report.piso.committed_convective_cfl_out_max &&
+      fixed_committed.absolute_max ==
+          fixed_report.piso.committed_convective_cfl_abs_max &&
+      fixed_committed.limit ==
+          fixed_report.piso.committed_convective_cfl_limit &&
+      fixed_committed.out_winner.valid &&
+      fixed_committed.absolute_winner.valid &&
+      fixed_committed.out_winner.rank == 0 &&
+      fixed_committed.absolute_winner.rank == 0 &&
+      fixed_committed.out_winner.out == fixed_committed.out_max &&
+      fixed_committed.absolute_winner.absolute ==
+          fixed_committed.absolute_max &&
+      fixed_committed.out_winner.out ==
+          (fixed_committed.dt /
+           fixed_committed.out_winner.density_volume) *
+              fixed_committed.out_winner.outgoing_mass_flow &&
+      fixed_committed.absolute_winner.absolute ==
+          (fixed_committed.dt /
+           fixed_committed.absolute_winner.density_volume) *
+              (0.5 *
+               fixed_committed.absolute_winner.absolute_mass_flow) &&
+      fixed_committed.failure_witness.valid &&
+      fixed_committed.failure_witness.out_winner.out ==
+          fixed_committed.out_max &&
+      fixed_committed.failure_witness.absolute_winner.absolute ==
+          fixed_committed.absolute_max;
+  CommittedConvectiveCflCertificate wrong_density = fixed_committed;
+  ++wrong_density.density;
+  CommittedConvectiveCflCertificate wrong_flux = fixed_committed;
+  ++wrong_flux.final_flux;
+  CommittedConvectiveCflCertificate wrong_dt = fixed_committed;
+  wrong_dt.dt *= 0.5;
+  CommittedConvectiveCflCertificate wrong_out_winner = fixed_committed;
+  wrong_out_winner.out_winner.out = std::nextafter(
+      wrong_out_winner.out_winner.out,
+      std::numeric_limits<double>::infinity());
+  CommittedConvectiveCflCertificate wrong_abs_winner = fixed_committed;
+  wrong_abs_winner.absolute_winner.absolute_mass_flow = std::nextafter(
+      wrong_abs_winner.absolute_winner.absolute_mass_flow,
+      std::numeric_limits<double>::infinity());
+  CommittedConvectiveCflCertificate missing_failure = fixed_committed;
+  missing_failure.failure_witness = {};
+  const bool committed_mutations_rejected =
+      !wrong_density.valid() && !wrong_flux.valid() && !wrong_dt.valid() &&
+      !wrong_out_winner.valid() && !wrong_abs_winner.valid() &&
+      !missing_failure.valid();
   const bool fixed_passed =
       !status && status.code == StatusCode::invalid_case &&
       status.detail == 10211U && !fixed_report.accepted &&
@@ -1106,6 +1192,7 @@ bool terminal_committed_cfl_gate_is_transactional() {
       terminal_components_pass(fixed_model, fixed_report) &&
       fixed_report.piso.committed_convective_cfl_out_max >
           fixed_report.piso.committed_convective_cfl_limit &&
+      fixed_committed_authority && committed_mutations_rejected &&
       fixed_snapshot && same_exact_state(fixed_before, fixed_after);
   if (!fixed_passed) {
     std::cerr << std::setprecision(17)
@@ -1120,6 +1207,16 @@ bool terminal_committed_cfl_gate_is_transactional() {
               << fixed_report.piso.committed_convective_cfl_limit
               << " rollback=" << fixed_snapshot << '/'
               << (fixed_snapshot && same_exact_state(fixed_before, fixed_after))
+              << " authority/mutations=" << fixed_committed_authority << '/'
+              << committed_mutations_rejected
+              << " cert=" << fixed_committed.valid() << ':'
+              << fixed_committed.density << ':' << fixed_committed.final_flux
+              << ':' << fixed_committed.dt << ':'
+              << fixed_committed.out_winner.formula_valid(fixed_committed.dt)
+              << ':'
+              << fixed_committed.absolute_winner.formula_valid(
+                     fixed_committed.dt)
+              << ':' << fixed_committed.failure_witness.valid
               << '\n';
     return false;
   }
@@ -1136,6 +1233,8 @@ bool terminal_committed_cfl_gate_is_transactional() {
                               capture_driver_state(retry_driver, retry_state);
   const MomentumAdvectiveCflCertificate& retry_advective =
       retry_report.momentum_predictor_limiter.advective_cfl;
+  const CommittedConvectiveCflCertificate& retry_committed =
+      retry_report.piso.committed_convective_cfl;
   const bool retry_passed =
       retry_snapshot && retry_report.accepted && retry_report.attempts == 2U &&
       retry_report.proposal.origin == StepOrigin::retry &&
@@ -1147,6 +1246,12 @@ bool terminal_committed_cfl_gate_is_transactional() {
       retry_advective.out_max <= retry_advective.limit &&
       retry_report.piso.committed_convective_cfl_out_max <=
           retry_report.piso.committed_convective_cfl_limit &&
+      retry_committed.valid() &&
+      retry_committed.final_flux == retry_report.piso.final_flux_revision &&
+      retry_committed.dt == retry_report.proposal.dt &&
+      retry_committed.out_winner.valid &&
+      retry_committed.absolute_winner.valid &&
+      !retry_committed.failure_witness.valid &&
       terminal_physical_certificate(retry_driver, retry_model, retry_report);
   if (!retry_passed) {
     std::cerr << std::setprecision(17)
@@ -1629,18 +1734,31 @@ bool reject_unresolved_characteristic_boundary() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const bool passed = run() && run_initialized_product() &&
-                      run_initialized_species_product() &&
-                      reject_invalid_thermodynamic_restart_atomically() &&
-                      restart_preserves_direct_flux_lineage() &&
-                      run_open_boundary_product() &&
-                      fixed_advective_cfl_gate_rolls_back_product() &&
-                      convective_cfl_policy_classifies_terminal_failure() &&
-                      terminal_committed_cfl_gate_is_transactional() &&
-                      run_mass_flow_boundary_product() &&
-                      run_immersed_final_force_product() &&
-                      retry_consumes_warm_seed_and_restart_starts_cold() &&
-                      reject_unresolved_characteristic_boundary();
+  bool passed = true;
+  const auto check = [&](const char* name, bool result) {
+    if (!result) std::cerr << "driver fixture failed: " << name << '\n';
+    passed &= result;
+  };
+  check("shared-cell-CFL", shared_cell_convective_cfl_kernel_has_one_formula());
+  check("cold-plan", run());
+  check("initialized-product", run_initialized_product());
+  check("initialized-species", run_initialized_species_product());
+  check("invalid-restart-rollback",
+        reject_invalid_thermodynamic_restart_atomically());
+  check("restart-flux-lineage", restart_preserves_direct_flux_lineage());
+  check("open-boundary", run_open_boundary_product());
+  check("fixed-provisional-CFL",
+        fixed_advective_cfl_gate_rolls_back_product());
+  check("terminal-CFL-policy",
+        convective_cfl_policy_classifies_terminal_failure());
+  check("terminal-CFL-transaction",
+        terminal_committed_cfl_gate_is_transactional());
+  check("mass-flow-boundary", run_mass_flow_boundary_product());
+  check("immersed-force", run_immersed_final_force_product());
+  check("warm-seed-retry-restart",
+        retry_consumes_warm_seed_and_restart_starts_cold());
+  check("unresolved-characteristic",
+        reject_unresolved_characteristic_boundary());
   if (!passed) std::cerr << "driver cold-plan failure\n";
   MPI_Finalize();
   return passed ? 0 : 1;

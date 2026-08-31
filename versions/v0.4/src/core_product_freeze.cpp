@@ -602,7 +602,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                                   turbulence_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 15U, ghosts,
                                   momentum_halo_bytes) ||
-      !detail::product_halo_bytes(local_shape, 2U, 1U,
+      !detail::product_halo_bytes(local_shape, 3U, 1U,
                                   momentum_limiter_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 5U, ghosts,
                                   pressure_halo_bytes) ||
@@ -1009,9 +1009,9 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     std::uint64_t limiter_bytes = 0U;
     std::uint64_t momentum_messages = 0U;
     std::uint64_t momentum_bytes = 0U;
-    if (!checked_multiply_u64(6U, 3U, limiter_messages) ||
+    if (!checked_multiply_u64(6U, 4U, limiter_messages) ||
         !checked_multiply_u64(
-            static_cast<std::uint64_t>(momentum_limiter_halo_bytes), 3U,
+            static_cast<std::uint64_t>(momentum_limiter_halo_bytes), 4U,
             limiter_bytes) ||
         !checked_add_u64(6U, momentum_donors.peer_messages,
                          momentum_messages) ||
@@ -3314,7 +3314,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
          pressure_energy_enthalpy_halo.size()},
         candidate->boundary.halo_topology());
   const std::array<HaloFieldSpec, 1U> momentum_limiter_halo{{
-      {candidate->fields.h_by_a, 1U, 2U}}};
+      {candidate->fields.h_by_a, 1U, 3U}}};
   if (status)
     status = candidate->momentum_limiter_halo.reserve(
         communicator, candidate->patch,

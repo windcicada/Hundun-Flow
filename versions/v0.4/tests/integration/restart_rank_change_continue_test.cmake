@@ -171,10 +171,15 @@ run_mpi("rank-change Restart continuation MPI4" 4
   --restart "${seed_root}/Restart"
   --steps 2 --output-interval 0 --restart-interval 2)
 
+file(READ "${seed_root}/Restart/current" seed_generation)
+string(STRIP "${seed_generation}" seed_generation)
+set(seed_manifest
+  "${seed_root}/Restart/${seed_generation}/manifest.bin")
 foreach(branch IN ITEMS control-mpi2 rank-change-mpi4)
-  run_checked("${branch} V5 runtime evidence validation"
+  run_checked("${branch} V6 runtime evidence validation"
     "${PYTHON}" "${VALIDATOR}" runtime
-    "${PROBE_ROOT}/${branch}/evidence.jsonl")
+    "${PROBE_ROOT}/${branch}/evidence.jsonl"
+    --run-start-manifest "${seed_manifest}")
 endforeach()
 
 set(assert_evidence [=[
@@ -202,7 +207,7 @@ for path in paths:
             row.get("step"), row.get("requested_bdf_order"),
             row.get("bdf_order"), row.get("restart_recovery"),
         )
-        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V5" or observed != wanted:
+        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V6" or observed != wanted:
             raise SystemExit(f"{path}: row {index} lifecycle {observed} != {wanted}")
         if (row.get("startup") is not False or row.get("retry") is not False or
                 row.get("temporal_method_fallback") is not False or
@@ -237,6 +242,12 @@ for path in paths:
                 abs(accepted_time - expected_time) > time_tolerance):
             raise SystemExit(
                 f"{path}: step {step} time {accepted_time} is not the fixed-dt target {expected_time}")
+        previous_time = row.get("previous_committed_time")
+        if (not isinstance(previous_time, (int, float)) or
+                isinstance(previous_time, bool) or
+                abs((accepted_time - previous_time) - fixed_dt) > time_tolerance):
+            raise SystemExit(
+                f"{path}: step {step} loses previous committed time authority")
         terminal = row.get("terminal_physical_audit")
         if not isinstance(terminal, dict) or terminal.get("present") is not True:
             raise SystemExit(f"{path}: step {step} lacks the terminal physical audit")
@@ -246,14 +257,15 @@ for path in paths:
         revisions.append(revision)
         limiter = row.get("momentum_predictor_limiter")
         if (not isinstance(limiter, dict) or
-                limiter.get("scheme") != "common_face_afc_v2" or
+                limiter.get("scheme") != "common_face_afc_v3_owner" or
                 "theta" in limiter or "activations" in limiter):
-            raise SystemExit(f"{path}: step {step} lost V5 AFC provenance")
+            raise SystemExit(f"{path}: step {step} lost V6 AFC provenance")
         advective = limiter.get("advective_cfl")
         if not isinstance(advective, dict) or advective.get("present") is not True:
             raise SystemExit(f"{path}: step {step} lacks advective CFL evidence")
-        for field in ("plan", "time_revision", "density_revision",
-                      "face_flux_revision"):
+        for field in ("plan", "time_revision_collective",
+                      "density_view_collective",
+                      "face_flux_view_collective"):
             value = advective.get(field)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise SystemExit(
@@ -263,9 +275,15 @@ for path in paths:
                 activity < 0):
             raise SystemExit(
                 f"{path}: step {step} advective CFL activity is invalid")
-        if advective["face_flux_revision"] == revision:
+        cfl = terminal.get("committed_convective_cfl")
+        face_view = cfl.get("face_flux_view") if isinstance(cfl, dict) else None
+        if (not isinstance(face_view, dict) or
+                not isinstance(face_view.get("collective"), int) or
+                face_view["collective"] <= 0 or
+                advective["face_flux_view_collective"] ==
+                    face_view["collective"]):
             raise SystemExit(
-                f"{path}: step {step} advective and final CFL revisions coincide")
+                f"{path}: step {step} advective and final CFL views coincide")
         for field in ("dt", "out_max", "abs_max", "limit"):
             value = advective.get(field)
             if (isinstance(value, bool) or
@@ -279,8 +297,8 @@ for path in paths:
                     advective["limit"] *
                         (1.0 + 64.0 * sys.float_info.epsilon)):
             raise SystemExit(f"{path}: step {step} advective CFL failed")
-        cfl = terminal.get("committed_convective_cfl")
-        if not isinstance(cfl, dict):
+        if (not isinstance(cfl, dict) or cfl.get("valid") is not True or
+                cfl.get("final_flux_revision") != revision):
             raise SystemExit(f"{path}: step {step} lacks committed CFL evidence")
         for field in ("out_max", "abs_max", "limit"):
             value = cfl.get(field)
@@ -325,8 +343,7 @@ for index, wanted in enumerate(expected):
             f"rank-count branches published different final-flux revisions at step {wanted[0]}")
     control_advective = control["momentum_predictor_limiter"]["advective_cfl"]
     changed_advective = changed["momentum_predictor_limiter"]["advective_cfl"]
-    for field in ("plan", "time_revision", "density_revision",
-                  "face_flux_revision", "activity_collective"):
+    for field in ("plan", "activity_collective"):
         if control_advective[field] != changed_advective[field]:
             raise SystemExit(
                 f"rank-count branches published different advective CFL {field} "

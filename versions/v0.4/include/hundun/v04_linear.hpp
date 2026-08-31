@@ -515,6 +515,19 @@ struct LinearReductionCounters {
   std::uint64_t wall_nanoseconds{};
 };
 
+inline constexpr std::size_t kReductionMaximumLocationPayload = 5U;
+
+// Deterministic max-location reduction.  Equal values select the smallest
+// global location and then the smallest rank, so the result is independent
+// of the MPI partition.  Payload travels with the selected record.
+struct ReductionMaximumLocation {
+  bool valid{};
+  double value{};
+  std::uint64_t global_location{};
+  std::int32_t rank{-1};
+  std::array<double, kReductionMaximumLocationPayload> payload{};
+};
+
 class ReductionEngine {
  public:
   ReductionEngine() noexcept = default;
@@ -531,6 +544,10 @@ class ReductionEngine {
                      Status local_status = {}) noexcept;
   Status checked_max(Span<const double> local, Span<double> global,
                      Status local_status = {}) noexcept;
+  Status checked_max_locations(
+      Span<const ReductionMaximumLocation> local,
+      Span<ReductionMaximumLocation> global,
+      Status local_status = {}) noexcept;
   Status consensus(Status local_status) noexcept;
   Status consensus_contract(PlanFingerprint local_fingerprint) noexcept;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)

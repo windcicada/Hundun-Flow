@@ -330,6 +330,68 @@ bool test_packed_hand_oracles(ReductionMode mode, int rank, int size) {
   return all_true(passed);
 }
 
+bool test_deterministic_maximum_locations(ReductionMode mode, int rank,
+                                          int size) {
+  ReductionEngine engine;
+  bool passed = expect(
+      static_cast<bool>(ReductionEngine::compile(MPI_COMM_WORLD, mode,
+                                                  kCapacity, engine)),
+      rank, "maximum-location reduction engine compiles");
+  passed = all_true(passed);
+  if (!passed) return false;
+
+  const std::uint64_t tied_location =
+      rank == 0 ? 7U : (rank == 1 || rank == 2 ? 3U : 9U);
+  std::array<ReductionMaximumLocation, 2U> local{{
+      {true, 10.0, tied_location, rank,
+       {100.0 + rank, 101.0 + rank, 102.0 + rank,
+        103.0 + rank, 104.0 + rank}},
+      {true, static_cast<double>(rank + 1),
+       static_cast<std::uint64_t>(100 - rank), rank,
+       {200.0 + rank, 201.0 + rank, 202.0 + rank,
+        203.0 + rank, 204.0 + rank}},
+  }};
+  std::array<ReductionMaximumLocation, 2U> global{};
+  const Status reduced = engine.checked_max_locations(
+      {local.data(), local.size()}, {global.data(), global.size()});
+  const int tied_rank = size == 1 ? 0 : 1;
+  const std::uint64_t expected_tied_location = size == 1 ? 7U : 3U;
+  const LinearReductionCounters counters = engine.counters();
+  passed &= expect(
+      static_cast<bool>(reduced) && global[0U].valid &&
+          global[0U].value == 10.0 &&
+          global[0U].global_location == expected_tied_location &&
+          global[0U].rank == tied_rank &&
+          global[0U].payload[0U] == 100.0 + tied_rank &&
+          global[1U].valid &&
+          global[1U].value == static_cast<double>(size) &&
+          global[1U].rank == size - 1 &&
+          global[1U].global_location ==
+              static_cast<std::uint64_t>(101 - size) &&
+          global[1U].payload[4U] == 203.0 + size &&
+          counters.calls == 1U && counters.scalars == 2U &&
+          counters.logical_bytes ==
+              2U * sizeof(ReductionMaximumLocation) &&
+          counters.tree_messages == expected_tree_messages(mode, size) &&
+          counters.blocking_operations == 2U,
+      rank,
+      "maximum-location tie uses global cell then rank and carries payload");
+
+  const auto before_invalid = engine.counters();
+  const auto unchanged_global = global;
+  if (rank == size - 1) local[0U].rank = rank + 1;
+  const Status invalid = engine.checked_max_locations(
+      {local.data(), local.size()}, {global.data(), global.size()});
+  passed &= expect(
+      invalid.code == StatusCode::numerical_failure &&
+          global[0U].global_location == unchanged_global[0U].global_location &&
+          global[1U].global_location == unchanged_global[1U].global_location &&
+          same(engine.counters(), before_invalid),
+      rank,
+      "rank-local maximum-location corruption fails collectively and atomically");
+  return all_true(passed);
+}
+
 bool test_allreduce_roundoff_tolerance(int rank, int size) {
   ReductionEngine engine;
   bool passed = expect(
@@ -844,6 +906,7 @@ bool test_communicator_compatibility_is_local_and_read_only(int rank,
 bool run_mode(ReductionMode mode, int rank, int size) {
   bool passed = test_compile_contract_and_atomic_replacement(mode, rank);
   passed &= test_packed_hand_oracles(mode, rank, size);
+  passed &= test_deterministic_maximum_locations(mode, rank, size);
   passed &= test_local_validation_is_collective_and_atomic(mode, rank, size);
   passed &= test_lowest_rank_failure_propagation(mode, rank, size);
   passed &= test_hot_reuse_and_exact_counters(mode, rank, size);

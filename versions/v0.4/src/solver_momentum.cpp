@@ -25,6 +25,11 @@ constexpr std::uint32_t kMomentumOperator = 1414U;
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
 
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+bool momentum_partition_alpha_mutation_armed = false;
+double momentum_partition_alpha_mutation = 1.0;
+#endif
+
 std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
   hash ^= value;
   hash *= kFnvPrime;
@@ -714,6 +719,23 @@ class MomentumJacobiPreconditioner final : public LinearPreconditioner {
 
 }  // namespace
 
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+namespace detail {
+
+void arm_momentum_partition_alpha_mutation_for_test(
+    bool armed, double alpha) noexcept {
+  momentum_partition_alpha_mutation_armed = armed;
+  momentum_partition_alpha_mutation = alpha;
+}
+
+void clear_momentum_partition_alpha_mutation_for_test() noexcept {
+  momentum_partition_alpha_mutation_armed = false;
+  momentum_partition_alpha_mutation = 1.0;
+}
+
+}  // namespace detail
+#endif
+
 Status assemble_momentum_impl(
     const MomentumEquationPlan& plan, const EquationStateView& state,
     const EquationMaterialView& material, ConstFieldView velocity_gradient,
@@ -1154,7 +1176,7 @@ Status limit_momentum_predictor_correction(
                 static_cast<std::size_t>(cells.z)
           : 0U;
   const std::array<HaloFieldSpec, 1U> halo_fields{{
-      {cell_workspace.field, 1U, 2U}}};
+      {cell_workspace.field, 1U, 3U}}};
   bool linear = false;
   const auto overlaps_flux = [](ConstFieldView cell,
                                 ConstFaceFluxView flux) noexcept {
@@ -1247,7 +1269,7 @@ Status limit_momentum_predictor_correction(
       !limiter_halo.validate_contract(
           communicator, patch, {halo_fields.data(), halo_fields.size()},
           boundary.halo_topology()) ||
-      reductions.capacity() < 3U))
+      reductions.capacity() < 4U))
     preflight = {StatusCode::invalid_plan, kMomentumAssembly};
   preflight = collective_status(communicator, preflight);
   if (!preflight) return preflight;
@@ -1362,58 +1384,50 @@ Status limit_momentum_predictor_correction(
         const double fyp = mass_flux.y.unchecked(yp);
         const double fzm = mass_flux.z.unchecked(cell);
         const double fzp = mass_flux.z.unchecked(zp);
-        const bool sealed_nonzero =
-            (!active_face(activity, cells, CartesianAxis::x, cell) &&
-             fxm != 0.0) ||
-            (!active_face(activity, cells, CartesianAxis::x, xp) &&
-             fxp != 0.0) ||
-            (!active_face(activity, cells, CartesianAxis::y, cell) &&
-             fym != 0.0) ||
-            (!active_face(activity, cells, CartesianAxis::y, yp) &&
-             fyp != 0.0) ||
-            (!active_face(activity, cells, CartesianAxis::z, cell) &&
-             fzm != 0.0) ||
-            (!active_face(activity, cells, CartesianAxis::z, zp) &&
-             fzp != 0.0);
         const double rho = density.unchecked(cell, 0U);
         const double volume = detail::cell_volume(kernels, cell);
-        if (sealed_nonzero || !std::isfinite(rho) || !(rho > 0.0) ||
-            !std::isfinite(volume) || !(volume > 0.0) ||
-            !std::isfinite(fxm) || !std::isfinite(fxp) ||
-            !std::isfinite(fym) || !std::isfinite(fyp) ||
-            !std::isfinite(fzm) || !std::isfinite(fzp)) {
-          cfl_status = {sealed_nonzero ? StatusCode::invalid_plan
-                                       : StatusCode::numerical_failure,
-                        sealed_nonzero ? kMomentumAssembly
-                                       : kMomentumNumerical};
+        const std::array<double, 6U> cell_flux{
+            fxm, fxp, fym, fyp, fzm, fzp};
+        const std::array<std::uint8_t, 6U> cell_active{{
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::x, cell)),
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::x, xp)),
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::y, cell)),
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::y, yp)),
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::z, cell)),
+            static_cast<std::uint8_t>(
+                active_face(activity, cells, CartesianAxis::z, zp)),
+        }};
+        detail::CellConvectiveCflResult cell_cfl;
+        const detail::CellConvectiveCflStatus cell_cfl_status =
+            detail::evaluate_cell_convective_cfl(
+                rho, volume, cell_flux, cell_active, certified_dt, cell_cfl);
+        if (cell_cfl_status != detail::CellConvectiveCflStatus::success) {
+          const bool authority_failure =
+              cell_cfl_status == detail::CellConvectiveCflStatus::
+                                     inactive_nonzero_flux ||
+              cell_cfl_status ==
+                  detail::CellConvectiveCflStatus::invalid_activity;
+          cfl_status = {authority_failure ? StatusCode::invalid_plan
+                                          : StatusCode::numerical_failure,
+                        authority_failure ? kMomentumAssembly
+                                          : kMomentumNumerical};
           break;
         }
-        const double outgoing =
-            std::max(-fxm, 0.0) + std::max(fxp, 0.0) +
-            std::max(-fym, 0.0) + std::max(fyp, 0.0) +
-            std::max(-fzm, 0.0) + std::max(fzp, 0.0);
-        const double absolute =
-            0.5 * (std::abs(fxm) + std::abs(fxp) + std::abs(fym) +
-                   std::abs(fyp) + std::abs(fzm) + std::abs(fzp));
-        const double rho_volume = rho * volume;
-        const double scale = certified_dt / rho_volume;
-        const double out = scale * outgoing;
-        const double abs = scale * absolute;
-        if (!std::isfinite(rho_volume) || !(rho_volume > 0.0) ||
-            !std::isfinite(out) || out < 0.0 || !std::isfinite(abs) ||
-            abs < 0.0) {
-          cfl_status = {StatusCode::numerical_failure, kMomentumNumerical};
-          break;
-        }
-        if (!local_cfl_cell_valid || out > local_cfl_max[0U]) {
+        if (!local_cfl_cell_valid || cell_cfl.out > local_cfl_max[0U]) {
           local_cfl_cell_valid = true;
           local_cfl_cell = cell;
-          local_cfl_rho_volume = rho_volume;
-          local_cfl_outgoing = outgoing;
-          local_cfl_absolute = absolute;
+          local_cfl_rho_volume = cell_cfl.density_volume;
+          local_cfl_outgoing = cell_cfl.outgoing_mass_flow;
+          local_cfl_absolute = cell_cfl.absolute_mass_flow;
         }
-        local_cfl_max[0U] = std::max(local_cfl_max[0U], out);
-        local_cfl_max[1U] = std::max(local_cfl_max[1U], abs);
+        local_cfl_max[0U] = std::max(local_cfl_max[0U], cell_cfl.out);
+        local_cfl_max[1U] =
+            std::max(local_cfl_max[1U], cell_cfl.absolute);
       }
     }
   }
@@ -1462,7 +1476,7 @@ Status limit_momentum_predictor_correction(
       witness.rank = local_location.rank;
       witness.out = local_cfl_max[0U];
       witness.absolute = certified_dt * local_cfl_absolute /
-                         local_cfl_rho_volume;
+                         (2.0 * local_cfl_rho_volume);
       witness.density_volume = local_cfl_rho_volume;
       witness.outgoing_mass_flow = local_cfl_outgoing;
       witness.absolute_mass_flow = local_cfl_absolute;
@@ -1515,6 +1529,7 @@ Status limit_momentum_predictor_correction(
             const Int3 cell{x, y, z};
             cell_workspace.unchecked(cell, 0U) = 1.0;
             cell_workspace.unchecked(cell, 1U) = 1.0;
+            cell_workspace.unchecked(cell, 2U) = 1.0;
             if (!fluid(cell)) continue;
 
             const double a = system.diagonal.unchecked(cell, component);
@@ -1655,7 +1670,7 @@ Status limit_momentum_predictor_correction(
     }
 
     FieldView ratio_view = cell_workspace;
-    ratio_view.components = 2U;
+    ratio_view.components = 3U;
     ratio_view.revision = hash_mix(kFnvOffset, assembly.plan);
     ratio_view.revision = hash_mix(ratio_view.revision, assembly.time);
     ratio_view.revision = hash_mix(ratio_view.revision, assembly.geometry);
@@ -1735,41 +1750,125 @@ Status limit_momentum_predictor_correction(
     }
   }
 
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  // The positive-side copy is deliberately perturbed only in tests.  The
+  // following owner publication must replace it with the negative-side
+  // authority, proving that shared-face equality is not an accidental
+  // consequence of equal cell-ratio arithmetic on the two ranks.
+  if (momentum_partition_alpha_mutation_armed && cells.x > 0 &&
+      !physical_face(0U, {0, 0, 0})) {
+    common_alpha.x.unchecked({0, 0, 0}) =
+        momentum_partition_alpha_mutation;
+  }
+#endif
+
+  // Publish one final alpha authority for every partition and periodic face.
+  // The negative-side cell owns its plus face and stores that coefficient in
+  // the matching workspace component.  Halo exchange sends the owner value
+  // to the positive-side rank, whose local low-face copy consumes it.  This
+  // makes the subsequent equal-and-opposite RHS update independent of each
+  // rank's redundant local alpha calculation.
+  for (std::int32_t z = 0; z < cells.z; ++z) {
+    for (std::int32_t y = 0; y < cells.y; ++y) {
+      for (std::int32_t x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        cell_workspace.unchecked(cell, 0U) =
+            common_alpha.x.unchecked({x + 1, y, z});
+        cell_workspace.unchecked(cell, 1U) =
+            common_alpha.y.unchecked({x, y + 1, z});
+        cell_workspace.unchecked(cell, 2U) =
+            common_alpha.z.unchecked({x, y, z + 1});
+      }
+    }
+  }
+  FieldView published_alpha = cell_workspace;
+  published_alpha.components = 3U;
+  published_alpha.revision = hash_mix(kFnvOffset, assembly.plan);
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, assembly.time);
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, assembly.geometry);
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, assembly.face_flux);
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, assembly.state);
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, double_bits(assembly.dt));
+  published_alpha.revision =
+      hash_mix(published_alpha.revision, common_alpha.revision);
+  published_alpha.revision = hash_mix(published_alpha.revision,
+                                      base_workspace_revision);
+  if (published_alpha.revision == 0U) published_alpha.revision = 1U;
+  std::array<FieldView, 1U> published_views{{published_alpha}};
+  HaloTicket published_ticket;
+  Status published_status = limiter_halo.begin(
+      kLimiterHaloStage + 3U,
+      {published_views.data(), published_views.size()}, local_status,
+      published_ticket);
+  if (published_status)
+    published_status = limiter_halo.finish(
+        published_ticket,
+        {published_views.data(), published_views.size()});
+  if (!published_status) return published_status;
+  if (published_views[0U].revision != published_alpha.revision ||
+      limiter_halo.ghost_revision(cell_workspace.field) !=
+          published_alpha.revision)
+    return {StatusCode::invalid_plan, kMomentumAssembly};
+  if (local_status) {
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+      if (physical_face(axis, {0, 0, 0})) continue;
+      Int3 extents = cells;
+      if (axis == 0U)
+        extents.x = 1;
+      else if (axis == 1U)
+        extents.y = 1;
+      else
+        extents.z = 1;
+      for (std::int32_t z = 0; z < extents.z; ++z) {
+        for (std::int32_t y = 0; y < extents.y; ++y) {
+          for (std::int32_t x = 0; x < extents.x; ++x) {
+            Int3 face{x, y, z};
+            if (axis == 0U)
+              face.x = 0;
+            else if (axis == 1U)
+              face.y = 0;
+            else
+              face.z = 0;
+            const Int3 owner = offset(face, axis, -1);
+            const double alpha =
+                published_alpha.unchecked(owner,
+                                          static_cast<std::uint8_t>(axis));
+            if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+              local_status = {StatusCode::numerical_failure,
+                              kMomentumNumerical};
+              break;
+            }
+            alpha_face(axis).unchecked(face) = alpha;
+          }
+          if (!local_status) break;
+        }
+        if (!local_status) break;
+      }
+      if (!local_status) break;
+    }
+  }
+
+  // Reuse the haloed cell workspace as one unique active-face marker per
+  // axis.  The marker coordinate is the face's negative-side cell; a
+  // physical low face therefore uses the one-cell ghost rather than
+  // colliding with the first interior plus-face marker.
+  for (std::int32_t z = -1; z <= cells.z; ++z)
+    for (std::int32_t y = -1; y <= cells.y; ++y)
+      for (std::int32_t x = -1; x <= cells.x; ++x)
+        for (std::uint8_t component = 0U; component < 3U; ++component)
+          cell_workspace.unchecked({x, y, z}, component) = 0.0;
+
   // Apply the single synchronized face coefficient to the full momentum
   // correction vector.  Starting from the high-order equation and adding
   // only the rejected fraction preserves its direction and retains the
   // byte-identical high-order fast path when alpha=1 and no majorization is
   // required.
-  std::array<double, 3U> local_metrics{};
-  for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
-    Int3 extents = cells;
-    if (axis == 0U)
-      ++extents.x;
-    else if (axis == 1U)
-      ++extents.y;
-    else
-      ++extents.z;
-    FaceFieldView common = alpha_face(axis);
-    for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
-      for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
-        for (std::int32_t x = 0; x < extents.x; ++x) {
-          const Int3 face{x, y, z};
-          const double alpha = common.unchecked(face);
-          if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
-            local_status = {StatusCode::numerical_failure,
-                            kMomentumNumerical};
-            break;
-          }
-          const Int3 left = offset(face, axis, -1);
-          const Int3 right = face;
-          const Int3 owner =
-              physical_face(axis, face) && !inside(left) ? right : left;
-          if (alpha < 1.0 && inside(owner) && fluid(owner))
-            local_metrics[2U] += 1.0;
-        }
-      }
-    }
-  }
+  std::array<double, 4U> local_metrics{};
   for (std::uint8_t component = 0U; component < 3U; ++component) {
     FrozenConvectionFaceField frozen;
     if (local_status) {
@@ -1852,6 +1951,8 @@ Status limit_momentum_predictor_correction(
               const double magnitude = std::abs(correction);
               local_metrics[0U] += magnitude;
               local_metrics[1U] += alpha * magnitude;
+              cell_workspace.unchecked(
+                  left, static_cast<std::uint8_t>(axis)) = 1.0;
             }
           }
         }
@@ -1859,23 +1960,76 @@ Status limit_momentum_predictor_correction(
     }
   }
 
-  std::array<double, 3U> global_metrics{};
+  double local_minimum_alpha = 1.0;
+  for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
+    Int3 extents = cells;
+    if (axis == 0U)
+      ++extents.x;
+    else if (axis == 1U)
+      ++extents.y;
+    else
+      ++extents.z;
+    const FaceFieldView common = alpha_face(axis);
+    for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
+      for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
+        for (std::int32_t x = 0; x < extents.x; ++x) {
+          const Int3 face{x, y, z};
+          const Int3 left = offset(face, axis, -1);
+          const Int3 right = face;
+          const Int3 owner =
+              physical_face(axis, face) && !inside(left) ? right : left;
+          if (!inside(owner) || !fluid(owner) ||
+              cell_workspace.unchecked(
+                  left, static_cast<std::uint8_t>(axis)) == 0.0)
+            continue;
+          const double alpha = common.unchecked(face);
+          if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+            local_status = {StatusCode::numerical_failure,
+                            kMomentumNumerical};
+            break;
+          }
+          local_metrics[3U] += 1.0;
+          local_minimum_alpha = std::min(local_minimum_alpha, alpha);
+          if (alpha < 1.0) local_metrics[2U] += 1.0;
+        }
+      }
+    }
+  }
+
+  std::array<double, 4U> global_metrics{};
   status = reductions.checked_sum(
       {local_metrics.data(), local_metrics.size()},
       {global_metrics.data(), global_metrics.size()}, local_status);
   if (!status) return status;
+  double global_negative_minimum_alpha = -1.0;
+  const double local_negative_minimum_alpha = -local_minimum_alpha;
+  status = reductions.checked_max(
+      {&local_negative_minimum_alpha, 1U},
+      {&global_negative_minimum_alpha, 1U}, {});
+  if (!status) return status;
   const double total = global_metrics[0U];
   const double retained = global_metrics[1U];
-  const double count = global_metrics[2U];
-  const double rounded_count = std::nearbyint(count);
+  const double limited_count = global_metrics[2U];
+  const double active_count = global_metrics[3U];
+  const double rounded_limited_count = std::nearbyint(limited_count);
+  const double rounded_active_count = std::nearbyint(active_count);
   if (!std::isfinite(total) || !std::isfinite(retained) ||
-      !std::isfinite(count) || total < 0.0 || retained < 0.0 ||
-      retained > total || count < 0.0 || count != rounded_count ||
-      rounded_count > static_cast<double>(UINT32_MAX)) {
+      !std::isfinite(limited_count) || !std::isfinite(active_count) ||
+      !std::isfinite(global_negative_minimum_alpha) || total < 0.0 ||
+      retained < 0.0 || retained > total || limited_count < 0.0 ||
+      active_count < limited_count ||
+      limited_count != rounded_limited_count ||
+      active_count != rounded_active_count ||
+      rounded_limited_count > static_cast<double>(UINT32_MAX) ||
+      rounded_active_count > static_cast<double>(UINT32_MAX) ||
+      global_negative_minimum_alpha < -1.0 ||
+      global_negative_minimum_alpha > 0.0) {
     return {StatusCode::numerical_failure, kMomentumNumerical};
   }
   const std::uint32_t activations =
-      static_cast<std::uint32_t>(rounded_count);
+      static_cast<std::uint32_t>(rounded_limited_count);
+  const std::uint32_t active_faces =
+      static_cast<std::uint32_t>(rounded_active_count);
   double theta = total > 0.0 ? retained / total : 1.0;
   theta = std::max(0.0, std::min(1.0, theta));
   if (activations == 0U) {
@@ -1886,6 +2040,15 @@ Status limit_momentum_predictor_correction(
   report.theta = theta;
   report.activations = activations;
   report.limited = activations != 0U;
+  report.correction_metrics_applicable = active_faces != 0U;
+  report.minimum_face_alpha =
+      active_faces != 0U ? -global_negative_minimum_alpha : 0.0;
+  report.active_correction_faces = active_faces;
+  report.limited_face_fraction =
+      active_faces != 0U
+          ? static_cast<double>(activations) /
+                static_cast<double>(active_faces)
+          : 0.0;
   if (activations != 0U && total > 0.0 && retained == 0.0)
     return {StatusCode::rejected_step, kMomentumNumerical};
   return {};

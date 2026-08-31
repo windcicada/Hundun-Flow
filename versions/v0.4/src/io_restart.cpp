@@ -2,6 +2,7 @@
 
 #include "hundun/v04_io.hpp"
 
+#include "app_identity_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "io_restart_detail.hpp"
 
@@ -897,6 +898,7 @@ void RestartImage::clear() noexcept {
   pressure_reference = 0.0;
   step = 0U;
   controller_state = 0U;
+  source_manifest_sha256 = {};
   fields.clear();
   for (std::vector<double>& axis : final_mass_flux) axis.clear();
   backward_euler_recovery = true;
@@ -1101,6 +1103,10 @@ Status RestartReader::load(MPI_Comm communicator,
   candidate.pressure_reference = manifest.pressure_reference;
   candidate.step = manifest.step;
   candidate.controller_state = manifest.controller_state;
+  if (!detail::runtime_sha256_bytes(
+          {manifest_bytes.data(), manifest_bytes.size()},
+          candidate.source_manifest_sha256))
+    status = {StatusCode::io_failure, kRestartIntegrity};
   candidate.backward_euler_recovery = true;
   std::size_t target_cells = 0U;
   if (!cell_count(expected.target_patch.cells, target_cells))

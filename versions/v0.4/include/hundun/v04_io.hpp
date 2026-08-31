@@ -16,6 +16,11 @@
 
 namespace hundun::v04 {
 
+inline constexpr std::size_t kRuntimeSha256HexCharacters = 64U;
+inline constexpr std::size_t kRuntimeGitObjectHexCharacters = 40U;
+using RuntimeSha256Digest =
+    std::array<char, kRuntimeSha256HexCharacters + 1U>;
+
 enum class RuntimeServiceKind : std::uint8_t {
   restart,
   visit,
@@ -132,6 +137,7 @@ struct RestartImage {
   double pressure_reference{};
   std::uint64_t step{};
   std::uint64_t controller_state{};
+  RuntimeSha256Digest source_manifest_sha256{};
   std::vector<RestartImageField> fields;
   std::array<std::vector<double>, 3U> final_mass_flux;
   bool backward_euler_recovery{true};
@@ -220,17 +226,45 @@ struct RuntimeTerminalPhysicalAudit {
   double closed_mass_tolerance{};
   double gauge_residual{};
   double gauge_tolerance{};
-  double committed_convective_cfl_out_max{};
-  double committed_convective_cfl_abs_max{};
-  double committed_convective_cfl_limit{};
+};
+
+struct RuntimeConvectiveCflWinner {
+  bool valid{};
+  Int3 global_cell{};
+  std::int32_t rank{-1};
+  double out{};
+  double absolute{};
+  double density_volume{};
+  double outgoing_mass_flow{};
+  double absolute_mass_flow{};
+};
+
+struct RuntimeCommittedConvectiveCflAudit {
+  bool valid{};
+  RevisionToken density_revision{};
+  RevisionToken final_flux_revision{};
+  FieldId density_field{};
+  // These communicator-wide fingerprints bind every rank-local logical view
+  // identity (storage/revision domain and layout) without publishing a
+  // rank-local token in an evidence row that must be byte-identical on all
+  // ranks.
+  PlanFingerprint density_view_collective{};
+  PlanFingerprint final_flux_view_collective{};
+  PlanFingerprint activity_collective{};
+  double dt{};
+  double out_max{};
+  double abs_max{};
+  double limit{};
+  RuntimeConvectiveCflWinner out_winner{};
+  RuntimeConvectiveCflWinner abs_winner{};
 };
 
 struct RuntimeAdvectiveCflAudit {
   bool present{};
   PlanFingerprint plan{};
-  RevisionToken time_revision{};
-  RevisionToken density_revision{};
-  RevisionToken face_flux_revision{};
+  PlanFingerprint time_revision_collective{};
+  PlanFingerprint density_view_collective{};
+  PlanFingerprint face_flux_view_collective{};
   PlanFingerprint activity_collective{};
   double dt{};
   double out_max{};
@@ -238,14 +272,43 @@ struct RuntimeAdvectiveCflAudit {
   double limit{};
 };
 
+// Runtime candidate identity contains only immutable content digests.  Paths,
+// mtimes and configure timestamps are deliberately excluded.  `head` and
+// `tree` are the exact Git object ids embedded by CMake; `executable` is
+// computed from the bytes of the image that is actually running.  `identity`
+// binds the four preceding values under the versioned canonical payload used
+// by both the writer and the external validator.
+struct RuntimeCandidateIdentity {
+  std::array<char, kRuntimeGitObjectHexCharacters + 1U> head{};
+  std::array<char, kRuntimeGitObjectHexCharacters + 1U> tree{};
+  std::array<char, kRuntimeSha256HexCharacters + 1U> build_manifest{};
+  std::array<char, kRuntimeSha256HexCharacters + 1U> executable{};
+  std::array<char, kRuntimeSha256HexCharacters + 1U> identity{};
+};
+
+enum class RuntimeRunStartKind : std::uint8_t { fresh, restart };
+
+// The first evidence row is anchored independently of that row's proposed
+// time.  Restart runs bind the prior step/time to the exact integrity-checked
+// manifest loaded by RestartReader; fresh runs bind the canonical zero state.
+struct RuntimeRunStartAnchor {
+  RuntimeRunStartKind kind{RuntimeRunStartKind::fresh};
+  std::uint64_t previous_step{};
+  double previous_time{};
+  RuntimeSha256Digest restart_manifest_sha256{};
+};
+
 struct RuntimeEvidenceRecord {
   PlanFingerprint build{};
   PlanFingerprint binary{};
+  RuntimeCandidateIdentity candidate_identity{};
   PlanFingerprint case_model{};
   PlanFingerprint stl{};
   PlanFingerprint product{};
   PlanFingerprint cpu_plan{};
+  RuntimeRunStartAnchor run_start{};
   std::uint64_t step{};
+  double previous_committed_time{};
   double time{};
   std::uint8_t requested_bdf_order{};
   std::uint8_t bdf_order{};
@@ -280,6 +343,7 @@ struct RuntimeEvidenceRecord {
       pressure_energy_refinement_termination{
           RuntimePressureEnergyRefinementTermination::none};
   RuntimeTerminalPhysicalAudit terminal_physical_audit{};
+  RuntimeCommittedConvectiveCflAudit committed_convective_cfl{};
   std::array<LinearSolveResult, 3U> momentum_predictor{};
   std::uint8_t momentum_predictor_solve_calls{};
   LinearSolveResult predictor_enthalpy_endpoint{};
@@ -289,6 +353,10 @@ struct RuntimeEvidenceRecord {
   std::uint8_t predictor_enthalpy_solve_calls{};
   double momentum_predictor_theta{1.0};
   std::uint32_t momentum_predictor_activations{};
+  bool momentum_correction_metrics_applicable{};
+  double momentum_minimum_face_alpha{};
+  std::uint32_t momentum_active_correction_faces{};
+  double momentum_limited_face_fraction{};
   bool momentum_predictor_limited{};
   RuntimeAdvectiveCflAudit momentum_advective_cfl{};
   double predictor_theta{1.0};

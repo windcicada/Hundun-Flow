@@ -2,55 +2,90 @@
 
 # HUNDUN-FLOW v0.4 runtime evidence schema
 
-`evidence/runtime.jsonl` uses `HUNDUN_V04_EVIDENCE_V5`. Each line is one
-collectively agreed committed-step record. Writers reject rank-disagreeing
-records and never observe trial state.
+New writers use `HUNDUN_V04_EVIDENCE_V6`. Each line is one collectively agreed
+committed-step record. Writers reject rank-disagreeing records and never
+observe trial state. Historical V1--V5 artifacts and validators remain frozen;
+V6 fields do not retrofit an older schema.
 
-V5 retains the V4 pressure--enthalpy refinement lifecycle and makes two
-accepted-step policies explicit. `momentum_predictor_limiter` identifies
-`scheme:"common_face_afc_v2"`, records the L1 fraction of retained
-anti-diffusive correction as `retained_correction_l1_ratio`, and counts global
-unique limited faces as `limited_faces`. An inactive limiter must report ratio
-one and zero faces; a limited row requires a strictly positive ratio below one
-and at least one limited face. The legacy V4 names `theta` and `activations`
-are not V5 fields.
+V6 identifies the exact running candidate with
+`candidate_identity:{schema,head,tree,build_manifest_sha256,executable_sha256,identity_sha256}`.
+`head` and `tree` are exact Git object ids embedded at configure time. Git
+HEAD/index/ref authorities and all v0.4 executable inputs are configure
+dependencies, so an incremental build cannot silently retain identity from a
+prior checkout or dirty source state. The build-manifest digest covers the
+clean/dirty source state, compiler, flags,
+build type and V0.4 feature switches without paths or timestamps. The
+executable digest is computed from `/proc/self/exe`; every rank must produce
+the same bytes. `identity_sha256` hashes a versioned canonical payload over
+the four identities. The legacy numeric `build` and `binary` fields are the
+first 64 bits of the build-manifest and executable digests and must agree with
+the full identity. Mixed executable/build identities in one JSONL file are
+rejected.
 
-The limiter embeds the momentum-advection certificate
-`advective_cfl:{present,plan,time_revision,density_revision,face_flux_revision,activity_collective,dt,out_max,abs_max,limit}`.
-`present` must be true; the plan and all three revisions must be nonzero; `dt`
-and `limit` must be positive. Both CFL maxima must be finite and nonnegative,
-and `out_max` must not exceed `limit` apart from a 64-binary64-epsilon
-comparison allowance. Its `limit` must equal the terminal committed CFL
-`limit`; both are the same configured acceptance ceiling. This certificate observes the face flux used by the
-momentum predictor, so its `face_flux_revision` must differ from the committed
-`terminal_physical_audit.final_flux_revision` produced after pressure
-correction. Missing, invalid, or same-revision certificates reject the row.
-The rank-local runtime certificate additionally binds the exact density view
-(base, shape, stride, component, replica, field, revision, storage and
-revision domain) and all three provisional-flux views (base, extents, stride,
-axis, storage and revision domain). These pointers are checked by the product
-driver before FGMRES and are deliberately not serialized into V5.
+Every V6 row carries a common
+`run_start:{kind,previous_step,previous_time,restart_manifest_sha256}` and
+records `previous_committed_time`. A fresh anchor is the canonical zero
+step/time with a null manifest. A restart anchor binds the predecessor
+step/time to the SHA-256 of the exact integrity-checked `manifest.bin` loaded
+by `RestartReader`. The writer and validator both
+require `time - previous_committed_time == advective_cfl.dt` within 128
+binary64 epsilons, including the first row. A fresh first row must be step one
+with previous time zero. A continuation first row must be the immediate
+successor of the anchored snapshot and be marked `restart_recovery`;
+subsequent rows preserve the same run-start anchor and bind the preceding
+committed time. This closes the former first-record gap without assuming every
+run starts at time zero or trusting two mutable time fields in the same row.
+Accordingly, external validation of a restart JSONL requires
+`runtime <evidence> --run-start-manifest <manifest.bin>`; the validator checks
+the manifest format and FNV integrity, recomputes its SHA-256, and decodes the
+authoritative predecessor step/time. Restart evidence without that frozen
+manifest is rejected. Fresh evidence needs no sidecar and rejects one if
+supplied.
 
-One V5 JSONL file is one immutable run. Its schema and
-`build,binary,case,stl,product,cpu_plan` identity are frozen by the first row;
-steps must then be contiguous and committed time must increase. For every row
-after the first, the advective-CFL `dt` must equal the adjacent committed-time
-increment within 128 binary64 epsilons. The momentum plan, IBM activity
-collective and configured CFL limit are also static across the file. A zero
-STL requires a zero activity collective, while an IBM case requires a nonzero
-one. Mixed schemas, identity mutation, skipped steps, time reversal, changed
-static authority or time--dt disagreement reject the file.
+The limiter policy is `scheme:"common_face_afc_v3_owner"`. A partition or
+periodic face has one negative-side alpha authority; the positive-side copy
+consumes the published value. Owner-only aggregation records
+`active_correction_faces`, `limited_faces`, `minimum_face_alpha`,
+`limited_face_fraction`, and the L1 `retained_correction_l1_ratio`. When no
+nonzero correction face exists, `correction_metrics_applicability` is
+`"not_applicable"`, both counts are zero, and the three ratio/alpha values are
+JSON `null`; default numeric zero is not evidence. Applicable metrics require
+positive active count, exact `limited/active` fraction, alpha in `[0,1]`, and
+ratio in `(0,1]`. A limited row requires a positive retained ratio below one.
 
-The terminal audit additionally contains
-`committed_convective_cfl:{out_max,abs_max,limit}`. These are the rank-global
-maximum outward and absolute convective CFL measures computed from the
-committed mass flux, plus the positive configured acceptance limit. All three
-values must be finite; both maxima must be nonnegative, and `out_max` must not
-exceed `limit` apart from a 64-binary64-epsilon comparison allowance. Because
-the values live inside `terminal_physical_audit`, they certify the same
-committed final-flux revision as EOS, continuity, energy, mass and gauge. The
-advective and committed CFL objects therefore form an explicit dual-revision
-record rather than treating predictor and final mass flux as interchangeable.
+The provisional certificate is
+`advective_cfl:{present,plan,time_revision_collective,density_view_collective,face_flux_view_collective,activity_collective,dt,out_max,abs_max,limit}`.
+The three collective fingerprints bind every rank-local logical revision/view
+identity while keeping the committed JSON row byte-identical across ranks.
+The in-memory certificate still binds exact base, shape, stride, replica,
+field, storage and revision-domain capabilities. The fingerprints are nonzero,
+and the provisional face-view fingerprint must differ from the terminal
+final-flux view fingerprint.
+
+The terminal audit contains the full compact committed certificate:
+`committed_convective_cfl:{valid,density_revision,final_flux_revision,density_view,face_flux_view,activity_collective,dt,out_max,abs_max,limit,out_winner,abs_winner}`.
+The exact density/final-flux revisions must match the terminal audit. The view
+objects carry communicator-wide fingerprints of all exact rank-local logical
+views. Each deterministic winner binds global cell, rank, `rho*V`, outgoing
+mass-flow sum, raw six-face absolute mass-flow sum, `dt`, and both CFL values.
+The validator recomputes `Co_out=dt*outgoing/(rho*V)` and
+`Co_abs=dt*0.5*absolute/(rho*V)`, verifies the advertised maximum, and rejects
+an outward maximum above the shared configured limit (apart from the frozen
+64-epsilon comparison slack). On an actual committed-CFL rejection, the same
+winner data are also available to the CLI failure path.
+
+One V6 JSONL file freezes schema, full candidate identity,
+`case,stl,product,cpu_plan`, momentum plan, IBM activity and CFL limit from its
+first row. Steps must be contiguous and the time anchors must form an exact
+committed chain. A zero STL requires zero activity; an IBM case requires
+nonzero activity. Mixed schemas/candidates, skipped steps, time reversal,
+changed static authority, aliased provisional/final views, invalid winners or
+time--dt disagreement reject the file.
+
+V5 remains supported only as an immutable historical schema. It retains
+`common_face_afc_v2`, raw provisional revision numbers, the adjacent-time
+check starting at the second row, and the scalar committed-CFL object. Frozen
+V5 oracle data are not regenerated from V6.
 
 V4 retained the V3 pressure lifecycle and terminal physical acceptance, and
 adds an explicit same-target nonlinear-refinement record. The ordinary
@@ -94,13 +129,13 @@ exactly two and `pressure` contains correctors one and two in order. Every
 entry records status, termination, iterations, initial/final FP64 true
 residual, recursive residual and supplemental convergence audit counters. A
 cap, failed termination, contract-incompatible audit, or metric above its
-limit rejects the row. New writers emit V5; immutable historical V1/V2/V3/V4
+limit rejects the row. New writers emit V6; immutable historical V1--V5
 evidence artifacts retain their original schema tag and are never rewritten.
-Consumers dispatch by the explicit schema tag; a newly constructed V5 runtime
+Consumers dispatch by the explicit schema tag; a newly constructed V6 runtime
 record defaults to an invalid pressure contract until its producer supplies
 the contract, terminal audit, advective and committed CFL certificates, and
 refinement termination. V4 rows keep their original limiter and terminal-audit
-shape; V5-only CFL or limiter fields do not retrofit a V4 row.
+shape; V5/V6-only CFL or limiter fields do not retrofit a V4 row.
 
 Required identity fields are `build`, `binary`, `case`, `stl`, `product`, and
 `cpu_plan`. A zero `stl` value means that the case has no immersed surface.
@@ -132,7 +167,7 @@ evidence paths. `tools/v04_evidence_validate.py` rejects reordered gates,
 candidate mutation, reused paths and artifact hash mismatch before replacing
 the manifest.
 
-Candidate identity stores absolute paths and SHA-256 values for the tests-off
+The separate machine-gate candidate manifest stores absolute paths and SHA-256 values for the tests-off
 product, tests-on product and test executable plus every flat case input. The
 validator re-hashes those files on every manifest operation. It also validates
 Git HEAD/tree object ids, compiler/linker/flags, positive product and CPU-plan

@@ -147,6 +147,15 @@ bool verify(const RestartImage& image, const MeshPatch& patch) {
       image.step == 0U || image.patch.begin.x != patch.begin.x ||
       image.patch.cells.x != patch.cells.x)
     return false;
+  for (std::size_t index = 0U; index < kRuntimeSha256HexCharacters;
+       ++index) {
+    const char value = image.source_manifest_sha256[index];
+    if (!((value >= '0' && value <= '9') ||
+          (value >= 'a' && value <= 'f')))
+      return false;
+  }
+  if (image.source_manifest_sha256[kRuntimeSha256HexCharacters] != '\0')
+    return false;
   const auto index = [](Int3 local, Int3 cells) {
     return (static_cast<std::size_t>(local.z) * cells.y + local.y) * cells.x +
            local.x;

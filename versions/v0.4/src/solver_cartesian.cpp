@@ -126,6 +126,57 @@ bool component_byte_interval(BasicFieldView<T> view,
 
 namespace detail {
 
+CellConvectiveCflStatus evaluate_cell_convective_cfl(
+    double density, double volume, const std::array<double, 6U>& face_flux,
+    const std::array<std::uint8_t, 6U>& active, double dt,
+    CellConvectiveCflResult& result) noexcept {
+  result = {};
+  for (std::size_t face = 0U; face < active.size(); ++face) {
+    if (active[face] > 1U)
+      return CellConvectiveCflStatus::invalid_activity;
+    if (active[face] == 0U && face_flux[face] != 0.0)
+      return CellConvectiveCflStatus::inactive_nonzero_flux;
+  }
+  if (!std::isfinite(density) || !(density > 0.0) ||
+      !std::isfinite(volume) || !(volume > 0.0) || !std::isfinite(dt) ||
+      !(dt > 0.0)) {
+    return CellConvectiveCflStatus::nonphysical_state;
+  }
+  for (double flux : face_flux)
+    if (!std::isfinite(flux))
+      return CellConvectiveCflStatus::nonphysical_state;
+
+  CellConvectiveCflResult candidate;
+  candidate.density_volume = density * volume;
+  candidate.outgoing_mass_flow =
+      std::max(-face_flux[0U], 0.0) + std::max(face_flux[1U], 0.0) +
+      std::max(-face_flux[2U], 0.0) + std::max(face_flux[3U], 0.0) +
+      std::max(-face_flux[4U], 0.0) + std::max(face_flux[5U], 0.0);
+  // Keep the raw six-face sum in the certificate.  The factor 1/2 belongs
+  // to the Co_abs definition, not to the meaning of this diagnostic field.
+  for (double flux : face_flux)
+    candidate.absolute_mass_flow += std::abs(flux);
+  // Preserve the established product arithmetic while centralising it: both
+  // provisional and committed authorities consume this exact scale-first
+  // evaluation, so extracting the shared kernel cannot move a CFL value by
+  // one ulp at a fixed-limit decision boundary.
+  const double scale = dt / candidate.density_volume;
+  candidate.out = scale * candidate.outgoing_mass_flow;
+  candidate.absolute = scale * (0.5 * candidate.absolute_mass_flow);
+  if (!std::isfinite(candidate.density_volume) ||
+      !(candidate.density_volume > 0.0) ||
+      !std::isfinite(candidate.outgoing_mass_flow) ||
+      candidate.outgoing_mass_flow < 0.0 ||
+      !std::isfinite(candidate.absolute_mass_flow) ||
+      candidate.absolute_mass_flow < 0.0 || !std::isfinite(candidate.out) ||
+      candidate.out < 0.0 || !std::isfinite(candidate.absolute) ||
+      candidate.absolute < 0.0) {
+    return CellConvectiveCflStatus::nonphysical_state;
+  }
+  result = candidate;
+  return CellConvectiveCflStatus::success;
+}
+
 bool valid_cells(Int3 cells) noexcept {
   return cells.x > 0 && cells.y > 0 && cells.z > 0;
 }
