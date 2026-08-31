@@ -4,6 +4,9 @@
 #include "hundun/v04_case.hpp"
 #include "hundun/v04_physics.hpp"
 
+#include "app_evidence_detail.hpp"
+#include "app_identity_detail.hpp"
+
 #include <mpi.h>
 
 #include <fcntl.h>
@@ -1197,6 +1200,9 @@ Status append_evidence(
     MPI_Comm communicator, const fs::path& path,
     const IoServicePlan& services, const ValidatedModel& model,
     PlanFingerprint product, PlanFingerprint cpu, PlanFingerprint stl,
+    const RuntimeCandidateIdentity& candidate_identity,
+    PlanFingerprint build_identity, PlanFingerprint binary_identity,
+    const RuntimeRunStartAnchor& run_start,
     const DriverStepReport& step, std::uint64_t maximum_step_nanoseconds,
     bool restart_recovery, DriverResourceReport& global_resources) {
   Status status =
@@ -1213,13 +1219,16 @@ Status append_evidence(
   if (!status) return status;
 
   RuntimeEvidenceRecord evidence;
-  evidence.build = UINT64_C(0x00040000);
-  evidence.binary = UINT64_C(0x00040001);
+  evidence.build = build_identity;
+  evidence.binary = binary_identity;
+  evidence.candidate_identity = candidate_identity;
   evidence.case_model = model.fingerprint;
   evidence.stl = stl;
   evidence.product = product;
   evidence.cpu_plan = cpu;
+  evidence.run_start = run_start;
   evidence.step = step.accepted_step;
+  evidence.previous_committed_time = step.proposal.time;
   evidence.time = step.accepted_time;
   evidence.requested_bdf_order = step.proposal.bdf.order;
   evidence.bdf_order = step.effective_bdf.order;
@@ -1297,12 +1306,10 @@ Status append_evidence(
       step.piso.gauge_residual;
   evidence.terminal_physical_audit.gauge_tolerance =
       model.solver.terminal.gauge;
-  evidence.terminal_physical_audit.committed_convective_cfl_out_max =
-      step.piso.committed_convective_cfl_out_max;
-  evidence.terminal_physical_audit.committed_convective_cfl_abs_max =
-      step.piso.committed_convective_cfl_abs_max;
-  evidence.terminal_physical_audit.committed_convective_cfl_limit =
-      step.piso.committed_convective_cfl_limit;
+  status = detail::runtime_committed_cfl(
+      communicator, step.piso.committed_convective_cfl,
+      evidence.committed_convective_cfl);
+  if (!status) return status;
   evidence.momentum_predictor = step.momentum_predictor_solve.components;
   evidence.momentum_predictor_solve_calls =
       step.momentum_predictor_solve.solve_calls;
@@ -1319,19 +1326,20 @@ Status append_evidence(
   evidence.momentum_predictor_theta = step.momentum_predictor_limiter.theta;
   evidence.momentum_predictor_activations =
       step.momentum_predictor_limiter.activations;
+  evidence.momentum_correction_metrics_applicable =
+      step.momentum_predictor_limiter.correction_metrics_applicable;
+  evidence.momentum_minimum_face_alpha =
+      step.momentum_predictor_limiter.minimum_face_alpha;
+  evidence.momentum_active_correction_faces =
+      step.momentum_predictor_limiter.active_correction_faces;
+  evidence.momentum_limited_face_fraction =
+      step.momentum_predictor_limiter.limited_face_fraction;
   evidence.momentum_predictor_limited =
       step.momentum_predictor_limiter.limited;
-  evidence.momentum_advective_cfl = {
-      step.momentum_predictor_limiter.advective_cfl.valid(),
-      step.momentum_predictor_limiter.advective_cfl.plan,
-      step.momentum_predictor_limiter.advective_cfl.time,
-      step.momentum_predictor_limiter.advective_cfl.density,
-      step.momentum_predictor_limiter.advective_cfl.face_flux,
-      step.momentum_predictor_limiter.advective_cfl.activity_collective,
-      step.momentum_predictor_limiter.advective_cfl.dt,
-      step.momentum_predictor_limiter.advective_cfl.out_max,
-      step.momentum_predictor_limiter.advective_cfl.absolute_max,
-      step.momentum_predictor_limiter.advective_cfl.limit};
+  status = detail::runtime_advective_cfl(
+      communicator, step.momentum_predictor_limiter.advective_cfl,
+      evidence.momentum_advective_cfl);
+  if (!status) return status;
   evidence.predictor_theta = step.thermophysical_predictor.theta;
   evidence.predictor_mass_flux_scale =
       step.thermophysical_predictor.mass_flux_scale;
@@ -1363,7 +1371,7 @@ Status append_evidence(
   evidence.retry = step.attempts != 1U;
   evidence.restart_recovery = restart_recovery;
   // This quick thin-domain comparison is intentionally not a formal release
-  // statistics candidate.  The full V5 numerical evidence is still emitted.
+  // statistics candidate.  The full V6 numerical evidence is still emitted.
   evidence.statistics_eligible = false;
   return EvidenceWriter::append(communicator, path, services, evidence);
 }
@@ -1394,10 +1402,7 @@ bool terminal_audit_valid(const ValidatedModel& model,
              model.solver.terminal.closed_mass &&
          step.piso.gauge_residual <= model.solver.terminal.gauge &&
          step.momentum_predictor_limiter.advective_cfl.valid() &&
-         std::isfinite(step.piso.committed_convective_cfl_out_max) &&
-         std::isfinite(step.piso.committed_convective_cfl_abs_max) &&
-         std::isfinite(step.piso.committed_convective_cfl_limit) &&
-         step.piso.committed_convective_cfl_limit > 0.0;
+         step.piso.committed_convective_cfl.valid();
 }
 
 int run(MPI_Comm communicator, int rank, const Options& options) {
@@ -1448,6 +1453,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::uint64_t starting_step = 0U;
   bool restarted = false;
   bool restart_requires_recovery = false;
+  RuntimeRunStartAnchor run_start;
   RestartBinding restart_binding;
   if (!options.restart_root.empty()) {
     RestartExpected expected;
@@ -1458,6 +1464,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                                    expected, image);
     if (status) {
       starting_step = image.step;
+      run_start.kind = RuntimeRunStartKind::restart;
+      run_start.previous_step = image.step;
+      run_start.previous_time = image.time;
+      run_start.restart_manifest_sha256 = image.source_manifest_sha256;
       restart_requires_recovery = image.backward_euler_recovery;
       okay = rank != 0 ||
               read_restart_binding(options.restart_root, image, fingerprint,
@@ -1539,6 +1549,21 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (rank == 0) std::cerr << "requested_steps_outside_window\n";
     return 3;
   }
+  RuntimeCandidateIdentity candidate_identity;
+  status = detail::runtime_candidate_identity(communicator,
+                                              candidate_identity);
+  if (!status) {
+    if (rank == 0)
+      std::cerr << "candidate_identity_status="
+                << static_cast<unsigned>(status.code) << '/' << status.detail
+                << '\n';
+    return 5;
+  }
+  const PlanFingerprint build_identity =
+      detail::runtime_sha256_fingerprint(candidate_identity.build_manifest);
+  const PlanFingerprint binary_identity =
+      detail::runtime_sha256_fingerprint(candidate_identity.executable);
+  if (build_identity == 0U || binary_identity == 0U) return 5;
   const Int3 global_cells = snapshot.geometry->global_cells();
   Accumulator accumulator;
   accumulator.profile.assign(spec.station_x_over_d.size() *
@@ -1583,6 +1608,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "restarted " << (restarted ? 1 : 0) << '\n'
              << "restart_requires_recovery "
              << (restart_requires_recovery ? 1 : 0) << '\n'
+             << "candidate_head " << candidate_identity.head.data() << '\n'
+             << "candidate_tree " << candidate_identity.tree.data() << '\n'
+             << "build_manifest_sha256 "
+             << candidate_identity.build_manifest.data() << '\n'
+             << "executable_sha256 " << candidate_identity.executable.data()
+             << '\n'
+             << "candidate_identity " << candidate_identity.identity.data()
+             << '\n'
              << "statistics_eligible 0\n"
              << "end\n";
     okay = write_exclusive(options.run_root / "RUN.meta", metadata.str());
@@ -1612,7 +1645,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 "T_min,T_max,rho_min,rho_max,"
                 "provisional_cfl_out,provisional_cfl_abs,provisional_cfl_limit,"
                 "committed_cfl_out,committed_cfl_abs,committed_cfl_limit,"
-                "afc_retained_l1_ratio,afc_limited_faces,afc_limited,"
+                "afc_metrics_applicable,afc_retained_l1_ratio,"
+                "afc_minimum_face_alpha,afc_active_correction_faces,"
+                "afc_limited_faces,afc_limited_face_fraction,afc_limited,"
                 "thermo_predictor_theta,thermo_predictor_limited,"
                 "pressure_solve_calls,refinement_solve_calls,linear_iterations,"
                 "max_rank_step_ns,included,exclusion\n";
@@ -1723,8 +1758,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (status)
       status = append_evidence(
           communicator, options.run_root / "evidence.jsonl", services, model,
-          product_fingerprint, cpu_fingerprint, stl_fingerprint, step,
-          maximum_nanoseconds, recovery, global_resources);
+          product_fingerprint, cpu_fingerprint, stl_fingerprint,
+          candidate_identity, build_identity, binary_identity, run_start,
+          step, maximum_nanoseconds, recovery, global_resources);
     if (!status) {
       if (rank == 0)
         std::cerr << "evidence_status=" << static_cast<unsigned>(status.code)
@@ -1774,8 +1810,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
           << step.piso.committed_convective_cfl_out_max << ','
           << step.piso.committed_convective_cfl_abs_max << ','
           << step.piso.committed_convective_cfl_limit << ','
+          << (step.momentum_predictor_limiter.correction_metrics_applicable
+                  ? 1
+                  : 0)
+          << ','
           << step.momentum_predictor_limiter.theta << ','
+          << step.momentum_predictor_limiter.minimum_face_alpha << ','
+          << step.momentum_predictor_limiter.active_correction_faces << ','
           << step.momentum_predictor_limiter.activations << ','
+          << step.momentum_predictor_limiter.limited_face_fraction << ','
           << (step.momentum_predictor_limiter.limited ? 1 : 0) << ','
           << step.thermophysical_predictor.theta << ','
           << (step.thermophysical_predictor.limited ? 1 : 0) << ','

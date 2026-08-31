@@ -205,6 +205,7 @@ set(hundun_v04_core_sources
   src/common_terminal_audit.c
   src/app_case.cpp
   src/app_driver.cpp
+  src/app_evidence_detail.cpp
   src/app_identity.cpp
   src/bc_apply.cpp
   src/bc_compile.cpp
@@ -303,6 +304,8 @@ target_compile_definitions(hundun PRIVATE
 add_executable(v04_thin_domain_runner
   "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")
 target_link_libraries(v04_thin_domain_runner PRIVATE hundun_v04_core)
+target_include_directories(v04_thin_domain_runner PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the

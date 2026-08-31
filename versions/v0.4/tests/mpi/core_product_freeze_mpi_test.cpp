@@ -1643,8 +1643,21 @@ bool run_local_donor_product(int rank) {
   CommittedProductBits committed_after;
   const bool captured_after =
       capture_committed_product_bits(driver, committed_after);
-  const bool rollback_exact =
+  // A fatal proposal is intentionally retired and replaced by a distinct BE
+  // recovery generation.  That ticket is controller state, not committed
+  // flow state.  Compare the latter bit-for-bit while independently proving
+  // the one-step generation transition instead of hiding it behind the old
+  // V1 Restart image's constant-zero controller placeholder.
+  const bool fatal_controller_recovery =
       captured_before && captured_after &&
+      committed_before.controller_state !=
+          std::numeric_limits<std::uint64_t>::max() &&
+      committed_after.controller_state ==
+          committed_before.controller_state + 1U;
+  if (captured_before && captured_after)
+    committed_before.controller_state = committed_after.controller_state;
+  const bool rollback_exact =
+      captured_before && captured_after && fatal_controller_recovery &&
       same_committed_product_bits(committed_before, committed_after);
   std::uint64_t factor_bits = 0U;
   static_assert(sizeof(factor_bits) == sizeof(
@@ -3517,7 +3530,9 @@ int main(int argc, char** argv) {
                    "product reports the forced implicit enthalpy endpoint");
   passed &= expect(run_local_donor_product(rank), rank,
                    "incompatible forced local-donor flux is rejected by a "
-                   "coupled candidate/terminal gate and rolls back exactly");
+                   "coupled candidate/terminal gate, rolls back committed "
+                   "flow state exactly, and retires the fatal controller "
+                   "ticket");
   passed &= expect(
       run_temporal_method_fallback_product(rank), rank,
       "BDF2 low-base failure falls back to BE within one attempt");

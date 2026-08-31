@@ -141,7 +141,9 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
     if (anchor.previous_step == 0U || empty_manifest ||
         !detail::valid_runtime_sha256(anchor.restart_manifest_sha256) ||
         zero_manifest ||
-        record.startup || record.restart_recovery != first)
+        record.startup || (record.restart_recovery && !first) ||
+        (first && record.restart_recovery &&
+         (record.requested_bdf_order != 1U || record.bdf_order != 1U)))
       return false;
   } else {
     return false;

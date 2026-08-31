@@ -911,8 +911,13 @@ def validate_v6_run_start(record: Dict[str, Any],
                          anchor["restart_manifest_sha256"]) is None or
                 int(anchor["restart_manifest_sha256"], 16) == 0 or
                 previous_step == 0 or record.get("startup") is not False or
-                record.get("restart_recovery") is not first):
+                (record.get("restart_recovery") is True and not first)):
             raise EvidenceError(f"{prefix} has an invalid restart anchor")
+        if (first and record.get("restart_recovery") is True and
+                (record.get("requested_bdf_order") != 1 or
+                 record.get("bdf_order") != 1)):
+            raise EvidenceError(
+                f"{prefix} lifecycle disagrees with legacy Restart recovery")
     else:
         raise EvidenceError(f"{prefix}.kind is invalid")
     if first and not _v6_close(record["previous_committed_time"],
@@ -933,14 +938,36 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
     (magic, version, rank_count, cells_x, cells_y, cells_z,
      plan, schema, geometry, time, dt, pressure_reference,
      step, controller_state, field_count) = fields
-    expected_size = header_size + 4 * field_count + 40 * rank_count + 8
-    if (magic != b"H4MANI01" or version != 1 or rank_count == 0 or
+    cursor = header_size + 4 * field_count
+    exact_history = version == 2
+    valid_exact = True
+    if exact_history and len(data) >= cursor + struct.calcsize("<ddQQI") + 8:
+        (previous_pressure_reference, closed_mass_target,
+         final_mass_flux_revision, previous_mass_flux_revision,
+         rate_count) = struct.unpack_from("<ddQQI", data, cursor)
+        cursor += struct.calcsize("<ddQQI")
+        valid_exact = (
+            controller_state != 0 and
+            math.isfinite(previous_pressure_reference) and
+            previous_pressure_reference > 0.0 and
+            math.isfinite(closed_mass_target) and closed_mass_target > 0.0 and
+            previous_mass_flux_revision > 0 and
+            previous_mass_flux_revision < final_mass_flux_revision and
+            final_mass_flux_revision < UINT64_MAX and
+            1 <= rate_count <= 64)
+        cursor += 4 * rate_count
+    elif exact_history:
+        valid_exact = False
+    expected_size = cursor + 40 * rank_count + 8
+    if (magic != b"H4MANI01" or version not in (1, 2) or
+            rank_count == 0 or
             min(cells_x, cells_y, cells_z) <= 0 or
             min(plan, schema, geometry) == 0 or
             not math.isfinite(time) or time < 0.0 or
             not math.isfinite(dt) or dt <= 0.0 or
             not math.isfinite(pressure_reference) or step == 0 or
             field_count < 3 or field_count > 64 or
+            not valid_exact or
             len(data) != expected_size):
         raise EvidenceError(f"restart manifest {path} has an invalid header")
     offset = 1469598103934665603
@@ -955,6 +982,7 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
         "sha256": hashlib.sha256(data).hexdigest(),
         "step": step,
         "time": time,
+        "backward_euler_recovery": version == 1,
     }
 
 
@@ -1795,7 +1823,10 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                                 anchor["previous_step"] !=
                                 restart_authority["step"] or
                                 not _v6_close(anchor["previous_time"],
-                                              restart_authority["time"])):
+                                              restart_authority["time"]) or
+                                record["restart_recovery"] is not
+                                restart_authority[
+                                    "backward_euler_recovery"]):
                             raise EvidenceError(
                                 f"line {line_number}: V6 run-start anchor "
                                 "disagrees with the frozen restart manifest")
@@ -2862,6 +2893,17 @@ def self_test() -> None:
             json.dumps(restart_v6) + "\n" +
             json.dumps(continuation_v6) + "\n", encoding="utf-8")
         validate_runtime(runtime_path, restart_manifest_path)
+
+        false_exact_history = json.loads(json.dumps(restart_v6))
+        false_exact_history.update({
+            "requested_bdf_order": 2,
+            "bdf_order": 2,
+            "restart_recovery": False,
+        })
+        reject_runtime(
+            false_exact_history,
+            "V6 legacy Restart manifest accepted as exact BDF2 history",
+            restart_manifest_path)
 
         reject_runtime(
             restart_v6,
