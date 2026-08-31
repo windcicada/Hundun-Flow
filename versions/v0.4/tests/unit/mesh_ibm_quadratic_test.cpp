@@ -671,6 +671,93 @@ bool test_hard_quality_gates_and_atomic_publication() {
   return passed;
 }
 
+bool test_adaptive_order_falls_back_only_to_full_rank_linear() {
+  const QuadraticFrame frame = rotated_frame();
+  auto donors = complete_donors(frame);
+  const auto rows = functionals(frame);
+  for (std::size_t index = 1U; index < donors.size(); ++index) {
+    donors[index].centre = donors[index % 4U].centre;
+    donors[index].widths = donors[index % 4U].widths;
+  }
+
+  QuadraticStencilPlan strict_plan;
+  const QuadraticStencilRequest request{
+      frame, {donors.data(), donors.size()}, {rows.data(), rows.size()}};
+  const Status strict = QuadraticStencilCompiler::compile(
+      {&request, 1U}, {}, strict_plan);
+  bool passed = expect(!strict && strict.detail == 1305U &&
+                           strict_plan.fingerprint() == 0U,
+                       "strict_quadratic rejects a rank-deficient "
+                       "quadratic basis atomically");
+
+  QuadraticStencilLimits adaptive_limits;
+  adaptive_limits.policy = IbmReconstructionPolicy::adaptive_order;
+  QuadraticStencilPlan adaptive_plan;
+  const Status adaptive = QuadraticStencilCompiler::compile(
+      {&request, 1U}, adaptive_limits, adaptive_plan);
+  passed &= expect(static_cast<bool>(adaptive) &&
+                       adaptive_plan.groups().size == 1U,
+                   "adaptive_order compiles the same donors locally");
+  if (!adaptive || adaptive_plan.groups().size != 1U) {
+    return false;
+  }
+  const QuadraticStencilQuality quality =
+      adaptive_plan.groups().data[0U].quality;
+  const IbmReconstructionAudit audit = adaptive_plan.audit();
+  passed &= expect(
+      quality.order == IbmReconstructionOrder::linear &&
+          quality.fallback_reason ==
+              IbmReconstructionFallbackReason::quadratic_rank &&
+          quality.rank == 4U && quality.condition_estimate <= 1.0e8,
+      "linear fallback publishes its order, cause, rank and condition");
+  passed &= expect(
+      audit.valid &&
+          audit.policy == IbmReconstructionPolicy::adaptive_order &&
+          audit.group_count == 1U && audit.quadratic_groups == 0U &&
+          audit.linear_groups == 1U && audit.rank_fallback_groups == 1U &&
+          audit.condition_fallback_groups == 0U &&
+          audit.coverage_fallback_groups == 0U &&
+          audit.donor_fallback_groups == 0U,
+      "plan audit counts the unique local fallback exactly once");
+
+  Polynomial linear;
+  std::fill(linear.coefficient.begin() + 4, linear.coefficient.end(), 0.0);
+  const OwnedField field = donor_field(linear, frame, donors);
+  double actual = -777.0;
+  const double expected = polynomial_value(linear, -0.6, 0.35, -0.25);
+  passed &= expect(static_cast<bool>(evaluate_quadratic_row(
+                       adaptive_plan, 0U, field.view, 0U, 0.0, 0.0,
+                       actual)) &&
+                       close(actual, expected),
+                   "fallback row exactly reconstructs a three-dimensional "
+                   "linear field");
+  return passed;
+}
+
+bool test_standard_search_expands_before_changing_order() {
+  const QuadraticFrame frame = rotated_frame();
+  const auto donors = complete_donors(frame);
+  const auto rows = functionals(frame);
+  QuadraticStencilLimits limits;
+  limits.standard_reach = 1U;
+  QuadraticStencilPlan plan;
+  bool passed = expect(compile_one(frame, donors, rows, plan, limits),
+                       "strict quadratic search expands to its certified "
+                       "maximum reach");
+  if (!passed) return false;
+  const QuadraticStencilQuality quality = plan.groups().data[0U].quality;
+  const IbmReconstructionAudit audit = plan.audit();
+  passed &= expect(
+      quality.order == IbmReconstructionOrder::quadratic &&
+          quality.fallback_reason ==
+              IbmReconstructionFallbackReason::none &&
+          quality.reach > limits.standard_reach &&
+          audit.expanded_search_groups == 1U &&
+          audit.linear_groups == 0U,
+      "donor reach expands while retaining a full quadratic stencil");
+  return passed;
+}
+
 bool test_evaluation_rejects_invalid_views_atomically() {
   const QuadraticFrame frame = rotated_frame();
   const auto donors = complete_donors(frame);
@@ -831,6 +918,8 @@ int main() {
       test_subset_search_rejects_bad_prefixes_and_scores_all_legal_counts();
   passed &= test_geometry_mutation_changes_plan_identity();
   passed &= test_hard_quality_gates_and_atomic_publication();
+  passed &= test_adaptive_order_falls_back_only_to_full_rank_linear();
+  passed &= test_standard_search_expands_before_changing_order();
   passed &= test_evaluation_rejects_invalid_views_atomically();
   passed &= test_positive_bounded_property_reconstruction();
   passed &= test_multiple_groups_keep_offsets_independent();

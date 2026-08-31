@@ -112,6 +112,17 @@ struct RestartBinding {
   std::string generation;
 };
 
+std::string_view ibm_reconstruction_policy_name(
+    IbmReconstructionPolicy policy) noexcept {
+  switch (policy) {
+    case IbmReconstructionPolicy::strict_quadratic:
+      return "strict_quadratic";
+    case IbmReconstructionPolicy::adaptive_order:
+      return "adaptive_order";
+  }
+  return "invalid";
+}
+
 bool parse_u64(std::string_view text, std::uint64_t& out) {
   if (text.empty() || text.front() == '-') return false;
   errno = 0;
@@ -1442,6 +1453,22 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   const PlanFingerprint cpu_fingerprint = plan.cpu_plan_fingerprint();
   const PlanFingerprint stl_fingerprint = plan.stl_fingerprint();
   const PlanSummary summary = plan.summary();
+  if (rank == 0 && summary.immersed) {
+    const IbmReconstructionAudit& boundary =
+        summary.ibm_boundary_reconstruction;
+    const IbmReconstructionAudit& surface =
+        summary.ibm_surface_reconstruction;
+    std::cerr << "ibm_reconstruction policy="
+              << ibm_reconstruction_policy_name(boundary.policy)
+              << " boundary_linear=" << boundary.linear_groups << '/'
+              << boundary.group_count
+              << " surface_linear=" << surface.linear_groups << '/'
+              << surface.group_count
+              << " expanded="
+              << boundary.expanded_search_groups +
+                     surface.expanded_search_groups
+              << '\n';
+  }
   const IoServicePlan* sealed_services = plan.io_services();
   if (sealed_services == nullptr || sealed_services->fingerprint() == 0U)
     return 4;
@@ -1615,6 +1642,28 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "executable_sha256 " << candidate_identity.executable.data()
              << '\n'
              << "candidate_identity " << candidate_identity.identity.data()
+             << '\n'
+             << "ibm_reconstruction_policy "
+             << ibm_reconstruction_policy_name(
+                    summary.ibm_boundary_reconstruction.policy)
+             << '\n'
+             << "ibm_boundary_reconstruction_groups "
+             << summary.ibm_boundary_reconstruction.group_count << '\n'
+             << "ibm_boundary_quadratic_groups "
+             << summary.ibm_boundary_reconstruction.quadratic_groups << '\n'
+             << "ibm_boundary_linear_groups "
+             << summary.ibm_boundary_reconstruction.linear_groups << '\n'
+             << "ibm_boundary_expanded_search_groups "
+             << summary.ibm_boundary_reconstruction.expanded_search_groups
+             << '\n'
+             << "ibm_surface_reconstruction_groups "
+             << summary.ibm_surface_reconstruction.group_count << '\n'
+             << "ibm_surface_quadratic_groups "
+             << summary.ibm_surface_reconstruction.quadratic_groups << '\n'
+             << "ibm_surface_linear_groups "
+             << summary.ibm_surface_reconstruction.linear_groups << '\n'
+             << "ibm_surface_expanded_search_groups "
+             << summary.ibm_surface_reconstruction.expanded_search_groups
              << '\n'
              << "statistics_eligible 0\n"
              << "end\n";

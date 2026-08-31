@@ -264,7 +264,15 @@ bool valid_stencil_limits(QuadraticStencilLimits limits) noexcept {
          limits.maximum_reach <= 4U &&
          limits.minimum_normal_bands >= 3U &&
          std::isfinite(limits.condition_limit) &&
-         limits.condition_limit >= 1.0 && limits.condition_limit <= 1.0e8;
+         limits.condition_limit >= 1.0 && limits.condition_limit <= 1.0e8 &&
+         limits.policy <= IbmReconstructionPolicy::adaptive_order &&
+         limits.minimum_linear_donors >= 4U &&
+         limits.minimum_linear_donors <= limits.maximum_donors &&
+         limits.minimum_linear_normal_bands >= 2U &&
+         limits.minimum_linear_normal_bands <=
+             limits.minimum_normal_bands &&
+         limits.standard_reach > 0U &&
+         limits.standard_reach <= limits.maximum_reach;
 }
 
 GlobalCellId global_id(Int3 index, Int3 cells) noexcept {
@@ -554,6 +562,10 @@ PlanFingerprint shared_compile_contract(
   hash.integer(limits.stencil.maximum_reach);
   hash.integer(limits.stencil.minimum_normal_bands);
   hash.real(limits.stencil.condition_limit);
+  hash.integer(static_cast<std::uint8_t>(limits.stencil.policy));
+  hash.integer(limits.stencil.minimum_linear_donors);
+  hash.integer(limits.stencil.minimum_linear_normal_bands);
+  hash.integer(limits.stencil.standard_reach);
   hash.integer(limits.maximum_persistent_bytes_per_rank);
   hash.integer(limits.maximum_peak_bytes_per_rank);
   hash.integer(limits.maximum_local_links);
@@ -1312,9 +1324,6 @@ Status collect_donors(const CartesianGeometryPlan& geometry,
             {}, norm_squared(delta), wall_normal / frame.scale,
             dot(delta, frame.tangent1) / frame.scale,
             dot(delta, frame.tangent2) / frame.scale};
-        available_quadrants = static_cast<std::uint8_t>(
-            available_quadrants |
-            (UINT8_C(1) << donor_quadrant(geometric)));
         const GlobalCellId canonical_id = global_id(canonical_index, global);
         std::uint8_t sparse_fluid = 0U;
         bool fluid = false;
@@ -1330,6 +1339,12 @@ Status collect_donors(const CartesianGeometryPlan& geometry,
         if (!fluid) {
           continue;
         }
+        // Coverage is a donor-side contract, not a Cartesian-search-box
+        // contract.  Solid/material-opposite cells cannot certify a
+        // tangential quadrant that the reconstruction is unable to use.
+        available_quadrants = static_cast<std::uint8_t>(
+            available_quadrants |
+            (UINT8_C(1) << donor_quadrant(geometric)));
         QuadraticDonorCell donor;
         donor.global_cell = canonical_id;
         // Keep the unwrapped logical search index for the reconstruction
@@ -1381,7 +1396,11 @@ Status collect_donors(const CartesianGeometryPlan& geometry,
   }
   frame.required_quadrant_mask = available_quadrants;
   std::sort(candidates.begin(), candidates.end(), donor_less);
-  if (candidates.size() < limits.minimum_donors) {
+  const std::size_t minimum_donors =
+      limits.policy == IbmReconstructionPolicy::adaptive_order
+          ? std::min(limits.minimum_donors, limits.minimum_linear_donors)
+          : limits.minimum_donors;
+  if (candidates.size() < minimum_donors) {
     return {StatusCode::invalid_plan, kPlanDonors};
   }
   const std::size_t count =
@@ -1471,6 +1490,19 @@ void QuadraticStencilPlan::refresh_fingerprint() noexcept {
   hash.integer(static_cast<std::uint64_t>(donor_global_cells_.size()));
   hash.integer(static_cast<std::uint64_t>(weights_.size()));
   hash.integer(maximum_halo_reach_);
+  hash.integer(audit_.valid ? 1U : 0U);
+  hash.integer(static_cast<std::uint8_t>(audit_.policy));
+  hash.integer(audit_.standard_reach);
+  hash.integer(audit_.group_count);
+  hash.integer(audit_.quadratic_groups);
+  hash.integer(audit_.linear_groups);
+  hash.integer(audit_.expanded_search_groups);
+  hash.integer(audit_.rank_fallback_groups);
+  hash.integer(audit_.condition_fallback_groups);
+  hash.integer(audit_.coverage_fallback_groups);
+  hash.integer(audit_.donor_fallback_groups);
+  hash.real(audit_.maximum_condition_estimate);
+  hash.real(audit_.maximum_functional_l1);
   for (const bool periodic : periodic_axes_) {
     hash.integer(periodic ? 1U : 0U);
   }
@@ -2057,6 +2089,12 @@ Status BoundaryStencilCompiler::compile(
             {requests.data(), requests.size()}, limits.stencil,
             candidate.reconstruction_);
       }
+      if (local && prepared.empty()) {
+        candidate.reconstruction_.audit_.valid = true;
+        candidate.reconstruction_.audit_.policy = limits.stencil.policy;
+        candidate.reconstruction_.audit_.standard_reach =
+            limits.stencil.standard_reach;
+      }
       if (local) {
         const Span<const QuadraticStencilGroup> groups =
             candidate.reconstruction_.groups();
@@ -2354,6 +2392,12 @@ Status SurfaceQuadratureCompiler::compile(
         local = QuadraticStencilCompiler::compile(
             {requests.data(), requests.size()}, limits.stencil,
             candidate.reconstruction_);
+      }
+      if (local && prepared.empty()) {
+        candidate.reconstruction_.audit_.valid = true;
+        candidate.reconstruction_.audit_.policy = limits.stencil.policy;
+        candidate.reconstruction_.audit_.standard_reach =
+            limits.stencil.standard_reach;
       }
       if (local && !prepared.empty()) {
         const Span<const QuadraticStencilGroup> groups =

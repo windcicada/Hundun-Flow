@@ -31,10 +31,13 @@ constexpr std::uint32_t kQuadraticEvaluation = 1309U;
 constexpr std::uint64_t kFnvOffset = UINT64_C(14695981039346656037);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
 constexpr std::size_t kBasisSize = 10U;
+constexpr std::size_t kLinearBasisSize = 4U;
 constexpr std::uint8_t kHardMinimumDonors = 14U;
+constexpr std::uint8_t kHardMinimumLinearDonors = 4U;
 constexpr std::uint8_t kHardMaximumDonors = 32U;
 constexpr std::uint8_t kHardMaximumReach = 4U;
 constexpr std::uint8_t kHardMinimumNormalBands = 3U;
+constexpr std::uint8_t kHardMinimumLinearNormalBands = 2U;
 constexpr double kHardConditionLimit = 1.0e8;
 
 static_assert(sizeof(double) == sizeof(std::uint64_t) &&
@@ -215,6 +218,13 @@ bool finite_basis(const std::array<double, kBasisSize>& values) noexcept {
                      [](double value) { return std::isfinite(value); });
 }
 
+bool finite_basis_prefix(const std::array<double, kBasisSize>& values,
+                         std::size_t count) noexcept {
+  return count <= values.size() &&
+         std::all_of(values.begin(), values.begin() + count,
+                     [](double value) { return std::isfinite(value); });
+}
+
 void subtract_constraint(std::array<double, kBasisSize>& functional,
                          QuadraticConstraint constraint,
                          double& wall_value_weight,
@@ -267,7 +277,39 @@ bool valid_limits(QuadraticStencilLimits limits) noexcept {
          limits.minimum_normal_bands >= kHardMinimumNormalBands &&
          std::isfinite(limits.condition_limit) &&
          limits.condition_limit >= 1.0 &&
-         limits.condition_limit <= kHardConditionLimit;
+         limits.condition_limit <= kHardConditionLimit &&
+         limits.policy <= IbmReconstructionPolicy::adaptive_order &&
+         limits.minimum_linear_donors >= kHardMinimumLinearDonors &&
+         limits.minimum_linear_donors <= limits.maximum_donors &&
+         limits.minimum_linear_normal_bands >=
+             kHardMinimumLinearNormalBands &&
+         limits.minimum_linear_normal_bands <=
+             limits.minimum_normal_bands &&
+         limits.standard_reach > 0U &&
+         limits.standard_reach <= limits.maximum_reach;
+}
+
+std::size_t minimum_request_donors(
+    QuadraticStencilLimits limits) noexcept {
+  return limits.policy == IbmReconstructionPolicy::adaptive_order
+             ? std::min(limits.minimum_donors,
+                        limits.minimum_linear_donors)
+             : limits.minimum_donors;
+}
+
+IbmReconstructionFallbackReason fallback_reason(Status status) noexcept {
+  switch (status.detail) {
+    case kQuadraticDonors:
+      return IbmReconstructionFallbackReason::quadratic_donors;
+    case kQuadraticCoverage:
+      return IbmReconstructionFallbackReason::quadratic_coverage;
+    case kQuadraticRank:
+      return IbmReconstructionFallbackReason::quadratic_rank;
+    case kQuadraticCondition:
+      return IbmReconstructionFallbackReason::quadratic_condition;
+    default:
+      return IbmReconstructionFallbackReason::none;
+  }
 }
 
 void hash_int3(Hash64& hash, Int3 value) noexcept {
@@ -317,7 +359,7 @@ Status validate_request(const QuadraticStencilRequest& request,
       request.functionals.size > UINT8_MAX) {
     return {StatusCode::invalid_plan, kQuadraticInput};
   }
-  if (request.donors.size < limits.minimum_donors ||
+  if (request.donors.size < minimum_request_donors(limits) ||
       request.donors.size > limits.maximum_donors) {
     return {StatusCode::invalid_plan, kQuadraticDonors};
   }
@@ -545,10 +587,31 @@ Status validate_functionals(const QuadraticStencilRequest& request) noexcept {
 Status compile_prefix(const QuadraticStencilRequest& request,
                       const DonorPool& pool, std::size_t donor_count,
                       QuadraticStencilLimits limits,
+                      IbmReconstructionOrder order,
+                      IbmReconstructionFallbackReason fallback,
+                      std::uint8_t allowed_reach,
                       BuildPayload& candidate) {
   candidate.clear();
+  const std::size_t basis_size =
+      order == IbmReconstructionOrder::quadratic ? kBasisSize
+                                                  : kLinearBasisSize;
+  const std::size_t free_basis_size = basis_size - 1U;
+  const std::uint8_t minimum_normal_bands =
+      order == IbmReconstructionOrder::quadratic
+          ? limits.minimum_normal_bands
+          : limits.minimum_linear_normal_bands;
   std::array<std::size_t, detail::ibm_qr::kMaximumRows> selected_order{};
-  std::copy_n(pool.order.begin(), donor_count, selected_order.begin());
+  std::size_t selected_count = 0U;
+  for (std::size_t position = 0U;
+       position < pool.size && selected_count < donor_count; ++position) {
+    const std::size_t source = pool.order[position];
+    if (pool.reach[source] <= allowed_reach) {
+      selected_order[selected_count++] = source;
+    }
+  }
+  if (selected_count != donor_count) {
+    return {StatusCode::invalid_plan, kQuadraticCoverage};
+  }
   std::sort(selected_order.begin(), selected_order.begin() + donor_count,
             [&](std::size_t left, std::size_t right) {
               return canonical_donor_less(request.donors.data[left],
@@ -565,31 +628,41 @@ Status compile_prefix(const QuadraticStencilRequest& request,
     quadrant_mask = static_cast<std::uint8_t>(
         quadrant_mask | pool.quadrant_bits[source]);
     maximum_reach = std::max(maximum_reach, pool.reach[source]);
-    std::copy(pool.basis[source].begin(), pool.basis[source].end(),
-              matrix.begin() +
-                  static_cast<std::ptrdiff_t>(row * kBasisSize));
+    std::copy_n(pool.basis[source].begin(), basis_size,
+                matrix.begin() +
+                    static_cast<std::ptrdiff_t>(row * basis_size));
     candidate.donor_global_cells.push_back(donor.global_cell);
     candidate.donor_local_indices.push_back(donor.local_index);
   }
   const std::uint8_t normal_bands =
       count_normal_bands(normal_coordinates, donor_count);
-  if (normal_bands < limits.minimum_normal_bands ||
+  if (maximum_reach > allowed_reach ||
+      normal_bands < minimum_normal_bands ||
       (quadrant_mask & request.frame.required_quadrant_mask) !=
           request.frame.required_quadrant_mask) {
     return {StatusCode::invalid_plan, kQuadraticCoverage};
   }
   detail::ibm_qr::Factorization factor;
   if (!detail::ibm_qr::factorize(matrix.data(), donor_count,
-                                 kBasisSize, limits.condition_limit, factor)) {
+                                 basis_size, limits.condition_limit, factor)) {
     return {StatusCode::invalid_plan,
-            factor.rank < kBasisSize ? kQuadraticRank : kQuadraticCondition};
+            factor.rank < basis_size ? kQuadraticRank
+                                     : kQuadraticCondition};
   }
 
   const PlanFingerprint qr_fingerprint = pivot_fingerprint(factor);
-  constexpr std::array<std::size_t, kBasisSize - 1U> value_free_basis{
-      1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U};
-  constexpr std::array<std::size_t, kBasisSize - 1U> gradient_free_basis{
-      0U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U};
+  std::array<std::size_t, kBasisSize - 1U> value_free_basis{};
+  std::array<std::size_t, kBasisSize - 1U> gradient_free_basis{};
+  std::size_t value_column = 0U;
+  std::size_t gradient_column = 0U;
+  for (std::size_t column = 0U; column < basis_size; ++column) {
+    if (column != 0U) value_free_basis[value_column++] = column;
+    if (column != 1U) gradient_free_basis[gradient_column++] = column;
+  }
+  if (value_column != free_basis_size ||
+      gradient_column != free_basis_size) {
+    return {StatusCode::invalid_plan, kQuadraticInput};
+  }
   std::array<double, detail::ibm_qr::kMaximumRows *
                          (kBasisSize - 1U)>
       value_constrained_matrix{};
@@ -597,26 +670,26 @@ Status compile_prefix(const QuadraticStencilRequest& request,
                          (kBasisSize - 1U)>
       gradient_constrained_matrix{};
   for (std::size_t donor = 0U; donor < donor_count; ++donor) {
-    for (std::size_t column = 0U; column < kBasisSize - 1U; ++column) {
-      value_constrained_matrix[donor * (kBasisSize - 1U) + column] =
-          matrix[donor * kBasisSize + value_free_basis[column]];
-      gradient_constrained_matrix[donor * (kBasisSize - 1U) + column] =
-          matrix[donor * kBasisSize + gradient_free_basis[column]];
+    for (std::size_t column = 0U; column < free_basis_size; ++column) {
+      value_constrained_matrix[donor * free_basis_size + column] =
+          matrix[donor * basis_size + value_free_basis[column]];
+      gradient_constrained_matrix[donor * free_basis_size + column] =
+          matrix[donor * basis_size + gradient_free_basis[column]];
     }
   }
   detail::ibm_qr::Factorization value_constrained_factor;
   detail::ibm_qr::Factorization gradient_constrained_factor;
   if (!detail::ibm_qr::factorize(value_constrained_matrix.data(),
-                                 donor_count, kBasisSize - 1U,
+                                 donor_count, free_basis_size,
                                  limits.condition_limit,
                                  value_constrained_factor) ||
       !detail::ibm_qr::factorize(gradient_constrained_matrix.data(),
-                                 donor_count, kBasisSize - 1U,
+                                 donor_count, free_basis_size,
                                  limits.condition_limit,
                                  gradient_constrained_factor)) {
     return {StatusCode::invalid_plan,
-            value_constrained_factor.rank < kBasisSize - 1U ||
-                    gradient_constrained_factor.rank < kBasisSize - 1U
+            value_constrained_factor.rank < free_basis_size ||
+                    gradient_constrained_factor.rank < free_basis_size
                 ? kQuadraticRank
                 : kQuadraticCondition};
   }
@@ -635,6 +708,8 @@ Status compile_prefix(const QuadraticStencilRequest& request,
   group_hash.real(request.frame.scale);
   hash_int3(group_hash, request.frame.anchor_global_cell);
   group_hash.integer(request.frame.required_quadrant_mask);
+  group_hash.integer(static_cast<std::uint8_t>(order));
+  group_hash.integer(static_cast<std::uint8_t>(fallback));
   group_hash.integer(qr_fingerprint);
   group_hash.real(condition_estimate);
 
@@ -651,7 +726,7 @@ Status compile_prefix(const QuadraticStencilRequest& request,
     double wall_gradient_weight = 0.0;
     subtract_constraint(functional, request_row.constraint, wall_value_weight,
                         wall_gradient_weight);
-    if (!finite_basis(functional)) {
+    if (!finite_basis_prefix(functional, basis_size)) {
       return {StatusCode::invalid_plan, kQuadraticFunctional};
     }
     std::array<double, detail::ibm_qr::kMaximumRows> weights{};
@@ -661,7 +736,7 @@ Status compile_prefix(const QuadraticStencilRequest& request,
           factor, functional.data(), weights.data());
     } else if (request_row.constraint == QuadraticConstraint::origin_value) {
       std::array<double, kBasisSize - 1U> reduced{};
-      for (std::size_t column = 0U; column < reduced.size(); ++column) {
+      for (std::size_t column = 0U; column < free_basis_size; ++column) {
         reduced[column] = functional[value_free_basis[column]];
       }
       solved = detail::ibm_qr::solve_transpose_minimum_norm(
@@ -670,13 +745,13 @@ Status compile_prefix(const QuadraticStencilRequest& request,
         double constrained_moment = 0.0;
         for (std::size_t donor = 0U; donor < donor_count; ++donor) {
           constrained_moment += weights[donor] *
-                                matrix[donor * kBasisSize + 0U];
+                                matrix[donor * basis_size + 0U];
         }
         wall_value_weight -= constrained_moment;
       }
     } else {
       std::array<double, kBasisSize - 1U> reduced{};
-      for (std::size_t column = 0U; column < reduced.size(); ++column) {
+      for (std::size_t column = 0U; column < free_basis_size; ++column) {
         reduced[column] = functional[gradient_free_basis[column]];
       }
       solved = detail::ibm_qr::solve_transpose_minimum_norm(
@@ -685,7 +760,7 @@ Status compile_prefix(const QuadraticStencilRequest& request,
         double constrained_moment = 0.0;
         for (std::size_t donor = 0U; donor < donor_count; ++donor) {
           constrained_moment += weights[donor] *
-                                matrix[donor * kBasisSize + 1U];
+                                matrix[donor * basis_size + 1U];
         }
         wall_gradient_weight =
             request.frame.scale * (functional[1U] - constrained_moment);
@@ -731,11 +806,18 @@ Status compile_prefix(const QuadraticStencilRequest& request,
   group.donor_begin = 0U;
   group.row_begin = 0U;
   group.row_count = static_cast<std::uint8_t>(request.functionals.size);
-  group.quality = {
-      static_cast<std::uint8_t>(donor_count), normal_bands,
-      quadrant_mask, request.frame.required_quadrant_mask, maximum_reach,
-      factor.rank, condition_estimate, maximum_functional_l1,
-      qr_fingerprint};
+  group.quality.donor_count = static_cast<std::uint8_t>(donor_count);
+  group.quality.normal_band_count = normal_bands;
+  group.quality.quadrant_mask = quadrant_mask;
+  group.quality.required_quadrant_mask =
+      request.frame.required_quadrant_mask;
+  group.quality.reach = maximum_reach;
+  group.quality.rank = factor.rank;
+  group.quality.condition_estimate = condition_estimate;
+  group.quality.functional_l1 = maximum_functional_l1;
+  group.quality.pivot_fingerprint = qr_fingerprint;
+  group.quality.order = order;
+  group.quality.fallback_reason = fallback;
   group.fingerprint = group_hash.finish();
   candidate.groups.push_back(group);
   candidate.maximum_halo_reach =
@@ -803,6 +885,52 @@ Status append_group(const BuildPayload& source,
   return {};
 }
 
+Status compile_group_order(
+    const QuadraticStencilRequest& request, const DonorPool& pool,
+    QuadraticStencilLimits limits, IbmReconstructionOrder order,
+    IbmReconstructionFallbackReason fallback, BuildPayload& candidate,
+    CompileWorkspace& workspace) {
+  workspace.trial.clear();
+  workspace.best.clear();
+  const std::size_t minimum_donors =
+      order == IbmReconstructionOrder::quadratic
+          ? limits.minimum_donors
+          : limits.minimum_linear_donors;
+  if (request.donors.size < minimum_donors) {
+    return {StatusCode::invalid_plan, kQuadraticDonors};
+  }
+  Status last_failure{StatusCode::invalid_plan, kQuadraticRank};
+  for (std::uint8_t allowed_reach = limits.standard_reach;
+       allowed_reach <= limits.maximum_reach; ++allowed_reach) {
+    workspace.best.clear();
+    std::size_t eligible_donors = 0U;
+    for (std::size_t donor = 0U; donor < pool.size; ++donor) {
+      eligible_donors += pool.reach[donor] <= allowed_reach ? 1U : 0U;
+    }
+    if (eligible_donors < minimum_donors) {
+      last_failure = {StatusCode::invalid_plan, kQuadraticCoverage};
+      continue;
+    }
+    for (std::size_t donor_count = minimum_donors;
+         donor_count <= eligible_donors; ++donor_count) {
+      const Status status = compile_prefix(
+          request, pool, donor_count, limits, order, fallback, allowed_reach,
+          workspace.trial);
+      if (!status) {
+        last_failure = status;
+        continue;
+      }
+      if (better_candidate(workspace.trial, workspace.best)) {
+        workspace.best = workspace.trial;
+      }
+    }
+    if (!workspace.best.groups.empty()) {
+      return append_group(workspace.best, candidate);
+    }
+  }
+  return last_failure;
+}
+
 Status compile_group(const QuadraticStencilRequest& request,
                      QuadraticStencilLimits limits, BuildPayload& candidate,
                      CompileWorkspace& workspace) {
@@ -824,23 +952,21 @@ Status compile_group(const QuadraticStencilRequest& request,
     payload->weights.reserve(weights);
     payload->clear();
   }
-  Status last_failure{StatusCode::invalid_plan, kQuadraticRank};
-  for (std::size_t donor_count = limits.minimum_donors;
-       donor_count <= request.donors.size; ++donor_count) {
-    const Status status = compile_prefix(request, pool, donor_count, limits,
-                                         workspace.trial);
-    if (!status) {
-      last_failure = status;
-      continue;
-    }
-    if (better_candidate(workspace.trial, workspace.best)) {
-      workspace.best = workspace.trial;
-    }
+  const Status quadratic = compile_group_order(
+      request, pool, limits, IbmReconstructionOrder::quadratic,
+      IbmReconstructionFallbackReason::none, candidate, workspace);
+  if (quadratic ||
+      limits.policy == IbmReconstructionPolicy::strict_quadratic) {
+    return quadratic;
   }
-  if (workspace.best.groups.empty()) {
-    return last_failure;
+  const IbmReconstructionFallbackReason reason =
+      fallback_reason(quadratic);
+  if (reason == IbmReconstructionFallbackReason::none) {
+    return quadratic;
   }
-  return append_group(workspace.best, candidate);
+  return compile_group_order(request, pool, limits,
+                             IbmReconstructionOrder::linear, reason,
+                             candidate, workspace);
 }
 
 bool index_in_view(Int3 index, ConstFieldView field) noexcept {
@@ -904,6 +1030,43 @@ Status QuadraticStencilCompiler::compile(
     candidate.donor_local_indices_ = std::move(payload.donor_local_indices);
     candidate.weights_ = std::move(payload.weights);
     candidate.maximum_halo_reach_ = payload.maximum_halo_reach;
+    candidate.audit_.valid = true;
+    candidate.audit_.policy = limits.policy;
+    candidate.audit_.standard_reach = limits.standard_reach;
+    candidate.audit_.group_count = candidate.groups_.size();
+    for (const QuadraticStencilGroup& group : candidate.groups_) {
+      const QuadraticStencilQuality& quality = group.quality;
+      if (quality.order == IbmReconstructionOrder::quadratic) {
+        ++candidate.audit_.quadratic_groups;
+      } else if (quality.order == IbmReconstructionOrder::linear) {
+        ++candidate.audit_.linear_groups;
+      }
+      if (quality.reach > limits.standard_reach) {
+        ++candidate.audit_.expanded_search_groups;
+      }
+      switch (quality.fallback_reason) {
+        case IbmReconstructionFallbackReason::quadratic_rank:
+          ++candidate.audit_.rank_fallback_groups;
+          break;
+        case IbmReconstructionFallbackReason::quadratic_condition:
+          ++candidate.audit_.condition_fallback_groups;
+          break;
+        case IbmReconstructionFallbackReason::quadratic_coverage:
+          ++candidate.audit_.coverage_fallback_groups;
+          break;
+        case IbmReconstructionFallbackReason::quadratic_donors:
+          ++candidate.audit_.donor_fallback_groups;
+          break;
+        case IbmReconstructionFallbackReason::none:
+          break;
+      }
+      candidate.audit_.maximum_condition_estimate =
+          std::max(candidate.audit_.maximum_condition_estimate,
+                   quality.condition_estimate);
+      candidate.audit_.maximum_functional_l1 =
+          std::max(candidate.audit_.maximum_functional_l1,
+                   quality.functional_l1);
+    }
     candidate.refresh_fingerprint();
     out = std::move(candidate);
     return {};

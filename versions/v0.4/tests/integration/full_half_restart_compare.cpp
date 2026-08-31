@@ -355,9 +355,29 @@ std::uint64_t physical_model_fingerprint(const ValidatedModel& model) {
     hash_path(hash, model.immersed_boundary->stl_file);
     hash_word(hash,
               static_cast<std::uint8_t>(model.immersed_boundary->fluid_side));
+    hash_word(hash, static_cast<std::uint8_t>(
+                        model.immersed_boundary->reconstruction_policy));
   }
   if (hash == 0U) hash = 1U;
   return hash;
+}
+
+bool same_ibm_audit(const IbmReconstructionAudit& left,
+                    const IbmReconstructionAudit& right) noexcept {
+  return left.valid == right.valid && left.policy == right.policy &&
+         left.standard_reach == right.standard_reach &&
+         left.group_count == right.group_count &&
+         left.quadratic_groups == right.quadratic_groups &&
+         left.linear_groups == right.linear_groups &&
+         left.expanded_search_groups == right.expanded_search_groups &&
+         left.rank_fallback_groups == right.rank_fallback_groups &&
+         left.condition_fallback_groups == right.condition_fallback_groups &&
+         left.coverage_fallback_groups == right.coverage_fallback_groups &&
+         left.donor_fallback_groups == right.donor_fallback_groups &&
+         same_bits(left.maximum_condition_estimate,
+                   right.maximum_condition_estimate) &&
+         same_bits(left.maximum_functional_l1,
+                   right.maximum_functional_l1);
 }
 
 bool same_summary(const PlanSummary& left, const PlanSummary& right) noexcept {
@@ -388,6 +408,10 @@ bool same_summary(const PlanSummary& left, const PlanSummary& right) noexcept {
          same_bits(left.terminal_gauge_tolerance,
                    right.terminal_gauge_tolerance) &&
          left.immersed == right.immersed &&
+         same_ibm_audit(left.ibm_boundary_reconstruction,
+                        right.ibm_boundary_reconstruction) &&
+         same_ibm_audit(left.ibm_surface_reconstruction,
+                        right.ibm_surface_reconstruction) &&
          left.exact_numeric_certified == right.exact_numeric_certified &&
          left.preconditioner_setup_certified ==
              right.preconditioner_setup_certified &&

@@ -148,6 +148,71 @@ bool product_candidate_boundary_supported(
   return true;
 }
 
+Status reduce_ibm_reconstruction_audit(
+    MPI_Comm communicator, const IbmReconstructionAudit& local,
+    IbmReconstructionAudit& global) noexcept {
+  if (!local.valid ||
+      local.policy > IbmReconstructionPolicy::adaptive_order ||
+      local.standard_reach == 0U ||
+      local.group_count != local.quadratic_groups + local.linear_groups) {
+    return {StatusCode::invalid_plan, kProductCollective};
+  }
+  std::array<std::uint64_t, 9U> counts{{
+      local.group_count,
+      local.quadratic_groups,
+      local.linear_groups,
+      local.expanded_search_groups,
+      local.rank_fallback_groups,
+      local.condition_fallback_groups,
+      local.coverage_fallback_groups,
+      local.donor_fallback_groups,
+      local.valid ? 1U : 0U,
+  }};
+  if (MPI_Allreduce(MPI_IN_PLACE, counts.data(),
+                    static_cast<int>(counts.size()), MPI_UINT64_T, MPI_SUM,
+                    communicator) != MPI_SUCCESS) {
+    return {StatusCode::mpi_failure, kProductCollective};
+  }
+  std::array<unsigned int, 2U> identity{{
+      static_cast<unsigned int>(local.policy),
+      static_cast<unsigned int>(local.standard_reach),
+  }};
+  std::array<unsigned int, 2U> minimum = identity;
+  std::array<unsigned int, 2U> maximum = identity;
+  if (MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
+                    static_cast<int>(minimum.size()), MPI_UNSIGNED, MPI_MIN,
+                    communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(MPI_IN_PLACE, maximum.data(),
+                    static_cast<int>(maximum.size()), MPI_UNSIGNED, MPI_MAX,
+                    communicator) != MPI_SUCCESS ||
+      minimum != maximum) {
+    return {StatusCode::mpi_failure, kProductCollective};
+  }
+  std::array<double, 2U> maxima{{local.maximum_condition_estimate,
+                                 local.maximum_functional_l1}};
+  if (MPI_Allreduce(MPI_IN_PLACE, maxima.data(),
+                    static_cast<int>(maxima.size()), MPI_DOUBLE, MPI_MAX,
+                    communicator) != MPI_SUCCESS ||
+      !std::isfinite(maxima[0U]) || !std::isfinite(maxima[1U])) {
+    return {StatusCode::mpi_failure, kProductCollective};
+  }
+  global = {};
+  global.valid = true;
+  global.policy = local.policy;
+  global.standard_reach = local.standard_reach;
+  global.group_count = counts[0U];
+  global.quadratic_groups = counts[1U];
+  global.linear_groups = counts[2U];
+  global.expanded_search_groups = counts[3U];
+  global.rank_fallback_groups = counts[4U];
+  global.condition_fallback_groups = counts[5U];
+  global.coverage_fallback_groups = counts[6U];
+  global.donor_fallback_groups = counts[7U];
+  global.maximum_condition_estimate = maxima[0U];
+  global.maximum_functional_l1 = maxima[1U];
+  return {};
+}
+
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 std::atomic<bool> g_candidate_globalization_armed{false};
 std::atomic<bool> g_candidate_globalization_published{false};
@@ -2221,6 +2286,8 @@ struct CompiledCasePlan::Impl {
   std::optional<IbmPhysicalBoundaryFluxAuthority>
       ibm_physical_boundary_flux;
   std::optional<SurfaceQuadraturePlan> quadrature;
+  IbmReconstructionAudit ibm_boundary_reconstruction{};
+  IbmReconstructionAudit ibm_surface_reconstruction{};
   BoundaryPlan boundary;
   std::array<BoundaryFaceSpec, 6U> boundary_specs{};
   SchemePlan schemes;
@@ -2756,6 +2823,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
     if (status) {
       ImmersedPlanLimits limits;
+      limits.stencil.policy =
+          model.immersed_boundary->reconstruction_policy;
+      if (limits.stencil.policy ==
+          IbmReconstructionPolicy::adaptive_order) {
+        limits.stencil.standard_reach = 2U;
+      }
       ImmersedDomainBoundaryPolicy boundary_policy;
       for (std::size_t face = 0U; face < model.boundaries.size(); ++face) {
         const BoundaryKind kind = model.boundaries[face].flow_kind;
@@ -2793,6 +2866,14 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             communicator, candidate->geometry, candidate->patch,
             *candidate->surface, *candidate->topology, boundary_policy, limits,
             *candidate->quadrature);
+      if (status)
+        status = reduce_ibm_reconstruction_audit(
+            communicator, candidate->ibm_boundary->reconstruction().audit(),
+            candidate->ibm_boundary_reconstruction);
+      if (status)
+        status = reduce_ibm_reconstruction_audit(
+            communicator, candidate->quadrature->reconstruction().audit(),
+            candidate->ibm_surface_reconstruction);
     }
     if (status) {
       // Scan triangles and line intersections are cold construction
@@ -4088,6 +4169,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       model.solver.terminal.closed_mass;
   candidate->summary.terminal_gauge_tolerance = model.solver.terminal.gauge;
   candidate->summary.immersed = immersed;
+  candidate->summary.ibm_boundary_reconstruction =
+      candidate->ibm_boundary_reconstruction;
+  candidate->summary.ibm_surface_reconstruction =
+      candidate->ibm_surface_reconstruction;
   candidate->summary.exact_numeric_certified = false;
   candidate->summary.preconditioner_setup_certified = false;
   candidate->summary.sealed = true;

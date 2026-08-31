@@ -48,6 +48,8 @@ struct PlanSummary {
   double terminal_closed_mass_tolerance{};
   double terminal_gauge_tolerance{};
   bool immersed{};
+  IbmReconstructionAudit ibm_boundary_reconstruction{};
+  IbmReconstructionAudit ibm_surface_reconstruction{};
   bool exact_numeric_certified{};
   bool preconditioner_setup_certified{};
   bool sealed{};

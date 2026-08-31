@@ -29,6 +29,7 @@ using hundun::v04::FieldId;
 using hundun::v04::FieldRegistry;
 using hundun::v04::FieldSchema;
 using hundun::v04::GeometryKind;
+using hundun::v04::IbmReconstructionPolicy;
 using hundun::v04::PressureReferenceKind;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
@@ -1047,6 +1048,56 @@ bool test_defaults_and_enums() {
   return passed;
 }
 
+bool test_immersed_reconstruction_policy_is_typed_and_hashed() {
+  const auto immersed_mesh = [](std::string_view policy) {
+    std::string mesh{kUniformMesh};
+    const std::string immersed =
+        std::string{R"json({"stl_file":"body.stl","fluid_side":"outside","reconstruction_policy":")json"} +
+        std::string(policy) + R"json("})json";
+    return replace_once(mesh, "\"immersed_boundary\":null",
+                        "\"immersed_boundary\":" + immersed)
+               ? mesh
+               : std::string{};
+  };
+
+  ScratchCase strict_case("ibm-strict-policy");
+  strict_case.write("case.json",
+                    case_json(immersed_mesh("strict_quadratic")));
+  strict_case.write("thermophysics.d", kPlaceholderThermophysics);
+  strict_case.write("body.stl", "strict policy identity\n");
+  ValidatedModel strict_model;
+  bool passed = expect(
+      static_cast<bool>(compile(strict_case.root(), strict_model)) &&
+          strict_model.immersed_boundary.has_value() &&
+          strict_model.immersed_boundary->reconstruction_policy ==
+              IbmReconstructionPolicy::strict_quadratic,
+      "strict_quadratic is a typed immersed reconstruction policy");
+
+  ScratchCase adaptive_case("ibm-adaptive-policy");
+  adaptive_case.write("case.json",
+                      case_json(immersed_mesh("adaptive_order")));
+  adaptive_case.write("thermophysics.d", kPlaceholderThermophysics);
+  adaptive_case.write("body.stl", "strict policy identity\n");
+  ValidatedModel adaptive_model;
+  passed &= expect(
+      static_cast<bool>(compile(adaptive_case.root(), adaptive_model)) &&
+          adaptive_model.immersed_boundary.has_value() &&
+          adaptive_model.immersed_boundary->reconstruction_policy ==
+              IbmReconstructionPolicy::adaptive_order &&
+          adaptive_model.fingerprint != strict_model.fingerprint,
+      "adaptive_order is typed and changes immutable case identity");
+
+  ScratchCase invalid_case("ibm-invalid-policy");
+  invalid_case.write("case.json", case_json(immersed_mesh("nearest_copy")));
+  invalid_case.write("thermophysics.d", kPlaceholderThermophysics);
+  invalid_case.write("body.stl", "strict policy identity\n");
+  ValidatedModel invalid_model;
+  passed &= expect(compile(invalid_case.root(), invalid_model).code ==
+                       StatusCode::invalid_case,
+                   "unapproved nearest-copy fallback is rejected");
+  return passed;
+}
+
 bool test_field_registry() {
   FieldRegistry registry;
   FieldId first = 99;
@@ -1118,6 +1169,7 @@ int main(int argc, char** argv) {
   passed &= test_case_and_reference_security();
   passed &= test_wire_rejects_duplicate_data_paths();
   passed &= test_defaults_and_enums();
+  passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();
   passed &= test_field_registry();
   passed &= test_field_id_overflow();
   const int finalize_status = MPI_Finalize();

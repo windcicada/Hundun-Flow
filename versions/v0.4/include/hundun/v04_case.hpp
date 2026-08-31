@@ -78,6 +78,10 @@ enum class DiffusionScheme : std::uint8_t { central2 };
 enum class TimeScheme : std::uint8_t { backward_euler, variable_bdf2 };
 enum class TransportLaw : std::uint8_t { constant, sutherland };
 enum class ImmersedFluidSide : std::uint8_t { outside, inside };
+enum class IbmReconstructionPolicy : std::uint8_t {
+  strict_quadratic,
+  adaptive_order
+};
 
 struct CaseSpec {
   std::filesystem::path root;
@@ -111,6 +115,8 @@ struct CartesianMeshSpec {
 struct ImmersedBoundarySpec {
   std::filesystem::path stl_file;
   ImmersedFluidSide fluid_side{ImmersedFluidSide::outside};
+  IbmReconstructionPolicy reconstruction_policy{
+      IbmReconstructionPolicy::strict_quadratic};
 };
 
 struct ScalarBoundarySpec {

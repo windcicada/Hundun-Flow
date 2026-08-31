@@ -2980,6 +2980,23 @@ bool run_immersed_product(int rank) {
   CompiledCasePlan plan;
   Status status =
       ProductCompiler::compile(MPI_COMM_WORLD, model, data_root, plan);
+  PlanSummary summary;
+  if (status) summary = plan.summary();
+  const bool reconstruction_audit =
+      summary.immersed && summary.ibm_boundary_reconstruction.valid &&
+      summary.ibm_surface_reconstruction.valid &&
+      summary.ibm_boundary_reconstruction.policy ==
+          IbmReconstructionPolicy::strict_quadratic &&
+      summary.ibm_surface_reconstruction.policy ==
+          IbmReconstructionPolicy::strict_quadratic &&
+      summary.ibm_boundary_reconstruction.group_count > 0U &&
+      summary.ibm_surface_reconstruction.group_count > 0U &&
+      summary.ibm_boundary_reconstruction.group_count ==
+          summary.ibm_boundary_reconstruction.quadratic_groups &&
+      summary.ibm_surface_reconstruction.group_count ==
+          summary.ibm_surface_reconstruction.quadratic_groups &&
+      summary.ibm_boundary_reconstruction.linear_groups == 0U &&
+      summary.ibm_surface_reconstruction.linear_groups == 0U;
   detail::PressureEnergyCandidateStorageDiagnostic storage;
   const bool storage_observed =
       status && detail::pressure_energy_candidate_storage_diagnostic_for_test(
@@ -3112,7 +3129,7 @@ bool run_immersed_product(int rank) {
   const bool passed =
       status && step.accepted && step.attempts == 1U &&
       step.failure.code == StatusCode::ok && ibm_role_matrix &&
-      certificate.valid() && candidate_donor_lineage &&
+      certificate.valid() && reconstruction_audit && candidate_donor_lineage &&
       candidate_relations && resource_relations &&
       (size == 1 ? global_ibm_messages == 0U
                  : global_ibm_messages > 0U) &&

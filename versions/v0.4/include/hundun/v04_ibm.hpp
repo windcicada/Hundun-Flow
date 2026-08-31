@@ -32,6 +32,17 @@ enum class QuadraticFunctionalKind : std::uint8_t {
   value,
   directional_derivative
 };
+enum class IbmReconstructionOrder : std::uint8_t {
+  linear = 1U,
+  quadratic = 2U
+};
+enum class IbmReconstructionFallbackReason : std::uint8_t {
+  none,
+  quadratic_donors,
+  quadratic_coverage,
+  quadratic_rank,
+  quadratic_condition
+};
 
 struct QuadraticFrame {
   Real3 origin{};
@@ -76,6 +87,11 @@ struct QuadraticStencilLimits {
   std::uint8_t maximum_reach{4U};
   std::uint8_t minimum_normal_bands{3U};
   double condition_limit{1.0e8};
+  IbmReconstructionPolicy policy{
+      IbmReconstructionPolicy::strict_quadratic};
+  std::uint8_t minimum_linear_donors{6U};
+  std::uint8_t minimum_linear_normal_bands{2U};
+  std::uint8_t standard_reach{4U};
 };
 
 struct QuadraticStencilQuality {
@@ -88,6 +104,9 @@ struct QuadraticStencilQuality {
   double condition_estimate{};
   double functional_l1{};
   PlanFingerprint pivot_fingerprint{};
+  IbmReconstructionOrder order{IbmReconstructionOrder::quadratic};
+  IbmReconstructionFallbackReason fallback_reason{
+      IbmReconstructionFallbackReason::none};
 };
 
 struct QuadraticStencilGroup {
@@ -103,6 +122,23 @@ struct QuadraticAffineRow {
   std::uint32_t weight_begin{};
   double wall_value_weight{};
   double wall_normal_gradient_weight_m{};
+};
+
+struct IbmReconstructionAudit {
+  bool valid{};
+  IbmReconstructionPolicy policy{
+      IbmReconstructionPolicy::strict_quadratic};
+  std::uint8_t standard_reach{};
+  std::uint64_t group_count{};
+  std::uint64_t quadratic_groups{};
+  std::uint64_t linear_groups{};
+  std::uint64_t expanded_search_groups{};
+  std::uint64_t rank_fallback_groups{};
+  std::uint64_t condition_fallback_groups{};
+  std::uint64_t coverage_fallback_groups{};
+  std::uint64_t donor_fallback_groups{};
+  double maximum_condition_estimate{};
+  double maximum_functional_l1{};
 };
 
 class QuadraticStencilPlan {
@@ -140,6 +176,7 @@ class QuadraticStencilPlan {
     return index < periodic_axes_.size() && periodic_axes_[index];
   }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+  const IbmReconstructionAudit& audit() const noexcept { return audit_; }
 
  private:
   friend class QuadraticStencilCompiler;
@@ -153,6 +190,7 @@ class QuadraticStencilPlan {
   std::vector<double> weights_;
   std::uint8_t maximum_halo_reach_{};
   std::array<bool, 3U> periodic_axes_{};
+  IbmReconstructionAudit audit_{};
   PlanFingerprint fingerprint_{};
 };
 
