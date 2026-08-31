@@ -1087,6 +1087,12 @@ class FinalFaceFluxWriter {
   // fresh-start flux is inserted into the restored lineage.
   Status initialize_restored(FaceFluxStorage& storage,
                              ConstFaceFluxView source) noexcept;
+  // Exact Restart installs distinct t_n/t_{n-1} payloads and preserves their
+  // committed revision lineage.  The one-source overload is the legacy BE
+  // recovery path and deliberately aliases the two history handles.
+  Status initialize_restored_history(
+      FaceFluxStorage& storage, ConstFaceFluxView accepted,
+      ConstFaceFluxView previous) noexcept;
   // Pure, allocation-free validation for a later publish_pending call.  A
   // failed preflight neither poisons the attempt nor consumes the pending
   // lease, so callers may first reach WORLD consensus and then publish.

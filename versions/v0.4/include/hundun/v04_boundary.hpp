@@ -645,6 +645,14 @@ class TimeControllerState {
                         double last_accepted_dt,
                         std::uint64_t accepted_step,
                         TimeControllerState& out) noexcept;
+  // Exact Restart preserves a complete two-level history and therefore does
+  // not insert a synthetic backward-Euler recovery seam.  The legacy
+  // overload above intentionally retains its historical BE behavior.
+  static Status restart_exact(const TimeSchemePlan& plan, double time,
+                              double last_accepted_dt,
+                              std::uint64_t accepted_step,
+                              std::uint64_t next_generation,
+                              TimeControllerState& out) noexcept;
   Status propose(MPI_Comm communicator, LocalTimeLimits limits,
                  StepTime& out) noexcept;
   Status prepare_finish(MPI_Comm communicator, const StepTime& step,
@@ -663,6 +671,7 @@ class TimeControllerState {
   double time() const noexcept { return time_; }
   double last_accepted_dt() const noexcept { return last_accepted_dt_; }
   std::uint64_t accepted_step() const noexcept { return accepted_step_; }
+  std::uint64_t next_generation() const noexcept { return next_generation_; }
   std::uint32_t retry_count() const noexcept { return retry_count_; }
   int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
   bool has_active_proposal() const noexcept { return active_; }

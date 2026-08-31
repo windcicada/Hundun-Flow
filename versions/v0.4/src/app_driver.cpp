@@ -529,6 +529,7 @@ Status ApplicationService::run(MPI_Comm communicator,
   status = ProductDriver::create(communicator, std::move(plan), driver);
   std::uint64_t starting_step = 0U;
   RuntimeRunStartAnchor run_start;
+  bool restart_backward_euler_recovery = false;
   if (status && !options.restart_directory.empty()) {
     RestartExpected expected;
     status = driver.restart_expected(expected);
@@ -542,6 +543,7 @@ Status ApplicationService::run(MPI_Comm communicator,
       run_start.previous_step = image.step;
       run_start.previous_time = image.time;
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
+      restart_backward_euler_recovery = image.backward_euler_recovery;
       status = driver.initialize_restart(image);
     }
   } else if (status) {
@@ -919,7 +921,8 @@ Status ApplicationService::run(MPI_Comm communicator,
       evidence.stages = {evidence_stages.data(), evidence_stages.size()};
       evidence.startup = step.accepted_step == 1U;
       evidence.retry = step.attempts != 1U;
-      evidence.restart_recovery = starting_step != 0U && step_index == 0U;
+      evidence.restart_recovery = restart_backward_euler_recovery &&
+                                  step_index == 0U;
       // Task 20 owns candidate identity and eligibility.  Ordinary product
       // runs are deliberately incapable of masquerading as benchmark data.
       evidence.statistics_eligible = false;

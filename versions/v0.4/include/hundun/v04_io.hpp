@@ -77,7 +77,9 @@ enum class RestartFieldRole : std::uint8_t {
   pressure_absolute,
   enthalpy,
   independent_species,
-  transported_scalar
+  transported_scalar,
+  enthalpy_nonadvective_rate,
+  scalar_nonadvective_rate
 };
 
 struct RestartFieldView {
@@ -98,6 +100,15 @@ struct RestartSnapshot {
   std::uint64_t controller_state{};
   Span<const RestartFieldView> fields{};
   ConstFaceFluxView final_mass_flux{};
+  // Version-two Restart images carry the complete accepted BDF history.
+  // The original fields/flux above remain the t_n authority so legacy
+  // aggregate initializers and version-one readers retain their meaning.
+  Span<const RestartFieldView> previous_fields{};
+  Span<const RestartFieldView> accepted_rate_fields{};
+  Span<const RestartFieldView> previous_rate_fields{};
+  ConstFaceFluxView previous_mass_flux{};
+  double previous_pressure_reference{};
+  double closed_mass_target{};
 };
 
 struct RestartWriteOptions {
@@ -117,6 +128,7 @@ struct RestartExpected {
   PlanFingerprint schema{};
   PlanFingerprint geometry{};
   Span<const RestartExpectedField> fields{};
+  Span<const RestartExpectedField> rate_fields{};
 };
 
 struct RestartImageField {
@@ -140,7 +152,19 @@ struct RestartImage {
   RuntimeSha256Digest source_manifest_sha256{};
   std::vector<RestartImageField> fields;
   std::array<std::vector<double>, 3U> final_mass_flux;
+  // True only for a legacy version-one image whose absent t_{n-1} state is
+  // synthesized from t_n.  Callers must insert one backward-Euler recovery
+  // step in that case.  False denotes an exact version-two history and the
+  // next requested/effective scheme may remain BDF2.
   bool backward_euler_recovery{true};
+  std::vector<RestartImageField> previous_fields;
+  std::vector<RestartImageField> accepted_rate_fields;
+  std::vector<RestartImageField> previous_rate_fields;
+  std::array<std::vector<double>, 3U> previous_mass_flux;
+  double previous_pressure_reference{};
+  double closed_mass_target{};
+  RevisionToken final_mass_flux_revision{};
+  RevisionToken previous_mass_flux_revision{};
 
   void clear() noexcept;
 };

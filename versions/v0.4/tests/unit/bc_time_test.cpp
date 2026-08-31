@@ -434,6 +434,20 @@ bool test_state_and_bdf() {
                        restart_first.origin == StepOrigin::restart &&
                        restart_first.bdf.order == 1U,
                    "restart first step always uses BE");
+  TimeControllerState exact_restarted;
+  passed &= expect(static_cast<bool>(TimeControllerState::restart_exact(
+                       plan, state.time(), state.last_accepted_dt(),
+                       state.accepted_step(), state.next_generation(),
+                       exact_restarted)),
+                   "exact restart restores complete accepted metadata");
+  StepTime exact_restart_first;
+  passed &= expect(static_cast<bool>(exact_restarted.propose(
+                       MPI_COMM_SELF, limits, exact_restart_first)) &&
+                       exact_restart_first.origin == StepOrigin::restart &&
+                       exact_restart_first.bdf.order == 2U &&
+                       exact_restart_first.generation ==
+                           state.next_generation(),
+                   "exact restart preserves BDF2 and generation lineage");
   TimeControllerState retained_restart = restarted;
   passed &= expect(TimeControllerState::restart(
                        plan, state.time(), plan.spec().maximum_dt * 2.0,

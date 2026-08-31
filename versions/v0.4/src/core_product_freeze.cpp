@@ -2311,7 +2311,11 @@ struct ProductDriver::Impl {
   MPI_Comm communicator{MPI_COMM_NULL};
   std::vector<SnapshotFieldView> output_fields;
   std::vector<RestartFieldView> restart_fields;
+  std::vector<RestartFieldView> restart_previous_fields;
+  std::vector<RestartFieldView> restart_rate_fields;
+  std::vector<RestartFieldView> restart_previous_rate_fields;
   std::vector<RestartExpectedField> restart_expected_fields;
+  std::vector<RestartExpectedField> restart_expected_rate_fields;
   std::vector<double> species_values;
   std::vector<ConstFieldView> species_accepted;
   std::vector<ConstFieldView> species_previous;
@@ -4147,8 +4151,16 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
   if (status) {
     candidate->output_fields.resize(product.io.snapshot_fields().size);
     candidate->restart_fields.resize(3U + product.fields.scalars.size());
+    candidate->restart_previous_fields.resize(
+        3U + product.fields.scalars.size());
     candidate->restart_expected_fields.resize(
         3U + product.fields.scalars.size());
+    candidate->restart_rate_fields.resize(
+        1U + product.fields.scalar_nonadvective_rates.size());
+    candidate->restart_previous_rate_fields.resize(
+        1U + product.fields.scalar_nonadvective_rates.size());
+    candidate->restart_expected_rate_fields.resize(
+        1U + product.fields.scalar_nonadvective_rates.size());
     candidate->restart_expected_fields[0U] = {
         RestartFieldRole::velocity, product.fields.velocity, 3U};
     candidate->restart_expected_fields[1U] = {
@@ -4161,6 +4173,14 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
               ? RestartFieldRole::independent_species
               : RestartFieldRole::transported_scalar,
           product.fields.scalars[index], 1U};
+    candidate->restart_expected_rate_fields[0U] = {
+        RestartFieldRole::enthalpy_nonadvective_rate,
+        product.fields.enthalpy_nonadvective_rate, 1U};
+    for (std::size_t index = 0U;
+         index < product.fields.scalar_nonadvective_rates.size(); ++index)
+      candidate->restart_expected_rate_fields[index + 1U] = {
+          RestartFieldRole::scalar_nonadvective_rate,
+          product.fields.scalar_nonadvective_rates[index], 1U};
     candidate->species_values.resize(
         product.thermodynamics.independent_species_count());
     const std::size_t species =
@@ -5143,7 +5163,9 @@ Status ProductDriver::restart_expected(RestartExpected& out) noexcept {
          product.schema_fingerprint,
          product.geometry.fingerprint(),
          {runtime.restart_expected_fields.data(),
-          runtime.restart_expected_fields.size()}};
+          runtime.restart_expected_fields.size()},
+         {runtime.restart_expected_rate_fields.data(),
+          runtime.restart_expected_rate_fields.size()}};
   return {};
 }
 
@@ -5967,11 +5989,23 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
     return {StatusCode::invalid_plan, kProductInput};
   ProductDriver::Impl& runtime = *implementation_;
   CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
+  const bool exact_history = !image.backward_euler_recovery;
   Status status =
-      !runtime.initialized && image.backward_euler_recovery &&
+      !runtime.initialized &&
               std::isfinite(image.time) && std::isfinite(image.dt) &&
               image.dt > 0.0 && std::isfinite(image.pressure_reference) &&
-              image.pressure_reference > 0.0 && image.step != 0U
+              image.pressure_reference > 0.0 && image.step != 0U &&
+              (!exact_history ||
+               (image.controller_state != 0U &&
+                std::isfinite(image.previous_pressure_reference) &&
+                image.previous_pressure_reference > 0.0 &&
+                std::isfinite(image.closed_mass_target) &&
+                image.closed_mass_target > 0.0 &&
+                image.previous_mass_flux_revision != 0U &&
+                image.previous_mass_flux_revision <
+                    image.final_mass_flux_revision &&
+                image.final_mass_flux_revision !=
+                    std::numeric_limits<RevisionToken>::max()))
           ? Status{}
           : Status{StatusCode::invalid_plan, kProductInput};
   const auto same_int3 = [](Int3 left, Int3 right) noexcept {
@@ -5995,19 +6029,35 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
       static_cast<std::size_t>(product.patch.cells.x) *
       static_cast<std::size_t>(product.patch.cells.y) *
       static_cast<std::size_t>(product.patch.cells.z);
-  for (std::size_t index = 0U; index < image.fields.size() && status;
-       ++index) {
-    const RestartImageField& field = image.fields[index];
-    const RestartExpectedField expected =
-        runtime.restart_expected_fields[index];
-    if (field.role != expected.role || field.field != expected.field ||
-        field.components != expected.components ||
-        field.values.size() != local_cells * field.components)
-      status = {StatusCode::invalid_plan, kProductInput};
-    for (double value : field.values)
-      if (status && !std::isfinite(value))
-        status = {StatusCode::numerical_failure, kProductInput};
-  }
+  const auto validate_fields = [&](const std::vector<RestartImageField>& fields,
+                                   const std::vector<RestartExpectedField>&
+                                       expected_fields) {
+    if (fields.size() != expected_fields.size())
+      return Status{StatusCode::invalid_plan, kProductInput};
+    for (std::size_t index = 0U; index < fields.size(); ++index) {
+      const RestartImageField& field = fields[index];
+      const RestartExpectedField expected = expected_fields[index];
+      if (field.role != expected.role || field.field != expected.field ||
+          field.components != expected.components ||
+          field.values.size() != local_cells * field.components)
+        return Status{StatusCode::invalid_plan, kProductInput};
+      for (double value : field.values)
+        if (!std::isfinite(value))
+          return Status{StatusCode::numerical_failure, kProductInput};
+    }
+    return Status{};
+  };
+  if (status)
+    status = validate_fields(image.fields, runtime.restart_expected_fields);
+  if (status && exact_history)
+    status = validate_fields(image.previous_fields,
+                             runtime.restart_expected_fields);
+  if (status && exact_history)
+    status = validate_fields(image.accepted_rate_fields,
+                             runtime.restart_expected_rate_fields);
+  if (status && exact_history)
+    status = validate_fields(image.previous_rate_fields,
+                             runtime.restart_expected_rate_fields);
   const Int3 cells = product.patch.cells;
   const std::size_t x_faces =
       static_cast<std::size_t>(cells.x + 1) * cells.y * cells.z;
@@ -6018,19 +6068,33 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
   if (status &&
       (image.final_mass_flux[0U].size() != x_faces ||
        image.final_mass_flux[1U].size() != y_faces ||
-       image.final_mass_flux[2U].size() != z_faces))
+       image.final_mass_flux[2U].size() != z_faces ||
+       (exact_history &&
+        (image.previous_mass_flux[0U].size() != x_faces ||
+         image.previous_mass_flux[1U].size() != y_faces ||
+         image.previous_mass_flux[2U].size() != z_faces))))
     status = {StatusCode::invalid_plan, kProductInput};
   for (const std::vector<double>& face : image.final_mass_flux)
     for (double value : face)
       if (status && !std::isfinite(value))
         status = {StatusCode::numerical_failure, kProductInput};
+  if (exact_history)
+    for (const std::vector<double>& face : image.previous_mass_flux)
+      for (double value : face)
+        if (status && !std::isfinite(value))
+          status = {StatusCode::numerical_failure, kProductInput};
   // All malformed-checkpoint decisions become collective before any rank
   // constructs a view into the checkpoint or enters a later mass reduction.
   status = product.reductions.consensus(status);
   if (!status) return status;
   TimeControllerState controller;
-  status = TimeControllerState::restart(
-      product.time, image.time, image.dt, image.step, controller);
+  status = exact_history
+               ? TimeControllerState::restart_exact(
+                     product.time, image.time, image.dt, image.step,
+                     image.controller_state, controller)
+               : TimeControllerState::restart(
+                     product.time, image.time, image.dt, image.step,
+                     controller);
   status = product.reductions.consensus(status);
   if (!status) return status;
   const auto face = [](const std::vector<double>& values, Int3 extents,
@@ -6045,7 +6109,8 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
     view.revision_domain = identity ^ UINT64_C(0x4f04);
     return view;
   };
-  const RevisionToken flux_revision = 17U;
+  const RevisionToken flux_revision =
+      exact_history ? image.final_mass_flux_revision : RevisionToken{17U};
   const ConstFaceFluxView restored_flux{
       face(image.final_mass_flux[0U], {cells.x + 1, cells.y, cells.z},
            CartesianAxis::x, 401U),
@@ -6055,8 +6120,20 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
            CartesianAxis::z, 401U),
       flux_revision,
       {}};
+  const ConstFaceFluxView restored_previous_flux{
+      face(image.previous_mass_flux[0U], {cells.x + 1, cells.y, cells.z},
+           CartesianAxis::x, 402U),
+      face(image.previous_mass_flux[1U], {cells.x, cells.y + 1, cells.z},
+           CartesianAxis::y, 402U),
+      face(image.previous_mass_flux[2U], {cells.x, cells.y, cells.z + 1},
+           CartesianAxis::z, 402U),
+      image.previous_mass_flux_revision,
+      {}};
   if (product.ibm_equations.has_value())
     status = product.ibm_equations->validate_interface_flux(restored_flux);
+  if (status && exact_history && product.ibm_equations.has_value())
+    status =
+        product.ibm_equations->validate_interface_flux(restored_previous_flux);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6069,6 +6146,7 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
   // rho, T, mu, lambda, cp, drho/dp, drho/dh, lambda/cp. This cold staging makes
   // thermodynamic validation atomic with respect to the driver state.
   std::vector<std::array<double, 8U>> restored_thermo;
+  std::vector<std::array<double, 8U>> restored_previous_thermo;
   Status allocation_status;
   try {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -6080,6 +6158,7 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
       throw std::bad_alloc{};
 #endif
     restored_thermo.resize(local_cells);
+    if (exact_history) restored_previous_thermo.resize(local_cells);
   } catch (const std::bad_alloc&) {
     allocation_status = {StatusCode::allocation_failure, kProductAllocation};
   } catch (...) {
@@ -6092,58 +6171,84 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
 #endif
   if (!status) return status;
   double local_mass = 0.0;
-  for (std::int32_t z = 0; z < cells.z && status; ++z)
-    for (std::int32_t y = 0; y < cells.y && status; ++y)
-      for (std::int32_t x = 0; x < cells.x; ++x) {
-        const std::size_t cell = static_cast<std::size_t>(x) +
-                                 static_cast<std::size_t>(cells.x) *
-                                     (static_cast<std::size_t>(y) +
-                                      static_cast<std::size_t>(cells.y) * z);
-        std::size_t species = 0U;
-        for (std::size_t scalar = 0U;
-             scalar < product.fields.scalars.size(); ++scalar)
-          if (product.fields.scalar_roles[scalar] ==
-              TransportedScalarRole::species)
-            runtime.species_values[species++] =
-                image.fields[scalar + 3U].values[cell];
-        const Real3 value{velocity.values[cell * 3U],
-                          velocity.values[cell * 3U + 1U],
-                          velocity.values[cell * 3U + 2U]};
-        ThermoState thermo;
-        status = product.thermodynamics.evaluate_from_reference_pressure(
-            image.pressure_reference, pressure.values[cell],
-            enthalpy.values[cell],
-            {runtime.species_values.data(), runtime.species_values.size()},
-            value, thermo, 300.0);
-        MolecularTransportState transport;
-        if (status)
-          status = product.transport.evaluate(
-              thermo.temperature,
-              {runtime.species_values.data(), runtime.species_values.size()},
-              transport);
-        if (!status || !(thermo.rho > 0.0) || !(thermo.cp > 0.0) ||
-            !(thermo.drho_dp_hY > 0.0) || !(transport.viscosity > 0.0) ||
-            !(thermo.drho_dh_pY < 0.0) ||
-            !(transport.conductivity > 0.0)) {
-          if (status)
-            status = {StatusCode::numerical_failure, kProductInput};
-          break;
-        }
-        restored_thermo[cell] = {
-            thermo.rho, thermo.temperature, transport.viscosity,
-            transport.conductivity, thermo.cp, thermo.drho_dp_hY,
-            thermo.drho_dh_pY, transport.conductivity / thermo.cp};
-        const std::size_t gx =
-            static_cast<std::size_t>(product.patch.begin.x + x);
-        const std::size_t gy =
-            static_cast<std::size_t>(product.patch.begin.y + y);
-        const std::size_t gz =
-            static_cast<std::size_t>(product.patch.begin.z + z);
-        if (!product.topology.has_value() ||
-            product.topology->region().data[cell] != 0U)
-          local_mass +=
-              thermo.rho * dx.data[gx] * dy.data[gy] * dz.data[gz];
-      }
+  const auto evaluate_level =
+      [&](const std::vector<RestartImageField>& fields,
+          double reference_pressure,
+          std::vector<std::array<double, 8U>>& states,
+          bool accumulate_mass) {
+        const RestartImageField& level_velocity = fields[0U];
+        const RestartImageField& level_pressure = fields[1U];
+        const RestartImageField& level_enthalpy = fields[2U];
+        Status level_status;
+        for (std::int32_t z = 0; z < cells.z && level_status; ++z)
+          for (std::int32_t y = 0; y < cells.y && level_status; ++y)
+            for (std::int32_t x = 0; x < cells.x; ++x) {
+              const std::size_t cell =
+                  static_cast<std::size_t>(x) +
+                  static_cast<std::size_t>(cells.x) *
+                      (static_cast<std::size_t>(y) +
+                       static_cast<std::size_t>(cells.y) * z);
+              std::size_t species = 0U;
+              for (std::size_t scalar = 0U;
+                   scalar < product.fields.scalars.size(); ++scalar)
+                if (product.fields.scalar_roles[scalar] ==
+                    TransportedScalarRole::species)
+                  runtime.species_values[species++] =
+                      fields[scalar + 3U].values[cell];
+              const Real3 value{
+                  level_velocity.values[cell * 3U],
+                  level_velocity.values[cell * 3U + 1U],
+                  level_velocity.values[cell * 3U + 2U]};
+              ThermoState thermo;
+              level_status =
+                  product.thermodynamics.evaluate_from_reference_pressure(
+                      reference_pressure, level_pressure.values[cell],
+                      level_enthalpy.values[cell],
+                      {runtime.species_values.data(),
+                       runtime.species_values.size()},
+                      value, thermo, 300.0);
+              MolecularTransportState transport;
+              if (level_status)
+                level_status = product.transport.evaluate(
+                    thermo.temperature,
+                    {runtime.species_values.data(),
+                     runtime.species_values.size()},
+                    transport);
+              if (!level_status || !(thermo.rho > 0.0) ||
+                  !(thermo.cp > 0.0) || !(thermo.drho_dp_hY > 0.0) ||
+                  !(transport.viscosity > 0.0) ||
+                  !(thermo.drho_dh_pY < 0.0) ||
+                  !(transport.conductivity > 0.0)) {
+                if (level_status)
+                  level_status = {StatusCode::numerical_failure,
+                                  kProductInput};
+                break;
+              }
+              states[cell] = {
+                  thermo.rho, thermo.temperature, transport.viscosity,
+                  transport.conductivity, thermo.cp, thermo.drho_dp_hY,
+                  thermo.drho_dh_pY, transport.conductivity / thermo.cp};
+              if (accumulate_mass &&
+                  (!product.topology.has_value() ||
+                   product.topology->region().data[cell] != 0U)) {
+                const std::size_t gx = static_cast<std::size_t>(
+                    product.patch.begin.x + x);
+                const std::size_t gy = static_cast<std::size_t>(
+                    product.patch.begin.y + y);
+                const std::size_t gz = static_cast<std::size_t>(
+                    product.patch.begin.z + z);
+                local_mass +=
+                    thermo.rho * dx.data[gx] * dy.data[gy] * dz.data[gz];
+              }
+            }
+        return level_status;
+      };
+  status = evaluate_level(image.fields, image.pressure_reference,
+                          restored_thermo, true);
+  if (status && exact_history)
+    status = evaluate_level(image.previous_fields,
+                            image.previous_pressure_reference,
+                            restored_previous_thermo, false);
   status = product.reductions.consensus(status);
   if (!status) return status;
   double global_mass = 0.0;
@@ -6233,7 +6338,11 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
       status = product.layers.view(
           role, runtime.restart_expected_fields[field_index].field,
           destination);
-      if (status) copy_image(image.fields[field_index], destination);
+      const RestartImageField& source =
+          exact_history && role == StateRole::accepted_n_minus_one
+              ? image.previous_fields[field_index]
+              : image.fields[field_index];
+      if (status) copy_image(source, destination);
     }
   }
 
@@ -6291,10 +6400,17 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
                                      (static_cast<std::size_t>(y) +
                                       static_cast<std::size_t>(cells.y) * z);
         const std::array<double, 8U>& restored = restored_thermo[cell];
+        const std::array<double, 8U>& restored_previous =
+            exact_history ? restored_previous_thermo[cell] : restored;
         const Int3 index{x, y, z};
         for (std::size_t role = 0U; role < roles.size(); ++role) {
-          rho_views[role].unchecked(index, 0U) = restored[0U];
-          temperature_views[role].unchecked(index, 0U) = restored[1U];
+          const std::array<double, 8U>& selected =
+              exact_history &&
+                      roles[role] == StateRole::accepted_n_minus_one
+                  ? restored_previous
+                  : restored;
+          rho_views[role].unchecked(index, 0U) = selected[0U];
+          temperature_views[role].unchecked(index, 0U) = selected[1U];
         }
         viscosity.unchecked(index, 0U) = restored[2U];
         effective_viscosity.unchecked(index, 0U) = restored[2U];
@@ -6319,22 +6435,181 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
       image.pressure_reference, true);
   if (!status) return status;
 
-  // This is the only flux-lineage publication on the restart path.  The
-  // writer preflights and copies atomically, reserving revision one for a
-  // genuine fresh start and installing active/previous revision two.
-  status = runtime.final_flux_writer.initialize_restored(product.final_flux,
-                                                          restored_flux);
-  if (!status) return status;
-  runtime.time = std::move(controller);
-  runtime.pressure_reference = image.pressure_reference;
-  runtime.previous_pressure_reference = image.pressure_reference;
-  runtime.closed_mass_target = global_mass;
-  runtime.pressure_correction_warm_start_valid = false;
+  if (exact_history) {
+    const auto restore_rates = [&](StateRole role,
+                                   const std::vector<RestartImageField>&
+                                       sources) {
+      for (std::size_t rate = 0U; rate < sources.size(); ++rate) {
+        FieldView destination;
+        Status copied = product.layers.view(
+            role, runtime.restart_expected_rate_fields[rate].field,
+            destination);
+        if (!copied) return copied;
+        copy_image(sources[rate], destination);
+      }
+      return Status{};
+    };
+    status = restore_rates(StateRole::accepted_n,
+                           image.accepted_rate_fields);
+    if (status)
+      status = restore_rates(StateRole::accepted_n_minus_one,
+                             image.previous_rate_fields);
+    if (status)
+      status = restore_rates(StateRole::trial, image.accepted_rate_fields);
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+  }
+
   runtime.enthalpy_ghosts = {};
   std::fill(runtime.species_ghosts.begin(), runtime.species_ghosts.end(),
             ThermophysicalGhostHistory{});
   std::fill(runtime.passive_ghosts.begin(), runtime.passive_ghosts.end(),
             ThermophysicalGhostHistory{});
+  if (exact_history) {
+    std::size_t halo_count = 0U;
+    const StateLayers& restored_layers = product.layers;
+    ConstFieldView previous_density;
+    ConstFieldView previous_velocity;
+    status = restored_layers.view(StateRole::accepted_n_minus_one,
+                                  product.fields.rho, previous_density);
+    if (status)
+      status = restored_layers.view(StateRole::accepted_n_minus_one,
+                                    product.fields.velocity,
+                                    previous_velocity);
+    FieldView previous_enthalpy;
+    if (status)
+      status = product.layers.view(StateRole::accepted_n_minus_one,
+                                   product.fields.enthalpy,
+                                   previous_enthalpy);
+    if (status) runtime.halo_views[halo_count++] = previous_enthalpy;
+    for (std::size_t scalar = 0U;
+         scalar < product.fields.scalars.size() && status; ++scalar) {
+      FieldView previous_scalar;
+      status = product.layers.view(StateRole::accepted_n_minus_one,
+                                   product.fields.scalars[scalar],
+                                   previous_scalar);
+      if (status) runtime.halo_views[halo_count++] = previous_scalar;
+    }
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+    HaloTicket ticket;
+    status = product.stage_halos[0U].begin(
+        10U, {runtime.halo_views.data(), halo_count}, ticket);
+    if (status)
+      status = product.stage_halos[0U].finish(
+          ticket, {runtime.halo_views.data(), halo_count});
+    if (status) {
+      previous_enthalpy = runtime.halo_views[0U];
+      std::size_t species = 0U;
+      std::size_t passive = 0U;
+      for (std::size_t scalar = 0U;
+           scalar < product.fields.scalars.size(); ++scalar) {
+        const ConstFieldView value =
+            as_const(runtime.halo_views[scalar + 1U]);
+        if (product.fields.scalar_roles[scalar] ==
+            TransportedScalarRole::species)
+          runtime.species_previous[species++] = value;
+        else
+          runtime.passive_previous[passive++] = value;
+      }
+      if (species != runtime.species_previous.size() ||
+          passive != runtime.passive_previous.size())
+        status = {StatusCode::invalid_plan, kProductBinding};
+    }
+    if (status)
+      status = resolve_static_boundary_values(
+          runtime.communicator, product.boundary, product.boundary_specs,
+          product.geometry, product.patch, product.thermodynamics,
+          image.previous_pressure_reference, previous_density,
+          previous_velocity, as_const(previous_enthalpy),
+          {runtime.species_previous.data(),
+           runtime.species_previous.size()},
+          {runtime.passive_previous.data(),
+           runtime.passive_previous.size()},
+          {runtime.species_values.data(), runtime.species_values.size()},
+          runtime.boundary_scalars, runtime.boundary_vectors,
+          runtime.boundary_normal_gradients, false);
+    if (status) {
+      status = apply_boundary_ghosts(
+          BoundaryStage::enthalpy, product.boundary,
+          {&previous_enthalpy, 1U}, runtime.resolved_boundary_values());
+    }
+    if (status && product.fields.scalars.size() != 0U)
+      status = apply_boundary_ghosts(
+          BoundaryStage::scalar, product.boundary,
+          {runtime.halo_views.data() + 1U,
+           product.fields.scalars.size()},
+          runtime.resolved_boundary_values());
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+
+    const auto ghost_authority = [&](ConstFieldView view,
+                                     std::uint8_t reach,
+                                     ThermophysicalGhostAuthority& out) {
+      if (product.stage_halos[0U].ghost_revision(view.field) !=
+              view.revision ||
+          product.stage_halos[0U].instance_identity() == 0U || reach == 0U ||
+          view.ghosts.x < reach || view.ghosts.y < reach ||
+          view.ghosts.z < reach)
+        return Status{StatusCode::invalid_plan, kProductCommunication};
+      out = {product.stage_halos[0U].instance_identity(),
+             view.field,
+             view.revision,
+             view.storage_identity,
+             view.revision_domain,
+             product.geometry.topology_revision(),
+             product.boundary.revision(),
+             reach};
+      return Status{};
+    };
+    status = ghost_authority(
+        as_const(previous_enthalpy),
+        product.equations.thermophysical_predictor().enthalpy_reach(),
+        runtime.enthalpy_ghosts.previous);
+    std::size_t species = 0U;
+    std::size_t passive = 0U;
+    for (std::size_t scalar = 0U;
+         scalar < product.fields.scalars.size() && status; ++scalar) {
+      const ConstFieldView value =
+          as_const(runtime.halo_views[scalar + 1U]);
+      if (product.fields.scalar_roles[scalar] ==
+          TransportedScalarRole::species) {
+        status = ghost_authority(
+            value,
+            product.equations.thermophysical_predictor().species_reach(),
+            runtime.species_ghosts[species++].previous);
+      } else {
+        status = ghost_authority(
+            value,
+            product.equations.thermophysical_predictor()
+                .passive_scalar_reach(),
+            runtime.passive_ghosts[passive++].previous);
+      }
+    }
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+  }
+
+  // This is the final fallible publication on the restart path.  All
+  // thermophysical and ghost-history validation has completed, so a failure
+  // cannot leave a visible time/controller authority paired with a partial
+  // face-flux lineage.  Legacy images synthesize revision two; exact images
+  // retain their distinct accepted/previous revision tokens.
+  status = exact_history
+               ? runtime.final_flux_writer.initialize_restored_history(
+                     product.final_flux, restored_flux,
+                     restored_previous_flux)
+               : runtime.final_flux_writer.initialize_restored(
+                     product.final_flux, restored_flux);
+  if (!status) return status;
+  runtime.time = std::move(controller);
+  runtime.pressure_reference = image.pressure_reference;
+  runtime.previous_pressure_reference =
+      exact_history ? image.previous_pressure_reference
+                    : image.pressure_reference;
+  runtime.closed_mass_target =
+      exact_history ? image.closed_mass_target : global_mass;
+  runtime.pressure_correction_warm_start_valid = false;
   runtime.predictor_diagnostics = {};
   runtime.initialized = true;
   return {};
@@ -13241,36 +13516,93 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
   ProductDriver::Impl& runtime = *implementation_;
   CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
   std::size_t index = 0U;
-  const auto append = [&](RestartFieldRole role, FieldId field) {
+  const auto append = [&](RestartFieldRole role, FieldId field,
+                          StateRole state,
+                          std::vector<RestartFieldView>& fields,
+                          std::size_t& selected) {
     ConstFieldView view;
-    const Status status =
-        product.layers.view(StateRole::accepted_n, field, view);
-    if (status) runtime.restart_fields[index++] = {role, view};
+    const Status status = product.layers.view(state, field, view);
+    if (status) fields[selected++] = {role, view};
     return status;
   };
-  Status status = append(RestartFieldRole::velocity, product.fields.velocity);
+  Status status = append(RestartFieldRole::velocity, product.fields.velocity,
+                         StateRole::accepted_n, runtime.restart_fields,
+                         index);
   if (status)
     status = append(RestartFieldRole::pressure_perturbation,
-                    product.fields.pressure);
+                    product.fields.pressure, StateRole::accepted_n,
+                    runtime.restart_fields, index);
   if (status)
-    status = append(RestartFieldRole::enthalpy, product.fields.enthalpy);
+    status = append(RestartFieldRole::enthalpy, product.fields.enthalpy,
+                    StateRole::accepted_n, runtime.restart_fields, index);
   for (std::size_t scalar = 0U;
        scalar < product.fields.scalars.size() && status; ++scalar) {
     status = append(product.fields.scalar_roles[scalar] ==
                             TransportedScalarRole::species
                         ? RestartFieldRole::independent_species
                         : RestartFieldRole::transported_scalar,
-                    product.fields.scalars[scalar]);
+                    product.fields.scalars[scalar], StateRole::accepted_n,
+                    runtime.restart_fields, index);
   }
+  index = 0U;
+  if (status)
+    status = append(RestartFieldRole::velocity, product.fields.velocity,
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_fields, index);
+  if (status)
+    status = append(RestartFieldRole::pressure_perturbation,
+                    product.fields.pressure,
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_fields, index);
+  if (status)
+    status = append(RestartFieldRole::enthalpy, product.fields.enthalpy,
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_fields, index);
+  for (std::size_t scalar = 0U;
+       scalar < product.fields.scalars.size() && status; ++scalar) {
+    status = append(product.fields.scalar_roles[scalar] ==
+                            TransportedScalarRole::species
+                        ? RestartFieldRole::independent_species
+                        : RestartFieldRole::transported_scalar,
+                    product.fields.scalars[scalar],
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_fields, index);
+  }
+  index = 0U;
+  if (status)
+    status = append(RestartFieldRole::enthalpy_nonadvective_rate,
+                    product.fields.enthalpy_nonadvective_rate,
+                    StateRole::accepted_n, runtime.restart_rate_fields,
+                    index);
+  for (std::size_t scalar = 0U;
+       scalar < product.fields.scalar_nonadvective_rates.size() && status;
+       ++scalar)
+    status = append(RestartFieldRole::scalar_nonadvective_rate,
+                    product.fields.scalar_nonadvective_rates[scalar],
+                    StateRole::accepted_n, runtime.restart_rate_fields,
+                    index);
+  index = 0U;
+  if (status)
+    status = append(RestartFieldRole::enthalpy_nonadvective_rate,
+                    product.fields.enthalpy_nonadvective_rate,
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_rate_fields, index);
+  for (std::size_t scalar = 0U;
+       scalar < product.fields.scalar_nonadvective_rates.size() && status;
+       ++scalar)
+    status = append(RestartFieldRole::scalar_nonadvective_rate,
+                    product.fields.scalar_nonadvective_rates[scalar],
+                    StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_rate_fields, index);
   ConstFaceFluxView flux;
+  ConstFaceFluxView previous_flux;
   if (status)
     status = runtime.final_flux_writer.committed(product.final_flux, flux);
+  if (status)
+    status = runtime.final_flux_writer.committed_previous(product.final_flux,
+                                                          previous_flux);
   if (!status) return status;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
-  ConstFaceFluxView previous_flux;
-  status = runtime.final_flux_writer.committed_previous(product.final_flux,
-                                                        previous_flux);
-  if (!status) return status;
   const auto payload = [](ConstFaceFluxView value) noexcept {
     std::uint64_t hash = detail::product_mix(
         UINT64_C(0xcbf29ce484222325), UINT64_C(0x666c757868697374));
@@ -13313,9 +13645,18 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
          runtime.time.last_accepted_dt(),
          runtime.pressure_reference,
          runtime.time.accepted_step(),
-         0U,
+         runtime.time.next_generation(),
          {runtime.restart_fields.data(), runtime.restart_fields.size()},
-         flux};
+         flux,
+         {runtime.restart_previous_fields.data(),
+          runtime.restart_previous_fields.size()},
+         {runtime.restart_rate_fields.data(),
+          runtime.restart_rate_fields.size()},
+         {runtime.restart_previous_rate_fields.data(),
+          runtime.restart_previous_rate_fields.size()},
+         previous_flux,
+         runtime.previous_pressure_reference,
+         runtime.closed_mass_target};
   return {};
 }
 

@@ -3232,10 +3232,12 @@ bool run_rank_change_product(int rank) {
       const std::string text{std::istreambuf_iterator<char>(evidence),
                              std::istreambuf_iterator<char>()};
       passed &= text.find("\"step\":3") != std::string::npos &&
-                text.find("\"bdf_order\":1") != std::string::npos &&
+                text.find("\"bdf_order\":2") != std::string::npos &&
                 text.find("\"step\":4") != std::string::npos &&
                 text.find("\"bdf_order\":2") != std::string::npos &&
-                text.find("\"restart_recovery\":true") !=
+                text.find("\"restart_recovery\":true") ==
+                    std::string::npos &&
+                text.find("\"restart_recovery\":false") !=
                     std::string::npos;
     }
     passed = collective(passed, MPI_COMM_WORLD);

@@ -297,6 +297,13 @@ target_link_libraries(hundun PRIVATE hundun_v04_core)
 target_compile_definitions(hundun PRIVATE
   HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
 
+# Benchmark observer for segmented Re=3900 thin-domain runs.  It links the
+# production core and has no test-access hooks, so adding the observer cannot
+# change the numerical product executable or its compile definitions.
+add_executable(v04_thin_domain_runner
+  "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")
+target_link_libraries(v04_thin_domain_runner PRIVATE hundun_v04_core)
+
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the
   # production executable or its compile/link inputs.

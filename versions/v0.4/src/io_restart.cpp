@@ -41,7 +41,8 @@ constexpr std::uint32_t kRestartIntegrity = 10306U;
 constexpr std::uint32_t kRestartMismatch = 10307U;
 constexpr std::uint32_t kRestartCoverage = 10308U;
 constexpr std::uint32_t kRestartPublication = 10309U;
-constexpr std::uint32_t kFormatVersion = 1U;
+constexpr std::uint32_t kLegacyFormatVersion = 1U;
+constexpr std::uint32_t kExactHistoryFormatVersion = 2U;
 constexpr std::array<char, 8U> kRankMagic{{'H', '4', 'R', 'A', 'N', 'K', '0', '1'}};
 constexpr std::array<char, 8U> kManifestMagic{{'H', '4', 'M', 'A', 'N', 'I', '0', '1'}};
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -209,6 +210,7 @@ struct RankRecord {
 };
 
 struct Manifest {
+  std::uint32_t format_version{kLegacyFormatVersion};
   std::uint32_t rank_count{};
   Int3 global_cells{};
   PlanFingerprint plan{};
@@ -219,7 +221,12 @@ struct Manifest {
   double pressure_reference{};
   std::uint64_t step{};
   std::uint64_t controller_state{};
+  double previous_pressure_reference{};
+  double closed_mass_target{};
+  RevisionToken final_mass_flux_revision{};
+  RevisionToken previous_mass_flux_revision{};
   std::vector<FieldMeta> fields;
+  std::vector<FieldMeta> rate_fields;
   std::vector<RankRecord> ranks;
 };
 
@@ -229,7 +236,11 @@ struct RankBlock {
   Manifest common;
   MeshPatch patch{};
   std::vector<RestartImageField> fields;
+  std::vector<RestartImageField> previous_fields;
+  std::vector<RestartImageField> accepted_rate_fields;
+  std::vector<RestartImageField> previous_rate_fields;
   std::array<std::vector<double>, 3U> flux;
+  std::array<std::vector<double>, 3U> previous_flux;
 };
 
 Status collective_status(MPI_Comm communicator, Status local) noexcept {
@@ -349,59 +360,120 @@ bool expected_face_extents(ConstFaceFluxView flux, Int3 cells) noexcept {
          flux.z.axis == CartesianAxis::z;
 }
 
+bool valid_field_catalog(Span<const RestartFieldView> fields,
+                         Int3 cells, bool rates) noexcept {
+  if (fields.data == nullptr || fields.size == 0U || fields.size > 64U)
+    return false;
+  bool velocity = false;
+  bool pressure = false;
+  bool enthalpy = false;
+  bool enthalpy_rate = false;
+  for (std::size_t index = 0U; index < fields.size; ++index) {
+    const RestartFieldView& field = fields.data[index];
+    detail::FieldStorageInterval interval{};
+    if (!detail::field_storage_interval(field.values, interval) ||
+        !same(field.values.interior, cells) ||
+        field.values.revision == 0U) {
+      return false;
+    }
+    for (std::size_t prior = 0U; prior < index; ++prior) {
+      if (fields.data[prior].values.field == field.values.field)
+        return false;
+    }
+    switch (field.role) {
+      case RestartFieldRole::velocity:
+        if (rates || velocity || field.values.components != 3U) return false;
+        velocity = true;
+        break;
+      case RestartFieldRole::pressure_perturbation:
+      case RestartFieldRole::pressure_absolute:
+        if (rates || pressure || field.values.components != 1U) return false;
+        pressure = true;
+        break;
+      case RestartFieldRole::enthalpy:
+        if (rates || enthalpy || field.values.components != 1U) return false;
+        enthalpy = true;
+        break;
+      case RestartFieldRole::independent_species:
+      case RestartFieldRole::transported_scalar:
+        if (rates || field.values.components != 1U) return false;
+        break;
+      case RestartFieldRole::enthalpy_nonadvective_rate:
+        if (!rates || enthalpy_rate || field.values.components != 1U)
+          return false;
+        enthalpy_rate = true;
+        break;
+      case RestartFieldRole::scalar_nonadvective_rate:
+        if (!rates || field.values.components != 1U) return false;
+        break;
+      default:
+        return false;
+    }
+  }
+  return rates ? enthalpy_rate : (velocity && pressure && enthalpy);
+}
+
+bool same_field_layout(Span<const RestartFieldView> left,
+                       Span<const RestartFieldView> right) noexcept {
+  if (left.size != right.size || left.data == nullptr || right.data == nullptr)
+    return false;
+  for (std::size_t index = 0U; index < left.size; ++index) {
+    if (left.data[index].role != right.data[index].role ||
+        left.data[index].values.field != right.data[index].values.field ||
+        left.data[index].values.components !=
+            right.data[index].values.components)
+      return false;
+  }
+  return true;
+}
+
+bool has_exact_history(const RestartSnapshot& snapshot) noexcept {
+  return snapshot.previous_fields.size != 0U ||
+         snapshot.accepted_rate_fields.size != 0U ||
+         snapshot.previous_rate_fields.size != 0U ||
+         snapshot.previous_mass_flux.revision != 0U ||
+         snapshot.previous_pressure_reference != 0.0 ||
+         snapshot.closed_mass_target != 0.0;
+}
+
 bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
   if (!valid_global_patch(snapshot.global_cells, snapshot.patch) ||
       snapshot.plan == 0U || snapshot.schema == 0U ||
       snapshot.geometry == 0U || !std::isfinite(snapshot.time) ||
       !std::isfinite(snapshot.dt) || snapshot.dt <= 0.0 ||
       !std::isfinite(snapshot.pressure_reference) || snapshot.step == 0U ||
-      snapshot.fields.data == nullptr || snapshot.fields.size < 3U ||
-      snapshot.fields.size > 64U ||
+      !valid_field_catalog(snapshot.fields, snapshot.patch.cells, false) ||
       !expected_face_extents(snapshot.final_mass_flux, snapshot.patch.cells)) {
     return false;
   }
-  bool velocity = false;
-  bool pressure = false;
-  bool enthalpy = false;
-  for (std::size_t index = 0U; index < snapshot.fields.size; ++index) {
-    const RestartFieldView& field = snapshot.fields.data[index];
-    detail::FieldStorageInterval interval{};
-    if (!detail::field_storage_interval(field.values, interval) ||
-        !same(field.values.interior, snapshot.patch.cells) ||
-        field.values.revision == 0U) {
-      return false;
-    }
-    for (std::size_t prior = 0U; prior < index; ++prior) {
-      if (snapshot.fields.data[prior].values.field == field.values.field)
-        return false;
-    }
-    switch (field.role) {
-      case RestartFieldRole::velocity:
-        if (velocity || field.values.components != 3U) return false;
-        velocity = true;
-        break;
-      case RestartFieldRole::pressure_perturbation:
-      case RestartFieldRole::pressure_absolute:
-        if (pressure || field.values.components != 1U) return false;
-        pressure = true;
-        break;
-      case RestartFieldRole::enthalpy:
-        if (enthalpy || field.values.components != 1U) return false;
-        enthalpy = true;
-        break;
-      case RestartFieldRole::independent_species:
-      case RestartFieldRole::transported_scalar:
-        if (field.values.components != 1U) return false;
-        break;
-      default:
-        return false;
-    }
-  }
-  return velocity && pressure && enthalpy;
+  if (!has_exact_history(snapshot)) return true;
+  return snapshot.controller_state != 0U &&
+         valid_field_catalog(snapshot.previous_fields,
+                             snapshot.patch.cells, false) &&
+         same_field_layout(snapshot.fields, snapshot.previous_fields) &&
+         valid_field_catalog(snapshot.accepted_rate_fields,
+                             snapshot.patch.cells, true) &&
+         valid_field_catalog(snapshot.previous_rate_fields,
+                             snapshot.patch.cells, true) &&
+         same_field_layout(snapshot.accepted_rate_fields,
+                           snapshot.previous_rate_fields) &&
+         expected_face_extents(snapshot.previous_mass_flux,
+                               snapshot.patch.cells) &&
+         snapshot.previous_mass_flux.revision <
+             snapshot.final_mass_flux.revision &&
+         snapshot.final_mass_flux.revision !=
+             std::numeric_limits<RevisionToken>::max() &&
+         std::isfinite(snapshot.previous_pressure_reference) &&
+         std::isfinite(snapshot.closed_mass_target) &&
+         snapshot.closed_mass_target > 0.0;
 }
 
 std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) noexcept {
   Encoder encoder;
+  const std::uint32_t version = has_exact_history(snapshot)
+                                    ? kExactHistoryFormatVersion
+                                    : kLegacyFormatVersion;
+  encoder.u32(version);
   encoder.int3(snapshot.global_cells);
   encoder.u64(snapshot.plan);
   encoder.u64(snapshot.schema);
@@ -417,11 +489,28 @@ std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) noexcept {
     encoder.u8(static_cast<std::uint8_t>(field.role));
     encoder.u16(field.values.field);
     encoder.u8(field.values.components);
+  }
+  if (version == kExactHistoryFormatVersion) {
+    encoder.real(snapshot.previous_pressure_reference);
+    encoder.real(snapshot.closed_mass_target);
+    encoder.u64(snapshot.final_mass_flux.revision);
+    encoder.u64(snapshot.previous_mass_flux.revision);
+    encoder.u32(
+        static_cast<std::uint32_t>(snapshot.accepted_rate_fields.size));
+    for (std::size_t index = 0U;
+         index < snapshot.accepted_rate_fields.size; ++index) {
+      const RestartFieldView field =
+          snapshot.accepted_rate_fields.data[index];
+      encoder.u8(static_cast<std::uint8_t>(field.role));
+      encoder.u16(field.values.field);
+      encoder.u8(field.values.components);
+    }
   }
   return hash_bytes(encoder.data().data(), encoder.data().size());
 }
 
-void encode_common(Encoder& encoder, const RestartSnapshot& snapshot) {
+void encode_common(Encoder& encoder, const RestartSnapshot& snapshot,
+                   std::uint32_t version) {
   encoder.int3(snapshot.global_cells);
   encoder.u64(snapshot.plan);
   encoder.u64(snapshot.schema);
@@ -438,10 +527,28 @@ void encode_common(Encoder& encoder, const RestartSnapshot& snapshot) {
     encoder.u16(field.values.field);
     encoder.u8(field.values.components);
   }
+  if (version == kExactHistoryFormatVersion) {
+    encoder.real(snapshot.previous_pressure_reference);
+    encoder.real(snapshot.closed_mass_target);
+    encoder.u64(snapshot.final_mass_flux.revision);
+    encoder.u64(snapshot.previous_mass_flux.revision);
+    encoder.u32(
+        static_cast<std::uint32_t>(snapshot.accepted_rate_fields.size));
+    for (std::size_t index = 0U;
+         index < snapshot.accepted_rate_fields.size; ++index) {
+      const RestartFieldView field =
+          snapshot.accepted_rate_fields.data[index];
+      encoder.u8(static_cast<std::uint8_t>(field.role));
+      encoder.u16(field.values.field);
+      encoder.u8(field.values.components);
+    }
+  }
 }
 
-bool decode_common(Decoder& decoder, Manifest& manifest) noexcept {
+bool decode_common(Decoder& decoder, std::uint32_t version,
+                   Manifest& manifest) noexcept {
   std::uint32_t field_count = 0U;
+  manifest.format_version = version;
   if (!decoder.int3(manifest.global_cells) || !decoder.u64(manifest.plan) ||
       !decoder.u64(manifest.schema) || !decoder.u64(manifest.geometry) ||
       !decoder.real(manifest.time) || !decoder.real(manifest.dt) ||
@@ -471,75 +578,132 @@ bool decode_common(Decoder& decoder, Manifest& manifest) noexcept {
     }
     field.role = static_cast<RestartFieldRole>(role);
   }
+  if (version == kExactHistoryFormatVersion) {
+    std::uint32_t rate_count = 0U;
+    if (!decoder.real(manifest.previous_pressure_reference) ||
+        !decoder.real(manifest.closed_mass_target) ||
+        !decoder.u64(manifest.final_mass_flux_revision) ||
+        !decoder.u64(manifest.previous_mass_flux_revision) ||
+        !decoder.u32(rate_count) || rate_count == 0U || rate_count > 64U ||
+        manifest.controller_state == 0U ||
+        !std::isfinite(manifest.previous_pressure_reference) ||
+        !std::isfinite(manifest.closed_mass_target) ||
+        !(manifest.closed_mass_target > 0.0) ||
+        manifest.previous_mass_flux_revision == 0U ||
+        manifest.previous_mass_flux_revision >=
+            manifest.final_mass_flux_revision ||
+        manifest.final_mass_flux_revision ==
+            std::numeric_limits<RevisionToken>::max()) {
+      return false;
+    }
+    try {
+      manifest.rate_fields.resize(rate_count);
+    } catch (...) {
+      return false;
+    }
+    for (FieldMeta& field : manifest.rate_fields) {
+      std::uint8_t role = 0U;
+      if (!decoder.u8(role) || !decoder.u16(field.field) ||
+          !decoder.u8(field.components) || field.components != 1U ||
+          role < static_cast<std::uint8_t>(
+                     RestartFieldRole::enthalpy_nonadvective_rate) ||
+          role > static_cast<std::uint8_t>(
+                     RestartFieldRole::scalar_nonadvective_rate)) {
+        return false;
+      }
+      field.role = static_cast<RestartFieldRole>(role);
+    }
+  } else if (version != kLegacyFormatVersion) {
+    return false;
+  }
   return true;
 }
 
 Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
                          std::vector<std::uint8_t>& out) {
   Encoder encoder;
+  const std::uint32_t version = has_exact_history(snapshot)
+                                    ? kExactHistoryFormatVersion
+                                    : kLegacyFormatVersion;
   encoder.bytes(kRankMagic.data(), kRankMagic.size());
-  encoder.u32(kFormatVersion);
+  encoder.u32(version);
   encoder.u32(static_cast<std::uint32_t>(size));
   encoder.u32(static_cast<std::uint32_t>(rank));
-  encode_common(encoder, snapshot);
+  encode_common(encoder, snapshot, version);
   encoder.int3(snapshot.patch.begin);
   encoder.int3(snapshot.patch.cells);
   std::size_t cells = 0U;
   if (!cell_count(snapshot.patch.cells, cells))
     return {StatusCode::invalid_plan, kRestartInput};
-  for (std::size_t field_index = 0U;
-       field_index < snapshot.fields.size; ++field_index) {
-    const ConstFieldView view = snapshot.fields.data[field_index].values;
-    std::size_t values = 0U;
-    if (!checked_multiply(cells, view.components, values))
-      return {StatusCode::invalid_plan, kRestartInput};
-    encoder.u64(values);
-    for (std::int32_t z = 0; z < view.interior.z; ++z)
-      for (std::int32_t y = 0; y < view.interior.y; ++y)
-        for (std::int32_t x = 0; x < view.interior.x; ++x)
-          for (std::uint8_t component = 0U; component < view.components;
-               ++component) {
-            const double value = view.unchecked({x, y, z}, component);
+  const auto encode_fields = [&](Span<const RestartFieldView> fields) {
+    for (std::size_t field_index = 0U; field_index < fields.size;
+         ++field_index) {
+      const ConstFieldView view = fields.data[field_index].values;
+      std::size_t values = 0U;
+      if (!checked_multiply(cells, view.components, values))
+        return Status{StatusCode::invalid_plan, kRestartInput};
+      encoder.u64(values);
+      for (std::int32_t z = 0; z < view.interior.z; ++z)
+        for (std::int32_t y = 0; y < view.interior.y; ++y)
+          for (std::int32_t x = 0; x < view.interior.x; ++x)
+            for (std::uint8_t component = 0U;
+                 component < view.components; ++component) {
+              const double value = view.unchecked({x, y, z}, component);
+              if (!std::isfinite(value))
+                return Status{StatusCode::numerical_failure, kRestartInput};
+              encoder.real(value);
+            }
+    }
+    return Status{};
+  };
+  const auto encode_flux = [&](ConstFaceFluxView flux) {
+    const std::array<ConstFaceFieldView, 3U> faces{
+        flux.x, flux.y, flux.z};
+    for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
+      Int3 owned = snapshot.patch.cells;
+      const std::int32_t patch_end =
+          axis == 0U ? snapshot.patch.begin.x + snapshot.patch.cells.x
+                     : (axis == 1U
+                            ? snapshot.patch.begin.y + snapshot.patch.cells.y
+                            : snapshot.patch.begin.z + snapshot.patch.cells.z);
+      const std::int32_t global_end =
+          axis == 0U ? snapshot.global_cells.x
+                     : (axis == 1U ? snapshot.global_cells.y
+                                   : snapshot.global_cells.z);
+      if (patch_end == global_end) {
+        if (axis == 0U)
+          ++owned.x;
+        else if (axis == 1U)
+          ++owned.y;
+        else
+          ++owned.z;
+      }
+      std::size_t values = 0U;
+      if (!cell_count(owned, values))
+        return Status{StatusCode::invalid_plan, kRestartInput};
+      encoder.u64(values);
+      for (std::int32_t z = 0; z < owned.z; ++z)
+        for (std::int32_t y = 0; y < owned.y; ++y)
+          for (std::int32_t x = 0; x < owned.x; ++x) {
+            const double value = faces[axis].unchecked({x, y, z});
             if (!std::isfinite(value))
-              return {StatusCode::numerical_failure, kRestartInput};
+              return Status{StatusCode::numerical_failure, kRestartInput};
             encoder.real(value);
           }
-  }
-  const ConstFaceFieldView faces[3]{snapshot.final_mass_flux.x,
-                                    snapshot.final_mass_flux.y,
-                                    snapshot.final_mass_flux.z};
-  for (std::size_t axis = 0U; axis < 3U; ++axis) {
-    Int3 owned = snapshot.patch.cells;
-    const std::int32_t patch_end =
-        axis == 0U ? snapshot.patch.begin.x + snapshot.patch.cells.x
-                   : (axis == 1U
-                          ? snapshot.patch.begin.y + snapshot.patch.cells.y
-                          : snapshot.patch.begin.z + snapshot.patch.cells.z);
-    const std::int32_t global_end =
-        axis == 0U ? snapshot.global_cells.x
-                   : (axis == 1U ? snapshot.global_cells.y
-                                 : snapshot.global_cells.z);
-    if (patch_end == global_end) {
-      if (axis == 0U)
-        ++owned.x;
-      else if (axis == 1U)
-        ++owned.y;
-      else
-        ++owned.z;
     }
-    std::size_t values = 0U;
-    if (!cell_count(owned, values))
-      return {StatusCode::invalid_plan, kRestartInput};
-    encoder.u64(values);
-    for (std::int32_t z = 0; z < owned.z; ++z)
-      for (std::int32_t y = 0; y < owned.y; ++y)
-        for (std::int32_t x = 0; x < owned.x; ++x) {
-          const double value = faces[axis].unchecked({x, y, z});
-          if (!std::isfinite(value))
-            return {StatusCode::numerical_failure, kRestartInput};
-          encoder.real(value);
-        }
-  }
+    return Status{};
+  };
+  Status status = encode_fields(snapshot.fields);
+  if (status && version == kExactHistoryFormatVersion)
+    status = encode_fields(snapshot.previous_fields);
+  if (status && version == kExactHistoryFormatVersion)
+    status = encode_fields(snapshot.accepted_rate_fields);
+  if (status && version == kExactHistoryFormatVersion)
+    status = encode_fields(snapshot.previous_rate_fields);
+  if (status) status = encode_flux(snapshot.final_mass_flux);
+  if (status && version == kExactHistoryFormatVersion)
+    status = encode_flux(snapshot.previous_mass_flux);
+  if (!status) return status;
   encoder.append_integrity();
   out = encoder.data();
   return {};
@@ -551,10 +715,13 @@ Status encode_manifest(const RestartSnapshot& snapshot, int size,
   if (records.size() != static_cast<std::size_t>(size))
     return {StatusCode::invalid_plan, kRestartManifest};
   Encoder encoder;
+  const std::uint32_t version = has_exact_history(snapshot)
+                                    ? kExactHistoryFormatVersion
+                                    : kLegacyFormatVersion;
   encoder.bytes(kManifestMagic.data(), kManifestMagic.size());
-  encoder.u32(kFormatVersion);
+  encoder.u32(version);
   encoder.u32(static_cast<std::uint32_t>(size));
-  encode_common(encoder, snapshot);
+  encode_common(encoder, snapshot, version);
   for (const RankRecord& record : records) {
     encoder.int3(record.begin);
     encoder.int3(record.cells);
@@ -577,9 +744,11 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
     Manifest candidate;
     if (!decoder.bytes(magic.data(), magic.size()) ||
         magic != kManifestMagic || !decoder.u32(version) ||
-        version != kFormatVersion || !decoder.u32(candidate.rank_count) ||
+        (version != kLegacyFormatVersion &&
+         version != kExactHistoryFormatVersion) ||
+        !decoder.u32(candidate.rank_count) ||
         candidate.rank_count == 0U ||
-        !decode_common(decoder, candidate) ||
+        !decode_common(decoder, version, candidate) ||
         !valid_global_patch(candidate.global_cells,
                             MeshPatch{{0, 0, 0}, candidate.global_cells, {}, {}})) {
       return {StatusCode::io_failure, kRestartManifest};
@@ -617,10 +786,12 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
     std::uint32_t version = 0U;
     RankBlock candidate;
     if (!decoder.bytes(magic.data(), magic.size()) || magic != kRankMagic ||
-        !decoder.u32(version) || version != kFormatVersion ||
+        !decoder.u32(version) ||
+        (version != kLegacyFormatVersion &&
+         version != kExactHistoryFormatVersion) ||
         !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
         !decoder.u32(candidate.rank) || candidate.rank >= candidate.rank_count ||
-        !decode_common(decoder, candidate.common) ||
+        !decode_common(decoder, version, candidate.common) ||
         !decoder.int3(candidate.patch.begin) ||
         !decoder.int3(candidate.patch.cells) ||
         !valid_global_patch(candidate.common.global_cells, candidate.patch)) {
@@ -629,57 +800,72 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
     std::size_t cells = 0U;
     if (!cell_count(candidate.patch.cells, cells))
       return {StatusCode::io_failure, kRestartRankFile};
-    candidate.fields.resize(candidate.common.fields.size());
-    for (std::size_t field_index = 0U;
-         field_index < candidate.fields.size(); ++field_index) {
-      const FieldMeta meta = candidate.common.fields[field_index];
-      RestartImageField& field = candidate.fields[field_index];
-      field.role = meta.role;
-      field.field = meta.field;
-      field.components = meta.components;
-      std::size_t expected_values = 0U;
-      std::uint64_t stored_values = 0U;
-      if (!checked_multiply(cells, meta.components, expected_values) ||
-          !decoder.u64(stored_values) || stored_values != expected_values) {
-        return {StatusCode::io_failure, kRestartRankFile};
+    const auto decode_fields = [&](const std::vector<FieldMeta>& metadata,
+                                   std::vector<RestartImageField>& fields) {
+      fields.resize(metadata.size());
+      for (std::size_t field_index = 0U; field_index < fields.size();
+           ++field_index) {
+        const FieldMeta meta = metadata[field_index];
+        RestartImageField& field = fields[field_index];
+        field.role = meta.role;
+        field.field = meta.field;
+        field.components = meta.components;
+        std::size_t expected_values = 0U;
+        std::uint64_t stored_values = 0U;
+        if (!checked_multiply(cells, meta.components, expected_values) ||
+            !decoder.u64(stored_values) || stored_values != expected_values)
+          return false;
+        field.values.resize(expected_values);
+        for (double& value : field.values)
+          if (!decoder.real(value) || !std::isfinite(value)) return false;
       }
-      field.values.resize(expected_values);
-      for (double& value : field.values) {
-        if (!decoder.real(value) || !std::isfinite(value))
-          return {StatusCode::io_failure, kRestartRankFile};
+      return true;
+    };
+    const auto decode_flux = [&](std::array<std::vector<double>, 3U>& flux) {
+      for (std::size_t axis = 0U; axis < flux.size(); ++axis) {
+        Int3 owned = candidate.patch.cells;
+        const std::int32_t patch_end =
+            axis == 0U
+                ? candidate.patch.begin.x + candidate.patch.cells.x
+                : (axis == 1U
+                       ? candidate.patch.begin.y + candidate.patch.cells.y
+                       : candidate.patch.begin.z + candidate.patch.cells.z);
+        const std::int32_t global_end =
+            axis == 0U ? candidate.common.global_cells.x
+                       : (axis == 1U ? candidate.common.global_cells.y
+                                     : candidate.common.global_cells.z);
+        if (patch_end == global_end) {
+          if (axis == 0U)
+            ++owned.x;
+          else if (axis == 1U)
+            ++owned.y;
+          else
+            ++owned.z;
+        }
+        std::size_t expected_values = 0U;
+        std::uint64_t stored_values = 0U;
+        if (!cell_count(owned, expected_values) ||
+            !decoder.u64(stored_values) || stored_values != expected_values)
+          return false;
+        flux[axis].resize(expected_values);
+        for (double& value : flux[axis])
+          if (!decoder.real(value) || !std::isfinite(value)) return false;
       }
-    }
-    for (std::size_t axis = 0U; axis < 3U; ++axis) {
-      Int3 owned = candidate.patch.cells;
-      const std::int32_t patch_end =
-          axis == 0U ? candidate.patch.begin.x + candidate.patch.cells.x
-                     : (axis == 1U
-                            ? candidate.patch.begin.y + candidate.patch.cells.y
-                            : candidate.patch.begin.z + candidate.patch.cells.z);
-      const std::int32_t global_end =
-          axis == 0U ? candidate.common.global_cells.x
-                     : (axis == 1U ? candidate.common.global_cells.y
-                                   : candidate.common.global_cells.z);
-      if (patch_end == global_end) {
-        if (axis == 0U)
-          ++owned.x;
-        else if (axis == 1U)
-          ++owned.y;
-        else
-          ++owned.z;
-      }
-      std::size_t expected_values = 0U;
-      std::uint64_t stored_values = 0U;
-      if (!cell_count(owned, expected_values) ||
-          !decoder.u64(stored_values) || stored_values != expected_values) {
-        return {StatusCode::io_failure, kRestartRankFile};
-      }
-      candidate.flux[axis].resize(expected_values);
-      for (double& value : candidate.flux[axis]) {
-        if (!decoder.real(value) || !std::isfinite(value))
-          return {StatusCode::io_failure, kRestartRankFile};
-      }
-    }
+      return true;
+    };
+    if (!decode_fields(candidate.common.fields, candidate.fields))
+      return {StatusCode::io_failure, kRestartRankFile};
+    if (version == kExactHistoryFormatVersion &&
+        (!decode_fields(candidate.common.fields, candidate.previous_fields) ||
+         !decode_fields(candidate.common.rate_fields,
+                        candidate.accepted_rate_fields) ||
+         !decode_fields(candidate.common.rate_fields,
+                        candidate.previous_rate_fields)))
+      return {StatusCode::io_failure, kRestartRankFile};
+    if (!decode_flux(candidate.flux) ||
+        (version == kExactHistoryFormatVersion &&
+         !decode_flux(candidate.previous_flux)))
+      return {StatusCode::io_failure, kRestartRankFile};
     std::uint64_t integrity = 0U;
     if (!decoder.u64(integrity) || decoder.remaining() != 0U) {
       return {StatusCode::io_failure, kRestartRankFile};
@@ -694,24 +880,34 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
 }
 
 bool same_common(const Manifest& left, const Manifest& right) noexcept {
-  if (!same(left.global_cells, right.global_cells) ||
+  if (left.format_version != right.format_version ||
+      !same(left.global_cells, right.global_cells) ||
       left.plan != right.plan || left.schema != right.schema ||
       left.geometry != right.geometry || left.time != right.time ||
       left.dt != right.dt ||
       left.pressure_reference != right.pressure_reference ||
       left.step != right.step ||
       left.controller_state != right.controller_state ||
-      left.fields.size() != right.fields.size()) {
+      left.previous_pressure_reference != right.previous_pressure_reference ||
+      left.closed_mass_target != right.closed_mass_target ||
+      left.final_mass_flux_revision != right.final_mass_flux_revision ||
+      left.previous_mass_flux_revision != right.previous_mass_flux_revision ||
+      left.fields.size() != right.fields.size() ||
+      left.rate_fields.size() != right.rate_fields.size()) {
     return false;
   }
-  for (std::size_t index = 0U; index < left.fields.size(); ++index) {
-    const FieldMeta a = left.fields[index];
-    const FieldMeta b = right.fields[index];
-    if (a.role != b.role || a.field != b.field ||
-        a.components != b.components)
-      return false;
-  }
-  return true;
+  const auto same_metadata = [](const std::vector<FieldMeta>& a,
+                                const std::vector<FieldMeta>& b) noexcept {
+    if (a.size() != b.size()) return false;
+    for (std::size_t index = 0U; index < a.size(); ++index)
+      if (a[index].role != b[index].role ||
+          a[index].field != b[index].field ||
+          a[index].components != b[index].components)
+        return false;
+    return true;
+  };
+  return same_metadata(left.fields, right.fields) &&
+         same_metadata(left.rate_fields, right.rate_fields);
 }
 
 Status broadcast_bytes(MPI_Comm communicator, int rank,
@@ -790,6 +986,18 @@ Status validate_expected(const RestartExpected& expected,
     if (field.role != stored.role || field.field != stored.field ||
         field.components != stored.components || field.components == 0U) {
       return {StatusCode::invalid_plan, kRestartMismatch};
+    }
+  }
+  if (manifest.format_version == kExactHistoryFormatVersion) {
+    if (expected.rate_fields.data == nullptr ||
+        expected.rate_fields.size != manifest.rate_fields.size())
+      return {StatusCode::invalid_plan, kRestartMismatch};
+    for (std::size_t index = 0U; index < expected.rate_fields.size; ++index) {
+      const RestartExpectedField field = expected.rate_fields.data[index];
+      const FieldMeta stored = manifest.rate_fields[index];
+      if (field.role != stored.role || field.field != stored.field ||
+          field.components != stored.components || field.components != 1U)
+        return {StatusCode::invalid_plan, kRestartMismatch};
     }
   }
   return {};
@@ -902,6 +1110,14 @@ void RestartImage::clear() noexcept {
   fields.clear();
   for (std::vector<double>& axis : final_mass_flux) axis.clear();
   backward_euler_recovery = true;
+  previous_fields.clear();
+  accepted_rate_fields.clear();
+  previous_rate_fields.clear();
+  for (std::vector<double>& axis : previous_mass_flux) axis.clear();
+  previous_pressure_reference = 0.0;
+  closed_mass_target = 0.0;
+  final_mass_flux_revision = 0U;
+  previous_mass_flux_revision = 0U;
 }
 
 Status RestartWriter::write(MPI_Comm communicator,
@@ -1107,26 +1323,43 @@ Status RestartReader::load(MPI_Comm communicator,
           {manifest_bytes.data(), manifest_bytes.size()},
           candidate.source_manifest_sha256))
     status = {StatusCode::io_failure, kRestartIntegrity};
-  candidate.backward_euler_recovery = true;
+  const bool exact_history =
+      manifest.format_version == kExactHistoryFormatVersion;
+  candidate.backward_euler_recovery = !exact_history;
+  candidate.previous_pressure_reference =
+      manifest.previous_pressure_reference;
+  candidate.closed_mass_target = manifest.closed_mass_target;
+  candidate.final_mass_flux_revision = manifest.final_mass_flux_revision;
+  candidate.previous_mass_flux_revision =
+      manifest.previous_mass_flux_revision;
   std::size_t target_cells = 0U;
   if (!cell_count(expected.target_patch.cells, target_cells))
     status = {StatusCode::invalid_plan, kRestartInput};
-  if (status) {
-    candidate.fields.resize(manifest.fields.size());
-    for (std::size_t index = 0U; index < candidate.fields.size(); ++index) {
-      const FieldMeta meta = manifest.fields[index];
-      RestartImageField& field = candidate.fields[index];
+  const auto allocate_fields = [&](const std::vector<FieldMeta>& metadata,
+                                   std::vector<RestartImageField>& fields) {
+    fields.resize(metadata.size());
+    for (std::size_t index = 0U; index < fields.size(); ++index) {
+      const FieldMeta meta = metadata[index];
+      RestartImageField& field = fields[index];
       field.role = meta.role;
       field.field = meta.field;
       field.components = meta.components;
       std::size_t values = 0U;
-      if (!checked_multiply(target_cells, meta.components, values)) {
-        status = {StatusCode::invalid_plan, kRestartInput};
-        break;
-      }
+      if (!checked_multiply(target_cells, meta.components, values))
+        return false;
       field.values.resize(values);
     }
-  }
+    return true;
+  };
+  if (status && !allocate_fields(manifest.fields, candidate.fields))
+    status = {StatusCode::invalid_plan, kRestartInput};
+  if (status && exact_history &&
+      (!allocate_fields(manifest.fields, candidate.previous_fields) ||
+       !allocate_fields(manifest.rate_fields,
+                        candidate.accepted_rate_fields) ||
+       !allocate_fields(manifest.rate_fields,
+                        candidate.previous_rate_fields)))
+    status = {StatusCode::invalid_plan, kRestartInput};
   std::vector<std::uint8_t> cell_coverage;
   std::array<std::vector<std::uint8_t>, 3U> face_coverage;
   std::array<Int3, 3U> target_face_extents{{
@@ -1145,6 +1378,8 @@ Status RestartReader::load(MPI_Comm communicator,
         break;
       }
       candidate.final_mass_flux[axis].assign(count, 0.0);
+      if (exact_history)
+        candidate.previous_mass_flux[axis].assign(count, 0.0);
       face_coverage[axis].assign(count, 0U);
     }
   }
@@ -1195,17 +1430,27 @@ Status RestartReader::load(MPI_Comm communicator,
             break;
           }
           cell_coverage[new_cell] = 1U;
-          for (std::size_t field_index = 0U;
-               field_index < candidate.fields.size(); ++field_index) {
-            const std::size_t components =
-                candidate.fields[field_index].components;
-            for (std::size_t component = 0U; component < components;
-                 ++component) {
-              candidate.fields[field_index]
-                  .values[new_cell * components + component] =
-                  block.fields[field_index]
-                      .values[old_cell * components + component];
+          const auto copy_fields = [&](std::vector<RestartImageField>& target,
+                                       const std::vector<RestartImageField>&
+                                           source_fields) {
+            for (std::size_t field_index = 0U;
+                 field_index < target.size(); ++field_index) {
+              const std::size_t components = target[field_index].components;
+              for (std::size_t component = 0U; component < components;
+                   ++component)
+                target[field_index]
+                    .values[new_cell * components + component] =
+                    source_fields[field_index]
+                        .values[old_cell * components + component];
             }
+          };
+          copy_fields(candidate.fields, block.fields);
+          if (exact_history) {
+            copy_fields(candidate.previous_fields, block.previous_fields);
+            copy_fields(candidate.accepted_rate_fields,
+                        block.accepted_rate_fields);
+            copy_fields(candidate.previous_rate_fields,
+                        block.previous_rate_fields);
           }
         }
     if (!status) break;
@@ -1254,6 +1499,9 @@ Status RestartReader::load(MPI_Comm communicator,
             face_coverage[axis][target_index] = 1U;
             candidate.final_mass_flux[axis][target_index] =
                 block.flux[axis][old_index];
+            if (exact_history)
+              candidate.previous_mass_flux[axis][target_index] =
+                  block.previous_flux[axis][old_index];
           }
     }
   }

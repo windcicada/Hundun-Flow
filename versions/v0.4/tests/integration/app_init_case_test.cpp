@@ -120,8 +120,10 @@ bool run() {
     passed &= text.find("HUNDUN_V04_EVIDENCE_V6") != std::string::npos &&
               text.find("\"candidate_identity\":{") != std::string::npos &&
               text.find("\"step\":3") != std::string::npos &&
-              text.find("\"bdf_order\":1") != std::string::npos &&
-              text.find("\"restart_recovery\":true") !=
+              text.find("\"bdf_order\":2") != std::string::npos &&
+              text.find("\"restart_recovery\":true") ==
+                  std::string::npos &&
+              text.find("\"restart_recovery\":false") !=
                   std::string::npos &&
               text.find(
                   "\"pressure_solve_contract\":\"continuity_energy_coupled\"") !=

@@ -51,6 +51,7 @@ struct Fixture {
   FinalFaceFluxAuthority authority;
   FinalFaceFluxWriter writer;
   ConstFaceFluxView committed_flux{};
+  ConstFaceFluxView previous_flux{};
 
   bool initialize(MPI_Comm communicator) {
     CartesianMeshSpec mesh;
@@ -126,6 +127,24 @@ struct Fixture {
     return true;
   }
 
+  bool promote_flux(MPI_Comm communicator) {
+    if (!transaction.begin(layers) || !transaction.revise_trial(0U))
+      return false;
+    PendingFaceFluxView pending;
+    const std::array dependencies{RevisionDependency{
+        AttemptTransaction::field_revision_source(0U),
+        transaction.trial_revision(0U)}};
+    if (!writer.begin_pending(transaction, final_storage, pending) ||
+        !detail::overwrite_pending_face_flux_for_test(pending, 777.0) ||
+        !writer.publish_pending(
+            {dependencies.data(), dependencies.size()}, pending) ||
+        !transaction.collective_finish(communicator, Status{}) ||
+        !writer.committed(final_storage, committed_flux) ||
+        !writer.committed_previous(final_storage, previous_flux))
+      return false;
+    return committed_flux.revision == 2U && previous_flux.revision == 1U;
+  }
+
   RestartSnapshot snapshot(std::uint64_t step) const noexcept {
     return {kGlobal,
             patch,
@@ -139,6 +158,91 @@ struct Fixture {
             UINT64_C(0x55aa),
             {restart_fields.data(), restart_fields.size()},
             committed_flux};
+  }
+};
+
+struct ExactFixture {
+  Fixture base;
+  std::array<test::OwnedField, 4U> previous_fields;
+  std::array<test::OwnedField, 2U> accepted_rates;
+  std::array<test::OwnedField, 2U> previous_rates;
+  std::array<RestartFieldView, 4U> previous_restart_fields{};
+  std::array<RestartFieldView, 2U> accepted_restart_rates{};
+  std::array<RestartFieldView, 2U> previous_restart_rates{};
+
+  bool initialize(MPI_Comm communicator) {
+    if (!base.initialize(communicator) || !base.promote_flux(communicator))
+      return false;
+    const std::array<std::uint8_t, 4U> components{{3U, 1U, 1U, 1U}};
+    const std::array<RestartFieldRole, 4U> roles{{
+        RestartFieldRole::velocity,
+        RestartFieldRole::pressure_perturbation,
+        RestartFieldRole::enthalpy,
+        RestartFieldRole::independent_species}};
+    for (std::size_t field = 0U; field < previous_fields.size(); ++field) {
+      previous_fields[field] = test::make_field(
+          static_cast<FieldId>(field), base.patch.cells, components[field],
+          0U, static_cast<RevisionToken>(500U + field),
+          static_cast<StorageIdentity>(600U + field));
+      for (std::int32_t z = 0; z < base.patch.cells.z; ++z)
+        for (std::int32_t y = 0; y < base.patch.cells.y; ++y)
+          for (std::int32_t x = 0; x < base.patch.cells.x; ++x)
+            for (std::uint8_t component = 0U;
+                 component < components[field]; ++component) {
+              const Int3 global{base.patch.begin.x + x,
+                                base.patch.begin.y + y,
+                                base.patch.begin.z + z};
+              previous_fields[field].view.unchecked({x, y, z}, component) =
+                  cell_value(field, component, global) + 50000.0;
+            }
+      previous_restart_fields[field] = {
+          roles[field], as_const(previous_fields[field].view)};
+    }
+    const std::array<RestartFieldRole, 2U> rate_roles{{
+        RestartFieldRole::enthalpy_nonadvective_rate,
+        RestartFieldRole::scalar_nonadvective_rate}};
+    for (std::size_t field = 0U; field < accepted_rates.size(); ++field) {
+      const FieldId id = static_cast<FieldId>(10U + field);
+      accepted_rates[field] = test::make_field(
+          id, base.patch.cells, 1U, 0U,
+          static_cast<RevisionToken>(700U + field),
+          static_cast<StorageIdentity>(800U + field));
+      previous_rates[field] = test::make_field(
+          id, base.patch.cells, 1U, 0U,
+          static_cast<RevisionToken>(900U + field),
+          static_cast<StorageIdentity>(1000U + field));
+      for (std::int32_t z = 0; z < base.patch.cells.z; ++z)
+        for (std::int32_t y = 0; y < base.patch.cells.y; ++y)
+          for (std::int32_t x = 0; x < base.patch.cells.x; ++x) {
+            const Int3 global{base.patch.begin.x + x,
+                              base.patch.begin.y + y,
+                              base.patch.begin.z + z};
+            accepted_rates[field].view.unchecked({x, y, z}, 0U) =
+                70000.0 + 1000.0 * field + global.x + 0.01 * global.y;
+            previous_rates[field].view.unchecked({x, y, z}, 0U) =
+                80000.0 + 1000.0 * field + global.x + 0.01 * global.y;
+          }
+      accepted_restart_rates[field] = {
+          rate_roles[field], as_const(accepted_rates[field].view)};
+      previous_restart_rates[field] = {
+          rate_roles[field], as_const(previous_rates[field].view)};
+    }
+    return true;
+  }
+
+  RestartSnapshot snapshot() const noexcept {
+    RestartSnapshot value = base.snapshot(50U);
+    value.controller_state = 51U;
+    value.previous_fields = {previous_restart_fields.data(),
+                             previous_restart_fields.size()};
+    value.accepted_rate_fields = {accepted_restart_rates.data(),
+                                  accepted_restart_rates.size()};
+    value.previous_rate_fields = {previous_restart_rates.data(),
+                                  previous_restart_rates.size()};
+    value.previous_mass_flux = base.previous_flux;
+    value.previous_pressure_reference = 101300.0;
+    value.closed_mass_target = 3.5;
+    return value;
   }
 };
 
@@ -192,6 +296,113 @@ bool verify(const RestartImage& image, const MeshPatch& patch) {
             return false;
         }
   return true;
+}
+
+bool exact_transition(MPI_Comm communicator, const fs::path& directory) {
+  ExactFixture fixture;
+  bool passed = fixture.initialize(communicator);
+  Status status;
+  if (passed)
+    status = RestartWriter::write(communicator, directory,
+                                  fixture.snapshot(), {1U});
+  passed = passed && static_cast<bool>(status);
+  const std::array<RestartExpectedField, 4U> expected_fields{{
+      {RestartFieldRole::velocity, 0U, 3U},
+      {RestartFieldRole::pressure_perturbation, 1U, 1U},
+      {RestartFieldRole::enthalpy, 2U, 1U},
+      {RestartFieldRole::independent_species, 3U, 1U}}};
+  const std::array<RestartExpectedField, 2U> expected_rates{{
+      {RestartFieldRole::enthalpy_nonadvective_rate, 10U, 1U},
+      {RestartFieldRole::scalar_nonadvective_rate, 11U, 1U}}};
+  const RestartExpected expected{
+      kGlobal,
+      fixture.base.patch,
+      kPlan,
+      kSchema,
+      kGeometry,
+      {expected_fields.data(), expected_fields.size()},
+      {expected_rates.data(), expected_rates.size()}};
+  RestartImage image;
+  if (passed)
+    status = RestartReader::load(communicator, directory, expected, image);
+  passed = passed && static_cast<bool>(status) &&
+           !image.backward_euler_recovery &&
+           image.controller_state == 51U &&
+           image.previous_pressure_reference == 101300.0 &&
+           image.closed_mass_target == 3.5 &&
+           image.final_mass_flux_revision == 2U &&
+           image.previous_mass_flux_revision == 1U &&
+           image.previous_fields.size() == expected_fields.size() &&
+           image.accepted_rate_fields.size() == expected_rates.size() &&
+           image.previous_rate_fields.size() == expected_rates.size();
+  const auto dense_index = [](Int3 local, Int3 cells) {
+    return (static_cast<std::size_t>(local.z) * cells.y + local.y) * cells.x +
+           local.x;
+  };
+  for (std::size_t field = 0U;
+       field < image.previous_fields.size() && passed; ++field)
+    for (std::int32_t z = 0; z < fixture.base.patch.cells.z; ++z)
+      for (std::int32_t y = 0; y < fixture.base.patch.cells.y; ++y)
+        for (std::int32_t x = 0; x < fixture.base.patch.cells.x; ++x) {
+          const Int3 local{x, y, z};
+          const Int3 global{fixture.base.patch.begin.x + x,
+                            fixture.base.patch.begin.y + y,
+                            fixture.base.patch.begin.z + z};
+          const std::size_t cell =
+              dense_index(local, fixture.base.patch.cells);
+          for (std::uint8_t component = 0U;
+               component < image.previous_fields[field].components;
+               ++component)
+            passed = passed &&
+                     image.previous_fields[field]
+                             .values[cell *
+                                         image.previous_fields[field]
+                                             .components +
+                                     component] ==
+                         cell_value(field, component, global) + 50000.0;
+        }
+  for (std::size_t field = 0U;
+       field < image.accepted_rate_fields.size() && passed; ++field)
+    for (std::int32_t z = 0; z < fixture.base.patch.cells.z; ++z)
+      for (std::int32_t y = 0; y < fixture.base.patch.cells.y; ++y)
+        for (std::int32_t x = 0; x < fixture.base.patch.cells.x; ++x) {
+          const Int3 global{fixture.base.patch.begin.x + x,
+                            fixture.base.patch.begin.y + y,
+                            fixture.base.patch.begin.z + z};
+          const std::size_t cell = dense_index({x, y, z},
+                                               fixture.base.patch.cells);
+          passed = image.accepted_rate_fields[field].values[cell] ==
+                       70000.0 + 1000.0 * field + global.x +
+                           0.01 * global.y &&
+                   image.previous_rate_fields[field].values[cell] ==
+                       80000.0 + 1000.0 * field + global.x +
+                           0.01 * global.y;
+        }
+  const std::array<Int3, 3U> extents{{
+      {fixture.base.patch.cells.x + 1, fixture.base.patch.cells.y,
+       fixture.base.patch.cells.z},
+      {fixture.base.patch.cells.x, fixture.base.patch.cells.y + 1,
+       fixture.base.patch.cells.z},
+      {fixture.base.patch.cells.x, fixture.base.patch.cells.y,
+       fixture.base.patch.cells.z + 1}}};
+  for (std::size_t axis = 0U; axis < extents.size() && passed; ++axis)
+    for (std::int32_t z = 0; z < extents[axis].z; ++z)
+      for (std::int32_t y = 0; y < extents[axis].y; ++y)
+        for (std::int32_t x = 0; x < extents[axis].x; ++x) {
+          const Int3 local{x, y, z};
+          const Int3 global{fixture.base.patch.begin.x + x,
+                            fixture.base.patch.begin.y + y,
+                            fixture.base.patch.begin.z + z};
+          const std::size_t index = dense_index(local, extents[axis]);
+          passed = passed &&
+                   image.final_mass_flux[axis][index] == 777.0 &&
+                   image.previous_mass_flux[axis][index] ==
+                       face_value(axis, global);
+        }
+  const int local = passed ? 1 : 0;
+  int global = 0;
+  MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, communicator);
+  return global != 0;
 }
 
 bool transition(MPI_Comm world, int writer_size, int reader_size,
@@ -378,6 +589,7 @@ int main(int argc, char** argv) {
   passed &= transition(MPI_COMM_WORLD, 1, 2, base / "one-to-two", 1U);
   passed &= transition(MPI_COMM_WORLD, 2, 4, base / "two-to-four", 2U);
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);
+  passed &= exact_transition(MPI_COMM_WORLD, base / "exact-four-to-four");
   passed &= failure_boundaries(MPI_COMM_WORLD, base / "failure-boundaries");
   if (rank == 0) {
     std::error_code error;

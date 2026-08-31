@@ -4,6 +4,10 @@ find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
 
+add_test(NAME v04_thin_domain_runner_self_test
+  COMMAND $<TARGET_FILE:v04_thin_domain_runner> --self-test)
+set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
+
 add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"

@@ -678,6 +678,70 @@ Status FinalFaceFluxWriter::initialize_restored(
   return {};
 }
 
+Status FinalFaceFluxWriter::initialize_restored_history(
+    FaceFluxStorage& storage, ConstFaceFluxView accepted,
+    ConstFaceFluxView previous) noexcept {
+  if (!issued_ || active_revision_ != 0U || previous_revision_ != 0U ||
+      pending_ || authority_transaction_ == nullptr ||
+      authority_transaction_->active() ||
+      storage.replicas_ != kFinalFaceFluxReplicas ||
+      !storage.final_storage_ || storage.authority_identity_ != 0U ||
+      storage.pending_writer_ != nullptr || storage_ != nullptr ||
+      transaction_ != nullptr || bound_storage_identity_ != 0U ||
+      bound_revision_domain_ != 0U ||
+      !detail::valid_flux_view(accepted, storage.cells_, accepted.revision) ||
+      !detail::valid_flux_view(previous, storage.cells_, previous.revision) ||
+      previous.revision >= accepted.revision ||
+      accepted.revision == std::numeric_limits<RevisionToken>::max()) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const std::array<ConstFaceFluxView, 2U> sources{{previous, accepted}};
+  for (const ConstFaceFluxView source : sources) {
+    const std::array<ConstFaceFieldView, 3U> inputs{
+        source.x, source.y, source.z};
+    for (const ConstFaceFieldView input : inputs)
+      for (std::int32_t z = 0; z < input.extents.z; ++z)
+        for (std::int32_t y = 0; y < input.extents.y; ++y)
+          for (std::int32_t x = 0; x < input.extents.x; ++x)
+            if (!std::isfinite(input.unchecked({x, y, z})))
+              return {StatusCode::numerical_failure, kFaceAuthority};
+  }
+
+  constexpr std::size_t previous_replica = 0U;
+  constexpr std::size_t accepted_replica = 1U;
+  const auto copy_to_replica = [&](ConstFaceFluxView source,
+                                   std::size_t replica) noexcept {
+    FaceFluxView destination;
+    Status status = storage.view_impl(replica, source.revision, destination);
+    if (!status) return status;
+    const std::array<ConstFaceFieldView, 3U> inputs{
+        source.x, source.y, source.z};
+    const std::array<FaceFieldView, 3U> outputs{
+        destination.x, destination.y, destination.z};
+    for (std::size_t axis = 0U; axis < inputs.size(); ++axis)
+      for (std::int32_t z = 0; z < inputs[axis].extents.z; ++z)
+        for (std::int32_t y = 0; y < inputs[axis].extents.y; ++y)
+          for (std::int32_t x = 0; x < inputs[axis].extents.x; ++x)
+            outputs[axis].unchecked({x, y, z}) =
+                inputs[axis].unchecked({x, y, z});
+    return Status{};
+  };
+  Status status = copy_to_replica(previous, previous_replica);
+  if (status) status = copy_to_replica(accepted, accepted_replica);
+  if (!status) return status;
+
+  active_replica_ = accepted_replica;
+  previous_replica_ = previous_replica;
+  pending_replica_ = 2U;
+  active_revision_ = accepted.revision;
+  previous_revision_ = previous.revision;
+  bound_storage_identity_ = storage.identity_;
+  bound_revision_domain_ = storage.revision_domain_;
+  bound_cells_ = storage.cells_;
+  storage.authority_identity_ = authority_fingerprint_;
+  return {};
+}
+
 Status FinalFaceFluxWriter::restore_committed(
     FaceFluxStorage& storage, ConstFaceFluxView source) noexcept {
   if (!issued_ || active_revision_ == 0U || pending_ ||

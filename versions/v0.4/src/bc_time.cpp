@@ -332,6 +332,34 @@ Status TimeControllerState::restart(const TimeSchemePlan& plan, double time,
   return {};
 }
 
+Status TimeControllerState::restart_exact(
+    const TimeSchemePlan& plan, double time, double last_accepted_dt,
+    std::uint64_t accepted_step, std::uint64_t next_generation,
+    TimeControllerState& out) noexcept {
+  const double first_candidate_time = time + last_accepted_dt;
+  if (plan.fingerprint() == 0U || !std::isfinite(time) ||
+      !finite_positive(last_accepted_dt) ||
+      last_accepted_dt < plan.spec().minimum_dt ||
+      last_accepted_dt > plan.spec().maximum_dt ||
+      accepted_step == std::numeric_limits<std::uint64_t>::max() ||
+      next_generation == 0U ||
+      next_generation == std::numeric_limits<std::uint64_t>::max() ||
+      !std::isfinite(first_candidate_time) ||
+      !(first_candidate_time > time)) {
+    return {StatusCode::invalid_plan, kTimeInput};
+  }
+  TimeControllerState candidate;
+  candidate.plan_ = plan;
+  candidate.time_ = time;
+  candidate.last_accepted_dt_ = last_accepted_dt;
+  candidate.accepted_step_ = accepted_step;
+  candidate.next_generation_ = next_generation;
+  candidate.next_origin_ = StepOrigin::restart;
+  candidate.force_backward_euler_ = false;
+  out = candidate;
+  return {};
+}
+
 Status TimeControllerState::coefficients(
     double dt, bool force_backward_euler,
     BdfCoefficients& out) const noexcept {

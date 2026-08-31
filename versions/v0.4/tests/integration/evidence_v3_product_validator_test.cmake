@@ -17,7 +17,7 @@ path = pathlib.Path(sys.argv[1])
 scenario = sys.argv[2]
 expected = {
     "fresh": ((1, 1, 1, True, False), (2, 2, 2, False, False)),
-    "restart": ((3, 1, 1, False, True), (4, 2, 2, False, False)),
+    "restart": ((3, 2, 2, False, False), (4, 2, 2, False, False)),
 }
 if scenario not in expected:
     raise SystemExit("unknown V6 producer scenario: " + scenario)

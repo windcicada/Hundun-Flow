@@ -816,6 +816,211 @@ bool restart_preserves_direct_flux_lineage() {
   return true;
 }
 
+bool exact_restart_preserves_bdf2_history() {
+  const fs::path restart_root =
+      fs::temp_directory_path() /
+      ("hundun-v04-exact-restart-" + std::to_string(::getpid()));
+  std::error_code cleanup_error;
+  fs::remove_all(restart_root, cleanup_error);
+
+  ValidatedModel model = test::product_model({8, 7, 6});
+  CompiledCasePlan source_plan;
+  Status status =
+      ProductCompiler::compile(MPI_COMM_SELF, model, {}, source_plan);
+  ProductDriver source;
+  if (status)
+    status = ProductDriver::create(MPI_COMM_SELF, std::move(source_plan),
+                                   source);
+  DriverInitialState initial;
+  initial.pressure_reference = 98000.0;
+  initial.temperature = 500.0;
+  initial.velocity = {0.2, -0.1, 0.0};
+  if (status) status = source.initialize(initial);
+  DriverStepReport first;
+  DriverStepReport second;
+  if (status)
+    status = source.advance({1.0, 1.0, 1.0, 1.0, 1.0}, first);
+  if (status)
+    status = source.advance({1.0, 1.0, 1.0, 1.0, 1.0}, second);
+  RestartSnapshot checkpoint;
+  if (status) status = source.committed_restart_snapshot(checkpoint);
+  if (status)
+    status = RestartWriter::write(MPI_COMM_SELF, restart_root, checkpoint,
+                                  {1U});
+
+  CompiledCasePlan resumed_plan;
+  if (status)
+    status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, resumed_plan);
+  ProductDriver resumed;
+  if (status)
+    status = ProductDriver::create(MPI_COMM_SELF, std::move(resumed_plan),
+                                   resumed);
+  RestartExpected expected;
+  if (status) status = resumed.restart_expected(expected);
+  RestartImage image;
+  if (status)
+    status = RestartReader::load(MPI_COMM_SELF, restart_root, expected,
+                                 image);
+  const bool exact_image =
+      status && !image.backward_euler_recovery &&
+      image.previous_fields.size() == image.fields.size() &&
+      !image.accepted_rate_fields.empty() &&
+      image.previous_rate_fields.size() ==
+          image.accepted_rate_fields.size() &&
+      image.previous_mass_flux_revision != 0U &&
+      image.previous_mass_flux_revision < image.final_mass_flux_revision;
+  bool failure_atomic = false;
+  if (status && exact_image) {
+    RestartImage invalid = image;
+    invalid.previous_rate_fields[0U].values[0U] =
+        std::numeric_limits<double>::quiet_NaN();
+    const Status rejected = resumed.initialize_restart(invalid);
+    failure_atomic = !rejected &&
+                     rejected.code == StatusCode::numerical_failure &&
+                     !resumed.initialized() &&
+                     resumed.pressure_reference() == 0.0 &&
+                     resumed.closed_mass_target() == 0.0;
+    if (!failure_atomic) status = rejected;
+  }
+  if (status) status = resumed.initialize_restart(image);
+  RestartSnapshot restored;
+  if (status) status = resumed.committed_restart_snapshot(restored);
+
+  const auto same_field_payload = [](Span<const RestartFieldView> left,
+                                     Span<const RestartFieldView> right) {
+    if (left.size != right.size) return false;
+    for (std::size_t field = 0U; field < left.size; ++field) {
+      const RestartFieldView a = left.data[field];
+      const RestartFieldView b = right.data[field];
+      if (a.role != b.role || a.values.field != b.values.field ||
+          a.values.components != b.values.components ||
+          a.values.interior.x != b.values.interior.x ||
+          a.values.interior.y != b.values.interior.y ||
+          a.values.interior.z != b.values.interior.z)
+        return false;
+      for (std::uint8_t component = 0U;
+           component < a.values.components; ++component)
+        for (std::int32_t z = 0; z < a.values.interior.z; ++z)
+          for (std::int32_t y = 0; y < a.values.interior.y; ++y)
+            for (std::int32_t x = 0; x < a.values.interior.x; ++x) {
+              const double av = a.values.unchecked({x, y, z}, component);
+              const double bv = b.values.unchecked({x, y, z}, component);
+              if (std::memcmp(&av, &bv, sizeof(double)) != 0) return false;
+            }
+    }
+    return true;
+  };
+  const auto same_flux_payload = [](ConstFaceFluxView left,
+                                    ConstFaceFluxView right) {
+    if (left.revision != right.revision) return false;
+    const std::array<ConstFaceFieldView, 3U> a{left.x, left.y, left.z};
+    const std::array<ConstFaceFieldView, 3U> b{right.x, right.y, right.z};
+    for (std::size_t axis = 0U; axis < a.size(); ++axis) {
+      if (a[axis].extents.x != b[axis].extents.x ||
+          a[axis].extents.y != b[axis].extents.y ||
+          a[axis].extents.z != b[axis].extents.z)
+        return false;
+      for (std::int32_t z = 0; z < a[axis].extents.z; ++z)
+        for (std::int32_t y = 0; y < a[axis].extents.y; ++y)
+          for (std::int32_t x = 0; x < a[axis].extents.x; ++x) {
+            const double av = a[axis].unchecked({x, y, z});
+            const double bv = b[axis].unchecked({x, y, z});
+            if (std::memcmp(&av, &bv, sizeof(double)) != 0) return false;
+          }
+    }
+    return true;
+  };
+  const bool exact_restore =
+      status && exact_image && restored.controller_state ==
+                                   checkpoint.controller_state &&
+      restored.previous_pressure_reference ==
+          checkpoint.previous_pressure_reference &&
+      restored.closed_mass_target == checkpoint.closed_mass_target &&
+      same_field_payload(restored.fields, checkpoint.fields) &&
+      same_field_payload(restored.previous_fields,
+                         checkpoint.previous_fields) &&
+      same_field_payload(restored.accepted_rate_fields,
+                         checkpoint.accepted_rate_fields) &&
+      same_field_payload(restored.previous_rate_fields,
+                         checkpoint.previous_rate_fields) &&
+      same_flux_payload(restored.final_mass_flux,
+                        checkpoint.final_mass_flux) &&
+      same_flux_payload(restored.previous_mass_flux,
+                        checkpoint.previous_mass_flux);
+
+  DriverStepReport continuous_step;
+  DriverStepReport resumed_step;
+  if (status)
+    status = source.advance({1.0, 1.0, 1.0, 1.0, 1.0}, continuous_step);
+  if (status)
+    status = resumed.advance({1.0, 1.0, 1.0, 1.0, 1.0}, resumed_step);
+  RestartSnapshot continuous_endpoint;
+  RestartSnapshot resumed_endpoint;
+  if (status)
+    status = source.committed_restart_snapshot(continuous_endpoint);
+  if (status)
+    status = resumed.committed_restart_snapshot(resumed_endpoint);
+
+  double maximum_relative_difference = 0.0;
+  const auto compare_field_payload = [&](Span<const RestartFieldView> left,
+                                         Span<const RestartFieldView> right) {
+    if (left.size != right.size) return false;
+    for (std::size_t field = 0U; field < left.size; ++field) {
+      const ConstFieldView a = left.data[field].values;
+      const ConstFieldView b = right.data[field].values;
+      if (left.data[field].role != right.data[field].role ||
+          a.components != b.components) return false;
+      for (std::uint8_t component = 0U; component < a.components; ++component)
+        for (std::int32_t z = 0; z < a.interior.z; ++z)
+          for (std::int32_t y = 0; y < a.interior.y; ++y)
+            for (std::int32_t x = 0; x < a.interior.x; ++x) {
+              const double av = a.unchecked({x, y, z}, component);
+              const double bv = b.unchecked({x, y, z}, component);
+              maximum_relative_difference = std::max(
+                  maximum_relative_difference,
+                  std::abs(av - bv) /
+                      std::max({1.0, std::abs(av), std::abs(bv)}));
+            }
+    }
+    return true;
+  };
+  const bool endpoint_layout =
+      status && compare_field_payload(continuous_endpoint.fields,
+                                      resumed_endpoint.fields);
+  const bool passed =
+      endpoint_layout && failure_atomic && exact_restore && first.accepted &&
+      second.accepted && second.effective_bdf.order == 2U &&
+      continuous_step.accepted && resumed_step.accepted &&
+      continuous_step.effective_bdf.order == 2U &&
+      resumed_step.proposal.origin == StepOrigin::restart &&
+      resumed_step.proposal.bdf.order == 2U &&
+      resumed_step.effective_bdf.order == 2U &&
+      !resumed_step.temporal_method_fallback &&
+      resumed_step.proposal.generation ==
+          continuous_step.proposal.generation &&
+      continuous_endpoint.step == resumed_endpoint.step &&
+      continuous_endpoint.time == resumed_endpoint.time &&
+      continuous_endpoint.controller_state ==
+          resumed_endpoint.controller_state &&
+      maximum_relative_difference <= 1.0e-9;
+  if (!passed) {
+    std::cerr << std::setprecision(17)
+              << "exact restart status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " image/atomic/restore=" << exact_image << '/'
+              << failure_atomic << '/' << exact_restore
+              << " orders=" << static_cast<unsigned>(second.effective_bdf.order)
+              << '/'
+              << static_cast<unsigned>(continuous_step.effective_bdf.order)
+              << '/' << static_cast<unsigned>(resumed_step.proposal.bdf.order)
+              << '/' << static_cast<unsigned>(resumed_step.effective_bdf.order)
+              << " fallback=" << resumed_step.temporal_method_fallback
+              << " max_relative=" << maximum_relative_difference << '\n';
+  }
+  fs::remove_all(restart_root, cleanup_error);
+  return passed;
+}
+
 bool run_open_boundary_product() {
   ValidatedModel model = test::product_model({8, 7, 6});
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
@@ -1746,6 +1951,7 @@ int main(int argc, char** argv) {
   check("invalid-restart-rollback",
         reject_invalid_thermodynamic_restart_atomically());
   check("restart-flux-lineage", restart_preserves_direct_flux_lineage());
+  check("exact-restart-BDF2", exact_restart_preserves_bdf2_history());
   check("open-boundary", run_open_boundary_product());
   check("fixed-provisional-CFL",
         fixed_advective_cfl_gate_rolls_back_product());

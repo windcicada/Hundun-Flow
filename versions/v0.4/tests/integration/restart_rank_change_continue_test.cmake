@@ -191,7 +191,7 @@ import sys
 fixed_dt = float(sys.argv[1])
 paths = [pathlib.Path(value) for value in sys.argv[2:]]
 expected = (
-    (3, 1, 1, True),
+    (3, 2, 2, False),
     (4, 2, 2, False),
 )
 all_rows = []
