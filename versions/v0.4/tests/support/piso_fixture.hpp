@@ -284,11 +284,12 @@ class PeriodicPisoFixture {
     const std::uint8_t reach = equations.kernels().reach();
     density = make_field(0U, cells, 1U, reach, 1601U, 2601U);
     velocity = make_field(1U, cells, 3U, 0U, 1602U, 2602U);
+    pressure = make_field(2U, cells, 1U, reach, 1611U, 2611U);
     momentum_diagonal = make_field(30U, cells, 3U, 0U, 1603U, 2603U);
     momentum_rhs = make_field(31U, cells, 3U, 0U, 1604U, 2604U);
     r_au = make_field(40U, cells, 3U, 1U, 1605U, 2605U);
     h_by_a = make_field(41U, cells, 3U, reach, 1606U, 2606U);
-    pressure_gradient = make_field(42U, cells, 3U, 0U, 1607U, 2610U);
+    pressure_gradient = make_field(42U, cells, 3U, 1U, 1607U, 2610U);
     x_pressure_coefficient =
         make_face_field(CartesianAxis::x, cells, 2607U);
     y_pressure_coefficient =
@@ -302,13 +303,15 @@ class PeriodicPisoFixture {
     }
     fill(density, 1.0);
     fill(velocity, 0.0);
+    fill(pressure, 0.0);
     fill(momentum_diagonal, 1.0);
     fill(momentum_rhs, 0.0);
 
-    const std::array<HaloFieldSpec, 3U> halo_fields{{
+    const std::array<HaloFieldSpec, 4U> halo_fields{{
         {density.view.field, 1U, 1U},
         {r_au.view.field, 1U, 3U},
-        {h_by_a.view.field, reach, 3U}}};
+        {h_by_a.view.field, reach, 3U},
+        {pressure_gradient.view.field, 1U, 3U}}};
     if (!halo.reserve(communicator, patch,
                       {halo_fields.data(), halo_fields.size()},
                       boundary.halo_topology())) {
@@ -494,6 +497,8 @@ class PeriodicPisoFixture {
     input.numeric_boundary = boundary.revision();
     input.prior_corrector = prior;
     input.corrector = corrector;
+    input.thermophysical_boundary.binding.pressure_perturbation =
+        as_const(pressure.view);
     return input;
   }
 
@@ -538,6 +543,7 @@ class PeriodicPisoFixture {
   PressureVelocityCoupler coupler;
   OwnedField density;
   OwnedField velocity;
+  OwnedField pressure;
   OwnedField momentum_diagonal;
   OwnedField momentum_rhs;
   OwnedField r_au;

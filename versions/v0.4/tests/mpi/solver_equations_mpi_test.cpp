@@ -1950,7 +1950,7 @@ bool test_piso_intermediate_halo_oracle(MPI_Comm world, int rank) {
   OwnedField h_by_a =
       make_field(41U, cells, 3U, reach, 306U, salt + 6U);
   OwnedField pressure_gradient =
-      make_field(42U, cells, 3U, 0U, 308U, salt + 10U);
+      make_field(42U, cells, 3U, 1U, 308U, salt + 10U);
   OwnedFaceField ax = make_face(CartesianAxis::x, cells, salt + 7U);
   OwnedFaceField ay = make_face(CartesianAxis::y, cells, salt + 8U);
   OwnedFaceField az = make_face(CartesianAxis::z, cells, salt + 9U);
@@ -2038,9 +2038,10 @@ bool test_piso_intermediate_halo_oracle(MPI_Comm world, int rank) {
   const PisoCouplerWorkspace workspace{
       r_au.view, h_by_a.view, pressure_gradient.view,
       ax.view, ay.view, az.view, phi};
-  const std::array<HaloFieldSpec, 3U> halo_fields{{
+  const std::array<HaloFieldSpec, 4U> halo_fields{{
       {density.view.field, 1U, 1U},
-      {r_au.view.field, 1U, 3U}, {h_by_a.view.field, reach, 3U}}};
+      {r_au.view.field, 1U, 3U}, {h_by_a.view.field, reach, 3U},
+      {pressure_gradient.view.field, 1U, 3U}}};
   HaloEngine halo;
   const Status halo_status = halo.reserve(
       world, patch, {halo_fields.data(), halo_fields.size()},

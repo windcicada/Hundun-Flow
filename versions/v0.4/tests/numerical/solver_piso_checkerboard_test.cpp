@@ -36,18 +36,57 @@ double face_sum(const PeriodicPisoFixture& fixture, Int3 cell) {
 
 bool test_production_checkerboard_mode() {
   PeriodicPisoFixture fixture;
-  bool passed = expect(fixture.initialize(8),
+  bool passed = expect(fixture.initialize(8, MPI_COMM_WORLD),
                        "production periodic PISO fixture compiles");
   if (!passed) {
     return false;
   }
   const BdfCoefficients bdf{10.0, -10.0, 0.0, 1U};
+  const Int3 cells = fixture.patch.cells;
+  for (std::int32_t z = -1; z <= cells.z; ++z) {
+    for (std::int32_t y = -1; y <= cells.y; ++y) {
+      for (std::int32_t x = -1; x <= cells.x; ++x) {
+        fixture.pressure.view.unchecked({x, y, z}, 0U) =
+            ((fixture.patch.begin.x + x + fixture.patch.begin.y + y +
+              fixture.patch.begin.z + z) &
+             1) == 0
+                ? 1.0
+                : -1.0;
+      }
+    }
+  }
+  ++fixture.pressure.view.revision;
   PisoIntermediateInput intermediate_input =
       fixture.intermediate_input(bdf, 5001U);
   PisoIntermediateCertificate intermediate;
   passed &= expect(static_cast<bool>(fixture.coupler.refresh(
                        intermediate_input, intermediate)),
                    "production rAU/HbyA/pressure-face lifecycle refreshes");
+  double predictor_response_error = 0.0;
+  double predictor_response_norm = 0.0;
+  for (std::int32_t z = 0; z < cells.z; ++z) {
+    for (std::int32_t y = 0; y < cells.y; ++y) {
+      for (std::int32_t x = 0; x <= cells.x; ++x) {
+        const Int3 face{x, y, z};
+        const Int3 left{x - 1, y, z};
+        const double jump =
+            fixture.pressure.view.unchecked(face, 0U) -
+            fixture.pressure.view.unchecked(left, 0U);
+        const double expected =
+            -fixture.x_pressure_coefficient.view.unchecked(face) * jump;
+        const double actual = fixture.phi_h_by_a.x.unchecked(face);
+        predictor_response_error =
+            std::max(predictor_response_error, std::abs(actual - expected));
+        predictor_response_norm =
+            std::max(predictor_response_norm, std::abs(expected));
+      }
+    }
+  }
+  passed &= expect(predictor_response_norm > 0.0 &&
+                       predictor_response_error <=
+                           1.0e-12 * predictor_response_norm,
+                   "C1 predictor face flux consumes the current pressure "
+                   "checkerboard through the spatial Rhie-Chow response");
 
   OwnedField accepted = make_field(50U, fixture.patch.cells, 1U, 0U, 5002U,
                                    6002U);
@@ -84,13 +123,13 @@ bool test_production_checkerboard_mode() {
       {correction_field, 1U, 1U}}};
   HaloEngine operator_halo;
   passed &= expect(static_cast<bool>(operator_halo.reserve(
-                       MPI_COMM_SELF, fixture.patch,
+                       MPI_COMM_WORLD, fixture.patch,
                        {halo_fields.data(), halo_fields.size()},
                        fixture.boundary.halo_topology())),
                    "pressure-operator halo reserves once");
   PressureLinearOperator pressure_operator;
   passed &= expect(static_cast<bool>(fixture.coupler.bind_pressure_operator(
-                       {MPI_COMM_SELF, &operator_halo, 5008U,
+                       {MPI_COMM_WORLD, &operator_halo, 5008U,
                         correction_field},
                        system, pressure_operator)) &&
                        static_cast<bool>(pressure_operator.refresh(
@@ -102,7 +141,6 @@ bool test_production_checkerboard_mode() {
     return false;
   }
 
-  const Int3 cells = fixture.patch.cells;
   fill(mode, 1.0);
   passed &= expect(static_cast<bool>(pressure_operator.apply(mode.view,
                                                              applied.view)),
@@ -124,7 +162,11 @@ bool test_production_checkerboard_mode() {
     for (std::int32_t y = 0; y < cells.y; ++y) {
       for (std::int32_t x = 0; x < cells.x; ++x) {
         mode.view.unchecked({x, y, z}, 0U) =
-            ((x + y + z) & 1) == 0 ? 1.0 : -1.0;
+            ((fixture.patch.begin.x + x + fixture.patch.begin.y + y +
+              fixture.patch.begin.z + z) &
+             1) == 0
+                ? 1.0
+                : -1.0;
       }
     }
   }
@@ -175,7 +217,10 @@ bool test_production_checkerboard_mode() {
   if (!passed) {
     std::cerr << "constant=" << constant_rayleigh
               << " checkerboard=" << checkerboard_rayleigh
-              << " oracle=" << oracle_rayleigh << '\n';
+              << " oracle=" << oracle_rayleigh
+              << " predictor-response-error=" << predictor_response_error
+              << " predictor-response-norm=" << predictor_response_norm
+              << '\n';
   }
   return passed;
 }

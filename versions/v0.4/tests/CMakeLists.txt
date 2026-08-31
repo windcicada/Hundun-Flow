@@ -273,6 +273,15 @@ target_link_libraries(v04_solver_piso_checkerboard_test PRIVATE
 add_test(NAME v04_solver_piso_checkerboard
   COMMAND v04_solver_piso_checkerboard_test)
 set_tests_properties(v04_solver_piso_checkerboard PROPERTIES TIMEOUT 60)
+foreach(rank_count IN ITEMS 2 4)
+  add_test(NAME v04_solver_piso_checkerboard_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:v04_solver_piso_checkerboard_test>
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_solver_piso_checkerboard_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 60)
+endforeach()
 
 add_executable(v04_solver_piso_temporal_order_test
   numerical/solver_piso_temporal_order_test.cpp)

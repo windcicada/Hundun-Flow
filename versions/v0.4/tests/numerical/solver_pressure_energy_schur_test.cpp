@@ -2537,7 +2537,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   OwnedField h_by_a = ghosted_components_field(
       41U, 9010U, 10010U, cells, reach, 3U);
   OwnedField pressure_gradient = ghosted_components_field(
-      42U, 9011U, 10011U, cells, 0U, 3U);
+      42U, 9011U, 10011U, cells, 1U, 3U);
   OwnedFaces pressure_coefficient = face_bundle(cells, 10012U, 11012U);
   OwnedFaces phi_h_by_a_storage = face_bundle(cells, 10013U, 11013U);
   FaceFluxView phi_h_by_a{phi_h_by_a_storage.x, phi_h_by_a_storage.y,
@@ -2550,10 +2550,11 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
       pressure_coefficient.y,
       pressure_coefficient.z,
       phi_h_by_a};
-  const std::array<HaloFieldSpec, 3U> coupler_halo_fields{{
+  const std::array<HaloFieldSpec, 4U> coupler_halo_fields{{
       {density.view.field, 1U, 1U},
       {r_au.view.field, 1U, 3U},
       {h_by_a.view.field, reach, 3U},
+      {pressure_gradient.view.field, 1U, 3U},
   }};
   HaloEngine coupler_halo;
   constexpr FieldId pressure_direction_field = 90U;

@@ -458,7 +458,7 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
   if (status) status = require(registry, "rAU", 3U, 1U, fields.r_au);
   if (status) status = require(registry, "HbyA", 3U, ghosts, fields.h_by_a);
   if (status)
-    status = require(registry, "grad_delta_pi", 3U, 0U,
+    status = require(registry, "grad_delta_pi", 3U, 1U,
                      fields.pressure_gradient);
   if (status)
     status = require(registry, "predictor_rho_star", 1U, 0U,
@@ -669,7 +669,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                                   momentum_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 3U, 1U,
                                   momentum_limiter_halo_bytes) ||
-      !detail::product_halo_bytes(local_shape, 5U, ghosts,
+      !detail::product_halo_bytes(local_shape, 8U, ghosts,
                                   pressure_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 1U, 1U,
                                   candidate_correction_halo_bytes) ||
@@ -924,7 +924,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
       {work_predictor_low, ghosts, false},
       {work_scalar_diffusivity, 1U, false},
       {work_r_au, 1U, true}, {work_h_by_a, ghosts, true},
-      {work_pressure_gradient, 0U, false},
+      {work_pressure_gradient, 1U, true},
       {work_pressure_correction, ghosts, true},
       {work_momentum_diagonal, 0U, false},
       {work_momentum_rhs, 0U, false},
@@ -1110,7 +1110,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     std::vector<FieldAccessSpec> reads{
         trial_rho, trial_u, trial_pi, trial_h, trial_t,
         work_momentum_diagonal, work_momentum_rhs, work_r_au, work_h_by_a,
-        work_pressure_correction, work_drho_dp, work_drho_dh,
+        work_pressure_gradient, work_pressure_correction, work_drho_dp,
+        work_drho_dh,
         work_pressure_energy_e_p, work_pressure_energy_e_h};
     std::vector<FieldAccessSpec> writes{
         trial_rho, trial_u, trial_pi, trial_h, trial_t,
@@ -1140,7 +1141,6 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     for (FieldId species : fields.pressure_energy_candidate_species)
       writes.push_back({species, StateVisibility::workspace});
     if (id == 50U) {
-      reads.push_back(work_pressure_gradient);
       reads.push_back(work_pressure_diagonal);
       reads.push_back(work_pressure_rhs);
       reads.push_back(work_pressure_energy_c_h);
@@ -1169,14 +1169,15 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
       for (FieldId species : fields.pressure_energy_candidate_species)
         reads.push_back({species, StateVisibility::workspace});
     }
-    const std::array ghost_fields{trial_rho, work_r_au, work_h_by_a};
+    const std::array ghost_fields{trial_rho, work_r_au, work_h_by_a,
+                                  work_pressure_gradient};
     // The pressure reconstruction consumes the Cartesian convection reach,
     // not the larger IBM donor-search capacity carried by state fields.
     // Exchanging all four IBM layers here both violated the coupler's sealed
     // halo contract and paid for unused communication on every corrector.
     constexpr std::uint8_t kCartesianEquationReach = 2U;
-    const std::array<std::uint8_t, 3U> widths{
-        1U, 1U, std::min(ghosts, kCartesianEquationReach)};
+    const std::array<std::uint8_t, 4U> widths{
+        1U, 1U, std::min(ghosts, kCartesianEquationReach), 1U};
     StageSpec stage;
     stage.id = id;
     stage.reads = {reads.data(), reads.size()};
@@ -1185,10 +1186,10 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     stage.ghost_widths = {widths.data(), widths.size()};
     std::vector<FieldAccessSpec> invalidates{
         trial_rho, trial_u, trial_pi, trial_h, trial_t, work_r_au,
-        work_h_by_a, work_pressure_correction, work_drho_dp, work_drho_dh,
+        work_h_by_a, work_pressure_gradient, work_pressure_correction,
+        work_drho_dp, work_drho_dh,
         work_pressure_energy_e_p, work_pressure_energy_e_h};
     if (id == 50U) {
-      invalidates.push_back(work_pressure_gradient);
       invalidates.push_back(work_pressure_diagonal);
       invalidates.push_back(work_pressure_rhs);
       invalidates.push_back(work_pressure_energy_c_h);

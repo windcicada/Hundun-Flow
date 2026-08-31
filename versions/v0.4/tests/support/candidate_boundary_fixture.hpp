@@ -301,16 +301,20 @@ class CandidateBoundaryFixture {
     diagnostic_step = 5U;
     const Int3 cells = patch.cells;
     const std::uint8_t reach = equations.kernels().reach();
-    density = make_field(0U, cells, 1U, reach, 1801U, 2801U);
+    const std::uint8_t state_reach =
+        spec.immersed
+            ? std::max(reach, immersed_boundary.maximum_halo_reach())
+            : reach;
+    density = make_field(0U, cells, 1U, state_reach, 1801U, 2801U);
     velocity = make_field(1U, cells, 3U, 0U, 1802U, 2802U);
-    pressure = make_field(2U, cells, 1U, reach, 1803U, 2803U);
-    enthalpy = make_field(3U, cells, 1U, reach, 1804U, 2804U);
-    temperature = make_field(4U, cells, 1U, reach, 1805U, 2805U);
+    pressure = make_field(2U, cells, 1U, state_reach, 1803U, 2803U);
+    enthalpy = make_field(3U, cells, 1U, state_reach, 1804U, 2804U);
+    temperature = make_field(4U, cells, 1U, state_reach, 1805U, 2805U);
     momentum_diagonal = make_field(30U, cells, 3U, 0U, 1806U, 2806U);
     momentum_rhs = make_field(31U, cells, 3U, 0U, 1807U, 2807U);
     r_au = make_field(40U, cells, 3U, 1U, 1808U, 2808U);
     h_by_a = make_field(41U, cells, 3U, reach, 1809U, 2809U);
-    pressure_gradient = make_field(42U, cells, 3U, 0U, 1810U, 2810U);
+    pressure_gradient = make_field(42U, cells, 3U, 1U, 1810U, 2810U);
     x_pressure_coefficient =
         make_face_field(CartesianAxis::x, cells, 2811U);
     y_pressure_coefficient =
@@ -325,15 +329,15 @@ class CandidateBoundaryFixture {
     pressure_rhs = make_field(54U, cells, 1U, 0U, 1815U, 2818U);
     for (std::size_t index = 0U; index < base_material.size(); ++index)
       base_material[index] = make_field(
-          static_cast<FieldId>(60U + index), cells, 1U, reach,
+          static_cast<FieldId>(60U + index), cells, 1U, state_reach,
           static_cast<RevisionToken>(1820U + index),
           static_cast<StorageIdentity>(2820U + index));
     if (spec.multispecies) {
       independent_species.resize(2U);
       independent_species[0U] =
-          make_field(8U, cells, 1U, reach, 1827U, 2827U);
+          make_field(8U, cells, 1U, state_reach, 1827U, 2827U);
       independent_species[1U] =
-          make_field(9U, cells, 1U, reach, 1828U, 2828U);
+          make_field(9U, cells, 1U, state_reach, 1828U, 2828U);
     }
     if (!FaceFluxStorage::allocate_workspace(cells, 2U, phi_storage) ||
         !phi_storage.workspace_view(0U, 1830U, phi_h_by_a) ||
@@ -465,10 +469,11 @@ class CandidateBoundaryFixture {
     fill_face_flux(trial_flux, 0.0);
 
     diagnostic_step = 7U;
-    const std::array<HaloFieldSpec, 3U> halo_fields{{
+    const std::array<HaloFieldSpec, 4U> halo_fields{{
         {density.view.field, 1U, 1U},
         {r_au.view.field, 1U, 3U},
-        {h_by_a.view.field, reach, 3U}}};
+        {h_by_a.view.field, reach, 3U},
+        {pressure_gradient.view.field, 1U, 3U}}};
     const std::array<HaloFieldSpec, 1U> correction_fields{{
         {correction_field, 1U, 1U}}};
     if (!halo.reserve(communicator, patch,
@@ -548,7 +553,7 @@ class CandidateBoundaryFixture {
           make_boundary_ghost_field_authority(species));
     const BoundaryThermophysicalGhostAuthority base_authority{
         1842U, boundary.revision(), boundary.local_layout_fingerprint(),
-        cells, {reach, reach, reach}, reach,
+        cells, {state_reach, state_reach, state_reach}, state_reach,
         {base_authorities.data(), base_authorities.size()}};
     const BoundaryThermophysicalGhostContext base_context{
         target_time, geometry.fingerprint(), pressure_reference_authority,

@@ -1845,6 +1845,16 @@ struct PressureVelocityCoupler::Impl {
                                       3U, 1);
     hash = mix_candidate_field_values(hash, as_const(workspace.r_au), cells,
                                       3U, 1);
+    if (current.corrector == 1U) {
+      if (!detail::valid_cell_view(current_pressure_perturbation, cells, 0U,
+                                   1U, 1U))
+        return 0U;
+      hash = hash_mix(
+          hash, scalar_reach_one_numeric_fingerprint(
+                    current_pressure_perturbation, cells));
+      hash = mix_candidate_field_values(
+          hash, as_const(workspace.pressure_gradient), cells, 3U, 0);
+    }
     hash = mix_candidate_flux_values(hash, as_const(workspace.phi_h_by_a));
     hash = mix_candidate_flux_values(
         hash, as_const(frozen_candidate_face_aux));
@@ -1915,6 +1925,9 @@ Status PressureVelocityCoupler::bind(
       workspace.h_by_a.ghosts.z >=
           static_cast<std::int32_t>(equations.kernels().reach()) &&
       detail::valid_cell_view(workspace.pressure_gradient, cells, 0U, 3U) &&
+      workspace.pressure_gradient.ghosts.x >= 1 &&
+      workspace.pressure_gradient.ghosts.y >= 1 &&
+      workspace.pressure_gradient.ghosts.z >= 1 &&
       !detail::field_views_overlap(as_const(workspace.r_au),
                                    as_const(workspace.h_by_a)) &&
       !detail::field_views_overlap(as_const(workspace.r_au),
@@ -1961,10 +1974,11 @@ Status PressureVelocityCoupler::bind(
                !detail::cell_face_views_overlap(workspace.pressure_gradient,
                                                 phi_face);
   }
-  const std::array<HaloFieldSpec, 3U> halo_fields{{
+  const std::array<HaloFieldSpec, 4U> halo_fields{{
       {services.density_field, 1U, 1U},
       {workspace.r_au.field, 1U, 3U},
-      {workspace.h_by_a.field, equations.kernels().reach(), 3U}}};
+      {workspace.h_by_a.field, equations.kernels().reach(), 3U},
+      {workspace.pressure_gradient.field, 1U, 3U}}};
   const std::array<HaloFieldSpec, 1U> correction_halo_fields{{
       {services.correction_field, 1U, 1U}}};
   const bool valid_services =
@@ -1978,6 +1992,9 @@ Status PressureVelocityCoupler::bind(
       services.halo_stage != 0U &&
       services.density_field != workspace.r_au.field &&
       services.density_field != workspace.h_by_a.field &&
+      services.density_field != workspace.pressure_gradient.field &&
+      workspace.r_au.field != workspace.pressure_gradient.field &&
+      workspace.h_by_a.field != workspace.pressure_gradient.field &&
       services.correction_halo != nullptr &&
       services.correction_halo->ready() &&
       services.correction_halo_stage != 0U &&
@@ -2562,9 +2579,9 @@ Status PressureVelocityCoupler::refresh_impl(
   const bool has_thermophysical_pressure =
       !empty_field_view(thermophysical_pressure);
   const bool valid_thermophysical_pressure =
-      !has_thermophysical_pressure ||
-      (thermophysical_pressure.field == impl.boundary->pressure_field() &&
-       detail::valid_cell_view(thermophysical_pressure, cells, 0U, 1U, 1U));
+      has_thermophysical_pressure &&
+      thermophysical_pressure.field == impl.boundary->pressure_field() &&
+      detail::valid_cell_view(thermophysical_pressure, cells, 0U, 1U, 1U);
   const bool valid_inputs =
       detail::valid_bdf_coefficients(input.bdf) &&
       input.bdf.order == input.predictor.order &&
@@ -2597,7 +2614,7 @@ Status PressureVelocityCoupler::refresh_impl(
       detail::valid_cell_view(input.momentum_system.diagonal, cells, 0U, 3U) &&
       detail::valid_cell_view(input.momentum_system.rhs, cells, 0U, 3U);
   const ConstFieldView cell_inputs[]{
-      as_const(input.density), input.trial_velocity,
+      as_const(input.density), input.trial_velocity, thermophysical_pressure,
       as_const(input.momentum_system.diagonal),
       as_const(input.momentum_system.rhs)};
   bool aliases = false;
@@ -2702,6 +2719,22 @@ Status PressureVelocityCoupler::refresh_impl(
     local = {StatusCode::numerical_failure, kPisoNumerical};
   }
   if (local) {
+    for (std::int32_t z = -1; z <= cells.z && local; ++z)
+      for (std::int32_t y = -1; y <= cells.y && local; ++y)
+        for (std::int32_t x = -1; x <= cells.x; ++x) {
+          const unsigned outside =
+              static_cast<unsigned>(x < 0 || x >= cells.x) +
+              static_cast<unsigned>(y < 0 || y >= cells.y) +
+              static_cast<unsigned>(z < 0 || z >= cells.z);
+          if (outside <= 1U &&
+              !std::isfinite(
+                  thermophysical_pressure.unchecked({x, y, z}, 0U))) {
+            local = {StatusCode::numerical_failure, kPisoNumerical};
+            break;
+          }
+        }
+  }
+  if (local) {
     for (std::int32_t z = 0; z < cells.z && local; ++z) {
       for (std::int32_t y = 0; y < cells.y && local; ++y) {
         for (std::int32_t x = 0; x < cells.x; ++x) {
@@ -2749,8 +2782,24 @@ Status PressureVelocityCoupler::refresh_impl(
       }
     }
   }
-  std::array<FieldView, 3U> halo_views{
-      input.density, impl.workspace.r_au, impl.workspace.h_by_a};
+  if (local) {
+    const std::array<ConstFieldView, 1U> pressure_reads{
+        thermophysical_pressure};
+    const std::array<FieldView, 1U> gradient_writes{
+        impl.workspace.pressure_gradient};
+    const KernelInvocation gradient_invocation{
+        {pressure_reads.data(), pressure_reads.size()},
+        {gradient_writes.data(), gradient_writes.size()}, box, 0U, 0U, 1U,
+        0U, nullptr};
+    local = cartesian_gradient(*impl.kernels, gradient_invocation);
+    if (local && input.immersed_interface != nullptr) {
+      local = input.immersed_interface->correct_pressure_gradient(
+          thermophysical_pressure, impl.workspace.pressure_gradient);
+    }
+  }
+  std::array<FieldView, 4U> halo_views{
+      input.density, impl.workspace.r_au, impl.workspace.h_by_a,
+      impl.workspace.pressure_gradient};
   HaloTicket ticket;
   Status status = impl.halo->begin(
       impl.halo_stage, {halo_views.data(), halo_views.size()}, local, ticket);
@@ -2764,6 +2813,7 @@ Status PressureVelocityCoupler::refresh_impl(
   const FieldView density_with_ghosts = halo_views[0U];
   impl.workspace.r_au = halo_views[1U];
   impl.workspace.h_by_a = halo_views[2U];
+  impl.workspace.pressure_gradient = halo_views[3U];
   const RevisionToken density_ghost_revision =
       impl.halo->ghost_revision(density_with_ghosts.field);
   ThermophysicalBoundaryTokens revalidated_thermophysical_boundary;
@@ -2807,6 +2857,8 @@ Status PressureVelocityCoupler::refresh_impl(
   // closure below.
   fill_physical_zero_gradient(impl.workspace.r_au, cells, 3U, 1U,
                               *impl.boundary);
+  fill_physical_zero_gradient(impl.workspace.pressure_gradient, cells, 3U,
+                              1U, *impl.boundary);
   FieldView constrained_h_by_a = impl.workspace.h_by_a;
   constrained_h_by_a.field = impl.boundary->velocity_field();
   status = apply_boundary_ghosts(
@@ -2856,6 +2908,10 @@ Status PressureVelocityCoupler::refresh_impl(
     const FaceFieldView auxiliary_faces[]{impl.frozen_candidate_face_aux.x,
                                           impl.frozen_candidate_face_aux.y,
                                           impl.frozen_candidate_face_aux.z};
+    const ConstFaceFieldView coefficient_faces[]{
+        as_const(impl.workspace.x_pressure_coefficient),
+        as_const(impl.workspace.y_pressure_coefficient),
+        as_const(impl.workspace.z_pressure_coefficient)};
     for (std::size_t axis_index = 0U; axis_index < 3U && status;
          ++axis_index) {
       const auto axis = static_cast<CartesianAxis>(axis_index);
@@ -2929,13 +2985,32 @@ Status PressureVelocityCoupler::refresh_impl(
                        input.bdf.a2 * previous) /
                           input.bdf.a0
                     : accepted;
+            const double pressure_gradient_flux =
+                detail::interpolate_face(
+                    *impl.kernels, axis, normal,
+                    left_rho *
+                        impl.workspace.r_au.unchecked(left, component) *
+                        impl.workspace.pressure_gradient.unchecked(
+                            left, component),
+                    right_rho *
+                        impl.workspace.r_au.unchecked(face, component) *
+                        impl.workspace.pressure_gradient.unchecked(
+                            face, component)) *
+                detail::face_area(*impl.kernels, axis, face);
+            const double pressure_jump_flux =
+                impl.pressure_boundary.mass_flux_response_unchecked(
+                    thermophysical_pressure, axis, face,
+                    coefficient_faces[axis_index].unchecked(face));
             const double value =
-                current + weight * (normalized_history - temporal);
+                current + weight * (normalized_history - temporal) +
+                pressure_gradient_flux + pressure_jump_flux;
             if (!std::isfinite(current) || !std::isfinite(rho_r_au) ||
                 !std::isfinite(weight) || weight < 0.0 ||
                 !std::isfinite(temporal) ||
                 !std::isfinite(accepted) || !std::isfinite(previous) ||
                 !std::isfinite(normalized_history) ||
+                !std::isfinite(pressure_gradient_flux) ||
+                !std::isfinite(pressure_jump_flux) ||
                 !std::isfinite(value)) {
               status = {StatusCode::numerical_failure, kPisoNumerical};
               break;
@@ -2962,6 +3037,8 @@ Status PressureVelocityCoupler::refresh_impl(
             hash_mix(corrected_revision, input.trial_flux.revision);
       }
       corrected_revision = hash_mix(corrected_revision, input.momentum.state);
+      corrected_revision =
+          hash_mix(corrected_revision, thermophysical_pressure.revision);
       impl.workspace.phi_h_by_a.revision =
           corrected_revision == 0U ? RevisionToken{1U}
                                    : corrected_revision;
@@ -3127,6 +3204,8 @@ Status PressureVelocityCoupler::refresh_impl(
         hash_mix(phi_h_by_a_dependency, input.trial_flux.revision);
   }
   if (input.corrector == 1U) {
+    phi_h_by_a_dependency =
+        mix_view(phi_h_by_a_dependency, thermophysical_pressure);
     phi_h_by_a_dependency = hash_mix(
         phi_h_by_a_dependency, committed_face_history_dependency);
     phi_h_by_a_dependency = mix_face(phi_h_by_a_dependency,
@@ -4332,6 +4411,36 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
                     impl.workspace.r_au.unchecked(face, component));
             q += impl.frozen_candidate_bdf.a0 * rho_r_au *
                  auxiliaries[axis_index].unchecked(face);
+            const ConstFieldView predictor_density =
+                as_const(impl.frozen_candidate_density);
+            const double predictor_coefficient = face_pressure_coefficient(
+                *impl.kernels, predictor_density,
+                as_const(impl.workspace.r_au), *impl.geometry, impl.patch,
+                impl.pressure_boundary, axis, face);
+            const double pressure_gradient_flux =
+                detail::interpolate_face(
+                    *impl.kernels, axis, axis_value(face, axis),
+                    predictor_density.unchecked(left, 0U) *
+                        impl.workspace.r_au.unchecked(left, component) *
+                        impl.workspace.pressure_gradient.unchecked(
+                            left, component),
+                    predictor_density.unchecked(face, 0U) *
+                        impl.workspace.r_au.unchecked(face, component) *
+                        impl.workspace.pressure_gradient.unchecked(
+                            face, component)) *
+                detail::face_area(*impl.kernels, axis, face);
+            const double pressure_jump_flux =
+                impl.pressure_boundary.mass_flux_response_unchecked(
+                    impl.current_pressure_perturbation, axis, face,
+                    predictor_coefficient);
+            q += pressure_gradient_flux + pressure_jump_flux;
+            if (!std::isfinite(predictor_coefficient) ||
+                predictor_coefficient < 0.0 ||
+                !std::isfinite(pressure_gradient_flux) ||
+                !std::isfinite(pressure_jump_flux)) {
+              local = {StatusCode::numerical_failure, kPisoNumerical};
+              break;
+            }
           } else {
             q += auxiliaries[axis_index].unchecked(face);
           }
