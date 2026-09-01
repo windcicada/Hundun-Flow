@@ -11864,6 +11864,7 @@ Status ProductDriver::Impl::execute_attempt(
             baseline.global_normalized_energy <=
                 product.summary.terminal_continuity_tolerance;
         bool selection_valid = false;
+        bool selected_artifact_valid = false;
         // A terminal exact baseline is a typed no-op authority regardless of
         // the (unconsumed) raw Newton direction.  Even a uniform converged
         // state can produce roundoff-sized nonzero dp/dh; sending that
@@ -11885,6 +11886,12 @@ Status ProductDriver::Impl::execute_attempt(
           loop.selected_alpha = 0.0;
           loop.selected_ordinal =
               static_cast<std::uint8_t>(baseline_ordinal);
+          // The exact alpha-zero evaluation already occupies the candidate
+          // scratch and carries the complete state/flux certificate.  Keep
+          // that immutable artifact for publication instead of replaying the
+          // same no-op candidate through every full-field product kernel.
+          loop.replay = baseline_artifacts;
+          selected_artifact_valid = true;
         } else {
           Status selection_status{StatusCode::rejected_step,
                                   kProductPressureEnergy};
@@ -11975,6 +11982,14 @@ Status ProductDriver::Impl::execute_attempt(
                 loop.selection);
             if (selection_status) {
               selection_valid = true;
+              // Selection is attempted immediately after this candidate was
+              // evaluated.  Earlier admissible candidates would already
+              // have terminated the loop, so the selected artifact is the
+              // one still resident in the preallocated candidate scratch.
+              // Promote its typed certificate rather than evaluating it a
+              // second time.
+              loop.replay = artifacts;
+              selected_artifact_valid = complete_sample;
               break;
             }
             if (selection_status.code != StatusCode::rejected_step)
@@ -12001,11 +12016,11 @@ Status ProductDriver::Impl::execute_attempt(
           loop.selected_ordinal = loop.selection.selected_halvings;
         }
 
-        candidate_status = evaluate_pressure_energy_candidate(
-            corrector, frozen, pressure,
-            loop.stationary.valid() ? nullptr : &loop.exact_baseline,
-            loop.direction, loop.selected_alpha,
-            loop.selected_ordinal, baseline_flux, loop.replay);
+        candidate_status = product.reductions.consensus(
+            selected_artifact_valid
+                ? Status{}
+                : Status{StatusCode::invalid_plan,
+                         kProductPressureEnergy});
         if (!candidate_status) {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
           publish_pressure_energy_candidate_loop_diagnostic(
