@@ -542,6 +542,30 @@ std::uint64_t mix_candidate_field_values(std::uint64_t hash,
   return hash;
 }
 
+void mix_candidate_field_values_pair(std::uint64_t& first,
+                                     std::uint64_t& second,
+                                     ConstFieldView field, Int3 cells,
+                                     std::uint8_t components,
+                                     std::int32_t ghost_reach) noexcept {
+  for (std::uint8_t component = 0U; component < components; ++component) {
+    for (std::int32_t z = -ghost_reach; z < cells.z + ghost_reach; ++z) {
+      for (std::int32_t y = -ghost_reach; y < cells.y + ghost_reach; ++y) {
+        for (std::int32_t x = -ghost_reach; x < cells.x + ghost_reach; ++x) {
+          const unsigned outside =
+              static_cast<unsigned>(x < 0 || x >= cells.x) +
+              static_cast<unsigned>(y < 0 || y >= cells.y) +
+              static_cast<unsigned>(z < 0 || z >= cells.z);
+          if (outside > 1U) continue;
+          const std::uint64_t bits =
+              double_bits(field.unchecked({x, y, z}, component));
+          first = hash_mix(first, bits);
+          second = hash_mix(second, bits);
+        }
+      }
+    }
+  }
+}
+
 std::uint64_t mix_candidate_flux_values(std::uint64_t hash,
                                         ConstFaceFluxView flux) noexcept {
   const std::array<ConstFaceFieldView, 3U> faces{flux.x, flux.y, flux.z};
@@ -762,20 +786,34 @@ std::uint64_t final_boundary_state_local_provenance(
   return mix_with_coordinates(hash, velocity, 3U);
 }
 
-std::uint64_t final_boundary_flux_local_provenance(
+struct ExactCandidateFluxLocalAudit {
+  std::uint64_t final_boundary_provenance{};
+  std::uint64_t exact_candidate_provenance{};
+  bool finite{};
+};
+
+ExactCandidateFluxLocalAudit exact_candidate_flux_local_audit(
     ConstFaceFluxView flux) noexcept {
-  std::uint64_t hash =
+  std::uint64_t final_boundary =
       hash_mix(kFnvOffset, UINT64_C(0x7065636266666c78));
+  std::uint64_t exact_candidate =
+      hash_mix(kFnvOffset, UINT64_C(0x6578616374666c78));
+  bool finite = true;
   for (ConstFaceFieldView face :
        {flux.x, flux.y, flux.z}) {
-    hash = hash_mix(hash, static_cast<std::uint8_t>(face.axis));
+    final_boundary =
+        hash_mix(final_boundary, static_cast<std::uint8_t>(face.axis));
     for (std::int32_t z = 0; z < face.extents.z; ++z)
       for (std::int32_t y = 0; y < face.extents.y; ++y)
-        for (std::int32_t x = 0; x < face.extents.x; ++x)
-          hash = hash_mix(
-              hash, double_bits(face.unchecked({x, y, z})));
+        for (std::int32_t x = 0; x < face.extents.x; ++x) {
+          const double value = face.unchecked({x, y, z});
+          const std::uint64_t bits = double_bits(value);
+          final_boundary = hash_mix(final_boundary, bits);
+          exact_candidate = hash_mix(exact_candidate, bits);
+          finite = finite && std::isfinite(value);
+        }
   }
-  return hash;
+  return {final_boundary, exact_candidate, finite};
 }
 
 bool same_piso_field_revision_identity(
@@ -4778,6 +4816,8 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
           : Status{StatusCode::invalid_plan, kPisoCoupler},
       impl.rank, impl.size, species_lowest);
   if (!species_status) return species_status;
+  ExactCandidateFluxLocalAudit candidate_flux_audit{};
+  bool candidate_flux_audit_valid = false;
   if (open_scope) {
     const FinalBoundaryFluxCertificate& final_boundary =
         input.final_boundary_flux;
@@ -4875,11 +4915,13 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
             input.thermodynamic.closure.composition,
             final_boundary.absolute_pressure_reference_,
             composition_numeric_provenance);
-    const std::uint64_t local_final_flux =
-        final_boundary_flux_local_provenance(input.candidate_flux);
+    candidate_flux_audit =
+        exact_candidate_flux_local_audit(input.candidate_flux);
+    candidate_flux_audit_valid = true;
     const std::array<Impl::CandidateProvenanceBatchEntry, 2U> replay_entries{{
         {local_final_state, UINT64_C(0x7065636266636f6c)},
-        {local_final_flux, UINT64_C(0x7065636266636f6d)},
+        {candidate_flux_audit.final_boundary_provenance,
+         UINT64_C(0x7065636266636f6d)},
     }};
     std::array<PlanFingerprint, 2U> replayed{};
     const Status replay_status = impl.collective_candidate_provenance_batch(
@@ -4958,9 +5000,13 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
 
   std::uint64_t direction_numeric =
       hash_mix(kFnvOffset, UINT64_C(0x76303466726f7a64));
-  direction_numeric = mix_candidate_field_values(
-      direction_numeric, pressure_stage.pressure_direction_view_, cells, 1U,
-      0);
+  std::uint64_t local_direction =
+      hash_mix(kFnvOffset, UINT64_C(0x7068646972656374));
+  local_direction = hash_mix(local_direction, authority.pressure_.state);
+  local_direction = hash_mix(local_direction, authority.pressure_.time);
+  mix_candidate_field_values_pair(
+      direction_numeric, local_direction,
+      pressure_stage.pressure_direction_view_, cells, 1U, 0);
   std::uint64_t pressure_replay = hash_mix(
       authority.canonical_lineage_, UINT64_C(0x7363616c65646470));
   pressure_replay =
@@ -5372,16 +5418,12 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
       }
     }
   }
-  for (ConstFaceFieldView face : candidate_faces) {
-    if (!local) break;
-    for (std::int32_t z = 0; z < face.extents.z && local; ++z)
-      for (std::int32_t y = 0; y < face.extents.y && local; ++y)
-        for (std::int32_t x = 0; x < face.extents.x; ++x)
-          if (!std::isfinite(face.unchecked({x, y, z}))) {
-            local = {StatusCode::numerical_failure, kPisoNumerical};
-            break;
-          }
+  if (local && !candidate_flux_audit_valid) {
+    candidate_flux_audit = exact_candidate_flux_local_audit(candidate_flux);
+    candidate_flux_audit_valid = true;
   }
+  if (local && !candidate_flux_audit.finite)
+    local = {StatusCode::numerical_failure, kPisoNumerical};
   if (baseline_request && !open_scope) {
     const std::array<ConstFaceFieldView, 3U> base_faces{
         as_const(impl.workspace.phi_h_by_a.x),
@@ -5413,12 +5455,6 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
           base_pressure, base_enthalpy, base_density, base_temperature,
           base_velocity, cells, impl.current_absolute_pressure_reference);
 
-  std::uint64_t local_direction =
-      hash_mix(kFnvOffset, UINT64_C(0x7068646972656374));
-  local_direction = hash_mix(local_direction, authority.pressure_.state);
-  local_direction = hash_mix(local_direction, authority.pressure_.time);
-  local_direction = mix_candidate_field_values(
-      local_direction, pressure_stage.pressure_direction_view_, cells, 1U, 0);
   local_direction = mix_candidate_field_values(
       local_direction, raw_enthalpy_direction, cells, 1U, 0);
 
@@ -5428,9 +5464,8 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
       thermodynamic_candidate.temperature, candidate_velocity, cells,
       thermodynamic_candidate);
   local_state = hash_mix(local_state, composition_numeric_provenance);
-  std::uint64_t local_flux =
-      hash_mix(kFnvOffset, UINT64_C(0x6578616374666c78));
-  local_flux = mix_candidate_flux_values(local_flux, candidate_flux);
+  const std::uint64_t local_flux =
+      candidate_flux_audit.exact_candidate_provenance;
   const std::uint64_t alpha_bits = double_bits(pressure_stage.alpha_);
   const std::array<Impl::CandidateProvenanceBatchEntry, 4U>
       provenance_entries{{
