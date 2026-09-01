@@ -212,6 +212,35 @@ CartesianFace selected_face(CartesianAxis axis, bool high) noexcept {
       2U * static_cast<std::size_t>(axis) + (high ? 1U : 0U));
 }
 
+template <class Visit>
+void for_each_boundary_face_storage_order(CartesianAxis axis, Int3 cells,
+                                          Visit&& visit) noexcept {
+  if (axis == CartesianAxis::x) {
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::uint8_t side = 0U; side < 2U; ++side) {
+          const bool high = side != 0U;
+          if (!visit({high ? cells.x : 0, y, z}, high)) return;
+        }
+    return;
+  }
+  if (axis == CartesianAxis::y) {
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::uint8_t side = 0U; side < 2U; ++side) {
+        const bool high = side != 0U;
+        for (std::int32_t x = 0; x < cells.x; ++x)
+          if (!visit({x, high ? cells.y : 0, z}, high)) return;
+      }
+    return;
+  }
+  for (std::uint8_t side = 0U; side < 2U; ++side) {
+    const bool high = side != 0U;
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x)
+        if (!visit({x, y, high ? cells.z : 0}, high)) return;
+  }
+}
+
 double outward_sign(bool high) noexcept { return high ? 1.0 : -1.0; }
 
 Int3 owner_cell(CartesianAxis axis, bool high, Int3 face,
@@ -511,39 +540,27 @@ Status prepare_physical_boundary_flux(
   for (std::size_t axis_index = 0U; axis_index < 3U && local; ++axis_index) {
     const auto axis = static_cast<CartesianAxis>(axis_index);
     const FaceFieldView destination = prepared_faces[axis_index];
-    for (std::int32_t z = 0; z < destination.extents.z && local; ++z)
-      for (std::int32_t y = 0; y < destination.extents.y && local; ++y)
-        for (std::int32_t x = 0; x < destination.extents.x; ++x) {
-          const Int3 face_index{x, y, z};
-          const std::int32_t normal =
-              axis == CartesianAxis::x
-                  ? x
-                  : (axis == CartesianAxis::y ? y : z);
-          const std::int32_t normal_extent =
-              axis == CartesianAxis::x
-                  ? cells.x
-                  : (axis == CartesianAxis::y ? cells.y : cells.z);
-          if (normal != 0 && normal != normal_extent) continue;
-          const bool high = normal == normal_extent;
+    for_each_boundary_face_storage_order(
+        axis, cells, [&](Int3 face_index, bool high) noexcept {
           const CartesianFace face = selected_face(axis, high);
           const BoundaryFacePlan* face_plan = nullptr;
           local = impl.boundary->face(face, face_plan);
           if (!local || face_plan == nullptr) {
             local = {StatusCode::invalid_plan,
                      kCandidateBoundaryFinalizer};
-            break;
+            return false;
           }
-          if (!face_plan->local_owner || face_plan->periodic) continue;
+          if (!face_plan->local_owner || face_plan->periodic) return true;
           if (face_plan->flow_parameter >= impl.boundary->parameter_count()) {
             local = {StatusCode::invalid_plan,
                      kCandidateBoundaryFinalizer};
-            break;
+            return false;
           }
           bool control_face_active = true;
           if (impl.immersed_physical_boundary_flux != nullptr)
             local = impl.immersed_physical_boundary_flux->physical_face_active(
                 axis, face_index, control_face_active);
-          if (!local) break;
+          if (!local) return false;
           if (!control_face_active) {
             if (face_plan->flow_kind == BoundaryKind::mass_flow_inlet) {
               const double target =
@@ -551,11 +568,11 @@ Status prepare_physical_boundary_flux(
               if (!finite_positive(target)) {
                 local = {StatusCode::numerical_failure,
                          kCandidateBoundaryNumerical};
-                break;
+                return false;
               }
               local_mass_target[static_cast<std::size_t>(face)] = target;
             }
-            continue;
+            return true;
           }
           const Int3 owner = owner_cell(axis, high, face_index, cells);
           const double face_area =
@@ -563,7 +580,7 @@ Status prepare_physical_boundary_flux(
           if (!finite_positive(face_area)) {
             local = {StatusCode::numerical_failure,
                      kCandidateBoundaryNumerical};
-            break;
+            return false;
           }
           if (face_plan->flow_kind == BoundaryKind::velocity_inlet) {
             const Real3 prescribed = vector_parameter(
@@ -577,7 +594,7 @@ Status prepare_physical_boundary_flux(
             if (local && !std::isfinite(value))
               local = {StatusCode::numerical_failure,
                        kCandidateBoundaryNumerical};
-            if (!local) break;
+            if (!local) return false;
             destination.unchecked(face_index) = value;
             local_inlet_hash = mix(local_inlet_hash, axis_index);
             local_inlet_hash = mix(local_inlet_hash, high ? 1U : 0U);
@@ -599,7 +616,7 @@ Status prepare_physical_boundary_flux(
                      mass_targets.data[face_plan->flow_parameter])))
               local = {StatusCode::numerical_failure,
                        kCandidateBoundaryNumerical};
-            if (!local) break;
+            if (!local) return false;
             local_capacity[static_cast<std::size_t>(face)] += capacity;
             local_mass_target[static_cast<std::size_t>(face)] =
                 mass_targets.data[face_plan->flow_parameter];
@@ -617,7 +634,7 @@ Status prepare_physical_boundary_flux(
                 ((owner_outward_velocity < 0.0) != (outward < 0.0))) {
               local = {StatusCode::rejected_step,
                        kCandidateBoundaryBackflow};
-              break;
+              return false;
             }
             local_outlet_hash = mix(local_outlet_hash, axis_index);
             local_outlet_hash = mix(local_outlet_hash, high ? 1U : 0U);
@@ -627,7 +644,7 @@ Status prepare_physical_boundary_flux(
               if (allow_backflow.data[face_plan->flow_parameter] == 0U) {
                 local = {StatusCode::rejected_step,
                          kCandidateBoundaryBackflow};
-                break;
+                return false;
               }
               const Real3 prescribed = vector_parameter(
                   *impl.boundary, face_plan->flow_parameter, true, false);
@@ -655,7 +672,7 @@ Status prepare_physical_boundary_flux(
                    !(outward_sign(high) * replayed_value < 0.0)))
                 local = {StatusCode::numerical_failure,
                          kCandidateBoundaryBackflow};
-              if (!local) break;
+              if (!local) return false;
               destination.unchecked(face_index) = value;
               local_fixed_point_iterations =
                   std::max(local_fixed_point_iterations, 1U);
@@ -669,7 +686,8 @@ Status prepare_physical_boundary_flux(
           } else {
             destination.unchecked(face_index) = 0.0;
           }
-        }
+          return true;
+        });
   }
   local_mass_target[6U] =
       static_cast<double>(local_fixed_point_iterations);
@@ -682,46 +700,35 @@ Status prepare_physical_boundary_flux(
       {result.global_mass_target.data(), result.global_mass_target.size()});
   if (!local) return local;
 
+  std::array<double, 6U> local_achieved{};
   for (std::size_t axis_index = 0U; axis_index < 3U && local; ++axis_index) {
     const auto axis = static_cast<CartesianAxis>(axis_index);
     const FaceFieldView destination = prepared_faces[axis_index];
-    for (std::int32_t z = 0; z < destination.extents.z && local; ++z)
-      for (std::int32_t y = 0; y < destination.extents.y && local; ++y)
-        for (std::int32_t x = 0; x < destination.extents.x; ++x) {
-          const Int3 index{x, y, z};
-          const std::int32_t normal =
-              axis == CartesianAxis::x
-                  ? x
-                  : (axis == CartesianAxis::y ? y : z);
-          const std::int32_t extent =
-              axis == CartesianAxis::x
-                  ? cells.x
-                  : (axis == CartesianAxis::y ? cells.y : cells.z);
-          if (normal != 0 && normal != extent) continue;
-          const bool high = normal == extent;
+    for_each_boundary_face_storage_order(
+        axis, cells, [&](Int3 index, bool high) noexcept {
           const CartesianFace face = selected_face(axis, high);
           const BoundaryFacePlan* face_plan = nullptr;
           local = impl.boundary->face(face, face_plan);
           if (!local || face_plan == nullptr) {
             local = {StatusCode::invalid_plan,
                      kCandidateBoundaryFinalizer};
-            break;
+            return false;
           }
           if (!face_plan->local_owner || face_plan->periodic ||
               face_plan->flow_kind != BoundaryKind::mass_flow_inlet)
-            continue;
+            return true;
           bool control_face_active = true;
           if (impl.immersed_physical_boundary_flux != nullptr)
             local = impl.immersed_physical_boundary_flux->physical_face_active(
                 axis, index, control_face_active);
-          if (!local) break;
-          if (!control_face_active) continue;
+          if (!local) return false;
+          if (!control_face_active) return true;
           const std::size_t face_slot = static_cast<std::size_t>(face);
           if (!finite_positive(global_capacity[face_slot]) ||
               !finite_positive(result.global_mass_target[face_slot])) {
             local = {StatusCode::numerical_failure,
                      kCandidateBoundaryNumerical};
-            break;
+            return false;
           }
           const double scale = result.global_mass_target[face_slot] /
                                global_capacity[face_slot];
@@ -729,49 +736,17 @@ Status prepare_physical_boundary_flux(
           if (!std::isfinite(value)) {
             local = {StatusCode::numerical_failure,
                      kCandidateBoundaryNumerical};
-            break;
+            return false;
           }
           destination.unchecked(index) = value;
           local_inlet_hash = mix(local_inlet_hash, axis_index);
           local_inlet_hash = mix(local_inlet_hash, high ? 1U : 0U);
           local_inlet_hash = mix(local_inlet_hash, double_bits(value));
-        }
+          local_achieved[face_slot] += -outward_sign(high) * value;
+          return true;
+        });
   }
-
-  std::array<double, 6U> local_achieved{};
-  for (std::size_t axis_index = 0U; axis_index < 3U && local; ++axis_index) {
-    const auto axis = static_cast<CartesianAxis>(axis_index);
-    const FaceFieldView destination = prepared_faces[axis_index];
-    for (std::int32_t z = 0; z < destination.extents.z; ++z)
-      for (std::int32_t y = 0; y < destination.extents.y; ++y)
-        for (std::int32_t x = 0; x < destination.extents.x; ++x) {
-          const Int3 index{x, y, z};
-          const std::int32_t normal =
-              axis == CartesianAxis::x
-                  ? x
-                  : (axis == CartesianAxis::y ? y : z);
-          const std::int32_t extent =
-              axis == CartesianAxis::x
-                  ? cells.x
-                  : (axis == CartesianAxis::y ? cells.y : cells.z);
-          if (normal != 0 && normal != extent) continue;
-          const bool high = normal == extent;
-          const CartesianFace face = selected_face(axis, high);
-          const BoundaryFacePlan* face_plan = nullptr;
-          if (!impl.boundary->face(face, face_plan) || face_plan == nullptr ||
-              !face_plan->local_owner || face_plan->periodic ||
-              face_plan->flow_kind != BoundaryKind::mass_flow_inlet)
-            continue;
-          bool control_face_active = true;
-          if (impl.immersed_physical_boundary_flux != nullptr)
-            local = impl.immersed_physical_boundary_flux->physical_face_active(
-                axis, index, control_face_active);
-          if (!local) break;
-          if (!control_face_active) continue;
-          local_achieved[static_cast<std::size_t>(face)] +=
-              -outward_sign(high) * destination.unchecked(index);
-        }
-  }
+  if (!local) local_achieved.fill(0.0);
   local = reductions.checked_sum(
       {local_achieved.data(), local_achieved.size()},
       {result.global_achieved.data(), result.global_achieved.size()}, local);
