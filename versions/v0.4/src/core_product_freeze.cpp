@@ -6847,27 +6847,6 @@ Status ProductDriver::Impl::execute_attempt(
               return false;
     return true;
   };
-  const auto same_flux_bits = [](ConstFaceFluxView left,
-                                 ConstFaceFluxView right) noexcept {
-    const std::array<ConstFaceFieldView, 3U> left_faces{left.x, left.y,
-                                                       left.z};
-    const std::array<ConstFaceFieldView, 3U> right_faces{right.x, right.y,
-                                                        right.z};
-    for (std::size_t axis = 0U; axis < left_faces.size(); ++axis) {
-      const ConstFaceFieldView lhs = left_faces[axis];
-      const ConstFaceFieldView rhs = right_faces[axis];
-      if (lhs.extents.x != rhs.extents.x || lhs.extents.y != rhs.extents.y ||
-          lhs.extents.z != rhs.extents.z)
-        return false;
-      for (std::int32_t z = 0; z < lhs.extents.z; ++z)
-        for (std::int32_t y = 0; y < lhs.extents.y; ++y)
-          for (std::int32_t x = 0; x < lhs.extents.x; ++x)
-            if (product_double_bits(lhs.unchecked({x, y, z})) !=
-                product_double_bits(rhs.unchecked({x, y, z})))
-              return false;
-    }
-    return true;
-  };
   const auto mix_field_numeric = [&](std::uint64_t hash,
                                      ConstFieldView field) noexcept {
     hash = detail::product_mix(hash, field.components);
@@ -9689,16 +9668,65 @@ Status ProductDriver::Impl::execute_attempt(
       };
   const auto pressure_energy_direction_fingerprint =
       [&](std::uint8_t corrector,
-          const PressureCorrectionCertificate& pressure) noexcept {
+          const PressureCorrectionCertificate& pressure,
+          double (&local_maximum)[2U], Status& local) noexcept {
+        local = {};
+        local_maximum[0U] = 0.0;
+        local_maximum[1U] = 0.0;
         std::uint64_t fingerprint = detail::product_mix(
             kFnvOffset, UINT64_C(0x7630347068646972));
         fingerprint = detail::product_mix(fingerprint, pressure.state);
         fingerprint = detail::product_mix(fingerprint, corrector);
         fingerprint = detail::product_mix(fingerprint, step.generation);
-        fingerprint = mix_field_numeric(
-            fingerprint, as_const(pressure_correction));
-        fingerprint = mix_field_numeric(
-            fingerprint, as_const(enthalpy_correction));
+        const ConstFieldView pressure_direction =
+            as_const(pressure_correction);
+        const ConstFieldView enthalpy_direction =
+            as_const(enthalpy_correction);
+        const auto scalar_direction_shape = [&](ConstFieldView field) noexcept {
+          return field.interior.x == cells.x &&
+                 field.interior.y == cells.y &&
+                 field.interior.z == cells.z && field.components == 1U;
+        };
+        if (!scalar_direction_shape(pressure_direction) ||
+            !scalar_direction_shape(enthalpy_direction)) {
+          local = {StatusCode::invalid_plan, kProductBinding};
+          return fingerprint == 0U ? PlanFingerprint{1U} : fingerprint;
+        }
+
+        // Preserve the canonical fingerprint order: all dp bits precede all
+        // dh bits.  The dh hash pass also consumes the corresponding dp value
+        // for the existing paired finite/max certificate, removing the later
+        // third traversal without changing its first-failure semantics.
+        fingerprint = detail::product_mix(fingerprint,
+                                          pressure_direction.components);
+        for (std::int32_t z = 0; z < cells.z; ++z)
+          for (std::int32_t y = 0; y < cells.y; ++y)
+            for (std::int32_t x = 0; x < cells.x; ++x)
+              fingerprint = detail::product_mix(
+                  fingerprint,
+                  product_double_bits(
+                      pressure_direction.unchecked({x, y, z}, 0U)));
+        fingerprint = detail::product_mix(fingerprint,
+                                          enthalpy_direction.components);
+        for (std::int32_t z = 0; z < cells.z; ++z)
+          for (std::int32_t y = 0; y < cells.y; ++y)
+            for (std::int32_t x = 0; x < cells.x; ++x) {
+              const Int3 cell{x, y, z};
+              const double dh = enthalpy_direction.unchecked(cell, 0U);
+              fingerprint = detail::product_mix(
+                  fingerprint, product_double_bits(dh));
+              if (!local) continue;
+              const double dp = pressure_direction.unchecked(cell, 0U);
+              if (!std::isfinite(dp) || !std::isfinite(dh)) {
+                local = {StatusCode::rejected_step,
+                         kProductPressureEnergy};
+                continue;
+              }
+              local_maximum[0U] =
+                  std::max(local_maximum[0U], std::abs(dp));
+              local_maximum[1U] =
+                  std::max(local_maximum[1U], std::abs(dh));
+            }
         return fingerprint == 0U ? PlanFingerprint{1U} : fingerprint;
       };
   const auto initialize_candidate_sample =
@@ -9727,6 +9755,22 @@ Status ProductDriver::Impl::execute_attempt(
         sample.mass_flux_provenance =
             flux == 0U ? PlanFingerprint{1U} : flux;
       };
+  // Test diagnostics consume their one-shot arm before they replay the
+  // candidate ladder.  Snapshot the request for the whole attempt so the
+  // diagnostic cannot switch from the full oracle to the production fast
+  // path halfway through that replay.
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  const bool alpha_zero_diagnostic_oracle_requested =
+      g_candidate_globalization_armed.load(std::memory_order_acquire) ||
+      g_candidate_globalization_published.load(std::memory_order_acquire);
+#endif
+  const auto alpha_zero_diagnostic_oracle_armed = [&]() noexcept {
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+    return alpha_zero_diagnostic_oracle_requested;
+#else
+    return false;
+#endif
+  };
   const auto evaluate_pressure_energy_candidate =
       [&](std::uint8_t corrector,
           const PisoFrozenMomentumStageAuthority& frozen,
@@ -9737,6 +9781,8 @@ Status ProductDriver::Impl::execute_attempt(
           PressureEnergyCandidateArtifacts& artifacts) {
         initialize_candidate_sample(alpha, ordinal, corrector, direction,
                                     artifacts);
+        const bool full_alpha_zero_oracle =
+            alpha == 0.0 && alpha_zero_diagnostic_oracle_armed();
         Status evaluated = revise_pressure_energy_candidate_workspaces();
         if (evaluated &&
             pressure_energy_candidate_species.size() != species_trial.size())
@@ -9849,120 +9895,143 @@ Status ProductDriver::Impl::execute_attempt(
                 // move rho by one ulp even when p/h/T/U are bit identical.
                 // Preserve that exact base closure so alpha zero and its
                 // frozen total flux share the same density authority.
-                for (std::size_t species = 0U;
-                     species < pressure_energy_candidate_species.size();
-                     ++species)
-                  species_values[species] =
-                      pressure_energy_candidate_species[species].unchecked(
-                          cell, 0U);
-                ThermoState oracle{};
-                Status oracle_status =
-                    product.thermodynamics.evaluate_from_reference_pressure(
-                        attempt_pressure_reference, candidate_pressure,
-                        candidate_enthalpy,
-                        {species_values.data(), species_values.size()},
-                        {pressure_energy_candidate_velocity.unchecked(cell,
-                                                                        0U),
-                         pressure_energy_candidate_velocity.unchecked(cell,
-                                                                        1U),
-                         pressure_energy_candidate_velocity.unchecked(cell,
-                                                                        2U)},
-                        oracle, trial_temperature.unchecked(cell, 0U));
-                MolecularTransportState oracle_transport{};
-                if (oracle_status)
-                  oracle_status = product.transport.evaluate(
-                      oracle.temperature,
-                      {species_values.data(), species_values.size()},
-                      oracle_transport);
                 const double base_density =
                     trial_density.unchecked(cell, 0U);
                 const double base_temperature =
                     trial_temperature.unchecked(cell, 0U);
-                const auto normalized_difference = [](double left,
-                                                       double right) noexcept {
-                  return std::abs(left - right) /
-                         std::max({1.0, std::abs(left), std::abs(right)});
-                };
-                const double density_difference =
-                    oracle_status
-                        ? std::abs(oracle.rho - base_density)
-                        : std::numeric_limits<double>::infinity();
-                const double temperature_difference =
-                    oracle_status
-                        ? std::abs(oracle.temperature - base_temperature)
-                        : std::numeric_limits<double>::infinity();
-                double material_error = std::numeric_limits<double>::infinity();
-                if (oracle_status) {
-                  material_error = 0.0;
-                  const std::array<std::pair<double, double>, 6U>
-                      material_pairs{{
-                          {oracle_transport.viscosity,
-                           molecular_viscosity.unchecked(cell, 0U)},
-                          {oracle.drho_dp_hY,
-                           compressibility.unchecked(cell, 0U)},
-                          {oracle.drho_dh_pY,
-                           enthalpy_compressibility.unchecked(cell, 0U)},
-                          {oracle_transport.conductivity,
-                           conductivity.unchecked(cell, 0U)},
-                          {oracle.cp,
-                           heat_capacity.unchecked(cell, 0U)},
-                          {oracle_transport.conductivity / oracle.cp,
-                           enthalpy_diffusivity.unchecked(cell, 0U)},
-                      }};
-                  for (const auto& pair : material_pairs)
-                    material_error = std::max(
-                        material_error,
-                        normalized_difference(pair.first, pair.second));
+                if (full_alpha_zero_oracle) {
+                  for (std::size_t species = 0U;
+                       species < pressure_energy_candidate_species.size();
+                       ++species)
+                    species_values[species] =
+                        pressure_energy_candidate_species[species].unchecked(
+                            cell, 0U);
+                  ThermoState oracle{};
+                  Status oracle_status = product.thermodynamics
+                                             .evaluate_from_reference_pressure(
+                                                 attempt_pressure_reference,
+                                                 candidate_pressure,
+                                                 candidate_enthalpy,
+                                                 {species_values.data(),
+                                                  species_values.size()},
+                                                 {pressure_energy_candidate_velocity
+                                                      .unchecked(cell, 0U),
+                                                  pressure_energy_candidate_velocity
+                                                      .unchecked(cell, 1U),
+                                                  pressure_energy_candidate_velocity
+                                                      .unchecked(cell, 2U)},
+                                                 oracle, base_temperature);
+                  MolecularTransportState oracle_transport{};
+                  if (oracle_status)
+                    oracle_status = product.transport.evaluate(
+                        oracle.temperature,
+                        {species_values.data(), species_values.size()},
+                        oracle_transport);
+                  const auto normalized_difference =
+                      [](double left, double right) noexcept {
+                        return std::abs(left - right) /
+                               std::max(
+                                   {1.0, std::abs(left), std::abs(right)});
+                      };
+                  const double density_difference =
+                      oracle_status
+                          ? std::abs(oracle.rho - base_density)
+                          : std::numeric_limits<double>::infinity();
+                  const double temperature_difference =
+                      oracle_status
+                          ? std::abs(oracle.temperature - base_temperature)
+                          : std::numeric_limits<double>::infinity();
+                  double material_error =
+                      std::numeric_limits<double>::infinity();
+                  if (oracle_status) {
+                    material_error = 0.0;
+                    const std::array<std::pair<double, double>, 6U>
+                        material_pairs{{
+                            {oracle_transport.viscosity,
+                             molecular_viscosity.unchecked(cell, 0U)},
+                            {oracle.drho_dp_hY,
+                             compressibility.unchecked(cell, 0U)},
+                            {oracle.drho_dh_pY,
+                             enthalpy_compressibility.unchecked(cell, 0U)},
+                            {oracle_transport.conductivity,
+                             conductivity.unchecked(cell, 0U)},
+                            {oracle.cp, heat_capacity.unchecked(cell, 0U)},
+                            {oracle_transport.conductivity / oracle.cp,
+                             enthalpy_diffusivity.unchecked(cell, 0U)},
+                        }};
+                    for (const auto& pair : material_pairs)
+                      material_error = std::max(
+                          material_error,
+                          normalized_difference(pair.first, pair.second));
+                  }
+                  const double density_error =
+                      normalized_difference(oracle.rho, base_density);
+                  const double temperature_error =
+                      normalized_difference(oracle.temperature,
+                                            base_temperature);
+                  if (!oracle_status || !std::isfinite(density_difference) ||
+                      !std::isfinite(temperature_difference) ||
+                      !std::isfinite(material_error) ||
+                      density_error > alpha_zero_oracle_tolerance ||
+                      temperature_error > alpha_zero_oracle_tolerance ||
+                      material_error > alpha_zero_oracle_tolerance) {
+                    local = {StatusCode::rejected_step,
+                             kProductPressureEnergy};
+                    break;
+                  }
+                  local_alpha_zero_oracle[0U] = std::max(
+                      local_alpha_zero_oracle[0U], density_difference);
+                  local_alpha_zero_oracle[1U] = std::max(
+                      local_alpha_zero_oracle[1U], temperature_difference);
+                  local_alpha_zero_oracle[2U] = std::max(
+                      local_alpha_zero_oracle[2U], material_error);
+                  local_alpha_zero_oracle[3U] = std::max(
+                      local_alpha_zero_oracle[3U], density_error);
+                  local_alpha_zero_oracle[4U] = std::max(
+                      local_alpha_zero_oracle[4U], temperature_error);
+                  local_alpha_zero_oracle[5U] = std::max(
+                      local_alpha_zero_oracle[5U],
+                      static_cast<double>(
+                          product_ulp_distance(oracle.rho, base_density)));
+                  local_alpha_zero_oracle[6U] = std::max(
+                      local_alpha_zero_oracle[6U],
+                      static_cast<double>(product_ulp_distance(
+                          oracle.temperature, base_temperature)));
+                  for (double value :
+                       {candidate_pressure, candidate_enthalpy, oracle.rho,
+                        oracle.temperature, oracle.cp, oracle.drho_dp_hY,
+                        oracle.drho_dh_pY, oracle_transport.viscosity,
+                        oracle_transport.conductivity,
+                        oracle_transport.conductivity / oracle.cp})
+                    local_alpha_zero_oracle_lineage = detail::product_mix(
+                        local_alpha_zero_oracle_lineage,
+                        product_double_bits(value));
+                } else {
+                  // The production baseline consumes the already-certified
+                  // live closure.  Mix the actual bytes being reused so the
+                  // fast path retains a deterministic, nonzero numeric oracle
+                  // lineage without repeating EOS or transport evaluation.
+                  for (double value :
+                       {candidate_pressure, candidate_enthalpy, base_density,
+                        base_temperature,
+                        heat_capacity.unchecked(cell, 0U),
+                        compressibility.unchecked(cell, 0U),
+                        enthalpy_compressibility.unchecked(cell, 0U),
+                        molecular_viscosity.unchecked(cell, 0U),
+                        conductivity.unchecked(cell, 0U),
+                        enthalpy_diffusivity.unchecked(cell, 0U)})
+                    local_alpha_zero_oracle_lineage = detail::product_mix(
+                        local_alpha_zero_oracle_lineage,
+                        product_double_bits(value));
                 }
-                const double density_error = normalized_difference(
-                    oracle.rho, base_density);
-                const double temperature_error = normalized_difference(
-                    oracle.temperature, base_temperature);
-                if (!oracle_status || !std::isfinite(density_difference) ||
-                    !std::isfinite(temperature_difference) ||
-                    !std::isfinite(material_error) ||
-                    density_error > alpha_zero_oracle_tolerance ||
-                    temperature_error > alpha_zero_oracle_tolerance ||
-                    material_error > alpha_zero_oracle_tolerance) {
-                  local = {StatusCode::rejected_step,
-                           kProductPressureEnergy};
-                  break;
-                }
-                local_alpha_zero_oracle[0U] = std::max(
-                    local_alpha_zero_oracle[0U], density_difference);
-                local_alpha_zero_oracle[1U] = std::max(
-                    local_alpha_zero_oracle[1U], temperature_difference);
-                local_alpha_zero_oracle[2U] = std::max(
-                    local_alpha_zero_oracle[2U], material_error);
-                local_alpha_zero_oracle[3U] = std::max(
-                    local_alpha_zero_oracle[3U], density_error);
-                local_alpha_zero_oracle[4U] = std::max(
-                    local_alpha_zero_oracle[4U], temperature_error);
-                local_alpha_zero_oracle[5U] = std::max(
-                    local_alpha_zero_oracle[5U],
-                    static_cast<double>(
-                        product_ulp_distance(oracle.rho, base_density)));
-                local_alpha_zero_oracle[6U] = std::max(
-                    local_alpha_zero_oracle[6U],
-                    static_cast<double>(product_ulp_distance(
-                        oracle.temperature, base_temperature)));
-                for (double value :
-                     {candidate_pressure, candidate_enthalpy, oracle.rho,
-                      oracle.temperature, oracle.cp, oracle.drho_dp_hY,
-                      oracle.drho_dh_pY, oracle_transport.viscosity,
-                      oracle_transport.conductivity,
-                      oracle_transport.conductivity / oracle.cp})
-                  local_alpha_zero_oracle_lineage = detail::product_mix(
-                      local_alpha_zero_oracle_lineage,
-                      product_double_bits(value));
                 pressure_energy_candidate_density.unchecked(cell, 0U) =
                     base_density;
                 pressure_energy_candidate_temperature.unchecked(cell, 0U) =
                     base_temperature;
                 pressure_energy_candidate_molecular_viscosity.unchecked(
                     cell, 0U) = molecular_viscosity.unchecked(cell, 0U);
-                pressure_energy_candidate_compressibility.unchecked(
-                    cell, 0U) = compressibility.unchecked(cell, 0U);
+                pressure_energy_candidate_compressibility.unchecked(cell, 0U) =
+                    compressibility.unchecked(cell, 0U);
                 pressure_energy_candidate_enthalpy_compressibility.unchecked(
                     cell, 0U) =
                     enthalpy_compressibility.unchecked(cell, 0U);
@@ -10041,7 +10110,7 @@ Status ProductDriver::Impl::execute_attempt(
         if (!evaluated)
           return Status{evaluated.code,
                         kProductPressureEnergy + 205U};
-        if (alpha == 0.0) {
+        if (full_alpha_zero_oracle) {
           double global_alpha_zero_oracle[7U]{};
           evaluated = product.reductions.checked_max(
               {local_alpha_zero_oracle, 7U},
@@ -10354,25 +10423,44 @@ Status ProductDriver::Impl::execute_attempt(
           return Status{evaluated.code,
                         kProductPressureEnergy + 255U};
 
-        {
-          const std::array<ConstFieldView, 1U> reads{
-              as_const(pressure_energy_candidate_velocity)};
-          const std::array<FieldView, 1U> writes{
-              pressure_energy_candidate_velocity_gradient};
-          local = cartesian_gradient(
-              product.equations.kernels(),
-              {{reads.data(), reads.size()}, {writes.data(), writes.size()},
-               full_box, 0U, 0U, 3U, 0U, nullptr});
+        if (alpha == 0.0 && !full_alpha_zero_oracle) {
+          // Alpha zero has exactly the live primitive state.  Reuse the
+          // certified live gradient directly; boundary/IBM and final-flux
+          // replay below remain candidate-local and are not bypassed.
+          for (std::int32_t z = 0; z < cells.z; ++z)
+            for (std::int32_t y = 0; y < cells.y; ++y)
+              for (std::int32_t x = 0; x < cells.x; ++x)
+                for (std::uint8_t component = 0U; component < 9U;
+                     ++component) {
+                  const double value =
+                      velocity_gradient.unchecked({x, y, z}, component);
+                  pressure_energy_candidate_velocity_gradient.unchecked(
+                      {x, y, z}, component) = value;
+                  local_alpha_zero_oracle_lineage = detail::product_mix(
+                      local_alpha_zero_oracle_lineage,
+                      product_double_bits(value));
+                }
+        } else {
+          {
+            const std::array<ConstFieldView, 1U> reads{
+                as_const(pressure_energy_candidate_velocity)};
+            const std::array<FieldView, 1U> writes{
+                pressure_energy_candidate_velocity_gradient};
+            local = cartesian_gradient(
+                product.equations.kernels(),
+                {{reads.data(), reads.size()}, {writes.data(), writes.size()},
+                 full_box, 0U, 0U, 3U, 0U, nullptr});
+          }
+          if (local && product.ibm_equations.has_value())
+            local = product.ibm_equations->correct_velocity_gradient(
+                as_const(pressure_energy_candidate_velocity),
+                pressure_energy_candidate_velocity_gradient);
+          evaluated = product.reductions.consensus(local);
+          if (!evaluated)
+            return Status{evaluated.code,
+                          kProductPressureEnergy + 208U};
         }
-        if (local && product.ibm_equations.has_value())
-          local = product.ibm_equations->correct_velocity_gradient(
-              as_const(pressure_energy_candidate_velocity),
-              pressure_energy_candidate_velocity_gradient);
-        evaluated = product.reductions.consensus(local);
-        if (!evaluated)
-          return Status{evaluated.code,
-                        kProductPressureEnergy + 208U};
-        if (alpha == 0.0) {
+        if (full_alpha_zero_oracle) {
           double local_gradient_error = 0.0;
           for (std::int32_t z = 0; z < cells.z; ++z)
             for (std::int32_t y = 0; y < cells.y; ++y)
@@ -10408,25 +10496,40 @@ Status ProductDriver::Impl::execute_attempt(
               pressure_energy_candidate_velocity_gradient);
           if (!evaluated) return evaluated;
         }
-        const TurbulenceCandidateInput turbulence_input{
-            as_const(pressure_energy_candidate_density),
-            as_const(pressure_energy_candidate_molecular_viscosity),
-            as_const(pressure_energy_candidate_velocity_gradient),
-            pressure_energy_candidate_velocity_gradient.revision};
-        // This certificate only authenticates the independently recomputed
-        // oracle output.  Alpha zero subsequently restores the conservative
-        // live material bytes, so retaining the certificate in the published
-        // artifacts would falsely authenticate an overwritten view.
-        TurbulenceCandidateCertificate turbulence_oracle;
-        evaluated = product.turbulence.evaluate_candidate_effective_viscosity(
-            turbulence_input,
-            pressure_energy_candidate_effective_viscosity,
-            turbulence_oracle);
-        evaluated = product.reductions.consensus(evaluated);
-        if (!evaluated)
-          return Status{evaluated.code,
-                        kProductPressureEnergy + 209U};
-        if (alpha == 0.0) {
+        if (alpha == 0.0 && !full_alpha_zero_oracle) {
+          for (std::int32_t z = 0; z < cells.z; ++z)
+            for (std::int32_t y = 0; y < cells.y; ++y)
+              for (std::int32_t x = 0; x < cells.x; ++x) {
+                const double value =
+                    effective_viscosity.unchecked({x, y, z}, 0U);
+                pressure_energy_candidate_effective_viscosity.unchecked(
+                    {x, y, z}, 0U) = value;
+                local_alpha_zero_oracle_lineage = detail::product_mix(
+                    local_alpha_zero_oracle_lineage,
+                    product_double_bits(value));
+              }
+        } else {
+          const TurbulenceCandidateInput turbulence_input{
+              as_const(pressure_energy_candidate_density),
+              as_const(pressure_energy_candidate_molecular_viscosity),
+              as_const(pressure_energy_candidate_velocity_gradient),
+              pressure_energy_candidate_velocity_gradient.revision};
+          // This certificate only authenticates the independently recomputed
+          // oracle output.  Alpha zero subsequently restores the conservative
+          // live material bytes, so retaining the certificate in the published
+          // artifacts would falsely authenticate an overwritten view.
+          TurbulenceCandidateCertificate turbulence_oracle;
+          evaluated =
+              product.turbulence.evaluate_candidate_effective_viscosity(
+                  turbulence_input,
+                  pressure_energy_candidate_effective_viscosity,
+                  turbulence_oracle);
+          evaluated = product.reductions.consensus(evaluated);
+          if (!evaluated)
+            return Status{evaluated.code,
+                          kProductPressureEnergy + 209U};
+        }
+        if (full_alpha_zero_oracle) {
           double local_effective_error = 0.0;
           for (std::int32_t z = 0; z < cells.z; ++z)
             for (std::int32_t y = 0; y < cells.y; ++y)
@@ -10835,9 +10938,9 @@ Status ProductDriver::Impl::execute_attempt(
           // the same-layer EOS-closed state plus its final physical boundary
           // flux.  The pre-finalizer residual was assembled with provisional
           // mechanical flux and is not that physical baseline.  Preserve the
-          // first full assembly, repeat the complete energy path, and demand
-          // deterministic equality.  Periodic/closed flow retains the
-          // stronger comparison against the live frozen residual.
+          // first full assembly.  An armed diagnostic repeats the complete
+          // energy path and demands deterministic equality; production uses
+          // the first physical assembly as both baseline and oracle.
           if (local && pressure_reference_kind ==
                            PressureReferenceKind::boundary_absolute) {
             for (std::int32_t z = 0; z < cells.z; ++z)
@@ -10846,38 +10949,50 @@ Status ProductDriver::Impl::execute_attempt(
                      ++x, ++energy_offset)
                   pressure_energy_baseline_energy_residual[energy_offset] =
                       pressure_energy_r_e.unchecked({x, y, z}, 0U);
-            local = assemble_candidate_energy();
-            local = product.reductions.consensus(local);
-            if (!local) return local;
+            if (full_alpha_zero_oracle) {
+              local = assemble_candidate_energy();
+              local = product.reductions.consensus(local);
+              if (!local) return local;
+            }
             energy_offset = 0U;
           }
           for (std::int32_t z = 0; z < cells.z && local; ++z)
             for (std::int32_t y = 0; y < cells.y && local; ++y)
               for (std::int32_t x = 0; x < cells.x;
                    ++x, ++energy_offset) {
-                const double oracle =
+                const double assembled_residual =
                     pressure_energy_r_e.unchecked({x, y, z}, 0U);
-                const double base =
-                    pressure_energy_baseline_energy_residual[energy_offset];
-                const double scale =
-                    std::max({1.0, std::abs(oracle), std::abs(base)});
-                local_energy_error = std::max(
-                    local_energy_error, std::abs(oracle - base) / scale);
+                const double oracle =
+                    !full_alpha_zero_oracle &&
+                            pressure_reference_kind ==
+                                PressureReferenceKind::boundary_absolute
+                        ? pressure_energy_baseline_energy_residual[energy_offset]
+                        : assembled_residual;
+                if (full_alpha_zero_oracle) {
+                  const double base =
+                      pressure_energy_baseline_energy_residual[energy_offset];
+                  const double scale =
+                      std::max({1.0, std::abs(oracle), std::abs(base)});
+                  local_energy_error = std::max(
+                      local_energy_error, std::abs(oracle - base) / scale);
+                }
                 local_alpha_zero_oracle_lineage = detail::product_mix(
                     local_alpha_zero_oracle_lineage,
                     product_double_bits(oracle));
               }
-          double global_energy_error = 0.0;
-          evaluated = product.reductions.checked_max(
-              {&local_energy_error, 1U}, {&global_energy_error, 1U},
-              local && std::isfinite(local_energy_error) &&
-                      local_energy_error <= alpha_zero_oracle_tolerance
-                  ? Status{}
-                  : Status{StatusCode::rejected_step,
-                           kProductPressureEnergy});
-          if (!evaluated) return evaluated;
-          artifacts.alpha_zero_energy_residual_oracle_error =
-              global_energy_error;
+          if (full_alpha_zero_oracle) {
+            double global_energy_error = 0.0;
+            evaluated = product.reductions.checked_max(
+                {&local_energy_error, 1U}, {&global_energy_error, 1U},
+                local && std::isfinite(local_energy_error) &&
+                        local_energy_error <= alpha_zero_oracle_tolerance
+                    ? Status{}
+                    : Status{StatusCode::rejected_step,
+                             kProductPressureEnergy});
+            if (!evaluated) return evaluated;
+            artifacts.alpha_zero_energy_residual_oracle_error =
+                global_energy_error;
+          }
         }
         evaluated = product.reductions.consensus(local);
         if (!evaluated) return evaluated;
@@ -11020,10 +11135,12 @@ Status ProductDriver::Impl::execute_attempt(
                       StatusCode::invalid_plan, kProductPressureEnergy};
                   break;
                 }
-                local_pressure_error[0U] =
-                    std::max(local_pressure_error[0U], difference);
-                local_pressure_error[1U] =
-                    std::max(local_pressure_error[1U], relative);
+                if (full_alpha_zero_oracle) {
+                  local_pressure_error[0U] =
+                      std::max(local_pressure_error[0U], difference);
+                  local_pressure_error[1U] =
+                      std::max(local_pressure_error[1U], relative);
+                }
                 local_alpha_zero_oracle_lineage = detail::product_mix(
                     local_alpha_zero_oracle_lineage,
                     product_double_bits(candidate_absolute));
@@ -11033,18 +11150,27 @@ Status ProductDriver::Impl::execute_attempt(
               }
             }
           }
-          double global_pressure_error[2U]{};
-          evaluated = product.reductions.checked_max(
-              {local_pressure_error, 2U}, {global_pressure_error, 2U},
-              local_pressure_status && alpha_zero_gauge_certified
-                  ? Status{}
-                  : Status{StatusCode::invalid_plan,
-                           kProductPressureEnergy});
-          if (!evaluated) return evaluated;
-          artifacts.alpha_zero_pressure_oracle_difference =
-              global_pressure_error[0U];
-          artifacts.alpha_zero_pressure_oracle_relative_error =
-              global_pressure_error[1U];
+          if (full_alpha_zero_oracle) {
+            double global_pressure_error[2U]{};
+            evaluated = product.reductions.checked_max(
+                {local_pressure_error, 2U}, {global_pressure_error, 2U},
+                local_pressure_status && alpha_zero_gauge_certified
+                    ? Status{}
+                    : Status{StatusCode::invalid_plan,
+                             kProductPressureEnergy});
+            if (!evaluated) return evaluated;
+            artifacts.alpha_zero_pressure_oracle_difference =
+                global_pressure_error[0U];
+            artifacts.alpha_zero_pressure_oracle_relative_error =
+                global_pressure_error[1U];
+          } else {
+            evaluated = product.reductions.consensus(
+                local_pressure_status && alpha_zero_gauge_certified
+                    ? Status{}
+                    : Status{StatusCode::invalid_plan,
+                             kProductPressureEnergy});
+            if (!evaluated) return evaluated;
+          }
           std::uint64_t lineage_xor = 0U;
           std::uint64_t lineage_sum = 0U;
           int communicator_size = 0;
@@ -11080,6 +11206,99 @@ Status ProductDriver::Impl::execute_attempt(
           alpha_zero_pressure_equivalent = true;
         }
 
+        bool alpha_zero_state_bits_match = alpha_zero_pressure_equivalent;
+        bool alpha_zero_flux_bits_match = true;
+        const auto has_cell_shape = [&](ConstFieldView field) noexcept {
+          return field.interior.x == cells.x &&
+                 field.interior.y == cells.y &&
+                 field.interior.z == cells.z && field.components != 0U;
+        };
+        const auto mix_candidate_field_numeric =
+            [&](std::uint64_t hash, ConstFieldView candidate,
+                ConstFieldView live,
+                const ConstFieldView* second_live = nullptr) noexcept {
+              if (alpha != 0.0) return mix_field_numeric(hash, candidate);
+              hash = detail::product_mix(hash, candidate.components);
+              const bool candidate_shape = has_cell_shape(candidate);
+              const bool live_shape =
+                  has_cell_shape(live) &&
+                  candidate.components == live.components;
+              const bool second_shape =
+                  second_live == nullptr ||
+                  (has_cell_shape(*second_live) &&
+                   candidate.components == second_live->components);
+              const bool comparable =
+                  candidate_shape && live_shape && second_shape;
+              if (!comparable) alpha_zero_state_bits_match = false;
+              if (!candidate_shape) return hash;
+              for (std::uint8_t component = 0U;
+                   component < candidate.components; ++component)
+                for (std::int32_t z = 0; z < cells.z; ++z)
+                  for (std::int32_t y = 0; y < cells.y; ++y)
+                    for (std::int32_t x = 0; x < cells.x; ++x) {
+                      const Int3 cell{x, y, z};
+                      const std::uint64_t candidate_bits =
+                          product_double_bits(
+                              candidate.unchecked(cell, component));
+                      hash = detail::product_mix(hash, candidate_bits);
+                      if (comparable &&
+                          (candidate_bits !=
+                               product_double_bits(
+                                   live.unchecked(cell, component)) ||
+                           (second_live != nullptr &&
+                            candidate_bits !=
+                                product_double_bits(second_live->unchecked(
+                                    cell, component)))))
+                        alpha_zero_state_bits_match = false;
+                    }
+              return hash;
+            };
+        const auto mix_candidate_flux_numeric =
+            [&](std::uint64_t hash, ConstFaceFluxView candidate,
+                ConstFaceFluxView live) noexcept {
+              if (alpha != 0.0) return mix_flux_numeric(hash, candidate);
+              const std::array<ConstFaceFieldView, 3U> candidate_faces{
+                  candidate.x, candidate.y, candidate.z};
+              const std::array<ConstFaceFieldView, 3U> live_faces{
+                  live.x, live.y, live.z};
+              const std::array<Int3, 3U> expected_extents{{
+                  {cells.x + 1, cells.y, cells.z},
+                  {cells.x, cells.y + 1, cells.z},
+                  {cells.x, cells.y, cells.z + 1},
+              }};
+              for (std::size_t axis = 0U; axis < candidate_faces.size();
+                   ++axis) {
+                const ConstFaceFieldView candidate_face =
+                    candidate_faces[axis];
+                const ConstFaceFieldView live_face = live_faces[axis];
+                const Int3 expected = expected_extents[axis];
+                const bool candidate_shape =
+                    candidate_face.extents.x == expected.x &&
+                    candidate_face.extents.y == expected.y &&
+                    candidate_face.extents.z == expected.z;
+                const bool comparable =
+                    candidate_shape && live_face.extents.x == expected.x &&
+                    live_face.extents.y == expected.y &&
+                    live_face.extents.z == expected.z;
+                if (!comparable) alpha_zero_flux_bits_match = false;
+                if (!candidate_shape) continue;
+                for (std::int32_t z = 0; z < candidate_face.extents.z; ++z)
+                  for (std::int32_t y = 0; y < candidate_face.extents.y; ++y)
+                    for (std::int32_t x = 0; x < candidate_face.extents.x;
+                         ++x) {
+                      const Int3 face{x, y, z};
+                      const std::uint64_t candidate_bits = product_double_bits(
+                          candidate_face.unchecked(face));
+                      hash = detail::product_mix(hash, candidate_bits);
+                      if (comparable &&
+                          candidate_bits != product_double_bits(
+                                                live_face.unchecked(face)))
+                        alpha_zero_flux_bits_match = false;
+                    }
+              }
+              return hash;
+            };
+
         std::uint64_t residual = detail::product_mix(
             artifacts.exact_certificate.canonical_lineage(),
             UINT64_C(0x726573696475616c));
@@ -11102,38 +11321,52 @@ Status ProductDriver::Impl::execute_attempt(
         }
         residual = mix_field_numeric(
             residual, as_const(pressure_energy_candidate_pressure));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_enthalpy));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_density));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_temperature));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_velocity));
-        residual = mix_field_numeric(
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_enthalpy),
+            as_const(trial_enthalpy));
+        const ConstFieldView eos_density_baseline = as_const(eos_density);
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_density),
+            as_const(trial_density), &eos_density_baseline);
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_temperature),
+            as_const(trial_temperature));
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_velocity),
+            as_const(trial_velocity));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_molecular_viscosity));
-        residual = mix_field_numeric(
+            as_const(pressure_energy_candidate_molecular_viscosity),
+            as_const(molecular_viscosity));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_effective_viscosity));
-        residual = mix_field_numeric(
+            as_const(pressure_energy_candidate_effective_viscosity),
+            as_const(effective_viscosity));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_velocity_gradient));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_compressibility));
-        residual = mix_field_numeric(
+            as_const(pressure_energy_candidate_velocity_gradient),
+            as_const(velocity_gradient));
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_compressibility),
+            as_const(compressibility));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_enthalpy_compressibility));
-        residual = mix_field_numeric(
+            as_const(pressure_energy_candidate_enthalpy_compressibility),
+            as_const(enthalpy_compressibility));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_thermal_conductivity));
-        residual = mix_field_numeric(
-            residual, as_const(pressure_energy_candidate_heat_capacity));
-        residual = mix_field_numeric(
+            as_const(pressure_energy_candidate_thermal_conductivity),
+            as_const(conductivity));
+        residual = mix_candidate_field_numeric(
+            residual, as_const(pressure_energy_candidate_heat_capacity),
+            as_const(heat_capacity));
+        residual = mix_candidate_field_numeric(
             residual,
-            as_const(pressure_energy_candidate_enthalpy_diffusivity));
+            as_const(pressure_energy_candidate_enthalpy_diffusivity),
+            as_const(enthalpy_diffusivity));
         residual = mix_field_numeric(residual, as_const(pressure_energy_r_e));
-        residual = mix_flux_numeric(residual, artifacts.flux);
+        residual = mix_candidate_flux_numeric(residual, artifacts.flux,
+                                              baseline_flux);
         residual = detail::product_mix(
             residual, product_double_bits(global_metrics[0U]));
         residual = detail::product_mix(
@@ -11188,52 +11421,9 @@ Status ProductDriver::Impl::execute_attempt(
             residual == 0U ? PlanFingerprint{1U} : residual;
 
         if (alpha == 0.0) {
-          const bool same_state =
-              alpha_zero_pressure_equivalent &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_enthalpy),
-                  as_const(trial_enthalpy)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_density),
-                  as_const(trial_density)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_temperature),
-                  as_const(trial_temperature)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_velocity),
-                  as_const(trial_velocity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_molecular_viscosity),
-                  as_const(molecular_viscosity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_effective_viscosity),
-                  as_const(effective_viscosity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_velocity_gradient),
-                  as_const(velocity_gradient)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_compressibility),
-                  as_const(compressibility)) &&
-              same_interior_bits(
-                  as_const(
-                      pressure_energy_candidate_enthalpy_compressibility),
-                  as_const(enthalpy_compressibility)) &&
-              same_interior_bits(
-                  as_const(
-                      pressure_energy_candidate_thermal_conductivity),
-                  as_const(conductivity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_heat_capacity),
-                  as_const(heat_capacity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_enthalpy_diffusivity),
-                  as_const(enthalpy_diffusivity)) &&
-              same_interior_bits(
-                  as_const(pressure_energy_candidate_density),
-                  as_const(eos_density));
           const double local_alpha_zero_mismatch =
-              same_state && alpha_zero_gauge_certified &&
-                      same_flux_bits(artifacts.flux, baseline_flux)
+              alpha_zero_state_bits_match && alpha_zero_gauge_certified &&
+                      alpha_zero_flux_bits_match
                   ? 0.0
                   : 1.0;
           double global_alpha_zero_mismatch = 1.0;
@@ -11863,34 +12053,26 @@ Status ProductDriver::Impl::execute_attempt(
         if (pressure_energy_baseline_energy_residual.size() !=
             expected_energy_values)
           return Status{StatusCode::invalid_plan, kProductBinding};
-        std::size_t baseline_energy_offset = 0U;
-        for (std::int32_t z = 0; z < cells.z; ++z)
-          for (std::int32_t y = 0; y < cells.y; ++y)
-            for (std::int32_t x = 0; x < cells.x;
-                 ++x, ++baseline_energy_offset)
-              pressure_energy_baseline_energy_residual
-                  [baseline_energy_offset] =
-                      pressure_energy_r_e.unchecked({x, y, z}, 0U);
-        loop.direction =
-            pressure_energy_direction_fingerprint(corrector, pressure);
+        // The live residual is an independent alpha-zero oracle only for an
+        // armed diagnostic in a periodic/closed domain.  Open boundaries must
+        // first install the candidate's final physical flux, so their baseline
+        // is captured after the first candidate energy assembly instead.
+        if (alpha_zero_diagnostic_oracle_armed() &&
+            pressure_reference_kind !=
+                PressureReferenceKind::boundary_absolute) {
+          std::size_t baseline_energy_offset = 0U;
+          for (std::int32_t z = 0; z < cells.z; ++z)
+            for (std::int32_t y = 0; y < cells.y; ++y)
+              for (std::int32_t x = 0; x < cells.x;
+                   ++x, ++baseline_energy_offset)
+                pressure_energy_baseline_energy_residual
+                    [baseline_energy_offset] =
+                        pressure_energy_r_e.unchecked({x, y, z}, 0U);
+        }
         double local_direction[2U]{};
         Status local;
-        for (std::int32_t z = 0; z < cells.z && local; ++z)
-          for (std::int32_t y = 0; y < cells.y && local; ++y)
-            for (std::int32_t x = 0; x < cells.x; ++x) {
-              const Int3 cell{x, y, z};
-              const double dp = pressure_correction.unchecked(cell, 0U);
-              const double dh = enthalpy_correction.unchecked(cell, 0U);
-              if (!std::isfinite(dp) || !std::isfinite(dh)) {
-                local = {StatusCode::rejected_step,
-                         kProductPressureEnergy};
-                break;
-              }
-              local_direction[0U] =
-                  std::max(local_direction[0U], std::abs(dp));
-              local_direction[1U] =
-                  std::max(local_direction[1U], std::abs(dh));
-            }
+        loop.direction = pressure_energy_direction_fingerprint(
+            corrector, pressure, local_direction, local);
         double global_direction[2U]{};
         Status candidate_status = product.reductions.checked_max(
             {local_direction, 2U}, {global_direction, 2U}, local);

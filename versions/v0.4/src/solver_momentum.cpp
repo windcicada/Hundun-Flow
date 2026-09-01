@@ -1869,27 +1869,21 @@ Status limit_momentum_predictor_correction(
   // byte-identical high-order fast path when alpha=1 and no majorization is
   // required.
   std::array<double, 4U> local_metrics{};
-  for (std::uint8_t component = 0U; component < 3U; ++component) {
-    FrozenConvectionFaceField frozen;
-    if (local_status) {
-      const FrozenConvectionContext context{plan.fingerprint(),
-                                            assembly.state};
-      const FrozenConvectionFaceOutput output{
-          face_workspace.x, face_workspace.y, face_workspace.z};
-      local_status = freeze_cartesian_target_convection_faces(
-          kernels, plan.convection_, mass_flux, velocity, component,
-          context, output, frozen);
-    }
-    if (local_status) {
-      for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
-        for (std::int32_t y = 0; y < cells.y && local_status; ++y) {
-          for (std::int32_t x = 0; x < cells.x; ++x) {
-            const Int3 cell{x, y, z};
-            if (!fluid(cell)) continue;
-            const double a = system.diagonal.unchecked(cell, component);
-            const double row_neighbour_sum =
-                neighbour_sum(cell, local_status);
-            if (!local_status) break;
+  double local_minimum_alpha = 1.0;
+  // Diffusion and incoming mass flux are shared by all three momentum rows,
+  // so compute their row sum once per cell and majorize every component.
+  if (local_status) {
+    for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
+      for (std::int32_t y = 0; y < cells.y && local_status; ++y) {
+        for (std::int32_t x = 0; x < cells.x; ++x) {
+          const Int3 cell{x, y, z};
+          if (!fluid(cell)) continue;
+          const double row_neighbour_sum =
+              neighbour_sum(cell, local_status);
+          if (!local_status) break;
+          for (std::uint8_t component = 0U; component < 3U; ++component) {
+            const double a =
+                system.diagonal.unchecked(cell, component);
             const double majorant = std::max(a, row_neighbour_sum);
             const double adjusted_rhs =
                 system.rhs.unchecked(cell, component) +
@@ -1905,8 +1899,21 @@ Status limit_momentum_predictor_correction(
               system.diagonal.unchecked(cell, component) = majorant;
             }
           }
+          if (!local_status) break;
         }
       }
+    }
+  }
+  for (std::uint8_t component = 0U; component < 3U; ++component) {
+    FrozenConvectionFaceField frozen;
+    if (local_status) {
+      const FrozenConvectionContext context{plan.fingerprint(),
+                                            assembly.state};
+      const FrozenConvectionFaceOutput output{
+          face_workspace.x, face_workspace.y, face_workspace.z};
+      local_status = freeze_cartesian_target_convection_faces(
+          kernels, plan.convection_, mass_flux, velocity, component,
+          context, output, frozen);
     }
     for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
       Int3 extents = cells;
@@ -1951,46 +1958,19 @@ Status limit_momentum_predictor_correction(
               const double magnitude = std::abs(correction);
               local_metrics[0U] += magnitude;
               local_metrics[1U] += alpha * magnitude;
-              cell_workspace.unchecked(
-                  left, static_cast<std::uint8_t>(axis)) = 1.0;
+              // Count a vector face only when its first active component is
+              // encountered; retained L1 remains component-wise above.
+              double& active_marker = cell_workspace.unchecked(
+                  left, static_cast<std::uint8_t>(axis));
+              if (active_marker == 0.0) {
+                active_marker = 1.0;
+                local_metrics[3U] += 1.0;
+                local_minimum_alpha =
+                    std::min(local_minimum_alpha, alpha);
+                if (alpha < 1.0) local_metrics[2U] += 1.0;
+              }
             }
           }
-        }
-      }
-    }
-  }
-
-  double local_minimum_alpha = 1.0;
-  for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
-    Int3 extents = cells;
-    if (axis == 0U)
-      ++extents.x;
-    else if (axis == 1U)
-      ++extents.y;
-    else
-      ++extents.z;
-    const FaceFieldView common = alpha_face(axis);
-    for (std::int32_t z = 0; z < extents.z && local_status; ++z) {
-      for (std::int32_t y = 0; y < extents.y && local_status; ++y) {
-        for (std::int32_t x = 0; x < extents.x; ++x) {
-          const Int3 face{x, y, z};
-          const Int3 left = offset(face, axis, -1);
-          const Int3 right = face;
-          const Int3 owner =
-              physical_face(axis, face) && !inside(left) ? right : left;
-          if (!inside(owner) || !fluid(owner) ||
-              cell_workspace.unchecked(
-                  left, static_cast<std::uint8_t>(axis)) == 0.0)
-            continue;
-          const double alpha = common.unchecked(face);
-          if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
-            local_status = {StatusCode::numerical_failure,
-                            kMomentumNumerical};
-            break;
-          }
-          local_metrics[3U] += 1.0;
-          local_minimum_alpha = std::min(local_minimum_alpha, alpha);
-          if (alpha < 1.0) local_metrics[2U] += 1.0;
         }
       }
     }
