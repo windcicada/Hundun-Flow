@@ -1639,27 +1639,51 @@ Status PressureEnergyPressureFluxOperator::apply_after_exchange(
           select_face(frozen_face_enthalpy_.x, frozen_face_enthalpy_.y,
                       frozen_face_enthalpy_.z, axis);
       Int3 plus = cell;
+      Int3 minus_left = cell;
+      bool minus_is_local_interior = false;
+      bool plus_is_local_interior = false;
       if (axis == CartesianAxis::x) {
         ++plus.x;
+        --minus_left.x;
+        minus_is_local_interior = cell.x > 0;
+        plus_is_local_interior = plus.x < cells.x;
       } else if (axis == CartesianAxis::y) {
         ++plus.y;
+        --minus_left.y;
+        minus_is_local_interior = cell.y > 0;
+        plus_is_local_interior = plus.y < cells.y;
       } else {
         ++plus.z;
+        --minus_left.z;
+        minus_is_local_interior = cell.z > 0;
+        plus_is_local_interior = plus.z < cells.z;
       }
+      const bool minus_active = active_face(activity_, axis, cells, cell);
+      const bool plus_active = active_face(activity_, axis, cells, plus);
       const double minus_response =
-          active_face(activity_, axis, cells, cell)
-              ? pressure_boundary_.mass_flux_response_unchecked(
-                    pressure, axis, cell, coefficient.unchecked(cell))
+          minus_active
+              ? (minus_is_local_interior
+                     ? -coefficient.unchecked(cell) *
+                           (pressure.unchecked(cell, 0U) -
+                            pressure.unchecked(minus_left, 0U))
+                     : pressure_boundary_.mass_flux_response_unchecked(
+                           pressure, axis, cell,
+                           coefficient.unchecked(cell)))
               : 0.0;
       const double plus_response =
-          active_face(activity_, axis, cells, plus)
-              ? pressure_boundary_.mass_flux_response_unchecked(
-                    pressure, axis, plus, coefficient.unchecked(plus))
+          plus_active
+              ? (plus_is_local_interior
+                     ? -coefficient.unchecked(plus) *
+                           (pressure.unchecked(plus, 0U) -
+                            pressure.unchecked(cell, 0U))
+                     : pressure_boundary_.mass_flux_response_unchecked(
+                           pressure, axis, plus,
+                           coefficient.unchecked(plus)))
               : 0.0;
-      if (active_face(activity_, axis, cells, plus)) {
+      if (plus_active) {
         value += enthalpy.unchecked(plus) * plus_response;
       }
-      if (active_face(activity_, axis, cells, cell)) {
+      if (minus_active) {
         value -= enthalpy.unchecked(cell) * minus_response;
       }
     }

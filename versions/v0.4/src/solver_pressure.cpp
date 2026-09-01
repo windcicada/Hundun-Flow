@@ -753,19 +753,37 @@ Status PressureLinearOperator::apply_after_exchange(FieldView input,
               implementation_->x, implementation_->y, implementation_->z,
               axis);
           Int3 plus_face = cell;
+          Int3 minus_cell = cell;
+          bool minus_is_local_interior = false;
+          bool plus_is_local_interior = false;
           if (axis == CartesianAxis::x) {
             ++plus_face.x;
+            --minus_cell.x;
+            minus_is_local_interior = cell.x > 0;
+            plus_is_local_interior = plus_face.x < cells.x;
           } else if (axis == CartesianAxis::y) {
             ++plus_face.y;
+            --minus_cell.y;
+            minus_is_local_interior = cell.y > 0;
+            plus_is_local_interior = plus_face.y < cells.y;
           } else {
             ++plus_face.z;
+            --minus_cell.z;
+            minus_is_local_interior = cell.z > 0;
+            plus_is_local_interior = plus_face.z < cells.z;
           }
-          value -= face.unchecked(cell) *
-                   implementation_->pressure_boundary
-                       .neighbor_value_unchecked(x, cell, axis, -1);
-          value -= face.unchecked(plus_face) *
-                   implementation_->pressure_boundary
-                       .neighbor_value_unchecked(x, cell, axis, 1);
+          const double minus_neighbor =
+              minus_is_local_interior
+                  ? x.unchecked(minus_cell, 0U)
+                  : implementation_->pressure_boundary
+                        .neighbor_value_unchecked(x, cell, axis, -1);
+          const double plus_neighbor =
+              plus_is_local_interior
+                  ? x.unchecked(plus_face, 0U)
+                  : implementation_->pressure_boundary
+                        .neighbor_value_unchecked(x, cell, axis, 1);
+          value -= face.unchecked(cell) * minus_neighbor;
+          value -= face.unchecked(plus_face) * plus_neighbor;
         }
         output.unchecked(cell, 0U) = value;
         if (!std::isfinite(value)) {

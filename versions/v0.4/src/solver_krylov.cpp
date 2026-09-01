@@ -2371,9 +2371,13 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
         for (std::size_t basis = 0U; basis < basis_count; ++basis) {
           FieldView z = workspace.vector(
               static_cast<std::uint8_t>(z_begin + basis), shape);
-          status = merge_status(
-              status, add_scaled(trial, y.data[basis], as_const(z)));
+          basis_views[basis] = as_const(z);
+          basis_scales[basis] = y.data[basis];
         }
+        status = merge_status(
+            status,
+            add_scaled_basis(trial, basis_views.data(), basis_scales.data(),
+                             basis_count));
         status = revise(workspace, trial_slot, trial, status);
         ax = workspace.vector(ax_slot, shape);
         double audited_residual = 0.0;
@@ -2426,9 +2430,11 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
       for (std::size_t basis = 0U; basis < basis_count; ++basis) {
         FieldView z = workspace.vector(
             static_cast<std::uint8_t>(z_begin + basis), shape);
-        status = merge_status(
-            status, add_scaled(x, y.data[basis], as_const(z)));
+        basis_views[basis] = as_const(z);
+        basis_scales[basis] = y.data[basis];
       }
+      status = add_scaled_basis(x, basis_views.data(), basis_scales.data(),
+                                basis_count);
       status = revise(workspace, x_slot, x, status);
       v0 = workspace.vector(v_begin, shape);
       ax = workspace.vector(ax_slot, shape);
