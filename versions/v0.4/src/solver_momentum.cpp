@@ -1509,6 +1509,7 @@ Status limit_momentum_predictor_correction(
 
   Status local_status;
   constexpr StageId kLimiterHaloStage = 33U;
+  constexpr std::uint8_t kNeighbourSumCacheComponent = 2U;
   const RevisionToken base_workspace_revision = cell_workspace.revision;
   for (std::uint8_t component = 0U; component < 3U; ++component) {
     FrozenConvectionFaceField frozen;
@@ -1529,15 +1530,33 @@ Status limit_momentum_predictor_correction(
             const Int3 cell{x, y, z};
             cell_workspace.unchecked(cell, 0U) = 1.0;
             cell_workspace.unchecked(cell, 1U) = 1.0;
-            cell_workspace.unchecked(cell, 2U) = 1.0;
+            if (component == 0U)
+              cell_workspace.unchecked(cell,
+                                       kNeighbourSumCacheComponent) = 1.0;
             if (!fluid(cell)) continue;
 
             const double a = system.diagonal.unchecked(cell, component);
             const double high_rhs = system.rhs.unchecked(cell, component);
             const double centre = velocity.unchecked(cell, component);
             const double row_neighbour_sum =
-                neighbour_sum(cell, local_status);
-            if (!local_status) break;
+                component == 0U
+                    ? neighbour_sum(cell, local_status)
+                    : cell_workspace.unchecked(
+                          cell, kNeighbourSumCacheComponent);
+            if (!local_status || !std::isfinite(row_neighbour_sum) ||
+                row_neighbour_sum < 0.0) {
+              if (local_status)
+                local_status = {StatusCode::numerical_failure,
+                                kMomentumNumerical};
+              break;
+            }
+            // Positive/negative ratios occupy components 0/1.  Component 2
+            // is otherwise unused by the limiter, and its interior values
+            // survive each ratio halo, so cache the common row sum there.
+            if (component == 0U)
+              cell_workspace.unchecked(cell,
+                                       kNeighbourSumCacheComponent) =
+                  row_neighbour_sum;
             const double majorant = std::max(a, row_neighbour_sum);
             const double majorant_rhs = high_rhs + (majorant - a) * centre;
             double delta = 0.0;
