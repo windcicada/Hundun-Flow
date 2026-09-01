@@ -138,6 +138,10 @@ double mg_level_diagonal_for_test(const NativeCartesianMgPlan& plan,
                                   std::size_t level,
                                   std::size_t cell) noexcept;
 
+Status mg_prolongate_add_for_test(NativeCartesianMgPlan& plan,
+                                  std::size_t fine_level,
+                                  StageId stage) noexcept;
+
 #endif
 
 }  // namespace hundun::v04::detail

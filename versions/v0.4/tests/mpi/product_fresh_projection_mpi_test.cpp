@@ -7,6 +7,7 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -496,7 +497,12 @@ bool distributed_no_ibm_bypass(int rank) {
 }
 
 bool distributed_projection_failure_retry(int rank) {
-  const ValidatedModel model = immersed_model();
+  constexpr std::uint32_t regular_pressure_maximum_iterations = 4U;
+  constexpr std::uint32_t fresh_krylov_restart = 30U;
+  ValidatedModel model = immersed_model();
+  model.solver.pressure.maximum_iterations =
+      regular_pressure_maximum_iterations;
+  model.solver.pressure.krylov_restart = fresh_krylov_restart;
   CompiledCasePlan plan;
   Status status =
       ProductCompiler::compile(MPI_COMM_WORLD, model, data_root(), plan);
@@ -516,6 +522,21 @@ bool distributed_projection_failure_retry(int rank) {
   CommittedOutputSnapshot unpublished;
   const Status output_status = driver.committed_output_snapshot(unpublished);
   detail::FreshInitializationDiagnostic rejected;
+  const auto strict_fresh_linear_gate =
+      [](const detail::FreshInitializationDiagnostic& diagnostic) noexcept {
+        const double limit =
+            std::max(1.0e-13,
+                     1.0e-13 * diagnostic.solve.initial_true_residual);
+        return diagnostic.solve.status &&
+               diagnostic.solve.termination == LinearTermination::converged &&
+               diagnostic.solve.iterations >
+                   regular_pressure_maximum_iterations &&
+               diagnostic.solve.iterations <=
+                   regular_pressure_maximum_iterations + fresh_krylov_restart &&
+               std::isfinite(diagnostic.solve.initial_true_residual) &&
+               std::isfinite(diagnostic.solve.final_true_residual) &&
+               diagnostic.solve.final_true_residual <= limit;
+      };
   const bool rejected_local =
       !status && !driver.initialized() && !output_status &&
       driver.pressure_reference() == 0.0 &&
@@ -523,6 +544,7 @@ bool distributed_projection_failure_retry(int rank) {
       detail::fresh_initialization_diagnostic_for_test(rejected) &&
       rejected.immersed && rejected.projection_attempted && rejected.audited &&
       !rejected.committed && !rejected.terminal_status &&
+      strict_fresh_linear_gate(rejected) &&
       rejected.prepared_lineage != 0U && rejected.solved_lineage != 0U &&
       rejected.candidate_lineage != 0U &&
       rejected.velocity_layers_bitwise_equal;
@@ -541,6 +563,8 @@ bool distributed_projection_failure_retry(int rank) {
       status && driver.initialized() &&
       detail::fresh_initialization_diagnostic_for_test(recovered) &&
       recovered.committed && recovered.terminal_status &&
+      strict_fresh_linear_gate(recovered) && recovered.audited &&
+      recovered.final_continuity_maximum <= recovered.continuity_limit &&
       recovered.generation > rejected.generation &&
       recovered.derived_velocity_dependents_rebuilt &&
       recovered.derived_velocity_lineage != 0U &&

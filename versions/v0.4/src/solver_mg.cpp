@@ -580,6 +580,11 @@ struct NativeCartesianMgPlan::Impl {
   std::vector<double> coefficient_tensor_storage;
   std::size_t coefficient_tensor_values{};
   std::size_t coefficient_tensor_plane{};
+  // Trilinear prolongation extends face halos in fixed axis order.  Two send
+  // and two receive planes cover both directions of one axis without hot
+  // allocation or a global gather.
+  std::vector<double> prolongation_extension_send;
+  std::vector<double> prolongation_extension_receive;
   Strategy strategy{};
   MgPlanCounters runtime_counters{};
   // A small point-smoother coarse level may be replicated on every rank.
@@ -905,6 +910,7 @@ Status build_levels(Implementation& implementation) {
   std::size_t maximum_values = 0U;
   std::size_t maximum_x = 0U;
   std::size_t maximum_plane = 0U;
+  std::size_t maximum_extension_plane = 0U;
   for (const detail::MgLevelStorage& level : implementation.levels) {
     maximum_values = std::max(
         {maximum_values, level.cells, level.x_faces, level.y_faces,
@@ -916,8 +922,15 @@ Status build_levels(Implementation& implementation) {
     const std::size_t nz = static_cast<std::size_t>(cells.z) + 1U;
     maximum_plane =
         std::max({maximum_plane, nx * ny, nx * nz, ny * nz});
+    const std::size_t cx = static_cast<std::size_t>(cells.x);
+    const std::size_t cy = static_cast<std::size_t>(cells.y);
+    const std::size_t cz = static_cast<std::size_t>(cells.z);
+    maximum_extension_plane = std::max(
+        {maximum_extension_plane, cy * cz, (cx + 2U) * cz,
+         (cx + 2U) * (cy + 2U)});
   }
   if (maximum_values == 0U || maximum_x == 0U || maximum_plane == 0U ||
+      maximum_extension_plane == 0U ||
       maximum_values >
           (std::numeric_limits<std::size_t>::max() - 2U * maximum_plane) /
               2U) {
@@ -928,6 +941,10 @@ Status build_levels(Implementation& implementation) {
   implementation.point_boundary_zero_storage.assign(maximum_x, 0.0);
   implementation.coefficient_tensor_storage.assign(
       2U * maximum_values + 2U * maximum_plane, 0.0);
+  implementation.prolongation_extension_send.assign(
+      2U * maximum_extension_plane, 0.0);
+  implementation.prolongation_extension_receive.assign(
+      2U * maximum_extension_plane, 0.0);
   return {};
 }
 
@@ -3457,8 +3474,171 @@ Status restrict_residual(Implementation& implementation,
 }
 
 template <class Implementation>
+Status extend_prolongation_face_halos(
+    Implementation& implementation, std::size_t coarse_index,
+    FieldView solution, StageId& stage, Status& deferred) noexcept {
+  const detail::MgLevelStorage& coarse = implementation.levels[coarse_index];
+  const MeshPatch patch = coarse.patch;
+  const MgBoundarySet boundary = implementation.spec.boundaries;
+  const bool periodic[3]{boundary.x_min == MgBoundaryKind::periodic,
+                         boundary.y_min == MgBoundaryKind::periodic,
+                         boundary.z_min == MgBoundaryKind::periodic};
+  const std::uint8_t fine_mask =
+      implementation.levels[coarse_index - 1U].coarsen_mask;
+  const bool active[3]{
+      (fine_mask & detail::kMgAxisX) != 0U &&
+          (patch.process_grid.x > 1 || periodic[0]),
+      (fine_mask & detail::kMgAxisY) != 0U &&
+          (patch.process_grid.y > 1 || periodic[1]),
+      (fine_mask & detail::kMgAxisZ) != 0U &&
+          (patch.process_grid.z > 1 || periodic[2])};
+  const int active_axes = static_cast<int>(active[0]) +
+                          static_cast<int>(active[1]) +
+                          static_cast<int>(active[2]);
+  if (active_axes < 2) return {};
+
+  constexpr int tag_base = 25000;
+  static_assert(tag_base +
+                        static_cast<int>(detail::kMgMaximumLevels * 8U) + 5 <=
+                    32767,
+                "prolongation extension tags fit MPI's required tag range");
+  const auto component = [](Int3 value, int axis) noexcept {
+    return axis == 0 ? value.x : (axis == 1 ? value.y : value.z);
+  };
+  const auto neighbor = [&](int axis, int direction) noexcept {
+    int coordinate[3]{patch.process_coord.x, patch.process_coord.y,
+                      patch.process_coord.z};
+    const int grid[3]{patch.process_grid.x, patch.process_grid.y,
+                      patch.process_grid.z};
+    coordinate[axis] += direction;
+    if (coordinate[axis] < 0 || coordinate[axis] >= grid[axis]) {
+      if (!periodic[axis]) return MPI_PROC_NULL;
+      coordinate[axis] = coordinate[axis] < 0 ? grid[axis] - 1 : 0;
+    }
+    return coordinate[0] + grid[0] *
+                               (coordinate[1] + grid[1] * coordinate[2]);
+  };
+
+  bool prior[3]{};
+  bool first = true;
+  Status local{};
+  const Int3 cells = coarse.view.local_shape;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (!active[axis]) continue;
+    if (first) {
+      prior[axis] = true;
+      first = false;
+      continue;
+    }
+    ++stage;
+    std::int32_t begin[3]{};
+    std::int32_t end[3]{cells.x, cells.y, cells.z};
+    end[axis] = 1;
+    std::size_t count = 1U;
+    for (int selected = 0; selected < 3; ++selected) {
+      if (selected == axis) continue;
+      if (prior[selected]) {
+        begin[selected] = -1;
+        ++end[selected];
+      }
+      // The exchanged-axis coordinate changes, while every plane coordinate
+      // is retained.  Thus peers have equal counts under uneven partitions.
+      count *= static_cast<std::size_t>(end[selected] - begin[selected]);
+    }
+    double* const send_min =
+        implementation.prolongation_extension_send.data();
+    double* const send_max = send_min + count;
+    double* const receive_min =
+        implementation.prolongation_extension_receive.data();
+    double* const receive_max = receive_min + count;
+    const auto pack = [&](std::int32_t selected,
+                          double* wire) noexcept {
+      std::size_t cursor = 0U;
+      for (std::int32_t k = begin[2]; k < end[2]; ++k)
+        for (std::int32_t j = begin[1]; j < end[1]; ++j)
+          for (std::int32_t i = begin[0]; i < end[0]; ++i) {
+            Int3 cell{i, j, k};
+            if (axis == 0) cell.x = selected;
+            if (axis == 1) cell.y = selected;
+            if (axis == 2) cell.z = selected;
+            wire[cursor++] = solution.unchecked(cell, 0U);
+          }
+    };
+    pack(0, send_min);
+    pack(component(cells, axis) - 1, send_max);
+
+    const int minus = neighbor(axis, -1);
+    const int plus = neighbor(axis, 1);
+    const int minus_tag =
+        tag_base + static_cast<int>(coarse_index * 8U + axis * 2U);
+    const int plus_tag = minus_tag + 1;
+    // Fixed blocking pairs have no request lifecycle to leak on an MPI error.
+    // The first sends the minimum plane toward minus and receives the plus
+    // neighbor's minimum plane; the second is the exact maximum-plane dual.
+    int mpi_status = MPI_Sendrecv(
+        send_min, static_cast<int>(count), MPI_DOUBLE, minus, plus_tag,
+        receive_max, static_cast<int>(count), MPI_DOUBLE, plus, plus_tag,
+        implementation.communicator, MPI_STATUS_IGNORE);
+    if (mpi_status != MPI_SUCCESS && local) {
+      local = {StatusCode::mpi_failure, kMgCollective};
+    }
+    mpi_status = MPI_Sendrecv(
+        send_max, static_cast<int>(count), MPI_DOUBLE, plus, minus_tag,
+        receive_min, static_cast<int>(count), MPI_DOUBLE, minus, minus_tag,
+        implementation.communicator, MPI_STATUS_IGNORE);
+    if (mpi_status != MPI_SUCCESS && local) {
+      local = {StatusCode::mpi_failure, kMgCollective};
+    }
+
+    if (local) {
+      const std::uint64_t messages =
+          static_cast<std::uint64_t>(minus != MPI_PROC_NULL) +
+          static_cast<std::uint64_t>(plus != MPI_PROC_NULL);
+      const std::uint64_t payload_bytes =
+          count > UINT64_MAX / sizeof(double)
+              ? UINT64_MAX
+              : static_cast<std::uint64_t>(count) * sizeof(double);
+      const std::uint64_t bytes =
+          messages == 0U || payload_bytes <= UINT64_MAX / (2U * messages)
+              ? 2U * messages * payload_bytes
+              : UINT64_MAX;
+      const auto saturating_add = [](std::uint64_t& target,
+                                     std::uint64_t increment) noexcept {
+        target = increment > UINT64_MAX - target ? UINT64_MAX
+                                                  : target + increment;
+      };
+      saturating_add(implementation.runtime_counters.point_to_point_messages,
+                     messages);
+      saturating_add(implementation.runtime_counters.point_to_point_bytes,
+                     bytes);
+      const auto unpack = [&](std::int32_t selected,
+                              const double* wire) noexcept {
+        std::size_t cursor = 0U;
+        for (std::int32_t k = begin[2]; k < end[2]; ++k)
+          for (std::int32_t j = begin[1]; j < end[1]; ++j)
+            for (std::int32_t i = begin[0]; i < end[0]; ++i) {
+              Int3 cell{i, j, k};
+              if (axis == 0) cell.x = selected;
+              if (axis == 1) cell.y = selected;
+              if (axis == 2) cell.z = selected;
+              solution.unchecked(cell, 0U) = wire[cursor++];
+            }
+      };
+      if (minus != MPI_PROC_NULL) unpack(-1, receive_min);
+      if (plus != MPI_PROC_NULL) {
+        unpack(component(cells, axis), receive_max);
+      }
+    }
+    prior[axis] = true;
+  }
+  if (!local && deferred) deferred = local;
+  return {};
+}
+
+template <class Implementation>
 Status prolongate_add(Implementation& implementation,
-                      std::size_t fine_index, StageId& stage) noexcept {
+                      std::size_t fine_index, StageId& stage,
+                      Status& deferred) noexcept {
   const detail::MgLevelStorage& fine = implementation.levels[fine_index];
   const detail::MgLevelStorage& coarse = implementation.levels[fine_index + 1U];
   FieldView fx = implementation.services.workspace->level(
@@ -3468,10 +3648,17 @@ Status prolongate_add(Implementation& implementation,
   Status status = exchange_solution(implementation, fine_index + 1U,
                                     coarse_solution, stage++);
   if (!status) return status;
+  status = extend_prolongation_face_halos(
+      implementation, fine_index + 1U, coarse_solution, stage, deferred);
+  if (!status) return status;
   const ConstFieldView cx = as_const(coarse_solution);
   const bool mx = (fine.coarsen_mask & detail::kMgAxisX) != 0U;
   const bool my = (fine.coarsen_mask & detail::kMgAxisY) != 0U;
   const bool mz = (fine.coarsen_mask & detail::kMgAxisZ) != 0U;
+  const MgBoundarySet boundary = implementation.spec.boundaries;
+  const bool periodic_x = boundary.x_min == MgBoundaryKind::periodic;
+  const bool periodic_y = boundary.y_min == MgBoundaryKind::periodic;
+  const bool periodic_z = boundary.z_min == MgBoundaryKind::periodic;
   const Int3 fs = fine.view.local_shape;
   for (std::int32_t k = 0; k < fs.z; ++k)
     for (std::int32_t j = 0; j < fs.y; ++j)
@@ -3481,6 +3668,7 @@ Status prolongate_add(Implementation& implementation,
         const auto interpolation = [](std::int32_t fine_global,
                                       bool coarsened,
                                       std::int32_t coarse_extent,
+                                      bool periodic,
                                       std::int32_t& left,
                                       std::int32_t& right,
                                       double& right_weight) noexcept {
@@ -3500,11 +3688,15 @@ Status prolongate_add(Implementation& implementation,
             right = parent + 1;
             right_weight = 0.25;
           }
-          if (left < 0) {
+          // Periodic endpoint indices deliberately remain -1/coarse_extent:
+          // exchange_solution populated those one-cell halo locations with
+          // the wrapped coarse neighbor.  Physical endpoints retain their
+          // established constant-extension clamp.
+          if (!periodic && left < 0) {
             left = 0;
             right = 0;
             right_weight = 0.0;
-          } else if (right >= coarse_extent) {
+          } else if (!periodic && right >= coarse_extent) {
             left = coarse_extent - 1;
             right = coarse_extent - 1;
             right_weight = 0.0;
@@ -3512,9 +3704,12 @@ Status prolongate_add(Implementation& implementation,
         };
         std::int32_t xl = 0, xr = 0, yl = 0, yr = 0, zl = 0, zr = 0;
         double xw = 0.0, yw = 0.0, zw = 0.0;
-        interpolation(fg.x, mx, coarse.view.global_shape.x, xl, xr, xw);
-        interpolation(fg.y, my, coarse.view.global_shape.y, yl, yr, yw);
-        interpolation(fg.z, mz, coarse.view.global_shape.z, zl, zr, zw);
+        interpolation(fg.x, mx, coarse.view.global_shape.x, periodic_x, xl,
+                      xr, xw);
+        interpolation(fg.y, my, coarse.view.global_shape.y, periodic_y, yl,
+                      yr, yw);
+        interpolation(fg.z, mz, coarse.view.global_shape.z, periodic_z, zl,
+                      zr, zw);
         double value = 0.0;
         for (int az = 0; az < (zl == zr ? 1 : 2); ++az) {
           const std::int32_t gz = az == 0 ? zl : zr;
@@ -3827,7 +4022,7 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
       deferred);
   if (!status) return status;
 #endif
-  status = prolongate_add(implementation, level, stage);
+  status = prolongate_add(implementation, level, stage, deferred);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) ++implementation.matrix_work.cycle_prolongations;
 #endif
@@ -4854,6 +5049,18 @@ struct NativeMgTestAccess {
                  storage.diagonal_offset)[cell];
   }
 
+  static Status prolongate_add_for_test(NativeCartesianMgPlan& plan,
+                                        std::size_t fine_level,
+                                        StageId stage) noexcept {
+    if (plan.implementation_ == nullptr ||
+        fine_level + 1U >= plan.implementation_->levels.size()) {
+      return {StatusCode::invalid_plan, kMgPlan};
+    }
+    Status deferred{};
+    const Status status =
+        prolongate_add(*plan.implementation_, fine_level, stage, deferred);
+    return status && !deferred ? deferred : status;
+  }
 };
 
 void set_mg_runtime_counters_for_test(
@@ -4913,6 +5120,12 @@ double mg_level_diagonal_for_test(const NativeCartesianMgPlan& plan,
                                   std::size_t level,
                                   std::size_t cell) noexcept {
   return NativeMgTestAccess::level_diagonal(plan, level, cell);
+}
+
+Status mg_prolongate_add_for_test(NativeCartesianMgPlan& plan,
+                                  std::size_t fine_level,
+                                  StageId stage) noexcept {
+  return NativeMgTestAccess::prolongate_add_for_test(plan, fine_level, stage);
 }
 
 }  // namespace detail

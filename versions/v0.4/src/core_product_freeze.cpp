@@ -2689,6 +2689,8 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   result.reduction_tree_messages = reduction.tree_messages;
   result.linear_iterations = resources.linear_iterations;
   const MgPlanCounters mg = pressure_mg.counters();
+  add(result.structured_messages, mg.point_to_point_messages);
+  add(result.structured_bytes, mg.point_to_point_bytes);
   result.mg_blocking_collectives = mg.blocking_collectives;
   result.mg_collective_logical_bytes = mg.collective_logical_bytes;
   result.exact_numeric_refills = mg.numeric_refreshes;
@@ -3694,6 +3696,17 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           piso_spec.pressure_algorithm == LinearAlgorithm::fgmres
               ? piso_spec.pressure_solve.restart
               : kAuxiliaryFgmresMaximumRestart;
+      const bool fresh_capacity_valid =
+          piso_spec.pressure_solve.maximum_iterations <=
+          std::numeric_limits<std::uint32_t>::max() - fresh_restart;
+      if (!fresh_capacity_valid)
+        status = {StatusCode::invalid_plan, kProductCapacity};
+      // The cold-start projection solve gets exactly one Krylov restart of
+      // headroom; the regular pressure-solve budget remains the case authority.
+      const std::uint32_t fresh_maximum_iterations =
+          fresh_capacity_valid
+              ? piso_spec.pressure_solve.maximum_iterations + fresh_restart
+              : 0U;
       FreshStartKinematicProjectionSpec fresh_spec;
       fresh_spec.communicator = communicator;
       fresh_spec.geometry = &candidate->geometry;
@@ -3704,18 +3717,19 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       fresh_spec.route =
           FreshStartProjectionLinearRoute::native_mg_fgmres;
       fresh_spec.solve = {1.0e-13,
-                          1.0e-12,
-                          piso_spec.pressure_solve.maximum_iterations,
+                          1.0e-13,
+                          fresh_maximum_iterations,
                           piso_spec.pressure_solve.true_residual_interval,
                           fresh_restart};
       fresh_spec.mg_policy = mg_spec.policy;
       fresh_spec.compatibility_absolute_tolerance = 1.0e-13;
       fresh_spec.compatibility_relative_tolerance = 1.0e-12;
-      // Compatibility and Krylov convergence use the stricter 1e-13/1e-12
-      // gate above.  Preserve the Fresh module's independently certified
-      // physical continuity gate; making it tighter here rejects the exact
-      // anchored residual at the one-cell gauge row without improving the
-      // solved operator.
+      // Krylov convergence uses the stricter 1e-13/1e-13 gate above, while
+      // compatibility retains its separately certified 1e-13/1e-12 gate.
+      // Preserve the Fresh module's independently certified physical
+      // continuity gate; making it tighter here rejects the exact anchored
+      // residual at the one-cell gauge row without improving the solved
+      // operator.
       fresh_spec.continuity_absolute_tolerance = 1.0e-12;
       fresh_spec.continuity_relative_tolerance = 1.0e-10;
       const FreshStartKinematicProjectionServices fresh_services{
@@ -3743,11 +3757,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           z_pressure,
           fresh_candidate_velocity,
           candidate_flux_capacity};
-      candidate->fresh_projection.emplace();
-      status = FreshStartKinematicProjectionPlan::compile(
-          fresh_spec, fresh_services, fresh_workspace,
-          *candidate->fresh_projection);
-      if (!status) candidate->fresh_projection.reset();
+      if (status) {
+        candidate->fresh_projection.emplace();
+        status = FreshStartKinematicProjectionPlan::compile(
+            fresh_spec, fresh_services, fresh_workspace,
+            *candidate->fresh_projection);
+        if (!status) candidate->fresh_projection.reset();
+      }
     }
   }
   if (status) {

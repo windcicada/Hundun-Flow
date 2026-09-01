@@ -34,7 +34,9 @@ bool same_counters(const MgPlanCounters& left,
          left.hierarchy_rebuilds == right.hierarchy_rebuilds &&
          left.applications == right.applications &&
          left.blocking_collectives == right.blocking_collectives &&
-         left.collective_logical_bytes == right.collective_logical_bytes;
+         left.collective_logical_bytes == right.collective_logical_bytes &&
+         left.point_to_point_messages == right.point_to_point_messages &&
+         left.point_to_point_bytes == right.point_to_point_bytes;
 }
 
 struct OwnedField {

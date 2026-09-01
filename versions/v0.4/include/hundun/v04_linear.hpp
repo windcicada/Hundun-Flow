@@ -147,6 +147,8 @@ struct MgPlanCounters {
   std::uint64_t applications{};
   std::uint64_t blocking_collectives{};
   std::uint64_t collective_logical_bytes{};
+  std::uint64_t point_to_point_messages{};
+  std::uint64_t point_to_point_bytes{};
 };
 
 struct MgLevelView {

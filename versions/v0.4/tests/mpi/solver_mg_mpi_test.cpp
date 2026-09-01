@@ -177,7 +177,9 @@ bool same(MgPlanCounters left, MgPlanCounters right) noexcept {
          left.hierarchy_rebuilds == right.hierarchy_rebuilds &&
          left.applications == right.applications &&
          left.blocking_collectives == right.blocking_collectives &&
-         left.collective_logical_bytes == right.collective_logical_bytes;
+         left.collective_logical_bytes == right.collective_logical_bytes &&
+         left.point_to_point_messages == right.point_to_point_messages &&
+         left.point_to_point_bytes == right.point_to_point_bytes;
 }
 
 bool same(detail::MgMatrixWorkCounters left,
@@ -589,6 +591,319 @@ HaloRuntimeCounters halo_counters(const Fixture& fixture) noexcept {
 
 MgBoundarySet boundaries(HaloTopology topology) noexcept;
 void fill_variable_point_fixture(Fixture& fixture) noexcept;
+
+bool test_periodic_prolongation_wraps_coarse_z_endpoint(int rank, int size) {
+  constexpr Int3 cells{8, 8, 32};
+  constexpr HaloTopology periodic_z{false, false, true};
+  Fixture periodic_fixture;
+  Fixture physical_fixture;
+  bool passed =
+      expect(initialize(periodic_fixture, periodic_z, 100.0, cells, 2U) &&
+                 initialize(physical_fixture, {}, 100.0, cells, 2U),
+             rank, "periodic/physical prolongation fixtures initialize");
+  if (!all_true(passed)) return false;
+
+  NativeCartesianMgSpec periodic_spec = mg_spec(periodic_fixture, 905U);
+  periodic_spec.boundaries = boundaries(periodic_z);
+  NativeCartesianMgSpec physical_spec = mg_spec(physical_fixture, 906U);
+  physical_spec.boundaries.z_min = MgBoundaryKind::neumann;
+  physical_spec.boundaries.z_max = MgBoundaryKind::neumann;
+  NativeCartesianMgPlan periodic_plan;
+  NativeCartesianMgPlan physical_plan;
+  const Status periodic_compile = NativeCartesianMgPlan::compile(
+      periodic_spec, services(periodic_fixture),
+      coefficient_views(periodic_fixture), periodic_plan);
+  const Status physical_compile = NativeCartesianMgPlan::compile(
+      physical_spec, services(physical_fixture),
+      coefficient_views(physical_fixture), physical_plan);
+  const bool fixture_contract =
+      static_cast<bool>(periodic_compile) &&
+      static_cast<bool>(physical_compile) &&
+      periodic_plan.level_count() == 2U && physical_plan.level_count() == 2U &&
+      (size == 1 ? periodic_fixture.patch.process_grid.z == 1
+                 : periodic_fixture.patch.process_grid.z > 1) &&
+      (size == 1 ? physical_fixture.patch.process_grid.z == 1
+                 : physical_fixture.patch.process_grid.z > 1) &&
+      periodic_fixture.requirements.levels[1U].global_shape.z == 16 &&
+      physical_fixture.requirements.levels[1U].global_shape.z == 16;
+  if (!fixture_contract) {
+    std::cerr << "rank " << rank << " prolongation fixture diagnostics: "
+              << "periodic_compile=" << packed(periodic_compile)
+              << " physical_compile=" << packed(physical_compile)
+              << " periodic_levels=" << periodic_plan.level_count()
+              << " physical_levels=" << physical_plan.level_count()
+              << " periodic_grid_z=" << periodic_fixture.patch.process_grid.z
+              << " physical_grid_z=" << physical_fixture.patch.process_grid.z
+              << " periodic_coarse_z="
+              << periodic_fixture.requirements.levels[1U].global_shape.z
+              << " physical_coarse_z="
+              << physical_fixture.requirements.levels[1U].global_shape.z
+              << '\n';
+  }
+  passed &= expect(
+      fixture_contract, rank,
+      "prolongation fixture puts periodic z endpoint across the MPI partition");
+  if (!all_true(passed)) return false;
+
+  const auto seed_coarse_and_clear_fine = [](Fixture& fixture) noexcept {
+    FieldView coarse = fixture.workspace.level(1U, MgWorkspaceSlot::solution);
+    const MeshPatch coarse_patch = fixture.requirements.levels[1U].patch;
+    for (std::int32_t k = 0; k < coarse.interior.z; ++k) {
+      const double value = static_cast<double>(coarse_patch.begin.z + k);
+      for (std::int32_t j = 0; j < coarse.interior.y; ++j) {
+        for (std::int32_t i = 0; i < coarse.interior.x; ++i) {
+          coarse.unchecked({i, j, k}, 0U) = value;
+        }
+      }
+    }
+    FieldView fine = fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    for (std::int32_t k = 0; k < fine.interior.z; ++k) {
+      for (std::int32_t j = 0; j < fine.interior.y; ++j) {
+        for (std::int32_t i = 0; i < fine.interior.x; ++i) {
+          fine.unchecked({i, j, k}, 0U) = 0.0;
+        }
+      }
+    }
+  };
+  seed_coarse_and_clear_fine(periodic_fixture);
+  seed_coarse_and_clear_fine(physical_fixture);
+
+  const Status periodic_status =
+      detail::mg_prolongate_add_for_test(periodic_plan, 0U, 12050U);
+  const Status physical_status =
+      detail::mg_prolongate_add_for_test(physical_plan, 0U, 12051U);
+  passed &= expect(static_cast<bool>(periodic_status) &&
+                       static_cast<bool>(physical_status),
+                   rank, "production prolongation succeeds");
+  if (!all_true(passed)) return false;
+
+  const auto endpoint_values_are = [](const Fixture& fixture,
+                                      double expected_minimum,
+                                      double expected_maximum) noexcept {
+    const FieldView fine =
+        fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    bool local = true;
+    for (std::int32_t k = 0; k < fine.interior.z; ++k) {
+      const std::int32_t global_z = fixture.patch.begin.z + k;
+      if (global_z != 0 && global_z != cells.z - 1) continue;
+      const double expected =
+          global_z == 0 ? expected_minimum : expected_maximum;
+      for (std::int32_t j = 0; j < fine.interior.y; ++j) {
+        for (std::int32_t i = 0; i < fine.interior.x; ++i) {
+          local = local && fine.unchecked({i, j, k}, 0U) == expected;
+        }
+      }
+    }
+    return local;
+  };
+  // With q_c(k)=k on 16 coarse cells, cell-centred linear interpolation at
+  // periodic fine endpoints is 3/4*q_c(0)+1/4*q_c(15)=3.75 and
+  // 3/4*q_c(15)+1/4*q_c(0)=11.25.  A physical symmetry boundary clamps.
+  passed &= expect(endpoint_values_are(periodic_fixture, 3.75, 11.25), rank,
+                   "periodic z prolongation consumes wrapped coarse neighbor");
+  passed &= expect(endpoint_values_are(physical_fixture, 0.0, 15.0), rank,
+                   "physical z prolongation keeps endpoint clamp");
+  return all_true(passed);
+}
+
+bool test_cross_partition_periodic_prolongation_uses_complete_donors(
+    int rank, int size) {
+  constexpr Int3 cells{32, 8, 32};
+  constexpr HaloTopology periodic_z{false, false, true};
+  constexpr double ghost_sentinel = -777.0;
+  Fixture periodic_fixture;
+  Fixture physical_fixture;
+  bool passed = expect(
+      initialize(periodic_fixture, periodic_z, 100.0, cells, 2U) &&
+          initialize(physical_fixture, {}, 100.0, cells, 2U),
+      rank, "cross-partition prolongation fixtures initialize");
+  if (!all_true(passed)) return false;
+
+  NativeCartesianMgSpec periodic_spec = mg_spec(periodic_fixture, 907U);
+  periodic_spec.boundaries = boundaries(periodic_z);
+  NativeCartesianMgSpec physical_spec = mg_spec(physical_fixture, 908U);
+  physical_spec.boundaries.z_min = MgBoundaryKind::neumann;
+  physical_spec.boundaries.z_max = MgBoundaryKind::neumann;
+  NativeCartesianMgPlan periodic_plan;
+  NativeCartesianMgPlan physical_plan;
+  const Status periodic_compile = NativeCartesianMgPlan::compile(
+      periodic_spec, services(periodic_fixture),
+      coefficient_views(periodic_fixture), periodic_plan);
+  const Status physical_compile = NativeCartesianMgPlan::compile(
+      physical_spec, services(physical_fixture),
+      coefficient_views(physical_fixture), physical_plan);
+  const Int3 expected_grid = size == 4   ? Int3{2, 1, 2}
+                             : size == 2 ? Int3{1, 1, 2}
+                                       : Int3{1, 1, 1};
+  const auto same_grid = [expected_grid](Int3 grid) noexcept {
+    return grid.x == expected_grid.x && grid.y == expected_grid.y &&
+           grid.z == expected_grid.z;
+  };
+  passed &= expect(
+      static_cast<bool>(periodic_compile) &&
+          static_cast<bool>(physical_compile) &&
+          periodic_plan.level_count() == 2U &&
+          physical_plan.level_count() == 2U &&
+          same_grid(periodic_fixture.patch.process_grid) &&
+          same_grid(physical_fixture.patch.process_grid) &&
+          periodic_fixture.requirements.levels[1U].global_shape.x == 16 &&
+          periodic_fixture.requirements.levels[1U].global_shape.z == 16 &&
+          physical_fixture.requirements.levels[1U].global_shape.x == 16 &&
+          physical_fixture.requirements.levels[1U].global_shape.z == 16,
+      rank,
+      "four-rank cross-partition fixture decomposes exactly two-by-one-by-two");
+  if (!all_true(passed)) return false;
+
+  const auto coarse_value = [](std::int32_t global_x,
+                               std::int32_t global_z) noexcept {
+    const double x = static_cast<double>(global_x);
+    const double z = static_cast<double>(global_z);
+    return 100.0 * x * z + x + z;
+  };
+  const auto seed = [coarse_value](Fixture& fixture) noexcept {
+    FieldView coarse =
+        fixture.workspace.level(1U, MgWorkspaceSlot::solution);
+    for (std::int32_t k = -1; k <= coarse.interior.z; ++k) {
+      for (std::int32_t j = -1; j <= coarse.interior.y; ++j) {
+        for (std::int32_t i = -1; i <= coarse.interior.x; ++i) {
+          coarse.unchecked({i, j, k}, 0U) = ghost_sentinel;
+        }
+      }
+    }
+    const MeshPatch coarse_patch = fixture.requirements.levels[1U].patch;
+    for (std::int32_t k = 0; k < coarse.interior.z; ++k) {
+      for (std::int32_t j = 0; j < coarse.interior.y; ++j) {
+        for (std::int32_t i = 0; i < coarse.interior.x; ++i) {
+          coarse.unchecked({i, j, k}, 0U) = coarse_value(
+              coarse_patch.begin.x + i, coarse_patch.begin.z + k);
+        }
+      }
+    }
+    FieldView fine = fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    for (std::int32_t k = 0; k < fine.interior.z; ++k) {
+      for (std::int32_t j = 0; j < fine.interior.y; ++j) {
+        for (std::int32_t i = 0; i < fine.interior.x; ++i) {
+          fine.unchecked({i, j, k}, 0U) = 0.0;
+        }
+      }
+    }
+  };
+  seed(periodic_fixture);
+  seed(physical_fixture);
+
+  const MgPlanCounters periodic_before = periodic_plan.counters();
+  const Status periodic_status = detail::mg_prolongate_add_for_test(
+      periodic_plan, 0U, 12052U);
+  const Status physical_status = detail::mg_prolongate_add_for_test(
+      physical_plan, 0U, 12053U);
+  passed &= expect(static_cast<bool>(periodic_status) &&
+                       static_cast<bool>(physical_status),
+                   rank, "cross-partition production prolongation succeeds");
+  if (!all_true(passed)) return false;
+  const MgPlanCounters periodic_after = periodic_plan.counters();
+  const std::uint64_t expected_messages = size == 4 ? 2U : 0U;
+  const std::uint64_t expected_bytes = size == 4 ? 1280U : 0U;
+  passed &= expect(
+      periodic_after.point_to_point_messages -
+                  periodic_before.point_to_point_messages ==
+              expected_messages &&
+          periodic_after.point_to_point_bytes -
+                  periodic_before.point_to_point_bytes ==
+              expected_bytes,
+      rank, "staged prolongation publishes exact point-to-point resources");
+
+  bool local_corner_complete = true;
+  bool local_witness_correct = true;
+  if (size == 4 && periodic_fixture.patch.process_coord.x == 1 &&
+      periodic_fixture.patch.process_coord.z == 0) {
+    const FieldView coarse =
+        periodic_fixture.workspace.level(1U, MgWorkspaceSlot::solution);
+    const FieldView fine =
+        periodic_fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    const double diagonal_corner = coarse.unchecked({-1, 0, -1}, 0U);
+    const double witness = fine.unchecked({0, 0, 0}, 0U);
+    local_corner_complete = diagonal_corner == 10522.0;
+    local_witness_correct = witness == 2917.75;
+    if (!local_witness_correct) {
+      std::cerr << "rank " << rank
+                << " cross-partition periodic prolongation witness="
+                << witness << " expected=2917.75 corner=" << diagonal_corner
+                << '\n';
+    }
+  }
+  passed &= expect(local_corner_complete, rank,
+                   "diagonal donor authority fills the x-z corner ghost");
+  passed &= expect(local_witness_correct, rank,
+                   "cross-partition periodic endpoint ignores stale corner ghost");
+
+  const auto interpolated_coordinate = [](std::int32_t fine,
+                                          std::int32_t coarse_extent,
+                                          bool periodic) noexcept {
+    if (fine == 0) {
+      return periodic ? 0.25 * static_cast<double>(coarse_extent - 1) : 0.0;
+    }
+    if (fine == 2 * coarse_extent - 1) {
+      return periodic ? 0.75 * static_cast<double>(coarse_extent - 1)
+                      : static_cast<double>(coarse_extent - 1);
+    }
+    return 0.5 * static_cast<double>(fine) - 0.25;
+  };
+  const auto matches_analytic = [interpolated_coordinate](
+                                    const Fixture& fixture,
+                                    bool periodic) noexcept {
+    const FieldView fine =
+        fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    bool local = true;
+    for (std::int32_t k = 0; k < fine.interior.z; ++k) {
+      const std::int32_t global_z = fixture.patch.begin.z + k;
+      const double z = interpolated_coordinate(global_z, 16, periodic);
+      for (std::int32_t j = 0; j < fine.interior.y; ++j) {
+        for (std::int32_t i = 0; i < fine.interior.x; ++i) {
+          const std::int32_t global_x = fixture.patch.begin.x + i;
+          const double x = interpolated_coordinate(global_x, 16, false);
+          const double expected = 100.0 * x * z + x + z;
+          const double actual = fine.unchecked({i, j, k}, 0U);
+          local = local &&
+                  std::abs(actual - expected) <=
+                      1.0e-13 * std::max(1.0, std::abs(expected));
+        }
+      }
+    }
+    return local;
+  };
+  passed &= expect(matches_analytic(periodic_fixture, true), rank,
+                   "periodic cross term is decomposition-independent");
+  passed &= expect(matches_analytic(physical_fixture, false), rank,
+                   "physical z endpoint remains clamped with x partitioning");
+
+  const auto conservative = [](const Fixture& fixture) noexcept {
+    const FieldView coarse =
+        fixture.workspace.level(1U, MgWorkspaceSlot::solution);
+    const FieldView fine =
+        fixture.workspace.level(0U, MgWorkspaceSlot::solution);
+    std::array<double, 2U> local{};
+    for (std::int32_t k = 0; k < coarse.interior.z; ++k)
+      for (std::int32_t j = 0; j < coarse.interior.y; ++j)
+        for (std::int32_t i = 0; i < coarse.interior.x; ++i)
+          local[0U] += coarse.unchecked({i, j, k}, 0U);
+    for (std::int32_t k = 0; k < fine.interior.z; ++k)
+      for (std::int32_t j = 0; j < fine.interior.y; ++j)
+        for (std::int32_t i = 0; i < fine.interior.x; ++i)
+          local[1U] += fine.unchecked({i, j, k}, 0U);
+    std::array<double, 2U> global{};
+    if (MPI_Allreduce(local.data(), global.data(), 2, MPI_DOUBLE, MPI_SUM,
+                      MPI_COMM_WORLD) != MPI_SUCCESS) {
+      return false;
+    }
+    return std::abs(global[1U] - 8.0 * global[0U]) <=
+           1.0e-13 * std::max(1.0, std::abs(global[1U]));
+  };
+  passed &= expect(conservative(periodic_fixture) &&
+                       conservative(physical_fixture),
+                   rank,
+                   "combined prolongation preserves the global integrated sum");
+  return all_true(passed);
+}
 
 bool test_fused_point_smoother_reference_oracle(int rank,
                                                 bool zero_pre_sweeps = false) {
@@ -2515,6 +2830,9 @@ int main(int argc, char** argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   bool passed = expect(size == 1 || size == 2 || size == 4, rank,
                        "MG MPI RED runs at 1, 2, or 4 ranks");
+  passed &= test_periodic_prolongation_wraps_coarse_z_endpoint(rank, size);
+  passed &= test_cross_partition_periodic_prolongation_uses_complete_donors(
+      rank, size);
   passed &= test_fused_point_smoother_reference_oracle(rank);
   passed &= test_fused_point_smoother_reference_oracle(rank, true);
   passed &= test_odd_periodic_point_smoother_fallback(rank);
