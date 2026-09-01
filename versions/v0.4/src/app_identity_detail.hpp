@@ -8,6 +8,11 @@
 
 namespace hundun::v04::detail {
 
+inline constexpr std::string_view kRuntimeEvidenceSchema =
+    "HUNDUN_V04_EVIDENCE_V7";
+inline constexpr std::string_view kRuntimeCandidateIdentitySchema =
+    "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2";
+
 Status runtime_candidate_identity(MPI_Comm communicator,
                                   RuntimeCandidateIdentity& out) noexcept;
 bool valid_runtime_candidate_identity(

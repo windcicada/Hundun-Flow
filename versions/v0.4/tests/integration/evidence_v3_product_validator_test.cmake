@@ -6,7 +6,7 @@ foreach(required IN ITEMS PRODUCT PYTHON VALIDATOR PROBE_ROOT)
   endif()
 endforeach()
 
-set(v6_product_row_check [=[
+set(v7_product_row_check [=[
 import hashlib
 import json
 import math
@@ -20,12 +20,12 @@ expected = {
     "restart": ((3, 2, 2, False, False), (4, 2, 2, False, False)),
 }
 if scenario not in expected:
-    raise SystemExit("unknown V6 producer scenario: " + scenario)
+    raise SystemExit("unknown V7 producer scenario: " + scenario)
 try:
     rows = [json.loads(line) for line in path.read_text(
         encoding="utf-8").splitlines() if line.strip()]
 except (OSError, ValueError) as error:
-    raise SystemExit("cannot read V6 producer evidence: " + str(error))
+    raise SystemExit("cannot read V7 producer evidence: " + str(error))
 if len(rows) != len(expected[scenario]):
     raise SystemExit("{} evidence must contain exactly {} rows; found {}".format(
         scenario, len(expected[scenario]), len(rows)))
@@ -33,8 +33,8 @@ for index, (row, wanted) in enumerate(zip(rows, expected[scenario]), 1):
     step, requested, executed, startup, restart_recovery = wanted
     if not isinstance(row, dict):
         raise SystemExit("{} row {} is not an object".format(scenario, index))
-    if row.get("schema") != "HUNDUN_V04_EVIDENCE_V6":
-        raise SystemExit("{} row {} is not V6".format(scenario, index))
+    if row.get("schema") != "HUNDUN_V04_EVIDENCE_V7":
+        raise SystemExit("{} row {} is not V7".format(scenario, index))
     observed = (row.get("step"), row.get("requested_bdf_order"),
                 row.get("bdf_order"), row.get("startup"),
                 row.get("restart_recovery"))
@@ -78,14 +78,15 @@ for index, (row, wanted) in enumerate(zip(rows, expected[scenario]), 1):
     identity = row.get("candidate_identity")
     if (not isinstance(identity, dict) or
             identity.get("schema") !=
-                "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1" or
+                "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2" or
             any(not isinstance(identity.get(field), str)
                 for field in ("head", "tree", "build_manifest_sha256",
                               "executable_sha256", "identity_sha256"))):
         raise SystemExit("{} step {} lacks candidate identity".format(
             scenario, step))
     payload = (
-        "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\n"
+        "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2\n"
+        "evidence_schema=HUNDUN_V04_EVIDENCE_V7\n"
         "head={}\ntree={}\nbuild_manifest_sha256={}\n"
         "executable_sha256={}\n").format(
             identity["head"], identity["tree"],
@@ -206,16 +207,16 @@ for index, (row, wanted) in enumerate(zip(rows, expected[scenario]), 1):
             scenario, step))
 ]=])
 
-function(assert_v6_product_rows evidence_path scenario)
+function(assert_v7_product_rows evidence_path scenario)
   execute_process(
-    COMMAND "${PYTHON}" -c "${v6_product_row_check}"
+    COMMAND "${PYTHON}" -c "${v7_product_row_check}"
             "${evidence_path}" "${scenario}"
     RESULT_VARIABLE row_status
     OUTPUT_VARIABLE row_output
     ERROR_VARIABLE row_error)
   if(NOT row_status EQUAL 0)
     message(FATAL_ERROR
-      "V6 ${scenario} row semantics failed (${row_status}): "
+      "V7 ${scenario} row semantics failed (${row_status}): "
       "${row_output}${row_error}")
   endif()
 endfunction()
@@ -229,7 +230,7 @@ execute_process(
   ERROR_VARIABLE init_error)
 if(NOT init_status EQUAL 0)
   message(FATAL_ERROR
-    "V6 producer init failed (${init_status}): ${init_output}${init_error}")
+    "V7 producer init failed (${init_status}): ${init_output}${init_error}")
 endif()
 
 execute_process(
@@ -241,10 +242,10 @@ execute_process(
   ERROR_VARIABLE run_error)
 if(NOT run_status EQUAL 0)
   message(FATAL_ERROR
-    "V6 producer run failed (${run_status}): ${run_output}${run_error}")
+    "V7 producer run failed (${run_status}): ${run_output}${run_error}")
 endif()
 
-assert_v6_product_rows("${PROBE_ROOT}/run/evidence.jsonl" fresh)
+assert_v7_product_rows("${PROBE_ROOT}/run/evidence.jsonl" fresh)
 
 execute_process(
   COMMAND "${PYTHON}" "${VALIDATOR}" runtime
@@ -254,7 +255,7 @@ execute_process(
   ERROR_VARIABLE validation_error)
 if(NOT validation_status EQUAL 0)
   message(FATAL_ERROR
-    "V6 producer evidence rejected (${validation_status}): "
+    "V7 producer evidence rejected (${validation_status}): "
     "${validation_output}${validation_error}")
 endif()
 
@@ -268,11 +269,11 @@ execute_process(
   ERROR_VARIABLE resumed_error)
 if(NOT resumed_status EQUAL 0)
   message(FATAL_ERROR
-    "V6 resumed producer run failed (${resumed_status}): "
+    "V7 resumed producer run failed (${resumed_status}): "
     "${resumed_output}${resumed_error}")
 endif()
 
-assert_v6_product_rows("${PROBE_ROOT}/run-resumed/evidence.jsonl" restart)
+assert_v7_product_rows("${PROBE_ROOT}/run-resumed/evidence.jsonl" restart)
 
 file(READ "${PROBE_ROOT}/run/Restart/current" restart_generation)
 string(STRIP "${restart_generation}" restart_generation)
@@ -287,6 +288,6 @@ execute_process(
   ERROR_VARIABLE resumed_validation_error)
 if(NOT resumed_validation_status EQUAL 0)
   message(FATAL_ERROR
-    "V6 resumed evidence rejected (${resumed_validation_status}): "
+    "V7 resumed evidence rejected (${resumed_validation_status}): "
     "${resumed_validation_output}${resumed_validation_error}")
 endif()

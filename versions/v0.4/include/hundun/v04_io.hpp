@@ -221,7 +221,7 @@ enum class RuntimePressureSolveContract : std::uint8_t {
 // Runtime evidence deliberately projects only the rank-invariant part of a
 // same-target pressure--enthalpy refinement solve.  The rank-local pressure
 // state and linear-system identities remain internal solver provenance.
-inline constexpr std::size_t kRuntimePressureEnergyRefinementCapacity = 6U;
+inline constexpr std::size_t kRuntimePressureEnergyRefinementCapacity = 12U;
 
 enum class RuntimePressureEnergyRefinementTermination : std::uint8_t {
   none,
@@ -300,8 +300,10 @@ struct RuntimeAdvectiveCflAudit {
 // mtimes and configure timestamps are deliberately excluded.  `head` and
 // `tree` are the exact Git object ids embedded by CMake; `executable` is
 // computed from the bytes of the image that is actually running.  `identity`
-// binds the four preceding values under the versioned canonical payload used
-// by both the writer and the external validator.
+// binds the four preceding values together with the runtime-evidence schema
+// under the versioned canonical payload used by both the writer and the
+// external validator.  This prevents a frozen row from being relabelled as a
+// newer evidence policy without changing its immutable candidate identity.
 struct RuntimeCandidateIdentity {
   std::array<char, kRuntimeGitObjectHexCharacters + 1U> head{};
   std::array<char, kRuntimeGitObjectHexCharacters + 1U> tree{};

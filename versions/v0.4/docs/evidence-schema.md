@@ -2,13 +2,21 @@
 
 # HUNDUN-FLOW v0.4 runtime evidence schema
 
-New writers use `HUNDUN_V04_EVIDENCE_V6`. Each line is one collectively agreed
+New writers use `HUNDUN_V04_EVIDENCE_V7`. Each line is one collectively agreed
 committed-step record. Writers reject rank-disagreeing records and never
-observe trial state. Historical V1--V5 artifacts and validators remain frozen;
-V6 fields do not retrofit an older schema.
+observe trial state. Historical V1--V6 artifacts and validators remain frozen;
+V7 fields do not retrofit an older schema. V7 retains the V6 candidate,
+time-anchor, CFL and owner-face AFC semantics, but raises the typed
+same-target pressure--enthalpy refinement prefix bound from six to twelve.
+This bound change is explicit in the schema identity, so a V6 validator cannot
+mistake a legal seven-through-twelve-entry V7 prefix for V6 evidence.
 
-V6 identifies the exact running candidate with
+V6 and V7 identify the exact running candidate with
 `candidate_identity:{schema,head,tree,build_manifest_sha256,executable_sha256,identity_sha256}`.
+V7 requires candidate-identity V2, whose canonical hash payload also contains
+`evidence_schema=HUNDUN_V04_EVIDENCE_V7`; V6 retains candidate-identity V1.
+Consequently, changing only a frozen V6 row's top-level schema string cannot
+turn it into V7 evidence.
 `head` and `tree` are exact Git object ids embedded at configure time. Git
 HEAD/index/ref authorities and all v0.4 executable inputs are configure
 dependencies, so an incremental build cannot silently retain identity from a
@@ -22,7 +30,7 @@ first 64 bits of the build-manifest and executable digests and must agree with
 the full identity. Mixed executable/build identities in one JSONL file are
 rejected.
 
-Every V6 row carries a common
+Every V6/V7 row carries a common
 `run_start:{kind,previous_step,previous_time,restart_manifest_sha256}` and
 records `previous_committed_time`. A fresh anchor is the canonical zero
 step/time with a null manifest. A restart anchor binds the predecessor
@@ -74,7 +82,7 @@ an outward maximum above the shared configured limit (apart from the frozen
 64-epsilon comparison slack). On an actual committed-CFL rejection, the same
 winner data are also available to the CLI failure path.
 
-One V6 JSONL file freezes schema, full candidate identity,
+One V6/V7 JSONL file freezes schema, full candidate identity,
 `case,stl,product,cpu_plan`, momentum plan, IBM activity and CFL limit from its
 first row. Steps must be contiguous and the time anchors must form an exact
 committed chain. A zero STL requires zero activity; an IBM case requires
@@ -85,13 +93,15 @@ time--dt disagreement reject the file.
 V5 remains supported only as an immutable historical schema. It retains
 `common_face_afc_v2`, raw provisional revision numbers, the adjacent-time
 check starting at the second row, and the scalar committed-CFL object. Frozen
-V5 oracle data are not regenerated from V6.
+V5 oracle data are not regenerated from V6 or V7. V6 likewise remains an
+immutable historical schema with a maximum six-entry refinement prefix.
 
 V4 retained the V3 pressure lifecycle and terminal physical acceptance, and
 adds an explicit same-target nonlinear-refinement record. The ordinary
 `pressure_solve_calls` remains exactly two: refinements are not extra PISO
 correctors. `pressure_energy_refinement_solve_calls` is a prefix count from
-zero through six, `pressure_energy_refinement_termination` must be
+zero through twelve in V7 and zero through six in frozen V4--V6 records.
+`pressure_energy_refinement_termination` must be
 `component_residuals_converged` for an accepted row, and
 `pressure_energy_refinement` contains exactly that many successful solves in
 ordinal order. Every entry binds one nonzero target generation and a unique,
@@ -129,13 +139,13 @@ exactly two and `pressure` contains correctors one and two in order. Every
 entry records status, termination, iterations, initial/final FP64 true
 residual, recursive residual and supplemental convergence audit counters. A
 cap, failed termination, contract-incompatible audit, or metric above its
-limit rejects the row. New writers emit V6; immutable historical V1--V5
+limit rejects the row. New writers emit V7; immutable historical V1--V6
 evidence artifacts retain their original schema tag and are never rewritten.
-Consumers dispatch by the explicit schema tag; a newly constructed V6 runtime
+Consumers dispatch by the explicit schema tag; a newly constructed V7 runtime
 record defaults to an invalid pressure contract until its producer supplies
 the contract, terminal audit, advective and committed CFL certificates, and
 refinement termination. V4 rows keep their original limiter and terminal-audit
-shape; V5/V6-only CFL or limiter fields do not retrofit a V4 row.
+shape; V5/V6/V7-only CFL or limiter fields do not retrofit a V4 row.
 
 Required identity fields are `build`, `binary`, `case`, `stl`, `product`, and
 `cpu_plan`. A zero `stl` value means that the case has no immersed surface.

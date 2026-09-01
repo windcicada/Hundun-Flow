@@ -42,7 +42,7 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
   --output run --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-128-rank Re=3900 发布候选采用每 rank 一个物理核心，任何单个 rank 的 owned-cell 数不超过 100,000。精确门槛见 [`HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V1`](docs/verification/v1.0-re3900-medium-release-policy.json)。该门只授权带明确 10% blockage/薄展向域限制的 V1.0 软件发布，不声称已完成旧 v0.4 规格中的 420-cycle 文献统计、完整展向域验证或所有 CFD 应用验证。
+128-rank Re=3900 发布候选采用每 rank 一个物理核心，任何单个 rank 的 owned-cell 数不超过 100,000。精确门槛见 [`HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V2`](docs/verification/v1.0-re3900-medium-release-policy.json)。该门只授权带明确 10% blockage/薄展向域限制的 V1.0 软件发布，不声称已完成旧 v0.4 规格中的 420-cycle 文献统计、完整展向域验证或所有 CFD 应用验证。
 
 ## 验证与文档
 

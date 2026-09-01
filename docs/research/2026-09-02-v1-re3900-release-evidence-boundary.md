@@ -7,7 +7,7 @@
 
 > 2026-09-02 决策更新：用户随后明确授权“中短程测试 GREEN 后在主分支发布
 > V1.0”。因此仓库在读取候选统计结果前新增了
-> [`HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V1`](../verification/v1.0-re3900-medium-release-policy.json)，
+> [`HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V2`](../verification/v1.0-re3900-medium-release-policy.json)，
 > 仅对 `v1.0.0` 建立新的、带 10D blockage/薄域限制的软件发布门。下文关于旧 v0.4
 > Task 21 尚未完成的结论仍为真，但这些旧门不再阻断这一 scoped V1.0；相应能力也不得
 > 被 V1.0 release 反向声称。
@@ -177,7 +177,7 @@ spanwise periodic；LR LES 使用 `dt U/D=0.006`、`481x480x48`，统计 `2020D/
 
 任一项失败即为 medium-short `RED`：
 
-- Evidence V6 candidate/time/Restart identity 可验证，首条及连续时间锚点正确；
+- Evidence V7 candidate/time/Restart identity 可验证，首条及连续时间锚点正确；
 - 每个 accepted step 的 EOS、continuity、energy、closed mass、gauge 分量门分别通过，
   `p/T/rho` 有限且严格为正；
 - provisional/committed CFL 都有效并低于配置上限；固定窗口不隐藏 retry 或 `dt` 改变；
@@ -188,7 +188,7 @@ spanwise periodic；LR LES 使用 `dt U/D=0.006`、`481x480x48`，统计 `2020D/
 
 这些门沿用
 [`V04-2 formal-acceptance research`](2026-08-30-v04-2-coast-open-cfd-formal-acceptance.md)
-§4.4、§5、§8.3 和最终 V04-2 Evidence V6 语义，不增设“所有面必须不受限”的伪门。
+§4.4、§5、§8.3 和最终 V04-2 Evidence V6/V7 语义，不增设“所有面必须不受限”的伪门。
 
 ### 5.3 物理比较门
 

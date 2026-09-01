@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -637,10 +638,22 @@ ProbeResult run_full_probe(int rank) {
                                     production_candidate_evaluation;
   const bool rejected = !probe.status && !report.accepted &&
                         probe.status.code == StatusCode::rejected_step &&
-                        probe.status.detail == 1505U &&
-                        report.failed_stage == 60U && report.attempts == 1U;
-  const bool rollback =
-      captured_before && captured_after && exact_committed_equal(before, after);
+                        probe.status.detail == 10210U &&
+                        report.failed_stage == 54U && report.attempts == 1U &&
+                        report.piso.final_flux_revision == 0U &&
+                        !report.piso.continuity_witness.valid;
+  // A fatal proposal retires its one-shot controller generation while every
+  // committed physical value and revision rolls back exactly.  Normalize the
+  // expected ticket transition before comparing the committed snapshot.
+  const bool fatal_controller_recovery =
+      captured_before && captured_after &&
+      before.controller_state != std::numeric_limits<std::uint64_t>::max() &&
+      after.controller_state == before.controller_state + 1U;
+  if (captured_before && captured_after)
+    before.controller_state = after.controller_state;
+  const bool rollback = captured_before && captured_after &&
+                        fatal_controller_recovery &&
+                        exact_committed_equal(before, after);
   const bool diagnostic_identical = same_u64(diagnostic_hash(diagnostic));
   const bool refinement_exhausted =
       refinement_prefix_certificate(
@@ -652,7 +665,7 @@ ProbeResult run_full_probe(int rank) {
       rejected && rollback && observed && diagnostic.valid &&
       diagnostic.production_candidate_loop && diagnostic.corrector == 2U &&
       diagnostic.selection_valid && diagnostic.replay_valid &&
-      diagnostic.committed &&
+      !diagnostic.committed &&
       diagnostic.sample_count > diagnostic.first_admissible_sample &&
       diagnostic.sample_count <=
           detail::kPressureEnergyCandidateGlobalizationSampleCapacity &&
@@ -664,13 +677,12 @@ ProbeResult run_full_probe(int rank) {
       diagnostic.maximum_absolute_enthalpy_correction > 0.0 &&
       diagnostic.selected_alpha ==
           diagnostic.samples[diagnostic.sample_count - 1U].alpha &&
-      report.piso.eos_residual <= probe.model.solver.terminal.eos &&
-      report.piso.continuity_residual <=
+      std::isfinite(diagnostic.selected_normalized_continuity) &&
+      diagnostic.selected_normalized_continuity <=
           probe.model.solver.terminal.continuity &&
-      report.piso.energy_residual > probe.model.solver.terminal.continuity &&
-      report.piso.closed_mass_residual <=
-          probe.model.solver.terminal.closed_mass &&
-      report.piso.gauge_residual <= probe.model.solver.terminal.gauge &&
+      std::isfinite(diagnostic.selected_normalized_energy) &&
+      diagnostic.selected_normalized_energy >
+          probe.model.solver.terminal.continuity &&
       diagnostic_identical && refinement_exhausted;
   if (rank == 0) {
     std::cout << std::setprecision(17)
@@ -715,35 +727,60 @@ ProbeResult run_full_probe(int rank) {
 }
 
 bool run_refinement_certificate(int rank) {
-  constexpr double kRefinementFixtureContinuityGate = 1.0460433e-10;
+  const bool replay_roundoff_contract =
+      detail::alpha_zero_energy_replay_equivalent(false, true, 128.0 *
+              std::numeric_limits<double>::epsilon()) &&
+      !detail::alpha_zero_energy_replay_equivalent(false, true, 1.0e-7) &&
+      !detail::alpha_zero_energy_replay_equivalent(
+          false, false, std::numeric_limits<double>::denorm_min()) &&
+      detail::alpha_zero_energy_replay_equivalent(true, false, 1.0);
+  // The first six refreshed solves still form a strict descent sequence but
+  // do not cross this gate.  The twelfth does.  This is the focused RED for
+  // the production failure in which a useful same-target direction was
+  // truncated by the original six-entry hot-resource contract.
+  constexpr double kRefinementFixtureContinuityGate = 1.0460408e-10;
   ValidatedModel model =
       retry_model(kFullDt, kFullDt, 1U, UINT64_C(0x18000c401));
   // The ordinary C2 replay is just outside this fixed component gate.  The
-  // first refreshed solve remains outside and the second crosses it, giving
-  // a deterministic accepted product step with a nonempty refinement prefix.
+  // first eleven refreshed solves remain outside and the twelfth crosses it,
+  // giving a deterministic accepted product step with bounded extra headroom.
   model.solver.terminal.continuity = kRefinementFixtureContinuityGate;
   DriverHarness refined = make_driver(std::move(model));
   DriverStepReport report;
   if (refined.status)
     refined.status = refined.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, report);
 
-  constexpr std::uint8_t expected_calls = 2U;
-  const bool prefix = refinement_prefix_certificate(
-      report, expected_calls,
-      PressureEnergyRefinementTermination::component_residuals_converged);
-  const bool trajectory =
-      refinement_trajectory_certificate(report, expected_calls);
+  constexpr std::uint8_t expected_calls = 12U;
+  constexpr std::size_t expected_terminal_index = expected_calls + 1U;
+  const bool expected_prefix_available =
+      report.piso.pressure_energy_refinement_solve_calls == expected_calls &&
+      report.pressure_energy_globalization.trajectory_count ==
+          2U + expected_calls;
+  const bool prefix =
+      expected_prefix_available &&
+      refinement_prefix_certificate(
+          report, expected_calls,
+          PressureEnergyRefinementTermination::component_residuals_converged);
+  const bool trajectory = expected_prefix_available &&
+                          refinement_trajectory_certificate(report,
+                                                            expected_calls);
   const auto &path = report.pressure_energy_globalization.trajectory;
   const double component_tolerance = refined.model.solver.terminal.continuity;
   const bool first_crosses_component_gate =
-      path[1U].selected.global_normalized_energy > component_tolerance &&
-      path[2U].selected.global_normalized_energy > component_tolerance &&
-      path[3U].selected.global_normalized_energy <= component_tolerance &&
-      path[3U].selected.global_normalized_continuity <= component_tolerance;
+      expected_prefix_available &&
+      path[expected_terminal_index - 1U]
+              .selected.global_normalized_energy > component_tolerance &&
+      path[expected_terminal_index].selected.global_normalized_energy <=
+          component_tolerance &&
+      path[expected_terminal_index].selected.global_normalized_continuity <=
+          component_tolerance;
   const bool terminal_matches_selected_trajectory =
-      wire_bits(path[3U].selected.global_normalized_continuity) ==
+      expected_prefix_available &&
+      wire_bits(path[expected_terminal_index]
+                    .selected.global_normalized_continuity) ==
           wire_bits(report.piso.continuity_residual) &&
-      wire_bits(path[3U].selected.global_normalized_energy) ==
+      wire_bits(path[expected_terminal_index]
+                    .selected.global_normalized_energy) ==
           wire_bits(report.piso.energy_residual);
   const bool terminal =
       refined.status && report.accepted && report.attempts == 1U &&
@@ -751,9 +788,48 @@ bool run_refinement_certificate(int rank) {
       report.piso.final_flux_revision != 0U &&
       !report.piso.continuity_witness.valid &&
       finite_positive_terminal_state(refined.driver, refined.model, report);
+
+  // Preserve a sub-capacity success certificate as a separate falsifier for
+  // the early-exit contract.  Raising the bound must not turn refinement into
+  // an unconditional twelve-solve loop.
+  constexpr double kEarlyExitContinuityGate = 1.0460433e-10;
+  ValidatedModel early_model =
+      retry_model(kFullDt, kFullDt, 1U, UINT64_C(0x18000c501));
+  early_model.solver.terminal.continuity = kEarlyExitContinuityGate;
+  DriverHarness early = make_driver(std::move(early_model));
+  DriverStepReport early_report;
+  if (early.status)
+    early.status =
+        early.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, early_report);
+  constexpr std::uint8_t kEarlyCalls = 2U;
+  constexpr std::size_t kEarlyTerminalIndex = kEarlyCalls + 1U;
+  const auto& early_path =
+      early_report.pressure_energy_globalization.trajectory;
+  const bool early_prefix_available =
+      early_report.piso.pressure_energy_refinement_solve_calls ==
+          kEarlyCalls &&
+      early_report.pressure_energy_globalization.trajectory_count ==
+          2U + kEarlyCalls;
+  const bool early_exit =
+      early_prefix_available && early.status && early_report.accepted &&
+      early_report.attempts == 1U && early_report.failed_stage == 0U &&
+      refinement_prefix_certificate(
+          early_report, kEarlyCalls,
+          PressureEnergyRefinementTermination::component_residuals_converged) &&
+      refinement_trajectory_certificate(early_report, kEarlyCalls) &&
+      early_path[kEarlyTerminalIndex - 1U]
+              .selected.global_normalized_energy >
+          kEarlyExitContinuityGate &&
+      early_path[kEarlyTerminalIndex].selected.global_normalized_energy <=
+          kEarlyExitContinuityGate &&
+      early_path[kEarlyTerminalIndex]
+              .selected.global_normalized_continuity <=
+          kEarlyExitContinuityGate &&
+      finite_positive_terminal_state(early.driver, early.model, early_report);
   const bool local =
-      prefix && trajectory && first_crosses_component_gate &&
-      terminal_matches_selected_trajectory && terminal;
+      replay_roundoff_contract && prefix && trajectory &&
+      first_crosses_component_gate &&
+      terminal_matches_selected_trajectory && terminal && early_exit;
   if (rank == 0)
     std::cout << std::setprecision(17) << "refinement status="
               << static_cast<unsigned>(refined.status.code) << '/'
@@ -772,7 +848,10 @@ bool run_refinement_certificate(int rank) {
               << report.piso.continuity_residual << '/'
               << report.piso.energy_residual << '/'
               << report.piso.closed_mass_residual << '/'
-              << report.piso.gauge_residual << '\n';
+              << report.piso.gauge_residual << " early-exit="
+              << static_cast<unsigned>(
+                     early_report.piso.pressure_energy_refinement_solve_calls)
+              << '/' << early_exit << '\n';
   return expect(collective(local), rank,
                 "real ProductDriver C2 refinement refreshes state and "
                 "linearization, then passes every independent terminal gate");
@@ -835,7 +914,7 @@ bool run_retry_certificate(int rank) {
       wire_bits(retry_first.proposal.dt) == wire_bits(kHalfDt) &&
       retry_first.effective_bdf.order == 1U && !retry_first.failure &&
       retry_first.failure.code == StatusCode::rejected_step &&
-      retry_first.failure.detail == 1505U && retry_first.failed_stage == 60U;
+      retry_first.failure.detail == 10210U && retry_first.failed_stage == 54U;
   const bool first_control_semantics =
       control_first.accepted && control_first.attempts == 1U &&
       control_first.proposal.origin == StepOrigin::restart &&

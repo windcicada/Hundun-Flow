@@ -30,6 +30,21 @@ inline constexpr std::uint32_t kProductRequiredCapabilities =
     product_exact_numeric | product_coarse_numeric | product_preconditioner |
     product_workspace | product_service_snapshot | product_collective_epochs;
 
+// A closed-mass gauge change may alter the final rounded bit of an otherwise
+// identical energy-residual replay.  This is a numerical reproducibility
+// allowance, not a physical residual tolerance: an O(EOS-tolerance) mismatch
+// must never be relabelled as gauge equivalence.
+inline constexpr double kAlphaZeroEnergyReplayRoundoffTolerance =
+    256.0 * std::numeric_limits<double>::epsilon();
+
+inline bool alpha_zero_energy_replay_equivalent(
+    bool bitwise_equal, bool closed_mass_gauge_shifted,
+    double relative_error) noexcept {
+  return bitwise_equal ||
+         (closed_mass_gauge_shifted && std::isfinite(relative_error) &&
+          relative_error <= kAlphaZeroEnergyReplayRoundoffTolerance);
+}
+
 inline Status validate_product_capabilities(std::uint32_t capabilities,
                                             bool immersed) noexcept {
   const std::uint32_t required =

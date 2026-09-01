@@ -207,7 +207,7 @@ for path in paths:
             row.get("step"), row.get("requested_bdf_order"),
             row.get("bdf_order"), row.get("restart_recovery"),
         )
-        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V6" or observed != wanted:
+        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V7" or observed != wanted:
             raise SystemExit(f"{path}: row {index} lifecycle {observed} != {wanted}")
         if (row.get("startup") is not False or row.get("retry") is not False or
                 row.get("temporal_method_fallback") is not False or
@@ -219,7 +219,7 @@ for path in paths:
         refinements = row.get("pressure_energy_refinement")
         if (isinstance(refinement_count, bool) or
                 not isinstance(refinement_count, int) or
-                refinement_count < 0 or refinement_count > 6 or
+                refinement_count < 0 or refinement_count > 12 or
                 not isinstance(refinements, list) or
                 len(refinements) != refinement_count or
                 row.get("pressure_energy_refinement_termination") !=

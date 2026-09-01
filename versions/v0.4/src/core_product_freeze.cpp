@@ -11001,11 +11001,28 @@ Status ProductDriver::Impl::execute_attempt(
               }
           if (full_alpha_zero_oracle) {
             double global_energy_error = 0.0;
+            const bool gauge_representation_shifted =
+                pressure_reference_kind == PressureReferenceKind::closed_mass &&
+                artifacts.exact.closed_gauge.shift != 0.0;
+            // A closed-mass gauge shift preserves absolute pressure but can
+            // change the final rounded bit of pressure work when p_ref + pi
+            // is reconstructed on a different rank decomposition.  The
+            // pressure oracle below independently certifies that gauge
+            // equivalence.  Keep the stronger byte oracle for an unshifted
+            // representation; for a shifted gauge require the recorded
+            // residual difference to remain inside an independent
+            // machine-roundoff bound.  The physical EOS tolerance is much
+            // too wide to certify replay equivalence.
+            const bool local_energy_oracle_equivalent =
+                detail::alpha_zero_energy_replay_equivalent(
+                    local_energy_bitwise_equal,
+                    gauge_representation_shifted, local_energy_error);
             evaluated = product.reductions.checked_max(
                 {&local_energy_error, 1U}, {&global_energy_error, 1U},
-                local && local_energy_bitwise_equal &&
+                local && local_energy_oracle_equivalent &&
                         std::isfinite(local_energy_error) &&
-                        local_energy_error <= alpha_zero_oracle_tolerance
+                        local_energy_error <=
+                            detail::kAlphaZeroEnergyReplayRoundoffTolerance
                     ? Status{}
                     : Status{StatusCode::rejected_step,
                              kProductPressureEnergy});
@@ -13093,6 +13110,15 @@ Status ProductDriver::Impl::execute_attempt(
     } else {
       report.pressure_energy_refinement_termination =
           PressureEnergyRefinementTermination::iteration_capacity_exhausted;
+      // The resource bound is itself an acceptance boundary.  Do not rely on
+      // the later terminal audit to happen to reject the last replay: a
+      // refreshed replay and the final assembly can straddle a component
+      // tolerance by roundoff.  Publish the complete observed prefix, then
+      // reject collectively before pending flux or terminal-audit authority
+      // exists.
+      attempt_stage = 54U;
+      status = product.reductions.consensus(
+          {StatusCode::rejected_step, kProductPressureEnergy});
     }
   }
   if (status) attempt_stage = 54U;

@@ -187,7 +187,7 @@ bool run_case(const fs::path& root, bool stretched) {
       evidence));
   const std::string evidence_text =
       read(root / "evidence" / "runtime.jsonl");
-  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V6") !=
+  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V7") !=
                 std::string::npos &&
             evidence_text.find("\"candidate_identity\":{") !=
                 std::string::npos &&

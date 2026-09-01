@@ -23,9 +23,6 @@ namespace hundun::v04::detail {
 namespace {
 
 constexpr std::uint32_t kRuntimeIdentityFailure = 10505U;
-constexpr std::string_view kIdentitySchema =
-    "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1";
-
 constexpr std::array<std::uint32_t, 64U> kSha256RoundConstants{{
     UINT32_C(0x428a2f98), UINT32_C(0x71374491), UINT32_C(0xb5c0fbcf),
     UINT32_C(0xe9b5dba5), UINT32_C(0x3956c25b), UINT32_C(0x59f111f1),
@@ -267,7 +264,9 @@ std::string identity_payload(const RuntimeCandidateIdentity& identity) {
   std::string payload;
   payload.reserve(420U);
   payload.append("schema=");
-  payload.append(kIdentitySchema);
+  payload.append(kRuntimeCandidateIdentitySchema);
+  payload.append("\nevidence_schema=");
+  payload.append(kRuntimeEvidenceSchema);
   payload.append("\nhead=");
   payload.append(identity.head.data(), kRuntimeGitObjectHexCharacters);
   payload.append("\ntree=");

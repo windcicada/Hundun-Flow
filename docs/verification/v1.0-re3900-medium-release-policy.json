@@ -1,8 +1,23 @@
 {
-  "schema": "HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V1",
-  "status": "preregistered_before_candidate_statistics",
+  "schema": "HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V2",
+  "status": "preregistered_after_rejected_candidate_before_replacement_statistics",
   "product_version": "1.0.0",
   "source_line": "v0.4",
+  "policy_lineage": {
+    "supersedes_schema": "HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V1",
+    "superseded_policy_sha256": "8cd5a47649850a5862a4b1d24b7017fe59667d93294a4934b493869a01e3a517",
+    "reason": "candidate_53e4b05_rejected_before_statistics_because_a_still_descending_same_target_refinement_hit_the_six_solve_bound",
+    "rejected_candidate": {
+      "head": "53e4b059c24769e1e75b3d811c63a6c276288392",
+      "tree": "46b59030f391e6d2b5006676c51802f2a4016cce",
+      "runtime_identity_sha256": "1878fe3939671ba96db71a2aca1533a6af7d4027f2243a2bf840cbfa6e88157b",
+      "accepted_steps_before_failure": 42,
+      "first_failed_attempted_step": 43,
+      "failed_stage": 60,
+      "status_code_detail": "6/1505",
+      "statistics_started": false
+    }
+  },
   "scope": "single_phase_cartesian_ibm_release_with_10d_blockage_thin_domain_re3900_medium_validation",
   "supersession": {
     "applies_to": "v1.0.0_release_only",
@@ -21,6 +36,9 @@
     "required_exact_head_tree_build_manifest_and_executable_sha256": true,
     "required_tests_off_binary": true,
     "required_v04_2_numerical_product_closure": true,
+    "required_runtime_evidence_schema": "HUNDUN_V04_EVIDENCE_V7",
+    "required_runtime_candidate_identity_schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2",
+    "required_pressure_energy_refinement_capacity": 12,
     "allowed_post_run_source_changes_before_tag": false
   },
   "case": {
@@ -61,6 +79,8 @@
     "retry_or_temporal_fallback_in_fixed_window_allowed": false,
     "statistics_steps_must_be_bdf2": true,
     "active_afc_retained_correction_l1_ratio_must_be_positive": true,
+    "pressure_energy_refinement_must_early_exit_on_component_convergence": true,
+    "pressure_energy_refinement_capacity_exhaustion_rejects_the_step": true,
     "mass_or_energy_monotone_drift_allowed": false,
     "unexplained_iteration_or_restart_discontinuity_allowed": false
   },

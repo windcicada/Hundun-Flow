@@ -70,7 +70,7 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V6") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V7") != std::string::npos &&
               text.find("\"candidate_identity\":{") != std::string::npos &&
               text.find("\"previous_committed_time\":") !=
                   std::string::npos &&
@@ -117,7 +117,7 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V6") != std::string::npos &&
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V7") != std::string::npos &&
               text.find("\"candidate_identity\":{") != std::string::npos &&
               text.find("\"step\":3") != std::string::npos &&
               text.find("\"bdf_order\":2") != std::string::npos &&

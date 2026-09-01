@@ -2288,7 +2288,7 @@ struct PisoContinuityWitness {
 // Extra same-target pressure--enthalpy solves are nonlinear refinements of
 // PISO corrector two, not additional PISO correctors.  The capacity is a
 // compile-time hot-resource contract and is deliberately not case input.
-inline constexpr std::size_t kPressureEnergyRefinementCapacity = 6U;
+inline constexpr std::size_t kPressureEnergyRefinementCapacity = 12U;
 
 enum class PressureEnergyRefinementTermination : std::uint8_t {
   none,

@@ -10257,6 +10257,8 @@ Status PisoPressureSolveEpoch::finalize(PisoAttemptReport& report) noexcept {
       refinement_solve_calls_);
   if (!active_ || failed_ || prepared_.valid || solve_calls_ != 2U ||
       !refinement_prefix_valid || !termination_valid ||
+      report.pressure_energy_refinement_termination ==
+          PressureEnergyRefinementTermination::iteration_capacity_exhausted ||
       report.pressure_energy_refinement_solve_calls !=
           refinement_solve_calls_) {
     return {StatusCode::invalid_plan, kPisoSolve};

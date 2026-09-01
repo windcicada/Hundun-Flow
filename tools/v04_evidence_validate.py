@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Set
 
 
 SCHEMA = "HUNDUN_V04_CANDIDATE_V1"
-RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V6"
+RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V7"
+V6_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V6"
 V5_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V5"
 V4_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V4"
 V3_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V3"
@@ -205,7 +206,8 @@ V4_REFINEMENT_SOLVE_FIELDS = (
     "convergence_rejections", "reduction_calls", "operator_applies",
     "preconditioner_applies", "norm_breakdown_restarts",
 ) + PRESSURE_EXTENSION_FIELDS
-PRESSURE_ENERGY_REFINEMENT_CAPACITY = 6
+PRESSURE_ENERGY_REFINEMENT_CAPACITY = 12
+HISTORICAL_PRESSURE_ENERGY_REFINEMENT_CAPACITY = 6
 LINEAR_TERMINATIONS = (
     "converged", "zero_rhs", "maximum_iterations", "breakdown",
     "non_finite", "operator_failure", "preconditioner_failure",
@@ -617,13 +619,14 @@ def reject_v4_fields_in_v3(record: Dict[str, Any], line_number: int) -> None:
                 f"line {line_number}: V3 runtime carries V4 field {field}")
 
 
-def validate_v4_refinement(record: Dict[str, Any], line_number: int) -> None:
+def validate_v4_refinement(record: Dict[str, Any], line_number: int,
+                           capacity: int) -> None:
     prefix = f"line {line_number}: V4 runtime"
     require_object_fields(record, V4_REFINEMENT_FIELDS, prefix)
     count = require_integer(
         record["pressure_energy_refinement_solve_calls"],
         f"{prefix}.pressure_energy_refinement_solve_calls", 0,
-        PRESSURE_ENERGY_REFINEMENT_CAPACITY)
+        capacity)
     termination = record["pressure_energy_refinement_termination"]
     if termination != "component_residuals_converged":
         raise EvidenceError(
@@ -641,7 +644,7 @@ def validate_v4_refinement(record: Dict[str, Any], line_number: int) -> None:
         solve = require_object_fields(
             solve, V4_REFINEMENT_SOLVE_FIELDS, solve_prefix)
         ordinal = require_integer(solve["ordinal"], f"{solve_prefix}.ordinal",
-                                  1, PRESSURE_ENERGY_REFINEMENT_CAPACITY)
+                                  1, capacity)
         target = require_integer(solve["target_generation"],
                                  f"{solve_prefix}.target_generation", 1)
         lineage = require_integer(solve["collective_lineage"],
@@ -853,13 +856,20 @@ def validate_v6_cfl_winner(value: Any, dt: float, maximum: float,
         raise EvidenceError(f"{name} does not bind {maximum_field}_max")
 
 
-def validate_v6_candidate_identity(record: Dict[str, Any],
-                                   line_number: int) -> None:
-    prefix = f"line {line_number}: V6 candidate_identity"
+def validate_v6_v7_candidate_identity(record: Dict[str, Any],
+                                      line_number: int) -> None:
+    prefix = f"line {line_number}: V6/V7 candidate_identity"
     identity = require_object_fields(
         record.get("candidate_identity"), V6_CANDIDATE_IDENTITY_FIELDS,
         prefix)
-    if identity["schema"] != "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1":
+    runtime_schema = record.get("schema")
+    if runtime_schema == RUNTIME_SCHEMA:
+        identity_schema = "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2"
+    elif runtime_schema == V6_RUNTIME_SCHEMA:
+        identity_schema = "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1"
+    else:
+        raise EvidenceError(f"{prefix} has invalid runtime schema")
+    if identity["schema"] != identity_schema:
         raise EvidenceError(f"{prefix}.schema is invalid")
     require_git_object(identity["head"], f"{prefix}.head")
     require_git_object(identity["tree"], f"{prefix}.tree")
@@ -869,7 +879,9 @@ def validate_v6_candidate_identity(record: Dict[str, Any],
         if re.fullmatch(r"[0-9a-f]{64}", identity[field]) is None:
             raise EvidenceError(f"{prefix}.{field} is not lowercase hex")
     payload = (
-        "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\n"
+        f"schema={identity_schema}\n" +
+        (f"evidence_schema={RUNTIME_SCHEMA}\n"
+         if runtime_schema == RUNTIME_SCHEMA else "") +
         f"head={identity['head']}\n"
         f"tree={identity['tree']}\n"
         f"build_manifest_sha256={identity['build_manifest_sha256']}\n"
@@ -986,15 +998,15 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
     }
 
 
-def validate_v6_runtime_record(record: Dict[str, Any],
-                               line_number: int) -> str:
-    """Validate immutable identity, first-step time, AFC and CFL V6 data."""
-    prefix = f"line {line_number}: V6 runtime"
+def validate_v6_v7_runtime_record(record: Dict[str, Any], line_number: int,
+                                  refinement_capacity: int) -> str:
+    """Validate immutable identity, first-step time, AFC and CFL V6/V7 data."""
+    prefix = f"line {line_number}: V6/V7 runtime"
     for field in ("candidate_identity", "run_start",
                   "previous_committed_time"):
         if field not in record:
             raise EvidenceError(f"{prefix} missing required field {field}")
-    validate_v6_candidate_identity(record, line_number)
+    validate_v6_v7_candidate_identity(record, line_number)
     validate_v6_run_start(record, line_number)
 
     terminal = require_object_fields(
@@ -1163,7 +1175,7 @@ def validate_v6_runtime_record(record: Dict[str, Any],
         "advective_cfl": legacy_advective,
     }
     contract = validate_v5_runtime_record(projection, line_number)
-    validate_v4_refinement(projection, line_number)
+    validate_v4_refinement(projection, line_number, refinement_capacity)
     if (not _v6_close(advective["dt"], dt) or
             not _v6_close(advective["limit"], limit) or
             advective["activity_collective"] != activity):
@@ -1739,7 +1751,7 @@ def advance(manifest_path: Path, gate_name: str, receipt_path: Path) -> None:
 def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
     prior_step = 0
     run_schema = None
-    prior_v6_record = None
+    prior_modern_record = None
     prior_v5_record = None
     restart_authority = (load_v04_restart_manifest(run_start_manifest)
                          if run_start_manifest is not None else None)
@@ -1755,7 +1767,8 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                 raise EvidenceError(
                     f"line {line_number}: runtime record must be an object")
             schema = record.get("schema")
-            if schema not in (RUNTIME_SCHEMA, V5_RUNTIME_SCHEMA,
+            if schema not in (RUNTIME_SCHEMA, V6_RUNTIME_SCHEMA,
+                              V5_RUNTIME_SCHEMA,
                               V4_RUNTIME_SCHEMA,
                               V3_RUNTIME_SCHEMA, V2_RUNTIME_SCHEMA,
                               LEGACY_RUNTIME_SCHEMA):
@@ -1765,19 +1778,23 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
             elif schema != run_schema:
                 raise EvidenceError(
                     f"line {line_number}: runtime schema changed within one file")
-            is_v6 = schema == RUNTIME_SCHEMA
+            is_v7 = schema == RUNTIME_SCHEMA
+            is_v6 = schema == V6_RUNTIME_SCHEMA
+            is_modern = is_v7 or is_v6
             is_v5 = schema == V5_RUNTIME_SCHEMA
             is_v4 = schema == V4_RUNTIME_SCHEMA
             is_v3 = schema == V3_RUNTIME_SCHEMA
             is_v2 = schema == V2_RUNTIME_SCHEMA
-            if not is_v6:
+            if not is_modern:
                 reject_v6_fields_in_pre_v6(record, line_number)
-            if not (is_v6 or is_v5):
+            if not (is_modern or is_v5):
                 reject_v5_fields_in_pre_v5(record, line_number)
-            requires_pressure = is_v6 or is_v5 or is_v4 or is_v3 or is_v2
-            if is_v6:
-                pressure_contract = validate_v6_runtime_record(
-                    record, line_number)
+            requires_pressure = is_modern or is_v5 or is_v4 or is_v3 or is_v2
+            if is_modern:
+                pressure_contract = validate_v6_v7_runtime_record(
+                    record, line_number,
+                    PRESSURE_ENERGY_REFINEMENT_CAPACITY if is_v7 else
+                    HISTORICAL_PRESSURE_ENERGY_REFINEMENT_CAPACITY)
             elif is_v5:
                 pressure_contract = validate_v5_runtime_record(
                     record, line_number)
@@ -1786,12 +1803,19 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                     record, line_number)
             else:
                 pressure_contract = None
-            if is_v6:
-                validate_v4_refinement(record, line_number)
+            if is_modern:
+                validate_v4_refinement(
+                    record, line_number,
+                    PRESSURE_ENERGY_REFINEMENT_CAPACITY if is_v7 else
+                    HISTORICAL_PRESSURE_ENERGY_REFINEMENT_CAPACITY)
             elif is_v5:
-                validate_v4_refinement(record, line_number)
+                validate_v4_refinement(
+                    record, line_number,
+                    HISTORICAL_PRESSURE_ENERGY_REFINEMENT_CAPACITY)
             elif is_v4:
-                validate_v4_refinement(record, line_number)
+                validate_v4_refinement(
+                    record, line_number,
+                    HISTORICAL_PRESSURE_ENERGY_REFINEMENT_CAPACITY)
             elif is_v3:
                 reject_v4_fields_in_v3(record, line_number)
             for identity in ("build", "binary", "case", "product", "cpu_plan"):
@@ -1801,22 +1825,22 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
             if not isinstance(step, int) or step <= prior_step:
                 raise EvidenceError(f"line {line_number}: steps not strictly increasing")
             prior_step = step
-            if is_v6:
-                if prior_v6_record is None:
+            if is_modern:
+                if prior_modern_record is None:
                     anchor = record["run_start"]
                     if step != anchor["previous_step"] + 1:
                         raise EvidenceError(
-                            f"line {line_number}: V6 first row is not the "
+                            f"line {line_number}: V6/V7 first row is not the "
                             "successor of its run-start anchor")
                     if not _v6_close(record["previous_committed_time"],
                                      anchor["previous_time"]):
                         raise EvidenceError(
-                            f"line {line_number}: V6 first row disagrees "
+                            f"line {line_number}: V6/V7 first row disagrees "
                             "with its run-start time")
                     if anchor["kind"] == "restart":
                         if restart_authority is None:
                             raise EvidenceError(
-                                f"line {line_number}: V6 restart evidence "
+                                f"line {line_number}: V6/V7 restart evidence "
                                 "requires --run-start-manifest")
                         if (anchor["restart_manifest_sha256"] !=
                                 restart_authority["sha256"] or
@@ -1828,39 +1852,39 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                                 restart_authority[
                                     "backward_euler_recovery"]):
                             raise EvidenceError(
-                                f"line {line_number}: V6 run-start anchor "
+                                f"line {line_number}: V6/V7 run-start anchor "
                                 "disagrees with the frozen restart manifest")
                         restart_authority_used = True
                     elif restart_authority is not None:
                         raise EvidenceError(
-                            f"line {line_number}: fresh V6 evidence was "
+                            f"line {line_number}: fresh V6/V7 evidence was "
                             "given a restart manifest")
                 else:
                     for field in ("build", "binary", "candidate_identity",
                                   "run_start", "case", "stl", "product",
                                   "cpu_plan"):
-                        if record[field] != prior_v6_record[field]:
+                        if record[field] != prior_modern_record[field]:
                             raise EvidenceError(
-                                f"line {line_number}: V6 immutable run "
+                                f"line {line_number}: V6/V7 immutable run "
                                 f"identity field {field} changed")
-                    if step != prior_v6_record["step"] + 1:
+                    if step != prior_modern_record["step"] + 1:
                         raise EvidenceError(
-                            f"line {line_number}: V6 steps are not contiguous")
+                            f"line {line_number}: V6/V7 steps are not contiguous")
                     if not _v6_close(record["previous_committed_time"],
-                                     prior_v6_record["time"]):
+                                     prior_modern_record["time"]):
                         raise EvidenceError(
-                            f"line {line_number}: V6 previous committed "
+                            f"line {line_number}: V6/V7 previous committed "
                             "time does not bind the adjacent row")
                     current_advective = record[
                         "momentum_predictor_limiter"]["advective_cfl"]
-                    prior_advective = prior_v6_record[
+                    prior_advective = prior_modern_record[
                         "momentum_predictor_limiter"]["advective_cfl"]
                     for field in ("plan", "activity_collective", "limit"):
                         if current_advective[field] != prior_advective[field]:
                             raise EvidenceError(
-                                f"line {line_number}: V6 static advective "
+                                f"line {line_number}: V6/V7 static advective "
                                 f"authority field {field} changed")
-                prior_v6_record = record
+                prior_modern_record = record
                 prior_v5_record = None
             elif is_v5:
                 if prior_v5_record is not None:
@@ -1894,9 +1918,9 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                             f"line {line_number}: V5 advective CFL dt "
                             "disagrees with the adjacent committed time delta")
                 prior_v5_record = record
-                prior_v6_record = None
+                prior_modern_record = None
             else:
-                prior_v6_record = None
+                prior_modern_record = None
                 prior_v5_record = None
             if ((record.get("startup") or record.get("retry") or
                  record.get("restart_recovery")) and
@@ -1940,7 +1964,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                     raise EvidenceError(
                         f"line {line_number}: invalid two-PISO pressure evidence")
                 extension_enabled = False
-                if is_v2 or is_v3 or is_v4 or is_v5 or is_v6:
+                if is_v2 or is_v3 or is_v4 or is_v5 or is_modern:
                     extension_fields = set(PRESSURE_EXTENSION_FIELDS)
                     extension_presence = []
                     for solve in pressure:
@@ -1956,7 +1980,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                         raise EvidenceError(
                             f"line {line_number}: inconsistent pressure extension presence")
                     extension_enabled = extension_presence[0]
-                    if (is_v3 or is_v4 or is_v5 or is_v6) and not extension_enabled:
+                    if (is_v3 or is_v4 or is_v5 or is_modern) and not extension_enabled:
                         raise EvidenceError(
                             f"line {line_number}: V3 lacks pressure extension")
                 for corrector, solve in enumerate(pressure, 1):
@@ -2076,7 +2100,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                     audits = solve["convergence_audits"]
                     rejections = solve["convergence_rejections"]
                     coupled_contract = (
-                        (is_v3 or is_v4 or is_v5 or is_v6) and
+                        (is_v3 or is_v4 or is_v5 or is_modern) and
                         pressure_contract == "continuity_energy_coupled")
                     if corrector == 1 or coupled_contract:
                         if audits != 0 or rejections != 0:
@@ -2695,16 +2719,28 @@ def self_test() -> None:
         reject_v5_contamination(runtime_v4, "V4")
         reject_v5_contamination(runtime, "V3")
 
-        def make_v6_identity(executable, build_manifest="3" * 64):
+        def make_candidate_identity(executable, runtime_schema,
+                                    build_manifest="3" * 64):
+            if runtime_schema == RUNTIME_SCHEMA:
+                identity_schema = \
+                    "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2"
+                evidence_binding = f"evidence_schema={RUNTIME_SCHEMA}\n"
+            elif runtime_schema == V6_RUNTIME_SCHEMA:
+                identity_schema = \
+                    "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1"
+                evidence_binding = ""
+            else:
+                raise AssertionError("unsupported candidate identity schema")
             identity = {
-                "schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1",
+                "schema": identity_schema,
                 "head": "1" * 40,
                 "tree": "2" * 40,
                 "build_manifest_sha256": build_manifest,
                 "executable_sha256": executable,
             }
             payload = (
-                "schema=HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\n"
+                f"schema={identity_schema}\n"
+                f"{evidence_binding}"
                 f"head={identity['head']}\n"
                 f"tree={identity['tree']}\n"
                 "build_manifest_sha256="
@@ -2714,10 +2750,11 @@ def self_test() -> None:
                 payload.encode("utf-8")).hexdigest()
             return identity
 
-        runtime_v6 = json.loads(json.dumps(runtime_v5))
-        runtime_v6.update({
+        runtime_v7 = json.loads(json.dumps(runtime_v5))
+        runtime_v7.update({
             "schema": RUNTIME_SCHEMA,
-            "candidate_identity": make_v6_identity("4" * 64),
+            "candidate_identity": make_candidate_identity(
+                "4" * 64, RUNTIME_SCHEMA),
             "build": int(("3" * 64)[:16], 16),
             "binary": int(("4" * 64)[:16], 16),
             "run_start": {
@@ -2731,7 +2768,7 @@ def self_test() -> None:
             "startup": True,
             "restart_recovery": False,
         })
-        runtime_v6["terminal_physical_audit"][
+        runtime_v7["terminal_physical_audit"][
             "committed_convective_cfl"] = {
                 "valid": True,
                 "density_revision": 33,
@@ -2760,7 +2797,7 @@ def self_test() -> None:
                     "absolute_mass_flow": 1.5,
                 },
             }
-        runtime_v6["momentum_predictor_limiter"] = {
+        runtime_v7["momentum_predictor_limiter"] = {
             "scheme": "common_face_afc_v3_owner",
             "limited": False,
             "correction_metrics_applicability": "not_applicable",
@@ -2779,11 +2816,65 @@ def self_test() -> None:
                 "limit": 0.5,
             },
         }
-        runtime_path.write_text(json.dumps(runtime_v6) + "\n",
+        runtime_path.write_text(json.dumps(runtime_v7) + "\n",
                                 encoding="utf-8")
         validate_runtime(runtime_path)
 
-        first_anchor_mismatch = json.loads(json.dumps(runtime_v6))
+        twelve_refinements_v7 = json.loads(json.dumps(runtime_v7))
+        twelve_refinements_v7["pressure_energy_refinement_solve_calls"] = 12
+        twelve_refinements_v7["linear_iterations"] = 12
+        twelve_refinements_v7["pressure_energy_refinement"] = [
+            dict(pressure_base, ordinal=ordinal, target_generation=71,
+                 collective_lineage=80 + ordinal)
+            for ordinal in range(1, 13)
+        ]
+        runtime_path.write_text(json.dumps(twelve_refinements_v7) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        thirteen_refinements_v7 = json.loads(json.dumps(
+            twelve_refinements_v7))
+        thirteen_refinements_v7[
+            "pressure_energy_refinement_solve_calls"] = 13
+        thirteen_refinements_v7["pressure_energy_refinement"].append(dict(
+            pressure_base, ordinal=13, target_generation=71,
+            collective_lineage=93))
+        reject_runtime(
+            thirteen_refinements_v7,
+            "V7 refinement prefix above the twelve-solve bound accepted")
+
+        frozen_six_refinements_v6 = json.loads(json.dumps(
+            twelve_refinements_v7))
+        frozen_six_refinements_v6["schema"] = V6_RUNTIME_SCHEMA
+        frozen_six_refinements_v6["candidate_identity"] = \
+            make_candidate_identity("4" * 64, V6_RUNTIME_SCHEMA)
+        frozen_six_refinements_v6[
+            "pressure_energy_refinement_solve_calls"] = 6
+        frozen_six_refinements_v6["pressure_energy_refinement"] = \
+            frozen_six_refinements_v6[
+                "pressure_energy_refinement"][:6]
+        runtime_path.write_text(json.dumps(frozen_six_refinements_v6) + "\n",
+                                encoding="utf-8")
+        validate_runtime(runtime_path)
+        seventh_refinement_v6 = json.loads(json.dumps(
+            frozen_six_refinements_v6))
+        seventh_refinement_v6[
+            "pressure_energy_refinement_solve_calls"] = 7
+        seventh_refinement_v6["pressure_energy_refinement"].append(dict(
+            pressure_base, ordinal=7, target_generation=71,
+            collective_lineage=87))
+        reject_runtime(
+            seventh_refinement_v6,
+            "frozen V6 refinement prefix above six accepted")
+
+        relabelled_v6_as_v7 = json.loads(json.dumps(
+            frozen_six_refinements_v6))
+        relabelled_v6_as_v7["schema"] = RUNTIME_SCHEMA
+        reject_runtime(
+            relabelled_v6_as_v7,
+            "frozen V6 row relabelled as V7 without a V2 identity accepted")
+
+        first_anchor_mismatch = json.loads(json.dumps(runtime_v7))
         first_anchor_mismatch["time"] = 0.006
         first_anchor_mismatch["momentum_predictor_limiter"][
             "advective_cfl"]["dt"] = 0.003
@@ -2795,32 +2886,32 @@ def self_test() -> None:
             winner.update({"out": 0.003, "abs": 0.00225})
         reject_runtime(
             first_anchor_mismatch,
-            "V6 first row time=0.006 with dt=0.003 accepted")
+            "V7 first row time=0.006 with dt=0.003 accepted")
 
-        invalid_identity_hash = json.loads(json.dumps(runtime_v6))
+        invalid_identity_hash = json.loads(json.dumps(runtime_v7))
         invalid_identity_hash["candidate_identity"][
             "identity_sha256"] = "0" * 64
         reject_runtime(invalid_identity_hash,
-                       "V6 invalid candidate identity hash accepted")
-        invalid_winner_formula = json.loads(json.dumps(runtime_v6))
+                       "V7 invalid candidate identity hash accepted")
+        invalid_winner_formula = json.loads(json.dumps(runtime_v7))
         invalid_winner_formula["terminal_physical_audit"][
             "committed_convective_cfl"]["out_winner"][
                 "outgoing_mass_flow"] = 2.0
         reject_runtime(invalid_winner_formula,
-                       "V6 invalid committed CFL winner formula accepted")
-        aliased_cfl_view = json.loads(json.dumps(runtime_v6))
+                       "V7 invalid committed CFL winner formula accepted")
+        aliased_cfl_view = json.loads(json.dumps(runtime_v7))
         aliased_cfl_view["momentum_predictor_limiter"]["advective_cfl"][
             "face_flux_view_collective"] = 42
         reject_runtime(aliased_cfl_view,
-                       "V6 aliased provisional/committed CFL view accepted")
-        fabricated_inactive_metric = json.loads(json.dumps(runtime_v6))
+                       "V7 aliased provisional/committed CFL view accepted")
+        fabricated_inactive_metric = json.loads(json.dumps(runtime_v7))
         fabricated_inactive_metric["momentum_predictor_limiter"][
             "minimum_face_alpha"] = 0.0
         reject_runtime(fabricated_inactive_metric,
-                       "V6 inactive AFC zero metric accepted")
+                       "V7 inactive AFC zero metric accepted")
 
-        applicable_v6 = json.loads(json.dumps(runtime_v6))
-        applicable_v6["momentum_predictor_limiter"].update({
+        applicable_v7 = json.loads(json.dumps(runtime_v7))
+        applicable_v7["momentum_predictor_limiter"].update({
             "limited": True,
             "correction_metrics_applicability": "applicable",
             "retained_correction_l1_ratio": 0.5,
@@ -2829,38 +2920,38 @@ def self_test() -> None:
             "limited_faces": 7,
             "limited_face_fraction": 0.5,
         })
-        runtime_path.write_text(json.dumps(applicable_v6) + "\n",
+        runtime_path.write_text(json.dumps(applicable_v7) + "\n",
                                 encoding="utf-8")
         validate_runtime(runtime_path)
 
-        second_v6 = json.loads(json.dumps(runtime_v6))
-        second_v6.update({"step": 2, "previous_committed_time": 0.5,
+        second_v7 = json.loads(json.dumps(runtime_v7))
+        second_v7.update({"step": 2, "previous_committed_time": 0.5,
                           "time": 1.0, "startup": False})
-        second_v6["momentum_predictor_limiter"]["advective_cfl"].update({
+        second_v7["momentum_predictor_limiter"]["advective_cfl"].update({
             "time_revision_collective": 132,
             "density_view_collective": 133,
             "face_flux_view_collective": 134,
         })
-        second_v6["terminal_physical_audit"]["final_flux_revision"] = 135
-        second_v6["terminal_physical_audit"]["committed_convective_cfl"].update({
+        second_v7["terminal_physical_audit"]["final_flux_revision"] = 135
+        second_v7["terminal_physical_audit"]["committed_convective_cfl"].update({
             "density_revision": 133, "final_flux_revision": 135,
         })
         runtime_path.write_text(
-            json.dumps(runtime_v6) + "\n" + json.dumps(second_v6) + "\n",
+            json.dumps(runtime_v7) + "\n" + json.dumps(second_v7) + "\n",
             encoding="utf-8")
         validate_runtime(runtime_path)
 
-        mixed_candidate_v6 = json.loads(json.dumps(second_v6))
-        mixed_candidate_v6["candidate_identity"] = make_v6_identity(
-            "5" * 64, "6" * 64)
-        mixed_candidate_v6["build"] = int(("6" * 64)[:16], 16)
-        mixed_candidate_v6["binary"] = int(("5" * 64)[:16], 16)
+        mixed_candidate_v7 = json.loads(json.dumps(second_v7))
+        mixed_candidate_v7["candidate_identity"] = make_candidate_identity(
+            "5" * 64, RUNTIME_SCHEMA, "6" * 64)
+        mixed_candidate_v7["build"] = int(("6" * 64)[:16], 16)
+        mixed_candidate_v7["binary"] = int(("5" * 64)[:16], 16)
         reject_runtime_rows(
-            [runtime_v6, mixed_candidate_v6],
-            "V6 mixed executable/build candidate identities accepted")
+            [runtime_v7, mixed_candidate_v7],
+            "V7 mixed executable/build candidate identities accepted")
 
-        restart_v6 = json.loads(json.dumps(runtime_v6))
-        restart_v6.update({"step": 10, "previous_committed_time": 4.5,
+        restart_v7 = json.loads(json.dumps(runtime_v7))
+        restart_v7.update({"step": 10, "previous_committed_time": 4.5,
                            "time": 5.0, "startup": False,
                            "restart_recovery": True})
         restart_manifest_path = root / "restart-manifest.bin"
@@ -2878,23 +2969,23 @@ def self_test() -> None:
         restart_manifest.extend(struct.pack("<Q", checksum))
         restart_manifest_path.write_bytes(restart_manifest)
         restart_manifest_sha256 = hashlib.sha256(restart_manifest).hexdigest()
-        restart_v6["run_start"] = {
+        restart_v7["run_start"] = {
             "kind": "restart", "previous_step": 9,
             "previous_time": 4.5,
             "restart_manifest_sha256": restart_manifest_sha256,
         }
-        continuation_v6 = json.loads(json.dumps(second_v6))
-        continuation_v6.update({"step": 11, "previous_committed_time": 5.0,
+        continuation_v7 = json.loads(json.dumps(second_v7))
+        continuation_v7.update({"step": 11, "previous_committed_time": 5.0,
                                 "time": 5.5, "startup": False,
                                 "restart_recovery": False})
-        continuation_v6["run_start"] = json.loads(json.dumps(
-            restart_v6["run_start"]))
+        continuation_v7["run_start"] = json.loads(json.dumps(
+            restart_v7["run_start"]))
         runtime_path.write_text(
-            json.dumps(restart_v6) + "\n" +
-            json.dumps(continuation_v6) + "\n", encoding="utf-8")
+            json.dumps(restart_v7) + "\n" +
+            json.dumps(continuation_v7) + "\n", encoding="utf-8")
         validate_runtime(runtime_path, restart_manifest_path)
 
-        false_exact_history = json.loads(json.dumps(restart_v6))
+        false_exact_history = json.loads(json.dumps(restart_v7))
         false_exact_history.update({
             "requested_bdf_order": 2,
             "bdf_order": 2,
@@ -2902,32 +2993,33 @@ def self_test() -> None:
         })
         reject_runtime(
             false_exact_history,
-            "V6 legacy Restart manifest accepted as exact BDF2 history",
+            "legacy Restart manifest accepted as exact BDF2 history",
             restart_manifest_path)
 
         reject_runtime(
-            restart_v6,
-            "V6 restart evidence accepted without its frozen manifest")
+            restart_v7,
+            "V7 restart evidence accepted without its frozen manifest")
 
-        shifted_restart_anchor = json.loads(json.dumps(restart_v6))
+        shifted_restart_anchor = json.loads(json.dumps(restart_v7))
         shifted_restart_anchor["previous_committed_time"] += 100.0
         shifted_restart_anchor["time"] += 100.0
         reject_runtime(
             shifted_restart_anchor,
-            "V6 restart row time and previous time shifted away from the "
+            "V7 restart row time and previous time shifted away from the "
             "snapshot anchor", restart_manifest_path)
 
-        shifted_entire_anchor = json.loads(json.dumps(restart_v6))
+        shifted_entire_anchor = json.loads(json.dumps(restart_v7))
         shifted_entire_anchor["run_start"]["previous_time"] += 100.0
         shifted_entire_anchor["previous_committed_time"] += 100.0
         shifted_entire_anchor["time"] += 100.0
         reject_runtime(
             shifted_entire_anchor,
-            "V6 restart anchor and row times shifted away from the same "
+            "V7 restart anchor and row times shifted away from the same "
             "manifest", restart_manifest_path)
 
         v5_with_v6_identity = json.loads(json.dumps(runtime_v5))
-        v5_with_v6_identity["candidate_identity"] = make_v6_identity("4" * 64)
+        v5_with_v6_identity["candidate_identity"] = make_candidate_identity(
+            "4" * 64, V6_RUNTIME_SCHEMA)
         reject_runtime(v5_with_v6_identity,
                        "frozen V5 accepted a V6 candidate identity")
 

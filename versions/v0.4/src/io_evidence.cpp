@@ -633,10 +633,11 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   std::ostringstream json;
   json.imbue(std::locale::classic());
   json << std::setprecision(17)
-       << "{\"schema\":\"HUNDUN_V04_EVIDENCE_V6\""
+       << "{\"schema\":\"" << detail::kRuntimeEvidenceSchema << "\""
        << ",\"build\":" << record.build
        << ",\"binary\":" << record.binary
-       << ",\"candidate_identity\":{\"schema\":\"HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1\""
+       << ",\"candidate_identity\":{\"schema\":\""
+       << detail::kRuntimeCandidateIdentitySchema << "\""
        << ",\"head\":\"" << record.candidate_identity.head.data()
        << "\",\"tree\":\"" << record.candidate_identity.tree.data()
        << "\",\"build_manifest_sha256\":\""
