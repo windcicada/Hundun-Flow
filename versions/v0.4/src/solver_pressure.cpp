@@ -343,6 +343,44 @@ bool same_cells(Int3 left, Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
 }
 
+bool same_identity(LinearIdentity left, LinearIdentity right) noexcept {
+  return left.symbolic == right.symbolic && left.numeric == right.numeric &&
+         left.hierarchy == right.hierarchy &&
+         left.workspace == right.workspace &&
+         left.fingerprint == right.fingerprint;
+}
+
+bool same_certificate(LinearOperatorCertificate left,
+                      LinearOperatorCertificate right) noexcept {
+  return same_identity(left.identity, right.identity) &&
+         left.collective_fingerprint == right.collective_fingerprint &&
+         same_cells(left.local_shape, right.local_shape) &&
+         left.operator_class == right.operator_class;
+}
+
+bool valid_linear_certificate(LinearOperatorCertificate certificate) noexcept {
+  return certificate.identity.symbolic != 0U &&
+         certificate.identity.numeric != 0U &&
+         certificate.identity.hierarchy != 0U &&
+         certificate.identity.workspace != 0U &&
+         certificate.identity.fingerprint != 0U &&
+         certificate.collective_fingerprint != 0U &&
+         certificate.local_shape.x > 0 && certificate.local_shape.y > 0 &&
+         certificate.local_shape.z > 0;
+}
+
+bool same_boundary(PressureCorrectionBoundaryCertificate left,
+                   PressureCorrectionBoundaryCertificate right) noexcept {
+  return left.valid() && right.valid() && left.semantic == right.semantic &&
+         left.rank_local_layout == right.rank_local_layout &&
+         left.geometry == right.geometry &&
+         left.source_revision == right.source_revision &&
+         same_cells(left.global_cells, right.global_cells) &&
+         same_cells(left.patch_begin, right.patch_begin) &&
+         same_cells(left.local_cells, right.local_cells) &&
+         left.geometry_fingerprint == right.geometry_fingerprint;
+}
+
 bool valid_coefficient(ConstFaceFieldView view, CartesianAxis axis,
                        Int3 cells) noexcept {
   Int3 expected = cells;
@@ -370,12 +408,37 @@ ConstFaceFieldView coefficient_for(ConstFaceFieldView x,
 
 }  // namespace
 
+PlanFingerprint PressureEnergySharedPressureInputCertificate::local_binding(
+    FieldView input) noexcept {
+  std::uint64_t hash = kOperatorFnvOffset;
+  hash = operator_hash(
+      hash, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+                input.base)));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.interior.x));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.interior.y));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.interior.z));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.ghosts.x));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.ghosts.y));
+  hash = operator_hash(hash, static_cast<std::uint64_t>(input.ghosts.z));
+  hash = operator_hash(hash, input.components);
+  hash = operator_hash(hash, input.stride_y);
+  hash = operator_hash(hash, input.stride_z);
+  hash = operator_hash(hash, input.component_stride);
+  hash = operator_hash(hash, input.replica);
+  hash = operator_hash(hash, input.field);
+  hash = operator_hash(hash, input.revision);
+  hash = operator_hash(hash, input.storage_identity);
+  hash = operator_hash(hash, input.revision_domain);
+  return hash == 0U ? 1U : hash;
+}
+
 struct PressureLinearOperator::Impl {
   PressureCorrectionBoundaryPlan pressure_boundary{};
   HaloEngine* halo{};
   MeshPatch patch{};
   StageId halo_stage{};
   FieldId solution_field{};
+  std::uint8_t halo_width{};
   ConstFieldView diagonal{};
   ConstFaceFieldView x{};
   ConstFaceFieldView y{};
@@ -385,6 +448,285 @@ struct PressureLinearOperator::Impl {
   LinearOperatorCertificate certificate{};
   LinearOperatorFailureProvenance failure_provenance{};
 };
+
+bool PressureEnergySharedPressureCertificate::valid() const noexcept {
+  return (scope_ == PressureEnergySharedPressureScope::cartesian ||
+          scope_ == PressureEnergySharedPressureScope::ibm_decorated) &&
+         valid_linear_certificate(regular_pressure_) &&
+         valid_linear_certificate(continuity_pressure_) &&
+         valid_linear_certificate(energy_pressure_) &&
+         same_identity(regular_pressure_.identity,
+                       continuity_pressure_.identity) &&
+         same_identity(regular_pressure_.identity, energy_pressure_.identity) &&
+         same_cells(regular_pressure_.local_shape,
+                    continuity_pressure_.local_shape) &&
+         same_cells(regular_pressure_.local_shape,
+                    energy_pressure_.local_shape) &&
+         collective_contract_ != 0U && rank_local_contract_ != 0U &&
+         halo_instance_ != 0U && halo_stage_ != 0U && halo_width_ != 0U &&
+         geometry_ != 0U && boundary_semantics_ != 0U &&
+         boundary_rank_local_layout_ != 0U && regular_issuer_ != nullptr &&
+         continuity_owner_ != nullptr && energy_consumer_ != nullptr &&
+         ((scope_ == PressureEnergySharedPressureScope::cartesian &&
+           continuity_owner_ == regular_issuer_) ||
+          (scope_ == PressureEnergySharedPressureScope::ibm_decorated &&
+           continuity_owner_ != regular_issuer_));
+}
+
+bool PressureEnergySharedPressureInputCertificate::valid() const noexcept {
+  return shared_contract_ != 0U && shared_rank_local_contract_ != 0U &&
+         halo_ghost_revision_ != 0U && input_rank_local_binding_ != 0U &&
+         input_storage_ != 0U && input_revision_domain_ != 0U &&
+         input_revision_ != 0U && issuer_ != nullptr;
+}
+
+Status PressureLinearOperator::certify_pressure_energy_shared_halo(
+    const LinearOperator& continuity_owner,
+    PressureEnergySharedPressureScope scope,
+    const PressureEnergyPressureFluxOperator& energy_pressure,
+    PressureEnergySharedPressureCertificate& certificate) const noexcept {
+  certificate = {};
+  if (implementation_ == nullptr) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+  const LinearOperatorCertificate regular = this->certificate();
+  const LinearOperatorCertificate continuity = continuity_owner.certificate();
+  const LinearOperatorCertificate energy = energy_pressure.certificate();
+  const PressureCorrectionBoundaryCertificate regular_boundary =
+      implementation_->pressure_boundary.certificate();
+  const PressureCorrectionBoundaryCertificate energy_boundary =
+      energy_pressure.pressure_boundary_.certificate();
+  const bool owner_matches_scope =
+      (scope == PressureEnergySharedPressureScope::cartesian &&
+       &continuity_owner == this) ||
+      (scope == PressureEnergySharedPressureScope::ibm_decorated &&
+       &continuity_owner != this);
+  const bool compatible =
+      owner_matches_scope && valid_linear_certificate(regular) &&
+      valid_linear_certificate(continuity) &&
+      valid_linear_certificate(energy) &&
+      regular.operator_class == LinearOperatorClass::spd &&
+      continuity.operator_class == LinearOperatorClass::spd &&
+      energy.operator_class == LinearOperatorClass::nonsymmetric &&
+      same_identity(regular.identity, continuity.identity) &&
+      same_identity(regular.identity, energy.identity) &&
+      same_cells(regular.local_shape, continuity.local_shape) &&
+      same_cells(regular.local_shape, energy.local_shape) &&
+      implementation_->pressure_boundary.current() &&
+      energy_pressure.certificate_.valid() &&
+      energy_pressure.pressure_boundary_.current() &&
+      same_boundary(regular_boundary, energy_boundary) &&
+      implementation_->halo != nullptr && implementation_->halo->ready() &&
+      energy_pressure.services_.halo == implementation_->halo &&
+      energy_pressure.services_.halo != nullptr &&
+      energy_pressure.services_.halo->ready() &&
+      energy_pressure.services_.halo_stage == implementation_->halo_stage &&
+      energy_pressure.services_.solution_field ==
+          implementation_->solution_field &&
+      energy_pressure.services_.halo_width == implementation_->halo_width &&
+      same_cells(energy_pressure.patch_.cells, implementation_->patch.cells) &&
+      same_cells(energy_pressure.patch_.begin, implementation_->patch.begin);
+  if (!compatible) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+
+  PressureEnergySharedPressureCertificate candidate;
+  candidate.scope_ = scope;
+  candidate.regular_pressure_ = regular;
+  candidate.continuity_pressure_ = continuity;
+  candidate.energy_pressure_ = energy;
+  candidate.halo_instance_ = implementation_->halo->instance_identity();
+  candidate.halo_stage_ = implementation_->halo_stage;
+  candidate.pressure_field_ = implementation_->solution_field;
+  candidate.halo_width_ = implementation_->halo_width;
+  candidate.geometry_ = regular_boundary.geometry;
+  candidate.boundary_semantics_ = regular_boundary.semantic;
+  candidate.boundary_rank_local_layout_ = regular_boundary.rank_local_layout;
+  candidate.regular_issuer_ = this;
+  candidate.continuity_owner_ = &continuity_owner;
+  candidate.energy_consumer_ = &energy_pressure;
+
+  std::uint64_t collective = kOperatorFnvOffset;
+  collective = operator_hash(collective,
+                             static_cast<std::uint8_t>(candidate.scope_));
+  collective = operator_hash(collective, regular.collective_fingerprint);
+  collective = operator_hash(collective, continuity.collective_fingerprint);
+  collective = operator_hash(collective, energy.collective_fingerprint);
+  collective = operator_hash(collective, candidate.halo_stage_);
+  collective = operator_hash(collective, candidate.pressure_field_);
+  collective = operator_hash(collective, candidate.halo_width_);
+  collective = operator_hash(collective, candidate.geometry_);
+  collective = operator_hash(collective, candidate.boundary_semantics_);
+  candidate.collective_contract_ = collective == 0U ? 1U : collective;
+
+  std::uint64_t local = kOperatorFnvOffset;
+  local = operator_hash(local, candidate.collective_contract_);
+  local = operator_hash(local, candidate.halo_instance_);
+  local = operator_hash(local, candidate.boundary_rank_local_layout_);
+  local = operator_hash(local, regular.identity.numeric);
+  local = operator_hash(local, regular.identity.workspace);
+  local = operator_hash(local, energy_pressure.certificate_.binding_revision);
+  local = operator_hash(
+      local, reinterpret_cast<std::uintptr_t>(&continuity_owner));
+  local = operator_hash(
+      local, reinterpret_cast<std::uintptr_t>(&energy_pressure));
+  candidate.rank_local_contract_ = local == 0U ? 1U : local;
+  if (!candidate.valid()) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+  certificate = candidate;
+  return {};
+}
+
+Status PressureLinearOperator::exchange_pressure_energy_shared_input(
+    FieldView input,
+    const PressureEnergySharedPressureCertificate& certificate,
+    PressureEnergySharedPressureInputCertificate& input_certificate) const
+    noexcept {
+  input_certificate = {};
+  if (implementation_ != nullptr) implementation_->failure_provenance = {};
+  const bool current =
+      implementation_ != nullptr && certificate.valid() &&
+      certificate.regular_issuer_ == this &&
+      same_certificate(certificate.regular_pressure_, this->certificate()) &&
+      certificate.halo_instance_ ==
+          implementation_->halo->instance_identity() &&
+      certificate.halo_stage_ == implementation_->halo_stage &&
+      certificate.pressure_field_ == implementation_->solution_field &&
+      certificate.halo_width_ == implementation_->halo_width &&
+      implementation_->pressure_boundary.current() &&
+      input.field == implementation_->solution_field &&
+      detail::valid_cell_view(as_const(input), implementation_->patch.cells,
+                              0U, 1U, implementation_->halo_width);
+  if (!current) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+
+  std::array<FieldView, 1U> fields{input};
+  HaloTicket ticket;
+  Status status = implementation_->halo->begin(
+      implementation_->halo_stage, {fields.data(), fields.size()}, ticket);
+  if (status) {
+    status = implementation_->halo->finish(ticket,
+                                            {fields.data(), fields.size()});
+  }
+  if (!status) {
+    implementation_->failure_provenance = {
+        status, LinearOperatorStatusScope::collective,
+        implementation_->halo->lowest_failing_rank()};
+    return status;
+  }
+  input = fields[0U];
+  PressureEnergySharedPressureInputCertificate issued;
+  issued.shared_contract_ = certificate.collective_contract_;
+  issued.shared_rank_local_contract_ = certificate.rank_local_contract_;
+  issued.halo_ghost_revision_ =
+      implementation_->halo->ghost_revision(input.field);
+  issued.input_rank_local_binding_ =
+      PressureEnergySharedPressureInputCertificate::local_binding(input);
+  issued.input_storage_ = input.storage_identity;
+  issued.input_revision_domain_ = input.revision_domain;
+  issued.input_revision_ = input.revision;
+  issued.input_field_ = input.field;
+  issued.issuer_ = this;
+  if (!issued.valid()) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+  input_certificate = issued;
+  return {};
+}
+
+Status PressureLinearOperator::validate_apply_views(FieldView input,
+                                                    FieldView output) const
+    noexcept {
+  if (implementation_ == nullptr ||
+      implementation_->certificate.identity.fingerprint == 0U ||
+      !implementation_->pressure_boundary.current() ||
+      input.field != implementation_->solution_field ||
+      !detail::valid_cell_view(as_const(input), implementation_->patch.cells,
+                               0U, 1U, implementation_->halo_width) ||
+      !detail::valid_cell_view(output, implementation_->patch.cells, 0U, 1U) ||
+      detail::field_views_overlap(as_const(input), as_const(output))) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+  return {};
+}
+
+Status PressureLinearOperator::apply_after_exchange(FieldView input,
+                                                    FieldView output) const
+    noexcept {
+  const Status valid = validate_apply_views(input, output);
+  if (!valid) return valid;
+  const ConstFieldView x = as_const(input);
+  const Int3 cells = implementation_->patch.cells;
+  Status arithmetic{};
+  for (std::int32_t iz = 0; iz < cells.z; ++iz) {
+    for (std::int32_t iy = 0; iy < cells.y; ++iy) {
+      for (std::int32_t ix = 0; ix < cells.x; ++ix) {
+        const Int3 cell{ix, iy, iz};
+        const double centre = x.unchecked(cell, 0U);
+        double value = implementation_->diagonal.unchecked(cell, 0U) * centre;
+        for (CartesianAxis axis : {CartesianAxis::x, CartesianAxis::y,
+                                   CartesianAxis::z}) {
+          const ConstFaceFieldView face = coefficient_for(
+              implementation_->x, implementation_->y, implementation_->z,
+              axis);
+          Int3 plus_face = cell;
+          if (axis == CartesianAxis::x) {
+            ++plus_face.x;
+          } else if (axis == CartesianAxis::y) {
+            ++plus_face.y;
+          } else {
+            ++plus_face.z;
+          }
+          value -= face.unchecked(cell) *
+                   implementation_->pressure_boundary
+                       .neighbor_value_unchecked(x, cell, axis, -1);
+          value -= face.unchecked(plus_face) *
+                   implementation_->pressure_boundary
+                       .neighbor_value_unchecked(x, cell, axis, 1);
+        }
+        output.unchecked(cell, 0U) = value;
+        if (!std::isfinite(value)) {
+          arithmetic = {StatusCode::numerical_failure,
+                        kPressureOperatorNumerical};
+        }
+      }
+    }
+  }
+  if (!arithmetic) {
+    implementation_->failure_provenance = {
+        arithmetic, LinearOperatorStatusScope::rank_local, -1};
+  }
+  return arithmetic;
+}
+
+Status PressureLinearOperator::apply_pressure_energy_shared_input(
+    FieldView input, FieldView output,
+    const PressureEnergySharedPressureCertificate& certificate,
+    const PressureEnergySharedPressureInputCertificate& input_certificate)
+    const noexcept {
+  if (implementation_ != nullptr) implementation_->failure_provenance = {};
+  const bool current =
+      implementation_ != nullptr && certificate.valid() &&
+      input_certificate.valid() && certificate.regular_issuer_ == this &&
+      input_certificate.issuer_ == this &&
+      input_certificate.shared_contract_ == certificate.collective_contract_ &&
+      input_certificate.shared_rank_local_contract_ ==
+          certificate.rank_local_contract_ &&
+      input_certificate.halo_ghost_revision_ ==
+          implementation_->halo->ghost_revision(input.field) &&
+      input_certificate.input_rank_local_binding_ ==
+          PressureEnergySharedPressureInputCertificate::local_binding(input) &&
+      input_certificate.input_storage_ == input.storage_identity &&
+      input_certificate.input_revision_domain_ == input.revision_domain &&
+      input_certificate.input_revision_ == input.revision &&
+      input_certificate.input_field_ == input.field;
+  if (!current) {
+    return {StatusCode::invalid_plan, kPressureOperator};
+  }
+  return apply_after_exchange(input, output);
+}
 
 PressureLinearOperator::~PressureLinearOperator() noexcept { release(); }
 
@@ -458,6 +800,7 @@ Status PressureLinearOperator::bind_internal(
   candidate->patch = patch;
   candidate->halo_stage = services.halo_stage;
   candidate->solution_field = services.solution_field;
+  candidate->halo_width = services.halo_width;
   candidate->diagonal = as_const(system.diagonal);
   candidate->x = x_coefficient;
   candidate->y = y_coefficient;
@@ -518,16 +861,8 @@ Status PressureLinearOperator::apply(FieldView x, FieldView y) const noexcept {
   if (implementation_ != nullptr) {
     implementation_->failure_provenance = {};
   }
-  if (implementation_ == nullptr ||
-      implementation_->certificate.identity.fingerprint == 0U ||
-      !implementation_->pressure_boundary.current() ||
-      x.field != implementation_->solution_field ||
-      !detail::valid_cell_view(as_const(x), implementation_->patch.cells, 0U,
-                               1U, 1U) ||
-      !detail::valid_cell_view(y, implementation_->patch.cells, 0U, 1U) ||
-      detail::field_views_overlap(as_const(x), as_const(y))) {
-    return {StatusCode::invalid_plan, kPressureOperator};
-  }
+  const Status valid = validate_apply_views(x, y);
+  if (!valid) return valid;
   std::array<FieldView, 1U> fields{x};
   HaloTicket ticket;
   Status status = implementation_->halo->begin(
@@ -543,45 +878,7 @@ Status PressureLinearOperator::apply(FieldView x, FieldView y) const noexcept {
     return status;
   }
   x = fields[0U];
-  const ConstFieldView input = as_const(x);
-  const Int3 cells = implementation_->patch.cells;
-  Status arithmetic{};
-  for (std::int32_t iz = 0; iz < cells.z; ++iz) {
-    for (std::int32_t iy = 0; iy < cells.y; ++iy) {
-      for (std::int32_t ix = 0; ix < cells.x; ++ix) {
-        const Int3 cell{ix, iy, iz};
-        const double centre = input.unchecked(cell, 0U);
-        double value =
-            implementation_->diagonal.unchecked(cell, 0U) * centre;
-        for (CartesianAxis axis : {CartesianAxis::x, CartesianAxis::y,
-                                   CartesianAxis::z}) {
-          const ConstFaceFieldView face = coefficient_for(
-              implementation_->x, implementation_->y, implementation_->z,
-              axis);
-          Int3 plus_face = cell;
-          if (axis == CartesianAxis::x) {
-            ++plus_face.x;
-          } else if (axis == CartesianAxis::y) {
-            ++plus_face.y;
-          } else {
-            ++plus_face.z;
-          }
-          value -= face.unchecked(cell) *
-                   implementation_->pressure_boundary
-                       .neighbor_value_unchecked(input, cell, axis, -1);
-          value -= face.unchecked(plus_face) *
-                   implementation_->pressure_boundary
-                       .neighbor_value_unchecked(input, cell, axis, 1);
-        }
-        y.unchecked(cell, 0U) = value;
-        if (!std::isfinite(value)) {
-          arithmetic = {StatusCode::numerical_failure,
-                        kPressureOperatorNumerical};
-        }
-      }
-    }
-  }
-  return arithmetic;
+  return apply_after_exchange(x, y);
 }
 
 PlanFingerprint PressureLinearOperator::fingerprint() const noexcept {

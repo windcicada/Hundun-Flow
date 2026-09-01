@@ -2885,7 +2885,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   energy_pressure_binding.boundary = &fixture.boundary;
   energy_pressure_binding.patch = fixture.patch;
   energy_pressure_binding.services = {
-      MPI_COMM_SELF, &pressure_halo, 915U, pressure_direction_field, 1U};
+      MPI_COMM_SELF, &pressure_halo, 914U, pressure_direction_field, 1U};
   energy_pressure_binding.intermediate = intermediate;
   energy_pressure_binding.pressure = pressure_certificate;
   energy_pressure_binding.temporal_diagonal =
@@ -3014,8 +3014,39 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
           jacobian.jacobian_scope == PressureEnergyJacobianScope::
                                            exact_cartesian_frozen_spatial &&
           jacobian.exact_algebraic_schur &&
-          !jacobian.full_nonlinear_jacobian,
-      "analytic frozen-target binds exact frozen-spatial Jacobian/Schur scope");
+          !jacobian.full_nonlinear_jacobian &&
+          jacobian.shared_pressure.valid() &&
+          jacobian.shared_pressure.scope() ==
+              PressureEnergySharedPressureScope::cartesian,
+      "analytic frozen-target binds exact Schur and typed shared-pressure halo");
+  if (!passed) return false;
+
+  auto mismatched_pressure_binding = energy_pressure_binding;
+  mismatched_pressure_binding.services.halo_stage = 915U;
+  PressureEnergyPressureFluxOperator mismatched_energy_pressure;
+  PressureEnergyPressureFluxCertificate mismatched_energy_certificate;
+  PressureEnergySchurBlockAuthority mismatched_block_authority;
+  PressureEnergySchurBinding mismatched_schur_binding = schur_binding;
+  PressureEnergySchurOperator mismatched_schur;
+  PressureEnergyJacobianCertificate mismatched_jacobian;
+  passed &= expect(
+      static_cast<bool>(PressureEnergyPressureFluxOperator::bind(
+          mismatched_pressure_binding, mismatched_energy_pressure,
+          mismatched_energy_certificate)) &&
+          static_cast<bool>(PressureEnergySchurBlockAuthority::exact_cartesian(
+              mismatched_energy_pressure, energy_enthalpy,
+              mismatched_block_authority)),
+      "stage-mutation fixture keeps the same mathematical E_p/E_h block");
+  mismatched_schur_binding.energy_pressure = &mismatched_energy_pressure;
+  mismatched_schur_binding.block_authority = mismatched_block_authority;
+  passed &= expect(
+      static_cast<bool>(PressureEnergySchurOperator::bind(
+          mismatched_schur_binding, mismatched_schur,
+          mismatched_jacobian)) &&
+          mismatched_jacobian.valid() &&
+          !mismatched_jacobian.shared_pressure.available(),
+      "a mismatched halo stage keeps generic Schur composition and cannot "
+      "reuse a ghost revision");
   if (!passed) return false;
 
   OwnedField pressure_direction = ghosted_field(
@@ -3368,10 +3399,34 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
       static_cast<bool>(continuity_pressure.apply(
           pressure_direction.view, continuity_pressure_action.view)) &&
           static_cast<bool>(energy_pressure.apply(
-              pressure_direction.view, energy_pressure_action.view)) &&
-          static_cast<bool>(
-              schur.apply(pressure_direction.view, schur_action.view)),
-      "analytic frozen-target applies the real C_p, E_p, and exact Schur");
+              pressure_direction.view, energy_pressure_action.view)),
+      "analytic frozen-target applies the independent real C_p and E_p");
+  const HaloRuntimeCounters pressure_halo_before_schur =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_before_schur =
+      energy_halo.runtime_counters();
+  passed &= expect(
+      static_cast<bool>(
+          schur.apply(pressure_direction.view, schur_action.view)),
+      "analytic frozen-target applies the exact Schur through its shared halo");
+  const HaloRuntimeCounters pressure_halo_after_schur =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_after_schur =
+      energy_halo.runtime_counters();
+  passed &= expect(
+      pressure_halo_after_schur.begin_calls -
+                  pressure_halo_before_schur.begin_calls ==
+              1U &&
+          pressure_halo_after_schur.finish_calls -
+                  pressure_halo_before_schur.finish_calls ==
+              1U &&
+          energy_halo_after_schur.begin_calls -
+                  energy_halo_before_schur.begin_calls ==
+              1U &&
+          energy_halo_after_schur.finish_calls -
+                  energy_halo_before_schur.finish_calls ==
+              1U,
+      "one Schur apply uses one shared C_p/E_p halo plus one E_h halo");
   if (!passed) return false;
   for (std::int32_t z = 0; z < cells.z; ++z)
     for (std::int32_t y = 0; y < cells.y; ++y)

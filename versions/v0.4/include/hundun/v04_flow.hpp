@@ -20,6 +20,8 @@ class IbmEquationInterfacePlan;
 class EBTopology;
 class RemoteDonorExchangePlan;
 class PressureEnergyCandidateBoundaryFinalizer;
+class IbmPressureOperator;
+class PressureLinearOperator;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 class FinalBoundaryFluxCertificateTestAccess;
 #endif
@@ -1890,6 +1892,79 @@ struct PressureEnergySchurBinding {
   PressureEnergySchurBlockAuthority block_authority{};
 };
 
+// Cold-certified authority for sharing one pressure-direction halo exchange
+// between the C_p and E_p blocks of a Schur action.  This is deliberately a
+// stronger contract than HaloEngine::ghost_revision(): it binds the exact
+// regular/possibly IBM-decorated continuity operator, E_p operator, halo
+// instance/stage/field/reach, Cartesian boundary semantics, geometry, and
+// local layout.  An unavailable certificate selects the generic three-halo
+// composition without changing the algebraic operator.
+enum class PressureEnergySharedPressureScope : std::uint8_t {
+  unavailable,
+  cartesian,
+  ibm_decorated,
+};
+
+class PressureEnergySharedPressureCertificate {
+ public:
+  PressureEnergySharedPressureScope scope() const noexcept { return scope_; }
+  bool available() const noexcept {
+    return scope_ != PressureEnergySharedPressureScope::unavailable;
+  }
+  bool valid() const noexcept;
+
+ private:
+  friend class PressureLinearOperator;
+  friend class IbmPressureOperator;
+  friend class PressureEnergyPressureFluxOperator;
+  friend class PressureEnergySchurOperator;
+
+  PressureEnergySharedPressureScope scope_{
+      PressureEnergySharedPressureScope::unavailable};
+  LinearOperatorCertificate regular_pressure_{};
+  LinearOperatorCertificate continuity_pressure_{};
+  LinearOperatorCertificate energy_pressure_{};
+  PlanFingerprint collective_contract_{};
+  RevisionToken rank_local_contract_{};
+  std::uintptr_t halo_instance_{};
+  StageId halo_stage_{};
+  FieldId pressure_field_{};
+  std::uint8_t halo_width_{};
+  RevisionToken geometry_{};
+  PlanFingerprint boundary_semantics_{};
+  PlanFingerprint boundary_rank_local_layout_{};
+  const PressureLinearOperator* regular_issuer_{};
+  const LinearOperator* continuity_owner_{};
+  const PressureEnergyPressureFluxOperator* energy_consumer_{};
+};
+
+// Per-application, unforgeable proof that the exact pressure FieldView was
+// exchanged under a PressureEnergySharedPressureCertificate.  E_p consumes
+// this proof after C_p (and optionally IBM's C_p-only decoration) instead of
+// initiating a second payload halo.
+class PressureEnergySharedPressureInputCertificate {
+ public:
+  bool valid() const noexcept;
+
+ private:
+  friend class PressureLinearOperator;
+  friend class IbmPressureOperator;
+  friend class PressureEnergyPressureFluxOperator;
+  friend class PressureEnergySchurOperator;
+
+  static PlanFingerprint local_binding(FieldView input) noexcept;
+
+  PlanFingerprint shared_contract_{};
+  RevisionToken shared_rank_local_contract_{};
+  RevisionToken halo_ghost_revision_{};
+  PlanFingerprint input_rank_local_binding_{};
+  StorageIdentity input_storage_{};
+  RevisionDomainIdentity input_revision_domain_{};
+  RevisionToken input_revision_{};
+  FieldId input_field_{};
+  const PressureLinearOperator* issuer_{};
+};
+
 enum class PressureEnergyJacobianScope : std::uint8_t {
   exact_cartesian_frozen_spatial,
   ibm_cartesian_spatial_quasi_newton,
@@ -1908,6 +1983,7 @@ struct PressureEnergyJacobianCertificate {
   std::size_t inactive_cells{};
   PlanFingerprint activity_local_fingerprint{};
   PlanFingerprint activity_collective_fingerprint{};
+  PressureEnergySharedPressureCertificate shared_pressure{};
   PressureEnergySchurSignClass sign_class{
       PressureEnergySchurSignClass::general};
   PressureEnergyJacobianScope jacobian_scope{
@@ -1937,6 +2013,7 @@ struct PressureEnergyJacobianCertificate {
                    static_cast<std::size_t>(schur.local_shape.z) &&
            ((activity_local_fingerprint == 0U) ==
             (activity_collective_fingerprint == 0U)) &&
+           (!shared_pressure.available() || shared_pressure.valid()) &&
            ((active_cells == 0U && minimum_scaled_abs_c_h == 0.0 &&
              maximum_scaled_abs_c_h == 0.0) ||
             (active_cells > 0U && minimum_scaled_abs_c_h > 0.0 &&
@@ -2011,6 +2088,9 @@ class PressureEnergySchurOperator final : public LinearOperator {
   ConstFieldView continuity_enthalpy_row_scale_{};
   PressureEnergySchurWorkspace workspace_{};
   PressureEnergyCellActivity activity_{};
+  const PressureLinearOperator* shared_cartesian_pressure_{};
+  const IbmPressureOperator* shared_ibm_pressure_{};
+  const PressureEnergyPressureFluxOperator* shared_energy_pressure_{};
   PressureEnergyJacobianCertificate certificate_{};
   mutable LinearOperatorFailureProvenance failure_{};
 };
@@ -2772,6 +2852,28 @@ class PressureLinearOperator final : public LinearOperator {
 
  private:
   friend class PressureVelocityCoupler;
+  friend class PressureEnergySchurOperator;
+  friend class PressureEnergyPressureFluxOperator;
+  friend class IbmPressureOperator;
+  Status certify_pressure_energy_shared_halo(
+      const LinearOperator& continuity_owner,
+      PressureEnergySharedPressureScope scope,
+      const PressureEnergyPressureFluxOperator& energy_pressure,
+      PressureEnergySharedPressureCertificate& certificate) const noexcept;
+  Status exchange_pressure_energy_shared_input(
+      FieldView input,
+      const PressureEnergySharedPressureCertificate& certificate,
+      PressureEnergySharedPressureInputCertificate& input_certificate) const
+      noexcept;
+  Status apply_pressure_energy_shared_input(
+      FieldView input, FieldView output,
+      const PressureEnergySharedPressureCertificate& certificate,
+      const PressureEnergySharedPressureInputCertificate& input_certificate)
+      const noexcept;
+  Status validate_apply_views(FieldView input, FieldView output) const
+      noexcept;
+  Status apply_after_exchange(FieldView input, FieldView output) const
+      noexcept;
   static Status bind_internal(
       const CartesianGeometryPlan& geometry, MeshPatch patch,
       const BoundaryPlan& boundary, PlanFingerprint coupler,
@@ -3002,8 +3104,19 @@ class PressureEnergyPressureFluxOperator final : public LinearOperator {
 
  private:
   friend class PressureEnergySchurBlockAuthority;
+  friend class PressureLinearOperator;
+  friend class PressureEnergySchurOperator;
 
   bool exact_pressure_work_current() const noexcept;
+  Status validate_apply_views(FieldView input, FieldView output) const
+      noexcept;
+  Status apply_after_exchange(FieldView input, FieldView output) const
+      noexcept;
+  Status apply_pressure_energy_shared_input(
+      FieldView input, FieldView output,
+      const PressureEnergySharedPressureCertificate& certificate,
+      const PressureEnergySharedPressureInputCertificate& input_certificate)
+      const noexcept;
 
   PressureCorrectionBoundaryPlan pressure_boundary_{};
   MeshPatch patch_{};

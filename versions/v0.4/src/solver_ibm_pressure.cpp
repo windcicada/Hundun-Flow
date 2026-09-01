@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/v04_ibm.hpp"
+#include "hundun/v04_flow.hpp"
 
 #include "field_view_interval_detail.hpp"
 
@@ -29,6 +30,21 @@ std::uint64_t mix(std::uint64_t hash, std::uint64_t value) noexcept {
 
 bool same_shape(Int3 left, Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+bool same_identity(LinearIdentity left, LinearIdentity right) noexcept {
+  return left.symbolic == right.symbolic && left.numeric == right.numeric &&
+         left.hierarchy == right.hierarchy &&
+         left.workspace == right.workspace &&
+         left.fingerprint == right.fingerprint;
+}
+
+bool same_certificate(LinearOperatorCertificate left,
+                      LinearOperatorCertificate right) noexcept {
+  return same_identity(left.identity, right.identity) &&
+         left.collective_fingerprint == right.collective_fingerprint &&
+         same_shape(left.local_shape, right.local_shape) &&
+         left.operator_class == right.operator_class;
 }
 
 template <class T>
@@ -252,6 +268,89 @@ Status IbmPressureOperator::apply(FieldView x, FieldView y) const noexcept {
         implementation_->regular->failure_provenance();
     return status;
   }
+  return decorate_pressure_action(x, y);
+}
+
+Status IbmPressureOperator::certify_pressure_energy_shared_halo(
+    const PressureEnergyPressureFluxOperator& energy_pressure,
+    PressureEnergySharedPressureCertificate& certificate) const noexcept {
+  certificate = {};
+  if (implementation_ == nullptr) {
+    return {StatusCode::invalid_plan, kIbmPressurePlan};
+  }
+  const auto* regular =
+      dynamic_cast<const PressureLinearOperator*>(implementation_->regular);
+  if (regular == nullptr) {
+    return {StatusCode::invalid_plan, kIbmPressurePlan};
+  }
+  return regular->certify_pressure_energy_shared_halo(
+      *this, PressureEnergySharedPressureScope::ibm_decorated,
+      energy_pressure, certificate);
+}
+
+Status IbmPressureOperator::exchange_pressure_energy_shared_input(
+    FieldView input,
+    const PressureEnergySharedPressureCertificate& certificate,
+    PressureEnergySharedPressureInputCertificate& input_certificate) const
+    noexcept {
+  input_certificate = {};
+  if (implementation_ == nullptr || !certificate.valid() ||
+      certificate.scope_ !=
+          PressureEnergySharedPressureScope::ibm_decorated ||
+      certificate.continuity_owner_ != this ||
+      !same_certificate(certificate.continuity_pressure_,
+                        this->certificate())) {
+    return {StatusCode::invalid_plan, kIbmPressureApply};
+  }
+  const auto* regular =
+      dynamic_cast<const PressureLinearOperator*>(implementation_->regular);
+  if (regular == nullptr) {
+    return {StatusCode::invalid_plan, kIbmPressureApply};
+  }
+  const Status status = regular->exchange_pressure_energy_shared_input(
+      input, certificate, input_certificate);
+  if (!status) {
+    implementation_->failure_provenance = regular->failure_provenance();
+  }
+  return status;
+}
+
+Status IbmPressureOperator::apply_pressure_energy_shared_input(
+    FieldView input, FieldView output,
+    const PressureEnergySharedPressureCertificate& certificate,
+    const PressureEnergySharedPressureInputCertificate& input_certificate)
+    const noexcept {
+  if (implementation_ != nullptr) implementation_->failure_provenance = {};
+  if (implementation_ == nullptr || !certificate.valid() ||
+      certificate.scope_ !=
+          PressureEnergySharedPressureScope::ibm_decorated ||
+      certificate.continuity_owner_ != this ||
+      !same_certificate(certificate.continuity_pressure_,
+                        this->certificate())) {
+    return {StatusCode::invalid_plan, kIbmPressureApply};
+  }
+  const auto* regular =
+      dynamic_cast<const PressureLinearOperator*>(implementation_->regular);
+  if (regular == nullptr) {
+    return {StatusCode::invalid_plan, kIbmPressureApply};
+  }
+  Status status = regular->apply_pressure_energy_shared_input(
+      input, output, certificate, input_certificate);
+  if (!status) {
+    implementation_->failure_provenance = regular->failure_provenance();
+    return status;
+  }
+  return decorate_pressure_action(input, output);
+}
+
+Status IbmPressureOperator::decorate_pressure_action(
+    FieldView x, FieldView y) const noexcept {
+  if (implementation_ == nullptr || certificate().identity.fingerprint == 0U ||
+      !valid_scalar(x, implementation_->cells, 1U) ||
+      !valid_scalar(y, implementation_->cells, 0U) ||
+      detail::field_views_overlap(as_const(x), as_const(y))) {
+    return {StatusCode::invalid_plan, kIbmPressureApply};
+  }
   const Span<const std::uint8_t> region = implementation_->topology->region();
   const std::size_t expected =
       static_cast<std::size_t>(implementation_->cells.x) *
@@ -273,7 +372,11 @@ Status IbmPressureOperator::apply(FieldView x, FieldView y) const noexcept {
     if (!std::isfinite(face) || face < 0.0 ||
         !std::isfinite(solid) || !std::isfinite(fluid) ||
         !std::isfinite(correction)) {
-      return {StatusCode::numerical_failure, kIbmPressureNumerical};
+      const Status status{StatusCode::numerical_failure,
+                          kIbmPressureNumerical};
+      implementation_->failure_provenance = {
+          status, LinearOperatorStatusScope::rank_local, -1};
+      return status;
     }
     y.unchecked(link.fluid_local_index, 0U) += correction;
   }

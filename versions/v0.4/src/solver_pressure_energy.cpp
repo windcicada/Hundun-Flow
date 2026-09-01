@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_equation_detail.hpp"
@@ -587,6 +588,21 @@ Status component_apply(const LinearOperator& component, FieldView input,
                        FieldView output,
                        LinearOperatorFailureProvenance& failure) noexcept {
   const Status status = component.apply(input, output);
+  if (status) return status;
+  const LinearOperatorFailureProvenance component_failure =
+      component.failure_provenance();
+  if (component_failure.status.code == status.code &&
+      component_failure.status.detail == status.detail) {
+    failure = component_failure;
+  } else {
+    failure = {status, LinearOperatorStatusScope::rank_local, -1};
+  }
+  return status;
+}
+
+Status capture_component_failure(
+    const LinearOperator& component, Status status,
+    LinearOperatorFailureProvenance& failure) noexcept {
   if (status) return status;
   const LinearOperatorFailureProvenance component_failure =
       component.failure_provenance();
@@ -1352,9 +1368,8 @@ Status PressureEnergyPressureFluxOperator::bind(
   return {};
 }
 
-Status PressureEnergyPressureFluxOperator::apply(
+Status PressureEnergyPressureFluxOperator::validate_apply_views(
     FieldView input, FieldView output) const noexcept {
-  failure_ = {};
   const Int3 cells = certificate_.linear.local_shape;
   bool aliases =
       detail::field_views_overlap(as_const(input), as_const(output)) ||
@@ -1404,11 +1419,19 @@ Status PressureEnergyPressureFluxOperator::apply(
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
+  return {};
+}
+
+Status PressureEnergyPressureFluxOperator::apply(
+    FieldView input, FieldView output) const noexcept {
+  failure_ = {};
+  Status status = validate_apply_views(input, output);
+  if (!status) return status;
 
   std::array<FieldView, 1U> fields{input};
   HaloTicket ticket;
-  Status status = services_.halo->begin(services_.halo_stage,
-                                        {fields.data(), fields.size()}, ticket);
+  status = services_.halo->begin(services_.halo_stage,
+                                 {fields.data(), fields.size()}, ticket);
   if (status) {
     status = services_.halo->finish(ticket, {fields.data(), fields.size()});
   }
@@ -1418,12 +1441,58 @@ Status PressureEnergyPressureFluxOperator::apply(
     return status;
   }
   input = fields[0U];
-  status = pressure_boundary_.fill_ghosts(input);
+  return apply_after_exchange(input, output);
+}
+
+Status PressureEnergyPressureFluxOperator::apply_pressure_energy_shared_input(
+    FieldView input, FieldView output,
+    const PressureEnergySharedPressureCertificate& certificate,
+    const PressureEnergySharedPressureInputCertificate& input_certificate)
+    const noexcept {
+  failure_ = {};
+  Status status = validate_apply_views(input, output);
+  if (!status) return status;
+  const bool current =
+      certificate.valid() && input_certificate.valid() &&
+      certificate.energy_consumer_ == this &&
+      same_certificate(certificate.energy_pressure_, this->certificate()) &&
+      certificate.halo_instance_ == services_.halo->instance_identity() &&
+      certificate.halo_stage_ == services_.halo_stage &&
+      certificate.pressure_field_ == services_.solution_field &&
+      certificate.halo_width_ == services_.halo_width &&
+      input_certificate.issuer_ == certificate.regular_issuer_ &&
+      input_certificate.shared_contract_ == certificate.collective_contract_ &&
+      input_certificate.shared_rank_local_contract_ ==
+          certificate.rank_local_contract_ &&
+      input_certificate.halo_ghost_revision_ ==
+          services_.halo->ghost_revision(input.field) &&
+      input_certificate.input_rank_local_binding_ ==
+          PressureEnergySharedPressureInputCertificate::local_binding(input) &&
+      input_certificate.input_storage_ == input.storage_identity &&
+      input_certificate.input_revision_domain_ == input.revision_domain &&
+      input_certificate.input_revision_ == input.revision &&
+      input_certificate.input_field_ == input.field;
+  if (!current) {
+    status = {StatusCode::invalid_plan,
+              kPressureEnergyPressureFluxApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  return apply_after_exchange(input, output);
+}
+
+Status PressureEnergyPressureFluxOperator::apply_after_exchange(
+    FieldView input, FieldView output) const noexcept {
+  Status status = pressure_boundary_.fill_ghosts(input);
   if (!status) {
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
+  const Int3 cells = certificate_.linear.local_shape;
   const ConstFieldView pressure = as_const(input);
+  const bool exact_pressure_work =
+      certificate_.pressure_work_scope ==
+      PressureEnergyPressureWorkScope::exact_cartesian;
 
   Status arithmetic;
   for_each_cell(cells, [&](Int3 cell) {
@@ -2560,6 +2629,54 @@ Status PressureEnergySchurOperator::bind(
       binding.activity.local_fingerprint;
   candidate.certificate_.activity_collective_fingerprint =
       binding.activity.collective_fingerprint;
+  const auto* typed_energy_pressure =
+      dynamic_cast<const PressureEnergyPressureFluxOperator*>(
+          binding.energy_pressure);
+  if (typed_energy_pressure != nullptr &&
+      block_authority.scope_ ==
+          PressureEnergySchurBlockScope::exact_cartesian_frozen_spatial) {
+    const auto* typed_continuity =
+        dynamic_cast<const PressureLinearOperator*>(
+            binding.continuity_pressure);
+    PressureEnergySharedPressureCertificate shared;
+    if (typed_continuity != nullptr &&
+        typed_continuity->certify_pressure_energy_shared_halo(
+            *typed_continuity,
+            PressureEnergySharedPressureScope::cartesian,
+            *typed_energy_pressure, shared)) {
+      candidate.shared_cartesian_pressure_ = typed_continuity;
+      candidate.shared_energy_pressure_ = typed_energy_pressure;
+      candidate.certificate_.shared_pressure = shared;
+    }
+  } else if (
+      typed_energy_pressure != nullptr &&
+      block_authority.scope_ == PressureEnergySchurBlockScope::
+                                      ibm_cartesian_spatial_quasi_newton) {
+    const auto* typed_continuity =
+        dynamic_cast<const IbmPressureOperator*>(binding.continuity_pressure);
+    PressureEnergySharedPressureCertificate shared;
+    if (typed_continuity != nullptr &&
+        typed_continuity->certify_pressure_energy_shared_halo(
+            *typed_energy_pressure, shared)) {
+      candidate.shared_ibm_pressure_ = typed_continuity;
+      candidate.shared_energy_pressure_ = typed_energy_pressure;
+      candidate.certificate_.shared_pressure = shared;
+    }
+  }
+  // The shared-halo policy changes the executable Schur route even though it
+  // preserves the algebraic block identity.  Bind that policy into both the
+  // collective and rank-local certificates so a generic three-halo operator
+  // cannot be mistaken for the typed two-halo implementation.
+  if (candidate.certificate_.shared_pressure.valid()) {
+    candidate.certificate_.schur.collective_fingerprint = nonzero_hash(
+        hash_mix(candidate.certificate_.schur.collective_fingerprint,
+                 candidate.certificate_.shared_pressure
+                     .collective_contract_));
+    candidate.certificate_.block_jacobian = nonzero_hash(
+        hash_mix(candidate.certificate_.block_jacobian,
+                 candidate.certificate_.shared_pressure
+                     .rank_local_contract_));
+  }
   candidate.certificate_.sign_class = PressureEnergySchurSignClass::general;
   if (block_authority.scope_ ==
       PressureEnergySchurBlockScope::exact_cartesian_frozen_spatial) {
@@ -2631,9 +2748,48 @@ Status PressureEnergySchurOperator::apply(FieldView pressure,
     return status;
   }
 
-  Status status = component_apply(*continuity_pressure_, pressure,
-                                  workspace_.continuity_response, failure_);
-  if (!status) return status;
+  Status status;
+  const bool shared_pressure = certificate_.shared_pressure.valid();
+  if (shared_pressure) {
+    // Consume E_p immediately after the shared C_p exchange.  Besides saving
+    // the second payload halo, this keeps the per-input certificate fail-closed:
+    // no intervening exchange can advance the certified pressure ghost view.
+    PressureEnergySharedPressureInputCertificate shared_input;
+    if (shared_cartesian_pressure_ != nullptr) {
+      status = shared_cartesian_pressure_
+                   ->exchange_pressure_energy_shared_input(
+                       pressure, certificate_.shared_pressure, shared_input);
+      if (!status)
+        return capture_component_failure(*continuity_pressure_, status,
+                                         failure_);
+      status = shared_cartesian_pressure_
+                   ->apply_pressure_energy_shared_input(
+                       pressure, workspace_.continuity_response,
+                       certificate_.shared_pressure, shared_input);
+    } else if (shared_ibm_pressure_ != nullptr) {
+      status = shared_ibm_pressure_->exchange_pressure_energy_shared_input(
+          pressure, certificate_.shared_pressure, shared_input);
+      if (!status)
+        return capture_component_failure(*continuity_pressure_, status,
+                                         failure_);
+      status = shared_ibm_pressure_->apply_pressure_energy_shared_input(
+          pressure, workspace_.continuity_response,
+          certificate_.shared_pressure, shared_input);
+    } else {
+      status = {StatusCode::invalid_plan, kPressureEnergySchurApply};
+    }
+    if (!status)
+      return capture_component_failure(*continuity_pressure_, status,
+                                       failure_);
+    status = shared_energy_pressure_->apply_pressure_energy_shared_input(
+        pressure, output, certificate_.shared_pressure, shared_input);
+    if (!status)
+      return capture_component_failure(*energy_pressure_, status, failure_);
+  } else {
+    status = component_apply(*continuity_pressure_, pressure,
+                             workspace_.continuity_response, failure_);
+    if (!status) return status;
+  }
   for_each_cell(shape, [&](Int3 cell) {
     workspace_.eliminated_enthalpy.unchecked(cell, 0U) =
         active_cell(activity_, shape, cell)
@@ -2645,8 +2801,10 @@ Status PressureEnergySchurOperator::apply(FieldView pressure,
                            workspace_.eliminated_enthalpy,
                            workspace_.energy_response, failure_);
   if (!status) return status;
-  status = component_apply(*energy_pressure_, pressure, output, failure_);
-  if (!status) return status;
+  if (!shared_pressure) {
+    status = component_apply(*energy_pressure_, pressure, output, failure_);
+    if (!status) return status;
+  }
   for_each_cell(shape, [&](Int3 cell) {
     if (active_cell(activity_, shape, cell)) {
       output.unchecked(cell, 0U) -=

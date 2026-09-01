@@ -16,6 +16,10 @@
 namespace hundun::v04 {
 
 class IbmPhysicalBoundaryFluxAuthority;
+class PressureEnergyPressureFluxOperator;
+class PressureEnergySchurOperator;
+class PressureEnergySharedPressureCertificate;
+class PressureEnergySharedPressureInputCertificate;
 
 using GlobalCellId = std::uint64_t;
 using SurfaceTriangleId = std::uint64_t;
@@ -894,6 +898,22 @@ class IbmPressureOperator final : public LinearOperator {
   PlanFingerprint fingerprint() const noexcept;
 
  private:
+  friend class PressureEnergySchurOperator;
+  Status certify_pressure_energy_shared_halo(
+      const PressureEnergyPressureFluxOperator& energy_pressure,
+      PressureEnergySharedPressureCertificate& certificate) const noexcept;
+  Status exchange_pressure_energy_shared_input(
+      FieldView input,
+      const PressureEnergySharedPressureCertificate& certificate,
+      PressureEnergySharedPressureInputCertificate& input_certificate) const
+      noexcept;
+  Status apply_pressure_energy_shared_input(
+      FieldView input, FieldView output,
+      const PressureEnergySharedPressureCertificate& certificate,
+      const PressureEnergySharedPressureInputCertificate& input_certificate)
+      const noexcept;
+  Status decorate_pressure_action(FieldView input, FieldView output) const
+      noexcept;
   static Status bind_internal(const LinearOperator& regular,
                               Int3 local_shape,
                               const EBTopology& topology,
