@@ -10872,10 +10872,13 @@ Status ProductDriver::Impl::execute_attempt(
                                               : nullptr;
         candidate_assembly.wall_treatment = nullptr;
         const auto assemble_candidate_energy = [&]() noexcept {
-          Status assembled = assemble_enthalpy(
+          const TargetCoupledEnthalpyResidualWorkspace residual_workspace{
+              pressure_energy_e_h, pressure_energy_r_c,
+              pressure_energy_e_p};
+          Status assembled = assemble_target_coupled_enthalpy_residual(
               product.equations.enthalpy(), candidate_state,
-              candidate_material, candidate_gradient, {}, candidate_assembly,
-              pressure_energy_system, artifacts.energy);
+              candidate_material, candidate_gradient, candidate_assembly,
+              pressure_energy_r_e, residual_workspace, artifacts.energy);
           if (assembled && product.ibm_equations.has_value()) {
             zero_field(pressure_energy_e_p);
             assembled = product.ibm_equations->correct_pressure_work(
