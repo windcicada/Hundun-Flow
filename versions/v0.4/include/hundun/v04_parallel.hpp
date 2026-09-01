@@ -150,6 +150,7 @@ struct HaloRuntimeCounters {
   std::uint64_t messages_started{};
   std::uint64_t bytes_packed{};
   std::uint64_t bytes_unpacked{};
+  std::uint64_t control_consensus_calls{};
 };
 
 class HaloEngine {
@@ -171,6 +172,18 @@ class HaloEngine {
   Status begin(StageId stage, Span<const FieldView> fields,
                Status prerequisite, HaloTicket& ticket) noexcept;
   Status finish(HaloTicket& ticket, Span<FieldView> fields) noexcept;
+  // A prepared epoch is entered only after its owner has cold-certified a
+  // fixed all-rank exchange schedule.  Its hot begin/finish pair performs no
+  // control collective: rank-local failures are retained in deferred while
+  // every rank completes the same persistent-request sequence.  The owner
+  // must close the epoch with the result of its outer collective authority.
+  Status enter_prepared_epoch() noexcept;
+  Status begin_prepared(StageId stage, Span<const FieldView> fields,
+                        Status& deferred, HaloTicket& ticket) noexcept;
+  Status finish_prepared(HaloTicket& ticket, Span<FieldView> fields,
+                         Status& deferred) noexcept;
+  void close_prepared_epoch(bool publish,
+                            int lowest_failing_rank = -1) noexcept;
   Status validate_contract(MPI_Comm communicator, const MeshPatch& patch,
                            Span<const HaloFieldSpec> fields,
                            HaloTopology topology) const noexcept;

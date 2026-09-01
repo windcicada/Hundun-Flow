@@ -99,6 +99,8 @@ struct HaloImplData {
   bool exchange_active{};
   bool requests_active{};
   bool poisoned{};
+  bool prepared_epoch_active{};
+  bool prepared_exchange_views_valid{};
 };
 
 std::atomic<std::uint64_t> g_next_halo_identity{1U};
@@ -217,9 +219,16 @@ Status raw_collective_status(MPI_Comm communicator, int rank, int size,
 }
 
 Status collective_status(HaloImplData& implementation, Status local) noexcept {
+  ++implementation.counters.control_consensus_calls;
   return raw_collective_status(implementation.control, implementation.rank,
                                implementation.size, local,
                                implementation.lowest_failing_rank);
+}
+
+void retain_deferred(Status local, Status& deferred) noexcept {
+  if (deferred && !local) {
+    deferred = local;
+  }
 }
 
 bool injected(FailurePoint point, int rank) noexcept {
@@ -1211,10 +1220,11 @@ Status HaloEngine::begin(StageId stage, Span<const FieldView> fields,
   if (!implementation.exchange_active) {
     invalidate_certificates(implementation);
   }
-  Status local = implementation.exchange_active || ticket.active_
-                     ? Status{StatusCode::invalid_plan,
-                              detail::halo_detail_state}
-                     : prerequisite;
+  Status local =
+      implementation.exchange_active || ticket.active_ ||
+              implementation.prepared_epoch_active
+          ? Status{StatusCode::invalid_plan, detail::halo_detail_state}
+          : prerequisite;
   if (local && implementation.poisoned) {
     local = recreate_requests(implementation);
   }
@@ -1363,6 +1373,190 @@ Status HaloEngine::finish(HaloTicket& ticket,
   finish_exchange_state(implementation);
   ticket = HaloTicket{};
   return {};
+}
+
+Status HaloEngine::enter_prepared_epoch() noexcept {
+  if (implementation_ == nullptr) {
+    return {StatusCode::invalid_plan, detail::halo_detail_state};
+  }
+  HaloImplData& implementation = *implementation_;
+  // An attempted epoch is itself a certificate boundary.  Invalidate before
+  // checking readiness so a rank-local rejected entry cannot retain an older
+  // ghost certificate while its peers reject the same outer authority.
+  invalidate_certificates(implementation);
+  for (FieldSlot& field : implementation.fields) {
+    field.pending_revision = 0U;
+  }
+  if (implementation.prepared_epoch_active || implementation.exchange_active ||
+      implementation.requests_active || implementation.poisoned) {
+    return {StatusCode::invalid_plan, detail::halo_detail_state};
+  }
+  implementation.prepared_exchange_views_valid = false;
+  implementation.prepared_epoch_active = true;
+  implementation.lowest_failing_rank = -1;
+  return {};
+}
+
+Status HaloEngine::begin_prepared(StageId stage,
+                                  Span<const FieldView> fields,
+                                  Status& deferred,
+                                  HaloTicket& ticket) noexcept {
+  if (implementation_ == nullptr) {
+    return {StatusCode::invalid_plan, detail::halo_detail_state};
+  }
+  HaloImplData& implementation = *implementation_;
+  ++implementation.counters.begin_calls;
+  Status local =
+      !implementation.prepared_epoch_active ||
+              implementation.exchange_active || ticket.active_ ||
+              implementation.poisoned
+          ? Status{StatusCode::invalid_plan, detail::halo_detail_state}
+          : Status{};
+  if (local) {
+    local = validate_begin_views(implementation, fields);
+  }
+  const bool views_valid = static_cast<bool>(local);
+  retain_deferred(local, deferred);
+  if (views_valid) {
+    if (injected(FailurePoint::pack, implementation.rank)) {
+      retain_deferred(
+          {StatusCode::invalid_plan, detail::halo_detail_pack_failure},
+          deferred);
+    }
+    for (const Peer& peer : implementation.peers) {
+      for (const Section& section : peer.sends) {
+        const FieldSlot& field = implementation.fields[section.field_slot];
+        pack_section(implementation.candidate_begin_views[section.field_slot],
+                     field.spec, section.face,
+                     implementation.send_storage.data() +
+                         static_cast<std::size_t>(section.offset));
+      }
+    }
+    implementation.counters.bytes_packed +=
+        implementation.stats.send_capacity_doubles * sizeof(double);
+  }
+  if (injected(FailurePoint::start, implementation.rank)) {
+    retain_deferred(
+        {StatusCode::mpi_failure, detail::halo_detail_start_failure},
+        deferred);
+  }
+  if (!implementation.requests.empty()) {
+    implementation.requests_active = true;
+    if (MPI_Startall(static_cast<int>(implementation.requests.size()),
+                     implementation.requests.data()) != MPI_SUCCESS) {
+      cancel_and_drain(implementation);
+      implementation.poisoned = true;
+      implementation.exchange_active = false;
+      implementation.prepared_exchange_views_valid = false;
+      ticket = HaloTicket{};
+      return {StatusCode::mpi_failure, detail::halo_detail_start_failure};
+    }
+  }
+  implementation.counters.messages_started += implementation.chunks.size();
+  if (views_valid) {
+    publish_begin_views(implementation);
+  }
+  ++implementation.generation;
+  if (implementation.generation == 0U) {
+    ++implementation.generation;
+  }
+  implementation.prepared_exchange_views_valid = views_valid;
+  implementation.exchange_active = true;
+  ticket.engine_identity_ = implementation.identity;
+  ticket.generation_ = implementation.generation;
+  ticket.stage_ = stage;
+  ticket.active_ = true;
+  return {};
+}
+
+Status HaloEngine::finish_prepared(HaloTicket& ticket,
+                                   Span<FieldView> fields,
+                                   Status& deferred) noexcept {
+  if (implementation_ == nullptr) {
+    return {StatusCode::invalid_plan, detail::halo_detail_state};
+  }
+  HaloImplData& implementation = *implementation_;
+  ++implementation.counters.finish_calls;
+  Status local =
+      !implementation.prepared_epoch_active ||
+              !implementation.exchange_active || implementation.poisoned ||
+              !ticket.active_ ||
+              ticket.engine_identity_ != implementation.identity ||
+              ticket.generation_ != implementation.generation
+          ? Status{StatusCode::invalid_plan, detail::halo_detail_state}
+          : Status{};
+  if (local && implementation.prepared_exchange_views_valid) {
+    local = bind_finish_views(implementation, fields);
+  }
+  const bool views_valid = implementation.prepared_exchange_views_valid &&
+                           static_cast<bool>(local);
+  retain_deferred(local, deferred);
+  if (injected(FailurePoint::completion, implementation.rank)) {
+    retain_deferred(
+        {StatusCode::mpi_failure, detail::halo_detail_completion_failure},
+        deferred);
+  }
+  if (implementation.requests_active) {
+    if (MPI_Waitall(static_cast<int>(implementation.requests.size()),
+                    implementation.requests.data(),
+                    implementation.statuses.data()) != MPI_SUCCESS) {
+      cancel_and_drain(implementation);
+      implementation.poisoned = true;
+      finish_exchange_state(implementation);
+      implementation.prepared_exchange_views_valid = false;
+      ticket = HaloTicket{};
+      return {StatusCode::mpi_failure,
+              detail::halo_detail_completion_failure};
+    }
+    implementation.requests_active = false;
+  }
+  if (injected(FailurePoint::unpack, implementation.rank)) {
+    retain_deferred(
+        {StatusCode::invalid_plan, detail::halo_detail_unpack_failure},
+        deferred);
+  }
+  if (views_valid) {
+    copy_local_peers(implementation);
+    for (const Peer& peer : implementation.peers) {
+      for (const Section& section : peer.receives) {
+        FieldSlot& field = implementation.fields[section.field_slot];
+        unpack_section(field.finish_view, field.spec, section.face,
+                       implementation.receive_storage.data() +
+                           static_cast<std::size_t>(section.offset));
+      }
+    }
+    implementation.counters.bytes_unpacked +=
+        implementation.stats.receive_capacity_doubles * sizeof(double);
+  }
+  finish_exchange_state(implementation);
+  implementation.prepared_exchange_views_valid = false;
+  ticket = HaloTicket{};
+  return {};
+}
+
+void HaloEngine::close_prepared_epoch(bool publish,
+                                      int lowest_failing_rank) noexcept {
+  if (implementation_ == nullptr) {
+    return;
+  }
+  HaloImplData& implementation = *implementation_;
+  if (!implementation.prepared_epoch_active) {
+    return;
+  }
+  const bool clean = !implementation.exchange_active &&
+                     !implementation.requests_active &&
+                     !implementation.poisoned;
+  if (publish && clean) {
+    for (FieldSlot& field : implementation.fields) {
+      field.ghost_revision = field.pending_revision;
+    }
+    implementation.lowest_failing_rank = -1;
+  } else {
+    invalidate_certificates(implementation);
+    implementation.lowest_failing_rank = lowest_failing_rank;
+  }
+  implementation.prepared_epoch_active = false;
+  implementation.prepared_exchange_views_valid = false;
 }
 
 Status HaloEngine::validate_contract(

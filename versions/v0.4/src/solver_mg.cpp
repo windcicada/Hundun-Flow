@@ -633,6 +633,8 @@ struct NativeCartesianMgPlan::Impl {
   int rank{};
   int size{};
   int lowest{-1};
+  bool prepared_halo_epoch{};
+  Status prepared_halo_deferred{};
 };
 
 namespace {
@@ -1890,6 +1892,42 @@ HaloEngine* halo_for(Implementation& implementation,
 }
 
 template <class Implementation>
+Status enter_prepared_halo_epoch(Implementation& implementation) noexcept {
+  Status local{};
+  const auto enter = [&](HaloEngine* halo) noexcept {
+    if (halo == nullptr) {
+      if (local) local = {StatusCode::invalid_plan, kMgPlan};
+      return;
+    }
+    const Status entered = halo->enter_prepared_epoch();
+    if (local && !entered) local = entered;
+  };
+  enter(implementation.services.finest_halo);
+  for (HaloEngine* halo : implementation.level_halo_table) {
+    enter(halo);
+  }
+  implementation.prepared_halo_epoch = static_cast<bool>(local);
+  implementation.prepared_halo_deferred = {};
+  return local;
+}
+
+template <class Implementation>
+void close_prepared_halo_epoch(Implementation& implementation, bool publish,
+                               int lowest_failing_rank) noexcept {
+  if (implementation.services.finest_halo != nullptr) {
+    implementation.services.finest_halo->close_prepared_epoch(
+        publish, lowest_failing_rank);
+  }
+  for (HaloEngine* halo : implementation.level_halo_table) {
+    if (halo != nullptr) {
+      halo->close_prepared_epoch(publish, lowest_failing_rank);
+    }
+  }
+  implementation.prepared_halo_epoch = false;
+  implementation.prepared_halo_deferred = {};
+}
+
+template <class Implementation>
 Status exchange_level_slot(Implementation& implementation, std::size_t level,
                            MgWorkspaceSlot slot, FieldView& field,
                            StageId stage) noexcept {
@@ -1899,10 +1937,17 @@ Status exchange_level_slot(Implementation& implementation, std::size_t level,
   HaloTicket ticket;
   std::array<FieldView, 1U> views{field};
   HaloEngine* const halo = halo_for(implementation, level);
-  local = halo->begin(
-      stage, {views.data(), views.size()}, ticket);
+  local = implementation.prepared_halo_epoch
+              ? halo->begin_prepared(stage, {views.data(), views.size()},
+                                     implementation.prepared_halo_deferred,
+                                     ticket)
+              : halo->begin(stage, {views.data(), views.size()}, ticket);
   if (local) {
-    local = halo->finish(ticket, {views.data(), views.size()});
+    local = implementation.prepared_halo_epoch
+                ? halo->finish_prepared(
+                      ticket, {views.data(), views.size()},
+                      implementation.prepared_halo_deferred)
+                : halo->finish(ticket, {views.data(), views.size()});
     field = views[0U];
   }
   if (!local) implementation.lowest = halo->lowest_failing_rank();
@@ -3339,10 +3384,17 @@ Status restrict_residual(Implementation& implementation,
   HaloTicket ticket;
   std::array<FieldView, 1U> views{fr};
   HaloEngine* const halo = halo_for(implementation, fine_index);
-  status = halo->begin(
-      stage++, {views.data(), views.size()}, ticket);
+  status = implementation.prepared_halo_epoch
+               ? halo->begin_prepared(
+                     stage++, {views.data(), views.size()},
+                     implementation.prepared_halo_deferred, ticket)
+               : halo->begin(stage++, {views.data(), views.size()}, ticket);
   if (status) {
-    status = halo->finish(ticket, {views.data(), views.size()});
+    status = implementation.prepared_halo_epoch
+                 ? halo->finish_prepared(
+                       ticket, {views.data(), views.size()},
+                       implementation.prepared_halo_deferred)
+                 : halo->finish(ticket, {views.data(), views.size()});
     fr = views[0U];
   }
   if (!status) implementation.lowest = halo->lowest_failing_rank();
@@ -4320,20 +4372,38 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   candidate = implementation.services.workspace->level(
       0U, MgWorkspaceSlot::solution);
   rhs = implementation.services.workspace->level(0U, MgWorkspaceSlot::rhs);
-  agreed = consensus(implementation, local);
-  if (!agreed) {
-    return agreed;
+  if (!prepared) {
+    agreed = consensus(implementation, local);
+    if (!agreed) {
+      return agreed;
+    }
+  } else if (!local) {
+    // Every level/slot and the maximum application count were certified by
+    // prepare_batch().  Preserve the fixed communication schedule if a
+    // revision counter is nevertheless found out of contract.
+    implementation.prepared_halo_deferred = local;
+    local = {};
   }
   if (implementation.spec.null_space == MgNullSpace::constant) {
     local = project_constant(implementation, 0U, rhs);
+    if (prepared && !local) {
+      close_prepared_halo_epoch(implementation, false,
+                                implementation.lowest);
+      return local;
+    }
     if (local) {
       local = implementation.services.workspace->revise_level(
           0U, MgWorkspaceSlot::rhs);
       rhs = implementation.services.workspace->level(
           0U, MgWorkspaceSlot::rhs);
     }
-    agreed = consensus(implementation, local);
-    if (!agreed) return agreed;
+    if (!prepared) {
+      agreed = consensus(implementation, local);
+      if (!agreed) return agreed;
+    } else if (!local) {
+      implementation.prepared_halo_deferred = local;
+      local = {};
+    }
   }
   StageId stage = 700U;
   Status deferred{};
@@ -4341,29 +4411,51 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   const std::uint8_t cycle_counter =
       implementation.spec.policy.cycle == MgCycleKind::f_cycle ? 2U : 1U;
   local = mg_cycle(implementation, 0U, cycle_counter, stage, deferred);
-  if (local && !deferred) {
-    local = deferred;
+  if (!prepared) {
+    if (local && !deferred) {
+      local = deferred;
+    }
+    agreed = consensus(implementation, local);
+    if (!agreed) return agreed;
+  } else if (!local) {
+    close_prepared_halo_epoch(implementation, false,
+                              implementation.lowest);
+    return local;
   }
-  agreed = consensus(implementation, local);
-  if (!agreed) return agreed;
   candidate = implementation.services.workspace->level(
       0U, MgWorkspaceSlot::solution);
   if (implementation.spec.null_space == MgNullSpace::constant) {
     local = project_constant(implementation, 0U, candidate);
+    if (prepared && !local) {
+      close_prepared_halo_epoch(implementation, false,
+                                implementation.lowest);
+      return local;
+    }
     if (local) {
       local = implementation.services.workspace->revise_level(
           0U, MgWorkspaceSlot::solution);
     }
     candidate = implementation.services.workspace->level(
         0U, MgWorkspaceSlot::solution);
-    agreed = consensus(implementation, local);
-    if (!agreed) {
-      return agreed;
+    if (!prepared) {
+      agreed = consensus(implementation, local);
+      if (!agreed) {
+        return agreed;
+      }
+    } else if (!local) {
+      implementation.prepared_halo_deferred = local;
+      local = {};
     }
   }
   local = compute_residual(implementation, 0U, stage);
-  agreed = consensus(implementation, local);
-  if (!agreed) return agreed;
+  if (!prepared) {
+    agreed = consensus(implementation, local);
+    if (!agreed) return agreed;
+  } else if (!local) {
+    close_prepared_halo_epoch(implementation, false,
+                              implementation.lowest);
+    return local;
+  }
   recursive = implementation.services.workspace->level(
       0U, MgWorkspaceSlot::residual);
   double local_projection[3]{};
@@ -4388,14 +4480,28 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
       {local_projection, 3U}, {projection, 3U});
   implementation.lowest =
       implementation.services.reductions->lowest_failing_rank();
-  if (!local) return local;
+  if (!local) {
+    if (prepared) {
+      close_prepared_halo_epoch(implementation, false,
+                                implementation.lowest);
+    }
+    return local;
+  }
   const bool finite_projection = std::isfinite(projection[0]) &&
                                  std::isfinite(projection[1]) &&
                                  std::isfinite(projection[2]) &&
                                  projection[0] >= 0.0 &&
                                  projection[2] >= 0.0;
   if (!finite_projection) {
-    return {StatusCode::numerical_failure, kMgApply};
+    if (!prepared) {
+      return {StatusCode::numerical_failure, kMgApply};
+    }
+    if (deferred) {
+      deferred = {StatusCode::numerical_failure, kMgApply};
+    }
+    projection[0] = 0.0;
+    projection[1] = 0.0;
+    projection[2] = 0.0;
   }
   const double scale = std::max(1.0, projection[0]);
   const double tiny = std::numeric_limits<double>::epsilon() * scale;
@@ -4428,7 +4534,12 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   implementation.last_final = std::sqrt(final_squared);
   if (!std::isfinite(alpha) || !std::isfinite(implementation.last_initial) ||
       !std::isfinite(implementation.last_final)) {
-    return {StatusCode::numerical_failure, kMgApply};
+    if (!prepared) {
+      return {StatusCode::numerical_failure, kMgApply};
+    }
+    if (deferred) {
+      deferred = {StatusCode::numerical_failure, kMgApply};
+    }
   }
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
@@ -4456,11 +4567,19 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
     if (!agreed) {
       return agreed;
     }
-  } else if (!local) {
-    // The cold proof reserves this increment for every rank.  A failure here
-    // can only indicate an out-of-contract mutation between applications;
-    // report it locally without reintroducing a success-path collective.
-    return local;
+  } else {
+    if (local && !deferred) {
+      local = deferred;
+    }
+    if (local && !implementation.prepared_halo_deferred) {
+      local = implementation.prepared_halo_deferred;
+    }
+    agreed = consensus(implementation, local);
+    close_prepared_halo_epoch(implementation, static_cast<bool>(agreed),
+                              implementation.lowest);
+    if (!agreed) {
+      return agreed;
+    }
   }
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
@@ -4511,7 +4630,7 @@ Status NativeCartesianMgPlan::apply_prepared(
   if (implementation_ == nullptr) {
     return {StatusCode::invalid_plan, kMgApply};
   }
-  const Impl& implementation = *implementation_;
+  Impl& implementation = *implementation_;
   const std::uintptr_t owner = reinterpret_cast<std::uintptr_t>(
       static_cast<const LinearPreconditioner*>(this));
   const bool valid_ticket =
@@ -4532,8 +4651,32 @@ Status NativeCartesianMgPlan::apply_prepared(
           ticket.preconditioner_application_base +
               ticket.maximum_applications &&
       iteration < ticket.maximum_applications;
-  if (!valid_ticket) {
-    return {StatusCode::invalid_plan, kMgApply};
+  // prepare_batch() already cold-certified every borrowed service identity;
+  // the ticket binds that proof to the exact plan generation and application
+  // budget.  Do not rescan the hierarchy on every Krylov application.
+  Status local = valid_ticket
+                     ? Status{}
+                     : Status{StatusCode::invalid_plan, kMgApply};
+  if (local) {
+    local = !valid_field(residual, implementation.spec.patch.cells) ||
+                    !valid_field(as_const(correction),
+                                 implementation.spec.patch.cells) ||
+                    detail::field_views_overlap(residual, correction) ||
+                    implementation.services.workspace->overlaps_storage(
+                        residual) ||
+                    implementation.services.workspace->overlaps_storage(
+                        correction)
+                ? Status{StatusCode::invalid_plan, kMgApply}
+                : Status{};
+  }
+  const Status epoch = enter_prepared_halo_epoch(implementation);
+  if (local && !epoch) local = epoch;
+  implementation.lowest = -1;
+  const Status agreed = consensus(implementation, local);
+  if (!agreed) {
+    close_prepared_halo_epoch(implementation, false,
+                              implementation.lowest);
+    return agreed;
   }
   return apply_impl(residual, correction, true);
 }

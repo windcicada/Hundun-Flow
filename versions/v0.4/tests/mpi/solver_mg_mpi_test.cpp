@@ -268,7 +268,8 @@ HaloRuntimeCounters difference(HaloRuntimeCounters after,
           after.finish_calls - before.finish_calls,
           after.messages_started - before.messages_started,
           after.bytes_packed - before.bytes_packed,
-          after.bytes_unpacked - before.bytes_unpacked};
+          after.bytes_unpacked - before.bytes_unpacked,
+          after.control_consensus_calls - before.control_consensus_calls};
 }
 
 bool same(LinearReductionCounters left,
@@ -581,6 +582,7 @@ HaloRuntimeCounters halo_counters(const Fixture& fixture) noexcept {
     result.messages_started += level.messages_started;
     result.bytes_packed += level.bytes_packed;
     result.bytes_unpacked += level.bytes_unpacked;
+    result.control_consensus_calls += level.control_consensus_calls;
   }
   return result;
 }
@@ -1611,7 +1613,7 @@ bool test_boundary_topology_contract_is_bidirectional(int rank) {
   return all_true(passed);
 }
 
-bool test_prepared_apply_equivalence(int rank) {
+bool test_prepared_apply_equivalence(int rank, int size) {
   Fixture direct_fixture;
   Fixture prepared_fixture;
   bool passed = expect(initialize(direct_fixture), rank,
@@ -1659,7 +1661,7 @@ bool test_prepared_apply_equivalence(int rank) {
 
   const LinearPreconditionerBatchDescriptor descriptor{
       &prepared_fixture.solver_workspace, prepared_fixture.patch.cells, 1U,
-      6U, 4U, 1U};
+      6U, 4U, 2U};
   LinearPreconditionerBatchTicket ticket;
   std::size_t allocations = 0U;
   Status cold_status{};
@@ -1704,7 +1706,7 @@ bool test_prepared_apply_equivalence(int rank) {
       direct_after.blocking_operations - direct_before.blocking_operations ==
           prepared_after.blocking_operations -
                   prepared_before.blocking_operations +
-              4U;
+              5U;
   const bool exact_equivalence =
       static_cast<bool>(direct_status) && static_cast<bool>(cold_status) &&
       static_cast<bool>(prepared_status) && allocations == 0U &&
@@ -1722,7 +1724,52 @@ bool test_prepared_apply_equivalence(int rank) {
       finite(prepared_fixture.correction.view);
   passed &= expect(
       exact_equivalence, rank,
-      "Native-MG direct/prepared paths have exact work and numerical identity with four fewer blocking collectives");
+      "Native-MG direct/prepared paths have exact work and numerical identity with five fewer blocking collectives");
+  passed &= expect(
+      direct_halo_delta.control_consensus_calls ==
+              4U * direct_halo_delta.begin_calls &&
+          prepared_halo_delta.control_consensus_calls == 0U &&
+          prepared_halo_delta.begin_calls > 0U,
+      rank,
+      "prepared Native-MG performs no per-Halo control consensus");
+
+  fill(prepared_fixture.correction, -71.0);
+  const std::uint64_t failure_checksum =
+      checksum(prepared_fixture.correction.view);
+  const HaloRuntimeCounters failure_halo_before =
+      halo_counters(prepared_fixture);
+  detail::set_halo_failure_for_test(detail::HaloFailurePoint::unpack,
+                                    size - 1);
+  Status deferred_failure{};
+  std::size_t failure_allocations = 0U;
+  {
+    allocation_observer::Guard guard;
+    deferred_failure = prepared.apply_prepared(
+        as_const(prepared_fixture.residual.view),
+        prepared_fixture.correction.view, 1U, ticket);
+    failure_allocations =
+        allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  detail::clear_halo_failure_for_test();
+  const HaloRuntimeCounters failure_halo = difference(
+      halo_counters(prepared_fixture), failure_halo_before);
+  bool ghost_unpublished =
+      prepared_fixture.halo.ghost_revision(kWorkspaceVectors) == 0U;
+  for (const HaloEngine& halo : prepared_fixture.coarse_halos) {
+    ghost_unpublished &= halo.ghost_revision(kWorkspaceVectors) == 0U;
+  }
+  passed &= expect(
+      deferred_failure.code == StatusCode::invalid_plan &&
+          deferred_failure.detail == detail::halo_detail_unpack_failure &&
+          identical(packed(deferred_failure)) &&
+          prepared.lowest_failing_rank() == size - 1 &&
+          checksum(prepared_fixture.correction.view) == failure_checksum &&
+          failure_allocations == 0U && ghost_unpublished &&
+          failure_halo.begin_calls == prepared_halo_delta.begin_calls &&
+          failure_halo.finish_calls == prepared_halo_delta.finish_calls &&
+          failure_halo.control_consensus_calls == 0U,
+      rank,
+      "prepared Native-MG defers a rank-local Halo failure through the fixed schedule and publishes no ghost certificate or correction");
 
   LinearPreconditionerBatchTicket invalid_ticket;
   const MgPlanCounters before_invalid = prepared.counters();
@@ -1731,7 +1778,7 @@ bool test_prepared_apply_equivalence(int rank) {
       0U, invalid_ticket);
   const Status over_boundary = prepared.apply_prepared(
       as_const(prepared_fixture.residual.view), prepared_fixture.correction.view,
-      1U, ticket);
+      2U, ticket);
   passed &= expect(
       invalid.code == StatusCode::invalid_plan &&
           over_boundary.code == StatusCode::invalid_plan &&
@@ -2511,7 +2558,7 @@ int main(int argc, char** argv) {
   passed &= test_point_row_boundary_and_small_x_oracle(rank);
   passed &= test_chebyshev_point_row_reference_oracle(rank);
   passed &= test_boundary_topology_contract_is_bidirectional(rank);
-  passed &= test_prepared_apply_equivalence(rank);
+  passed &= test_prepared_apply_equivalence(rank, size);
   passed &= test_progress_and_hot_reuse(rank);
   passed &= test_collective_failure_is_transactional(rank, size);
   passed &= test_default_v_cycle_is_explicit_v_cycle(rank);
