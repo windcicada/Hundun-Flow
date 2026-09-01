@@ -10930,6 +10930,7 @@ Status ProductDriver::Impl::execute_attempt(
               static_cast<std::size_t>(cells.y) *
               static_cast<std::size_t>(cells.z);
           double local_energy_error = 0.0;
+          bool local_energy_bitwise_equal = true;
           std::size_t energy_offset = 0U;
           if (pressure_energy_baseline_energy_residual.size() !=
               expected_energy_values)
@@ -10971,6 +10972,9 @@ Status ProductDriver::Impl::execute_attempt(
                 if (full_alpha_zero_oracle) {
                   const double base =
                       pressure_energy_baseline_energy_residual[energy_offset];
+                  local_energy_bitwise_equal &=
+                      product_double_bits(oracle) ==
+                      product_double_bits(base);
                   const double scale =
                       std::max({1.0, std::abs(oracle), std::abs(base)});
                   local_energy_error = std::max(
@@ -10984,7 +10988,8 @@ Status ProductDriver::Impl::execute_attempt(
             double global_energy_error = 0.0;
             evaluated = product.reductions.checked_max(
                 {&local_energy_error, 1U}, {&global_energy_error, 1U},
-                local && std::isfinite(local_energy_error) &&
+                local && local_energy_bitwise_equal &&
+                        std::isfinite(local_energy_error) &&
                         local_energy_error <= alpha_zero_oracle_tolerance
                     ? Status{}
                     : Status{StatusCode::rejected_step,
