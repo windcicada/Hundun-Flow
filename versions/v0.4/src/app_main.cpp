@@ -215,7 +215,7 @@ int main(int argc, char* argv[]) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   int result = 2;
   if (argc == 2 && std::string_view{argv[1]} == "--version") {
-    if (rank == 0) std::cout << "HUNDUN-FLOW 0.4.0 source=v0.4\n";
+    if (rank == 0) std::cout << "HUNDUN-FLOW 1.0.0 source=v0.4\n";
     result = 0;
   } else if ((argc == 3 || argc == 4) &&
              std::string_view{argv[1]} == "validate" &&

@@ -1,0 +1,97 @@
+{
+  "schema": "HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V1",
+  "status": "preregistered_before_candidate_statistics",
+  "product_version": "1.0.0",
+  "source_line": "v0.4",
+  "scope": "single_phase_cartesian_ibm_release_with_10d_blockage_thin_domain_re3900_medium_validation",
+  "supersession": {
+    "applies_to": "v1.0.0_release_only",
+    "replaces": "v0.4_task21_full20_and_420_cycle_release_predicate",
+    "does_not_claim": [
+      "v0.4_task21_formal_acceptance",
+      "420_cycle_literature_statistics",
+      "full_span_or_full_domain_validation",
+      "direct_total_drag_or_equivalent_periodic_span_lift_authority"
+    ]
+  },
+  "candidate": {
+    "required_product_version": "1.0.0",
+    "required_clean_source": true,
+    "required_dco_clean_chain": true,
+    "required_exact_head_tree_build_manifest_and_executable_sha256": true,
+    "required_tests_off_binary": true,
+    "required_v04_2_numerical_product_closure": true,
+    "allowed_post_run_source_changes_before_tag": false
+  },
+  "case": {
+    "re_d": 3900.0,
+    "domain_lower": [-5.0, -5.0, 0.0],
+    "domain_upper": [15.0, 5.0, 3.0],
+    "cylinder_center": [0.0, 0.0],
+    "diameter": 1.0,
+    "spanwise_boundary": "periodic",
+    "mesh_kind": "tensor_stretched",
+    "global_cells": [456, 256, 104],
+    "global_cell_count": 12140544,
+    "mpi_ranks": 128,
+    "process_grid": [8, 8, 2],
+    "owned_cells_per_rank": 94848,
+    "maximum_owned_cells_per_rank": 100000,
+    "ibm_reconstruction_policy": "strict_quadratic",
+    "fixed_dt_u_over_d": 0.002,
+    "convective_cfl_limit": 0.8
+  },
+  "window": {
+    "fresh_development_steps": 10000,
+    "fresh_development_time_d_over_u": 20.0,
+    "sampling_steps": 25000,
+    "sampling_time_d_over_u": 50.0,
+    "collection_end_step": 35000,
+    "minimum_observed_shedding_cycles": 10,
+    "minimum_contiguous_blocks": 5,
+    "checkpoint_interval_steps": 500,
+    "failed_retry_fallback_or_recovery_steps_are_samples": false,
+    "window_selection_after_viewing_results_allowed": false
+  },
+  "numerical_health": {
+    "terminal_components_required": ["eos", "continuity", "energy", "closed_mass", "gauge"],
+    "each_component_must_meet_its_configured_tolerance": true,
+    "pressure_temperature_density_must_be_finite_and_positive": true,
+    "provisional_and_committed_cfl_must_be_valid_and_below_limit": true,
+    "retry_or_temporal_fallback_in_fixed_window_allowed": false,
+    "statistics_steps_must_be_bdf2": true,
+    "active_afc_retained_correction_l1_ratio_must_be_positive": true,
+    "mass_or_energy_monotone_drift_allowed": false,
+    "unexplained_iteration_or_restart_discontinuity_allowed": false
+  },
+  "literature": {
+    "parnaudeau_sha256": "8a90682cf6d5d503538dabf47f8097a7e18f962eeeb5e53ce39858bcbb6361b9",
+    "strouhal_direct_experiment_interval": [0.206, 0.210],
+    "strouhal_sampling_interval_must_overlap_experiment": true,
+    "profile_stations_x_over_d": [1.06, 1.54, 2.02],
+    "profile_quantities": ["mean_u_over_uc", "mean_v_over_uc", "uu_over_uc2", "vv_over_uc2", "uv_over_uc2"],
+    "required_profile_count": 15,
+    "missing_or_selectively_cropped_profile_allowed": false,
+    "any_complete_profile_with_zero_interval_overlap_allowed": false,
+    "paper_digitization_bound_is_experimental_uncertainty": false,
+    "wang_2024_role": "peer_reference_only"
+  },
+  "stability": {
+    "strictly_monotone_five_block_sequence_with_disjoint_endpoint_intervals_allowed": false,
+    "disjoint_first_half_and_second_half_intervals_allowed": false,
+    "insufficient_window_is_release_green": false
+  },
+  "domain_sensitivity": {
+    "historical_20d_identity_is_read_only_diagnostic": true,
+    "historical_20d_restart_may_seed_candidate": false,
+    "blockage_span_grid_and_candidate_differences_must_be_reported": true,
+    "deviation_may_be_attributed_to_solver_without_domain_evidence": false
+  },
+  "release": {
+    "all_policy_gates_must_pass": true,
+    "required_decision": "ACCEPT_V1_0_SCOPED_PRODUCT_RELEASE",
+    "main_must_point_to_exact_candidate": true,
+    "tag": "v1.0.0",
+    "remote_branch_tag_and_release_assets_must_be_verified": true
+  }
+}
