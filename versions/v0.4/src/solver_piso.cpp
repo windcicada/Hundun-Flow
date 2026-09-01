@@ -1797,17 +1797,56 @@ struct PressureVelocityCoupler::Impl {
   mutable PlanFingerprint current_frozen_exact_lineage{};
   mutable PlanFingerprint current_frozen_exact_scratch{};
 
-  Status collective_candidate_provenance(
-      std::uint64_t local, std::uint64_t domain,
-      PlanFingerprint& provenance) const noexcept {
-    provenance = 0U;
-    if (communicator == MPI_COMM_NULL || size <= 0 ||
+  static constexpr std::size_t kCandidateProvenanceBatchCapacity = 4U;
+  static constexpr std::uint8_t kCandidateProvenanceNoDependency =
+      std::numeric_limits<std::uint8_t>::max();
+
+  struct CandidateProvenanceBatchEntry {
+    std::uint64_t local{};
+    std::uint64_t domain{};
+    std::uint8_t dependency{kCandidateProvenanceNoDependency};
+    std::uint64_t suffix{};
+  };
+
+  Status collective_candidate_provenance_batch(
+      const CandidateProvenanceBatchEntry* entries, std::size_t entry_count,
+      PlanFingerprint* provenances) const noexcept {
+    if (communicator == MPI_COMM_NULL || size <= 0 || entries == nullptr ||
+        provenances == nullptr || entry_count == 0U ||
+        entry_count > kCandidateProvenanceBatchCapacity ||
         !frozen_candidate_collective_hashes) {
       return {StatusCode::invalid_plan, kPisoCoupler};
     }
+    for (std::size_t entry = 0U; entry < entry_count; ++entry)
+      provenances[entry] = 0U;
+    bool has_dependencies = false;
+    std::array<std::uint64_t, 2U * kCandidateProvenanceBatchCapacity>
+        local_payload{};
+    for (std::size_t entry = 0U; entry < entry_count; ++entry) {
+      if (entries[entry].dependency != kCandidateProvenanceNoDependency &&
+          entries[entry].dependency >= entry) {
+        return {StatusCode::invalid_plan, kPisoCoupler};
+      }
+      has_dependencies =
+          has_dependencies ||
+          entries[entry].dependency != kCandidateProvenanceNoDependency;
+    }
+    // A dependent rank-local fingerprint is mixed in the original order:
+    // raw local bytes, the already-folded collective dependency, then that
+    // rank's suffix.  Gather the suffix beside the raw hash so even a rejected
+    // rank-divergent alpha produces exactly the same fold as the scalar route.
+    const std::size_t payload_stride = has_dependencies ? 2U : 1U;
+    for (std::size_t entry = 0U; entry < entry_count; ++entry) {
+      local_payload[payload_stride * entry] = entries[entry].local;
+      if (has_dependencies)
+        local_payload[payload_stride * entry + 1U] = entries[entry].suffix;
+    }
+    const std::size_t payload_count = payload_stride * entry_count;
+    const int batch_count = static_cast<int>(payload_count);
     const int gather_result = MPI_Allgather(
-        &local, 1, MPI_UINT64_T, frozen_candidate_collective_hashes.get(), 1,
-        MPI_UINT64_T, communicator);
+        local_payload.data(), batch_count, MPI_UINT64_T,
+        frozen_candidate_collective_hashes.get(), batch_count, MPI_UINT64_T,
+        communicator);
     const int local_failure = gather_result == MPI_SUCCESS ? 0 : 1;
     int global_failure = 0;
     const int consensus_result = MPI_Allreduce(
@@ -1815,15 +1854,35 @@ struct PressureVelocityCoupler::Impl {
     if (consensus_result != MPI_SUCCESS || global_failure != 0) {
       return {StatusCode::mpi_failure, kPisoCollective};
     }
-    std::uint64_t collective = hash_mix(kFnvOffset, domain);
-    collective = hash_mix(collective, static_cast<std::uint64_t>(size));
-    for (int rank_index = 0; rank_index < size; ++rank_index)
-      collective = hash_mix(
-          collective,
-          frozen_candidate_collective_hashes[static_cast<std::size_t>(
-              rank_index)]);
-    provenance = collective == 0U ? 1U : collective;
+    for (std::size_t entry = 0U; entry < entry_count; ++entry) {
+      std::uint64_t collective = hash_mix(kFnvOffset, entries[entry].domain);
+      collective = hash_mix(collective, static_cast<std::uint64_t>(size));
+      for (int rank_index = 0; rank_index < size; ++rank_index) {
+        const std::size_t rank_offset =
+            static_cast<std::size_t>(rank_index) * payload_count;
+        const std::size_t entry_offset = payload_stride * entry;
+        std::uint64_t rank_local = frozen_candidate_collective_hashes[
+            rank_offset + entry_offset];
+        if (entries[entry].dependency !=
+            kCandidateProvenanceNoDependency) {
+          rank_local = hash_mix(
+              rank_local, provenances[entries[entry].dependency]);
+          rank_local = hash_mix(
+              rank_local, frozen_candidate_collective_hashes[
+                              rank_offset + entry_offset + 1U]);
+        }
+        collective = hash_mix(collective, rank_local);
+      }
+      provenances[entry] = collective == 0U ? 1U : collective;
+    }
     return {};
+  }
+
+  Status collective_candidate_provenance(
+      std::uint64_t local, std::uint64_t domain,
+      PlanFingerprint& provenance) const noexcept {
+    const CandidateProvenanceBatchEntry entry{local, domain};
+    return collective_candidate_provenance_batch(&entry, 1U, &provenance);
   }
 
   PlanFingerprint frozen_candidate_numeric_fingerprint() const noexcept {
@@ -2108,7 +2167,8 @@ Status PressureVelocityCoupler::bind(
       new (std::nothrow) double[frozen_face_count]);
   candidate->frozen_candidate_collective_hashes.reset(
       new (std::nothrow) std::uint64_t[
-          static_cast<std::size_t>(communicator_size)]);
+          static_cast<std::size_t>(communicator_size) *
+          2U * Impl::kCandidateProvenanceBatchCapacity]);
   candidate->independent_species_count =
       services.thermodynamics->independent_species_count();
   if (candidate->independent_species_count != 0U) {
@@ -4815,22 +4875,20 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
             input.thermodynamic.closure.composition,
             final_boundary.absolute_pressure_reference_,
             composition_numeric_provenance);
-    PlanFingerprint replayed_final_state = 0U;
-    Status replay_status = impl.collective_candidate_provenance(
-        local_final_state, UINT64_C(0x7065636266636f6c),
-        replayed_final_state);
-    if (!replay_status) return replay_status;
     const std::uint64_t local_final_flux =
         final_boundary_flux_local_provenance(input.candidate_flux);
-    PlanFingerprint replayed_final_flux = 0U;
-    replay_status = impl.collective_candidate_provenance(
-        local_final_flux, UINT64_C(0x7065636266636f6d),
-        replayed_final_flux);
+    const std::array<Impl::CandidateProvenanceBatchEntry, 2U> replay_entries{{
+        {local_final_state, UINT64_C(0x7065636266636f6c)},
+        {local_final_flux, UINT64_C(0x7065636266636f6d)},
+    }};
+    std::array<PlanFingerprint, 2U> replayed{};
+    const Status replay_status = impl.collective_candidate_provenance_batch(
+        replay_entries.data(), replay_entries.size(), replayed.data());
     if (!replay_status) return replay_status;
     final_boundary_local =
-        replayed_final_state ==
+        replayed[0U] ==
                 final_boundary.candidate_state_provenance_ &&
-            replayed_final_flux == final_boundary.final_flux_provenance_
+            replayed[1U] == final_boundary.final_flux_provenance_
             ? Status{}
             : Status{StatusCode::invalid_plan, kPisoCoupler};
     const Status replay_consensus = collective_status(
@@ -5354,11 +5412,6 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
       frozen_exact_base_state_local_provenance(
           base_pressure, base_enthalpy, base_density, base_temperature,
           base_velocity, cells, impl.current_absolute_pressure_reference);
-  PlanFingerprint base_state_provenance = 0U;
-  status = impl.collective_candidate_provenance(
-      local_base_state, UINT64_C(0x6578616362617367),
-      base_state_provenance);
-  if (!status) return status;
 
   std::uint64_t local_direction =
       hash_mix(kFnvOffset, UINT64_C(0x7068646972656374));
@@ -5368,11 +5421,6 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
       local_direction, pressure_stage.pressure_direction_view_, cells, 1U, 0);
   local_direction = mix_candidate_field_values(
       local_direction, raw_enthalpy_direction, cells, 1U, 0);
-  PlanFingerprint correction_direction = 0U;
-  status = impl.collective_candidate_provenance(
-      local_direction, UINT64_C(0x7068646972676c62),
-      correction_direction);
-  if (!status) return status;
 
   std::uint64_t local_state = frozen_exact_candidate_state_local_provenance(
       candidate_pressure, thermodynamic_candidate.enthalpy,
@@ -5380,23 +5428,26 @@ Status PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(
       thermodynamic_candidate.temperature, candidate_velocity, cells,
       thermodynamic_candidate);
   local_state = hash_mix(local_state, composition_numeric_provenance);
-  local_state = hash_mix(local_state, correction_direction);
-  local_state = hash_mix(local_state, double_bits(pressure_stage.alpha_));
-  PlanFingerprint candidate_state_provenance = 0U;
-  status = impl.collective_candidate_provenance(
-      local_state, UINT64_C(0x6578616374737467),
-      candidate_state_provenance);
-  if (!status) return status;
   std::uint64_t local_flux =
       hash_mix(kFnvOffset, UINT64_C(0x6578616374666c78));
   local_flux = mix_candidate_flux_values(local_flux, candidate_flux);
-  local_flux = hash_mix(local_flux, correction_direction);
-  local_flux = hash_mix(local_flux, double_bits(pressure_stage.alpha_));
-  PlanFingerprint candidate_flux_provenance = 0U;
-  status = impl.collective_candidate_provenance(
-      local_flux, UINT64_C(0x6578616374666c67),
-      candidate_flux_provenance);
+  const std::uint64_t alpha_bits = double_bits(pressure_stage.alpha_);
+  const std::array<Impl::CandidateProvenanceBatchEntry, 4U>
+      provenance_entries{{
+          {local_base_state, UINT64_C(0x6578616362617367)},
+          {local_direction, UINT64_C(0x7068646972676c62)},
+          {local_state, UINT64_C(0x6578616374737467), 1U, alpha_bits},
+          {local_flux, UINT64_C(0x6578616374666c67), 1U, alpha_bits},
+      }};
+  std::array<PlanFingerprint, 4U> provenances{};
+  status = impl.collective_candidate_provenance_batch(
+      provenance_entries.data(), provenance_entries.size(),
+      provenances.data());
   if (!status) return status;
+  const PlanFingerprint base_state_provenance = provenances[0U];
+  const PlanFingerprint correction_direction = provenances[1U];
+  const PlanFingerprint candidate_state_provenance = provenances[2U];
+  const PlanFingerprint candidate_flux_provenance = provenances[3U];
 
   const bool baseline_certificate = baseline_request;
   const bool matching_baseline =
