@@ -2421,7 +2421,7 @@ bool test_boundary_constant_h_and_directional_derivative() {
 bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   EnthalpySpatialFixture fixture;
   bool passed = expect(
-      make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, true, false),
+      make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, true, true),
       "analytic frozen-target fixture compiles a periodic Cartesian layer");
   if (!passed) return false;
 
@@ -2836,11 +2836,31 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
       face_bundle(cells, 10212U, 11212U);
   OwnedFaces directional_enthalpy_storage =
       face_bundle(cells, 10213U, 11213U);
+  OwnedFaces prepared_frozen_enthalpy_storage =
+      face_bundle(cells, 10218U, 11218U);
+  OwnedFaces prepared_directional_enthalpy_storage =
+      face_bundle(cells, 10219U, 11219U);
+  OwnedFaces compiled_enthalpy_conductance =
+      face_bundle(cells, 10214U, 11214U);
+  OwnedField compiled_enthalpy_local =
+      shaped_field(72U, 10215U, 11215U, cells, 0.0);
+  OwnedField compiled_enthalpy_response =
+      shaped_field(73U, 10216U, 11216U, cells, 0.0);
+  const auto face_value_count = [](ConstFaceFieldView face) noexcept {
+    return static_cast<std::size_t>(face.extents.x) *
+           static_cast<std::size_t>(face.extents.y) *
+           static_cast<std::size_t>(face.extents.z);
+  };
+  const std::size_t compiled_enthalpy_branch_count =
+      face_value_count(target_flux.x) + face_value_count(target_flux.y) +
+      face_value_count(target_flux.z);
+  std::vector<std::uint16_t> compiled_enthalpy_branches(
+      compiled_enthalpy_branch_count, UINT16_C(0));
   const FrozenConvectionContext convection_context{
       equations.enthalpy().fingerprint(), fixture.boundary.revision()};
   FrozenConvectionFaceField frozen_enthalpy;
   passed &= expect(static_cast<bool>(freeze_cartesian_target_convection_faces(
-                       equations.kernels(), fixture.schemes.enthalpy(),
+                       equations.kernels(), ConvectionScheme::central2,
                        target_flux, as_const(target_enthalpy.view), 0U,
                        convection_context,
                        {frozen_enthalpy_storage.x,
@@ -2848,6 +2868,16 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
                         frozen_enthalpy_storage.z},
                        frozen_enthalpy)),
                    "analytic frozen-target freezes enthalpy reconstruction");
+  FrozenConvectionFaceField prepared_frozen_enthalpy;
+  passed &= expect(static_cast<bool>(freeze_cartesian_target_convection_faces(
+                       equations.kernels(),
+                       ConvectionScheme::limited_central2, target_flux,
+                       as_const(target_enthalpy.view), 0U, convection_context,
+                       {prepared_frozen_enthalpy_storage.x,
+                        prepared_frozen_enthalpy_storage.y,
+                        prepared_frozen_enthalpy_storage.z},
+                       prepared_frozen_enthalpy)),
+                   "prepared Schur freezes the production limited target");
   if (!passed) return false;
 
   const auto select_const_face = [](ConstFaceFieldView x,
@@ -2982,6 +3012,26 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
           !energy_pressure_certificate.flux_only_quasi_newton,
       "analytic frozen-target binds the complete Cartesian E_p operator");
 
+  PressureEnergyFrozenFaceEnthalpy prepared_pressure_frozen_enthalpy{
+      prepared_frozen_enthalpy.x, prepared_frozen_enthalpy.y,
+      prepared_frozen_enthalpy.z, prepared_frozen_enthalpy.revision,
+      prepared_frozen_enthalpy.reconstruction, 0U};
+  prepared_pressure_frozen_enthalpy.local_binding =
+      pressure_energy_frozen_face_enthalpy_local_binding(
+          prepared_pressure_frozen_enthalpy);
+  PressureEnergyPressureFluxBinding prepared_energy_pressure_binding =
+      energy_pressure_binding;
+  prepared_energy_pressure_binding.frozen_face_enthalpy =
+      prepared_pressure_frozen_enthalpy;
+  PressureEnergyPressureFluxOperator prepared_energy_pressure;
+  PressureEnergyPressureFluxCertificate prepared_energy_pressure_certificate;
+  passed &= expect(
+      static_cast<bool>(PressureEnergyPressureFluxOperator::bind(
+          prepared_energy_pressure_binding, prepared_energy_pressure,
+          prepared_energy_pressure_certificate)) &&
+          prepared_energy_pressure_certificate.full_cartesian_pressure_work,
+      "prepared Schur binds the real limited-target E_p operator");
+
   constexpr FieldId enthalpy_direction_field = 91U;
   const std::array<HaloFieldSpec, 2U> energy_halo_fields{{
       {enthalpy_direction_field, 2U, 1U},
@@ -2998,7 +3048,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   energy_enthalpy_binding.kernels = &equations.kernels();
   energy_enthalpy_binding.boundary = &fixture.boundary;
   energy_enthalpy_binding.patch = fixture.patch;
-  energy_enthalpy_binding.convection = fixture.schemes.enthalpy();
+  energy_enthalpy_binding.convection = ConvectionScheme::central2;
   energy_enthalpy_binding.services = {
       MPI_COMM_SELF, &energy_halo, 916U, enthalpy_direction_field,
       delta_temperature.view.field};
@@ -3041,6 +3091,32 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
           energy_enthalpy_certificate.exact_cartesian_spatial_response &&
           energy_enthalpy_certificate.exact_temperature_space_conduction,
       "analytic frozen-target binds the frozen-spatial E_h operator");
+
+  PressureEnergyEnthalpyBinding prepared_energy_enthalpy_binding =
+      energy_enthalpy_binding;
+  prepared_energy_enthalpy_binding.convection =
+      ConvectionScheme::limited_central2;
+  prepared_energy_enthalpy_binding.frozen_face_enthalpy =
+      prepared_frozen_enthalpy;
+  prepared_energy_enthalpy_binding.workspace = {
+      delta_temperature.view,
+      {prepared_directional_enthalpy_storage.x,
+       prepared_directional_enthalpy_storage.y,
+       prepared_directional_enthalpy_storage.z},
+      {compiled_enthalpy_local.view,
+       {compiled_enthalpy_conductance.x, compiled_enthalpy_conductance.y,
+        compiled_enthalpy_conductance.z},
+       {{compiled_enthalpy_branches.data(),
+         compiled_enthalpy_branches.size()}},
+       compiled_enthalpy_response.view}};
+  PressureEnergyEnthalpyOperator prepared_energy_enthalpy;
+  PressureEnergyEnthalpyCertificate prepared_energy_enthalpy_certificate;
+  passed &= expect(
+      static_cast<bool>(PressureEnergyEnthalpyOperator::bind(
+          prepared_energy_enthalpy_binding, prepared_energy_enthalpy,
+          prepared_energy_enthalpy_certificate)) &&
+          prepared_energy_enthalpy_certificate.compiled_factored_apply,
+      "prepared Schur binds the compiled limited-target E_h operator");
 
   PressureEnergyDiagonalOperator continuity_enthalpy_operator;
   PressureEnergyDiagonalCertificate continuity_enthalpy_certificate;
@@ -3091,6 +3167,25 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
           jacobian.shared_pressure.scope() ==
               PressureEnergySharedPressureScope::cartesian,
       "analytic frozen-target binds exact Schur and typed shared-pressure halo");
+
+  PressureEnergySchurBlockAuthority prepared_block_authority;
+  PressureEnergySchurBinding prepared_schur_binding = schur_binding;
+  prepared_schur_binding.energy_pressure = &prepared_energy_pressure;
+  prepared_schur_binding.energy_enthalpy = &prepared_energy_enthalpy;
+  passed &= expect(
+      static_cast<bool>(PressureEnergySchurBlockAuthority::exact_cartesian(
+          prepared_energy_pressure, prepared_energy_enthalpy,
+          prepared_block_authority)),
+      "prepared Schur derives a real compiled block authority");
+  prepared_schur_binding.block_authority = prepared_block_authority;
+  PressureEnergySchurOperator prepared_schur;
+  PressureEnergyJacobianCertificate prepared_jacobian;
+  passed &= expect(
+      static_cast<bool>(PressureEnergySchurOperator::bind(
+          prepared_schur_binding, prepared_schur, prepared_jacobian)) &&
+          prepared_jacobian.valid() &&
+          prepared_jacobian.shared_pressure.valid(),
+      "prepared Schur binds real shared-pressure and compiled-E_h routes");
   if (!passed) return false;
 
   auto mismatched_pressure_binding = energy_pressure_binding;
@@ -3499,6 +3594,183 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
                   energy_halo_before_schur.finish_calls ==
               1U,
       "one Schur apply uses one shared C_p/E_p halo plus one E_h halo");
+  OwnedField prepared_schur_reference =
+      shaped_field(74U, 10217U, 11217U, cells, 0.0);
+  OwnedField prepared_schur_action =
+      shaped_field(75U, 10220U, 11220U, cells, 0.0);
+  passed &= expect(
+      static_cast<bool>(prepared_schur.apply(
+          pressure_direction.view, prepared_schur_reference.view)),
+      "ordinary compiled Schur action provides the prepared oracle");
+  PressureEnergySchurPreparedApplyEpoch schur_prepared_epoch;
+  const Status schur_prepare =
+      prepared_schur.prepare_repeated_apply(schur_prepared_epoch);
+  const bool ghosts_unpublished_after_prepare =
+      pressure_halo.ghost_revision(pressure_direction_field) == 0U &&
+      energy_halo.ghost_revision(enthalpy_direction_field) == 0U &&
+      energy_halo.ghost_revision(delta_temperature.view.field) == 0U;
+  const HaloRuntimeCounters pressure_halo_before_prepared =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_before_prepared =
+      energy_halo.runtime_counters();
+  const Status schur_prepared_apply =
+      prepared_schur.apply(pressure_direction.view, prepared_schur_action.view);
+  const Status schur_prepared_reapply =
+      prepared_schur.apply(pressure_direction.view, prepared_schur_action.view);
+  const HaloRuntimeCounters pressure_halo_after_prepared =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_after_prepared =
+      energy_halo.runtime_counters();
+  const bool ghosts_unpublished_before_close =
+      pressure_halo.ghost_revision(pressure_direction_field) == 0U &&
+      energy_halo.ghost_revision(enthalpy_direction_field) == 0U &&
+      energy_halo.ghost_revision(delta_temperature.view.field) == 0U;
+  const Status schur_prepared_close =
+      prepared_schur.close_repeated_apply(schur_prepared_epoch);
+  const bool ghosts_published_by_successful_close =
+      pressure_halo.ghost_revision(pressure_direction_field) ==
+          pressure_direction.view.revision &&
+      energy_halo.ghost_revision(enthalpy_direction_field) ==
+          schur_enthalpy_workspace.view.revision &&
+      energy_halo.ghost_revision(delta_temperature.view.field) ==
+          delta_temperature.view.revision;
+  bool prepared_schur_equal = true;
+  for (std::int32_t z = 0; z < cells.z; ++z)
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x)
+        prepared_schur_equal =
+            prepared_schur_equal &&
+            close(prepared_schur_action.view.unchecked({x, y, z}, 0U),
+                  prepared_schur_reference.view.unchecked({x, y, z}, 0U));
+  passed &= expect(
+      static_cast<bool>(schur_prepare) &&
+          static_cast<bool>(schur_prepared_apply) &&
+          static_cast<bool>(schur_prepared_reapply) &&
+          static_cast<bool>(schur_prepared_close) && prepared_schur_equal &&
+          ghosts_unpublished_after_prepare &&
+          ghosts_unpublished_before_close &&
+          ghosts_published_by_successful_close &&
+          !schur_prepared_epoch.valid(),
+      "prepared real Schur preserves the ordinary exact action");
+  passed &= expect(
+      pressure_halo_after_prepared.begin_calls -
+                  pressure_halo_before_prepared.begin_calls ==
+              2U &&
+          pressure_halo_after_prepared.finish_calls -
+                  pressure_halo_before_prepared.finish_calls ==
+              2U &&
+          energy_halo_after_prepared.begin_calls -
+                  energy_halo_before_prepared.begin_calls ==
+              2U &&
+          energy_halo_after_prepared.finish_calls -
+                  energy_halo_before_prepared.finish_calls ==
+              2U,
+      "each repeated Schur apply retains one pressure and one E_h payload "
+      "exchange");
+  passed &= expect(
+      pressure_halo_after_prepared.control_consensus_calls -
+                  pressure_halo_before_prepared.control_consensus_calls ==
+              0U &&
+          energy_halo_after_prepared.control_consensus_calls -
+                  energy_halo_before_prepared.control_consensus_calls ==
+              0U,
+      "prepared Schur performs no hot Halo control consensus");
+
+  const std::vector<double> failed_output_snapshot =
+      prepared_schur_action.storage;
+  const double saved_nonfinite_probe =
+      pressure_direction.view.unchecked({0, 0, 0}, 0U);
+  pressure_direction.view.unchecked({0, 0, 0}, 0U) =
+      std::numeric_limits<double>::quiet_NaN();
+  PressureEnergySchurPreparedApplyEpoch failed_epoch;
+  const Status failed_prepare =
+      prepared_schur.prepare_repeated_apply(failed_epoch);
+  const HaloRuntimeCounters pressure_halo_before_failure =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_before_failure =
+      energy_halo.runtime_counters();
+  const Status failed_apply = prepared_schur.apply(
+      pressure_direction.view, prepared_schur_action.view);
+  const HaloRuntimeCounters pressure_halo_after_failure =
+      pressure_halo.runtime_counters();
+  const HaloRuntimeCounters energy_halo_after_failure =
+      energy_halo.runtime_counters();
+  const Status failed_close =
+      prepared_schur.close_repeated_apply(failed_epoch, failed_apply, 0);
+  pressure_direction.view.unchecked({0, 0, 0}, 0U) = saved_nonfinite_probe;
+  passed &= expect(
+      static_cast<bool>(failed_prepare) &&
+          failed_apply.code == StatusCode::numerical_failure &&
+          static_cast<bool>(failed_close) &&
+          prepared_schur_action.storage == failed_output_snapshot &&
+          pressure_halo_after_failure.begin_calls -
+                  pressure_halo_before_failure.begin_calls ==
+              1U &&
+          pressure_halo_after_failure.finish_calls -
+                  pressure_halo_before_failure.finish_calls ==
+              1U &&
+          energy_halo_after_failure.begin_calls -
+                  energy_halo_before_failure.begin_calls ==
+              1U &&
+          energy_halo_after_failure.finish_calls -
+                  energy_halo_before_failure.finish_calls ==
+              1U &&
+          pressure_halo_after_failure.control_consensus_calls -
+                  pressure_halo_before_failure.control_consensus_calls ==
+              0U &&
+          energy_halo_after_failure.control_consensus_calls -
+                  energy_halo_before_failure.control_consensus_calls ==
+              0U &&
+          pressure_halo.ghost_revision(pressure_direction_field) == 0U &&
+          energy_halo.ghost_revision(enthalpy_direction_field) == 0U &&
+          energy_halo.ghost_revision(delta_temperature.view.field) == 0U,
+      "failed prepared Schur keeps its fixed Halo schedule, output, and "
+      "unpublished ghost transaction");
+
+  FieldView foreign_pressure = pressure_direction.view;
+  foreign_pressure.field = static_cast<FieldId>(pressure_direction_field + 1U);
+  FieldView shallow_pressure = pressure_direction.view;
+  shallow_pressure.ghosts = {0, 0, 0};
+  const auto invalid_pressure_view_fails_closed = [&](FieldView invalid) {
+    const std::vector<double> output_snapshot = prepared_schur_action.storage;
+    const Status ordinary =
+        prepared_schur.apply(invalid, prepared_schur_action.view);
+    PressureEnergySchurPreparedApplyEpoch epoch;
+    const Status prepare = prepared_schur.prepare_repeated_apply(epoch);
+    const HaloRuntimeCounters pressure_before =
+        pressure_halo.runtime_counters();
+    const HaloRuntimeCounters energy_before = energy_halo.runtime_counters();
+    const Status prepared =
+        prepared_schur.apply(invalid, prepared_schur_action.view);
+    const HaloRuntimeCounters pressure_after =
+        pressure_halo.runtime_counters();
+    const HaloRuntimeCounters energy_after = energy_halo.runtime_counters();
+    const Status close =
+        prepared_schur.close_repeated_apply(epoch, prepared, 0);
+    return ordinary.code == StatusCode::invalid_plan &&
+           static_cast<bool>(prepare) &&
+           prepared.code == StatusCode::invalid_plan &&
+           static_cast<bool>(close) &&
+           prepared_schur_action.storage == output_snapshot &&
+           pressure_after.begin_calls - pressure_before.begin_calls == 1U &&
+           pressure_after.finish_calls - pressure_before.finish_calls == 1U &&
+           energy_after.begin_calls - energy_before.begin_calls == 1U &&
+           energy_after.finish_calls - energy_before.finish_calls == 1U &&
+           pressure_after.control_consensus_calls -
+                   pressure_before.control_consensus_calls ==
+               0U &&
+           energy_after.control_consensus_calls -
+                   energy_before.control_consensus_calls ==
+               0U &&
+           pressure_halo.ghost_revision(pressure_direction_field) == 0U &&
+           energy_halo.ghost_revision(enthalpy_direction_field) == 0U &&
+           energy_halo.ghost_revision(delta_temperature.view.field) == 0U;
+  };
+  passed &= expect(
+      invalid_pressure_view_fails_closed(foreign_pressure) &&
+          invalid_pressure_view_fails_closed(shallow_pressure),
+      "foreign FieldId and zero-ghost pressure views fail closed while "
+      "prepared Schur completes its fixed benign Halo schedule");
   if (!passed) return false;
   for (std::int32_t z = 0; z < cells.z; ++z)
     for (std::int32_t y = 0; y < cells.y; ++y)

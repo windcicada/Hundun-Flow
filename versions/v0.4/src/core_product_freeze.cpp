@@ -9391,21 +9391,47 @@ Status ProductDriver::Impl::execute_attempt(
             coupled = {StatusCode::invalid_plan, kProductPressureEnergy};
         }
         coupled = product.reductions.consensus(coupled);
-        PressureEnergySchurPreparedApplyEpoch repeated_apply_epoch;
-        if (coupled)
-          coupled =
-              schur_operator.prepare_repeated_apply(repeated_apply_epoch);
-        coupled = product.reductions.consensus(coupled);
         if (coupled)
           coupled = schur_operator.form_pressure_rhs(
               as_const(pressure_energy_r_c),
               as_const(pressure_energy_r_e), pressure_rhs);
         coupled = product.reductions.consensus(coupled);
+        PressureEnergySchurPreparedApplyEpoch repeated_apply_epoch;
         if (coupled)
+          coupled =
+              schur_operator.prepare_repeated_apply(repeated_apply_epoch);
+        coupled = product.reductions.consensus(coupled);
+        const int prepare_lowest_failing_rank =
+            product.reductions.lowest_failing_rank();
+        const bool solve_invoked = static_cast<bool>(coupled);
+        int close_lowest_failing_rank = prepare_lowest_failing_rank;
+        if (solve_invoked) {
           coupled = solve_epoch.solve_prepared(
               schur_operator,
               PisoPressureSolveContract::continuity_energy_coupled,
               product.reductions, &resources);
+          // This accessor is written directly from the LinearSolveResult and
+          // avoids copying the full PisoAttemptReport on every hot solve.  An
+          // invoked solve without a concrete rank deliberately closes with
+          // -1 rather than manufacturing rank zero from a second consensus.
+          close_lowest_failing_rank =
+              solve_epoch.latest_solve_outcome_available()
+                  ? solve_epoch.latest_solve_lowest_failing_rank()
+                  : -1;
+        }
+        // Prepared Halo apply deliberately defers rank-local failures to the
+        // Krylov checked reductions.  Publish one explicit all-rank solve
+        // outcome before either Halo epoch can publish ghost revisions.
+        if (solve_invoked)
+          coupled = product.reductions.consensus(coupled);
+        Status closed;
+        if (repeated_apply_epoch.valid())
+          closed = schur_operator.close_repeated_apply(
+              repeated_apply_epoch, coupled, close_lowest_failing_rank);
+        // Preserve a failed solve; otherwise publish even a rank-local close
+        // anomaly before any rank can enter ordinary recovery.  This avoids a
+        // conditional-collective split on the exceptional close path.
+        coupled = product.reductions.consensus(coupled ? closed : coupled);
         if (coupled) {
           FieldView pressure_correction_for_operator = pressure_correction;
           pressure_correction_for_operator.field =
@@ -9525,11 +9551,6 @@ Status ProductDriver::Impl::execute_attempt(
           }
         }
 #endif
-        Status closed;
-        if (repeated_apply_epoch.valid())
-          closed =
-              schur_operator.close_repeated_apply(repeated_apply_epoch);
-        if (coupled && !closed) coupled = closed;
         return product.reductions.consensus(coupled);
       };
   struct PressureEnergyCandidateArtifacts {
@@ -9843,10 +9864,6 @@ Status ProductDriver::Impl::execute_attempt(
                   ? Status{}
                   : Status{StatusCode::invalid_plan,
                            kProductPressureEnergy});
-          if (!evaluated) return evaluated;
-          evaluated = copy_interior(
-              as_const(trial_velocity),
-              pressure_energy_candidate_velocity);
           if (!evaluated) return evaluated;
         }
 
@@ -10658,32 +10675,11 @@ Status ProductDriver::Impl::execute_attempt(
           }
         }
 #endif
-        if (alpha == 0.0) {
-          bool density_matches = true;
-          for (std::int32_t z = -1; z <= cells.z && density_matches; ++z)
-            for (std::int32_t y = -1; y <= cells.y && density_matches; ++y)
-              for (std::int32_t x = -1; x <= cells.x; ++x) {
-                const unsigned outside =
-                    static_cast<unsigned>(x < 0 || x >= cells.x) +
-                    static_cast<unsigned>(y < 0 || y >= cells.y) +
-                    static_cast<unsigned>(z < 0 || z >= cells.z);
-                if (outside > 1U) continue;
-                if (product_double_bits(
-                        pressure_energy_candidate_density.unchecked(
-                            {x, y, z}, 0U)) !=
-                    product_double_bits(
-                        trial_density.unchecked({x, y, z}, 0U))) {
-                  density_matches = false;
-                  break;
-                }
-              }
-          evaluated = product.reductions.consensus(
-              density_matches
-                  ? Status{}
-                  : Status{StatusCode::invalid_plan,
-                           kProductPressureEnergy + 250U});
-          if (!evaluated) return evaluated;
-        }
+        // stage_frozen_momentum_flux is the single alpha-zero density
+        // authority.  It checks the complete face-neighbour envelope against
+        // the density snapshot captured by refresh() and publishes any
+        // mismatch collectively before forming a face flux.  Do not repeat
+        // the same full-field scan and consensus here.
         evaluated = product.coupler.stage_frozen_momentum_flux(
             frozen, artifacts.velocity_stage,
             as_const(pressure_energy_candidate_density),

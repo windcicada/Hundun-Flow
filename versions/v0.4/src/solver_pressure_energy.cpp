@@ -66,6 +66,10 @@ std::uint64_t nonzero_hash(std::uint64_t value) noexcept {
   return value == 0U ? UINT64_C(0x9e3779b97f4a7c15) : value;
 }
 
+void retain_first_failure(Status candidate, Status& deferred) noexcept {
+  if (deferred && !candidate) deferred = candidate;
+}
+
 double pressure_energy_globalization_merit(
     const PressureEnergyGlobalizationSample& sample) noexcept {
   // A coupled Newton direction may exchange residual between the continuity
@@ -2600,16 +2604,46 @@ Status PressureEnergyEnthalpyOperator::apply_prepared(
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
-  return apply_impl(input, output, true);
+  return apply_impl(input, output, true, nullptr);
 }
 
 Status PressureEnergyEnthalpyOperator::apply(FieldView input,
                                              FieldView output) const noexcept {
-  return apply_impl(input, output, false);
+  return apply_impl(input, output, false, nullptr);
+}
+
+Status PressureEnergyEnthalpyOperator::enter_schur_prepared_halo()
+    const noexcept {
+  const bool current =
+      certificate_.valid() && certificate_.compiled_factored_apply &&
+      services_.halo != nullptr && services_.halo->ready() &&
+      services_.halo->instance_identity() == certificate_.halo_instance;
+  if (!current) {
+    const Status status{StatusCode::invalid_plan,
+                        kPressureEnergyEnthalpyApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  const Status status = services_.halo->enter_prepared_epoch();
+  if (!status)
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+  return status;
+}
+
+Status PressureEnergyEnthalpyOperator::apply_schur_prepared(
+    FieldView input, FieldView output, Status& deferred) const noexcept {
+  return apply_impl(input, output, true, &deferred);
+}
+
+void PressureEnergyEnthalpyOperator::close_schur_prepared_halo(
+    bool publish, int lowest_failing_rank) const noexcept {
+  if (services_.halo == nullptr) return;
+  services_.halo->close_prepared_epoch(publish, lowest_failing_rank);
 }
 
 Status PressureEnergyEnthalpyOperator::apply_impl(
-    FieldView input, FieldView output, bool snapshot_validated) const noexcept {
+    FieldView input, FieldView output, bool snapshot_validated,
+    Status* prepared_deferred) const noexcept {
   failure_ = {};
   if (services_.halo == nullptr) {
     const Status status{StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
@@ -2784,20 +2818,46 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
       }
       delta_temperature.unchecked(cell, 0U) = delta_t;
     });
+  } else if (prepared_deferred != nullptr) {
+    // The prepared epoch must still execute the certified payload schedule on
+    // every rank.  Publish a deterministic benign payload when the local
+    // arithmetic preflight has already failed; the deferred failure prevents
+    // any response from being consumed.
+    for_each_cell(cells, [&](Int3 cell) {
+      delta_temperature.unchecked(cell, 0U) = 0.0;
+    });
   }
 
   std::array<FieldView, 2U> fields{input, delta_temperature};
   HaloTicket ticket;
-  Status status = services_.halo->begin(services_.halo_stage,
-                                        {fields.data(), fields.size()},
-                                        prerequisite, ticket);
-  if (status) {
-    status = services_.halo->finish(ticket, {fields.data(), fields.size()});
-  }
-  if (!status) {
-    failure_ = {status, LinearOperatorStatusScope::collective,
-                services_.halo->lowest_failing_rank()};
-    return status;
+  Status status;
+  if (prepared_deferred != nullptr) {
+    retain_first_failure(prerequisite, *prepared_deferred);
+    status = services_.halo->begin_prepared(
+        services_.halo_stage, {fields.data(), fields.size()},
+        *prepared_deferred, ticket);
+    if (status) {
+      status = services_.halo->finish_prepared(
+          ticket, {fields.data(), fields.size()}, *prepared_deferred);
+    }
+    retain_first_failure(status, *prepared_deferred);
+    if (!status || !*prepared_deferred) {
+      const Status failure = !status ? status : *prepared_deferred;
+      failure_ = {failure, LinearOperatorStatusScope::rank_local, -1};
+      return failure;
+    }
+  } else {
+    status = services_.halo->begin(services_.halo_stage,
+                                   {fields.data(), fields.size()},
+                                   prerequisite, ticket);
+    if (status) {
+      status = services_.halo->finish(ticket, {fields.data(), fields.size()});
+    }
+    if (!status) {
+      failure_ = {status, LinearOperatorStatusScope::collective,
+                  services_.halo->lowest_failing_rank()};
+      return status;
+    }
   }
   input = fields[0U];
   delta_temperature = fields[1U];
@@ -3107,6 +3167,7 @@ Status PressureEnergySchurOperator::bind(
     if (typed_continuity != nullptr &&
         typed_continuity->certify_pressure_energy_shared_halo(
             *typed_energy_pressure, shared)) {
+      candidate.shared_cartesian_pressure_ = shared.regular_issuer_;
       candidate.shared_ibm_pressure_ = typed_continuity;
       candidate.shared_energy_pressure_ = typed_energy_pressure;
       candidate.certificate_.shared_pressure = shared;
@@ -3163,6 +3224,9 @@ Status PressureEnergySchurOperator::prepare_repeated_apply(
   failure_ = {};
   epoch = {};
   if (repeated_apply_active_ || compiled_energy_enthalpy_ == nullptr ||
+      shared_cartesian_pressure_ == nullptr ||
+      shared_energy_pressure_ == nullptr ||
+      !certificate_.shared_pressure.valid() ||
       !certificate_.valid() ||
       !components_current(continuity_pressure_,
                           continuity_pressure_certificate_, energy_pressure_,
@@ -3173,29 +3237,97 @@ Status PressureEnergySchurOperator::prepare_repeated_apply(
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
-  const Status status =
+  Status status =
       compiled_energy_enthalpy_->prepare_repeated_apply(enthalpy_epoch_);
-  if (!status)
-    return capture_component_failure(*energy_enthalpy_, status, failure_);
+  if (status) {
+    status = shared_cartesian_pressure_
+                 ->enter_pressure_energy_shared_prepared_halo(
+                     certificate_.shared_pressure);
+    pressure_halo_epoch_active_ = static_cast<bool>(status);
+  }
+  if (status) {
+    status = compiled_energy_enthalpy_->enter_schur_prepared_halo();
+    enthalpy_halo_epoch_active_ = static_cast<bool>(status);
+  }
+  if (!status) {
+    if (enthalpy_halo_epoch_active_)
+      compiled_energy_enthalpy_->close_schur_prepared_halo(false, -1);
+    if (pressure_halo_epoch_active_)
+      shared_cartesian_pressure_
+          ->close_pressure_energy_shared_prepared_halo(false, -1);
+    if (enthalpy_epoch_.valid()) {
+      (void)compiled_energy_enthalpy_->close_repeated_apply(enthalpy_epoch_);
+    }
+    pressure_halo_epoch_active_ = false;
+    enthalpy_halo_epoch_active_ = false;
+    prepared_halo_epoch_ = 0U;
+    prepared_pressure_exchange_ = 0U;
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  ++prepared_pressure_exchange_ordinal_;
+  if (prepared_pressure_exchange_ordinal_ == 0U)
+    ++prepared_pressure_exchange_ordinal_;
+  prepared_halo_epoch_ = nonzero_hash(hash_mix(
+      certificate_.block_jacobian, prepared_pressure_exchange_ordinal_));
   repeated_apply_active_ = true;
   epoch.issuer_ = this;
   epoch.block_jacobian_ = certificate_.block_jacobian;
+  epoch.halo_epoch_ = prepared_halo_epoch_;
   return {};
 }
 
 Status PressureEnergySchurOperator::close_repeated_apply(
     PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept {
-  if (!repeated_apply_active_ || !epoch.valid() || epoch.issuer_ != this ||
-      epoch.block_jacobian_ != certificate_.block_jacobian ||
-      compiled_energy_enthalpy_ == nullptr) {
+  return close_repeated_apply(epoch, {}, -1);
+}
+
+Status PressureEnergySchurOperator::close_repeated_apply(
+    PressureEnergySchurPreparedApplyEpoch& epoch,
+    Status globally_consistent_solve_status,
+    int lowest_failing_rank) const noexcept {
+  const bool valid =
+      repeated_apply_active_ && epoch.valid() && epoch.issuer_ == this &&
+      epoch.block_jacobian_ == certificate_.block_jacobian &&
+      epoch.halo_epoch_ == prepared_halo_epoch_ &&
+      compiled_energy_enthalpy_ != nullptr &&
+      shared_cartesian_pressure_ != nullptr &&
+      pressure_halo_epoch_active_ && enthalpy_halo_epoch_active_ &&
+      enthalpy_epoch_.valid();
+  if (!valid) {
+    if (enthalpy_halo_epoch_active_ && compiled_energy_enthalpy_ != nullptr)
+      compiled_energy_enthalpy_->close_schur_prepared_halo(false, -1);
+    if (pressure_halo_epoch_active_ && shared_cartesian_pressure_ != nullptr)
+      shared_cartesian_pressure_
+          ->close_pressure_energy_shared_prepared_halo(false, -1);
+    if (enthalpy_epoch_.valid() && compiled_energy_enthalpy_ != nullptr)
+      (void)compiled_energy_enthalpy_->close_repeated_apply(enthalpy_epoch_);
+    repeated_apply_active_ = false;
+    pressure_halo_epoch_active_ = false;
+    enthalpy_halo_epoch_active_ = false;
+    prepared_halo_epoch_ = 0U;
+    prepared_pressure_exchange_ = 0U;
+    epoch = {};
     return {StatusCode::invalid_plan, kPressureEnergySchurApply};
   }
-  const Status status =
+
+  const Status enthalpy_close =
       compiled_energy_enthalpy_->close_repeated_apply(enthalpy_epoch_);
+  const bool publish = static_cast<bool>(globally_consistent_solve_status) &&
+                       static_cast<bool>(enthalpy_close);
+  compiled_energy_enthalpy_->close_schur_prepared_halo(
+      publish, publish ? -1 : lowest_failing_rank);
+  shared_cartesian_pressure_->close_pressure_energy_shared_prepared_halo(
+      publish, publish ? -1 : lowest_failing_rank);
   repeated_apply_active_ = false;
+  pressure_halo_epoch_active_ = false;
+  enthalpy_halo_epoch_active_ = false;
+  prepared_halo_epoch_ = 0U;
+  prepared_pressure_exchange_ = 0U;
   epoch = {};
-  if (!status)
-    return capture_component_failure(*energy_enthalpy_, status, failure_);
+  if (!enthalpy_close)
+    return capture_component_failure(*energy_enthalpy_, enthalpy_close,
+                                     failure_);
   return {};
 }
 
@@ -3226,39 +3358,149 @@ Status PressureEnergySchurOperator::apply(FieldView pressure,
                                           FieldView output) const noexcept {
   failure_ = {};
   const Int3 shape = certificate_.schur.local_shape;
-  if (!certificate_.valid() || continuity_pressure_ == nullptr ||
-      energy_pressure_ == nullptr || energy_enthalpy_ == nullptr ||
-      !components_current(continuity_pressure_,
-                          continuity_pressure_certificate_,
-                          energy_pressure_, energy_pressure_certificate_,
-                          energy_enthalpy_,
-                          energy_enthalpy_certificate_)) {
-    const Status status{StatusCode::invalid_plan,
-                        kPressureEnergySchurApply};
-    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
-    return status;
+  const bool components_valid =
+      certificate_.valid() && continuity_pressure_ != nullptr &&
+      energy_pressure_ != nullptr && energy_enthalpy_ != nullptr &&
+      components_current(continuity_pressure_,
+                         continuity_pressure_certificate_, energy_pressure_,
+                         energy_pressure_certificate_, energy_enthalpy_,
+                         energy_enthalpy_certificate_);
+  const bool views_valid =
+      valid_scalar_view(pressure, shape) &&
+      valid_scalar_view(output, shape) &&
+      !overlaps(as_const(pressure), as_const(output)) &&
+      !overlaps(as_const(pressure), continuity_enthalpy_diagonal_) &&
+      !overlaps(as_const(output), continuity_enthalpy_diagonal_) &&
+      !overlaps(as_const(pressure), continuity_enthalpy_row_scale_) &&
+      !overlaps(as_const(output), continuity_enthalpy_row_scale_) &&
+      !overlaps(as_const(pressure),
+                as_const(workspace_.continuity_response)) &&
+      !overlaps(as_const(pressure),
+                as_const(workspace_.eliminated_enthalpy)) &&
+      !overlaps(as_const(pressure), as_const(workspace_.energy_response)) &&
+      !overlaps(as_const(output),
+                as_const(workspace_.continuity_response)) &&
+      !overlaps(as_const(output),
+                as_const(workspace_.eliminated_enthalpy)) &&
+      !overlaps(as_const(output), as_const(workspace_.energy_response));
+  Status validation =
+      components_valid && views_valid
+          ? Status{}
+          : Status{StatusCode::invalid_plan, kPressureEnergySchurApply};
+
+  if (repeated_apply_active_) {
+    const bool prepared_current =
+        prepared_halo_epoch_ != 0U && pressure_halo_epoch_active_ &&
+        enthalpy_halo_epoch_active_ && enthalpy_epoch_.valid() &&
+        shared_cartesian_pressure_ != nullptr &&
+        shared_energy_pressure_ != nullptr &&
+        compiled_energy_enthalpy_ != nullptr &&
+        certificate_.shared_pressure.valid();
+    if (validation && !prepared_current) {
+      validation = {StatusCode::invalid_plan, kPressureEnergySchurApply};
+    }
+    Status deferred = validation;
+
+    ++prepared_pressure_exchange_ordinal_;
+    if (prepared_pressure_exchange_ordinal_ == 0U)
+      ++prepared_pressure_exchange_ordinal_;
+    const RevisionToken exchange_token = nonzero_hash(hash_mix(
+        prepared_halo_epoch_, prepared_pressure_exchange_ordinal_));
+    FieldView pressure_payload = pressure;
+    const bool pressure_exchange_view_valid =
+        certificate_.shared_pressure.valid() &&
+        pressure.field == certificate_.shared_pressure.pressure_field_ &&
+        detail::valid_cell_view(
+            as_const(pressure), shape, 0U, 1U,
+            certificate_.shared_pressure.halo_width_);
+    if (deferred && !pressure_exchange_view_valid) {
+      deferred = {StatusCode::invalid_plan, kPressureEnergySchurApply};
+    }
+    if (!pressure_exchange_view_valid) {
+      // Keep the fixed pressure-Halo schedule even for a rank-local invalid
+      // Krylov view.  The Schur-owned reach-two eliminated field is a valid,
+      // disjoint benign payload after relabelling; deferred prevents either
+      // pressure block from consuming it.
+      pressure_payload = workspace_.eliminated_enthalpy;
+      pressure_payload.field = certificate_.shared_pressure.pressure_field_;
+      if (valid_scalar_view(workspace_.eliminated_enthalpy, shape)) {
+        for_each_cell(shape, [&](Int3 cell) {
+          pressure_payload.unchecked(cell, 0U) = 0.0;
+        });
+      }
+    }
+    Status immediate{StatusCode::invalid_plan, kPressureEnergySchurApply};
+    if (shared_cartesian_pressure_ != nullptr) {
+      immediate = shared_cartesian_pressure_
+                      ->exchange_pressure_energy_shared_input_prepared(
+                          pressure_payload, certificate_.shared_pressure,
+                          deferred);
+    }
+    retain_first_failure(immediate, deferred);
+    if (immediate && deferred)
+      prepared_pressure_exchange_ = exchange_token;
+
+    if (deferred && prepared_pressure_exchange_ == exchange_token) {
+      Status local = shared_cartesian_pressure_->apply_after_exchange(
+          pressure_payload, workspace_.continuity_response);
+      if (local && shared_ibm_pressure_ != nullptr) {
+        local = shared_ibm_pressure_->decorate_pressure_action(
+            pressure_payload, workspace_.continuity_response);
+      }
+      retain_first_failure(local, deferred);
+    }
+
+    if (deferred) {
+      for_each_cell(shape, [&](Int3 cell) {
+        workspace_.eliminated_enthalpy.unchecked(cell, 0U) =
+            active_cell(activity_, shape, cell)
+                ? workspace_.continuity_response.unchecked(cell, 0U) /
+                      continuity_enthalpy_diagonal_.unchecked(cell, 0U)
+                : 0.0;
+      });
+    } else if (valid_scalar_view(workspace_.eliminated_enthalpy, shape)) {
+      for_each_cell(shape, [&](Int3 cell) {
+        workspace_.eliminated_enthalpy.unchecked(cell, 0U) = 0.0;
+      });
+    }
+
+    if (compiled_energy_enthalpy_ != nullptr) {
+      immediate = compiled_energy_enthalpy_->apply_schur_prepared(
+          workspace_.eliminated_enthalpy, workspace_.energy_response,
+          deferred);
+    } else {
+      immediate = {StatusCode::invalid_plan, kPressureEnergySchurApply};
+    }
+    retain_first_failure(immediate, deferred);
+    if (deferred && prepared_pressure_exchange_ == exchange_token) {
+      // E_h uses a disjoint HaloEngine, so the completed pressure exchange is
+      // still the exact shared C_p/E_p input.  Stage E_p over the now-dead C_p
+      // response and commit the caller output only after both blocks succeed.
+      const Status local = shared_energy_pressure_->apply_after_exchange(
+          pressure_payload, workspace_.continuity_response);
+      retain_first_failure(local, deferred);
+    }
+    prepared_pressure_exchange_ = 0U;
+    if (!deferred) {
+      failure_ = {deferred, LinearOperatorStatusScope::rank_local, -1};
+      return deferred;
+    }
+
+    for_each_cell(shape, [&](Int3 cell) {
+      if (active_cell(activity_, shape, cell)) {
+        output.unchecked(cell, 0U) =
+            workspace_.continuity_response.unchecked(cell, 0U) -
+            workspace_.energy_response.unchecked(cell, 0U);
+      } else {
+        output.unchecked(cell, 0U) = pressure.unchecked(cell, 0U);
+      }
+    });
+    return {};
   }
-  if (!valid_scalar_view(pressure, shape) ||
-      !valid_scalar_view(output, shape) ||
-      overlaps(as_const(pressure), as_const(output)) ||
-      overlaps(as_const(pressure), continuity_enthalpy_diagonal_) ||
-      overlaps(as_const(output), continuity_enthalpy_diagonal_) ||
-      overlaps(as_const(pressure), continuity_enthalpy_row_scale_) ||
-      overlaps(as_const(output), continuity_enthalpy_row_scale_) ||
-      overlaps(as_const(pressure),
-               as_const(workspace_.continuity_response)) ||
-      overlaps(as_const(pressure),
-               as_const(workspace_.eliminated_enthalpy)) ||
-      overlaps(as_const(pressure), as_const(workspace_.energy_response)) ||
-      overlaps(as_const(output),
-               as_const(workspace_.continuity_response)) ||
-      overlaps(as_const(output),
-               as_const(workspace_.eliminated_enthalpy)) ||
-      overlaps(as_const(output), as_const(workspace_.energy_response))) {
-    const Status status{StatusCode::invalid_plan,
-                        kPressureEnergySchurApply};
-    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
-    return status;
+
+  if (!validation) {
+    failure_ = {validation, LinearOperatorStatusScope::rank_local, -1};
+    return validation;
   }
 
   Status status;

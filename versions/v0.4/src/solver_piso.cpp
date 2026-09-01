@@ -9751,6 +9751,8 @@ Status PisoPressureSolveEpoch::begin(const PisoPlan& plan) noexcept {
   refinement_target_generation_ = 0U;
   solve_calls_ = 0U;
   refinement_solve_calls_ = 0U;
+  latest_solve_outcome_available_ = false;
+  latest_solve_lowest_failing_rank_ = -1;
   failed_ = false;
   active_ = true;
   return {};
@@ -9946,6 +9948,12 @@ Status PisoPressureSolveEpoch::solve_prepared(
     PisoPressureSolveContract contract,
     ReductionEngine& reductions,
     ResourceCounters* resources) noexcept {
+  // This narrow authority describes only the LinearSolveResult produced by
+  // the current invocation.  Early lifecycle rejection deliberately leaves
+  // it unavailable; a recorded solve with no specific failing rank publishes
+  // available=true, rank=-1.
+  latest_solve_outcome_available_ = false;
+  latest_solve_lowest_failing_rank_ = -1;
   const bool valid_contract =
       contract == PisoPressureSolveContract::pressure_continuity ||
       contract == PisoPressureSolveContract::continuity_energy_coupled;
@@ -10074,6 +10082,8 @@ Status PisoPressureSolveEpoch::solve_prepared(
                                 workspace, reductions, resources)
                : solve_fgmres(exact_operator, preconditioner, invocation,
                               workspace, reductions, resources);
+  latest_solve_outcome_available_ = true;
+  latest_solve_lowest_failing_rank_ = result.lowest_failing_rank;
   const auto record_refinement_result = [&](LinearSolveResult solve) noexcept {
     PisoPressureEnergyRefinementSolveReport recorded;
     recorded.solve = solve;
@@ -10265,6 +10275,8 @@ Status PisoPressureSolveEpoch::finalize(PisoAttemptReport& report) noexcept {
   epoch_rank_ = -1;
   epoch_size_ = 0;
   refinement_target_generation_ = 0U;
+  latest_solve_outcome_available_ = false;
+  latest_solve_lowest_failing_rank_ = -1;
   active_ = false;
   return {};
 }

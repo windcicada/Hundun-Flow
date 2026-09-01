@@ -1842,9 +1842,16 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
       PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept;
 
  private:
+  friend class PressureEnergySchurOperator;
+  Status enter_schur_prepared_halo() const noexcept;
+  Status apply_schur_prepared(FieldView input, FieldView output,
+                              Status& deferred) const noexcept;
+  void close_schur_prepared_halo(bool publish,
+                                 int lowest_failing_rank) const noexcept;
   Status validate_compiled_snapshot() const noexcept;
   Status apply_impl(FieldView input, FieldView output,
-                    bool snapshot_validated) const noexcept;
+                    bool snapshot_validated,
+                    Status* prepared_deferred = nullptr) const noexcept;
   const CartesianGeometryPlan* geometry_{};
   const CartesianKernelPlan* kernels_{};
   const BoundaryPlan* boundary_{};
@@ -1963,13 +1970,15 @@ class PressureEnergySchurOperator;
 class PressureEnergySchurPreparedApplyEpoch {
  public:
   bool valid() const noexcept {
-    return issuer_ != nullptr && block_jacobian_ != 0U;
+    return issuer_ != nullptr && block_jacobian_ != 0U &&
+           halo_epoch_ != 0U;
   }
 
  private:
   friend class PressureEnergySchurOperator;
   const PressureEnergySchurOperator* issuer_{};
   RevisionToken block_jacobian_{};
+  RevisionToken halo_epoch_{};
 };
 
 // Cold-certified authority for sharing one pressure-direction halo exchange
@@ -2160,6 +2169,10 @@ class PressureEnergySchurOperator final : public LinearOperator {
       PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept;
   Status close_repeated_apply(
       PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept;
+  Status close_repeated_apply(
+      PressureEnergySchurPreparedApplyEpoch& epoch,
+      Status globally_consistent_solve_status,
+      int lowest_failing_rank) const noexcept;
 
  private:
   Status apply_energy_enthalpy(FieldView input, FieldView output) const noexcept;
@@ -2179,6 +2192,11 @@ class PressureEnergySchurOperator final : public LinearOperator {
   const PressureEnergyEnthalpyOperator* compiled_energy_enthalpy_{};
   mutable PressureEnergyEnthalpyPreparedEpoch enthalpy_epoch_{};
   mutable bool repeated_apply_active_{};
+  mutable bool pressure_halo_epoch_active_{};
+  mutable bool enthalpy_halo_epoch_active_{};
+  mutable RevisionToken prepared_halo_epoch_{};
+  mutable RevisionToken prepared_pressure_exchange_{};
+  mutable std::uint64_t prepared_pressure_exchange_ordinal_{};
   PressureEnergyJacobianCertificate certificate_{};
   mutable LinearOperatorFailureProvenance failure_{};
 };
@@ -2953,6 +2971,15 @@ class PressureLinearOperator final : public LinearOperator {
       const PressureEnergySharedPressureCertificate& certificate,
       PressureEnergySharedPressureInputCertificate& input_certificate) const
       noexcept;
+  Status enter_pressure_energy_shared_prepared_halo(
+      const PressureEnergySharedPressureCertificate& certificate) const
+      noexcept;
+  Status exchange_pressure_energy_shared_input_prepared(
+      FieldView input,
+      const PressureEnergySharedPressureCertificate& certificate,
+      Status& deferred) const noexcept;
+  void close_pressure_energy_shared_prepared_halo(
+      bool publish, int lowest_failing_rank) const noexcept;
   Status apply_pressure_energy_shared_input(
       FieldView input, FieldView output,
       const PressureEnergySharedPressureCertificate& certificate,
@@ -4199,6 +4226,12 @@ class PisoPressureSolveEpoch {
   std::uint8_t refinement_solve_calls() const noexcept {
     return refinement_solve_calls_;
   }
+  bool latest_solve_outcome_available() const noexcept {
+    return latest_solve_outcome_available_;
+  }
+  int latest_solve_lowest_failing_rank() const noexcept {
+    return latest_solve_lowest_failing_rank_;
+  }
   bool active() const noexcept { return active_; }
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   static bool validate_pressure_energy_refinement_report_for_test(
@@ -4239,6 +4272,8 @@ class PisoPressureSolveEpoch {
   RevisionToken refinement_target_generation_{};
   std::uint8_t solve_calls_{};
   std::uint8_t refinement_solve_calls_{};
+  bool latest_solve_outcome_available_{};
+  int latest_solve_lowest_failing_rank_{-1};
   bool active_{};
   bool failed_{};
 };

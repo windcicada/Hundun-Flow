@@ -636,6 +636,87 @@ Status PressureLinearOperator::exchange_pressure_energy_shared_input(
   return {};
 }
 
+Status PressureLinearOperator::enter_pressure_energy_shared_prepared_halo(
+    const PressureEnergySharedPressureCertificate& certificate) const
+    noexcept {
+  if (implementation_ != nullptr) implementation_->failure_provenance = {};
+  const bool current =
+      implementation_ != nullptr && certificate.valid() &&
+      certificate.regular_issuer_ == this &&
+      same_certificate(certificate.regular_pressure_, this->certificate()) &&
+      certificate.halo_instance_ ==
+          implementation_->halo->instance_identity() &&
+      certificate.halo_stage_ == implementation_->halo_stage &&
+      certificate.pressure_field_ == implementation_->solution_field &&
+      certificate.halo_width_ == implementation_->halo_width &&
+      implementation_->pressure_boundary.current();
+  if (!current) {
+    const Status status{StatusCode::invalid_plan, kPressureOperator};
+    if (implementation_ != nullptr) {
+      implementation_->failure_provenance = {
+          status, LinearOperatorStatusScope::rank_local, -1};
+    }
+    return status;
+  }
+  const Status status = implementation_->halo->enter_prepared_epoch();
+  if (!status) {
+    implementation_->failure_provenance = {
+        status, LinearOperatorStatusScope::rank_local, -1};
+  }
+  return status;
+}
+
+Status PressureLinearOperator::exchange_pressure_energy_shared_input_prepared(
+    FieldView input,
+    const PressureEnergySharedPressureCertificate& certificate,
+    Status& deferred) const noexcept {
+  if (implementation_ != nullptr) implementation_->failure_provenance = {};
+  const bool current =
+      implementation_ != nullptr && certificate.valid() &&
+      certificate.regular_issuer_ == this &&
+      same_certificate(certificate.regular_pressure_, this->certificate()) &&
+      certificate.halo_instance_ ==
+          implementation_->halo->instance_identity() &&
+      certificate.halo_stage_ == implementation_->halo_stage &&
+      certificate.pressure_field_ == implementation_->solution_field &&
+      certificate.halo_width_ == implementation_->halo_width &&
+      implementation_->pressure_boundary.current() &&
+      input.field == implementation_->solution_field &&
+      detail::valid_cell_view(as_const(input), implementation_->patch.cells,
+                              0U, 1U, implementation_->halo_width);
+  if (deferred && !current) {
+    deferred = {StatusCode::invalid_plan, kPressureOperator};
+  }
+
+  std::array<FieldView, 1U> fields{input};
+  HaloTicket ticket;
+  Status immediate = implementation_ == nullptr
+                         ? Status{StatusCode::invalid_plan, kPressureOperator}
+                         : implementation_->halo->begin_prepared(
+                               implementation_->halo_stage,
+                               {fields.data(), fields.size()}, deferred,
+                               ticket);
+  if (immediate) {
+    immediate = implementation_->halo->finish_prepared(
+        ticket, {fields.data(), fields.size()}, deferred);
+  }
+  if (!immediate) {
+    if (deferred) deferred = immediate;
+    if (implementation_ != nullptr) {
+      implementation_->failure_provenance = {
+          immediate, LinearOperatorStatusScope::rank_local, -1};
+    }
+  }
+  return immediate;
+}
+
+void PressureLinearOperator::close_pressure_energy_shared_prepared_halo(
+    bool publish, int lowest_failing_rank) const noexcept {
+  if (implementation_ == nullptr || implementation_->halo == nullptr) return;
+  implementation_->halo->close_prepared_epoch(publish,
+                                               lowest_failing_rank);
+}
+
 Status PressureLinearOperator::validate_apply_views(FieldView input,
                                                     FieldView output) const
     noexcept {
