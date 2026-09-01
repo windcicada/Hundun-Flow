@@ -224,6 +224,18 @@ struct EquationSystemView {
   FaceFieldView z_coefficient{};
 };
 
+// Allocation-free scratch for the same-target candidate energy residual.
+// All three fields and the separately supplied residual are attempt-local and
+// may contain partial results after failure; only the certificate is published
+// on success.  IBM pressure-work and thermal interface corrections,
+// inactive-cell zeroing and terminal energy gates stay at the caller, exactly
+// as for assemble_enthalpy().
+struct TargetCoupledEnthalpyResidualWorkspace {
+  FieldView pressure_work{};
+  FieldView viscous_dissipation{};
+  FieldView diffusion{};
+};
+
 // "v04mafc3": direction-preserving, owner-published common-face scalar AFC
 // with partition-invariant face metrics, the
 // quadratic smooth-extremum allowance and one-sided physical-outflow
@@ -1023,6 +1035,12 @@ class EnthalpyEquationPlan {
       const EquationMaterialView&, ConstFieldView,
       Span<const EquationContributionView>, const EquationAssemblyContext&,
       EquationSystemView, EquationAssemblyCertificate&) noexcept;
+  friend Status assemble_target_coupled_enthalpy_residual(
+      const EnthalpyEquationPlan&, const EquationStateView&,
+      const EquationMaterialView&, ConstFieldView,
+      const EquationAssemblyContext&, FieldView,
+      TargetCoupledEnthalpyResidualWorkspace,
+      EquationAssemblyCertificate&) noexcept;
   friend Status assemble_enthalpy_impl(
       const EnthalpyEquationPlan&, const EquationStateView&,
       const EquationMaterialView&, ConstFieldView,
@@ -4274,6 +4292,17 @@ Status assemble_enthalpy(
     ConstFieldView velocity_gradient,
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate) noexcept;
+
+// Candidate-only residual seam.  It accepts exactly a full-domain,
+// target-coupled, non-provisional flux and a contribution stage with no
+// registered energy sources/sinks.  The successful residual is bitwise equal
+// to assemble_enthalpy() for the same inputs and empty contributions.
+Status assemble_target_coupled_enthalpy_residual(
+    const EnthalpyEquationPlan& plan, const EquationStateView& state,
+    const EquationMaterialView& material, ConstFieldView velocity_gradient,
+    const EquationAssemblyContext& context, FieldView residual,
+    TargetCoupledEnthalpyResidualWorkspace workspace,
     EquationAssemblyCertificate& certificate) noexcept;
 
 Status assemble_species(

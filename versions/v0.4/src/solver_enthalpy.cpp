@@ -911,6 +911,154 @@ Status newtonian_viscous_dissipation(const VelocityGradient& gradient,
   return {};
 }
 
+namespace {
+
+struct EnthalpyCellTerms {
+  double pressure_work{};
+  double viscous_dissipation{};
+  double source{};
+  double sink{};
+  double diffusion_diagonal{};
+  double diagonal{};
+};
+
+struct EnthalpyCellSystem {
+  double residual{};
+  double diagonal{};
+  double rhs{};
+};
+
+void form_enthalpy_linear_terms(
+    const CartesianKernelPlan& kernels,
+    const EquationMaterialView& material,
+    const EquationAssemblyContext& context, Int3 cell, double rho,
+    EnthalpyCellTerms& terms) noexcept {
+  const double volume = detail::cell_volume(kernels, cell);
+  terms.diffusion_diagonal =
+      detail::diffusion_diagonal(kernels, material.enthalpy_diffusivity, cell);
+  terms.diagonal = (context.bdf.a0 * rho + terms.sink) * volume +
+                   terms.diffusion_diagonal;
+}
+
+Status evaluate_enthalpy_cell_terms(
+    const CartesianKernelPlan& kernels, const EquationStateView& state,
+    const EquationMaterialView& material, ConstFieldView velocity_gradient,
+    Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, Int3 cell,
+    bool validate_individual_sinks, EnthalpyCellTerms& terms) noexcept {
+  const double rho = state.density.trial.unchecked(cell, 0U);
+  const double rho_n = state.density.accepted.unchecked(cell, 0U);
+  const double rho_nm1 = state.density.previous.unchecked(cell, 0U);
+  const double h = state.enthalpy.trial.unchecked(cell, 0U);
+  const double hn = state.enthalpy.accepted.unchecked(cell, 0U);
+  const double hnm1 = state.enthalpy.previous.unchecked(cell, 0U);
+  const double temperature = state.temperature.trial.unchecked(cell, 0U);
+  const double conductivity =
+      material.thermal_conductivity.unchecked(cell, 0U);
+  const double enthalpy_diffusivity =
+      material.enthalpy_diffusivity.unchecked(cell, 0U);
+  const double viscosity = material.effective_viscosity.unchecked(cell, 0U);
+  if (!std::isfinite(rho) || !std::isfinite(rho_n) ||
+      !std::isfinite(rho_nm1) || rho <= 0.0 || rho_n <= 0.0 ||
+      rho_nm1 <= 0.0 || !std::isfinite(h) || !std::isfinite(hn) ||
+      !std::isfinite(hnm1) || !std::isfinite(temperature) ||
+      !std::isfinite(conductivity) || conductivity <= 0.0 ||
+      !std::isfinite(enthalpy_diffusivity) || enthalpy_diffusivity <= 0.0 ||
+      !std::isfinite(viscosity) || viscosity < 0.0) {
+    return {StatusCode::numerical_failure, kEnthalpyNumerical};
+  }
+
+  VelocityGradient local_gradient;
+  for (std::uint8_t component = 0U; component < 9U; ++component) {
+    local_gradient.value[component] =
+        velocity_gradient.unchecked(cell, component);
+  }
+  const PressureWorkPoint work{
+      state.pressure_reference +
+          state.pressure_perturbation.trial.unchecked(cell, 0U),
+      state.accepted_pressure_reference +
+          state.pressure_perturbation.accepted.unchecked(cell, 0U),
+      state.previous_pressure_reference +
+          state.pressure_perturbation.previous.unchecked(cell, 0U),
+      {pressure_gradient_component(kernels,
+                                   state.pressure_perturbation.trial, cell,
+                                   0U),
+       pressure_gradient_component(kernels,
+                                   state.pressure_perturbation.trial, cell,
+                                   1U),
+       pressure_gradient_component(kernels,
+                                   state.pressure_perturbation.trial, cell,
+                                   2U)},
+      {state.velocity.trial.unchecked(cell, 0U),
+       state.velocity.trial.unchecked(cell, 1U),
+       state.velocity.trial.unchecked(cell, 2U)},
+      0.0};
+  EnthalpyCellTerms candidate;
+  if (!evaluate_pressure_material_derivative(
+          context.bdf, work, candidate.pressure_work) ||
+      !newtonian_viscous_dissipation(
+          local_gradient, viscosity, candidate.viscous_dissipation)) {
+    return {StatusCode::numerical_failure, kEnthalpyNumerical};
+  }
+  for (std::size_t index = 0U; index < contributions.size; ++index) {
+    candidate.source += contributions.data[index]
+                            .explicit_source_density.unchecked(cell, 0U);
+    if (contributions.data[index].has_implicit_sink) {
+      const double value = contributions.data[index]
+                               .implicit_sink_density.unchecked(cell, 0U);
+      if (validate_individual_sinks &&
+          (!std::isfinite(value) || value < 0.0)) {
+        return {StatusCode::numerical_failure, kEnthalpyNumerical};
+      }
+      candidate.sink += value;
+    }
+  }
+  form_enthalpy_linear_terms(kernels, material, context, cell, rho,
+                             candidate);
+  if (!std::isfinite(candidate.source) ||
+      !std::isfinite(candidate.sink) || candidate.sink < 0.0 ||
+      !std::isfinite(candidate.diagonal) || candidate.diagonal <= 0.0 ||
+      !std::isfinite(candidate.pressure_work) ||
+      !std::isfinite(candidate.viscous_dissipation)) {
+    return {StatusCode::numerical_failure, kEnthalpyNumerical};
+  }
+  terms = candidate;
+  return {};
+}
+
+Status combine_enthalpy_cell_system(
+    const CartesianKernelPlan& kernels, const EquationStateView& state,
+    const EquationAssemblyContext& context, Int3 cell, double convection,
+    double diffusion, const EnthalpyCellTerms& terms,
+    EnthalpyCellSystem& system) noexcept {
+  const double rho = state.density.trial.unchecked(cell, 0U);
+  const double h = state.enthalpy.trial.unchecked(cell, 0U);
+  const double unsteady =
+      context.bdf.a0 * rho * h +
+      context.bdf.a1 * state.density.accepted.unchecked(cell, 0U) *
+          state.enthalpy.accepted.unchecked(cell, 0U) +
+      context.bdf.a2 * state.density.previous.unchecked(cell, 0U) *
+          state.enthalpy.previous.unchecked(cell, 0U);
+  const double volume = detail::cell_volume(kernels, cell);
+  EnthalpyCellSystem candidate;
+  candidate.residual =
+      (unsteady + convection - terms.pressure_work - diffusion -
+       terms.viscous_dissipation - terms.source + terms.sink * h) *
+      volume;
+  candidate.diagonal = terms.diagonal;
+  candidate.rhs = candidate.diagonal * h - candidate.residual;
+  if (!std::isfinite(candidate.residual) ||
+      !std::isfinite(candidate.diagonal) || candidate.diagonal <= 0.0 ||
+      !std::isfinite(terms.diffusion_diagonal) ||
+      terms.diffusion_diagonal <= 0.0 || !std::isfinite(candidate.rhs)) {
+    return {StatusCode::numerical_failure, kEnthalpyNumerical};
+  }
+  system = candidate;
+  return {};
+}
+
+}  // namespace
+
 Status assemble_enthalpy_impl(
     const EnthalpyEquationPlan& plan, const EquationStateView& state,
     const EquationMaterialView& material, ConstFieldView velocity_gradient,
@@ -1000,83 +1148,11 @@ Status assemble_enthalpy_impl(
   for (std::int32_t z = box.begin.z; z < end.z; ++z) {
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
-        const Int3 cell{x, y, z};
-        const double rho = state.density.trial.unchecked(cell, 0U);
-        const double rho_n = state.density.accepted.unchecked(cell, 0U);
-        const double rho_nm1 = state.density.previous.unchecked(cell, 0U);
-        const double h = state.enthalpy.trial.unchecked(cell, 0U);
-        const double hn = state.enthalpy.accepted.unchecked(cell, 0U);
-        const double hnm1 = state.enthalpy.previous.unchecked(cell, 0U);
-        const double temperature = state.temperature.trial.unchecked(cell, 0U);
-        const double conductivity =
-            material.thermal_conductivity.unchecked(cell, 0U);
-        const double enthalpy_diffusivity =
-            material.enthalpy_diffusivity.unchecked(cell, 0U);
-        const double viscosity =
-            material.effective_viscosity.unchecked(cell, 0U);
-        if (!std::isfinite(rho) || !std::isfinite(rho_n) ||
-            !std::isfinite(rho_nm1) || rho <= 0.0 || rho_n <= 0.0 ||
-            rho_nm1 <= 0.0 || !std::isfinite(h) || !std::isfinite(hn) ||
-            !std::isfinite(hnm1) || !std::isfinite(temperature) ||
-            !std::isfinite(conductivity) || conductivity <= 0.0 ||
-            !std::isfinite(enthalpy_diffusivity) ||
-            enthalpy_diffusivity <= 0.0 || !std::isfinite(viscosity) ||
-            viscosity < 0.0) {
-          return {StatusCode::numerical_failure, kEnthalpyNumerical};
-        }
-        VelocityGradient local_gradient;
-        for (std::uint8_t component = 0U; component < 9U; ++component) {
-          local_gradient.value[component] =
-              velocity_gradient.unchecked(cell, component);
-        }
-        const PressureWorkPoint work{
-            state.pressure_reference +
-                state.pressure_perturbation.trial.unchecked(cell, 0U),
-            state.accepted_pressure_reference +
-                state.pressure_perturbation.accepted.unchecked(cell, 0U),
-            state.previous_pressure_reference +
-                state.pressure_perturbation.previous.unchecked(cell, 0U),
-            {pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 0U),
-             pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 1U),
-             pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 2U)},
-            {state.velocity.trial.unchecked(cell, 0U),
-             state.velocity.trial.unchecked(cell, 1U),
-             state.velocity.trial.unchecked(cell, 2U)},
-            0.0};
-        double pressure_work = 0.0;
-        double dissipation = 0.0;
-        if (!evaluate_pressure_material_derivative(context.bdf, work,
-                                                   pressure_work) ||
-            !newtonian_viscous_dissipation(local_gradient, viscosity,
-                                            dissipation)) {
-          return {StatusCode::numerical_failure, kEnthalpyNumerical};
-        }
-        double source = 0.0;
-        double sink = 0.0;
-        for (std::size_t index = 0U; index < contributions.size; ++index) {
-          source += contributions.data[index]
-                        .explicit_source_density.unchecked(cell, 0U);
-          if (contributions.data[index].has_implicit_sink) {
-            sink += contributions.data[index]
-                        .implicit_sink_density.unchecked(cell, 0U);
-          }
-        }
-        const double diagonal =
-            (context.bdf.a0 * rho + sink) *
-                detail::cell_volume(*plan.kernels_, cell) +
-            detail::diffusion_diagonal(
-                *plan.kernels_, material.enthalpy_diffusivity, cell);
-        if (!std::isfinite(source) || !std::isfinite(sink) || sink < 0.0 ||
-            !std::isfinite(diagonal) || diagonal <= 0.0 ||
-            !std::isfinite(pressure_work) || !std::isfinite(dissipation)) {
-          return {StatusCode::numerical_failure, kEnthalpyNumerical};
-        }
+        EnthalpyCellTerms terms;
+        const Status cell_status = evaluate_enthalpy_cell_terms(
+            *plan.kernels_, state, material, velocity_gradient,
+            contributions, context, {x, y, z}, false, terms);
+        if (!cell_status) return cell_status;
       }
     }
   }
@@ -1133,87 +1209,20 @@ Status assemble_enthalpy_impl(
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
         const Int3 cell{x, y, z};
-        const double rho = state.density.trial.unchecked(cell, 0U);
-        const double h = state.enthalpy.trial.unchecked(cell, 0U);
-        const double unsteady =
-            context.bdf.a0 * rho * h +
-            context.bdf.a1 * state.density.accepted.unchecked(cell, 0U) *
-                state.enthalpy.accepted.unchecked(cell, 0U) +
-            context.bdf.a2 * state.density.previous.unchecked(cell, 0U) *
-                state.enthalpy.previous.unchecked(cell, 0U);
-        const double p = state.pressure_reference +
-                         state.pressure_perturbation.trial.unchecked(cell, 0U);
-        const double pn = state.accepted_pressure_reference +
-                          state.pressure_perturbation.accepted.unchecked(cell,
-                                                                         0U);
-        const double pnm1 = state.previous_pressure_reference +
-            state.pressure_perturbation.previous.unchecked(cell, 0U);
-        const PressureWorkPoint work{
-            p,
-            pn,
-            pnm1,
-            {pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 0U),
-             pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 1U),
-             pressure_gradient_component(*plan.kernels_,
-                                         state.pressure_perturbation.trial,
-                                         cell, 2U)},
-            {state.velocity.trial.unchecked(cell, 0U),
-             state.velocity.trial.unchecked(cell, 1U),
-             state.velocity.trial.unchecked(cell, 2U)},
-            0.0};
-        double pressure_work = 0.0;
-        double dissipation = 0.0;
-        VelocityGradient local_gradient;
-        for (std::uint8_t component = 0U; component < 9U; ++component) {
-          local_gradient.value[component] =
-              velocity_gradient.unchecked(cell, component);
-        }
-        if (!evaluate_pressure_material_derivative(context.bdf, work,
-                                                   pressure_work) ||
-            !newtonian_viscous_dissipation(
-                local_gradient,
-                material.effective_viscosity.unchecked(cell, 0U),
-                dissipation)) {
-          return {StatusCode::numerical_failure, kEnthalpyNumerical};
-        }
-        double source = 0.0;
-        double sink = 0.0;
-        for (std::size_t i = 0U; i < contributions.size; ++i) {
-          source += contributions.data[i].explicit_source_density.unchecked(
-              cell, 0U);
-          if (contributions.data[i].has_implicit_sink) {
-            const double value =
-                contributions.data[i].implicit_sink_density.unchecked(cell,
-                                                                       0U);
-            if (!std::isfinite(value) || value < 0.0) {
-              return {StatusCode::numerical_failure, kEnthalpyNumerical};
-            }
-            sink += value;
-          }
-        }
-        const double volume = detail::cell_volume(*plan.kernels_, cell);
-        const double diffusion_diagonal = detail::diffusion_diagonal(
-            *plan.kernels_, material.enthalpy_diffusivity, cell);
-        const double residual =
-            (unsteady + system.rhs.unchecked(cell, 0U) - pressure_work -
-             system.residual.unchecked(cell, 0U) - dissipation - source +
-             sink * h) *
-            volume;
-        const double diagonal = (context.bdf.a0 * rho + sink) * volume +
-                                diffusion_diagonal;
-        const double rhs = diagonal * h - residual;
-        if (!std::isfinite(residual) || !std::isfinite(diagonal) ||
-            diagonal <= 0.0 || !std::isfinite(diffusion_diagonal) ||
-            diffusion_diagonal <= 0.0 || !std::isfinite(rhs)) {
-          return {StatusCode::numerical_failure, kEnthalpyNumerical};
-        }
-        system.residual.unchecked(cell, 0U) = residual;
-        system.diagonal.unchecked(cell, 0U) = diagonal;
-        system.rhs.unchecked(cell, 0U) = rhs;
+        EnthalpyCellTerms terms;
+        Status cell_status = evaluate_enthalpy_cell_terms(
+            *plan.kernels_, state, material, velocity_gradient,
+            contributions, context, cell, true, terms);
+        EnthalpyCellSystem cell_system;
+        if (cell_status)
+          cell_status = combine_enthalpy_cell_system(
+              *plan.kernels_, state, context, cell,
+              system.rhs.unchecked(cell, 0U),
+              system.residual.unchecked(cell, 0U), terms, cell_system);
+        if (!cell_status) return cell_status;
+        system.residual.unchecked(cell, 0U) = cell_system.residual;
+        system.diagonal.unchecked(cell, 0U) = cell_system.diagonal;
+        system.rhs.unchecked(cell, 0U) = cell_system.rhs;
       }
     }
   }
@@ -1274,6 +1283,174 @@ Status assemble_enthalpy(
     return status;
   }
   return epoch.finalize(certificate);
+}
+
+Status assemble_target_coupled_enthalpy_residual(
+    const EnthalpyEquationPlan& plan, const EquationStateView& state,
+    const EquationMaterialView& material, ConstFieldView velocity_gradient,
+    const EquationAssemblyContext& context, FieldView residual,
+    TargetCoupledEnthalpyResidualWorkspace workspace,
+    EquationAssemblyCertificate& certificate) noexcept {
+  Span<const CompiledContribution> selected_descriptors{};
+  if (!detail::select_contribution_stage(
+          {plan.contributions_.data(), plan.contributions_.size()},
+          context.contribution_stage, selected_descriptors) ||
+      selected_descriptors.size != 0U) {
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  }
+
+  const KernelBox box = resolved_box(context.box, plan.cells_);
+  if (plan.kernels_ == nullptr || plan.fingerprint_ == 0U ||
+      context.geometry != plan.geometry_revision_ ||
+      context.boundary != plan.boundary_revision_ ||
+      context.thermo != plan.thermodynamics_fingerprint_ ||
+      context.transport != plan.transport_fingerprint_ ||
+      context.scope != EquationAssemblyScope::target_coupled ||
+      context.provisional_mass_flux ||
+      !detail::full_equation_box(box, plan.cells_) ||
+      !compatible_history(state.density, plan.cells_, plan.density_, 1U, 0U) ||
+      !compatible_history(state.velocity, plan.cells_, plan.velocity_, 3U,
+                          1U) ||
+      !compatible_history(state.pressure_perturbation, plan.cells_,
+                          plan.pressure_, 1U, 1U) ||
+      !compatible_history(state.enthalpy, plan.cells_, plan.enthalpy_, 1U,
+                          plan.convection_reach_) ||
+      !compatible_history(state.temperature, plan.cells_, plan.temperature_,
+                          1U, 1U) ||
+      !detail::valid_cell_view(material.thermal_conductivity, plan.cells_, 0U,
+                               1U, 1U) ||
+      !detail::valid_cell_view(material.effective_viscosity, plan.cells_, 0U,
+                               1U, 0U) ||
+      !detail::valid_cell_view(material.enthalpy_diffusivity, plan.cells_, 0U,
+                               1U, 1U) ||
+      velocity_gradient.field != plan.velocity_gradient_ ||
+      !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 0U) ||
+      !valid_flux_context(*plan.kernels_, context, box) ||
+      !detail::finite_face_flux(context.mass_flux, box) ||
+      !detail::finite_face_neighbour_slabs(
+          state.enthalpy.trial, box, 0U, 1U, plan.convection_reach_) ||
+      !detail::finite_face_neighbour_slabs(state.temperature.trial, box, 0U,
+                                           1U) ||
+      !detail::finite_face_neighbour_slabs(
+          state.pressure_perturbation.trial, box, 0U, 1U) ||
+      !detail::valid_cell_view(residual, plan.cells_, 0U, 1U) ||
+      !detail::valid_cell_view(workspace.pressure_work, plan.cells_, 0U, 1U) ||
+      !detail::valid_cell_view(workspace.viscous_dissipation, plan.cells_, 0U,
+                               1U) ||
+      !detail::valid_cell_view(workspace.diffusion, plan.cells_, 0U, 1U)) {
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  }
+
+  const std::array<FieldView, 4U> outputs{
+      residual, workspace.pressure_work, workspace.viscous_dissipation,
+      workspace.diffusion};
+  for (std::size_t left = 0U; left < outputs.size(); ++left) {
+    for (std::size_t right = left + 1U; right < outputs.size(); ++right) {
+      if (detail::field_views_overlap(as_const(outputs[left]),
+                                      as_const(outputs[right]))) {
+        return {StatusCode::invalid_plan, kEnthalpyAssembly};
+      }
+    }
+    if (detail::cell_face_views_overlap(outputs[left], context.mass_flux.x) ||
+        detail::cell_face_views_overlap(outputs[left], context.mass_flux.y) ||
+        detail::cell_face_views_overlap(outputs[left], context.mass_flux.z)) {
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+    }
+  }
+
+  const auto aliases_output = [&](ConstFieldView input) noexcept {
+    for (FieldView output : outputs) {
+      if (detail::field_views_overlap(input, as_const(output))) return true;
+    }
+    return false;
+  };
+  const PrimitiveHistory histories[]{
+      state.density, state.velocity, state.pressure_perturbation,
+      state.enthalpy, state.temperature};
+  for (const PrimitiveHistory& history : histories) {
+    if (aliases_output(history.trial) || aliases_output(history.accepted) ||
+        aliases_output(history.previous)) {
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+    }
+  }
+  const ConstFieldView material_fields[]{material.thermal_conductivity,
+                                         material.effective_viscosity,
+                                         material.enthalpy_diffusivity,
+                                         velocity_gradient};
+  for (ConstFieldView field : material_fields) {
+    if (aliases_output(field)) {
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+    }
+  }
+
+  const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
+                 box.begin.z + box.cells.z};
+  for (std::int32_t z = box.begin.z; z < end.z; ++z) {
+    for (std::int32_t y = box.begin.y; y < end.y; ++y) {
+      for (std::int32_t x = box.begin.x; x < end.x; ++x) {
+        const Int3 cell{x, y, z};
+        EnthalpyCellTerms terms;
+        const Status cell_status = evaluate_enthalpy_cell_terms(
+            *plan.kernels_, state, material, velocity_gradient, {}, context,
+            cell, false, terms);
+        if (!cell_status) return cell_status;
+        workspace.pressure_work.unchecked(cell, 0U) = terms.pressure_work;
+        workspace.viscous_dissipation.unchecked(cell, 0U) =
+            terms.viscous_dissipation;
+      }
+    }
+  }
+
+  const std::array<ConstFieldView, 1U> enthalpy_reads{state.enthalpy.trial};
+  const std::array<FieldView, 1U> convection_writes{residual};
+  const KernelInvocation convection{
+      {enthalpy_reads.data(), enthalpy_reads.size()},
+      {convection_writes.data(), convection_writes.size()}, box,
+      0U, 0U, 1U, context.face_flux, context.counters};
+  Status status = cartesian_target_convection(
+      *plan.kernels_, plan.convection_, context.mass_flux, convection);
+  if (!status) return status;
+
+  const std::array<ConstFieldView, 1U> thermal_reads{state.temperature.trial};
+  const std::array<FieldView, 1U> diffusion_writes{workspace.diffusion};
+  const KernelInvocation conduction{
+      {thermal_reads.data(), thermal_reads.size()},
+      {diffusion_writes.data(), diffusion_writes.size()}, box,
+      0U, 0U, 1U, 0U, context.counters};
+  status = cartesian_diffusion(*plan.kernels_, material.thermal_conductivity,
+                               conduction);
+  if (!status) return status;
+
+  // residual already owns the convection term.  Complete it in place from
+  // the preflighted expensive terms and the exact temperature diffusion.
+  // It is attempt-local and may therefore be partial on failure; the typed
+  // certificate remains unpublished until every cell succeeds.
+  for (std::int32_t z = box.begin.z; z < end.z; ++z) {
+    for (std::int32_t y = box.begin.y; y < end.y; ++y) {
+      for (std::int32_t x = box.begin.x; x < end.x; ++x) {
+        const Int3 cell{x, y, z};
+        const double rho = state.density.trial.unchecked(cell, 0U);
+        EnthalpyCellTerms terms;
+        terms.pressure_work = workspace.pressure_work.unchecked(cell, 0U);
+        terms.viscous_dissipation =
+            workspace.viscous_dissipation.unchecked(cell, 0U);
+        form_enthalpy_linear_terms(*plan.kernels_, material, context, cell,
+                                   rho, terms);
+        EnthalpyCellSystem cell_system;
+        const Status cell_status = combine_enthalpy_cell_system(
+            *plan.kernels_, state, context, cell,
+            residual.unchecked(cell, 0U),
+            workspace.diffusion.unchecked(cell, 0U), terms, cell_system);
+        if (!cell_status) return cell_status;
+        residual.unchecked(cell, 0U) = cell_system.residual;
+      }
+    }
+  }
+  certificate = {plan.fingerprint_, context.scope, context.time,
+                 context.geometry, context.face_flux,
+                 state_revision(state, material, velocity_gradient, {}),
+                 context.dt};
+  return {};
 }
 
 }  // namespace hundun::v04

@@ -6,7 +6,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -26,6 +28,14 @@ bool expect(bool condition, std::string_view description) {
 bool close(double actual, double expected) {
   return std::isfinite(actual) &&
          std::abs(actual - expected) <= 1.0e-12 * std::max(1.0, std::abs(expected));
+}
+
+bool bitwise_equal(const std::vector<double>& left,
+                   const std::vector<double>& right) {
+  return left.size() == right.size() &&
+         (left.empty() ||
+          std::memcmp(left.data(), right.data(),
+                      left.size() * sizeof(double)) == 0);
 }
 
 struct OwnedField {
@@ -608,6 +618,13 @@ bool test_production_enthalpy_assembly_oracle() {
   OwnedField diagonal = make_field(30U, cells, 1U, 0U, 617U);
   OwnedField rhs = make_field(31U, cells, 1U, 0U, 618U);
   OwnedField residual = make_field(32U, cells, 1U, 0U, 619U);
+  OwnedField target_residual = make_field(33U, cells, 1U, 0U, 623U);
+  OwnedField target_pressure_work_scratch =
+      make_field(34U, cells, 1U, 0U, 624U);
+  OwnedField target_viscous_dissipation_scratch =
+      make_field(35U, cells, 1U, 0U, 625U);
+  OwnedField target_diffusion_scratch =
+      make_field(36U, cells, 1U, 0U, 626U);
   OwnedFaceField ax = make_face_field(CartesianAxis::x, cells, 620U);
   OwnedFaceField ay = make_face_field(CartesianAxis::y, cells, 621U);
   OwnedFaceField az = make_face_field(CartesianAxis::z, cells, 622U);
@@ -802,6 +819,56 @@ bool test_production_enthalpy_assembly_oracle() {
       -dissipation * volume,
       "viscous dissipation isolates in production assembler");
 
+  // Differential oracle for the candidate-only path: retain non-zero
+  // unsteady, convection, pressure-work, conduction and dissipation terms in
+  // the same target state so equality cannot pass through an all-zero seam.
+  reset_fields();
+  select_flux(moving);
+  state.pressure_reference = 100.3;
+  state.accepted_pressure_reference = 100.1;
+  state.previous_pressure_reference = 99.8;
+  for (std::int32_t k = -2; k < cells.z + 2; ++k) {
+    for (std::int32_t j = -2; j < cells.y + 2; ++j) {
+      for (std::int32_t i = -2; i < cells.x + 2; ++i) {
+        const Int3 cell{i, j, k};
+        const double x = (static_cast<double>(i) + 0.5) * spacing;
+        rho_trial.view.unchecked(cell, 0U) = 1.1 + 0.01 * x;
+        rho_accepted.view.unchecked(cell, 0U) = 1.0 + 0.005 * x;
+        rho_previous.view.unchecked(cell, 0U) = 0.9 + 0.002 * x;
+        velocity.view.unchecked(cell, 0U) = velocity_x;
+        velocity.view.unchecked(cell, 1U) = 0.2;
+        h_trial.view.unchecked(cell, 0U) = 300002.0 + 3.0 * x;
+        h_accepted.view.unchecked(cell, 0U) = 300000.0 + 2.0 * x;
+        h_previous.view.unchecked(cell, 0U) = 299998.0 + x;
+        if (i >= -1 && i < cells.x + 1 && j >= -1 &&
+            j < cells.y + 1 && k >= -1 && k < cells.z + 1) {
+          pi_trial.view.unchecked(cell, 0U) = 0.3 * x;
+          pi_accepted.view.unchecked(cell, 0U) = 0.2 * x;
+          pi_previous.view.unchecked(cell, 0U) = 0.1 * x;
+          temperature.view.unchecked(cell, 0U) = 300.0 + 5.0 * x * x;
+          mu.view.unchecked(cell, 0U) = viscosity;
+        }
+      }
+    }
+  }
+  for (std::int32_t k = 0; k < cells.z; ++k) {
+    for (std::int32_t j = 0; j < cells.y; ++j) {
+      for (std::int32_t i = 0; i < cells.x; ++i) {
+        for (std::uint8_t component = 0U; component < 9U; ++component) {
+          gradients.view.unchecked({i, j, k}, component) =
+              gradient_values[component];
+        }
+      }
+    }
+  }
+  EquationAssemblyCertificate combined_certificate;
+  passed &= expect(static_cast<bool>(assemble_enthalpy(
+                       fixture.equations.enthalpy(), state, material,
+                       as_const(gradients.view), {}, context, system,
+                       combined_certificate)),
+                   "combined non-zero enthalpy residual assembles");
+  certificate = combined_certificate;
+
   const std::vector<double> full_diagonal = diagonal.bytes;
   const std::vector<double> full_rhs = rhs.bytes;
   const std::vector<double> full_residual = residual.bytes;
@@ -853,6 +920,83 @@ bool test_production_enthalpy_assembly_oracle() {
                        target_certificate.scope ==
                            EquationAssemblyScope::target_coupled,
                    "target-coupled assembly equals the final conservative residual");
+
+  std::fill(target_residual.bytes.begin(), target_residual.bytes.end(),
+            -67.0);
+  std::fill(target_pressure_work_scratch.bytes.begin(),
+            target_pressure_work_scratch.bytes.end(), -68.0);
+  std::fill(target_viscous_dissipation_scratch.bytes.begin(),
+            target_viscous_dissipation_scratch.bytes.end(), -69.0);
+  std::fill(target_diffusion_scratch.bytes.begin(),
+            target_diffusion_scratch.bytes.end(), -70.0);
+  const TargetCoupledEnthalpyResidualWorkspace target_workspace{
+      target_pressure_work_scratch.view,
+      target_viscous_dissipation_scratch.view,
+      target_diffusion_scratch.view};
+  EquationAssemblyCertificate residual_certificate;
+  const Status residual_status = assemble_target_coupled_enthalpy_residual(
+      fixture.equations.enthalpy(), state, material,
+      as_const(gradients.view), context, target_residual.view,
+      target_workspace, residual_certificate);
+  passed &= expect(static_cast<bool>(residual_status),
+                   "target-coupled residual-only assembly succeeds");
+  passed &= expect(bitwise_equal(target_residual.bytes, full_residual) &&
+                       same_certificate(residual_certificate,
+                                        target_certificate),
+                   "residual-only target path is bitwise equal to full assembly");
+
+  const std::vector<double> published_target_residual = target_residual.bytes;
+  const EquationAssemblyCertificate published_residual_certificate =
+      residual_certificate;
+  const double last_enthalpy =
+      h_trial.view.unchecked({cells.x - 1, cells.y - 1, cells.z - 1}, 0U);
+  h_trial.view.unchecked({cells.x - 1, cells.y - 1, cells.z - 1}, 0U) =
+      std::numeric_limits<double>::max() / 4.0;
+  const Status failed_residual_status =
+      assemble_target_coupled_enthalpy_residual(
+          fixture.equations.enthalpy(), state, material,
+          as_const(gradients.view), context, target_residual.view,
+          target_workspace, residual_certificate);
+  passed &= expect(failed_residual_status.code ==
+                           StatusCode::numerical_failure &&
+                       same_certificate(residual_certificate,
+                                        published_residual_certificate),
+                   "residual-only numerical failure preserves its certificate");
+  h_trial.view.unchecked({cells.x - 1, cells.y - 1, cells.z - 1}, 0U) =
+      last_enthalpy;
+  const Status recovered_residual_status =
+      assemble_target_coupled_enthalpy_residual(
+          fixture.equations.enthalpy(), state, material,
+          as_const(gradients.view), context, target_residual.view,
+          target_workspace, residual_certificate);
+  passed &= expect(static_cast<bool>(recovered_residual_status) &&
+                       bitwise_equal(target_residual.bytes, full_residual) &&
+                       same_certificate(residual_certificate,
+                                        published_residual_certificate),
+                   "a successful replay fully overwrites a partial residual");
+  passed &= expect(
+      assemble_target_coupled_enthalpy_residual(
+          fixture.equations.enthalpy(), state, material,
+          as_const(gradients.view), final_context, target_residual.view,
+          target_workspace, residual_certificate).code ==
+              StatusCode::invalid_plan &&
+          bitwise_equal(target_residual.bytes, published_target_residual) &&
+          same_certificate(residual_certificate,
+                           published_residual_certificate),
+      "residual-only seam rejects final-conservative scope atomically");
+  EquationAssemblyContext partial_target_context = context;
+  partial_target_context.box = {{1, 0, 0},
+                                {cells.x - 1, cells.y, cells.z}};
+  passed &= expect(
+      assemble_target_coupled_enthalpy_residual(
+          fixture.equations.enthalpy(), state, material,
+          as_const(gradients.view), partial_target_context,
+          target_residual.view, target_workspace,
+          residual_certificate).code == StatusCode::invalid_plan &&
+          bitwise_equal(target_residual.bytes, published_target_residual) &&
+          same_certificate(residual_certificate,
+                           published_residual_certificate),
+      "residual-only seam rejects a partial box atomically");
   context = final_context;
   const KernelBox lower{{0, 0, 0}, {cells.x / 2, cells.y, cells.z}};
   const KernelBox upper{{cells.x / 2, 0, 0},
