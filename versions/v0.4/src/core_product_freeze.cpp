@@ -1397,6 +1397,46 @@ Status make_pressure_face_views(std::vector<double>& storage, Int3 cells,
   return {};
 }
 
+Status make_pressure_energy_compiled_cell_views(
+    std::vector<double>& storage, Int3 cells, FieldId semantic_field,
+    RevisionToken revision, FieldView& local_diagonal,
+    FieldView& response_stage) noexcept {
+  std::size_t cell_values = 0U;
+  std::size_t expected = 0U;
+  if (!detail::product_cell_count(cells, cell_values) ||
+      !detail::product_checked_multiply(cell_values, 2U, expected) ||
+      storage.size() != expected || storage.data() == nullptr ||
+      semantic_field == 0U || revision == 0U) {
+    return {StatusCode::invalid_plan, kProductBinding};
+  }
+  const StorageIdentity identity =
+      static_cast<StorageIdentity>(reinterpret_cast<std::uintptr_t>(
+          storage.data()));
+  const RevisionDomainIdentity domain = identity ^ UINT64_C(0xa04e4c0d);
+  if (identity == 0U || domain == 0U) {
+    return {StatusCode::invalid_plan, kProductBinding};
+  }
+  const auto make = [&](double* base) noexcept {
+    FieldView view;
+    view.base = base;
+    view.interior = cells;
+    view.ghosts = {};
+    view.components = 1U;
+    view.stride_y = static_cast<std::size_t>(cells.x);
+    view.stride_z = view.stride_y * static_cast<std::size_t>(cells.y);
+    view.component_stride = cell_values;
+    view.replica = 0U;
+    view.field = semantic_field;
+    view.revision = revision;
+    view.storage_identity = identity;
+    view.revision_domain = domain;
+    return view;
+  };
+  local_diagonal = make(storage.data());
+  response_stage = make(storage.data() + cell_values);
+  return {};
+}
+
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 bool candidate_field_range(const FieldView& view,
                            const ArenaFieldLayout& layout,
@@ -2346,6 +2386,11 @@ struct CompiledCasePlan::Impl {
   std::vector<double> energy_assembly_face_storage;
   std::vector<double> energy_frozen_enthalpy_face_storage;
   std::vector<double> energy_directional_enthalpy_face_storage;
+  // Cold-compiled E_h factors.  The two cell spans hold the immutable local
+  // diagonal and the transactional response staging field.  Limiter branch
+  // codes are compact metadata; neither allocation participates in a halo.
+  std::vector<double> energy_compiled_enthalpy_cell_storage;
+  std::vector<std::uint16_t> energy_compiled_enthalpy_branch_storage;
   std::vector<std::uint8_t> pressure_mg_cell_activity;
   std::vector<std::uint8_t> pressure_mg_x_activity;
   std::vector<std::uint8_t> pressure_mg_y_activity;
@@ -3250,7 +3295,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   candidate->phases[4U] = ProductFreezePhase::plan_instantiation;
   std::size_t face_doubles = 0U;
+  std::size_t compiled_enthalpy_cell_doubles = 0U;
   if (!detail::product_face_doubles(candidate->patch.cells, face_doubles)) {
+    return {StatusCode::invalid_plan, kProductCapacity};
+  }
+  if (!detail::product_checked_multiply(
+          local_cells, 2U, compiled_enthalpy_cell_doubles)) {
     return {StatusCode::invalid_plan, kProductCapacity};
   }
   try {
@@ -3259,6 +3309,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     candidate->energy_frozen_enthalpy_face_storage.assign(face_doubles, 0.0);
     candidate->energy_directional_enthalpy_face_storage.assign(face_doubles,
                                                                0.0);
+    candidate->energy_compiled_enthalpy_cell_storage.assign(
+        compiled_enthalpy_cell_doubles, 0.0);
+    candidate->energy_compiled_enthalpy_branch_storage.assign(face_doubles,
+                                                              0U);
   } catch (const std::bad_alloc&) {
     return {StatusCode::allocation_failure, kProductCapacity};
   }
@@ -8540,6 +8594,8 @@ Status ProductDriver::Impl::execute_attempt(
   FieldView schur_eliminated_enthalpy;
   FieldView schur_energy_response;
   FieldView pressure_energy_delta_temperature;
+  FieldView pressure_energy_compiled_enthalpy_local;
+  FieldView pressure_energy_compiled_enthalpy_response;
   if (status)
     status = runtime_write_view(product.fields.pressure_energy_c_h,
                                 pressure_energy_c_h);
@@ -8633,6 +8689,12 @@ Status ProductDriver::Impl::execute_attempt(
     status = runtime_write_view(
         product.fields.pressure_energy_delta_temperature,
         pressure_energy_delta_temperature);
+  if (status)
+    status = make_pressure_energy_compiled_cell_views(
+        product.energy_compiled_enthalpy_cell_storage, cells,
+        product.fields.pressure_energy_e_h, pressure_energy_e_h.revision,
+        pressure_energy_compiled_enthalpy_local,
+        pressure_energy_compiled_enthalpy_response);
   FaceFieldView energy_assembly_x_coefficient;
   FaceFieldView energy_assembly_y_coefficient;
   FaceFieldView energy_assembly_z_coefficient;
@@ -8789,6 +8851,12 @@ Status ProductDriver::Impl::execute_attempt(
       revised = runtime_write_view(
           product.fields.pressure_energy_delta_temperature,
           pressure_energy_delta_temperature);
+    if (revised)
+      revised = make_pressure_energy_compiled_cell_views(
+          product.energy_compiled_enthalpy_cell_storage, cells,
+          product.fields.pressure_energy_e_h, pressure_energy_e_h.revision,
+          pressure_energy_compiled_enthalpy_local,
+          pressure_energy_compiled_enthalpy_response);
     if (revised)
       pressure_energy_system = {
           pressure_energy_e_h, pressure_energy_r_c, pressure_energy_r_e,
@@ -9244,7 +9312,18 @@ Status ProductDriver::Impl::execute_attempt(
             pressure_energy_delta_temperature,
             {energy_directional_x_enthalpy,
              energy_directional_y_enthalpy,
-             energy_directional_z_enthalpy}};
+             energy_directional_z_enthalpy},
+            {// The enthalpy assembly face coefficients are dead throughout
+             // this linear solve.  Reuse their frozen capacity for exact
+             // lambda transmissibilities; every nonlinear candidate replay
+             // reassembles its own coefficients before consuming them.
+             pressure_energy_compiled_enthalpy_local,
+             {energy_assembly_x_coefficient,
+              energy_assembly_y_coefficient,
+              energy_assembly_z_coefficient},
+             {{product.energy_compiled_enthalpy_branch_storage.data(),
+               product.energy_compiled_enthalpy_branch_storage.size()}},
+             pressure_energy_compiled_enthalpy_response}};
         energy_enthalpy_binding.activity =
             pressure_energy_continuity_activity;
         energy_enthalpy_binding.identity = identity;
@@ -9332,6 +9411,11 @@ Status ProductDriver::Impl::execute_attempt(
               jacobian_certificate.full_nonlinear_jacobian)
             coupled = {StatusCode::invalid_plan, kProductPressureEnergy};
         }
+        coupled = product.reductions.consensus(coupled);
+        PressureEnergySchurPreparedApplyEpoch repeated_apply_epoch;
+        if (coupled)
+          coupled =
+              schur_operator.prepare_repeated_apply(repeated_apply_epoch);
         coupled = product.reductions.consensus(coupled);
         if (coupled)
           coupled = schur_operator.form_pressure_rhs(
@@ -9462,6 +9546,11 @@ Status ProductDriver::Impl::execute_attempt(
           }
         }
 #endif
+        Status closed;
+        if (repeated_apply_epoch.valid())
+          closed =
+              schur_operator.close_repeated_apply(repeated_apply_epoch);
+        if (coupled && !closed) coupled = closed;
         return product.reductions.consensus(coupled);
       };
   struct PressureEnergyCandidateArtifacts {

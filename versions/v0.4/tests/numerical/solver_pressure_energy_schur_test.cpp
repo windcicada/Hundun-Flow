@@ -1028,7 +1028,6 @@ bool test_enthalpy_spatial_target_contract_binds() {
                    "frozen-spatial E_h applies one complete target response");
   if (!passed)
     return false;
-
   OwnedFaces zero_flux_storage = face_bundle(cells, 8970U, 8971U, 0.0);
   const ConstFaceFluxView zero_flux = flux_view(zero_flux_storage, 8972U);
   OwnedFaces zero_flux_frozen_storage = face_bundle(cells, 8973U, 8974U);
@@ -1844,6 +1843,19 @@ bool test_enthalpy_semismooth_limiter_certificate() {
   const ConstFaceFluxView flux = flux_view(flux_storage, 8917U);
   OwnedFaces frozen_storage = face_bundle(cells, 8918U, 8919U);
   OwnedFaces directional_storage = face_bundle(cells, 8920U, 8921U);
+  OwnedFaces compiled_conductance = face_bundle(cells, 8938U, 8939U);
+  OwnedField compiled_local = shaped_field(46U, 8940U, 8941U, cells, 0.0);
+  OwnedField compiled_response = shaped_field(47U, 8942U, 8943U, cells, 0.0);
+  const auto face_values = [](ConstFaceFieldView face) {
+    return static_cast<std::size_t>(face.extents.x) *
+           static_cast<std::size_t>(face.extents.y) *
+           static_cast<std::size_t>(face.extents.z);
+  };
+  const std::size_t branch_count =
+      face_values(as_const(flux_storage.x)) +
+      face_values(as_const(flux_storage.y)) +
+      face_values(as_const(flux_storage.z));
+  std::vector<std::uint16_t> compiled_branches(branch_count, UINT16_C(0));
   const FrozenConvectionContext context{8922U, fixture.boundary.revision()};
   FrozenConvectionFaceField frozen;
   passed &= expect(prepare_frozen_enthalpy(
@@ -1876,7 +1888,12 @@ bool test_enthalpy_semismooth_limiter_certificate() {
   binding.frozen_face_enthalpy = frozen;
   binding.workspace = {
       delta_temperature.view,
-      {directional_storage.x, directional_storage.y, directional_storage.z}};
+      {directional_storage.x, directional_storage.y, directional_storage.z},
+      {compiled_local.view,
+       {compiled_conductance.x, compiled_conductance.y,
+        compiled_conductance.z},
+       {{compiled_branches.data(), compiled_branches.size()}},
+       compiled_response.view}};
   binding.identity = {8929U, 8930U, 8931U, 8932U, 8933U};
   binding.linearization_policy =
       FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope;
@@ -1886,6 +1903,9 @@ bool test_enthalpy_semismooth_limiter_certificate() {
       static_cast<bool>(PressureEnergyEnthalpyOperator::bind(
           binding, semismooth, semismooth_certificate)) &&
           semismooth_certificate.valid() &&
+          semismooth_certificate.compiled_factored_apply &&
+          semismooth_certificate.compiled_numeric_revision != 0U &&
+          semismooth_certificate.compiled_local_binding != 0U &&
           semismooth_certificate.generalized_face_count > 0U &&
           semismooth_certificate.linearization_policy ==
               FrozenConvectionLinearizationPolicy::
@@ -1915,6 +1935,58 @@ bool test_enthalpy_semismooth_limiter_certificate() {
   passed &=
       expect(static_cast<bool>(semismooth.apply(direction.view, output.view)),
              "certified semismooth limiter action remains finite");
+  PressureEnergyEnthalpyPreparedEpoch prepared_epoch;
+  OwnedField prepared_output = shaped_field(48U, 8944U, 8945U, cells, -2.0);
+  const Status prepare_status =
+      semismooth.prepare_repeated_apply(prepared_epoch);
+  const Status prepared_status = semismooth.apply_prepared(
+      direction.view, prepared_output.view, prepared_epoch);
+  const Status close_status = semismooth.close_repeated_apply(prepared_epoch);
+  bool prepared_equal = true;
+  for (std::int32_t z = 0; z < cells.z; ++z)
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x)
+        prepared_equal =
+            prepared_equal &&
+            close(prepared_output.view.unchecked({x, y, z}, 0U),
+                  output.view.unchecked({x, y, z}, 0U));
+  passed &= expect(static_cast<bool>(prepare_status) &&
+                       static_cast<bool>(prepared_status) &&
+                       static_cast<bool>(close_status) && prepared_equal &&
+                       !prepared_epoch.valid(),
+                   "prepared limited E_h epoch preserves the exact action");
+
+  std::fill(prepared_output.storage.begin(), prepared_output.storage.end(),
+            -3.0);
+  const std::vector<double> rejected_snapshot = prepared_output.storage;
+  compiled_branches[0U] ^= UINT16_C(1);
+  const Status stale_branch =
+      semismooth.apply(direction.view, prepared_output.view);
+  compiled_branches[0U] ^= UINT16_C(1);
+  passed &= expect(stale_branch.code == StatusCode::invalid_plan &&
+                       prepared_output.storage == rejected_snapshot,
+                   "raw compiled branch mutation fails atomically");
+
+  const double saved_target = target.view.unchecked({1, 1, 1}, 0U);
+  target.view.unchecked({1, 1, 1}, 0U) = saved_target + 0.25;
+  const Status stale_target =
+      semismooth.apply(direction.view, prepared_output.view);
+  target.view.unchecked({1, 1, 1}, 0U) = saved_target;
+  passed &= expect(stale_target.code == StatusCode::invalid_plan &&
+                       prepared_output.storage == rejected_snapshot,
+                   "compiled limited E_h detects raw target mutation before "
+                   "output commit");
+
+  const double saved_lambda = lambda.view.unchecked({1, 1, 1}, 0U);
+  lambda.view.unchecked({1, 1, 1}, 0U) =
+      std::numeric_limits<double>::quiet_NaN();
+  const Status stale_transport =
+      semismooth.apply(direction.view, prepared_output.view);
+  lambda.view.unchecked({1, 1, 1}, 0U) = saved_lambda;
+  passed &= expect(stale_transport.code == StatusCode::numerical_failure &&
+                       prepared_output.storage == rejected_snapshot,
+                   "compiled limited E_h detects nonfinite raw transport "
+                   "before output commit");
   return passed;
 }
 

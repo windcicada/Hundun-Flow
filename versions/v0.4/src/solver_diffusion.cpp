@@ -727,6 +727,245 @@ void dispatch_direction_commit(
   }
 }
 
+constexpr std::uint16_t kCompiledBranchGeneralized = UINT16_C(0x8000);
+
+std::size_t face_value_count(Int3 extents) noexcept {
+  return static_cast<std::size_t>(extents.x) *
+         static_cast<std::size_t>(extents.y) *
+         static_cast<std::size_t>(extents.z);
+}
+
+std::size_t compiled_branch_count(Int3 cells) noexcept {
+  return face_value_count(expected_face_extents(cells, CartesianAxis::x)) +
+         face_value_count(expected_face_extents(cells, CartesianAxis::y)) +
+         face_value_count(expected_face_extents(cells, CartesianAxis::z));
+}
+
+template <std::size_t Axis>
+std::size_t compiled_branch_offset(Int3 cells, Int3 face) noexcept {
+  const CartesianAxis axis = static_cast<CartesianAxis>(Axis);
+  const Int3 extents = expected_face_extents(cells, axis);
+  std::size_t base = 0U;
+  if constexpr (Axis >= 1U)
+    base += face_value_count(
+        expected_face_extents(cells, CartesianAxis::x));
+  if constexpr (Axis >= 2U)
+    base += face_value_count(
+        expected_face_extents(cells, CartesianAxis::y));
+  return base + static_cast<std::size_t>(face.x) +
+         static_cast<std::size_t>(extents.x) *
+             (static_cast<std::size_t>(face.y) +
+              static_cast<std::size_t>(extents.y) *
+                  static_cast<std::size_t>(face.z));
+}
+
+template <bool Uniform, std::size_t Axis, bool Commit>
+void compile_limited_branch_axis(
+    const CartesianKernelPlan& plan, ConstFaceFluxView flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionLinearizationPolicy policy, ConstFaceFieldView frozen,
+    std::uint16_t* output_values,
+    DirectionalPreflightState& state) noexcept {
+  state.branch_hash = hash_mix(state.branch_hash, Axis);
+  for (std::int32_t z = 0; z < frozen.extents.z; ++z) {
+    for (std::int32_t y = 0; y < frozen.extents.y; ++y) {
+      for (std::int32_t x = 0; x < frozen.extents.x; ++x) {
+        const Int3 face{x, y, z};
+        const double rate = face_rate<Axis>(flux, face);
+        const double target_value =
+            reconstructed_face<Uniform, Axis,
+                               ConvectionScheme::limited_central2>(
+                plan, target, target_component, face, rate);
+        const FaceBranchSelection selection =
+            select_face_branches<Uniform, Axis,
+                                 ConvectionScheme::limited_central2>(
+                plan, target, target_component, face, rate);
+        const bool generalized = !selection.differentiable;
+        if (!std::isfinite(rate) || !std::isfinite(target_value) ||
+            !std::isfinite(frozen.unchecked(face))) {
+          state.result = DirectionalPreflight::nonfinite;
+          return;
+        }
+        if (!same_bits(target_value, frozen.unchecked(face))) {
+          state.result = DirectionalPreflight::stale_numeric;
+          return;
+        }
+        if (generalized &&
+            policy != FrozenConvectionLinearizationPolicy::
+                          semismooth_generalized_zero_slope) {
+          state.result = DirectionalPreflight::nondifferentiable;
+          return;
+        }
+        if (selection.code >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::uint16_t>::max() &
+                ~kCompiledBranchGeneralized)) {
+          state.result = DirectionalPreflight::nonfinite;
+          return;
+        }
+        state.branch_hash = hash_mix(state.branch_hash, selection.code);
+        state.branch_hash = hash_mix(state.branch_hash, generalized ? 1U : 0U);
+        if (generalized) {
+          if (state.generalized_face_count ==
+              std::numeric_limits<std::uint64_t>::max()) {
+            state.result = DirectionalPreflight::nonfinite;
+            return;
+          }
+          ++state.generalized_face_count;
+        }
+        if constexpr (Commit) {
+          output_values[compiled_branch_offset<Axis>(plan.cells(), face)] =
+              static_cast<std::uint16_t>(selection.code) |
+              (generalized ? kCompiledBranchGeneralized : UINT16_C(0));
+        }
+      }
+    }
+  }
+}
+
+template <bool Uniform, bool Commit>
+void compile_limited_branch_faces(
+    const CartesianKernelPlan& plan, ConstFaceFluxView flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen,
+    std::uint16_t* output_values,
+    DirectionalPreflightState& state) noexcept {
+  compile_limited_branch_axis<Uniform, 0U, Commit>(
+      plan, flux, target, target_component, policy, frozen.x, output_values,
+      state);
+  if (state.result == DirectionalPreflight::success)
+    compile_limited_branch_axis<Uniform, 1U, Commit>(
+        plan, flux, target, target_component, policy, frozen.y, output_values,
+        state);
+  if (state.result == DirectionalPreflight::success)
+    compile_limited_branch_axis<Uniform, 2U, Commit>(
+        plan, flux, target, target_component, policy, frozen.z, output_values,
+        state);
+}
+
+template <bool Uniform, std::size_t Axis>
+bool apply_limited_branch_axis(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component, FaceFieldView output) noexcept {
+  for (std::int32_t z = 0; z < output.extents.z; ++z) {
+    for (std::int32_t y = 0; y < output.extents.y; ++y) {
+      for (std::int32_t x = 0; x < output.extents.x; ++x) {
+        const Int3 face{x, y, z};
+        const std::uint16_t encoded =
+            branches.values.data[compiled_branch_offset<Axis>(plan.cells(),
+                                                               face)];
+        const std::uint16_t branch_code =
+            encoded & static_cast<std::uint16_t>(~kCompiledBranchGeneralized);
+        const bool generalized =
+            (encoded & kCompiledBranchGeneralized) != 0U;
+        const LimitedSlopeBranch left_branch =
+            static_cast<LimitedSlopeBranch>(branch_code & UINT16_C(0x0f));
+        const LimitedSlopeBranch right_branch = static_cast<LimitedSlopeBranch>(
+            (branch_code >> 4U) & UINT16_C(0x0f));
+        if ((branch_code & UINT16_C(0xff00)) != UINT16_C(0x0200) ||
+            static_cast<std::uint8_t>(left_branch) <
+                static_cast<std::uint8_t>(LimitedSlopeBranch::zero) ||
+            static_cast<std::uint8_t>(left_branch) >
+                static_cast<std::uint8_t>(
+                    LimitedSlopeBranch::nondifferentiable) ||
+            static_cast<std::uint8_t>(right_branch) <
+                static_cast<std::uint8_t>(LimitedSlopeBranch::zero) ||
+            static_cast<std::uint8_t>(right_branch) >
+                static_cast<std::uint8_t>(
+                    LimitedSlopeBranch::nondifferentiable)) {
+          return false;
+        }
+        const Int3 left = offset_axis<Axis>(face, -1);
+        const Int3 right = face;
+        const double v_left = variation.unchecked(left, variation_component);
+        const double v_right = variation.unchecked(right, variation_component);
+        double value = 0.0;
+        if (generalized) {
+          if (branches.policy != FrozenConvectionLinearizationPolicy::
+                                     semismooth_generalized_zero_slope ||
+              left_branch != LimitedSlopeBranch::nondifferentiable &&
+                  right_branch != LimitedSlopeBranch::nondifferentiable) {
+            return false;
+          }
+          value = 0.5 * (v_left + v_right);
+        } else {
+          if (left_branch == LimitedSlopeBranch::nondifferentiable ||
+              right_branch == LimitedSlopeBranch::nondifferentiable) {
+            return false;
+          }
+          const std::int32_t normal = axis_index<Axis>(face);
+          const double face_coordinate =
+              detail::metric_face<Uniform>(plan, Axis, normal);
+          const double left_slope =
+              directional_limited_slope_values<Uniform, Axis>(
+                  plan, normal - 1,
+                  variation.unchecked(offset_axis<Axis>(left, -1),
+                                      variation_component),
+                  v_left, v_right, left_branch);
+          const double right_slope =
+              directional_limited_slope_values<Uniform, Axis>(
+                  plan, normal, v_left, v_right,
+                  variation.unchecked(offset_axis<Axis>(right, 1),
+                                      variation_component),
+                  right_branch);
+          const double left_reconstructed =
+              v_left + left_slope *
+                           (face_coordinate -
+                            detail::metric_centre<Uniform>(plan, Axis,
+                                                           normal - 1));
+          const double right_reconstructed =
+              v_right + right_slope *
+                            (face_coordinate -
+                             detail::metric_centre<Uniform>(plan, Axis,
+                                                            normal));
+          value = 0.5 * (left_reconstructed + right_reconstructed);
+        }
+        if (!std::isfinite(value)) return false;
+        output.unchecked(face) = value;
+      }
+    }
+  }
+  return true;
+}
+
+template <bool Uniform, std::size_t Axis>
+bool verify_limited_branch_axis(
+    const CartesianKernelPlan& plan, ConstFaceFluxView flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionBranchPlan& branches,
+    ConstFaceFieldView frozen) noexcept {
+  for (std::int32_t z = 0; z < frozen.extents.z; ++z) {
+    for (std::int32_t y = 0; y < frozen.extents.y; ++y) {
+      for (std::int32_t x = 0; x < frozen.extents.x; ++x) {
+        const Int3 face{x, y, z};
+        const double rate = face_rate<Axis>(flux, face);
+        const FaceBranchSelection selection =
+            select_face_branches<Uniform, Axis,
+                                 ConvectionScheme::limited_central2>(
+                plan, target, target_component, face, rate);
+        const bool generalized = !selection.differentiable;
+        if (generalized &&
+            policy != FrozenConvectionLinearizationPolicy::
+                          semismooth_generalized_zero_slope) {
+          return false;
+        }
+        const std::uint16_t expected =
+            static_cast<std::uint16_t>(selection.code) |
+            (generalized ? kCompiledBranchGeneralized : UINT16_C(0));
+        if (branches.values.data[compiled_branch_offset<Axis>(plan.cells(),
+                                                              face)] !=
+            expected) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 template <bool Uniform, std::size_t Axis>
 inline double diffusion_transmissibility(const CartesianKernelPlan& plan,
                                          ConstFieldView diffusivity,
@@ -1341,6 +1580,284 @@ Status differentiate_frozen_cartesian_target_convection_faces(
                 policy, preflight.generalized_face_count,
                 classical_everywhere};
   return {};
+}
+
+Status compile_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen,
+    FrozenConvectionBranchOutput output,
+    FrozenConvectionBranchPlan& branches) noexcept {
+  branches = {};
+  const Int3 cells = plan.cells();
+  const ConstFaceFieldView flux_faces[]{target_flux.x, target_flux.y,
+                                       target_flux.z};
+  const ConstFaceFieldView frozen_faces[]{frozen.x, frozen.y, frozen.z};
+  if (plan.fingerprint() == 0U || !valid_linearization_policy(policy) ||
+      context.collective_semantics == 0U || context.closure == 0U ||
+      !detail::valid_cell_view(target, cells, target_component, 1U, 2U) ||
+      !detail::valid_flux_view(target_flux, cells, target_flux.revision) ||
+      target_flux.certificate.valid() || !frozen.valid() ||
+      !valid_frozen_output(frozen.x, CartesianAxis::x, cells) ||
+      !valid_frozen_output(frozen.y, CartesianAxis::y, cells) ||
+      !valid_frozen_output(frozen.z, CartesianAxis::z, cells) ||
+      frozen.x.storage_identity != frozen.y.storage_identity ||
+      frozen.x.storage_identity != frozen.z.storage_identity ||
+      frozen.x.revision_domain != frozen.y.revision_domain ||
+      frozen.x.revision_domain != frozen.z.revision_domain ||
+      output.values.data == nullptr ||
+      output.values.size != compiled_branch_count(cells)) {
+    return {StatusCode::invalid_plan, kTransportKernel};
+  }
+
+  const std::uint64_t frozen_reconstruction = frozen_reconstruction_identity(
+      ConvectionScheme::limited_central2, context);
+  const std::uint64_t frozen_revision = frozen_revision_identity(
+      frozen_reconstruction, context, target_flux, target, target_component);
+  const std::array<ConstFaceFieldView, 3U> frozen_output_faces{
+      frozen.x, frozen.y, frozen.z};
+  const std::uint64_t frozen_local = frozen_local_binding_identity(
+      frozen_revision, frozen_reconstruction, plan, target_flux, target,
+      frozen_output_faces);
+  if (frozen.revision != frozen_revision ||
+      frozen.reconstruction != frozen_reconstruction ||
+      frozen.local_binding != frozen_local ||
+      !frozen.exact_target_reconstruction) {
+    return {StatusCode::invalid_plan, kTransportKernel};
+  }
+
+  const std::uint64_t reconstruction =
+      directional_reconstruction_identity(frozen_reconstruction, policy);
+  DirectionalPreflightState preflight;
+  preflight.branch_hash = hash_mix(kFnvOffset, reconstruction);
+  preflight.branch_hash = hash_mix(preflight.branch_hash, frozen_revision);
+  if (plan.geometry_kind() == GeometryKind::uniform) {
+    compile_limited_branch_faces<true, false>(
+        plan, target_flux, target, target_component, policy, frozen, nullptr,
+        preflight);
+  } else {
+    compile_limited_branch_faces<false, false>(
+        plan, target_flux, target, target_component, policy, frozen, nullptr,
+        preflight);
+  }
+  if (preflight.result == DirectionalPreflight::stale_numeric)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  if (preflight.result == DirectionalPreflight::nondifferentiable)
+    return {StatusCode::numerical_failure, kTransportNondifferentiable};
+  if (preflight.result != DirectionalPreflight::success)
+    return {StatusCode::numerical_failure, kTransportNumerical};
+
+  DirectionalPreflightState commit;
+  commit.branch_hash = hash_mix(kFnvOffset, reconstruction);
+  commit.branch_hash = hash_mix(commit.branch_hash, frozen_revision);
+  if (plan.geometry_kind() == GeometryKind::uniform) {
+    compile_limited_branch_faces<true, true>(
+        plan, target_flux, target, target_component, policy, frozen,
+        output.values.data, commit);
+  } else {
+    compile_limited_branch_faces<false, true>(
+        plan, target_flux, target, target_component, policy, frozen,
+        output.values.data, commit);
+  }
+  if (commit.result != DirectionalPreflight::success ||
+      commit.branch_hash != preflight.branch_hash ||
+      commit.generalized_face_count != preflight.generalized_face_count) {
+    return {StatusCode::numerical_failure, kTransportNumerical};
+  }
+
+  const std::uint64_t branch_authority = nonzero_hash(preflight.branch_hash);
+  std::uint64_t revision =
+      hash_mix(kFnvOffset, kFrozenConvectionDerivativeSchema);
+  revision = hash_mix(revision, reconstruction);
+  revision = hash_mix(revision, frozen_revision);
+  revision = hash_mix(revision, target.field);
+  revision = hash_mix(revision, target.revision);
+  revision = nonzero_hash(revision);
+  std::uint64_t local = hash_mix(kFnvOffset, revision);
+  local = hash_mix(local, reconstruction);
+  local = hash_mix(local, branch_authority);
+  local = hash_mix(local, static_cast<std::uint8_t>(policy));
+  local = hash_mix(local, preflight.generalized_face_count);
+  local = hash_mix(local, plan.fingerprint());
+  local = mix_field_view(local, target);
+  for (ConstFaceFieldView face : flux_faces) local = mix_face_view(local, face);
+  for (ConstFaceFieldView face : frozen_faces)
+    local = mix_face_view(local, face);
+  local = hash_mix(local,
+                   reinterpret_cast<std::uintptr_t>(output.values.data));
+  local = hash_mix(local, output.values.size);
+  local = nonzero_hash(local);
+
+  FrozenConvectionBranchPlan candidate{
+      {output.values.data, output.values.size},
+      cells,
+      plan.fingerprint(),
+      revision,
+      reconstruction,
+      branch_authority,
+      local,
+      policy,
+      preflight.generalized_face_count,
+      preflight.generalized_face_count == 0U};
+  if (!candidate.valid())
+    return {StatusCode::invalid_plan, kTransportKernel};
+  branches = candidate;
+  return {};
+}
+
+Status validate_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    const FrozenConvectionFaceField& frozen,
+    const FrozenConvectionBranchPlan& branches) noexcept {
+  const Int3 cells = plan.cells();
+  if (!branches.valid() || !same_shape(branches.cells, cells) ||
+      branches.kernels != plan.fingerprint() ||
+      branches.values.size != compiled_branch_count(cells) ||
+      !detail::valid_cell_view(target, cells, target_component, 1U, 2U) ||
+      !detail::valid_flux_view(target_flux, cells, target_flux.revision) ||
+      target_flux.certificate.valid() || !frozen.valid()) {
+    return {StatusCode::invalid_plan, kTransportKernel};
+  }
+  const std::uint64_t frozen_reconstruction = frozen_reconstruction_identity(
+      ConvectionScheme::limited_central2, context);
+  const std::uint64_t frozen_revision = frozen_revision_identity(
+      frozen_reconstruction, context, target_flux, target, target_component);
+  const std::array<ConstFaceFieldView, 3U> frozen_output_faces{
+      frozen.x, frozen.y, frozen.z};
+  const std::uint64_t frozen_local = frozen_local_binding_identity(
+      frozen_revision, frozen_reconstruction, plan, target_flux, target,
+      frozen_output_faces);
+  if (frozen.revision != frozen_revision ||
+      frozen.reconstruction != frozen_reconstruction ||
+      frozen.local_binding != frozen_local ||
+      !frozen.exact_target_reconstruction) {
+    return {StatusCode::invalid_plan, kTransportKernel};
+  }
+  const std::uint64_t reconstruction = directional_reconstruction_identity(
+      frozen_reconstruction, branches.policy);
+  DirectionalPreflightState preflight;
+  preflight.branch_hash = hash_mix(kFnvOffset, reconstruction);
+  preflight.branch_hash = hash_mix(preflight.branch_hash, frozen_revision);
+  if (plan.geometry_kind() == GeometryKind::uniform) {
+    compile_limited_branch_faces<true, false>(
+        plan, target_flux, target, target_component, branches.policy, frozen,
+        nullptr, preflight);
+  } else {
+    compile_limited_branch_faces<false, false>(
+        plan, target_flux, target, target_component, branches.policy, frozen,
+        nullptr, preflight);
+  }
+  if (preflight.result == DirectionalPreflight::stale_numeric)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  if (preflight.result == DirectionalPreflight::nondifferentiable)
+    return {StatusCode::numerical_failure, kTransportNondifferentiable};
+  if (preflight.result != DirectionalPreflight::success)
+    return {StatusCode::numerical_failure, kTransportNumerical};
+  const std::uint64_t branch_authority = nonzero_hash(preflight.branch_hash);
+  std::uint64_t revision =
+      hash_mix(kFnvOffset, kFrozenConvectionDerivativeSchema);
+  revision = hash_mix(revision, reconstruction);
+  revision = hash_mix(revision, frozen_revision);
+  revision = hash_mix(revision, target.field);
+  revision = hash_mix(revision, target.revision);
+  revision = nonzero_hash(revision);
+  const ConstFaceFieldView flux_faces[]{target_flux.x, target_flux.y,
+                                       target_flux.z};
+  const ConstFaceFieldView frozen_faces[]{frozen.x, frozen.y, frozen.z};
+  std::uint64_t local = hash_mix(kFnvOffset, revision);
+  local = hash_mix(local, reconstruction);
+  local = hash_mix(local, branch_authority);
+  local = hash_mix(local, static_cast<std::uint8_t>(branches.policy));
+  local = hash_mix(local, preflight.generalized_face_count);
+  local = hash_mix(local, plan.fingerprint());
+  local = mix_field_view(local, target);
+  for (ConstFaceFieldView face : flux_faces) local = mix_face_view(local, face);
+  for (ConstFaceFieldView face : frozen_faces)
+    local = mix_face_view(local, face);
+  local = hash_mix(local,
+                   reinterpret_cast<std::uintptr_t>(branches.values.data));
+  local = hash_mix(local, branches.values.size);
+  local = nonzero_hash(local);
+  const bool identity = revision == branches.revision &&
+                        reconstruction == branches.reconstruction &&
+                        branch_authority == branches.branch_authority &&
+                        local == branches.local_binding &&
+                        preflight.generalized_face_count ==
+                            branches.generalized_face_count &&
+                        (preflight.generalized_face_count == 0U) ==
+                            branches.classical_everywhere;
+  if (!identity)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  const bool verified = plan.geometry_kind() == GeometryKind::uniform
+                            ? verify_limited_branch_axis<true, 0U>(
+                                  plan, target_flux, target, target_component,
+                                  branches.policy, branches, frozen.x) &&
+                                  verify_limited_branch_axis<true, 1U>(
+                                      plan, target_flux, target,
+                                      target_component, branches.policy,
+                                      branches, frozen.y) &&
+                                  verify_limited_branch_axis<true, 2U>(
+                                      plan, target_flux, target,
+                                      target_component, branches.policy,
+                                      branches, frozen.z)
+                            : verify_limited_branch_axis<false, 0U>(
+                                  plan, target_flux, target, target_component,
+                                  branches.policy, branches, frozen.x) &&
+                                  verify_limited_branch_axis<false, 1U>(
+                                      plan, target_flux, target,
+                                      target_component, branches.policy,
+                                      branches, frozen.y) &&
+                                  verify_limited_branch_axis<false, 2U>(
+                                      plan, target_flux, target,
+                                      target_component, branches.policy,
+                                      branches, frozen.z);
+  return verified ? Status{}
+                  : Status{StatusCode::invalid_plan, kTransportKernel};
+}
+
+Status apply_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component,
+    FrozenConvectionFaceOutput output) noexcept {
+  const Int3 cells = plan.cells();
+  const FaceFieldView outputs[]{output.x, output.y, output.z};
+  bool aliases = false;
+  for (FaceFieldView face : outputs)
+    aliases = aliases || detail::cell_face_views_overlap(variation, face);
+  for (std::size_t left = 0U; left < 3U; ++left)
+    for (std::size_t right = left + 1U; right < 3U; ++right)
+      aliases = aliases || detail::face_views_overlap(outputs[left],
+                                                      outputs[right]);
+  if (!branches.valid() || !same_shape(branches.cells, cells) ||
+      branches.kernels != plan.fingerprint() ||
+      branches.values.size != compiled_branch_count(cells) ||
+      !detail::valid_cell_view(variation, cells, variation_component, 1U, 2U) ||
+      !valid_frozen_output(output.x, CartesianAxis::x, cells) ||
+      !valid_frozen_output(output.y, CartesianAxis::y, cells) ||
+      !valid_frozen_output(output.z, CartesianAxis::z, cells) || aliases) {
+    return {StatusCode::invalid_plan, kTransportKernel};
+  }
+  const bool finite =
+      plan.geometry_kind() == GeometryKind::uniform
+          ? apply_limited_branch_axis<true, 0U>(
+                plan, branches, variation, variation_component, output.x) &&
+                apply_limited_branch_axis<true, 1U>(
+                    plan, branches, variation, variation_component, output.y) &&
+                apply_limited_branch_axis<true, 2U>(
+                    plan, branches, variation, variation_component, output.z)
+          : apply_limited_branch_axis<false, 0U>(
+                plan, branches, variation, variation_component, output.x) &&
+                apply_limited_branch_axis<false, 1U>(
+                    plan, branches, variation, variation_component, output.y) &&
+                apply_limited_branch_axis<false, 2U>(
+                    plan, branches, variation, variation_component, output.z);
+  return finite ? Status{}
+                : Status{StatusCode::numerical_failure, kTransportNumerical};
 }
 
 Status cartesian_provisional_convection(

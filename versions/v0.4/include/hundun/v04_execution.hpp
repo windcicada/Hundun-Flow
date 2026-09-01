@@ -511,6 +511,72 @@ struct FrozenConvectionFaceOutput {
   FaceFieldView z{};
 };
 
+enum class FrozenConvectionLinearizationPolicy : std::uint8_t {
+  classical_active_branch,
+  semismooth_generalized_zero_slope
+};
+
+// Opaque, cold-compiled limiter authority for repeated directional actions.
+// Each uint16 entry encodes the exact left/right limited-central branch and a
+// semismooth-generalized bit.  It is metadata, not a transported FP32 field;
+// all numerical values and arithmetic remain FP64.
+struct FrozenConvectionBranchOutput {
+  Span<std::uint16_t> values{};
+};
+
+struct FrozenConvectionBranchPlan {
+  Span<const std::uint16_t> values{};
+  Int3 cells{};
+  PlanFingerprint kernels{};
+  RevisionToken revision{};
+  PlanFingerprint reconstruction{};
+  PlanFingerprint branch_authority{};
+  PlanFingerprint local_binding{};
+  FrozenConvectionLinearizationPolicy policy{
+      FrozenConvectionLinearizationPolicy::classical_active_branch};
+  std::uint64_t generalized_face_count{};
+  bool classical_everywhere{};
+
+  bool valid() const noexcept {
+    return values.data != nullptr && values.size != 0U && cells.x > 0 &&
+           cells.y > 0 && cells.z > 0 && kernels != 0U && revision != 0U &&
+           reconstruction != 0U &&
+           branch_authority != 0U && local_binding != 0U &&
+           classical_everywhere == (generalized_face_count == 0U) &&
+           (policy == FrozenConvectionLinearizationPolicy::classical_active_branch
+                ? classical_everywhere
+                : policy == FrozenConvectionLinearizationPolicy::
+                                semismooth_generalized_zero_slope);
+  }
+};
+
+// limited_central2-only optimized route.  Other schemes retain the generic
+// derivative path.  Compilation bitwise-checks the frozen nonlinear face field
+// before publishing any branch byte.
+Status compile_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen,
+    FrozenConvectionBranchOutput output,
+    FrozenConvectionBranchPlan& branches) noexcept;
+
+Status validate_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    const FrozenConvectionFaceField& frozen,
+    const FrozenConvectionBranchPlan& branches) noexcept;
+
+// Applies the original FP64 directional_limited_slope_values arithmetic in
+// its original order while consuming the already-certified branch selection.
+Status apply_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component,
+    FrozenConvectionFaceOutput output) noexcept;
+
 // Two-pass and allocation-free: all face values are preflighted before any
 // output byte is changed.  The input flux must be an uncommitted target-layer
 // view, matching cartesian_target_convection semantics.
@@ -520,11 +586,6 @@ Status freeze_cartesian_target_convection_faces(
     std::uint8_t component, FrozenConvectionContext context,
     FrozenConvectionFaceOutput output,
     FrozenConvectionFaceField& frozen) noexcept;
-
-enum class FrozenConvectionLinearizationPolicy : std::uint8_t {
-  classical_active_branch,
-  semismooth_generalized_zero_slope
-};
 
 // Directional face values obtained by applying one explicit linearization
 // policy to a FrozenConvectionFaceField and a cell-centred variation.

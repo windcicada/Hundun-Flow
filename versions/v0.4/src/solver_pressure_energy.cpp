@@ -58,6 +58,10 @@ std::uint64_t double_bits(double value) noexcept {
   return bits;
 }
 
+bool same_bits(double left, double right) noexcept {
+  return double_bits(left) == double_bits(right);
+}
+
 std::uint64_t nonzero_hash(std::uint64_t value) noexcept {
   return value == 0U ? UINT64_C(0x9e3779b97f4a7c15) : value;
 }
@@ -369,6 +373,20 @@ PlanFingerprint enthalpy_collective_fingerprint(
                                 as_const(binding.workspace.delta_temperature)};
   for (ConstFieldView field : fields)
     hash = mix_collective_view(hash, field);
+  const bool compiled =
+      binding.workspace.compiled.local_diagonal.base != nullptr ||
+      binding.workspace.compiled.response_stage.base != nullptr ||
+      binding.workspace.compiled.directional_branches.values.data != nullptr ||
+      binding.workspace.compiled.thermal_conductance.x.base != nullptr ||
+      binding.workspace.compiled.thermal_conductance.y.base != nullptr ||
+      binding.workspace.compiled.thermal_conductance.z.base != nullptr;
+  hash = hash_mix(hash, compiled ? 1U : 0U);
+  if (compiled) {
+    hash = mix_collective_view(
+        hash, as_const(binding.workspace.compiled.local_diagonal));
+    hash = mix_collective_view(
+        hash, as_const(binding.workspace.compiled.response_stage));
+  }
   hash = hash_mix(hash, binding.services.enthalpy_variation_field);
   hash = hash_mix(hash, binding.services.temperature_variation_field);
   hash = hash_mix(hash, binding.activity.collective_fingerprint);
@@ -400,6 +418,25 @@ RevisionToken enthalpy_binding_revision(
                                 as_const(binding.workspace.delta_temperature)};
   for (ConstFieldView field : fields)
     hash = mix_local_field(hash, field);
+  const bool compiled =
+      binding.workspace.compiled.local_diagonal.base != nullptr ||
+      binding.workspace.compiled.response_stage.base != nullptr ||
+      binding.workspace.compiled.directional_branches.values.data != nullptr ||
+      binding.workspace.compiled.thermal_conductance.x.base != nullptr ||
+      binding.workspace.compiled.thermal_conductance.y.base != nullptr ||
+      binding.workspace.compiled.thermal_conductance.z.base != nullptr;
+  hash = hash_mix(hash, compiled ? 1U : 0U);
+  if (compiled) {
+    hash = mix_local_field(
+        hash, as_const(binding.workspace.compiled.local_diagonal));
+    hash = mix_local_field(
+        hash, as_const(binding.workspace.compiled.response_stage));
+    hash = hash_mix(
+        hash, reinterpret_cast<std::uintptr_t>(
+                  binding.workspace.compiled.directional_branches.values.data));
+    hash = hash_mix(
+        hash, binding.workspace.compiled.directional_branches.values.size);
+  }
   const ConstFaceFieldView faces[]{
       binding.target_flux.x,
       binding.target_flux.y,
@@ -412,6 +449,14 @@ RevisionToken enthalpy_binding_revision(
       as_const(binding.workspace.directional_enthalpy.z)};
   for (ConstFaceFieldView face : faces)
     hash = mix_local_face(hash, face);
+  if (compiled) {
+    const ConstFaceFieldView compiled_faces[]{
+        as_const(binding.workspace.compiled.thermal_conductance.x),
+        as_const(binding.workspace.compiled.thermal_conductance.y),
+        as_const(binding.workspace.compiled.thermal_conductance.z)};
+    for (ConstFaceFieldView face : compiled_faces)
+      hash = mix_local_face(hash, face);
+  }
   return nonzero_hash(hash);
 }
 
@@ -550,6 +595,83 @@ bool valid_scalar_view(BasicFieldView<T> view, Int3 shape) noexcept {
          view.revision != 0U && view.storage_identity != 0U &&
          view.revision_domain != 0U &&
          detail::field_storage_interval(view, interval);
+}
+
+std::size_t pressure_energy_face_count(Int3 cells,
+                                       CartesianAxis axis) noexcept {
+  const Int3 shape = face_shape(cells, axis);
+  return static_cast<std::size_t>(shape.x) *
+         static_cast<std::size_t>(shape.y) *
+         static_cast<std::size_t>(shape.z);
+}
+
+std::size_t pressure_energy_branch_count(Int3 cells) noexcept {
+  return pressure_energy_face_count(cells, CartesianAxis::x) +
+         pressure_energy_face_count(cells, CartesianAxis::y) +
+         pressure_energy_face_count(cells, CartesianAxis::z);
+}
+
+bool compiled_enthalpy_workspace_present(
+    const PressureEnergyEnthalpyCompiledWorkspace& workspace) noexcept {
+  return workspace.local_diagonal.base != nullptr ||
+         workspace.response_stage.base != nullptr ||
+         workspace.directional_branches.values.data != nullptr ||
+         workspace.directional_branches.values.size != 0U ||
+         workspace.thermal_conductance.x.base != nullptr ||
+         workspace.thermal_conductance.y.base != nullptr ||
+         workspace.thermal_conductance.z.base != nullptr;
+}
+
+bool valid_compiled_enthalpy_workspace(
+    const PressureEnergyEnthalpyCompiledWorkspace& workspace,
+    Int3 cells) noexcept {
+  return valid_scalar_view(workspace.local_diagonal, cells) &&
+         valid_scalar_view(workspace.response_stage, cells) &&
+         workspace.directional_branches.values.data != nullptr &&
+         workspace.directional_branches.values.size ==
+             pressure_energy_branch_count(cells) &&
+         valid_face_view(as_const(workspace.thermal_conductance.x),
+                         CartesianAxis::x, cells) &&
+         valid_face_view(as_const(workspace.thermal_conductance.y),
+                         CartesianAxis::y, cells) &&
+         valid_face_view(as_const(workspace.thermal_conductance.z),
+                         CartesianAxis::z, cells);
+}
+
+PlanFingerprint compiled_enthalpy_local_binding(
+    const PressureEnergyEnthalpyBinding& binding,
+    const FrozenConvectionBranchPlan& branches) noexcept {
+  std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyEnthalpySchema);
+  hash = hash_mix(hash, branches.revision);
+  hash = hash_mix(hash, branches.branch_authority);
+  hash = hash_mix(hash, branches.local_binding);
+  hash = mix_local_field(
+      hash, as_const(binding.workspace.compiled.local_diagonal));
+  hash = mix_local_field(hash,
+                         as_const(binding.workspace.compiled.response_stage));
+  hash = hash_mix(hash,
+                  reinterpret_cast<std::uintptr_t>(branches.values.data));
+  hash = hash_mix(hash, branches.values.size);
+  const ConstFaceFieldView faces[]{
+      as_const(binding.workspace.compiled.thermal_conductance.x),
+      as_const(binding.workspace.compiled.thermal_conductance.y),
+      as_const(binding.workspace.compiled.thermal_conductance.z)};
+  for (ConstFaceFieldView face : faces) hash = mix_local_face(hash, face);
+  return nonzero_hash(hash);
+}
+
+RevisionToken compiled_enthalpy_numeric_revision(
+    const PressureEnergyEnthalpyBinding& binding,
+    const FrozenConvectionBranchPlan& branches) noexcept {
+  std::uint64_t hash = compiled_enthalpy_local_binding(binding, branches);
+  hash = hash_mix(hash, binding.assembled_diagonal.revision);
+  hash = hash_mix(hash, binding.target_enthalpy.revision);
+  hash = hash_mix(hash, binding.density_enthalpy_derivative.revision);
+  hash = hash_mix(hash, binding.heat_capacity.revision);
+  hash = hash_mix(hash, binding.thermal_conductivity.revision);
+  hash = hash_mix(hash, binding.enthalpy_diffusivity.revision);
+  hash = hash_mix(hash, binding.authority.target_time);
+  return nonzero_hash(hash);
 }
 
 template <class Left, class Right>
@@ -1939,7 +2061,12 @@ bool PressureEnergyEnthalpyCertificate::valid() const noexcept {
          exact_cartesian_spatial_response &&
          exact_temperature_space_conduction && !ibm_spatial_derivative &&
          inactive_rows_identity && inactive_interfaces_zero &&
-         allocation_free_apply;
+         allocation_free_apply &&
+         (compiled_factored_apply
+              ? compiled_numeric_revision != 0U &&
+                    compiled_local_binding != 0U
+              : compiled_numeric_revision == 0U &&
+                    compiled_local_binding == 0U);
 }
 
 Status PressureEnergyEnthalpyOperator::bind(
@@ -2028,9 +2155,15 @@ Status PressureEnergyEnthalpyOperator::bind(
       valid_face_view(as_const(binding.workspace.directional_enthalpy.z),
                       CartesianAxis::z, cells) &&
       valid_pressure_flux_activity(binding.activity, cells);
+  const bool compiled_present =
+      compiled_enthalpy_workspace_present(binding.workspace.compiled);
+  const bool compiled_views_valid =
+      !compiled_present ||
+      (binding.convection == ConvectionScheme::limited_central2 &&
+       valid_compiled_enthalpy_workspace(binding.workspace.compiled, cells));
   if (!pointers_valid || !geometry_valid || !boundary_valid ||
       !semantics_valid || !services_valid || !halo_valid || !cell_views_valid ||
-      !face_views_valid) {
+      !face_views_valid || !compiled_views_valid) {
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
   }
 
@@ -2068,6 +2201,39 @@ Status PressureEnergyEnthalpyOperator::bind(
          ++right) {
       aliases = aliases ||
                 detail::face_views_overlap(face_views[left], face_views[right]);
+    }
+  }
+  if (compiled_present) {
+    const ConstFieldView compiled_cells[]{
+        as_const(binding.workspace.compiled.local_diagonal),
+        as_const(binding.workspace.compiled.response_stage)};
+    const ConstFaceFieldView compiled_faces[]{
+        as_const(binding.workspace.compiled.thermal_conductance.x),
+        as_const(binding.workspace.compiled.thermal_conductance.y),
+        as_const(binding.workspace.compiled.thermal_conductance.z)};
+    for (ConstFieldView compiled_cell : compiled_cells) {
+      for (ConstFieldView cell : cell_views)
+        aliases = aliases || overlaps(compiled_cell, cell);
+      for (ConstFaceFieldView face : face_views)
+        aliases = aliases ||
+                  detail::cell_face_views_overlap(compiled_cell, face);
+      for (ConstFaceFieldView face : compiled_faces)
+        aliases = aliases ||
+                  detail::cell_face_views_overlap(compiled_cell, face);
+    }
+    aliases = aliases || overlaps(compiled_cells[0U], compiled_cells[1U]);
+    for (std::size_t left = 0U; left < std::size(compiled_faces); ++left) {
+      for (ConstFieldView cell : cell_views)
+        aliases = aliases ||
+                  detail::cell_face_views_overlap(cell, compiled_faces[left]);
+      for (std::size_t right = left + 1U;
+           right < std::size(compiled_faces); ++right) {
+        aliases = aliases || detail::face_views_overlap(compiled_faces[left],
+                                                        compiled_faces[right]);
+      }
+      for (ConstFaceFieldView face : face_views)
+        aliases = aliases ||
+                  detail::face_views_overlap(compiled_faces[left], face);
     }
   }
   if (aliases) {
@@ -2142,6 +2308,60 @@ Status PressureEnergyEnthalpyOperator::bind(
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
   }
 
+  FrozenConvectionBranchPlan compiled_branches;
+  if (compiled_present) {
+    const Status compiled_status = compile_frozen_limited_central2_branches(
+        *binding.kernels, binding.target_flux, binding.target_enthalpy, 0U,
+        binding.convection_context, binding.linearization_policy,
+        binding.frozen_face_enthalpy,
+        binding.workspace.compiled.directional_branches, compiled_branches);
+    if (!compiled_status) return compiled_status;
+    if (!compiled_branches.valid() ||
+        compiled_branches.reconstruction != directional.reconstruction ||
+        compiled_branches.branch_authority != directional.branch_authority ||
+        compiled_branches.generalized_face_count !=
+            directional.generalized_face_count ||
+        compiled_branches.policy != directional.policy) {
+      return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
+    }
+    for_each_cell(cells, [&](Int3 cell) {
+      double local = 1.0;
+      if (binding.activity.cells.size == 0U ||
+          binding.activity.cells.data[cell_offset(cells, cell)] != 0U) {
+        const double diagonal =
+            binding.assembled_diagonal.unchecked(cell, 0U);
+        const double enthalpy = binding.target_enthalpy.unchecked(cell, 0U);
+        const double rho_h =
+            binding.density_enthalpy_derivative.unchecked(cell, 0U);
+        const double volume = detail::cell_volume(*binding.kernels, cell);
+        const double proxy_diagonal = detail::diffusion_diagonal(
+            *binding.kernels, binding.enthalpy_diffusivity, cell);
+        local = diagonal - proxy_diagonal +
+                binding.authority.bdf.a0 * volume * enthalpy * rho_h;
+      }
+      binding.workspace.compiled.local_diagonal.unchecked(cell, 0U) = local;
+      binding.workspace.compiled.response_stage.unchecked(cell, 0U) = 0.0;
+    });
+    for (CartesianAxis axis :
+         {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
+      FaceFieldView output =
+          axis == CartesianAxis::x
+              ? binding.workspace.compiled.thermal_conductance.x
+              : (axis == CartesianAxis::y
+                     ? binding.workspace.compiled.thermal_conductance.y
+                     : binding.workspace.compiled.thermal_conductance.z);
+      for (std::int32_t z = 0; z < output.extents.z; ++z) {
+        for (std::int32_t y = 0; y < output.extents.y; ++y) {
+          for (std::int32_t x = 0; x < output.extents.x; ++x) {
+            const Int3 face{x, y, z};
+            output.unchecked(face) = detail::positive_transmissibility(
+                *binding.kernels, binding.thermal_conductivity, axis, face);
+          }
+        }
+      }
+    }
+  }
+
   PressureEnergyEnthalpyOperator candidate;
   candidate.geometry_ = binding.geometry;
   candidate.kernels_ = binding.kernels;
@@ -2159,6 +2379,18 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.convection_context_ = binding.convection_context;
   candidate.frozen_face_enthalpy_ = binding.frozen_face_enthalpy;
   candidate.workspace_ = binding.workspace;
+  if (compiled_present) {
+    candidate.compiled_directional_branches_ = compiled_branches;
+    candidate.compiled_local_diagonal_ =
+        as_const(binding.workspace.compiled.local_diagonal);
+    candidate.thermal_conductance_x_ =
+        as_const(binding.workspace.compiled.thermal_conductance.x);
+    candidate.thermal_conductance_y_ =
+        as_const(binding.workspace.compiled.thermal_conductance.y);
+    candidate.thermal_conductance_z_ =
+        as_const(binding.workspace.compiled.thermal_conductance.z);
+    candidate.response_stage_ = binding.workspace.compiled.response_stage;
+  }
   candidate.activity_ = binding.activity;
   candidate.certificate_.linear = {binding.identity,
                                    enthalpy_collective_fingerprint(binding),
@@ -2225,6 +2457,13 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.certificate_.inactive_rows_identity = true;
   candidate.certificate_.inactive_interfaces_zero = true;
   candidate.certificate_.allocation_free_apply = true;
+  candidate.certificate_.compiled_factored_apply = compiled_present;
+  if (compiled_present) {
+    candidate.certificate_.compiled_local_binding =
+        compiled_enthalpy_local_binding(binding, compiled_branches);
+    candidate.certificate_.compiled_numeric_revision =
+        compiled_enthalpy_numeric_revision(binding, compiled_branches);
+  }
   if (!candidate.certificate_.valid()) {
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
   }
@@ -2233,8 +2472,144 @@ Status PressureEnergyEnthalpyOperator::bind(
   return {};
 }
 
+Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
+    const noexcept {
+  if (!certificate_.valid() || !certificate_.compiled_factored_apply ||
+      geometry_ == nullptr || kernels_ == nullptr || boundary_ == nullptr ||
+      !compiled_directional_branches_.valid()) {
+    return {StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
+  }
+  PressureEnergyEnthalpyBinding current_binding;
+  current_binding.geometry = geometry_;
+  current_binding.kernels = kernels_;
+  current_binding.boundary = boundary_;
+  current_binding.patch = patch_;
+  current_binding.convection = convection_;
+  current_binding.services = services_;
+  current_binding.authority = certificate_.authority;
+  current_binding.assembled_diagonal = assembled_diagonal_;
+  current_binding.target_enthalpy = target_enthalpy_;
+  current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
+  current_binding.heat_capacity = heat_capacity_;
+  current_binding.thermal_conductivity = thermal_conductivity_;
+  current_binding.enthalpy_diffusivity = enthalpy_diffusivity_;
+  current_binding.target_flux = target_flux_;
+  current_binding.convection_context = convection_context_;
+  current_binding.frozen_face_enthalpy = frozen_face_enthalpy_;
+  current_binding.workspace = workspace_;
+  current_binding.activity = activity_;
+  current_binding.identity = certificate_.linear.identity;
+  current_binding.linearization_policy = certificate_.linearization_policy;
+  if (compiled_enthalpy_local_binding(current_binding,
+                                       compiled_directional_branches_) !=
+          certificate_.compiled_local_binding ||
+      compiled_enthalpy_numeric_revision(current_binding,
+                                          compiled_directional_branches_) !=
+          certificate_.compiled_numeric_revision) {
+    return {StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
+  }
+
+  Status status = validate_frozen_limited_central2_branches(
+      *kernels_, target_flux_, target_enthalpy_, 0U, convection_context_,
+      frozen_face_enthalpy_, compiled_directional_branches_);
+  if (!status) return status;
+
+  const Int3 cells = certificate_.linear.local_shape;
+  bool finite = true;
+  bool exact = true;
+  for_each_cell(cells, [&](Int3 cell) {
+    double expected = 1.0;
+    if (activity_.cells.size == 0U ||
+        activity_.cells.data[cell_offset(cells, cell)] != 0U) {
+      const double diagonal = assembled_diagonal_.unchecked(cell, 0U);
+      const double enthalpy = target_enthalpy_.unchecked(cell, 0U);
+      const double rho_h =
+          density_enthalpy_derivative_.unchecked(cell, 0U);
+      const double volume = detail::cell_volume(*kernels_, cell);
+      const double proxy_diagonal =
+          detail::diffusion_diagonal(*kernels_, enthalpy_diffusivity_, cell);
+      expected = diagonal - proxy_diagonal +
+                 certificate_.authority.bdf.a0 * volume * enthalpy * rho_h;
+    }
+    const double compiled = compiled_local_diagonal_.unchecked(cell, 0U);
+    finite = finite && std::isfinite(expected) && std::isfinite(compiled);
+    exact = exact && same_bits(expected, compiled);
+  });
+  for (CartesianAxis axis :
+       {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
+    const ConstFaceFieldView compiled =
+        select_face(thermal_conductance_x_, thermal_conductance_y_,
+                    thermal_conductance_z_, axis);
+    for (std::int32_t z = 0; z < compiled.extents.z; ++z) {
+      for (std::int32_t y = 0; y < compiled.extents.y; ++y) {
+        for (std::int32_t x = 0; x < compiled.extents.x; ++x) {
+          const Int3 face{x, y, z};
+          const double expected = detail::positive_transmissibility(
+              *kernels_, thermal_conductivity_, axis, face);
+          const double observed = compiled.unchecked(face);
+          finite =
+              finite && std::isfinite(expected) && std::isfinite(observed);
+          exact = exact && same_bits(expected, observed);
+        }
+      }
+    }
+  }
+  if (!finite)
+    return {StatusCode::numerical_failure, kPressureEnergyEnthalpyApply};
+  return exact ? Status{}
+               : Status{StatusCode::invalid_plan,
+                        kPressureEnergyEnthalpyApply};
+}
+
+Status PressureEnergyEnthalpyOperator::prepare_repeated_apply(
+    PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept {
+  failure_ = {};
+  epoch = {};
+  const Status status = validate_compiled_snapshot();
+  if (!status) {
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  epoch.issuer_ = this;
+  epoch.binding_revision_ = certificate_.binding_revision;
+  epoch.compiled_numeric_revision_ = certificate_.compiled_numeric_revision;
+  return {};
+}
+
+Status PressureEnergyEnthalpyOperator::close_repeated_apply(
+    PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept {
+  if (!epoch.valid() || epoch.issuer_ != this ||
+      epoch.binding_revision_ != certificate_.binding_revision ||
+      epoch.compiled_numeric_revision_ !=
+          certificate_.compiled_numeric_revision) {
+    return {StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
+  }
+  epoch = {};
+  return {};
+}
+
+Status PressureEnergyEnthalpyOperator::apply_prepared(
+    FieldView input, FieldView output,
+    const PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept {
+  if (!epoch.valid() || epoch.issuer_ != this ||
+      epoch.binding_revision_ != certificate_.binding_revision ||
+      epoch.compiled_numeric_revision_ !=
+          certificate_.compiled_numeric_revision) {
+    const Status status{StatusCode::invalid_plan,
+                        kPressureEnergyEnthalpyApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  return apply_impl(input, output, true);
+}
+
 Status PressureEnergyEnthalpyOperator::apply(FieldView input,
                                              FieldView output) const noexcept {
+  return apply_impl(input, output, false);
+}
+
+Status PressureEnergyEnthalpyOperator::apply_impl(
+    FieldView input, FieldView output, bool snapshot_validated) const noexcept {
   failure_ = {};
   if (services_.halo == nullptr) {
     const Status status{StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
@@ -2269,6 +2644,24 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
               detail::cell_face_views_overlap(as_const(input), face) ||
               detail::cell_face_views_overlap(as_const(output), face);
   }
+  if (certificate_.compiled_factored_apply) {
+    const ConstFieldView compiled_fields[]{compiled_local_diagonal_,
+                                           as_const(response_stage_)};
+    const ConstFaceFieldView compiled_faces[]{thermal_conductance_x_,
+                                              thermal_conductance_y_,
+                                              thermal_conductance_z_};
+    for (ConstFieldView field : compiled_fields) {
+      aliases =
+          aliases || detail::field_views_overlap(as_const(input), field) ||
+          detail::field_views_overlap(as_const(output), field);
+    }
+    for (ConstFaceFieldView face : compiled_faces) {
+      aliases = aliases ||
+                detail::cell_face_views_overlap(as_const(input), face) ||
+                detail::cell_face_views_overlap(as_const(output), face);
+    }
+  }
+
   PressureEnergyEnthalpyBinding current_binding;
   current_binding.geometry = geometry_;
   current_binding.kernels = kernels_;
@@ -2290,6 +2683,23 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
   current_binding.activity = activity_;
   current_binding.identity = certificate_.linear.identity;
   current_binding.linearization_policy = certificate_.linearization_policy;
+  const bool compiled_current =
+      !certificate_.compiled_factored_apply ||
+      (compiled_directional_branches_.valid() &&
+       compiled_directional_branches_.reconstruction ==
+           certificate_.directional_reconstruction &&
+       compiled_directional_branches_.branch_authority ==
+           certificate_.directional_branch_authority &&
+       compiled_directional_branches_.generalized_face_count ==
+           certificate_.generalized_face_count &&
+       compiled_directional_branches_.policy ==
+           certificate_.linearization_policy &&
+       compiled_enthalpy_local_binding(current_binding,
+                                        compiled_directional_branches_) ==
+           certificate_.compiled_local_binding &&
+       compiled_enthalpy_numeric_revision(current_binding,
+                                           compiled_directional_branches_) ==
+           certificate_.compiled_numeric_revision);
   const bool current =
       certificate_.valid() && geometry_ != nullptr && kernels_ != nullptr &&
       boundary_ != nullptr && services_.halo->ready() &&
@@ -2346,7 +2756,8 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
           certificate_.linear.collective_fingerprint &&
       enthalpy_binding_revision(current_binding,
                                 certificate_.directional_branch_authority) ==
-          certificate_.binding_revision;
+          certificate_.binding_revision &&
+      compiled_current;
   const bool views_valid =
       current && input.field == services_.enthalpy_variation_field &&
       detail::valid_cell_view(as_const(input), cells, 0U, 1U, 2U) &&
@@ -2354,6 +2765,10 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
   Status prerequisite = views_valid ? Status{}
                                     : Status{StatusCode::invalid_plan,
                                              kPressureEnergyEnthalpyApply};
+  if (prerequisite && certificate_.compiled_factored_apply &&
+      !snapshot_validated) {
+    prerequisite = validate_compiled_snapshot();
+  }
 
   FieldView delta_temperature = workspace_.delta_temperature;
   if (prerequisite) {
@@ -2400,22 +2815,29 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
   }
 
   FrozenConvectionFaceDirectionalDerivative directional;
-  status = differentiate_frozen_cartesian_target_convection_faces(
-      *kernels_, convection_, target_flux_, target_enthalpy_, 0U,
-      convection_context_, certificate_.linearization_policy,
-      frozen_face_enthalpy_, as_const(input), 0U,
-      workspace_.directional_enthalpy, directional);
+  if (certificate_.compiled_factored_apply) {
+    status = apply_frozen_limited_central2_branches(
+        *kernels_, compiled_directional_branches_, as_const(input), 0U,
+        workspace_.directional_enthalpy);
+  } else {
+    status = differentiate_frozen_cartesian_target_convection_faces(
+        *kernels_, convection_, target_flux_, target_enthalpy_, 0U,
+        convection_context_, certificate_.linearization_policy,
+        frozen_face_enthalpy_, as_const(input), 0U,
+        workspace_.directional_enthalpy, directional);
+  }
   if (!status) {
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
-  if (!directional.valid() ||
-      directional.reconstruction != certificate_.directional_reconstruction ||
-      directional.branch_authority !=
-          certificate_.directional_branch_authority ||
-      directional.generalized_face_count !=
-          certificate_.generalized_face_count ||
-      directional.policy != certificate_.linearization_policy) {
+  if (!certificate_.compiled_factored_apply &&
+      (!directional.valid() ||
+       directional.reconstruction != certificate_.directional_reconstruction ||
+       directional.branch_authority !=
+           certificate_.directional_branch_authority ||
+       directional.generalized_face_count !=
+           certificate_.generalized_face_count ||
+       directional.policy != certificate_.linearization_policy)) {
     status = {StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
@@ -2428,14 +2850,16 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
         activity_.cells.data[cell_offset(cells, cell)] == 0U) {
       return direction.unchecked(cell, 0U);
     }
-    const double volume = detail::cell_volume(*kernels_, cell);
-    const double proxy_diagonal =
-        detail::diffusion_diagonal(*kernels_, enthalpy_diffusivity_, cell);
-    const double local = assembled_diagonal_.unchecked(cell, 0U) -
-                         proxy_diagonal +
-                         certificate_.authority.bdf.a0 * volume *
-                             target_enthalpy_.unchecked(cell, 0U) *
-                             density_enthalpy_derivative_.unchecked(cell, 0U);
+    const double local =
+        certificate_.compiled_factored_apply
+            ? compiled_local_diagonal_.unchecked(cell, 0U)
+            : assembled_diagonal_.unchecked(cell, 0U) -
+                  detail::diffusion_diagonal(*kernels_,
+                                             enthalpy_diffusivity_, cell) +
+                  certificate_.authority.bdf.a0 *
+                      detail::cell_volume(*kernels_, cell) *
+                      target_enthalpy_.unchecked(cell, 0U) *
+                      density_enthalpy_derivative_.unchecked(cell, 0U);
     double value = local * direction.unchecked(cell, 0U);
     const double centre_temperature = delta_t.unchecked(cell, 0U);
     for (CartesianAxis axis :
@@ -2450,17 +2874,16 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
       const ConstFaceFieldView flux =
           select_face(target_flux_.x, target_flux_.y, target_flux_.z, axis);
       const ConstFaceFieldView face_direction =
-          select_face(directional.x, directional.y, directional.z, axis);
-      if (active_face(activity_, axis, cells, plus)) {
+          select_face(as_const(workspace_.directional_enthalpy.x),
+                      as_const(workspace_.directional_enthalpy.y),
+                      as_const(workspace_.directional_enthalpy.z), axis);
+      if (active_face(activity_, axis, cells, plus))
         value += flux.unchecked(plus) * face_direction.unchecked(plus);
-      }
-      if (active_face(activity_, axis, cells, cell)) {
+      if (active_face(activity_, axis, cells, cell))
         value -= flux.unchecked(cell) * face_direction.unchecked(cell);
-      }
       for (int side : {-1, 1}) {
         const Int3 face = side < 0 ? cell : plus;
-        if (!active_face(activity_, axis, cells, face))
-          continue;
+        if (!active_face(activity_, axis, cells, face)) continue;
         Int3 neighbour = cell;
         if (axis == CartesianAxis::x)
           neighbour.x += side;
@@ -2468,8 +2891,13 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
           neighbour.y += side;
         else
           neighbour.z += side;
-        const double conductance = detail::positive_transmissibility(
-            *kernels_, thermal_conductivity_, axis, face);
+        const double conductance =
+            certificate_.compiled_factored_apply
+                ? select_face(thermal_conductance_x_, thermal_conductance_y_,
+                              thermal_conductance_z_, axis)
+                      .unchecked(face)
+                : detail::positive_transmissibility(
+                      *kernels_, thermal_conductivity_, axis, face);
         value += conductance *
                  (centre_temperature - delta_t.unchecked(neighbour, 0U));
       }
@@ -2478,17 +2906,31 @@ Status PressureEnergyEnthalpyOperator::apply(FieldView input,
   };
 
   bool finite = true;
-  for_each_cell(cells, [&](Int3 cell) {
-    if (!std::isfinite(evaluate(cell)))
-      finite = false;
-  });
+  if (certificate_.compiled_factored_apply) {
+    for_each_cell(cells, [&](Int3 cell) {
+      const double value = evaluate(cell);
+      if (!std::isfinite(value)) finite = false;
+      response_stage_.unchecked(cell, 0U) = value;
+    });
+  } else {
+    for_each_cell(cells, [&](Int3 cell) {
+      if (!std::isfinite(evaluate(cell))) finite = false;
+    });
+  }
   if (!finite) {
     status = {StatusCode::numerical_failure, kPressureEnergyEnthalpyApply};
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
     return status;
   }
-  for_each_cell(
-      cells, [&](Int3 cell) { output.unchecked(cell, 0U) = evaluate(cell); });
+  if (certificate_.compiled_factored_apply) {
+    for_each_cell(cells, [&](Int3 cell) {
+      output.unchecked(cell, 0U) = response_stage_.unchecked(cell, 0U);
+    });
+  } else {
+    for_each_cell(cells, [&](Int3 cell) {
+      output.unchecked(cell, 0U) = evaluate(cell);
+    });
+  }
   return {};
 }
 
@@ -2599,6 +3041,13 @@ Status PressureEnergySchurOperator::bind(
   candidate.continuity_pressure_ = binding.continuity_pressure;
   candidate.energy_pressure_ = binding.energy_pressure;
   candidate.energy_enthalpy_ = binding.energy_enthalpy;
+  const auto* typed_enthalpy =
+      dynamic_cast<const PressureEnergyEnthalpyOperator*>(
+          binding.energy_enthalpy);
+  if (typed_enthalpy != nullptr &&
+      typed_enthalpy->enthalpy_certificate().compiled_factored_apply) {
+    candidate.compiled_energy_enthalpy_ = typed_enthalpy;
+  }
   candidate.continuity_pressure_certificate_ = cp_certificate;
   candidate.energy_pressure_certificate_ = ep_certificate;
   candidate.energy_enthalpy_certificate_ = eh_certificate;
@@ -2709,6 +3158,70 @@ Status PressureEnergySchurOperator::bind(
   return {};
 }
 
+Status PressureEnergySchurOperator::prepare_repeated_apply(
+    PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept {
+  failure_ = {};
+  epoch = {};
+  if (repeated_apply_active_ || compiled_energy_enthalpy_ == nullptr ||
+      !certificate_.valid() ||
+      !components_current(continuity_pressure_,
+                          continuity_pressure_certificate_, energy_pressure_,
+                          energy_pressure_certificate_, energy_enthalpy_,
+                          energy_enthalpy_certificate_)) {
+    const Status status{StatusCode::invalid_plan,
+                        kPressureEnergySchurApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  const Status status =
+      compiled_energy_enthalpy_->prepare_repeated_apply(enthalpy_epoch_);
+  if (!status)
+    return capture_component_failure(*energy_enthalpy_, status, failure_);
+  repeated_apply_active_ = true;
+  epoch.issuer_ = this;
+  epoch.block_jacobian_ = certificate_.block_jacobian;
+  return {};
+}
+
+Status PressureEnergySchurOperator::close_repeated_apply(
+    PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept {
+  if (!repeated_apply_active_ || !epoch.valid() || epoch.issuer_ != this ||
+      epoch.block_jacobian_ != certificate_.block_jacobian ||
+      compiled_energy_enthalpy_ == nullptr) {
+    return {StatusCode::invalid_plan, kPressureEnergySchurApply};
+  }
+  const Status status =
+      compiled_energy_enthalpy_->close_repeated_apply(enthalpy_epoch_);
+  repeated_apply_active_ = false;
+  epoch = {};
+  if (!status)
+    return capture_component_failure(*energy_enthalpy_, status, failure_);
+  return {};
+}
+
+Status PressureEnergySchurOperator::apply_energy_enthalpy(
+    FieldView input, FieldView output) const noexcept {
+  if (energy_enthalpy_ == nullptr) {
+    const Status status{StatusCode::invalid_plan,
+                        kPressureEnergySchurApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  if (!repeated_apply_active_)
+    return component_apply(*energy_enthalpy_, input, output, failure_);
+  if (compiled_energy_enthalpy_ == nullptr || !enthalpy_epoch_.valid()) {
+    const Status status{StatusCode::invalid_plan,
+                        kPressureEnergySchurApply};
+    failure_ = {status, LinearOperatorStatusScope::rank_local, -1};
+    return status;
+  }
+  const Status status = compiled_energy_enthalpy_->apply_prepared(
+      input, output, enthalpy_epoch_);
+  if (!status)
+    return capture_component_failure(*energy_enthalpy_, status, failure_);
+  return {};
+}
+
 Status PressureEnergySchurOperator::apply(FieldView pressure,
                                           FieldView output) const noexcept {
   failure_ = {};
@@ -2797,9 +3310,8 @@ Status PressureEnergySchurOperator::apply(FieldView pressure,
                   continuity_enthalpy_diagonal_.unchecked(cell, 0U)
             : 0.0;
   });
-  status = component_apply(*energy_enthalpy_,
-                           workspace_.eliminated_enthalpy,
-                           workspace_.energy_response, failure_);
+  status = apply_energy_enthalpy(workspace_.eliminated_enthalpy,
+                                 workspace_.energy_response);
   if (!status) return status;
   if (!shared_pressure) {
     status = component_apply(*energy_pressure_, pressure, output, failure_);
@@ -2840,9 +3352,8 @@ Status PressureEnergySchurOperator::form_pressure_rhs(
                   continuity_enthalpy_diagonal_.unchecked(cell, 0U)
             : 0.0;
   });
-  Status status = component_apply(*energy_enthalpy_,
-                                  workspace_.eliminated_enthalpy,
-                                  workspace_.energy_response, failure_);
+  Status status = apply_energy_enthalpy(workspace_.eliminated_enthalpy,
+                                        workspace_.energy_response);
   if (!status) return status;
   for_each_cell(shape, [&](Int3 cell) {
     output.unchecked(cell, 0U) = active_cell(activity_, shape, cell)
@@ -2911,9 +3422,8 @@ Status PressureEnergySchurOperator::
                   continuity_enthalpy_diagonal_.unchecked(cell, 0U)
             : 0.0;
   });
-  Status status = component_apply(*energy_enthalpy_,
-                                  workspace_.eliminated_enthalpy,
-                                  workspace_.energy_response, failure_);
+  Status status = apply_energy_enthalpy(workspace_.eliminated_enthalpy,
+                                        workspace_.energy_response);
   if (!status) return status;
   for_each_cell(shape, [&](Int3 cell) {
     output.unchecked(cell, 0U) =

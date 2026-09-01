@@ -1668,9 +1668,24 @@ struct PressureEnergyEnthalpyServices {
   FieldId temperature_variation_field{};
 };
 
+struct PressureEnergyEnthalpyCompiledWorkspace {
+  // Interior-only immutable factor produced at bind time.
+  FieldView local_diagonal{};
+  // Exact temperature-space conductance on every Cartesian face.
+  FrozenConvectionFaceOutput thermal_conductance{};
+  FrozenConvectionBranchOutput directional_branches{};
+  // Transactional cell output: a failed finite audit never publishes a
+  // partially evaluated caller output.
+  FieldView response_stage{};
+};
+
 struct PressureEnergyEnthalpyWorkspace {
   FieldView delta_temperature{};
   FrozenConvectionFaceOutput directional_enthalpy{};
+  // An entirely empty value selects the certified generic fallback.  A
+  // partially populated value is an invalid binding: silently mixing compiled
+  // and generic factors would weaken revision identity.
+  PressureEnergyEnthalpyCompiledWorkspace compiled{};
 };
 
 struct PressureEnergyEnthalpyBinding {
@@ -1739,8 +1754,26 @@ struct PressureEnergyEnthalpyCertificate {
   bool inactive_rows_identity{};
   bool inactive_interfaces_zero{};
   bool allocation_free_apply{};
+  bool compiled_factored_apply{};
+  RevisionToken compiled_numeric_revision{};
+  PlanFingerprint compiled_local_binding{};
 
   bool valid() const noexcept;
+};
+
+class PressureEnergyEnthalpyOperator;
+class PressureEnergyEnthalpyPreparedEpoch {
+ public:
+  bool valid() const noexcept {
+    return issuer_ != nullptr && binding_revision_ != 0U &&
+           compiled_numeric_revision_ != 0U;
+  }
+
+ private:
+  friend class PressureEnergyEnthalpyOperator;
+  const PressureEnergyEnthalpyOperator* issuer_{};
+  RevisionToken binding_revision_{};
+  RevisionToken compiled_numeric_revision_{};
 };
 
 // Complete frozen-spatial target-layer energy response
@@ -1782,8 +1815,18 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
     return certificate_;
   }
   Status apply(FieldView input, FieldView output) const noexcept override;
+  Status prepare_repeated_apply(
+      PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept;
+  Status apply_prepared(
+      FieldView input, FieldView output,
+      const PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept;
+  Status close_repeated_apply(
+      PressureEnergyEnthalpyPreparedEpoch& epoch) const noexcept;
 
  private:
+  Status validate_compiled_snapshot() const noexcept;
+  Status apply_impl(FieldView input, FieldView output,
+                    bool snapshot_validated) const noexcept;
   const CartesianGeometryPlan* geometry_{};
   const CartesianKernelPlan* kernels_{};
   const BoundaryPlan* boundary_{};
@@ -1800,6 +1843,12 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
   FrozenConvectionContext convection_context_{};
   FrozenConvectionFaceField frozen_face_enthalpy_{};
   PressureEnergyEnthalpyWorkspace workspace_{};
+  FrozenConvectionBranchPlan compiled_directional_branches_{};
+  ConstFieldView compiled_local_diagonal_{};
+  ConstFaceFieldView thermal_conductance_x_{};
+  ConstFaceFieldView thermal_conductance_y_{};
+  ConstFaceFieldView thermal_conductance_z_{};
+  FieldView response_stage_{};
   PressureContinuityActivityView activity_{};
   PressureEnergyEnthalpyCertificate certificate_{};
   mutable LinearOperatorFailureProvenance failure_{};
@@ -1890,6 +1939,19 @@ struct PressureEnergySchurBinding {
   PressureEnergyCellActivity activity{};
   double scaled_pivot_floor{};
   PressureEnergySchurBlockAuthority block_authority{};
+};
+
+class PressureEnergySchurOperator;
+class PressureEnergySchurPreparedApplyEpoch {
+ public:
+  bool valid() const noexcept {
+    return issuer_ != nullptr && block_jacobian_ != 0U;
+  }
+
+ private:
+  friend class PressureEnergySchurOperator;
+  const PressureEnergySchurOperator* issuer_{};
+  RevisionToken block_jacobian_{};
 };
 
 // Cold-certified authority for sharing one pressure-direction halo exchange
@@ -2076,8 +2138,13 @@ class PressureEnergySchurOperator final : public LinearOperator {
   Status recover_enthalpy_from_continuity_system_rhs(
       ConstFieldView continuity_system_rhs, FieldView pressure_correction,
       FieldView enthalpy_correction) const noexcept;
+  Status prepare_repeated_apply(
+      PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept;
+  Status close_repeated_apply(
+      PressureEnergySchurPreparedApplyEpoch& epoch) const noexcept;
 
  private:
+  Status apply_energy_enthalpy(FieldView input, FieldView output) const noexcept;
   const LinearOperator* continuity_pressure_{};
   const LinearOperator* energy_pressure_{};
   const LinearOperator* energy_enthalpy_{};
@@ -2091,6 +2158,9 @@ class PressureEnergySchurOperator final : public LinearOperator {
   const PressureLinearOperator* shared_cartesian_pressure_{};
   const IbmPressureOperator* shared_ibm_pressure_{};
   const PressureEnergyPressureFluxOperator* shared_energy_pressure_{};
+  const PressureEnergyEnthalpyOperator* compiled_energy_enthalpy_{};
+  mutable PressureEnergyEnthalpyPreparedEpoch enthalpy_epoch_{};
+  mutable bool repeated_apply_active_{};
   PressureEnergyJacobianCertificate certificate_{};
   mutable LinearOperatorFailureProvenance failure_{};
 };
