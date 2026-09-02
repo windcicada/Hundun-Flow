@@ -1936,6 +1936,11 @@ struct PressureVelocityCoupler::Impl {
     hash = hash_mix(hash, double_bits(frozen_candidate_bdf.a1));
     hash = hash_mix(hash, double_bits(frozen_candidate_bdf.a2));
     hash = hash_mix(hash, frozen_candidate_bdf.order);
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+    // Keep the diagnostic core's byte-exact mutation detector.  Production
+    // fields are mutated only through revision-issuing authorities, so the
+    // complete binding below provides the same frozen-candidate guard without
+    // rescanning these large arrays at every consumer boundary.
     hash = mix_candidate_field_values(
         hash, as_const(frozen_candidate_density), cells, 1U, 1);
     hash = mix_candidate_field_values(hash, as_const(workspace.h_by_a), cells,
@@ -1955,6 +1960,24 @@ struct PressureVelocityCoupler::Impl {
     hash = mix_candidate_flux_values(hash, as_const(workspace.phi_h_by_a));
     hash = mix_candidate_flux_values(
         hash, as_const(frozen_candidate_face_aux));
+#else
+    hash = mix_complete_view_identity(
+        hash, as_const(frozen_candidate_density));
+    hash = mix_complete_view_identity(hash, as_const(workspace.h_by_a));
+    hash = mix_complete_view_identity(hash, as_const(workspace.r_au));
+    if (current.corrector == 1U) {
+      if (!detail::valid_cell_view(current_pressure_perturbation, cells, 0U,
+                                   1U, 1U))
+        return 0U;
+      hash = mix_complete_view_identity(hash, current_pressure_perturbation);
+      hash = mix_complete_view_identity(
+          hash, as_const(workspace.pressure_gradient));
+    }
+    hash = mix_candidate_flux_binding(
+        hash, as_const(workspace.phi_h_by_a));
+    hash = mix_candidate_flux_binding(
+        hash, as_const(frozen_candidate_face_aux));
+#endif
     if (immersed_interface != nullptr ||
         candidate_pressure_correction_donors != nullptr) {
       hash = hash_mix(
