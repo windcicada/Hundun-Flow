@@ -688,8 +688,8 @@ bool test_pressure_energy_candidate_storage_lineage() {
       "candidate halos freeze the live geometric reach under new field lineage");
   passed &= expect(
       diagnostic.workspace_flux_capacity.aligned_payload_allocations == 1U &&
-          diagnostic.workspace_flux_capacity.replicas == 4U &&
-          diagnostic.workspace_flux_capacity.directional_blocks == 12U &&
+          diagnostic.workspace_flux_capacity.replicas == 6U &&
+          diagnostic.workspace_flux_capacity.directional_blocks == 18U &&
           diagnostic.final_flux_capacity.aligned_payload_allocations == 1U &&
           diagnostic.final_flux_capacity.replicas == 3U &&
           diagnostic.final_flux_capacity.directional_blocks == 9U &&

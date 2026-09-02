@@ -3321,10 +3321,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   status = FaceFluxStorage::allocate_final(candidate->patch.cells,
                                            candidate->final_flux);
   if (status)
-    // phiHbyA, the provisional corrected flux, the mechanical globalization
-    // flux, and its final physical-boundary flux can all be live together.
-    // Four cold replicas keep finalization transactional and allocation-free.
-    status = FaceFluxStorage::allocate_workspace(candidate->patch.cells, 4U,
+    // Four pressure/candidate fluxes can be live together.  Two additional
+    // replicas retain all three momentum AFC reconstructions while their
+    // common face alpha is formed, avoiding a second reconstruction pass.
+    status = FaceFluxStorage::allocate_workspace(candidate->patch.cells, 6U,
                                                  candidate->phi_workspace);
   if (!status) {
     return status;
@@ -3930,8 +3930,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
            candidate->ibm_rate_donors->fingerprint());
   if (!independent_halo_lineage || !independent_candidate_donor_lineage ||
       workspace_flux_capacity.aligned_payload_allocations != 1U ||
-      workspace_flux_capacity.replicas != 4U ||
-      workspace_flux_capacity.directional_blocks != 12U ||
+      workspace_flux_capacity.replicas != 6U ||
+      workspace_flux_capacity.directional_blocks != 18U ||
       final_flux_capacity.aligned_payload_allocations != 1U ||
       final_flux_capacity.replicas != 3U ||
       final_flux_capacity.directional_blocks != 9U)
@@ -3963,8 +3963,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     candidate_lineage =
         detail::product_mix(candidate_lineage, descriptor->ghost_width);
   }
-  candidate_lineage = detail::product_mix(
-      candidate_lineage, workspace_flux_capacity.replicas);
+  // Only the four pressure/candidate flux roles belong to checkpoint plan
+  // semantics.  The two extra replicas are transient AFC cache capacity and
+  // must not invalidate an otherwise compatible restart.
+  candidate_lineage = detail::product_mix(candidate_lineage, 4U);
   candidate_lineage = detail::product_mix(
       candidate_lineage,
       7U + candidate->fields.pressure_energy_candidate_species.size());
@@ -8296,20 +8298,27 @@ Status ProductDriver::Impl::execute_attempt(
                 product.pressure_mg_activity_fingerprint,
                 product.pressure_mg_activity_collective}
           : MgDomainActivityView{};
-  FaceFluxView momentum_limiter_faces;
+  std::array<FaceFluxView, 3U> momentum_limiter_faces{};
   FaceFluxView momentum_limiter_alpha;
-  if (status)
+  const auto limiter_revision = [](RevisionToken base,
+                                   RevisionToken offset) noexcept {
+    return base <= std::numeric_limits<RevisionToken>::max() - offset
+               ? base + offset
+               : base - offset;
+  };
+  for (std::size_t component = 0U;
+       component < momentum_limiter_faces.size() && status; ++component) {
+    const RevisionToken revision = limiter_revision(
+        momentum_certificate.state,
+        static_cast<RevisionToken>(component + 1U));
     status = product.phi_workspace.workspace_view(
-        2U, momentum_certificate.state, momentum_limiter_faces);
+        2U + component, revision, momentum_limiter_faces[component]);
+  }
   if (status) {
-    RevisionToken alpha_revision =
-        momentum_certificate.state ==
-                std::numeric_limits<RevisionToken>::max()
-            ? momentum_certificate.state - 1U
-            : momentum_certificate.state + 1U;
-    if (alpha_revision == 0U) alpha_revision = 1U;
+    const RevisionToken alpha_revision =
+        limiter_revision(momentum_certificate.state, 4U);
     status = product.phi_workspace.workspace_view(
-        3U, alpha_revision, momentum_limiter_alpha);
+        5U, alpha_revision, momentum_limiter_alpha);
   }
   if (status)
     status = limit_momentum_predictor_correction(

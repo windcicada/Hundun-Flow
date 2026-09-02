@@ -485,7 +485,7 @@ void clear_momentum_partition_alpha_mutation_for_test() noexcept;
 
 struct MomentumPredictorLimiterWorkspace {
   FieldView cell_ratios{};
-  FaceFluxView high_order_faces{};
+  std::array<FaceFluxView, 3U> high_order_faces{};
   FaceFluxView common_face_alpha{};
 };
 

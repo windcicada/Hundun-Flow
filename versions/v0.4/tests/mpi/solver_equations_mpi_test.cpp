@@ -695,6 +695,18 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
       CartesianAxis::y, cells, 25000U + static_cast<unsigned>(rank));
   OwnedFaceField momentum_limiter_z = make_face(
       CartesianAxis::z, cells, 25000U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_one_x = make_face(
+      CartesianAxis::x, cells, 25010U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_one_y = make_face(
+      CartesianAxis::y, cells, 25010U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_one_z = make_face(
+      CartesianAxis::z, cells, 25010U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_two_x = make_face(
+      CartesianAxis::x, cells, 25020U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_two_y = make_face(
+      CartesianAxis::y, cells, 25020U + static_cast<unsigned>(rank));
+  OwnedFaceField momentum_limiter_two_z = make_face(
+      CartesianAxis::z, cells, 25020U + static_cast<unsigned>(rank));
   OwnedFaceField momentum_limiter_alpha_x = make_face(
       CartesianAxis::x, cells, 25100U + static_cast<unsigned>(rank));
   OwnedFaceField momentum_limiter_alpha_y = make_face(
@@ -768,8 +780,12 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
       linear_certificate, as_const(velocity.view), as_const(rho.view),
       context.dt, 1.0e9, as_const(flux), {}, linear_system,
       {momentum_limiter_cells.view,
-       {momentum_limiter_x.view, momentum_limiter_y.view,
-        momentum_limiter_z.view, 914U, {}},
+       {{{momentum_limiter_x.view, momentum_limiter_y.view,
+          momentum_limiter_z.view, 914U, {}},
+         {momentum_limiter_one_x.view, momentum_limiter_one_y.view,
+          momentum_limiter_one_z.view, 916U, {}},
+         {momentum_limiter_two_x.view, momentum_limiter_two_y.view,
+          momentum_limiter_two_z.view, 917U, {}}}},
        {momentum_limiter_alpha_x.view, momentum_limiter_alpha_y.view,
         momentum_limiter_alpha_z.view, 915U, {}}},
       momentum_limiter_halo, momentum_reductions, limiter_report);
@@ -1190,6 +1206,18 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
       make_face(CartesianAxis::y, cells, salt + 9U);
   OwnedFaceField limiter_z =
       make_face(CartesianAxis::z, cells, salt + 9U);
+  OwnedFaceField limiter_one_x =
+      make_face(CartesianAxis::x, cells, salt + 15U);
+  OwnedFaceField limiter_one_y =
+      make_face(CartesianAxis::y, cells, salt + 15U);
+  OwnedFaceField limiter_one_z =
+      make_face(CartesianAxis::z, cells, salt + 15U);
+  OwnedFaceField limiter_two_x =
+      make_face(CartesianAxis::x, cells, salt + 16U);
+  OwnedFaceField limiter_two_y =
+      make_face(CartesianAxis::y, cells, salt + 16U);
+  OwnedFaceField limiter_two_z =
+      make_face(CartesianAxis::z, cells, salt + 16U);
   OwnedFaceField limiter_alpha_x =
       make_face(CartesianAxis::x, cells, salt + 10U);
   OwnedFaceField limiter_alpha_y =
@@ -1302,10 +1330,16 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
       1.0e-6};
   FaceFluxView limiter_faces{limiter_x.view, limiter_y.view, limiter_z.view,
                              408U, {}};
+  FaceFluxView limiter_one_faces{limiter_one_x.view, limiter_one_y.view,
+                                 limiter_one_z.view, 410U, {}};
+  FaceFluxView limiter_two_faces{limiter_two_x.view, limiter_two_y.view,
+                                 limiter_two_z.view, 411U, {}};
   FaceFluxView limiter_alpha_faces{limiter_alpha_x.view, limiter_alpha_y.view,
                                    limiter_alpha_z.view, 409U, {}};
   const MomentumPredictorLimiterWorkspace limiter_workspace{
-      limiter_cells.view, limiter_faces, limiter_alpha_faces};
+      limiter_cells.view,
+      {limiter_faces, limiter_one_faces, limiter_two_faces},
+      limiter_alpha_faces};
   constexpr double limiter_step_dt = 1.0e-6;
   constexpr double limiter_cfl_limit = 1.0e9;
 
@@ -1573,6 +1607,12 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
   OwnedFaceField high_x = make_face(CartesianAxis::x, cells, salt + 13U);
   OwnedFaceField high_y = make_face(CartesianAxis::y, cells, salt + 13U);
   OwnedFaceField high_z = make_face(CartesianAxis::z, cells, salt + 13U);
+  OwnedFaceField high_one_x = make_face(CartesianAxis::x, cells, salt + 15U);
+  OwnedFaceField high_one_y = make_face(CartesianAxis::y, cells, salt + 15U);
+  OwnedFaceField high_one_z = make_face(CartesianAxis::z, cells, salt + 15U);
+  OwnedFaceField high_two_x = make_face(CartesianAxis::x, cells, salt + 16U);
+  OwnedFaceField high_two_y = make_face(CartesianAxis::y, cells, salt + 16U);
+  OwnedFaceField high_two_z = make_face(CartesianAxis::z, cells, salt + 16U);
   OwnedFaceField alpha_x = make_face(CartesianAxis::x, cells, salt + 14U);
   OwnedFaceField alpha_y = make_face(CartesianAxis::y, cells, salt + 14U);
   OwnedFaceField alpha_z = make_face(CartesianAxis::z, cells, salt + 14U);
@@ -1581,7 +1621,9 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
       coefficient_y.view, coefficient_z.view};
   const MomentumPredictorLimiterWorkspace workspace{
       limiter_cells.view,
-      {high_x.view, high_y.view, high_z.view, 507U, {}},
+      {{{high_x.view, high_y.view, high_z.view, 507U, {}},
+        {high_one_x.view, high_one_y.view, high_one_z.view, 509U, {}},
+        {high_two_x.view, high_two_y.view, high_two_z.view, 510U, {}}}},
       {alpha_x.view, alpha_y.view, alpha_z.view, 508U, {}}};
 
   ReductionEngine reductions;
@@ -1762,6 +1804,12 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
   const std::vector<double> authority_high_x = high_x.bytes;
   const std::vector<double> authority_high_y = high_y.bytes;
   const std::vector<double> authority_high_z = high_z.bytes;
+  const std::vector<double> authority_high_one_x = high_one_x.bytes;
+  const std::vector<double> authority_high_one_y = high_one_y.bytes;
+  const std::vector<double> authority_high_one_z = high_one_z.bytes;
+  const std::vector<double> authority_high_two_x = high_two_x.bytes;
+  const std::vector<double> authority_high_two_y = high_two_y.bytes;
+  const std::vector<double> authority_high_two_z = high_two_z.bytes;
   const std::vector<double> authority_alpha_x = alpha_x.bytes;
   const std::vector<double> authority_alpha_y = alpha_y.bytes;
   const std::vector<double> authority_alpha_z = alpha_z.bytes;
@@ -1773,6 +1821,12 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
            limiter_cells.bytes == authority_cells &&
            high_x.bytes == authority_high_x && high_y.bytes == authority_high_y &&
            high_z.bytes == authority_high_z &&
+           high_one_x.bytes == authority_high_one_x &&
+           high_one_y.bytes == authority_high_one_y &&
+           high_one_z.bytes == authority_high_one_z &&
+           high_two_x.bytes == authority_high_two_x &&
+           high_two_y.bytes == authority_high_two_y &&
+           high_two_z.bytes == authority_high_two_z &&
            alpha_x.bytes == authority_alpha_x &&
            alpha_y.bytes == authority_alpha_y &&
            alpha_z.bytes == authority_alpha_z &&
@@ -1846,6 +1900,12 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
     const std::vector<double> mismatch_high_x = high_x.bytes;
     const std::vector<double> mismatch_high_y = high_y.bytes;
     const std::vector<double> mismatch_high_z = high_z.bytes;
+    const std::vector<double> mismatch_high_one_x = high_one_x.bytes;
+    const std::vector<double> mismatch_high_one_y = high_one_y.bytes;
+    const std::vector<double> mismatch_high_one_z = high_one_z.bytes;
+    const std::vector<double> mismatch_high_two_x = high_two_x.bytes;
+    const std::vector<double> mismatch_high_two_y = high_two_y.bytes;
+    const std::vector<double> mismatch_high_two_z = high_two_z.bytes;
     const std::vector<double> mismatch_alpha_x = alpha_x.bytes;
     const std::vector<double> mismatch_alpha_y = alpha_y.bytes;
     const std::vector<double> mismatch_alpha_z = alpha_z.bytes;
@@ -1869,6 +1929,12 @@ bool test_open_boundary_one_sided_momentum_limiter(MPI_Comm world, int rank) {
             high_x.bytes == mismatch_high_x &&
             high_y.bytes == mismatch_high_y &&
             high_z.bytes == mismatch_high_z &&
+            high_one_x.bytes == mismatch_high_one_x &&
+            high_one_y.bytes == mismatch_high_one_y &&
+            high_one_z.bytes == mismatch_high_one_z &&
+            high_two_x.bytes == mismatch_high_two_x &&
+            high_two_y.bytes == mismatch_high_two_y &&
+            high_two_z.bytes == mismatch_high_two_z &&
             alpha_x.bytes == mismatch_alpha_x &&
             alpha_y.bytes == mismatch_alpha_y &&
             alpha_z.bytes == mismatch_alpha_z &&

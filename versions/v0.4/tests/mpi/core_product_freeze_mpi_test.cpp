@@ -580,8 +580,8 @@ bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
                diagnostic.candidate_correction_halo != 0U &&
                diagnostic.correction_halo !=
                    diagnostic.candidate_correction_halo &&
-               diagnostic.workspace_flux_capacity.replicas == 4U &&
-               diagnostic.workspace_flux_capacity.directional_blocks == 12U &&
+               diagnostic.workspace_flux_capacity.replicas == 6U &&
+               diagnostic.workspace_flux_capacity.directional_blocks == 18U &&
                diagnostic.final_flux_capacity.replicas == 3U &&
                diagnostic.final_flux_capacity.directional_blocks == 9U &&
                diagnostic.execution_graph != 0U &&

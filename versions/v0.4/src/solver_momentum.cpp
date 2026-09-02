@@ -1166,7 +1166,8 @@ Status limit_momentum_predictor_correction(
     MomentumPredictorLimiterReport& report) noexcept {
   report = {};
   FieldView cell_workspace = workspace.cell_ratios;
-  FaceFluxView face_workspace = workspace.high_order_faces;
+  const std::array<FaceFluxView, 3U> face_workspace =
+      workspace.high_order_faces;
   FaceFluxView common_alpha = workspace.common_face_alpha;
   const Int3 cells = system.rhs.interior;
   const std::size_t cell_count =
@@ -1184,7 +1185,9 @@ Status limit_momentum_predictor_correction(
            detail::cell_face_views_overlap(cell, flux.y) ||
            detail::cell_face_views_overlap(cell, flux.z);
   };
-  const ConstFaceFluxView limiter_faces = as_const(face_workspace);
+  const std::array<ConstFaceFluxView, 3U> limiter_faces{
+      as_const(face_workspace[0U]), as_const(face_workspace[1U]),
+      as_const(face_workspace[2U])};
   const ConstFaceFluxView alpha_faces = as_const(common_alpha);
   const ConstFaceFluxView equation_faces{
       as_const(system.x_coefficient), as_const(system.y_coefficient),
@@ -1198,6 +1201,29 @@ Status limit_momentum_predictor_correction(
         if (detail::face_views_overlap(left_face, right_face)) return true;
     return false;
   };
+  const auto overlaps_limiter_faces = [&](ConstFieldView cell) noexcept {
+    for (const ConstFaceFluxView faces : limiter_faces)
+      if (overlaps_flux(cell, faces)) return true;
+    return false;
+  };
+  const auto limiter_faces_overlap = [&](ConstFaceFluxView faces) noexcept {
+    for (const ConstFaceFluxView cached : limiter_faces)
+      if (fluxes_overlap(cached, faces)) return true;
+    return false;
+  };
+  bool valid_limiter_faces = true;
+  for (std::size_t component = 0U; component < limiter_faces.size();
+       ++component) {
+    valid_limiter_faces =
+        valid_limiter_faces &&
+        detail::valid_flux_view(limiter_faces[component], cells,
+                                face_workspace[component].revision);
+    for (std::size_t prior = 0U; prior < component; ++prior) {
+      valid_limiter_faces =
+          valid_limiter_faces &&
+          !fluxes_overlap(limiter_faces[component], limiter_faces[prior]);
+    }
+  }
   Status preflight = reductions.validate_communicator(communicator);
   if (preflight && (communicator == MPI_COMM_NULL || cell_count == 0U ||
       plan.kernels_ == nullptr || plan.kernels_->fingerprint() == 0U ||
@@ -1221,8 +1247,7 @@ Status limit_momentum_predictor_correction(
       !(convective_cfl_limit > 0.0) ||
       !detail::valid_cell_view(as_const(cell_workspace), cells, 0U, 3U, 1U) ||
       !detail::valid_flux_view(mass_flux, cells, assembly.face_flux) ||
-      !detail::valid_flux_view(as_const(face_workspace), cells,
-                               face_workspace.revision) ||
+      !valid_limiter_faces ||
       !detail::valid_flux_view(as_const(common_alpha), cells,
                                common_alpha.revision) ||
       !detail::finite_face_flux(mass_flux, {{0, 0, 0}, cells}) ||
@@ -1241,12 +1266,12 @@ Status limit_momentum_predictor_correction(
                                   as_const(cell_workspace)) ||
       detail::field_views_overlap(as_const(system.residual),
                                   as_const(cell_workspace)) ||
-      overlaps_flux(velocity, limiter_faces) ||
-      overlaps_flux(as_const(system.diagonal), limiter_faces) ||
-      overlaps_flux(as_const(system.rhs), limiter_faces) ||
-      overlaps_flux(as_const(system.residual), limiter_faces) ||
-      overlaps_flux(as_const(cell_workspace), limiter_faces) ||
-      overlaps_flux(density, limiter_faces) ||
+      overlaps_limiter_faces(velocity) ||
+      overlaps_limiter_faces(as_const(system.diagonal)) ||
+      overlaps_limiter_faces(as_const(system.rhs)) ||
+      overlaps_limiter_faces(as_const(system.residual)) ||
+      overlaps_limiter_faces(as_const(cell_workspace)) ||
+      overlaps_limiter_faces(density) ||
       overlaps_flux(velocity, alpha_faces) ||
       overlaps_flux(as_const(system.diagonal), alpha_faces) ||
       overlaps_flux(as_const(system.rhs), alpha_faces) ||
@@ -1259,10 +1284,10 @@ Status limit_momentum_predictor_correction(
       overlaps_flux(as_const(system.residual), mass_flux) ||
       overlaps_flux(as_const(cell_workspace), mass_flux) ||
       overlaps_flux(density, mass_flux) ||
-      fluxes_overlap(limiter_faces, mass_flux) ||
+      limiter_faces_overlap(mass_flux) ||
       fluxes_overlap(alpha_faces, mass_flux) ||
-      fluxes_overlap(limiter_faces, alpha_faces) ||
-      fluxes_overlap(equation_faces, limiter_faces) ||
+      limiter_faces_overlap(alpha_faces) ||
+      limiter_faces_overlap(equation_faces) ||
       fluxes_overlap(equation_faces, alpha_faces) ||
       fluxes_overlap(equation_faces, mass_flux) ||
       !limiter_halo.ready() ||
@@ -1511,17 +1536,19 @@ Status limit_momentum_predictor_correction(
   constexpr StageId kLimiterHaloStage = 33U;
   constexpr std::uint8_t kNeighbourSumCacheComponent = 2U;
   const RevisionToken base_workspace_revision = cell_workspace.revision;
+  std::array<FrozenConvectionFaceField, 3U> frozen_components{};
   for (std::uint8_t component = 0U; component < 3U; ++component) {
-    FrozenConvectionFaceField frozen;
     if (local_status) {
       const FrozenConvectionContext context{plan.fingerprint(),
                                             assembly.state};
       const FrozenConvectionFaceOutput output{
-          face_workspace.x, face_workspace.y, face_workspace.z};
+          face_workspace[component].x, face_workspace[component].y,
+          face_workspace[component].z};
       local_status = freeze_cartesian_target_convection_faces(
           kernels, plan.convection_, mass_flux, velocity, component,
-          context, output, frozen);
+          context, output, frozen_components[component]);
     }
+    const FrozenConvectionFaceField& frozen = frozen_components[component];
 
     if (local_status) {
       for (std::int32_t z = 0; z < cells.z && local_status; ++z) {
@@ -1924,16 +1951,7 @@ Status limit_momentum_predictor_correction(
     }
   }
   for (std::uint8_t component = 0U; component < 3U; ++component) {
-    FrozenConvectionFaceField frozen;
-    if (local_status) {
-      const FrozenConvectionContext context{plan.fingerprint(),
-                                            assembly.state};
-      const FrozenConvectionFaceOutput output{
-          face_workspace.x, face_workspace.y, face_workspace.z};
-      local_status = freeze_cartesian_target_convection_faces(
-          kernels, plan.convection_, mass_flux, velocity, component,
-          context, output, frozen);
-    }
+    const FrozenConvectionFaceField& frozen = frozen_components[component];
     for (std::size_t axis = 0U; axis < 3U && local_status; ++axis) {
       Int3 extents = cells;
       if (axis == 0U)
