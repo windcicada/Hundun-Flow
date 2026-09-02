@@ -1,0 +1,19 @@
+diff --git a/versions/v0.4/src/app_main.cpp b/versions/v0.4/src/app_main.cpp
+index 7f4bc83..382b5d4 100644
+--- a/versions/v0.4/src/app_main.cpp
++++ b/versions/v0.4/src/app_main.cpp
+@@ -347,0 +348,6 @@ int main(int argc, char* argv[]) {
++        std::cerr << "[DEBUG-pe] valid="
++                  << (report.pressure_energy_globalization.valid ? 1 : 0)
++                  << " trajectories="
++                  << static_cast<unsigned>(
++                         report.pressure_energy_globalization.trajectory_count)
++                  << '\n';
+@@ -576,2 +582 @@ int main(int argc, char* argv[]) {
+-      if (!status && rank == 0 && report.failed_stage != 0U &&
+-          report.pressure_energy_globalization.valid) {
++      if (rank == 0 && report.pressure_energy_globalization.valid) {
+@@ -619,0 +625,3 @@ int main(int argc, char* argv[]) {
++      if (status && rank == 0 &&
++          report.pressure_energy_globalization.valid)
++        std::cerr << '\n';
