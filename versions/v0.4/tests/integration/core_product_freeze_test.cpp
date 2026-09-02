@@ -87,6 +87,97 @@ bool test_pressure_energy_temporal_operand_scale() {
   return passed;
 }
 
+bool test_pressure_inexact_forcing_policy() {
+  const LinearSolveControl base{1.0e-8, 1.0e-6, 500U, 16U, 30U};
+  const auto same_fixed_control = [&](const LinearSolveControl& value) {
+    return value.absolute_tolerance == base.absolute_tolerance &&
+           value.maximum_iterations == base.maximum_iterations &&
+           value.true_residual_interval == base.true_residual_interval &&
+           value.restart == base.restart;
+  };
+  bool passed = true;
+
+  const LinearSolveControl cold =
+      detail::product_pressure_inexact_forcing_control(
+          base, {0.0, 0.0, 0.0, 1.0e-6, false, false});
+  passed &= expect(same_fixed_control(cold) &&
+                       cold.relative_tolerance == 1.0e-4,
+                   "cold inexact pressure solve uses the guarded ceiling");
+
+  const LinearSolveControl intermediate =
+      detail::product_pressure_inexact_forcing_control(
+          base, {5.0e-5, 4.0e-5, 0.0, 1.0e-6, true, false});
+  passed &= expect(same_fixed_control(intermediate) &&
+                       intermediate.relative_tolerance == 5.0e-6,
+                   "inexact pressure tolerance follows nonlinear residual");
+
+  const LinearSolveControl terminal =
+      detail::product_pressure_inexact_forcing_control(
+          base, {9.0e-6, 8.0e-6, 0.0, 1.0e-6, true, false});
+  passed &= expect(same_fixed_control(terminal) &&
+                       terminal.relative_tolerance ==
+                           base.relative_tolerance,
+                   "terminal band restores the case pressure tolerance");
+
+  const LinearSolveControl stagnated =
+      detail::product_pressure_inexact_forcing_control(
+          base, {1.0e-3, 8.0e-4, 1.05e-3, 1.0e-6, true, true});
+  passed &= expect(same_fixed_control(stagnated) &&
+                       stagnated.relative_tolerance ==
+                           base.relative_tolerance,
+                   "stagnating nonlinear residual restores full accuracy");
+
+  const LinearSolveControl contracting =
+      detail::product_pressure_inexact_forcing_control(
+          base, {8.0e-4, 7.0e-4, 1.0e-3, 1.0e-6, true, true});
+  passed &= expect(same_fixed_control(contracting) &&
+                       contracting.relative_tolerance == 8.0e-5,
+                   "contracting far-field residual retains inexact solve");
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const LinearSolveControl invalid =
+      detail::product_pressure_inexact_forcing_control(
+          base, {nan, 1.0e-3, 0.0, 1.0e-6, true, false});
+  passed &= expect(same_fixed_control(invalid) &&
+                       invalid.relative_tolerance ==
+                           base.relative_tolerance,
+                   "non-finite forcing input fails closed");
+
+  const LinearSolveControl already_loose{1.0e-8, 1.0e-4, 500U, 16U, 30U};
+  const LinearSolveControl unchanged =
+      detail::product_pressure_inexact_forcing_control(
+          already_loose, {1.0, 1.0, 0.0, 1.0e-4, false, false});
+  passed &= expect(unchanged.absolute_tolerance ==
+                           already_loose.absolute_tolerance &&
+                       unchanged.relative_tolerance ==
+                           already_loose.relative_tolerance &&
+                       unchanged.maximum_iterations ==
+                           already_loose.maximum_iterations &&
+                       unchanged.true_residual_interval ==
+                           already_loose.true_residual_interval &&
+                       unchanged.restart == already_loose.restart,
+                   "an already-loose case authority is not changed");
+
+  const LinearSolveControl deliberately_strict{1.0e-15, 1.0e-13, 800U, 4U,
+                                                64U};
+  const LinearSolveControl strict_unchanged =
+      detail::product_pressure_inexact_forcing_control(
+          deliberately_strict,
+          {0.0, 0.0, 0.0, 1.0e-12, false, false});
+  passed &= expect(
+      strict_unchanged.relative_tolerance ==
+              deliberately_strict.relative_tolerance &&
+          strict_unchanged.absolute_tolerance ==
+              deliberately_strict.absolute_tolerance &&
+          strict_unchanged.maximum_iterations ==
+              deliberately_strict.maximum_iterations &&
+          strict_unchanged.true_residual_interval ==
+              deliberately_strict.true_residual_interval &&
+          strict_unchanged.restart == deliberately_strict.restart,
+      "a case tolerance stricter than its terminal gate disables forcing");
+  return passed;
+}
+
 bool test_freeze() {
   ValidatedModel model = test::product_model();
   model.solver.pressure = {1.0e-8, 2.0e-7, 333U, 7U, 16U};
@@ -1021,6 +1112,7 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   const bool passed = test_incomplete_registration() &&
                       test_pressure_energy_temporal_operand_scale() &&
+                      test_pressure_inexact_forcing_policy() &&
                       test_freeze() &&
                       test_pressure_energy_restart_schema() &&
                       test_pressure_energy_candidate_storage_lineage() &&

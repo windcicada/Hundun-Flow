@@ -2289,6 +2289,11 @@ struct PisoContinuityWitness {
 // PISO corrector two, not additional PISO correctors.  The capacity is a
 // compile-time hot-resource contract and is deliberately not case input.
 inline constexpr std::size_t kPressureEnergyRefinementCapacity = 12U;
+// Product-only inexact forcing may relax an inner coupled solve up to this
+// ceiling.  Case input remains the terminal linear authority, and exact
+// nonlinear/terminal gates still decide acceptance.
+inline constexpr double kPressureInexactForcingRelativeToleranceCeiling =
+    1.0e-4;
 
 enum class PressureEnergyRefinementTermination : std::uint8_t {
   none,
@@ -4189,6 +4194,12 @@ class PisoPressureSolveEpoch {
   Status solve_prepared(
       LinearOperator& exact_operator,
       PisoPressureSolveContract contract,
+      ReductionEngine& reductions,
+      ResourceCounters* resources = nullptr) noexcept;
+  Status solve_prepared(
+      LinearOperator& exact_operator,
+      PisoPressureSolveContract contract,
+      const LinearSolveControl& solve_control,
       ReductionEngine& reductions,
       ResourceCounters* resources = nullptr) noexcept;
   Status solve(

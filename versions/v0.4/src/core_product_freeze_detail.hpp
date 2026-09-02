@@ -4,6 +4,7 @@
 
 #include "hundun/v04_product.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -113,6 +114,66 @@ inline bool product_pressure_energy_temporal_operand_scale(
     return false;
   scale = candidate;
   return true;
+}
+
+struct ProductPressureInexactForcingState {
+  double normalized_continuity{};
+  double normalized_energy{};
+  double previous_merit{};
+  double terminal_tolerance{};
+  bool residual_available{};
+  bool previous_merit_available{};
+};
+
+// Select only the inner coupled linear tolerance.  The case control remains
+// the lower bound and is restored near the terminal gate, on stagnation, or
+// whenever the nonlinear evidence is invalid.
+inline LinearSolveControl product_pressure_inexact_forcing_control(
+    LinearSolveControl base,
+    ProductPressureInexactForcingState state) noexcept {
+  const bool valid_base = std::isfinite(base.absolute_tolerance) &&
+                          std::isfinite(base.relative_tolerance) &&
+                          base.absolute_tolerance > 0.0 &&
+                          base.relative_tolerance > 0.0 &&
+                          base.relative_tolerance < 1.0 &&
+                          base.maximum_iterations > 0U &&
+                          base.true_residual_interval > 0U;
+  if (!valid_base ||
+      base.relative_tolerance >=
+          kPressureInexactForcingRelativeToleranceCeiling ||
+      !std::isfinite(state.terminal_tolerance) ||
+      !(state.terminal_tolerance > 0.0) ||
+      base.relative_tolerance < state.terminal_tolerance)
+    return base;
+
+  if (!state.residual_available) {
+    base.relative_tolerance =
+        kPressureInexactForcingRelativeToleranceCeiling;
+    return base;
+  }
+  if (!std::isfinite(state.normalized_continuity) ||
+      state.normalized_continuity < 0.0 ||
+      !std::isfinite(state.normalized_energy) ||
+      state.normalized_energy < 0.0)
+    return base;
+  const double merit =
+      std::max(state.normalized_continuity, state.normalized_energy);
+  const double terminal_band = 10.0 * state.terminal_tolerance;
+  if (!std::isfinite(terminal_band) || merit <= terminal_band)
+    return base;
+
+  if (state.previous_merit_available) {
+    if (!std::isfinite(state.previous_merit) ||
+        !(state.previous_merit > 0.0) ||
+        merit >= 0.9 * state.previous_merit)
+      return base;
+  }
+  const double requested = 0.1 * merit;
+  if (!std::isfinite(requested)) return base;
+  base.relative_tolerance = std::min(
+      kPressureInexactForcingRelativeToleranceCeiling,
+      std::max(base.relative_tolerance, requested));
+  return base;
 }
 
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS

@@ -9237,7 +9237,8 @@ Status ProductDriver::Impl::execute_attempt(
           const PressureCorrectionCertificate& pressure,
           ConstFaceFluxView target_flux,
           const FrozenConvectionFaceField& frozen_enthalpy,
-          LinearIdentity identity, MgCoefficientIdentity coefficients) {
+          LinearIdentity identity, MgCoefficientIdentity coefficients,
+          const LinearSolveControl& solve_control) {
         Status coupled =
             refinement_iteration == 0U
                 ? solve_epoch.prepare_linear_lifecycle(
@@ -9425,7 +9426,7 @@ Status ProductDriver::Impl::execute_attempt(
           coupled = solve_epoch.solve_prepared(
               schur_operator,
               PisoPressureSolveContract::continuity_energy_coupled,
-              product.reductions, &resources);
+              solve_control, product.reductions, &resources);
           // This accessor is written directly from the LinearSolveResult and
           // avoids copying the full PisoAttemptReport on every hot solve.  An
           // invoked solve without a concrete rank deliberately closes with
@@ -11916,6 +11917,42 @@ Status ProductDriver::Impl::execute_attempt(
     std::uint64_t sealed_halo_bytes{};
     bool replay_valid{};
   };
+  const auto pressure_energy_loop_merit =
+      [](const PressureEnergyCandidateLoopResult& loop,
+         double& merit) noexcept {
+        merit = 0.0;
+        if (!loop.replay_valid ||
+            !std::isfinite(
+                loop.replay.sample.global_normalized_continuity) ||
+            loop.replay.sample.global_normalized_continuity < 0.0 ||
+            !std::isfinite(loop.replay.sample.global_normalized_energy) ||
+            loop.replay.sample.global_normalized_energy < 0.0)
+          return false;
+        merit = std::max(
+            loop.replay.sample.global_normalized_continuity,
+            loop.replay.sample.global_normalized_energy);
+        return true;
+      };
+  const auto pressure_inexact_control =
+      [&](const PressureEnergyCandidateLoopResult* loop,
+          double previous_merit,
+          bool previous_merit_available) noexcept {
+        detail::ProductPressureInexactForcingState forcing;
+        forcing.previous_merit = previous_merit;
+        forcing.terminal_tolerance =
+            product.summary.terminal_continuity_tolerance;
+        forcing.previous_merit_available = previous_merit_available;
+        double merit = 0.0;
+        if (loop != nullptr && pressure_energy_loop_merit(*loop, merit)) {
+          forcing.normalized_continuity =
+              loop->replay.sample.global_normalized_continuity;
+          forcing.normalized_energy =
+              loop->replay.sample.global_normalized_energy;
+          forcing.residual_available = true;
+        }
+        return detail::product_pressure_inexact_forcing_control(
+            product.piso.pressure_solve(), forcing);
+      };
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   const auto publish_pressure_energy_candidate_loop_diagnostic =
       [&](const PressureEnergyGlobalizationSample& baseline,
@@ -12714,7 +12751,8 @@ Status ProductDriver::Impl::execute_attempt(
   if (status)
     status = solve_pressure_energy(
         1U, 0U, intermediate_one, pressure_one, pressure_energy_target_flux,
-        pressure_energy_frozen_enthalpy, identity_one, coefficient_one);
+        pressure_energy_frozen_enthalpy, identity_one, coefficient_one,
+        pressure_inexact_control(nullptr, 0.0, false));
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) observe_pressure_energy_candidate_globalization(1U);
 #endif
@@ -12914,7 +12952,11 @@ Status ProductDriver::Impl::execute_attempt(
   if (status)
     status = solve_pressure_energy(
         2U, 0U, intermediate_two, pressure_two, pressure_energy_target_flux,
-        pressure_energy_frozen_enthalpy, identity_two, coefficient_two);
+        pressure_energy_frozen_enthalpy, identity_two, coefficient_two,
+        // Both mandatory PISO correctors are inexact nonlinear directions.
+        // Exact C2 replay below either accepts the five gates or enters a
+        // residual-aware refinement; it never accepts this linear norm alone.
+        pressure_inexact_control(nullptr, 0.0, false));
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) observe_pressure_energy_candidate_globalization(2U);
 #endif
@@ -12961,6 +13003,10 @@ Status ProductDriver::Impl::execute_attempt(
   bool pressure_energy_refinement_converged =
       !pressure_energy_candidate_scope ||
       pressure_energy_components_converged(candidate_loop_two);
+  double pressure_energy_previous_merit = 0.0;
+  bool pressure_energy_previous_merit_available =
+      pressure_energy_loop_merit(candidate_loop_one,
+                                 pressure_energy_previous_merit);
   std::uint8_t refinement_iteration = 1U;
   while (status && pressure_energy_candidate_scope &&
          !pressure_energy_refinement_converged &&
@@ -13070,6 +13116,14 @@ Status ProductDriver::Impl::execute_attempt(
         linear_identity(refined_pressure);
     const MgCoefficientIdentity refinement_coefficient{
         refined_pressure.state, refined_pressure.state, 0.0};
+    double pressure_energy_current_merit = 0.0;
+    const bool pressure_energy_current_merit_available =
+        pressure_energy_loop_merit(candidate_loop_two,
+                                   pressure_energy_current_merit);
+    const LinearSolveControl refinement_solve_control =
+        pressure_inexact_control(
+            &candidate_loop_two, pressure_energy_previous_merit,
+            pressure_energy_previous_merit_available);
     if (status && ibm_pressure_operator.has_value())
       status = ibm_pressure_operator->mask_solid_rhs(pressure_system.rhs);
     if (status) status = form_pressure_energy_blocks();
@@ -13077,7 +13131,8 @@ Status ProductDriver::Impl::execute_attempt(
       status = solve_pressure_energy(
           2U, refinement_iteration, refined_intermediate, refined_pressure,
           pressure_energy_target_flux, pressure_energy_frozen_enthalpy,
-          refinement_identity, refinement_coefficient);
+          refinement_identity, refinement_coefficient,
+          refinement_solve_control);
     if (solve_epoch.solve_calls() != 0U) {
       const Status observed = solve_epoch.observe(report);
       if (status && !observed) status = observed;
@@ -13098,6 +13153,9 @@ Status ProductDriver::Impl::execute_attempt(
     if (status)
       pressure_energy_refinement_converged =
           pressure_energy_components_converged(candidate_loop_two);
+    pressure_energy_previous_merit = pressure_energy_current_merit;
+    pressure_energy_previous_merit_available =
+        pressure_energy_current_merit_available;
     ++refinement_iteration;
   }
   if (pressure_energy_candidate_scope) {

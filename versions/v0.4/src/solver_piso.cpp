@@ -9948,6 +9948,19 @@ Status PisoPressureSolveEpoch::solve_prepared(
     PisoPressureSolveContract contract,
     ReductionEngine& reductions,
     ResourceCounters* resources) noexcept {
+  const LinearSolveControl control =
+      prepared_.plan == nullptr ? LinearSolveControl{}
+                                : prepared_.plan->pressure_solve();
+  return solve_prepared(exact_operator, contract, control, reductions,
+                        resources);
+}
+
+Status PisoPressureSolveEpoch::solve_prepared(
+    LinearOperator& exact_operator,
+    PisoPressureSolveContract contract,
+    const LinearSolveControl& solve_control,
+    ReductionEngine& reductions,
+    ResourceCounters* resources) noexcept {
   // This narrow authority describes only the LinearSolveResult produced by
   // the current invocation.  Early lifecycle rejection deliberately leaves
   // it unavailable; a recorded solve with no specific failing rank publishes
@@ -9998,11 +10011,36 @@ Status PisoPressureSolveEpoch::solve_prepared(
              prepared.pressure.pressure_energy_refinement == 0U &&
              prepared.pressure
                      .pressure_energy_refinement_collective_lineage == 0U);
+  bool solve_control_valid = false;
+  if (prepared.plan != nullptr) {
+    const LinearSolveControl& base = prepared.plan->pressure_solve();
+    const bool fixed_control_matches =
+        solve_control.absolute_tolerance == base.absolute_tolerance &&
+        solve_control.maximum_iterations == base.maximum_iterations &&
+        solve_control.true_residual_interval ==
+            base.true_residual_interval &&
+        solve_control.restart == base.restart;
+    const bool exact_control =
+        solve_control.relative_tolerance == base.relative_tolerance;
+    const bool guarded_inexact_control =
+        contract == PisoPressureSolveContract::continuity_energy_coupled &&
+        base.relative_tolerance <
+            kPressureInexactForcingRelativeToleranceCeiling &&
+        solve_control.relative_tolerance >= base.relative_tolerance &&
+        solve_control.relative_tolerance <=
+            kPressureInexactForcingRelativeToleranceCeiling;
+    solve_control_valid =
+        fixed_control_matches && (exact_control || guarded_inexact_control) &&
+        valid_control(prepared.plan->pressure_algorithm(),
+                      prepared.plan->pressure_correction_scaling(),
+                      solve_control);
+  }
   if (prepared.plan == nullptr || prepared.coupler == nullptr ||
       prepared.coupler->implementation_ == nullptr ||
       prepared.lifecycle_operator == nullptr ||
       prepared.preconditioner == nullptr || prepared.workspace == nullptr ||
       epoch_workspace_ != prepared.workspace || !sequence_valid ||
+      !solve_control_valid ||
       !same_pressure_certificate(prepared.pressure,
                                  prepared_.pressure) ||
       !same_linear_identity(prepared.identity, prepared_.identity) ||
@@ -10075,7 +10113,7 @@ Status PisoPressureSolveEpoch::solve_prepared(
           ? &convergence_audit
           : nullptr;
   const LinearSolveInvocation invocation{
-      as_const(system.rhs), correction, identity, plan.pressure_solve(),
+      as_const(system.rhs), correction, identity, solve_control,
       selected_audit};
   LinearSolveResult result =
       bicgstab ? solve_bicgstab(exact_operator, preconditioner, invocation,
