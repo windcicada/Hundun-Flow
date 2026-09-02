@@ -1359,6 +1359,10 @@ Status linearize_pressure_energy_temporal(
 
 inline constexpr std::size_t kPressureEnergyGlobalizationCandidateCount = 25U;
 inline constexpr double kPressureEnergyGlobalizationArmijoCoefficient = 1.0e-4;
+// Aitken acceleration is only a candidate-generation policy.  Values above
+// one remain non-publishing until the exact candidate evaluator and Armijo
+// selector certify them; two bounds the extrapolation and its fallback cost.
+inline constexpr double kPressureEnergyAitkenMaximumAlpha = 2.0;
 
 // A pure, already-globally-reduced sample.  The policy below neither evaluates
 // candidate fields nor performs MPI communication; its caller is responsible
@@ -1413,6 +1417,7 @@ struct PressureEnergyGlobalizationSelectionCertificate {
   bool strict_merit_decrease{};
   bool armijo_sufficient_decrease{};
   bool full_nonlinear_newton{};
+  bool extrapolated{};
 
   bool valid() const noexcept;
 };
@@ -1426,6 +1431,14 @@ struct PressureEnergyGlobalizationSelectionCertificate {
 Status select_pressure_energy_globalization(
     const PressureEnergyGlobalizationSample& baseline,
     Span<const PressureEnergyGlobalizationSample> candidates,
+    PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept;
+
+// Certifies one fully evaluated Aitken trial with 1 < alpha <= 2.  Rejection
+// returns no authority, allowing the caller to execute the unchanged
+// alpha=1,1/2,... globalization ladder.
+Status select_pressure_energy_extrapolation(
+    const PressureEnergyGlobalizationSample& baseline,
+    const PressureEnergyGlobalizationSample& candidate,
     PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept;
 
 enum class PressureEnergySchurSignClass : std::uint8_t { general };
@@ -3306,7 +3319,8 @@ class PisoFrozenMomentumPressureStageCertificate {
     return issuer_ != nullptr && stage_lineage_ != 0U &&
            pressure_direction_.valid() && scaled_pressure_correction_.valid() &&
            halo_instance_ != 0U &&
-           std::isfinite(alpha_) && alpha_ >= 0.0 && alpha_ <= 1.0 &&
+           std::isfinite(alpha_) && alpha_ >= 0.0 &&
+           alpha_ <= kPressureEnergyAitkenMaximumAlpha &&
            correction_direction_ != 0U && canonical_lineage_ != 0U &&
            scratch_binding_ != 0U &&
            (corrector_ == 1U || corrector_ == 2U);
@@ -3352,7 +3366,8 @@ class PisoFrozenMomentumVelocityStageCertificate {
            halo_ghost_revision_ != 0U &&
            candidate_velocity_numeric_ != 0U &&
            std::isfinite(alpha_) &&
-           alpha_ >= 0.0 && alpha_ <= 1.0 && canonical_lineage_ != 0U &&
+           alpha_ >= 0.0 && alpha_ <= kPressureEnergyAitkenMaximumAlpha &&
+           canonical_lineage_ != 0U &&
            scratch_binding_ != 0U && (corrector_ == 1U || corrector_ == 2U);
   }
   double alpha() const noexcept { return alpha_; }
@@ -3397,7 +3412,8 @@ class PisoFrozenMomentumFluxStageCertificate {
            face_flux_revision_domain_ != 0U && std::isfinite(alpha_) &&
            candidate_density_numeric_ != 0U &&
            mechanical_flux_numeric_ != 0U &&
-           alpha_ >= 0.0 && alpha_ <= 1.0 && canonical_lineage_ != 0U &&
+           alpha_ >= 0.0 && alpha_ <= kPressureEnergyAitkenMaximumAlpha &&
+           canonical_lineage_ != 0U &&
            scratch_binding_ != 0U &&
            (scope_ == PisoFrozenMomentumStageScope::cartesian_periodic ||
             (scope_ == PisoFrozenMomentumStageScope::
@@ -3469,7 +3485,8 @@ class FinalBoundaryFluxCertificate {
            std::isfinite(absolute_pressure_reference_) &&
            absolute_pressure_reference_ > 0.0 && target_time_ != 0U &&
            (corrector_ == 1U || corrector_ == 2U) &&
-           std::isfinite(alpha_) && alpha_ >= 0.0 && alpha_ <= 1.0 &&
+           std::isfinite(alpha_) && alpha_ >= 0.0 &&
+           alpha_ <= kPressureEnergyAitkenMaximumAlpha &&
            candidate_pressure_.valid() && candidate_enthalpy_.valid() &&
            candidate_density_.valid() && candidate_temperature_.valid() &&
            candidate_velocity_.valid() && composition_identity_ != 0U &&
@@ -3723,7 +3740,8 @@ class PisoFrozenMomentumExactCandidateCertificate {
            (independent_species_count_ == 0U ||
             independent_species_views_.data != nullptr) &&
            target_time_ != 0U &&
-           std::isfinite(alpha_) && alpha_ >= 0.0 && alpha_ <= 1.0 &&
+           std::isfinite(alpha_) && alpha_ >= 0.0 &&
+           alpha_ <= kPressureEnergyAitkenMaximumAlpha &&
            (corrector_ == 1U || corrector_ == 2U);
   }
   double alpha() const noexcept { return alpha_; }

@@ -3905,7 +3905,7 @@ Status PressureVelocityCoupler::form_frozen_momentum_scaled_pressure(
           impl.boundary->halo_topology()));
   Status local;
   if (!current_authority || !valid_views || !std::isfinite(alpha) ||
-      alpha < 0.0 || alpha > 1.0) {
+      alpha < 0.0 || alpha > kPressureEnergyAitkenMaximumAlpha) {
     local = {StatusCode::invalid_plan, kPisoCoupler};
   }
   if (local) {

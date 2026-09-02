@@ -178,6 +178,34 @@ bool test_pressure_inexact_forcing_policy() {
   return passed;
 }
 
+bool test_pressure_aitken_initial_alpha() {
+  bool passed = true;
+  passed &= expect(
+      std::abs(detail::product_pressure_aitken_initial_alpha(1.0, 0.2, 1.0) -
+               1.25) <= 8.0 * std::numeric_limits<double>::epsilon(),
+      "contracting nonlinear merit produces the scalar Aitken factor");
+  passed &= expect(
+      std::abs(detail::product_pressure_aitken_initial_alpha(1.0, 0.2, 1.4) -
+                   1.75) <=
+          8.0 * std::numeric_limits<double>::epsilon(),
+      "the previous relaxation removes the observed-contraction lag");
+  passed &= expect(
+      detail::product_pressure_aitken_initial_alpha(1.0, 0.5, 1.0) == 2.0 &&
+          detail::product_pressure_aitken_initial_alpha(1.0, 0.8, 1.5) == 2.0,
+      "Aitken extrapolation is capped at two");
+  passed &= expect(
+      detail::product_pressure_aitken_initial_alpha(1.0, 0.95, 1.5) == 1.0 &&
+          detail::product_pressure_aitken_initial_alpha(1.0, 1.0, 1.5) == 1.0,
+      "stagnating merit disables extrapolation");
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(
+      detail::product_pressure_aitken_initial_alpha(0.0, 0.5, 1.0) == 1.0 &&
+          detail::product_pressure_aitken_initial_alpha(1.0, nan, 1.0) == 1.0 &&
+          detail::product_pressure_aitken_initial_alpha(1.0, 0.2, 0.5) == 1.0,
+      "invalid Aitken evidence fails closed to the legacy full step");
+  return passed;
+}
+
 bool test_freeze() {
   ValidatedModel model = test::product_model();
   model.solver.pressure = {1.0e-8, 2.0e-7, 333U, 7U, 16U};
@@ -1113,6 +1141,7 @@ int main(int argc, char** argv) {
   const bool passed = test_incomplete_registration() &&
                       test_pressure_energy_temporal_operand_scale() &&
                       test_pressure_inexact_forcing_policy() &&
+                      test_pressure_aitken_initial_alpha() &&
                       test_freeze() &&
                       test_pressure_energy_restart_schema() &&
                       test_pressure_energy_candidate_storage_lineage() &&

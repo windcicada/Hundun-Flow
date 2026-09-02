@@ -98,6 +98,10 @@ static_assert(noexcept(select_pressure_energy_globalization(
     std::declval<const PressureEnergyGlobalizationSample&>(),
     std::declval<Span<const PressureEnergyGlobalizationSample>>(),
     std::declval<PressureEnergyGlobalizationSelectionCertificate&>())));
+static_assert(noexcept(select_pressure_energy_extrapolation(
+    std::declval<const PressureEnergyGlobalizationSample&>(),
+    std::declval<const PressureEnergyGlobalizationSample&>(),
+    std::declval<PressureEnergyGlobalizationSelectionCertificate&>())));
 
 bool expect(bool condition, std::string_view description) {
   if (!condition) std::cerr << "FAIL: " << description << '\n';
@@ -164,6 +168,48 @@ bool test_full_step_is_selected_first() {
                     certificate.candidate_mass_flux_provenance ==
                         candidates[0U].mass_flux_provenance,
                 "certificate binds C1, target, direction, alpha, state and flux");
+}
+
+bool test_safeguarded_extrapolation_is_distinct_and_fail_closed() {
+  const auto baseline = make_baseline(2U);
+  auto extrapolated = baseline;
+  extrapolated.alpha = 1.5;
+  extrapolated.global_normalized_continuity = 0.4;
+  extrapolated.global_normalized_energy = 0.5;
+  extrapolated.state_provenance = 1001U;
+  extrapolated.mass_flux_provenance = 2001U;
+
+  PressureEnergyGlobalizationSelectionCertificate certificate;
+  Status status = select_pressure_energy_extrapolation(
+      baseline, extrapolated, certificate);
+  bool passed = expect(static_cast<bool>(status) && certificate.valid() &&
+                           certificate.extrapolated &&
+                           certificate.alpha == extrapolated.alpha &&
+                           certificate.selected_halvings == 0U,
+                       "an exact decreasing alpha>1 candidate is certified");
+
+  auto forged = certificate;
+  forged.extrapolated = false;
+  passed &= expect(!forged.valid(),
+                   "an extrapolated certificate cannot claim the legacy ladder");
+
+  auto nondecreasing = extrapolated;
+  nondecreasing.global_normalized_continuity = 1.1;
+  nondecreasing.global_normalized_energy = 1.1;
+  status = select_pressure_energy_extrapolation(
+      baseline, nondecreasing, certificate);
+  passed &= expect(status.code == StatusCode::rejected_step &&
+                       !certificate.valid(),
+                   "a non-decreasing extrapolation falls back without authority");
+
+  auto out_of_range = extrapolated;
+  out_of_range.alpha = 2.01;
+  status = select_pressure_energy_extrapolation(
+      baseline, out_of_range, certificate);
+  passed &= expect(status.code == StatusCode::invalid_plan &&
+                       !certificate.valid(),
+                   "an extrapolation above the safeguarded cap is invalid");
+  return passed;
 }
 
 bool test_evaluated_prefix_selects_without_requiring_the_frozen_tail() {
@@ -484,6 +530,7 @@ bool test_selection_is_allocation_free_and_rank_independent() {
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   bool passed = test_full_step_is_selected_first();
+  passed &= test_safeguarded_extrapolation_is_distinct_and_fail_closed();
   passed &= test_evaluated_prefix_selects_without_requiring_the_frozen_tail();
   passed &= test_non_decreasing_full_step_is_rejected_before_c2_half_step();
   passed &= test_armijo_envelope_is_stricter_than_any_decrease();

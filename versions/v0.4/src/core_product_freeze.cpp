@@ -10991,8 +10991,26 @@ Status ProductDriver::Impl::execute_attempt(
                   local_energy_bitwise_equal &=
                       product_double_bits(oracle) ==
                       product_double_bits(base);
-                  const double scale =
-                      std::max({1.0, std::abs(oracle), std::abs(base)});
+                  const Int3 cell{x, y, z};
+                  const double volume =
+                      detail::cell_volume(product.equations.kernels(), cell);
+                  double temporal_operand_scale = 0.0;
+                  if (!pressure_energy_temporal_scale(
+                          artifacts.pressure_reference,
+                          as_const(pressure_energy_candidate_density),
+                          as_const(pressure_energy_candidate_enthalpy),
+                          as_const(pressure_energy_candidate_pressure), cell,
+                          volume, temporal_operand_scale)) {
+                    local = {StatusCode::numerical_failure,
+                             kProductPressureEnergy};
+                    break;
+                  }
+                  // The residual may be a near-zero cancellation of large
+                  // temporal and pressure operands.  Scale its replay error by
+                  // those operands, not by the cancelled residual itself.
+                  const double scale = std::max(
+                      {1.0, std::abs(oracle), std::abs(base),
+                       temporal_operand_scale});
                   local_energy_error = std::max(
                       local_energy_error, std::abs(oracle - base) / scale);
                 }
@@ -11006,7 +11024,7 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_reference_kind == PressureReferenceKind::closed_mass &&
                 artifacts.exact.closed_gauge.shift != 0.0;
             // A closed-mass gauge shift preserves absolute pressure but can
-            // change the final rounded bit of pressure work when p_ref + pi
+            // change the rounded pressure-work cancellation when p_ref + pi
             // is reconstructed on a different rank decomposition.  The
             // pressure oracle below independently certifies that gauge
             // equivalence.  Keep the stronger byte oracle for an unshifted
@@ -12076,6 +12094,7 @@ Status ProductDriver::Impl::execute_attempt(
             alpha_diagnostic = {};
             continue;
           }
+          alpha_diagnostic.alpha = candidates[index].alpha;
           alpha_diagnostic.admissible =
               candidates[index].thermodynamically_admissible &&
               candidates[index].state_and_flux_finite;
@@ -12116,6 +12135,7 @@ Status ProductDriver::Impl::execute_attempt(
           const PisoIntermediateCertificate& intermediate,
           const PressureCorrectionCertificate& pressure,
           ConstFaceFluxView baseline_flux,
+          double extrapolated_alpha,
           PressureEnergyCandidateLoopResult& loop) {
         loop = {};
         const DriverResourceReport candidate_resource_before =
@@ -12147,6 +12167,11 @@ Status ProductDriver::Impl::execute_attempt(
         Status local;
         loop.direction = pressure_energy_direction_fingerprint(
             corrector, pressure, local_direction, local);
+        if (local &&
+            (!std::isfinite(extrapolated_alpha) ||
+             extrapolated_alpha < 1.0 ||
+             extrapolated_alpha > kPressureEnergyAitkenMaximumAlpha))
+          local = {StatusCode::invalid_plan, kProductPressureEnergy};
         double global_direction[2U]{};
         Status candidate_status = product.reductions.checked_max(
             {local_direction, 2U}, {global_direction, 2U}, local);
@@ -12240,105 +12265,150 @@ Status ProductDriver::Impl::execute_attempt(
         } else {
           Status selection_status{StatusCode::rejected_step,
                                   kProductPressureEnergy};
-          for (std::size_t index = 0U; index < candidates.size(); ++index) {
-            const double alpha =
-                std::ldexp(1.0, -static_cast<int>(index));
-            PressureEnergyCandidateArtifacts artifacts;
+          const auto exact_candidate_matches =
+              [&](const PressureEnergyCandidateArtifacts& artifacts,
+                  const PressureEnergyGlobalizationSample& sample,
+                  double alpha) noexcept {
+                const PisoFrozenMomentumExactCandidateCertificate& exact =
+                    artifacts.exact_certificate;
+                return exact.valid() && exact.alpha() == alpha &&
+                       exact.corrector() == corrector &&
+                       exact.target_time() == baseline.target_time &&
+                       exact.correction_direction() ==
+                           baseline.correction_direction &&
+                       exact.baseline_state_provenance() ==
+                           baseline.state_provenance &&
+                       exact.baseline_mass_flux_provenance() ==
+                           baseline.mass_flux_provenance &&
+                       exact.candidate_state_provenance() ==
+                           sample.state_provenance &&
+                       exact.candidate_mass_flux_provenance() ==
+                           sample.mass_flux_provenance;
+              };
+          if (extrapolated_alpha > 1.0) {
+            PressureEnergyCandidateArtifacts extrapolated;
             candidate_status = evaluate_pressure_energy_candidate(
                 corrector, frozen, pressure, &loop.exact_baseline,
-                loop.direction, alpha, index, baseline_flux, artifacts);
-            candidates[index] = artifacts.sample;
+                loop.direction, extrapolated_alpha, 0U, baseline_flux,
+                extrapolated);
             const bool complete_sample =
                 static_cast<bool>(candidate_status);
-            if (!candidate_status) {
-              if (candidate_status.code != StatusCode::rejected_step &&
-                  candidate_status.code != StatusCode::numerical_failure)
-                return candidate_status;
-              PressureEnergyGlobalizationSample& rejected =
-                  candidates[index];
-              rejected.alpha = alpha;
-              rejected.corrector = baseline.corrector;
-              rejected.target_time = baseline.target_time;
-              rejected.correction_direction =
-                  baseline.correction_direction;
-              rejected.global_normalized_continuity =
-                  std::numeric_limits<double>::infinity();
-              rejected.global_normalized_energy =
-                  std::numeric_limits<double>::infinity();
-              rejected.thermodynamically_admissible = false;
-              rejected.state_and_flux_finite = false;
-              PlanFingerprint state = baseline.state_provenance;
-              PlanFingerprint flux = baseline.mass_flux_provenance;
-              do {
-                ++state;
-                if (state == 0U) ++state;
-              } while (state == baseline.state_provenance ||
-                       std::any_of(
-                           candidates.begin(), candidates.begin() + index,
-                           [state](const PressureEnergyGlobalizationSample&
-                                       prior) noexcept {
-                             return prior.state_provenance == state;
-                           }));
-              do {
-                ++flux;
-                if (flux == 0U) ++flux;
-              } while (flux == baseline.mass_flux_provenance ||
-                       std::any_of(
-                           candidates.begin(), candidates.begin() + index,
-                           [flux](const PressureEnergyGlobalizationSample&
-                                      prior) noexcept {
-                             return prior.mass_flux_provenance == flux;
-                           }));
-              rejected.state_provenance = state;
-              rejected.mass_flux_provenance = flux;
-              candidate_status = {};
-            } else {
-              const PisoFrozenMomentumExactCandidateCertificate& exact =
-                  artifacts.exact_certificate;
-              const bool exact_binding =
-                  exact.valid() && exact.alpha() == alpha &&
-                  exact.corrector() == corrector &&
-                  exact.target_time() == baseline.target_time &&
-                  exact.correction_direction() == baseline.correction_direction &&
-                  exact.baseline_state_provenance() ==
-                      baseline.state_provenance &&
-                  exact.baseline_mass_flux_provenance() ==
-                      baseline.mass_flux_provenance &&
-                  exact.candidate_state_provenance() ==
-                      candidates[index].state_provenance &&
-                  exact.candidate_mass_flux_provenance() ==
-                      candidates[index].mass_flux_provenance;
+            if (!candidate_status &&
+                candidate_status.code != StatusCode::rejected_step &&
+                candidate_status.code != StatusCode::numerical_failure)
+              return candidate_status;
+            if (complete_sample) {
+              candidates[0U] = extrapolated.sample;
               candidate_status = product.reductions.consensus(
-                  exact_binding
+                  exact_candidate_matches(extrapolated, candidates[0U],
+                                          extrapolated_alpha)
                       ? Status{}
                       : Status{StatusCode::invalid_plan,
                                kProductPressureEnergy});
               if (!candidate_status) return candidate_status;
+              residual_replay_provenance[0U] =
+                  extrapolated.residual_replay_provenance;
+              loop.evaluated_candidates = 1U;
+              selection_status = select_pressure_energy_extrapolation(
+                  baseline, candidates[0U], loop.selection);
+              if (selection_status) {
+                selection_valid = true;
+                loop.replay = extrapolated;
+                selected_artifact_valid = true;
+              } else if (selection_status.code !=
+                         StatusCode::rejected_step) {
+                return selection_status;
+              }
+            } else {
+              candidate_status = {};
             }
-            residual_replay_provenance[index] =
-                complete_sample
-                    ? artifacts.residual_replay_provenance
-                    : PlanFingerprint{};
-            loop.evaluated_candidates =
-                static_cast<std::uint8_t>(index + 1U);
-            selection_status = select_pressure_energy_globalization(
-                baseline,
-                {candidates.data(), loop.evaluated_candidates},
-                loop.selection);
-            if (selection_status) {
-              selection_valid = true;
-              // Selection is attempted immediately after this candidate was
-              // evaluated.  Earlier admissible candidates would already
-              // have terminated the loop, so the selected artifact is the
-              // one still resident in the preallocated candidate scratch.
-              // Promote its typed certificate rather than evaluating it a
-              // second time.
-              loop.replay = artifacts;
-              selected_artifact_valid = complete_sample;
-              break;
+          }
+          if (!selection_valid) {
+            for (std::size_t index = 0U; index < candidates.size(); ++index) {
+              const double alpha =
+                  std::ldexp(1.0, -static_cast<int>(index));
+              PressureEnergyCandidateArtifacts artifacts;
+              candidate_status = evaluate_pressure_energy_candidate(
+                  corrector, frozen, pressure, &loop.exact_baseline,
+                  loop.direction, alpha, index, baseline_flux, artifacts);
+              candidates[index] = artifacts.sample;
+              const bool complete_sample =
+                  static_cast<bool>(candidate_status);
+              if (!candidate_status) {
+                if (candidate_status.code != StatusCode::rejected_step &&
+                    candidate_status.code != StatusCode::numerical_failure)
+                  return candidate_status;
+                PressureEnergyGlobalizationSample& rejected =
+                    candidates[index];
+                rejected.alpha = alpha;
+                rejected.corrector = baseline.corrector;
+                rejected.target_time = baseline.target_time;
+                rejected.correction_direction =
+                    baseline.correction_direction;
+                rejected.global_normalized_continuity =
+                    std::numeric_limits<double>::infinity();
+                rejected.global_normalized_energy =
+                    std::numeric_limits<double>::infinity();
+                rejected.thermodynamically_admissible = false;
+                rejected.state_and_flux_finite = false;
+                PlanFingerprint state = baseline.state_provenance;
+                PlanFingerprint flux = baseline.mass_flux_provenance;
+                do {
+                  ++state;
+                  if (state == 0U) ++state;
+                } while (state == baseline.state_provenance ||
+                         std::any_of(
+                             candidates.begin(), candidates.begin() + index,
+                             [state](const PressureEnergyGlobalizationSample&
+                                         prior) noexcept {
+                               return prior.state_provenance == state;
+                             }));
+                do {
+                  ++flux;
+                  if (flux == 0U) ++flux;
+                } while (flux == baseline.mass_flux_provenance ||
+                         std::any_of(
+                             candidates.begin(), candidates.begin() + index,
+                             [flux](const PressureEnergyGlobalizationSample&
+                                        prior) noexcept {
+                               return prior.mass_flux_provenance == flux;
+                             }));
+                rejected.state_provenance = state;
+                rejected.mass_flux_provenance = flux;
+                candidate_status = {};
+              } else {
+                candidate_status = product.reductions.consensus(
+                    exact_candidate_matches(artifacts, candidates[index], alpha)
+                        ? Status{}
+                        : Status{StatusCode::invalid_plan,
+                                 kProductPressureEnergy});
+                if (!candidate_status) return candidate_status;
+              }
+              residual_replay_provenance[index] =
+                  complete_sample
+                      ? artifacts.residual_replay_provenance
+                      : PlanFingerprint{};
+              loop.evaluated_candidates =
+                  static_cast<std::uint8_t>(index + 1U);
+              selection_status = select_pressure_energy_globalization(
+                  baseline,
+                  {candidates.data(), loop.evaluated_candidates},
+                  loop.selection);
+              if (selection_status) {
+                selection_valid = true;
+                // Selection is attempted immediately after this candidate was
+                // evaluated.  Earlier admissible candidates would already
+                // have terminated the loop, so the selected artifact is the
+                // one still resident in the preallocated candidate scratch.
+                // Promote its typed certificate rather than evaluating it a
+                // second time.
+                loop.replay = artifacts;
+                selected_artifact_valid = complete_sample;
+                break;
+              }
+              if (selection_status.code != StatusCode::rejected_step)
+                return selection_status;
             }
-            if (selection_status.code != StatusCode::rejected_step)
-              return selection_status;
           }
           pressure_energy_globalization.valid = true;
           pressure_energy_globalization.corrector = corrector;
@@ -12770,6 +12840,7 @@ Status ProductDriver::Impl::execute_attempt(
       status = run_pressure_energy_candidate_loop(
           1U, 0U, intermediate_one, pressure_one,
           pressure_energy_target_flux,
+          1.0,
           candidate_loop_one);
   } else if (status) {
     status = revise_exact_thermodynamic_workspaces();
@@ -12973,6 +13044,7 @@ Status ProductDriver::Impl::execute_attempt(
       status = run_pressure_energy_candidate_loop(
           2U, 0U, intermediate_two, pressure_two,
           pressure_energy_target_flux,
+          1.0,
           candidate_loop_two);
   } else if (status) {
     status = revise_exact_thermodynamic_workspaces();
@@ -13120,6 +13192,14 @@ Status ProductDriver::Impl::execute_attempt(
     const bool pressure_energy_current_merit_available =
         pressure_energy_loop_merit(candidate_loop_two,
                                    pressure_energy_current_merit);
+    const double refinement_extrapolated_alpha =
+        pressure_energy_previous_merit_available &&
+                pressure_energy_current_merit_available
+            ? detail::product_pressure_aitken_initial_alpha(
+                  pressure_energy_previous_merit,
+                  pressure_energy_current_merit,
+                  candidate_loop_two.selected_alpha)
+            : 1.0;
     const LinearSolveControl refinement_solve_control =
         pressure_inexact_control(
             &candidate_loop_two, pressure_energy_previous_merit,
@@ -13149,6 +13229,7 @@ Status ProductDriver::Impl::execute_attempt(
       status = run_pressure_energy_candidate_loop(
           2U, refinement_iteration, intermediate_two, pressure_two,
           pressure_energy_target_flux,
+          refinement_extrapolated_alpha,
           candidate_loop_two);
     if (status)
       pressure_energy_refinement_converged =

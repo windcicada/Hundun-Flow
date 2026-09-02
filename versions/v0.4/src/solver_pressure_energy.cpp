@@ -41,6 +41,10 @@ constexpr std::uint64_t kPressureEnergyEnthalpySchema =
 // provenance lineage.
 constexpr std::uint64_t kPressureEnergyGlobalizationSchema =
     UINT64_C(0x7630347065676c32);
+// "v04peax1": a bounded alpha>1 exact candidate is deliberately distinct
+// from the legacy alpha=1,1/2,... globalization ladder.
+constexpr std::uint64_t kPressureEnergyExtrapolationSchema =
+    UINT64_C(0x7630347065617831);
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
 
@@ -102,6 +106,93 @@ PlanFingerprint pressure_energy_globalization_selection_provenance(
                   double_bits(selected.global_normalized_continuity));
   hash = hash_mix(hash, double_bits(selected.global_normalized_energy));
   return nonzero_hash(hash);
+}
+
+PlanFingerprint pressure_energy_extrapolation_selection_provenance(
+    const PressureEnergyGlobalizationSample& baseline,
+    const PressureEnergyGlobalizationSample& selected) noexcept {
+  std::uint64_t hash =
+      hash_mix(kFnvOffset, kPressureEnergyExtrapolationSchema);
+  hash = hash_mix(hash, baseline.corrector);
+  hash = hash_mix(hash, baseline.target_time);
+  hash = hash_mix(hash, baseline.correction_direction);
+  hash = hash_mix(hash, baseline.state_provenance);
+  hash = hash_mix(hash, baseline.mass_flux_provenance);
+  hash = hash_mix(hash, double_bits(selected.alpha));
+  hash = hash_mix(hash, selected.state_provenance);
+  hash = hash_mix(hash, selected.mass_flux_provenance);
+  hash = hash_mix(hash,
+                  double_bits(baseline.global_normalized_continuity));
+  hash = hash_mix(hash, double_bits(baseline.global_normalized_energy));
+  hash = hash_mix(hash,
+                  double_bits(selected.global_normalized_continuity));
+  hash = hash_mix(hash, double_bits(selected.global_normalized_energy));
+  return nonzero_hash(hash);
+}
+
+Status certify_pressure_energy_globalization_selection(
+    const PressureEnergyGlobalizationSample& baseline,
+    const PressureEnergyGlobalizationSample& selected,
+    std::uint8_t selected_halvings, bool extrapolated,
+    PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept {
+  const double baseline_merit = pressure_energy_globalization_merit(baseline);
+  const double candidate_merit = pressure_energy_globalization_merit(selected);
+  const double armijo_upper_bound =
+      (1.0 - kPressureEnergyGlobalizationArmijoCoefficient * selected.alpha) *
+      baseline_merit;
+  const bool acceptable =
+      selected.thermodynamically_admissible &&
+      selected.state_and_flux_finite && std::isfinite(candidate_merit) &&
+      selected.global_normalized_continuity >= 0.0 &&
+      selected.global_normalized_energy >= 0.0 &&
+      candidate_merit < baseline_merit &&
+      candidate_merit <= armijo_upper_bound;
+  if (!acceptable)
+    return {StatusCode::rejected_step, kPressureEnergyGlobalization};
+
+  PressureEnergyGlobalizationSelectionCertificate selected_certificate;
+  selected_certificate.scope = PressureEnergyGlobalizationScope::
+      frozen_momentum_continuity_energy_globalization;
+  selected_certificate.alpha = selected.alpha;
+  selected_certificate.baseline_normalized_continuity =
+      baseline.global_normalized_continuity;
+  selected_certificate.baseline_normalized_energy =
+      baseline.global_normalized_energy;
+  selected_certificate.candidate_normalized_continuity =
+      selected.global_normalized_continuity;
+  selected_certificate.candidate_normalized_energy =
+      selected.global_normalized_energy;
+  selected_certificate.baseline_merit = baseline_merit;
+  selected_certificate.candidate_merit = candidate_merit;
+  selected_certificate.armijo_upper_bound = armijo_upper_bound;
+  selected_certificate.target_time = baseline.target_time;
+  selected_certificate.correction_direction = baseline.correction_direction;
+  selected_certificate.baseline_state_provenance =
+      baseline.state_provenance;
+  selected_certificate.baseline_mass_flux_provenance =
+      baseline.mass_flux_provenance;
+  selected_certificate.candidate_state_provenance =
+      selected.state_provenance;
+  selected_certificate.candidate_mass_flux_provenance =
+      selected.mass_flux_provenance;
+  selected_certificate.corrector = baseline.corrector;
+  selected_certificate.selected_halvings = selected_halvings;
+  selected_certificate.thermodynamically_admissible = true;
+  selected_certificate.state_and_flux_finite = true;
+  selected_certificate.strict_merit_decrease = true;
+  selected_certificate.armijo_sufficient_decrease = true;
+  selected_certificate.full_nonlinear_newton = false;
+  selected_certificate.extrapolated = extrapolated;
+  selected_certificate.selection_provenance =
+      extrapolated
+          ? pressure_energy_extrapolation_selection_provenance(baseline,
+                                                                selected)
+          : pressure_energy_globalization_selection_provenance(
+                baseline, selected, selected_halvings);
+  if (!selected_certificate.valid())
+    return {StatusCode::invalid_plan, kPressureEnergyGlobalization};
+  certificate = selected_certificate;
+  return {};
 }
 
 bool same_shape(Int3 left, Int3 right) noexcept {
@@ -807,6 +898,11 @@ bool runtime_views_valid(ConstFieldView first, ConstFieldView second,
 bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
   const double expected_alpha =
       std::ldexp(1.0, -static_cast<int>(selected_halvings));
+  const bool valid_alpha =
+      extrapolated
+          ? selected_halvings == 0U && std::isfinite(alpha) && alpha > 1.0 &&
+                alpha <= kPressureEnergyAitkenMaximumAlpha
+          : std::isfinite(alpha) && alpha == expected_alpha;
   const double expected_baseline_merit = std::hypot(
       baseline_normalized_continuity, baseline_normalized_energy);
   const double expected_candidate_merit = std::hypot(
@@ -824,7 +920,7 @@ bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
       candidate_state_provenance == baseline_state_provenance ||
       candidate_mass_flux_provenance == baseline_mass_flux_provenance ||
       selected_halvings >= kPressureEnergyGlobalizationCandidateCount ||
-      !std::isfinite(alpha) || alpha != expected_alpha ||
+      !valid_alpha ||
       !std::isfinite(baseline_normalized_continuity) ||
       baseline_normalized_continuity < 0.0 ||
       !std::isfinite(baseline_normalized_energy) ||
@@ -863,9 +959,13 @@ bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
   selected.global_normalized_energy = candidate_normalized_energy;
   selected.state_provenance = candidate_state_provenance;
   selected.mass_flux_provenance = candidate_mass_flux_provenance;
-  return selection_provenance ==
-         pressure_energy_globalization_selection_provenance(
-             baseline, selected, selected_halvings);
+  const PlanFingerprint expected_provenance =
+      extrapolated
+          ? pressure_energy_extrapolation_selection_provenance(baseline,
+                                                                selected)
+          : pressure_energy_globalization_selection_provenance(
+                baseline, selected, selected_halvings);
+  return selection_provenance == expected_provenance;
 }
 
 PlanFingerprint pressure_energy_frozen_face_enthalpy_local_binding(
@@ -1970,6 +2070,46 @@ Status select_pressure_energy_globalization(
   }
   certificate = selected_certificate;
   return {};
+}
+
+Status select_pressure_energy_extrapolation(
+    const PressureEnergyGlobalizationSample& baseline,
+    const PressureEnergyGlobalizationSample& candidate,
+    PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept {
+  certificate = {};
+  const bool valid_baseline =
+      baseline.alpha == 0.0 &&
+      std::isfinite(baseline.global_normalized_continuity) &&
+      baseline.global_normalized_continuity >= 0.0 &&
+      std::isfinite(baseline.global_normalized_energy) &&
+      baseline.global_normalized_energy >= 0.0 &&
+      baseline.thermodynamically_admissible &&
+      baseline.state_and_flux_finite &&
+      (baseline.corrector == 1U || baseline.corrector == 2U) &&
+      baseline.target_time != 0U && baseline.correction_direction != 0U &&
+      baseline.state_provenance != 0U &&
+      baseline.mass_flux_provenance != 0U;
+  const bool valid_continuity_norm =
+      !std::isfinite(candidate.global_normalized_continuity) ||
+      candidate.global_normalized_continuity >= 0.0;
+  const bool valid_energy_norm =
+      !std::isfinite(candidate.global_normalized_energy) ||
+      candidate.global_normalized_energy >= 0.0;
+  const bool matching_candidate =
+      std::isfinite(candidate.alpha) && candidate.alpha > 1.0 &&
+      candidate.alpha <= kPressureEnergyAitkenMaximumAlpha &&
+      candidate.corrector == baseline.corrector &&
+      candidate.target_time == baseline.target_time &&
+      candidate.correction_direction == baseline.correction_direction &&
+      candidate.state_provenance != 0U &&
+      candidate.mass_flux_provenance != 0U &&
+      candidate.state_provenance != baseline.state_provenance &&
+      candidate.mass_flux_provenance != baseline.mass_flux_provenance &&
+      valid_continuity_norm && valid_energy_norm;
+  if (!valid_baseline || !matching_candidate)
+    return {StatusCode::invalid_plan, kPressureEnergyGlobalization};
+  return certify_pressure_energy_globalization_selection(
+      baseline, candidate, 0U, true, certificate);
 }
 
 Status PressureEnergyDiagonalOperator::bind(

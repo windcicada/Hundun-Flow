@@ -176,6 +176,29 @@ inline LinearSolveControl product_pressure_inexact_forcing_control(
   return base;
 }
 
+// Scalar Aitken relaxation for a contracting fixed-point merit.  The observed
+// contraction already includes the previous relaxation, so carry that factor
+// forward instead of lagging one accelerated update behind.  The exact
+// candidate layer remains the acceptance authority; invalid or stagnating
+// evidence keeps the legacy full step, and extrapolation is capped at two.
+inline double product_pressure_aitken_initial_alpha(
+    double previous_merit, double current_merit,
+    double previous_alpha) noexcept {
+  if (!std::isfinite(previous_merit) || !(previous_merit > 0.0) ||
+      !std::isfinite(current_merit) || !(current_merit > 0.0) ||
+      !std::isfinite(previous_alpha) || previous_alpha < 1.0 ||
+      previous_alpha > kPressureEnergyAitkenMaximumAlpha ||
+      current_merit >= 0.9 * previous_merit)
+    return 1.0;
+  const double contraction = current_merit / previous_merit;
+  if (!std::isfinite(contraction) || !(contraction > 0.0) ||
+      !(contraction < 0.9))
+    return 1.0;
+  const double alpha = previous_alpha / (1.0 - contraction);
+  if (!std::isfinite(alpha) || !(alpha > 1.0)) return 1.0;
+  return std::min(kPressureEnergyAitkenMaximumAlpha, alpha);
+}
+
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
 inline constexpr std::size_t
     kPressureEnergyCandidateGlobalizationSampleCapacity = 25U;

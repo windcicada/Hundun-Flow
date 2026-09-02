@@ -1158,8 +1158,19 @@ bool run_pressure_energy_candidate_globalization_red(int rank) {
   CommittedProductBits committed_after;
   const bool captured_after =
       capture_committed_product_bits(driver, committed_after);
-  const bool committed_rollback_exact =
+  // The rejected fatal proposal is retired by advancing the controller ticket.
+  // That generation is not committed flow state, so prove its exact one-step
+  // transition separately before comparing all physical state bit-for-bit.
+  const bool fatal_controller_recovery =
       captured_before && captured_after &&
+      committed_before.controller_state !=
+          std::numeric_limits<std::uint64_t>::max() &&
+      committed_after.controller_state ==
+          committed_before.controller_state + 1U;
+  if (captured_before && captured_after)
+    committed_before.controller_state = committed_after.controller_state;
+  const bool committed_rollback_exact =
+      captured_before && captured_after && fatal_controller_recovery &&
       same_committed_product_bits(committed_before, committed_after);
 
   const std::size_t reported_sample_count = std::min<std::size_t>(
