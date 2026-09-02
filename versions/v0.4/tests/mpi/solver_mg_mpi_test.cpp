@@ -2021,7 +2021,7 @@ bool test_prepared_apply_equivalence(int rank, int size) {
       direct_after.blocking_operations - direct_before.blocking_operations ==
           prepared_after.blocking_operations -
                   prepared_before.blocking_operations +
-              5U;
+              6U;
   const bool exact_equivalence =
       static_cast<bool>(direct_status) && static_cast<bool>(cold_status) &&
       static_cast<bool>(prepared_status) && allocations == 0U &&
@@ -2039,7 +2039,7 @@ bool test_prepared_apply_equivalence(int rank, int size) {
       finite(prepared_fixture.correction.view);
   passed &= expect(
       exact_equivalence, rank,
-      "Native-MG direct/prepared paths have exact work and numerical identity with five fewer blocking collectives");
+      "Native-MG direct/prepared paths have exact work and numerical identity with six fewer blocking collectives");
   passed &= expect(
       direct_halo_delta.control_consensus_calls ==
               4U * direct_halo_delta.begin_calls &&
@@ -2085,6 +2085,17 @@ bool test_prepared_apply_equivalence(int rank, int size) {
           failure_halo.control_consensus_calls == 0U,
       rank,
       "prepared Native-MG defers a rank-local Halo failure through the fixed schedule and publishes no ghost certificate or correction");
+
+  const Status recovered = prepared.apply_prepared(
+      as_const(prepared_fixture.residual.view),
+      prepared_fixture.correction.view, 1U, ticket);
+  passed &= expect(
+      static_cast<bool>(recovered) &&
+          prepared.counters().applications ==
+              prepared_plan_before.applications + 2U &&
+          finite(prepared_fixture.correction.view),
+      rank,
+      "prepared Native-MG retries successfully on the same persistent requests after a deferred failure");
 
   LinearPreconditionerBatchTicket invalid_ticket;
   const MgPlanCounters before_invalid = prepared.counters();

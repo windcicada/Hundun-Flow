@@ -1526,6 +1526,7 @@ Status aggregate_tensor_channel(Implementation& implementation,
 
   double* current = first;
   double* next = second;
+  Status deferred{};
   for (int axis = 0; axis < 3; ++axis) {
     const std::uint8_t bit = static_cast<std::uint8_t>(1U << axis);
     if ((fine.coarsen_mask & bit) == 0U) continue;
@@ -1563,8 +1564,10 @@ Status aggregate_tensor_channel(Implementation& implementation,
                     expected_rank == implementation.rank
                 ? Status{}
                 : Status{StatusCode::invalid_plan, kMgPlan};
+    if (local && !deferred) local = deferred;
     agreed = consensus(implementation, local);
     if (!agreed) return agreed;
+    deferred = {};
 
     if (send) {
       // A normal-face channel needs the aligned face one fine interval inside
@@ -1584,62 +1587,60 @@ Status aggregate_tensor_channel(Implementation& implementation,
                                  32U) +
             channel * 4 + axis,
         implementation.communicator, MPI_STATUS_IGNORE);
-    agreed = consensus(
-        implementation,
-        mpi_status == MPI_SUCCESS
-            ? Status{}
-            : Status{StatusCode::mpi_failure, kMgCollective});
-    if (!agreed) return agreed;
+    deferred = mpi_status == MPI_SUCCESS
+                   ? Status{}
+                   : Status{StatusCode::mpi_failure, kMgCollective};
 
-    bool mapping_valid = true;
-    for (std::int32_t k = 0; k < next_extents.z; ++k) {
-      for (std::int32_t j = 0; j < next_extents.y; ++j) {
-        for (std::int32_t i = 0; i < next_extents.x; ++i) {
-          const Int3 output{i, j, k};
-          const std::int32_t coarse_global =
-              axis_component(next_patch.begin, axis) +
-              axis_component(output, axis);
-          double value = 0.0;
-          if (face_axis == axis) {
-            const std::int32_t fine_global =
-                std::min(2 * coarse_global, global_extent);
-            Int3 source = output;
-            set_axis_component(source, axis, fine_global - begin);
-            const std::int32_t selected = axis_component(source, axis);
-            if (selected >= 0 && selected < axis_component(extents, axis)) {
-              value = current[flat(extents, source)];
-            } else if (receive && fine_global == end + 1) {
-              value = receive_wire[tensor_plane_offset(extents, axis,
-                                                       output)];
-            } else {
-              mapping_valid = false;
-            }
-          } else {
-            const std::int32_t first_child = 2 * coarse_global;
-            for (int child = 0; child < 2; ++child) {
-              const std::int32_t fine_global = first_child + child;
-              if (fine_global >= global_extent) continue;
+    bool mapping_valid = mpi_status == MPI_SUCCESS;
+    if (mapping_valid) {
+      for (std::int32_t k = 0; k < next_extents.z; ++k) {
+        for (std::int32_t j = 0; j < next_extents.y; ++j) {
+          for (std::int32_t i = 0; i < next_extents.x; ++i) {
+            const Int3 output{i, j, k};
+            const std::int32_t coarse_global =
+                axis_component(next_patch.begin, axis) +
+                axis_component(output, axis);
+            double value = 0.0;
+            if (face_axis == axis) {
+              const std::int32_t fine_global =
+                  std::min(2 * coarse_global, global_extent);
               Int3 source = output;
               set_axis_component(source, axis, fine_global - begin);
               const std::int32_t selected = axis_component(source, axis);
               if (selected >= 0 && selected < axis_component(extents, axis)) {
-                value += current[flat(extents, source)];
-              } else if (receive && fine_global == end) {
-                value += receive_wire[tensor_plane_offset(extents, axis,
-                                                          output)];
+                value = current[flat(extents, source)];
+              } else if (receive && fine_global == end + 1) {
+                value = receive_wire[tensor_plane_offset(extents, axis,
+                                                         output)];
               } else {
                 mapping_valid = false;
               }
+            } else {
+              const std::int32_t first_child = 2 * coarse_global;
+              for (int child = 0; child < 2; ++child) {
+                const std::int32_t fine_global = first_child + child;
+                if (fine_global >= global_extent) continue;
+                Int3 source = output;
+                set_axis_component(source, axis, fine_global - begin);
+                const std::int32_t selected = axis_component(source, axis);
+                if (selected >= 0 &&
+                    selected < axis_component(extents, axis)) {
+                  value += current[flat(extents, source)];
+                } else if (receive && fine_global == end) {
+                  value += receive_wire[tensor_plane_offset(extents, axis,
+                                                            output)];
+                } else {
+                  mapping_valid = false;
+                }
+              }
             }
+            next[flat(next_extents, output)] = value;
           }
-          next[flat(next_extents, output)] = value;
         }
       }
     }
-    agreed = consensus(
-        implementation,
-        mapping_valid ? Status{} : Status{StatusCode::invalid_plan, kMgPlan});
-    if (!agreed) return agreed;
+    if (deferred && !mapping_valid)
+      deferred = {StatusCode::invalid_plan, kMgPlan};
     std::swap(current, next);
     global = next_global;
     patch = next_patch;
@@ -1653,6 +1654,7 @@ Status aggregate_tensor_channel(Implementation& implementation,
                   same_shape(extents, target_extents)
               ? Status{}
               : Status{StatusCode::invalid_plan, kMgPlan};
+  if (local && !deferred) local = deferred;
   agreed = consensus(implementation, local);
   if (!agreed) return agreed;
   std::copy_n(current, cell_count(extents), target);
@@ -4670,9 +4672,22 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
       }
     }
   }
+  std::uint64_t next_applications = 0U;
+  Status reduction_prerequisite =
+      increment(implementation.runtime_counters.applications,
+                next_applications)
+          ? Status{}
+          : Status{StatusCode::invalid_plan, kMgCounter};
+  if (prepared && reduction_prerequisite && !deferred) {
+    reduction_prerequisite = deferred;
+  }
+  if (prepared && reduction_prerequisite &&
+      !implementation.prepared_halo_deferred) {
+    reduction_prerequisite = implementation.prepared_halo_deferred;
+  }
   double projection[3]{};
   local = implementation.services.reductions->checked_sum(
-      {local_projection, 3U}, {projection, 3U});
+      {local_projection, 3U}, {projection, 3U}, reduction_prerequisite);
   implementation.lowest =
       implementation.services.reductions->lowest_failing_rank();
   if (!local) {
@@ -4688,15 +4703,11 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
                                  projection[0] >= 0.0 &&
                                  projection[2] >= 0.0;
   if (!finite_projection) {
-    if (!prepared) {
-      return {StatusCode::numerical_failure, kMgApply};
+    if (prepared) {
+      implementation.lowest = 0;
+      close_prepared_halo_epoch(implementation, false, 0);
     }
-    if (deferred) {
-      deferred = {StatusCode::numerical_failure, kMgApply};
-    }
-    projection[0] = 0.0;
-    projection[1] = 0.0;
-    projection[2] = 0.0;
+    return {StatusCode::numerical_failure, kMgApply};
   }
   const double scale = std::max(1.0, projection[0]);
   const double tiny = std::numeric_limits<double>::epsilon() * scale;
@@ -4729,12 +4740,11 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   implementation.last_final = std::sqrt(final_squared);
   if (!std::isfinite(alpha) || !std::isfinite(implementation.last_initial) ||
       !std::isfinite(implementation.last_final)) {
-    if (!prepared) {
-      return {StatusCode::numerical_failure, kMgApply};
+    if (prepared) {
+      implementation.lowest = 0;
+      close_prepared_halo_epoch(implementation, false, 0);
     }
-    if (deferred) {
-      deferred = {StatusCode::numerical_failure, kMgApply};
-    }
+    return {StatusCode::numerical_failure, kMgApply};
   }
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
@@ -4752,29 +4762,18 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
       }
     }
   }
-  std::uint64_t next_applications = 0U;
-  local = increment(implementation.runtime_counters.applications,
-                    next_applications)
-              ? Status{}
-              : Status{StatusCode::invalid_plan, kMgCounter};
   if (!prepared) {
-    agreed = consensus(implementation, local);
+    agreed = consensus(implementation, {});
     if (!agreed) {
       return agreed;
     }
   } else {
-    if (local && !deferred) {
-      local = deferred;
-    }
-    if (local && !implementation.prepared_halo_deferred) {
-      local = implementation.prepared_halo_deferred;
-    }
-    agreed = consensus(implementation, local);
-    close_prepared_halo_epoch(implementation, static_cast<bool>(agreed),
-                              implementation.lowest);
-    if (!agreed) {
-      return agreed;
-    }
+    // The checked projection reduction above is the final collective in a
+    // prepared application.  It carries every rank-local Halo/workspace/
+    // counter failure.  Everything after it depends only on the identical
+    // global projection, so publishing the prepared epoch needs no second
+    // success-only consensus.
+    close_prepared_halo_epoch(implementation, true, -1);
   }
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
