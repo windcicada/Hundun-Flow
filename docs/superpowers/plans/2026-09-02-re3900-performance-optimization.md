@@ -2,7 +2,7 @@
 
 日期：2026-09-02
 
-状态：`ACTIVE / 当前节点 H3_ARRAY_PASSES`
+状态：`ACTIVE / 当前节点 H4_PRECONDITIONER`
 
 ## 目标
 
@@ -266,7 +266,7 @@ SHA-256 为 `43bad1cf70a3c98f15232d06bdd2a430a24078c21bce7252f0e4df1c48d6c848`�
 
 ### H3：减少全场数组 pass
 
-状态：`PENDING`
+状态：`COMPLETE`
 
 - 在 EOS/transport/residual 生成 pass 中同步产生审计与 provenance；
 - 合并相邻 zero、mask、EOS、transport、residual、hash pass；
@@ -276,6 +276,40 @@ SHA-256 为 `43bad1cf70a3c98f15232d06bdd2a430a24078c21bce7252f0e4df1c48d6c848`�
 
 **验收：**全场 pass/cell visits 减少，最终状态和终端审计在既定误差门内一致；不得只删除
 certificate 或 hash 语义来获得提速。
+
+完成证据（2026-09-03）：
+
+- 接受提交 `6206bdc28c46b822ef6bd1d328ce87dc421b61cc`，tree
+  `641fa4951d84a7a0cd366c089320e77add8e38ef`。冻结候选在生产核心中以完整
+  pointer/layout/storage/revision-domain/revision lineage 绑定；测试核心仍逐值计算原 FP64
+  位级 hash，因此无 revision 静默篡改的诊断覆盖没有删除。
+- H2/H3 优化前后 gprof 均观察到每步每 rank 约 55 次冻结候选指纹调用；H2 每次扫描
+  density、`HbyA`、`rAU`、压力/梯度（C1）及两组面通量，H3 生产路径的这些调用为
+  O(1)，数组值访问从 55 次组合审计降为 0。优化后 profile 中该函数自耗时降为 0；
+  完整数值 provenance、真实残差和终端审计仍保留在原路径。
+- 干净 Release 构建的 pressure-energy Schur/globalization、PISO authority/mutation、
+  1/2/4-rank PISO、核心产品及 pressure-energy retry 共 17 项检查全部通过。正式二进制
+  SHA-256 为 `8b86c2359c51c65206436dba7fad93e5db25bae03babab5a9ff3d32e5f020286`，
+  build manifest SHA-256 为
+  `25e081b2155974cdd617bee8577fcef3532c77c77ae08231cad4b37e4d658949`。
+- 清除一次遗留递归搜索造成的 I/O/load 污染后，采用 H2/H3、H3/H2、H2/H3 反序配对
+  各三轮。H3/H2 单步中位为 `22.481344 / 23.077041 s`（`-2.58%`），三组配对
+  相对变化中位为 `-4.46%`；Stage 40+50 中位为
+  `20.843059 / 21.394500 s`（`-2.58%`），reduction 中位为
+  `5.568769 / 5.779437 s`（`-3.65%`）。
+- 六轮均为 162 次总线性迭代、205 次压力 operator、156 次 preconditioner、420 次
+  solver reduction、3 次 refinement 和 3,201 次 blocking collective；H3 三轮终端
+  continuity/energy 均逐值为 `9.940878e-7 / 7.947763e-7`。被遗留搜索污染的绝对
+  时间三轮保留在证据目录，但明确排除在性能统计之外。
+
+正式证据目录：
+`/home/wyf/code_dev/.benchmarks/hundun-h3-array-passes-20260903/controlled-runs`；H3 三轮
+`evidence.jsonl` SHA-256 分别为
+`2121bc78c0af7e4fef877603781311e9956c278035e52b62d7c9062ac0aa9e47`、
+`b77c61e7ca1f4c0bc2622005c72d1ab5d17e557fd21b0f3f137b898d19447f52`、
+`41e4b52708055c30ef3f519601c01a5aa059d6ac7776108f0f7b56e401b986eb`。优化后 gprof
+报告 SHA-256 为
+`08b44a538260c758b954feca2400ed294d17d0de4b9c5d07684dde8e6d9a923b`。
 
 ### H4：预条件器工作量与分层精度
 
@@ -309,8 +343,8 @@ Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译�
 
 ## 当前下一步
 
-执行 H3：冻结 H2 提交、case、128-rank mapping 和 step-50 restart，先用硬件计数器与
-现有 stage/cell-visit 诊断定位 Stage 40/50 中重复的 EOS、transport、zero/mask、residual
-和 provenance pass；优先合并共享同一输入 revision 且没有中间发布边界的相邻 pass。
-以全场 pass/cell visits、内存带宽、max-rank 时间和最终五门共同验收，不以删除证书、
-完整状态或 FP64 真实残差换取提速。
+执行 H4：以 H3 接受提交、同一 case、128-rank mapping 和 step-50 restart 为基线，先从
+现有 F-cycle/FGMRES 的 level、smoother、coarse-grid、operator/preconditioner 和 halo 计数
+建立工作量模型，再单变量比较 communication-light block-local/Schwarz 与分层低精度
+预条件工作数组。外层 Schur operator、FGMRES 解、FP64 真残差、候选验收和终端五门保持
+FP64；任何迭代或 refinement 增量抵消局部吞吐收益的候选均拒绝。
