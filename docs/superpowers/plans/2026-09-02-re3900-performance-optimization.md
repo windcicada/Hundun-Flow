@@ -2,7 +2,7 @@
 
 日期：2026-09-02
 
-状态：`ACTIVE / 当前节点 R1_COAST_CONTROLLED_DELTA`
+状态：`ACTIVE / 当前节点 H0_HUNDUN_LINEAR_CONTROL`
 
 ## 目标
 
@@ -98,7 +98,7 @@ restart 末端三种条件下执行真残差，因此不存在完全相同的 12
 
 ### R1：同二进制 COAST 受控差异矩阵
 
-状态：`PENDING / NEXT`
+状态：`COMPLETE`
 
 在隔离工作树中，用同一 profiling binary、同一 320 x 320 x 33 case、相同输出设置和
 相同 rank mapping 至少运行以下诊断组合：
@@ -126,9 +126,35 @@ restart 末端三种条件下执行真残差，因此不存在完全相同的 12
 **进入 H0 的门：**同二进制矩阵完整，能够把差距至少分成 backend、tolerance 和
 strict-physics/audit 三类；否则不修改 HUNDUN 求解器。
 
+完成证据（2026-09-02）：
+
+- 同一 profiling binary、同一 320 x 320 x 33 case、128 ranks、固定绑核完成 C0--C4
+  各三轮；每轮 1 BE + 5 BDF2，15/15 运行成功且 critical-rank self partition 闭合。
+- BDF2 中位耗时 C0/C1/C2/C3/C4 分别为
+  `0.398283 / 0.426525 / 0.415725 / 0.679622 / 1.203166 s`。
+- C0 -> C1 强制 GMG 为 `+7.09%`，C1 -> C2 legacy ICCG 为 `-2.53%`；两者处于短跑
+  auto 探测和后端噪声量级，不能解释主要慢化。
+- C2 -> C3 将线性控制从 `1e-4` 收紧到 `1e-6` 后增加 `0.263898 s`（`+63.48%`）；
+  C3 -> C4 严格物理/可靠残差增加 `0.523543 s`（`+77.03%`）。
+- C4 terminal audit 中位仅 `0.012083 s`，不是 C3 -> C4 增量的主因；C4 压力
+  operator/preconditioner 中位为 `520/512`，六步每 rank `MPI_Allreduce=17262`，而
+  C3 为 `228/228` 和 `9381`。五组 `MPI_Allgatherv` 均为 0。
+- 严格模式 18/18 步终端接受，180 次线性求解共 648 次 FP64 真残差审计，无 cap hit；
+  EOS/continuity/gauge 最大残差为
+  `1.102e-7 / 1.056e-7 / 2.139e-8`。
+
+证据目录：`/home/wyf/code_dev/.benchmarks/coast-r1-controlled-matrix-20260902`；
+`summary.json` SHA-256
+`ceb8681f28265a88edcb1ad7c7c499918453c976e7bf53703bce06924c034902`，
+`report.md` SHA-256
+`e51c73efbdc5d188c7d4ab7931f56ead09f416212343aae27a9fa0e4236362d7`。
+
+结论：R1 门已满足。backend 本身不是首要矛盾；线性过求解及严格路径增加的
+operator/collective 工作量是可迁移到 HUNDUN 的主要优化信号。
+
 ### H0：HUNDUN 低风险线性控制
 
-状态：`PENDING`
+状态：`IN_PROGRESS / NEXT`
 
 1. 以当前 `true_residual_interval=4` 为基线，A/B 测试 8 和 16。
    递归残差达到门槛时仍立即执行 FP64 真残差，restart 末端仍强制审计。
@@ -208,4 +234,6 @@ Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译�
 
 ## 当前下一步
 
-只执行 R1 的同二进制 COAST 受控差异矩阵。R1 完成并复核前，不开始 H0 代码修改。
+执行 H0：先固定当前 `true_residual_interval=4` 与压力内层 `1e-6` 基线，再分别测试
+`interval=8/16` 和压力内层 `1e-4`；保持递归收敛即时真残差、restart 末端审计、两次
+PISO 及五个 FP64 终端门不变。只有单变量 A/B 通过后才实现非线性残差感知 forcing。
