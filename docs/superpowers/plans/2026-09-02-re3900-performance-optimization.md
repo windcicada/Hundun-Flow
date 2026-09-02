@@ -2,7 +2,7 @@
 
 日期：2026-09-02
 
-状态：`ACTIVE / 当前节点 H2_PRESSURE_COMMUNICATION`
+状态：`ACTIVE / 当前节点 H3_ARRAY_PASSES`
 
 ## 目标
 
@@ -222,7 +222,7 @@ PISO、迭代终止原因和 rollback 全部通过。任何 `interval` 造成 au
 
 ### H2：减少压力路径集合通信
 
-状态：`PENDING`
+状态：`COMPLETE`
 
 - 保留 MG/Schur 已有 prepared batch；
 - 将 prepared epoch 扩展到候选态、AFC 和可共享失败 authority 的相邻阶段；
@@ -231,6 +231,38 @@ PISO、迭代终止原因和 rollback 全部通过。任何 `interval` 造成 au
 
 **验收：**相同科学工作量下集合通信次数和 reduction 时间下降；failure injection、最低
 失败 rank、persistent request 恢复以及 ghost revision 证书测试全部通过。
+
+完成证据（2026-09-03）：
+
+- 接受提交 `7bc64a60273a26d0cf883b7d24e605c3db3a6be1`，tree
+  `6019b00a3defe40bb8df78812e04aa31d5dc2196`。PMPI 调用点审计确认热点不是 Schur
+  apply：205 次 Schur apply 没有 `Allreduce`；主要冗余来自每次系数刷新时粗网格张量
+  聚合的成功状态共识，以及 156 次 prepared-MG apply 的末端发布共识。
+- 张量聚合保留每次 `MPI_Sendrecv` 前的集体前检，把其完成状态和本地映射状态延迟到
+  下一次必需前检（最后一个轴延迟到函数末端前检），不跨越下一次 MPI；prepared-MG
+  则把 Halo/workspace/counter 状态搭载到已有 FP64 投影归约，归约后的判断只依赖各 rank
+  相同的全局投影。
+- 同一诊断二进制和 step-50 restart 下，压力/候选作用域 PMPI `Allreduce` 从
+  `3020 -> 2184`（`-27.68%`），`Allgatherv` 保持 `1096`；完整 evidence 的 blocking
+  collectives 从 `4207 -> 3201`，恰好减少 `850` 次张量聚合共识和 `156` 次 prepared-MG
+  发布共识。
+- 干净 Release 构建的 20D x 10D x 3D 三轮中位/P90为
+  `23.099072 / 23.168112 s`；相对 H1 中位 `24.262052 s` 再降低 `4.79%`。reduction
+  中位为 `5.669419 s`，Stage 40+50 中位为 `21.455973 s`，分别较 H1 降低
+  `5.15% / 5.11%`。
+- 三轮均保持 162 次总线性迭代、3 次 refinement，以及完全相同的压力/精化
+  operator/preconditioner/reduction 计数；terminal continuity/energy 仍逐值为
+  `9.940878e-7 / 7.947763e-7`。干净构建的 MG 数值/复用、1/2/4-rank MG、奇数分区、
+  更新契约、Krylov、Halo 故障与恢复、核心产品和 pressure-energy retry 共 27 项检查
+  全部通过，并新增同一 persistent requests 在 deferred failure 后成功重试的断言。
+
+正式证据目录：
+`/home/wyf/code_dev/.benchmarks/hundun-h2-communication-20260903/formal-runs`；三轮
+`evidence.jsonl` SHA-256 分别为
+`471e718880441479c674dda3bb36605cdd3d7a513bfb8ed12a571f176955d8b1`、
+`79090e7e93588bf3153c5ff307f93054e690edd72fbf174cc27c3de9f50a3edd`、
+`a9e392a94d3b16441488290e1b07c2fda400d465ae5e951b00712ca4ede0ef61`；正式 runner
+SHA-256 为 `43bad1cf70a3c98f15232d06bdd2a430a24078c21bce7252f0e4df1c48d6c848`。
 
 ### H3：减少全场数组 pass
 
@@ -277,7 +309,8 @@ Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译�
 
 ## 当前下一步
 
-执行 H2：冻结 H1 提交、case、128-rank mapping 和 step-50 restart，先把 4207 次
-blocking collectives 按 Krylov、MG、exact candidate、halo、failure authority 和 commit
-分解；只合并相邻且共享同一数值/失败 authority 的通信。以 PMPI 计数、reduction 时间、
-最低失败 rank、ghost revision 和最终五门共同验收，不以删除证书或降低精度换取提速。
+执行 H3：冻结 H2 提交、case、128-rank mapping 和 step-50 restart，先用硬件计数器与
+现有 stage/cell-visit 诊断定位 Stage 40/50 中重复的 EOS、transport、zero/mask、residual
+和 provenance pass；优先合并共享同一输入 revision 且没有中间发布边界的相邻 pass。
+以全场 pass/cell visits、内存带宽、max-rank 时间和最终五门共同验收，不以删除证书、
+完整状态或 FP64 真实残差换取提速。
