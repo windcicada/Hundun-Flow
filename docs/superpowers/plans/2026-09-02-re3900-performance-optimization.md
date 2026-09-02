@@ -2,7 +2,7 @@
 
 日期：2026-09-02
 
-状态：`ACTIVE / 当前节点 H0_HUNDUN_LINEAR_CONTROL`
+状态：`ACTIVE / 当前节点 H2_PRESSURE_COMMUNICATION`
 
 ## 目标
 
@@ -154,7 +154,7 @@ operator/collective 工作量是可迁移到 HUNDUN 的主要优化信号。
 
 ### H0：HUNDUN 低风险线性控制
 
-状态：`IN_PROGRESS / NEXT`
+状态：`COMPLETE`
 
 1. 以当前 `true_residual_interval=4` 为基线，A/B 测试 8 和 16。
    递归残差达到门槛时仍立即执行 FP64 真残差，restart 末端仍强制审计。
@@ -166,9 +166,26 @@ operator/collective 工作量是可迁移到 HUNDUN 的主要优化信号。
 PISO、迭代终止原因和 rollback 全部通过。任何 `interval` 造成 audit reject、restart 增加或
 非线性 refinement 增加都不接受。
 
+完成证据（2026-09-03）：
+
+- 接受提交 `60cf89ec74ef2933d27067711587a9d315645bb3`，tree
+  `2888797f341a7fd37459354588f00058b70c52cb`。保留 case `rtol=1e-6` 和全部
+  `1e-6` 终端门，只在两次强制 PISO 方向及远离终端的 refinement 内使用受保护的
+  `1e-4` inexact forcing；停滞、无效残差、接近终端或 case 更严格时恢复 case 控制。
+- `true_residual_interval=8/16` 单变量收益不足；接受配置使用 interval 32，但递归残差
+  达标和 restart 末端仍立即做 FP64 真残差，旧 checkpoint 的计划指纹不匹配时明确拒绝。
+- 320 x 320 x 33、128 ranks 的 15 个 BDF2 步中位/P90 从
+  `2.592414 / 2.807993 s` 降至 `2.033780 / 2.154805 s`，分别降低
+  `21.55% / 23.26%`；线性迭代 `50 -> 36`、operator `65 -> 40`、blocking
+  collectives `1372 -> 1196`，refinement 保持 0。
+- 三轮 runtime validator 及 16 项原聚焦检查通过。产品时序收敛测试的 stage-44
+  `2/5790` 已在精确的 H0 前提交 `faa8ad2` 上复现，登记为既有失败而非 H0 回归。
+
+证据目录：`/home/wyf/code_dev/.benchmarks/hundun-h0-inexact-forcing-20260903`。
+
 ### H1：减少 pressure-energy refinement 数量
 
-状态：`PENDING`
+状态：`COMPLETE`
 
 1. 用已保存的成功轨迹补丁确认当前 alpha、merit 和各终端残差收缩率。
 2. 若仍为 `alpha=1` 且线性收敛，先测试 depth=2--3 的 safeguarded Aitken/Anderson。
@@ -176,6 +193,32 @@ PISO、迭代终止原因和 rollback 全部通过。任何 `interval` 造成 au
 
 **目标：**20D x 10D x 3D 的 refinement 中位数由 6 降到不高于 3。按现有拟合，
 降到 2 次的理论节省约 15.8 s/步；该数值是预测，不是验收承诺。
+
+完成证据（2026-09-03）：
+
+- 接受提交 `13ac181da171ed20ed544840ee423050bbbbdd3c`，tree
+  `353647897ba51b783881d943cfad5bdf3b47c329`。以终端实际使用的
+  `max(continuity, energy)` 为标量，使用去除上一轮 relaxation 影响的 safeguarded
+  Aitken 系数；系数上限为 2，且 `alpha>1` 只生成候选，不获得发布权限。
+- 所有外推态仍经过原 exact candidate evaluator、正性/有限性、严格 merit decrease、
+  Armijo、谱系绑定和 commit/rollback；外推拒绝或数值失败时执行未改动的
+  `alpha=1,1/2,...` ladder。
+- 同一 step-50 restart 的诊断轨迹中，接受系数为 `1.13691 / 1.77344 / 2.0`；第 3 次
+  refinement 后 continuity/energy 为 `9.940878e-7 / 7.947763e-7`，三次重复逐值一致。
+- 干净构建的 20D x 10D x 3D 正式三轮中位/P90为 `24.262052 / 24.524881 s`；相对
+  H0 同重启 `41.473374 s`，压力路径迭代 `240 -> 156`、operator `314 -> 205`、
+  blocking collectives `6537 -> 4207`，refinement `6 -> 3`。Stage 40+50 中位为
+  `22.610701 s`，reduction 中位为 `5.977023 s`。
+- 干净构建的 globalization、PISO authority、1/2/4-rank 核心产品、故障注入回滚和
+  pressure-energy retry 聚焦测试 18/18 通过。测试诊断另外修正了已存在的 controller
+  ticket/已提交流场混淆、候选 alpha 元数据丢失，以及相消残差使用错误尺度的问题。
+
+正式证据目录：
+`/home/wyf/code_dev/.benchmarks/hundun-h1-pressure-energy-20260903/formal-runs`；三轮
+`evidence.jsonl` SHA-256 分别为
+`c8fbe69e3be7cdba620a54e82c16b39b8c5232e79df13474c6e601d1330abe47`、
+`7d172ce606ec952852b870260bd44fb52339ff171165f0b4b0723ba56c4443cb`、
+`439dd00a49e223728c81d1c395939ea864f67ba11ee1d0d458a5d183a9354f4d`。
 
 ### H2：减少压力路径集合通信
 
@@ -234,6 +277,7 @@ Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译�
 
 ## 当前下一步
 
-执行 H0：先固定当前 `true_residual_interval=4` 与压力内层 `1e-6` 基线，再分别测试
-`interval=8/16` 和压力内层 `1e-4`；保持递归收敛即时真残差、restart 末端审计、两次
-PISO 及五个 FP64 终端门不变。只有单变量 A/B 通过后才实现非线性残差感知 forcing。
+执行 H2：冻结 H1 提交、case、128-rank mapping 和 step-50 restart，先把 4207 次
+blocking collectives 按 Krylov、MG、exact candidate、halo、failure authority 和 commit
+分解；只合并相邻且共享同一数值/失败 authority 的通信。以 PMPI 计数、reduction 时间、
+最低失败 rank、ghost revision 和最终五门共同验收，不以删除证书或降低精度换取提速。
