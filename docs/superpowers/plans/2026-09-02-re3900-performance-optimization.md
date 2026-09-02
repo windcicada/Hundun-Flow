@@ -2,7 +2,7 @@
 
 日期：2026-09-02
 
-状态：`ACTIVE / 当前节点 H4_PRECONDITIONER`
+状态：`COMPLETE / R0--R1 与 H0--H5 已闭环`
 
 ## 目标
 
@@ -63,6 +63,11 @@ full20 的 COAST P90 为 15.419435 s/step、当时 HUNDUN P90 为 4.418378 s/ste
 - 代表步有 6,046 次阻塞集合通信，记录的 reduction 时间为 6.781 s。
 
 证据：`/home/wyf/r39m/c12/x50/evidence.jsonl`。
+
+主计划收口时，同一 step-50 restart 的 H0/H5 单步中位为
+`41.473374 / 22.391036 s`，累计降低 `46.01%`；pressure-energy refinement 从 6 次
+降为 3 次，blocking collectives 从 6,537 次降为 3,201 次。该对比用于表示本计划各节点
+的累计工程收益；H5 自身的归因仍以 H3/H5 干净构建对照为准。
 
 ## 已验证的 COAST 差异及其含义
 
@@ -313,7 +318,7 @@ certificate 或 hash 语义来获得提速。
 
 ### H4：预条件器工作量与分层精度
 
-状态：`PENDING`
+状态：`COMPLETE / 保留 FGMRES + F-cycle`
 
 - 保留 FGMRES + F-cycle 作为可靠基线；历史证据中 F-cycle 快于 guarded V-cycle；
 - A/B 测试 communication-light block-local/Schwarz 预条件器，但以总时间和总工作量判断；
@@ -321,15 +326,93 @@ certificate 或 hash 语义来获得提速。
 - 外层 operator、FGMRES 解、状态、FP64 真残差及终端审计保持 FP64；
 - 不引入运行期 auto profiler，先离线选定明确后端并保留可靠 fallback。
 
+完成证据（2026-09-03）：
+
+- 以 H3 接受代码和同一 step-50 restart 做单变量诊断。最近的受控 F-cycle 样本为
+  `22.048897 s`、162 次线性迭代、205/156 次 operator/preconditioner 和 3,201 次
+  blocking collectives。
+- 固定 V-cycle 为 `25.818467 s`（相对 F-cycle `+17.10%`），线性迭代升至 200，
+  operator/preconditioner 为 `254/194`；首次系数刷新用 F、随后用 V 的混合方案为
+  `26.566787 s`（`+20.49%`），迭代仍为 198。两者虽减少消息数，但增加的压力工作量
+  抵消并超过通信收益，均拒绝。
+- 四次红黑局部 sweep 的零重叠 rank-block Schwarz 将 structured messages 从
+  `13,054,464` 降至 `2,170,368`，但线性迭代增至 1,046、operator/preconditioner
+  增至 `1,323/1,040`、通信字节增至 `171,532,513,280`，单步为 `98.235333 s`
+  （`+345.53%`），拒绝。
+- 三个候选的终端 continuity/energy 仍在 `1e-6` 门内，因此拒绝依据是总工作量和总时间，
+  不是精度失败。对应 evidence SHA-256 分别为
+  `376015024ca3d9e0be2e2f4e5aa6746f8e4532666f5b8b8bf26eaab5409cecdb`、
+  `71eece3bed99ae47fa7166b25df6e36f2bdd307264ed320d38579d697698a73c`、
+  `ab3d093453813b80dd67d05fc13189ff069aa6f116926434f475b9e7fd96aec5`。
+- 分层 FP32 审计确认现有 MG 数据契约从 `BasicFaceFieldView`、`MgWorkspaceRequirements`、
+  `MgWorkspace`、层级/复制缓冲到 `HaloEngine` 均固定为 `double`/`MPI_DOUBLE`。把数值量化
+  后仍存入 double 不能测试存储带宽或低精度 halo；真正的 FP32 候选需要跨层 typed
+  workspace/halo 重构，超出本节点的低风险单变量改动范围，故不实施。外层状态、FGMRES
+  解、Schur operator、FP64 真残差及终端审计维持原样。
+
+诊断证据目录：
+`/home/wyf/code_dev/.benchmarks/hundun-h4-preconditioner-20260903`。
+
 ### H5：动量 AFC 与硬件收尾
 
-状态：`PENDING`
+状态：`COMPLETE`
 
 - 复用冻结的高阶面修正，减少 AFC 二次计算；
 - 批量 limiter halo，保留唯一 common-face authority 和等量反号守恒；
 - 最后测试 `-march/-mtune`、NUMA first-touch/绑核及节点内 halo。
 
 Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译器调优替代压力根因修复。
+
+完成证据（2026-09-03）：
+
+- 接受提交 `4476ac5a49da6037eb2ffab7285efbe12212091a`，tree
+  `2e6db419a4ab4a51f09d77d6591ec404292a7394`。每个速度分量的高阶面重构由两次降为一次，
+  三个分量分别保存在互不别名的 face workspace；第二次 AFC correction/metrics pass
+  直接复用冻结结果。common-face alpha、owner authority、等量反号守恒、failure-before-
+  mutation 和原始分量顺序不变。
+- `phi_workspace` 从 4 个扩为 6 个 replica：0/1 仍服务时间/候选通量，2/3/4 保存三个
+  分量的 AFC 面场，5 保存 common alpha。checkpoint 指纹仍只编码原有四个持久语义角色，
+  两个纯临时缓存不改变 restart 兼容性；旧 step-50 restart 已在正式运行中通过。
+- 只保留最后一个分量的首个候选在三组配对中 Stage 30 收益不稳定，已拒绝。完整三分量
+  缓存的提交前诊断三组均使 Stage 30 降低 `4.18%--6.29%`，因此进入干净构建验收。
+- 干净 Release 构建的关键回归共 21/21 通过，覆盖 pressure-energy Schur/globalization、
+  PISO authority/mutation、solver equations、AFC 产品冻结、pressure-energy retry、应用驱动
+  以及 MPI 1/2/4 ranks；`focused-21.log` SHA-256 为
+  `b812daf1c4de9c1ae1cfe82a742c90fc07e97ef92a48a56c48bf2834f4e4418c`。
+- H3/H5 三次正式单步中位如下；Stage 40+50 和 reduction 的小幅变化不归因于 AFC：
+
+| 指标 | H3 | H5 | 变化 |
+|---|---:|---:|---:|
+| max-rank step | 22.481344 s | 22.391036 s | -0.40% |
+| Stage 30 | 1.348177 s | 1.276689 s | -5.30% |
+| Stage 40+50 | 20.843059 s | 20.809205 s | -0.16% |
+| reduction | 5.568769 s | 5.489720 s | -1.42% |
+| max-rank RSS | 409,706,496 B | 414,953,472 B | +5,246,976 B / +1.28% |
+
+- 三轮 H5 均保持 162 次总线性迭代、205/156 次压力 operator/preconditioner、3 次
+  refinement、3,201 次 blocking collectives，以及完全相同的 structured message/byte
+  计数。AFC retained ratio 均为 `0.9976554563922444`，terminal continuity/energy 逐值为
+  `9.940877864179103e-7 / 7.947762810986709e-7`。
+- 另一次连续 step 51--53、128-rank 运行完整通过；三步的 refinement 均为 3，EOS、
+  closed-mass、gauge 均为 0，continuity/energy 均低于 `1e-6`，CFL 约 0.339 且低于 0.8。
+  该运行验证缓存 revision 随连续时间步推进，不纳入 H3/H5 性能中位数。
+- 正式 runner SHA-256 为
+  `fb9109bc0fd59f9cc2a4f833cddcbabe1cbc5455cb30d7cbdb8beefba0fe8d8f`，build manifest
+  SHA-256 为
+  `8bce3d923b1b0bbc6ac1af99bb02d5b64bb55dc3bf3286594ec9de2647899c76`。三轮正式
+  `evidence.jsonl` SHA-256 分别为
+  `fd1d17a21a4a9ea88c6fa0bb177c754ace4e5aace72a71d5e76a6f1cab149e73`、
+  `291a601167697cec5d2e89035488aef44e9d3387dcc03c03873477e542296d9e`、
+  `b86ee389aced682bfdc9bde8655a59ab844fdf3873344df2e27ac93f55f581cd`；连续三步证据
+  SHA-256 为 `c5686b8121d4d279fd2ad586d2b5f3fee0550d3335968c857928a58fd75b4934`。
+- `-march=znver3` 与额外 `-mtune=znver3` 的实际 runner `.text` 均为 4,593,509 bytes，
+  SHA-256 同为 `df96cdbdee84744ded2f140e5d5e19b655f7721f215452e47950028596d4d777`，
+  因此不增加无效编译开关。128-rank 命令已按两 socket 各 64 rank、每 rank 一个物理核
+  绑核；分配发生在绑定进程内，Open MPI 提供 `vader/sm/self/tcp` 节点内传输。
+- `codex/v04-intranode-halo-p0` 仍是 `P0_PLANNED_DEFERRED_NOT_IN_V1` 文档封存分支，
+  没有可验收的节点内 halo 实现或测试，故不合并、不宣称能力，继续作为独立保留分支。
+
+正式证据目录：`/home/wyf/code_dev/.benchmarks/hundun-h5-afc-20260903/formal-runs`。
 
 ## 每个节点的统一验收
 
@@ -341,10 +424,9 @@ Stage 30 明显小于 Stage 40+50；H0--H4 未完成前，不以 AFC 或编译�
 5. 性能变化小于噪声区间或依赖更弱终端门时，结论为 `REJECT`。
 6. 接受后在本文件更新节点状态、commit/tree 和证据路径，再进入下一节点。
 
-## 当前下一步
+## 收口状态与后续
 
-执行 H4：以 H3 接受提交、同一 case、128-rank mapping 和 step-50 restart 为基线，先从
-现有 F-cycle/FGMRES 的 level、smoother、coarse-grid、operator/preconditioner 和 halo 计数
-建立工作量模型，再单变量比较 communication-light block-local/Schwarz 与分层低精度
-预条件工作数组。外层 Schur operator、FGMRES 解、FP64 真残差、候选验收和终端五门保持
-FP64；任何迭代或 refinement 增量抵消局部吞吐收益的候选均拒绝。
+本计划已经完成；工作主线为 `codex/re3900-10d-smoke`，可靠后端保持
+FGMRES + F-cycle，H5 三分量 AFC 缓存已进入主线。后续如需生产放大，应另立验证任务，
+先运行更长的连续 BDF2 窗口并检查统计量、力/通量和内存高水位，不在本计划内继续叠加
+求解器或精度变化。节点内 halo 只有在明确解除 P0 封存并重新完成 MPI/NUMA intake 后再评估。
