@@ -12,9 +12,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -31,11 +33,14 @@ using hundun::v04::FieldRegistry;
 using hundun::v04::FieldSchema;
 using hundun::v04::GeometryKind;
 using hundun::v04::IbmReconstructionPolicy;
+using hundun::v04::LinearAlgorithm;
+using hundun::v04::MgCorrectionScaling;
 using hundun::v04::PressureReferenceKind;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
 using hundun::v04::TimeControlKind;
 using hundun::v04::TimeScheme;
+using hundun::v04::TransportLaw;
 using hundun::v04::TransportedScalarRole;
 using hundun::v04::TurbulenceKind;
 using hundun::v04::ValidatedModel;
@@ -73,6 +78,31 @@ constexpr std::string_view kTensorMesh = R"json({
   "data_files":[],"immersed_boundary":null
 })json";
 
+constexpr std::string_view kCoastRuntimeAxesMesh = R"json({
+  "kind":"coast_runtime_axes_v1",
+  "axes_file":"axes.dat",
+  "domain":{"lower":[0,0,0],"upper":[1,1,1]},
+  "exact_cells":[2,2,1],
+  "base_spacing":[0.5,0.5,1.0],
+  "minimum_spacing":[0.01,0.01,0.01],
+  "max_growth_ratio":1.2,
+  "focus_regions":[],
+  "limits":{"max_global_cells":16,
+            "max_memory_bytes_per_rank":1048576},
+  "data_files":[],"immersed_boundary":null
+})json";
+
+constexpr std::string_view kCoastRuntimeAxes = R"data(
+COAST_RUNTIME_AXES 1
+grid 2 2 1
+x 3
+0 0.1000000001 1
+y 3
+0 0.4 1
+z 2
+0 1
+)data";
+
 constexpr std::string_view kPlaceholderThermophysics = R"data(
 HUNDUN_THERMOPHYSICS_V1
 temperature_bounds 200 3000
@@ -85,6 +115,22 @@ temperature_switch 1000
 nasa7_low 3.5 0 0 0 0 0 0
 nasa7_high 3.5 0 0 0 0 0 0
 transport_sutherland 1.716e-5 273.15 110.4 0.71
+end_species
+end
+)data";
+
+constexpr std::string_view kCoastNativeAirThermophysics = R"data(
+HUNDUN_THERMOPHYSICS_V1
+temperature_bounds 273.15 6000
+temperature_inversion 1e-12 64
+closed_mass_newton 1e-12 32 0.2
+species_count 1
+species air
+molecular_weight 28.850334
+temperature_switch 1000
+nasa7_low 3.5838100068 -7.2700635412e-4 1.67056387003e-6 -1.091801341e-10 -4.317787988e-13 -1050.5394088 3.1124135035
+nasa7_high 3.1013370688 1.24138813631e-3 -4.1882038804e-7 6.641656204e-11 -3.9127843272e-15 -985.27467132 5.3560174057
+transport_coast_native_air
 end_species
 end
 )data";
@@ -184,6 +230,52 @@ bool replace_once(std::string& text, std::string_view from,
   }
   text.replace(position, from.size(), to);
   return true;
+}
+
+void append_wire_real(std::vector<std::uint8_t>& bytes, double value) {
+  std::uint64_t bits = 0U;
+  std::memcpy(&bits, &value, sizeof(bits));
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    bytes.push_back(static_cast<std::uint8_t>((bits >> shift) & 0xffU));
+  }
+}
+
+bool replace_unique_wire_real(std::vector<std::uint8_t>& payload, double from,
+                              double to) {
+  std::vector<std::uint8_t> source;
+  std::vector<std::uint8_t> replacement;
+  append_wire_real(source, from);
+  append_wire_real(replacement, to);
+  const auto found =
+      std::search(payload.begin(), payload.end(), source.begin(), source.end());
+  if (found == payload.end() ||
+      std::search(std::next(found), payload.end(), source.begin(),
+                  source.end()) != payload.end()) {
+    return false;
+  }
+  std::copy(replacement.begin(), replacement.end(), found);
+  return true;
+}
+
+bool forge_legacy_native_air_wire(std::vector<std::uint8_t>& payload,
+                                  double canonical_high_a6) {
+  std::vector<std::uint8_t> transport;
+  transport.push_back(static_cast<std::uint8_t>(TransportLaw::sutherland));
+  append_wire_real(transport, 1.23456789e-5);
+  append_wire_real(transport, 321.25);
+  append_wire_real(transport, 111.75);
+  append_wire_real(transport, 0.73);
+  append_wire_real(transport, 0.0);
+  const auto found = std::search(payload.begin(), payload.end(),
+                                 transport.begin(), transport.end());
+  if (found == payload.end() ||
+      std::search(std::next(found), payload.end(), transport.begin(),
+                  transport.end()) != payload.end()) {
+    return false;
+  }
+  *found = static_cast<std::uint8_t>(TransportLaw::coast_native_air);
+  std::fill(std::next(found), found + transport.size(), 0U);
+  return replace_unique_wire_real(payload, canonical_high_a6, -985.27467132);
 }
 
 bool compile_json_fingerprint(std::string_view label, std::string_view json,
@@ -390,6 +482,289 @@ bool test_tensor_normalization_and_fingerprint() {
                    "tensor mesh accepts exact cells together with base spacing");
   passed &= expect(exact.fingerprint != first.fingerprint,
                    "typed mesh changes affect fingerprint");
+  return passed;
+}
+
+bool test_coast_runtime_axes_case() {
+  ScratchCase scratch("coast-runtime-axes");
+  scratch.write("case.json", case_json(kCoastRuntimeAxesMesh));
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  scratch.write("axes.dat", kCoastRuntimeAxes);
+  ValidatedModel model;
+  const Status status = compile(scratch.root(), model);
+  bool passed = expect(static_cast<bool>(status),
+                       "COAST runtime axes case compiles");
+  passed &= expect(
+      status && model.mesh.kind == GeometryKind::coast_runtime_axes_v1 &&
+          model.mesh.axes_file == fs::path("axes.dat") &&
+          model.mesh.coast_runtime_faces[0U].size() == 3U,
+      "COAST runtime axes source identity survives case wire");
+  passed &= expect(
+      status && model.mesh.coast_runtime_faces[0U][1U] ==
+                    static_cast<double>(static_cast<float>(0.1000000001)),
+      "COAST runtime axes wire carries float32-effective faces");
+
+  constexpr std::string_view projected_mesh = R"json({
+    "kind":"coast_runtime_axes_v1","axes_file":"axes.dat",
+    "domain":{"lower":[0,0,0],"upper":[1,1,0.06]},
+    "exact_cells":[2,2,1],"base_spacing":[0.5,0.5,0.06],
+    "minimum_spacing":[0.01,0.01,0.01],"max_growth_ratio":1.2,
+    "focus_regions":[{"lower":[0.1,0.1,0],"upper":[0.5,0.5,0.06],
+                      "target_spacing":[0.1,0.1,0.03]}],
+    "limits":{"max_global_cells":16,
+              "max_memory_bytes_per_rank":1048576},
+    "data_files":[],"immersed_boundary":null
+  })json";
+  constexpr std::string_view projected_axes = R"data(
+COAST_RUNTIME_AXES 1
+grid 2 2 1
+x 3
+0 0.1 1
+y 3
+0 0.4 1
+z 2
+0 0.06
+)data";
+  ScratchCase projected("coast-runtime-axes-projected-boundary");
+  projected.write("case.json", case_json(projected_mesh));
+  projected.write("thermophysics.d", kPlaceholderThermophysics);
+  projected.write("axes.dat", projected_axes);
+  ValidatedModel projected_model;
+  const Status projected_status = compile(projected.root(), projected_model);
+  passed &= expect(
+      projected_status && projected_model.mesh.focus_regions.size() == 1U &&
+          projected_model.mesh.focus_regions[0U].upper.z ==
+              static_cast<double>(static_cast<float>(0.06)),
+      "COAST float32 domain projection clips boundary-touching focus regions");
+  return passed;
+}
+
+bool test_coast_native_air_requires_coast_axes_wire() {
+  ScratchCase axes("coast-native-air-axes");
+  axes.write("case.json", case_json(kCoastRuntimeAxesMesh));
+  axes.write("thermophysics.d", kCoastNativeAirThermophysics);
+  axes.write("axes.dat", kCoastRuntimeAxes);
+  ValidatedModel native_model;
+  bool passed = expect(
+      compile(axes.root(), native_model) &&
+          native_model.mesh.kind == GeometryKind::coast_runtime_axes_v1 &&
+          native_model.thermophysics.species.size() == 1U &&
+          native_model.thermophysics.species.front().transport_law ==
+              TransportLaw::coast_native_air,
+      "COAST-native air compiles through the COAST axes wire family");
+  if (!passed) return false;
+
+  ScratchCase non_axes("coast-native-air-non-axes");
+  non_axes.write("case.json", case_json(kUniformMesh));
+  non_axes.write("thermophysics.d", kCoastNativeAirThermophysics);
+  ValidatedModel rejected;
+  rejected.fingerprint = UINT64_C(987654321);
+  passed &= expect(
+      compile(non_axes.root(), rejected).code == StatusCode::invalid_case &&
+          rejected.fingerprint == UINT64_C(987654321),
+      "non-axes cases reject COAST-native air transactionally");
+
+  ScratchCase ordinary("coast-native-air-serialize-gate");
+  ordinary.write("case.json", case_json(kUniformMesh));
+  ordinary.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel ordinary_model;
+  passed &= expect(static_cast<bool>(compile(ordinary.root(), ordinary_model)),
+                   "native-air serialization gate seed compiles");
+  ordinary_model.thermophysics = native_model.thermophysics;
+  std::vector<std::uint8_t> rejected_payload{0xa5U};
+  passed &= expect(
+      hundun::v04::detail::serialize_model_for_test(ordinary_model,
+                                                    rejected_payload)
+                  .code == StatusCode::invalid_case &&
+          rejected_payload == std::vector<std::uint8_t>{0xa5U},
+      "non-axes serialization rejects COAST-native air transactionally");
+
+  ValidatedModel oversized = native_model;
+  constexpr std::int32_t oversized_x_cells = 32768;
+  oversized.mesh.exact_cells.x = oversized_x_cells;
+  oversized.mesh.base_spacing.x =
+      1.0 / static_cast<double>(oversized_x_cells);
+  oversized.mesh.minimum_spacing.x = oversized.mesh.base_spacing.x;
+  oversized.mesh.limits.max_global_cells =
+      static_cast<std::uint64_t>(oversized_x_cells) * 2U;
+  oversized.mesh.limits.max_memory_bytes_per_rank = UINT64_C(1073741824);
+  oversized.mesh.coast_runtime_faces[0U].resize(
+      static_cast<std::size_t>(oversized_x_cells) + 1U);
+  for (std::int32_t index = 0; index <= oversized_x_cells; ++index) {
+    oversized.mesh.coast_runtime_faces[0U][static_cast<std::size_t>(index)] =
+        static_cast<double>(static_cast<float>(index) /
+                            static_cast<float>(oversized_x_cells));
+  }
+  std::vector<std::uint8_t> oversized_payload{0xa5U};
+  passed &= expect(
+      hundun::v04::detail::serialize_model_for_test(oversized,
+                                                    oversized_payload)
+                  .code == StatusCode::invalid_case &&
+          oversized_payload == std::vector<std::uint8_t>{0xa5U},
+      "oversized COAST axes wire rejection preserves the caller payload");
+
+  std::string sutherland{kCoastNativeAirThermophysics};
+  passed &= expect(
+      replace_once(sutherland, "transport_coast_native_air",
+                   "transport_sutherland 1.23456789e-5 321.25 111.75 0.73"),
+      "legacy wire seed selects a valid distinct transport law");
+  ScratchCase seed("coast-native-air-legacy-wire-seed");
+  seed.write("case.json", case_json(kUniformMesh));
+  seed.write("thermophysics.d", sutherland);
+  ValidatedModel seed_model;
+  passed &= expect(static_cast<bool>(compile(seed.root(), seed_model)),
+                   "legacy wire seed case compiles");
+  if (!passed) return false;
+  const double canonical_high_a6 =
+      seed_model.thermophysics.species.front().nasa7_high[5U];
+  const auto rejects_wire = [&](const std::vector<std::uint8_t>& payload,
+                                std::string_view label) {
+    ValidatedModel decoded;
+    decoded.fingerprint = UINT64_C(987654321);
+    const Status status =
+        hundun::v04::detail::deserialize_model_for_test(payload, decoded);
+    return expect(status.code == StatusCode::invalid_case &&
+                      decoded.fingerprint == UINT64_C(987654321),
+                  label);
+  };
+  struct WireVariant {
+    CouplingKind coupling;
+    LinearAlgorithm algorithm;
+    std::uint8_t version;
+  };
+  constexpr std::array<WireVariant, 4U> variants{{
+      {CouplingKind::piso, LinearAlgorithm::fgmres, 11U},
+      {CouplingKind::piso, LinearAlgorithm::bicgstab, 12U},
+      {CouplingKind::simple, LinearAlgorithm::fgmres, 13U},
+      {CouplingKind::simple, LinearAlgorithm::bicgstab, 14U},
+  }};
+  for (const WireVariant& variant : variants) {
+    ValidatedModel wire_model = seed_model;
+    wire_model.solver.coupling = variant.coupling;
+    wire_model.solver.pressure.algorithm = variant.algorithm;
+    if (variant.algorithm == LinearAlgorithm::bicgstab) {
+      wire_model.solver.pressure.mg_correction_scaling =
+          MgCorrectionScaling::unit_linear;
+      wire_model.solver.pressure.krylov_restart = 0U;
+    }
+    std::vector<std::uint8_t> payload;
+    const bool forged =
+        hundun::v04::detail::serialize_model_for_test(wire_model, payload) &&
+        !payload.empty() && payload.front() == variant.version &&
+        forge_legacy_native_air_wire(payload, canonical_high_a6);
+    passed &= expect(forged, "legacy native-air wire fixture is well formed");
+    if (!forged) continue;
+    passed &= rejects_wire(payload,
+                           "wire v11-v14 reject COAST-native air");
+    if (variant.version <= 12U) {
+      std::vector<std::uint8_t> legacy = payload;
+      if (legacy.size() <= 9U) {
+        passed &= expect(false, "legacy wire fixture has a complete tail");
+        continue;
+      }
+      legacy.erase(legacy.end() - 9);
+      legacy.front() = static_cast<std::uint8_t>(variant.version - 2U);
+      passed &= rejects_wire(legacy, "wire v9-v10 reject COAST-native air");
+    }
+  }
+  return passed;
+}
+
+bool coast_axes_rejects(std::string_view label, std::string_view axes,
+                        std::string_view mesh = kCoastRuntimeAxesMesh) {
+  ScratchCase scratch(label);
+  scratch.write("case.json", case_json(mesh));
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  scratch.write("axes.dat", axes);
+  ValidatedModel model;
+  model.fingerprint = UINT64_C(987654321);
+  const Status status = compile(scratch.root(), model);
+  return expect(status.code == StatusCode::invalid_case &&
+                    model.fingerprint == UINT64_C(987654321),
+                label);
+}
+
+bool test_coast_runtime_axes_strictness_and_fingerprint() {
+  bool passed = true;
+  passed &= coast_axes_rejects(
+      "COAST axes require exact header",
+      "NOT_COAST_RUNTIME_AXES 1 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axes require version one",
+      "COAST_RUNTIME_AXES 2 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST grid count matches declared topology",
+      "COAST_RUNTIME_AXES 1 grid 3 2 1 x 4 0 .1 .2 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axis count matches grid count",
+      "COAST_RUNTIME_AXES 1 grid 2 2 1 x 4 0 .1 .2 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axes reject non-finite coordinates",
+      "COAST_RUNTIME_AXES 1 grid 2 2 1 x 3 0 nan 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axes require strict monotonicity",
+      "COAST_RUNTIME_AXES 1 grid 2 2 1 x 3 0 .4 .3 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axes reject float32 projection collapse",
+      "COAST_RUNTIME_AXES 1 grid 2 2 1 x 3 0 1e-50 1 y 3 0 .4 1 z 2 0 1");
+  passed &= coast_axes_rejects(
+      "COAST axes reject trailing tokens",
+      "COAST_RUNTIME_AXES 1 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1 extra");
+
+  std::string memory_limited{kCoastRuntimeAxesMesh};
+  passed &= expect(replace_once(memory_limited,
+                                "\"max_memory_bytes_per_rank\":1048576",
+                                "\"max_memory_bytes_per_rank\":63"),
+                   "COAST axes memory-limit fixture mutation");
+  passed &= coast_axes_rejects("COAST axes obey mesh memory limit",
+                               kCoastRuntimeAxes, memory_limited);
+
+  std::string nested_path{kCoastRuntimeAxesMesh};
+  passed &= expect(replace_once(nested_path, "\"axes.dat\"",
+                                "\"runtime/axes.dat\""),
+                   "COAST nested axes fixture mutation");
+  passed &= coast_axes_rejects("COAST axes path is a direct leaf",
+                               kCoastRuntimeAxes, nested_path);
+
+  std::string missing_key{kCoastRuntimeAxesMesh};
+  passed &= expect(replace_once(missing_key, "\"axes_file\":\"axes.dat\",",
+                                ""),
+                   "COAST missing axes key fixture mutation");
+  passed &= coast_axes_rejects("COAST axes key is mandatory",
+                               kCoastRuntimeAxes, missing_key);
+
+  ScratchCase first_case("coast-axes-fingerprint-first");
+  first_case.write("case.json", case_json(kCoastRuntimeAxesMesh));
+  first_case.write("thermophysics.d", kPlaceholderThermophysics);
+  first_case.write("axes.dat", kCoastRuntimeAxes);
+  ValidatedModel first;
+  passed &= expect(static_cast<bool>(compile(first_case.root(), first)),
+                   "first COAST axes fingerprint fixture compiles");
+
+  std::string changed_faces{kCoastRuntimeAxes};
+  passed &= expect(replace_once(changed_faces, "0.1000000001", "0.2"),
+                   "COAST effective-face fingerprint fixture mutation");
+  ScratchCase second_case("coast-axes-fingerprint-second");
+  second_case.write("case.json", case_json(kCoastRuntimeAxesMesh));
+  second_case.write("thermophysics.d", kPlaceholderThermophysics);
+  second_case.write("axes.dat", changed_faces);
+  ValidatedModel second;
+  passed &= expect(static_cast<bool>(compile(second_case.root(), second)) &&
+                       first.fingerprint != second.fingerprint,
+                   "effective COAST faces affect case fingerprint");
+
+  std::string reformatted{kCoastRuntimeAxes};
+  reformatted.append("\n");
+  ScratchCase third_case("coast-axes-fingerprint-third");
+  third_case.write("case.json", case_json(kCoastRuntimeAxesMesh));
+  third_case.write("thermophysics.d", kPlaceholderThermophysics);
+  third_case.write("axes.dat", reformatted);
+  ValidatedModel third;
+  passed &= expect(static_cast<bool>(compile(third_case.root(), third)) &&
+                       first.mesh.coast_runtime_faces ==
+                           third.mesh.coast_runtime_faces &&
+                       first.fingerprint != third.fingerprint,
+                   "COAST source file bytes affect case fingerprint");
   return passed;
 }
 
@@ -1173,6 +1548,9 @@ int main(int argc, char** argv) {
   bool passed = true;
   passed &= test_valid_fixture();
   passed &= test_tensor_normalization_and_fingerprint();
+  passed &= test_coast_runtime_axes_case();
+  passed &= test_coast_native_air_requires_coast_axes_wire();
+  passed &= test_coast_runtime_axes_strictness_and_fingerprint();
   passed &= test_every_typed_mesh_field_affects_fingerprint();
   passed &= test_typed_case_fields_and_fingerprint();
   passed &= test_transported_scalar_catalog();

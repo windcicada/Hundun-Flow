@@ -40,6 +40,18 @@ constexpr long double kContinuityRelativeTolerance = 1.0e-8L;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
+// Exact 0.21 O2 + 0.79 N2 mole-weighted NASA7 scientific values independently
+// derived from the pinned Cantera example-data record documented in
+// THIRD_PARTY.md.  No license is inferred from the parent Cantera repository.
+constexpr std::array<double, 7U> kCoastNativeAirNasaLow{
+    3.5838100068,       -7.2700635412e-4, 1.67056387003e-6,
+    -1.091801341e-10,  -4.317787988e-13, -1050.5394088,
+    3.1124135035};
+constexpr std::array<double, 7U> kCoastNativeAirNasaHigh{
+    3.1013370688,      1.24138813631e-3, -4.1882038804e-7,
+    6.641656204e-11,  -3.9127843272e-15, -985.27467132,
+    5.3560174057};
+
 Status invalid(std::uint32_t detail) noexcept {
   return {StatusCode::invalid_case, detail};
 }
@@ -61,6 +73,18 @@ bool valid_name(std::string_view value) noexcept {
 
 bool finite_positive(double value) noexcept {
   return std::isfinite(value) && value > 0.0;
+}
+
+bool coast_native_air_species(
+    const SpeciesThermophysicalSpec& species) noexcept {
+  return species.molecular_weight == kCoastNativeAirMolecularWeight &&
+         species.temperature_switch == 1000.0 &&
+         species.nasa7_low == kCoastNativeAirNasaLow &&
+         species.nasa7_high == kCoastNativeAirNasaHigh &&
+         species.viscosity_reference == 0.0 &&
+         species.transport_reference_temperature == 0.0 &&
+         species.sutherland_temperature == 0.0 && species.prandtl == 0.0 &&
+         species.conductivity == 0.0;
 }
 
 bool parse_real(std::string_view token, double& out) noexcept {
@@ -348,7 +372,8 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
         !finite_positive(species.temperature_switch) ||
         species.temperature_switch <= spec.minimum_temperature ||
         species.temperature_switch >= spec.maximum_temperature ||
-        !finite_positive(species.viscosity_reference)) {
+        (species.transport_law != TransportLaw::coast_native_air &&
+         !finite_positive(species.viscosity_reference))) {
       return false;
     }
     for (std::size_t prior = 0U; prior < species_index; ++prior) {
@@ -377,6 +402,10 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
           species.sutherland_temperature < 0.0 ||
           !std::isfinite(species.sutherland_temperature) ||
           !finite_positive(species.prandtl) || species.conductivity != 0.0) {
+        return false;
+      }
+    } else if (species.transport_law == TransportLaw::coast_native_air) {
+      if (spec.species.size() != 1U || !coast_native_air_species(species)) {
         return false;
       }
     } else {
@@ -414,7 +443,9 @@ bool canonicalize_spec(ThermophysicalSpec& spec) noexcept {
     if (!std::isfinite(constant)) {
       return false;
     }
-    species.nasa7_high[5U] = constant;
+    if (species.transport_law != TransportLaw::coast_native_air) {
+      species.nasa7_high[5U] = constant;
+    }
   }
   return valid_spec(spec);
 }
@@ -606,6 +637,8 @@ Status parse_text(std::string_view text, ThermophysicalSpec& out) noexcept {
             !tokens.real(species.prandtl)) {
           return invalid(kSyntax);
         }
+      } else if (tokens.exact("transport_coast_native_air")) {
+        species.transport_law = TransportLaw::coast_native_air;
       } else {
         return invalid(kSyntax);
       }

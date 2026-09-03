@@ -89,6 +89,65 @@ bool test_uniform_metrics() {
   return passed;
 }
 
+bool test_coast_runtime_axes_metrics() {
+  CartesianMeshSpec mesh;
+  mesh.kind = GeometryKind::coast_runtime_axes_v1;
+  mesh.axes_file = "axes.dat";
+  mesh.coast_runtime_faces = {
+      std::vector<double>{-0.1, -0.025, 0.05},
+      std::vector<double>{-0.02, 0.0, 0.03},
+      std::vector<double>{0.0, 0.06}};
+  mesh.has_exact_cells = true;
+  mesh.exact_cells = {2, 2, 1};
+  mesh.lower = {-0.1, -0.02, 0.0};
+  mesh.upper = {0.05, 0.03, 0.06};
+  mesh.limits = {32U, 1U << 20U};
+
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  const Status status = CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, mesh, GeometryBudget{}, geometry, patch);
+  bool passed = expect(static_cast<bool>(status),
+                       "COAST runtime axes compile directly");
+  passed &= expect(same(geometry.global_cells(), {2, 2, 1}) &&
+                       geometry.kind() ==
+                           GeometryKind::coast_runtime_axes_v1,
+                   "COAST runtime axes preserve topology");
+  passed &= expect(
+      status && geometry.x().faces().size == 3U &&
+          geometry.x().faces().data[1] ==
+              static_cast<double>(static_cast<float>(-0.025)),
+      "COAST runtime axes use the solver's float32 effective coordinate");
+  const PlanFingerprint retained = geometry.fingerprint();
+
+  CartesianMeshSpec collapsed = mesh;
+  collapsed.coast_runtime_faces[0U][1U] = -0.1 + 1.0e-12;
+  const Status collapsed_status = CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, collapsed, GeometryBudget{}, geometry, patch);
+  passed &= expect(collapsed_status.code == StatusCode::invalid_plan &&
+                       geometry.fingerprint() == retained,
+                   "float32-collapsed COAST faces are rejected atomically");
+
+  CartesianMeshSpec mismatched = mesh;
+  mismatched.exact_cells.x = 3;
+  const Status mismatched_status = CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, mismatched, GeometryBudget{}, geometry, patch);
+  passed &= expect(mismatched_status.code == StatusCode::invalid_plan &&
+                       geometry.fingerprint() == retained,
+                   "COAST face counts must match declared cells");
+
+  CartesianMeshSpec changed = mesh;
+  changed.coast_runtime_faces[0U][1U] = -0.02;
+  CartesianGeometryPlan changed_geometry;
+  MeshPatch changed_patch;
+  passed &= expect(static_cast<bool>(CartesianGeometryCompiler::compile(
+                       MPI_COMM_SELF, changed, GeometryBudget{},
+                       changed_geometry, changed_patch)) &&
+                       changed_geometry.fingerprint() != retained,
+                   "effective COAST faces bind geometry identity");
+  return passed;
+}
+
 bool test_hard_limits_and_publication() {
   bool passed = true;
   CartesianGeometryPlan retained;
@@ -197,6 +256,7 @@ int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
   passed &= test_uniform_metrics();
+  passed &= test_coast_runtime_axes_metrics();
   passed &= test_hard_limits_and_publication();
   passed &= test_cpu_tiles();
   passed &= test_extreme_decomposition_arithmetic();

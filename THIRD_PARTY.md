@@ -74,3 +74,41 @@ required at runtime by HUNDUN-FLOW. Exact evidence paths and adoption decisions 
 - Sole exception: for Task 5, the user authorizes porting or adapting the `imb_mesh_y.cpp`
   scanning mathematics/method without provenance boilerplate. This narrow authorization does
   not extend to any other COAST C++ or to old COAST Fortran.
+
+### Cantera example-data scientific reference
+
+- Locator: Cantera 3.1.0 points `data/example_data` to the independent
+  `Cantera/cantera-example-data` gitlink
+  `1a5d27e508a38b1791543e9fded80ffd5c5b8d75`; the referenced record is
+  `n-hexane-NUIG-2015.yaml` at that commit.
+- Reference scope: the record's O2 and N2 NASA7 values were used as an
+  independently documented scientific source for the fixed 0.21/0.79
+  mole-fraction pseudo-air coefficients.
+- Licensing boundary: that pinned example-data repository does not provide a
+  license grant for the record, and the parent Cantera repository's license is
+  not asserted to cover it. HUNDUN neither redistributes the YAML/mechanism nor
+  links Cantera at runtime; it records only the directly mole-weighted O2/N2
+  numerical scientific values and makes no upstream-license claim for them.
+
+### Published transport-model mathematics
+
+- P. Yoon and G. Thodos, "Viscosity of Nonpolar Gaseous Mixtures at Normal
+  Pressures," AIChE Journal 16(2), 300--304 (1970), DOI
+  `10.1002/aic.690160225`.
+- C. R. Wilke, "A Viscosity Equation for Gas Mixtures," Journal of Chemical
+  Physics 18 (1950), DOI `10.1063/1.1747673`.
+- A. W. Vreman, "An eddy-viscosity subgrid-scale model for turbulent shear
+  flow: Algebraic theory and applications," Physics of Fluids 16 (2004), DOI
+  `10.1063/1.1785131`.
+- Reference scope: public mathematical definitions for the Yoon--Thodos
+  low-pressure species viscosity, Wilke gas-mixture viscosity weighting, and
+  the Vreman SGS invariant. The fixed O2/N2 inputs use `Tc` in K, `Pc` in atm,
+  and molecular weight in g/mol; the correlation returns micropoise before the
+  exact `1e-7 Pa s` conversion. The retained O2/N2 inputs
+  `Tc=154.4/126.2 K` and `Pc=49.7/33.5 atm` are the deliberately rounded
+  comparison-contract values also tabulated in R. B. Bird, W. E. Stewart, and
+  E. N. Lightfoot, *Transport Phenomena*, 2nd ed. (Wiley, 2002), Appendix E,
+  Table E.1. NIST Chemistry WebBook SRD 69 was used only as an independent
+  reasonableness check, not as the source of those exact rounded values.
+  HUNDUN owns the implementation and tests; no publication or third-party
+  source text is copied.

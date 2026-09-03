@@ -246,11 +246,15 @@ struct PressureEnergyCandidateStorageDiagnostic {
       scratch_fields{};
   std::uintptr_t coupled_state_halo{};
   std::uintptr_t candidate_state_halo{};
+  std::uintptr_t coupled_thermal_halo{};
+  std::uintptr_t candidate_thermal_halo{};
   std::uintptr_t candidate_finalizer_state_halo{};
   std::uintptr_t correction_halo{};
   std::uintptr_t candidate_correction_halo{};
   HaloPlanStats coupled_state_halo_plan{};
   HaloPlanStats candidate_state_halo_plan{};
+  HaloPlanStats coupled_thermal_halo_plan{};
+  HaloPlanStats candidate_thermal_halo_plan{};
   HaloPlanStats candidate_finalizer_state_halo_plan{};
   HaloPlanStats correction_halo_plan{};
   HaloPlanStats candidate_correction_halo_plan{};

@@ -562,14 +562,31 @@ bool run_restart_restore_allocation_contract(int rank) {
 
 bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
   detail::PressureEnergyCandidateStorageDiagnostic diagnostic;
+  std::size_t live_thermal_halo_bytes = 0U;
+  const bool thermal_budget_sized = detail::product_halo_bytes(
+      plan.summary().local_cells, 2U, 1U, live_thermal_halo_bytes);
+  const std::uint64_t refinement_thermal_bytes =
+      static_cast<std::uint64_t>(kPressureEnergyRefinementCapacity) *
+      live_thermal_halo_bytes;
+  const std::uint64_t refinement_thermal_messages =
+      refinement_thermal_bytes / sizeof(double);
   bool valid = detail::pressure_energy_candidate_storage_diagnostic_for_test(
                    diagnostic) &&
+               thermal_budget_sized &&
                diagnostic.valid && diagnostic.plan == plan.fingerprint() &&
                diagnostic.lineage_fingerprint != 0U &&
                same_u64(diagnostic.lineage_fingerprint, MPI_COMM_WORLD) &&
                diagnostic.coupled_state_halo != 0U &&
                diagnostic.candidate_state_halo != 0U &&
                diagnostic.coupled_state_halo !=
+                   diagnostic.candidate_state_halo &&
+               diagnostic.coupled_thermal_halo != 0U &&
+               diagnostic.candidate_thermal_halo != 0U &&
+               diagnostic.coupled_thermal_halo !=
+                   diagnostic.candidate_thermal_halo &&
+               diagnostic.coupled_thermal_halo !=
+                   diagnostic.coupled_state_halo &&
+               diagnostic.candidate_thermal_halo !=
                    diagnostic.candidate_state_halo &&
                diagnostic.candidate_finalizer_state_halo != 0U &&
                diagnostic.candidate_finalizer_state_halo !=
@@ -590,13 +607,15 @@ bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
                diagnostic.corrector_one_resource_contract
                        .merged_halo_bytes > 0U &&
                diagnostic.corrector_two_resource_contract
-                       .merged_halo_messages ==
+                       .merged_halo_messages >
                    diagnostic.corrector_one_resource_contract
-                       .merged_halo_messages &&
+                           .merged_halo_messages +
+                       refinement_thermal_messages &&
                diagnostic.corrector_two_resource_contract
-                       .merged_halo_bytes ==
+                       .merged_halo_bytes >
                    diagnostic.corrector_one_resource_contract
-                       .merged_halo_bytes;
+                           .merged_halo_bytes +
+                       refinement_thermal_bytes;
   const auto disjoint = [](std::uintptr_t left_begin,
                            std::uintptr_t left_end,
                            std::uintptr_t right_begin,
@@ -620,6 +639,8 @@ bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
   };
   valid &= same_halo_capacity(diagnostic.coupled_state_halo_plan,
                               diagnostic.candidate_state_halo_plan) &&
+           same_halo_capacity(diagnostic.coupled_thermal_halo_plan,
+                              diagnostic.candidate_thermal_halo_plan) &&
            same_halo_capacity(diagnostic.correction_halo_plan,
                               diagnostic.candidate_correction_halo_plan);
   for (std::size_t left = 0U; left < diagnostic.fields.size(); ++left) {
@@ -667,6 +688,19 @@ bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
 
 bool run_candidate_storage_lineage_only(int rank) {
   ValidatedModel model = test::product_model({17, 11, 7});
+  SpeciesThermophysicalSpec& air = model.thermophysics.species.front();
+  air.molecular_weight = kCoastNativeAirMolecularWeight;
+  air.nasa7_low = {3.5838100068,      -7.2700635412e-4,
+                   1.67056387003e-6, -1.091801341e-10,
+                   -4.317787988e-13, -1050.5394088,
+                   3.1124135035};
+  air.nasa7_high = {3.1013370688,      1.24138813631e-3,
+                    -4.1882038804e-7, 6.641656204e-11,
+                    -3.9127843272e-15, -985.27467132,
+                    5.3560174057};
+  air.viscosity_reference = 0.0;
+  air.conductivity = 0.0;
+  air.transport_law = TransportLaw::coast_native_air;
   model.fingerprint = UINT64_C(0x18000c501);
   CompiledCasePlan plan;
   Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);

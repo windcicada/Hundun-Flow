@@ -104,6 +104,63 @@ Status convective_cfl_acceptance_status(TimeControlKind control,
              : Status{StatusCode::rejected_step, kProductConvectiveCfl};
 }
 
+Status refresh_coast_native_air_effective_thermal_transport(
+    const TransportPlan& transport, ConstFieldView molecular_viscosity,
+    ConstFieldView effective_viscosity, ConstFieldView heat_capacity,
+    FieldView conductivity, FieldView enthalpy_diffusivity) noexcept {
+  if (transport.kernel() != TransportKernel::coast_native_air) return {};
+  const Int3 cells = molecular_viscosity.interior;
+  const auto valid_scalar = [&](ConstFieldView view) noexcept {
+    return view.base != nullptr && view.components == 1U &&
+           view.interior.x == cells.x && view.interior.y == cells.y &&
+           view.interior.z == cells.z;
+  };
+  if (cells.x <= 0 || cells.y <= 0 || cells.z <= 0 ||
+      !valid_scalar(effective_viscosity) || !valid_scalar(heat_capacity) ||
+      !valid_scalar(as_const(conductivity)) ||
+      !valid_scalar(as_const(enthalpy_diffusivity))) {
+    return {StatusCode::invalid_plan, kProductBinding};
+  }
+  for (std::int32_t z = 0; z < cells.z; ++z) {
+    for (std::int32_t y = 0; y < cells.y; ++y) {
+      for (std::int32_t x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        double lambda = 0.0;
+        double gamma_h = 0.0;
+        const Status status = transport.effective_enthalpy_transport(
+            molecular_viscosity.unchecked(cell, 0U),
+            effective_viscosity.unchecked(cell, 0U),
+            heat_capacity.unchecked(cell, 0U), lambda, gamma_h);
+        if (!status) return status;
+        conductivity.unchecked(cell, 0U) = lambda;
+        enthalpy_diffusivity.unchecked(cell, 0U) = gamma_h;
+      }
+    }
+  }
+  return {};
+}
+
+Status exchange_effective_thermal_ghosts(
+    HaloEngine& halo, StageId stage, const BoundaryPlan& boundary,
+    FieldView& conductivity, FieldView& enthalpy_diffusivity,
+    Status prerequisite) noexcept {
+  std::array<FieldView, 2U> fields{conductivity, enthalpy_diffusivity};
+  HaloTicket ticket;
+  Status status =
+      halo.begin(stage, {fields.data(), fields.size()}, prerequisite, ticket);
+  if (status)
+    status = halo.finish(ticket, {fields.data(), fields.size()});
+  if (status) {
+    conductivity = fields[0U];
+    enthalpy_diffusivity = fields[1U];
+    status = apply_physical_zero_gradient(
+        boundary, {fields.data(), fields.size()});
+    conductivity = fields[0U];
+    enthalpy_diffusivity = fields[1U];
+  }
+  return status;
+}
+
 bool product_entirely_periodic(const BoundaryPlan& boundary) noexcept {
   for (std::size_t index = 0U; index < 6U; ++index) {
     const BoundaryFacePlan* face = nullptr;
@@ -651,6 +708,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   std::size_t candidate_state_full_halo_bytes = 0U;
   std::size_t candidate_state_face_halo_bytes = 0U;
   std::size_t candidate_state_halo_bytes = 0U;
+  std::size_t thermal_halo_bytes = 0U;
   std::size_t candidate_finalizer_halo_bytes = 0U;
   std::size_t force_halo_bytes = 0U;
   if (!detail::product_field_bytes(local_cells, 8U, default_workspace) ||
@@ -676,8 +734,10 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
       !detail::product_halo_bytes(
           local_shape, 6U + fields.pressure_energy_candidate_species.size(),
           ghosts, candidate_state_full_halo_bytes) ||
-      !detail::product_halo_bytes(local_shape, 3U, 1U,
+      !detail::product_halo_bytes(local_shape, 1U, 1U,
                                   candidate_state_face_halo_bytes) ||
+      !detail::product_halo_bytes(local_shape, 2U, 1U,
+                                  thermal_halo_bytes) ||
       !detail::product_halo_bytes(
           local_shape, 7U + fields.pressure_energy_candidate_species.size(),
           1U, candidate_finalizer_halo_bytes) ||
@@ -730,7 +790,30 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     out = left * right;
     return true;
   };
-  // ResourceContract is deliberately an upper bound.  Reserve all three
+  const std::uint64_t thermal_halo_messages =
+      static_cast<std::uint64_t>(thermal_halo_bytes / sizeof(double));
+  const auto add_live_thermal_halo_budget =
+      [&](StageResourceSpec& resources,
+          std::uint64_t exchange_count) noexcept {
+        std::uint64_t added_messages = 0U;
+        std::uint64_t added_bytes = 0U;
+        std::uint64_t total_messages = 0U;
+        std::uint64_t total_bytes = 0U;
+        if (!checked_multiply_u64(thermal_halo_messages, exchange_count,
+                                  added_messages) ||
+            !checked_multiply_u64(
+                static_cast<std::uint64_t>(thermal_halo_bytes),
+                exchange_count, added_bytes) ||
+            !checked_add_u64(resources.merged_halo_messages, added_messages,
+                             total_messages) ||
+            !checked_add_u64(resources.merged_halo_bytes, added_bytes,
+                             total_bytes))
+          return false;
+        resources.merged_halo_messages = total_messages;
+        resources.merged_halo_bytes = total_bytes;
+        return true;
+      };
+  // ResourceContract is deliberately an upper bound.  Reserve all four
   // independent candidate halo routes for every evaluation, even though the
   // finalizer route is inactive for a closed-periodic case.  A transport
   // chunk contains at least one double, so the total payload-double count is
@@ -750,11 +833,18 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
           candidate_messages_per_evaluation) ||
       !checked_add_u64(
           candidate_messages_per_evaluation,
+          thermal_halo_messages,
+          candidate_messages_per_evaluation) ||
+      !checked_add_u64(
+          candidate_messages_per_evaluation,
           static_cast<std::uint64_t>(candidate_finalizer_halo_bytes /
                                      sizeof(double)),
           candidate_messages_per_evaluation) ||
       !checked_add_u64(candidate_bytes_per_evaluation,
                        static_cast<std::uint64_t>(candidate_state_halo_bytes),
+                       candidate_bytes_per_evaluation) ||
+      !checked_add_u64(candidate_bytes_per_evaluation,
+                       static_cast<std::uint64_t>(thermal_halo_bytes),
                        candidate_bytes_per_evaluation) ||
       !checked_add_u64(
           candidate_bytes_per_evaluation,
@@ -1041,16 +1131,20 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
          work_cp, work_drho_dp, work_drho_dh, work_lambda_cp},
         std::move(thermo_ghosts),
         {6U, thermo_halo_bytes, 0U, 0U, 0U, 0U, 0U}, true);
-  if (status)
+  if (status) {
+    StageResourceSpec turbulence_resources{
+        6U + gradient_donors.peer_messages,
+        turbulence_halo_bytes + gradient_donors.bytes_per_exchange,
+        0U, 0U, 1U, 0U, 0U};
+    if (!add_live_thermal_halo_budget(turbulence_resources, 1U))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     status = register_mutating(
         20U,
         {trial_rho, trial_u, trial_mu, trial_mu_eff, accepted_rho,
          accepted_u, work_h_by_a},
         {trial_grad, trial_mu_eff, work_h_by_a}, {trial_u, work_h_by_a},
-        {6U + gradient_donors.peer_messages,
-         turbulence_halo_bytes + gradient_donors.bytes_per_exchange,
-         0U, 0U, 1U, 0U, 0U},
-        false);
+        turbulence_resources, false);
+  }
   if (status) {
     StageSpec momentum;
     const std::array reads{trial_rho, trial_u, trial_pi, trial_mu_eff,
@@ -1101,7 +1195,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
           static_cast<std::uint64_t>(pressure_halo_bytes) +
               pressure_donors.bytes_per_exchange,
           candidate_halo_bytes,
-          pressure_resources.merged_halo_bytes))
+          pressure_resources.merged_halo_bytes) ||
+      !add_live_thermal_halo_budget(pressure_resources, 1U))
     return {StatusCode::invalid_plan, kProductAnalysis};
   pressure_resources.numeric_refills = 3U;
   pressure_resources.linear_iterations = 400U;
@@ -1229,10 +1324,35 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   if (status) {
     StageSpec contribution_two;
     contribution_two.id = 45U;
+    if (!add_live_thermal_halo_budget(contribution_two.resources, 2U))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     status = compiler.register_stage(contribution_two);
   }
   if (status) {
     StageResourceSpec second = pressure_resources;
+    // The inherited budget covers the initial C2 solve, its complete bounded
+    // candidate-globalization loop, and the terminal coupled-state refresh.
+    // Every bounded refinement may repeat both the complete candidate loop
+    // and one live thermal refresh.
+    constexpr std::uint64_t refinement_count =
+        static_cast<std::uint64_t>(kPressureEnergyRefinementCapacity);
+    std::uint64_t refinement_candidate_bytes = 0U;
+    std::uint64_t refinement_candidate_messages = 0U;
+    std::uint64_t second_bytes = 0U;
+    std::uint64_t second_messages = 0U;
+    if (!checked_multiply_u64(candidate_halo_bytes, refinement_count,
+                              refinement_candidate_bytes) ||
+        !checked_multiply_u64(candidate_halo_messages, refinement_count,
+                              refinement_candidate_messages) ||
+        !checked_add_u64(second.merged_halo_bytes,
+                         refinement_candidate_bytes, second_bytes) ||
+        !checked_add_u64(second.merged_halo_messages,
+                         refinement_candidate_messages, second_messages))
+      return {StatusCode::invalid_plan, kProductAnalysis};
+    second.merged_halo_bytes = second_bytes;
+    second.merged_halo_messages = second_messages;
+    if (!add_live_thermal_halo_budget(second, refinement_count))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     second.cache_publishes = 1U;
     status = register_pressure(50U, second);
   }
@@ -1270,6 +1390,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     force.resources.merged_halo_bytes =
         force_halo_bytes + gradient_donors.bytes_per_exchange +
         force_donors.bytes_per_exchange + rate_donors.bytes_per_exchange;
+    if (!add_live_thermal_halo_budget(force.resources, 1U))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     force.resources.cache_publishes = 1U;
     force.collective_consensus = true;
     status = compiler.register_stage(force);
@@ -2360,6 +2482,8 @@ struct CompiledCasePlan::Impl {
   HaloEngine final_velocity_halo;
   HaloEngine coupled_state_halo;
   HaloEngine candidate_state_halo;
+  HaloEngine coupled_thermal_halo;
+  HaloEngine candidate_thermal_halo;
   HaloEngine candidate_finalizer_state_halo;
   HaloEngine correction_halo;
   HaloEngine candidate_correction_halo;
@@ -2659,6 +2783,8 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   halo(product.final_velocity_halo);
   halo(product.coupled_state_halo);
   halo(product.candidate_state_halo);
+  halo(product.coupled_thermal_halo);
+  halo(product.candidate_thermal_halo);
   halo(product.candidate_finalizer_state_halo);
   halo(product.correction_halo);
   halo(product.candidate_correction_halo);
@@ -3356,18 +3482,15 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         communicator, candidate->patch,
         {final_velocity_halo.data(), final_velocity_halo.size()},
         candidate->boundary.halo_topology());
-  // The same-target pressure-energy loop revises all primitive and thermal
-  // authorities together.  Freeze one independent halo with the full
-  // equation/IBM reach for fields consumed by the next coupled residual;
-  // one layer remains sufficient for density and face diffusion material.
-  const std::array<HaloFieldSpec, 7U> coupled_state_halo{{
+  // The same-target pressure-energy loop first publishes primitive authority.
+  // Effective thermal material depends on the resulting velocity ghosts and
+  // therefore owns a later, narrow exchange below.
+  const std::array<HaloFieldSpec, 5U> coupled_state_halo{{
       {candidate->fields.velocity, ghosts, 3U},
       {candidate->fields.rho, 1U, 1U},
       {candidate->fields.pressure, ghosts, 1U},
       {candidate->fields.enthalpy, ghosts, 1U},
       {candidate->fields.temperature, ghosts, 1U},
-      {candidate->fields.thermal_conductivity, 1U, 1U},
-      {candidate->fields.enthalpy_diffusivity, 1U, 1U},
   }};
   if (status)
     status = candidate->coupled_state_halo.reserve(
@@ -3380,7 +3503,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   std::vector<HaloFieldSpec> candidate_state_halo;
   if (status) {
     candidate_state_halo.reserve(
-        7U + candidate->fields.pressure_energy_candidate_species.size());
+        5U + candidate->fields.pressure_energy_candidate_species.size());
     candidate_state_halo.push_back(
         {candidate->fields.pressure_energy_candidate_velocity, ghosts, 3U});
     candidate_state_halo.push_back(
@@ -3391,12 +3514,6 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         {candidate->fields.pressure_energy_candidate_enthalpy, ghosts, 1U});
     candidate_state_halo.push_back(
         {candidate->fields.pressure_energy_candidate_temperature, ghosts, 1U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_thermal_conductivity, 1U,
-         1U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_enthalpy_diffusivity, 1U,
-         1U});
     for (FieldId species :
          candidate->fields.pressure_energy_candidate_species)
       candidate_state_halo.push_back({species, ghosts, 1U});
@@ -3405,8 +3522,28 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         {candidate_state_halo.data(), candidate_state_halo.size()},
         candidate->boundary.halo_topology());
   }
+  const std::array<HaloFieldSpec, 2U> coupled_thermal_halo{{
+      {candidate->fields.thermal_conductivity, 1U, 1U},
+      {candidate->fields.enthalpy_diffusivity, 1U, 1U},
+  }};
+  if (status)
+    status = candidate->coupled_thermal_halo.reserve(
+        communicator, candidate->patch,
+        {coupled_thermal_halo.data(), coupled_thermal_halo.size()},
+        candidate->boundary.halo_topology());
+  const std::array<HaloFieldSpec, 2U> candidate_thermal_halo{{
+      {candidate->fields.pressure_energy_candidate_thermal_conductivity, 1U,
+       1U},
+      {candidate->fields.pressure_energy_candidate_enthalpy_diffusivity, 1U,
+       1U},
+  }};
+  if (status)
+    status = candidate->candidate_thermal_halo.reserve(
+        communicator, candidate->patch,
+        {candidate_thermal_halo.data(), candidate_thermal_halo.size()},
+        candidate->boundary.halo_topology());
   // Physical boundary finalization consumes an exact, narrow candidate
-  // primitive contract.  It must not accept the seven-field residual halo as
+  // primitive contract.  It must not accept the residual-state halo as
   // a superset because that would erase U/Y lineage and permit stale ghosts.
   std::vector<HaloFieldSpec> candidate_finalizer_state_halo;
   if (status) {
@@ -3890,25 +4027,26 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       candidate->phi_workspace.counters();
   const FaceFluxStorageCounters final_flux_capacity =
       candidate->final_flux.counters();
-  const bool independent_halo_lineage =
-      candidate->coupled_state_halo.ready() &&
-      candidate->candidate_state_halo.ready() &&
-      candidate->candidate_finalizer_state_halo.ready() &&
-      candidate->correction_halo.ready() &&
-      candidate->candidate_correction_halo.ready() &&
-      candidate->coupled_state_halo.instance_identity() != 0U &&
-      candidate->candidate_state_halo.instance_identity() != 0U &&
-      candidate->candidate_finalizer_state_halo.instance_identity() != 0U &&
-      candidate->coupled_state_halo.instance_identity() !=
-          candidate->candidate_state_halo.instance_identity() &&
-      candidate->candidate_finalizer_state_halo.instance_identity() !=
-          candidate->candidate_state_halo.instance_identity() &&
-      candidate->candidate_finalizer_state_halo.instance_identity() !=
-          candidate->coupled_state_halo.instance_identity() &&
-      candidate->correction_halo.instance_identity() != 0U &&
-      candidate->candidate_correction_halo.instance_identity() != 0U &&
-      candidate->correction_halo.instance_identity() !=
-          candidate->candidate_correction_halo.instance_identity();
+  const std::array<const HaloEngine*, 7U> independent_halos{{
+      &candidate->coupled_state_halo,
+      &candidate->candidate_state_halo,
+      &candidate->coupled_thermal_halo,
+      &candidate->candidate_thermal_halo,
+      &candidate->candidate_finalizer_state_halo,
+      &candidate->correction_halo,
+      &candidate->candidate_correction_halo,
+  }};
+  bool independent_halo_lineage = true;
+  for (std::size_t index = 0U;
+       index < independent_halos.size() && independent_halo_lineage; ++index) {
+    const HaloEngine& halo = *independent_halos[index];
+    independent_halo_lineage = halo.ready() && halo.instance_identity() != 0U;
+    for (std::size_t other = index + 1U;
+         other < independent_halos.size() && independent_halo_lineage; ++other)
+      independent_halo_lineage =
+          halo.instance_identity() !=
+          independent_halos[other]->instance_identity();
+  }
   const bool independent_candidate_donor_lineage =
       !immersed ||
       (candidate->ibm_candidate_pressure_donors.has_value() &&
@@ -4125,6 +4263,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       candidate->coupled_state_halo.instance_identity();
   storage_diagnostic.candidate_state_halo =
       candidate->candidate_state_halo.instance_identity();
+  storage_diagnostic.coupled_thermal_halo =
+      candidate->coupled_thermal_halo.instance_identity();
+  storage_diagnostic.candidate_thermal_halo =
+      candidate->candidate_thermal_halo.instance_identity();
   storage_diagnostic.candidate_finalizer_state_halo =
       candidate->candidate_finalizer_state_halo.instance_identity();
   storage_diagnostic.correction_halo =
@@ -4135,6 +4277,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       candidate->coupled_state_halo.plan_stats();
   storage_diagnostic.candidate_state_halo_plan =
       candidate->candidate_state_halo.plan_stats();
+  storage_diagnostic.coupled_thermal_halo_plan =
+      candidate->coupled_thermal_halo.plan_stats();
+  storage_diagnostic.candidate_thermal_halo_plan =
+      candidate->candidate_thermal_halo.plan_stats();
   storage_diagnostic.candidate_finalizer_state_halo_plan =
       candidate->candidate_finalizer_state_halo.plan_stats();
   storage_diagnostic.correction_halo_plan =
@@ -4857,6 +5003,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   FieldView molecular_viscosity;
   FieldView effective_viscosity;
   FieldView conductivity;
+  FieldView heat_capacity;
+  FieldView enthalpy_diffusivity;
   status = runtime_view_for_write(product.fields.velocity_gradient,
                                   velocity_gradient);
   if (status) {
@@ -4886,10 +5034,34 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  if (status)
+  if (status && product.transport.kernel() ==
+                    TransportKernel::coast_native_air)
+    status = product.layers.runtime_view(
+        FieldLifetime::persistent_workspace, product.fields.heat_capacity,
+        heat_capacity);
+  if (status && product.transport.kernel() ==
+                    TransportKernel::coast_native_air)
+    status = runtime_view_for_write(product.fields.thermal_conductivity,
+                                    conductivity);
+  if (status && product.transport.kernel() ==
+                    TransportKernel::coast_native_air)
+    status = runtime_view_for_write(product.fields.enthalpy_diffusivity,
+                                    enthalpy_diffusivity);
+  if (status && product.transport.kernel() ==
+                    TransportKernel::coast_native_air)
+    status = refresh_coast_native_air_effective_thermal_transport(
+        product.transport, as_const(molecular_viscosity),
+        as_const(effective_viscosity), as_const(heat_capacity), conductivity,
+        enthalpy_diffusivity);
+  if (status && product.transport.kernel() !=
+                    TransportKernel::coast_native_air)
     status = product.layers.runtime_view(
         FieldLifetime::persistent_workspace,
         product.fields.thermal_conductivity, conductivity);
+  if (product.transport.kernel() == TransportKernel::coast_native_air)
+    status = exchange_effective_thermal_ghosts(
+        product.coupled_thermal_halo, 60U, product.boundary, conductivity,
+        enthalpy_diffusivity, status);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -7369,6 +7541,27 @@ Status ProductDriver::Impl::execute_attempt(
   if (status)
     status = runtime_write_view(product.fields.eos_density, eos_density);
 
+  const auto refresh_live_effective_thermal_ghosts =
+      [&](StageId stage, Status prerequisite) {
+        if (product.transport.kernel() != TransportKernel::coast_native_air)
+          return prerequisite;
+        if (prerequisite)
+          prerequisite = runtime_write_view(
+              product.fields.thermal_conductivity, conductivity);
+        if (prerequisite)
+          prerequisite = runtime_write_view(
+              product.fields.enthalpy_diffusivity, enthalpy_diffusivity);
+        if (prerequisite)
+          prerequisite = refresh_coast_native_air_effective_thermal_transport(
+              product.transport, as_const(molecular_viscosity),
+              as_const(effective_viscosity), as_const(heat_capacity),
+              conductivity, enthalpy_diffusivity);
+        prerequisite = exchange_effective_thermal_ghosts(
+            product.coupled_thermal_halo, stage, product.boundary, conductivity,
+            enthalpy_diffusivity, prerequisite);
+        return product.reductions.consensus(prerequisite);
+      };
+
   const auto capture_thermo_failure = [&](Int3 cell, double p_ref,
                                           Status failure) noexcept {
     NumericalFailureContext context;
@@ -8076,6 +8269,8 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
+  if (momentum_path_active)
+    status = refresh_live_effective_thermal_ghosts(20U, status);
   const auto publish_momentum_state = [&](StageId halo_stage,
                                            Status prerequisite,
                                            bool enter_collective) {
@@ -8421,8 +8616,8 @@ Status ProductDriver::Impl::execute_attempt(
   // A pressure-energy corrector is a same-target nonlinear state, not a
   // pressure-only post-process.  Publish every primitive/material field that
   // the next continuity and energy residual consumes before asking the
-  // coupler for HbyA/phiHbyA.  The fixed seven-field order is frozen with the
-  // halo plan and is identical on every rank and every corrector.
+  // coupler for HbyA/phiHbyA.  Effective thermal fields are published only
+  // after the resulting velocity ghosts have refreshed turbulence.
   const auto refresh_coupled_state = [&](
       StageId halo_stage, BoundaryThermophysicalGhostPhase phase,
       Status prerequisite = {}) {
@@ -8442,18 +8637,14 @@ Status ProductDriver::Impl::execute_attempt(
     halo_views[2U] = trial_pressure;
     halo_views[3U] = trial_enthalpy;
     halo_views[4U] = trial_temperature;
-    halo_views[5U] = conductivity;
-    halo_views[6U] = enthalpy_diffusivity;
     refreshed =
-        exchange(product.coupled_state_halo, halo_stage, 7U, refreshed);
+        exchange(product.coupled_state_halo, halo_stage, 5U, refreshed);
     if (refreshed) {
       trial_velocity = halo_views[0U];
       trial_density = halo_views[1U];
       trial_pressure = halo_views[2U];
       trial_enthalpy = halo_views[3U];
       trial_temperature = halo_views[4U];
-      conductivity = halo_views[5U];
-      enthalpy_diffusivity = halo_views[6U];
       refreshed = apply_boundary_ghosts(
           BoundaryStage::momentum, product.boundary,
           {&trial_velocity, 1U}, boundary_values);
@@ -8584,6 +8775,8 @@ Status ProductDriver::Impl::execute_attempt(
       refreshed = product.turbulence.update(
           turbulence_input, effective_viscosity, turbulence_certificate);
     }
+    if (product.transport.kernel() == TransportKernel::coast_native_air)
+      return refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
     return product.reductions.consensus(refreshed);
   };
 
@@ -10056,6 +10249,21 @@ Status ProductDriver::Impl::execute_attempt(
                         oracle.temperature,
                         {species_values.data(), species_values.size()},
                         oracle_transport);
+                  double oracle_conductivity = 0.0;
+                  double oracle_enthalpy_diffusivity = 0.0;
+                  if (oracle_status) {
+                    oracle_conductivity = oracle_transport.conductivity;
+                    oracle_enthalpy_diffusivity =
+                        oracle_transport.conductivity / oracle.cp;
+                    if (product.transport.kernel() ==
+                        TransportKernel::coast_native_air)
+                      oracle_status =
+                          product.transport.effective_enthalpy_transport(
+                              oracle_transport.viscosity,
+                              effective_viscosity.unchecked(cell, 0U),
+                              oracle.cp, oracle_conductivity,
+                              oracle_enthalpy_diffusivity);
+                  }
                   const auto normalized_difference =
                       [](double left, double right) noexcept {
                         return std::abs(left - right) /
@@ -10082,10 +10290,10 @@ Status ProductDriver::Impl::execute_attempt(
                              compressibility.unchecked(cell, 0U)},
                             {oracle.drho_dh_pY,
                              enthalpy_compressibility.unchecked(cell, 0U)},
-                            {oracle_transport.conductivity,
+                            {oracle_conductivity,
                              conductivity.unchecked(cell, 0U)},
                             {oracle.cp, heat_capacity.unchecked(cell, 0U)},
-                            {oracle_transport.conductivity / oracle.cp,
+                            {oracle_enthalpy_diffusivity,
                              enthalpy_diffusivity.unchecked(cell, 0U)},
                         }};
                     for (const auto& pair : material_pairs)
@@ -10130,8 +10338,7 @@ Status ProductDriver::Impl::execute_attempt(
                        {candidate_pressure, candidate_enthalpy, oracle.rho,
                         oracle.temperature, oracle.cp, oracle.drho_dp_hY,
                         oracle.drho_dh_pY, oracle_transport.viscosity,
-                        oracle_transport.conductivity,
-                        oracle_transport.conductivity / oracle.cp})
+                        oracle_conductivity, oracle_enthalpy_diffusivity})
                     local_alpha_zero_oracle_lineage = detail::product_mix(
                         local_alpha_zero_oracle_lineage,
                         product_double_bits(value));
@@ -10303,14 +10510,12 @@ Status ProductDriver::Impl::execute_attempt(
         halo_views[2U] = pressure_energy_candidate_pressure;
         halo_views[3U] = pressure_energy_candidate_enthalpy;
         halo_views[4U] = pressure_energy_candidate_temperature;
-        halo_views[5U] = pressure_energy_candidate_thermal_conductivity;
-        halo_views[6U] = pressure_energy_candidate_enthalpy_diffusivity;
         for (std::size_t species = 0U;
              species < pressure_energy_candidate_species.size(); ++species)
-          halo_views[species + 7U] =
+          halo_views[species + 5U] =
               pressure_energy_candidate_species[species];
         const std::size_t candidate_state_halo_count =
-            7U + pressure_energy_candidate_species.size();
+            5U + pressure_energy_candidate_species.size();
         evaluated =
             exchange(product.candidate_state_halo, state_stage,
                      candidate_state_halo_count, evaluated);
@@ -10322,12 +10527,10 @@ Status ProductDriver::Impl::execute_attempt(
         pressure_energy_candidate_pressure = halo_views[2U];
         pressure_energy_candidate_enthalpy = halo_views[3U];
         pressure_energy_candidate_temperature = halo_views[4U];
-        pressure_energy_candidate_thermal_conductivity = halo_views[5U];
-        pressure_energy_candidate_enthalpy_diffusivity = halo_views[6U];
         for (std::size_t species = 0U;
              species < pressure_energy_candidate_species.size(); ++species) {
           pressure_energy_candidate_species[species] =
-              halo_views[species + 7U];
+              halo_views[species + 5U];
           pressure_energy_candidate_species_const[species] =
               as_const(pressure_energy_candidate_species[species]);
           pressure_energy_candidate_species_history[species].trial =
@@ -10692,6 +10895,24 @@ Status ProductDriver::Impl::execute_attempt(
               pressure_energy_candidate_effective_viscosity);
           if (!evaluated) return evaluated;
         }
+        if (evaluated)
+          evaluated = refresh_coast_native_air_effective_thermal_transport(
+              product.transport,
+              as_const(pressure_energy_candidate_molecular_viscosity),
+              as_const(pressure_energy_candidate_effective_viscosity),
+              as_const(pressure_energy_candidate_heat_capacity),
+              pressure_energy_candidate_thermal_conductivity,
+              pressure_energy_candidate_enthalpy_diffusivity);
+        if (product.transport.kernel() == TransportKernel::coast_native_air) {
+          evaluated = exchange_effective_thermal_ghosts(
+              product.candidate_thermal_halo, state_stage, product.boundary,
+              pressure_energy_candidate_thermal_conductivity,
+              pressure_energy_candidate_enthalpy_diffusivity, evaluated);
+          evaluated = product.reductions.consensus(evaluated);
+        }
+        if (!evaluated)
+          return Status{evaluated.code,
+                        kProductPressureEnergy + 209U};
 
         RevisionToken flux_revision = detail::product_mix(
             direction, product_double_bits(alpha));
@@ -13732,7 +13953,11 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  status = product.reductions.consensus(status);
+  if (final_rate_path_active && product.transport.kernel() ==
+                                    TransportKernel::coast_native_air)
+    status = refresh_live_effective_thermal_ghosts(60U, status);
+  else
+    status = product.reductions.consensus(status);
   const std::size_t final_rate_halo_count =
       7U + product.fields.scalars.size();
   if (status) {

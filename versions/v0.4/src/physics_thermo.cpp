@@ -31,6 +31,7 @@ constexpr std::uint32_t kClosedMassConvergence = 823U;
 constexpr std::size_t kMaximumSpecies = 65U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+constexpr double kCoastNativeAirEnthalpyReferenceTemperature = 273.15;
 
 bool finite(double value) noexcept { return std::isfinite(value); }
 
@@ -140,7 +141,8 @@ bool valid_spec_header(const ThermophysicalSpec& spec) noexcept {
          spec.species.size() <= kMaximumSpecies;
 }
 
-double species_cp(double temperature, double inverse_molecular_weight,
+double species_cp(double universal_gas_constant, double temperature,
+                  double inverse_molecular_weight,
                   const std::array<double, 7U>& coefficients) noexcept {
   const double polynomial =
       ((((coefficients[4U] * temperature + coefficients[3U]) * temperature +
@@ -149,19 +151,26 @@ double species_cp(double temperature, double inverse_molecular_weight,
          coefficients[1U]) *
             temperature +
         coefficients[0U]);
-  return kUniversalGasConstant * inverse_molecular_weight * polynomial;
+  return universal_gas_constant * inverse_molecular_weight * polynomial;
 }
 
-double species_h(double temperature, double inverse_molecular_weight,
-                 const std::array<double, 7U>& coefficients) noexcept {
+double dimensionless_h(
+    double temperature,
+    const std::array<double, 7U>& coefficients) noexcept {
   const double t2 = temperature * temperature;
   const double t3 = t2 * temperature;
   const double t4 = t3 * temperature;
-  const double dimensionless =
-      coefficients[0U] * temperature + coefficients[1U] * t2 * 0.5 +
-      coefficients[2U] * t3 / 3.0 + coefficients[3U] * t4 * 0.25 +
-      coefficients[4U] * t4 * temperature * 0.2 + coefficients[5U];
-  return kUniversalGasConstant * inverse_molecular_weight * dimensionless;
+  return coefficients[0U] * temperature +
+         coefficients[1U] * t2 * 0.5 + coefficients[2U] * t3 / 3.0 +
+         coefficients[3U] * t4 * 0.25 +
+         coefficients[4U] * t4 * temperature * 0.2 + coefficients[5U];
+}
+
+double species_h(double universal_gas_constant, double temperature,
+                 double inverse_molecular_weight,
+                 const std::array<double, 7U>& coefficients) noexcept {
+  return universal_gas_constant * inverse_molecular_weight *
+         dimensionless_h(temperature, coefficients);
 }
 
 Status collective_failure(MPI_Comm communicator, Status local,
@@ -315,6 +324,13 @@ Status ThermodynamicsPlan::compile(
         canonical_spec.temperature_relative_tolerance;
     candidate.maximum_iterations_ =
         canonical_spec.maximum_temperature_iterations;
+    const bool coast_native_air =
+        canonical_spec.species.size() == 1U &&
+        canonical_spec.species.front().transport_law ==
+            TransportLaw::coast_native_air;
+    candidate.universal_gas_constant_ =
+        coast_native_air ? kCoastNativeAirUniversalGasConstant
+                         : kUniversalGasConstant;
     candidate.source_fingerprint_ =
         detail::thermophysical_spec_fingerprint(canonical_spec);
     if (candidate.source_fingerprint_ == 0U) {
@@ -331,6 +347,7 @@ Status ThermodynamicsPlan::compile(
     hash.real(candidate.maximum_temperature_);
     hash.real(candidate.relative_tolerance_);
     hash.integer(candidate.maximum_iterations_);
+    hash.real(candidate.universal_gas_constant_);
     hash.integer(static_cast<std::uint16_t>(candidate.dependent_species_));
     for (const std::uint16_t mapped : candidate.independent_to_species_) {
       hash.integer(mapped);
@@ -338,6 +355,15 @@ Status ThermodynamicsPlan::compile(
     for (std::size_t species = 0U; species < count; ++species) {
       const SpeciesThermophysicalSpec& source =
           canonical_spec.species[species];
+      std::array<double, 7U> low = source.nasa7_low;
+      std::array<double, 7U> high = source.nasa7_high;
+      if (coast_native_air) {
+        // Ordinary non-reacting COAST stores primary h as h(T)-h(273.15 K).
+        const double reference = dimensionless_h(
+            kCoastNativeAirEnthalpyReferenceTemperature, low);
+        low[5U] -= reference;
+        high[5U] -= reference;
+      }
       candidate.inverse_molecular_weight_[species] =
           1.0 / source.molecular_weight;
       candidate.temperature_switch_[species] = source.temperature_switch;
@@ -345,38 +371,38 @@ Status ThermodynamicsPlan::compile(
       hash.real(source.molecular_weight);
       hash.real(source.temperature_switch);
       for (std::size_t coefficient = 0U; coefficient < 7U; ++coefficient) {
-        candidate.nasa_low_[coefficient][species] =
-            source.nasa7_low[coefficient];
-        candidate.nasa_high_[coefficient][species] =
-            source.nasa7_high[coefficient];
-        hash.real(source.nasa7_low[coefficient]);
-        hash.real(source.nasa7_high[coefficient]);
+        candidate.nasa_low_[coefficient][species] = low[coefficient];
+        candidate.nasa_high_[coefficient][species] = high[coefficient];
+        hash.real(low[coefficient]);
+        hash.real(high[coefficient]);
       }
       candidate.species_enthalpy_minimum_[species] = species_h(
+          candidate.universal_gas_constant_,
           candidate.minimum_temperature_,
           candidate.inverse_molecular_weight_[species],
           candidate.minimum_temperature_ <= candidate.temperature_switch_[species]
-              ? source.nasa7_low
-              : source.nasa7_high);
+              ? low
+              : high);
       candidate.species_enthalpy_maximum_[species] = species_h(
+          candidate.universal_gas_constant_,
           candidate.maximum_temperature_,
           candidate.inverse_molecular_weight_[species],
           candidate.maximum_temperature_ <= candidate.temperature_switch_[species]
-              ? source.nasa7_low
-              : source.nasa7_high);
+              ? low
+              : high);
       if (!finite(candidate.species_enthalpy_minimum_[species]) ||
           !finite(candidate.species_enthalpy_maximum_[species])) {
         return {StatusCode::invalid_plan, kThermoSpeciesBounds};
       }
       for (std::size_t coefficient = 1U; coefficient <= 4U; ++coefficient) {
-        constant_cp &= source.nasa7_low[coefficient] == 0.0 &&
-                       source.nasa7_high[coefficient] == 0.0;
+        constant_cp &= low[coefficient] == 0.0 &&
+                       high[coefficient] == 0.0;
       }
-      constant_cp &= source.nasa7_low[0U] == source.nasa7_high[0U];
-      constant_cp &= source.nasa7_low[5U] == source.nasa7_high[5U];
-      const double source_offset = kUniversalGasConstant *
+      constant_cp &= low[0U] == high[0U];
+      constant_cp &= low[5U] == high[5U];
+      const double source_offset = candidate.universal_gas_constant_ *
                                    candidate.inverse_molecular_weight_[species] *
-                                   source.nasa7_low[5U];
+                                   low[5U];
       if (species == 0U) {
         enthalpy_offset = source_offset;
       } else {
@@ -455,12 +481,14 @@ Status ThermodynamicsPlan::mixture_properties(
           (low ? nasa_low_[index] : nasa_high_[index])[species];
     }
     mixture_h += mass_fraction *
-                 species_h(temperature, inverse_molecular_weight_[species],
+                 species_h(universal_gas_constant_, temperature,
+                           inverse_molecular_weight_[species],
                            coefficients);
     mixture_cp += mass_fraction *
-                  species_cp(temperature, inverse_molecular_weight_[species],
+                  species_cp(universal_gas_constant_, temperature,
+                             inverse_molecular_weight_[species],
                              coefficients);
-    mixture_r += mass_fraction * kUniversalGasConstant *
+    mixture_r += mass_fraction * universal_gas_constant_ *
                  inverse_molecular_weight_[species];
   }
   {
@@ -472,12 +500,14 @@ Status ThermodynamicsPlan::mixture_properties(
           (low ? nasa_low_[index] : nasa_high_[index])[species];
     }
     mixture_h += dependent *
-                 species_h(temperature, inverse_molecular_weight_[species],
+                 species_h(universal_gas_constant_, temperature,
+                           inverse_molecular_weight_[species],
                            coefficients);
     mixture_cp += dependent *
-                  species_cp(temperature, inverse_molecular_weight_[species],
+                  species_cp(universal_gas_constant_, temperature,
+                             inverse_molecular_weight_[species],
                              coefficients);
-    mixture_r += dependent * kUniversalGasConstant *
+    mixture_r += dependent * universal_gas_constant_ *
                  inverse_molecular_weight_[species];
   }
   if (!finite(mixture_h) || !finite(mixture_cp) || !finite(mixture_r) ||
@@ -587,12 +617,12 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
       const std::size_t species = independent_to_species_[independent];
       const double fraction = independent_mass_fractions.data[independent];
       const double species_gas =
-          kUniversalGasConstant * inverse_molecular_weight_[species];
+          universal_gas_constant_ * inverse_molecular_weight_[species];
       gas += fraction * species_gas;
       cp += fraction * species_gas * nasa_low_[0U][species];
     }
     const double dependent_gas =
-        kUniversalGasConstant *
+        universal_gas_constant_ *
         inverse_molecular_weight_[dependent_species_];
     gas += dependent * dependent_gas;
     cp += dependent * dependent_gas *

@@ -21,9 +21,11 @@
 #include <fcntl.h>
 #include <initializer_list>
 #include <limits>
+#include <locale>
 #include <new>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -45,12 +47,77 @@ constexpr std::uint8_t kWireVersion = 11U;
 constexpr std::uint8_t kPressureAlgorithmWireVersion = 12U;
 constexpr std::uint8_t kSimpleWireVersion = 13U;
 constexpr std::uint8_t kSimplePressureAlgorithmWireVersion = 14U;
+constexpr std::uint8_t kCoastAxesWireVersion = 15U;
+constexpr std::uint8_t kCoastAxesPressureAlgorithmWireVersion = 16U;
+constexpr std::uint8_t kCoastAxesSimpleWireVersion = 17U;
+constexpr std::uint8_t kCoastAxesSimplePressureAlgorithmWireVersion = 18U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
 constexpr std::size_t kMaxScalarsPerFace = 64U;
 constexpr std::size_t kMaxTransportedScalars = 64U;
 constexpr std::size_t kMaxStableNameBytes = 255U;
+
+constexpr bool coast_axes_wire(std::uint8_t version) noexcept {
+  return version == kCoastAxesWireVersion ||
+         version == kCoastAxesPressureAlgorithmWireVersion ||
+         version == kCoastAxesSimpleWireVersion ||
+         version == kCoastAxesSimplePressureAlgorithmWireVersion;
+}
+
+constexpr bool transport_law_wire_compatible(std::uint8_t version,
+                                             TransportLaw law) noexcept {
+  return law != TransportLaw::coast_native_air || coast_axes_wire(version);
+}
+
+static_assert(!transport_law_wire_compatible(kLegacyWireVersion,
+                                             TransportLaw::coast_native_air));
+static_assert(!transport_law_wire_compatible(
+    kLegacyPressureAlgorithmWireVersion, TransportLaw::coast_native_air));
+static_assert(!transport_law_wire_compatible(kWireVersion,
+                                             TransportLaw::coast_native_air));
+static_assert(!transport_law_wire_compatible(
+    kPressureAlgorithmWireVersion, TransportLaw::coast_native_air));
+static_assert(!transport_law_wire_compatible(kSimpleWireVersion,
+                                             TransportLaw::coast_native_air));
+static_assert(!transport_law_wire_compatible(
+    kSimplePressureAlgorithmWireVersion, TransportLaw::coast_native_air));
+static_assert(transport_law_wire_compatible(kCoastAxesWireVersion,
+                                            TransportLaw::coast_native_air));
+static_assert(transport_law_wire_compatible(
+    kCoastAxesPressureAlgorithmWireVersion,
+    TransportLaw::coast_native_air));
+static_assert(transport_law_wire_compatible(kCoastAxesSimpleWireVersion,
+                                            TransportLaw::coast_native_air));
+static_assert(transport_law_wire_compatible(
+    kCoastAxesSimplePressureAlgorithmWireVersion,
+    TransportLaw::coast_native_air));
+
+constexpr bool simple_wire(std::uint8_t version) noexcept {
+  return version == kSimpleWireVersion ||
+         version == kSimplePressureAlgorithmWireVersion ||
+         version == kCoastAxesSimpleWireVersion ||
+         version == kCoastAxesSimplePressureAlgorithmWireVersion;
+}
+
+constexpr bool pressure_algorithm_wire(std::uint8_t version) noexcept {
+  return version == kLegacyPressureAlgorithmWireVersion ||
+         version == kPressureAlgorithmWireVersion ||
+         version == kSimplePressureAlgorithmWireVersion ||
+         version == kCoastAxesPressureAlgorithmWireVersion ||
+         version == kCoastAxesSimplePressureAlgorithmWireVersion;
+}
+
+bool thermophysics_compatible_with_coast_axes(
+    const ThermophysicalSpec& thermophysics, bool coast_axes) noexcept {
+  return coast_axes ||
+         std::none_of(
+             thermophysics.species.begin(), thermophysics.species.end(),
+             [](const SpeciesThermophysicalSpec& species) {
+               return species.transport_law == TransportLaw::coast_native_air;
+             });
+}
+
 constexpr std::string_view kSemanticContract =
     "HUNDUN-FLOW-v0.4-case-wire-v11|input-schema=1|units=SI|"
     "flow=single_phase_low_mach_compressible|"
@@ -417,6 +484,10 @@ bool parse_geometry(std::string_view value, GeometryKind& out) noexcept {
   }
   if (value == "tensor_stretched") {
     out = GeometryKind::tensor_stretched;
+    return true;
+  }
+  if (value == "coast_runtime_axes_v1") {
+    out = GeometryKind::coast_runtime_axes_v1;
     return true;
   }
   return false;
@@ -900,7 +971,11 @@ bool valid_canonical_mesh(const CartesianMeshSpec& mesh) noexcept {
     return false;
   }
   if (mesh.kind == GeometryKind::uniform) {
-    if (!mesh.has_exact_cells || mesh.has_base_spacing ||
+    if (!mesh.axes_file.empty() ||
+        std::any_of(mesh.coast_runtime_faces.begin(),
+                    mesh.coast_runtime_faces.end(),
+                    [](const auto& axis) { return !axis.empty(); }) ||
+        !mesh.has_exact_cells || mesh.has_base_spacing ||
         !mesh.focus_regions.empty() || mesh.max_growth_ratio != 1.0) {
       return false;
     }
@@ -915,7 +990,8 @@ bool valid_canonical_mesh(const CartesianMeshSpec& mesh) noexcept {
            std::isfinite(widths.z) &&
            componentwise_at_most(mesh.minimum_spacing, widths);
   }
-  if (mesh.kind != GeometryKind::tensor_stretched ||
+  if ((mesh.kind != GeometryKind::tensor_stretched &&
+       mesh.kind != GeometryKind::coast_runtime_axes_v1) ||
       !mesh.has_base_spacing ||
       !componentwise_at_least(mesh.base_spacing, mesh.minimum_spacing)) {
     return false;
@@ -932,11 +1008,48 @@ bool valid_canonical_mesh(const CartesianMeshSpec& mesh) noexcept {
       return false;
     }
   }
-  return std::is_sorted(mesh.focus_regions.begin(), mesh.focus_regions.end(),
-                        focus_less) &&
-         std::adjacent_find(mesh.focus_regions.begin(),
-                            mesh.focus_regions.end(), same_focus) ==
-             mesh.focus_regions.end();
+  if (!std::is_sorted(mesh.focus_regions.begin(), mesh.focus_regions.end(),
+                      focus_less) ||
+      std::adjacent_find(mesh.focus_regions.begin(),
+                         mesh.focus_regions.end(), same_focus) !=
+          mesh.focus_regions.end()) {
+    return false;
+  }
+  if (mesh.kind == GeometryKind::tensor_stretched) {
+    return mesh.axes_file.empty() &&
+           std::all_of(mesh.coast_runtime_faces.begin(),
+                       mesh.coast_runtime_faces.end(),
+                       [](const auto& axis) { return axis.empty(); });
+  }
+  if (mesh.axes_file.empty() || !mesh.has_exact_cells) {
+    return false;
+  }
+  const std::array<std::int32_t, 3U> cells{
+      mesh.exact_cells.x, mesh.exact_cells.y, mesh.exact_cells.z};
+  const std::array<double, 3U> lower{mesh.lower.x, mesh.lower.y, mesh.lower.z};
+  const std::array<double, 3U> upper{mesh.upper.x, mesh.upper.y, mesh.upper.z};
+  std::uint64_t face_count = 0U;
+  for (std::size_t axis = 0U; axis < mesh.coast_runtime_faces.size(); ++axis) {
+    const auto& faces = mesh.coast_runtime_faces[axis];
+    if (cells[axis] <= 0 ||
+        faces.size() != static_cast<std::size_t>(cells[axis]) + 1U ||
+        faces.front() != lower[axis] || faces.back() != upper[axis] ||
+        faces.size() > std::numeric_limits<std::uint64_t>::max() - face_count) {
+      return false;
+    }
+    face_count += static_cast<std::uint64_t>(faces.size());
+    double previous = 0.0;
+    for (std::size_t index = 0U; index < faces.size(); ++index) {
+      const double coordinate = faces[index];
+      if (!std::isfinite(coordinate) ||
+          coordinate != static_cast<double>(static_cast<float>(coordinate)) ||
+          (index != 0U && !(previous < coordinate))) {
+        return false;
+      }
+      previous = coordinate;
+    }
+  }
+  return face_count <= mesh.limits.max_memory_bytes_per_rank / sizeof(double);
 }
 
 void hash_mesh(Hash64& hash, const CartesianMeshSpec& mesh) noexcept {
@@ -963,6 +1076,15 @@ void hash_mesh(Hash64& hash, const CartesianMeshSpec& mesh) noexcept {
   }
   hash.integer(mesh.limits.max_global_cells);
   hash.integer(mesh.limits.max_memory_bytes_per_rank);
+  if (mesh.kind == GeometryKind::coast_runtime_axes_v1) {
+    hash.text(mesh.axes_file.generic_string());
+    for (const auto& axis : mesh.coast_runtime_faces) {
+      hash.integer(static_cast<std::uint64_t>(axis.size()));
+      for (const double coordinate : axis) {
+        hash.real(coordinate);
+      }
+    }
+  }
 }
 
 bool valid_name(std::string_view value) noexcept {
@@ -1237,6 +1359,90 @@ Status open_direct_file(int root_descriptor, std::string_view name,
   return open_regular_at(root_descriptor, relative, rank,
                          detail_reference_missing, detail_reference_path,
                          descriptor, metadata);
+}
+
+Status parse_coast_runtime_axes(
+    std::string_view text, const CartesianMeshSpec& declared,
+    std::array<std::vector<double>, 3U>& out) {
+  std::istringstream input{std::string(text)};
+  input.imbue(std::locale::classic());
+  std::string token;
+  std::int64_t version = 0;
+  std::array<std::int64_t, 3U> cells{};
+  if (!(input >> token) || token != "COAST_RUNTIME_AXES" ||
+      !(input >> version) || version != 1 || !(input >> token) ||
+      token != "grid" || !(input >> cells[0] >> cells[1] >> cells[2]) ||
+      !declared.has_exact_cells) {
+    return invalid_case(detail_json_value);
+  }
+  const std::array<std::int32_t, 3U> declared_cells{
+      declared.exact_cells.x, declared.exact_cells.y,
+      declared.exact_cells.z};
+  std::uint64_t global_cells = 1U;
+  std::uint64_t total_faces = 0U;
+  for (std::size_t axis = 0U; axis < cells.size(); ++axis) {
+    if (cells[axis] <= 0 ||
+        cells[axis] >= std::numeric_limits<std::int32_t>::max() ||
+        cells[axis] != declared_cells[axis]) {
+      return invalid_case(detail_json_value);
+    }
+    const auto count = static_cast<std::uint64_t>(cells[axis]);
+    if (global_cells > declared.limits.max_global_cells / count ||
+        count + 1U > std::numeric_limits<std::uint64_t>::max() - total_faces) {
+      return invalid_case(detail_json_value);
+    }
+    global_cells *= count;
+    total_faces += count + 1U;
+  }
+  if (global_cells > declared.limits.max_global_cells ||
+      total_faces >
+          declared.limits.max_memory_bytes_per_rank / sizeof(double)) {
+    return invalid_case(detail_json_value);
+  }
+
+  constexpr std::array<std::string_view, 3U> names{"x", "y", "z"};
+  for (std::size_t axis = 0U; axis < names.size(); ++axis) {
+    std::int64_t count = 0;
+    if (!(input >> token) || token != names[axis] || !(input >> count) ||
+        count != cells[axis] + 1) {
+      return invalid_case(detail_json_value);
+    }
+    out[axis].resize(static_cast<std::size_t>(count));
+    double previous = 0.0;
+    for (std::size_t index = 0U; index < out[axis].size(); ++index) {
+      double coordinate = 0.0;
+      if (!(input >> coordinate)) {
+        return invalid_case(detail_json_value);
+      }
+      coordinate = static_cast<double>(static_cast<float>(coordinate));
+      if (!std::isfinite(coordinate) ||
+          (index != 0U && !(previous < coordinate))) {
+        return invalid_case(detail_json_value);
+      }
+      out[axis][index] = coordinate;
+      previous = coordinate;
+    }
+  }
+  if (input >> token) {
+    return invalid_case(detail_json_value);
+  }
+  const std::array<double, 3U> declared_lower{
+      static_cast<double>(static_cast<float>(declared.lower.x)),
+      static_cast<double>(static_cast<float>(declared.lower.y)),
+      static_cast<double>(static_cast<float>(declared.lower.z))};
+  const std::array<double, 3U> declared_upper{
+      static_cast<double>(static_cast<float>(declared.upper.x)),
+      static_cast<double>(static_cast<float>(declared.upper.y)),
+      static_cast<double>(static_cast<float>(declared.upper.z))};
+  for (std::size_t axis = 0U; axis < out.size(); ++axis) {
+    if (!std::isfinite(declared_lower[axis]) ||
+        !std::isfinite(declared_upper[axis]) ||
+        out[axis].front() != declared_lower[axis] ||
+        out[axis].back() != declared_upper[axis]) {
+      return invalid_case(detail_json_value);
+    }
+  }
+  return {};
 }
 
 class WireWriter {
@@ -1622,7 +1828,7 @@ void write_thermophysics(WireWriter& writer,
   }
 }
 
-bool read_thermophysics(WireReader& reader,
+bool read_thermophysics(WireReader& reader, std::uint8_t wire_version,
                         ThermophysicalSpec& value) {
   std::string path;
   std::uint16_t species_count = 0U;
@@ -1658,7 +1864,10 @@ bool read_thermophysics(WireReader& reader,
         return false;
       }
     }
-    if (!reader.byte(law) || law > 1U ||
+    if (!reader.byte(law) ||
+        law > static_cast<std::uint8_t>(TransportLaw::coast_native_air) ||
+        !transport_law_wire_compatible(wire_version,
+                                       static_cast<TransportLaw>(law)) ||
         !reader.real(species.viscosity_reference) ||
         !reader.real(species.transport_reference_temperature) ||
         !reader.real(species.sutherland_temperature) ||
@@ -1704,6 +1913,10 @@ bool unique_reference_paths(const ValidatedModel& model) {
     if (!insert(model.thermophysics.data_file)) {
       return false;
     }
+    if (model.mesh.kind == GeometryKind::coast_runtime_axes_v1 &&
+        !insert(model.mesh.axes_file)) {
+      return false;
+    }
     for (const fs::path& path : model.data_files) {
       if (!insert(path)) {
         return false;
@@ -1729,7 +1942,8 @@ Status serialize_model(const ValidatedModel& model,
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
         model.data_files.size() + (model.immersed_boundary.has_value() ? 1U : 0U) +
-                1U >
+                (model.mesh.kind == GeometryKind::coast_runtime_axes_v1 ? 2U
+                                                                        : 1U) >
             detail::kMaxReferencedFiles ||
         model.data_files.size() > std::numeric_limits<std::uint16_t>::max() ||
         (model.immersed_boundary.has_value() &&
@@ -1742,8 +1956,18 @@ Status serialize_model(const ValidatedModel& model,
     if (!valid_direct_name(model.thermophysics.data_file.generic_string(),
                            ".d", thermophysical_path) ||
         !detail::valid_thermophysical_spec(model.thermophysics) ||
-        detail::thermophysical_spec_fingerprint(model.thermophysics) == 0U) {
+        detail::thermophysical_spec_fingerprint(model.thermophysics) == 0U ||
+        !thermophysics_compatible_with_coast_axes(
+            model.thermophysics,
+            model.mesh.kind == GeometryKind::coast_runtime_axes_v1)) {
       return invalid_case(detail_wire);
+    }
+    if (model.mesh.kind == GeometryKind::coast_runtime_axes_v1) {
+      fs::path axes_path;
+      if (!valid_direct_name(model.mesh.axes_file.generic_string(), ".dat",
+                             axes_path)) {
+        return invalid_case(detail_wire);
+      }
     }
     for (const BoundaryFaceSpec& face : model.boundaries) {
       if (!valid_boundary(face)) {
@@ -1756,11 +1980,21 @@ Status serialize_model(const ValidatedModel& model,
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
     const bool simple = model.solver.coupling == CouplingKind::simple;
-    writer.byte(simple
-                    ? (extended_solver ? kSimplePressureAlgorithmWireVersion
-                                       : kSimpleWireVersion)
-                    : (extended_solver ? kPressureAlgorithmWireVersion
-                                       : kWireVersion));
+    const bool coast_axes =
+        model.mesh.kind == GeometryKind::coast_runtime_axes_v1;
+    writer.byte(
+        coast_axes
+            ? (simple ? (extended_solver
+                             ? kCoastAxesSimplePressureAlgorithmWireVersion
+                             : kCoastAxesSimpleWireVersion)
+                      : (extended_solver
+                             ? kCoastAxesPressureAlgorithmWireVersion
+                             : kCoastAxesWireVersion))
+            : (simple ? (extended_solver
+                             ? kSimplePressureAlgorithmWireVersion
+                             : kSimpleWireVersion)
+                      : (extended_solver ? kPressureAlgorithmWireVersion
+                                         : kWireVersion)));
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
@@ -1786,6 +2020,17 @@ Status serialize_model(const ValidatedModel& model,
     }
     writer.u64(model.mesh.limits.max_global_cells);
     writer.u64(model.mesh.limits.max_memory_bytes_per_rank);
+    if (coast_axes) {
+      if (!writer.text(model.mesh.axes_file.generic_string())) {
+        return invalid_case(detail_wire);
+      }
+      for (const auto& axis : model.mesh.coast_runtime_faces) {
+        writer.u64(static_cast<std::uint64_t>(axis.size()));
+        for (const double coordinate : axis) {
+          writer.real(coordinate);
+        }
+      }
+    }
     for (const BoundaryFaceSpec& face : model.boundaries) {
       write_boundary(writer, face);
     }
@@ -1814,10 +2059,11 @@ Status serialize_model(const ValidatedModel& model,
       return invalid_case(detail_wire);
     }
     writer.u64(model.fingerprint);
-    out = std::move(writer).take();
-    if (out.empty() || out.size() > detail::kMaxWireBytes) {
+    std::vector<std::uint8_t> candidate = std::move(writer).take();
+    if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
       return invalid_case(detail_wire);
     }
+    out = std::move(candidate);
     return {};
   } catch (...) {
     return {StatusCode::allocation_failure, detail_wire};
@@ -1845,9 +2091,17 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
          version != kWireVersion &&
          version != kPressureAlgorithmWireVersion &&
          version != kSimpleWireVersion &&
-         version != kSimplePressureAlgorithmWireVersion) ||
+         version != kSimplePressureAlgorithmWireVersion &&
+         version != kCoastAxesWireVersion &&
+         version != kCoastAxesPressureAlgorithmWireVersion &&
+         version != kCoastAxesSimpleWireVersion &&
+         version != kCoastAxesSimplePressureAlgorithmWireVersion) ||
         !reader.byte(geometry) ||
-        geometry > static_cast<std::uint8_t>(GeometryKind::tensor_stretched) ||
+        geometry >
+            static_cast<std::uint8_t>(GeometryKind::coast_runtime_axes_v1) ||
+        (coast_axes_wire(version) !=
+         (geometry == static_cast<std::uint8_t>(
+                          GeometryKind::coast_runtime_axes_v1))) ||
         !reader.byte(turbulence) ||
         turbulence >
             static_cast<std::uint8_t>(TurbulenceKind::vreman_wall_function) ||
@@ -1858,11 +2112,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     }
 
     ValidatedModel model;
-    model.solver.coupling =
-        version == kSimpleWireVersion ||
-                version == kSimplePressureAlgorithmWireVersion
-            ? CouplingKind::simple
-            : CouplingKind::piso;
+    model.solver.coupling = simple_wire(version) ? CouplingKind::simple
+                                                  : CouplingKind::piso;
     model.mesh.kind = static_cast<GeometryKind>(geometry);
     model.turbulence = static_cast<TurbulenceKind>(turbulence);
     model.pressure_reference =
@@ -1930,6 +2181,33 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         model.mesh.limits.max_memory_bytes_per_rank == 0U) {
       return invalid_case(detail_wire);
     }
+    if (coast_axes_wire(version)) {
+      std::string path;
+      fs::path parsed;
+      if (!reader.text(path) || !valid_direct_name(path, ".dat", parsed)) {
+        return invalid_case(detail_wire);
+      }
+      model.mesh.axes_file = std::move(parsed);
+      const std::array<std::int32_t, 3U> cells{
+          model.mesh.exact_cells.x, model.mesh.exact_cells.y,
+          model.mesh.exact_cells.z};
+      for (std::size_t axis = 0U;
+           axis < model.mesh.coast_runtime_faces.size(); ++axis) {
+        std::uint64_t count = 0U;
+        if (cells[axis] <= 0 || !reader.u64(count) ||
+            count != static_cast<std::uint64_t>(cells[axis]) + 1U ||
+            count > detail::kMaxWireBytes / sizeof(double)) {
+          return invalid_case(detail_wire);
+        }
+        auto& faces = model.mesh.coast_runtime_faces[axis];
+        faces.resize(static_cast<std::size_t>(count));
+        for (double& coordinate : faces) {
+          if (!reader.real(coordinate)) {
+            return invalid_case(detail_wire);
+          }
+        }
+      }
+    }
     for (BoundaryFaceSpec& face : model.boundaries) {
       if (!read_boundary(reader, face)) {
         return invalid_case(detail_wire);
@@ -1937,25 +2215,22 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     }
     if (!read_transported_scalars(reader, model.transported_scalars) ||
         !read_solver(reader, model.solver,
-                     version == kLegacyPressureAlgorithmWireVersion ||
-                         version == kPressureAlgorithmWireVersion ||
-                         version == kSimplePressureAlgorithmWireVersion) ||
+                     pressure_algorithm_wire(version)) ||
         !read_schemes(reader, model.schemes) ||
         !read_time(reader, model.time) ||
-        !read_thermophysics(reader, model.thermophysics) ||
+        !read_thermophysics(reader, version, model.thermophysics) ||
         !reader.u16(data_count) || data_count > detail::kMaxReferencedFiles ||
         !reader.byte(has_stl) || has_stl > 1U || !reader.byte(fluid_side) ||
         fluid_side > static_cast<std::uint8_t>(ImmersedFluidSide::inside) ||
-        ((version == kWireVersion ||
-          version == kPressureAlgorithmWireVersion ||
-          version == kSimpleWireVersion ||
-          version == kSimplePressureAlgorithmWireVersion) &&
+        ((version != kLegacyWireVersion &&
+          version != kLegacyPressureAlgorithmWireVersion) &&
          (!reader.byte(reconstruction_policy) ||
           reconstruction_policy > static_cast<std::uint8_t>(
                                       IbmReconstructionPolicy::adaptive_order))) ||
         (has_stl == 0U && fluid_side != 0U) ||
         (has_stl == 0U && reconstruction_policy != 0U) ||
-        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) + 1U >
+        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) +
+                (coast_axes_wire(version) ? 2U : 1U) >
             detail::kMaxReferencedFiles) {
       return invalid_case(detail_wire);
     }
@@ -2067,10 +2342,23 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* transported_scalars =
         yyjson_obj_get(root, "transported_scalars");
     yyjson_val* thermophysics = yyjson_obj_get(root, "thermophysics");
-    if (!object_has_exact_keys(
-            mesh, {"kind", "domain", "exact_cells", "base_spacing",
+    const auto geometry_text = string_value(mesh, "kind");
+    const bool coast_axes_schema =
+        equals(geometry_text, "coast_runtime_axes_v1");
+    const bool mesh_schema =
+        coast_axes_schema
+            ? object_has_exact_keys(
+                  mesh,
+                  {"kind", "axes_file", "domain", "exact_cells",
+                   "base_spacing", "minimum_spacing", "max_growth_ratio",
+                   "focus_regions", "limits", "data_files",
+                   "immersed_boundary"})
+            : object_has_exact_keys(
+                  mesh,
+                  {"kind", "domain", "exact_cells", "base_spacing",
                    "minimum_spacing", "max_growth_ratio", "focus_regions",
-                   "limits", "data_files", "immersed_boundary"}) ||
+                   "limits", "data_files", "immersed_boundary"});
+    if (!mesh_schema ||
         !object_has_exact_keys(flow,
                                {"model", "pressure_reference", "reacting"}) ||
         !(object_has_exact_keys(solver,
@@ -2101,7 +2389,6 @@ Status compile_on_root(const fs::path& case_root, int rank,
       return invalid_case(detail_json_schema);
     }
 
-    const auto geometry_text = string_value(mesh, "kind");
     const auto turbulence_text =
         turbulence == nullptr
             ? std::optional<std::string_view>{"vreman_wall_function"}
@@ -2190,6 +2477,16 @@ Status compile_on_root(const fs::path& case_root, int rank,
         model.mesh.max_growth_ratio < 1.0) {
       return invalid_case(detail_json_value);
     }
+    if (coast_axes_schema) {
+      model.mesh.lower = {
+          static_cast<double>(static_cast<float>(model.mesh.lower.x)),
+          static_cast<double>(static_cast<float>(model.mesh.lower.y)),
+          static_cast<double>(static_cast<float>(model.mesh.lower.z))};
+      model.mesh.upper = {
+          static_cast<double>(static_cast<float>(model.mesh.upper.x)),
+          static_cast<double>(static_cast<float>(model.mesh.upper.y)),
+          static_cast<double>(static_cast<float>(model.mesh.upper.z))};
+    }
 
     yyjson_val* max_global_cells = yyjson_obj_get(limits, "max_global_cells");
     yyjson_val* max_memory_bytes =
@@ -2244,7 +2541,13 @@ Status compile_on_root(const fs::path& case_root, int rank,
         std::unique(model.mesh.focus_regions.begin(),
                     model.mesh.focus_regions.end(), same_focus),
         model.mesh.focus_regions.end());
-    if (!valid_canonical_mesh(model.mesh)) {
+    const GeometryKind parsed_geometry = model.mesh.kind;
+    if (parsed_geometry == GeometryKind::coast_runtime_axes_v1) {
+      model.mesh.kind = GeometryKind::tensor_stretched;
+    }
+    const bool valid_mesh_controls = valid_canonical_mesh(model.mesh);
+    model.mesh.kind = parsed_geometry;
+    if (!valid_mesh_controls) {
       return invalid_case(detail_json_value);
     }
 
@@ -2289,17 +2592,62 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
     const auto thermophysical_file =
         string_value(thermophysics, "data_file");
+    const auto axes_file = coast_axes_schema
+                               ? string_value(mesh, "axes_file")
+                               : std::optional<std::string_view>{};
     if (!yyjson_is_arr(data_files) ||
         !thermophysical_file.has_value() ||
+        (coast_axes_schema && !axes_file.has_value()) ||
         (!yyjson_is_null(immersed_boundary) && !yyjson_is_str(stl_file))) {
       return invalid_case(detail_reference_count);
     }
     const std::size_t data_file_count = yyjson_arr_size(data_files);
     const std::size_t total_reference_count =
-        data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U) + 1U;
+        data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U) +
+        (coast_axes_schema ? 2U : 1U);
     if (data_file_count > detail::kMaxReferencedFiles ||
         total_reference_count > detail::kMaxReferencedFiles) {
       return invalid_case(detail_reference_count);
+    }
+
+    std::set<std::pair<dev_t, ino_t>> referenced_targets;
+    std::string axes_source;
+    if (coast_axes_schema) {
+      fs::path relative;
+      UniqueFd descriptor;
+      struct stat metadata {};
+      const Status opened = open_direct_file(
+          root_descriptor.get(), *axes_file, ".dat", rank, relative,
+          descriptor, metadata);
+      if (!opened) {
+        return opened;
+      }
+      if (!referenced_targets
+               .insert(std::make_pair(metadata.st_dev, metadata.st_ino))
+               .second) {
+        return invalid_case(detail_reference_path);
+      }
+      const Status read = read_bounded_text(
+          descriptor, metadata, detail::kMaxReferencedFileBytes,
+          detail_reference_missing, detail_reference_too_large, axes_source);
+      if (!read) {
+        return read;
+      }
+      const Status parsed = parse_coast_runtime_axes(
+          axes_source, model.mesh, model.mesh.coast_runtime_faces);
+      if (!parsed) {
+        return parsed;
+      }
+      model.mesh.axes_file = std::move(relative);
+      model.mesh.lower = {model.mesh.coast_runtime_faces[0U].front(),
+                          model.mesh.coast_runtime_faces[1U].front(),
+                          model.mesh.coast_runtime_faces[2U].front()};
+      model.mesh.upper = {model.mesh.coast_runtime_faces[0U].back(),
+                          model.mesh.coast_runtime_faces[1U].back(),
+                          model.mesh.coast_runtime_faces[2U].back()};
+      if (!valid_canonical_mesh(model.mesh)) {
+        return invalid_case(detail_json_value);
+      }
     }
 
     Hash64 hash;
@@ -2307,6 +2655,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
                   ? kSemanticContract
                   : kSimpleSemanticContract);
     hash_mesh(hash, model.mesh);
+    if (coast_axes_schema) {
+      hash.text("coast-runtime-axes-source-v1");
+      hash.integer(static_cast<std::uint64_t>(axes_source.size()));
+      hash.bytes(axes_source.data(), axes_source.size());
+    }
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
     hash.integer(static_cast<std::uint8_t>(model.pressure_reference));
     hash_transported_scalars(hash, model.transported_scalars);
@@ -2319,7 +2672,6 @@ Status compile_on_root(const fs::path& case_root, int rank,
     hash.integer(static_cast<std::uint16_t>(data_file_count));
 
     model.data_files.reserve(data_file_count);
-    std::set<std::pair<dev_t, ino_t>> referenced_targets;
     {
       fs::path relative;
       UniqueFd descriptor;
@@ -2354,6 +2706,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
       }
       thermophysics.data_file = std::move(relative);
       if (!detail::valid_thermophysical_spec(thermophysics)) {
+        return invalid_case(detail_json_value);
+      }
+      if (!thermophysics_compatible_with_coast_axes(thermophysics,
+                                                    coast_axes_schema)) {
         return invalid_case(detail_json_value);
       }
       const PlanFingerprint thermophysical_fingerprint =

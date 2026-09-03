@@ -150,6 +150,32 @@ ThermophysicalSpec two_species_spec(bool sutherland) {
   return spec;
 }
 
+ThermophysicalSpec coast_native_air_spec() {
+  ThermophysicalSpec spec;
+  spec.data_file = "thermophysics.d";
+  spec.minimum_temperature = 200.0;
+  spec.maximum_temperature = 6000.0;
+  spec.temperature_relative_tolerance = 1.0e-12;
+  spec.maximum_temperature_iterations = 80U;
+  spec.closed_mass_relative_tolerance = 1.0e-12;
+  spec.maximum_closed_mass_iterations = 20U;
+  spec.maximum_closed_mass_relative_step = 0.2;
+  SpeciesThermophysicalSpec air;
+  air.stable_name = "air";
+  air.molecular_weight = 28.850334;
+  air.temperature_switch = 1000.0;
+  air.nasa7_low = {3.5838100068, -7.2700635412e-4,
+                   1.67056387003e-6, -1.091801341e-10,
+                   -4.317787988e-13, -1050.5394088, 3.1124135035};
+  air.nasa7_high = {3.1013370688, 1.24138813631e-3,
+                    -4.1882038804e-7, 6.641656204e-11,
+                    -3.9127843272e-15, -985.27467132,
+                    5.3560174057};
+  air.transport_law = TransportLaw::coast_native_air;
+  spec.species.push_back(air);
+  return spec;
+}
+
 std::array<TransportedScalarSpec, 1U> scalar_catalog() {
   return {TransportedScalarSpec{"light", TransportedScalarRole::species}};
 }
@@ -371,6 +397,98 @@ bool test_transport_rejects_mismatched_thermodynamics() {
   std::swap(reordered.species[0U], reordered.species[1U]);
   passed &= expect(!TransportPlan::compile(reordered, thermodynamics, rejected),
                    "transport rejects reordered species from another authority");
+  return passed;
+}
+
+bool test_coast_native_air_oracle() {
+  const ThermophysicalSpec spec = coast_native_air_spec();
+  ThermodynamicsPlan thermodynamics;
+  TransportPlan transport;
+  bool passed = expect(static_cast<bool>(ThermodynamicsPlan::compile(
+                           spec, {}, thermodynamics)) &&
+                           static_cast<bool>(TransportPlan::compile(
+                               spec, thermodynamics, transport)),
+                       "COAST-native fixed air compiles without a species scalar");
+  if (!passed) return false;
+  passed &= expect(thermodynamics.kernel() == ThermodynamicsKernel::nasa7 &&
+                       transport.kernel() == TransportKernel::coast_native_air,
+                   "COAST-native air keeps variable thermo and transport kernels");
+  passed &= expect(transport.enthalpy_prandtl() == 0.70,
+                   "COAST-native air fixes the volume enthalpy Prandtl to 0.70");
+
+  struct Oracle {
+    double temperature;
+    double enthalpy;
+    double cp;
+    double viscosity;
+    double conductivity;
+  };
+  constexpr std::array<Oracle, 2U> oracle{{
+      {300.0, 27138.60823928275, 1011.426077876576,
+       1.8407959269119987e-5, 0.0265975572075397},
+      {600.0, 336196.7668615102, 1057.494020091266,
+       3.037922796329096e-5, 0.0458940741516708},
+  }};
+  double reference_enthalpy = 1.0;
+  double reference_cp = 0.0;
+  double reference_gas_constant = 0.0;
+  passed &= expect(
+      static_cast<bool>(thermodynamics.mixture_enthalpy(
+          273.15, {}, reference_enthalpy, reference_cp,
+          reference_gas_constant)) &&
+          close(reference_enthalpy, 0.0, 0.0, 1.0e-11),
+      "COAST-native primary enthalpy is referenced to 273.15 K");
+  for (const Oracle& expected : oracle) {
+    double enthalpy = 0.0;
+    double cp = 0.0;
+    double gas_constant = 0.0;
+    MolecularTransportState state;
+    ThermoState reconstructed;
+    passed &= expect(
+        static_cast<bool>(thermodynamics.mixture_enthalpy(
+            expected.temperature, {}, enthalpy, cp, gas_constant)) &&
+            static_cast<bool>(transport.evaluate(expected.temperature, {},
+                                                 state)) &&
+            static_cast<bool>(thermodynamics.evaluate(
+                101325.0, enthalpy, {}, {}, reconstructed)) &&
+            close(gas_constant, 288.1873048679436, 2.0e-15) &&
+            close(enthalpy, expected.enthalpy, 2.0e-13) &&
+            close(cp, expected.cp, 2.0e-13) &&
+            close(reconstructed.temperature, expected.temperature,
+                  2.0e-13) &&
+            close(state.viscosity, expected.viscosity, 2.0e-13) &&
+            close(state.conductivity, expected.conductivity, 2.0e-13),
+        "COAST-native air matches the 21/79 NASA/Yoon-Thodos/Wilke oracle");
+  }
+  double effective_conductivity = 0.0;
+  double effective_diffusivity = 0.0;
+  constexpr double molecular_viscosity = 1.8407959269119987e-5;
+  constexpr double effective_viscosity = 3.0 * molecular_viscosity;
+  constexpr double heat_capacity = 1011.426077876576;
+  passed &= expect(
+      static_cast<bool>(transport.effective_enthalpy_transport(
+          molecular_viscosity, effective_viscosity, heat_capacity,
+          effective_conductivity, effective_diffusivity)) &&
+          close(effective_diffusivity, effective_viscosity / 0.70) &&
+          close(effective_conductivity,
+                heat_capacity * effective_viscosity / 0.70),
+      "COAST-native volume enthalpy diffusion includes mu_sgs at Pr=0.70");
+
+  ThermophysicalSpec extra_species = spec;
+  extra_species.species.push_back(spec.species.front());
+  extra_species.species.back().stable_name = "not-air";
+  ThermodynamicsPlan rejected_thermodynamics;
+  passed &= expect(!ThermodynamicsPlan::compile(
+                       extra_species, {}, rejected_thermodynamics),
+                   "COAST-native air rejects a multi-species surrogate");
+  const std::array<TransportedScalarSpec, 1U> extra_species_scalar{{
+      {"air", TransportedScalarRole::species}}};
+  passed &= expect(!ThermodynamicsPlan::compile(
+                       spec,
+                       {extra_species_scalar.data(),
+                        extra_species_scalar.size()},
+                       rejected_thermodynamics),
+                   "COAST-native air rejects an extra species equation");
   return passed;
 }
 
@@ -815,6 +933,7 @@ int main(int argc, char** argv) {
   passed &= test_constant_and_wilke_transport();
   passed &= test_sutherland_temperature_dependence();
   passed &= test_transport_rejects_mismatched_thermodynamics();
+  passed &= test_coast_native_air_oracle();
   passed &= test_derived_gradient_lifecycle();
   passed &= test_quadratic_gradient(uniform_mesh(), false);
   passed &= test_quadratic_gradient(stretched_mesh(), true);

@@ -2,7 +2,7 @@
 
 # HUNDUN-FLOW v0.4 case-input schema
 
-Status: Task 20 production controls and wire-v9 schema, 2026-08-21
+Status: production controls and wire-v9--v18 compatibility, 2026-09-03
 
 ## Authority and directory layout
 
@@ -14,12 +14,12 @@ nested paths, incorrect suffixes, missing files, symbolic links, and hard-link
 aliases are rejected.
 
 Rank 0 alone opens the case-root descriptor, `case.json`, `.d`, and STL files. It
-reads and parses the thermophysical `.d` file exactly once, normalizes the closed
-schema, hashes the complete typed model and referenced bytes, and broadcasts a
-bounded wire-v9 model. The runtime model retains compact typed thermophysical
-data, never the source text. Other ranks never inspect the filesystem or parse
-JSON or `.d` text. Failed compilation leaves the caller's output model unchanged
-on every rank.
+reads and parses the thermophysical `.d` file and any COAST runtime-axis file
+exactly once, normalizes the closed schema, hashes the complete typed model and
+referenced bytes, and broadcasts a bounded typed model. The runtime model retains
+compact typed thermophysical data and effective axis coordinates, never the
+source text. Other ranks never inspect the filesystem or parse JSON or `.d` text.
+Failed compilation leaves the caller's output model unchanged on every rank.
 
 ## Complete closed schema
 
@@ -30,8 +30,8 @@ are errors. The root has exactly these required keys:
 `transported_scalars`, `boundaries`, `schemes`, and `time`.
 
 `turbulence` is the only optional key anywhere in the root schema. Omitting it
-selects `vreman_wall_function`. JSON `schema_version` remains `1`; wire version
-`9` is an internal typed-model format.
+selects `vreman_wall_function`. JSON `schema_version` remains `1`; wire versions
+9 through 18 are internal typed-model formats retained for backward decoding.
 
 `CaseCompiler` closes and types the JSON, checks local enum, finite-number, and
 range constraints, canonicalizes the mesh, and publishes the typed model. It
@@ -233,10 +233,11 @@ required boundary, scheme, and time-control field are explicit.
 
 ## Mesh
 
-The `mesh` object has exactly `kind`, `domain`, `exact_cells`,
+The `mesh` object normally has exactly `kind`, `domain`, `exact_cells`,
 `base_spacing`, `minimum_spacing`, `max_growth_ratio`, `focus_regions`,
-`limits`, `data_files`, and `immersed_boundary`. `domain` has exactly `lower` and
-`upper`; `limits` has exactly `max_global_cells` and
+`limits`, `data_files`, and `immersed_boundary`. The
+`coast_runtime_axes_v1` variant additionally requires `axes_file`. `domain` has
+exactly `lower` and `upper`; `limits` has exactly `max_global_cells` and
 `max_memory_bytes_per_rank`; each focus-region object has exactly `lower`,
 `upper`, and `target_spacing`.
 
@@ -270,6 +271,32 @@ Partly external boxes are clipped to the domain; wholly external or merely
 touching boxes are rejected. After clipping, regions are sorted
 lexicographically by lower bound, upper bound, and target spacing, then exact
 duplicates are removed. Negative zero is normalized to positive zero.
+
+### COAST runtime-axis Cartesian mesh
+
+For `kind: "coast_runtime_axes_v1"`, `exact_cells` and `base_spacing` are
+required and the mesh object additionally contains a direct-root `.dat`
+`axes_file`. Its closed text format is:
+
+```text
+COAST_RUNTIME_AXES 1
+grid NX NY NZ
+x NX+1
+<x-face coordinates>
+y NY+1
+<y-face coordinates>
+z NZ+1
+<z-face coordinates>
+```
+
+Counts must match `exact_cells`, coordinates must be finite and strictly
+increasing after projection to float32, endpoints must match the declared
+domain after the same projection, and trailing tokens are rejected. HUNDUN
+stores each effective coordinate as `double(float(source))` so the geometry is
+identical to the COAST Fortran runtime representation. The source bytes, direct
+path, and all effective coordinates participate in case identity. Declared
+spacing/focus controls remain auditable generator metadata; runtime metrics are
+computed only from the imported faces.
 
 ## Flow, solver, and turbulence
 
@@ -351,7 +378,15 @@ weight, an interior NASA-7 switch temperature, low/high seven-coefficient
 records, and exactly one transport record:
 
 - `transport_constant <mu> <k>`; or
-- `transport_sutherland <mu_ref> <T_ref> <S> <Pr>`.
+- `transport_sutherland <mu_ref> <T_ref> <S> <Pr>`; or
+- `transport_coast_native_air` for the one-species fixed 0.21 O2/0.79 N2
+  pseudo-air contract.
+
+`transport_coast_native_air` takes no numeric arguments. It is accepted only
+with the registered molecular weight and NASA7 records for that fixed mixture.
+It evaluates temperature-dependent heat capacity, Yoon--Thodos species
+viscosities with Wilke mixture weighting, and `k=cp*mu/0.70`; it is not a
+constant-property shortcut.
 
 All numbers are finite and the physical scales and tolerances are positive.
 Iteration counts are bounded by 256. Validation proves `cp/R > 1` throughout
@@ -517,6 +552,7 @@ bounds remain explicit for every control kind.
 | --- | --- |
 | `units` | `SI` |
 | `thermophysics.data_file` | unique direct-root name ending in `.d` |
+| `mesh.axes_file` | required unique direct-root name ending in `.dat` only for `coast_runtime_axes_v1` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
 | `mesh.immersed_boundary` | `null`, the legacy two-key object `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`, or that object plus exactly `"reconstruction_policy": "strict_quadratic" | "adaptive_order"`; the STL remains a unique direct-root `.stl` file |
 
@@ -574,11 +610,14 @@ shock/supersonic settings; those are not cross-field decisions made by
 | typed MPI wire payload | 256 KiB |
 
 The deterministic nonzero fingerprint hashes a versioned semantic contract
-followed by the complete canonical typed model: mesh geometry and normalized
+followed by the complete canonical typed model: mesh geometry, imported
+float32-effective axes when present, and normalized
 focus regions; limits; turbulence and pressure-reference kinds; all six faces
 and all scalar entries in face order; all schemes; every time-control field;
 the validated typed thermophysical model; normalized reference kinds/names; and
-exact referenced file bytes plus byte counts. Floating-point values are hashed
+exact referenced file bytes plus byte counts. The raw runtime-axis source bytes
+are also hashed, so source-format changes remain auditable even when their
+effective coordinates are unchanged. Floating-point values are hashed
 by their canonical IEEE-754 binary64 bit patterns. JSON whitespace, object-key
 order, normalization-equivalent focus input, and `-0.0` therefore do not affect
 identity, while any typed setting or referenced-byte change does.

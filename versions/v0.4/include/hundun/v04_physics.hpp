@@ -17,6 +17,8 @@
 namespace hundun::v04 {
 
 inline constexpr double kUniversalGasConstant = 8314.46261815324;
+inline constexpr double kCoastNativeAirUniversalGasConstant = 8314.3;
+inline constexpr double kCoastNativeAirMolecularWeight = 28.850334;
 
 enum class ThermodynamicsKernel : std::uint8_t { nasa7, constant_cp };
 
@@ -192,12 +194,17 @@ class ThermodynamicsPlan {
   double relative_tolerance_{};
   std::uint32_t maximum_iterations_{};
   double constant_enthalpy_offset_{};
+  double universal_gas_constant_{kUniversalGasConstant};
   PlanFingerprint source_fingerprint_{};
   ThermodynamicsKernel kernel_{ThermodynamicsKernel::nasa7};
   PlanFingerprint fingerprint_{};
 };
 
-enum class TransportKernel : std::uint8_t { constant, sutherland_wilke };
+enum class TransportKernel : std::uint8_t {
+  constant,
+  sutherland_wilke,
+  coast_native_air
+};
 
 struct MolecularTransportState {
   double viscosity{};
@@ -218,8 +225,15 @@ class TransportPlan {
   Status evaluate(double temperature,
                   Span<const double> independent_mass_fractions,
                   MolecularTransportState& out) const noexcept;
+  Status effective_enthalpy_transport(double molecular_viscosity,
+                                      double effective_viscosity,
+                                      double heat_capacity,
+                                      double& conductivity,
+                                      double& enthalpy_diffusivity) const
+      noexcept;
 
   TransportKernel kernel() const noexcept { return kernel_; }
+  double enthalpy_prandtl() const noexcept { return enthalpy_prandtl_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
@@ -239,6 +253,7 @@ class TransportPlan {
   std::size_t dependent_species_{};
   double minimum_temperature_{};
   double maximum_temperature_{};
+  double enthalpy_prandtl_{};
   TransportKernel kernel_{TransportKernel::constant};
   PlanFingerprint fingerprint_{};
 };

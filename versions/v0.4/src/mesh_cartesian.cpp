@@ -205,7 +205,7 @@ Status broadcast_geometry_metadata(GeometryKind& kind, Real3& lower,
     return {StatusCode::mpi_failure, kGeometryCollective};
   }
   if (wire_kind >
-          static_cast<std::uint8_t>(GeometryKind::tensor_stretched) ||
+          static_cast<std::uint8_t>(GeometryKind::coast_runtime_axes_v1) ||
       !std::all_of(bounds.begin(), bounds.end(),
                    [](double value) { return std::isfinite(value); }) ||
       !(bounds[0] < bounds[3]) || !(bounds[1] < bounds[4]) ||
@@ -320,6 +320,40 @@ PlanFingerprint geometry_fingerprint(
   return hash.finish();
 }
 
+Status copy_coast_runtime_faces(
+    const CartesianMeshSpec& mesh,
+    std::array<std::vector<double>, 3U>& faces) noexcept {
+  if (mesh.axes_file.empty() || !mesh.has_exact_cells) {
+    return {StatusCode::invalid_plan, kGeometryWire};
+  }
+  try {
+    faces = mesh.coast_runtime_faces;
+  } catch (const std::bad_alloc&) {
+    return {StatusCode::allocation_failure, kGeometryWire};
+  } catch (...) {
+    return {StatusCode::invalid_plan, kGeometryWire};
+  }
+  const std::array<std::int32_t, 3U> expected{
+      mesh.exact_cells.x, mesh.exact_cells.y, mesh.exact_cells.z};
+  for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
+    if (expected[axis] <= 0 ||
+        faces[axis].size() != static_cast<std::size_t>(expected[axis]) + 1U) {
+      return {StatusCode::invalid_plan, kGeometryWire};
+    }
+    double previous = 0.0;
+    for (std::size_t index = 0U; index < faces[axis].size(); ++index) {
+      const double effective =
+          static_cast<double>(static_cast<float>(faces[axis][index]));
+      if (!std::isfinite(effective) || (index != 0U && !(previous < effective))) {
+        return {StatusCode::invalid_plan, kGeometryWire};
+      }
+      faces[axis][index] = effective;
+      previous = effective;
+    }
+  }
+  return {};
+}
+
 }  // namespace
 
 Span<const double> AxisMetrics::faces() const noexcept {
@@ -364,14 +398,19 @@ Status CartesianGeometryCompiler::compile(
   std::array<std::vector<double>, 3U> faces;
   Status root_status{};
   std::uint64_t root_payload_limit = 0U;
+  GeometryKind authoritative_kind = mesh.kind;
+  Real3 authoritative_lower = mesh.lower;
+  Real3 authoritative_upper = mesh.upper;
   if (rank == 0) {
     root_status = geometry_payload_limit(mesh, budget, root_payload_limit);
     if (root_status) {
       root_status = preflight_exact_geometry(mesh, root_payload_limit);
     }
     if (root_status) {
-      root_status =
-          detail::generate_cartesian_faces(mesh, root_payload_limit, faces);
+      root_status = mesh.kind == GeometryKind::coast_runtime_axes_v1
+                        ? copy_coast_runtime_faces(mesh, faces)
+                        : detail::generate_cartesian_faces(
+                              mesh, root_payload_limit, faces);
     }
     if (root_status) {
       const bool representable =
@@ -400,15 +439,19 @@ Status CartesianGeometryCompiler::compile(
       if (root_status) {
         root_status = metric_peak_gate(faces, root_payload_limit);
       }
+      if (root_status &&
+          mesh.kind == GeometryKind::coast_runtime_axes_v1) {
+        authoritative_lower = {faces[0].front(), faces[1].front(),
+                               faces[2].front()};
+        authoritative_upper = {faces[0].back(), faces[1].back(),
+                               faces[2].back()};
+      }
     }
   }
   const Status generated = collective_status(root_status, communicator);
   if (!generated) {
     return generated;
   }
-  GeometryKind authoritative_kind = mesh.kind;
-  Real3 authoritative_lower = mesh.lower;
-  Real3 authoritative_upper = mesh.upper;
   const Status metadata_status = broadcast_geometry_metadata(
       authoritative_kind, authoritative_lower, authoritative_upper, rank,
       communicator);

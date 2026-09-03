@@ -22,7 +22,11 @@ enum class MgCorrectionScaling : std::uint8_t {
   unit_linear
 };
 
-enum class GeometryKind : std::uint8_t { uniform, tensor_stretched };
+enum class GeometryKind : std::uint8_t {
+  uniform,
+  tensor_stretched,
+  coast_runtime_axes_v1
+};
 enum class TurbulenceKind : std::uint8_t {
   none,
   wale,
@@ -77,7 +81,11 @@ enum class ConvectionScheme : std::uint8_t {
 };
 enum class DiffusionScheme : std::uint8_t { central2 };
 enum class TimeScheme : std::uint8_t { backward_euler, variable_bdf2 };
-enum class TransportLaw : std::uint8_t { constant, sutherland };
+enum class TransportLaw : std::uint8_t {
+  constant,
+  sutherland,
+  coast_native_air
+};
 enum class ImmersedFluidSide : std::uint8_t { outside, inside };
 enum class IbmReconstructionPolicy : std::uint8_t {
   strict_quadratic,
@@ -101,6 +109,8 @@ struct MeshLimits {
 
 struct CartesianMeshSpec {
   GeometryKind kind{GeometryKind::uniform};
+  std::filesystem::path axes_file;
+  std::array<std::vector<double>, 3U> coast_runtime_faces;
   Real3 lower{};
   Real3 upper{};
   bool has_exact_cells{};

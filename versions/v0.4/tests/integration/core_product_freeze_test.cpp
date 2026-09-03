@@ -513,6 +513,95 @@ bool test_freeze() {
   return passed;
 }
 
+bool test_live_thermal_halo_resource_contract() {
+  constexpr Int3 cells{17, 11, 7};
+  CompiledCasePlan plan;
+  const Status status =
+      ProductCompiler::compile(MPI_COMM_SELF, test::product_model(cells), {},
+                               plan);
+  const FrozenExecutionGraph* graph = plan.execution_graph();
+  const FrozenStage* stage20 = graph == nullptr ? nullptr : graph->stage(20U);
+  const FrozenStage* stage40 = graph == nullptr ? nullptr : graph->stage(40U);
+  const FrozenStage* stage45 = graph == nullptr ? nullptr : graph->stage(45U);
+  const FrozenStage* stage50 = graph == nullptr ? nullptr : graph->stage(50U);
+  const FrozenStage* stage60 = graph == nullptr ? nullptr : graph->stage(60U);
+
+  std::size_t thermal_bytes = 0U;
+  std::size_t turbulence_bytes = 0U;
+  std::size_t pressure_bytes = 0U;
+  std::size_t candidate_correction_bytes = 0U;
+  std::size_t candidate_state_full_bytes = 0U;
+  std::size_t candidate_state_face_bytes = 0U;
+  std::size_t candidate_finalizer_bytes = 0U;
+  std::size_t force_bytes = 0U;
+  const bool sized =
+      detail::product_halo_bytes(cells, 2U, 1U, thermal_bytes) &&
+      detail::product_halo_bytes(cells, 6U, 2U, turbulence_bytes) &&
+      detail::product_halo_bytes(cells, 8U, 2U, pressure_bytes) &&
+      detail::product_halo_bytes(cells, 1U, 1U,
+                                 candidate_correction_bytes) &&
+      detail::product_halo_bytes(cells, 6U, 2U,
+                                 candidate_state_full_bytes) &&
+      detail::product_halo_bytes(cells, 1U, 1U,
+                                 candidate_state_face_bytes) &&
+      detail::product_halo_bytes(cells, 7U, 1U,
+                                 candidate_finalizer_bytes) &&
+      detail::product_halo_bytes(cells, 15U, 2U, force_bytes);
+  if (!expect(status && graph != nullptr && stage20 != nullptr &&
+                  stage40 != nullptr && stage45 != nullptr &&
+                  stage50 != nullptr && stage60 != nullptr && sized,
+              "thermal resource-contract fixture freezes"))
+    return false;
+
+  constexpr std::uint64_t candidate_evaluations =
+      static_cast<std::uint64_t>(
+          kPressureEnergyGlobalizationCandidateCount + 2U);
+  const std::uint64_t candidate_bytes_per_evaluation =
+      candidate_correction_bytes + candidate_state_full_bytes +
+      candidate_state_face_bytes + thermal_bytes +
+      candidate_finalizer_bytes;
+  const std::uint64_t candidate_messages_per_evaluation =
+      candidate_bytes_per_evaluation / sizeof(double);
+  const std::uint64_t thermal_messages =
+      thermal_bytes / sizeof(double);
+  const std::uint64_t stage40_bytes =
+      pressure_bytes +
+      candidate_evaluations * candidate_bytes_per_evaluation + thermal_bytes;
+  const std::uint64_t stage40_messages =
+      6U + candidate_evaluations * candidate_messages_per_evaluation +
+      thermal_messages;
+  const std::uint64_t refinement_exchanges =
+      static_cast<std::uint64_t>(kPressureEnergyRefinementCapacity);
+
+  return expect(
+      stage20->resources.merged_halo_bytes ==
+              turbulence_bytes + thermal_bytes &&
+          stage20->resources.merged_halo_messages ==
+              6U + thermal_messages &&
+          stage40->resources.merged_halo_bytes == stage40_bytes &&
+          stage40->resources.merged_halo_messages == stage40_messages &&
+          stage45->resources.merged_halo_bytes == 2U * thermal_bytes &&
+          stage45->resources.merged_halo_messages ==
+              2U * thermal_messages &&
+          stage50->resources.merged_halo_bytes ==
+              stage40_bytes +
+                  refinement_exchanges *
+                      (candidate_evaluations *
+                           candidate_bytes_per_evaluation +
+                       thermal_bytes) &&
+          stage50->resources.merged_halo_messages ==
+              stage40_messages +
+                  refinement_exchanges *
+                      (candidate_evaluations *
+                           candidate_messages_per_evaluation +
+                       thermal_messages) &&
+          stage60->resources.merged_halo_bytes ==
+              force_bytes + thermal_bytes &&
+          stage60->resources.merged_halo_messages ==
+              6U + thermal_messages,
+      "every live and refinement-candidate halo is present in its stage seal");
+}
+
 bool test_pressure_energy_restart_schema() {
   ValidatedModel model = test::product_model({17, 11, 7});
   CompiledCasePlan plan;
@@ -655,6 +744,15 @@ bool test_pressure_energy_candidate_storage_lineage() {
           diagnostic.coupled_state_halo != diagnostic.candidate_state_halo,
       "candidate halo owns an independent engine lineage");
   passed &= expect(
+      diagnostic.coupled_thermal_halo != 0U &&
+          diagnostic.candidate_thermal_halo != 0U &&
+          diagnostic.coupled_thermal_halo !=
+              diagnostic.candidate_thermal_halo &&
+          diagnostic.coupled_thermal_halo != diagnostic.coupled_state_halo &&
+          diagnostic.candidate_thermal_halo !=
+              diagnostic.candidate_state_halo,
+      "effective thermal ghosts own live and candidate halo lineages");
+  passed &= expect(
       diagnostic.candidate_finalizer_state_halo != 0U &&
           diagnostic.candidate_finalizer_state_halo !=
               diagnostic.candidate_state_halo &&
@@ -683,6 +781,8 @@ bool test_pressure_energy_candidate_storage_lineage() {
   passed &= expect(
       same_halo_capacity(diagnostic.coupled_state_halo_plan,
                          diagnostic.candidate_state_halo_plan) &&
+          same_halo_capacity(diagnostic.coupled_thermal_halo_plan,
+                             diagnostic.candidate_thermal_halo_plan) &&
           same_halo_capacity(diagnostic.correction_halo_plan,
                              diagnostic.candidate_correction_halo_plan),
       "candidate halos freeze the live geometric reach under new field lineage");
@@ -1143,6 +1243,7 @@ int main(int argc, char** argv) {
                       test_pressure_inexact_forcing_policy() &&
                       test_pressure_aitken_initial_alpha() &&
                       test_freeze() &&
+                      test_live_thermal_halo_resource_contract() &&
                       test_pressure_energy_restart_schema() &&
                       test_pressure_energy_candidate_storage_lineage() &&
                       test_fatal_time_finish_is_recoverable() &&
