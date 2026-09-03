@@ -125,6 +125,21 @@ struct ProductPressureInexactForcingState {
   bool previous_merit_available{};
 };
 
+inline bool product_pressure_coupled_merit(
+    double normalized_continuity, double normalized_energy,
+    double& merit) noexcept {
+  merit = 0.0;
+  if (!std::isfinite(normalized_continuity) ||
+      normalized_continuity < 0.0 ||
+      !std::isfinite(normalized_energy) || normalized_energy < 0.0)
+    return false;
+  const double candidate =
+      std::hypot(normalized_continuity, normalized_energy);
+  if (!std::isfinite(candidate)) return false;
+  merit = candidate;
+  return true;
+}
+
 // Select only the inner coupled linear tolerance.  The case control remains
 // the lower bound and is restored near the terminal gate, on stagnation, or
 // whenever the nonlinear evidence is invalid.
@@ -151,15 +166,14 @@ inline LinearSolveControl product_pressure_inexact_forcing_control(
         kPressureInexactForcingRelativeToleranceCeiling;
     return base;
   }
-  if (!std::isfinite(state.normalized_continuity) ||
-      state.normalized_continuity < 0.0 ||
-      !std::isfinite(state.normalized_energy) ||
-      state.normalized_energy < 0.0)
+  double merit = 0.0;
+  if (!product_pressure_coupled_merit(state.normalized_continuity,
+                                      state.normalized_energy, merit))
     return base;
-  const double merit =
+  const double terminal_component =
       std::max(state.normalized_continuity, state.normalized_energy);
   const double terminal_band = 10.0 * state.terminal_tolerance;
-  if (!std::isfinite(terminal_band) || merit <= terminal_band)
+  if (!std::isfinite(terminal_band) || terminal_component <= terminal_band)
     return base;
 
   if (state.previous_merit_available) {

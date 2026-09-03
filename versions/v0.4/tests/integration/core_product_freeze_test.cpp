@@ -9,6 +9,7 @@
 #include <mpi.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -108,8 +109,9 @@ bool test_pressure_inexact_forcing_policy() {
       detail::product_pressure_inexact_forcing_control(
           base, {5.0e-5, 4.0e-5, 0.0, 1.0e-6, true, false});
   passed &= expect(same_fixed_control(intermediate) &&
-                       intermediate.relative_tolerance == 5.0e-6,
-                   "inexact pressure tolerance follows nonlinear residual");
+                       intermediate.relative_tolerance ==
+                           0.1 * std::hypot(5.0e-5, 4.0e-5),
+                   "inexact pressure tolerance follows the coupled merit");
 
   const LinearSolveControl terminal =
       detail::product_pressure_inexact_forcing_control(
@@ -129,9 +131,9 @@ bool test_pressure_inexact_forcing_policy() {
 
   const LinearSolveControl contracting =
       detail::product_pressure_inexact_forcing_control(
-          base, {8.0e-4, 7.0e-4, 1.0e-3, 1.0e-6, true, true});
+          base, {8.0e-4, 7.0e-4, 1.5e-3, 1.0e-6, true, true});
   passed &= expect(same_fixed_control(contracting) &&
-                       contracting.relative_tolerance == 8.0e-5,
+                       contracting.relative_tolerance == 1.0e-4,
                    "contracting far-field residual retains inexact solve");
 
   const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -175,6 +177,44 @@ bool test_pressure_inexact_forcing_policy() {
               deliberately_strict.true_residual_interval &&
           strict_unchanged.restart == deliberately_strict.restart,
       "a case tolerance stricter than its terminal gate disables forcing");
+  return passed;
+}
+
+bool test_pressure_coupled_merit_policy() {
+  double previous = -1.0;
+  double current = -1.0;
+  bool passed = true;
+  passed &= expect(
+      detail::product_pressure_coupled_merit(
+          0.00417391, 0.00369408, previous) &&
+          detail::product_pressure_coupled_merit(
+              0.00420923, 0.000517943, current) &&
+          previous == std::hypot(0.00417391, 0.00369408) &&
+          current == std::hypot(0.00420923, 0.000517943) &&
+          detail::product_pressure_aitken_initial_alpha(previous, current,
+                                                        1.0) == 2.0,
+      "coupled merit preserves Re3900 joint descent when one component rises");
+
+  passed &= expect(
+      detail::product_pressure_coupled_merit(1.0, 0.0, previous) &&
+          detail::product_pressure_coupled_merit(0.8, 0.6, current) &&
+          previous == 1.0 && current == 1.0 &&
+          detail::product_pressure_aitken_initial_alpha(previous, current,
+                                                        1.0) == 1.0,
+      "coupled merit rejects a componentwise contraction with no joint descent");
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  double invalid = 1.0;
+  passed &= expect(
+      !detail::product_pressure_coupled_merit(-1.0, 0.0, invalid) &&
+          invalid == 0.0 &&
+          !detail::product_pressure_coupled_merit(nan, 0.0, invalid) &&
+          invalid == 0.0 &&
+          !detail::product_pressure_coupled_merit(
+              std::numeric_limits<double>::max(),
+              std::numeric_limits<double>::max(), invalid) &&
+          invalid == 0.0,
+      "invalid coupled merit inputs fail closed");
   return passed;
 }
 
@@ -1241,6 +1281,7 @@ int main(int argc, char** argv) {
   const bool passed = test_incomplete_registration() &&
                       test_pressure_energy_temporal_operand_scale() &&
                       test_pressure_inexact_forcing_policy() &&
+                      test_pressure_coupled_merit_policy() &&
                       test_pressure_aitken_initial_alpha() &&
                       test_freeze() &&
                       test_live_thermal_halo_resource_contract() &&

@@ -12257,17 +12257,9 @@ Status ProductDriver::Impl::execute_attempt(
       [](const PressureEnergyCandidateLoopResult& loop,
          double& merit) noexcept {
         merit = 0.0;
-        if (!loop.replay_valid ||
-            !std::isfinite(
-                loop.replay.sample.global_normalized_continuity) ||
-            loop.replay.sample.global_normalized_continuity < 0.0 ||
-            !std::isfinite(loop.replay.sample.global_normalized_energy) ||
-            loop.replay.sample.global_normalized_energy < 0.0)
-          return false;
-        merit = std::max(
+        return loop.replay_valid && detail::product_pressure_coupled_merit(
             loop.replay.sample.global_normalized_continuity,
-            loop.replay.sample.global_normalized_energy);
-        return true;
+            loop.replay.sample.global_normalized_energy, merit);
       };
   const auto pressure_energy_components_converged =
       [&](const PressureEnergyCandidateLoopResult& loop) noexcept {
