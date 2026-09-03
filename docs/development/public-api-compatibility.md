@@ -28,3 +28,9 @@ certificate 均在既有字段之后追加 collective/rank-local lineage。手�
 返回的完整 certificate，不应自行拼装 token。这些 certificate 不是 Restart、网络
 或磁盘格式，因此本次变化不改变持久化 schema；若外部代码把公共结构体原始字节
 当作 wire ABI，必须改为按字段序列化并显式版本化。
+
+`PressureEnergyGlobalizationIterationReport` 在既有字段之后追加
+`jacobian_scope_valid` 和 `jacobian_scope`。旧 aggregate 初始化继续成立，新增字段
+默认为无效；消费者必须先检查 `jacobian_scope_valid`。该观测只存在于进程内报告，
+不改变 runtime evidence、Restart 或网络格式，但混用新旧头文件的二进制需要完整
+重编译。

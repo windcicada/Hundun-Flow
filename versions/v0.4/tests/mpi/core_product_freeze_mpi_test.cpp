@@ -3355,6 +3355,166 @@ bool run_simple_coupling_compile(int rank) {
                 "SIMPLE performs two momentum-pressure outer iterations");
 }
 
+bool run_simple_immersed_refinement(int rank) {
+  ValidatedModel model = multispecies_open_model(true);
+  model.solver.coupling = CouplingKind::simple;
+  model.time.initial_dt = 2.5e-4;
+  model.boundaries[0U].velocity = {1.0, 0.0, 0.0};
+  model.boundaries[1U].backflow_velocity = {-1.0, 0.0, 0.0};
+  model.fingerprint = UINT64_C(0x18000a12);
+  const std::filesystem::path data_root =
+      std::filesystem::path{HUNDUN_V04_SOURCE_ROOT} / "tests" / "data";
+  CompiledCasePlan plan;
+  Status status =
+      ProductCompiler::compile(MPI_COMM_WORLD, model, data_root, plan);
+  const PlanSummary summary = status ? plan.summary() : PlanSummary{};
+  ProductDriver driver;
+  if (status)
+    status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  const std::array<double, 3U> initial_scalars{{0.10, 0.20, 0.05}};
+  DriverInitialState initial;
+  initial.pressure_reference = 98000.0;
+  initial.temperature = 315.0;
+  initial.velocity = {1.0, 0.0, 0.0};
+  initial.transported_scalars =
+      {initial_scalars.data(), initial_scalars.size()};
+  if (status) status = driver.initialize(initial);
+  DriverStepReport step;
+  if (status)
+    status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+
+  const auto converged = [](const LinearSolveResult& solve) {
+    return solve.status &&
+           (solve.termination == LinearTermination::converged ||
+            solve.termination == LinearTermination::zero_rhs) &&
+           std::isfinite(solve.initial_true_residual) &&
+           std::isfinite(solve.final_true_residual) &&
+           solve.final_true_residual <= solve.initial_true_residual;
+  };
+  const std::uint8_t refinement_calls =
+      step.piso.pressure_energy_refinement_solve_calls;
+  bool linear = step.piso.pressure_solve_calls == 2U &&
+                converged(step.piso.pressure[0U]) &&
+                converged(step.piso.pressure[1U]) &&
+                refinement_calls > 0U &&
+                refinement_calls <= kPressureEnergyRefinementCapacity;
+  for (std::size_t index = 0U; index < refinement_calls; ++index)
+    linear &= step.piso.pressure_energy_refinement[index].valid() &&
+              step.piso.pressure_energy_refinement[index].ordinal ==
+                  index + 1U &&
+              converged(step.piso.pressure_energy_refinement[index].solve);
+  for (std::size_t index = refinement_calls;
+       index < step.piso.pressure_energy_refinement.size(); ++index)
+    linear &= !step.piso.pressure_energy_refinement[index].valid();
+
+  const auto& globalization = step.pressure_energy_globalization;
+  const std::uint8_t trajectory_count =
+      static_cast<std::uint8_t>(2U + refinement_calls);
+  bool trajectory = globalization.valid &&
+                    globalization.trajectory_count == trajectory_count;
+  std::uint64_t trajectory_hash = UINT64_C(1469598103934665603);
+  const auto mix = [](std::uint64_t hash, std::uint64_t value) {
+    return (hash ^ value) * UINT64_C(1099511628211);
+  };
+  for (std::uint8_t index = 0U; index < trajectory_count; ++index) {
+    const auto& iteration = globalization.trajectory[index];
+    const std::uint8_t expected_corrector = index == 0U ? 1U : 2U;
+    const std::uint8_t expected_refinement =
+        index < 2U ? 0U : static_cast<std::uint8_t>(index - 1U);
+    trajectory &= iteration.valid &&
+                  iteration.corrector == expected_corrector &&
+                  iteration.refinement_iteration == expected_refinement &&
+                  (index == 0U
+                       ? !iteration.jacobian_scope_valid
+                       : iteration.jacobian_scope_valid &&
+                             iteration.jacobian_scope ==
+                                 PressureEnergyJacobianScope::
+                                     ibm_double_diagonal_quasi_newton) &&
+                  iteration.baseline.corrector == expected_corrector &&
+                  iteration.selected.corrector == expected_corrector &&
+                  iteration.baseline.target_time ==
+                      globalization.trajectory[0U].baseline.target_time &&
+                  iteration.selected.target_time ==
+                      globalization.trajectory[0U].baseline.target_time &&
+                  iteration.baseline.thermodynamically_admissible &&
+                  iteration.baseline.state_and_flux_finite &&
+                  iteration.selected.thermodynamically_admissible &&
+                  iteration.selected.state_and_flux_finite;
+    if (index >= 2U) {
+      const auto& prior = globalization.trajectory[index - 1U];
+      trajectory &=
+          wire_bits(iteration.baseline.global_normalized_continuity) ==
+              wire_bits(prior.selected.global_normalized_continuity) &&
+          wire_bits(iteration.baseline.global_normalized_energy) ==
+              wire_bits(prior.selected.global_normalized_energy);
+    }
+    trajectory_hash = mix(trajectory_hash, iteration.valid);
+    trajectory_hash = mix(trajectory_hash, iteration.corrector);
+    trajectory_hash = mix(trajectory_hash, iteration.refinement_iteration);
+    trajectory_hash = mix(trajectory_hash, iteration.jacobian_scope_valid);
+    trajectory_hash = mix(
+        trajectory_hash, static_cast<std::uint8_t>(iteration.jacobian_scope));
+    trajectory_hash = mix(
+        trajectory_hash,
+        wire_bits(iteration.selected.global_normalized_continuity));
+    trajectory_hash = mix(
+        trajectory_hash,
+        wire_bits(iteration.selected.global_normalized_energy));
+  }
+  for (std::size_t index = trajectory_count;
+       index < globalization.trajectory.size(); ++index)
+    trajectory &= !globalization.trajectory[index].valid &&
+                  !globalization.trajectory[index].jacobian_scope_valid;
+  trajectory &= same_u64(trajectory_hash, MPI_COMM_WORLD);
+  if (trajectory_count > 0U) {
+    const auto& terminal = globalization.trajectory[trajectory_count - 1U];
+    trajectory &=
+        wire_bits(terminal.selected.global_normalized_continuity) ==
+            wire_bits(step.piso.continuity_residual) &&
+        wire_bits(terminal.selected.global_normalized_energy) ==
+            wire_bits(step.piso.energy_residual);
+  }
+
+  const bool terminal =
+      std::isfinite(step.piso.eos_residual) &&
+      step.piso.eos_residual <= summary.terminal_eos_tolerance &&
+      std::isfinite(step.piso.continuity_residual) &&
+      step.piso.continuity_residual <=
+          summary.terminal_continuity_tolerance &&
+      std::isfinite(step.piso.energy_residual) &&
+      step.piso.energy_residual <= summary.terminal_continuity_tolerance &&
+      std::isfinite(step.piso.closed_mass_residual) &&
+      step.piso.closed_mass_residual <= summary.terminal_closed_mass_tolerance &&
+      std::isfinite(step.piso.gauge_residual) &&
+      step.piso.gauge_residual <= summary.terminal_gauge_tolerance;
+  const bool passed =
+      status && summary.coupling == CouplingKind::simple && summary.immersed &&
+      step.accepted && step.attempts == 1U && step.failed_stage == 0U &&
+      step.failure.code == StatusCode::ok &&
+      step.piso.pressure_energy_refinement_termination ==
+          PressureEnergyRefinementTermination::component_residuals_converged &&
+      step.piso.final_flux_revision != 0U && linear && trajectory && terminal;
+  if (!passed && rank == 0)
+    std::cerr << std::setprecision(17) << "simple-immersed-refinement="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " accepted/attempts/calls=" << step.accepted << '/'
+              << step.attempts << '/'
+              << static_cast<unsigned>(
+                     step.piso.pressure_energy_refinement_solve_calls)
+              << " trajectory="
+              << static_cast<unsigned>(
+                     step.pressure_energy_globalization.trajectory_count)
+              << " residuals=" << step.piso.eos_residual << '/'
+              << step.piso.continuity_residual << '/'
+              << step.piso.energy_residual << '/'
+              << step.piso.closed_mass_residual << '/'
+              << step.piso.gauge_residual << " checks=" << linear << '/'
+              << trajectory << '/' << terminal << '\n';
+  return expect(collective(passed, MPI_COMM_WORLD), rank,
+                "SIMPLE IBM C2 refinements use one diagonal Schur scope and "
+                "pass exact trajectory, linear and terminal gates");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3365,6 +3525,12 @@ int main(int argc, char** argv) {
       std::strcmp(argv[1], "--simple-compile-only") == 0) {
     const bool passed =
         collective(run_simple_coupling_compile(rank), MPI_COMM_WORLD);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 &&
+      std::strcmp(argv[1], "--simple-immersed-refinement-only") == 0) {
+    const bool passed = run_simple_immersed_refinement(rank);
     MPI_Finalize();
     return passed ? 0 : 1;
   }
@@ -3644,6 +3810,7 @@ int main(int argc, char** argv) {
                    "product restart advances across 1->2->4->1 ranks");
   passed &= expect(run_simple_coupling_compile(rank), rank,
                    "SIMPLE coupling freezes collectively");
+  passed &= run_simple_immersed_refinement(rank);
   passed = collective(passed, MPI_COMM_WORLD);
   MPI_Finalize();
   return passed ? 0 : 1;

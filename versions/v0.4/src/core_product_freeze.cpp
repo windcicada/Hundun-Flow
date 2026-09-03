@@ -9469,6 +9469,11 @@ Status ProductDriver::Impl::execute_attempt(
     }
     return product.reductions.consensus(formed);
   };
+  struct PressureEnergyJacobianObservation {
+    bool valid{};
+    PressureEnergyJacobianScope scope{
+        PressureEnergyJacobianScope::generic_algebraic_quasi_newton};
+  };
   const auto solve_pressure_energy =
       [&](std::uint8_t corrector,
           std::uint8_t refinement_iteration,
@@ -9477,7 +9482,9 @@ Status ProductDriver::Impl::execute_attempt(
           ConstFaceFluxView target_flux,
           const FrozenConvectionFaceField& frozen_enthalpy,
           LinearIdentity identity, MgCoefficientIdentity coefficients,
-          const LinearSolveControl& solve_control) {
+          const LinearSolveControl& solve_control,
+          PressureEnergyJacobianObservation& jacobian_observation) {
+        jacobian_observation = {};
         Status coupled =
             refinement_iteration == 0U
                 ? solve_epoch.prepare_linear_lifecycle(
@@ -9588,9 +9595,9 @@ Status ProductDriver::Impl::execute_attempt(
           return product.reductions.consensus(coupled);
         }
         const bool simple_diagonal_schur =
-            product.piso.coupling() == CouplingKind::simple &&
-            corrector == 2U && refinement_iteration == 0U &&
-            product.ibm_equations.has_value();
+            detail::product_use_simple_diagonal_schur(
+                product.piso.coupling(), corrector, refinement_iteration,
+                product.ibm_equations.has_value());
         PisoCartesianPressureWorkLinearization pressure_work;
         if (coupled && !simple_diagonal_schur &&
             !product.ibm_equations.has_value())
@@ -9713,6 +9720,8 @@ Status ProductDriver::Impl::execute_attempt(
         const bool solve_invoked = static_cast<bool>(coupled);
         int close_lowest_failing_rank = prepare_lowest_failing_rank;
         if (solve_invoked) {
+          jacobian_observation.scope = jacobian_certificate.jacobian_scope;
+          jacobian_observation.valid = true;
           coupled = solve_epoch.solve_prepared(
               schur_operator,
               PisoPressureSolveContract::continuity_energy_coupled,
@@ -12455,6 +12464,7 @@ Status ProductDriver::Impl::execute_attempt(
   const auto run_pressure_energy_candidate_loop =
       [&](std::uint8_t corrector,
           std::uint8_t refinement_iteration,
+          const PressureEnergyJacobianObservation& jacobian_observation,
           const PisoIntermediateCertificate& intermediate,
           const PressureCorrectionCertificate& pressure,
           ConstFaceFluxView baseline_flux,
@@ -12885,6 +12895,8 @@ Status ProductDriver::Impl::execute_attempt(
             iteration.valid = true;
             iteration.corrector = corrector;
             iteration.refinement_iteration = refinement_iteration;
+            iteration.jacobian_scope_valid = jacobian_observation.valid;
+            iteration.jacobian_scope = jacobian_observation.scope;
             iteration.maximum_absolute_pressure_correction =
                 loop.maximum_pressure_direction;
             iteration.maximum_absolute_enthalpy_correction =
@@ -13146,11 +13158,12 @@ Status ProductDriver::Impl::execute_attempt(
     status = ibm_pressure_operator->mask_solid_rhs(pressure_system.rhs);
   if (status && product.piso.coupling() != CouplingKind::simple)
     status = form_pressure_energy_blocks();
+  PressureEnergyJacobianObservation jacobian_one;
   if (status)
     status = solve_pressure_energy(
         1U, 0U, intermediate_one, pressure_one, pressure_energy_target_flux,
         pressure_energy_frozen_enthalpy, identity_one, coefficient_one,
-        pressure_inexact_control(nullptr, 0.0, false));
+        pressure_inexact_control(nullptr, 0.0, false), jacobian_one);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) observe_pressure_energy_candidate_globalization(1U);
 #endif
@@ -13166,7 +13179,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = revise_coupled_trial_views();
     if (status)
       status = run_pressure_energy_candidate_loop(
-          1U, 0U, intermediate_one, pressure_one,
+          1U, 0U, jacobian_one, intermediate_one, pressure_one,
           pressure_energy_target_flux,
           1.0,
           false,
@@ -13364,6 +13377,7 @@ Status ProductDriver::Impl::execute_attempt(
   MgCoefficientIdentity coefficient_two{pressure_two.state,
                                         pressure_two.state, 0.0};
   PressureEnergyCandidateLoopResult candidate_loop_two;
+  PressureEnergyJacobianObservation jacobian_two;
   bool stationary_two = false;
   if (status && probe_stationary_two) {
     zero_field(pressure_correction);
@@ -13371,7 +13385,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = revise_coupled_trial_views();
     if (status)
       status = run_pressure_energy_candidate_loop(
-          2U, 0U, intermediate_two, pressure_two,
+          2U, 0U, jacobian_two, intermediate_two, pressure_two,
           pressure_energy_target_flux, 1.0, true, candidate_loop_two);
     stationary_two =
         static_cast<bool>(status) && candidate_loop_two.stationary.valid();
@@ -13419,7 +13433,7 @@ Status ProductDriver::Impl::execute_attempt(
         // Both mandatory PISO correctors are inexact nonlinear directions.
         // Exact C2 replay below either accepts the five gates or enters a
         // residual-aware refinement; it never accepts this linear norm alone.
-        pressure_inexact_control(nullptr, 0.0, false));
+        pressure_inexact_control(nullptr, 0.0, false), jacobian_two);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) observe_pressure_energy_candidate_globalization(2U);
 #endif
@@ -13433,7 +13447,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = revise_coupled_trial_views();
     if (status)
       status = run_pressure_energy_candidate_loop(
-          2U, 0U, intermediate_two, pressure_two,
+          2U, 0U, jacobian_two, intermediate_two, pressure_two,
           pressure_energy_target_flux,
           1.0,
           false,
@@ -13586,12 +13600,13 @@ Status ProductDriver::Impl::execute_attempt(
     if (status && ibm_pressure_operator.has_value())
       status = ibm_pressure_operator->mask_solid_rhs(pressure_system.rhs);
     if (status) status = form_pressure_energy_blocks();
+    PressureEnergyJacobianObservation refinement_jacobian;
     if (status)
       status = solve_pressure_energy(
           2U, refinement_iteration, refined_intermediate, refined_pressure,
           pressure_energy_target_flux, pressure_energy_frozen_enthalpy,
           refinement_identity, refinement_coefficient,
-          refinement_solve_control);
+          refinement_solve_control, refinement_jacobian);
     if (solve_epoch.solve_calls() != 0U) {
       const Status observed = solve_epoch.observe(report);
       if (status && !observed) status = observed;
@@ -13606,7 +13621,8 @@ Status ProductDriver::Impl::execute_attempt(
     }
     if (status)
       status = run_pressure_energy_candidate_loop(
-          2U, refinement_iteration, intermediate_two, pressure_two,
+          2U, refinement_iteration, refinement_jacobian, intermediate_two,
+          pressure_two,
           pressure_energy_target_flux,
           refinement_extrapolated_alpha,
           false,

@@ -140,6 +140,13 @@ inline bool product_pressure_coupled_merit(
   return true;
 }
 
+inline bool product_use_simple_diagonal_schur(
+    CouplingKind coupling, std::uint8_t corrector,
+    std::uint8_t refinement_iteration, bool immersed) noexcept {
+  return coupling == CouplingKind::simple && corrector == 2U && immersed &&
+         refinement_iteration <= kPressureEnergyRefinementCapacity;
+}
+
 // Select only the inner coupled linear tolerance.  The case control remains
 // the lower bound and is restored near the terminal gate, on stagnation, or
 // whenever the nonlinear evidence is invalid.

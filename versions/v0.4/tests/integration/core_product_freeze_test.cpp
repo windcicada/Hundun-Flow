@@ -218,6 +218,32 @@ bool test_pressure_coupled_merit_policy() {
   return passed;
 }
 
+bool test_simple_diagonal_schur_policy() {
+  constexpr std::uint8_t capacity =
+      static_cast<std::uint8_t>(kPressureEnergyRefinementCapacity);
+  bool passed = true;
+  passed &= expect(
+      detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U, 0U,
+                                                true) &&
+          detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U,
+                                                    1U, true) &&
+          detail::product_use_simple_diagonal_schur(
+              CouplingKind::simple, 2U, capacity, true),
+      "SIMPLE IBM C2 uses the diagonal Schur policy through refinement capacity");
+  passed &= expect(
+      !detail::product_use_simple_diagonal_schur(CouplingKind::piso, 2U, 0U,
+                                                 true) &&
+          !detail::product_use_simple_diagonal_schur(CouplingKind::simple, 1U,
+                                                     0U, true) &&
+          !detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U,
+                                                     0U, false) &&
+          !detail::product_use_simple_diagonal_schur(
+              CouplingKind::simple, 2U,
+              static_cast<std::uint8_t>(capacity + 1U), true),
+      "diagonal Schur policy rejects PISO, C1, non-IBM and excess refinement");
+  return passed;
+}
+
 bool test_pressure_aitken_initial_alpha() {
   bool passed = true;
   passed &= expect(
@@ -1282,6 +1308,7 @@ int main(int argc, char** argv) {
                       test_pressure_energy_temporal_operand_scale() &&
                       test_pressure_inexact_forcing_policy() &&
                       test_pressure_coupled_merit_policy() &&
+                      test_simple_diagonal_schur_policy() &&
                       test_pressure_aitken_initial_alpha() &&
                       test_freeze() &&
                       test_live_thermal_halo_resource_contract() &&

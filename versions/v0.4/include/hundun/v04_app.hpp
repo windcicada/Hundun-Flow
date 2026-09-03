@@ -148,6 +148,9 @@ struct PressureEnergyGlobalizationIterationReport {
   double maximum_absolute_enthalpy_correction{};
   PressureEnergyGlobalizationSample baseline{};
   PressureEnergyGlobalizationSample selected{};
+  bool jacobian_scope_valid{};
+  PressureEnergyJacobianScope jacobian_scope{
+      PressureEnergyJacobianScope::generic_algebraic_quasi_newton};
 };
 
 inline constexpr std::size_t kPressureEnergyGlobalizationTrajectoryCapacity =
