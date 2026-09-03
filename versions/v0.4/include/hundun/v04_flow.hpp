@@ -492,6 +492,10 @@ struct MomentumPredictorLimiterWorkspace {
 struct MomentumPredictorSolveReport {
   std::array<LinearSolveResult, 3U> components{};
   std::uint8_t solve_calls{};
+  // Number of full momentum predictor passes at this target time. PISO uses
+  // one; COAST-consistent SIMPLE reassembles momentum before its second
+  // pressure correction and therefore uses two.
+  std::uint8_t predictor_passes{};
 };
 
 struct EquationAssemblyCertificate {
@@ -2215,6 +2219,7 @@ class PressureEnergySchurOperator final : public LinearOperator {
 };
 
 struct PisoPlanSpec {
+  CouplingKind coupling{CouplingKind::piso};
   std::uint8_t pressure_correctors{2U};
   StageId pressure_stage{};
   RevisionSlotId final_flux_slot{};
@@ -2247,6 +2252,7 @@ class PisoPlan {
                         const EquationPlanSet& equations,
                         const PisoPlanSpec& spec, PisoPlan& out,
                         PisoCompileDiagnostics* diagnostics = nullptr) noexcept;
+  CouplingKind coupling() const noexcept { return coupling_; }
   std::uint8_t pressure_correctors() const noexcept { return 2U; }
   LinearAlgorithm pressure_algorithm() const noexcept {
     return pressure_algorithm_;
@@ -2267,6 +2273,7 @@ class PisoPlan {
   PlanFingerprint equations_fingerprint_{};
   PlanFingerprint predictor_fingerprint_{};
   PlanFingerprint pressure_reference_fingerprint_{};
+  CouplingKind coupling_{CouplingKind::piso};
   StageId pressure_stage_{};
   RevisionSlotId final_flux_slot_{};
   LinearAlgorithm pressure_algorithm_{LinearAlgorithm::fgmres};
@@ -2307,6 +2314,8 @@ inline constexpr std::size_t kPressureEnergyRefinementCapacity = 12U;
 // nonlinear/terminal gates still decide acceptance.
 inline constexpr double kPressureInexactForcingRelativeToleranceCeiling =
     1.0e-4;
+inline constexpr double kSimplePressureInexactForcingRelativeToleranceCeiling =
+    5.0e-4;
 
 enum class PressureEnergyRefinementTermination : std::uint8_t {
   none,
@@ -3858,6 +3867,7 @@ class PressureEnergyStationaryCertificate {
 
  private:
   friend class PressureVelocityCoupler;
+  friend class PisoPressureSolveEpoch;
   const PressureVelocityCoupler* issuer_{};
   PlanFingerprint exact_lineage_{};
   RevisionToken target_time_{};
@@ -4220,6 +4230,11 @@ class PisoPressureSolveEpoch {
       const LinearSolveControl& solve_control,
       ReductionEngine& reductions,
       ResourceCounters* resources = nullptr) noexcept;
+  Status record_stationary(
+      const PisoPlan& plan,
+      const PressureCorrectionCertificate& pressure,
+      const PressureEnergyStationaryCertificate& stationary,
+      PressureVelocityCoupler& coupler) noexcept;
   Status solve(
       const PisoPlan& plan, std::uint8_t corrector,
       const PressureCorrectionCertificate& pressure,

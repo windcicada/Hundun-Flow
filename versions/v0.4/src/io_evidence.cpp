@@ -58,6 +58,18 @@ std::string_view pressure_solve_contract_name(
   return "invalid";
 }
 
+std::string_view coupling_name(RuntimeCouplingKind coupling) noexcept {
+  switch (coupling) {
+    case RuntimeCouplingKind::piso:
+      return "PISO";
+    case RuntimeCouplingKind::simple:
+      return "SIMPLE";
+    case RuntimeCouplingKind::invalid:
+      break;
+  }
+  return "invalid";
+}
+
 std::string_view pressure_energy_refinement_termination_name(
     RuntimePressureEnergyRefinementTermination termination) noexcept {
   switch (termination) {
@@ -201,6 +213,11 @@ Status validate_record(const IoServicePlan& services,
   const bool continuity_energy_coupled_contract =
       record.pressure_solve_contract ==
       RuntimePressureSolveContract::continuity_energy_coupled;
+  const bool valid_coupling =
+      (record.coupling == RuntimeCouplingKind::piso &&
+       record.momentum_predictor_passes == 1U) ||
+      (record.coupling == RuntimeCouplingKind::simple &&
+       record.momentum_predictor_passes == 2U);
   const RuntimeTerminalPhysicalAudit& terminal =
       record.terminal_physical_audit;
   constexpr double kConvectiveCflComparisonSlack =
@@ -479,6 +496,7 @@ Status validate_record(const IoServicePlan& services,
       ((record.startup || record.retry || record.restart_recovery) &&
        record.statistics_eligible) ||
       record.pressure_solve_calls != 2U ||
+      !valid_coupling ||
       (!pressure_continuity_contract &&
        !continuity_energy_coupled_contract) ||
       !valid_refinement ||
@@ -670,6 +688,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"requested_bdf_order\":"
        << static_cast<unsigned>(record.requested_bdf_order)
        << ",\"bdf_order\":" << static_cast<unsigned>(record.bdf_order)
+       << ",\"coupling\":\"" << coupling_name(record.coupling) << "\""
        << ",\"temporal_method_fallback\":"
        << (record.temporal_method_fallback ? "true" : "false")
        << ",\"thermophysical_predictor_calls\":"
@@ -767,6 +786,8 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   json << "}}"
        << ",\"momentum_predictor_solve_calls\":"
        << static_cast<unsigned>(record.momentum_predictor_solve_calls)
+       << ",\"momentum_predictor_passes\":"
+       << static_cast<unsigned>(record.momentum_predictor_passes)
        << ",\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v3_owner\",\"limited\":"
        << (record.momentum_predictor_limited ? "true" : "false")
        << ",\"correction_metrics_applicability\":\""

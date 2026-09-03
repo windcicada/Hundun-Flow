@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
         "reacting": false
       },
       "solver": {
-        "coupling": "PISO",
+        "coupling": "SIMPLE",
         "pressure_correctors": 2,
         "pressure_linear": {
           "absolute_tolerance": 1e-8,
@@ -210,6 +210,8 @@ int main(int argc, char** argv) {
   passed &= expect(same_u64(model_signature, MPI_COMM_WORLD), rank,
                    "typed model is identical");
   passed &= expect(first.mesh.kind == hundun::v04::GeometryKind::tensor_stretched &&
+                       first.solver.coupling ==
+                           hundun::v04::CouplingKind::simple &&
                        first.mesh.lower.x == 0.0 && first.mesh.upper.x == 2.0 &&
                        first.mesh.has_exact_cells &&
                        first.mesh.exact_cells.x == 16 &&

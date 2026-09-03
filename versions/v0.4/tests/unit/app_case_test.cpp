@@ -25,6 +25,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using hundun::v04::CaseCompiler;
+using hundun::v04::CouplingKind;
 using hundun::v04::FieldId;
 using hundun::v04::FieldRegistry;
 using hundun::v04::FieldSchema;
@@ -831,9 +832,6 @@ bool test_case_and_reference_security() {
   passed &= rejects("reacting flow", case_json(
       kUniformMesh,
       R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":true})json"));
-  passed &= rejects("SIMPLE coupling", case_json(
-      kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
-      R"json({"coupling":"SIMPLE","pressure_correctors":2})json"));
   passed &= rejects("PIMPLE coupling", case_json(
       kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PIMPLE","pressure_correctors":2})json"));
@@ -1006,9 +1004,24 @@ bool test_defaults_and_enums() {
   defaults.write("thermophysics.d", kPlaceholderThermophysics);
   ValidatedModel default_model;
   bool passed = expect(static_cast<bool>(compile(defaults.root(), default_model)) &&
+                           default_model.solver.coupling ==
+                               CouplingKind::piso &&
                            default_model.turbulence ==
                                TurbulenceKind::vreman_wall_function,
                        "omitted turbulence selects the production default");
+  ScratchCase simple("simple-coupling");
+  simple.write(
+      "case.json",
+      case_json(
+          kUniformMesh,
+          R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+          R"json({"coupling":"SIMPLE","pressure_correctors":2})json"));
+  simple.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel simple_model;
+  passed &= expect(static_cast<bool>(compile(simple.root(), simple_model)) &&
+                       simple_model.solver.coupling == CouplingKind::simple &&
+                       simple_model.fingerprint != default_model.fingerprint,
+                   "SIMPLE coupling compiles as a distinct typed model");
   ScratchCase enums("enums");
   enums.write("case.json", case_json(kTensorMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"closed_mass","reacting":false})json",
                                       R"json({"coupling":"PISO","pressure_correctors":2})json",

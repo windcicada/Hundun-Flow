@@ -9,7 +9,7 @@
 namespace hundun::v04::detail {
 
 inline constexpr std::string_view kRuntimeEvidenceSchema =
-    "HUNDUN_V04_EVIDENCE_V7";
+    "HUNDUN_V04_EVIDENCE_V8";
 inline constexpr std::string_view kRuntimeCandidateIdentitySchema =
     "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2";
 

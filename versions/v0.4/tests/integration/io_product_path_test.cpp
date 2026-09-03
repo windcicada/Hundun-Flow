@@ -147,6 +147,7 @@ bool run_case(const fs::path& root, bool stretched) {
   evidence.time = snapshot.time;
   evidence.requested_bdf_order = 2U;
   evidence.bdf_order = 2U;
+  evidence.coupling = RuntimeCouplingKind::piso;
   evidence.thermophysical_predictor_calls = 1U;
   evidence.maximum_rank_step_nanoseconds = 100U;
   evidence.blocking_collectives = 1U;
@@ -171,6 +172,7 @@ bool run_case(const fs::path& root, bool stretched) {
   evidence.momentum_advective_cfl = {
       true, 41U, 14U, 15U, 16U, 0U, 0.25, 0.125, 0.25, 0.5};
   evidence.momentum_predictor_solve_calls = 3U;
+  evidence.momentum_predictor_passes = 1U;
   evidence.predictor_blocking_collectives = 1U;
   evidence.pressure[0U].termination = LinearTermination::converged;
   evidence.pressure[1U].termination = LinearTermination::converged;
@@ -182,12 +184,27 @@ bool run_case(const fs::path& root, bool stretched) {
   evidence.stages = {timings.data(), timings.size()};
   evidence.startup = true;
   evidence.statistics_eligible = false;
+  RuntimeEvidenceRecord invalid_simple = evidence;
+  invalid_simple.coupling = RuntimeCouplingKind::simple;
+  passed &= !EvidenceWriter::append(
+      MPI_COMM_SELF, root / "evidence" / "invalid-simple.jsonl", services,
+      invalid_simple);
+  RuntimeEvidenceRecord simple = invalid_simple;
+  simple.momentum_predictor_passes = 2U;
+  passed &= static_cast<bool>(EvidenceWriter::append(
+      MPI_COMM_SELF, root / "evidence" / "simple.jsonl", services, simple));
+  const std::string simple_evidence =
+      read(root / "evidence" / "simple.jsonl");
+  passed &= simple_evidence.find("\"coupling\":\"SIMPLE\"") !=
+                std::string::npos &&
+            simple_evidence.find("\"momentum_predictor_passes\":2") !=
+                std::string::npos;
   passed &= static_cast<bool>(EvidenceWriter::append(
       MPI_COMM_SELF, root / "evidence" / "runtime.jsonl", services,
       evidence));
   const std::string evidence_text =
       read(root / "evidence" / "runtime.jsonl");
-  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V7") !=
+  passed &= evidence_text.find("HUNDUN_V04_EVIDENCE_V8") !=
                 std::string::npos &&
             evidence_text.find("\"candidate_identity\":{") !=
                 std::string::npos &&
@@ -200,7 +217,11 @@ bool run_case(const fs::path& root, bool stretched) {
                 std::string::npos &&
             evidence_text.find("\"pressure_solve_calls\":2") !=
                 std::string::npos &&
+            evidence_text.find("\"coupling\":\"PISO\"") !=
+                std::string::npos &&
             evidence_text.find("\"momentum_predictor_solve_calls\":3") !=
+                std::string::npos &&
+            evidence_text.find("\"momentum_predictor_passes\":1") !=
                 std::string::npos &&
             evidence_text.find("\"requested_bdf_order\":2") !=
                 std::string::npos &&

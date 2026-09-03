@@ -209,13 +209,19 @@ struct StageTimingRecord {
   std::uint64_t maximum_nanoseconds{};
 };
 
-// One pressure-solve contract applies to both correctors in a committed
-// product attempt.  Invalid is the default so a runtime evidence row cannot
-// infer linear-audit obligations from termination alone.
+// One terminal pressure--energy acceptance contract applies to a committed
+// product attempt. Internal linear directions may differ by coupling; invalid
+// is the default so evidence cannot infer obligations from termination alone.
 enum class RuntimePressureSolveContract : std::uint8_t {
   invalid,
   pressure_continuity,
   continuity_energy_coupled,
+};
+
+enum class RuntimeCouplingKind : std::uint8_t {
+  invalid,
+  piso,
+  simple,
 };
 
 // Runtime evidence deliberately projects only the rank-invariant part of a
@@ -338,6 +344,7 @@ struct RuntimeEvidenceRecord {
   double time{};
   std::uint8_t requested_bdf_order{};
   std::uint8_t bdf_order{};
+  RuntimeCouplingKind coupling{RuntimeCouplingKind::invalid};
   std::uint8_t thermophysical_predictor_calls{};
   bool temporal_method_fallback{};
   std::uint64_t launcher_nanoseconds{};
@@ -372,6 +379,7 @@ struct RuntimeEvidenceRecord {
   RuntimeCommittedConvectiveCflAudit committed_convective_cfl{};
   std::array<LinearSolveResult, 3U> momentum_predictor{};
   std::uint8_t momentum_predictor_solve_calls{};
+  std::uint8_t momentum_predictor_passes{};
   LinearSolveResult predictor_enthalpy_endpoint{};
   double predictor_enthalpy_endpoint_alpha{1.0};
   double predictor_bdf_endpoint_alpha{1.0};

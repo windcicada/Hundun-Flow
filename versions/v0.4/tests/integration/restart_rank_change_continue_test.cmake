@@ -207,8 +207,11 @@ for path in paths:
             row.get("step"), row.get("requested_bdf_order"),
             row.get("bdf_order"), row.get("restart_recovery"),
         )
-        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V7" or observed != wanted:
+        if row.get("schema") != "HUNDUN_V04_EVIDENCE_V8" or observed != wanted:
             raise SystemExit(f"{path}: row {index} lifecycle {observed} != {wanted}")
+        if (row.get("coupling") != "PISO" or
+                row.get("momentum_predictor_passes") != 1):
+            raise SystemExit(f"{path}: step {step} has invalid PISO coupling evidence")
         if (row.get("startup") is not False or row.get("retry") is not False or
                 row.get("temporal_method_fallback") is not False or
                 row.get("thermophysical_predictor_calls") != 1):

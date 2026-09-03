@@ -43,6 +43,8 @@ constexpr std::uint8_t kLegacyWireVersion = 9U;
 constexpr std::uint8_t kLegacyPressureAlgorithmWireVersion = 10U;
 constexpr std::uint8_t kWireVersion = 11U;
 constexpr std::uint8_t kPressureAlgorithmWireVersion = 12U;
+constexpr std::uint8_t kSimpleWireVersion = 13U;
+constexpr std::uint8_t kSimplePressureAlgorithmWireVersion = 14U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -54,6 +56,16 @@ constexpr std::string_view kSemanticContract =
     "flow=single_phase_low_mach_compressible|"
     "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
     "coupling=PISO|pressure_correctors=2|pressure-linear=typed|"
+    "terminal-tolerances=typed|"
+    "transported-scalars=typed-catalog-with-schmidt-closures|"
+    "thermophysics=typed-direct-root-data|boundaries=typed-six-face|"
+    "ibm-reconstruction-policy=strict_quadratic|adaptive_order|"
+    "schemes=typed|time=typed";
+constexpr std::string_view kSimpleSemanticContract =
+    "HUNDUN-FLOW-v0.4-case-wire-v13|input-schema=1|units=SI|"
+    "flow=single_phase_low_mach_compressible|"
+    "pressure_reference=boundary_absolute|closed_mass|reacting=false|"
+    "coupling=SIMPLE|outer_iterations=2|pressure-linear=typed|"
     "terminal-tolerances=typed|"
     "transported-scalars=typed-catalog-with-schmidt-closures|"
     "thermophysics=typed-direct-root-data|boundaries=typed-six-face|"
@@ -1079,8 +1091,10 @@ bool valid_solver(const SolverSpec& solver) noexcept {
       pressure.algorithm == LinearAlgorithm::fgmres
           ? pressure.krylov_restart >= 2U && pressure.krylov_restart <= 64U
           : pressure.krylov_restart == 0U;
-  return finite && valid_algorithm && valid_scaling && valid_pair &&
-         valid_restart && pressure.absolute_tolerance > 0.0 &&
+  const bool valid_coupling = solver.coupling == CouplingKind::piso ||
+                              solver.coupling == CouplingKind::simple;
+  return finite && valid_coupling && valid_algorithm && valid_scaling &&
+         valid_pair && valid_restart && pressure.absolute_tolerance > 0.0 &&
          pressure.absolute_tolerance < 1.0 &&
          pressure.relative_tolerance > 0.0 &&
          pressure.relative_tolerance < 1.0 &&
@@ -1741,7 +1755,12 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
-    writer.byte(extended_solver ? kPressureAlgorithmWireVersion : kWireVersion);
+    const bool simple = model.solver.coupling == CouplingKind::simple;
+    writer.byte(simple
+                    ? (extended_solver ? kSimplePressureAlgorithmWireVersion
+                                       : kSimpleWireVersion)
+                    : (extended_solver ? kPressureAlgorithmWireVersion
+                                       : kWireVersion));
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
@@ -1824,7 +1843,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         (version != kLegacyWireVersion &&
          version != kLegacyPressureAlgorithmWireVersion &&
          version != kWireVersion &&
-         version != kPressureAlgorithmWireVersion) ||
+         version != kPressureAlgorithmWireVersion &&
+         version != kSimpleWireVersion &&
+         version != kSimplePressureAlgorithmWireVersion) ||
         !reader.byte(geometry) ||
         geometry > static_cast<std::uint8_t>(GeometryKind::tensor_stretched) ||
         !reader.byte(turbulence) ||
@@ -1837,6 +1858,11 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     }
 
     ValidatedModel model;
+    model.solver.coupling =
+        version == kSimpleWireVersion ||
+                version == kSimplePressureAlgorithmWireVersion
+            ? CouplingKind::simple
+            : CouplingKind::piso;
     model.mesh.kind = static_cast<GeometryKind>(geometry);
     model.turbulence = static_cast<TurbulenceKind>(turbulence);
     model.pressure_reference =
@@ -1912,7 +1938,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     if (!read_transported_scalars(reader, model.transported_scalars) ||
         !read_solver(reader, model.solver,
                      version == kLegacyPressureAlgorithmWireVersion ||
-                         version == kPressureAlgorithmWireVersion) ||
+                         version == kPressureAlgorithmWireVersion ||
+                         version == kSimplePressureAlgorithmWireVersion) ||
         !read_schemes(reader, model.schemes) ||
         !read_time(reader, model.time) ||
         !read_thermophysics(reader, model.thermophysics) ||
@@ -1920,7 +1947,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !reader.byte(has_stl) || has_stl > 1U || !reader.byte(fluid_side) ||
         fluid_side > static_cast<std::uint8_t>(ImmersedFluidSide::inside) ||
         ((version == kWireVersion ||
-          version == kPressureAlgorithmWireVersion) &&
+          version == kPressureAlgorithmWireVersion ||
+          version == kSimpleWireVersion ||
+          version == kSimplePressureAlgorithmWireVersion) &&
          (!reader.byte(reconstruction_policy) ||
           reconstruction_policy > static_cast<std::uint8_t>(
                                       IbmReconstructionPolicy::adaptive_order))) ||
@@ -2079,14 +2108,22 @@ Status compile_on_root(const fs::path& case_root, int rank,
             : string_value(turbulence, "model");
     const auto pressure_reference_text =
         string_value(flow, "pressure_reference");
+    const auto coupling_text = string_value(solver, "coupling");
     if (!geometry_text || !turbulence_text || !pressure_reference_text ||
+        !coupling_text ||
         !parse_geometry(*geometry_text, model.mesh.kind) ||
         !parse_turbulence(*turbulence_text, model.turbulence) ||
         !parse_pressure_reference(*pressure_reference_text,
                                   model.pressure_reference) ||
         !equals(string_value(flow, "model"),
-                "single_phase_low_mach_compressible") ||
-        !equals(string_value(solver, "coupling"), "PISO")) {
+                "single_phase_low_mach_compressible")) {
+      return invalid_case(detail_json_value);
+    }
+    if (*coupling_text == "PISO") {
+      model.solver.coupling = CouplingKind::piso;
+    } else if (*coupling_text == "SIMPLE") {
+      model.solver.coupling = CouplingKind::simple;
+    } else {
       return invalid_case(detail_json_value);
     }
     constexpr std::array<std::string_view, 6U> face_names{
@@ -2266,7 +2303,9 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
 
     Hash64 hash;
-    hash.text(kSemanticContract);
+    hash.text(model.solver.coupling == CouplingKind::piso
+                  ? kSemanticContract
+                  : kSimpleSemanticContract);
     hash_mesh(hash, model.mesh);
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
     hash.integer(static_cast<std::uint8_t>(model.pressure_reference));

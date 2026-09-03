@@ -16,6 +16,7 @@
 namespace hundun::v04 {
 
 enum class LinearAlgorithm : std::uint8_t { pcg, fgmres, bicgstab };
+enum class CouplingKind : std::uint8_t { piso, simple };
 enum class MgCorrectionScaling : std::uint8_t {
   residual_minimizing,
   unit_linear
@@ -188,6 +189,7 @@ struct SolverToleranceSpec {
 };
 
 struct SolverSpec {
+  CouplingKind coupling{CouplingKind::piso};
   PressureLinearSolverSpec pressure;
   SolverToleranceSpec terminal;
 };

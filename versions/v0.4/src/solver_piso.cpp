@@ -193,6 +193,8 @@ PlanFingerprint spec_fingerprint(const EquationPlanSet& equations,
   hash = hash_mix(hash, equations.semantic_fingerprint());
   hash = hash_mix(hash, equations.thermophysical_predictor().fingerprint());
   hash = hash_mix(hash, equations.pressure_reference().fingerprint());
+  if (spec.coupling != CouplingKind::piso)
+    hash = hash_mix(hash, static_cast<std::uint8_t>(spec.coupling));
   hash = hash_mix(hash, spec.pressure_correctors);
   hash = hash_mix(hash, spec.pressure_stage);
   hash = hash_mix(hash, spec.final_flux_slot);
@@ -1662,7 +1664,10 @@ Status PisoPlan::compile(MPI_Comm communicator,
   if (equations.fingerprint() == 0U ||
       equations.thermophysical_predictor().fingerprint() == 0U ||
       equations.pressure_reference().fingerprint() == 0U || cells.x <= 0 ||
-      cells.y <= 0 || cells.z <= 0 || spec.pressure_correctors != 2U ||
+      cells.y <= 0 || cells.z <= 0 ||
+      (spec.coupling != CouplingKind::piso &&
+       spec.coupling != CouplingKind::simple) ||
+      spec.pressure_correctors != 2U ||
       spec.pressure_stage == 0U ||
       !valid_pressure_algorithm(spec.pressure_algorithm) ||
       !valid_control(spec.pressure_algorithm, spec.mg_correction_scaling,
@@ -1708,6 +1713,7 @@ Status PisoPlan::compile(MPI_Comm communicator,
       equations.thermophysical_predictor().fingerprint();
   candidate.pressure_reference_fingerprint_ =
       equations.pressure_reference().fingerprint();
+  candidate.coupling_ = spec.coupling;
   candidate.pressure_stage_ = spec.pressure_stage;
   candidate.final_flux_slot_ = spec.final_flux_slot;
   candidate.pressure_algorithm_ = spec.pressure_algorithm;
@@ -10045,13 +10051,21 @@ Status PisoPressureSolveEpoch::solve_prepared(
         solve_control.restart == base.restart;
     const bool exact_control =
         solve_control.relative_tolerance == base.relative_tolerance;
+    const double guarded_ceiling =
+        contract == PisoPressureSolveContract::pressure_continuity &&
+                prepared.plan->coupling() == CouplingKind::simple &&
+                prepared.corrector == 1U && !pressure_energy_refinement
+            ? kSimplePressureInexactForcingRelativeToleranceCeiling
+            : kPressureInexactForcingRelativeToleranceCeiling;
     const bool guarded_inexact_control =
-        contract == PisoPressureSolveContract::continuity_energy_coupled &&
+        (contract == PisoPressureSolveContract::continuity_energy_coupled ||
+         (contract == PisoPressureSolveContract::pressure_continuity &&
+          prepared.plan->coupling() == CouplingKind::simple &&
+          prepared.corrector == 1U && !pressure_energy_refinement)) &&
         base.relative_tolerance <
-            kPressureInexactForcingRelativeToleranceCeiling &&
+            guarded_ceiling &&
         solve_control.relative_tolerance >= base.relative_tolerance &&
-        solve_control.relative_tolerance <=
-            kPressureInexactForcingRelativeToleranceCeiling;
+        solve_control.relative_tolerance <= guarded_ceiling;
     solve_control_valid =
         fixed_control_matches && (exact_control || guarded_inexact_control) &&
         valid_control(prepared.plan->pressure_algorithm(),
@@ -10103,16 +10117,19 @@ Status PisoPressureSolveEpoch::solve_prepared(
   const LinearIdentity identity = prepared.identity;
   const PressureCorrectionCertificate pressure = prepared.pressure;
   const bool bicgstab = plan.pressure_algorithm() == LinearAlgorithm::bicgstab;
+  const bool independent_simple_sweep =
+      plan.coupling() == CouplingKind::simple && !pressure_energy_refinement;
   const bool pressure_continuity_contract =
       contract == PisoPressureSolveContract::pressure_continuity;
   if (!pressure_continuity_contract && coupler.implementation_ != nullptr)
     coupler.implementation_->sealed = {};
 
   Status status{};
-  if (bicgstab) {
-    // BiCGStab has no Arnoldi recycle span.  Clear any caller-owned stale
-    // state and keep both correctors on the same prepared workspace without
-    // entering the FGMRES capture/projection lifecycle.
+  if (bicgstab || independent_simple_sweep) {
+    // BiCGStab has no Arnoldi recycle span. SIMPLE also deliberately breaks
+    // the frozen-momentum C1->C2 projection lineage because a fresh momentum
+    // system is assembled between its pressure solves. Clear any stale span
+    // while retaining the prepared workspace identity across both solves.
     if (corrector == 1U)
       workspace_ = &workspace;
     workspace.recycle_clear();
@@ -10227,7 +10244,7 @@ Status PisoPressureSolveEpoch::solve_prepared(
         workspace.recycle_capture_blocking_operations();
     workspace.recycle_clear();
     workspace_ = nullptr;
-  } else if (bicgstab) {
+  } else if (bicgstab || independent_simple_sweep) {
     result.recycle_cycle_corrections = 0U;
     result.recycle_capture_vector_passes = 0U;
     result.recycle_capture_cycle_attempts = 0U;
@@ -10262,6 +10279,53 @@ Status PisoPressureSolveEpoch::solve_prepared(
     ++solve_calls_;
   }
   prepared_ = {};
+  return {};
+}
+
+Status PisoPressureSolveEpoch::record_stationary(
+    const PisoPlan& plan,
+    const PressureCorrectionCertificate& pressure,
+    const PressureEnergyStationaryCertificate& stationary,
+    PressureVelocityCoupler& coupler) noexcept {
+  const auto reject = [&](Status status) noexcept {
+    if (coupler.implementation_ != nullptr)
+      coupler.implementation_->sealed = {};
+    discard_workspace();
+    active_ = false;
+    failed_ = true;
+    return status;
+  };
+  const bool current =
+      active_ && !failed_ && !prepared_.valid &&
+      plan.fingerprint() == plan_ &&
+      plan.coupling() == CouplingKind::simple && solve_calls_ == 1U &&
+      refinement_solve_calls_ == 0U && pressure.valid() &&
+      pressure.corrector == 2U &&
+      pressure.pressure_energy_refinement == 0U && stationary.valid() &&
+      stationary.issuer_ == &coupler && stationary.corrector_ == 2U &&
+      stationary.target_time_ == pressure.time &&
+      coupler.implementation_ != nullptr && epoch_coupler_ == &coupler &&
+      epoch_workspace_ != nullptr && workspace_ == epoch_workspace_ &&
+      epoch_communicator_ == coupler.implementation_->communicator &&
+      epoch_rank_ == coupler.implementation_->rank &&
+      epoch_size_ == coupler.implementation_->size &&
+      stationary.exact_lineage_ ==
+          coupler.implementation_->current_frozen_exact_lineage &&
+      same_pressure_certificate(
+          pressure, coupler.implementation_->current_pressure_work);
+  if (!current)
+    return reject({StatusCode::invalid_plan, kPisoSolve});
+
+  LinearSolveResult result;
+  result.status = {};
+  result.termination = LinearTermination::zero_rhs;
+  result.lowest_failing_rank = -1;
+  results_[solve_calls_] = result;
+  ++solve_calls_;
+  latest_solve_outcome_available_ = true;
+  latest_solve_lowest_failing_rank_ = -1;
+  workspace_->recycle_clear();
+  workspace_ = nullptr;
   return {};
 }
 

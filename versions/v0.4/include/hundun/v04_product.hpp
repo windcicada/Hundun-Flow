@@ -29,6 +29,7 @@ enum class ProductFreezePhase : std::uint8_t {
 };
 
 struct PlanSummary {
+  CouplingKind coupling{CouplingKind::piso};
   Int3 global_cells{};
   Int3 local_cells{};
   std::size_t field_count{};

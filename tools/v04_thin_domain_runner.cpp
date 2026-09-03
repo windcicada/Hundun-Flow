@@ -1243,6 +1243,10 @@ Status append_evidence(
   evidence.time = step.accepted_time;
   evidence.requested_bdf_order = step.proposal.bdf.order;
   evidence.bdf_order = step.effective_bdf.order;
+  evidence.coupling =
+      model.solver.coupling == CouplingKind::simple
+          ? RuntimeCouplingKind::simple
+          : RuntimeCouplingKind::piso;
   evidence.thermophysical_predictor_calls =
       step.thermophysical_predictor_calls;
   evidence.temporal_method_fallback = step.temporal_method_fallback;
@@ -1309,6 +1313,8 @@ Status append_evidence(
       step.piso.energy_residual;
   evidence.terminal_physical_audit.energy_tolerance =
       model.solver.terminal.continuity;
+  evidence.momentum_predictor_passes =
+      step.momentum_predictor_solve.predictor_passes;
   evidence.terminal_physical_audit.closed_mass_residual =
       step.piso.closed_mass_residual;
   evidence.terminal_physical_audit.closed_mass_tolerance =
@@ -1726,13 +1732,83 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         step.accepted_step != starting_step + index + 1U ||
         !std::isfinite(step.accepted_time) ||
         !terminal_audit_valid(model, step)) {
+      std::array<StageTimingRecord, kDriverTimedStageCapacity> failed_stages{};
+      const Status failed_timing_status =
+          okay ? collect_stage_timings(communicator, step, failed_stages)
+               : Status{StatusCode::mpi_failure, kRunnerInput};
       if (rank == 0)
         std::cerr << "advance_failure expected_step="
                   << starting_step + index + 1U
                   << " reported_step=" << step.accepted_step
                   << " attempts=" << step.attempts << " status="
                   << static_cast<unsigned>(status.code) << '/' << status.detail
-                  << " stage=" << step.failed_stage << '\n';
+                  << " stage=" << step.failed_stage
+                  << " momentum_predictor_passes="
+                  << static_cast<unsigned>(
+                         step.momentum_predictor_solve.predictor_passes)
+                  << " pressure_solve_calls="
+                  << static_cast<unsigned>(step.piso.pressure_solve_calls)
+                  << " refinement_solve_calls="
+                  << static_cast<unsigned>(
+                         step.piso.pressure_energy_refinement_solve_calls)
+                  << " max_rank_step_ns=" << maximum_nanoseconds
+                  << '\n';
+      if (rank == 0 && failed_timing_status) {
+        std::cerr << "failure_stage_max_ns";
+        for (const StageTimingRecord& timing : failed_stages)
+          std::cerr << ' ' << timing.stage << '=' << timing.maximum_nanoseconds;
+        std::cerr << '\n';
+      }
+      if (rank == 0 && step.pressure_energy_globalization.valid &&
+          step.pressure_energy_globalization.trajectory_count != 0U) {
+        const std::size_t last = static_cast<std::size_t>(
+            step.pressure_energy_globalization.trajectory_count - 1U);
+        const PressureEnergyGlobalizationIterationReport& iteration =
+            step.pressure_energy_globalization.trajectory[last];
+        std::cerr << "pressure_energy_failure corrector="
+                  << static_cast<unsigned>(iteration.corrector)
+                  << " refinement="
+                  << static_cast<unsigned>(iteration.refinement_iteration)
+                  << " baseline_continuity="
+                  << iteration.baseline.global_normalized_continuity
+                  << " baseline_energy="
+                  << iteration.baseline.global_normalized_energy
+                  << " selected_alpha=" << iteration.selected.alpha
+                  << " selected_continuity="
+                  << iteration.selected.global_normalized_continuity
+                  << " selected_energy="
+                  << iteration.selected.global_normalized_energy << '\n';
+      }
+      if (rank == 0 && step.pressure_energy_globalization.valid) {
+        const PressureEnergyGlobalizationAttemptReport& attempt =
+            step.pressure_energy_globalization;
+        std::cerr << "pressure_energy_attempt corrector="
+                  << static_cast<unsigned>(attempt.corrector)
+                  << " samples="
+                  << static_cast<unsigned>(attempt.sample_count)
+                  << " max_dp="
+                  << attempt.maximum_absolute_pressure_correction
+                  << " max_dh="
+                  << attempt.maximum_absolute_enthalpy_correction
+                  << " baseline_continuity="
+                  << attempt.baseline.global_normalized_continuity
+                  << " baseline_energy="
+                  << attempt.baseline.global_normalized_energy << '\n';
+        for (std::uint8_t sample = 0U; sample < attempt.sample_count;
+             ++sample) {
+          const PressureEnergyGlobalizationSample& candidate =
+              attempt.candidates[sample];
+          std::cerr << "pressure_energy_sample ordinal="
+                    << static_cast<unsigned>(sample)
+                    << " alpha=" << candidate.alpha
+                    << " continuity="
+                    << candidate.global_normalized_continuity
+                    << " energy=" << candidate.global_normalized_energy
+                    << " admissible="
+                    << candidate.thermodynamically_admissible << '/'
+                    << candidate.state_and_flux_finite << '\n';
+        }
+      }
       return 7;
     }
     const bool startup = step.accepted_step == 1U;
@@ -1750,7 +1826,6 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       if (rank == 0) std::cerr << "exact_restart_bdf2_provenance_failure\n";
       return 7;
     }
-
     SurfaceForce surface;
     FinalForceCertificate certificate;
     status = driver.committed_surface_force(surface, certificate);

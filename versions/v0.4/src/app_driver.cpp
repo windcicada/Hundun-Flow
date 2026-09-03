@@ -620,6 +620,10 @@ Status ApplicationService::run(MPI_Comm communicator,
       evidence.time = step.accepted_time;
       evidence.requested_bdf_order = step.proposal.bdf.order;
       evidence.bdf_order = step.effective_bdf.order;
+      evidence.coupling =
+          model.solver.coupling == CouplingKind::simple
+              ? RuntimeCouplingKind::simple
+              : RuntimeCouplingKind::piso;
       evidence.thermophysical_predictor_calls =
           step.thermophysical_predictor_calls;
       evidence.temporal_method_fallback = step.temporal_method_fallback;
@@ -665,12 +669,11 @@ Status ApplicationService::run(MPI_Comm communicator,
               : 0U;
       evidence.pressure = step.piso.pressure;
       evidence.pressure_solve_calls = step.piso.pressure_solve_calls;
-      // The production ProductDriver currently executes both correctors with
-      // PisoPressureSolveContract::continuity_energy_coupled.  Keep this
-      // explicit runtime-evidence binding in sync if ProductDriver later
-      // exposes a per-attempt contract in DriverStepReport; termination cannot
-      // identify the contract because zero-RHS exits before any optional
-      // linear audit.
+      // ProductDriver accepts the complete attempt against the coupled
+      // continuity--energy terminal contract.  SIMPLE may use a pressure-only
+      // C1 direction internally; C2 and the exact candidate audit still close
+      // the same coupled attempt.  Termination alone cannot identify this
+      // contract because zero-RHS exits before any optional linear audit.
       evidence.pressure_solve_contract =
           RuntimePressureSolveContract::continuity_energy_coupled;
       evidence.pressure_energy_refinement_solve_calls =
@@ -709,6 +712,8 @@ Status ApplicationService::run(MPI_Comm communicator,
       // configured normalized continuity tolerance.
       evidence.terminal_physical_audit.energy_tolerance =
           model.solver.terminal.continuity;
+      evidence.momentum_predictor_passes =
+          step.momentum_predictor_solve.predictor_passes;
       evidence.terminal_physical_audit.closed_mass_residual =
           step.piso.closed_mass_residual;
       evidence.terminal_physical_audit.closed_mass_tolerance =

@@ -3293,12 +3293,47 @@ bool run_rank_change_product(int rank) {
   return collective(passed, MPI_COMM_WORLD);
 }
 
+bool run_simple_coupling_compile(int rank) {
+  ValidatedModel model = test::product_model({8, 8, 8});
+  model.solver.coupling = CouplingKind::simple;
+  model.fingerprint = UINT64_C(0x18000a11);
+  CompiledCasePlan plan;
+  const Status status =
+      ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+  const PlanSummary summary = status ? plan.summary() : PlanSummary{};
+  ProductDriver driver;
+  Status runtime = status;
+  if (runtime)
+    runtime = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  if (runtime) runtime = driver.initialize({});
+  DriverStepReport step;
+  if (runtime)
+    runtime = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+  return expect(runtime && summary.coupling == CouplingKind::simple &&
+                    summary.pressure_correctors == 2U && summary.sealed &&
+                    step.accepted && step.piso.pressure_solve_calls == 2U &&
+                    step.momentum_predictor_solve.predictor_passes == 2U &&
+                    step.piso.pressure[1U].termination ==
+                        LinearTermination::zero_rhs &&
+                    step.piso.pressure[1U].iterations == 0U &&
+                    step.piso.pressure_energy_refinement_solve_calls == 0U,
+                rank,
+                "SIMPLE performs two momentum-pressure outer iterations");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (argc == 2 &&
+      std::strcmp(argv[1], "--simple-compile-only") == 0) {
+    const bool passed =
+        collective(run_simple_coupling_compile(rank), MPI_COMM_WORLD);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if (argc == 2 &&
       std::strcmp(argv[1], "--candidate-storage-only") == 0) {
     const bool passed = run_candidate_storage_lineage_only(rank);
@@ -3443,7 +3478,8 @@ int main(int argc, char** argv) {
                   MPI_COMM_WORLD);
     passed &= expect(global_cells == UINT64_C(17) * 11U * 7U, rank,
                      "nondivisible local patches cover the global domain once");
-    passed &= expect(summary.pressure_correctors == 2U && summary.sealed &&
+    passed &= expect(summary.coupling == CouplingKind::piso &&
+                         summary.pressure_correctors == 2U && summary.sealed &&
                          !summary.exact_numeric_certified &&
                          !summary.preconditioner_setup_certified,
                      rank, "all ranks seal the same lifecycle state");
@@ -3572,6 +3608,8 @@ int main(int argc, char** argv) {
                    "immersed product advances with compact remote donors");
   passed &= expect(run_rank_change_product(rank), rank,
                    "product restart advances across 1->2->4->1 ranks");
+  passed &= expect(run_simple_coupling_compile(rank), rank,
+                   "SIMPLE coupling freezes collectively");
   passed = collective(passed, MPI_COMM_WORLD);
   MPI_Finalize();
   return passed ? 0 : 1;
