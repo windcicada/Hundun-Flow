@@ -278,8 +278,12 @@ These objects are closed and have the following exact fields and values:
 | Object | Exact fields | Accepted values |
 | --- | --- | --- |
 | `flow` | `model`, `pressure_reference`, `reacting` | `model` is `single_phase_low_mach_compressible`; `pressure_reference` is `boundary_absolute` or `closed_mass`; `reacting` is `false` |
-| `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `PISO`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
+| `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `PISO` or `SIMPLE`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
 | `turbulence` | `model` | Optional object; `model` is `vreman_wall_function`, `wale`, or `none` |
+
+`PISO` performs one momentum-predictor pass followed by two pressure
+corrections. `SIMPLE` performs two momentum--pressure outer passes while
+retaining the same exact terminal physical audit and rollback contract.
 
 `pressure_linear` is closed and has the exact fields
 `absolute_tolerance`, `relative_tolerance`, `maximum_iterations`,
