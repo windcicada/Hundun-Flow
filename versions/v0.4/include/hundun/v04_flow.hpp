@@ -2315,7 +2315,7 @@ inline constexpr std::size_t kPressureEnergyRefinementCapacity = 12U;
 inline constexpr double kPressureInexactForcingRelativeToleranceCeiling =
     1.0e-4;
 inline constexpr double kSimplePressureInexactForcingRelativeToleranceCeiling =
-    5.0e-4;
+    1.0e-3;
 
 enum class PressureEnergyRefinementTermination : std::uint8_t {
   none,
