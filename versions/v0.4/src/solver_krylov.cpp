@@ -1564,7 +1564,7 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
   }
   Status initial_guess_selection_status;
   const bool reset_initial_guess =
-      workspace.recycle_capture_active() &&
+      workspace.recycle_initial_guess_guard_active() &&
       result.initial_true_residual > rhs_norm;
   if (reset_initial_guess) {
     initial_guess_selection_status =
@@ -1964,6 +1964,15 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
             reductions, initial_calls);
       }
       convergence_audit_deferred = true;
+    }
+  }
+
+  if (workspace.recycle_initial_guess_guard_only()) {
+    status = reductions.consensus(initial_guess_selection_status);
+    initial_guess_selection_status = {};
+    if (!status) {
+      return finish_failure(result, status, LinearTermination::invalid_plan,
+                            resources, reductions, initial_calls);
     }
   }
 

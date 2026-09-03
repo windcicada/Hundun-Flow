@@ -673,6 +673,8 @@ class SolverWorkspace {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   Status recycle_begin_capture_for_test(
       Int3 shape, PlanFingerprint source_identity) noexcept;
+  Status recycle_begin_initial_guess_guard_for_test(
+      Int3 shape, PlanFingerprint source_identity) noexcept;
   Status recycle_begin_projection_for_test(
       Int3 shape, PlanFingerprint current_identity) noexcept;
   Status recycle_capture_cycle_start_for_test(
@@ -706,6 +708,7 @@ class SolverWorkspace {
 
   struct RecycleState {
     bool capture_active{};
+    bool initial_guess_guard_only{};
     bool cycle_active{};
     bool projection_pending{};
     Int3 shape{};
@@ -725,11 +728,19 @@ class SolverWorkspace {
 
   Status recycle_begin_capture(Int3 shape,
                                PlanFingerprint source_identity) noexcept;
+  Status recycle_begin_initial_guess_guard(
+      Int3 shape, PlanFingerprint source_identity) noexcept;
   Status recycle_begin_projection(Int3 shape,
                                   PlanFingerprint current_identity) noexcept;
   void recycle_clear() noexcept;
   bool recycle_capture_active() const noexcept {
     return recycle_.capture_active;
+  }
+  bool recycle_initial_guess_guard_active() const noexcept {
+    return recycle_.capture_active || recycle_.initial_guess_guard_only;
+  }
+  bool recycle_initial_guess_guard_only() const noexcept {
+    return recycle_.initial_guess_guard_only;
   }
   Status recycle_capture_cycle_start(ConstFieldView solution,
                                      ReductionEngine& reductions,

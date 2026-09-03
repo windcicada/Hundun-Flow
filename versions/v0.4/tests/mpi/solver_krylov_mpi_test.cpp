@@ -2230,6 +2230,7 @@ struct GuardSelectionProbe {
 
 bool run_guard_selection_probe(MPI_Comm communicator, double seed_scale,
                                double absolute_tolerance, bool capture,
+                               bool guard_only,
                                GuardSelectionProbe& output) {
   SolveFixture fixture;
   if (!initialize_fixture(communicator, LinearAlgorithm::fgmres, 4U,
@@ -2245,6 +2246,12 @@ bool run_guard_selection_probe(MPI_Comm communicator, double seed_scale,
   if (capture &&
       !fixture.workspace.recycle_begin_capture_for_test(
           shape, fixture.expected.fingerprint)) {
+    return false;
+  }
+  if (guard_only &&
+      (capture ||
+       !fixture.workspace.recycle_begin_initial_guess_guard_for_test(
+           shape, fixture.expected.fingerprint))) {
     return false;
   }
   TridiagonalOperator linear_operator(
@@ -2468,9 +2475,11 @@ bool test_c1_residual_guarded_warm_start(MPI_Comm communicator, int rank) {
   GuardSelectionProbe cold;
   GuardSelectionProbe worse;
   const bool cold_ran =
-      run_guard_selection_probe(communicator, 0.0, 1.0e-13, true, cold);
+      run_guard_selection_probe(communicator, 0.0, 1.0e-13, true, false,
+                                cold);
   const bool worse_ran =
-      run_guard_selection_probe(communicator, 3.0, 1.0e-13, true, worse);
+      run_guard_selection_probe(communicator, 3.0, 1.0e-13, true, false,
+                                worse);
   const bool worse_matches_cold =
       cold_ran && worse_ran && cold.result.status.code == StatusCode::ok &&
       worse.result.status.code == StatusCode::ok &&
@@ -2503,6 +2512,36 @@ bool test_c1_residual_guarded_warm_start(MPI_Comm communicator, int rank) {
       worse_matches_cold, rank,
       "strictly worse C1 seed falls back to the exact zero-seed result, work, chronological correction and zero-allocation path");
 
+  GuardSelectionProbe guarded_cold;
+  GuardSelectionProbe guarded_worse;
+  const bool guarded_cold_ran = run_guard_selection_probe(
+      communicator, 0.0, 1.0e-13, false, true, guarded_cold);
+  const bool guarded_worse_ran = run_guard_selection_probe(
+      communicator, 3.0, 1.0e-13, false, true, guarded_worse);
+  const bool guard_without_capture =
+      guarded_cold_ran && guarded_worse_ran &&
+      guarded_cold.result.status.code == StatusCode::ok &&
+      guarded_worse.result.status.code == StatusCode::ok &&
+      same_complete_result(guarded_cold.result, guarded_worse.result) &&
+      same_reduction_work(guarded_cold.reduction_work,
+                          guarded_worse.reduction_work) &&
+      guarded_cold.operator_calls == guarded_worse.operator_calls &&
+      guarded_cold.preconditioner_calls == guarded_worse.preconditioner_calls &&
+      guarded_cold.correction_count == 0U &&
+      guarded_worse.correction_count == 0U &&
+      same_dense(guarded_cold.solution, guarded_worse.solution) &&
+      std::abs(guarded_worse.result.initial_true_residual - rhs_norm) <=
+          norm_tolerance &&
+      guarded_cold.result.recycle_cycle_corrections == 0U &&
+      guarded_cold.result.recycle_capture_vector_passes == 0U &&
+      guarded_cold.result.recycle_capture_cycle_attempts == 0U &&
+      guarded_cold.result.recycle_capture_reduction_calls == 0U &&
+      guarded_cold.result.recycle_capture_blocking_operations == 0U &&
+      guarded_cold.allocations == 0U && guarded_worse.allocations == 0U;
+  passed &= expect(
+      guard_without_capture, rank,
+      "refinement guard preserves zero-seed fallback without recycle capture work");
+
   const auto retained_probe = [&](double seed_scale,
                                   const DenseVector& seed,
                                   double expected_fraction,
@@ -2510,9 +2549,9 @@ bool test_c1_residual_guarded_warm_start(MPI_Comm communicator, int rank) {
     GuardSelectionProbe capture;
     GuardSelectionProbe ordinary;
     const bool capture_ran = run_guard_selection_probe(
-        communicator, seed_scale, 1.0e-13, true, capture);
+        communicator, seed_scale, 1.0e-13, true, false, capture);
     const bool ordinary_ran = run_guard_selection_probe(
-        communicator, seed_scale, 1.0e-13, false, ordinary);
+        communicator, seed_scale, 1.0e-13, false, false, ordinary);
     const DenseVector expected_correction =
         dense_difference(capture.solution, seed);
     const bool retained =
@@ -2555,9 +2594,9 @@ bool test_c1_residual_guarded_warm_start(MPI_Comm communicator, int rank) {
   GuardSelectionProbe cold_early;
   GuardSelectionProbe worse_early;
   const bool cold_early_ran = run_guard_selection_probe(
-      communicator, 0.0, 1.0e6, true, cold_early);
+      communicator, 0.0, 1.0e6, true, false, cold_early);
   const bool worse_early_ran = run_guard_selection_probe(
-      communicator, 3.0, 1.0e6, true, worse_early);
+      communicator, 3.0, 1.0e6, true, false, worse_early);
   const bool early_exception =
       cold_early_ran && worse_early_ran &&
       cold_early.result.status.code == StatusCode::ok &&

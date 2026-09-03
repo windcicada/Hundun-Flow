@@ -733,7 +733,8 @@ Span<double> SolverWorkspace::scalars(std::size_t offset,
 
 Status SolverWorkspace::recycle_begin_capture(
     Int3 shape, PlanFingerprint source_identity) noexcept {
-  if (recycle_.capture_active || recycle_.projection_pending ||
+  if (recycle_.capture_active || recycle_.initial_guess_guard_only ||
+      recycle_.projection_pending ||
       requirements_.algorithm != LinearAlgorithm::fgmres ||
       !valid_shape(shape) || source_identity == 0U ||
       !shape_contains(requirements_.maximum_shape, shape) ||
@@ -749,6 +750,23 @@ Status SolverWorkspace::recycle_begin_capture(
   recycle_.source_identity = source_identity;
   recycle_.snapshot_slot = static_cast<std::uint8_t>(
       2U * static_cast<std::size_t>(requirements_.maximum_restart) + 3U);
+  return {};
+}
+
+Status SolverWorkspace::recycle_begin_initial_guess_guard(
+    Int3 shape, PlanFingerprint source_identity) noexcept {
+  if (recycle_.capture_active || recycle_.initial_guess_guard_only ||
+      recycle_.cycle_active || recycle_.projection_pending ||
+      requirements_.algorithm != LinearAlgorithm::fgmres ||
+      !valid_shape(shape) || source_identity == 0U ||
+      !shape_contains(requirements_.maximum_shape, shape) ||
+      requirements_.maximum_restart == 0U) {
+    return {StatusCode::invalid_plan, kLinearWorkspace};
+  }
+  recycle_ = {};
+  recycle_.initial_guess_guard_only = true;
+  recycle_.shape = shape;
+  recycle_.source_identity = source_identity;
   return {};
 }
 
@@ -1019,6 +1037,11 @@ void SolverWorkspace::recycle_set_projection_result(
 Status SolverWorkspace::recycle_begin_capture_for_test(
     Int3 shape, PlanFingerprint source_identity) noexcept {
   return recycle_begin_capture(shape, source_identity);
+}
+
+Status SolverWorkspace::recycle_begin_initial_guess_guard_for_test(
+    Int3 shape, PlanFingerprint source_identity) noexcept {
+  return recycle_begin_initial_guess_guard(shape, source_identity);
 }
 
 Status SolverWorkspace::recycle_begin_projection_for_test(
