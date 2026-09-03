@@ -4,6 +4,7 @@
 #define HUNDUN_V04_ENABLE_TEST_ACCESS 1
 #endif
 #include "hundun/v04_flow.hpp"
+#include "../../src/solver_piso_detail.hpp"
 #include "../support/candidate_boundary_fixture.hpp"
 #include "../support/ibm_force_fixture.hpp"
 
@@ -129,6 +130,16 @@ bool expect(bool condition, std::string_view description) {
     std::cerr << "FAIL: " << description << '\n';
   }
   return condition;
+}
+
+bool test_production_pressure_mg_policy() {
+  const MgHierarchyPolicy policy = detail::production_pressure_mg_policy();
+  return expect(
+      policy.pre_sweeps == 1U && policy.post_sweeps == 2U &&
+          policy.point_smoother == MgPointSmootherKind::chebyshev_jacobi &&
+          policy.cycle == MgCycleKind::f_cycle &&
+          policy.chebyshev_lower_spectrum_fraction == 0.3,
+      "production pressure and Fresh projection share the certified MG policy");
 }
 
 bool same_double_bits(double left, double right) {
@@ -9571,7 +9582,8 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
-  bool passed = test_exactly_two_compile_authority();
+  bool passed = test_production_pressure_mg_policy();
+  passed &= test_exactly_two_compile_authority();
   passed &= test_coupler_lifecycle_and_mutations();
   passed &= test_frozen_momentum_candidate_alpha_zero_exact();
   passed &= test_frozen_momentum_candidate_c1_c2_mapping();

@@ -6,6 +6,16 @@
 
 namespace hundun::v04::detail {
 
+inline MgHierarchyPolicy production_pressure_mg_policy() noexcept {
+  MgHierarchyPolicy policy;
+  policy.pre_sweeps = 1U;
+  policy.post_sweeps = 2U;
+  policy.point_smoother = MgPointSmootherKind::chebyshev_jacobi;
+  policy.cycle = MgCycleKind::f_cycle;
+  policy.chebyshev_lower_spectrum_fraction = 0.3;
+  return policy;
+}
+
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 
 // Arm on every participating rank.  The next refresh injects a local

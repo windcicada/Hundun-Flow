@@ -6788,11 +6788,7 @@ Status PressureVelocityCoupler::make_native_pressure_mg_spec(
   candidate.null_space = MgNullSpace::none;
   candidate.operator_class =
       MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
-  candidate.policy.pre_sweeps = 1U;
-  candidate.policy.post_sweeps = 2U;
-  candidate.policy.point_smoother = MgPointSmootherKind::chebyshev_jacobi;
-  candidate.policy.cycle = MgCycleKind::f_cycle;
-  candidate.policy.chebyshev_lower_spectrum_fraction = 0.3;
+  candidate.policy = detail::production_pressure_mg_policy();
   candidate.correction_scaling = impl.mg_correction_scaling;
   candidate.identity = identity;
   candidate.coefficients = coefficients;

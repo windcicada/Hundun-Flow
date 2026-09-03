@@ -8,6 +8,7 @@
 #include "core_product_freeze_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
+#include "solver_piso_detail.hpp"
 
 #include <mpi.h>
 
@@ -3112,6 +3113,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
   }
   NativeCartesianMgSpec mg_spec;
+  mg_spec.policy = detail::production_pressure_mg_policy();
   if (status)
     status = make_mg_workspace_requirements(
         communicator, candidate->geometry, candidate->patch, mg_spec.policy,
