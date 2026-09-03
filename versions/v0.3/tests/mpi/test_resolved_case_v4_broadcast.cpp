@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "src/app_resolved_case_v4_broadcast_detail.hpp"
 #include "src/cfg_resolved_case_v4_loader_detail.hpp"

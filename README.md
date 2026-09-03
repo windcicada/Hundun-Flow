@@ -1,21 +1,45 @@
-# HUNDUN-FLOW
+# HUNDUN-FLOW 1.0.0
 
-HUNDUN-FLOW 是一个 C++17/MPI 低马赫数有限体积求解器，面向 Cartesian 网格上的单相流、LES 和静止浸入边界（IBM）。当前默认源码线位于 `versions/v0.4`；这里的 `v0.4` 是内部源码/API 命名空间，公开产品版本为 `1.0.0`。
+HUNDUN-FLOW 是一个使用 C++17 和 MPI 编写的低马赫数有限体积求解器，面向 Cartesian 网格上的单相流、LES 和静止浸入边界（IBM）计算。它适合需要明确数值门限、可恢复计算和运行证据的 CPU 集群任务。
 
-当前分支是 V1.0 发布候选。只有预注册的 Re=3900 中短程产品/物理门、候选身份和发布 provenance 全部通过后，才会创建 `v1.0.0` tag；候选失败时不会发布。
+公开产品版本是 `1.0.0`。当前实现仍保留 `versions/v0.4` 目录和 `hundun::v04` 命名空间，便于已有算例和 API 继续使用；冻结的 `versions/v0.3` 源码线也可以独立构建。
 
-## 主要能力
+## 为什么开发 HUNDUN-FLOW
 
-- tensor-stretched Cartesian 网格与 MPI Cartesian 分解；
-- 单相低马赫理想气体热力学、温度/密度/输运同步更新；
-- 两次 PISO pressure corrector，以及同目标时间层的 continuity--energy pressure--enthalpy nonlinear refinement；
-- conservative final face mass-flux authority、EOS/continuity/energy/closed-mass/gauge 独立终端门；
-- common-face owner AFC、provisional/committed CFL 证书和事务化 retry/rollback；
-- 静止、封闭 STL IBM，支持严格三维二次和可审计的局部自适应降阶；
-- WALE 与 Vreman wall-function 路径；
-- exact-history MPI Restart、Visit 输出和 Evidence V6 provenance。
+这个项目有三个直接目的：
 
-完整边界见[当前版本能力](docs/releases/current-capabilities.md)、[已接受能力](docs/verification/accepted-capabilities.md)和[适用范围与限制](docs/numerics/applicability-and-limitations.md)。
+- 独立实现一套可检查的低马赫数压力、焓和密度耦合流程；
+- 在 MPI 并行计算中保留终端残差、通量、Restart 和候选身份，失败时回滚，不把异常状态写成已接受结果；
+- 在相同网格、物性和边界输入下对比 COAST 等既有程序的计算成本，同时保留温度相关热力学和输运模型，不用常 `cp`、常分子黏度或常导热系数换取速度。
+
+HUNDUN-FLOW 1.0.0 是软件版本，不代表所有 CFD 场景都已经完成物理验证。当前适用范围和未完成项见[适用范围与限制](docs/numerics/applicability-and-limitations.md)。
+
+## 已实现功能
+
+- tensor-stretched Cartesian 网格、MPI Cartesian 分解，以及 COAST runtime axes 格式导入；
+- 单相低马赫理想气体，支持温度和组分相关的 `cp`、密度、分子黏度与导热系数；
+- 可选择 `PISO` 或 `SIMPLE` 耦合路径，两次 pressure corrector 和 same-target continuity--energy nonlinear refinement；
+- BDF 时间推进、固定或自适应时间步、retry/rollback 和 provisional/committed CFL 检查；
+- 入口、出口、周期、对称等外边界；
+- 静止封闭 STL IBM，支持 `strict_quadratic` 和可审计的 `adaptive_order` 重构；
+- WALE、Vreman 和 wall-function 路径；
+- common-face owner AFC、最终面质量通量，以及 EOS、continuity、energy、closed-mass、gauge 五项终端检查；
+- exact-history MPI Restart、Visit 输出和 Evidence V8 运行记录；
+- Release 构建中的 Git commit、tree、编译器、编译参数和可执行文件 SHA-256 身份。
+
+更细的能力说明在[当前版本能力](docs/releases/current-capabilities.md)和[已接受能力](docs/verification/accepted-capabilities.md)。
+
+## 计划功能
+
+下面这些功能不属于 1.0.0 已实现范围：
+
+- 反应流、燃烧化学、喷雾、颗粒、多相和辐射；
+- 移动或变形 IBM、相交表面、非流形和未封闭几何；
+- AMR、嵌套网格、非结构网格和 GPU 后端；
+- 可压缩激波、声学和高马赫数求解；
+- 更广泛的网格/时间步独立性研究、长时间统计和复杂工程几何验证。
+
+开发顺序以可复现的算例和测试为准。计划项不会以占位接口冒充已完成功能。
 
 ## 构建
 
@@ -30,11 +54,11 @@ cmake --build build/release -j 2 --target hundun
 build/release/versions/v0.4/hundun --version
 ```
 
-冻结的旧 `versions/v0.3` 产品线仍可通过 `-DHUNDUN_SOURCE_VERSION=v0.3` 独立构建；两条源码线不会混合链接。
+构建冻结的旧源码线时，将 `HUNDUN_SOURCE_VERSION` 改为 `v0.3`。两条源码线不会混合链接。
 
 ## 运行
 
-先验证算例，再运行：
+先检查算例和 MPI 分解，再启动计算：
 
 ```sh
 mpirun -np 4 build/release/versions/v0.4/hundun validate case --dry-plan
@@ -42,15 +66,50 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
   --output run --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-128-rank Re=3900 发布候选采用每 rank 一个物理核心，任何单个 rank 的 owned-cell 数不超过 100,000。精确门槛见 [`HUNDUN_V1_RE3900_MEDIUM_RELEASE_POLICY_V2`](docs/verification/v1.0-re3900-medium-release-policy.json)。该门只授权带明确 10% blockage/薄展向域限制的 V1.0 软件发布，不声称已完成旧 v0.4 规格中的 420-cycle 文献统计、完整展向域验证或所有 CFD 应用验证。
+`--output-interval 0` 关闭 Visit、screen 和 monitor 输出；Evidence 仍会写入运行目录。正式计算前应检查边界方向、IBM donor、CFL、正性、质量与能量残差、limiter 活性和统计窗口。
 
-## 验证与文档
+## 已完成测试
 
-- [V04-2 数值产品闭环](docs/verification/2026-08-30-v04-2-pressure-enthalpy-production-closure.md)
-- [V1.0 Re=3900 文献与产品证据边界](docs/research/2026-09-02-v1-re3900-release-evidence-boundary.md)
-- [Re=3900 冻结文献边界](docs/research/2026-08-31-v04-re3900-thin-domain-literature-boundary.md)
+源码测试覆盖单元、数值、MPI、Restart、I/O、回滚和命令行路径。与 1.0.0 SIMPLE 优化直接相关的检查包括：
+
+- SIMPLE diagonal Schur 选择策略的 RED→GREEN 测试；
+- 1、2、4 ranks 的 SIMPLE+IBM 非零 refinement 测试；
+- pressure--energy Schur、globalization、Krylov 和 pressure-energy retry 测试；
+- 128 ranks 的严格算例静态检查、dry-plan 和一次正式性能运行；
+- 每步无 retry，所有线性求解完成，EOS、continuity、energy、closed-mass、gauge 门限通过。
+
+严格性能算例使用以下共同输入：
+
+- `D=0.02 m`，`Uc=2.89668 m/s`，`Re=3900`；
+- 计算域 `[-0.10,0.30] × [-0.10,0.10] × [0,0.06] m`，即 `20D × 10D × 3D`；
+- `456 × 256 × 104 = 12,140,544` cells，HUNDUN 与 COAST 使用同一组坐标；
+- 128 MPI ranks，每 rank 一个物理核心；
+- COAST 原生空气模型：NASA7 `cp(T)`、Yoon--Thodos/Wilke `mu(T,Y)`、`k=cp*mu/0.70`；
+- 每条路径只运行一次，其中 1 步启动，随后 5 步计时。
+
+| 路径 | 五个热步中位数 | 结论 |
+| --- | ---: | --- |
+| HUNDUN PISO，同提交基线 | 27.624453 s | 基线 |
+| HUNDUN SIMPLE，同提交基线 | 26.437491 s | 比 PISO 低 4.30% |
+| HUNDUN SIMPLE，1.0.0 优化路径 | 17.540536 s | 比普通可压缩 COAST 低 17.68% |
+| 普通可压缩 COAST | 21.306931 s | 对照 |
+
+优化集中在 SIMPLE+IBM 的 pressure-energy refinement。旧路径在首次 C2 后切回空间 `E_p/E_h` Schur，而预条件器仍是连续性压力 MG；1.0.0 让后续 refinement 继续使用 double-diagonal Schur，省去了相应的空间 stencil 和焓 halo。Stage 50 中位数从 21.319866 s 降到 13.268423 s。refinement 次数和线性迭代没有减少，因此这项结果不能归因于放宽收敛条件或减少物理计算。
+
+本次 HUNDUN 最大 continuity 和 energy 残差分别为 `7.451850e-7` 和 `9.369710e-7`，均低于 `1e-6`。性能证据对应优化提交 `fca607cf483e39996461619bb83295ee8cb05c98`，Evidence SHA-256 为 `ce9616316685ad3fc5f62b98be1d1d474677f0f8cea538a780007d24a607b274`。发布提交只增加 README 和源码水印，不改变该算法路径。
+
+普通 COAST 的终端质量平衡策略比 HUNDUN 宽松，两套程序也保留各自的离散和 IBM 实现。因此，上表用于比较相同网格、物性和边界输入下的产品运行时间，不是数值算法完全等价的证明。PISO 与原始 SIMPLE 两行是同提交下的耦合 A/B；最终优化 SIMPLE 与 PISO 的差值还包含后续 SIMPLE 专用优化。
+
+## 文档
+
+- [快速开始](docs/user-guide/quick-start.md)
+- [配置说明](docs/user-guide/configuration.md)
+- [控制方程](docs/numerics/governing-equations.md)
+- [离散方法](docs/numerics/discretization.md)
+- [Restart](docs/user-guide/restart.md)
+- [诊断输出](docs/user-guide/diagnostics.md)
 - [文档入口](docs/index.md)
 
 ## 许可证
 
-HUNDUN-FLOW 采用 Apache License 2.0，见 [LICENSE](LICENSE)。第三方组件及其许可证见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+HUNDUN-FLOW 采用 Apache License 2.0，见 [LICENSE](LICENSE)。第三方组件及许可证见 [THIRD_PARTY.md](THIRD_PARTY.md)。

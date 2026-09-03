@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 foreach(required IN ITEMS PRODUCT PYTHON VALIDATOR PROBE_ROOT)
   if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")

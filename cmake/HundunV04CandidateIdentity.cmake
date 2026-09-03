@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 function(hundun_v04_write_build_identity)
   cmake_parse_arguments(ARG "" "OUTPUT;SOURCE_ROOT;BINARY;TESTS_ON_BINARY;TESTS_OFF_BINARY" "INPUTS" ${ARGN})

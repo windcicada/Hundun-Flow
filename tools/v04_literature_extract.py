@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 """Validate frozen literature data and write an immutable hash receipt."""
 
 import argparse

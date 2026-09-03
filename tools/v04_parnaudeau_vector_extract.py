@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 """Extract Parnaudeau Fig. 11--15 filled PIV marker objects reproducibly."""
 
 import argparse

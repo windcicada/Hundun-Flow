@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 cmake_minimum_required(VERSION 3.21)
 file(STRINGS "${HUNDUN_STAGE3_CAPABILITY_LEDGER}" lines)
 set(profile_count 0)

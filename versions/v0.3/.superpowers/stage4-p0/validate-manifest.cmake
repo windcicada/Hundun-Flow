@@ -1,3 +1,4 @@
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 cmake_minimum_required(VERSION 3.21)
 
 foreach(required_variable IN ITEMS MANIFEST EXTERNAL_ROOT EXPECTED_CANTERA_SHA)

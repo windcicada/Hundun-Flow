@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 function(hundun_configure_warnings target)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

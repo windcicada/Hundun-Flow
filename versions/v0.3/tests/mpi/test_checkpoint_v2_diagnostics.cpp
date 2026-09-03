@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "tests/support/diag_checkpoint_v2_test_access.hpp"
 #include "src/flow_checkpoint_v2_detail.hpp"

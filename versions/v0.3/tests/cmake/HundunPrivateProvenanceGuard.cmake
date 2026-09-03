@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 # This guard is for the private governance fixture only.  The product guard
 # intentionally does not carry this repository-specific token policy.

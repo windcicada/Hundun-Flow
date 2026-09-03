@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 if(NOT DEFINED HUNDUN_SOURCE_ROOT)
   message(FATAL_ERROR "HUNDUN_SOURCE_ROOT is required")
 endif()

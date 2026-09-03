@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
+# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 #
 # HUNDUN_STAGE2_LIST_ONLY=1 validates and prints the exact registered
 # inventory without executing numerical tests. It exists only for the
