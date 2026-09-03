@@ -409,7 +409,14 @@ bool refinement_prefix_certificate(
         std::isfinite(refinement.solve.final_true_residual) &&
         refinement.solve.final_true_residual <=
             refinement.solve.initial_true_residual;
+    const bool no_dead_recycle_capture =
+        refinement.solve.recycle_cycle_corrections == 0U &&
+        refinement.solve.recycle_capture_vector_passes == 0U &&
+        refinement.solve.recycle_capture_cycle_attempts == 0U &&
+        refinement.solve.recycle_capture_reduction_calls == 0U &&
+        refinement.solve.recycle_capture_blocking_operations == 0U;
     valid &= refinement.valid() && accepted_solve &&
+             no_dead_recycle_capture &&
              refinement.ordinal == static_cast<std::uint8_t>(index + 1U) &&
              same_u64(refinement.target_generation) &&
              same_u64(refinement.collective_lineage) &&

@@ -10121,23 +10121,24 @@ Status PisoPressureSolveEpoch::solve_prepared(
     coupler.implementation_->sealed = {};
 
   Status status{};
-  if (bicgstab || independent_simple_sweep) {
+  if (bicgstab || independent_simple_sweep || pressure_energy_refinement) {
     // BiCGStab has no Arnoldi recycle span. SIMPLE also deliberately breaks
     // the frozen-momentum C1->C2 projection lineage because a fresh momentum
-    // system is assembled between its pressure solves. Clear any stale span
-    // while retaining the prepared workspace identity across both solves.
+    // system is assembled between its pressure solves. Each pressure-energy
+    // refinement has a fresh numeric linearization and no following consumer
+    // for a captured span, so capturing its restart corrections would only
+    // add field passes and reductions before the span is cleared. Clear any
+    // stale span while retaining the prepared workspace identity across the
+    // two mandatory solves.
     if (corrector == 1U)
       workspace_ = &workspace;
     workspace.recycle_clear();
   } else {
-    status = pressure_energy_refinement
-                 ? workspace.recycle_begin_capture(system.rhs.interior,
-                                                   identity.fingerprint)
-                 : (corrector == 1U
+    status = corrector == 1U
                  ? workspace.recycle_begin_capture(system.rhs.interior,
                                                    identity.fingerprint)
                  : workspace.recycle_begin_projection(system.rhs.interior,
-                                                      identity.fingerprint));
+                                                      identity.fingerprint);
     if (!status) return reject(status);
     if (corrector == 1U)
       workspace_ = &workspace;
