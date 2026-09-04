@@ -3,6 +3,7 @@
 
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_case.hpp"
+#include "hundun/v04_mpi_runtime.hpp"
 #include "hundun/v04_physics.hpp"
 
 #include "app_evidence_detail.hpp"
@@ -2098,6 +2099,7 @@ void usage(int rank) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (!hundun::v04::prepare_mpi_runtime_environment()) return 2;
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);

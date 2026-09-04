@@ -51,6 +51,11 @@ target_link_libraries(v04_core_status_test PRIVATE hundun_v04_test_core)
 
 add_test(NAME v04_core_status COMMAND v04_core_status_test)
 
+add_executable(v04_app_mpi_runtime_test
+  unit/app_mpi_runtime_test.cpp)
+target_link_libraries(v04_app_mpi_runtime_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_app_mpi_runtime COMMAND v04_app_mpi_runtime_test)
+
 add_executable(v04_public_headers_test
   unit/public_headers_test.cpp)
 target_link_libraries(v04_public_headers_test PRIVATE

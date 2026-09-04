@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_app.hpp"
+#include "hundun/v04_mpi_runtime.hpp"
 
 #include <mpi.h>
 
@@ -211,6 +212,7 @@ bool nonnegative_integer(std::string_view text, std::uint64_t& out) noexcept {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  if (!hundun::v04::prepare_mpi_runtime_environment()) return 2;
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);

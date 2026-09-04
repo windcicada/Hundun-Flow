@@ -208,6 +208,7 @@ set(hundun_v04_core_sources
   src/app_driver.cpp
   src/app_evidence_detail.cpp
   src/app_identity.cpp
+  src/app_mpi_runtime.cpp
   src/bc_apply.cpp
   src/bc_compile.cpp
   src/bc_nscbc.cpp
