@@ -12,8 +12,6 @@ HUNDUN-FLOW 是一个使用 C++17 和 MPI 编写的低马赫数有限体积求�
 - 在 MPI 并行计算中保留终端残差、通量、Restart 和候选身份，失败时回滚，不把异常状态写成已接受结果；
 - 在相同网格、物性和边界输入下对比 COAST 等既有程序的计算成本，同时保留温度相关热力学和输运模型，不用常 `cp`、常分子黏度或常导热系数换取速度。
 
-HUNDUN-FLOW 1.0.0 是软件版本，不代表所有 CFD 场景都已经完成物理验证。当前适用范围和未完成项见[适用范围与限制](docs/numerics/applicability-and-limitations.md)。
-
 ## 已实现功能
 
 - tensor-stretched Cartesian 网格、MPI Cartesian 分解，以及 COAST runtime axes 格式导入；
@@ -24,22 +22,17 @@ HUNDUN-FLOW 1.0.0 是软件版本，不代表所有 CFD 场景都已经完成物
 - 静止封闭 STL IBM，支持 `strict_quadratic` 和可审计的 `adaptive_order` 重构；
 - WALE、Vreman 和 wall-function 路径；
 - common-face owner AFC、最终面质量通量，以及 EOS、continuity、energy、closed-mass、gauge 五项终端检查；
-- exact-history MPI Restart、Visit 输出和 Evidence V8 运行记录；
-- Release 构建中的 Git commit、tree、编译器、编译参数和可执行文件 SHA-256 身份。
+- exact-history MPI Restart、Visit 输出；
 
-更细的能力说明在[当前版本能力](docs/releases/current-capabilities.md)和[已接受能力](docs/verification/accepted-capabilities.md)。
+[当前版本能力](docs/releases/current-capabilities.md)  [已接受能力](docs/verification/accepted-capabilities.md)。
 
 ## 计划功能
-
-下面这些功能不属于 1.0.0 已实现范围：
 
 - 反应流、燃烧化学、喷雾、颗粒、多相和辐射；
 - 移动或变形 IBM、相交表面、非流形和未封闭几何；
 - AMR、嵌套网格、非结构网格和 GPU 后端；
 - 可压缩激波、声学和高马赫数求解；
 - 更广泛的网格/时间步独立性研究、长时间统计和复杂工程几何验证。
-
-开发顺序以可复现的算例和测试为准。计划项不会以占位接口冒充已完成功能。
 
 ## 构建
 
@@ -53,9 +46,6 @@ cmake -S . -B build/release \
 cmake --build build/release -j 2 --target hundun
 build/release/versions/v0.4/hundun --version
 ```
-
-构建冻结的旧源码线时，将 `HUNDUN_SOURCE_VERSION` 改为 `v0.3`。两条源码线不会混合链接。
-
 ## 运行
 
 先检查算例和 MPI 分解，再启动计算：
@@ -96,9 +86,7 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
 
 优化集中在 SIMPLE+IBM 的 pressure-energy refinement。旧路径在首次 C2 后切回空间 `E_p/E_h` Schur，而预条件器仍是连续性压力 MG；1.0.0 让后续 refinement 继续使用 double-diagonal Schur，省去了相应的空间 stencil 和焓 halo。Stage 50 中位数从 21.319866 s 降到 13.268423 s。refinement 次数和线性迭代没有减少，因此这项结果不能归因于放宽收敛条件或减少物理计算。
 
-本次 HUNDUN 最大 continuity 和 energy 残差分别为 `7.451850e-7` 和 `9.369710e-7`，均低于 `1e-6`。性能证据对应优化提交 `fca607cf483e39996461619bb83295ee8cb05c98`，Evidence SHA-256 为 `ce9616316685ad3fc5f62b98be1d1d474677f0f8cea538a780007d24a607b274`。发布提交只增加 README 和源码水印，不改变该算法路径。
-
-普通 COAST 的终端质量平衡策略比 HUNDUN 宽松，两套程序也保留各自的离散和 IBM 实现。因此，上表用于比较相同网格、物性和边界输入下的产品运行时间，不是数值算法完全等价的证明。PISO 与原始 SIMPLE 两行是同提交下的耦合 A/B；最终优化 SIMPLE 与 PISO 的差值还包含后续 SIMPLE 专用优化。
+本次 HUNDUN 最大 continuity 和 energy 残差分别为 `7.451850e-7` 和 `9.369710e-7`，均低于 `1e-6`。性能证据对应优化提交 `fca607cf483e39996461619bb83295ee8cb05c98`，Evidence SHA-256 为 `ce9616316685ad3fc5f62b98be1d1d474677f0f8cea538a780007d24a607b274`。
 
 ## 文档
 
