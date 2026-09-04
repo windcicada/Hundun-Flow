@@ -6446,7 +6446,7 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
   };
   const RevisionToken flux_revision =
       exact_history ? image.final_mass_flux_revision : RevisionToken{17U};
-  const ConstFaceFluxView restored_flux{
+  ConstFaceFluxView restored_flux{
       face(image.final_mass_flux[0U], {cells.x + 1, cells.y, cells.z},
            CartesianAxis::x, 401U),
       face(image.final_mass_flux[1U], {cells.x, cells.y + 1, cells.z},
@@ -6455,7 +6455,7 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
            CartesianAxis::z, 401U),
       flux_revision,
       {}};
-  const ConstFaceFluxView restored_previous_flux{
+  ConstFaceFluxView restored_previous_flux{
       face(image.previous_mass_flux[0U], {cells.x + 1, cells.y, cells.z},
            CartesianAxis::x, 402U),
       face(image.previous_mass_flux[1U], {cells.x, cells.y + 1, cells.z},
@@ -6464,7 +6464,36 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
            CartesianAxis::z, 402U),
       image.previous_mass_flux_revision,
       {}};
+  // Restart owns a shared face from one patch, while an immersed link can
+  // belong to its neighbor.  Restore the payload first, then reapply the
+  // mandatory zero-flux constraint to both accepted history levels.
+  const auto canonicalize_ibm_flux =
+      [&](ConstFaceFluxView source, std::size_t replica,
+          ConstFaceFluxView& out) noexcept {
+        FaceFluxView destination;
+        Status local = product.phi_workspace.workspace_view(
+            replica, source.revision, destination);
+        if (!local) return local;
+        const std::array<ConstFaceFieldView, 3U> inputs{
+            source.x, source.y, source.z};
+        const std::array<FaceFieldView, 3U> outputs{
+            destination.x, destination.y, destination.z};
+        for (std::size_t axis = 0U; axis < inputs.size(); ++axis)
+          for (std::int32_t z = 0; z < inputs[axis].extents.z; ++z)
+            for (std::int32_t y = 0; y < inputs[axis].extents.y; ++y)
+              for (std::int32_t x = 0; x < inputs[axis].extents.x; ++x)
+                outputs[axis].unchecked({x, y, z}) =
+                    inputs[axis].unchecked({x, y, z});
+        local = product.ibm_equations->zero_interface_flux(destination);
+        if (local) out = as_const(destination);
+        return local;
+      };
   if (product.ibm_equations.has_value())
+    status = canonicalize_ibm_flux(restored_flux, 0U, restored_flux);
+  if (status && exact_history && product.ibm_equations.has_value())
+    status = canonicalize_ibm_flux(restored_previous_flux, 1U,
+                                   restored_previous_flux);
+  if (status && product.ibm_equations.has_value())
     status = product.ibm_equations->validate_interface_flux(restored_flux);
   if (status && exact_history && product.ibm_equations.has_value())
     status =

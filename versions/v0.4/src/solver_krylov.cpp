@@ -2190,15 +2190,6 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
               LinearTermination::maximum_iterations, resources, reductions,
               initial_calls);
         }
-        const double progress_guard =
-            64.0 * std::numeric_limits<double>::epsilon() *
-            std::max(beta, tolerance);
-        if (!(result.final_true_residual + progress_guard < beta)) {
-          return finish_failure(
-              result, {StatusCode::numerical_failure, kLinearSolveBreakdown},
-              LinearTermination::breakdown, resources, reductions,
-              initial_calls);
-        }
         if (result.norm_breakdown_restarts ==
             std::numeric_limits<std::uint64_t>::max()) {
           return finish_failure(

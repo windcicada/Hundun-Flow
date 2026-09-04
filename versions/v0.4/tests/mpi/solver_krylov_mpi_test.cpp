@@ -1437,7 +1437,7 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
     const bool initialized = initialize_fixture(
         communicator, LinearAlgorithm::fgmres, 4U, fixture);
     passed &= expect(initialized, rank,
-                     "bounded FGMRES breakdown-restart fixture initializes");
+                     "later-column FGMRES breakdown fixture initializes");
     if (!all_true(initialized, communicator)) return false;
     fill_system(fixture, -1.2, 3.0, -0.7, 2.5);
     const SolutionSnapshot before = snapshot_solution(fixture.solution.view);
@@ -1445,23 +1445,32 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
                            -1.2, 3.0, -0.7, false);
     ScalingPreconditioner preconditioner(fixture.expected, 1.0 / 3.0,
                                          false);
+    LinearSolveControl selected = control(300U, 4U);
+    selected.true_residual_interval = 1U;
     detail::force_single_reduction_fgmres_breakdown_for_test(2U);
     const LinearSolveResult result = solve_fgmres(
-        op, preconditioner, invocation(fixture, control(4U, 4U)),
+        op, preconditioner, invocation(fixture, selected),
         fixture.workspace, fixture.reductions);
     detail::force_single_reduction_fgmres_breakdown_for_test(0U);
+    const ResidualOracle oracle = independent_true_residual(
+        fixture, communicator, -1.2, 3.0, -0.7);
+    const double error = global_error(fixture, communicator);
     passed &= expect(
-            result.status.code == StatusCode::rejected_step &&
-            result.termination == LinearTermination::maximum_iterations &&
-            result.iterations == 4U &&
-            result.norm_breakdown_restarts == 1U &&
-            result.preconditioner_applies == 4U &&
-            result.operator_applies == 7U &&
-            result.reduction_calls == 12U &&
-            same_solution(fixture.solution.view, before) &&
-            finite_solution(fixture),
+        result.status.code == StatusCode::ok &&
+            result.termination == LinearTermination::converged &&
+            result.iterations > 1U &&
+            result.iterations < selected.maximum_iterations &&
+            result.norm_breakdown_restarts > 0U &&
+            result.norm_breakdown_restarts < result.iterations &&
+            result.preconditioner_applies == result.iterations &&
+            result.operator_applies == 1U + 2U * result.iterations &&
+            result.reduction_calls == 4U + 3U * result.iterations &&
+            !same_solution(fixture.solution.view, before) &&
+            residual_report_matches(result.final_true_residual, oracle) &&
+            residual_is_accepted(oracle, selected) &&
+            finite_solution(fixture) && error < 1.0e-8,
         rank,
-        "later unsafe norm replaces the true residual and remains bounded");
+        "later unsafe norm restarts remain bounded through convergence");
   }
   return all_true(passed, communicator);
 }

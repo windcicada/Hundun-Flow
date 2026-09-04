@@ -1842,21 +1842,34 @@ bool run_immersed_final_force_product() {
   if (status && !copy_restart_image(snapshot, expected, valid))
     status = {StatusCode::invalid_plan, 0U};
   if (!status) return false;
-  RestartImage invalid = valid;
-  for (std::vector<double>& face : invalid.final_mass_flux)
+  RestartImage duplicated = valid;
+  for (std::vector<double>& face : duplicated.final_mass_flux)
     std::fill(face.begin(), face.end(), 1.0);
-  status = target.initialize_restart(invalid);
-  passed &= !status && status.code == StatusCode::numerical_failure &&
-            !target.initialized() && target.pressure_reference() == 0.0 &&
-            target.closed_mass_target() == 0.0;
-  if (!passed) {
-    std::cerr << "immersed invalid Restart flux published state status="
-              << static_cast<unsigned>(status.code) << '/' << status.detail
-              << " initialized=" << target.initialized() << '\n';
-    return false;
+  status = target.initialize_restart(duplicated);
+  RestartSnapshot restored;
+  if (status) status = target.committed_restart_snapshot(restored);
+  bool saw_ibm_zero = false;
+  bool preserved_non_ibm = false;
+  if (status) {
+    const std::array<ConstFaceFieldView, 3U> faces{
+        restored.final_mass_flux.x, restored.final_mass_flux.y,
+        restored.final_mass_flux.z};
+    for (const ConstFaceFieldView face : faces)
+      for (std::int32_t z = 0; z < face.extents.z; ++z)
+        for (std::int32_t y = 0; y < face.extents.y; ++y)
+          for (std::int32_t x = 0; x < face.extents.x; ++x) {
+            const double value = face.unchecked({x, y, z});
+            saw_ibm_zero = saw_ibm_zero || value == 0.0;
+            preserved_non_ibm = preserved_non_ibm || value == 1.0;
+          }
   }
-  status = target.initialize_restart(valid);
-  passed &= static_cast<bool>(status) && target.initialized();
+  passed &= status && target.initialized() && saw_ibm_zero &&
+            preserved_non_ibm;
+  if (!passed)
+    std::cerr << "immersed Restart IBM canonicalization status="
+              << static_cast<unsigned>(status.code) << '/' << status.detail
+              << " initialized/zero/non-IBM=" << target.initialized() << '/'
+              << saw_ibm_zero << '/' << preserved_non_ibm << '\n';
   return passed;
 }
 
