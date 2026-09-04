@@ -360,6 +360,49 @@ bool write_exclusive(const fs::path& path, std::string_view text) {
   return okay;
 }
 
+class EvidenceFile {
+ public:
+  EvidenceFile() = default;
+  EvidenceFile(const EvidenceFile&) = delete;
+  EvidenceFile& operator=(const EvidenceFile&) = delete;
+
+  ~EvidenceFile() {
+    if (descriptor_ >= 0) ::close(descriptor_);
+  }
+
+  bool open_exclusive(const fs::path& path) noexcept {
+    if (descriptor_ >= 0) return false;
+    descriptor_ = ::open(path.c_str(),
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    return descriptor_ >= 0;
+  }
+
+  bool append(std::string_view text) noexcept {
+    if (descriptor_ < 0) return false;
+    std::size_t cursor = 0U;
+    while (cursor < text.size()) {
+      const ssize_t count =
+          ::write(descriptor_, text.data() + cursor, text.size() - cursor);
+      if (count < 0 && errno == EINTR) continue;
+      if (count <= 0) return false;
+      cursor += static_cast<std::size_t>(count);
+    }
+    return true;
+  }
+
+  bool sync() noexcept { return descriptor_ >= 0 && ::fsync(descriptor_) == 0; }
+
+  bool close() noexcept {
+    if (descriptor_ < 0) return false;
+    const int descriptor = descriptor_;
+    descriptor_ = -1;
+    return ::close(descriptor) == 0;
+  }
+
+ private:
+  int descriptor_{-1};
+};
+
 bool sync_directory(const fs::path& path) {
   const int descriptor =
       ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1142,8 +1185,11 @@ Status collect_evidence_resources(MPI_Comm communicator,
   return {};
 }
 
-Status collect_peak_rss(MPI_Comm communicator, std::uint64_t& maximum_rank,
+Status collect_peak_rss(MPI_Comm communicator, MPI_Comm node_communicator,
+                        std::uint64_t& maximum_rank,
                         std::uint64_t& maximum_node) {
+  if (communicator == MPI_COMM_NULL || node_communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, kRunnerInput};
   rusage usage{};
   if (::getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0)
     return {StatusCode::io_failure, kRunnerInput};
@@ -1154,15 +1200,10 @@ Status collect_peak_rss(MPI_Comm communicator, std::uint64_t& maximum_rank,
   if (MPI_Allreduce(&local, &maximum_rank, 1, MPI_UINT64_T, MPI_MAX,
                     communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kRunnerInput};
-  MPI_Comm shared = MPI_COMM_NULL;
-  if (MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
-                          MPI_INFO_NULL, &shared) != MPI_SUCCESS)
-    return {StatusCode::mpi_failure, kRunnerInput};
   std::uint64_t node = 0U;
   const int reduce = MPI_Allreduce(&local, &node, 1, MPI_UINT64_T, MPI_SUM,
-                                   shared);
-  const int free = MPI_Comm_free(&shared);
-  if (reduce != MPI_SUCCESS || free != MPI_SUCCESS)
+                                   node_communicator);
+  if (reduce != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kRunnerInput};
   if (MPI_Allreduce(&node, &maximum_node, 1, MPI_UINT64_T, MPI_MAX,
                     communicator) != MPI_SUCCESS)
@@ -1210,7 +1251,8 @@ Status collect_stage_timings(
 }
 
 Status append_evidence(
-    MPI_Comm communicator, const fs::path& path,
+    MPI_Comm communicator, MPI_Comm node_communicator, int rank,
+    EvidenceFile& evidence_file,
     const IoServicePlan& services, const ValidatedModel& model,
     PlanFingerprint product, PlanFingerprint cpu, PlanFingerprint stl,
     const RuntimeCandidateIdentity& candidate_identity,
@@ -1224,7 +1266,7 @@ Status append_evidence(
   if (!status) return status;
   std::uint64_t maximum_rank_rss = 0U;
   std::uint64_t maximum_node_rss = 0U;
-  status = collect_peak_rss(communicator, maximum_rank_rss,
+  status = collect_peak_rss(communicator, node_communicator, maximum_rank_rss,
                             maximum_node_rss);
   if (!status) return status;
   std::array<StageTimingRecord, kDriverTimedStageCapacity> stages{};
@@ -1392,7 +1434,14 @@ Status append_evidence(
   // This quick thin-domain comparison is intentionally not a formal release
   // statistics candidate.  The full V6 numerical evidence is still emitted.
   evidence.statistics_eligible = false;
-  return EvidenceWriter::append(communicator, path, services, evidence);
+  std::string line;
+  status = detail::runtime_encode_evidence_line(
+      communicator, services, evidence, line);
+  if (!status) return status;
+  const bool written = rank != 0 || evidence_file.append(line);
+  return all_true(communicator, written)
+             ? Status{}
+             : Status{StatusCode::io_failure, kRunnerInput};
 }
 
 bool terminal_audit_valid(const ValidatedModel& model,
@@ -1715,6 +1764,18 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   }
   if (!all_true(communicator, okay)) return 6;
 
+  MPI_Comm node_communicator = MPI_COMM_NULL;
+  okay = MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
+                             MPI_INFO_NULL,
+                             &node_communicator) == MPI_SUCCESS;
+  if (!all_true(communicator, okay)) return 6;
+
+  EvidenceFile evidence_file;
+  if (rank == 0)
+    okay = evidence_file.open_exclusive(options.run_root / "evidence.jsonl") &&
+           sync_directory(options.run_root);
+  if (!all_true(communicator, okay)) return 6;
+
   const double force_scale = 0.5 * spec.rho_ref * spec.u_ref * spec.u_ref *
                              spec.diameter * spec.span;
   if (!std::isfinite(force_scale) || !(force_scale > 0.0)) return 3;
@@ -1883,7 +1944,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     DriverResourceReport global_resources;
     if (status)
       status = append_evidence(
-          communicator, options.run_root / "evidence.jsonl", services, model,
+          communicator, node_communicator, rank, evidence_file, services, model,
           product_fingerprint, cpu_fingerprint, stl_fingerprint,
           candidate_identity, build_identity, binary_identity, run_start,
           step, maximum_nanoseconds, recovery, global_resources);
@@ -1977,7 +2038,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         health.flush();
         probe.flush();
         okay = static_cast<bool>(force) && static_cast<bool>(health) &&
-               static_cast<bool>(probe);
+               static_cast<bool>(probe) && evidence_file.sync();
       }
       if (!all_true(communicator, okay) ||
           !consensus_u64(communicator, accumulator.sample_steps) ||
@@ -1996,11 +2057,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     force.close();
     health.close();
     probe.close();
-    okay = ::chmod((options.run_root / "force.csv").c_str(), 0444) == 0 &&
+    okay = evidence_file.close() &&
+           ::chmod((options.run_root / "evidence.jsonl").c_str(), 0444) == 0 &&
+           ::chmod((options.run_root / "force.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "health.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "probe.csv").c_str(), 0444) == 0 &&
            sync_directory(options.run_root);
   }
+  okay = MPI_Comm_free(&node_communicator) == MPI_SUCCESS && okay;
   if (!all_true(communicator, okay)) return 6;
   if (rank == 0)
     std::cout << "COMPLETED steps=" << options.steps
@@ -2009,7 +2073,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   return 0;
 }
 
-bool self_test() {
+bool self_test(MPI_Comm communicator) {
   const std::array<double, 4U> coordinates{{-1.5, -0.5, 0.5, 1.5}};
   Bracket exact;
   Bracket middle;
@@ -2023,6 +2087,23 @@ bool self_test() {
               std::abs(middle.upper_weight - 0.5) < 1.0e-15 &&
               !bracket({coordinates.data(), coordinates.size()}, 2.0,
                        invalid);
+  MPI_Comm node_communicator = MPI_COMM_NULL;
+  okay = okay &&
+         MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
+                             MPI_INFO_NULL,
+                             &node_communicator) == MPI_SUCCESS;
+  std::uint64_t maximum_rank_rss = 0U;
+  std::uint64_t maximum_node_rss = 0U;
+  if (okay) {
+    const Status first = collect_peak_rss(
+        communicator, node_communicator, maximum_rank_rss, maximum_node_rss);
+    const Status second = collect_peak_rss(
+        communicator, node_communicator, maximum_rank_rss, maximum_node_rss);
+    okay = first && second && maximum_rank_rss > 0U &&
+           maximum_node_rss >= maximum_rank_rss;
+  }
+  if (node_communicator != MPI_COMM_NULL)
+    okay = MPI_Comm_free(&node_communicator) == MPI_SUCCESS && okay;
   StatisticsSpec spec;
   spec.development_steps = 10U;
   spec.collection_end_step = 20U;
@@ -2081,6 +2162,16 @@ bool self_test() {
   wrong_size.centerline.assign(2U, 0.0);
   okay = okay && !decode_accumulator(accumulator_path, fingerprint, 11U, 12U,
                                      9U, 0.25, wrong_size);
+  const fs::path evidence_path = root / "evidence.jsonl";
+  EvidenceFile evidence;
+  okay = okay && evidence.open_exclusive(evidence_path) &&
+         evidence.append("one\n") && evidence.append("two\n") &&
+         evidence.sync() && evidence.close();
+  std::ifstream evidence_input(evidence_path);
+  std::ostringstream evidence_text;
+  evidence_text << evidence_input.rdbuf();
+  okay = okay && static_cast<bool>(evidence_input) &&
+         evidence_text.str() == "one\ntwo\n";
   fs::remove_all(root, error);
   return okay;
 }
@@ -2109,7 +2200,7 @@ int main(int argc, char** argv) {
     usage(rank);
     result = 2;
   } else if (options.self_test) {
-    const bool local = self_test();
+    const bool local = self_test(MPI_COMM_WORLD);
     const bool passed = all_true(MPI_COMM_WORLD, local);
     if (rank == 0)
       std::cout << (passed ? "PASS" : "FAIL")
