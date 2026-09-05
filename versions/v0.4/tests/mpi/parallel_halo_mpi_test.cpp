@@ -17,6 +17,16 @@
 #include <string_view>
 #include <vector>
 
+namespace collective_observer {
+std::uint64_t allreduce_calls = 0U;
+}
+
+extern "C" int MPI_Allreduce(const void* send, void* receive, int count,
+                             MPI_Datatype type, MPI_Op op, MPI_Comm comm) {
+  ++collective_observer::allreduce_calls;
+  return PMPI_Allreduce(send, receive, count, type, op, comm);
+}
+
 namespace allocation_observer {
 
 std::atomic<bool> enabled{false};
@@ -337,6 +347,9 @@ std::array<FieldView, 2U> field_views(OwnedField& velocity,
 bool exchange(HaloEngine& engine, StageId stage,
               std::array<FieldView, 2U>& views, int rank,
               bool check_publication_boundary) {
+  const auto observed_before = collective_observer::allreduce_calls;
+  const auto reported_before =
+      engine.runtime_counters().control_consensus_calls;
   HaloTicket ticket;
   bool passed = expect(static_cast<bool>(engine.begin(
                            stage, Span<const FieldView>{views.data(), views.size()},
@@ -356,6 +369,12 @@ bool exchange(HaloEngine& engine, StageId stage,
                        engine.ghost_revision(kVelocity) == 17U &&
                        engine.ghost_revision(kPressure) == 23U,
                    rank, "finish alone publishes exact field revisions");
+  const auto actual = collective_observer::allreduce_calls - observed_before;
+  const auto reported =
+      engine.runtime_counters().control_consensus_calls - reported_before;
+  passed &= expect(actual == 4U && reported == actual, rank,
+                   "PMPI confirms four ordinary halo control Allreduces "
+                   "without double counting");
   return passed;
 }
 

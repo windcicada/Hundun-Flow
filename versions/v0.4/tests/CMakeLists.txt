@@ -45,6 +45,58 @@ add_test(NAME v04_literature_partial_receipt
           receipt-validate
           "${hundun_repository_root}/docs/verification/v0.4-literature-data-receipt-r4-partial.json")
 
+add_executable(v04_product_mg_capacity_mpi_test mpi/product_mg_capacity_mpi_test.cpp)
+target_link_libraries(v04_product_mg_capacity_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_mg_capacity_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_mg_capacity_mpi_test>" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_mg_capacity_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 90)
+endforeach()
+
+add_executable(v04_product_allocation_failure_mpi_test mpi/product_allocation_failure_mpi_test.cpp)
+target_link_libraries(v04_product_allocation_failure_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+target_compile_definitions(v04_product_allocation_failure_mpi_test PRIVATE
+  HUNDUN_V04_TEST_DATA_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/data")
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_allocation_failure_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_allocation_failure_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 30)
+  foreach(operation IN ITEMS compile create initialize)
+    foreach(geometry IN ITEMS cartesian immersed)
+      set(allocation_test v04_product_${operation}_allocations_${geometry}_mpi_${rank_count})
+      add_test(NAME ${allocation_test}
+        COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+                ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>"
+                ${MPIEXEC_POSTFLAGS} 0 -1 ${operation} ${geometry})
+      # Sweep actual allocations, not hard-coded ordinals tied to one build.
+      # This is a correctness audit, never a performance timing sample.
+      set_tests_properties(${allocation_test} PROPERTIES
+        PROCESSORS "${rank_count}" TIMEOUT 1800 LABELS "allocation_audit")
+    endforeach()
+  endforeach()
+endforeach()
+
+add_executable(v04_product_memory_profile_mpi_test
+  mpi/product_allocation_failure_mpi_test.cpp)
+target_link_libraries(v04_product_memory_profile_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+target_compile_definitions(v04_product_memory_profile_mpi_test PRIVATE
+  HUNDUN_V04_TEST_DATA_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/data")
+foreach(rank_count IN ITEMS 1 2 4)
+  foreach(geometry IN ITEMS cartesian immersed)
+    add_test(NAME v04_product_memory_profile_${geometry}_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_memory_profile_mpi_test>"
+              ${MPIEXEC_POSTFLAGS} --memory-profile ${geometry})
+    set_tests_properties(v04_product_memory_profile_${geometry}_mpi_${rank_count}
+      PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120)
+  endforeach()
+endforeach()
+
 add_executable(v04_core_status_test
   unit/core_status_test.cpp)
 target_link_libraries(v04_core_status_test PRIVATE hundun_v04_test_core)

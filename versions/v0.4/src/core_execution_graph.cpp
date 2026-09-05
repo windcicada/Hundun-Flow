@@ -132,11 +132,10 @@ bool byte_ranges_overlap(const WorkspaceInterval& left,
 }
 
 template <class Stage>
-Status allocate_workspace(
-    const Stage& stage, std::size_t registration,
-    std::size_t live_through,
-    std::vector<WorkspaceInterval>& active, std::size_t& offset,
-    std::size_t& high_water) noexcept {
+Status allocate_workspace(const Stage& stage, std::size_t registration,
+                          std::size_t live_through,
+                          std::vector<WorkspaceInterval>& active,
+                          std::size_t& offset, std::size_t& high_water) {
   offset = 0U;
   if (stage.workspace_bytes == 0U) {
     return {};

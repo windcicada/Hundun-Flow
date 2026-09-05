@@ -41,7 +41,7 @@ class FieldSchema {
 class FieldRegistry {
  public:
   FieldRegistry() = default;
-  FieldRegistry(const FieldRegistry&) = default;
+  FieldRegistry(const FieldRegistry& other);
   FieldRegistry& operator=(const FieldRegistry&) = default;
   FieldRegistry(FieldRegistry&&) noexcept = default;
   FieldRegistry& operator=(FieldRegistry&&) noexcept = default;

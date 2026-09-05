@@ -1,0 +1,3254 @@
+{
+  "schema": "HUNDUN_MAIN_REVIEW_EVIDENCE_V1",
+  "baseline_sha": "69d8eee715c9565ccc033ea7fb95d2bf3b95aae6",
+  "head_when_packed_not_a_claim_of_build_head": "69d8eee715c9565ccc033ea7fb95d2bf3b95aae6",
+  "branch": "codex/v04-mpi-memory-review",
+  "implementation_patch_sha256": "002cd705a867445fe71ece8e149ea761dee170957ee57383d1ae6c19072ad6d8",
+  "source_patch_paths": [
+    "versions/v0.4",
+    "tools/v04_thin_domain_runner.cpp",
+    "tools/v04_review_evidence_pack.py",
+    "README.md"
+  ],
+  "source_identity_note": "Baseline plus patch identifies tested implementation; untracked source must be staged before packing. A later documentation/evidence commit does not relabel existing binaries.",
+  "worktree_status_when_packed": [
+    " M AGENTS.md",
+    "M  README.md",
+    "A  docs/verification/2026-09-05-main-review-repairs.md",
+    "A  tools/v04_review_evidence_pack.py",
+    "M  tools/v04_thin_domain_runner.cpp",
+    "M  versions/v0.4/include/hundun/v04_app.hpp",
+    "M  versions/v0.4/include/hundun/v04_field.hpp",
+    "M  versions/v0.4/include/hundun/v04_ibm.hpp",
+    "M  versions/v0.4/src/app_driver.cpp",
+    "M  versions/v0.4/src/app_main.cpp",
+    "M  versions/v0.4/src/core_execution_graph.cpp",
+    "M  versions/v0.4/src/core_field_registry.cpp",
+    "M  versions/v0.4/src/core_product_freeze.cpp",
+    "M  versions/v0.4/src/mesh_ibm_plan.cpp",
+    "M  versions/v0.4/src/parallel_ibm_donor.cpp",
+    "M  versions/v0.4/src/physics_input.cpp",
+    "M  versions/v0.4/src/physics_input_detail.hpp",
+    "M  versions/v0.4/src/physics_thermo.cpp",
+    "M  versions/v0.4/src/physics_transport.cpp",
+    "M  versions/v0.4/src/solver_ibm_force.cpp",
+    "M  versions/v0.4/src/solver_ibm_pressure.cpp",
+    "M  versions/v0.4/src/solver_initialization_projection.cpp",
+    "M  versions/v0.4/src/solver_mg.cpp",
+    "M  versions/v0.4/tests/CMakeLists.txt",
+    "M  versions/v0.4/tests/focused_manifest.cmake",
+    "M  versions/v0.4/tests/integration/app_init_case_test.cpp",
+    "M  versions/v0.4/tests/mpi/app_output_failure_mpi_test.cpp",
+    "M  versions/v0.4/tests/mpi/parallel_halo_mpi_test.cpp",
+    "M  versions/v0.4/tests/mpi/product_adaptive_limits_mpi_test.cpp",
+    "A  versions/v0.4/tests/mpi/product_allocation_failure_mpi_test.cpp",
+    "A  versions/v0.4/tests/mpi/product_mg_capacity_mpi_test.cpp",
+    "M  versions/v0.4/tests/mpi/product_pressure_energy_retry_mpi_test.cpp",
+    "?? .codegraphf/",
+    "?? docs/verification/2026-09-05-main-review-evidence/"
+  ],
+  "builds": {
+    "build-re3900-fix-test": {
+      "CMAKE_BUILD_TYPE:STRING": "Release",
+      "CMAKE_CXX_COMPILER:STRING": "/home/wyf/.local/bin/clang++",
+      "CMAKE_CXX_COMPILER_AR:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ar",
+      "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/clang-scan-deps",
+      "CMAKE_CXX_COMPILER_RANLIB:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ranlib",
+      "CMAKE_CXX_FLAGS:STRING": "-stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -march=znver3 -mno-fma -ffp-contract=off",
+      "CMAKE_CXX_FLAGS_DEBUG:STRING": "-g",
+      "CMAKE_CXX_FLAGS_MINSIZEREL:STRING": "-Os -DNDEBUG",
+      "CMAKE_CXX_FLAGS_RELEASE:STRING": "-O3 -DNDEBUG",
+      "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING": "-O2 -g -DNDEBUG",
+      "CMAKE_C_COMPILER:STRING": "/usr/bin/cc",
+      "CMAKE_C_COMPILER_AR:FILEPATH": "/usr/bin/gcc-ar-7",
+      "CMAKE_C_COMPILER_RANLIB:FILEPATH": "/usr/bin/gcc-ranlib-7",
+      "CMAKE_C_FLAGS:STRING": "",
+      "CMAKE_C_FLAGS_DEBUG:STRING": "-g",
+      "CMAKE_C_FLAGS_MINSIZEREL:STRING": "-Os -DNDEBUG",
+      "CMAKE_C_FLAGS_RELEASE:STRING": "-O3 -DNDEBUG",
+      "CMAKE_C_FLAGS_RELWITHDEBINFO:STRING": "-O2 -g -DNDEBUG",
+      "CMAKE_EXE_LINKER_FLAGS:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_DEBUG:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING": "",
+      "HUNDUN_BUILD_TESTS:BOOL": "ON",
+      "HUNDUN_ENABLE_ASAN:BOOL": "OFF",
+      "HUNDUN_ENABLE_HYPRE:BOOL": "OFF",
+      "HUNDUN_ENABLE_UBSAN:BOOL": "OFF",
+      "HUNDUN_SOURCE_VERSION:STRING": "v0.4",
+      "HUNDUN_V04_PYTHON_EXECUTABLE:FILEPATH": "/usr/bin/python3.6",
+      "MPI_C_ADDITIONAL_INCLUDE_DIRS:STRING": "",
+      "MPI_C_COMPILER:FILEPATH": "/usr/bin/mpicc",
+      "MPI_C_COMPILER_INCLUDE_DIRS:STRING": "/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi;/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent;/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include;/usr/lib/x86_64-linux-gnu/openmpi/include",
+      "MPI_C_COMPILE_DEFINITIONS:STRING": "",
+      "MPI_C_COMPILE_OPTIONS:STRING": "-pthread",
+      "MPI_C_HEADER_DIR:PATH": "/usr/lib/x86_64-linux-gnu/openmpi/include",
+      "MPI_C_LIB_NAMES:STRING": "mpi",
+      "MPI_C_LINK_FLAGS:STRING": "-L/usr/lib/x86_64-linux-gnu/openmpi/lib -pthread",
+      "MPI_mpi_LIBRARY:FILEPATH": "/usr/lib/libmpi.so",
+      "CMAKE_CXX_COMPILER-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_AR-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_RANLIB-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER_AR-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER_RANLIB-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "HUNDUN_SOURCE_VERSION-STRINGS:INTERNAL": "v0.4;v0.3",
+      "MPI_C_ADDITIONAL_INCLUDE_DIRS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILER-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILER_INCLUDE_DIRS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILE_DEFINITIONS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILE_OPTIONS-ADVANCED:INTERNAL": "1",
+      "MPI_C_HEADER_DIR-ADVANCED:INTERNAL": "1",
+      "MPI_C_LIB_NAMES-ADVANCED:INTERNAL": "1",
+      "MPI_C_LINK_FLAGS-ADVANCED:INTERNAL": "1",
+      "MPI_RESULT_C_test_mpi_normal:INTERNAL": "TRUE",
+      "MPI_mpi_LIBRARY-ADVANCED:INTERNAL": "1"
+    },
+    "build-audit-sanitize": {
+      "CMAKE_BUILD_TYPE:STRING": "Debug",
+      "CMAKE_CXX_COMPILER:UNINITIALIZED": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/clang++",
+      "CMAKE_CXX_COMPILER_AR:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ar",
+      "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/clang-scan-deps",
+      "CMAKE_CXX_COMPILER_RANLIB:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ranlib",
+      "CMAKE_CXX_FLAGS:STRING": "-stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -mno-fma -ffp-contract=off",
+      "CMAKE_CXX_FLAGS_DEBUG:STRING": "-g",
+      "CMAKE_CXX_FLAGS_MINSIZEREL:STRING": "-Os -DNDEBUG",
+      "CMAKE_CXX_FLAGS_RELEASE:STRING": "-O3 -DNDEBUG",
+      "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING": "-O2 -g -DNDEBUG",
+      "CMAKE_C_COMPILER:UNINITIALIZED": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/clang",
+      "CMAKE_C_COMPILER_AR:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ar",
+      "CMAKE_C_COMPILER_CLANG_SCAN_DEPS:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/clang-scan-deps",
+      "CMAKE_C_COMPILER_RANLIB:FILEPATH": "/home/wyf/.local/opt/hundun-toolchain/clang/bin/llvm-ranlib",
+      "CMAKE_C_FLAGS:STRING": "",
+      "CMAKE_C_FLAGS_DEBUG:STRING": "-g",
+      "CMAKE_C_FLAGS_MINSIZEREL:STRING": "-Os -DNDEBUG",
+      "CMAKE_C_FLAGS_RELEASE:STRING": "-O3 -DNDEBUG",
+      "CMAKE_C_FLAGS_RELWITHDEBINFO:STRING": "-O2 -g -DNDEBUG",
+      "CMAKE_EXE_LINKER_FLAGS:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_DEBUG:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING": "",
+      "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING": "",
+      "HUNDUN_BUILD_TESTS:BOOL": "ON",
+      "HUNDUN_ENABLE_ASAN:BOOL": "ON",
+      "HUNDUN_ENABLE_HYPRE:BOOL": "OFF",
+      "HUNDUN_ENABLE_UBSAN:BOOL": "ON",
+      "HUNDUN_SOURCE_VERSION:STRING": "v0.4",
+      "HUNDUN_V04_PYTHON_EXECUTABLE:FILEPATH": "/usr/bin/python3.6",
+      "MPI_C_ADDITIONAL_INCLUDE_DIRS:STRING": "",
+      "MPI_C_COMPILER:FILEPATH": "/usr/bin/mpicc",
+      "MPI_C_COMPILER_INCLUDE_DIRS:STRING": "/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi;/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent;/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include;/usr/lib/x86_64-linux-gnu/openmpi/include",
+      "MPI_C_COMPILE_DEFINITIONS:STRING": "",
+      "MPI_C_COMPILE_OPTIONS:STRING": "-pthread",
+      "MPI_C_HEADER_DIR:PATH": "/usr/lib/x86_64-linux-gnu/openmpi/include",
+      "MPI_C_LIB_NAMES:STRING": "mpi",
+      "MPI_C_LINK_FLAGS:STRING": "-L/usr/lib/x86_64-linux-gnu/openmpi/lib -pthread",
+      "MPI_mpi_LIBRARY:FILEPATH": "/usr/lib/libmpi.so",
+      "CMAKE_CXX_COMPILER-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_AR-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_COMPILER_RANLIB-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER_AR-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER_CLANG_SCAN_DEPS-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_COMPILER_RANLIB-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+      "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+      "HUNDUN_SOURCE_VERSION-STRINGS:INTERNAL": "v0.4;v0.3",
+      "MPI_C_ADDITIONAL_INCLUDE_DIRS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILER-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILER_INCLUDE_DIRS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILE_DEFINITIONS-ADVANCED:INTERNAL": "1",
+      "MPI_C_COMPILE_OPTIONS-ADVANCED:INTERNAL": "1",
+      "MPI_C_HEADER_DIR-ADVANCED:INTERNAL": "1",
+      "MPI_C_LIB_NAMES-ADVANCED:INTERNAL": "1",
+      "MPI_C_LINK_FLAGS-ADVANCED:INTERNAL": "1",
+      "MPI_RESULT_C_test_mpi_normal:INTERNAL": "TRUE",
+      "MPI_mpi_LIBRARY-ADVANCED:INTERNAL": "1"
+    }
+  },
+  "binaries": {
+    "build-re3900-fix-test/versions/v0.4/hundun": {
+      "bytes": 5257944,
+      "sha256": "7e59301800870644c196421846bfc6be855d53e2c778c050d7bcda32a8d587e3"
+    },
+    "build-re3900-fix-test/versions/v0.4/tests/v04_product_allocation_failure_mpi_test": {
+      "bytes": 5016240,
+      "sha256": "71d22363eb17e118869f2e26462d78ad858ee18df7c003172e4b497a69f4ed4e"
+    },
+    "build-re3900-fix-test/versions/v0.4/tests/v04_product_memory_profile_mpi_test": {
+      "bytes": 5016240,
+      "sha256": "71d22363eb17e118869f2e26462d78ad858ee18df7c003172e4b497a69f4ed4e"
+    },
+    "build-re3900-fix-test/versions/v0.4/tests/v04_product_mg_capacity_mpi_test": {
+      "bytes": 4780688,
+      "sha256": "4b6e0e0ba844a88e0c6a8ee131958c6fe7c0c721dbd47c88a44df619c409709f"
+    },
+    "build-re3900-fix-test/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test": {
+      "bytes": 4848376,
+      "sha256": "5e460206f44abfae3b8f066e575eb4a3f25c630880e7dbcf43fb12a52506e84a"
+    },
+    "build-re3900-fix-test/versions/v0.4/tests/v04_parallel_halo_mpi_test": {
+      "bytes": 160248,
+      "sha256": "60431a0741af474bc3eb162a41af37e19d045565feb728ed9075c87a8d1a0ed5"
+    },
+    "build-audit-sanitize/versions/v0.4/tests/v04_product_allocation_failure_mpi_test": {
+      "bytes": 67209512,
+      "sha256": "7ca8b10565460a59109a1581801605cd1f873a70b023438b2cebbe2a262f16cf"
+    },
+    "build-audit-sanitize/versions/v0.4/tests/v04_product_memory_profile_mpi_test": {
+      "bytes": 67209512,
+      "sha256": "7ca8b10565460a59109a1581801605cd1f873a70b023438b2cebbe2a262f16cf"
+    },
+    "build-audit-sanitize/versions/v0.4/tests/v04_product_mg_capacity_mpi_test": {
+      "bytes": 64709664,
+      "sha256": "d33225c51fc319254c3d210b7f21876fd972a3278b71037edd6b4de7f7a9cc6e"
+    },
+    "build-audit-sanitize/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test": {
+      "bytes": 65564728,
+      "sha256": "40cb49b9328ea8e910e877f619b1ef19b39179326978538086a3a598b8c89b3c"
+    },
+    "build-audit-sanitize/versions/v0.4/tests/v04_parallel_halo_mpi_test": {
+      "bytes": 5111008,
+      "sha256": "cf13f30dbdaeba8e0538406d3434973967bb6bad29d4fde2fb0356eb791c2e22"
+    }
+  },
+  "ctest_summaries": {
+    "hundun-review-69d8eee-ctest-console.log": {
+      "complete_summary_found": true,
+      "total": 217,
+      "passed": 216,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-69d8eee-ctest.log": {
+      "complete_summary_found": true,
+      "total": 217,
+      "passed": 216,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-app-report-green.log": {
+      "complete_summary_found": true,
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-app-report-red.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_app_output_failure_mpi_2",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-candidate-extrapolation-console.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-extrapolation.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-extrapolation2-console.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-extrapolation2.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-work-and-memory-green-console.log": {
+      "complete_summary_found": true,
+      "total": 9,
+      "passed": 9,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-work-and-memory-green.log": {
+      "complete_summary_found": true,
+      "total": 9,
+      "passed": 9,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-candidate-work-red-console.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_product_pressure_energy_retry_mpi_2",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-candidate-work-red.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_product_pressure_energy_retry_mpi_2",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-driver-completion-green.log": {
+      "complete_summary_found": true,
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-driver-report-red.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_product_adaptive_limits_mpi_2",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-final-release-ctest-console.log": {
+      "complete_summary_found": true,
+      "total": 247,
+      "passed": 246,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-final-release-ctest.log": {
+      "complete_summary_found": true,
+      "total": 247,
+      "passed": 246,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-final-sanitizer-ctest-console.log": {
+      "complete_summary_found": true,
+      "total": 14,
+      "passed": 14,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-final-sanitizer-ctest.log": {
+      "complete_summary_found": true,
+      "total": 14,
+      "passed": 14,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-first-batch-ctest-console.log": {
+      "complete_summary_found": true,
+      "total": 241,
+      "passed": 235,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_app_init_case",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-first-batch-ctest.log": {
+      "complete_summary_found": true,
+      "total": 241,
+      "passed": 235,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_literature_partial_receipt",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_solver_initialization_projection_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_app_init_case",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-first-batch-followup-green-console.log": {
+      "complete_summary_found": true,
+      "total": 11,
+      "passed": 5,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_product_memory_profile_cartesian_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_4",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-first-batch-followup-green.log": {
+      "complete_summary_found": true,
+      "total": 11,
+      "passed": 5,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_product_memory_profile_cartesian_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_4",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-halo-accounting-green-console.log": {
+      "complete_summary_found": true,
+      "total": 9,
+      "passed": 9,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-halo-accounting-green.log": {
+      "complete_summary_found": true,
+      "total": 9,
+      "passed": 9,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-memory-pmpi-green-console.log": {
+      "complete_summary_found": true,
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-memory-pmpi-green.log": {
+      "complete_summary_found": true,
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-memory-profile-green-console.log": {
+      "complete_summary_found": true,
+      "total": 6,
+      "passed": 0,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_product_memory_profile_cartesian_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_4",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-memory-profile-green.log": {
+      "complete_summary_found": true,
+      "total": 6,
+      "passed": 0,
+      "failed": 6,
+      "failed_tests": [
+        [
+          "v04_product_memory_profile_cartesian_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_1",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_2",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_cartesian_mpi_4",
+          "Failed"
+        ],
+        [
+          "v04_product_memory_profile_immersed_mpi_4",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-mg-bounds-green.log": {
+      "complete_summary_found": true,
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-mg-green.log": {
+      "complete_summary_found": true,
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-mg-red.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_product_mg_capacity_mpi_2",
+          "Failed"
+        ]
+      ]
+    },
+    "hundun-review-product-alloc-green.log": {
+      "complete_summary_found": true,
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "failed_tests": []
+    },
+    "hundun-review-product-alloc-red.log": {
+      "complete_summary_found": true,
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_product_allocation_failure_mpi_2",
+          "Timeout"
+        ]
+      ]
+    },
+    "hundun-review-sanitizer-ctest-console.log": {
+      "complete_summary_found": true,
+      "total": 27,
+      "passed": 26,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_solver_mg_convergence",
+          "Timeout"
+        ]
+      ]
+    },
+    "hundun-review-sanitizer-ctest.log": {
+      "complete_summary_found": true,
+      "total": 27,
+      "passed": 26,
+      "failed": 1,
+      "failed_tests": [
+        [
+          "v04_solver_mg_convergence",
+          "Timeout"
+        ]
+      ]
+    }
+  },
+  "recorded_command_statuses": {
+    "source": "Observed process completions from this review; not inferred from log text",
+    "records": [
+      {
+        "name": "final_release_ctest",
+        "log": "hundun-review-final-release-ctest-console.log",
+        "exit_code": 8,
+        "passed": 246,
+        "total": 247,
+        "ctest_elapsed_seconds": 445.67
+      },
+      {
+        "name": "final_changed_path_asan_ubsan_ctest",
+        "log": "hundun-review-final-sanitizer-ctest-console.log",
+        "exit_code": 0,
+        "passed": 14,
+        "total": 14,
+        "ctest_elapsed_seconds": 112.03
+      }
+    ]
+  },
+  "final_runtime_records": {
+    "memory": [
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 16334848,
+        "historical_maxrss_bytes": 16908288
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 29271377,
+        "cpp_phase_peak_bytes": 29278417,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 446,
+        "sampled_rss_bytes": 48304128,
+        "historical_maxrss_bytes": 48304128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 29337314,
+        "cpp_phase_peak_bytes": 29340386,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 472,
+        "sampled_rss_bytes": 48304128,
+        "historical_maxrss_bytes": 48304128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 29815650,
+        "cpp_phase_peak_bytes": 29815650,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 482,
+        "sampled_rss_bytes": 49459200,
+        "historical_maxrss_bytes": 49459200
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 30311138,
+        "cpp_phase_peak_bytes": 30311138,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 51253248,
+        "historical_maxrss_bytes": 51253248
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 30311138,
+        "cpp_phase_peak_bytes": 30311138,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 51253248,
+        "historical_maxrss_bytes": 51253248
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 30311138,
+        "cpp_phase_peak_bytes": 30476223,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 52133888,
+        "historical_maxrss_bytes": 52133888
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 30311138,
+        "cpp_phase_peak_bytes": 31962266,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 53485568,
+        "historical_maxrss_bytes": 53485568
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 30311138,
+        "cpp_phase_peak_bytes": 32135862,
+        "aligned_live_bytes": 15568768,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 53755904,
+        "historical_maxrss_bytes": 53755904
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 39415808,
+        "historical_maxrss_bytes": 53755904
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 16580608,
+        "historical_maxrss_bytes": 17375232
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9601313,
+        "cpp_phase_peak_bytes": 9608353,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 356,
+        "sampled_rss_bytes": 28585984,
+        "historical_maxrss_bytes": 28585984
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9631794,
+        "cpp_phase_peak_bytes": 9631794,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 379,
+        "sampled_rss_bytes": 28585984,
+        "historical_maxrss_bytes": 28585984
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9631794,
+        "cpp_phase_peak_bytes": 9631794,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 379,
+        "sampled_rss_bytes": 28585984,
+        "historical_maxrss_bytes": 28585984
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9707106,
+        "cpp_phase_peak_bytes": 9707106,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 389,
+        "sampled_rss_bytes": 30330880,
+        "historical_maxrss_bytes": 30330880
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9707106,
+        "cpp_phase_peak_bytes": 9707106,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 389,
+        "sampled_rss_bytes": 30330880,
+        "historical_maxrss_bytes": 30330880
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9707106,
+        "cpp_phase_peak_bytes": 9728808,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 389,
+        "sampled_rss_bytes": 30330880,
+        "historical_maxrss_bytes": 30330880
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9707106,
+        "cpp_phase_peak_bytes": 9915418,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 389,
+        "sampled_rss_bytes": 31580160,
+        "historical_maxrss_bytes": 31580160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 9707106,
+        "cpp_phase_peak_bytes": 9940982,
+        "aligned_live_bytes": 2994048,
+        "cpp_live_objects": 389,
+        "sampled_rss_bytes": 31580160,
+        "historical_maxrss_bytes": 31580160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29007872,
+        "historical_maxrss_bytes": 31580160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17424384,
+        "historical_maxrss_bytes": 17432576
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17444864,
+        "historical_maxrss_bytes": 17444864
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8163141,
+        "cpp_phase_peak_bytes": 8170181,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 461,
+        "sampled_rss_bytes": 28360704,
+        "historical_maxrss_bytes": 28360704
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8163021,
+        "cpp_phase_peak_bytes": 8170061,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 454,
+        "sampled_rss_bytes": 28459008,
+        "historical_maxrss_bytes": 28459008
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8191574,
+        "cpp_phase_peak_bytes": 8191574,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 484,
+        "sampled_rss_bytes": 28360704,
+        "historical_maxrss_bytes": 28360704
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8191454,
+        "cpp_phase_peak_bytes": 8191454,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 477,
+        "sampled_rss_bytes": 28459008,
+        "historical_maxrss_bytes": 28459008
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8191574,
+        "cpp_phase_peak_bytes": 8191574,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 484,
+        "sampled_rss_bytes": 28360704,
+        "historical_maxrss_bytes": 28360704
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8191454,
+        "cpp_phase_peak_bytes": 8191454,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 477,
+        "sampled_rss_bytes": 28459008,
+        "historical_maxrss_bytes": 28459008
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8234118,
+        "cpp_phase_peak_bytes": 8234118,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 494,
+        "sampled_rss_bytes": 30339072,
+        "historical_maxrss_bytes": 30339072
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8233998,
+        "cpp_phase_peak_bytes": 8233998,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 487,
+        "sampled_rss_bytes": 30470144,
+        "historical_maxrss_bytes": 30470144
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8234118,
+        "cpp_phase_peak_bytes": 8234118,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 494,
+        "sampled_rss_bytes": 30339072,
+        "historical_maxrss_bytes": 30339072
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8233998,
+        "cpp_phase_peak_bytes": 8233998,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 487,
+        "sampled_rss_bytes": 30470144,
+        "historical_maxrss_bytes": 30470144
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8234118,
+        "cpp_phase_peak_bytes": 8245578,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 494,
+        "sampled_rss_bytes": 30339072,
+        "historical_maxrss_bytes": 30339072
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8233998,
+        "cpp_phase_peak_bytes": 8245458,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 487,
+        "sampled_rss_bytes": 30470144,
+        "historical_maxrss_bytes": 30470144
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8234118,
+        "cpp_phase_peak_bytes": 8337982,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 494,
+        "sampled_rss_bytes": 30339072,
+        "historical_maxrss_bytes": 30339072
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8233998,
+        "cpp_phase_peak_bytes": 8338886,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 487,
+        "sampled_rss_bytes": 30470144,
+        "historical_maxrss_bytes": 30470144
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8234118,
+        "cpp_phase_peak_bytes": 8353322,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 494,
+        "sampled_rss_bytes": 31268864,
+        "historical_maxrss_bytes": 31268864
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 8233998,
+        "cpp_phase_peak_bytes": 8353202,
+        "aligned_live_bytes": 1898112,
+        "cpp_live_objects": 487,
+        "sampled_rss_bytes": 31342592,
+        "historical_maxrss_bytes": 31342592
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29466624,
+        "historical_maxrss_bytes": 31268864
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29532160,
+        "historical_maxrss_bytes": 31342592
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17313792,
+        "historical_maxrss_bytes": 17313792
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17371136,
+        "historical_maxrss_bytes": 17371136
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20500845,
+        "cpp_phase_peak_bytes": 20507885,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 596,
+        "sampled_rss_bytes": 40759296,
+        "historical_maxrss_bytes": 40759296
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20500725,
+        "cpp_phase_peak_bytes": 20507765,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 589,
+        "sampled_rss_bytes": 40914944,
+        "historical_maxrss_bytes": 40914944
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20547326,
+        "cpp_phase_peak_bytes": 20548862,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 622,
+        "sampled_rss_bytes": 40759296,
+        "historical_maxrss_bytes": 40759296
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20547206,
+        "cpp_phase_peak_bytes": 20548742,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 615,
+        "sampled_rss_bytes": 40914944,
+        "historical_maxrss_bytes": 40914944
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20802814,
+        "cpp_phase_peak_bytes": 20802814,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 652,
+        "sampled_rss_bytes": 42139648,
+        "historical_maxrss_bytes": 42139648
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 20802694,
+        "cpp_phase_peak_bytes": 20802694,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 645,
+        "sampled_rss_bytes": 41738240,
+        "historical_maxrss_bytes": 41738240
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21067006,
+        "cpp_phase_peak_bytes": 21067006,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 686,
+        "sampled_rss_bytes": 43999232,
+        "historical_maxrss_bytes": 43999232
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21066886,
+        "cpp_phase_peak_bytes": 21066886,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 679,
+        "sampled_rss_bytes": 43257856,
+        "historical_maxrss_bytes": 43257856
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21067006,
+        "cpp_phase_peak_bytes": 21067006,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 686,
+        "sampled_rss_bytes": 43999232,
+        "historical_maxrss_bytes": 43999232
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21066886,
+        "cpp_phase_peak_bytes": 21066886,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 679,
+        "sampled_rss_bytes": 44044288,
+        "historical_maxrss_bytes": 44044288
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21067006,
+        "cpp_phase_peak_bytes": 21150169,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 686,
+        "sampled_rss_bytes": 43999232,
+        "historical_maxrss_bytes": 43999232
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21066886,
+        "cpp_phase_peak_bytes": 21150050,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 679,
+        "sampled_rss_bytes": 44044288,
+        "historical_maxrss_bytes": 44044288
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21067006,
+        "cpp_phase_peak_bytes": 21890742,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 686,
+        "sampled_rss_bytes": 44953600,
+        "historical_maxrss_bytes": 44953600
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21066886,
+        "cpp_phase_peak_bytes": 21894718,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 679,
+        "sampled_rss_bytes": 44929024,
+        "historical_maxrss_bytes": 44929024
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21067006,
+        "cpp_phase_peak_bytes": 21986338,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 686,
+        "sampled_rss_bytes": 44953600,
+        "historical_maxrss_bytes": 44953600
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 21066886,
+        "cpp_phase_peak_bytes": 21986218,
+        "aligned_live_bytes": 9657216,
+        "cpp_live_objects": 679,
+        "sampled_rss_bytes": 44929024,
+        "historical_maxrss_bytes": 44929024
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 36098048,
+        "historical_maxrss_bytes": 44953600
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 36012032,
+        "historical_maxrss_bytes": 44929024
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17584128,
+        "historical_maxrss_bytes": 17584128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17997824,
+        "historical_maxrss_bytes": 17997824
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17842176,
+        "historical_maxrss_bytes": 17842176
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17801216,
+        "historical_maxrss_bytes": 17801216
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14948645,
+        "cpp_phase_peak_bytes": 14955685,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 633,
+        "sampled_rss_bytes": 36065280,
+        "historical_maxrss_bytes": 36065280
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14952389,
+        "cpp_phase_peak_bytes": 14959429,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 640,
+        "sampled_rss_bytes": 35819520,
+        "historical_maxrss_bytes": 35819520
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14949429,
+        "cpp_phase_peak_bytes": 14956469,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 633,
+        "sampled_rss_bytes": 36409344,
+        "historical_maxrss_bytes": 36409344
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14951381,
+        "cpp_phase_peak_bytes": 14958421,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 633,
+        "sampled_rss_bytes": 36593664,
+        "historical_maxrss_bytes": 36593664
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14986182,
+        "cpp_phase_peak_bytes": 14986950,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 659,
+        "sampled_rss_bytes": 36409344,
+        "historical_maxrss_bytes": 36409344
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14985398,
+        "cpp_phase_peak_bytes": 14986166,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 659,
+        "sampled_rss_bytes": 36683776,
+        "historical_maxrss_bytes": 36683776
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14988134,
+        "cpp_phase_peak_bytes": 14988902,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 659,
+        "sampled_rss_bytes": 36593664,
+        "historical_maxrss_bytes": 36593664
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 14989142,
+        "cpp_phase_peak_bytes": 14989910,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 666,
+        "sampled_rss_bytes": 36487168,
+        "historical_maxrss_bytes": 36487168
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15120678,
+        "cpp_phase_peak_bytes": 15120678,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 689,
+        "sampled_rss_bytes": 37339136,
+        "historical_maxrss_bytes": 37339136
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15118726,
+        "cpp_phase_peak_bytes": 15118726,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 689,
+        "sampled_rss_bytes": 37154816,
+        "historical_maxrss_bytes": 37154816
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15117942,
+        "cpp_phase_peak_bytes": 15117942,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 689,
+        "sampled_rss_bytes": 37756928,
+        "historical_maxrss_bytes": 37756928
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15121686,
+        "cpp_phase_peak_bytes": 15121686,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 696,
+        "sampled_rss_bytes": 37425152,
+        "historical_maxrss_bytes": 37425152
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15254902,
+        "cpp_phase_peak_bytes": 15254902,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38940672,
+        "historical_maxrss_bytes": 38940672
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15257638,
+        "cpp_phase_peak_bytes": 15257638,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38510592,
+        "historical_maxrss_bytes": 38510592
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15255686,
+        "cpp_phase_peak_bytes": 15255686,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38395904,
+        "historical_maxrss_bytes": 38395904
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15258646,
+        "cpp_phase_peak_bytes": 15258646,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 730,
+        "sampled_rss_bytes": 38727680,
+        "historical_maxrss_bytes": 38727680
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15255686,
+        "cpp_phase_peak_bytes": 15255686,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38395904,
+        "historical_maxrss_bytes": 38395904
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15254902,
+        "cpp_phase_peak_bytes": 15254902,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38940672,
+        "historical_maxrss_bytes": 38940672
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15257638,
+        "cpp_phase_peak_bytes": 15257638,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38510592,
+        "historical_maxrss_bytes": 38510592
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15258646,
+        "cpp_phase_peak_bytes": 15258646,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 730,
+        "sampled_rss_bytes": 38727680,
+        "historical_maxrss_bytes": 38727680
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15257638,
+        "cpp_phase_peak_bytes": 15299842,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38510592,
+        "historical_maxrss_bytes": 38510592
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15255686,
+        "cpp_phase_peak_bytes": 15297889,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39313408,
+        "historical_maxrss_bytes": 39313408
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15254902,
+        "cpp_phase_peak_bytes": 15297105,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 38940672,
+        "historical_maxrss_bytes": 38940672
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15258646,
+        "cpp_phase_peak_bytes": 15300832,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 730,
+        "sampled_rss_bytes": 38727680,
+        "historical_maxrss_bytes": 38727680
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15254902,
+        "cpp_phase_peak_bytes": 15668014,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39944192,
+        "historical_maxrss_bytes": 39944192
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15257638,
+        "cpp_phase_peak_bytes": 15672798,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39600128,
+        "historical_maxrss_bytes": 39600128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15255686,
+        "cpp_phase_peak_bytes": 15668798,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39583744,
+        "historical_maxrss_bytes": 39583744
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15258646,
+        "cpp_phase_peak_bytes": 15669710,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 730,
+        "sampled_rss_bytes": 39661568,
+        "historical_maxrss_bytes": 39661568
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15255686,
+        "cpp_phase_peak_bytes": 15719306,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39583744,
+        "historical_maxrss_bytes": 39583744
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15254902,
+        "cpp_phase_peak_bytes": 15718522,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39944192,
+        "historical_maxrss_bytes": 39944192
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15257638,
+        "cpp_phase_peak_bytes": 15721258,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 723,
+        "sampled_rss_bytes": 39600128,
+        "historical_maxrss_bytes": 39600128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 15258646,
+        "cpp_phase_peak_bytes": 15722266,
+        "aligned_live_bytes": 6052992,
+        "cpp_live_objects": 730,
+        "sampled_rss_bytes": 39661568,
+        "historical_maxrss_bytes": 39661568
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 34013184,
+        "historical_maxrss_bytes": 39583744
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 34254848,
+        "historical_maxrss_bytes": 39944192
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 34021376,
+        "historical_maxrss_bytes": 39600128
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 33959936,
+        "historical_maxrss_bytes": 39661568
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17702912,
+        "historical_maxrss_bytes": 17702912
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17711104,
+        "historical_maxrss_bytes": 17711104
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17661952,
+        "historical_maxrss_bytes": 17661952
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "before_compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 17727488,
+        "historical_maxrss_bytes": 17727488
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7236629,
+        "cpp_phase_peak_bytes": 7243669,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 503,
+        "sampled_rss_bytes": 27607040,
+        "historical_maxrss_bytes": 27607040
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7236405,
+        "cpp_phase_peak_bytes": 7243445,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 27574272,
+        "historical_maxrss_bytes": 27574272
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7236405,
+        "cpp_phase_peak_bytes": 7243445,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 27611136,
+        "historical_maxrss_bytes": 27611136
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "compile",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7236405,
+        "cpp_phase_peak_bytes": 7243445,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 496,
+        "sampled_rss_bytes": 27521024,
+        "historical_maxrss_bytes": 27521024
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27611136,
+        "historical_maxrss_bytes": 27611136
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27521024,
+        "historical_maxrss_bytes": 27521024
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27574272,
+        "historical_maxrss_bytes": 27574272
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "create",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7264038,
+        "cpp_phase_peak_bytes": 7264038,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 526,
+        "sampled_rss_bytes": 27607040,
+        "historical_maxrss_bytes": 27607040
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27574272,
+        "historical_maxrss_bytes": 27574272
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27611136,
+        "historical_maxrss_bytes": 27611136
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7263814,
+        "cpp_phase_peak_bytes": 7263814,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 519,
+        "sampled_rss_bytes": 27521024,
+        "historical_maxrss_bytes": 27521024
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "initialize",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7264038,
+        "cpp_phase_peak_bytes": 7264038,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 526,
+        "sampled_rss_bytes": 27607040,
+        "historical_maxrss_bytes": 27607040
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29077504,
+        "historical_maxrss_bytes": 29077504
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30392320,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29290496,
+        "historical_maxrss_bytes": 29290496
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_cold",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287606,
+        "cpp_phase_peak_bytes": 7287606,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 536,
+        "sampled_rss_bytes": 29302784,
+        "historical_maxrss_bytes": 29302784
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29290496,
+        "historical_maxrss_bytes": 29290496
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29077504,
+        "historical_maxrss_bytes": 29077504
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7287382,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30392320,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "advance_warm",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287606,
+        "cpp_phase_peak_bytes": 7287606,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 536,
+        "sampled_rss_bytes": 29302784,
+        "historical_maxrss_bytes": 29302784
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7293722,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30392320,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7293722,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29290496,
+        "historical_maxrss_bytes": 29290496
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7293722,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30556160,
+        "historical_maxrss_bytes": 30556160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "visit",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287606,
+        "cpp_phase_peak_bytes": 7293946,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 536,
+        "sampled_rss_bytes": 29302784,
+        "historical_maxrss_bytes": 29302784
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7340302,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30556160,
+        "historical_maxrss_bytes": 30556160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7339790,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30392320,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7339790,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 29290496,
+        "historical_maxrss_bytes": 29290496
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_write",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287606,
+        "cpp_phase_peak_bytes": 7339502,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 536,
+        "sampled_rss_bytes": 30855168,
+        "historical_maxrss_bytes": 30855168
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7348586,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30597120,
+        "historical_maxrss_bytes": 30597120
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7348586,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30556160,
+        "historical_maxrss_bytes": 30556160
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287382,
+        "cpp_phase_peak_bytes": 7348586,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 529,
+        "sampled_rss_bytes": 30392320,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "restart_read",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 7287606,
+        "cpp_phase_peak_bytes": 7348810,
+        "aligned_live_bytes": 1212288,
+        "cpp_live_objects": 536,
+        "sampled_rss_bytes": 30855168,
+        "historical_maxrss_bytes": 30855168
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29634560,
+        "historical_maxrss_bytes": 30392320
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29765632,
+        "historical_maxrss_bytes": 30855168
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29450240,
+        "historical_maxrss_bytes": 30597120
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "phase": "released",
+        "status_code": 0,
+        "status_detail": 0,
+        "cpp_live_bytes": 0,
+        "cpp_phase_peak_bytes": 0,
+        "aligned_live_bytes": 0,
+        "cpp_live_objects": 0,
+        "sampled_rss_bytes": 29483008,
+        "historical_maxrss_bytes": 30556160
+      }
+    ],
+    "capacity": [
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "arena_bytes": 14499712,
+        "face_flux_bytes": 1069056,
+        "observed_aligned_bytes": 15568768,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "arena_bytes": 2837376,
+        "face_flux_bytes": 156672,
+        "observed_aligned_bytes": 2994048,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "arena_bytes": 1817472,
+        "face_flux_bytes": 80640,
+        "observed_aligned_bytes": 1898112,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "arena_bytes": 1817472,
+        "face_flux_bytes": 80640,
+        "observed_aligned_bytes": 1898112,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "arena_bytes": 9113472,
+        "face_flux_bytes": 543744,
+        "observed_aligned_bytes": 9657216,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "arena_bytes": 9113472,
+        "face_flux_bytes": 543744,
+        "observed_aligned_bytes": 9657216,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "arena_bytes": 5776512,
+        "face_flux_bytes": 276480,
+        "observed_aligned_bytes": 6052992,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "arena_bytes": 5776512,
+        "face_flux_bytes": 276480,
+        "observed_aligned_bytes": 6052992,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "arena_bytes": 5776512,
+        "face_flux_bytes": 276480,
+        "observed_aligned_bytes": 6052992,
+        "matched": true
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "arena_bytes": 5776512,
+        "face_flux_bytes": 276480,
+        "observed_aligned_bytes": 6052992,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "arena_bytes": 1170816,
+        "face_flux_bytes": 41472,
+        "observed_aligned_bytes": 1212288,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "arena_bytes": 1170816,
+        "face_flux_bytes": 41472,
+        "observed_aligned_bytes": 1212288,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "arena_bytes": 1170816,
+        "face_flux_bytes": 41472,
+        "observed_aligned_bytes": 1212288,
+        "matched": true
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "arena_bytes": 1170816,
+        "face_flux_bytes": 41472,
+        "observed_aligned_bytes": 1212288,
+        "matched": true
+      }
+    ],
+    "collectives": [
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 360,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 577,
+        "reported_solver_partial": 469,
+        "unattributed": 108,
+        "allreduce": 540,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 384,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 599,
+        "reported_solver_partial": 493,
+        "unattributed": 106,
+        "allreduce": 564,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 380,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 597,
+        "reported_solver_partial": 489,
+        "unattributed": 108,
+        "allreduce": 557,
+        "bcast": 16,
+        "allgather": 21,
+        "allgatherv": 2,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "immersed",
+        "rank": 1,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 2,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 3,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "immersed",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 422,
+        "halo_control": 92,
+        "donor_control": 17,
+        "pmpi_advance_total": 637,
+        "reported_solver_partial": 531,
+        "unattributed": 106,
+        "allreduce": 576,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 26,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 1,
+        "legacy_solver_partial": 283,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 476,
+        "reported_solver_partial": 375,
+        "unattributed": 101,
+        "allreduce": 439,
+        "bcast": 16,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 1
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 2,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 3,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 1,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      },
+      {
+        "geometry": "cartesian",
+        "rank": 0,
+        "step": 2,
+        "legacy_solver_partial": 307,
+        "halo_control": 92,
+        "donor_control": 0,
+        "pmpi_advance_total": 498,
+        "reported_solver_partial": 399,
+        "unattributed": 99,
+        "allreduce": 463,
+        "bcast": 15,
+        "allgather": 20,
+        "allgatherv": 0,
+        "comm_dup": 0
+      }
+    ]
+  },
+  "historical_receipt_read_only_audit": [
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-parnaudeau.json",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-parnaudeau.json",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "8a90682cf6d5d503538dabf47f8097a7e18f962eeeb5e53ce39858bcbb6361b9",
+      "actual_sha256": "8a90682cf6d5d503538dabf47f8097a7e18f962eeeb5e53ce39858bcbb6361b9",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-norberg.json",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-norberg.json",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "4c8db4c241c72b383d68828d391e30b9f721128e4d1b0f83758b63df3ce6696f",
+      "actual_sha256": "4c8db4c241c72b383d68828d391e30b9f721128e4d1b0f83758b63df3ce6696f",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/references/cylinder-re3900-tadrist.json",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-tadrist.json",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "6788b727e72558dd87fd19b41e63e0030cc570ad772dc0a5e4cc5b2468e1705b",
+      "actual_sha256": "6788b727e72558dd87fd19b41e63e0030cc570ad772dc0a5e4cc5b2468e1705b",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/references/backward-step-driver-seegmiller.json",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/backward-step-driver-seegmiller.json",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "b19ef7a300d8115736f01188e8c481eb5a1b68d98ad15af86d6f055c3e726a5c",
+      "actual_sha256": "b19ef7a300d8115736f01188e8c481eb5a1b68d98ad15af86d6f055c3e726a5c",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/source-primary.pdf",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/source-primary.pdf",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "b8a775e5a5078e19fc47d9c5f47e95b81b4a68d4449e4444459088ed9befcdd4",
+      "actual_sha256": "b8a775e5a5078e19fc47d9c5f47e95b81b4a68d4449e4444459088ed9befcdd4",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/verification/v0.4-parnaudeau-controlled-digitization-rule.md",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/verification/v0.4-parnaudeau-controlled-digitization-rule.md",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "335bac3cf8c1edf5587b4c916620987cbfaee13b7dc649855be8a258cc9cf4b5",
+      "actual_sha256": "335bac3cf8c1edf5587b4c916620987cbfaee13b7dc649855be8a258cc9cf4b5",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/calibration.json",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/calibration.json",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "a3cb287d34033808f3cd7f77594b2b9f77cf8a27289ad4a45e4a6eaec6c475ee",
+      "actual_sha256": "a3cb287d34033808f3cd7f77594b2b9f77cf8a27289ad4a45e4a6eaec6c475ee",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/raw-trace.json",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/raw-trace.json",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "7c017aeff21ca05a11dd3f102bd1d5a132353af872af2bc20e1800fe387ce048",
+      "actual_sha256": "7c017aeff21ca05a11dd3f102bd1d5a132353af872af2bc20e1800fe387ce048",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/tools/v04_parnaudeau_vector_extract.py",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/tools/v04_parnaudeau_vector_extract.py",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "c73fb4eb663c450f2b288edbe23d7c4a4233c94f13570ebb790834a986c3dc25",
+      "actual_sha256": "e58190295d70dcc8dc9b727b12e8d196dfa486efd3c95462c12dc70b4ac2fc33",
+      "hash_matches": false
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/tadrist1990.pdf",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/tadrist1990.pdf",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "e62f0c6bfc2b2bea7e89de6ffb075eee0740bcc1ee393254e44c2bb84ab4e1d3",
+      "actual_sha256": "e62f0c6bfc2b2bea7e89de6ffb075eee0740bcc1ee393254e44c2bb84ab4e1d3",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SOURCE-RECEIPT.md",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SOURCE-RECEIPT.md",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "c126d129d70b52a29ee7c05c16f1e20040ecc8e4b8d02ce3cfcbc6ea6150b406",
+      "actual_sha256": "c126d129d70b52a29ee7c05c16f1e20040ecc8e4b8d02ce3cfcbc6ea6150b406",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SHA256SUMS.txt",
+      "checked_path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SHA256SUMS.txt",
+      "relocated_candidate": false,
+      "exists": true,
+      "expected_sha256": "22b2ee0d917ff91feda102a61e999df93afc1e7b4896c94f89d8207663c6d8f8",
+      "actual_sha256": "22b2ee0d917ff91feda102a61e999df93afc1e7b4896c94f89d8207663c6d8f8",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/docs/research/2026-08-22-v04-tadrist1990-primary-pdf-inventory.md",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/research/2026-08-22-v04-tadrist1990-primary-pdf-inventory.md",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "2997f0d298ffa75724401f3a6f20d37ab0ceac6ac690b5e06a2e8c37a90ed028",
+      "actual_sha256": "2997f0d298ffa75724401f3a6f20d37ab0ceac6ac690b5e06a2e8c37a90ed028",
+      "hash_matches": true
+    },
+    {
+      "original_path": "/home/wyf/code_dev/hundun-flow/tools/v04_literature_extract.py",
+      "checked_path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/tools/v04_literature_extract.py",
+      "relocated_candidate": true,
+      "exists": true,
+      "expected_sha256": "7336f5dc1c697ea514b9b8a3011a14e3ad2a2465c9957bb10e7b96dfd714ead6",
+      "actual_sha256": "ede8d957d285ad9d88a9e65bb78b6d919be87acd87e880982648c538f0bebbc3",
+      "hash_matches": false
+    }
+  ],
+  "formal_performance_comparison": {
+    "performed": false,
+    "paths": [
+      "Hundun PISO",
+      "Hundun SIMPLE",
+      "COAST ordinary compressible"
+    ]
+  },
+  "limits": [
+    "C++ new tracker excludes MPI/libc malloc, stacks and allocator overhead",
+    "ru_maxrss is a historical process high-water mark, not synchronized node peak",
+    "PMPI subtotal gaps are explicit and not assigned to unrelated counters",
+    "No long Re3900 run, old-checkpoint migration, push, tag or release"
+  ]
+}

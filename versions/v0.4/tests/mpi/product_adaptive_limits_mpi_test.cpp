@@ -85,6 +85,10 @@ bool minimum_dt_rejection_preserves_state_and_reports_failure() {
                 report.attempts == 0U && report.failed_stage == 0U &&
                 report.accepted_step == 1U &&
                 report.accepted_time == committed_time;
+  passed &= report.completion.outcome.detail == status.detail &&
+            report.completion.stop_reason.detail == 454U &&
+            report.completion.first_failure.attempt == 0U &&
+            report.completion.last_failure.attempt == 0U;
   passed &=
       report.initial_time_proposal.evaluated &&
       std::abs(report.initial_time_proposal.proposed_dt - 8.0e-7) < 1.0e-20 &&
@@ -118,14 +122,31 @@ bool minimum_dt_rejection_preserves_state_and_reports_failure() {
       recovered.initial_time_proposal.proposed_dt == recovered.proposal.dt;
   return passed;
 }
+bool uninitialized_driver_resets_report() {
+  ProductDriver driver;
+  DriverStepReport report;
+  report.accepted = true;
+  report.accepted_step = 123U;
+  report.attempts = 5U;
+  report.failed_stage = 50U;
+  const Status status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, report);
+  const bool passed = !status && !report.accepted &&
+                      report.accepted_step == 0U && report.attempts == 0U &&
+                      report.failed_stage == 0U &&
+                      report.failure.code == status.code &&
+                      report.failure.detail == status.detail;
+  if (!passed)
+    std::cerr << "FAIL uninitialized driver retained previous report\n";
+  return passed;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   const bool passed =
-      uniform_flow(1.0, 1.0, false) && uniform_flow(0.5, 1.0, false) &&
-      uniform_flow(0.0, 1.0, false) && uniform_flow(1.0, 0.002, false) &&
-      uniform_flow(1.0, 1.0, true) &&
+      uninitialized_driver_resets_report() && uniform_flow(1.0, 1.0, false) &&
+      uniform_flow(0.5, 1.0, false) && uniform_flow(0.0, 1.0, false) &&
+      uniform_flow(1.0, 0.002, false) && uniform_flow(1.0, 1.0, true) &&
       minimum_dt_rejection_preserves_state_and_reports_failure();
   int result = passed ? 1 : 0;
   MPI_Allreduce(MPI_IN_PLACE, &result, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);

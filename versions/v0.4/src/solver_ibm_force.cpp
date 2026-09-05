@@ -313,15 +313,23 @@ Status FinalForceCache::bind(MPI_Comm communicator,
                              RevisionToken geometry_revision, StageId stage,
                              RevisionSlotId cache_slot,
                              FinalForceCache& out) noexcept {
-  if (communicator == MPI_COMM_NULL ||
-      quadrature.physical_fingerprint() == 0U ||
-      quadrature.local_layout_fingerprint() == 0U ||
-      geometry_revision == 0U || stage == 0U) {
+  if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kForceCache};
-  }
+  Status status = force_consensus(
+      communicator, quadrature.physical_fingerprint() == 0U ||
+                            quadrature.local_layout_fingerprint() == 0U ||
+                            geometry_revision == 0U || stage == 0U
+                        ? Status{StatusCode::invalid_plan, kForceCache}
+                        : Status{});
+  if (!status) return status;
   Impl* candidate = new (std::nothrow) Impl;
-  if (candidate == nullptr) {
-    return {StatusCode::allocation_failure, kForceCache};
+  status = force_consensus(
+      communicator, candidate == nullptr
+                        ? Status{StatusCode::allocation_failure, kForceCache}
+                        : Status{});
+  if (!status) {
+    delete candidate;
+    return status;
   }
   if (MPI_Comm_dup(communicator, &candidate->communicator) != MPI_SUCCESS ||
       MPI_Comm_set_errhandler(candidate->communicator, MPI_ERRORS_RETURN) !=

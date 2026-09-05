@@ -214,11 +214,14 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
                               const ThermodynamicsPlan& thermodynamics,
                               TransportPlan& out) noexcept {
   const std::size_t count = spec.species.size();
+  PlanFingerprint source_fingerprint = 0U;
+  const Status identity_status =
+      detail::thermophysical_spec_fingerprint(spec, source_fingerprint);
+  if (!identity_status) return identity_status;
   if (count == 0U || count > kMaximumSpecies ||
       thermodynamics.fingerprint_ == 0U ||
       thermodynamics.source_fingerprint_ == 0U ||
-      detail::thermophysical_spec_fingerprint(spec) !=
-          thermodynamics.source_fingerprint_ ||
+      source_fingerprint != thermodynamics.source_fingerprint_ ||
       thermodynamics.inverse_molecular_weight_.size() != count ||
       thermodynamics.temperature_switch_.size() != count ||
       thermodynamics.dependent_species_ >= count ||

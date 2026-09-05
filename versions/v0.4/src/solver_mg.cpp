@@ -4247,29 +4247,6 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
   }
   try {
     local = build_levels(*candidate);
-    if (local) {
-      local = initialize_replicated_coarse(
-          *candidate, counters, next_external_collectives,
-          next_external_bytes);
-    }
-    if (local) {
-      local = build_coarse_coefficients(
-          *candidate, candidate->hierarchy_storage.data());
-    }
-    if (local) {
-      local = validate_certified_hierarchy(
-          *candidate, candidate->hierarchy_storage.data());
-    }
-    if (local && candidate->replicated_coarse) {
-      local = build_replicated_operator(
-          *candidate, candidate->hierarchy_storage.data(),
-          candidate->replicated_operator_active);
-      if (local) {
-        std::copy(candidate->replicated_operator_active.begin(),
-                  candidate->replicated_operator_active.end(),
-                  candidate->replicated_operator_inactive.begin());
-      }
-    }
   } catch (const std::bad_alloc&) {
     local = {StatusCode::allocation_failure, 0U};
   } catch (...) {
@@ -4279,6 +4256,35 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
   if (!agreed) {
     destroy(candidate);
     return agreed;
+  }
+  // Level construction is local and allocating.  No rank may enter the
+  // replicated/coefficient collectives until every rank has completed it.
+  local = initialize_replicated_coarse(
+      *candidate, counters, next_external_collectives, next_external_bytes);
+  if (local) {
+    local = build_coarse_coefficients(*candidate,
+                                      candidate->hierarchy_storage.data());
+  }
+  if (local) {
+    local = validate_certified_hierarchy(*candidate,
+                                         candidate->hierarchy_storage.data());
+  }
+  agreed = consensus(*candidate, local);
+  if (!agreed) {
+    destroy(candidate);
+    return agreed;
+  }
+  if (candidate->replicated_coarse) {
+    local = build_replicated_operator(*candidate,
+                                      candidate->hierarchy_storage.data(),
+                                      candidate->replicated_operator_active);
+    if (!local) {
+      destroy(candidate);
+      return local;
+    }
+    std::copy(candidate->replicated_operator_active.begin(),
+              candidate->replicated_operator_active.end(),
+              candidate->replicated_operator_inactive.begin());
   }
   candidate->generation = 1U;
   candidate->symbolic = public_symbolic_fingerprint(spec, strategy);

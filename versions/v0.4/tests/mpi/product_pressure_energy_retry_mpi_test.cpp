@@ -171,8 +171,8 @@ struct DriverHarness {
   Status status{};
 };
 
-DriverHarness make_driver(ValidatedModel model,
-                          double checkpoint_dt = kFullDt) {
+DriverHarness make_driver(ValidatedModel model, double checkpoint_dt = kFullDt,
+                          bool warm_perturbation = false) {
   DriverHarness harness;
   harness.model = std::move(model);
   CompiledCasePlan plan;
@@ -186,6 +186,13 @@ DriverHarness make_driver(ValidatedModel model,
     harness.status = harness.driver.restart_expected(expected);
   if (harness.status) {
     RestartImage image = make_restart_image(expected, checkpoint_dt);
+    if (warm_perturbation) {
+      for (auto &field : image.fields) {
+        if (field.role != RestartFieldRole::enthalpy) continue;
+        for (double &value : field.values)
+          value = kBaseEnthalpy + 1.0e5 + 1.0e3 * (value - kBaseEnthalpy);
+      }
+    }
     harness.status = harness.driver.initialize_restart(image);
   }
   return harness;
@@ -644,12 +651,19 @@ ProbeResult run_full_probe(int rank) {
                             diagnostic.samples[0U].first_failure_reason ==
                                 detail::PressureEnergyCandidateFailureReason::
                                     production_candidate_evaluation;
-  const bool rejected = !probe.status && !report.accepted &&
-                        probe.status.code == StatusCode::rejected_step &&
-                        probe.status.detail == 10210U &&
-                        report.failed_stage == 54U && report.attempts == 1U &&
-                        report.piso.final_flux_revision == 0U &&
-                        !report.piso.continuity_witness.valid;
+  const bool rejected =
+      !probe.status && !report.accepted &&
+      probe.status.code == StatusCode::rejected_step &&
+      probe.status.detail == 10210U && report.failed_stage == 54U &&
+      report.attempts == 1U &&
+      report.completion.outcome.code == probe.status.code &&
+      report.completion.outcome.detail == probe.status.detail &&
+      report.completion.stop_reason.code == StatusCode::rejected_step &&
+      report.completion.stop_reason.detail == 454U &&
+      report.completion.first_failure.attempt == 1U &&
+      report.completion.last_failure.attempt == 1U &&
+      report.piso.final_flux_revision == 0U &&
+      !report.piso.continuity_witness.valid;
   // A fatal proposal retires its one-shot controller generation while every
   // committed physical value and revision rolls back exactly.  Normalize the
   // expected ticket transition before comparing the committed snapshot.
@@ -764,6 +778,23 @@ bool run_refinement_certificate(int rank) {
       report.piso.pressure_energy_refinement_solve_calls == expected_calls &&
       report.pressure_energy_globalization.trajectory_count ==
           2U + expected_calls;
+  const auto &work = report.pressure_energy_globalization.work;
+  const bool work_observed =
+      work.baseline_evaluations == 2U + expected_calls &&
+      work.ladder_evaluations + work.extrapolation_evaluations >=
+          2U + expected_calls &&
+      work.local_evaluation_nanoseconds != 0U;
+  if (rank == 0)
+    std::cout << "candidate-work baseline=" << work.baseline_evaluations
+              << " extrapolation=" << work.extrapolation_evaluations
+              << " ladder=" << work.ladder_evaluations
+              << " incomplete=" << work.incomplete_evaluations
+              << " rejected_extrapolations=" << work.rejected_extrapolations
+              << '\n';
+  if (!expect(work_observed, rank,
+              "public candidate work includes every baseline and candidate "
+              "evaluation"))
+    return false;
   const bool prefix =
       expected_prefix_available &&
       refinement_prefix_certificate(
@@ -922,7 +953,13 @@ bool run_retry_certificate(int rank) {
       wire_bits(retry_first.proposal.dt) == wire_bits(kHalfDt) &&
       retry_first.effective_bdf.order == 1U && !retry_first.failure &&
       retry_first.failure.code == StatusCode::rejected_step &&
-      retry_first.failure.detail == 10210U && retry_first.failed_stage == 54U;
+      retry_first.failure.detail == 10210U && retry_first.failed_stage == 54U &&
+      retry_first.completion.outcome && retry_first.completion.stop_reason &&
+      retry_first.completion.first_failure.attempt == 1U &&
+      retry_first.completion.last_failure.attempt == 1U &&
+      retry_first.completion.first_failure.failure.detail == 10210U &&
+      retry_first.completion.first_failure.stage == 54U &&
+      retry_first.completion.first_failure.dt == kFullDt;
   const bool first_control_semantics =
       control_first.accepted && control_first.attempts == 1U &&
       control_first.proposal.origin == StepOrigin::restart &&
@@ -973,6 +1010,103 @@ bool run_retry_certificate(int rank) {
                 "bitwise identical and terminal-positive");
 }
 
+bool run_retry_exhaustion_report(int rank) {
+  auto model = retry_model(kHalfDt, kFullDt, 1U, UINT64_C(0x18000c701));
+  // Both targets remain in the known rejected interval, above minimum_dt.
+  // This isolates retry-capacity exhaustion from the minimum-dt test above.
+  model.time.retry_factor = 0.99;
+  auto driver = make_driver(std::move(model));
+  ExactCommittedBits before, after;
+  const bool captured =
+      driver.status && capture_exact_committed(driver.driver, before);
+  DriverStepReport report;
+  if (driver.status)
+    driver.status = driver.driver.advance({1, 1, 1, 1, 1}, report);
+  const bool captured_after = capture_exact_committed(driver.driver, after);
+  const auto &completed = report.completion;
+  const bool valid =
+      !driver.status && !report.accepted && report.attempts == 2U &&
+      completed.outcome.code == driver.status.code &&
+      completed.outcome.detail == driver.status.detail &&
+      completed.stop_reason.code == StatusCode::rejected_step &&
+      completed.stop_reason.detail == 455U &&
+      completed.first_failure.attempt == 1U &&
+      completed.last_failure.attempt == 2U &&
+      completed.first_failure.dt > completed.last_failure.dt &&
+      completed.last_failure.dt > kHalfDt && captured && captured_after &&
+      before.field_values == after.field_values &&
+      before.flux_values == after.flux_values && before.time == after.time &&
+      before.step == after.step;
+  if (rank == 0)
+    std::cout << "retry-exhaustion outcome="
+              << static_cast<unsigned>(driver.status.code) << '/'
+              << driver.status.detail
+              << " stop=" << completed.stop_reason.detail
+              << " attempts=" << report.attempts << '\n';
+  return expect(collective(valid), rank,
+                "retry exhaustion reports 455 and two real attempts without "
+                "advancing state");
+}
+
+bool run_candidate_accounting_certificate(int rank) {
+  // A separate warm, nonuniform public restart fixture leaves the NASA7 lower
+  // temperature boundary inactive. No production candidate result is replaced.
+  auto model = retry_model(kFullDt, kFullDt, 1U, UINT64_C(0x18000c601));
+  model.solver.terminal.continuity = 1.0e-13;
+  auto driver = make_driver(std::move(model), kFullDt, true);
+  DriverStepReport report;
+  if (driver.status)
+    driver.status = driver.driver.advance({1, 1, 1, 1, 1}, report);
+  const auto &globalization = report.pressure_energy_globalization;
+  const auto &work = globalization.work;
+  std::uint32_t baselines = 0, ladder = 0, extrapolations = 0, incomplete = 0;
+  bool valid = work.baseline_evaluations > 0;
+  for (std::size_t i = 0; i < globalization.trajectory_count; ++i) {
+    const auto &iteration = globalization.trajectory[i];
+    baselines += iteration.work.baseline_evaluations;
+    ladder += iteration.work.ladder_evaluations;
+    extrapolations += iteration.work.extrapolation_evaluations;
+    incomplete += iteration.work.incomplete_evaluations;
+    const auto &extrapolation = iteration.extrapolation;
+    valid &= iteration.work.extrapolation_evaluations ==
+             static_cast<unsigned>(extrapolation.attempted);
+    if (extrapolation.attempted) {
+      valid &= extrapolation.alpha > 1.0 &&
+               extrapolation.sample.alpha == extrapolation.alpha &&
+               extrapolation.complete ==
+                   static_cast<bool>(extrapolation.evaluation_status);
+      if (extrapolation.selected)
+        valid &= iteration.selected.alpha == extrapolation.alpha;
+      else
+        valid &= iteration.selected.alpha <= 1.0;
+    }
+  }
+  // If a loop failed before publication, the last-loop counters still account
+  // for its full attempted work without fabricating a successful trajectory.
+  valid &= baselines <= work.baseline_evaluations &&
+           ladder <= work.ladder_evaluations &&
+           extrapolations <= work.extrapolation_evaluations &&
+           incomplete <= work.incomplete_evaluations;
+  if (driver.status)
+    valid &= baselines == work.baseline_evaluations &&
+             ladder == work.ladder_evaluations &&
+             extrapolations == work.extrapolation_evaluations &&
+             incomplete == work.incomplete_evaluations;
+  if (rank == 0)
+    std::cout << "warm-candidate-work status="
+              << static_cast<unsigned>(driver.status.code) << '/'
+              << driver.status.detail
+              << " baseline=" << work.baseline_evaluations
+              << " extrapolation=" << work.extrapolation_evaluations
+              << " ladder=" << work.ladder_evaluations
+              << " incomplete=" << work.incomplete_evaluations
+              << " rejected_extrapolations=" << work.rejected_extrapolations
+              << '\n';
+  return expect(collective(valid), rank,
+                "candidate accounting preserves extrapolation separately from "
+                "ladder slots");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -981,6 +1115,8 @@ int main(int argc, char **argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   bool passed = run_refinement_certificate(rank);
   passed &= run_retry_certificate(rank);
+  passed &= run_retry_exhaustion_report(rank);
+  passed &= run_candidate_accounting_certificate(rank);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

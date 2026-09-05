@@ -1137,7 +1137,7 @@ RuntimePressureEnergyRefinementTermination refinement_termination(
 Status collect_evidence_resources(MPI_Comm communicator,
                                   const DriverResourceReport& local,
                                   DriverResourceReport& global) {
-  std::array<std::uint64_t, 16U> maxima{{
+  std::array<std::uint64_t, 18U> maxima{{
       local.structured_messages,
       local.structured_bytes,
       local.ibm_messages,
@@ -1154,6 +1154,8 @@ Status collect_evidence_resources(MPI_Comm communicator,
       local.mg_blocking_collectives,
       local.mg_collective_logical_bytes,
       local.predictor_blocking_collectives,
+      local.structured_control_collectives,
+      local.ibm_control_collectives,
   }};
   if (MPI_Allreduce(MPI_IN_PLACE, maxima.data(),
                     static_cast<int>(maxima.size()), MPI_UINT64_T, MPI_MAX,
@@ -1182,6 +1184,8 @@ Status collect_evidence_resources(MPI_Comm communicator,
   global.mg_blocking_collectives = maxima[13U];
   global.mg_collective_logical_bytes = maxima[14U];
   global.predictor_blocking_collectives = maxima[15U];
+  global.structured_control_collectives = maxima[16U];
+  global.ibm_control_collectives = maxima[17U];
   return {};
 }
 
@@ -1311,6 +1315,13 @@ Status append_evidence(
     return {StatusCode::invalid_plan, kRunnerInput};
   evidence.blocking_collectives +=
       global_resources.predictor_blocking_collectives;
+  // Same tracked subtotal as ApplicationService, not the complete PMPI census.
+  for (std::uint64_t calls : {global_resources.structured_control_collectives,
+                              global_resources.ibm_control_collectives}) {
+    if (calls > UINT64_MAX - evidence.blocking_collectives)
+      return {StatusCode::invalid_plan, kRunnerInput};
+    evidence.blocking_collectives += calls;
+  }
   evidence.reduction_nanoseconds = global_resources.reduction_nanoseconds;
   evidence.linear_iterations = global_resources.linear_iterations;
   evidence.exact_numeric_refills = global_resources.exact_numeric_refills;
@@ -1868,12 +1879,18 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         }
         std::cerr << "pressure_energy_attempt corrector="
                   << static_cast<unsigned>(attempt.corrector)
-                  << " samples="
-                  << static_cast<unsigned>(attempt.sample_count)
-                  << " max_dp="
-                  << attempt.maximum_absolute_pressure_correction
-                  << " max_dh="
-                  << attempt.maximum_absolute_enthalpy_correction
+                  << " samples=" << static_cast<unsigned>(attempt.sample_count)
+                  << " baseline_evaluations="
+                  << attempt.work.baseline_evaluations
+                  << " extrapolation_evaluations="
+                  << attempt.work.extrapolation_evaluations
+                  << " ladder_evaluations=" << attempt.work.ladder_evaluations
+                  << " incomplete_evaluations="
+                  << attempt.work.incomplete_evaluations
+                  << " evaluation_ns_rank0="
+                  << attempt.work.local_evaluation_nanoseconds
+                  << " max_dp=" << attempt.maximum_absolute_pressure_correction
+                  << " max_dh=" << attempt.maximum_absolute_enthalpy_correction
                   << " baseline_continuity="
                   << attempt.baseline.global_normalized_continuity
                   << " baseline_energy="

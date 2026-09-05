@@ -648,7 +648,9 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     status = require(registry, "krylov_scalars", 1U, 0U,
                      fields.krylov_scalars);
   if (status)
-    status = require(registry, "mg_arena", 1U, 1U, fields.mg_arena);
+    // The linear bundle already contains every level's padded ghost cells.
+    // Level views (and their halo contracts) still have their own ghost width.
+    status = require(registry, "mg_arena", 1U, 0U, fields.mg_arena);
   if (!status) return status;
   try {
     fields.scalars.reserve(model.transported_scalars.size());
@@ -710,7 +712,7 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                      RemoteDonorExchangeStats momentum_donors,
                      RemoteDonorExchangeStats rate_donors,
                      RemoteDonorExchangeStats force_donors,
-                     FrozenExecutionGraph& graph) noexcept {
+                     FrozenExecutionGraph& graph) {
   std::size_t default_workspace = 0U;
   std::size_t momentum_workspace = 0U;
   std::size_t predictor_halo_bytes = 0U;
@@ -1433,6 +1435,43 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   return status ? compiler.freeze(graph) : status;
 }
 
+// Cold local stages must agree before the next collective or destruction of
+// MPI-owning candidates. A communication failure itself is not recoverable
+// merely because a local allocation error can be propagated this way.
+Status product_collective_status(MPI_Comm communicator, Status local) noexcept {
+  int rank = 0, size = 0;
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0)
+    return {StatusCode::mpi_failure, kProductCollective};
+  const int candidate = local ? size : rank;
+  int failing = size;
+  if (MPI_Allreduce(&candidate, &failing, 1, MPI_INT, MPI_MIN, communicator) !=
+      MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kProductCollective};
+  if (failing == size) return {};
+  std::uint64_t wire = 0U;
+  if (rank == failing)
+    wire = (static_cast<std::uint64_t>(local.code) << 32U) | local.detail;
+  if (MPI_Bcast(&wire, 1, MPI_UINT64_T, failing, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kProductCollective};
+  return {static_cast<StatusCode>(wire >> 32U),
+          static_cast<std::uint32_t>(wire)};
+}
+
+// The callback may only perform local work, never a collective-capable call.
+template <class LocalWork>
+Status product_local_stage(MPI_Comm communicator, LocalWork&& work) noexcept {
+  Status local;
+  try {
+    local = work();
+  } catch (const std::bad_alloc&) {
+    local = {StatusCode::allocation_failure, kProductAllocation};
+  } catch (...) {
+    local = {StatusCode::invalid_plan, kProductInput};
+  }
+  return product_collective_status(communicator, local);
+}
+
 Status collective_semantic(MPI_Comm communicator,
   PlanFingerprint fingerprint) noexcept {
   PlanFingerprint minimum = 0U;
@@ -1463,14 +1502,13 @@ Status reserve_stage_halo(MPI_Comm communicator, const MeshPatch& patch,
                           const FrozenExecutionGraph& graph, StageId stage_id,
                           HaloEngine& out) noexcept {
   const FrozenStage* stage = graph.stage(stage_id);
-  if (stage == nullptr) return {StatusCode::invalid_plan, kProductCommunication};
   const Span<const FieldAccessSpec> ghosts = graph.ghosts(stage_id);
   const Span<const std::uint8_t> widths = graph.ghost_widths(stage_id);
-  if (ghosts.size == 0U || ghosts.size != widths.size) {
-    return {StatusCode::invalid_plan, kProductCommunication};
-  }
-  try {
-    std::vector<HaloFieldSpec> fields;
+  std::vector<HaloFieldSpec> fields;
+  Status status = product_local_stage(communicator, [&]() -> Status {
+    if (stage == nullptr || ghosts.size == 0U || ghosts.size != widths.size) {
+      return {StatusCode::invalid_plan, kProductCommunication};
+    }
     fields.reserve(ghosts.size);
     for (std::size_t index = 0U; index < ghosts.size; ++index) {
       const FieldDescriptor* descriptor =
@@ -1482,23 +1520,20 @@ Status reserve_stage_halo(MPI_Comm communicator, const MeshPatch& patch,
       fields.push_back({descriptor->id, widths.data[index],
                         descriptor->components});
     }
-    Status status = out.reserve(communicator, patch,
-                                {fields.data(), fields.size()}, topology);
-    if (!status) return status;
-    const HaloPlanStats stats = out.plan_stats();
-    if (stats.maximum_messages_per_exchange >
-            stage->resources.merged_halo_messages ||
-        stats.maximum_bytes_per_exchange >
-            stage->resources.merged_halo_bytes) {
-      return {StatusCode::invalid_plan,
-              static_cast<std::uint32_t>(kProductCommunication + stage_id)};
-    }
     return {};
-  } catch (const std::bad_alloc&) {
-    return {StatusCode::allocation_failure, kProductCommunication};
-  } catch (...) {
-    return {StatusCode::invalid_plan, kProductCommunication};
+  });
+  if (!status) return status;
+  status = out.reserve(communicator, patch, {fields.data(), fields.size()},
+                       topology);
+  if (!status) return status;
+  const HaloPlanStats stats = out.plan_stats();
+  if (stats.maximum_messages_per_exchange >
+          stage->resources.merged_halo_messages ||
+      stats.maximum_bytes_per_exchange > stage->resources.merged_halo_bytes) {
+    status = {StatusCode::invalid_plan,
+              static_cast<std::uint32_t>(kProductCommunication + stage_id)};
   }
+  return product_collective_status(communicator, status);
 }
 
 Status make_pressure_face_views(std::vector<double>& storage, Int3 cells,
@@ -2788,6 +2823,8 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   };
   const auto halo = [&](const HaloEngine& engine) {
     const HaloRuntimeCounters counters = engine.runtime_counters();
+    add(result.structured_control_collectives,
+        counters.control_consensus_calls);
     add(result.structured_exchanges, counters.begin_calls);
     add(result.structured_messages, counters.messages_started);
     add(result.structured_bytes, counters.bytes_packed);
@@ -2812,6 +2849,7 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   const auto donor = [&](const std::optional<RemoteDonorExchangePlan>& plan) {
     if (!plan.has_value()) return;
     const RemoteDonorExchangeCounters counters = plan->runtime_counters();
+    add(result.ibm_control_collectives, counters.control_consensus_calls);
     add(result.ibm_exchanges, counters.exchange_calls);
     add(result.ibm_messages, counters.peer_messages);
     add(result.ibm_bytes, counters.bytes);
@@ -2850,6 +2888,11 @@ DriverResourceReport resource_difference(DriverResourceReport after,
   };
   result.structured_exchanges = difference(
       after.structured_exchanges, before.structured_exchanges);
+  result.structured_control_collectives =
+      difference(after.structured_control_collectives,
+                 before.structured_control_collectives);
+  result.ibm_control_collectives =
+      difference(after.ibm_control_collectives, before.ibm_control_collectives);
   result.structured_messages = difference(
       after.structured_messages, before.structured_messages);
   result.structured_bytes =
@@ -2950,21 +2993,26 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                                 const ValidatedModel& model,
                                 const std::filesystem::path& case_root,
                                 CompiledCasePlan& out) noexcept try {
-  if (communicator == MPI_COMM_NULL || model.fingerprint == 0U ||
-      out.implementation_ != nullptr) {
+  if (communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kProductInput};
   }
+  Status status = product_collective_status(
+      communicator, model.fingerprint == 0U || out.implementation_ != nullptr
+                        ? Status{StatusCode::invalid_plan, kProductInput}
+                        : Status{});
+  if (!status) return status;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   g_candidate_storage_published.store(false, std::memory_order_release);
   g_candidate_storage_diagnostic = {};
 #endif
-  std::unique_ptr<CompiledCasePlan::Impl> candidate{
-      new (std::nothrow) CompiledCasePlan::Impl};
-  if (!candidate) {
-    return {StatusCode::allocation_failure, kProductAllocation};
-  }
-  candidate->boundary_specs = model.boundaries;
-  Status status = CartesianGeometryCompiler::compile(
+  std::unique_ptr<CompiledCasePlan::Impl> candidate;
+  status = product_local_stage(communicator, [&] {
+    candidate.reset(new CompiledCasePlan::Impl);
+    candidate->boundary_specs = model.boundaries;
+    return Status{};
+  });
+  if (!status) return status;
+  status = CartesianGeometryCompiler::compile(
       communicator, model.mesh, {}, candidate->geometry, candidate->patch);
   CpuExecutionRequest cpu_request;
   cpu_request.threads_per_rank = 1U;
@@ -2986,12 +3034,15 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         candidate->geometry, candidate->patch, CartesianAxis::y, scan_budget,
         *candidate->scan);
     if (status) {
-      candidate->surface.emplace();
-      status = ImmersedSurfaceCompiler::compile(*candidate->scan,
-                                                *candidate->surface);
-      if (status)
-        candidate->stl_fingerprint =
-            candidate->surface->source_triangle_fingerprint();
+      status = product_local_stage(communicator, [&] {
+        candidate->surface.emplace();
+        status = ImmersedSurfaceCompiler::compile(*candidate->scan,
+                                                  *candidate->surface);
+        if (status)
+          candidate->stl_fingerprint =
+              candidate->surface->source_triangle_fingerprint();
+        return status;
+      });
     }
     if (status) {
       candidate->topology.emplace();
@@ -3002,14 +3053,16 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           model.immersed_boundary->fluid_side, limits, *candidate->topology);
     }
     if (status) {
-      status = make_pressure_mg_activity(
-          *candidate->topology, candidate->patch.cells,
-          candidate->pressure_mg_cell_activity,
-          candidate->pressure_mg_x_activity,
-          candidate->pressure_mg_y_activity,
-          candidate->pressure_mg_z_activity,
-          candidate->pressure_mg_activity_fingerprint,
-          candidate->pressure_mg_activity_collective);
+      status = product_local_stage(communicator, [&] {
+        return make_pressure_mg_activity(
+            *candidate->topology, candidate->patch.cells,
+            candidate->pressure_mg_cell_activity,
+            candidate->pressure_mg_x_activity,
+            candidate->pressure_mg_y_activity,
+            candidate->pressure_mg_z_activity,
+            candidate->pressure_mg_activity_fingerprint,
+            candidate->pressure_mg_activity_collective);
+      });
     }
     if (status) {
       ImmersedPlanLimits limits;
@@ -3046,6 +3099,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       }
       candidate->ibm_boundary.emplace();
       candidate->quadrature.emplace();
+      status = product_collective_status(communicator, status);
       if (status)
         status = BoundaryStencilCompiler::compile(
             communicator, candidate->geometry, candidate->patch,
@@ -3074,14 +3128,18 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   if (!status) return status;
   candidate->phases[0U] = ProductFreezePhase::geometry_and_decomposition;
   std::size_t local_cells = 0U;
-  if (!detail::product_cell_count(candidate->patch.cells, local_cells)) {
-    return {StatusCode::invalid_plan, kProductInput};
-  }
   std::size_t maximum_cells_per_rank = 0U;
-  if (!detail::product_cell_count(candidate->geometry.global_cells(),
-                                  maximum_cells_per_rank)) {
-    return {StatusCode::invalid_plan, kProductInput};
-  }
+  status = product_local_stage(communicator, [&]() -> Status {
+    if (!detail::product_cell_count(candidate->patch.cells, local_cells)) {
+      return {StatusCode::invalid_plan, kProductInput};
+    }
+    if (!detail::product_cell_count(candidate->geometry.global_cells(),
+                                    maximum_cells_per_rank)) {
+      return {StatusCode::invalid_plan, kProductInput};
+    }
+    return {};
+  });
+  if (!status) return status;
   PisoPlanSpec piso_spec;
   piso_spec.coupling = model.solver.coupling;
   piso_spec.pressure_correctors = 2U;
@@ -3129,6 +3187,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   NativeCartesianMgSpec mg_spec;
   mg_spec.policy = detail::production_pressure_mg_policy();
+  status = product_collective_status(communicator, status);
   if (status)
     status = make_mg_workspace_requirements(
         communicator, candidate->geometry, candidate->patch, mg_spec.policy,
@@ -3136,10 +3195,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   FieldRegistry registry;
   const std::uint8_t ghosts = immersed ? 4U : 2U;
   if (status)
-    status = register_fields(registry, candidate->fields, model, ghosts,
+    status = product_local_stage(communicator, [&] {
+      return register_fields(registry, candidate->fields, model, ghosts,
                              candidate->krylov_requirements,
                              candidate->auxiliary_krylov_requirements,
                              candidate->mg_requirements);
+    });
   if (status && immersed) {
     const std::array<RemoteDonorFieldSpec, 1U> pressure_fields{{
         {candidate->fields.pressure_correction, 1U}}};
@@ -3208,12 +3269,17 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
     std::vector<RemoteDonorFieldSpec> rate_fields;
     if (status) {
-      rate_fields.reserve(2U + candidate->fields.scalars.size());
-      rate_fields.push_back({candidate->fields.pressure, 1U});
-      rate_fields.push_back({candidate->fields.temperature, 1U});
-      for (FieldId scalar : candidate->fields.scalars)
-        rate_fields.push_back({scalar, 1U});
-      candidate->ibm_rate_donors.emplace();
+      status = product_local_stage(communicator, [&] {
+        rate_fields.reserve(2U + candidate->fields.scalars.size());
+        rate_fields.push_back({candidate->fields.pressure, 1U});
+        rate_fields.push_back({candidate->fields.temperature, 1U});
+        for (FieldId scalar : candidate->fields.scalars)
+          rate_fields.push_back({scalar, 1U});
+        candidate->ibm_rate_donors.emplace();
+        return Status{};
+      });
+    }
+    if (status) {
       status = RemoteDonorExchangePlan::analyze(
           communicator, candidate->geometry.global_cells(), candidate->patch,
           candidate->ibm_boundary->reconstruction(),
@@ -3236,167 +3302,185 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   if (!status) return status;
   candidate->phases[1U] = ProductFreezePhase::capability_registration;
-  candidate->schema_fingerprint = registry.fingerprint();
-  status = compile_graph(
-      candidate->fields, ghosts, candidate->patch.cells, local_cells,
-      candidate->ibm_pressure_donors.has_value()
-          ? candidate->ibm_pressure_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_candidate_pressure_donors.has_value()
-          ? candidate->ibm_candidate_pressure_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_candidate_velocity_donors.has_value()
-          ? candidate->ibm_candidate_velocity_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_candidate_rate_donors.has_value()
-          ? candidate->ibm_candidate_rate_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_gradient_donors.has_value()
-          ? candidate->ibm_gradient_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_momentum_donors.has_value()
-          ? candidate->ibm_momentum_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_rate_donors.has_value()
-          ? candidate->ibm_rate_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->ibm_force_donors.has_value()
-          ? candidate->ibm_force_donors->stats()
-          : RemoteDonorExchangeStats{},
-      candidate->graph);
-  std::vector<SnapshotFieldSpec> snapshots{
-      {candidate->fields.velocity, 3U}, {candidate->fields.pressure, 1U},
-      {candidate->fields.enthalpy, 1U}};
-  for (FieldId scalar : candidate->fields.scalars) snapshots.push_back({scalar, 1U});
-  std::size_t snapshot_components = 0U;
-  std::size_t snapshot_bytes = 0U;
-  std::size_t coordinate_values = 0U;
-  std::size_t coordinate_bytes = 0U;
-  std::size_t staging_bytes = 0U;
-  if (!detail::product_checked_add(5U, candidate->fields.scalars.size(),
-                                   snapshot_components) ||
-      !detail::product_field_bytes(local_cells, snapshot_components,
-                                   snapshot_bytes) ||
-      !detail::product_checked_add(
-          static_cast<std::size_t>(candidate->patch.cells.x),
-          static_cast<std::size_t>(candidate->patch.cells.y),
-          coordinate_values) ||
-      !detail::product_checked_add(
-          coordinate_values,
-          static_cast<std::size_t>(candidate->patch.cells.z),
-          coordinate_values) ||
-      !detail::product_checked_add(coordinate_values, 3U,
-                                   coordinate_values) ||
-      !detail::product_checked_multiply(coordinate_values, sizeof(double),
-                                        coordinate_bytes) ||
-      !detail::product_checked_add(snapshot_bytes, coordinate_bytes,
-                                   staging_bytes) ||
-      !detail::product_checked_add(staging_bytes, 65536U, staging_bytes)) {
-    return {StatusCode::invalid_plan, kProductAnalysis};
-  }
-  std::array<RuntimeServiceCapacity, 5U> services{};
-  for (std::size_t index = 0U; index < services.size(); ++index) {
-    services[index] = {static_cast<RuntimeServiceKind>(index),
-                       static_cast<StageId>(200U + index), snapshot_bytes,
-                       staging_bytes, 8U};
-  }
-  if (status)
-    status = IoServicePlan::compile({snapshots.data(), snapshots.size()},
-                                    {services.data(), services.size()},
-                                    local_cells, candidate->io);
-  std::uint32_t registered_capabilities =
-      detail::product_fields | detail::product_structured_ghosts |
-      detail::product_cache_dependencies | detail::product_exact_numeric |
-      detail::product_coarse_numeric | detail::product_preconditioner |
-      detail::product_workspace | detail::product_service_snapshot |
-      detail::product_collective_epochs;
-  if (immersed) registered_capabilities |= detail::product_ibm_donors;
-  if (status)
-    status = detail::validate_product_capabilities(registered_capabilities,
-                                                   immersed);
-  if (!status) return status;
-  candidate->phases[2U] = ProductFreezePhase::logical_analysis;
-  FieldRegistry schema_registry = registry;
-  status = schema_registry.freeze(candidate->schema);
-  std::vector<ArenaFieldRequest> requests;
-  try {
-    requests.reserve(candidate->schema.size());
-    for (const FieldDescriptor& descriptor : candidate->schema) {
-      Int3 interior = candidate->patch.cells;
-      if (descriptor.id == candidate->fields.krylov_scalars) {
-        const std::size_t scalar_doubles = std::max(
-            candidate->krylov_requirements.scalar_doubles,
-            candidate->auxiliary_krylov_requirements.scalar_doubles);
-        if (scalar_doubles >
-            static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-          status = {StatusCode::invalid_plan, kProductCapacity};
-          break;
-        }
-        interior = {static_cast<std::int32_t>(scalar_doubles), 1, 1};
-      } else if (descriptor.id == candidate->fields.mg_arena) {
-        interior = candidate->mg_requirements.arena_shape;
-      }
-      requests.push_back({descriptor.id, interior, {0U},
-                          state_field(descriptor.id, candidate->fields)
-                              ? FieldLifetime::state_layer
-                              : FieldLifetime::persistent_workspace});
+  status = product_local_stage(communicator, [&]() -> Status {
+    candidate->schema_fingerprint = registry.fingerprint();
+    status = compile_graph(
+        candidate->fields, ghosts, candidate->patch.cells, local_cells,
+        candidate->ibm_pressure_donors.has_value()
+            ? candidate->ibm_pressure_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_candidate_pressure_donors.has_value()
+            ? candidate->ibm_candidate_pressure_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_candidate_velocity_donors.has_value()
+            ? candidate->ibm_candidate_velocity_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_candidate_rate_donors.has_value()
+            ? candidate->ibm_candidate_rate_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_gradient_donors.has_value()
+            ? candidate->ibm_gradient_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_momentum_donors.has_value()
+            ? candidate->ibm_momentum_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_rate_donors.has_value()
+            ? candidate->ibm_rate_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->ibm_force_donors.has_value()
+            ? candidate->ibm_force_donors->stats()
+            : RemoteDonorExchangeStats{},
+        candidate->graph);
+    std::vector<SnapshotFieldSpec> snapshots{{candidate->fields.velocity, 3U},
+                                             {candidate->fields.pressure, 1U},
+                                             {candidate->fields.enthalpy, 1U}};
+    for (FieldId scalar : candidate->fields.scalars)
+      snapshots.push_back({scalar, 1U});
+    std::size_t snapshot_components = 0U;
+    std::size_t snapshot_bytes = 0U;
+    std::size_t coordinate_values = 0U;
+    std::size_t coordinate_bytes = 0U;
+    std::size_t staging_bytes = 0U;
+    if (!detail::product_checked_add(5U, candidate->fields.scalars.size(),
+                                     snapshot_components) ||
+        !detail::product_field_bytes(local_cells, snapshot_components,
+                                     snapshot_bytes) ||
+        !detail::product_checked_add(
+            static_cast<std::size_t>(candidate->patch.cells.x),
+            static_cast<std::size_t>(candidate->patch.cells.y),
+            coordinate_values) ||
+        !detail::product_checked_add(
+            coordinate_values,
+            static_cast<std::size_t>(candidate->patch.cells.z),
+            coordinate_values) ||
+        !detail::product_checked_add(coordinate_values, 3U,
+                                     coordinate_values) ||
+        !detail::product_checked_multiply(coordinate_values, sizeof(double),
+                                          coordinate_bytes) ||
+        !detail::product_checked_add(snapshot_bytes, coordinate_bytes,
+                                     staging_bytes) ||
+        !detail::product_checked_add(staging_bytes, 65536U, staging_bytes)) {
+      return {StatusCode::invalid_plan, kProductAnalysis};
     }
-  } catch (const std::bad_alloc&) {
-    status = {StatusCode::allocation_failure, kProductAllocation};
-  }
-  if (status)
-    status = ArenaLayout::compile(candidate->schema,
-                                  {requests.data(), requests.size()},
-                                  candidate->layout);
-  if (status) status = StateLayers::allocate(candidate->layout, candidate->layers);
-  if (!status) {
+    std::array<RuntimeServiceCapacity, 5U> services{};
+    for (std::size_t index = 0U; index < services.size(); ++index) {
+      services[index] = {static_cast<RuntimeServiceKind>(index),
+                         static_cast<StageId>(200U + index), snapshot_bytes,
+                         staging_bytes, 8U};
+    }
+    if (status)
+      status = IoServicePlan::compile({snapshots.data(), snapshots.size()},
+                                      {services.data(), services.size()},
+                                      local_cells, candidate->io);
+    std::uint32_t registered_capabilities =
+        detail::product_fields | detail::product_structured_ghosts |
+        detail::product_cache_dependencies | detail::product_exact_numeric |
+        detail::product_coarse_numeric | detail::product_preconditioner |
+        detail::product_workspace | detail::product_service_snapshot |
+        detail::product_collective_epochs;
+    if (immersed) registered_capabilities |= detail::product_ibm_donors;
+    if (status)
+      status = detail::validate_product_capabilities(registered_capabilities,
+                                                     immersed);
+    if (!status) return status;
+    candidate->phases[2U] = ProductFreezePhase::logical_analysis;
+    FieldRegistry schema_registry = registry;
+    status = schema_registry.freeze(candidate->schema);
+    std::vector<ArenaFieldRequest> requests;
+    try {
+      requests.reserve(candidate->schema.size());
+      for (const FieldDescriptor& descriptor : candidate->schema) {
+        Int3 interior = candidate->patch.cells;
+        if (descriptor.id == candidate->fields.krylov_scalars) {
+          const std::size_t scalar_doubles =
+              std::max(candidate->krylov_requirements.scalar_doubles,
+                       candidate->auxiliary_krylov_requirements.scalar_doubles);
+          if (scalar_doubles > static_cast<std::size_t>(
+                                   std::numeric_limits<std::int32_t>::max())) {
+            status = {StatusCode::invalid_plan, kProductCapacity};
+            break;
+          }
+          interior = {static_cast<std::int32_t>(scalar_doubles), 1, 1};
+        } else if (descriptor.id == candidate->fields.mg_arena) {
+          interior = candidate->mg_requirements.arena_shape;
+        }
+        requests.push_back({descriptor.id,
+                            interior,
+                            {0U},
+                            state_field(descriptor.id, candidate->fields)
+                                ? FieldLifetime::state_layer
+                                : FieldLifetime::persistent_workspace});
+      }
+    } catch (const std::bad_alloc&) {
+      status = {StatusCode::allocation_failure, kProductAllocation};
+    }
+    if (status)
+      status = ArenaLayout::compile(candidate->schema,
+                                    {requests.data(), requests.size()},
+                                    candidate->layout);
+    if (status)
+      status = StateLayers::allocate(candidate->layout, candidate->layers);
+    if (!status) {
+      return status;
+    }
+    candidate->phases[3U] = ProductFreezePhase::schema_and_allocation;
     return status;
-  }
-  candidate->phases[3U] = ProductFreezePhase::schema_and_allocation;
+  });
+  if (!status) return status;
   const PlanFingerprint registry_before = registry.fingerprint();
   status = BoundaryCompiler::compile(
       communicator, model, candidate->geometry, candidate->patch, registry,
       candidate->boundary, candidate->schemes, candidate->time);
-  if (status && registry.fingerprint() != registry_before)
-    status = {StatusCode::invalid_plan, kProductInstantiation};
-  if (status)
-    status = ThermodynamicsPlan::compile(model.thermophysics,
-                                         {model.transported_scalars.data(),
-                                          model.transported_scalars.size()},
-                                         candidate->thermodynamics);
-  if (status)
-    status = TransportPlan::compile(model.thermophysics,
-                                    candidate->thermodynamics,
-                                    candidate->transport);
-  if (status)
-    status = ClosedMassPlan::compile(model.pressure_reference,
-                                     model.thermophysics,
-                                     candidate->closed_mass);
-  std::vector<FieldId> declared;
-  if (status) {
-    declared.reserve(candidate->schema.size());
-    for (const FieldDescriptor& descriptor : candidate->schema)
-      declared.push_back(descriptor.id);
-    status = candidate->contributions.configure(
-        {declared.data(), declared.size()});
-  }
+  if (!status) return status;
+  status = product_local_stage(communicator, [&]() -> Status {
+    if (status && registry.fingerprint() != registry_before)
+      status = {StatusCode::invalid_plan, kProductInstantiation};
+    if (status)
+      status = ThermodynamicsPlan::compile(
+          model.thermophysics,
+          {model.transported_scalars.data(), model.transported_scalars.size()},
+          candidate->thermodynamics);
+    if (status)
+      status = TransportPlan::compile(
+          model.thermophysics, candidate->thermodynamics, candidate->transport);
+    if (status)
+      status =
+          ClosedMassPlan::compile(model.pressure_reference, model.thermophysics,
+                                  candidate->closed_mass);
+    std::vector<FieldId> declared;
+    if (status) {
+      declared.reserve(candidate->schema.size());
+      for (const FieldDescriptor& descriptor : candidate->schema)
+        declared.push_back(descriptor.id);
+      status = candidate->contributions.configure(
+          {declared.data(), declared.size()});
+    }
+    return status;
+  });
+  if (!status) return status;
   TurbulencePlanSpec turbulence_spec;
   turbulence_spec.kind = model.turbulence;
   if (status)
     status = TurbulencePlan::compile(
         communicator, turbulence_spec, candidate->geometry, candidate->patch,
-        candidate->fields.effective_viscosity, 20U,
-        candidate->contributions, candidate->turbulence);
-  if (status) status = candidate->contributions.freeze();
+        candidate->fields.effective_viscosity, 20U, candidate->contributions,
+        candidate->turbulence);
   std::vector<ScalarEquationSpec> scalar_specs;
+  if (status)
+    status = product_local_stage(communicator, [&]() -> Status {
+      status = candidate->contributions.freeze();
+      if (!status) return status;
+      for (std::size_t index = 0U; index < candidate->fields.scalars.size();
+           ++index) {
+        scalar_specs.push_back(
+            {candidate->fields.scalars[index],
+             model.transported_scalars[index].role,
+             model.transported_scalars[index].molecular_schmidt,
+             model.transported_scalars[index].turbulent_schmidt});
+      }
+      return status;
+    });
   if (status) {
-    for (std::size_t index = 0U; index < candidate->fields.scalars.size();
-         ++index) {
-      scalar_specs.push_back({candidate->fields.scalars[index],
-                              model.transported_scalars[index].role,
-                              model.transported_scalars[index].molecular_schmidt,
-                              model.transported_scalars[index].turbulent_schmidt});
-    }
     EquationPlanSpec equation_spec;
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
@@ -3425,6 +3509,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = IbmEquationInterfacePlan::compile(
         candidate->equations.kernels(), *candidate->topology,
         *candidate->ibm_boundary, *candidate->ibm_equations);
+    status = product_collective_status(communicator, status);
     if (status) {
       candidate->ibm_physical_boundary_flux.emplace();
       status = IbmPhysicalBoundaryFluxAuthority::compile(
@@ -3440,40 +3525,44 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return status;
   }
   candidate->phases[4U] = ProductFreezePhase::plan_instantiation;
-  std::size_t face_doubles = 0U;
-  std::size_t compiled_enthalpy_cell_doubles = 0U;
-  if (!detail::product_face_doubles(candidate->patch.cells, face_doubles)) {
-    return {StatusCode::invalid_plan, kProductCapacity};
-  }
-  if (!detail::product_checked_multiply(
-          local_cells, 2U, compiled_enthalpy_cell_doubles)) {
-    return {StatusCode::invalid_plan, kProductCapacity};
-  }
-  try {
-    candidate->pressure_face_storage.assign(face_doubles, 0.0);
-    candidate->energy_assembly_face_storage.assign(face_doubles, 0.0);
-    candidate->energy_frozen_enthalpy_face_storage.assign(face_doubles, 0.0);
-    candidate->energy_directional_enthalpy_face_storage.assign(face_doubles,
-                                                               0.0);
-    candidate->energy_compiled_enthalpy_cell_storage.assign(
-        compiled_enthalpy_cell_doubles, 0.0);
-    candidate->energy_compiled_enthalpy_branch_storage.assign(face_doubles,
-                                                              0U);
-  } catch (const std::bad_alloc&) {
-    return {StatusCode::allocation_failure, kProductCapacity};
-  }
-  status = FaceFluxStorage::allocate_final(candidate->patch.cells,
-                                           candidate->final_flux);
-  if (status)
-    // Four pressure/candidate fluxes can be live together.  Two additional
-    // replicas retain all three momentum AFC reconstructions while their
-    // common face alpha is formed, avoiding a second reconstruction pass.
-    status = FaceFluxStorage::allocate_workspace(candidate->patch.cells, 6U,
-                                                 candidate->phi_workspace);
-  if (!status) {
+  status = product_local_stage(communicator, [&]() -> Status {
+    std::size_t face_doubles = 0U;
+    std::size_t compiled_enthalpy_cell_doubles = 0U;
+    if (!detail::product_face_doubles(candidate->patch.cells, face_doubles)) {
+      return {StatusCode::invalid_plan, kProductCapacity};
+    }
+    if (!detail::product_checked_multiply(local_cells, 2U,
+                                          compiled_enthalpy_cell_doubles)) {
+      return {StatusCode::invalid_plan, kProductCapacity};
+    }
+    try {
+      candidate->pressure_face_storage.assign(face_doubles, 0.0);
+      candidate->energy_assembly_face_storage.assign(face_doubles, 0.0);
+      candidate->energy_frozen_enthalpy_face_storage.assign(face_doubles, 0.0);
+      candidate->energy_directional_enthalpy_face_storage.assign(face_doubles,
+                                                                 0.0);
+      candidate->energy_compiled_enthalpy_cell_storage.assign(
+          compiled_enthalpy_cell_doubles, 0.0);
+      candidate->energy_compiled_enthalpy_branch_storage.assign(face_doubles,
+                                                                0U);
+    } catch (const std::bad_alloc&) {
+      return {StatusCode::allocation_failure, kProductCapacity};
+    }
+    status = FaceFluxStorage::allocate_final(candidate->patch.cells,
+                                             candidate->final_flux);
+    if (status)
+      // Four pressure/candidate fluxes can be live together.  Two additional
+      // replicas retain all three momentum AFC reconstructions while their
+      // common face alpha is formed, avoiding a second reconstruction pass.
+      status = FaceFluxStorage::allocate_workspace(candidate->patch.cells, 6U,
+                                                   candidate->phi_workspace);
+    if (!status) {
+      return status;
+    }
+    candidate->phases[5U] = ProductFreezePhase::numeric_capacity;
     return status;
-  }
-  candidate->phases[5U] = ProductFreezePhase::numeric_capacity;
+  });
+  if (!status) return status;
   constexpr std::array<StageId, 6U> kHaloStages{
       {10U, 15U, 20U, 30U, 40U, 60U}};
   for (std::size_t index = 0U; index < kHaloStages.size() && status; ++index) {
@@ -3519,21 +3608,27 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   // coupled-state halo, even though both routes have the same geometric reach.
   std::vector<HaloFieldSpec> candidate_state_halo;
   if (status) {
-    candidate_state_halo.reserve(
-        5U + candidate->fields.pressure_energy_candidate_species.size());
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_velocity, ghosts, 3U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_density, 1U, 1U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_pressure, ghosts, 1U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_enthalpy, ghosts, 1U});
-    candidate_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_temperature, ghosts, 1U});
-    for (FieldId species :
-         candidate->fields.pressure_energy_candidate_species)
-      candidate_state_halo.push_back({species, ghosts, 1U});
+    status = product_local_stage(communicator, [&] {
+      candidate_state_halo.reserve(
+          5U + candidate->fields.pressure_energy_candidate_species.size());
+      candidate_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_velocity, ghosts, 3U});
+      candidate_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_density, 1U, 1U});
+      candidate_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_pressure, ghosts, 1U});
+      candidate_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_enthalpy, ghosts, 1U});
+      candidate_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_temperature, ghosts,
+           1U});
+      for (FieldId species :
+           candidate->fields.pressure_energy_candidate_species)
+        candidate_state_halo.push_back({species, ghosts, 1U});
+      return Status{};
+    });
+  }
+  if (status) {
     status = candidate->candidate_state_halo.reserve(
         communicator, candidate->patch,
         {candidate_state_halo.data(), candidate_state_halo.size()},
@@ -3564,21 +3659,26 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   // a superset because that would erase U/Y lineage and permit stale ghosts.
   std::vector<HaloFieldSpec> candidate_finalizer_state_halo;
   if (status) {
-    candidate_finalizer_state_halo.reserve(
-        5U + candidate->fields.pressure_energy_candidate_species.size());
-    candidate_finalizer_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_pressure, 1U, 1U});
-    candidate_finalizer_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_enthalpy, 1U, 1U});
-    candidate_finalizer_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_density, 1U, 1U});
-    candidate_finalizer_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_temperature, 1U, 1U});
-    candidate_finalizer_state_halo.push_back(
-        {candidate->fields.pressure_energy_candidate_velocity, 1U, 3U});
-    for (FieldId species :
-         candidate->fields.pressure_energy_candidate_species)
-      candidate_finalizer_state_halo.push_back({species, 1U, 1U});
+    status = product_local_stage(communicator, [&] {
+      candidate_finalizer_state_halo.reserve(
+          5U + candidate->fields.pressure_energy_candidate_species.size());
+      candidate_finalizer_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_pressure, 1U, 1U});
+      candidate_finalizer_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_enthalpy, 1U, 1U});
+      candidate_finalizer_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_density, 1U, 1U});
+      candidate_finalizer_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_temperature, 1U, 1U});
+      candidate_finalizer_state_halo.push_back(
+          {candidate->fields.pressure_energy_candidate_velocity, 1U, 3U});
+      for (FieldId species :
+           candidate->fields.pressure_energy_candidate_species)
+        candidate_finalizer_state_halo.push_back({species, 1U, 1U});
+      return Status{};
+    });
+  }
+  if (status) {
     status = candidate->candidate_finalizer_state_halo.reserve(
         communicator, candidate->patch,
         {candidate_finalizer_state_halo.data(),
@@ -3632,8 +3732,14 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         {mg_halo.data(), mg_halo.size()},
         candidate->boundary.halo_topology());
   if (status) {
-    candidate->coarse_halos.resize(candidate->mg_requirements.level_count - 1U);
-    candidate->coarse_halo_pointers.resize(candidate->coarse_halos.size());
+    status = product_local_stage(communicator, [&] {
+      candidate->coarse_halos.resize(candidate->mg_requirements.level_count -
+                                     1U);
+      candidate->coarse_halo_pointers.resize(candidate->coarse_halos.size());
+      return Status{};
+    });
+  }
+  if (status) {
     for (std::size_t level = 1U;
          level < candidate->mg_requirements.level_count; ++level) {
       status = candidate->coarse_halos[level - 1U].reserve(
@@ -3793,6 +3899,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     if (!same_storage || !disjoint_replicas)
       status = {StatusCode::invalid_plan, kProductBinding};
   }
+  status = product_collective_status(communicator, status);
   if (status)
     status = ReductionEngine::compile(
         communicator, ReductionMode::mpi_allreduce,
@@ -3828,6 +3935,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           FieldLifetime::persistent_workspace,
           candidate->fields.pressure_energy_candidate_velocity,
           fresh_candidate_velocity);
+    status = product_collective_status(communicator, status);
     if (status) {
       const MgDomainActivityView activity =
           candidate->topology.has_value()
@@ -4027,323 +4135,329 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = PressureEnergyCandidateBoundaryFinalizer::bind(
         finalizer_binding, candidate->candidate_boundary_finalizer);
   }
-  FieldView state_probe;
-  if (status)
-    status = candidate->layers.view(StateRole::trial, candidate->fields.rho,
-                                    state_probe);
-  if (!status) {
-    // Preserve the failing subsystem detail.  Replacing it with the generic
-    // product-binding tag made sealed-product diagnostics unable to identify
-    // which view/coupler contract was violated.
-    return status;
-  }
-  candidate->state_address =
-      reinterpret_cast<std::uintptr_t>(state_probe.base);
-  candidate->phases[7U] = ProductFreezePhase::view_and_graph_binding;
-  const FaceFluxStorageCounters workspace_flux_capacity =
-      candidate->phi_workspace.counters();
-  const FaceFluxStorageCounters final_flux_capacity =
-      candidate->final_flux.counters();
-  const std::array<const HaloEngine*, 7U> independent_halos{{
-      &candidate->coupled_state_halo,
-      &candidate->candidate_state_halo,
-      &candidate->coupled_thermal_halo,
-      &candidate->candidate_thermal_halo,
-      &candidate->candidate_finalizer_state_halo,
-      &candidate->correction_halo,
-      &candidate->candidate_correction_halo,
-  }};
-  bool independent_halo_lineage = true;
-  for (std::size_t index = 0U;
-       index < independent_halos.size() && independent_halo_lineage; ++index) {
-    const HaloEngine& halo = *independent_halos[index];
-    independent_halo_lineage = halo.ready() && halo.instance_identity() != 0U;
-    for (std::size_t other = index + 1U;
-         other < independent_halos.size() && independent_halo_lineage; ++other)
-      independent_halo_lineage =
-          halo.instance_identity() !=
-          independent_halos[other]->instance_identity();
-  }
-  const bool independent_candidate_donor_lineage =
-      !immersed ||
-      (candidate->ibm_candidate_pressure_donors.has_value() &&
-       candidate->ibm_candidate_pressure_donors->ready() &&
-       candidate->ibm_candidate_pressure_donors->fingerprint() != 0U &&
-       candidate->ibm_candidate_velocity_donors.has_value() &&
-       candidate->ibm_candidate_velocity_donors->ready() &&
-       candidate->ibm_candidate_velocity_donors->fingerprint() != 0U &&
-       candidate->ibm_candidate_rate_donors.has_value() &&
-       candidate->ibm_candidate_rate_donors->ready() &&
-       candidate->ibm_candidate_rate_donors->fingerprint() != 0U &&
-       candidate->ibm_gradient_donors.has_value() &&
-       candidate->ibm_rate_donors.has_value() &&
-       candidate->ibm_pressure_donors.has_value() &&
-       candidate->ibm_candidate_pressure_donors->fingerprint() !=
-           candidate->ibm_pressure_donors->fingerprint() &&
-       candidate->ibm_candidate_velocity_donors->fingerprint() !=
-           candidate->ibm_gradient_donors->fingerprint() &&
-       candidate->ibm_candidate_rate_donors->fingerprint() !=
-           candidate->ibm_rate_donors->fingerprint());
-  if (!independent_halo_lineage || !independent_candidate_donor_lineage ||
-      workspace_flux_capacity.aligned_payload_allocations != 1U ||
-      workspace_flux_capacity.replicas != 6U ||
-      workspace_flux_capacity.directional_blocks != 18U ||
-      final_flux_capacity.aligned_payload_allocations != 1U ||
-      final_flux_capacity.replicas != 3U ||
-      final_flux_capacity.directional_blocks != 9U)
-    return {StatusCode::invalid_plan, kProductBinding};
-  const std::array<FieldId, 14U> candidate_lineage_fields{{
-      candidate->fields.pressure_energy_candidate_pressure,
-      candidate->fields.pressure_energy_candidate_enthalpy,
-      candidate->fields.pressure_energy_candidate_density,
-      candidate->fields.pressure_energy_candidate_temperature,
-      candidate->fields.pressure_energy_candidate_velocity,
-      candidate->fields.pressure_energy_candidate_pressure_correction,
-      candidate->fields.pressure_energy_candidate_molecular_viscosity,
-      candidate->fields.pressure_energy_candidate_effective_viscosity,
-      candidate->fields.pressure_energy_candidate_velocity_gradient,
-      candidate->fields.pressure_energy_candidate_compressibility,
-      candidate->fields.pressure_energy_candidate_enthalpy_compressibility,
-      candidate->fields.pressure_energy_candidate_thermal_conductivity,
-      candidate->fields.pressure_energy_candidate_heat_capacity,
-      candidate->fields.pressure_energy_candidate_enthalpy_diffusivity,
-  }};
   std::uint64_t candidate_lineage = kFnvOffset;
-  for (FieldId field : candidate_lineage_fields) {
-    const FieldDescriptor* descriptor = find_descriptor(candidate->schema, field);
-    if (descriptor == nullptr)
-      return {StatusCode::invalid_plan, kProductBinding};
-    candidate_lineage = detail::product_mix(candidate_lineage, field);
-    candidate_lineage =
-        detail::product_mix(candidate_lineage, descriptor->components);
-    candidate_lineage =
-        detail::product_mix(candidate_lineage, descriptor->ghost_width);
-  }
-  // Only the four pressure/candidate flux roles belong to checkpoint plan
-  // semantics.  The two extra replicas are transient AFC cache capacity and
-  // must not invalidate an otherwise compatible restart.
-  candidate_lineage = detail::product_mix(candidate_lineage, 4U);
-  candidate_lineage = detail::product_mix(
-      candidate_lineage,
-      7U + candidate->fields.pressure_energy_candidate_species.size());
-  candidate_lineage = detail::product_mix(candidate_lineage, 1U);
-  for (FieldId species :
-       candidate->fields.pressure_energy_candidate_species)
-    candidate_lineage = detail::product_mix(candidate_lineage, species);
-  if (immersed) {
-    // Remote-donor fingerprints include rank-local receive/supply layouts.
-    // Candidate publication certificates bind those exact local plans, while
-    // the product semantic lineage must remain rank invariant.
-    candidate_lineage = detail::product_mix(
-        candidate_lineage, kIbmCandidatePressureCorrectionDonorStage);
-    candidate_lineage = detail::product_mix(
-        candidate_lineage, kIbmCandidateVelocityDonorStage);
-    candidate_lineage = detail::product_mix(
-        candidate_lineage, kIbmCandidateEnergyRateDonorStage);
-  }
-  if (candidate_lineage == 0U) candidate_lineage = 1U;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   detail::PressureEnergyCandidateStorageDiagnostic storage_diagnostic;
-  const std::array<std::pair<FieldId, FieldId>,
-                   detail::kPressureEnergyCandidateFieldCount>
-      primitive_pairs{{
-          {candidate->fields.pressure_energy_candidate_pressure,
-           candidate->fields.pressure},
-          {candidate->fields.pressure_energy_candidate_enthalpy,
-           candidate->fields.enthalpy},
-          {candidate->fields.pressure_energy_candidate_density,
-           candidate->fields.rho},
-          {candidate->fields.pressure_energy_candidate_temperature,
-           candidate->fields.temperature},
-          {candidate->fields.pressure_energy_candidate_velocity,
-           candidate->fields.velocity},
-      }};
-  for (std::size_t index = 0U;
-       index < primitive_pairs.size() && status; ++index)
-    status = capture_candidate_field_storage(
-        candidate->layers, candidate->layout, primitive_pairs[index].first,
-        primitive_pairs[index].second, true,
-        storage_diagnostic.fields[index]);
-  const std::array<std::pair<FieldId, FieldId>,
-                   detail::kPressureEnergyCandidateScratchFieldCount>
-      scratch_pairs{{
-          {candidate->fields.pressure_energy_candidate_pressure_correction,
-           candidate->fields.pressure_correction},
-          {candidate->fields.pressure_energy_candidate_molecular_viscosity,
-           candidate->fields.molecular_viscosity},
-          {candidate->fields.pressure_energy_candidate_effective_viscosity,
-           candidate->fields.effective_viscosity},
-          {candidate->fields.pressure_energy_candidate_velocity_gradient,
-           candidate->fields.velocity_gradient},
-          {candidate->fields.pressure_energy_candidate_compressibility,
-           candidate->fields.compressibility},
-          {candidate->fields.pressure_energy_candidate_enthalpy_compressibility,
-           candidate->fields.enthalpy_compressibility},
-          {candidate->fields.pressure_energy_candidate_thermal_conductivity,
-           candidate->fields.thermal_conductivity},
-          {candidate->fields.pressure_energy_candidate_heat_capacity,
-           candidate->fields.heat_capacity},
-          {candidate->fields.pressure_energy_candidate_enthalpy_diffusivity,
-           candidate->fields.enthalpy_diffusivity},
-      }};
-  for (std::size_t index = 0U; index < scratch_pairs.size() && status;
-       ++index)
-    status = capture_candidate_field_storage(
-        candidate->layers, candidate->layout, scratch_pairs[index].first,
-        scratch_pairs[index].second, false,
-        storage_diagnostic.scratch_fields[index]);
-  for (std::size_t left = 0U;
-       left < storage_diagnostic.fields.size() && status; ++left) {
-    for (std::size_t right = left + 1U;
-         right < storage_diagnostic.fields.size(); ++right)
-      if (!candidate_ranges_disjoint(storage_diagnostic.fields[left],
-                                     storage_diagnostic.fields[right])) {
-        status = {StatusCode::invalid_plan, kProductBinding};
-        break;
-      }
-    for (const auto& scratch : storage_diagnostic.scratch_fields)
-      if (!candidate_ranges_disjoint(storage_diagnostic.fields[left],
-                                     scratch)) {
-        status = {StatusCode::invalid_plan, kProductBinding};
-        break;
-      }
-  }
-  for (std::size_t left = 0U;
-       left < storage_diagnostic.scratch_fields.size() && status; ++left)
-    for (std::size_t right = left + 1U;
-         right < storage_diagnostic.scratch_fields.size(); ++right)
-      if (!candidate_ranges_disjoint(
-              storage_diagnostic.scratch_fields[left],
-              storage_diagnostic.scratch_fields[right])) {
-        status = {StatusCode::invalid_plan, kProductBinding};
-        break;
-      }
-  std::array<FaceFluxView,
-             detail::kPressureEnergyCandidateFluxReplicaCount>
-      flux_replicas{};
-  for (std::size_t replica = 0U;
-       replica < flux_replicas.size() && status; ++replica)
-    status = candidate->phi_workspace.workspace_view(
-        replica, static_cast<RevisionToken>(replica + 1U),
-        flux_replicas[replica]);
-  std::uintptr_t flux_stride_bytes = 0U;
-  if (status) {
-    const std::uintptr_t first =
-        reinterpret_cast<std::uintptr_t>(flux_replicas[0U].x.base);
-    const std::uintptr_t second =
-        reinterpret_cast<std::uintptr_t>(flux_replicas[1U].x.base);
-    const std::uintptr_t third =
-        reinterpret_cast<std::uintptr_t>(flux_replicas[2U].x.base);
-    const std::uintptr_t fourth =
-        reinterpret_cast<std::uintptr_t>(flux_replicas[3U].x.base);
-    if (first == 0U || second <= first || third <= second ||
-        fourth <= third || second - first != third - second ||
-        second - first != fourth - third)
-      status = {StatusCode::invalid_plan, kProductBinding};
-    else
-      flux_stride_bytes = second - first;
-  }
-  for (std::size_t replica = 0U;
-       replica < flux_replicas.size() && status; ++replica) {
-    const FaceFluxView& flux = flux_replicas[replica];
-    auto& captured = storage_diagnostic.flux_replicas[replica];
-    captured.bases = {{
-        reinterpret_cast<std::uintptr_t>(flux.x.base),
-        reinterpret_cast<std::uintptr_t>(flux.y.base),
-        reinterpret_cast<std::uintptr_t>(flux.z.base),
-    }};
-    captured.replica_begin = captured.bases[0U];
-    if (captured.replica_begin >
-        std::numeric_limits<std::uintptr_t>::max() - flux_stride_bytes) {
-      status = {StatusCode::invalid_plan, kProductBinding};
-      break;
-    }
-    captured.replica_end = captured.replica_begin + flux_stride_bytes;
-    captured.storage = flux.x.storage_identity;
-    captured.revision_domain = flux.x.revision_domain;
-    captured.revision = flux.revision;
-    if (captured.storage == 0U || captured.revision_domain == 0U ||
-        captured.revision == 0U ||
-        flux.y.storage_identity != captured.storage ||
-        flux.z.storage_identity != captured.storage ||
-        flux.y.revision_domain != captured.revision_domain ||
-        flux.z.revision_domain != captured.revision_domain ||
-        captured.bases[1U] < captured.replica_begin ||
-        captured.bases[1U] >= captured.replica_end ||
-        captured.bases[2U] < captured.replica_begin ||
-        captured.bases[2U] >= captured.replica_end)
-      status = {StatusCode::invalid_plan, kProductBinding};
-  }
-  if (!status) return status;
-  storage_diagnostic.lineage_fingerprint = candidate_lineage;
-  storage_diagnostic.coupled_state_halo =
-      candidate->coupled_state_halo.instance_identity();
-  storage_diagnostic.candidate_state_halo =
-      candidate->candidate_state_halo.instance_identity();
-  storage_diagnostic.coupled_thermal_halo =
-      candidate->coupled_thermal_halo.instance_identity();
-  storage_diagnostic.candidate_thermal_halo =
-      candidate->candidate_thermal_halo.instance_identity();
-  storage_diagnostic.candidate_finalizer_state_halo =
-      candidate->candidate_finalizer_state_halo.instance_identity();
-  storage_diagnostic.correction_halo =
-      candidate->correction_halo.instance_identity();
-  storage_diagnostic.candidate_correction_halo =
-      candidate->candidate_correction_halo.instance_identity();
-  storage_diagnostic.coupled_state_halo_plan =
-      candidate->coupled_state_halo.plan_stats();
-  storage_diagnostic.candidate_state_halo_plan =
-      candidate->candidate_state_halo.plan_stats();
-  storage_diagnostic.coupled_thermal_halo_plan =
-      candidate->coupled_thermal_halo.plan_stats();
-  storage_diagnostic.candidate_thermal_halo_plan =
-      candidate->candidate_thermal_halo.plan_stats();
-  storage_diagnostic.candidate_finalizer_state_halo_plan =
-      candidate->candidate_finalizer_state_halo.plan_stats();
-  storage_diagnostic.correction_halo_plan =
-      candidate->correction_halo.plan_stats();
-  storage_diagnostic.candidate_correction_halo_plan =
-      candidate->candidate_correction_halo.plan_stats();
-  storage_diagnostic.local_ibm_reconstruction_reach =
-      candidate->ibm_boundary.has_value()
-          ? candidate->ibm_boundary->maximum_halo_reach()
-          : std::uint8_t{0U};
-  if (candidate->ibm_candidate_pressure_donors.has_value()) {
-    storage_diagnostic.candidate_pressure_donor_plan =
-        candidate->ibm_candidate_pressure_donors->fingerprint();
-    storage_diagnostic.candidate_pressure_donor_stats =
-        candidate->ibm_candidate_pressure_donors->stats();
-    storage_diagnostic.candidate_pressure_donor_reach =
-        candidate->ibm_candidate_pressure_donors->reach();
-  }
-  if (candidate->ibm_candidate_velocity_donors.has_value()) {
-    storage_diagnostic.candidate_velocity_donor_plan =
-        candidate->ibm_candidate_velocity_donors->fingerprint();
-    storage_diagnostic.candidate_velocity_donor_stats =
-        candidate->ibm_candidate_velocity_donors->stats();
-  }
-  if (candidate->ibm_candidate_rate_donors.has_value()) {
-    storage_diagnostic.candidate_rate_donor_plan =
-        candidate->ibm_candidate_rate_donors->fingerprint();
-    storage_diagnostic.candidate_rate_donor_stats =
-        candidate->ibm_candidate_rate_donors->stats();
-  }
-  storage_diagnostic.workspace_flux_capacity = workspace_flux_capacity;
-  storage_diagnostic.final_flux_capacity = final_flux_capacity;
-  storage_diagnostic.field_storage_capacity = candidate->layers.counters();
-  storage_diagnostic.arena_doubles = candidate->layout.total_doubles();
-  storage_diagnostic.execution_graph = candidate->graph.fingerprint();
-  const FrozenStage* const corrector_one_stage =
-      candidate->graph.stage(40U);
-  const FrozenStage* const corrector_two_stage =
-      candidate->graph.stage(50U);
-  if (corrector_one_stage == nullptr || corrector_two_stage == nullptr)
-    return {StatusCode::invalid_plan, kProductBinding};
-  storage_diagnostic.corrector_one_resource_contract =
-      corrector_one_stage->resources;
-  storage_diagnostic.corrector_two_resource_contract =
-      corrector_two_stage->resources;
 #endif
+  status = product_local_stage(communicator, [&]() -> Status {
+    FieldView state_probe;
+    if (status)
+      status = candidate->layers.view(StateRole::trial, candidate->fields.rho,
+                                      state_probe);
+    if (!status) {
+      // Preserve the failing subsystem detail.  Replacing it with the generic
+      // product-binding tag made sealed-product diagnostics unable to identify
+      // which view/coupler contract was violated.
+      return status;
+    }
+    candidate->state_address =
+        reinterpret_cast<std::uintptr_t>(state_probe.base);
+    candidate->phases[7U] = ProductFreezePhase::view_and_graph_binding;
+    const FaceFluxStorageCounters workspace_flux_capacity =
+        candidate->phi_workspace.counters();
+    const FaceFluxStorageCounters final_flux_capacity =
+        candidate->final_flux.counters();
+    const std::array<const HaloEngine*, 7U> independent_halos{{
+        &candidate->coupled_state_halo,
+        &candidate->candidate_state_halo,
+        &candidate->coupled_thermal_halo,
+        &candidate->candidate_thermal_halo,
+        &candidate->candidate_finalizer_state_halo,
+        &candidate->correction_halo,
+        &candidate->candidate_correction_halo,
+    }};
+    bool independent_halo_lineage = true;
+    for (std::size_t index = 0U;
+         index < independent_halos.size() && independent_halo_lineage;
+         ++index) {
+      const HaloEngine& halo = *independent_halos[index];
+      independent_halo_lineage = halo.ready() && halo.instance_identity() != 0U;
+      for (std::size_t other = index + 1U;
+           other < independent_halos.size() && independent_halo_lineage;
+           ++other)
+        independent_halo_lineage =
+            halo.instance_identity() !=
+            independent_halos[other]->instance_identity();
+    }
+    const bool independent_candidate_donor_lineage =
+        !immersed ||
+        (candidate->ibm_candidate_pressure_donors.has_value() &&
+         candidate->ibm_candidate_pressure_donors->ready() &&
+         candidate->ibm_candidate_pressure_donors->fingerprint() != 0U &&
+         candidate->ibm_candidate_velocity_donors.has_value() &&
+         candidate->ibm_candidate_velocity_donors->ready() &&
+         candidate->ibm_candidate_velocity_donors->fingerprint() != 0U &&
+         candidate->ibm_candidate_rate_donors.has_value() &&
+         candidate->ibm_candidate_rate_donors->ready() &&
+         candidate->ibm_candidate_rate_donors->fingerprint() != 0U &&
+         candidate->ibm_gradient_donors.has_value() &&
+         candidate->ibm_rate_donors.has_value() &&
+         candidate->ibm_pressure_donors.has_value() &&
+         candidate->ibm_candidate_pressure_donors->fingerprint() !=
+             candidate->ibm_pressure_donors->fingerprint() &&
+         candidate->ibm_candidate_velocity_donors->fingerprint() !=
+             candidate->ibm_gradient_donors->fingerprint() &&
+         candidate->ibm_candidate_rate_donors->fingerprint() !=
+             candidate->ibm_rate_donors->fingerprint());
+    if (!independent_halo_lineage || !independent_candidate_donor_lineage ||
+        workspace_flux_capacity.aligned_payload_allocations != 1U ||
+        workspace_flux_capacity.replicas != 6U ||
+        workspace_flux_capacity.directional_blocks != 18U ||
+        final_flux_capacity.aligned_payload_allocations != 1U ||
+        final_flux_capacity.replicas != 3U ||
+        final_flux_capacity.directional_blocks != 9U)
+      return {StatusCode::invalid_plan, kProductBinding};
+    const std::array<FieldId, 14U> candidate_lineage_fields{{
+        candidate->fields.pressure_energy_candidate_pressure,
+        candidate->fields.pressure_energy_candidate_enthalpy,
+        candidate->fields.pressure_energy_candidate_density,
+        candidate->fields.pressure_energy_candidate_temperature,
+        candidate->fields.pressure_energy_candidate_velocity,
+        candidate->fields.pressure_energy_candidate_pressure_correction,
+        candidate->fields.pressure_energy_candidate_molecular_viscosity,
+        candidate->fields.pressure_energy_candidate_effective_viscosity,
+        candidate->fields.pressure_energy_candidate_velocity_gradient,
+        candidate->fields.pressure_energy_candidate_compressibility,
+        candidate->fields.pressure_energy_candidate_enthalpy_compressibility,
+        candidate->fields.pressure_energy_candidate_thermal_conductivity,
+        candidate->fields.pressure_energy_candidate_heat_capacity,
+        candidate->fields.pressure_energy_candidate_enthalpy_diffusivity,
+    }};
+    for (FieldId field : candidate_lineage_fields) {
+      const FieldDescriptor* descriptor =
+          find_descriptor(candidate->schema, field);
+      if (descriptor == nullptr)
+        return {StatusCode::invalid_plan, kProductBinding};
+      candidate_lineage = detail::product_mix(candidate_lineage, field);
+      candidate_lineage =
+          detail::product_mix(candidate_lineage, descriptor->components);
+      candidate_lineage =
+          detail::product_mix(candidate_lineage, descriptor->ghost_width);
+    }
+    // Only the four pressure/candidate flux roles belong to checkpoint plan
+    // semantics.  The two extra replicas are transient AFC cache capacity and
+    // must not invalidate an otherwise compatible restart.
+    candidate_lineage = detail::product_mix(candidate_lineage, 4U);
+    candidate_lineage = detail::product_mix(
+        candidate_lineage,
+        7U + candidate->fields.pressure_energy_candidate_species.size());
+    candidate_lineage = detail::product_mix(candidate_lineage, 1U);
+    for (FieldId species : candidate->fields.pressure_energy_candidate_species)
+      candidate_lineage = detail::product_mix(candidate_lineage, species);
+    if (immersed) {
+      // Remote-donor fingerprints include rank-local receive/supply layouts.
+      // Candidate publication certificates bind those exact local plans, while
+      // the product semantic lineage must remain rank invariant.
+      candidate_lineage = detail::product_mix(
+          candidate_lineage, kIbmCandidatePressureCorrectionDonorStage);
+      candidate_lineage = detail::product_mix(candidate_lineage,
+                                              kIbmCandidateVelocityDonorStage);
+      candidate_lineage = detail::product_mix(
+          candidate_lineage, kIbmCandidateEnergyRateDonorStage);
+    }
+    if (candidate_lineage == 0U) candidate_lineage = 1U;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+    const std::array<std::pair<FieldId, FieldId>,
+                     detail::kPressureEnergyCandidateFieldCount>
+        primitive_pairs{{
+            {candidate->fields.pressure_energy_candidate_pressure,
+             candidate->fields.pressure},
+            {candidate->fields.pressure_energy_candidate_enthalpy,
+             candidate->fields.enthalpy},
+            {candidate->fields.pressure_energy_candidate_density,
+             candidate->fields.rho},
+            {candidate->fields.pressure_energy_candidate_temperature,
+             candidate->fields.temperature},
+            {candidate->fields.pressure_energy_candidate_velocity,
+             candidate->fields.velocity},
+        }};
+    for (std::size_t index = 0U; index < primitive_pairs.size() && status;
+         ++index)
+      status = capture_candidate_field_storage(
+          candidate->layers, candidate->layout, primitive_pairs[index].first,
+          primitive_pairs[index].second, true,
+          storage_diagnostic.fields[index]);
+    const std::array<std::pair<FieldId, FieldId>,
+                     detail::kPressureEnergyCandidateScratchFieldCount>
+        scratch_pairs{{
+            {candidate->fields.pressure_energy_candidate_pressure_correction,
+             candidate->fields.pressure_correction},
+            {candidate->fields.pressure_energy_candidate_molecular_viscosity,
+             candidate->fields.molecular_viscosity},
+            {candidate->fields.pressure_energy_candidate_effective_viscosity,
+             candidate->fields.effective_viscosity},
+            {candidate->fields.pressure_energy_candidate_velocity_gradient,
+             candidate->fields.velocity_gradient},
+            {candidate->fields.pressure_energy_candidate_compressibility,
+             candidate->fields.compressibility},
+            {candidate->fields
+                 .pressure_energy_candidate_enthalpy_compressibility,
+             candidate->fields.enthalpy_compressibility},
+            {candidate->fields.pressure_energy_candidate_thermal_conductivity,
+             candidate->fields.thermal_conductivity},
+            {candidate->fields.pressure_energy_candidate_heat_capacity,
+             candidate->fields.heat_capacity},
+            {candidate->fields.pressure_energy_candidate_enthalpy_diffusivity,
+             candidate->fields.enthalpy_diffusivity},
+        }};
+    for (std::size_t index = 0U; index < scratch_pairs.size() && status;
+         ++index)
+      status = capture_candidate_field_storage(
+          candidate->layers, candidate->layout, scratch_pairs[index].first,
+          scratch_pairs[index].second, false,
+          storage_diagnostic.scratch_fields[index]);
+    for (std::size_t left = 0U;
+         left < storage_diagnostic.fields.size() && status; ++left) {
+      for (std::size_t right = left + 1U;
+           right < storage_diagnostic.fields.size(); ++right)
+        if (!candidate_ranges_disjoint(storage_diagnostic.fields[left],
+                                       storage_diagnostic.fields[right])) {
+          status = {StatusCode::invalid_plan, kProductBinding};
+          break;
+        }
+      for (const auto& scratch : storage_diagnostic.scratch_fields)
+        if (!candidate_ranges_disjoint(storage_diagnostic.fields[left],
+                                       scratch)) {
+          status = {StatusCode::invalid_plan, kProductBinding};
+          break;
+        }
+    }
+    for (std::size_t left = 0U;
+         left < storage_diagnostic.scratch_fields.size() && status; ++left)
+      for (std::size_t right = left + 1U;
+           right < storage_diagnostic.scratch_fields.size(); ++right)
+        if (!candidate_ranges_disjoint(
+                storage_diagnostic.scratch_fields[left],
+                storage_diagnostic.scratch_fields[right])) {
+          status = {StatusCode::invalid_plan, kProductBinding};
+          break;
+        }
+    std::array<FaceFluxView, detail::kPressureEnergyCandidateFluxReplicaCount>
+        flux_replicas{};
+    for (std::size_t replica = 0U; replica < flux_replicas.size() && status;
+         ++replica)
+      status = candidate->phi_workspace.workspace_view(
+          replica, static_cast<RevisionToken>(replica + 1U),
+          flux_replicas[replica]);
+    std::uintptr_t flux_stride_bytes = 0U;
+    if (status) {
+      const std::uintptr_t first =
+          reinterpret_cast<std::uintptr_t>(flux_replicas[0U].x.base);
+      const std::uintptr_t second =
+          reinterpret_cast<std::uintptr_t>(flux_replicas[1U].x.base);
+      const std::uintptr_t third =
+          reinterpret_cast<std::uintptr_t>(flux_replicas[2U].x.base);
+      const std::uintptr_t fourth =
+          reinterpret_cast<std::uintptr_t>(flux_replicas[3U].x.base);
+      if (first == 0U || second <= first || third <= second ||
+          fourth <= third || second - first != third - second ||
+          second - first != fourth - third)
+        status = {StatusCode::invalid_plan, kProductBinding};
+      else
+        flux_stride_bytes = second - first;
+    }
+    for (std::size_t replica = 0U; replica < flux_replicas.size() && status;
+         ++replica) {
+      const FaceFluxView& flux = flux_replicas[replica];
+      auto& captured = storage_diagnostic.flux_replicas[replica];
+      captured.bases = {{
+          reinterpret_cast<std::uintptr_t>(flux.x.base),
+          reinterpret_cast<std::uintptr_t>(flux.y.base),
+          reinterpret_cast<std::uintptr_t>(flux.z.base),
+      }};
+      captured.replica_begin = captured.bases[0U];
+      if (captured.replica_begin >
+          std::numeric_limits<std::uintptr_t>::max() - flux_stride_bytes) {
+        status = {StatusCode::invalid_plan, kProductBinding};
+        break;
+      }
+      captured.replica_end = captured.replica_begin + flux_stride_bytes;
+      captured.storage = flux.x.storage_identity;
+      captured.revision_domain = flux.x.revision_domain;
+      captured.revision = flux.revision;
+      if (captured.storage == 0U || captured.revision_domain == 0U ||
+          captured.revision == 0U ||
+          flux.y.storage_identity != captured.storage ||
+          flux.z.storage_identity != captured.storage ||
+          flux.y.revision_domain != captured.revision_domain ||
+          flux.z.revision_domain != captured.revision_domain ||
+          captured.bases[1U] < captured.replica_begin ||
+          captured.bases[1U] >= captured.replica_end ||
+          captured.bases[2U] < captured.replica_begin ||
+          captured.bases[2U] >= captured.replica_end)
+        status = {StatusCode::invalid_plan, kProductBinding};
+    }
+    if (!status) return status;
+    storage_diagnostic.lineage_fingerprint = candidate_lineage;
+    storage_diagnostic.coupled_state_halo =
+        candidate->coupled_state_halo.instance_identity();
+    storage_diagnostic.candidate_state_halo =
+        candidate->candidate_state_halo.instance_identity();
+    storage_diagnostic.coupled_thermal_halo =
+        candidate->coupled_thermal_halo.instance_identity();
+    storage_diagnostic.candidate_thermal_halo =
+        candidate->candidate_thermal_halo.instance_identity();
+    storage_diagnostic.candidate_finalizer_state_halo =
+        candidate->candidate_finalizer_state_halo.instance_identity();
+    storage_diagnostic.correction_halo =
+        candidate->correction_halo.instance_identity();
+    storage_diagnostic.candidate_correction_halo =
+        candidate->candidate_correction_halo.instance_identity();
+    storage_diagnostic.coupled_state_halo_plan =
+        candidate->coupled_state_halo.plan_stats();
+    storage_diagnostic.candidate_state_halo_plan =
+        candidate->candidate_state_halo.plan_stats();
+    storage_diagnostic.coupled_thermal_halo_plan =
+        candidate->coupled_thermal_halo.plan_stats();
+    storage_diagnostic.candidate_thermal_halo_plan =
+        candidate->candidate_thermal_halo.plan_stats();
+    storage_diagnostic.candidate_finalizer_state_halo_plan =
+        candidate->candidate_finalizer_state_halo.plan_stats();
+    storage_diagnostic.correction_halo_plan =
+        candidate->correction_halo.plan_stats();
+    storage_diagnostic.candidate_correction_halo_plan =
+        candidate->candidate_correction_halo.plan_stats();
+    storage_diagnostic.local_ibm_reconstruction_reach =
+        candidate->ibm_boundary.has_value()
+            ? candidate->ibm_boundary->maximum_halo_reach()
+            : std::uint8_t{0U};
+    if (candidate->ibm_candidate_pressure_donors.has_value()) {
+      storage_diagnostic.candidate_pressure_donor_plan =
+          candidate->ibm_candidate_pressure_donors->fingerprint();
+      storage_diagnostic.candidate_pressure_donor_stats =
+          candidate->ibm_candidate_pressure_donors->stats();
+      storage_diagnostic.candidate_pressure_donor_reach =
+          candidate->ibm_candidate_pressure_donors->reach();
+    }
+    if (candidate->ibm_candidate_velocity_donors.has_value()) {
+      storage_diagnostic.candidate_velocity_donor_plan =
+          candidate->ibm_candidate_velocity_donors->fingerprint();
+      storage_diagnostic.candidate_velocity_donor_stats =
+          candidate->ibm_candidate_velocity_donors->stats();
+    }
+    if (candidate->ibm_candidate_rate_donors.has_value()) {
+      storage_diagnostic.candidate_rate_donor_plan =
+          candidate->ibm_candidate_rate_donors->fingerprint();
+      storage_diagnostic.candidate_rate_donor_stats =
+          candidate->ibm_candidate_rate_donors->stats();
+    }
+    storage_diagnostic.workspace_flux_capacity = workspace_flux_capacity;
+    storage_diagnostic.final_flux_capacity = final_flux_capacity;
+    storage_diagnostic.field_storage_capacity = candidate->layers.counters();
+    storage_diagnostic.arena_doubles = candidate->layout.total_doubles();
+    storage_diagnostic.execution_graph = candidate->graph.fingerprint();
+    const FrozenStage* const corrector_one_stage = candidate->graph.stage(40U);
+    const FrozenStage* const corrector_two_stage = candidate->graph.stage(50U);
+    if (corrector_one_stage == nullptr || corrector_two_stage == nullptr)
+      return {StatusCode::invalid_plan, kProductBinding};
+    storage_diagnostic.corrector_one_resource_contract =
+        corrector_one_stage->resources;
+    storage_diagnostic.corrector_two_resource_contract =
+        corrector_two_stage->resources;
+#endif
+    return status;
+  });
+  if (!status) return status;
   std::uint64_t semantic = kFnvOffset;
   semantic = detail::product_mix(semantic, model.fingerprint);
   semantic = detail::product_mix(semantic, candidate->geometry.fingerprint());
@@ -4373,8 +4487,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       candidate->krylov_workspace.vector_storage_address() == 0U ||
       !auxiliary_workspace_valid ||
       candidate->mg_workspace.storage_address() == 0U) {
-    return status ? Status{StatusCode::invalid_plan, kProductBinding} : status;
+    if (status) status = {StatusCode::invalid_plan, kProductBinding};
   }
+  status = product_collective_status(communicator, status);
+  if (!status) return status;
   candidate->phases[8U] = ProductFreezePhase::validation;
   candidate->phases[9U] = ProductFreezePhase::sealed;
   candidate->summary.coupling = candidate->piso.coupling();
@@ -4444,24 +4560,36 @@ void ProductDriver::release() noexcept {
 
 Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
                              ProductDriver& out) noexcept try {
-  if (communicator == MPI_COMM_NULL || out.implementation_ != nullptr ||
-      plan.implementation_ == nullptr || !plan.summary().sealed) {
+  if (communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kProductInput};
   }
-  std::unique_ptr<ProductDriver::Impl> candidate{
-      new (std::nothrow) ProductDriver::Impl};
-  if (!candidate)
-    return {StatusCode::allocation_failure, kProductAllocation};
+  Status status = product_collective_status(
+      communicator, out.implementation_ != nullptr ||
+                            plan.implementation_ == nullptr ||
+                            !plan.summary().sealed
+                        ? Status{StatusCode::invalid_plan, kProductInput}
+                        : Status{});
+  if (!status) return status;
+  std::unique_ptr<ProductDriver::Impl> candidate;
+  status = product_local_stage(communicator, [&] {
+    candidate.reset(new ProductDriver::Impl);
+    return Status{};
+  });
+  if (!status) return status;
   if (MPI_Comm_dup(communicator, &candidate->communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kProductCollective};
   CompiledCasePlan::Impl& product = *plan.implementation_;
-  Status status = AttemptTransaction::create(
-      product.layers.field_count(), 8U, product.layers.field_count() + 8U,
-      candidate->transaction);
-  if (status)
-    status = candidate->final_flux_authority.claim(
-        product.piso.pressure_stage(), product.piso.final_flux_slot(),
-        candidate->transaction, candidate->final_flux_writer);
+  status = product_local_stage(communicator, [&] {
+    status = AttemptTransaction::create(product.layers.field_count(), 8U,
+                                        product.layers.field_count() + 8U,
+                                        candidate->transaction);
+    if (status)
+      status = candidate->final_flux_authority.claim(
+          product.piso.pressure_stage(), product.piso.final_flux_slot(),
+          candidate->transaction, candidate->final_flux_writer);
+    return status;
+  });
+  if (!status) return status;
   if (status && product.quadrature.has_value()) {
     candidate->final_force_cache.emplace();
     status = FinalForceCache::bind(
@@ -4469,201 +4597,204 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
         product.geometry.topology_revision(), 60U, 1U,
         *candidate->final_force_cache);
   }
-  if (status)
-    status = TimeControllerState::start(product.time, 0.0, candidate->time);
-  if (status) {
-    candidate->output_fields.resize(product.io.snapshot_fields().size);
-    candidate->restart_fields.resize(3U + product.fields.scalars.size());
-    candidate->restart_previous_fields.resize(
-        3U + product.fields.scalars.size());
-    candidate->restart_expected_fields.resize(
-        3U + product.fields.scalars.size());
-    candidate->restart_rate_fields.resize(
-        1U + product.fields.scalar_nonadvective_rates.size());
-    candidate->restart_previous_rate_fields.resize(
-        1U + product.fields.scalar_nonadvective_rates.size());
-    candidate->restart_expected_rate_fields.resize(
-        1U + product.fields.scalar_nonadvective_rates.size());
-    candidate->restart_expected_fields[0U] = {
-        RestartFieldRole::velocity, product.fields.velocity, 3U};
-    candidate->restart_expected_fields[1U] = {
-        RestartFieldRole::pressure_perturbation, product.fields.pressure, 1U};
-    candidate->restart_expected_fields[2U] = {
-        RestartFieldRole::enthalpy, product.fields.enthalpy, 1U};
-    for (std::size_t index = 0U; index < product.fields.scalars.size(); ++index)
-      candidate->restart_expected_fields[index + 3U] = {
-          product.fields.scalar_roles[index] == TransportedScalarRole::species
-              ? RestartFieldRole::independent_species
-              : RestartFieldRole::transported_scalar,
-          product.fields.scalars[index], 1U};
-    candidate->restart_expected_rate_fields[0U] = {
-        RestartFieldRole::enthalpy_nonadvective_rate,
-        product.fields.enthalpy_nonadvective_rate, 1U};
-    for (std::size_t index = 0U;
-         index < product.fields.scalar_nonadvective_rates.size(); ++index)
-      candidate->restart_expected_rate_fields[index + 1U] = {
-          RestartFieldRole::scalar_nonadvective_rate,
-          product.fields.scalar_nonadvective_rates[index], 1U};
-    candidate->species_values.resize(
-        product.thermodynamics.independent_species_count());
-    const std::size_t species =
-        product.thermodynamics.independent_species_count();
-    const std::size_t passive =
-        product.fields.scalars.size() - species;
-    candidate->species_accepted.resize(species);
-    candidate->species_previous.resize(species);
-    candidate->passive_accepted.resize(passive);
-    candidate->passive_previous.resize(passive);
-    candidate->species_trial.resize(species);
-    candidate->pressure_energy_candidate_species.resize(species);
-    candidate->pressure_energy_candidate_species_const.resize(species);
-    candidate->pressure_energy_candidate_species_boundary_aliases.resize(
-        species);
-    candidate->pressure_energy_candidate_species_history.resize(species);
-    std::size_t candidate_cell_count = 0U;
-    if (!detail::product_cell_count(product.patch.cells,
-                                    candidate_cell_count))
-      return {StatusCode::invalid_plan, kProductBinding};
-    candidate->pressure_energy_baseline_energy_residual.resize(
-        candidate_cell_count);
-    candidate->passive_trial.resize(passive);
-    candidate->species_low.resize(species);
-    candidate->passive_low.resize(passive);
-    candidate->species_ghosts.resize(species);
-    candidate->passive_ghosts.resize(passive);
-    candidate->trial_species_ghosts.resize(species);
-    candidate->trial_passive_ghosts.resize(passive);
-    candidate->species_history.resize(species);
-    candidate->passive_history.resize(passive);
-    candidate->species_rate_history.resize(species);
-    candidate->passive_rate_history.resize(passive);
-    candidate->species_rate_output.resize(species);
-    candidate->passive_rate_output.resize(passive);
-    candidate->boundary_scalars.resize(
-        product.boundary.resolved_scalar_count());
-    candidate->boundary_vectors.resize(
-        product.boundary.resolved_vector_count());
-    candidate->boundary_normal_gradients.resize(
-        product.boundary.resolved_normal_gradient_count());
-    candidate->boundary_thermo_authority_fields.resize(species + 2U);
-    // Reserve the current terminal-rate payload plus the coupled scalar views
-    // required by the same-target pressure-energy correction. The coupled
-    // halo is bound separately; this vector is the allocation-free hot-path
-    // staging capacity shared by both routes.
-    candidate->halo_views.resize(16U + product.fields.scalars.size());
-    candidate->final_dependencies.resize(6U + species);
-  }
-  FieldView pressure_diagonal;
-  FieldView pressure_rhs;
-  if (status)
-    status = product.layers.runtime_view(
-        FieldLifetime::persistent_workspace,
-        product.fields.pressure_diagonal, pressure_diagonal);
-  if (status)
-    status = product.layers.runtime_view(
-        FieldLifetime::persistent_workspace, product.fields.pressure_rhs,
-        pressure_rhs);
-  const std::array<FieldId, 26U> pressure_energy_workspace_fields{{
-      product.fields.enthalpy_compressibility,
-      product.fields.pressure_energy_c_h,
-      product.fields.pressure_energy_c_h_row_scale,
-      product.fields.pressure_energy_e_p,
-      product.fields.pressure_energy_e_h,
-      product.fields.pressure_energy_continuity_residual,
-      product.fields.pressure_energy_energy_residual,
-      product.fields.enthalpy_correction,
-      product.fields.pressure_energy_delta_temperature,
-      product.fields.pressure_energy_candidate_pressure,
-      product.fields.pressure_energy_candidate_pressure_correction,
-      product.fields.pressure_energy_candidate_enthalpy,
-      product.fields.pressure_energy_candidate_density,
-      product.fields.pressure_energy_candidate_temperature,
-      product.fields.pressure_energy_candidate_velocity,
-      product.fields.pressure_energy_candidate_molecular_viscosity,
-      product.fields.pressure_energy_candidate_effective_viscosity,
-      product.fields.pressure_energy_candidate_velocity_gradient,
-      product.fields.pressure_energy_candidate_compressibility,
-      product.fields.pressure_energy_candidate_enthalpy_compressibility,
-      product.fields.pressure_energy_candidate_thermal_conductivity,
-      product.fields.pressure_energy_candidate_heat_capacity,
-      product.fields.pressure_energy_candidate_enthalpy_diffusivity,
-      product.fields.schur_continuity_response,
-      product.fields.schur_eliminated_enthalpy,
-      product.fields.schur_energy_response,
-  }};
-  std::array<FieldView, pressure_energy_workspace_fields.size()>
-      pressure_energy_workspace_views{};
-  for (std::size_t index = 0U;
-       index < pressure_energy_workspace_fields.size() && status; ++index) {
-    status = product.layers.runtime_view(
-        FieldLifetime::persistent_workspace,
-        pressure_energy_workspace_fields[index],
-        pressure_energy_workspace_views[index]);
-  }
-  if (status)
-    status = product.coupler.bind_pressure_operator(
-        {candidate->communicator, &product.krylov_halo, 140U,
-         product.fields.krylov_vectors, 1U},
-        {pressure_diagonal, pressure_rhs}, candidate->pressure_operator);
-  if (status && product.ibm_boundary.has_value() &&
-      product.topology.has_value()) {
-    FaceFieldView x_pressure;
-    FaceFieldView y_pressure;
-    FaceFieldView z_pressure;
-    status = make_pressure_face_views(product.pressure_face_storage,
-                                      product.patch.cells, x_pressure,
-                                      y_pressure, z_pressure);
+  if (!status) return status;
+  status = product_local_stage(communicator, [&]() -> Status {
+    if (status)
+      status = TimeControllerState::start(product.time, 0.0, candidate->time);
     if (status) {
-      candidate->ibm_pressure_operator.emplace();
-      status = IbmPressureOperator::bind_lifecycle(
-          candidate->pressure_operator, product.patch.cells,
-          *product.topology, *product.ibm_boundary, as_const(x_pressure),
-          as_const(y_pressure), as_const(z_pressure),
-          product.geometry.topology_revision(), nullptr, 0U,
-          *candidate->ibm_pressure_operator);
+      candidate->output_fields.resize(product.io.snapshot_fields().size);
+      candidate->restart_fields.resize(3U + product.fields.scalars.size());
+      candidate->restart_previous_fields.resize(3U +
+                                                product.fields.scalars.size());
+      candidate->restart_expected_fields.resize(3U +
+                                                product.fields.scalars.size());
+      candidate->restart_rate_fields.resize(
+          1U + product.fields.scalar_nonadvective_rates.size());
+      candidate->restart_previous_rate_fields.resize(
+          1U + product.fields.scalar_nonadvective_rates.size());
+      candidate->restart_expected_rate_fields.resize(
+          1U + product.fields.scalar_nonadvective_rates.size());
+      candidate->restart_expected_fields[0U] = {RestartFieldRole::velocity,
+                                                product.fields.velocity, 3U};
+      candidate->restart_expected_fields[1U] = {
+          RestartFieldRole::pressure_perturbation, product.fields.pressure, 1U};
+      candidate->restart_expected_fields[2U] = {RestartFieldRole::enthalpy,
+                                                product.fields.enthalpy, 1U};
+      for (std::size_t index = 0U; index < product.fields.scalars.size();
+           ++index)
+        candidate->restart_expected_fields[index + 3U] = {
+            product.fields.scalar_roles[index] == TransportedScalarRole::species
+                ? RestartFieldRole::independent_species
+                : RestartFieldRole::transported_scalar,
+            product.fields.scalars[index], 1U};
+      candidate->restart_expected_rate_fields[0U] = {
+          RestartFieldRole::enthalpy_nonadvective_rate,
+          product.fields.enthalpy_nonadvective_rate, 1U};
+      for (std::size_t index = 0U;
+           index < product.fields.scalar_nonadvective_rates.size(); ++index)
+        candidate->restart_expected_rate_fields[index + 1U] = {
+            RestartFieldRole::scalar_nonadvective_rate,
+            product.fields.scalar_nonadvective_rates[index], 1U};
+      candidate->species_values.resize(
+          product.thermodynamics.independent_species_count());
+      const std::size_t species =
+          product.thermodynamics.independent_species_count();
+      const std::size_t passive = product.fields.scalars.size() - species;
+      candidate->species_accepted.resize(species);
+      candidate->species_previous.resize(species);
+      candidate->passive_accepted.resize(passive);
+      candidate->passive_previous.resize(passive);
+      candidate->species_trial.resize(species);
+      candidate->pressure_energy_candidate_species.resize(species);
+      candidate->pressure_energy_candidate_species_const.resize(species);
+      candidate->pressure_energy_candidate_species_boundary_aliases.resize(
+          species);
+      candidate->pressure_energy_candidate_species_history.resize(species);
+      std::size_t candidate_cell_count = 0U;
+      if (!detail::product_cell_count(product.patch.cells,
+                                      candidate_cell_count))
+        return {StatusCode::invalid_plan, kProductBinding};
+      candidate->pressure_energy_baseline_energy_residual.resize(
+          candidate_cell_count);
+      candidate->passive_trial.resize(passive);
+      candidate->species_low.resize(species);
+      candidate->passive_low.resize(passive);
+      candidate->species_ghosts.resize(species);
+      candidate->passive_ghosts.resize(passive);
+      candidate->trial_species_ghosts.resize(species);
+      candidate->trial_passive_ghosts.resize(passive);
+      candidate->species_history.resize(species);
+      candidate->passive_history.resize(passive);
+      candidate->species_rate_history.resize(species);
+      candidate->passive_rate_history.resize(passive);
+      candidate->species_rate_output.resize(species);
+      candidate->passive_rate_output.resize(passive);
+      candidate->boundary_scalars.resize(
+          product.boundary.resolved_scalar_count());
+      candidate->boundary_vectors.resize(
+          product.boundary.resolved_vector_count());
+      candidate->boundary_normal_gradients.resize(
+          product.boundary.resolved_normal_gradient_count());
+      candidate->boundary_thermo_authority_fields.resize(species + 2U);
+      // Reserve the current terminal-rate payload plus the coupled scalar views
+      // required by the same-target pressure-energy correction. The coupled
+      // halo is bound separately; this vector is the allocation-free hot-path
+      // staging capacity shared by both routes.
+      candidate->halo_views.resize(16U + product.fields.scalars.size());
+      candidate->final_dependencies.resize(6U + species);
     }
-  }
-  FieldView enthalpy_krylov_vectors;
-  FieldView enthalpy_krylov_scalars;
-  if (status)
-    status = product.layers.runtime_view(
-        FieldLifetime::persistent_workspace, product.fields.krylov_vectors,
-        enthalpy_krylov_vectors);
-  if (status)
-    status = product.layers.runtime_view(
-        FieldLifetime::persistent_workspace, product.fields.krylov_scalars,
-        enthalpy_krylov_scalars);
-  if (status) {
-    const MgDomainActivityView activity =
-        product.topology.has_value()
-            ? MgDomainActivityView{
-                  {product.pressure_mg_cell_activity.data(),
-                   product.pressure_mg_cell_activity.size()},
-                  {product.pressure_mg_x_activity.data(),
-                   product.pressure_mg_x_activity.size()},
-                  {product.pressure_mg_y_activity.data(),
-                   product.pressure_mg_y_activity.size()},
-                  {product.pressure_mg_z_activity.data(),
-                   product.pressure_mg_z_activity.size()},
-                  product.pressure_mg_activity_fingerprint,
-                  product.pressure_mg_activity_collective}
-            : MgDomainActivityView{};
-    const ConservativeEnthalpyEndpointServices endpoint_services{
-        candidate->communicator,
-        &product.equations.kernels(),
-        &product.boundary,
-        product.patch,
-        activity,
-        &product.krylov_halo,
-        &product.reductions,
-        15U,
-        product.auxiliary_krylov_requirements,
-        enthalpy_krylov_vectors,
-        enthalpy_krylov_scalars,
-        product.fields.enthalpy};
-    status = ConservativeEnthalpyEndpoint::bind(
-        endpoint_services, candidate->enthalpy_endpoint);
-  }
+    FieldView pressure_diagonal;
+    FieldView pressure_rhs;
+    if (status)
+      status = product.layers.runtime_view(FieldLifetime::persistent_workspace,
+                                           product.fields.pressure_diagonal,
+                                           pressure_diagonal);
+    if (status)
+      status = product.layers.runtime_view(FieldLifetime::persistent_workspace,
+                                           product.fields.pressure_rhs,
+                                           pressure_rhs);
+    const std::array<FieldId, 26U> pressure_energy_workspace_fields{{
+        product.fields.enthalpy_compressibility,
+        product.fields.pressure_energy_c_h,
+        product.fields.pressure_energy_c_h_row_scale,
+        product.fields.pressure_energy_e_p,
+        product.fields.pressure_energy_e_h,
+        product.fields.pressure_energy_continuity_residual,
+        product.fields.pressure_energy_energy_residual,
+        product.fields.enthalpy_correction,
+        product.fields.pressure_energy_delta_temperature,
+        product.fields.pressure_energy_candidate_pressure,
+        product.fields.pressure_energy_candidate_pressure_correction,
+        product.fields.pressure_energy_candidate_enthalpy,
+        product.fields.pressure_energy_candidate_density,
+        product.fields.pressure_energy_candidate_temperature,
+        product.fields.pressure_energy_candidate_velocity,
+        product.fields.pressure_energy_candidate_molecular_viscosity,
+        product.fields.pressure_energy_candidate_effective_viscosity,
+        product.fields.pressure_energy_candidate_velocity_gradient,
+        product.fields.pressure_energy_candidate_compressibility,
+        product.fields.pressure_energy_candidate_enthalpy_compressibility,
+        product.fields.pressure_energy_candidate_thermal_conductivity,
+        product.fields.pressure_energy_candidate_heat_capacity,
+        product.fields.pressure_energy_candidate_enthalpy_diffusivity,
+        product.fields.schur_continuity_response,
+        product.fields.schur_eliminated_enthalpy,
+        product.fields.schur_energy_response,
+    }};
+    std::array<FieldView, pressure_energy_workspace_fields.size()>
+        pressure_energy_workspace_views{};
+    for (std::size_t index = 0U;
+         index < pressure_energy_workspace_fields.size() && status; ++index) {
+      status =
+          product.layers.runtime_view(FieldLifetime::persistent_workspace,
+                                      pressure_energy_workspace_fields[index],
+                                      pressure_energy_workspace_views[index]);
+    }
+    if (status)
+      status = product.coupler.bind_pressure_operator(
+          {candidate->communicator, &product.krylov_halo, 140U,
+           product.fields.krylov_vectors, 1U},
+          {pressure_diagonal, pressure_rhs}, candidate->pressure_operator);
+    if (status && product.ibm_boundary.has_value() &&
+        product.topology.has_value()) {
+      FaceFieldView x_pressure;
+      FaceFieldView y_pressure;
+      FaceFieldView z_pressure;
+      status = make_pressure_face_views(product.pressure_face_storage,
+                                        product.patch.cells, x_pressure,
+                                        y_pressure, z_pressure);
+      if (status) {
+        candidate->ibm_pressure_operator.emplace();
+        status = IbmPressureOperator::bind_lifecycle(
+            candidate->pressure_operator, product.patch.cells,
+            *product.topology, *product.ibm_boundary, as_const(x_pressure),
+            as_const(y_pressure), as_const(z_pressure),
+            product.geometry.topology_revision(), nullptr, 0U,
+            *candidate->ibm_pressure_operator);
+      }
+    }
+    FieldView enthalpy_krylov_vectors;
+    FieldView enthalpy_krylov_scalars;
+    if (status)
+      status = product.layers.runtime_view(FieldLifetime::persistent_workspace,
+                                           product.fields.krylov_vectors,
+                                           enthalpy_krylov_vectors);
+    if (status)
+      status = product.layers.runtime_view(FieldLifetime::persistent_workspace,
+                                           product.fields.krylov_scalars,
+                                           enthalpy_krylov_scalars);
+    if (status) {
+      const MgDomainActivityView activity =
+          product.topology.has_value()
+              ? MgDomainActivityView{{product.pressure_mg_cell_activity.data(),
+                                      product.pressure_mg_cell_activity.size()},
+                                     {product.pressure_mg_x_activity.data(),
+                                      product.pressure_mg_x_activity.size()},
+                                     {product.pressure_mg_y_activity.data(),
+                                      product.pressure_mg_y_activity.size()},
+                                     {product.pressure_mg_z_activity.data(),
+                                      product.pressure_mg_z_activity.size()},
+                                     product.pressure_mg_activity_fingerprint,
+                                     product.pressure_mg_activity_collective}
+              : MgDomainActivityView{};
+      const ConservativeEnthalpyEndpointServices endpoint_services{
+          candidate->communicator,
+          &product.equations.kernels(),
+          &product.boundary,
+          product.patch,
+          activity,
+          &product.krylov_halo,
+          &product.reductions,
+          15U,
+          product.auxiliary_krylov_requirements,
+          enthalpy_krylov_vectors,
+          enthalpy_krylov_scalars,
+          product.fields.enthalpy};
+      status = ConservativeEnthalpyEndpoint::bind(endpoint_services,
+                                                  candidate->enthalpy_endpoint);
+    }
+    return status;
+  });
   if (!status) return status;
   candidate->plan = std::move(plan);
   out.implementation_ = candidate.release();
@@ -12522,6 +12653,9 @@ Status ProductDriver::Impl::execute_attempt(
           bool stationary_only,
           PressureEnergyCandidateLoopResult& loop) {
         loop = {};
+        pressure_energy_globalization.last_loop_work = {};
+        pressure_energy_globalization.last_extrapolation = {};
+        pressure_energy_globalization.candidate_evaluation_status = {};
         const DriverResourceReport candidate_resource_before =
             resource_snapshot();
         const std::size_t expected_energy_values =
@@ -12571,13 +12705,43 @@ Status ProductDriver::Impl::execute_attempt(
           return Status{candidate_status.code,
                         kProductPressureEnergy + 101U};
         loop.authority = frozen;
+        const auto tracked_evaluate =
+            [&](double alpha, std::size_t ordinal,
+                const PisoFrozenMomentumExactCandidateCertificate*
+                    exact_baseline,
+                PressureEnergyCandidateArtifacts& artifacts) {
+              auto& total = pressure_energy_globalization.work;
+              auto& current = pressure_energy_globalization.last_loop_work;
+              for (auto* work : {&total, &current}) {
+                if (alpha == 0.0)
+                  ++work->baseline_evaluations;
+                else if (alpha > 1.0)
+                  ++work->extrapolation_evaluations;
+                else
+                  ++work->ladder_evaluations;
+              }
+              const auto begin = std::chrono::steady_clock::now();
+              const Status result = evaluate_pressure_energy_candidate(
+                  corrector, frozen, pressure, exact_baseline, loop.direction,
+                  alpha, ordinal, baseline_flux, artifacts);
+              const auto elapsed = static_cast<std::uint64_t>(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - begin)
+                      .count());
+              for (auto* work : {&total, &current}) {
+                if (!result) ++work->incomplete_evaluations;
+                auto& accumulated = work->local_evaluation_nanoseconds;
+                accumulated = elapsed > UINT64_MAX - accumulated
+                                  ? UINT64_MAX
+                                  : accumulated + elapsed;
+              }
+              return result;
+            };
         constexpr std::size_t baseline_ordinal =
             kPressureEnergyGlobalizationCandidateCount;
         PressureEnergyCandidateArtifacts baseline_artifacts;
-        candidate_status = evaluate_pressure_energy_candidate(
-            corrector, frozen, pressure, nullptr, loop.direction, 0.0,
-            baseline_ordinal,
-            baseline_flux, baseline_artifacts);
+        candidate_status = tracked_evaluate(0.0, baseline_ordinal, nullptr,
+                                            baseline_artifacts);
         if (!candidate_status) return candidate_status;
         loop.exact_baseline = baseline_artifacts.exact_certificate;
         const bool exact_baseline_binding =
@@ -12675,10 +12839,14 @@ Status ProductDriver::Impl::execute_attempt(
               };
           if (extrapolated_alpha > 1.0) {
             PressureEnergyCandidateArtifacts extrapolated;
-            candidate_status = evaluate_pressure_energy_candidate(
-                corrector, frozen, pressure, &loop.exact_baseline,
-                loop.direction, extrapolated_alpha, 0U, baseline_flux,
-                extrapolated);
+            auto& recorded = pressure_energy_globalization.last_extrapolation;
+            recorded.attempted = true;
+            recorded.alpha = extrapolated_alpha;
+            candidate_status = tracked_evaluate(
+                extrapolated_alpha, 0U, &loop.exact_baseline, extrapolated);
+            recorded.evaluation_status = candidate_status;
+            recorded.complete = static_cast<bool>(candidate_status);
+            recorded.sample = extrapolated.sample;
             const bool complete_sample =
                 static_cast<bool>(candidate_status);
             if (!candidate_status &&
@@ -12699,6 +12867,14 @@ Status ProductDriver::Impl::execute_attempt(
               loop.evaluated_candidates = 1U;
               selection_status = select_pressure_energy_extrapolation(
                   baseline, candidates[0U], loop.selection);
+              recorded.selection_attempted = true;
+              recorded.selection_status = selection_status;
+              recorded.selected = static_cast<bool>(selection_status);
+              if (selection_status.code == StatusCode::rejected_step) {
+                ++pressure_energy_globalization.work.rejected_extrapolations;
+                ++pressure_energy_globalization.last_loop_work
+                      .rejected_extrapolations;
+              }
               if (selection_status) {
                 selection_valid = true;
                 loop.replay = extrapolated;
@@ -12716,9 +12892,10 @@ Status ProductDriver::Impl::execute_attempt(
               const double alpha =
                   std::ldexp(1.0, -static_cast<int>(index));
               PressureEnergyCandidateArtifacts artifacts;
-              candidate_status = evaluate_pressure_energy_candidate(
-                  corrector, frozen, pressure, &loop.exact_baseline,
-                  loop.direction, alpha, index, baseline_flux, artifacts);
+              candidate_status = tracked_evaluate(
+                  alpha, index, &loop.exact_baseline, artifacts);
+              pressure_energy_globalization.candidate_evaluation_status[index] =
+                  candidate_status;
               candidates[index] = artifacts.sample;
               const bool complete_sample =
                   static_cast<bool>(candidate_status);
@@ -12953,6 +13130,9 @@ Status ProductDriver::Impl::execute_attempt(
                 loop.maximum_enthalpy_direction;
             iteration.baseline = baseline;
             iteration.selected = loop.replay.sample;
+            iteration.work = pressure_energy_globalization.last_loop_work;
+            iteration.extrapolation =
+                pressure_energy_globalization.last_extrapolation;
             ++pressure_energy_globalization.trajectory_count;
           }
         }
@@ -14403,9 +14583,13 @@ Status ProductDriver::constrain_convective_time_limit(
 
 Status ProductDriver::advance(LocalTimeLimits limits,
                               DriverStepReport& report) noexcept {
+  report = {};
   if (implementation_ == nullptr || !implementation_->initialized ||
       implementation_->time.has_active_proposal()) {
-    return {StatusCode::invalid_plan, kProductInput};
+    const Status status{StatusCode::invalid_plan, kProductInput};
+    report.failure = status;
+    report.completion.outcome = report.completion.stop_reason = status;
+    return status;
   }
   DriverStepReport candidate;
   candidate.accepted_step = implementation_->time.accepted_step();
@@ -14421,6 +14605,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     // No numerical attempt took place. Publish the rejected proposal outcome
     // instead of leaving a reused report describing the previous success.
     candidate.failure = status;
+    candidate.completion.outcome = candidate.completion.stop_reason = status;
     candidate.resources = resource_difference(
         implementation_->resource_snapshot(), resources_before);
     report = candidate;
@@ -14460,12 +14645,20 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     if (!attempt_status) {
       candidate.failed_stage = implementation_->attempt_stage;
       candidate.failure = attempt_status;
+      const StepAttemptFailure failure{attempt_status,
+                                       implementation_->attempt_stage,
+                                       candidate.attempts, proposal.dt};
+      if (candidate.completion.first_failure.attempt == 0U)
+        candidate.completion.first_failure = failure;
+      candidate.completion.last_failure = failure;
       if (!candidate.numerical_failure.valid &&
           implementation_->numerical_failure.valid) {
         candidate.numerical_failure = implementation_->numerical_failure;
       }
     }
     if (!prepared_attempt.valid()) {
+      candidate.completion.outcome = candidate.completion.stop_reason =
+          attempt_status;
       candidate.resources = resource_difference(
           implementation_->resource_snapshot(), resources_before);
       candidate.resources.predictor_blocking_collectives =
@@ -14489,11 +14682,13 @@ Status ProductDriver::advance(LocalTimeLimits limits,
           implementation_->resource_snapshot(), resources_before);
       candidate.resources.predictor_blocking_collectives =
           predictor_blocking_collectives;
+      candidate.completion.stop_reason = time_prepare;
+      candidate.completion.outcome =
+          time_prepare.code == StatusCode::rejected_step && !last_attempt_status
+              ? last_attempt_status
+              : time_prepare;
       report = candidate;
-      return time_prepare.code == StatusCode::rejected_step &&
-                     !last_attempt_status
-                 ? last_attempt_status
-                 : time_prepare;
+      return candidate.completion.outcome;
     }
 
     if (prepared_time.decision() == TimeFinishDecision::accept) {
@@ -14504,7 +14699,10 @@ Status ProductDriver::advance(LocalTimeLimits limits,
         implementation_->transaction.commit_reject(prepared_attempt);
         implementation_->finalize_pending_force_cache();
         implementation_->discard_pending_attempt_side_state();
-        return {StatusCode::invalid_plan, kProductBinding};
+        candidate.completion.outcome = candidate.completion.stop_reason =
+            Status{StatusCode::invalid_plan, kProductBinding};
+        report = candidate;
+        return candidate.completion.outcome;
       }
       implementation_->transaction.commit_accept(prepared_attempt);
       implementation_->time.commit_accept(prepared_time);
@@ -14536,19 +14734,25 @@ Status ProductDriver::advance(LocalTimeLimits limits,
           implementation_->resource_snapshot(), resources_before);
       candidate.resources.predictor_blocking_collectives =
           predictor_blocking_collectives;
+      candidate.completion.stop_reason = finish;
+      candidate.completion.outcome =
+          finish.code == StatusCode::rejected_step && !last_attempt_status
+              ? last_attempt_status
+              : finish;
       report = candidate;
-      return finish.code == StatusCode::rejected_step &&
-                     !last_attempt_status
-                 ? last_attempt_status
-                 : finish;
+      return candidate.completion.outcome;
     }
 
     const bool consistent_retry =
         !attempt_status && attempt_decision == AttemptFinishDecision::reject &&
         prepared_time.decision() == TimeFinishDecision::retry;
     assert(consistent_retry);
-    if (!consistent_retry)
-      return {StatusCode::invalid_plan, kProductBinding};
+    if (!consistent_retry) {
+      candidate.completion.outcome = candidate.completion.stop_reason =
+          Status{StatusCode::invalid_plan, kProductBinding};
+      report = candidate;
+      return candidate.completion.outcome;
+    }
     implementation_->time.commit_retry(prepared_time, next);
     if (candidate.numerical_failure.valid) {
       candidate.numerical_failure.retry_proposed = true;
@@ -14558,6 +14762,8 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     }
     proposal = next;
   }
+  candidate.completion.outcome = candidate.completion.stop_reason = status;
+  report = candidate;
   return status;
 }
 

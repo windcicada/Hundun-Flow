@@ -1,0 +1,1010 @@
+{
+  "schema": "HUNDUN_REVIEW_LOG_MANIFEST_V1",
+  "artifacts": [
+    {
+      "path": "logs/hundun-review-69d8eee-build.log.gz",
+      "raw_bytes": 8854,
+      "raw_sha256": "18eb2cb59493acb64ea851028f70ec76e4c952dcc246ca5138b7050a4bf5fe56",
+      "stored_bytes": 1400,
+      "stored_sha256": "2fdcf7029b332e93a04043f5c666f49d37062536d8b8489eb744c68f3c18c03c",
+      "original_path": "/tmp/hundun-review-69d8eee-build.log"
+    },
+    {
+      "path": "logs/hundun-review-69d8eee-ctest-console.log.gz",
+      "raw_bytes": 33794,
+      "raw_sha256": "122824c9804ca01976c7b67ff3f7d812bbf77edaa7b4d0639f06c11f57e363e1",
+      "stored_bytes": 4928,
+      "stored_sha256": "b75c71711a036c8758da1ab649a425dc702bf79ef8d1346cc4f11da9c002abe0",
+      "original_path": "/tmp/hundun-review-69d8eee-ctest-console.log"
+    },
+    {
+      "path": "logs/hundun-review-69d8eee-ctest.log.gz",
+      "raw_bytes": 33842,
+      "raw_sha256": "8f39f4322e4970ca57a05b3b8aa16da94a4e2fe81699e0b0c26efd7646a8b67a",
+      "stored_bytes": 4979,
+      "stored_sha256": "af6a5040e7b165d668fd46fd5d2fea9799be06e5b9715653a1f10c992c86ef07",
+      "original_path": "/tmp/hundun-review-69d8eee-ctest.log"
+    },
+    {
+      "path": "logs/hundun-review-app-report-green.log.gz",
+      "raw_bytes": 3293,
+      "raw_sha256": "e407f04d065cfae6fcdf6b81fa5f7a07e48db0f5b3447674610cf79637ab129f",
+      "stored_bytes": 710,
+      "stored_sha256": "32ba9e010d79fd6e64d0c878c879029b59fbb9503421d1352ba32538d50d4a00",
+      "original_path": "/tmp/hundun-review-app-report-green.log"
+    },
+    {
+      "path": "logs/hundun-review-app-report-red-build.log.gz",
+      "raw_bytes": 253,
+      "raw_sha256": "83e3ba72b62c08755c4c607e46f8699c10c0cc60b05b00751a6724aa5840f62a",
+      "stored_bytes": 171,
+      "stored_sha256": "1af20bf8a8bd59664507a4e5c50cf68fc78665a6e0c2e612e71c6da0d681a4c3",
+      "original_path": "/tmp/hundun-review-app-report-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-app-report-red.log.gz",
+      "raw_bytes": 2343,
+      "raw_sha256": "73a0c0209c61e339275a91f4f247c3fed86295f52536dcdd5f8d0a257a274160",
+      "stored_bytes": 847,
+      "stored_sha256": "22ce511b41532c825fff2bb4115e0af1749156a1238dbddf1e9b943fcef7c286",
+      "original_path": "/tmp/hundun-review-app-report-red.log"
+    },
+    {
+      "path": "logs/hundun-review-batch1-report-registry-build.log.gz",
+      "raw_bytes": 7452,
+      "raw_sha256": "62f34afb616652a80b88a95d38c552ac5d04c348e98d153bbb523a792d6fe706",
+      "stored_bytes": 1045,
+      "stored_sha256": "2562e8f0bf9e2a2b0a96b975483f7b04d7545c12a5d53991b42d6ad3851d4f6e",
+      "original_path": "/tmp/hundun-review-batch1-report-registry-build.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation-build.log.gz",
+      "raw_bytes": 286,
+      "raw_sha256": "b10fd3e3207650d83621f3ed4199c953fd5596635f21edd49dd218f3d2512d2b",
+      "stored_bytes": 179,
+      "stored_sha256": "ec20453fe01c34aed61ba2cdf985bb02f9be4684edb041d025798a2a60169cd7",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation-build.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation-build2.log.gz",
+      "raw_bytes": 286,
+      "raw_sha256": "b10fd3e3207650d83621f3ed4199c953fd5596635f21edd49dd218f3d2512d2b",
+      "stored_bytes": 179,
+      "stored_sha256": "ec20453fe01c34aed61ba2cdf985bb02f9be4684edb041d025798a2a60169cd7",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation-build2.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation-console.log.gz",
+      "raw_bytes": 2439,
+      "raw_sha256": "fd1aeee7f819b8484bfdef8c3c813a46415bebd84d5987794987b22e19ae900c",
+      "stored_bytes": 1027,
+      "stored_sha256": "af2e2ed18e4b7d4657e00adac30f486d780687ed062b50f22d6f17b3be3fb58c",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation-console.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation.log.gz",
+      "raw_bytes": 2634,
+      "raw_sha256": "e03a540287277519fa472708c934a72c6ec6aeacb238d2dcbf2a82f9f3aedff4",
+      "stored_bytes": 1086,
+      "stored_sha256": "98e24813b7d3d41b78b450afce84ec16e5e7e8e65804528fbd125355203ceb72",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation2-console.log.gz",
+      "raw_bytes": 2439,
+      "raw_sha256": "c1b645d160354c0dcd1cb3ad1b039f6c261baf7d87e520e8e0d23deb50b722d1",
+      "stored_bytes": 1030,
+      "stored_sha256": "cb980f060c7945a62acc843bae340e06cc8b7b309c87b351c11cd745c689b614",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation2-console.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-extrapolation2.log.gz",
+      "raw_bytes": 2634,
+      "raw_sha256": "a868b40364c6ea901a924d50e59ab40e80021a40f8ea0a97d7026a9a61583149",
+      "stored_bytes": 1090,
+      "stored_sha256": "ff22a9840287d3e06d30136b384aa26de3965a95582c2676209c4d7c319a306a",
+      "original_path": "/tmp/hundun-review-candidate-extrapolation2.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-and-memory-green-console.log.gz",
+      "raw_bytes": 44399,
+      "raw_sha256": "a9bad78120049699dc122860659e3258d3da1138701302508d709d70011835da",
+      "stored_bytes": 4208,
+      "stored_sha256": "5ee104726d31e4255e8d1746a53c325f65dde19bb6592cb5ac9742d551502f9d",
+      "original_path": "/tmp/hundun-review-candidate-work-and-memory-green-console.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-and-memory-green.log.gz",
+      "raw_bytes": 45330,
+      "raw_sha256": "89689dca4bd2c22229fe956ed592150d9f99a5b61c0f1a51710eb2a3f1ae09f2",
+      "stored_bytes": 4300,
+      "stored_sha256": "f1ce057747f057ec6bdae8d4020d6cbed13de12b750d75e92d821df1bae4e7b9",
+      "original_path": "/tmp/hundun-review-candidate-work-and-memory-green.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-green-build.log.gz",
+      "raw_bytes": 781,
+      "raw_sha256": "8f3a666222a66c53268b6b8a8da55687588434f55caf7b472a10d491ce5d5896",
+      "stored_bytes": 382,
+      "stored_sha256": "2324be90b18d3a1d35dfb0318221da3cbec93335bca2d6df20c035763694ddc2",
+      "original_path": "/tmp/hundun-review-candidate-work-green-build.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-red-build.log.gz",
+      "raw_bytes": 803,
+      "raw_sha256": "e5b2a4616b1c59170e8b4bd5edf966757a7c564170062a59dbb3ef2869203102",
+      "stored_bytes": 366,
+      "stored_sha256": "efca1546243d84e9c79540b52f2cf06ef84d142e6a235d9c7b819b65bb65905c",
+      "original_path": "/tmp/hundun-review-candidate-work-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-red-console.log.gz",
+      "raw_bytes": 2082,
+      "raw_sha256": "932f74a2c43eb5728e45a81d84971a2bb3ba9f3282e544dff93fa8ffd34076cb",
+      "stored_bytes": 987,
+      "stored_sha256": "bae09f36599937eff598fd5707589b91ba8d5dcfb2902938d511c461b30b38d0",
+      "original_path": "/tmp/hundun-review-candidate-work-red-console.log"
+    },
+    {
+      "path": "logs/hundun-review-candidate-work-red.log.gz",
+      "raw_bytes": 2130,
+      "raw_sha256": "afd20ec186bdc1aa64c56394a3b1997a9ae41a5ae05aeb0d7c291539e3366664",
+      "stored_bytes": 1028,
+      "stored_sha256": "ec619a5dfed15e5c079fbc9556f0a666758b74b8b619a884571dfa8d3c085eba",
+      "original_path": "/tmp/hundun-review-candidate-work-red.log"
+    },
+    {
+      "path": "logs/hundun-review-codegraphf-sync.log.gz",
+      "raw_bytes": 45976,
+      "raw_sha256": "f802f180c3489fa8e3a8f0c4128280b2db9dad3d7c561f6e9ea2cf1a3fb240be",
+      "stored_bytes": 1784,
+      "stored_sha256": "6dcec19d950bb81fba1b971bfc0215dce2c3faedc8c037b55f7468395d6855a6",
+      "original_path": "/tmp/hundun-review-codegraphf-sync.log"
+    },
+    {
+      "path": "logs/hundun-review-command-statuses.log.gz",
+      "raw_bytes": 553,
+      "raw_sha256": "5026befa5c26c78e50cada2a666e299abe7051e1cf066f505054209f39fc1e0a",
+      "stored_bytes": 273,
+      "stored_sha256": "495458ec56ce380b43b0ddcf70437f52a8f64fa1a47658695aabcc1219265d26",
+      "original_path": "/tmp/hundun-review-command-statuses.log"
+    },
+    {
+      "path": "logs/hundun-review-compile-app-green-build.log.gz",
+      "raw_bytes": 1221,
+      "raw_sha256": "3fc770ecd637d9621402cf0e6acf49ea6784c70331175b9e046810ac77fa247f",
+      "stored_bytes": 417,
+      "stored_sha256": "76eeb60c3a18e71cdd960f42d96ba9d7a633e5691939d1105c59fffff017ff19",
+      "original_path": "/tmp/hundun-review-compile-app-green-build.log"
+    },
+    {
+      "path": "logs/hundun-review-donor-allocation-build.log.gz",
+      "raw_bytes": 648,
+      "raw_sha256": "1b9acd58c22dc4326a9c79cb9ac98e6e56f3b47a22d3062e5fea3e40f4c5eb90",
+      "stored_bytes": 351,
+      "stored_sha256": "7247084cc7996d412e43da5c15c03aa57c2b9a044be36a432a4f58b906f15206",
+      "original_path": "/tmp/hundun-review-donor-allocation-build.log"
+    },
+    {
+      "path": "logs/hundun-review-driver-completion-green.log.gz",
+      "raw_bytes": 6512,
+      "raw_sha256": "a9e57f302847560b611df81f9fec6b9162410d12c186983459b11795d6e6fb26",
+      "stored_bytes": 1313,
+      "stored_sha256": "cbf9772696012e990891c91615d0384996388f997b22ab8d6de587c269acd13e",
+      "original_path": "/tmp/hundun-review-driver-completion-green.log"
+    },
+    {
+      "path": "logs/hundun-review-driver-report-red-build.log.gz",
+      "raw_bytes": 268,
+      "raw_sha256": "95111a58d4a4252bb6cba398bb7e44c7571e824dd5e2e427e2874c91efe3b855",
+      "stored_bytes": 175,
+      "stored_sha256": "fae22bac01c58873f3442e8a7b7f1b78c6361a6b87d162b8b372aa2581439290",
+      "original_path": "/tmp/hundun-review-driver-report-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-driver-report-red.log.gz",
+      "raw_bytes": 2430,
+      "raw_sha256": "e14e5b828b437805777d0a9e43d9b4f608c23b827d6214977318a56b43498778",
+      "stored_bytes": 866,
+      "stored_sha256": "549b146bf7369b88740f38d64baa353b9860f00f141c59eb6ffa42b3a3c3d31a",
+      "original_path": "/tmp/hundun-review-driver-report-red.log"
+    },
+    {
+      "path": "logs/hundun-review-evidence-pack-self-test.log.gz",
+      "raw_bytes": 36,
+      "raw_sha256": "9359b820b67ec4f0f57c4ace60f3f1090ee789186ef9aac5f7aea2bed1f6297b",
+      "stored_bytes": 54,
+      "stored_sha256": "948a41f4a38be903933ac59f3b3c0ff66d1b7c2fe00f4c991a81d89d382c1a2f",
+      "original_path": "/tmp/hundun-review-evidence-pack-self-test.log"
+    },
+    {
+      "path": "logs/hundun-review-final-codegraphf-sync.log.gz",
+      "raw_bytes": 78209,
+      "raw_sha256": "1d1365043a22e8029e2c0fafe5d79ff2bc2fd41c76d710cfca1b2bd99ff8e03c",
+      "stored_bytes": 2506,
+      "stored_sha256": "aad7202d22ad50e9c775ebc7c18b83634de8ec4452306ca2a643c928d7408175",
+      "original_path": "/tmp/hundun-review-final-codegraphf-sync.log"
+    },
+    {
+      "path": "logs/hundun-review-final-format.log.gz",
+      "raw_bytes": 365,
+      "raw_sha256": "0aebdf9db59171921a707d4851a935e3dd53cc6be22c0b437675af61f482c927",
+      "stored_bytes": 187,
+      "stored_sha256": "5d5c18a585a6fb0fb9e4353e7e4007086936a7f9a17f6a5b477b5917a740d16e",
+      "original_path": "/tmp/hundun-review-final-format.log"
+    },
+    {
+      "path": "logs/hundun-review-final-release-build.log.gz",
+      "raw_bytes": 34153,
+      "raw_sha256": "2f24d87146b76bbb50f960e8a4588f2f371ec2de2c42829c82fd55abed7782b5",
+      "stored_bytes": 3536,
+      "stored_sha256": "dda8f240c157e999b6ae1c8035b459b4f63a09328b5c47ecf6bd77520c006702",
+      "original_path": "/tmp/hundun-review-final-release-build.log"
+    },
+    {
+      "path": "logs/hundun-review-final-release-ctest-console.log.gz",
+      "raw_bytes": 38813,
+      "raw_sha256": "3f36806e37d1b12591bc7075e016c2f0957f9316de19328a0196003fc3939a61",
+      "stored_bytes": 5536,
+      "stored_sha256": "6da48d3849d7b2e0e257928c4d43273adb99203fc58119df62cff72991bcc299",
+      "original_path": "/tmp/hundun-review-final-release-ctest-console.log"
+    },
+    {
+      "path": "logs/hundun-review-final-release-ctest.log.gz",
+      "raw_bytes": 38861,
+      "raw_sha256": "52e50348026ae02b874433e511d5af3548e8681a8c261352dd1e3db0e9a3ca41",
+      "stored_bytes": 5588,
+      "stored_sha256": "b604c83aa30b8d94caad1e5750a1c740da7d40ca645a3ae00253341a9c0e649d",
+      "original_path": "/tmp/hundun-review-final-release-ctest.log"
+    },
+    {
+      "path": "logs/hundun-review-final-release-full-details.log.gz",
+      "raw_bytes": 9074778,
+      "raw_sha256": "1f1edbca2212530e9a7339ec3dabc1ae3b8ca962beec587547a2021bb0df0b5a",
+      "stored_bytes": 213598,
+      "stored_sha256": "28b098ac91aaa9b64093fa92847e56b9b016b12a949fa80d1254e4d00fb522fd",
+      "original_path": "/tmp/hundun-review-final-release-full-details.log"
+    },
+    {
+      "path": "logs/hundun-review-final-sanitizer-build.log.gz",
+      "raw_bytes": 7969,
+      "raw_sha256": "2b3dfa0af8a183923cd1fbeef001fc4355fa4f0dc24651d27e2e122e574ee82b",
+      "stored_bytes": 1091,
+      "stored_sha256": "9a079902372dae593075e6b3e64eeadd8f074c0d2651b59c8569e60f26edeaec",
+      "original_path": "/tmp/hundun-review-final-sanitizer-build.log"
+    },
+    {
+      "path": "logs/hundun-review-final-sanitizer-ctest-console.log.gz",
+      "raw_bytes": 2264,
+      "raw_sha256": "a7db03716dc39f51984943b98a31980eaadb2fa3d53e906d40a37995b53baea7",
+      "stored_bytes": 611,
+      "stored_sha256": "b181d052bb226e5f2b57d8c59ee90fce72fe110eccf42ee89cb51b74d811d87d",
+      "original_path": "/tmp/hundun-review-final-sanitizer-ctest-console.log"
+    },
+    {
+      "path": "logs/hundun-review-final-sanitizer-ctest.log.gz",
+      "raw_bytes": 2294,
+      "raw_sha256": "ae84bdc5efc5db37f2beee1f7543baac52d649571b61e2be80b4e979fb7cf82f",
+      "stored_bytes": 640,
+      "stored_sha256": "18b9e64060ea6a1cc8f98f47895413fae4ee278220b33ac3b6d1e0cfd8cb334f",
+      "original_path": "/tmp/hundun-review-final-sanitizer-ctest.log"
+    },
+    {
+      "path": "logs/hundun-review-final-sanitizer-full-details.log.gz",
+      "raw_bytes": 35729,
+      "raw_sha256": "d2bd192ada0eba822f98f5173c171a3bf60e19a78aed7848dac8595e03b2264a",
+      "stored_bytes": 3737,
+      "stored_sha256": "7e62fe2be29b13a3420f84f2fe56183e1280d6c755e0621edad6fbfbc68dbeb9",
+      "original_path": "/tmp/hundun-review-final-sanitizer-full-details.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-ctest-console.log.gz",
+      "raw_bytes": 40767,
+      "raw_sha256": "bd0a3b35c95df8f64e004841143429ea1407670a231eabef472a421591c07592",
+      "stored_bytes": 5960,
+      "stored_sha256": "2ff470f4f67c455239b36ce0a5c183443d4d1fc8c34db8c6f16ccfca87de8d1e",
+      "original_path": "/tmp/hundun-review-first-batch-ctest-console.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-ctest.log.gz",
+      "raw_bytes": 40815,
+      "raw_sha256": "fbf7d4f20c62ec4d2e3ae9503c4f1dde0332f4ef7a60ed141d154f801fc91175",
+      "stored_bytes": 6011,
+      "stored_sha256": "6c86b01601814acd50518db657a9093109f52c1bd7d8b14fdcc727ffdb31a6b6",
+      "original_path": "/tmp/hundun-review-first-batch-ctest.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-followup-build.log.gz",
+      "raw_bytes": 2685,
+      "raw_sha256": "9ce49b4e23a51b6b22359e6a3a7fcf0f3ba48feaa45469d7fafc4d05429b2286",
+      "stored_bytes": 849,
+      "stored_sha256": "39e1db9ac5e4d8e75003e5412c4e68f128e1b19097cf29195b92de2e37b3391e",
+      "original_path": "/tmp/hundun-review-first-batch-followup-build.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-followup-build2.log.gz",
+      "raw_bytes": 600,
+      "raw_sha256": "4507337e95f5384f93d5113ad8a0187547b3c7c79d874906bb10b56eac317bb9",
+      "stored_bytes": 264,
+      "stored_sha256": "a0450b602e7f46002c881bbf7590e98898b312dd863e89df43791a68e0a2b503",
+      "original_path": "/tmp/hundun-review-first-batch-followup-build2.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-followup-green-console.log.gz",
+      "raw_bytes": 45068,
+      "raw_sha256": "c873afb034780cceb60f6971f1e1a6277fca3d8353b48cb7c8f4083095f29c23",
+      "stored_bytes": 3954,
+      "stored_sha256": "1fa14728d0b496de86baac09ea275d5f9857794254949ec843004a6f21822ac8",
+      "original_path": "/tmp/hundun-review-first-batch-followup-green-console.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-followup-green.log.gz",
+      "raw_bytes": 46201,
+      "raw_sha256": "9cac18e2bfe4b9cad5afea9675359b18be38d2ec98cd20fd70c7aed96b0a0f3b",
+      "stored_bytes": 4049,
+      "stored_sha256": "f252fbb6e7bfabbef0d907c501aad48a741f65f177bf8b2209de701b39b8f22b",
+      "original_path": "/tmp/hundun-review-first-batch-followup-green.log"
+    },
+    {
+      "path": "logs/hundun-review-first-batch-full-build.log.gz",
+      "raw_bytes": 33917,
+      "raw_sha256": "71cb1b6d865928a8936eac30f8d78c414900eb5c5252b2d3f1535b81f31a999d",
+      "stored_bytes": 3515,
+      "stored_sha256": "e2f870b9536af383fce1430c06187323123d6dd29c772f486a5abff93e5cd790",
+      "original_path": "/tmp/hundun-review-first-batch-full-build.log"
+    },
+    {
+      "path": "logs/hundun-review-force-bind-build.log.gz",
+      "raw_bytes": 861,
+      "raw_sha256": "357630e105a54dbbb7087a56d9829cbf3f8acbcb56e9aceb6fafa0640ee7b710",
+      "stored_bytes": 386,
+      "stored_sha256": "1e53ccaf57031d09fbc0799e8de397e90ef3550fc7a85bdbe08f9406d8b506ce",
+      "original_path": "/tmp/hundun-review-force-bind-build.log"
+    },
+    {
+      "path": "logs/hundun-review-format.log.gz",
+      "raw_bytes": 702,
+      "raw_sha256": "ef26d9e09701559b0e66f97ef8aba9c9aa1faa972243f8bba99a7a4e092c312e",
+      "stored_bytes": 250,
+      "stored_sha256": "042d421c2e6071ed2076d05671ea5d913c948b224613f1d58a2872c350a30d97",
+      "original_path": "/tmp/hundun-review-format.log"
+    },
+    {
+      "path": "logs/hundun-review-halo-accounting-build.log.gz",
+      "raw_bytes": 2656,
+      "raw_sha256": "6187b1cc2c0a486050b07ff4bb34d9b61b2728e33d906189741bfef1ca8f332a",
+      "stored_bytes": 588,
+      "stored_sha256": "a6f428019546e4eb8ee7f9aa9c1ed3f3b4419fa4f30ebb76f71e27a1d0aaf730",
+      "original_path": "/tmp/hundun-review-halo-accounting-build.log"
+    },
+    {
+      "path": "logs/hundun-review-halo-accounting-green-console.log.gz",
+      "raw_bytes": 56121,
+      "raw_sha256": "1ff72935a55681a115797e9becf42773eb596dab2330f3260787318699415d50",
+      "stored_bytes": 4846,
+      "stored_sha256": "958ba18f30dd33114e94a8ef819cdd4951d6d606fd2f65c2add7d4bb8217ea3d",
+      "original_path": "/tmp/hundun-review-halo-accounting-green-console.log"
+    },
+    {
+      "path": "logs/hundun-review-halo-accounting-green.log.gz",
+      "raw_bytes": 57052,
+      "raw_sha256": "5dfa9ac2b3b68b5cc242edeab4cde685f0f8bc7ebcf15a74c32b3175b7461f12",
+      "stored_bytes": 4939,
+      "stored_sha256": "f956f8f4b1f8de539f4f58b8a5cac089bdd00a97b07340bafd157c493479b76d",
+      "original_path": "/tmp/hundun-review-halo-accounting-green.log"
+    },
+    {
+      "path": "logs/hundun-review-ibm-pressure-bind-build.log.gz",
+      "raw_bytes": 755,
+      "raw_sha256": "80b1d2b8b75fac5dd36e2e30aba56bb7b02706dd0faae373000a8de07695a2ab",
+      "stored_bytes": 366,
+      "stored_sha256": "c6f79bb5e2077b2da0ca18ebec6a27bc01bfda909c59575aedc233011cf85f08",
+      "original_path": "/tmp/hundun-review-ibm-pressure-bind-build.log"
+    },
+    {
+      "path": "logs/hundun-review-initialize-allocations-build.log.gz",
+      "raw_bytes": 277,
+      "raw_sha256": "76300f429031817395a9bbe32756e67351c24a73a1ad1f562bdd04eafd86d163",
+      "stored_bytes": 176,
+      "stored_sha256": "b1c249cd6bbf5996aa3262a3b4296e1f76150fb6f3abc6f22b886b492440e97d",
+      "original_path": "/tmp/hundun-review-initialize-allocations-build.log"
+    },
+    {
+      "path": "logs/hundun-review-memory-pmpi-green-console.log.gz",
+      "raw_bytes": 42670,
+      "raw_sha256": "eb56f101f4eec15a906ddb9ee4d2515549dd4381acda6f3608cf0b1f68646c2d",
+      "stored_bytes": 3542,
+      "stored_sha256": "e4f572f1def1b4250b6b154211bb4b9a5f5d1466b423745353cace1be40594a6",
+      "original_path": "/tmp/hundun-review-memory-pmpi-green-console.log"
+    },
+    {
+      "path": "logs/hundun-review-memory-pmpi-green.log.gz",
+      "raw_bytes": 43325,
+      "raw_sha256": "5719aa4fdeb591a26d5ff20a8453790f132cac683d9b380a1804cfb52671bb59",
+      "stored_bytes": 3620,
+      "stored_sha256": "cefe8efccb8e352d858e3a38fa9ca22568dba024b1c5a4b12fb142ae3043ff51",
+      "original_path": "/tmp/hundun-review-memory-pmpi-green.log"
+    },
+    {
+      "path": "logs/hundun-review-memory-profile-build.log.gz",
+      "raw_bytes": 269,
+      "raw_sha256": "3f58455560f59f2297d01d7d6ef3770179e7f9d738e7cca0d8a2bbcfe3f4278b",
+      "stored_bytes": 187,
+      "stored_sha256": "18030de994269e280d89be6b3b5a03068f390c85dc5492a72c1af1b32d407916",
+      "original_path": "/tmp/hundun-review-memory-profile-build.log"
+    },
+    {
+      "path": "logs/hundun-review-memory-profile-green-console.log.gz",
+      "raw_bytes": 41976,
+      "raw_sha256": "4560fa52e4f6ee35cf63d4efa38345669a0c7a4d0c805d6e0485997707f203af",
+      "stored_bytes": 3664,
+      "stored_sha256": "8a7084aa47caf05d3e8a9b471280c90cceb0467d5d7d91f785b8c30b0641ce89",
+      "original_path": "/tmp/hundun-review-memory-profile-green-console.log"
+    },
+    {
+      "path": "logs/hundun-review-memory-profile-green.log.gz",
+      "raw_bytes": 42603,
+      "raw_sha256": "841eba39142f81b44fdbf50939e6895ebb5b7c0fb836bf7ac8519aae61c81d10",
+      "stored_bytes": 3751,
+      "stored_sha256": "2d4a1a453057c108af87e33d4bd57da7a12cb8bb3aad6dbce3d2c0912f7c6aae",
+      "original_path": "/tmp/hundun-review-memory-profile-green.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-bounds-green.log.gz",
+      "raw_bytes": 3372,
+      "raw_sha256": "5dcb58a38531b25dcda949a54010cd791d023a676cc350ec10900f575e9cee69",
+      "stored_bytes": 738,
+      "stored_sha256": "9d979e20d08743d112462963d168f5fa7808c3c2007a080ae5a94cd8a5baf866",
+      "original_path": "/tmp/hundun-review-mg-bounds-green.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-green-build.log.gz",
+      "raw_bytes": 642,
+      "raw_sha256": "0aed6b2b81651ab374cf40937462a6911fee01e21a2445d2422625f4941f5b6a",
+      "stored_bytes": 344,
+      "stored_sha256": "7d0e81d33451d7a6fd8f7d57f6c51997b4b3876f7e486b5dd887476599726f6b",
+      "original_path": "/tmp/hundun-review-mg-green-build.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-green.log.gz",
+      "raw_bytes": 3341,
+      "raw_sha256": "fafb087c1cafb06d866757e79ea63f954728adca9ca618205a0b81a50230c595",
+      "stored_bytes": 740,
+      "stored_sha256": "78b36dd4eaca8e090536f20641a6ff274c90ed8712c7c3b6c2f715b4c9d242af",
+      "original_path": "/tmp/hundun-review-mg-green.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-init-build.log.gz",
+      "raw_bytes": 639,
+      "raw_sha256": "d3d373cb7ed07402869f24034cf4d1acb659edc1613fa2a400aaaa7a56d684bc",
+      "stored_bytes": 345,
+      "stored_sha256": "60ee6fd6708c7b8e29f05f5534602faf653f6fbf7edfe8d854bddaeaf917806d",
+      "original_path": "/tmp/hundun-review-mg-init-build.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-red-build.log.gz",
+      "raw_bytes": 497,
+      "raw_sha256": "e5c8ff4bda26974bba1b6efb7eeb022129f690750f5169be9e3fb31fe10c1407",
+      "stored_bytes": 296,
+      "stored_sha256": "3b4d1a12f6c54158af7a96d5099d8729a1561a5d4a1088ae85ead61d4fc773bd",
+      "original_path": "/tmp/hundun-review-mg-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-mg-red.log.gz",
+      "raw_bytes": 2663,
+      "raw_sha256": "c1de70f101db7e5ba7c12f3ffd407f02acf880ebcf4d942ff3fc8a826d9f0992",
+      "stored_bytes": 946,
+      "stored_sha256": "ae3c02fcd7034723785dd5709d30a276e575f6d846aeaf537754639e2af160c1",
+      "original_path": "/tmp/hundun-review-mg-red.log"
+    },
+    {
+      "path": "logs/hundun-review-pmpi-profile-build.log.gz",
+      "raw_bytes": 269,
+      "raw_sha256": "3f58455560f59f2297d01d7d6ef3770179e7f9d738e7cca0d8a2bbcfe3f4278b",
+      "stored_bytes": 187,
+      "stored_sha256": "18030de994269e280d89be6b3b5a03068f390c85dc5492a72c1af1b32d407916",
+      "original_path": "/tmp/hundun-review-pmpi-profile-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-4633-backtrace.log.gz",
+      "raw_bytes": 822,
+      "raw_sha256": "ad0868a0caac4b03fbdb028545bf8ab7b7c77ebc61e2e3daa9f966340f777871",
+      "stored_bytes": 435,
+      "stored_sha256": "661381978c9a7d37597c4208f3a9b3ee015b07a04d7a3aa25218fc3a2720436e",
+      "original_path": "/tmp/hundun-review-product-alloc-4633-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-4633-backtrace2.log.gz",
+      "raw_bytes": 3825,
+      "raw_sha256": "8115bab0d6211005d5d1399f40ece42362d774bd4ff4305317477a27c1d25c6d",
+      "stored_bytes": 1279,
+      "stored_sha256": "b5ae9621fb0340a086bc2f45a3edd084288aa7708b950f4f5eb07158bb8ec3e3",
+      "original_path": "/tmp/hundun-review-product-alloc-4633-backtrace2.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-4766-backtrace.log.gz",
+      "raw_bytes": 2614,
+      "raw_sha256": "85f03f6fbe48d22d5d7e108e73f0db8b89fd62c080ad86d1209ea8d79de1a7b8",
+      "stored_bytes": 1084,
+      "stored_sha256": "bb60a6e0c844a5486601867476c7accab55a904dc9055e96e64118789a96cc33",
+      "original_path": "/tmp/hundun-review-product-alloc-4766-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-4843-backtrace.log.gz",
+      "raw_bytes": 3098,
+      "raw_sha256": "4d17d0de505b7989954b1053003ae2fd6f82478c66e53d0bb0103df247999ed8",
+      "stored_bytes": 1166,
+      "stored_sha256": "a0d2ba5da07bcecbcde3b545e7a89a4c1f3e116a9d204dba75be22e088bd2ed0",
+      "original_path": "/tmp/hundun-review-product-alloc-4843-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-4897-backtrace.log.gz",
+      "raw_bytes": 3381,
+      "raw_sha256": "eb54ed785fd93f21301e4ad9e49c768805554af8c5967d4aa094640b6577587d",
+      "stored_bytes": 1205,
+      "stored_sha256": "8493a078851074c9240ba4a833bf8fbcb03bfb4f36e97120b28dbf774bff4cad",
+      "original_path": "/tmp/hundun-review-product-alloc-4897-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-5036-backtrace.log.gz",
+      "raw_bytes": 3255,
+      "raw_sha256": "53c718ea09eb4718373a607eb88aaa23fc76c1338d094d29495ce399cfc99461",
+      "stored_bytes": 1223,
+      "stored_sha256": "8c9f004279f3971a4f0c4f04b10caef6db0a22cfe178b7943361d16470155d6b",
+      "original_path": "/tmp/hundun-review-product-alloc-5036-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-5150-backtrace.log.gz",
+      "raw_bytes": 2886,
+      "raw_sha256": "4c05de5cb02541a3beda65576433d3a194e29b2fa6ab6de9d077a3e08c286ce0",
+      "stored_bytes": 1143,
+      "stored_sha256": "8ff2c3d2343c22ddf8a93fbd3885eb67c300670f661f2bd5e4dc227510052d2c",
+      "original_path": "/tmp/hundun-review-product-alloc-5150-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-5783-backtrace.log.gz",
+      "raw_bytes": 2454,
+      "raw_sha256": "f85d56698f33e9441bac6fbbba9d1511bfc2b43febaec3990c5b6d8944e2ead7",
+      "stored_bytes": 1066,
+      "stored_sha256": "278bef419512e3655f92eb9a9bad8fdcd085b913d1ef9a778ba06748eeb52899",
+      "original_path": "/tmp/hundun-review-product-alloc-5783-backtrace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-arena-build.log.gz",
+      "raw_bytes": 550,
+      "raw_sha256": "9c8b0539c5832e67de0d317c0e47aadccf0954ec30c407697b53fe5086110255",
+      "stored_bytes": 332,
+      "stored_sha256": "19120754b017d80af8b1271164af3b77edc1c9f2ded435b5b11a05aef978d4ec",
+      "original_path": "/tmp/hundun-review-product-alloc-arena-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-green-build.log.gz",
+      "raw_bytes": 550,
+      "raw_sha256": "9c8b0539c5832e67de0d317c0e47aadccf0954ec30c407697b53fe5086110255",
+      "stored_bytes": 332,
+      "stored_sha256": "19120754b017d80af8b1271164af3b77edc1c9f2ded435b5b11a05aef978d4ec",
+      "original_path": "/tmp/hundun-review-product-alloc-green-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-green.log.gz",
+      "raw_bytes": 713,
+      "raw_sha256": "320695986ca6bdec5b8af7320bf35b0f65631f42284c16b14ec334b9fb0fea84",
+      "stored_bytes": 312,
+      "stored_sha256": "7c0515f27818b1a3f89139dc3e45b098b5a48997391e0df32564075f1c77afe1",
+      "original_path": "/tmp/hundun-review-product-alloc-green.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-hash-build.log.gz",
+      "raw_bytes": 950,
+      "raw_sha256": "c20a78edec2e13131907008e253d7062c215c0371ac2546c07d8d4f0f2587ea4",
+      "stored_bytes": 380,
+      "stored_sha256": "6d2d0a554d7781c6a1866214eb907340132a498d83ab8f1e21220d27439f18f5",
+      "original_path": "/tmp/hundun-review-product-alloc-hash-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-local-stages-build.log.gz",
+      "raw_bytes": 550,
+      "raw_sha256": "9c8b0539c5832e67de0d317c0e47aadccf0954ec30c407697b53fe5086110255",
+      "stored_bytes": 332,
+      "stored_sha256": "19120754b017d80af8b1271164af3b77edc1c9f2ded435b5b11a05aef978d4ec",
+      "original_path": "/tmp/hundun-review-product-alloc-local-stages-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-red-build.log.gz",
+      "raw_bytes": 518,
+      "raw_sha256": "1ae29394f06c2e5439db6b79b6c9576eed9d7979cd10405c550761b5d2f9dbb5",
+      "stored_bytes": 300,
+      "stored_sha256": "7dd214216fa1e85f720da4a5078104509fd7dac8df6cad3573d351fe052c7682",
+      "original_path": "/tmp/hundun-review-product-alloc-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-red.log.gz",
+      "raw_bytes": 622,
+      "raw_sha256": "db04bb5f7c60ea47fa82a0c79bcb4bb2dfe860ff8fffb75e0732f7f5480dfc96",
+      "stored_bytes": 359,
+      "stored_sha256": "e616729eff53bc6d5a74d9019d638943f9776604cbdeb623085cbf53444a6b44",
+      "original_path": "/tmp/hundun-review-product-alloc-red.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-registry-build.log.gz",
+      "raw_bytes": 550,
+      "raw_sha256": "9c8b0539c5832e67de0d317c0e47aadccf0954ec30c407697b53fe5086110255",
+      "stored_bytes": 332,
+      "stored_sha256": "19120754b017d80af8b1271164af3b77edc1c9f2ded435b5b11a05aef978d4ec",
+      "original_path": "/tmp/hundun-review-product-alloc-registry-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-01.log.gz",
+      "raw_bytes": 789,
+      "raw_sha256": "dcb3bb6306106c27f697511357c7a69f304dd2c3423561437c4f42e70a71b177",
+      "stored_bytes": 348,
+      "stored_sha256": "3f6c258c50f04908a7927e3aecf3e1ba352b7bbdf3ce1de008c9ae9bc1d4f062",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-01.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-02.log.gz",
+      "raw_bytes": 476545,
+      "raw_sha256": "a2e777b026c0138973506f6f344ebfebec890d0d6fd6a8a7b6a3cd0c58de6d64",
+      "stored_bytes": 13365,
+      "stored_sha256": "e749d88fbde9ae2e9b5a930557a280bcbd93e95aaf51b029c07e45cc01a5421d",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-02.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-03.log.gz",
+      "raw_bytes": 15013,
+      "raw_sha256": "c03fe2e9b3408851b93af87f127e6932f2363aefbcc5128c63dbc2e5ead5084b",
+      "stored_bytes": 988,
+      "stored_sha256": "0ff8ee0619c50680052771050f06ba26fc94ef18c464c34489845421e457c5c6",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-03.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-04.log.gz",
+      "raw_bytes": 9481,
+      "raw_sha256": "ca4095c00fc3a3a58c293a62bd7556df1522361c17d7270d75354cc7d95fd854",
+      "stored_bytes": 828,
+      "stored_sha256": "6626a00ef4c79a8e66db625c72b97f04e529c34a16aeac5836bcf5bb84ed7451",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-04.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-05.log.gz",
+      "raw_bytes": 32139,
+      "raw_sha256": "eed40d9473a401ed84eace10234c640f264567d3381f5bf98f2c3dcd2bf2df67",
+      "stored_bytes": 1209,
+      "stored_sha256": "dd10b9fc02c85b3ea4759798f7d684befd13a410ee8f03eff04ff525aec2131f",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-05.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-06.log.gz",
+      "raw_bytes": 64145,
+      "raw_sha256": "ea41f471bcab70bd4bd6f22e7f980f77dd445cb39ca03082f597c795d2c56c72",
+      "stored_bytes": 1927,
+      "stored_sha256": "c2151f688b963f1594a9fd1e540814c934039707ff4205325a6fb2279c61a841",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-06.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-07.log.gz",
+      "raw_bytes": 10356,
+      "raw_sha256": "6814dcf6204f8836751a160cf55ec929c2087036a5fd71508c89f650da9f9c99",
+      "stored_bytes": 413,
+      "stored_sha256": "0bdcfcf5f14198fefbc50ac0f65a7ac88aca6c1644e75cc62d5d98e7eb9e2cfc",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-07.log"
+    },
+    {
+      "path": "logs/hundun-review-product-alloc-scan-build.log.gz",
+      "raw_bytes": 277,
+      "raw_sha256": "76300f429031817395a9bbe32756e67351c24a73a1ad1f562bdd04eafd86d163",
+      "stored_bytes": 176,
+      "stored_sha256": "b1c249cd6bbf5996aa3262a3b4296e1f76150fb6f3abc6f22b886b492440e97d",
+      "original_path": "/tmp/hundun-review-product-alloc-scan-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-allocation-copy-build.log.gz",
+      "raw_bytes": 550,
+      "raw_sha256": "9c8b0539c5832e67de0d317c0e47aadccf0954ec30c407697b53fe5086110255",
+      "stored_bytes": 332,
+      "stored_sha256": "19120754b017d80af8b1271164af3b77edc1c9f2ded435b5b11a05aef978d4ec",
+      "original_path": "/tmp/hundun-review-product-allocation-copy-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-allocation-resources-2.log.gz",
+      "raw_bytes": 699492,
+      "raw_sha256": "28c1510131639e8417ea382c755364dcc8e341ec707361c27cf5b386c5f70db0",
+      "stored_bytes": 14774,
+      "stored_sha256": "afe2897cb0988441552c5001a263608b0120e359b7a60786e3135ad2c5a5f598",
+      "original_path": "/tmp/hundun-review-product-allocation-resources-2.log"
+    },
+    {
+      "path": "logs/hundun-review-product-allocation-resources-2b.log.gz",
+      "raw_bytes": 20773,
+      "raw_sha256": "a54598c82267f6ec5df2d334bdaf6c077aca24c310fa07afba1e771561fec79e",
+      "stored_bytes": 789,
+      "stored_sha256": "e01880cf003a4036544fb42457c797343a8f5bc1cc94f21b3717c39b49a4e620",
+      "original_path": "/tmp/hundun-review-product-allocation-resources-2b.log"
+    },
+    {
+      "path": "logs/hundun-review-product-allocation-resources-2c.log.gz",
+      "raw_bytes": 1665738,
+      "raw_sha256": "997a2625f3fc8d72cda11cc08f6615839251ffbf54203eb13a8eb723d6957daa",
+      "stored_bytes": 34230,
+      "stored_sha256": "d5fd3489f771273699c3815dd92fae4d8916f55ff6fc7318408000dd3e2d77c5",
+      "original_path": "/tmp/hundun-review-product-allocation-resources-2c.log"
+    },
+    {
+      "path": "logs/hundun-review-product-allocation-resources-build.log.gz",
+      "raw_bytes": 277,
+      "raw_sha256": "76300f429031817395a9bbe32756e67351c24a73a1ad1f562bdd04eafd86d163",
+      "stored_bytes": 176,
+      "stored_sha256": "b1c249cd6bbf5996aa3262a3b4296e1f76150fb6f3abc6f22b886b492440e97d",
+      "original_path": "/tmp/hundun-review-product-allocation-resources-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-create-green.log.gz",
+      "raw_bytes": 4986,
+      "raw_sha256": "d61a1781bd2f2b03b4ac679fff7bb8256b0fc7480e3574129324679e9df37ba1",
+      "stored_bytes": 285,
+      "stored_sha256": "ffdf913a404df76ec245eeae916eeac77feff56678551cd497fb26a1a8b318d9",
+      "original_path": "/tmp/hundun-review-product-create-green.log"
+    },
+    {
+      "path": "logs/hundun-review-product-create-red-build.log.gz",
+      "raw_bytes": 277,
+      "raw_sha256": "76300f429031817395a9bbe32756e67351c24a73a1ad1f562bdd04eafd86d163",
+      "stored_bytes": 176,
+      "stored_sha256": "b1c249cd6bbf5996aa3262a3b4296e1f76150fb6f3abc6f22b886b492440e97d",
+      "original_path": "/tmp/hundun-review-product-create-red-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-create-red.log.gz",
+      "raw_bytes": 35,
+      "raw_sha256": "58920f92057378925255778fab2584ec13c8a354b30dbb570d8ec13ec5a152cb",
+      "stored_bytes": 55,
+      "stored_sha256": "949c437036450e9f19156f4a9f963c7f234247348909dc8a51a3bcf4a9e038cf",
+      "original_path": "/tmp/hundun-review-product-create-red.log"
+    },
+    {
+      "path": "logs/hundun-review-product-fresh-allocation-build.log.gz",
+      "raw_bytes": 768,
+      "raw_sha256": "583dc5de5f8d0ab7eb5c7af6ff692cb4381318434d551623e7f968a88808686f",
+      "stored_bytes": 371,
+      "stored_sha256": "191fbc1ef8c6562516e6140a371e2230f4154569a4e7b4e04b6c83b2a657ea1f",
+      "original_path": "/tmp/hundun-review-product-fresh-allocation-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-alloc-4947-trace.log.gz",
+      "raw_bytes": 3898,
+      "raw_sha256": "4513294130cf1e412901c0c1120a1d135b666eb84420a9d4eb5fb8ecae207002",
+      "stored_bytes": 1303,
+      "stored_sha256": "127b838eb7f33da229228da8e2a6d7b2200a7b06673eb794fa786f7d3aa3eec8",
+      "original_path": "/tmp/hundun-review-product-ibm-alloc-4947-trace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-alloc-5129-trace.log.gz",
+      "raw_bytes": 2553,
+      "raw_sha256": "1cd1fce7ff9da4aec907c3d3061493de7e1d8cf223cfebc41ed5f63e74ab5285",
+      "stored_bytes": 1135,
+      "stored_sha256": "721e0e971ff08a1cab3cb3f0288c54c0d39f55670075ef76d6a694107227bb3a",
+      "original_path": "/tmp/hundun-review-product-ibm-alloc-5129-trace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-alloc-trace.log.gz",
+      "raw_bytes": 2223,
+      "raw_sha256": "916fcc814341de5ad0a57647d73cf39ae0aa3b72fb992afac770b893a8b597c4",
+      "stored_bytes": 1018,
+      "stored_sha256": "4ca780d40b5976a457884abb3e983db08cd00ef248b041ad7058cf32574cea18",
+      "original_path": "/tmp/hundun-review-product-ibm-alloc-trace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-allocation-build.log.gz",
+      "raw_bytes": 730,
+      "raw_sha256": "5483f7c6b34d90201fb2e5be9885e713b75a7d02bf6b819b7da1c1fafbf10525",
+      "stored_bytes": 326,
+      "stored_sha256": "78af2a1fef2546cee8d0221d101a9ea6eed2229b6f4dd5f59ca22db06a955bd0",
+      "original_path": "/tmp/hundun-review-product-ibm-allocation-build.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-compile-green2.log.gz",
+      "raw_bytes": 26282,
+      "raw_sha256": "f896c313cd26634c6aa78afc3ea3fef980c840138e357635ddaf6d0f460c5c22",
+      "stored_bytes": 899,
+      "stored_sha256": "924b7547da2921f3643913b88afd5da60e2c6aa1b9cad9176047803ee811c2f7",
+      "original_path": "/tmp/hundun-review-product-ibm-compile-green2.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-compile-green3.log.gz",
+      "raw_bytes": 336770,
+      "raw_sha256": "5c77cdc51529c31b17e14c82dcb6e1e3b29747aee66c91bd5dab65a5cd980638",
+      "stored_bytes": 7297,
+      "stored_sha256": "e18b7f2ff87dfaa52f5e031f57bd87bda5ab87f040774fda425c0c19e9b8116f",
+      "original_path": "/tmp/hundun-review-product-ibm-compile-green3.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-compile-red.log.gz",
+      "raw_bytes": 708294,
+      "raw_sha256": "c9cc7a5a868e95f56c94625781e01a45628ffe53033ef2398a97230d2d31e585",
+      "stored_bytes": 15283,
+      "stored_sha256": "96462d5a7877d866406aa6119248a2c1af8ee5cbeb5271d59ee67c44dec37287",
+      "original_path": "/tmp/hundun-review-product-ibm-compile-red.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-compile-tail-green.log.gz",
+      "raw_bytes": 44589,
+      "raw_sha256": "e9da8f8785ab3cf3e043a6be086f1aab6af0c1014fec1d6f30b7c1fb7765556b",
+      "stored_bytes": 1071,
+      "stored_sha256": "337fbd8ea486414f8107f45f22139fe865dcab1252aca45bbd380a5be8dd9afe",
+      "original_path": "/tmp/hundun-review-product-ibm-compile-tail-green.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-create-green.log.gz",
+      "raw_bytes": 10066,
+      "raw_sha256": "e86c585da7dd47279132d18a5d3adea5f172056403b4f2ab90190144075eb276",
+      "stored_bytes": 395,
+      "stored_sha256": "f063b09b17459f5991baaa958d6078dc52ed01119362756097d59776b708fc82",
+      "original_path": "/tmp/hundun-review-product-ibm-create-green.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-create-red.log.gz",
+      "raw_bytes": 1838,
+      "raw_sha256": "42fb79e00499d474362beda11441bd614c9292fd882627f93bf27856eb7c8990",
+      "stored_bytes": 185,
+      "stored_sha256": "f9ebad97fe3b6aa712e3a8174bc8c5732d5767cd68e6cba78c7684eec3aac78b",
+      "original_path": "/tmp/hundun-review-product-ibm-create-red.log"
+    },
+    {
+      "path": "logs/hundun-review-product-ibm-create-red2.log.gz",
+      "raw_bytes": 3575,
+      "raw_sha256": "c6cc0afce3db96e13e0e33a9df9119d84304cacd12c60e8ab3a3dc47cb3ce9b4",
+      "stored_bytes": 662,
+      "stored_sha256": "dd8b17b83715bf50e00a819cbae1af479b427e62d7baffc83fd17c393499b0d6",
+      "original_path": "/tmp/hundun-review-product-ibm-create-red2.log"
+    },
+    {
+      "path": "logs/hundun-review-product-initialize-alloc-3-trace.log.gz",
+      "raw_bytes": 2626,
+      "raw_sha256": "6b05e4e2d0fc1774e438b37144b055c064226bfd90d2df789cb8cd2866c7c8d7",
+      "stored_bytes": 1137,
+      "stored_sha256": "85618b8bf91599a32b4f8a354130d159b4f574537badbd277f6050ba9e1b2e23",
+      "original_path": "/tmp/hundun-review-product-initialize-alloc-3-trace.log"
+    },
+    {
+      "path": "logs/hundun-review-product-initialize-alloc-green.log.gz",
+      "raw_bytes": 9322,
+      "raw_sha256": "07bfd5d17ea75b7aa7aabf6a4a8893a9ae87dec2021547f035f8abad70c3c2c6",
+      "stored_bytes": 338,
+      "stored_sha256": "66993026c75300ec27f9d7f4f58ba774782310cf2e582e632e27ef478446acde",
+      "original_path": "/tmp/hundun-review-product-initialize-alloc-green.log"
+    },
+    {
+      "path": "logs/hundun-review-product-initialize-alloc-red.log.gz",
+      "raw_bytes": 502,
+      "raw_sha256": "48a7690d8be0d4f1b4c5b77af3d47938be1c5ae8f60970d281afd168e4fe729b",
+      "stored_bytes": 145,
+      "stored_sha256": "9c948bca844d89c8169a494cd478437f9ef88ae0f506ca10350273aa16448198",
+      "original_path": "/tmp/hundun-review-product-initialize-alloc-red.log"
+    },
+    {
+      "path": "logs/hundun-review-quadrature-exception-build.log.gz",
+      "raw_bytes": 643,
+      "raw_sha256": "9d834d99b58f300bafd1cc52ba3b8a1d4a4ac960660349f636872f5df891689a",
+      "stored_bytes": 349,
+      "stored_sha256": "648e975b16425538c3e1fc3ab2ba8004f49d4edfc0ad97999b36ce1c6429460b",
+      "original_path": "/tmp/hundun-review-quadrature-exception-build.log"
+    },
+    {
+      "path": "logs/hundun-review-receipt-audit.log.gz",
+      "raw_bytes": 226,
+      "raw_sha256": "a147650cba7fdeff4e92facd15795adfaeed044d7052fb1757ae108288af7a32",
+      "stored_bytes": 155,
+      "stored_sha256": "0bbcd11efa0808c23c65ed22654b78848910566917f772855605d62f7a848f96",
+      "original_path": "/tmp/hundun-review-receipt-audit.log"
+    },
+    {
+      "path": "logs/hundun-review-restart-identity-init.log.gz",
+      "raw_bytes": 53,
+      "raw_sha256": "6bf223456d6737be26b30786251cf3d8634c77b58379a3d874c748c3a90fe8c8",
+      "stored_bytes": 71,
+      "stored_sha256": "01faae6e8c5ad23b269f28bc3dac0daf3df75628a91a37e50a521f297243baba",
+      "original_path": "/tmp/hundun-review-restart-identity-init.log"
+    },
+    {
+      "path": "logs/hundun-review-restart-identity-new-reading-old.log.gz",
+      "raw_bytes": 747,
+      "raw_sha256": "2b4c8127485048a307a53a39f899bc13c2145b1f7509d797aa49c09559929cb4",
+      "stored_bytes": 335,
+      "stored_sha256": "d70a7b93ff14bd38b6a23969d58d67e8694fc66fee28f3c137880eb88f99fb93",
+      "original_path": "/tmp/hundun-review-restart-identity-new-reading-old.log"
+    },
+    {
+      "path": "logs/hundun-review-restart-identity-new-resumed.log.gz",
+      "raw_bytes": 497,
+      "raw_sha256": "e3e04e885692c6d3f4afb8c158a686a89284bcbb7d669f8c5e82af18c5b8bdb8",
+      "stored_bytes": 241,
+      "stored_sha256": "c6b34ba0f891100ec27617b486e241cc6512c4439a6f5e74c545ffc2021ef7a0",
+      "original_path": "/tmp/hundun-review-restart-identity-new-resumed.log"
+    },
+    {
+      "path": "logs/hundun-review-restart-identity-new-run.log.gz",
+      "raw_bytes": 496,
+      "raw_sha256": "61e906b75b88a8224c75087ec2f07825739b0393eacb91ee543cac633c994c66",
+      "stored_bytes": 241,
+      "stored_sha256": "c44b35eda01da02b01857de44cf407ae27f30fdc9d18523b61a7472d6095a72f",
+      "original_path": "/tmp/hundun-review-restart-identity-new-run.log"
+    },
+    {
+      "path": "logs/hundun-review-restart-identity-old-run.log.gz",
+      "raw_bytes": 496,
+      "raw_sha256": "11b23320458903238e58d7313d1c65a638fe46b99115c0057630eab17478276e",
+      "stored_bytes": 241,
+      "stored_sha256": "b2ccdc85f26b19352a0fca2493cf73cd29efd2c7cce06d7084042e75d2b4a738",
+      "original_path": "/tmp/hundun-review-restart-identity-old-run.log"
+    },
+    {
+      "path": "logs/hundun-review-retry-format.log.gz",
+      "raw_bytes": 86,
+      "raw_sha256": "e34c84a2d05ba492e9fa324e729218e413c6c166bf20a9872264c98f70a93081",
+      "stored_bytes": 95,
+      "stored_sha256": "c3168be35883e655efe41774a4987bc835e9533d8a50217adfbde15fc1c8bca4",
+      "original_path": "/tmp/hundun-review-retry-format.log"
+    },
+    {
+      "path": "logs/hundun-review-sanitizer-build.log.gz",
+      "raw_bytes": 11061,
+      "raw_sha256": "95cde86eba3e49203a12e57591847801aea4044c44bc5def2b72680f8c16eaf3",
+      "stored_bytes": 1500,
+      "stored_sha256": "85644c70cfeda1564e5e6b87c2dbf7a83126f298428019521236dcc0480b3604",
+      "original_path": "/tmp/hundun-review-sanitizer-build.log"
+    },
+    {
+      "path": "logs/hundun-review-sanitizer-build2.log.gz",
+      "raw_bytes": 2272,
+      "raw_sha256": "15ab8014759fb0a82ae2ebab68dacb65f3258dbfe38471d5a290d3c66c6f3c57",
+      "stored_bytes": 443,
+      "stored_sha256": "03e2943f31014c13c0e08c24d66adec6245159c6f940f161623521ca21abb73c",
+      "original_path": "/tmp/hundun-review-sanitizer-build2.log"
+    },
+    {
+      "path": "logs/hundun-review-sanitizer-ctest-console.log.gz",
+      "raw_bytes": 4442,
+      "raw_sha256": "9a8b0180005a6992f113ec8c154a2de6a8f56b8f1f49bab57ea2512f13456203",
+      "stored_bytes": 964,
+      "stored_sha256": "a1c1c14f1ecea88cad9663974f006b9d7290e35d23330aad118c7a08ed23455d",
+      "original_path": "/tmp/hundun-review-sanitizer-ctest-console.log"
+    },
+    {
+      "path": "logs/hundun-review-sanitizer-ctest.log.gz",
+      "raw_bytes": 4490,
+      "raw_sha256": "5a7397fe8beb601b31bbb87ec1c37c04006f99836314d0a0139a6ca3d2951b00",
+      "stored_bytes": 1008,
+      "stored_sha256": "c6cf47f225098921160e4454407e7eeda471a6b16ffdb4535cb6e5a39693a38a",
+      "original_path": "/tmp/hundun-review-sanitizer-ctest.log"
+    },
+    {
+      "path": "logs/hundun-review-sanitizer-mg-convergence-standalone.log.gz",
+      "raw_bytes": 846,
+      "raw_sha256": "d3d7814ee1162893eda10e8e1009143a9acb15a43d05500cc7714f77b5f05273",
+      "stored_bytes": 391,
+      "stored_sha256": "0742705a3da550f6edce40e751e95870a0f2cddbe2f41e44ef6da71f4c1bbf4e",
+      "original_path": "/tmp/hundun-review-sanitizer-mg-convergence-standalone.log"
+    },
+    {
+      "path": "implementation.patch.gz",
+      "raw_bytes": 278080,
+      "raw_sha256": "002cd705a867445fe71ece8e149ea761dee170957ee57383d1ae6c19072ad6d8",
+      "stored_bytes": 52236,
+      "stored_sha256": "b4cfdc58fbcabc51ada9d4393b2424f43209ee6a23e23fded47e15e13864ad6b"
+    },
+    {
+      "path": "builds/build-re3900-fix-test-CMakeCache.txt.gz",
+      "raw_bytes": 20169,
+      "raw_sha256": "872ba26bef2e6d60d9cb8d9602f0d94ca81102b31c7b2fcba53a051013ccf28c",
+      "stored_bytes": 3907,
+      "stored_sha256": "a6e68359ba6a84531d7c3658f9e3772a3bd0cede608b48d567e5c3883ae3b981"
+    },
+    {
+      "path": "builds/build-audit-sanitize-CMakeCache.txt.gz",
+      "raw_bytes": 20946,
+      "raw_sha256": "a6ecc4732ae6c0c678f0c456d011ec66f10a9b4eed7eab9ee1f6ae95e4f66b93",
+      "stored_bytes": 3855,
+      "stored_sha256": "52c6405e15f2da247daea0921158472ebc2fc7f6150fa9d241a24e0c801b3244"
+    }
+  ]
+}

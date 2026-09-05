@@ -42,6 +42,22 @@ const char* failure_phase_name(hundun::v04::ApplicationFailurePhase phase) {
       return "resources";
     case Phase::evidence:
       return "Evidence";
+    case Phase::input:
+      return "input";
+    case Phase::case_compile:
+      return "case_compile";
+    case Phase::product_compile:
+      return "product_compile";
+    case Phase::driver_create:
+      return "driver_create";
+    case Phase::initialize:
+      return "initialize";
+    case Phase::restart_load:
+      return "restart_load";
+    case Phase::runtime_identity:
+      return "runtime_identity";
+    case Phase::time_control:
+      return "time_control";
   }
   return "unknown";
 }

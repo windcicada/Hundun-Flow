@@ -24,6 +24,10 @@ Status canonicalize_thermophysical_spec(
 // Invalid models or empty source paths return zero.
 PlanFingerprint thermophysical_spec_fingerprint(
     const ThermophysicalSpec& spec) noexcept;
+// Compilation callers need to distinguish allocation failure from invalid
+// input.
+Status thermophysical_spec_fingerprint(const ThermophysicalSpec& spec,
+                                       PlanFingerprint& out) noexcept;
 
 Status parse_thermophysical_text(std::string_view text,
                                  ThermophysicalSpec& out) noexcept;

@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_ibm.hpp"
-#include "hundun/v04_flow.hpp"
-
-#include "field_view_interval_detail.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <utility>
 #include <vector>
+
+#include "field_view_interval_detail.hpp"
+#include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
 
 namespace hundun::v04 {
 namespace {
@@ -113,12 +113,10 @@ struct IbmPressureOperator::Impl {
 
 Status IbmPressureOperator::bind_internal(
     const LinearOperator& regular, Int3 cells, const EBTopology& topology,
-    const BoundaryStencilPlan& boundary,
-    ConstFaceFieldView x_coefficient, ConstFaceFieldView y_coefficient,
-    ConstFaceFieldView z_coefficient, RevisionToken geometry_revision,
-    RemoteDonorExchangePlan* donor_exchange,
-    StageId donor_stage,
-    IbmPressureOperator& out) noexcept {
+    const BoundaryStencilPlan& boundary, ConstFaceFieldView x_coefficient,
+    ConstFaceFieldView y_coefficient, ConstFaceFieldView z_coefficient,
+    RevisionToken geometry_revision, RemoteDonorExchangePlan* donor_exchange,
+    StageId donor_stage, IbmPressureOperator& out) noexcept try {
   (void)donor_exchange;
   (void)donor_stage;
   const std::size_t expected_cells =
@@ -138,9 +136,7 @@ Status IbmPressureOperator::bind_internal(
       !valid_face(z_coefficient, CartesianAxis::z, cells)) {
     return {StatusCode::invalid_plan, kIbmPressurePlan};
   }
-  Impl* candidate = new (std::nothrow) Impl;
-  if (candidate == nullptr)
-    return {StatusCode::allocation_failure, kIbmPressurePlan};
+  auto candidate = std::make_unique<Impl>();
   candidate->regular = &regular;
   candidate->topology = &topology;
   candidate->boundary = &boundary;
@@ -175,8 +171,12 @@ Status IbmPressureOperator::bind_internal(
   collective = mix(collective, geometry_revision);
   candidate->collective_static = collective == 0U ? 1U : collective;
   out.release();
-  out.implementation_ = candidate;
+  out.implementation_ = candidate.release();
   return {};
+} catch (const std::bad_alloc&) {
+  return {StatusCode::allocation_failure, kIbmPressurePlan};
+} catch (...) {
+  return {StatusCode::invalid_plan, kIbmPressurePlan};
 }
 
 IbmPressureOperator::~IbmPressureOperator() noexcept { release(); }

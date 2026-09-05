@@ -35,40 +35,79 @@ int main(int argc, char** argv) {
   MPI_Bcast(&ready, 1, MPI_INT, 0, MPI_COMM_WORLD);
   const fs::path root{root_text.data()};
   bool passed = ready != 0;
-  for (const auto phase :
-       {ApplicationFailurePhase::visit, ApplicationFailurePhase::screen,
-        ApplicationFailurePhase::monitor, ApplicationFailurePhase::restart,
-        ApplicationFailurePhase::resources,
-        ApplicationFailurePhase::evidence}) {
-    if (!passed) break;
-    ApplicationRunOptions options;
-    options.case_root = root / "case";
-    options.run_directory =
-        root / ("phase-" + std::to_string(static_cast<int>(phase)));
-    options.source_root = HUNDUN_V04_SOURCE_ROOT;
-    options.steps = 1U;
-    ApplicationRunReport report;
-    detail::arm_application_local_allocation_failure_for_test(phase, ranks - 1);
+  {
+    ApplicationRunOptions invalid;
+    ApplicationRunReport reused;
+    reused.accepted_steps = 99U;
+    reused.final_time = 7.0;
+    reused.attempts = 4U;
+    reused.failed_stage = 50U;
+    reused.failure_phase = ApplicationFailurePhase::advance;
     const Status status =
-        ApplicationService::run(MPI_COMM_WORLD, options, report);
-    const std::uint64_t packed =
-        (static_cast<std::uint64_t>(status.code) << 32U) | status.detail;
-    std::uint64_t low = 0U, high = 0U;
-    MPI_Allreduce(&packed, &low, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&packed, &high, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
-    int okay = status.code == StatusCode::allocation_failure && low == high &&
-                       report.failure.code == status.code &&
-                       report.failure.detail == status.detail &&
-                       report.failure_phase == phase &&
-                       report.accepted_steps == 1U && report.final_time > 0.0 &&
-                       report.failed_stage == 0U
-                   ? 1
-                   : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
-    passed = okay != 0;
+        ApplicationService::run(MPI_COMM_WORLD, invalid, reused);
+    passed = passed && !status && reused.failure.code == status.code &&
+             reused.failure.detail == status.detail &&
+             reused.accepted_steps == 0U && reused.final_time == 0.0 &&
+             reused.attempts == 0U && reused.failed_stage == 0U &&
+             reused.failure_phase == ApplicationFailurePhase::input;
     if (rank == 0)
-      std::cout << "app local failure phase=" << static_cast<int>(phase)
-                << " consistent=" << passed << '\n';
+      std::cout << "app reused early report reset=" << passed << '\n';
+  }
+  for (int target = 0; target<ranks; target += ranks> 1 ? ranks - 1 : 1) {
+    ApplicationRunOptions invalid;
+    invalid.case_root = root / "case";
+    invalid.run_directory = root / "invalid-local-options";
+    invalid.source_root = HUNDUN_V04_SOURCE_ROOT;
+    invalid.steps = rank == target ? 0U : 1U;
+    ApplicationRunReport report;
+    const Status status =
+        ApplicationService::run(MPI_COMM_WORLD, invalid, report);
+    passed &= status.code == StatusCode::invalid_case &&
+              report.failure_phase == ApplicationFailurePhase::input &&
+              report.accepted_steps == 0U && report.attempts == 0U;
+  }
+  for (int target = 0; target<ranks; target += ranks> 1 ? ranks - 1 : 1) {
+    for (const auto phase :
+         {ApplicationFailurePhase::initialize, ApplicationFailurePhase::visit,
+          ApplicationFailurePhase::screen, ApplicationFailurePhase::monitor,
+          ApplicationFailurePhase::restart, ApplicationFailurePhase::resources,
+          ApplicationFailurePhase::evidence}) {
+      if (!passed) break;
+      ApplicationRunOptions options;
+      options.case_root = root / "case";
+      options.run_directory =
+          root / ("phase-" + std::to_string(static_cast<int>(phase)) +
+                  "-rank-" + std::to_string(target));
+      options.source_root = HUNDUN_V04_SOURCE_ROOT;
+      options.steps = 1U;
+      ApplicationRunReport report;
+      detail::arm_application_local_allocation_failure_for_test(phase, target);
+      const Status status =
+          ApplicationService::run(MPI_COMM_WORLD, options, report);
+      const std::uint64_t packed =
+          (static_cast<std::uint64_t>(status.code) << 32U) | status.detail;
+      std::uint64_t low = 0U, high = 0U;
+      MPI_Allreduce(&packed, &low, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+      MPI_Allreduce(&packed, &high, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+      const bool setup = phase == ApplicationFailurePhase::initialize;
+      int okay =
+          status.code == StatusCode::allocation_failure && low == high &&
+                  report.failure.code == status.code &&
+                  report.failure.detail == status.detail &&
+                  report.failure_phase == phase &&
+                  report.accepted_steps == (setup ? 0U : 1U) &&
+                  (setup ? report.final_time == 0.0 && report.attempts == 0U
+                         : report.final_time > 0.0 &&
+                               report.step_completion.outcome) &&
+                  report.failed_stage == 0U
+              ? 1
+              : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      passed = okay != 0;
+      if (rank == 0)
+        std::cout << "app local failure phase=" << static_cast<int>(phase)
+                  << " target=" << target << " consistent=" << passed << '\n';
+    }
   }
   MPI_Barrier(MPI_COMM_WORLD);
   if (rank == 0) fs::remove_all(root);

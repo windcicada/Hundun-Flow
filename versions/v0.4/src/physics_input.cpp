@@ -491,11 +491,10 @@ class SpecHash64 final {
   std::uint64_t value_{kFnvOffset};
 };
 
-PlanFingerprint fingerprint_spec(const ThermophysicalSpec& spec) noexcept {
+PlanFingerprint fingerprint_spec(const ThermophysicalSpec& spec) {
   if (spec.data_file.empty() || !valid_spec(spec)) {
     return 0U;
   }
-  try {
     ThermophysicalSpec canonical = spec;
     if (!canonicalize_spec(canonical)) {
       return 0U;
@@ -533,9 +532,6 @@ PlanFingerprint fingerprint_spec(const ThermophysicalSpec& spec) noexcept {
       hash.real(species.conductivity);
     }
     return hash.finish();
-  } catch (...) {
-    return 0U;
-  }
 }
 
 PlanFingerprint fingerprint_scalar_catalog(
@@ -704,7 +700,22 @@ Status canonicalize_thermophysical_spec(
 
 PlanFingerprint thermophysical_spec_fingerprint(
     const ThermophysicalSpec& spec) noexcept {
-  return fingerprint_spec(spec);
+  PlanFingerprint fingerprint = 0U;
+  (void)thermophysical_spec_fingerprint(spec, fingerprint);
+  return fingerprint;
+}
+
+Status thermophysical_spec_fingerprint(const ThermophysicalSpec& spec,
+                                       PlanFingerprint& out) noexcept {
+  out = 0U;
+  try {
+    out = fingerprint_spec(spec);
+    return out != 0U ? Status{} : Status{StatusCode::invalid_plan, kInput};
+  } catch (const std::bad_alloc&) {
+    return {StatusCode::allocation_failure, kInput};
+  } catch (...) {
+    return {StatusCode::invalid_plan, kInput};
+  }
 }
 
 Status parse_thermophysical_text(std::string_view text,

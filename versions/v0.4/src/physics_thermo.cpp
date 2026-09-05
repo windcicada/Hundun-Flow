@@ -332,11 +332,9 @@ Status ThermodynamicsPlan::compile(
     candidate.universal_gas_constant_ =
         coast_native_air ? kCoastNativeAirUniversalGasConstant
                          : kUniversalGasConstant;
-    candidate.source_fingerprint_ =
-        detail::thermophysical_spec_fingerprint(canonical_spec);
-    if (candidate.source_fingerprint_ == 0U) {
-      return {StatusCode::invalid_plan, kThermoInput};
-    }
+    const Status identity_status = detail::thermophysical_spec_fingerprint(
+        canonical_spec, candidate.source_fingerprint_);
+    if (!identity_status) return identity_status;
 
     bool constant_cp = true;
     bool common_enthalpy_offset = true;

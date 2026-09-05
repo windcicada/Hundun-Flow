@@ -728,6 +728,7 @@ struct RemoteDonorExchangeCounters {
   std::uint64_t exchange_calls{};
   std::uint64_t peer_messages{};
   std::uint64_t bytes{};
+  std::uint64_t control_consensus_calls{};
 };
 
 // Immutable compact gather for off-rank quadratic donors.  It exchanges only

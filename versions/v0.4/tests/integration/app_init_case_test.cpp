@@ -81,6 +81,15 @@ bool run() {
                 "step-00000000000000000002.visit") &&
             fs::exists(root / "run" / "Restart" / "current");
   {
+    std::ifstream monitor(root / "run" / "monitor.jsonl", std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>(monitor),
+                           std::istreambuf_iterator<char>()};
+    passed &= text.find("\"candidate_baseline_evaluations\":2") !=
+                  std::string::npos &&
+              text.find("\"candidate_incomplete_evaluations\":0") !=
+                  std::string::npos;
+  }
+  {
     std::ifstream evidence(root / "run" / "evidence.jsonl",
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
@@ -182,9 +191,17 @@ bool run() {
   unchanged_run.product = UINT64_C(0xcafef00d);
   ApplicationRunOptions invalid_run = run_options;
   invalid_run.run_directory = case_root / "inside";
-  passed &= !ApplicationService::run(MPI_COMM_SELF, invalid_run,
-                                     unchanged_run) &&
-            unchanged_run.product == UINT64_C(0xcafef00d);
+  const Status invalid_status =
+      ApplicationService::run(MPI_COMM_SELF, invalid_run, unchanged_run);
+  // Run reports describe this invocation, including early input failures.
+  // CaseValidationReport below intentionally retains its separate contract.
+  passed &= !invalid_status && unchanged_run.product == 0U &&
+            unchanged_run.accepted_steps == 0U &&
+            unchanged_run.final_time == 0.0 &&
+            unchanged_run.failed_stage == 0U && unchanged_run.attempts == 0U &&
+            unchanged_run.failure_phase == ApplicationFailurePhase::input &&
+            unchanged_run.failure.code == invalid_status.code &&
+            unchanged_run.failure.detail == invalid_status.detail;
 
   for (const char* blocked : {"Visit", "Restart", "evidence.jsonl"}) {
     ApplicationRunOptions failure_options = run_options;

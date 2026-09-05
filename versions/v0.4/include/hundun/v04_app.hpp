@@ -141,6 +141,27 @@ struct NumericalFailureContext {
 // Failure-visible record of the exact frozen-momentum continuity--energy
 // globalization.  Samples already contain global residual norms; copying
 // them into the step report adds no diagnostic collective or mutable alias.
+struct PressureEnergyCandidateWorkReport {
+  std::uint32_t baseline_evaluations{};
+  std::uint32_t extrapolation_evaluations{};
+  std::uint32_t ladder_evaluations{};
+  std::uint32_t incomplete_evaluations{};
+  std::uint32_t rejected_extrapolations{};
+  // Local inclusive evaluation time, not a rank maximum or complete step time.
+  std::uint64_t local_evaluation_nanoseconds{};
+};
+
+struct PressureEnergyExtrapolationReport {
+  bool attempted{};
+  bool complete{};
+  bool selection_attempted{};
+  bool selected{};
+  double alpha{};
+  Status evaluation_status{};
+  Status selection_status{};
+  PressureEnergyGlobalizationSample sample{};
+};
+
 struct PressureEnergyGlobalizationIterationReport {
   bool valid{};
   std::uint8_t corrector{};
@@ -152,6 +173,8 @@ struct PressureEnergyGlobalizationIterationReport {
   bool jacobian_scope_valid{};
   PressureEnergyJacobianScope jacobian_scope{
       PressureEnergyJacobianScope::generic_algebraic_quasi_newton};
+  PressureEnergyCandidateWorkReport work{};
+  PressureEnergyExtrapolationReport extrapolation{};
 };
 
 inline constexpr std::size_t kPressureEnergyGlobalizationTrajectoryCapacity =
@@ -160,6 +183,9 @@ inline constexpr std::size_t kPressureEnergyGlobalizationTrajectoryCapacity =
 struct PressureEnergyGlobalizationAttemptReport {
   bool valid{};
   std::uint8_t corrector{};
+  // Occupied legacy candidate slots in the latest nonstationary loop:
+  // an accepted extrapolation, or the final backtracking ladder. Not total
+  // work.
   std::uint8_t sample_count{};
   std::uint8_t trajectory_count{};
   double maximum_absolute_pressure_correction{};
@@ -171,6 +197,13 @@ struct PressureEnergyGlobalizationAttemptReport {
   std::array<PressureEnergyGlobalizationIterationReport,
              kPressureEnergyGlobalizationTrajectoryCapacity>
       trajectory{};
+  // Includes unsuccessful evaluations and all loops in this numerical attempt.
+  // A subsequent time-step retry starts a new attempt report.
+  PressureEnergyCandidateWorkReport work{};
+  PressureEnergyCandidateWorkReport last_loop_work{};
+  PressureEnergyExtrapolationReport last_extrapolation{};
+  std::array<Status, kPressureEnergyGlobalizationCandidateCount>
+      candidate_evaluation_status{};
 };
 
 enum class ApplicationFailurePhase : std::uint8_t {
@@ -181,7 +214,32 @@ enum class ApplicationFailurePhase : std::uint8_t {
   monitor,
   restart,
   resources,
-  evidence
+  evidence,
+  input,
+  case_compile,
+  product_compile,
+  driver_create,
+  initialize,
+  restart_load,
+  runtime_identity,
+  time_control
+};
+
+struct StepAttemptFailure {
+  Status failure{};
+  StageId stage{};
+  std::uint32_t attempt{};  // One-based; zero means no failed attempt occurred.
+  double dt{};
+};
+
+struct StepCompletionReport {
+  Status outcome{};  // Exactly the status returned by advance.
+  // The controller/commit decision, before preserving a legacy attempt error
+  // in the return value. For example minimum_dt (454) or retry capacity (455).
+  // Both outcome and stop_reason are OK after an accepted retry.
+  Status stop_reason{};
+  StepAttemptFailure first_failure{};
+  StepAttemptFailure last_failure{};
 };
 
 struct ApplicationRunReport {
@@ -193,6 +251,7 @@ struct ApplicationRunReport {
   std::uint32_t attempts{};
   Status failure{};
   ApplicationFailurePhase failure_phase{ApplicationFailurePhase::none};
+  StepCompletionReport step_completion{};
   // First proposal in this advance; subsequent retry dt remains in the
   // numerical attempt diagnostics. Present even for a minimum-dt rejection.
   TimeProposalDiagnostic initial_time_proposal{};
@@ -260,6 +319,8 @@ struct DriverResourceReport {
   std::uint64_t exact_numeric_refills{};
   std::uint64_t hierarchy_rebuilds{};
   std::uint64_t preconditioner_applications{};
+  std::uint64_t structured_control_collectives{};
+  std::uint64_t ibm_control_collectives{};
 };
 
 inline constexpr std::size_t kDriverTimedStageCapacity = 10U;
@@ -270,6 +331,7 @@ struct DriverStageTiming {
 };
 
 struct DriverStepReport {
+  StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
   StepTime proposal{};
   BdfCoefficients effective_bdf{};
@@ -278,7 +340,8 @@ struct DriverStepReport {
   double accepted_time{};
   std::uint32_t attempts{};
   StageId failed_stage{};
-  Status failure{};
+  Status failure{};  // Legacy last-attempt error; use completion.outcome for
+                     // the result.
   NumericalFailureContext numerical_failure{};
   ThermophysicalPredictorDiagnostics thermophysical_predictor{};
   PressureEnergyGlobalizationAttemptReport pressure_energy_globalization{};

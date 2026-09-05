@@ -20,6 +20,14 @@ std::uint64_t hash_mix(std::uint64_t hash, std::uint64_t value) noexcept {
 
 }  // namespace
 
+FieldRegistry::FieldRegistry(const FieldRegistry& other) {
+  // Fully construct the containers before copying allocating elements. Their
+  // destructors then own partial capacity even when a string copy fails.
+  fields_ = other.fields_;
+  names_ = other.names_;
+  frozen_ = other.frozen_;
+}
+
 Status FieldRegistry::declare_field(std::string_view stable_name,
                                     std::uint8_t components,
                                     std::uint8_t ghost_width, FieldId& out) {

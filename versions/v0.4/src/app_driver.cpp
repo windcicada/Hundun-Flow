@@ -85,7 +85,7 @@ Status collect_evidence_resources(
   // Job-wide traffic is a sum.  Logical solver work and elapsed reduction
   // time are reported at the slowest rank so every rank emits one identical
   // committed-step record without hiding load imbalance.
-  std::array<std::uint64_t, 16U> maxima{{
+  std::array<std::uint64_t, 18U> maxima{{
       local.structured_messages,
       local.structured_bytes,
       local.ibm_messages,
@@ -102,6 +102,8 @@ Status collect_evidence_resources(
       local.mg_blocking_collectives,
       local.mg_collective_logical_bytes,
       local.predictor_blocking_collectives,
+      local.structured_control_collectives,
+      local.ibm_control_collectives,
   }};
   if (MPI_Allreduce(MPI_IN_PLACE, maxima.data(),
                     static_cast<int>(maxima.size()), MPI_UINT64_T, MPI_MAX,
@@ -140,6 +142,8 @@ Status collect_evidence_resources(
   global.mg_blocking_collectives = maxima[13U];
   global.mg_collective_logical_bytes = maxima[14U];
   global.predictor_blocking_collectives = maxima[15U];
+  global.structured_control_collectives = maxima[16U];
+  global.ibm_control_collectives = maxima[17U];
   return {};
 }
 
@@ -413,41 +417,63 @@ Status ApplicationService::validate_run_directories(
   return {StatusCode::invalid_case, kApplicationPath};
 }
 
-Status ApplicationService::run(MPI_Comm communicator,
-                               const ApplicationRunOptions& options,
-                               ApplicationRunReport& report) noexcept try {
-  if (communicator == MPI_COMM_NULL || options.case_root.empty() ||
-      options.run_directory.empty() || options.source_root.empty() ||
-      options.steps == 0U)
+static Status run_application(MPI_Comm communicator,
+                              const ApplicationRunOptions& options,
+                              ApplicationRunReport& report) noexcept try {
+  if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_case, kApplicationInput};
+  int rank = 0;
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kApplicationInput};
   Status status = detail::output_collective_status(
-      communicator,
-      validate_run_directories(options.case_root, options.run_directory,
-                               options.source_root));
+      communicator, options.case_root.empty() ||
+                            options.run_directory.empty() ||
+                            options.source_root.empty() || options.steps == 0U
+                        ? Status{StatusCode::invalid_case, kApplicationInput}
+                        : Status{});
+  if (status)
+    status = detail::output_collective_status(
+        communicator,
+        ApplicationService::validate_run_directories(
+            options.case_root, options.run_directory, options.source_root));
+  if (!status) return status;
+  report.failure_phase = ApplicationFailurePhase::case_compile;
   ValidatedModel model;
   if (status)
     status = CaseCompiler::load_and_compile(communicator, options.case_root,
                                             model);
+  if (!status) return status;
+  report.case_model = model.fingerprint;
+  report.failure_phase = ApplicationFailurePhase::product_compile;
   CompiledCasePlan plan;
   if (status)
     status = ProductCompiler::compile(communicator, model, options.case_root,
                                       plan);
   if (!status) return status;
   const PlanFingerprint product_fingerprint = plan.fingerprint();
+  report.product = product_fingerprint;
   const PlanFingerprint cpu_plan_fingerprint = plan.cpu_plan_fingerprint();
   const PlanFingerprint stl_fingerprint = plan.stl_fingerprint();
   const IoServicePlan* sealed_services = plan.io_services();
-  if (sealed_services == nullptr || sealed_services->fingerprint() == 0U)
-    return {StatusCode::invalid_plan, kApplicationInput};
+  status = detail::output_collective_status(
+      communicator,
+      sealed_services == nullptr || sealed_services->fingerprint() == 0U
+          ? Status{StatusCode::invalid_plan, kApplicationInput}
+          : Status{});
+  if (!status) return status;
   const IoServicePlan& services = *sealed_services;
   ProductDriver driver;
+  report.failure_phase = ApplicationFailurePhase::driver_create;
   status = ProductDriver::create(communicator, std::move(plan), driver);
+  if (!status) return status;
   std::uint64_t starting_step = 0U;
   RuntimeRunStartAnchor run_start;
   bool restart_backward_euler_recovery = false;
   if (status && !options.restart_directory.empty()) {
+    report.failure_phase = ApplicationFailurePhase::restart_load;
     RestartExpected expected;
-    status = driver.restart_expected(expected);
+    status = detail::output_collective_status(
+        communicator, driver.restart_expected(expected));
     RestartImage image;
     if (status)
       status = RestartReader::load(communicator, options.restart_directory,
@@ -459,10 +485,18 @@ Status ApplicationService::run(MPI_Comm communicator,
       run_start.previous_time = image.time;
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
       restart_backward_euler_recovery = image.backward_euler_recovery;
+      report.failure_phase = ApplicationFailurePhase::initialize;
       status = driver.initialize_restart(image);
     }
   } else if (status) {
-    std::vector<double> initial_scalars(model.transported_scalars.size(), 0.0);
+    report.failure_phase = ApplicationFailurePhase::initialize;
+    std::vector<double> initial_scalars;
+    status = detail::output_collective_stage(communicator, [&] {
+      local_allocation_checkpoint(report.failure_phase, rank);
+      initial_scalars.assign(model.transported_scalars.size(), 0.0);
+      return Status{};
+    });
+    if (!status) return status;
     DriverInitialState initial;
     initial.transported_scalars =
         {initial_scalars.data(), initial_scalars.size()};
@@ -482,6 +516,9 @@ Status ApplicationService::run(MPI_Comm communicator,
     status = driver.initialize(initial);
   }
   if (!status) return status;
+  report.accepted_steps = starting_step;
+  report.final_time = run_start.previous_time;
+  report.failure_phase = ApplicationFailurePhase::runtime_identity;
   RuntimeCandidateIdentity candidate_identity;
   status = detail::runtime_candidate_identity(communicator,
                                               candidate_identity);
@@ -497,10 +534,6 @@ Status ApplicationService::run(MPI_Comm communicator,
     return {StatusCode::invalid_case, kApplicationInput};
   const std::uint64_t target_step = starting_step + options.steps;
 
-  int rank = 0;
-  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
-    return {StatusCode::mpi_failure, kApplicationInput};
-  report = {};
   report.case_model = model.fingerprint;
   report.product = product_fingerprint;
   report.accepted_steps = starting_step;
@@ -515,13 +548,17 @@ Status ApplicationService::run(MPI_Comm communicator,
           : Status{StatusCode::mpi_failure, kApplicationInput});
   for (std::uint64_t step_index = 0U;
        step_index < options.steps && status; ++step_index) {
-    report.failure_phase = ApplicationFailurePhase::advance;
+    report.failure_phase = ApplicationFailurePhase::time_control;
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     LocalTimeLimits time_limits = options.time_limits;
     status = driver.constrain_convective_time_limit(time_limits);
-    if (status) status = driver.advance(time_limits, step);
+    if (status) {
+      report.failure_phase = ApplicationFailurePhase::advance;
+      status = driver.advance(time_limits, step);
+    }
     report.attempts = step.attempts;
+    report.step_completion = step.completion;
     report.initial_time_proposal = step.initial_time_proposal;
     // Commit is authoritative even if a later resource collective or writer
     // fails.  Never report an accepted step as a failed numerical attempt.
@@ -653,26 +690,35 @@ Status ApplicationService::run(MPI_Comm communicator,
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "monitor.jsonl";
         std::ostringstream payload;
-        payload << "{\"attempts\":" << step.attempts
-                << ",\"continuity\":" << step.piso.continuity_residual
-                << ",\"energy\":" << step.piso.energy_residual
-                << ",\"eos\":" << step.piso.eos_residual
-                << ",\"advective_convective_cfl_out\":"
-                << step.momentum_predictor_limiter.advective_cfl.out_max
-                << ",\"advective_convective_cfl_abs\":"
-                << step.momentum_predictor_limiter.advective_cfl.absolute_max
-                << ",\"advective_convective_cfl_limit\":"
-                << step.momentum_predictor_limiter.advective_cfl.limit
-                << ",\"committed_convective_cfl_out\":"
-                << step.piso.committed_convective_cfl_out_max
-                << ",\"committed_convective_cfl_abs\":"
-                << step.piso.committed_convective_cfl_abs_max
-                << ",\"committed_convective_cfl_limit\":"
-                << step.piso.committed_convective_cfl_limit
-                << ",\"predictor_limited\":"
-                << (step.thermophysical_predictor.limited ? "true" : "false")
-                << ",\"predictor_theta\":"
-                << step.thermophysical_predictor.theta << '}';
+        payload
+            << "{\"attempts\":" << step.attempts
+            << ",\"candidate_baseline_evaluations\":"
+            << step.pressure_energy_globalization.work.baseline_evaluations
+            << ",\"candidate_extrapolation_evaluations\":"
+            << step.pressure_energy_globalization.work.extrapolation_evaluations
+            << ",\"candidate_ladder_evaluations\":"
+            << step.pressure_energy_globalization.work.ladder_evaluations
+            << ",\"candidate_incomplete_evaluations\":"
+            << step.pressure_energy_globalization.work.incomplete_evaluations
+            << ",\"continuity\":" << step.piso.continuity_residual
+            << ",\"energy\":" << step.piso.energy_residual
+            << ",\"eos\":" << step.piso.eos_residual
+            << ",\"advective_convective_cfl_out\":"
+            << step.momentum_predictor_limiter.advective_cfl.out_max
+            << ",\"advective_convective_cfl_abs\":"
+            << step.momentum_predictor_limiter.advective_cfl.absolute_max
+            << ",\"advective_convective_cfl_limit\":"
+            << step.momentum_predictor_limiter.advective_cfl.limit
+            << ",\"committed_convective_cfl_out\":"
+            << step.piso.committed_convective_cfl_out_max
+            << ",\"committed_convective_cfl_abs\":"
+            << step.piso.committed_convective_cfl_abs_max
+            << ",\"committed_convective_cfl_limit\":"
+            << step.piso.committed_convective_cfl_limit
+            << ",\"predictor_limited\":"
+            << (step.thermophysical_predictor.limited ? "true" : "false")
+            << ",\"predictor_theta\":" << step.thermophysical_predictor.theta
+            << '}';
         monitor_text = payload.str();
         return Status{};
       });
@@ -758,6 +804,19 @@ Status ApplicationService::run(MPI_Comm communicator,
       }
       evidence.blocking_collectives +=
           evidence_resources.predictor_blocking_collectives;
+      // Include halo/donor control reductions once. This remains the tracked
+      // solver subtotal: direct time/coupler consensus and cold MPI plan setup
+      // require separate attribution before calling it a complete MPI census.
+      for (std::uint64_t calls :
+           {evidence_resources.structured_control_collectives,
+            evidence_resources.ibm_control_collectives}) {
+        if (calls > UINT64_MAX - evidence.blocking_collectives) {
+          status = {StatusCode::invalid_plan, kApplicationInput};
+          break;
+        }
+        evidence.blocking_collectives += calls;
+      }
+      if (!status) break;
       evidence.reduction_nanoseconds =
           evidence_resources.reduction_nanoseconds;
       evidence.linear_iterations = evidence_resources.linear_iterations;
@@ -932,6 +991,18 @@ Status ApplicationService::run(MPI_Comm communicator,
   return {StatusCode::allocation_failure, kApplicationInput};
 } catch (...) {
   return {StatusCode::invalid_case, kApplicationInput};
+}
+
+Status ApplicationService::run(MPI_Comm communicator,
+                               const ApplicationRunOptions& options,
+                               ApplicationRunReport& report) noexcept {
+  // One entry/exit owner for the public report, including setup and catches.
+  report = {};
+  report.failure_phase = ApplicationFailurePhase::input;
+  const Status outcome = run_application(communicator, options, report);
+  report.failure = outcome;
+  if (outcome) report.failure_phase = ApplicationFailurePhase::none;
+  return outcome;
 }
 
 }  // namespace hundun::v04

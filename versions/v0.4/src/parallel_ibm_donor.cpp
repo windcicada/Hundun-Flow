@@ -26,6 +26,34 @@ constexpr std::uint32_t kDonorExchange = 14504U;
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
 
+// Cold preparation callbacks are local-only; agree before any next exchange.
+template <class Work>
+Status donor_local_stage(MPI_Comm communicator, int rank, int size,
+                         Work&& work) noexcept {
+  Status local;
+  try {
+    local = work();
+  } catch (const std::bad_alloc&) {
+    local = {StatusCode::allocation_failure, kDonorLayout};
+  } catch (...) {
+    local = {StatusCode::invalid_plan, kDonorInput};
+  }
+  const int candidate = local ? size : rank;
+  int failing = size;
+  if (MPI_Allreduce(&candidate, &failing, 1, MPI_INT, MPI_MIN, communicator) !=
+      MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kDonorCollective};
+  if (failing == size) return {};
+  std::uint64_t wire =
+      rank == failing
+          ? (static_cast<std::uint64_t>(local.code) << 32U) | local.detail
+          : 0U;
+  if (MPI_Bcast(&wire, 1, MPI_UINT64_T, failing, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kDonorCollective};
+  return {static_cast<StatusCode>(wire >> 32U),
+          static_cast<std::uint32_t>(wire)};
+}
+
 std::uint64_t mix(std::uint64_t hash, std::uint64_t value) noexcept {
   hash ^= value;
   hash *= kFnvPrime;
@@ -267,15 +295,21 @@ Status RemoteDonorExchangePlan::analyze(
     const QuadraticStencilPlan& reconstruction,
     Span<const RemoteDonorFieldSpec> fields, StageId stage,
     RemoteDonorExchangePlan& out) noexcept try {
-  if (communicator == MPI_COMM_NULL || out.implementation_ != nullptr ||
-      reconstruction.fingerprint() == 0U ||
-      fields.data == nullptr || fields.size == 0U || stage == 0U)
+  if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kDonorInput};
   int rank = -1;
   int size = 0;
   if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
       MPI_Comm_size(communicator, &size) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kDonorCollective};
+  Status status = donor_local_stage(communicator, rank, size, [&] {
+    return out.implementation_ != nullptr ||
+                   reconstruction.fingerprint() == 0U ||
+                   fields.data == nullptr || fields.size == 0U || stage == 0U
+               ? Status{StatusCode::invalid_plan, kDonorInput}
+               : Status{};
+  });
+  if (!status) return status;
   const unsigned local_reach = reconstruction.maximum_halo_reach();
   unsigned global_reach = 0U;
   if (MPI_Allreduce(&local_reach, &global_reach, 1, MPI_UNSIGNED, MPI_MAX,
@@ -315,42 +349,46 @@ Status RemoteDonorExchangePlan::analyze(
     return {StatusCode::invalid_plan, kDonorInput};
 
   std::vector<Need> needs;
-  needs.reserve(globals.size);
-  for (std::size_t index = 0U; index < globals.size; ++index) {
-    bool decoded = false;
-    const Int3 canonical = decode(globals.data[index], global_cells, decoded);
-    Int3 raw{};
-    const Int3 local = locals.data[index];
-    Int3 canonical_from_raw{};
-    if (!decoded || !raw_index(local, patch, raw) ||
-        !in_padded(local, patch.cells,
-                   {static_cast<std::int32_t>(global_reach),
-                    static_cast<std::int32_t>(global_reach),
-                    static_cast<std::int32_t>(global_reach)}) ||
-        !canonicalize_raw(raw, global_cells, global_reach, reconstruction,
-                          canonical_from_raw) ||
-        !same(canonical, canonical_from_raw)) {
-      local_valid = false;
-      break;
+  status = donor_local_stage(communicator, rank, size, [&] {
+    needs.reserve(globals.size);
+    for (std::size_t index = 0U; index < globals.size; ++index) {
+      bool decoded = false;
+      const Int3 canonical = decode(globals.data[index], global_cells, decoded);
+      Int3 raw{};
+      const Int3 local = locals.data[index];
+      Int3 canonical_from_raw{};
+      if (!decoded || !raw_index(local, patch, raw) ||
+          !in_padded(local, patch.cells,
+                     {static_cast<std::int32_t>(global_reach),
+                      static_cast<std::int32_t>(global_reach),
+                      static_cast<std::int32_t>(global_reach)}) ||
+          !canonicalize_raw(raw, global_cells, global_reach, reconstruction,
+                            canonical_from_raw) ||
+          !same(canonical, canonical_from_raw)) {
+        local_valid = false;
+        break;
+      }
+      if (!inside(local, patch.cells))
+        needs.push_back(
+            {owner_rank(canonical, global_cells, patch.process_grid),
+             globals.data[index], local});
     }
-    if (!inside(local, patch.cells))
-      needs.push_back(
-          {owner_rank(canonical, global_cells, patch.process_grid),
-           globals.data[index], local});
-  }
-  std::sort(needs.begin(), needs.end(), need_less);
-  // A canonical donor may serve distinct raw ghost targets.  The same
-  // canonical/target pair can also be referenced by several reconstruction
-  // groups, so retain one request for that storage slot deterministically.
-  // Per-group canonical duplicates are rejected by collect_donors before this
-  // exchange plan is constructed.
-  const auto unique_end = std::unique(
-      needs.begin(), needs.end(), [](const Need& left, const Need& right) {
-        return left.global == right.global && same(left.local, right.local);
-      });
-  needs.erase(unique_end, needs.end());
-  for (const Need& need : needs)
-    local_valid = local_valid && need.owner >= 0 && need.owner < size;
+    std::sort(needs.begin(), needs.end(), need_less);
+    // A canonical donor may serve distinct raw ghost targets.  The same
+    // canonical/target pair can also be referenced by several reconstruction
+    // groups, so retain one request for that storage slot deterministically.
+    // Per-group canonical duplicates are rejected by collect_donors before this
+    // exchange plan is constructed.
+    const auto unique_end = std::unique(
+        needs.begin(), needs.end(), [](const Need& left, const Need& right) {
+          return left.global == right.global && same(left.local, right.local);
+        });
+    needs.erase(unique_end, needs.end());
+    for (const Need& need : needs)
+      local_valid = local_valid && need.owner >= 0 && need.owner < size;
+    return Status{};
+  });
+  if (!status) return status;
   valid_integer = local_valid ? 1 : 0;
   if (MPI_Allreduce(&valid_integer, &globally_valid, 1, MPI_INT, MPI_MIN,
                     communicator) != MPI_SUCCESS)
@@ -358,36 +396,50 @@ Status RemoteDonorExchangePlan::analyze(
   if (globally_valid == 0)
     return {StatusCode::invalid_plan, kDonorLayout};
 
-  std::vector<int> request_counts(static_cast<std::size_t>(size), 0);
-  for (const Need& need : needs) {
-    int& count = request_counts[static_cast<std::size_t>(need.owner)];
-    if (count == std::numeric_limits<int>::max())
-      return {StatusCode::invalid_plan, kDonorLayout};
-    ++count;
-  }
-  std::vector<int> supply_counts(static_cast<std::size_t>(size), 0);
+  std::vector<int> request_counts;
+  std::vector<int> supply_counts;
+  status = donor_local_stage(communicator, rank, size, [&]() -> Status {
+    request_counts.assign(static_cast<std::size_t>(size), 0);
+    for (const Need& need : needs) {
+      int& count = request_counts[static_cast<std::size_t>(need.owner)];
+      if (count == std::numeric_limits<int>::max())
+        return {StatusCode::invalid_plan, kDonorLayout};
+      ++count;
+    }
+    supply_counts.assign(static_cast<std::size_t>(size), 0);
+    return {};
+  });
+  if (!status) return status;
   if (MPI_Alltoall(request_counts.data(), 1, MPI_INT, supply_counts.data(), 1,
                    MPI_INT, communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kDonorCollective};
-  std::vector<int> request_displacements(static_cast<std::size_t>(size), 0);
-  std::vector<int> supply_displacements(static_cast<std::size_t>(size), 0);
+  std::vector<int> request_displacements;
+  std::vector<int> supply_displacements;
+  std::vector<GlobalCellId> requested;
+  std::vector<GlobalCellId> supplied;
   int request_total = 0;
   int supply_total = 0;
-  for (int peer = 0; peer < size; ++peer) {
-    request_displacements[static_cast<std::size_t>(peer)] = request_total;
-    supply_displacements[static_cast<std::size_t>(peer)] = supply_total;
-    if (request_counts[static_cast<std::size_t>(peer)] >
-            std::numeric_limits<int>::max() - request_total ||
-        supply_counts[static_cast<std::size_t>(peer)] >
-            std::numeric_limits<int>::max() - supply_total)
-      return {StatusCode::invalid_plan, kDonorLayout};
-    request_total += request_counts[static_cast<std::size_t>(peer)];
-    supply_total += supply_counts[static_cast<std::size_t>(peer)];
-  }
-  std::vector<GlobalCellId> requested(static_cast<std::size_t>(request_total));
-  for (std::size_t index = 0U; index < needs.size(); ++index)
-    requested[index] = needs[index].global;
-  std::vector<GlobalCellId> supplied(static_cast<std::size_t>(supply_total));
+  status = donor_local_stage(communicator, rank, size, [&]() -> Status {
+    request_displacements.assign(static_cast<std::size_t>(size), 0);
+    supply_displacements.assign(static_cast<std::size_t>(size), 0);
+    for (int peer = 0; peer < size; ++peer) {
+      request_displacements[static_cast<std::size_t>(peer)] = request_total;
+      supply_displacements[static_cast<std::size_t>(peer)] = supply_total;
+      if (request_counts[static_cast<std::size_t>(peer)] >
+              std::numeric_limits<int>::max() - request_total ||
+          supply_counts[static_cast<std::size_t>(peer)] >
+              std::numeric_limits<int>::max() - supply_total)
+        return {StatusCode::invalid_plan, kDonorLayout};
+      request_total += request_counts[static_cast<std::size_t>(peer)];
+      supply_total += supply_counts[static_cast<std::size_t>(peer)];
+    }
+    requested.resize(static_cast<std::size_t>(request_total));
+    for (std::size_t index = 0U; index < needs.size(); ++index)
+      requested[index] = needs[index].global;
+    supplied.resize(static_cast<std::size_t>(supply_total));
+    return {};
+  });
+  if (!status) return status;
   if (MPI_Alltoallv(requested.data(), request_counts.data(),
                     request_displacements.data(), MPI_UINT64_T,
                     supplied.data(), supply_counts.data(),
@@ -396,19 +448,23 @@ Status RemoteDonorExchangePlan::analyze(
     return {StatusCode::mpi_failure, kDonorCollective};
 
   std::vector<Int3> send_sources;
-  send_sources.reserve(supplied.size());
-  for (GlobalCellId id : supplied) {
-    bool decoded = false;
-    const Int3 global = decode(id, global_cells, decoded);
-    const Int3 local{global.x - patch.begin.x, global.y - patch.begin.y,
-                     global.z - patch.begin.z};
-    if (!decoded || !inside(local, patch.cells) ||
-        owner_rank(global, global_cells, patch.process_grid) != rank) {
-      local_valid = false;
-      break;
+  status = donor_local_stage(communicator, rank, size, [&] {
+    send_sources.reserve(supplied.size());
+    for (GlobalCellId id : supplied) {
+      bool decoded = false;
+      const Int3 global = decode(id, global_cells, decoded);
+      const Int3 local{global.x - patch.begin.x, global.y - patch.begin.y,
+                       global.z - patch.begin.z};
+      if (!decoded || !inside(local, patch.cells) ||
+          owner_rank(global, global_cells, patch.process_grid) != rank) {
+        local_valid = false;
+        break;
+      }
+      send_sources.push_back(local);
     }
-    send_sources.push_back(local);
-  }
+    return Status{};
+  });
+  if (!status) return status;
   valid_integer = local_valid ? 1 : 0;
   if (MPI_Allreduce(&valid_integer, &globally_valid, 1, MPI_INT, MPI_MIN,
                     communicator) != MPI_SUCCESS)
@@ -416,66 +472,69 @@ Status RemoteDonorExchangePlan::analyze(
   if (globally_valid == 0)
     return {StatusCode::invalid_plan, kDonorLayout};
 
-  std::unique_ptr<Impl> candidate{new (std::nothrow) Impl};
-  if (candidate == nullptr)
-    return {StatusCode::allocation_failure, kDonorLayout};
-  candidate->patch = patch;
-  candidate->global = global_cells;
-  candidate->fields.assign(fields.data, fields.data + fields.size);
-  candidate->receive_targets.reserve(needs.size());
-  for (const Need& need : needs)
-    candidate->receive_targets.push_back(need.local);
-  candidate->send_sources = std::move(send_sources);
-  candidate->values_per_cell = values_per_cell;
-  candidate->reach = static_cast<std::uint8_t>(global_reach);
-  candidate->stage = stage;
-  candidate->receive_counts = request_counts;
-  candidate->receive_displacements = request_displacements;
-  candidate->send_counts = supply_counts;
-  candidate->send_displacements = supply_displacements;
-  std::size_t receive_values = 0U;
-  std::size_t send_values = 0U;
-  if (!multiply(candidate->receive_targets.size(), values_per_cell,
-                receive_values) ||
-      !multiply(candidate->send_sources.size(), values_per_cell,
-                send_values)) {
-    return {StatusCode::invalid_plan, kDonorLayout};
-  }
-  std::uint32_t peer_messages = 0U;
-  for (int peer = 0; peer < size; ++peer) {
-    const int receive_cells = request_counts[static_cast<std::size_t>(peer)];
-    const int send_cells = supply_counts[static_cast<std::size_t>(peer)];
-    if ((receive_cells > 0 &&
-         values_per_cell >
-             static_cast<std::size_t>(std::numeric_limits<int>::max() /
-                                      receive_cells)) ||
-        (send_cells > 0 &&
-         values_per_cell >
-             static_cast<std::size_t>(std::numeric_limits<int>::max() /
-                                      send_cells))) {
+  std::unique_ptr<Impl> candidate;
+  status = donor_local_stage(communicator, rank, size, [&]() -> Status {
+    candidate.reset(new Impl);
+    candidate->patch = patch;
+    candidate->global = global_cells;
+    candidate->fields.assign(fields.data, fields.data + fields.size);
+    candidate->receive_targets.reserve(needs.size());
+    for (const Need& need : needs)
+      candidate->receive_targets.push_back(need.local);
+    candidate->send_sources = std::move(send_sources);
+    candidate->values_per_cell = values_per_cell;
+    candidate->reach = static_cast<std::uint8_t>(global_reach);
+    candidate->stage = stage;
+    candidate->receive_counts = request_counts;
+    candidate->receive_displacements = request_displacements;
+    candidate->send_counts = supply_counts;
+    candidate->send_displacements = supply_displacements;
+    std::size_t receive_values = 0U;
+    std::size_t send_values = 0U;
+    if (!multiply(candidate->receive_targets.size(), values_per_cell,
+                  receive_values) ||
+        !multiply(candidate->send_sources.size(), values_per_cell,
+                  send_values)) {
       return {StatusCode::invalid_plan, kDonorLayout};
     }
-    peer_messages += receive_cells > 0 ? 1U : 0U;
-    peer_messages += send_cells > 0 ? 1U : 0U;
-  }
-  candidate->stats.received_cells = candidate->receive_targets.size();
-  candidate->stats.supplied_cells = candidate->send_sources.size();
-  candidate->stats.bytes_per_exchange =
-      (receive_values + send_values) * sizeof(double);
-  candidate->stats.peer_messages = peer_messages;
-  std::uint64_t hash = kFnvOffset;
-  hash = mix(hash, reconstruction.fingerprint());
-  hash = mix(hash, stage);
-  hash = mix(hash, values_per_cell);
-  hash = mix(hash, candidate->reach);
-  hash = mix(hash, candidate->stats.received_cells);
-  hash = mix(hash, candidate->stats.supplied_cells);
-  for (const RemoteDonorFieldSpec field : candidate->fields) {
-    hash = mix(hash, field.field);
-    hash = mix(hash, field.components);
-  }
-  for (const Need& need : needs) hash = mix(hash, need.global);
-  candidate->fingerprint = hash == 0U ? 1U : hash;
+    std::uint32_t peer_messages = 0U;
+    for (int peer = 0; peer < size; ++peer) {
+      const int receive_cells = request_counts[static_cast<std::size_t>(peer)];
+      const int send_cells = supply_counts[static_cast<std::size_t>(peer)];
+      if ((receive_cells > 0 &&
+           values_per_cell >
+               static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                        receive_cells)) ||
+          (send_cells > 0 &&
+           values_per_cell >
+               static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                        send_cells))) {
+        return {StatusCode::invalid_plan, kDonorLayout};
+      }
+      peer_messages += receive_cells > 0 ? 1U : 0U;
+      peer_messages += send_cells > 0 ? 1U : 0U;
+    }
+    candidate->stats.received_cells = candidate->receive_targets.size();
+    candidate->stats.supplied_cells = candidate->send_sources.size();
+    candidate->stats.bytes_per_exchange =
+        (receive_values + send_values) * sizeof(double);
+    candidate->stats.peer_messages = peer_messages;
+    std::uint64_t hash = kFnvOffset;
+    hash = mix(hash, reconstruction.fingerprint());
+    hash = mix(hash, stage);
+    hash = mix(hash, values_per_cell);
+    hash = mix(hash, candidate->reach);
+    hash = mix(hash, candidate->stats.received_cells);
+    hash = mix(hash, candidate->stats.supplied_cells);
+    for (const RemoteDonorFieldSpec field : candidate->fields) {
+      hash = mix(hash, field.field);
+      hash = mix(hash, field.components);
+    }
+    for (const Need& need : needs) hash = mix(hash, need.global);
+    candidate->fingerprint = hash == 0U ? 1U : hash;
+    return {};
+  });
+  if (!status) return status;
   out.implementation_ = candidate.release();
   return {};
 } catch (const std::bad_alloc&) {
@@ -610,6 +669,8 @@ Status RemoteDonorExchangePlan::exchange(StageId stage,
       stage, {fields.data, fields.size});
   const int local_preflight = preflight ? 1 : 0;
   int global_preflight = 0;
+  if (plan.counters.control_consensus_calls != UINT64_MAX)
+    ++plan.counters.control_consensus_calls;
   if (MPI_Allreduce(&local_preflight, &global_preflight, 1, MPI_INT, MPI_MIN,
                     plan.communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kDonorCollective};

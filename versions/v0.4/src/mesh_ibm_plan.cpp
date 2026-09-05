@@ -423,8 +423,7 @@ bool lies_on_domain_face(const std::array<Real3, 3U>& triangle,
 template <class Visitor>
 Status visit_domain_clipped_quadrature(
     const CartesianGeometryPlan& geometry,
-    Span<const SurfaceTriangle> surface_triangles,
-    Visitor&& visitor) noexcept {
+    Span<const SurfaceTriangle> surface_triangles, Visitor&& visitor) {
   const Real3 lower = geometry.lower();
   const Real3 upper = geometry.upper();
   for (std::size_t triangle_index = 0U;

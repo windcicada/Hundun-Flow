@@ -728,6 +728,44 @@ struct FreshStartKinematicProjectionPlan::Impl {
 
 namespace {
 
+Status fresh_compile_consensus(MPI_Comm communicator, Status local) noexcept {
+  int rank = 0, size = 0;
+  if (communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, kFreshProjectionPlan};
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kFreshProjectionPlan};
+  const int candidate = local ? size : rank;
+  int failing = size;
+  if (MPI_Allreduce(&candidate, &failing, 1, MPI_INT, MPI_MIN, communicator) !=
+      MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kFreshProjectionPlan};
+  if (failing == size) return {};
+  std::uint64_t wire =
+      rank == failing
+          ? (static_cast<std::uint64_t>(local.code) << 32U) | local.detail
+          : 0U;
+  if (MPI_Bcast(&wire, 1, MPI_UINT64_T, failing, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kFreshProjectionPlan};
+  return {static_cast<StatusCode>(wire >> 32U),
+          static_cast<std::uint32_t>(wire)};
+}
+
+// Local-only callbacks. No neighbor exchange or collective may enter this
+// scope.
+template <class Work>
+Status fresh_local_stage(MPI_Comm communicator, Work &&work) noexcept {
+  Status local;
+  try {
+    local = work();
+  } catch (const std::bad_alloc &) {
+    local = {StatusCode::allocation_failure, kFreshProjectionPlan};
+  } catch (...) {
+    local = {StatusCode::invalid_plan, kFreshProjectionPlan};
+  }
+  return fresh_compile_consensus(communicator, local);
+}
+
 template <class Implementation>
 Status copy_activity(const FreshStartKinematicProjectionSpec &spec,
                      Implementation &impl) {
@@ -772,8 +810,12 @@ Status compile_components_scalable(Implementation &impl) {
   const Int3 global = impl.geometry->global_cells();
   try {
     const std::size_t local_cell_count = cell_count(cells);
-    DisjointSet sets(local_cell_count);
-    Status local{};
+    DisjointSet sets(0U);
+    Status local = fresh_local_stage(impl.communicator, [&] {
+      sets = DisjointSet(local_cell_count);
+      return Status{};
+    });
+    if (!local) return local;
     std::uint64_t local_active_count = 0U;
     for (std::int32_t z = 0; z < cells.z; ++z)
       for (std::int32_t y = 0; y < cells.y; ++y)
@@ -911,9 +953,16 @@ Status compile_components_scalable(Implementation &impl) {
     if (!local)
       return local;
 
-    std::vector<std::uint64_t> root_label(local_cell_count, UINT64_MAX);
-    std::vector<std::uint8_t> root_dirichlet(local_cell_count, 0U);
-    std::vector<std::uint8_t> root_distributed(local_cell_count, 0U);
+    std::vector<std::uint64_t> root_label;
+    std::vector<std::uint8_t> root_dirichlet;
+    std::vector<std::uint8_t> root_distributed;
+    local = fresh_local_stage(impl.communicator, [&] {
+      root_label.assign(local_cell_count, UINT64_MAX);
+      root_dirichlet.assign(local_cell_count, 0U);
+      root_distributed.assign(local_cell_count, 0U);
+      return Status{};
+    });
+    if (!local) return local;
     for (std::int32_t z = 0; z < cells.z; ++z)
       for (std::int32_t y = 0; y < cells.y; ++y)
         for (std::int32_t x = 0; x < cells.x; ++x) {
@@ -952,6 +1001,23 @@ Status compile_components_scalable(Implementation &impl) {
     std::vector<std::uint64_t> send_high;
     std::vector<std::uint64_t> receive_from_plus;
     std::vector<std::uint64_t> receive_from_minus;
+    // Both later exchange widths fit this capacity; assign below cannot grow.
+    local = fresh_local_stage(impl.communicator, [&]() -> Status {
+      std::size_t area = 0U;
+      for (CartesianAxis axis :
+           {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
+        if (neighbor(axis, false) != MPI_PROC_NULL ||
+            neighbor(axis, true) != MPI_PROC_NULL)
+          area = std::max(area, boundary_area(axis));
+      }
+      if (area > static_cast<std::size_t>(INT_MAX) / 3U)
+        return {StatusCode::invalid_plan, kFreshProjectionPlan};
+      for (auto *values :
+           {&send_low, &send_high, &receive_from_plus, &receive_from_minus})
+        values->reserve(3U * area);
+      return {};
+    });
+    if (!local) return local;
     const auto exchange_axis = [&](CartesianAxis axis, std::size_t width,
                                    int tag) -> Status {
       const std::size_t area = boundary_area(axis);
@@ -1109,51 +1175,53 @@ Status compile_components_scalable(Implementation &impl) {
     if (global_changed)
       return {StatusCode::invalid_plan, kFreshProjectionPlan};
 
-    impl.component_labels.clear();
-    for (std::size_t flat = 0U; flat < local_cell_count; ++flat)
-      if (sets.find(flat) == flat && root_label[flat] != UINT64_MAX)
-        impl.component_labels.push_back(root_label[flat]);
-    std::sort(impl.component_labels.begin(), impl.component_labels.end());
-    impl.component_labels.erase(
-        std::unique(impl.component_labels.begin(), impl.component_labels.end()),
-        impl.component_labels.end());
-    if (impl.component_labels.empty())
-      return {StatusCode::invalid_plan, kFreshProjectionPlan};
-    impl.component_dirichlet.assign(impl.component_labels.size(), 0U);
-    impl.component_distributed.assign(impl.component_labels.size(), 0U);
     std::unordered_map<std::uint64_t, std::uint32_t> component_index;
-    component_index.reserve(2U * impl.component_labels.size() + 1U);
-    for (std::size_t component = 0U; component < impl.component_labels.size();
-         ++component)
-      component_index.emplace(impl.component_labels[component],
-                              static_cast<std::uint32_t>(component));
-    for (std::size_t flat = 0U; flat < local_cell_count; ++flat) {
-      if (sets.find(flat) != flat || root_label[flat] == UINT64_MAX)
-        continue;
-      const std::uint32_t component = component_index[root_label[flat]];
-      impl.component_dirichlet[component] =
-          static_cast<std::uint8_t>(impl.component_dirichlet[component] != 0U ||
-                                    root_dirichlet[flat] != 0U);
-      impl.component_distributed[component] = static_cast<std::uint8_t>(
-          impl.component_distributed[component] != 0U ||
-          root_distributed[flat] != 0U);
-    }
-    impl.local_components.assign(local_cell_count, kNoComponent);
-    for (std::int32_t z = 0; z < cells.z; ++z)
-      for (std::int32_t y = 0; y < cells.y; ++y)
-        for (std::int32_t x = 0; x < cells.x; ++x) {
-          const Int3 cell{x, y, z};
-          if (!impl.cell_active(cell))
-            continue;
-          const std::size_t flat = flat_cell(cells, cell);
-          impl.local_components[flat] =
-              component_index[root_label[sets.find(flat)]];
-        }
-    impl.component_anchors.clear();
-    for (std::size_t component = 0U; component < impl.component_labels.size();
-         ++component)
-      if (impl.component_dirichlet[component] == 0U)
-        impl.component_anchors.push_back(impl.component_labels[component]);
+    local = fresh_local_stage(impl.communicator, [&]() -> Status {
+      impl.component_labels.clear();
+      for (std::size_t flat = 0U; flat < local_cell_count; ++flat)
+        if (sets.find(flat) == flat && root_label[flat] != UINT64_MAX)
+          impl.component_labels.push_back(root_label[flat]);
+      std::sort(impl.component_labels.begin(), impl.component_labels.end());
+      impl.component_labels.erase(std::unique(impl.component_labels.begin(),
+                                              impl.component_labels.end()),
+                                  impl.component_labels.end());
+      if (impl.component_labels.empty())
+        return {StatusCode::invalid_plan, kFreshProjectionPlan};
+      impl.component_dirichlet.assign(impl.component_labels.size(), 0U);
+      impl.component_distributed.assign(impl.component_labels.size(), 0U);
+      component_index.reserve(2U * impl.component_labels.size() + 1U);
+      for (std::size_t component = 0U; component < impl.component_labels.size();
+           ++component)
+        component_index.emplace(impl.component_labels[component],
+                                static_cast<std::uint32_t>(component));
+      for (std::size_t flat = 0U; flat < local_cell_count; ++flat) {
+        if (sets.find(flat) != flat || root_label[flat] == UINT64_MAX) continue;
+        const std::uint32_t component = component_index[root_label[flat]];
+        impl.component_dirichlet[component] = static_cast<std::uint8_t>(
+            impl.component_dirichlet[component] != 0U ||
+            root_dirichlet[flat] != 0U);
+        impl.component_distributed[component] = static_cast<std::uint8_t>(
+            impl.component_distributed[component] != 0U ||
+            root_distributed[flat] != 0U);
+      }
+      impl.local_components.assign(local_cell_count, kNoComponent);
+      for (std::int32_t z = 0; z < cells.z; ++z)
+        for (std::int32_t y = 0; y < cells.y; ++y)
+          for (std::int32_t x = 0; x < cells.x; ++x) {
+            const Int3 cell{x, y, z};
+            if (!impl.cell_active(cell)) continue;
+            const std::size_t flat = flat_cell(cells, cell);
+            impl.local_components[flat] =
+                component_index[root_label[sets.find(flat)]];
+          }
+      impl.component_anchors.clear();
+      for (std::size_t component = 0U; component < impl.component_labels.size();
+           ++component)
+        if (impl.component_dirichlet[component] == 0U)
+          impl.component_anchors.push_back(impl.component_labels[component]);
+      return {};
+    });
+    if (!local) return local;
 
     const auto owner_axis = [](std::int32_t index, std::int32_t extent,
                                std::int32_t partitions) noexcept {
@@ -1211,25 +1279,30 @@ Status compile_components_scalable(Implementation &impl) {
                       MPI_UINT64_T, MPI_SUM, impl.communicator) != MPI_SUCCESS)
       return {StatusCode::mpi_failure, kFreshProjectionPlan};
 
-    impl.component_send_counts.assign(static_cast<std::size_t>(impl.size), 0);
-    impl.component_send_displacements.assign(
-        static_cast<std::size_t>(impl.size), 0);
-    impl.component_receive_counts.assign(static_cast<std::size_t>(impl.size),
-                                         0);
-    impl.component_receive_displacements.assign(
-        static_cast<std::size_t>(impl.size), 0);
-    for (std::size_t component = 0U; component < impl.component_labels.size();
-         ++component)
-      if (impl.component_distributed[component] != 0U &&
-          impl.component_dirichlet[component] == 0U)
-        ++impl.component_send_counts[static_cast<std::size_t>(
-            owner_rank(impl.component_labels[component]))];
     int send_total = 0;
-    for (int rank = 0; rank < impl.size; ++rank) {
-      impl.component_send_displacements[static_cast<std::size_t>(rank)] =
-          send_total;
-      send_total += impl.component_send_counts[static_cast<std::size_t>(rank)];
-    }
+    local = fresh_local_stage(impl.communicator, [&]() -> Status {
+      impl.component_send_counts.assign(static_cast<std::size_t>(impl.size), 0);
+      impl.component_send_displacements.assign(
+          static_cast<std::size_t>(impl.size), 0);
+      impl.component_receive_counts.assign(static_cast<std::size_t>(impl.size),
+                                           0);
+      impl.component_receive_displacements.assign(
+          static_cast<std::size_t>(impl.size), 0);
+      for (std::size_t component = 0U; component < impl.component_labels.size();
+           ++component)
+        if (impl.component_distributed[component] != 0U &&
+            impl.component_dirichlet[component] == 0U)
+          ++impl.component_send_counts[static_cast<std::size_t>(
+              owner_rank(impl.component_labels[component]))];
+      for (int rank = 0; rank < impl.size; ++rank) {
+        impl.component_send_displacements[static_cast<std::size_t>(rank)] =
+            send_total;
+        send_total +=
+            impl.component_send_counts[static_cast<std::size_t>(rank)];
+      }
+      return {};
+    });
+    if (!local) return local;
     if (MPI_Alltoall(impl.component_send_counts.data(), 1, MPI_INT,
                      impl.component_receive_counts.data(), 1, MPI_INT,
                      impl.communicator) != MPI_SUCCESS)
@@ -1241,29 +1314,34 @@ Status compile_components_scalable(Implementation &impl) {
       receive_total +=
           impl.component_receive_counts[static_cast<std::size_t>(rank)];
     }
-    impl.component_send_labels.resize(static_cast<std::size_t>(send_total));
-    impl.component_receive_labels.resize(
-        static_cast<std::size_t>(receive_total));
-    impl.component_route_local_index.clear();
-    impl.component_route_send_slot.clear();
-    impl.component_route_local_index.reserve(
-        static_cast<std::size_t>(send_total));
-    impl.component_route_send_slot.reserve(
-        static_cast<std::size_t>(send_total));
-    std::vector<int> cursor = impl.component_send_displacements;
-    for (std::size_t component = 0U; component < impl.component_labels.size();
-         ++component) {
-      if (impl.component_distributed[component] == 0U ||
-          impl.component_dirichlet[component] != 0U)
-        continue;
-      const int owner = owner_rank(impl.component_labels[component]);
-      const std::uint32_t slot =
-          static_cast<std::uint32_t>(cursor[static_cast<std::size_t>(owner)]++);
-      impl.component_route_local_index.push_back(
-          static_cast<std::uint32_t>(component));
-      impl.component_route_send_slot.push_back(slot);
-      impl.component_send_labels[slot] = impl.component_labels[component];
-    }
+    std::vector<int> cursor;
+    local = fresh_local_stage(impl.communicator, [&] {
+      impl.component_send_labels.resize(static_cast<std::size_t>(send_total));
+      impl.component_receive_labels.resize(
+          static_cast<std::size_t>(receive_total));
+      impl.component_route_local_index.clear();
+      impl.component_route_send_slot.clear();
+      impl.component_route_local_index.reserve(
+          static_cast<std::size_t>(send_total));
+      impl.component_route_send_slot.reserve(
+          static_cast<std::size_t>(send_total));
+      cursor = impl.component_send_displacements;
+      for (std::size_t component = 0U; component < impl.component_labels.size();
+           ++component) {
+        if (impl.component_distributed[component] == 0U ||
+            impl.component_dirichlet[component] != 0U)
+          continue;
+        const int owner = owner_rank(impl.component_labels[component]);
+        const std::uint32_t slot = static_cast<std::uint32_t>(
+            cursor[static_cast<std::size_t>(owner)]++);
+        impl.component_route_local_index.push_back(
+            static_cast<std::uint32_t>(component));
+        impl.component_route_send_slot.push_back(slot);
+        impl.component_send_labels[slot] = impl.component_labels[component];
+      }
+      return Status{};
+    });
+    if (!local) return local;
     if (MPI_Alltoallv(impl.component_send_labels.data(),
                       impl.component_send_counts.data(),
                       impl.component_send_displacements.data(), MPI_UINT64_T,
@@ -1272,98 +1350,102 @@ Status compile_components_scalable(Implementation &impl) {
                       impl.component_receive_displacements.data(), MPI_UINT64_T,
                       impl.communicator) != MPI_SUCCESS)
       return {StatusCode::mpi_failure, kFreshProjectionPlan};
-    impl.component_owner_labels = impl.component_receive_labels;
-    std::sort(impl.component_owner_labels.begin(),
-              impl.component_owner_labels.end());
-    impl.component_owner_labels.erase(
-        std::unique(impl.component_owner_labels.begin(),
-                    impl.component_owner_labels.end()),
-        impl.component_owner_labels.end());
-    impl.component_receive_owner_slot.resize(
-        impl.component_receive_labels.size());
-    for (std::size_t index = 0U; index < impl.component_receive_labels.size();
-         ++index) {
-      if (owner_rank(impl.component_receive_labels[index]) != impl.rank)
-        return {StatusCode::invalid_plan, kFreshProjectionPlan};
-      impl.component_receive_owner_slot[index] = static_cast<std::uint32_t>(
-          std::lower_bound(impl.component_owner_labels.begin(),
-                           impl.component_owner_labels.end(),
-                           impl.component_receive_labels[index]) -
-          impl.component_owner_labels.begin());
-    }
-    impl.component_send_value_counts.resize(
-        static_cast<std::size_t>(impl.size));
-    impl.component_send_value_displacements.resize(
-        static_cast<std::size_t>(impl.size));
-    impl.component_receive_value_counts.resize(
-        static_cast<std::size_t>(impl.size));
-    impl.component_receive_value_displacements.resize(
-        static_cast<std::size_t>(impl.size));
-    for (int rank = 0; rank < impl.size; ++rank) {
-      const std::size_t index = static_cast<std::size_t>(rank);
-      if (impl.component_send_counts[index] > INT_MAX / 2 ||
-          impl.component_receive_counts[index] > INT_MAX / 2)
-        return {StatusCode::invalid_plan, kFreshProjectionPlan};
-      impl.component_send_value_counts[index] =
-          2 * impl.component_send_counts[index];
-      impl.component_send_value_displacements[index] =
-          2 * impl.component_send_displacements[index];
-      impl.component_receive_value_counts[index] =
-          2 * impl.component_receive_counts[index];
-      impl.component_receive_value_displacements[index] =
-          2 * impl.component_receive_displacements[index];
-    }
-    impl.component_send_values.resize(2U * send_total);
-    impl.component_receive_values.resize(2U * receive_total);
-    impl.component_response_send_values.resize(2U * receive_total);
-    impl.component_response_receive_values.resize(2U * send_total);
-    impl.component_owner_sums.resize(impl.component_owner_labels.size());
-    impl.component_owner_scales.resize(impl.component_owner_labels.size());
-
-    // Exact byte count of every simultaneously live, module-owned component
-    // communication buffer, using actual vector capacities rather than a
-    // formula over logical records.  The local DSU/topology is deliberately
-    // excluded: it is neither transmitted nor replicated on another rank.
     std::uint64_t communication_bytes = 0U;
-    bool payload_fits = true;
-    const auto account = [&](std::size_t capacity,
-                             std::size_t element_bytes) noexcept {
-      if (capacity > UINT64_MAX / element_bytes ||
-          communication_bytes >
-              UINT64_MAX -
-                  static_cast<std::uint64_t>(capacity) * element_bytes) {
-        payload_fits = false;
-        return;
+    local = fresh_local_stage(impl.communicator, [&]() -> Status {
+      impl.component_owner_labels = impl.component_receive_labels;
+      std::sort(impl.component_owner_labels.begin(),
+                impl.component_owner_labels.end());
+      impl.component_owner_labels.erase(
+          std::unique(impl.component_owner_labels.begin(),
+                      impl.component_owner_labels.end()),
+          impl.component_owner_labels.end());
+      impl.component_receive_owner_slot.resize(
+          impl.component_receive_labels.size());
+      for (std::size_t index = 0U; index < impl.component_receive_labels.size();
+           ++index) {
+        if (owner_rank(impl.component_receive_labels[index]) != impl.rank)
+          return {StatusCode::invalid_plan, kFreshProjectionPlan};
+        impl.component_receive_owner_slot[index] = static_cast<std::uint32_t>(
+            std::lower_bound(impl.component_owner_labels.begin(),
+                             impl.component_owner_labels.end(),
+                             impl.component_receive_labels[index]) -
+            impl.component_owner_labels.begin());
       }
-      communication_bytes +=
-          static_cast<std::uint64_t>(capacity) * element_bytes;
-    };
-    for (const auto *values :
-         {&send_low, &send_high, &receive_from_plus, &receive_from_minus,
-          &impl.component_send_labels, &impl.component_receive_labels,
-          &impl.component_owner_labels, &impl.rank_hashes})
-      account(values->capacity(), sizeof(std::uint64_t));
-    for (const auto *values :
-         {&impl.component_send_values, &impl.component_receive_values,
-          &impl.component_response_send_values,
-          &impl.component_response_receive_values, &impl.component_owner_sums,
-          &impl.component_owner_scales})
-      account(values->capacity(), sizeof(double));
-    for (const auto *values :
-         {&impl.component_route_local_index, &impl.component_route_send_slot,
-          &impl.component_receive_owner_slot})
-      account(values->capacity(), sizeof(std::uint32_t));
-    for (const auto *values :
-         {&cursor, &impl.component_send_counts,
-          &impl.component_send_displacements, &impl.component_receive_counts,
-          &impl.component_receive_displacements,
-          &impl.component_send_value_counts,
-          &impl.component_send_value_displacements,
-          &impl.component_receive_value_counts,
-          &impl.component_receive_value_displacements})
-      account(values->capacity(), sizeof(int));
-    if (!payload_fits || communication_bytes > UINT64_MAX - 7U)
-      return {StatusCode::invalid_plan, kFreshProjectionPlan};
+      impl.component_send_value_counts.resize(
+          static_cast<std::size_t>(impl.size));
+      impl.component_send_value_displacements.resize(
+          static_cast<std::size_t>(impl.size));
+      impl.component_receive_value_counts.resize(
+          static_cast<std::size_t>(impl.size));
+      impl.component_receive_value_displacements.resize(
+          static_cast<std::size_t>(impl.size));
+      for (int rank = 0; rank < impl.size; ++rank) {
+        const std::size_t index = static_cast<std::size_t>(rank);
+        if (impl.component_send_counts[index] > INT_MAX / 2 ||
+            impl.component_receive_counts[index] > INT_MAX / 2)
+          return {StatusCode::invalid_plan, kFreshProjectionPlan};
+        impl.component_send_value_counts[index] =
+            2 * impl.component_send_counts[index];
+        impl.component_send_value_displacements[index] =
+            2 * impl.component_send_displacements[index];
+        impl.component_receive_value_counts[index] =
+            2 * impl.component_receive_counts[index];
+        impl.component_receive_value_displacements[index] =
+            2 * impl.component_receive_displacements[index];
+      }
+      impl.component_send_values.resize(2U * send_total);
+      impl.component_receive_values.resize(2U * receive_total);
+      impl.component_response_send_values.resize(2U * receive_total);
+      impl.component_response_receive_values.resize(2U * send_total);
+      impl.component_owner_sums.resize(impl.component_owner_labels.size());
+      impl.component_owner_scales.resize(impl.component_owner_labels.size());
+
+      // Exact byte count of every simultaneously live, module-owned component
+      // communication buffer, using actual vector capacities rather than a
+      // formula over logical records.  The local DSU/topology is deliberately
+      // excluded: it is neither transmitted nor replicated on another rank.
+      bool payload_fits = true;
+      const auto account = [&](std::size_t capacity,
+                               std::size_t element_bytes) noexcept {
+        if (capacity > UINT64_MAX / element_bytes ||
+            communication_bytes >
+                UINT64_MAX -
+                    static_cast<std::uint64_t>(capacity) * element_bytes) {
+          payload_fits = false;
+          return;
+        }
+        communication_bytes +=
+            static_cast<std::uint64_t>(capacity) * element_bytes;
+      };
+      for (const auto *values :
+           {&send_low, &send_high, &receive_from_plus, &receive_from_minus,
+            &impl.component_send_labels, &impl.component_receive_labels,
+            &impl.component_owner_labels, &impl.rank_hashes})
+        account(values->capacity(), sizeof(std::uint64_t));
+      for (const auto *values :
+           {&impl.component_send_values, &impl.component_receive_values,
+            &impl.component_response_send_values,
+            &impl.component_response_receive_values, &impl.component_owner_sums,
+            &impl.component_owner_scales})
+        account(values->capacity(), sizeof(double));
+      for (const auto *values :
+           {&impl.component_route_local_index, &impl.component_route_send_slot,
+            &impl.component_receive_owner_slot})
+        account(values->capacity(), sizeof(std::uint32_t));
+      for (const auto *values :
+           {&cursor, &impl.component_send_counts,
+            &impl.component_send_displacements, &impl.component_receive_counts,
+            &impl.component_receive_displacements,
+            &impl.component_send_value_counts,
+            &impl.component_send_value_displacements,
+            &impl.component_receive_value_counts,
+            &impl.component_receive_value_displacements})
+        account(values->capacity(), sizeof(int));
+      if (!payload_fits || communication_bytes > UINT64_MAX - 7U)
+        return {StatusCode::invalid_plan, kFreshProjectionPlan};
+      return {};
+    });
+    if (!local) return local;
     const std::uint64_t local_peak_payload = (communication_bytes + 7U) / 8U;
     std::uint64_t maximum_peak_payload = 0U;
     std::uint64_t global_peak_payload = 0U;
@@ -1441,49 +1523,52 @@ bool adjacent_global_cells(const Implementation &impl, CartesianAxis axis,
 template <class Implementation>
 Status build_anchored_activity(Implementation &impl) {
   const Int3 cells = impl.patch.cells;
-  try {
-    impl.mg_cells.assign(cell_count(cells), 0U);
-    impl.mg_x_faces.assign(cell_count(face_extents(cells, CartesianAxis::x)),
-                           0U);
-    impl.mg_y_faces.assign(cell_count(face_extents(cells, CartesianAxis::y)),
-                           0U);
-    impl.mg_z_faces.assign(cell_count(face_extents(cells, CartesianAxis::z)),
-                           0U);
-  } catch (const std::bad_alloc &) {
-    return {StatusCode::allocation_failure, kFreshProjectionPlan};
-  }
-  for (std::int32_t z = 0; z < cells.z; ++z)
-    for (std::int32_t y = 0; y < cells.y; ++y)
-      for (std::int32_t x = 0; x < cells.x; ++x) {
-        const Int3 cell{x, y, z};
-        impl.mg_cells[flat_cell(cells, cell)] =
-            impl.cell_active(cell) && !impl.anchor_gid(impl.gid(cell)) ? 1U
-                                                                       : 0U;
-      }
-  for (CartesianAxis axis :
-       {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
-    const Int3 extents = face_extents(cells, axis);
-    std::vector<std::uint8_t> &target =
-        axis == CartesianAxis::x
-            ? impl.mg_x_faces
-            : (axis == CartesianAxis::y ? impl.mg_y_faces : impl.mg_z_faces);
-    for (std::int32_t z = 0; z < extents.z; ++z)
-      for (std::int32_t y = 0; y < extents.y; ++y)
-        for (std::int32_t x = 0; x < extents.x; ++x) {
-          const Int3 face{x, y, z};
-          if (!impl.face_active(axis, face))
-            continue;
-          std::array<std::uint64_t, 2U> adjacent{};
-          std::size_t adjacent_count = 0U;
-          if (!adjacent_global_cells(impl, axis, face, adjacent,
-                                     adjacent_count))
-            return {StatusCode::invalid_plan, kFreshProjectionPlan};
-          bool enabled = true;
-          for (std::size_t index = 0U; index < adjacent_count; ++index)
-            enabled = enabled && !impl.anchor_gid(adjacent[index]);
-          target[flat_face(extents, face)] = enabled ? 1U : 0U;
+  Status status = fresh_local_stage(impl.communicator, [&]() -> Status {
+    try {
+      impl.mg_cells.assign(cell_count(cells), 0U);
+      impl.mg_x_faces.assign(cell_count(face_extents(cells, CartesianAxis::x)),
+                             0U);
+      impl.mg_y_faces.assign(cell_count(face_extents(cells, CartesianAxis::y)),
+                             0U);
+      impl.mg_z_faces.assign(cell_count(face_extents(cells, CartesianAxis::z)),
+                             0U);
+    } catch (const std::bad_alloc &) {
+      return {StatusCode::allocation_failure, kFreshProjectionPlan};
+    }
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x) {
+          const Int3 cell{x, y, z};
+          impl.mg_cells[flat_cell(cells, cell)] =
+              impl.cell_active(cell) && !impl.anchor_gid(impl.gid(cell)) ? 1U
+                                                                         : 0U;
         }
-  }
+    for (CartesianAxis axis :
+         {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
+      const Int3 extents = face_extents(cells, axis);
+      std::vector<std::uint8_t> &target =
+          axis == CartesianAxis::x
+              ? impl.mg_x_faces
+              : (axis == CartesianAxis::y ? impl.mg_y_faces : impl.mg_z_faces);
+      for (std::int32_t z = 0; z < extents.z; ++z)
+        for (std::int32_t y = 0; y < extents.y; ++y)
+          for (std::int32_t x = 0; x < extents.x; ++x) {
+            const Int3 face{x, y, z};
+            if (!impl.face_active(axis, face)) continue;
+            std::array<std::uint64_t, 2U> adjacent{};
+            std::size_t adjacent_count = 0U;
+            if (!adjacent_global_cells(impl, axis, face, adjacent,
+                                       adjacent_count))
+              return {StatusCode::invalid_plan, kFreshProjectionPlan};
+            bool enabled = true;
+            for (std::size_t index = 0U; index < adjacent_count; ++index)
+              enabled = enabled && !impl.anchor_gid(adjacent[index]);
+            target[flat_face(extents, face)] = enabled ? 1U : 0U;
+          }
+    }
+    return {};
+  });
+  if (!status) return status;
   std::uint64_t local = mix(kFnvOffset, UINT64_C(0x66726573686d6761));
   for (std::uint8_t value : impl.mg_cells)
     local = mix(local, value);
@@ -1813,6 +1898,7 @@ Status FreshStartKinematicProjectionPlan::compile(
           solver_and_mg_workspaces_disjoint(*services.solver_workspace,
                                             *services.mg.workspace);
   }
+  Status status;
   if (!communicator || spec.geometry == nullptr ||
       spec.geometry->fingerprint() == 0U || spec.kernels == nullptr ||
       spec.kernels->fingerprint() == 0U || spec.boundary == nullptr ||
@@ -1826,7 +1912,9 @@ Status FreshStartKinematicProjectionPlan::compile(
       !valid_activity(spec.activity, cells) || !route_control || !tolerances ||
       !linear_services || !mg_services || !valid_workspace ||
       !workspace_disjoint_from_linear)
-    return {StatusCode::invalid_plan, kFreshProjectionPlan};
+    status = {StatusCode::invalid_plan, kFreshProjectionPlan};
+  status = fresh_compile_consensus(spec.communicator, status);
+  if (!status) return status;
 
   const std::array<HaloFieldSpec, 1U> operator_fields{
       {{services.krylov_field, 1U, 1U}}};
@@ -1840,50 +1928,60 @@ Status FreshStartKinematicProjectionPlan::compile(
           spec.communicator, spec.patch,
           {correction_fields.data(), correction_fields.size()},
           spec.boundary->halo_topology()))
-    return {StatusCode::invalid_plan, kFreshProjectionPlan};
+    status = {StatusCode::invalid_plan, kFreshProjectionPlan};
+  status = fresh_compile_consensus(spec.communicator, status);
+  if (!status) return status;
 
-  auto candidate = std::unique_ptr<Impl>(new (std::nothrow) Impl);
-  if (!candidate)
-    return {StatusCode::allocation_failure, kFreshProjectionPlan};
-  candidate->communicator = spec.communicator;
-  candidate->rank = rank;
-  candidate->size = size;
-  candidate->geometry = spec.geometry;
-  candidate->kernels = spec.kernels;
-  candidate->boundary = spec.boundary;
-  candidate->patch = spec.patch;
-  candidate->route = spec.route;
-  candidate->solve_control = spec.solve;
-  candidate->mg_policy = spec.mg_policy;
-  candidate->compatibility_absolute = spec.compatibility_absolute_tolerance;
-  candidate->compatibility_relative = spec.compatibility_relative_tolerance;
-  candidate->continuity_absolute = spec.continuity_absolute_tolerance;
-  candidate->continuity_relative = spec.continuity_relative_tolerance;
-  candidate->services = services;
-  candidate->workspace = workspace;
-  candidate->bypass_no_immersed = empty_activity(spec.activity);
-  try {
-    candidate->rank_hashes.resize(static_cast<std::size_t>(size));
-  } catch (const std::bad_alloc &) {
-    return {StatusCode::allocation_failure, kFreshProjectionPlan};
-  }
-  Status status = PressureCorrectionBoundaryPlan::compile(
-      *spec.geometry, spec.patch, *spec.boundary, candidate->pressure_boundary);
-  if (status)
-    status = copy_activity(spec, *candidate);
+  std::unique_ptr<Impl> candidate;
+  status = fresh_local_stage(spec.communicator, [&]() -> Status {
+    candidate.reset(new Impl);
+    candidate->communicator = spec.communicator;
+    candidate->rank = rank;
+    candidate->size = size;
+    candidate->geometry = spec.geometry;
+    candidate->kernels = spec.kernels;
+    candidate->boundary = spec.boundary;
+    candidate->patch = spec.patch;
+    candidate->route = spec.route;
+    candidate->solve_control = spec.solve;
+    candidate->mg_policy = spec.mg_policy;
+    candidate->compatibility_absolute = spec.compatibility_absolute_tolerance;
+    candidate->compatibility_relative = spec.compatibility_relative_tolerance;
+    candidate->continuity_absolute = spec.continuity_absolute_tolerance;
+    candidate->continuity_relative = spec.continuity_relative_tolerance;
+    candidate->services = services;
+    candidate->workspace = workspace;
+    candidate->bypass_no_immersed = empty_activity(spec.activity);
+    try {
+      candidate->rank_hashes.resize(static_cast<std::size_t>(size));
+    } catch (const std::bad_alloc &) {
+      return {StatusCode::allocation_failure, kFreshProjectionPlan};
+    }
+    status = PressureCorrectionBoundaryPlan::compile(
+        *spec.geometry, spec.patch, *spec.boundary,
+        candidate->pressure_boundary);
+    if (status) status = copy_activity(spec, *candidate);
+    return status;
+  });
+  if (!status) return status;
   if (status)
     status = compile_components_scalable(*candidate);
   if (status)
     status = build_anchored_activity(*candidate);
   if (!status)
     return status;
-  try {
-    candidate->component_local_sums.resize(candidate->component_labels.size());
-    candidate->component_local_scales.resize(
-        candidate->component_labels.size());
-  } catch (const std::bad_alloc &) {
-    return {StatusCode::allocation_failure, kFreshProjectionPlan};
-  }
+  status = fresh_local_stage(spec.communicator, [&]() -> Status {
+    try {
+      candidate->component_local_sums.resize(
+          candidate->component_labels.size());
+      candidate->component_local_scales.resize(
+          candidate->component_labels.size());
+    } catch (const std::bad_alloc &) {
+      return {StatusCode::allocation_failure, kFreshProjectionPlan};
+    }
+    return {};
+  });
+  if (!status) return status;
 
   std::uint64_t plan_hash = mix(kFnvOffset, UINT64_C(0x6672657368706c6e));
   plan_hash = mix(plan_hash, spec.geometry->fingerprint());
@@ -1911,8 +2009,12 @@ Status FreshStartKinematicProjectionPlan::compile(
   candidate->red.no_immersed_bitwise_bypass = true;
   candidate->red.three_layer_joint_commit = true;
   candidate->red.chi_writes_pressure = false;
-  if (!candidate->red.valid())
-    return {StatusCode::invalid_plan, kFreshProjectionPlan};
+  status = fresh_compile_consensus(
+      spec.communicator,
+      candidate->red.valid()
+          ? Status{}
+          : Status{StatusCode::invalid_plan, kFreshProjectionPlan});
+  if (!status) return status;
 
   out.release();
   out.implementation_ = candidate.release();
