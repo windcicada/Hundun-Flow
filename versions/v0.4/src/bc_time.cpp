@@ -389,9 +389,10 @@ Status TimeControllerState::coefficients(
   return {};
 }
 
-Status TimeControllerState::propose(MPI_Comm communicator,
-                                    LocalTimeLimits limits,
-                                    StepTime& out) noexcept {
+Status TimeControllerState::propose(
+    MPI_Comm communicator, LocalTimeLimits limits, StepTime& out,
+    TimeProposalDiagnostic* diagnostic) noexcept {
+  if (diagnostic != nullptr) *diagnostic = {};
   if (communicator == MPI_COMM_NULL) {
     lowest_failing_rank_ = -1;
     return {StatusCode::invalid_plan, kTimeCollective};
@@ -480,13 +481,15 @@ Status TimeControllerState::propose(MPI_Comm communicator,
                                   : Status{})
                            : Status{StatusCode::numerical_failure,
                                     kTimeLimitValue};
+    // Carry rejected-dt diagnostics on the existing authority wire without
+    // publishing an active StepTime or changing the output on failure.
+    candidate.time = time_;
+    candidate.dt = proposed_dt;
+    candidate.accepted_step = accepted_step_;
+    candidate.attempt = retry_count_;
+    candidate.origin = next_origin_;
+    candidate.generation = next_generation_;
     if (authority_status) {
-      candidate.time = time_;
-      candidate.dt = proposed_dt;
-      candidate.accepted_step = accepted_step_;
-      candidate.attempt = retry_count_;
-      candidate.origin = next_origin_;
-      candidate.generation = next_generation_;
       authority_status =
           coefficients(candidate.dt, force_backward_euler_, candidate.bdf);
     }
@@ -538,6 +541,11 @@ Status TimeControllerState::propose(MPI_Comm communicator,
   }
   status = collective_status(communicator, local, lowest);
   lowest_failing_rank_ = lowest;
+  if (diagnostic != nullptr &&
+      (status || (status.code == StatusCode::rejected_step &&
+                  status.detail == kTimeMinimum))) {
+    *diagnostic = {true, candidate.dt, plan_.spec().minimum_dt};
+  }
   if (!status) {
     return status;
   }

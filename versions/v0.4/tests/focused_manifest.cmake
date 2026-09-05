@@ -6,6 +6,9 @@
 # selector.  Small-grid timings are intentionally absent; core_hot_resource is
 # a lifecycle/allocation contract, not a performance acceptance test.
 set(HUNDUN_V04_FOCUSED_TESTS
+  v04_app_resource_lifecycle_mpi_1
+  v04_app_resource_lifecycle_mpi_2
+  v04_app_resource_lifecycle_mpi_4
   v04_evidence_workflow
   v04_app_cli_continuity_witness
   v04_app_case_allocation_mpi_1
@@ -169,6 +172,8 @@ set(HUNDUN_V04_FOCUSED_TESTS
 # registered only through mpiexec use MPI-1 as the direct analogue; MPI-4 stays
 # in the complete focused gate without multiplying sanitizer runtime.
 set(HUNDUN_V04_FOCUSED_SANITIZER_TESTS
+  v04_app_resource_lifecycle_mpi_1
+  v04_app_resource_lifecycle_mpi_2
   v04_app_case_allocation_mpi_1
   v04_app_case_allocation_mpi_2
   v04_app_output_failure_mpi_1

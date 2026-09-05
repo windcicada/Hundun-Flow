@@ -54,6 +54,70 @@ bool uniform_flow(double speed, double external_scale, bool fixed) {
               << " dt=" << step.proposal.dt << " expected=" << expected << '\n';
   return passed;
 }
+bool minimum_dt_rejection_preserves_state_and_reports_failure() {
+  ValidatedModel model = test::product_model({8, 8, 8});
+  model.turbulence = TurbulenceKind::none;
+  model.time.control = TimeControlKind::adaptive_flow;
+  model.time.initial_dt = model.time.maximum_dt = 0.01;
+  model.time.minimum_dt = 0.001;
+  CompiledCasePlan plan;
+  Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+  ProductDriver driver;
+  if (status)
+    status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  if (status) status = driver.initialize({});
+  DriverStepReport report;
+  if (status) status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, report);
+  int okay = status && report.accepted && report.accepted_step == 1U ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  if (!okay) return false;
+  const double committed_time = report.accepted_time;
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  // Only one rank constrains the proposal below minimum_dt. Reuse the last
+  // report, as a caller naturally does in a time loop.
+  const double limit = rank == ranks - 1 ? 1.0e-6 : 1.0;
+  status = driver.advance({limit, 1.0, 1.0, 1.0, 1.0}, report);
+  bool passed = status.code == StatusCode::rejected_step &&
+                status.detail == 454U && report.failure.code == status.code &&
+                report.failure.detail == status.detail && !report.accepted &&
+                report.attempts == 0U && report.failed_stage == 0U &&
+                report.accepted_step == 1U &&
+                report.accepted_time == committed_time;
+  passed &=
+      report.initial_time_proposal.evaluated &&
+      std::abs(report.initial_time_proposal.proposed_dt - 8.0e-7) < 1.0e-20 &&
+      report.initial_time_proposal.minimum_dt == 0.001 &&
+      report.proposal.generation == 0U;
+  if (!passed)
+    std::cerr << "FAIL pre-solve time rejection: status="
+              << static_cast<int>(status.code) << '/' << status.detail
+              << " report_failure=" << static_cast<int>(report.failure.code)
+              << '/' << report.failure.detail << " accepted=" << report.accepted
+              << " attempts=" << report.attempts << '\n';
+  CommittedOutputSnapshot snapshot;
+  const Status snapshot_status = driver.committed_output_snapshot(snapshot);
+  passed &=
+      snapshot_status && snapshot.step == 1U && snapshot.time == committed_time;
+  // An invalid local input has no trustworthy globally evaluated proposal.
+  // It must clear the previous rejection diagnostic instead of reusing it.
+  status = driver.advance({rank == ranks - 1 ? -1.0 : 1.0, 1.0, 1.0, 1.0, 1.0},
+                          report);
+  passed &= !status && !report.initial_time_proposal.evaluated &&
+            !report.accepted && report.attempts == 0U &&
+            report.failure.code == status.code &&
+            report.failure.detail == status.detail;
+  DriverStepReport recovered;
+  status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, recovered);
+  passed &= status && recovered.accepted && recovered.accepted_step == 2U &&
+            recovered.attempts == 1U &&
+            recovered.accepted_time > committed_time;
+  passed &=
+      recovered.initial_time_proposal.evaluated &&
+      recovered.initial_time_proposal.proposed_dt == recovered.proposal.dt;
+  return passed;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -61,7 +125,8 @@ int main(int argc, char** argv) {
   const bool passed =
       uniform_flow(1.0, 1.0, false) && uniform_flow(0.5, 1.0, false) &&
       uniform_flow(0.0, 1.0, false) && uniform_flow(1.0, 0.002, false) &&
-      uniform_flow(1.0, 1.0, true);
+      uniform_flow(1.0, 1.0, true) &&
+      minimum_dt_rejection_preserves_state_and_reports_failure();
   int result = passed ? 1 : 0;
   MPI_Allreduce(MPI_IN_PLACE, &result, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
   MPI_Finalize();

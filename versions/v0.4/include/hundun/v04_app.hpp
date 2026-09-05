@@ -193,6 +193,9 @@ struct ApplicationRunReport {
   std::uint32_t attempts{};
   Status failure{};
   ApplicationFailurePhase failure_phase{ApplicationFailurePhase::none};
+  // First proposal in this advance; subsequent retry dt remains in the
+  // numerical attempt diagnostics. Present even for a minimum-dt rejection.
+  TimeProposalDiagnostic initial_time_proposal{};
   BdfCoefficients requested_bdf{};
   BdfCoefficients effective_bdf{};
   std::uint8_t thermophysical_predictor_calls{};
@@ -267,6 +270,7 @@ struct DriverStageTiming {
 };
 
 struct DriverStepReport {
+  TimeProposalDiagnostic initial_time_proposal{};
   StepTime proposal{};
   BdfCoefficients effective_bdf{};
   PisoAttemptReport piso{};

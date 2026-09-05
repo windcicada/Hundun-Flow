@@ -1328,6 +1328,22 @@ foreach(rank_count IN ITEMS 1 2 4)
     PROCESSORS "${rank_count}" TIMEOUT 60)
 endforeach()
 
+add_executable(v04_app_resource_lifecycle_mpi_test
+  mpi/app_resource_lifecycle_mpi_test.cpp)
+target_link_libraries(v04_app_resource_lifecycle_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+target_compile_definitions(v04_app_resource_lifecycle_mpi_test PRIVATE
+  HUNDUN_V04_SOURCE_ROOT="${hundun_repository_root}")
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_app_resource_lifecycle_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_app_resource_lifecycle_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_app_resource_lifecycle_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 180)
+endforeach()
+
 add_executable(v04_app_output_failure_mpi_test
   mpi/app_output_failure_mpi_test.cpp)
 target_link_libraries(v04_app_output_failure_mpi_test PRIVATE

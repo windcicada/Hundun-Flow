@@ -131,3 +131,26 @@ if(NOT adaptive_screen MATCHES "attempts=1" OR
    NOT adaptive_output MATCHES " time=0\\.01([ \\n]|$)")
   message(FATAL_ERROR "CLI did not use one dt=0.01 attempt: ${adaptive_output}${adaptive_screen}")
 endif()
+
+# Reject the same flow-based dt before any solve, and explain the actual
+# proposal versus its configured lower bound instead of reporting only 454.
+string(REGEX REPLACE [=["minimum_dt": [^,}]+]=]
+                     [=["minimum_dt": 0.02]=]
+                     minimum_json "${adaptive_json}")
+file(WRITE "${PROBE_ROOT}/case/case.json" "${minimum_json}")
+execute_process(
+  COMMAND "${PRODUCT}" run "${PROBE_ROOT}/case"
+          --output "${PROBE_ROOT}/minimum-dt"
+          --steps 1 --output-interval 0 --restart-interval 0
+  RESULT_VARIABLE minimum_status
+  OUTPUT_VARIABLE minimum_output
+  ERROR_VARIABLE minimum_error)
+if(minimum_status EQUAL 0 OR
+   NOT minimum_error MATCHES "rejected step detail=454" OR
+   NOT minimum_error MATCHES "termination_phase=advance committed_step=0" OR
+   NOT minimum_error MATCHES "attempts=0" OR
+   NOT minimum_error MATCHES "initial_proposed_dt=0\\.01" OR
+   NOT minimum_error MATCHES "minimum_dt=0\\.02" OR
+   minimum_error MATCHES "failed_stage=")
+  message(FATAL_ERROR "CLI lost pre-solve dt rejection diagnostics: ${minimum_error}")
+endif()

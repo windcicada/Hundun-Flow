@@ -14408,12 +14408,24 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     return {StatusCode::invalid_plan, kProductInput};
   }
   DriverStepReport candidate;
+  candidate.accepted_step = implementation_->time.accepted_step();
+  candidate.accepted_time = implementation_->time.time();
   std::uint64_t predictor_blocking_collectives = 0U;
   const DriverResourceReport resources_before =
       implementation_->resource_snapshot();
   StepTime proposal;
-  Status status = implementation_->time.propose(
-      implementation_->communicator, limits, proposal);
+  Status status =
+      implementation_->time.propose(implementation_->communicator, limits,
+                                    proposal, &candidate.initial_time_proposal);
+  if (!status) {
+    // No numerical attempt took place. Publish the rejected proposal outcome
+    // instead of leaving a reused report describing the previous success.
+    candidate.failure = status;
+    candidate.resources = resource_difference(
+        implementation_->resource_snapshot(), resources_before);
+    report = candidate;
+    return status;
+  }
   Status last_attempt_status;
   while (status) {
     ++candidate.attempts;

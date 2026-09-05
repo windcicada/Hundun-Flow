@@ -586,6 +586,15 @@ struct StepTime {
   std::uint64_t generation{};
 };
 
+// Diagnostic only, not an active proposal or an authorization to advance.
+// Remains unevaluated if input validation or a collective fails before a
+// trustworthy globally agreed dt is available.
+struct TimeProposalDiagnostic {
+  bool evaluated{};
+  double proposed_dt{};
+  double minimum_dt{};
+};
+
 class TimeControllerState;
 
 enum class TimeFinishDecision : std::uint8_t { accept, retry, fatal };
@@ -654,8 +663,8 @@ class TimeControllerState {
                               std::uint64_t accepted_step,
                               std::uint64_t next_generation,
                               TimeControllerState& out) noexcept;
-  Status propose(MPI_Comm communicator, LocalTimeLimits limits,
-                 StepTime& out) noexcept;
+  Status propose(MPI_Comm communicator, LocalTimeLimits limits, StepTime& out,
+                 TimeProposalDiagnostic* diagnostic = nullptr) noexcept;
   Status prepare_finish(MPI_Comm communicator, const StepTime& step,
                         Status local_outcome,
                         PreparedTimeFinish& out) noexcept;

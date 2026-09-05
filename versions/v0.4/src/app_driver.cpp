@@ -143,7 +143,26 @@ Status collect_evidence_resources(
   return {};
 }
 
-Status collect_peak_rss(MPI_Comm communicator, std::uint64_t& maximum_rank,
+// One shared communicator per application run, including early writer exits.
+// It must not be static: successive runs may use different communicator groups.
+struct SharedResourceCommunicator {
+  MPI_Comm value{MPI_COMM_NULL};
+  SharedResourceCommunicator() = default;
+  SharedResourceCommunicator(const SharedResourceCommunicator&) = delete;
+  SharedResourceCommunicator& operator=(const SharedResourceCommunicator&) =
+      delete;
+  ~SharedResourceCommunicator() {
+    if (value != MPI_COMM_NULL) MPI_Comm_free(&value);
+  }
+  Status close() noexcept {
+    if (value != MPI_COMM_NULL && MPI_Comm_free(&value) != MPI_SUCCESS)
+      return {StatusCode::mpi_failure, kApplicationInput};
+    return {};
+  }
+};
+
+Status collect_peak_rss(MPI_Comm communicator, MPI_Comm shared,
+                        std::uint64_t& maximum_rank,
                         std::uint64_t& maximum_node) noexcept {
   rusage usage{};
   Status status;
@@ -159,15 +178,10 @@ Status collect_peak_rss(MPI_Comm communicator, std::uint64_t& maximum_rank,
                     communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kApplicationInput};
 
-  MPI_Comm shared = MPI_COMM_NULL;
-  if (MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
-                          MPI_INFO_NULL, &shared) != MPI_SUCCESS)
-    return {StatusCode::mpi_failure, kApplicationInput};
   std::uint64_t node = 0U;
   const int node_sum = MPI_Allreduce(&local, &node, 1, MPI_UINT64_T, MPI_SUM,
                                      shared);
-  const int free_status = MPI_Comm_free(&shared);
-  if (node_sum != MPI_SUCCESS || free_status != MPI_SUCCESS)
+  if (node_sum != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kApplicationInput};
   if (MPI_Allreduce(&node, &maximum_node, 1, MPI_UINT64_T, MPI_MAX,
                     communicator) != MPI_SUCCESS)
@@ -491,6 +505,14 @@ Status ApplicationService::run(MPI_Comm communicator,
   report.product = product_fingerprint;
   report.accepted_steps = starting_step;
   report.final_time = run_start.previous_time;
+  SharedResourceCommunicator shared_resources;
+  report.failure_phase = ApplicationFailurePhase::resources;
+  status = detail::output_collective_status(
+      communicator,
+      MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,
+                          &shared_resources.value) == MPI_SUCCESS
+          ? Status{}
+          : Status{StatusCode::mpi_failure, kApplicationInput});
   for (std::uint64_t step_index = 0U;
        step_index < options.steps && status; ++step_index) {
     report.failure_phase = ApplicationFailurePhase::advance;
@@ -500,6 +522,7 @@ Status ApplicationService::run(MPI_Comm communicator,
     status = driver.constrain_convective_time_limit(time_limits);
     if (status) status = driver.advance(time_limits, step);
     report.attempts = step.attempts;
+    report.initial_time_proposal = step.initial_time_proposal;
     // Commit is authoritative even if a later resource collective or writer
     // fails.  Never report an accepted step as a failed numerical attempt.
     if (step.accepted) {
@@ -682,8 +705,8 @@ Status ApplicationService::run(MPI_Comm communicator,
       if (!status) break;
       std::uint64_t maximum_rank_rss = 0U;
       std::uint64_t maximum_node_rss = 0U;
-      status = collect_peak_rss(communicator, maximum_rank_rss,
-                                maximum_node_rss);
+      status = collect_peak_rss(communicator, shared_resources.value,
+                                maximum_rank_rss, maximum_node_rss);
       if (!status) break;
       std::array<StageTimingRecord, kDriverTimedStageCapacity>
           evidence_stages{};
@@ -886,6 +909,12 @@ Status ApplicationService::run(MPI_Comm communicator,
         status = EvidenceWriter::append(communicator, output_path, services,
                                         evidence);
     }
+  }
+  const Status shared_close_status =
+      detail::output_collective_status(communicator, shared_resources.close());
+  if (status && !shared_close_status) {
+    report.failure_phase = ApplicationFailurePhase::resources;
+    status = shared_close_status;
   }
   if (!status) {
     report.failure = status;

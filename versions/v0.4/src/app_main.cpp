@@ -378,7 +378,14 @@ int main(int argc, char* argv[]) {
                   << " committed_step=" << report.accepted_steps
                   << " committed_time=" << std::setprecision(17)
                   << report.final_time
-                  << " output_root=" << options.run_directory << '\n';
+                  << " output_root=" << options.run_directory
+                  << " attempts=" << report.attempts;
+        if (report.initial_time_proposal.evaluated)
+          std::cerr << " initial_proposed_dt="
+                    << report.initial_time_proposal.proposed_dt
+                    << " minimum_dt="
+                    << report.initial_time_proposal.minimum_dt;
+        std::cerr << '\n';
       }
       if (!status && rank == 0 && report.failed_stage != 0U) {
         std::cerr << "failed_stage=" << report.failed_stage
