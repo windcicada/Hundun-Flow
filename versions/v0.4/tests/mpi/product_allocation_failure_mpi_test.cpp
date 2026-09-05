@@ -243,6 +243,37 @@ extern "C" int MPI_Barrier(MPI_Comm comm) {
 }
 
 namespace {
+hundun::v04::Status prepare_restart_image(
+    const hundun::v04::ValidatedModel& model,
+    const std::filesystem::path& case_root,
+    hundun::v04::RestartImage& image) {
+  using namespace hundun::v04;
+  int rank = 0, id = static_cast<int>(getpid());
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Bcast(&id, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("hundun-restart-allocation-seed-" + std::to_string(id));
+  CompiledCasePlan plan;
+  ProductDriver driver;
+  RestartExpected expected;
+  Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan);
+  if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  if (status) status = driver.restart_expected(expected);
+  if (status) status = driver.initialize({});
+  DriverStepReport step;
+  if (status) status = driver.advance({1, 1, 1, 1, 1}, step);
+  RestartSnapshot snapshot;
+  if (status) status = driver.committed_restart_snapshot(snapshot);
+  if (status) status = RestartWriter::write(MPI_COMM_WORLD, root, snapshot);
+  if (status) status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+  }
+  return status;
+}
+
 // Requested, simultaneously live C++ storage: no views, allocator overhead,
 // libc/MPI malloc, stacks, input model or observer table are counted twice.
 bool memory_profile(bool immersed, int rank) {
@@ -439,8 +470,10 @@ int main(int argc, char** argv) {
       argc > 2 ? std::strtol(argv[2], nullptr, 10) : first;
   const bool create = argc > 3 && std::strcmp(argv[3], "create") == 0;
   const bool initialize = argc > 3 && std::strcmp(argv[3], "initialize") == 0;
+  const bool restore = argc > 3 && std::strcmp(argv[3], "initialize_restart") == 0;
   const bool immersed = argc > 4 && std::strcmp(argv[4], "immersed") == 0;
-  const char* operation = initialize ? "initialize"
+  const char* operation = restore ? "initialize_restart"
+                          : initialize ? "initialize"
                           : create   ? "create"
                                      : "compile";
   bool passed = true;
@@ -460,21 +493,25 @@ int main(int argc, char** argv) {
     }
     DriverInitialState initial;
     initial.velocity = {0.1, 0.0, 0.0};
+    RestartImage image;
+    if (restore && !prepare_restart_image(model, case_root, image))
+      MPI_Abort(MPI_COMM_WORLD, 2);
     std::uint64_t count = 0U;
     if (requested_last < 0) {
       CompiledCasePlan baseline;
       ProductDriver baseline_driver;
-      if ((create || initialize) &&
+      if ((create || initialize || restore) &&
           !ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, baseline))
         MPI_Abort(MPI_COMM_WORLD, 2);
-      if (initialize &&
+      if ((initialize || restore) &&
           !ProductDriver::create(MPI_COMM_WORLD, std::move(baseline),
                                  baseline_driver))
         MPI_Abort(MPI_COMM_WORLD, 2);
       allocations = 0U;
       counting = rank == target;
       const Status compiled =
-          initialize ? baseline_driver.initialize(initial)
+          restore ? baseline_driver.initialize_restart(image)
+          : initialize ? baseline_driver.initialize(initial)
           : create ? ProductDriver::create(MPI_COMM_WORLD, std::move(baseline),
                                            baseline_driver)
                    : ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
@@ -498,10 +535,10 @@ int main(int argc, char** argv) {
     for (long index = first; index <= last && passed; ++index) {
       CompiledCasePlan plan;
       ProductDriver driver;
-      if ((create || initialize) &&
+      if ((create || initialize || restore) &&
           !ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan))
         MPI_Abort(MPI_COMM_WORLD, 2);
-      if (initialize &&
+      if ((initialize || restore) &&
           !ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver))
         MPI_Abort(MPI_COMM_WORLD, 2);
       const PlanFingerprint original_plan = plan.fingerprint();
@@ -513,7 +550,8 @@ int main(int argc, char** argv) {
       peak_bytes = 0U;
       fail_after = rank == target ? index : -1;
       const Status status =
-          initialize ? driver.initialize(initial)
+          restore ? driver.initialize_restart(image)
+          : initialize ? driver.initialize(initial)
           : create
               ? ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver)
               : ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
@@ -536,6 +574,17 @@ int main(int argc, char** argv) {
                          !driver.initialized()
                      ? 1
                      : 0;
+      if (restore) {
+        // Every recoverable allocation failure leaves this driver reusable;
+        // retry the real image with injection disabled, without re-creating it.
+        const Status retried = driver.initialize_restart(image);
+        RestartSnapshot restored;
+        const Status captured = retried ? driver.committed_restart_snapshot(restored)
+                                        : retried;
+        okay &= captured && restored.step == image.step &&
+                restored.time == image.time && restored.dt == image.dt &&
+                restored.controller_state == image.controller_state;
+      }
       driver = ProductDriver{};
       plan = CompiledCasePlan{};
       okay &= live_count == 0U && live_bytes == 0U && comm_count == 0U &&

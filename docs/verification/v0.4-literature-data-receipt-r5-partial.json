@@ -1,0 +1,94 @@
+{
+  "artifacts": [
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-parnaudeau.json",
+      "sha256": "8a90682cf6d5d503538dabf47f8097a7e18f962eeeb5e53ce39858bcbb6361b9"
+    },
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-norberg.json",
+      "sha256": "4c8db4c241c72b383d68828d391e30b9f721128e4d1b0f83758b63df3ce6696f"
+    },
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-tadrist.json",
+      "sha256": "6788b727e72558dd87fd19b41e63e0030cc570ad772dc0a5e4cc5b2468e1705b"
+    },
+    {
+      "kind": "reference",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/backward-step-driver-seegmiller.json",
+      "sha256": "b19ef7a300d8115736f01188e8c481eb5a1b68d98ad15af86d6f055c3e726a5c"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/source-primary.pdf",
+      "sha256": "b8a775e5a5078e19fc47d9c5f47e95b81b4a68d4449e4444459088ed9befcdd4"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/verification/v0.4-parnaudeau-controlled-digitization-rule.md",
+      "sha256": "335bac3cf8c1edf5587b4c916620987cbfaee13b7dc649855be8a258cc9cf4b5"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/calibration.json",
+      "sha256": "a3cb287d34033808f3cd7f77594b2b9f77cf8a27289ad4a45e4a6eaec6c475ee"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/parnaudeau-b8a775e5-h1adbc99-r3/raw-trace.json",
+      "sha256": "7c017aeff21ca05a11dd3f102bd1d5a132353af872af2bc20e1800fe387ce048"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/verification/literature-r4-artifacts/c73fb4eb663c450f2b288edbe23d7c4a4233c94f13570ebb790834a986c3dc25.snapshot",
+      "sha256": "c73fb4eb663c450f2b288edbe23d7c4a4233c94f13570ebb790834a986c3dc25"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/tadrist1990.pdf",
+      "sha256": "e62f0c6bfc2b2bea7e89de6ffb075eee0740bcc1ee393254e44c2bb84ab4e1d3"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SOURCE-RECEIPT.md",
+      "sha256": "c126d129d70b52a29ee7c05c16f1e20040ecc8e4b8d02ce3cfcbc6ea6150b406"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.benchmarks/hundun-flow-v0.4-re3900/literature/tadrist-1990-user-authorized-e62f0c6b/SHA256SUMS.txt",
+      "sha256": "22b2ee0d917ff91feda102a61e999df93afc1e7b4896c94f89d8207663c6d8f8"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/research/2026-08-22-v04-tadrist1990-primary-pdf-inventory.md",
+      "sha256": "2997f0d298ffa75724401f3a6f20d37ab0ceac6ac690b5e06a2e8c37a90ed028"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/verification/literature-r4-artifacts/7336f5dc1c697ea514b9b8a3011a14e3ad2a2465c9957bb10e7b96dfd714ead6.snapshot",
+      "sha256": "7336f5dc1c697ea514b9b8a3011a14e3ad2a2465c9957bb10e7b96dfd714ead6"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/verification/v0.4-literature-data-receipt-r4-partial.json",
+      "sha256": "1dfdeb16b92f4a29a5dc2a0c4daa146499e8decb1af5df197b652203e36b2e3f"
+    },
+    {
+      "kind": "attachment",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/tools/v04_parnaudeau_vector_extract.py",
+      "sha256": "e58190295d70dcc8dc9b727b12e8d196dfa486efd3c95462c12dc70b4ac2fc33"
+    },
+    {
+      "kind": "extractor",
+      "path": "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/tools/v04_literature_extract.py",
+      "sha256": "4f0debb1fcf6ca0b062f28cd700f8f22d0d1a0d5dde7f76cc6d723cb0c34368a"
+    }
+  ],
+  "complete": false,
+  "incomplete_references": [
+    "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/docs/references/cylinder-re3900-norberg.json"
+  ],
+  "schema": "HUNDUN_V04_LITERATURE_RECEIPT_V1"
+}

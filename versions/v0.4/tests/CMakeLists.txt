@@ -43,7 +43,14 @@ add_test(NAME v04_literature_partial_receipt
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_literature_extract.py"
           receipt-validate
-          "${hundun_repository_root}/docs/verification/v0.4-literature-data-receipt-r4-partial.json")
+          "${hundun_repository_root}/docs/verification/v0.4-literature-data-receipt-r4-partial.json"
+          --historical --relocate-root "/home/wyf/code_dev/hundun-flow=${hundun_repository_root}"
+          --artifact-store "${hundun_repository_root}/docs/verification/literature-r4-artifacts"
+          --json)
+add_test(NAME v04_literature_receipt_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/integration/literature_receipt_cli_test.py")
+set_tests_properties(v04_literature_receipt_cli PROPERTIES TIMEOUT 30)
 
 add_executable(v04_product_mg_capacity_mpi_test mpi/product_mg_capacity_mpi_test.cpp)
 add_executable(v04_product_restart_storage_mpi_test mpi/product_restart_storage_mpi_test.cpp)
@@ -74,7 +81,7 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_allocation_failure_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 30)
-  foreach(operation IN ITEMS compile create initialize)
+  foreach(operation IN ITEMS compile create initialize initialize_restart)
     foreach(geometry IN ITEMS cartesian immersed)
       set(allocation_test v04_product_${operation}_allocations_${geometry}_mpi_${rank_count})
       add_test(NAME ${allocation_test}

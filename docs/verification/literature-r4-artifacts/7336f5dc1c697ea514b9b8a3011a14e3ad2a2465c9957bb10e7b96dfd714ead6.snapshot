@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 """Validate frozen literature data and write an immutable hash receipt."""
 
 import argparse
@@ -369,42 +368,7 @@ def write_receipt(output, references, attachments):
         os.close(descriptor)
 
 
-def receipt_relocations(values):
-    roots = {}
-    for value in values:
-        old, separator, new = value.partition("=")
-        if not separator or not old or not new:
-            raise LiteratureError("relocation requires OLD=NEW")
-        source, target = Path(old), Path(new)
-        if not source.is_absolute() or not target.is_absolute():
-            raise LiteratureError("relocation roots must be absolute")
-        source, target = source.resolve(), target.resolve()
-        if source in roots:
-            raise LiteratureError("duplicate relocation root: {}".format(source))
-        roots[source] = target
-    # Most-specific directory mapping wins; never match a string-prefix sibling.
-    return sorted(roots.items(), key=lambda item: len(item[0].parts), reverse=True)
-
-
-def receipt_artifact_path(artifact, relocations, artifact_store):
-    if artifact_store is not None:
-        snapshot = artifact_store / (artifact["sha256"] + ".snapshot")
-        if snapshot.exists():
-            return snapshot
-    original = Path(artifact["path"]).resolve()
-    for old, new in relocations:
-        try:
-            return new / original.relative_to(old)
-        except ValueError:
-            pass
-    return original
-
-
-def validate_receipt(path, require_complete=False, historical=False,
-                     relocations=(), artifact_store=None):
-    if not historical and (relocations or artifact_store is not None):
-        raise LiteratureError("relocation and artifact store require --historical")
-    roots = receipt_relocations(relocations)
+def validate_receipt(path, require_complete=False):
     document = load(path)
     if (not isinstance(document, dict) or
             document.get("schema") != "HUNDUN_V04_LITERATURE_RECEIPT_V1"):
@@ -420,13 +384,9 @@ def validate_receipt(path, require_complete=False, historical=False,
     for artifact in artifacts:
         if (not isinstance(artifact, dict) or
                 artifact.get("kind") not in ("reference", "attachment", "extractor") or
-                not isinstance(artifact.get("path"), str) or not artifact["path"] or
-                not isinstance(artifact.get("sha256"), str) or
-                len(artifact["sha256"]) != 64 or
-                any(char not in "0123456789abcdef" for char in artifact["sha256"])):
+                not isinstance(artifact.get("path"), str)):
             raise LiteratureError("{}: malformed receipt artifact".format(path))
-        artifact_path = (receipt_artifact_path(artifact, roots, artifact_store)
-                         if historical else Path(artifact["path"]))
+        artifact_path = Path(artifact["path"])
         canonical = str(artifact_path.resolve())
         if canonical in seen:
             raise LiteratureError("{}: duplicate artifact {}".format(
@@ -435,13 +395,12 @@ def validate_receipt(path, require_complete=False, historical=False,
         if artifact["kind"] == "extractor":
             if extractor_seen:
                 raise LiteratureError("{}: duplicate extractor".format(path))
+            current_extractor = Path(__file__).resolve()
+            if artifact.get("sha256") != sha256(current_extractor):
+                raise LiteratureError(
+                    "{}: receipt binds a different extractor".format(path))
             extractor_seen = True
-            if not historical:
-                current_extractor = Path(__file__).resolve()
-                if artifact.get("sha256") != sha256(current_extractor):
-                    raise LiteratureError(
-                        "{}: receipt binds a different extractor".format(path))
-                continue
+            continue
         if not artifact_path.is_file():
             raise LiteratureError("{}: missing artifact {}".format(
                 path, artifact_path))
@@ -453,9 +412,7 @@ def validate_receipt(path, require_complete=False, historical=False,
         if artifact["kind"] == "reference":
             reference = validate_reference(artifact_path)
             if not reference_complete(reference):
-                # The receipt records its original namespace, not today's location.
-                # Keep that binding immutable even when resolving relocated bytes.
-                incomplete.append(str(Path(artifact["path"]).resolve()))
+                incomplete.append(canonical)
             required_attachments.update(required_attachment_hashes(reference))
     if not extractor_seen:
         raise LiteratureError("{}: extractor is not bound".format(path))
@@ -704,14 +661,6 @@ def main():
     receipt_validate = commands.add_parser("receipt-validate")
     receipt_validate.add_argument("path", type=Path)
     receipt_validate.add_argument("--require-complete", action="store_true")
-    receipt_validate.add_argument("--historical", action="store_true",
-                                  help="verify bound historical bytes, never execute them")
-    receipt_validate.add_argument("--relocate-root", action="append", default=[],
-                                  metavar="OLD=NEW", help="explicit absolute root mapping")
-    receipt_validate.add_argument("--artifact-store", type=Path,
-                                  help="content-addressed SHA256.snapshot archive")
-    receipt_validate.add_argument("--json", action="store_true",
-                                  help="report historical and current validator identities")
     commands.add_parser("self-test")
     arguments = parser.parse_args()
     if arguments.command is None:
@@ -728,20 +677,7 @@ def main():
             write_receipt(arguments.output, arguments.reference,
                           arguments.attachment)
         elif arguments.command == "receipt-validate":
-            document = validate_receipt(arguments.path, arguments.require_complete,
-                                        arguments.historical, arguments.relocate_root,
-                                        arguments.artifact_store)
-            if arguments.json:
-                extractor = next(item for item in document["artifacts"]
-                                 if item["kind"] == "extractor")
-                print(json.dumps({
-                    "mode": "historical" if arguments.historical else "strict",
-                    "complete": document["complete"],
-                    "receipt_sha256": sha256(arguments.path),
-                    "bound_extractor_sha256": extractor["sha256"],
-                    "validator_sha256": sha256(Path(__file__).resolve()),
-                    "artifacts_verified": len(document["artifacts"]),
-                }, sort_keys=True))
+            validate_receipt(arguments.path, arguments.require_complete)
         else:
             self_test()
     except (LiteratureError, OSError, ValueError, json.JSONDecodeError) as error:
