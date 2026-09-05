@@ -173,6 +173,17 @@ struct PressureEnergyGlobalizationAttemptReport {
       trajectory{};
 };
 
+enum class ApplicationFailurePhase : std::uint8_t {
+  none,
+  advance,
+  visit,
+  screen,
+  monitor,
+  restart,
+  resources,
+  evidence
+};
+
 struct ApplicationRunReport {
   PlanFingerprint case_model{};
   PlanFingerprint product{};
@@ -181,6 +192,7 @@ struct ApplicationRunReport {
   StageId failed_stage{};
   std::uint32_t attempts{};
   Status failure{};
+  ApplicationFailurePhase failure_phase{ApplicationFailurePhase::none};
   BdfCoefficients requested_bdf{};
   BdfCoefficients effective_bdf{};
   std::uint8_t thermophysical_predictor_calls{};
@@ -290,6 +302,10 @@ class ProductDriver {
   Status restart_expected(RestartExpected& out) noexcept;
   Status initialize(const DriverInitialState& initial) noexcept;
   Status initialize_restart(const RestartImage& image) noexcept;
+  // Add the accepted-flow convective bound without changing the caller's
+  // explicit diffusion/acoustic bounds. No-op for a fixed-dt product.
+  Status constrain_convective_time_limit(LocalTimeLimits& limits) noexcept;
+  // Programmatic callers retain authority over explicit physical time scales.
   Status advance(LocalTimeLimits limits, DriverStepReport& report) noexcept;
   Status committed_output_snapshot(CommittedOutputSnapshot& out) noexcept;
   Status committed_restart_snapshot(RestartSnapshot& out) noexcept;

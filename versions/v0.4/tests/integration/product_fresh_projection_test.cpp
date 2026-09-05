@@ -408,7 +408,8 @@ bool make_restart_image(const ValidatedModel &model,
   return true;
 }
 
-bool restart_matches_image(ProductDriver &driver, const RestartImage &image) {
+bool restart_matches_image(ProductDriver &driver, const RestartImage &image,
+                           const ValidatedModel &model) {
   RestartSnapshot restored;
   Status status = driver.committed_restart_snapshot(restored);
   bool passed = expect(static_cast<bool>(status),
@@ -435,17 +436,30 @@ bool restart_matches_image(ProductDriver &driver, const RestartImage &image) {
   const std::array<ConstFaceFieldView, 3U> faces{restored.final_mass_flux.x,
                                                  restored.final_mass_flux.y,
                                                  restored.final_mass_flux.z};
-  for (std::size_t axis = 0U; axis < faces.size() && passed; ++axis) {
+  std::size_t canonicalized_interfaces = 0U;
+  for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
     std::size_t face = 0U;
     for (std::int32_t z = 0; z < faces[axis].extents.z; ++z)
       for (std::int32_t y = 0; y < faces[axis].extents.y; ++y)
-        for (std::int32_t x = 0; x < faces[axis].extents.x; ++x, ++face)
-          passed &= same_bits(faces[axis].unchecked({x, y, z}),
-                              image.final_mass_flux[axis][face]);
+        for (std::int32_t x = 0; x < faces[axis].extents.x; ++x, ++face) {
+          Int3 low{x, y, z};
+          if (axis == 0U) --low.x;
+          if (axis == 1U) --low.y;
+          if (axis == 2U) --low.z;
+          const bool interface = cube_solid(model, restored.patch, low) !=
+                                 cube_solid(model, restored.patch, {x, y, z});
+          const double original = image.final_mass_flux[axis][face];
+          // Restart must reimpose the impermeable IBM interface.  Its
+          // canonical +0 is not an invocation of the Fresh projection.
+          const double expected = interface ? 0.0 : original;
+          passed &= same_bits(faces[axis].unchecked({x, y, z}), expected);
+          canonicalized_interfaces += interface && std::signbit(original);
+        }
   }
+  passed &= canonicalized_interfaces == 192U;
   return expect(passed,
                 "Restart skips Fresh projection and restores velocity and "
-                "signed-zero final flux bytes exactly");
+                "non-interface flux bytes exactly; IBM flux is canonical zero");
 }
 
 bool restart_skips_fresh_projection(const ValidatedModel &model,
@@ -486,7 +500,7 @@ bool restart_skips_fresh_projection(const ValidatedModel &model,
           derived.rate_layers_bitwise_equal,
       "Restart rebuilds velocity dependents without rewriting checkpoint "
       "U/phi");
-  return restart_matches_image(driver, image) && passed;
+  return restart_matches_image(driver, image, model) && passed;
 }
 
 bool projection_failure_is_atomic_and_retryable() {

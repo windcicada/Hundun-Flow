@@ -582,6 +582,16 @@ struct FreshStartKinematicProjectionPlan::Impl {
                  std::uint32_t) noexcept override;
   } jacobi;
 
+  struct ContinuityAudit final : LinearConvergenceAudit {
+    Impl *owner{};
+    LinearConvergenceAuditCertificate certificate() const noexcept override {
+      return {owner == nullptr ? 0U : owner->collective_operator};
+    }
+    Status evaluate(ConstFieldView solution, ConstFieldView,
+                    ReductionEngine &reductions,
+                    LinearConvergenceAuditResult &result) noexcept override;
+  } continuity_audit;
+
   MPI_Comm communicator{MPI_COMM_NULL};
   int rank{-1};
   int size{};
@@ -659,6 +669,7 @@ struct FreshStartKinematicProjectionPlan::Impl {
   Impl() noexcept {
     exact_operator.owner = this;
     jacobi.owner = this;
+    continuity_audit.owner = this;
   }
 
   Status consensus(Status local) const noexcept {
@@ -2308,7 +2319,13 @@ Status FreshStartKinematicProjectionPlan::solve(
   } else {
     const LinearSolveInvocation invocation{
         as_const(impl.workspace.rhs), impl.workspace.chi, impl.linear_identity,
-        impl.solve_control, nullptr};
+        impl.solve_control,
+        impl.route == FreshStartProjectionLinearRoute::native_mg_fgmres &&
+                impl.continuity_absolute + impl.continuity_relative *
+                                               impl.initial_continuity_maximum >
+                    0.0
+            ? &impl.continuity_audit
+            : nullptr};
     result = impl.route == FreshStartProjectionLinearRoute::native_mg_fgmres
                  ? solve_fgmres(impl.exact_operator, impl.native_mg, invocation,
                                 *impl.services.solver_workspace,
@@ -2353,6 +2370,44 @@ Status FreshStartKinematicProjectionPlan::solve(
 }
 
 namespace {
+
+template <class Implementation>
+Status form_projected_flux(Implementation &impl, ConstFieldView chi,
+                           bool &fixed_flux_unchanged) noexcept {
+  Status local;
+  fixed_flux_unchanged = true;
+  for (CartesianAxis axis :
+       {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
+    const ConstFaceFieldView input = select(impl.input.mass_flux, axis);
+    const ConstFaceFieldView mobility =
+        select(as_const(impl.workspace.x_physical_mobility),
+               as_const(impl.workspace.y_physical_mobility),
+               as_const(impl.workspace.z_physical_mobility), axis);
+    const FaceFieldView output =
+        select(impl.workspace.candidate_mass_flux, axis);
+    for (std::int32_t z = 0; z < output.extents.z && local; ++z)
+      for (std::int32_t y = 0; y < output.extents.y && local; ++y)
+        for (std::int32_t x = 0; x < output.extents.x; ++x) {
+          const Int3 face{x, y, z};
+          const double base = input.unchecked(face);
+          double value = base;
+          const double coefficient = mobility.unchecked(face);
+          if (coefficient != 0.0)
+            value += impl.pressure_boundary.mass_flux_response(chi, axis, face,
+                                                               coefficient);
+          if (!std::isfinite(value)) {
+            local = {StatusCode::numerical_failure, kFreshProjectionNumerical};
+            break;
+          }
+          output.unchecked(face) = value;
+          if (coefficient == 0.0)
+            fixed_flux_unchanged =
+                fixed_flux_unchanged &&
+                std::memcmp(&output.unchecked(face), &base, sizeof(base)) == 0;
+        }
+  }
+  return local;
+}
 
 template <class Implementation>
 double masked_gradient_component(const Implementation &impl, ConstFieldView chi,
@@ -2401,6 +2456,63 @@ double masked_gradient_component(const Implementation &impl, ConstFieldView chi,
 }
 
 } // namespace
+
+Status FreshStartKinematicProjectionPlan::Impl::ContinuityAudit::evaluate(
+    ConstFieldView solution, ConstFieldView, ReductionEngine &reductions,
+    LinearConvergenceAuditResult &result) noexcept {
+  Impl &impl = *owner;
+  const Int3 cells = impl.patch.cells;
+  // The anchored algebraic L2 norm does not bound continuity at the removed
+  // gauge row.  Test the actual unanchored flux response before Krylov exits.
+  // This only stages chi/phi; the accepted U/phi transaction remains untouched.
+  for (std::int32_t z = 0; z < cells.z; ++z)
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x)
+        impl.workspace.chi.unchecked({x, y, z}, 0U) =
+            solution.unchecked({x, y, z}, 0U);
+  std::array<FieldView, 1U> fields{impl.workspace.chi};
+  HaloTicket ticket;
+  Status status = impl.services.correction_halo->begin(
+      impl.services.correction_halo_stage, {fields.data(), fields.size()},
+      ticket);
+  if (status)
+    status = impl.services.correction_halo->finish(
+        ticket, {fields.data(), fields.size()});
+  if (!status) return status;
+  impl.workspace.chi = fields[0U];
+  status = impl.pressure_boundary.fill_ghosts(impl.workspace.chi);
+  status = reductions.consensus(status);
+  if (!status) return status;
+  bool fixed_flux_unchanged = true;
+  status = form_projected_flux(impl, as_const(impl.workspace.chi),
+                               fixed_flux_unchanged);
+  if (status && !fixed_flux_unchanged)
+    status = {StatusCode::invalid_plan, kFreshProjectionAudit};
+  double local_maximum = 0.0;
+  for (std::int32_t z = 0; z < cells.z && status; ++z)
+    for (std::int32_t y = 0; y < cells.y && status; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        if (!impl.cell_active(cell)) continue;
+        const double residual =
+            divergence(as_const(impl.workspace.candidate_mass_flux), cell);
+        if (!std::isfinite(residual)) {
+          status = {StatusCode::numerical_failure, kFreshProjectionNumerical};
+          break;
+        }
+        local_maximum = std::max(local_maximum, std::abs(residual));
+      }
+  double maximum = 0.0;
+  status = reductions.checked_max({&local_maximum, 1U}, {&maximum, 1U}, status);
+  if (!status) return status;
+  result = {};
+  result.metric = maximum;
+  result.unscaled_metric = maximum;
+  result.limit = impl.continuity_absolute +
+                 impl.continuity_relative * impl.initial_continuity_maximum;
+  result.accepted = maximum <= result.limit;
+  return {};
+}
 
 Status FreshStartKinematicProjectionPlan::audit(
     const FreshStartKinematicProjectionSolvedCertificate &solved,
@@ -2467,36 +2579,7 @@ Status FreshStartKinematicProjectionPlan::audit(
   const Int3 cells = impl.patch.cells;
 
   bool fixed_flux_unchanged = true;
-  for (CartesianAxis axis :
-       {CartesianAxis::x, CartesianAxis::y, CartesianAxis::z}) {
-    const ConstFaceFieldView input = select(impl.input.mass_flux, axis);
-    FaceFieldView output = select(impl.workspace.candidate_mass_flux, axis);
-    const ConstFaceFieldView mobility =
-        select(as_const(impl.workspace.x_physical_mobility),
-               as_const(impl.workspace.y_physical_mobility),
-               as_const(impl.workspace.z_physical_mobility), axis);
-    for (std::int32_t z = 0; z < output.extents.z && local; ++z)
-      for (std::int32_t y = 0; y < output.extents.y && local; ++y)
-        for (std::int32_t x = 0; x < output.extents.x; ++x) {
-          const Int3 face{x, y, z};
-          const double base = input.unchecked(face);
-          const double coefficient = mobility.unchecked(face);
-          double value = base;
-          if (coefficient != 0.0) {
-            value += impl.pressure_boundary.mass_flux_response(chi, axis, face,
-                                                               coefficient);
-          } else {
-            fixed_flux_unchanged =
-                fixed_flux_unchanged &&
-                std::memcmp(&value, &base, sizeof(value)) == 0;
-          }
-          if (!std::isfinite(value)) {
-            local = {StatusCode::numerical_failure, kFreshProjectionNumerical};
-            break;
-          }
-          output.unchecked(face) = value;
-        }
-  }
+  local = form_projected_flux(impl, chi, fixed_flux_unchanged);
   for (std::int32_t z = 0; z < cells.z && local; ++z)
     for (std::int32_t y = 0; y < cells.y && local; ++y)
       for (std::int32_t x = 0; x < cells.x; ++x) {

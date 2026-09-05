@@ -9614,6 +9614,11 @@ Status ProductDriver::Impl::execute_attempt(
              {{product.energy_compiled_enthalpy_branch_storage.data(),
                product.energy_compiled_enthalpy_branch_storage.size()}},
              pressure_energy_compiled_enthalpy_response}};
+        // The factored cache freezes limited-central limiter branches.  Other
+        // public schemes use the existing spatial operator without that cache.
+        if (energy_enthalpy_binding.convection !=
+            ConvectionScheme::limited_central2)
+          energy_enthalpy_binding.workspace.compiled = {};
         energy_enthalpy_binding.activity =
             pressure_energy_continuity_activity;
         energy_enthalpy_binding.identity = identity;
@@ -9755,7 +9760,8 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(pressure_energy_r_e), pressure_rhs);
         coupled = product.reductions.consensus(coupled);
         PressureEnergySchurPreparedApplyEpoch repeated_apply_epoch;
-        if (coupled && !simple_diagonal_schur)
+        if (coupled && !simple_diagonal_schur &&
+            energy_enthalpy_certificate.compiled_factored_apply)
           coupled =
               schur_operator.prepare_repeated_apply(repeated_apply_epoch);
         coupled = product.reductions.consensus(coupled);
@@ -14330,6 +14336,69 @@ Status ProductDriver::Impl::execute_attempt(
     status = {};
   finish_stage_timings();
   return status;
+}
+
+Status ProductDriver::constrain_convective_time_limit(
+    LocalTimeLimits& limits) noexcept {
+  if (implementation_ == nullptr || !implementation_->initialized ||
+      implementation_->time.has_active_proposal()) {
+    return {StatusCode::invalid_plan, kProductInput};
+  }
+  // The caller's limits remain additional upper bounds.  For adaptive runs,
+  // derive the convective bound from the last committed rho/phi, using the
+  // same outward-mass-flow definition as the provisional and final audits.
+  // Fixed-dt scientific cases do not enter this scan or change their dt.
+  CompiledCasePlan::Impl& product = *implementation_->plan.implementation_;
+  if (product.time.spec().control != TimeControlKind::fixed) {
+    ConstFieldView density;
+    ConstFaceFluxView flux;
+    const StateLayers& layers = product.layers;
+    Status local =
+        layers.view(StateRole::accepted_n, product.fields.rho, density);
+    if (local)
+      local = implementation_->final_flux_writer.committed(product.final_flux,
+                                                           flux);
+    const auto region = product.topology.has_value()
+                            ? product.topology->region()
+                            : Span<const std::uint8_t>{};
+    const Int3 cells = product.patch.cells;
+    const auto wx = product.geometry.x().widths();
+    const auto wy = product.geometry.y().widths();
+    const auto wz = product.geometry.z().widths();
+    double maximum_rate = 0.0;
+    std::size_t flat = 0U;
+    constexpr std::array<std::uint8_t, 6U> active{{1U, 1U, 1U, 1U, 1U, 1U}};
+    for (std::int32_t z = 0; z < cells.z && local; ++z)
+      for (std::int32_t y = 0; y < cells.y && local; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x, ++flat) {
+          if (region.data != nullptr &&
+              region.data[flat] == static_cast<std::uint8_t>(RegionFlag::solid))
+            continue;
+          const Int3 cell{x, y, z};
+          const double volume = wx.data[product.patch.begin.x + x] *
+                                wy.data[product.patch.begin.y + y] *
+                                wz.data[product.patch.begin.z + z];
+          const std::array<double, 6U> faces{
+              {flux.x.unchecked(cell), flux.x.unchecked({x + 1, y, z}),
+               flux.y.unchecked(cell), flux.y.unchecked({x, y + 1, z}),
+               flux.z.unchecked(cell), flux.z.unchecked({x, y, z + 1})}};
+          detail::CellConvectiveCflResult cfl;
+          if (detail::evaluate_cell_convective_cfl(
+                  density.unchecked(cell, 0U), volume, faces, active, 1.0,
+                  cfl) != detail::CellConvectiveCflStatus::success) {
+            local = {StatusCode::numerical_failure, kProductConvectiveCfl};
+            break;
+          }
+          maximum_rate = std::max(maximum_rate, cfl.out);
+        }
+    local = product.reductions.consensus(local);
+    if (!local) return local;
+    // No outflow means no additional convective restriction.  Propose applies
+    // the target CFL once, and performs the existing global minimum reduction.
+    if (maximum_rate > 0.0)
+      limits.convective = std::min(limits.convective, 1.0 / maximum_rate);
+  }
+  return {};
 }
 
 Status ProductDriver::advance(LocalTimeLimits limits,

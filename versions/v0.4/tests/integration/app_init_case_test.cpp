@@ -37,6 +37,11 @@ bool run() {
             report.summary.sealed && report.summary.pressure_correctors == 2U;
   passed &= static_cast<bool>(ApplicationService::validate_run_directories(
       case_root, root / "run", HUNDUN_V04_SOURCE_ROOT));
+  passed &= static_cast<bool>(ApplicationService::validate_run_directories(
+      case_root, root / "case-sibling", HUNDUN_V04_SOURCE_ROOT));
+  passed &= ApplicationService::validate_run_directories(
+                case_root, root / "case" / "nested", HUNDUN_V04_SOURCE_ROOT)
+                .code == StatusCode::invalid_case;
   passed &= ApplicationService::validate_run_directories(
                 case_root, case_root / "run", HUNDUN_V04_SOURCE_ROOT)
                 .code == StatusCode::invalid_case;
@@ -56,6 +61,15 @@ bool run() {
   run_options.restart_interval = 1U;
   passed &= static_cast<bool>(
       ApplicationService::run(MPI_COMM_SELF, run_options, run_report));
+  if (run_report.piso.pressure_solve_calls != 2U ||
+      run_report.momentum_predictor_solve.predictor_passes != 1U ||
+      run_report.pressure_energy_globalization.trajectory_count == 0U) {
+    std::cerr << "FAIL: successful ApplicationService run preserves the last "
+                 "accepted step diagnostics; pressure_solve_calls="
+              << static_cast<unsigned>(run_report.piso.pressure_solve_calls)
+              << '\n';
+    passed = false;
+  }
   passed &= run_report.case_model == report.case_model &&
             run_report.product == report.product &&
             run_report.accepted_steps == 2U && run_report.final_time > 0.0 &&
@@ -171,6 +185,39 @@ bool run() {
   passed &= !ApplicationService::run(MPI_COMM_SELF, invalid_run,
                                      unchanged_run) &&
             unchanged_run.product == UINT64_C(0xcafef00d);
+
+  for (const char* blocked : {"Visit", "Restart", "evidence.jsonl"}) {
+    ApplicationRunOptions failure_options = run_options;
+    failure_options.run_directory = root / (std::string("blocked-") + blocked);
+    failure_options.steps = 1U;
+    failure_options.output_interval = std::string(blocked) == "Visit" ? 1U : 0U;
+    failure_options.restart_interval =
+        std::string(blocked) == "Restart" ? 1U : 0U;
+    fs::create_directories(failure_options.run_directory);
+    const fs::path blocked_path = failure_options.run_directory / blocked;
+    if (std::string(blocked) == "evidence.jsonl")
+      fs::create_directory(blocked_path);
+    else
+      std::ofstream(blocked_path) << "test-owned output blocker\n";
+    ApplicationRunReport failure_report;
+    const Status failure =
+        ApplicationService::run(MPI_COMM_SELF, failure_options, failure_report);
+    const ApplicationFailurePhase expected_phase =
+        std::string(blocked) == "Visit"     ? ApplicationFailurePhase::visit
+        : std::string(blocked) == "Restart" ? ApplicationFailurePhase::restart
+                                            : ApplicationFailurePhase::evidence;
+    if (failure || failure_report.accepted_steps != 1U ||
+        !(failure_report.final_time > 0.0) ||
+        failure_report.failure.code != failure.code ||
+        failure_report.failure.detail != failure.detail ||
+        failure_report.failed_stage != 0U ||
+        failure_report.failure_phase != expected_phase) {
+      std::cerr << "FAIL: post-commit " << blocked
+                << " failure retains accepted step/time and I/O status; "
+                << "accepted_steps=" << failure_report.accepted_steps << '\n';
+      passed = false;
+    }
+  }
 
   for (fs::recursive_directory_iterator iterator(HUNDUN_V04_SOURCE_ROOT, error),
        end;

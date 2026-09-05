@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_app.hpp"
-
-#include "hundun/v04_case.hpp"
-
-#include "app_evidence_detail.hpp"
-#include "app_identity_detail.hpp"
-
 #include <fcntl.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -23,7 +16,28 @@
 #include <string_view>
 #include <vector>
 
+#include "app_driver_detail.hpp"
+#include "app_evidence_detail.hpp"
+#include "app_identity_detail.hpp"
+#include "hundun/v04_app.hpp"
+#include "hundun/v04_case.hpp"
+#include "io_output_detail.hpp"
+
 namespace hundun::v04 {
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+namespace detail {
+namespace {
+thread_local ApplicationFailurePhase failure_phase =
+    ApplicationFailurePhase::none;
+thread_local int failure_rank = -1;
+}  // namespace
+void arm_application_local_allocation_failure_for_test(
+    ApplicationFailurePhase phase, int rank) noexcept {
+  failure_phase = phase;
+  failure_rank = rank;
+}
+}  // namespace detail
+#endif
 namespace {
 
 namespace fs = std::filesystem;
@@ -31,6 +45,18 @@ namespace fs = std::filesystem;
 constexpr std::uint32_t kApplicationInput = 10501U;
 constexpr std::uint32_t kApplicationPath = 10502U;
 constexpr std::uint32_t kApplicationTemplate = 10503U;
+
+void local_allocation_checkpoint(ApplicationFailurePhase phase, int rank) {
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  if (detail::failure_phase == phase && detail::failure_rank == rank) {
+    detail::failure_phase = ApplicationFailurePhase::none;
+    throw std::bad_alloc{};
+  }
+#else
+  (void)phase;
+  (void)rank;
+#endif
+}
 
 static_assert(kRuntimePressureEnergyRefinementCapacity ==
               kPressureEnergyRefinementCapacity);
@@ -120,11 +146,14 @@ Status collect_evidence_resources(
 Status collect_peak_rss(MPI_Comm communicator, std::uint64_t& maximum_rank,
                         std::uint64_t& maximum_node) noexcept {
   rusage usage{};
+  Status status;
   if (::getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0)
-    return {StatusCode::io_failure, kApplicationInput};
+    status = {StatusCode::io_failure, kApplicationInput};
   const auto kib = static_cast<std::uint64_t>(usage.ru_maxrss);
-  if (kib > UINT64_MAX / 1024U)
-    return {StatusCode::invalid_plan, kApplicationInput};
+  if (status && kib > UINT64_MAX / 1024U)
+    status = {StatusCode::invalid_plan, kApplicationInput};
+  status = detail::output_collective_status(communicator, status);
+  if (!status) return status;
   const std::uint64_t local = kib * 1024U;
   if (MPI_Allreduce(&local, &maximum_rank, 1, MPI_UINT64_T, MPI_MAX,
                     communicator) != MPI_SUCCESS)
@@ -283,17 +312,22 @@ bool sync_directory(const fs::path& path) noexcept {
 }
 
 bool within(const fs::path& candidate, const fs::path& parent) noexcept {
-  auto candidate_iterator = candidate.begin();
-  auto parent_iterator = parent.begin();
-  for (; parent_iterator != parent.end(); ++parent_iterator, ++candidate_iterator) {
-    if (candidate_iterator == candidate.end() ||
-        *candidate_iterator != *parent_iterator)
-      return false;
-  }
-  return true;
+  // Both operands have already been made absolute and canonical.  Comparing
+  // native strings at a separator boundary avoids allocating path components
+  // (some libc++ path iterators terminate on component-allocation failure).
+  const auto& value = candidate.native();
+  const auto& base = parent.native();
+  std::size_t length = base.size();
+  while (length > 1U && base[length - 1U] == fs::path::preferred_separator)
+    --length;
+  return length != 0U && value.size() >= length &&
+         value.compare(0U, length, base, 0U, length) == 0 &&
+         (value.size() == length ||
+          base[length - 1U] == fs::path::preferred_separator ||
+          value[length] == fs::path::preferred_separator);
 }
 
-bool absolute_normalized(const fs::path& path, fs::path& out) noexcept {
+bool absolute_normalized(const fs::path& path, fs::path& out) {
   std::error_code error;
   out = fs::weakly_canonical(path, error);
   if (!error) return true;
@@ -359,6 +393,8 @@ Status ApplicationService::validate_run_directories(
     return {StatusCode::invalid_case, kApplicationPath};
   }
   return {};
+} catch (const std::bad_alloc&) {
+  return {StatusCode::allocation_failure, kApplicationPath};
 } catch (...) {
   return {StatusCode::invalid_case, kApplicationPath};
 }
@@ -370,8 +406,10 @@ Status ApplicationService::run(MPI_Comm communicator,
       options.run_directory.empty() || options.source_root.empty() ||
       options.steps == 0U)
     return {StatusCode::invalid_case, kApplicationInput};
-  Status status = validate_run_directories(
-      options.case_root, options.run_directory, options.source_root);
+  Status status = detail::output_collective_status(
+      communicator,
+      validate_run_directories(options.case_root, options.run_directory,
+                               options.source_root));
   ValidatedModel model;
   if (status)
     status = CaseCompiler::load_and_compile(communicator, options.case_root,
@@ -387,7 +425,7 @@ Status ApplicationService::run(MPI_Comm communicator,
   const IoServicePlan* sealed_services = plan.io_services();
   if (sealed_services == nullptr || sealed_services->fingerprint() == 0U)
     return {StatusCode::invalid_plan, kApplicationInput};
-  const IoServicePlan services = *sealed_services;
+  const IoServicePlan& services = *sealed_services;
   ProductDriver driver;
   status = ProductDriver::create(communicator, std::move(plan), driver);
   std::uint64_t starting_step = 0U;
@@ -451,11 +489,23 @@ Status ApplicationService::run(MPI_Comm communicator,
   report = {};
   report.case_model = model.fingerprint;
   report.product = product_fingerprint;
+  report.accepted_steps = starting_step;
+  report.final_time = run_start.previous_time;
   for (std::uint64_t step_index = 0U;
        step_index < options.steps && status; ++step_index) {
+    report.failure_phase = ApplicationFailurePhase::advance;
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
-    status = driver.advance(options.time_limits, step);
+    LocalTimeLimits time_limits = options.time_limits;
+    status = driver.constrain_convective_time_limit(time_limits);
+    if (status) status = driver.advance(time_limits, step);
+    report.attempts = step.attempts;
+    // Commit is authoritative even if a later resource collective or writer
+    // fails.  Never report an accepted step as a failed numerical attempt.
+    if (step.accepted) {
+      report.accepted_steps = step.accepted_step;
+      report.final_time = step.accepted_time;
+    }
     const auto end = std::chrono::steady_clock::now();
     const auto local_nanoseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
@@ -529,71 +579,103 @@ Status ApplicationService::run(MPI_Comm communicator,
         (step.accepted_step % options.restart_interval == 0U ||
          step.accepted_step == target_step);
     CommittedOutputSnapshot snapshot;
-    if (output) status = driver.committed_output_snapshot(snapshot);
+    fs::path output_path;
+    if (output) {
+      report.failure_phase = ApplicationFailurePhase::visit;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        output_path = options.run_directory / "Visit";
+        return driver.committed_output_snapshot(snapshot);
+      });
+    }
     if (status && output)
-      status = VisitWriter::write(communicator,
-                                  options.run_directory / "Visit", services,
-                                  snapshot);
+      status =
+          VisitWriter::write(communicator, output_path, services, snapshot);
     if (status && output) {
-      std::ostringstream summary;
-      summary << "attempts=" << step.attempts
-              << " continuity=" << step.piso.continuity_residual
-              << " energy=" << step.piso.energy_residual
-              << " eos=" << step.piso.eos_residual
-              << " advective_cfl_out="
-              << step.momentum_predictor_limiter.advective_cfl.out_max
-              << " advective_cfl_abs="
-              << step.momentum_predictor_limiter.advective_cfl.absolute_max
-              << " advective_cfl_limit="
-              << step.momentum_predictor_limiter.advective_cfl.limit
-              << " committed_cfl_out="
-              << step.piso.committed_convective_cfl_out_max
-              << " committed_cfl_abs="
-              << step.piso.committed_convective_cfl_abs_max
-              << " committed_cfl_limit="
-              << step.piso.committed_convective_cfl_limit
-              << " predictor_limited="
-              << (step.thermophysical_predictor.limited ? 1 : 0)
-              << " predictor_theta="
-              << step.thermophysical_predictor.theta;
-      status = ScreenWriter::append(
-          communicator, options.run_directory / "screen.log", services,
-          snapshot, summary.str());
+      report.failure_phase = ApplicationFailurePhase::screen;
+      std::string screen_text;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        output_path = options.run_directory / "screen.log";
+        std::ostringstream summary;
+        summary << "attempts=" << step.attempts
+                << " continuity=" << step.piso.continuity_residual
+                << " energy=" << step.piso.energy_residual
+                << " eos=" << step.piso.eos_residual << " advective_cfl_out="
+                << step.momentum_predictor_limiter.advective_cfl.out_max
+                << " advective_cfl_abs="
+                << step.momentum_predictor_limiter.advective_cfl.absolute_max
+                << " advective_cfl_limit="
+                << step.momentum_predictor_limiter.advective_cfl.limit
+                << " committed_cfl_out="
+                << step.piso.committed_convective_cfl_out_max
+                << " committed_cfl_abs="
+                << step.piso.committed_convective_cfl_abs_max
+                << " committed_cfl_limit="
+                << step.piso.committed_convective_cfl_limit
+                << " predictor_limited="
+                << (step.thermophysical_predictor.limited ? 1 : 0)
+                << " predictor_theta=" << step.thermophysical_predictor.theta;
+        screen_text = summary.str();
+        return Status{};
+      });
+      if (status)
+        status = ScreenWriter::append(communicator, output_path, services,
+                                      snapshot, screen_text);
     }
     if (status && output) {
-      std::ostringstream payload;
-      payload << "{\"attempts\":" << step.attempts
-              << ",\"continuity\":" << step.piso.continuity_residual
-              << ",\"energy\":" << step.piso.energy_residual
-              << ",\"eos\":" << step.piso.eos_residual
-              << ",\"advective_convective_cfl_out\":"
-              << step.momentum_predictor_limiter.advective_cfl.out_max
-              << ",\"advective_convective_cfl_abs\":"
-              << step.momentum_predictor_limiter.advective_cfl.absolute_max
-              << ",\"advective_convective_cfl_limit\":"
-              << step.momentum_predictor_limiter.advective_cfl.limit
-              << ",\"committed_convective_cfl_out\":"
-              << step.piso.committed_convective_cfl_out_max
-              << ",\"committed_convective_cfl_abs\":"
-              << step.piso.committed_convective_cfl_abs_max
-              << ",\"committed_convective_cfl_limit\":"
-              << step.piso.committed_convective_cfl_limit
-              << ",\"predictor_limited\":"
-              << (step.thermophysical_predictor.limited ? "true" : "false")
-              << ",\"predictor_theta\":"
-              << step.thermophysical_predictor.theta << '}';
-      status = MonitorWriter::append(
-          communicator, options.run_directory / "monitor.jsonl", services,
-          snapshot, payload.str());
+      report.failure_phase = ApplicationFailurePhase::monitor;
+      std::string monitor_text;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        output_path = options.run_directory / "monitor.jsonl";
+        std::ostringstream payload;
+        payload << "{\"attempts\":" << step.attempts
+                << ",\"continuity\":" << step.piso.continuity_residual
+                << ",\"energy\":" << step.piso.energy_residual
+                << ",\"eos\":" << step.piso.eos_residual
+                << ",\"advective_convective_cfl_out\":"
+                << step.momentum_predictor_limiter.advective_cfl.out_max
+                << ",\"advective_convective_cfl_abs\":"
+                << step.momentum_predictor_limiter.advective_cfl.absolute_max
+                << ",\"advective_convective_cfl_limit\":"
+                << step.momentum_predictor_limiter.advective_cfl.limit
+                << ",\"committed_convective_cfl_out\":"
+                << step.piso.committed_convective_cfl_out_max
+                << ",\"committed_convective_cfl_abs\":"
+                << step.piso.committed_convective_cfl_abs_max
+                << ",\"committed_convective_cfl_limit\":"
+                << step.piso.committed_convective_cfl_limit
+                << ",\"predictor_limited\":"
+                << (step.thermophysical_predictor.limited ? "true" : "false")
+                << ",\"predictor_theta\":"
+                << step.thermophysical_predictor.theta << '}';
+        monitor_text = payload.str();
+        return Status{};
+      });
+      if (status)
+        status = MonitorWriter::append(communicator, output_path, services,
+                                       snapshot, monitor_text);
     }
     RestartSnapshot restart_snapshot;
+    if (status && restart) {
+      report.failure_phase = ApplicationFailurePhase::restart;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        output_path = options.run_directory / "Restart";
+        return driver.committed_restart_snapshot(restart_snapshot);
+      });
+    }
     if (status && restart)
-      status = driver.committed_restart_snapshot(restart_snapshot);
-    if (status && restart)
-      status = RestartWriter::write(
-          communicator, options.run_directory / "Restart", restart_snapshot,
-          {1U});
+      status = RestartWriter::write(communicator, output_path, restart_snapshot,
+                                    {1U});
     if (status) {
+      report.failure_phase = ApplicationFailurePhase::resources;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        return Status{};
+      });
+      if (!status) break;
       DriverResourceReport evidence_resources;
       status = collect_evidence_resources(communicator, step.resources,
                                           evidence_resources);
@@ -794,48 +876,27 @@ Status ApplicationService::run(MPI_Comm communicator,
       // Task 20 owns candidate identity and eligibility.  Ordinary product
       // runs are deliberately incapable of masquerading as benchmark data.
       evidence.statistics_eligible = false;
-      status = EvidenceWriter::append(
-          communicator, options.run_directory / "evidence.jsonl", services,
-          evidence);
+      report.failure_phase = ApplicationFailurePhase::evidence;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        output_path = options.run_directory / "evidence.jsonl";
+        return Status{};
+      });
+      if (status)
+        status = EvidenceWriter::append(communicator, output_path, services,
+                                        evidence);
     }
   }
-  if (!status) return status;
-  ApplicationRunReport candidate;
-  candidate.case_model = model.fingerprint;
-  candidate.product = product_fingerprint;
+  if (!status) {
+    report.failure = status;
+    return status;
+  }
   CommittedOutputSnapshot final_snapshot;
   status = driver.committed_output_snapshot(final_snapshot);
   if (!status) return status;
-  candidate.accepted_steps = final_snapshot.step;
-  candidate.final_time = final_snapshot.time;
-  candidate.requested_bdf = report.requested_bdf;
-  candidate.effective_bdf = report.effective_bdf;
-  candidate.thermophysical_predictor_calls =
-      report.thermophysical_predictor_calls;
-  candidate.temporal_method_fallback = report.temporal_method_fallback;
-  candidate.momentum_predictor_limiter =
-      report.momentum_predictor_limiter;
-  candidate.thermophysical_predictor = report.thermophysical_predictor;
-  candidate.predictor_limiter_activations =
-      report.predictor_limiter_activations;
-  candidate.predictor_low_order_transport_passes =
-      report.predictor_low_order_transport_passes;
-  candidate.predictor_low_order_halo_exchanges =
-      report.predictor_low_order_halo_exchanges;
-  candidate.minimum_predictor_theta = report.minimum_predictor_theta;
-  candidate.maximum_advective_convective_cfl_out =
-      report.maximum_advective_convective_cfl_out;
-  candidate.maximum_advective_convective_cfl_abs =
-      report.maximum_advective_convective_cfl_abs;
-  candidate.advective_convective_cfl_limit =
-      report.advective_convective_cfl_limit;
-  candidate.maximum_committed_convective_cfl_out =
-      report.maximum_committed_convective_cfl_out;
-  candidate.maximum_committed_convective_cfl_abs =
-      report.maximum_committed_convective_cfl_abs;
-  candidate.committed_convective_cfl_limit =
-      report.committed_convective_cfl_limit;
-  report = candidate;
+  report.accepted_steps = final_snapshot.step;
+  report.final_time = final_snapshot.time;
+  report.failure_phase = ApplicationFailurePhase::none;
   (void)rank;
   return {};
 } catch (const std::bad_alloc&) {

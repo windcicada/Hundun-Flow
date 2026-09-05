@@ -23,6 +23,29 @@ using hundun::v04::CaseValidationReport;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
 
+const char* failure_phase_name(hundun::v04::ApplicationFailurePhase phase) {
+  using Phase = hundun::v04::ApplicationFailurePhase;
+  switch (phase) {
+    case Phase::none:
+      return "setup";
+    case Phase::advance:
+      return "advance";
+    case Phase::visit:
+      return "Visit";
+    case Phase::screen:
+      return "Screen";
+    case Phase::monitor:
+      return "Monitor";
+    case Phase::restart:
+      return "Restart";
+    case Phase::resources:
+      return "resources";
+    case Phase::evidence:
+      return "Evidence";
+  }
+  return "unknown";
+}
+
 int finish(Status status, int rank) {
   if (!status && rank == 0) {
     std::cerr << hundun::v04::status_message(status)
@@ -348,6 +371,14 @@ int main(int argc, char* argv[]) {
                            .limited_face_fraction;
         }
         std::cout << '\n';
+      }
+      if (!status && rank == 0) {
+        std::cerr << "termination_phase="
+                  << failure_phase_name(report.failure_phase)
+                  << " committed_step=" << report.accepted_steps
+                  << " committed_time=" << std::setprecision(17)
+                  << report.final_time
+                  << " output_root=" << options.run_directory << '\n';
       }
       if (!status && rank == 0 && report.failed_stage != 0U) {
         std::cerr << "failed_stage=" << report.failed_stage

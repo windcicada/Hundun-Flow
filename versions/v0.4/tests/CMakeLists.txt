@@ -1298,6 +1298,55 @@ foreach(rank_count IN ITEMS 1 2 4)
     PROCESSORS "${rank_count}")
 endforeach()
 
+add_executable(v04_app_case_allocation_mpi_test
+  mpi/app_case_allocation_mpi_test.cpp)
+target_link_libraries(v04_app_case_allocation_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+target_compile_definitions(v04_app_case_allocation_mpi_test PRIVATE
+  HUNDUN_V04_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+foreach(rank_count IN ITEMS 1 2)
+  add_test(NAME v04_app_case_allocation_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_app_case_allocation_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_app_case_allocation_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 60)
+endforeach()
+
+add_executable(v04_product_adaptive_limits_mpi_test
+  mpi/product_adaptive_limits_mpi_test.cpp)
+target_link_libraries(v04_product_adaptive_limits_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_adaptive_limits_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_product_adaptive_limits_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_adaptive_limits_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 60)
+endforeach()
+
+add_executable(v04_app_output_failure_mpi_test
+  mpi/app_output_failure_mpi_test.cpp)
+target_link_libraries(v04_app_output_failure_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+target_include_directories(v04_app_output_failure_mpi_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_app_output_failure_mpi_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1
+  HUNDUN_V04_SOURCE_ROOT="${hundun_repository_root}")
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_app_output_failure_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_app_output_failure_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_app_output_failure_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 180)
+endforeach()
+
 add_executable(v04_parallel_halo_mpi_test
   mpi/parallel_halo_mpi_test.cpp)
 target_include_directories(v04_parallel_halo_mpi_test PRIVATE

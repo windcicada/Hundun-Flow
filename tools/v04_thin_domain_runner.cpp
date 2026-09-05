@@ -1845,6 +1845,27 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       if (rank == 0 && step.pressure_energy_globalization.valid) {
         const PressureEnergyGlobalizationAttemptReport& attempt =
             step.pressure_energy_globalization;
+        for (std::size_t ordinal = 0U; ordinal < attempt.trajectory_count &&
+                                       ordinal < attempt.trajectory.size();
+             ++ordinal) {
+          const auto& iteration = attempt.trajectory[ordinal];
+          std::cerr << "pressure_energy_trajectory ordinal=" << ordinal
+                    << " corrector="
+                    << static_cast<unsigned>(iteration.corrector)
+                    << " refinement="
+                    << static_cast<unsigned>(iteration.refinement_iteration)
+                    << " jacobian="
+                    << static_cast<unsigned>(iteration.jacobian_scope)
+                    << " baseline_continuity="
+                    << iteration.baseline.global_normalized_continuity
+                    << " baseline_energy="
+                    << iteration.baseline.global_normalized_energy
+                    << " alpha=" << iteration.selected.alpha
+                    << " selected_continuity="
+                    << iteration.selected.global_normalized_continuity
+                    << " selected_energy="
+                    << iteration.selected.global_normalized_energy << '\n';
+        }
         std::cerr << "pressure_energy_attempt corrector="
                   << static_cast<unsigned>(attempt.corrector)
                   << " samples="

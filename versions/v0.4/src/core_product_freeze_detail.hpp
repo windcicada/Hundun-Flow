@@ -144,8 +144,12 @@ inline bool product_pressure_coupled_merit(
 inline bool product_use_simple_diagonal_schur(
     CouplingKind coupling, std::uint8_t corrector,
     std::uint8_t refinement_iteration, bool immersed) noexcept {
+  // Reserve half of the existing refinement budget for the spatial response
+  // if the cheap diagonal approximation has not reached the physical gates.
+  // This is still the existing IBM quasi-Newton operator, not a claim of an
+  // exact IBM Jacobian, and does not extend the iteration/acceptance limits.
   return coupling == CouplingKind::simple && corrector == 2U && immersed &&
-         refinement_iteration <= kPressureEnergyRefinementCapacity;
+         refinement_iteration <= kPressureEnergyRefinementCapacity / 2U;
 }
 
 // Select only the inner coupled linear tolerance.  The case control remains

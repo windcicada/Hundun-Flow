@@ -223,14 +223,18 @@ bool test_simple_diagonal_schur_policy() {
   constexpr std::uint8_t capacity =
       static_cast<std::uint8_t>(kPressureEnergyRefinementCapacity);
   bool passed = true;
-  passed &= expect(
-      detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U, 0U,
-                                                true) &&
-          detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U,
-                                                    1U, true) &&
-          detail::product_use_simple_diagonal_schur(
-              CouplingKind::simple, 2U, capacity, true),
-      "SIMPLE IBM C2 uses the diagonal Schur policy through refinement capacity");
+  passed &=
+      expect(detail::product_use_simple_diagonal_schur(CouplingKind::simple, 2U,
+                                                       0U, true) &&
+                 detail::product_use_simple_diagonal_schur(CouplingKind::simple,
+                                                           2U, 1U, true) &&
+                 detail::product_use_simple_diagonal_schur(
+                     CouplingKind::simple, 2U, capacity / 2U, true) &&
+                 !detail::product_use_simple_diagonal_schur(
+                     CouplingKind::simple, 2U, capacity / 2U + 1U, true) &&
+                 !detail::product_use_simple_diagonal_schur(
+                     CouplingKind::simple, 2U, capacity, true),
+             "SIMPLE IBM C2 reserves late refinements for spatial fallback");
   passed &= expect(
       !detail::product_use_simple_diagonal_schur(CouplingKind::piso, 2U, 0U,
                                                  true) &&

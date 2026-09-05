@@ -85,3 +85,49 @@ if(run_error MATCHES " eos=" OR
   message(FATAL_ERROR
     "CLI exposed unavailable terminal audit data: ${run_error}")
 endif()
+
+# A post-commit file failure must not look like an unaccepted numerical step.
+file(WRITE "${PROBE_ROOT}/case/case.json" "${original_case_json}")
+file(MAKE_DIRECTORY "${PROBE_ROOT}/output-failure/evidence.jsonl")
+execute_process(
+  COMMAND "${PRODUCT}" run "${PROBE_ROOT}/case"
+          --output "${PROBE_ROOT}/output-failure"
+          --steps 1 --output-interval 0 --restart-interval 0
+  RESULT_VARIABLE output_status
+  OUTPUT_VARIABLE output_text
+  ERROR_VARIABLE output_error)
+if(output_status EQUAL 0 OR
+   NOT output_error MATCHES "termination_phase=Evidence committed_step=1" OR
+   output_error MATCHES "committed_time=0([ \\n]|$)" OR
+   output_error MATCHES "failed_stage=")
+  message(FATAL_ERROR
+    "CLI lost the accepted step or mislabeled an output failure: ${output_error}")
+endif()
+
+# The actual CLI must compute the flow-based bound before its first attempt.
+# On this dx=0.125 grid with U=10, Co=0.8 gives dt=0.01, not the input 0.1.
+set(adaptive_json "${original_case_json}")
+string(REPLACE "[0.1, 0.0, 0.0]" "[10.0, 0.0, 0.0]"
+               adaptive_json "${adaptive_json}")
+string(REPLACE "\"initial_dt\": 0.0001" "\"initial_dt\": 0.1"
+               adaptive_json "${adaptive_json}")
+string(REPLACE "\"maximum_dt\": 0.01" "\"maximum_dt\": 0.1"
+               adaptive_json "${adaptive_json}")
+string(REPLACE "\"maximum_retries\": 8" "\"maximum_retries\": 1"
+               adaptive_json "${adaptive_json}")
+file(WRITE "${PROBE_ROOT}/case/case.json" "${adaptive_json}")
+execute_process(
+  COMMAND "${PRODUCT}" run "${PROBE_ROOT}/case"
+          --output "${PROBE_ROOT}/adaptive-flow"
+          --steps 1 --output-interval 1 --restart-interval 0
+  RESULT_VARIABLE adaptive_status
+  OUTPUT_VARIABLE adaptive_output
+  ERROR_VARIABLE adaptive_error)
+if(NOT adaptive_status EQUAL 0)
+  message(FATAL_ERROR "CLI flow-based dt failed: ${adaptive_output}${adaptive_error}")
+endif()
+file(READ "${PROBE_ROOT}/adaptive-flow/screen.log" adaptive_screen)
+if(NOT adaptive_screen MATCHES "attempts=1" OR
+   NOT adaptive_output MATCHES " time=0\\.01([ \\n]|$)")
+  message(FATAL_ERROR "CLI did not use one dt=0.01 attempt: ${adaptive_output}${adaptive_screen}")
+endif()

@@ -473,7 +473,7 @@ bool equals(std::optional<std::string_view> value,
 bool finite_real(yyjson_val* value, double& out) noexcept;
 bool parse_real3(yyjson_val* value, Real3& out) noexcept;
 bool valid_name(std::string_view value) noexcept;
-bool valid_boundary(const BoundaryFaceSpec& face) noexcept;
+bool valid_boundary(const BoundaryFaceSpec& face);
 bool valid_solver(const SolverSpec& solver) noexcept;
 bool valid_schemes(const SchemeSpec& schemes) noexcept;
 bool valid_time(const TimeControlSpec& time) noexcept;
@@ -1101,7 +1101,7 @@ bool valid_name(std::string_view value) noexcept {
   return true;
 }
 
-bool valid_boundary(const BoundaryFaceSpec& face) noexcept {
+bool valid_boundary(const BoundaryFaceSpec& face) {
   const auto finite3 = [](Real3 value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) &&
            std::isfinite(value.z);

@@ -345,9 +345,21 @@ bool distributed_restart_skips_fresh(const ValidatedModel &model,
       std::size_t face = 0U;
       for (std::int32_t z = 0; z < faces[axis].extents.z; ++z)
         for (std::int32_t y = 0; y < faces[axis].extents.y; ++y)
-          for (std::int32_t x = 0; x < faces[axis].extents.x; ++x, ++face)
-            local_exact &= same_bits(faces[axis].unchecked({x, y, z}),
-                                     image.final_mass_flux[axis][face]);
+          for (std::int32_t x = 0; x < faces[axis].extents.x; ++x, ++face) {
+            Int3 low{x, y, z};
+            if (axis == 0U) --low.x;
+            if (axis == 1U) --low.y;
+            if (axis == 2U) --low.z;
+            const bool interface = cube_solid(model, restart.patch, low) !=
+                                   cube_solid(model, restart.patch, {x, y, z});
+            // The owning fluid rank reapplies impermeability.  Duplicated
+            // partition faces may retain either sign of zero; every other
+            // checkpoint byte, including negative zeros, is authoritative.
+            local_exact &=
+                interface ? faces[axis].unchecked({x, y, z}) == 0.0
+                          : same_bits(faces[axis].unchecked({x, y, z}),
+                                      image.final_mass_flux[axis][face]);
+          }
     }
   }
   detail::FreshInitializationDiagnostic unexpected;
@@ -364,8 +376,8 @@ bool distributed_restart_skips_fresh(const ValidatedModel &model,
       derived.rate_layers_bitwise_equal;
   passed = collective(local_exact);
   return expect(passed, rank,
-                "distributed Restart skips Fresh and restores U/final-flux "
-                "bytes exactly");
+                "distributed Restart skips Fresh and restores U/non-interface "
+                "flux bytes exactly, with zero IBM interface flux");
 }
 
 bool distributed_ibm_fresh(int rank) {
