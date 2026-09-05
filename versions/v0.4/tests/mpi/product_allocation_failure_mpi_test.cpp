@@ -245,8 +245,8 @@ extern "C" int MPI_Barrier(MPI_Comm comm) {
 namespace {
 hundun::v04::Status prepare_restart_image(
     const hundun::v04::ValidatedModel& model,
-    const std::filesystem::path& case_root,
-    hundun::v04::RestartImage& image) {
+    const std::filesystem::path& case_root, hundun::v04::RestartImage& image,
+    std::filesystem::path* retained_root = nullptr) {
   using namespace hundun::v04;
   int rank = 0, id = static_cast<int>(getpid());
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -267,7 +267,8 @@ hundun::v04::Status prepare_restart_image(
   if (status) status = RestartWriter::write(MPI_COMM_WORLD, root, snapshot);
   if (status) status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
   MPI_Barrier(MPI_COMM_WORLD);
-  if (rank == 0) {
+  if (retained_root != nullptr) *retained_root = root;
+  if (rank == 0 && retained_root == nullptr) {
     std::error_code error;
     std::filesystem::remove_all(root, error);
   }
@@ -471,11 +472,14 @@ int main(int argc, char** argv) {
   const bool create = argc > 3 && std::strcmp(argv[3], "create") == 0;
   const bool initialize = argc > 3 && std::strcmp(argv[3], "initialize") == 0;
   const bool restore = argc > 3 && std::strcmp(argv[3], "initialize_restart") == 0;
+  const bool read_restart =
+      argc > 3 && std::strcmp(argv[3], "read_restart") == 0;
   const bool immersed = argc > 4 && std::strcmp(argv[4], "immersed") == 0;
-  const char* operation = restore ? "initialize_restart"
+  const char* operation = read_restart ? "read_restart"
+                          : restore    ? "initialize_restart"
                           : initialize ? "initialize"
-                          : create   ? "create"
-                                     : "compile";
+                          : create     ? "create"
+                                       : "compile";
   bool passed = true;
   const int target_stride = ranks > 1 ? ranks - 1 : 1;
   for (int target = 0; target < ranks; target += target_stride) {
@@ -494,23 +498,32 @@ int main(int argc, char** argv) {
     DriverInitialState initial;
     initial.velocity = {0.1, 0.0, 0.0};
     RestartImage image;
-    if (restore && !prepare_restart_image(model, case_root, image))
+    std::filesystem::path restart_root;
+    if ((restore || read_restart) &&
+        !prepare_restart_image(model, case_root, image,
+                               read_restart ? &restart_root : nullptr))
       MPI_Abort(MPI_COMM_WORLD, 2);
     std::uint64_t count = 0U;
     if (requested_last < 0) {
       CompiledCasePlan baseline;
       ProductDriver baseline_driver;
-      if ((create || initialize || restore) &&
+      if ((create || initialize || restore || read_restart) &&
           !ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, baseline))
         MPI_Abort(MPI_COMM_WORLD, 2);
-      if ((initialize || restore) &&
+      if ((initialize || restore || read_restart) &&
           !ProductDriver::create(MPI_COMM_WORLD, std::move(baseline),
                                  baseline_driver))
+        MPI_Abort(MPI_COMM_WORLD, 2);
+      RestartExpected expected;
+      RestartImage loaded;
+      if (read_restart && !baseline_driver.restart_expected(expected))
         MPI_Abort(MPI_COMM_WORLD, 2);
       allocations = 0U;
       counting = rank == target;
       const Status compiled =
-          restore ? baseline_driver.initialize_restart(image)
+          read_restart ? RestartReader::load(MPI_COMM_WORLD, restart_root,
+                                             expected, loaded)
+          : restore    ? baseline_driver.initialize_restart(image)
           : initialize ? baseline_driver.initialize(initial)
           : create ? ProductDriver::create(MPI_COMM_WORLD, std::move(baseline),
                                            baseline_driver)
@@ -535,13 +548,18 @@ int main(int argc, char** argv) {
     for (long index = first; index <= last && passed; ++index) {
       CompiledCasePlan plan;
       ProductDriver driver;
-      if ((create || initialize || restore) &&
+      if ((create || initialize || restore || read_restart) &&
           !ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan))
         MPI_Abort(MPI_COMM_WORLD, 2);
-      if ((initialize || restore) &&
+      if ((initialize || restore || read_restart) &&
           !ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver))
         MPI_Abort(MPI_COMM_WORLD, 2);
       const PlanFingerprint original_plan = plan.fingerprint();
+      RestartExpected expected;
+      RestartImage loaded;
+      loaded.step = 999U;
+      if (read_restart && !driver.restart_expected(expected))
+        MPI_Abort(MPI_COMM_WORLD, 2);
       if (rank == 0)
         std::cerr << operation << " allocation target=" << target
                   << " index=" << index << '\n';
@@ -550,7 +568,9 @@ int main(int argc, char** argv) {
       peak_bytes = 0U;
       fail_after = rank == target ? index : -1;
       const Status status =
-          restore ? driver.initialize_restart(image)
+          read_restart ? RestartReader::load(MPI_COMM_WORLD, restart_root,
+                                             expected, loaded)
+          : restore    ? driver.initialize_restart(image)
           : initialize ? driver.initialize(initial)
           : create
               ? ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver)
@@ -585,6 +605,17 @@ int main(int argc, char** argv) {
                 restored.time == image.time && restored.dt == image.dt &&
                 restored.controller_state == image.controller_state;
       }
+      if (read_restart) {
+        okay &= loaded.step == 999U && loaded.fields.empty();
+        const Status retried =
+            RestartReader::load(MPI_COMM_WORLD, restart_root, expected, loaded);
+        okay &= retried && loaded.step == image.step &&
+                loaded.time == image.time &&
+                loaded.fields.size() == image.fields.size() &&
+                loaded.final_mass_flux == image.final_mass_flux &&
+                loaded.previous_mass_flux == image.previous_mass_flux;
+        loaded = RestartImage{};
+      }
       driver = ProductDriver{};
       plan = CompiledCasePlan{};
       okay &= live_count == 0U && live_bytes == 0U && comm_count == 0U &&
@@ -598,6 +629,11 @@ int main(int argc, char** argv) {
                   << " live_comms=" << comm_count
                   << " live_requests=" << request_count << '\n';
       passed = okay != 0;
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (read_restart && rank == 0) {
+      std::error_code error;
+      std::filesystem::remove_all(restart_root, error);
     }
   }
   MPI_Finalize();

@@ -5,6 +5,20 @@ find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
 
+add_executable(v04_mpi_observer_probe mpi/mpi_observer_probe.c)
+target_link_libraries(v04_mpi_observer_probe PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})
+add_library(v04_mpi_observer SHARED "${hundun_repository_root}/tools/v04_mpi_observer.c")
+target_link_libraries(v04_mpi_observer PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})
+add_test(NAME v04_mpi_observer_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/integration/mpi_observer_cli_test.py"
+          "${MPIEXEC_EXECUTABLE}" "$<TARGET_FILE:v04_mpi_observer>"
+          "$<TARGET_FILE:v04_mpi_observer_probe>")
+set_tests_properties(v04_mpi_observer_cli PROPERTIES PROCESSORS 2 TIMEOUT 45)
+add_test(NAME v04_performance_observation_accounting
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+          "${hundun_repository_root}/tools/v04_performance_observe.py" --self-test)
+
 add_test(NAME v04_thin_domain_runner_self_test
   COMMAND $<TARGET_FILE:v04_thin_domain_runner> --self-test)
 set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
@@ -81,7 +95,7 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_allocation_failure_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 30)
-  foreach(operation IN ITEMS compile create initialize initialize_restart)
+  foreach(operation IN ITEMS compile create initialize initialize_restart read_restart)
     foreach(geometry IN ITEMS cartesian immersed)
       set(allocation_test v04_product_${operation}_allocations_${geometry}_mpi_${rank_count})
       add_test(NAME ${allocation_test}

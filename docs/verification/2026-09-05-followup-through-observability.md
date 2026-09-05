@@ -42,5 +42,29 @@
 
 ## 3. 剩余回归和观测
 
-待实施：重启全分配失败、外推拒绝后梯级接受、I/O错误信息，
-完整步墙钟/模块耗时及通信归类；随后提出可归因优化方案。
+已补充并验证：
+
+- `initialize_restart`真实new分配失败扫描：Cartesian/IBM、1/2/4 ranks，6/6。
+  每次失败后在同一driver上重试，核对历史并检查跟踪的C++/通信资源归零。
+- 新增`RestartReader::load`扫描时，原程序rank 0首次分配失败触发SIGABRT。
+  根因包括read_current_name的noexcept、广播前本地分配未汇总、以及读入/重分区
+  构造的外层catch。现按本地阶段汇总错误，保留原输出对象，并区分分配与文件错误。
+  完整扫描Cartesian/IBM、1/2/4 ranks，6/6；2-rank示例扫描108/100个分配点。
+- 真实温暖非均匀重启夹具：外推alpha=2被拒绝，alpha=1梯级候选被接受，
+  整步一次完成；1/2/4 ranks均覆盖。与原候选计数及应用计时检查合计7/7。
+- POSIX边界故障注入确认open/write/fsync的单次EINTR原先会终止输出。
+  现重试EINTR、完成短写，但不重试close；ENOSPC等首个错误不会被close覆盖。
+  Visit/Screen/Monitor/Evidence提供固定容量的errno、操作、路径、失败rank报告，
+  即使仅rank 0请求报告也保持同一MPI流程。实际目录冲突在ApplicationService中
+  报告为已接受步之后的Visit失败。相关新增及原分配回归24/24。
+- ApplicationRunReport/CLI区分完整本地运行时间与原advance计时；计时包含初始化、
+  输出、资源、Evidence和清理。数值候选细分8个不重叠的包含式阶段，Schur求解分为
+  准备、Krylov、关闭/焓恢复。时间只在阶段边界采样，没有逐单元计时或额外候选MPI。
+- thin runner可选`--observe-performance`保存各rank的整步及子阶段数据。
+  其计时不包含写这份观测记录本身的gather/write，不能据此声称完全无I/O。
+- 可选PMPI动态附件只在advance区间统计9种阻塞collective及调用点，不增加collective。
+  独立2-rank检查确认区间内1次Allreduce、2次Bcast、1次Barrier被准确计数，区间外忽略。
+
+待完成：最终Release/ASan+UBSan验证；目标Re3900从743起的单次3步诊断（含最终输出/
+checkpoint，不是长测）；把观测原始文件与符号归类结果打包，再写优化优先级。
+尚不宣称RestartWriter所有POSIX错误上下文/分配路径均已完成审计。

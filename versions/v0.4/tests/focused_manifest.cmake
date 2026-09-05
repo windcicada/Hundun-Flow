@@ -6,6 +6,14 @@
 # selector.  Small-grid timings are intentionally absent; core_hot_resource is
 # a lifecycle/allocation contract, not a performance acceptance test.
 set(HUNDUN_V04_FOCUSED_TESTS
+  v04_mpi_observer_cli
+  v04_performance_observation_accounting
+  v04_product_read_restart_allocations_cartesian_mpi_1
+  v04_product_read_restart_allocations_cartesian_mpi_2
+  v04_product_read_restart_allocations_cartesian_mpi_4
+  v04_product_read_restart_allocations_immersed_mpi_1
+  v04_product_read_restart_allocations_immersed_mpi_2
+  v04_product_read_restart_allocations_immersed_mpi_4
   v04_io_visit_syscalls_mpi_1
   v04_io_visit_syscalls_mpi_2
   v04_io_visit_syscalls_mpi_4

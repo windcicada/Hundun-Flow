@@ -28,6 +28,11 @@
 #include <utility>
 #include <vector>
 
+// Optional LD_PRELOAD observer: absent in ordinary runs and never a required
+// product dependency. The observer wraps PMPI without adding collectives.
+extern "C" void hundun_v04_observe_step(std::uint64_t, int)
+    __attribute__((weak));
+
 #include "app_evidence_detail.hpp"
 #include "app_identity_detail.hpp"
 #include "hundun/v04_app.hpp"
@@ -1841,7 +1846,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     detail::LocalPhaseTimer<6U> step_timer(local_step_phases);
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
+    if (options.observe_performance && hundun_v04_observe_step)
+      hundun_v04_observe_step(starting_step + index + 1U, 1);
     status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+    if (options.observe_performance && hundun_v04_observe_step)
+      hundun_v04_observe_step(starting_step + index + 1U, 0);
     step_timer.phase(1U);
     const auto end = std::chrono::steady_clock::now();
     const auto local_nanoseconds = static_cast<std::uint64_t>(

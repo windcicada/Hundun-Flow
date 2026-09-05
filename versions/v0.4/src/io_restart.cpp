@@ -279,6 +279,19 @@ Status consensus_u64(MPI_Comm communicator, std::uint64_t value) noexcept {
              : Status{StatusCode::invalid_plan, kRestartMismatch};
 }
 
+template <class LocalWork>
+Status restart_local_stage(MPI_Comm communicator, LocalWork&& work) noexcept {
+  Status status;
+  try {
+    status = work();
+  } catch (const std::bad_alloc&) {
+    status = {StatusCode::allocation_failure, kRestartInput};
+  } catch (...) {
+    status = {StatusCode::io_failure, kRestartInput};
+  }
+  return collective_status(communicator, status);
+}
+
 bool write_file_sync(const fs::path& path,
                      const std::vector<std::uint8_t>& bytes) noexcept {
   const int descriptor =
@@ -300,8 +313,7 @@ bool write_file_sync(const fs::path& path,
   return okay;
 }
 
-bool read_file(const fs::path& path,
-               std::vector<std::uint8_t>& bytes) noexcept {
+bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes) {
   const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (descriptor < 0) return false;
   struct stat info {};
@@ -310,7 +322,8 @@ bool read_file(const fs::path& path,
     try {
       bytes.resize(static_cast<std::size_t>(info.st_size));
     } catch (...) {
-      okay = false;
+      ::close(descriptor);
+      throw;  // The enclosing local stage distinguishes allocation from I/O.
     }
   }
   std::size_t cursor = 0U;
@@ -547,7 +560,7 @@ void encode_common(Encoder& encoder, const RestartSnapshot& snapshot,
 }
 
 bool decode_common(Decoder& decoder, std::uint32_t version,
-                   Manifest& manifest) noexcept {
+                   Manifest& manifest) {
   std::uint32_t field_count = 0U;
   manifest.format_version = version;
   if (!decoder.int3(manifest.global_cells) || !decoder.u64(manifest.plan) ||
@@ -563,11 +576,7 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
       !std::isfinite(manifest.pressure_reference) || manifest.step == 0U) {
     return false;
   }
-  try {
-    manifest.fields.resize(field_count);
-  } catch (...) {
-    return false;
-  }
+  manifest.fields.resize(field_count);
   for (FieldMeta& field : manifest.fields) {
     std::uint8_t role = 0U;
     if (!decoder.u8(role) || !decoder.u16(field.field) ||
@@ -597,11 +606,7 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
             std::numeric_limits<RevisionToken>::max()) {
       return false;
     }
-    try {
-      manifest.rate_fields.resize(rate_count);
-    } catch (...) {
-      return false;
-    }
+    manifest.rate_fields.resize(rate_count);
     for (FieldMeta& field : manifest.rate_fields) {
       std::uint8_t role = 0U;
       if (!decoder.u8(role) || !decoder.u16(field.field) ||
@@ -917,11 +922,14 @@ Status broadcast_bytes(MPI_Comm communicator, int rank,
   if (MPI_Bcast(&size, 1, MPI_UINT64_T, 0, communicator) != MPI_SUCCESS ||
       size == 0U || size > static_cast<std::uint64_t>(INT_MAX))
     return {StatusCode::mpi_failure, kRestartCollective};
+  Status status;
   try {
     if (rank != 0) bytes.resize(static_cast<std::size_t>(size));
   } catch (...) {
-    return {StatusCode::allocation_failure, kRestartCollective};
+    status = {StatusCode::allocation_failure, kRestartCollective};
   }
+  status = collective_status(communicator, status);
+  if (!status) return status;
   return MPI_Bcast(bytes.data(), static_cast<int>(bytes.size()), MPI_BYTE, 0,
                    communicator) == MPI_SUCCESS
              ? Status{}
@@ -931,12 +939,15 @@ Status broadcast_bytes(MPI_Comm communicator, int rank,
 Status broadcast_string(MPI_Comm communicator, int rank,
                         std::string& value) noexcept {
   std::vector<std::uint8_t> bytes;
+  Status status;
   try {
     if (rank == 0) bytes.assign(value.begin(), value.end());
   } catch (...) {
-    return {StatusCode::allocation_failure, kRestartCollective};
+    status = {StatusCode::allocation_failure, kRestartCollective};
   }
-  Status status = broadcast_bytes(communicator, rank, bytes);
+  status = collective_status(communicator, status);
+  if (!status) return status;
+  status = broadcast_bytes(communicator, rank, bytes);
   if (status && rank != 0) {
     try {
       value.assign(bytes.begin(), bytes.end());
@@ -947,8 +958,8 @@ Status broadcast_string(MPI_Comm communicator, int rank,
   return collective_status(communicator, status);
 }
 
-Status read_current_name(const fs::path& directory,
-                         std::string& out) noexcept {
+Status read_current_name(const fs::path& directory, std::string& out) noexcept
+    try {
   std::vector<std::uint8_t> bytes;
   if (!read_file(directory / "current", bytes) || bytes.empty() ||
       bytes.size() > 256U)
@@ -968,6 +979,10 @@ Status read_current_name(const fs::path& directory,
     return {StatusCode::allocation_failure, kRestartDirectory};
   }
   return {};
+} catch (const std::bad_alloc&) {
+  return {StatusCode::allocation_failure, kRestartDirectory};
+} catch (...) {
+  return {StatusCode::io_failure, kRestartDirectory};
 }
 
 Status validate_expected(const RestartExpected& expected,
@@ -1272,15 +1287,16 @@ Status RestartReader::load(MPI_Comm communicator,
   }
   std::string generation;
   std::vector<std::uint8_t> manifest_bytes;
-  Status status;
-  if (rank == 0) {
-    status = read_current_name(restart_directory, generation);
-    if (status &&
-        !read_file(restart_directory / generation / "manifest.bin",
-                   manifest_bytes))
-      status = {StatusCode::io_failure, kRestartManifest};
-  }
-  status = collective_status(communicator, status);
+  Status status = restart_local_stage(communicator, [&]() -> Status {
+    Status local;
+    if (rank == 0) {
+      local = read_current_name(restart_directory, generation);
+      if (local && !read_file(restart_directory / generation / "manifest.bin",
+                              manifest_bytes))
+        local = {StatusCode::io_failure, kRestartManifest};
+    }
+    return local;
+  });
   if (!status) return status;
   status = broadcast_string(communicator, rank, generation);
   if (!status) return status;
@@ -1293,240 +1309,246 @@ Status RestartReader::load(MPI_Comm communicator,
   status = collective_status(communicator, status);
   if (!status) return status;
 
-  const fs::path generation_directory = restart_directory / generation;
-  for (std::uint32_t source = static_cast<std::uint32_t>(rank);
-       source < manifest.rank_count && status;
-       source += static_cast<std::uint32_t>(size)) {
-    std::vector<std::uint8_t> bytes;
-    RankBlock block;
-    const RankRecord record = manifest.ranks[source];
-    if (!read_file(generation_directory / rank_name(source), bytes) ||
-        bytes.size() != record.bytes ||
-        hash_bytes(bytes.data(), bytes.size()) != record.hash) {
-      status = {StatusCode::io_failure, kRestartIntegrity};
-      break;
+  fs::path generation_directory;
+  status = restart_local_stage(communicator, [&]() -> Status {
+    generation_directory = restart_directory / generation;
+    for (std::uint32_t source = static_cast<std::uint32_t>(rank);
+         source < manifest.rank_count && status;
+         source += static_cast<std::uint32_t>(size)) {
+      std::vector<std::uint8_t> bytes;
+      RankBlock block;
+      const RankRecord record = manifest.ranks[source];
+      if (!read_file(generation_directory / rank_name(source), bytes) ||
+          bytes.size() != record.bytes ||
+          hash_bytes(bytes.data(), bytes.size()) != record.hash) {
+        status = {StatusCode::io_failure, kRestartIntegrity};
+        break;
+      }
+      status = parse_rank_block(bytes, block);
+      if (status &&
+          (block.rank_count != manifest.rank_count || block.rank != source ||
+           !same(block.patch.begin, record.begin) ||
+           !same(block.patch.cells, record.cells) ||
+           !same_common(block.common, manifest))) {
+        status = {StatusCode::io_failure, kRestartMismatch};
+      }
     }
-    status = parse_rank_block(bytes, block);
-    if (status &&
-        (block.rank_count != manifest.rank_count || block.rank != source ||
-         !same(block.patch.begin, record.begin) ||
-         !same(block.patch.cells, record.cells) ||
-         !same_common(block.common, manifest))) {
-      status = {StatusCode::io_failure, kRestartMismatch};
-    }
-  }
-  status = collective_status(communicator, status);
+    return status;
+  });
   if (!status) return status;
 
   RestartImage candidate;
-  candidate.global_cells = manifest.global_cells;
-  candidate.patch = expected.target_patch;
-  candidate.plan = manifest.plan;
-  candidate.schema = manifest.schema;
-  candidate.storage_layout_migrated =
-      manifest.plan != expected.plan || manifest.schema != expected.schema;
-  candidate.geometry = manifest.geometry;
-  candidate.time = manifest.time;
-  candidate.dt = manifest.dt;
-  candidate.pressure_reference = manifest.pressure_reference;
-  candidate.step = manifest.step;
-  candidate.controller_state = manifest.controller_state;
-  if (!detail::runtime_sha256_bytes(
-          {manifest_bytes.data(), manifest_bytes.size()},
-          candidate.source_manifest_sha256))
-    status = {StatusCode::io_failure, kRestartIntegrity};
-  const bool exact_history =
-      manifest.format_version == kExactHistoryFormatVersion;
-  candidate.backward_euler_recovery = !exact_history;
-  candidate.previous_pressure_reference =
-      manifest.previous_pressure_reference;
-  candidate.closed_mass_target = manifest.closed_mass_target;
-  candidate.final_mass_flux_revision = manifest.final_mass_flux_revision;
-  candidate.previous_mass_flux_revision =
-      manifest.previous_mass_flux_revision;
-  std::size_t target_cells = 0U;
-  if (!cell_count(expected.target_patch.cells, target_cells))
-    status = {StatusCode::invalid_plan, kRestartInput};
-  const auto allocate_fields = [&](const std::vector<FieldMeta>& metadata,
-                                   std::vector<RestartImageField>& fields) {
-    fields.resize(metadata.size());
-    for (std::size_t index = 0U; index < fields.size(); ++index) {
-      const FieldMeta meta = metadata[index];
-      RestartImageField& field = fields[index];
-      field.role = meta.role;
-      field.field = meta.field;
-      field.components = meta.components;
-      std::size_t values = 0U;
-      if (!checked_multiply(target_cells, meta.components, values))
-        return false;
-      field.values.resize(values);
+  status = restart_local_stage(communicator, [&]() -> Status {
+    candidate.global_cells = manifest.global_cells;
+    candidate.patch = expected.target_patch;
+    candidate.plan = manifest.plan;
+    candidate.schema = manifest.schema;
+    candidate.storage_layout_migrated =
+        manifest.plan != expected.plan || manifest.schema != expected.schema;
+    candidate.geometry = manifest.geometry;
+    candidate.time = manifest.time;
+    candidate.dt = manifest.dt;
+    candidate.pressure_reference = manifest.pressure_reference;
+    candidate.step = manifest.step;
+    candidate.controller_state = manifest.controller_state;
+    if (!detail::runtime_sha256_bytes(
+            {manifest_bytes.data(), manifest_bytes.size()},
+            candidate.source_manifest_sha256))
+      status = {StatusCode::io_failure, kRestartIntegrity};
+    const bool exact_history =
+        manifest.format_version == kExactHistoryFormatVersion;
+    candidate.backward_euler_recovery = !exact_history;
+    candidate.previous_pressure_reference =
+        manifest.previous_pressure_reference;
+    candidate.closed_mass_target = manifest.closed_mass_target;
+    candidate.final_mass_flux_revision = manifest.final_mass_flux_revision;
+    candidate.previous_mass_flux_revision =
+        manifest.previous_mass_flux_revision;
+    std::size_t target_cells = 0U;
+    if (!cell_count(expected.target_patch.cells, target_cells))
+      status = {StatusCode::invalid_plan, kRestartInput};
+    const auto allocate_fields = [&](const std::vector<FieldMeta>& metadata,
+                                     std::vector<RestartImageField>& fields) {
+      fields.resize(metadata.size());
+      for (std::size_t index = 0U; index < fields.size(); ++index) {
+        const FieldMeta meta = metadata[index];
+        RestartImageField& field = fields[index];
+        field.role = meta.role;
+        field.field = meta.field;
+        field.components = meta.components;
+        std::size_t values = 0U;
+        if (!checked_multiply(target_cells, meta.components, values))
+          return false;
+        field.values.resize(values);
+      }
+      return true;
+    };
+    if (status && !allocate_fields(manifest.fields, candidate.fields))
+      status = {StatusCode::invalid_plan, kRestartInput};
+    if (status && exact_history &&
+        (!allocate_fields(manifest.fields, candidate.previous_fields) ||
+         !allocate_fields(manifest.rate_fields,
+                          candidate.accepted_rate_fields) ||
+         !allocate_fields(manifest.rate_fields,
+                          candidate.previous_rate_fields)))
+      status = {StatusCode::invalid_plan, kRestartInput};
+    std::vector<std::uint8_t> cell_coverage;
+    std::array<std::vector<std::uint8_t>, 3U> face_coverage;
+    std::array<Int3, 3U> target_face_extents{
+        {{expected.target_patch.cells.x + 1, expected.target_patch.cells.y,
+          expected.target_patch.cells.z},
+         {expected.target_patch.cells.x, expected.target_patch.cells.y + 1,
+          expected.target_patch.cells.z},
+         {expected.target_patch.cells.x, expected.target_patch.cells.y,
+          expected.target_patch.cells.z + 1}}};
+    if (status) {
+      cell_coverage.assign(target_cells, 0U);
+      for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        std::size_t count = 0U;
+        if (!cell_count(target_face_extents[axis], count)) {
+          status = {StatusCode::invalid_plan, kRestartInput};
+          break;
+        }
+        candidate.final_mass_flux[axis].assign(count, 0.0);
+        if (exact_history)
+          candidate.previous_mass_flux[axis].assign(count, 0.0);
+        face_coverage[axis].assign(count, 0U);
+      }
     }
-    return true;
-  };
-  if (status && !allocate_fields(manifest.fields, candidate.fields))
-    status = {StatusCode::invalid_plan, kRestartInput};
-  if (status && exact_history &&
-      (!allocate_fields(manifest.fields, candidate.previous_fields) ||
-       !allocate_fields(manifest.rate_fields,
-                        candidate.accepted_rate_fields) ||
-       !allocate_fields(manifest.rate_fields,
-                        candidate.previous_rate_fields)))
-    status = {StatusCode::invalid_plan, kRestartInput};
-  std::vector<std::uint8_t> cell_coverage;
-  std::array<std::vector<std::uint8_t>, 3U> face_coverage;
-  std::array<Int3, 3U> target_face_extents{{
-      {expected.target_patch.cells.x + 1, expected.target_patch.cells.y,
-       expected.target_patch.cells.z},
-      {expected.target_patch.cells.x, expected.target_patch.cells.y + 1,
-       expected.target_patch.cells.z},
-      {expected.target_patch.cells.x, expected.target_patch.cells.y,
-       expected.target_patch.cells.z + 1}}};
-  if (status) {
-    cell_coverage.assign(target_cells, 0U);
-    for (std::size_t axis = 0U; axis < 3U; ++axis) {
-      std::size_t count = 0U;
-      if (!cell_count(target_face_extents[axis], count)) {
-        status = {StatusCode::invalid_plan, kRestartInput};
+
+    const auto dense_index = [](Int3 local, Int3 cells) noexcept {
+      return (static_cast<std::size_t>(local.z) *
+                  static_cast<std::size_t>(cells.y) +
+              static_cast<std::size_t>(local.y)) *
+                 static_cast<std::size_t>(cells.x) +
+             static_cast<std::size_t>(local.x);
+    };
+    for (std::uint32_t source = 0U; source < manifest.rank_count && status;
+         ++source) {
+      std::vector<std::uint8_t> bytes;
+      RankBlock block;
+      if (!read_file(generation_directory / rank_name(source), bytes)) {
+        status = {StatusCode::io_failure, kRestartRankFile};
         break;
       }
-      candidate.final_mass_flux[axis].assign(count, 0.0);
-      if (exact_history)
-        candidate.previous_mass_flux[axis].assign(count, 0.0);
-      face_coverage[axis].assign(count, 0U);
-    }
-  }
-
-  const auto dense_index = [](Int3 local, Int3 cells) noexcept {
-    return (static_cast<std::size_t>(local.z) *
-                static_cast<std::size_t>(cells.y) +
-            static_cast<std::size_t>(local.y)) *
-               static_cast<std::size_t>(cells.x) +
-           static_cast<std::size_t>(local.x);
-  };
-  for (std::uint32_t source = 0U;
-       source < manifest.rank_count && status; ++source) {
-    std::vector<std::uint8_t> bytes;
-    RankBlock block;
-    if (!read_file(generation_directory / rank_name(source), bytes)) {
-      status = {StatusCode::io_failure, kRestartRankFile};
-      break;
-    }
-    status = parse_rank_block(bytes, block);
-    if (!status) break;
-    const Int3 begin{
-        std::max(block.patch.begin.x, expected.target_patch.begin.x),
-        std::max(block.patch.begin.y, expected.target_patch.begin.y),
-        std::max(block.patch.begin.z, expected.target_patch.begin.z)};
-    const Int3 end{
-        std::min(block.patch.begin.x + block.patch.cells.x,
-                 expected.target_patch.begin.x + expected.target_patch.cells.x),
-        std::min(block.patch.begin.y + block.patch.cells.y,
-                 expected.target_patch.begin.y + expected.target_patch.cells.y),
-        std::min(block.patch.begin.z + block.patch.cells.z,
-                 expected.target_patch.begin.z + expected.target_patch.cells.z)};
-    for (std::int32_t z = begin.z; z < end.z; ++z)
-      for (std::int32_t y = begin.y; y < end.y; ++y)
-        for (std::int32_t x = begin.x; x < end.x; ++x) {
-          const Int3 old_local{x - block.patch.begin.x,
-                               y - block.patch.begin.y,
-                               z - block.patch.begin.z};
-          const Int3 new_local{x - expected.target_patch.begin.x,
-                               y - expected.target_patch.begin.y,
-                               z - expected.target_patch.begin.z};
-          const std::size_t old_cell =
-              dense_index(old_local, block.patch.cells);
-          const std::size_t new_cell =
-              dense_index(new_local, expected.target_patch.cells);
-          if (cell_coverage[new_cell] != 0U) {
-            status = {StatusCode::io_failure, kRestartCoverage};
-            break;
-          }
-          cell_coverage[new_cell] = 1U;
-          const auto copy_fields = [&](std::vector<RestartImageField>& target,
-                                       const std::vector<RestartImageField>&
-                                           source_fields) {
-            for (std::size_t field_index = 0U;
-                 field_index < target.size(); ++field_index) {
-              const std::size_t components = target[field_index].components;
-              for (std::size_t component = 0U; component < components;
-                   ++component)
-                target[field_index]
-                    .values[new_cell * components + component] =
-                    source_fields[field_index]
-                        .values[old_cell * components + component];
-            }
-          };
-          copy_fields(candidate.fields, block.fields);
-          if (exact_history) {
-            copy_fields(candidate.previous_fields, block.previous_fields);
-            copy_fields(candidate.accepted_rate_fields,
-                        block.accepted_rate_fields);
-            copy_fields(candidate.previous_rate_fields,
-                        block.previous_rate_fields);
-          }
-        }
-    if (!status) break;
-
-    for (std::size_t axis = 0U; axis < 3U && status; ++axis) {
-      Int3 old_owned = block.patch.cells;
-      const std::int32_t old_end =
-          axis == 0U ? block.patch.begin.x + block.patch.cells.x
-                     : (axis == 1U
-                            ? block.patch.begin.y + block.patch.cells.y
-                            : block.patch.begin.z + block.patch.cells.z);
-      const std::int32_t global_end =
-          axis == 0U ? manifest.global_cells.x
-                     : (axis == 1U ? manifest.global_cells.y
-                                   : manifest.global_cells.z);
-      if (old_end == global_end) {
-        if (axis == 0U)
-          ++old_owned.x;
-        else if (axis == 1U)
-          ++old_owned.y;
-        else
-          ++old_owned.z;
-      }
-      for (std::int32_t z = 0; z < old_owned.z; ++z)
-        for (std::int32_t y = 0; y < old_owned.y; ++y)
-          for (std::int32_t x = 0; x < old_owned.x; ++x) {
-            const Int3 global{block.patch.begin.x + x,
-                              block.patch.begin.y + y,
-                              block.patch.begin.z + z};
-            const Int3 target_local{
-                global.x - expected.target_patch.begin.x,
-                global.y - expected.target_patch.begin.y,
-                global.z - expected.target_patch.begin.z};
-            const Int3 extent = target_face_extents[axis];
-            if (target_local.x < 0 || target_local.y < 0 ||
-                target_local.z < 0 || target_local.x >= extent.x ||
-                target_local.y >= extent.y || target_local.z >= extent.z)
-              continue;
-            const std::size_t old_index = dense_index({x, y, z}, old_owned);
-            const std::size_t target_index =
-                dense_index(target_local, extent);
-            if (face_coverage[axis][target_index] != 0U) {
+      status = parse_rank_block(bytes, block);
+      if (!status) break;
+      const Int3 begin{
+          std::max(block.patch.begin.x, expected.target_patch.begin.x),
+          std::max(block.patch.begin.y, expected.target_patch.begin.y),
+          std::max(block.patch.begin.z, expected.target_patch.begin.z)};
+      const Int3 end{std::min(block.patch.begin.x + block.patch.cells.x,
+                              expected.target_patch.begin.x +
+                                  expected.target_patch.cells.x),
+                     std::min(block.patch.begin.y + block.patch.cells.y,
+                              expected.target_patch.begin.y +
+                                  expected.target_patch.cells.y),
+                     std::min(block.patch.begin.z + block.patch.cells.z,
+                              expected.target_patch.begin.z +
+                                  expected.target_patch.cells.z)};
+      for (std::int32_t z = begin.z; z < end.z; ++z)
+        for (std::int32_t y = begin.y; y < end.y; ++y)
+          for (std::int32_t x = begin.x; x < end.x; ++x) {
+            const Int3 old_local{x - block.patch.begin.x,
+                                 y - block.patch.begin.y,
+                                 z - block.patch.begin.z};
+            const Int3 new_local{x - expected.target_patch.begin.x,
+                                 y - expected.target_patch.begin.y,
+                                 z - expected.target_patch.begin.z};
+            const std::size_t old_cell =
+                dense_index(old_local, block.patch.cells);
+            const std::size_t new_cell =
+                dense_index(new_local, expected.target_patch.cells);
+            if (cell_coverage[new_cell] != 0U) {
               status = {StatusCode::io_failure, kRestartCoverage};
               break;
             }
-            face_coverage[axis][target_index] = 1U;
-            candidate.final_mass_flux[axis][target_index] =
-                block.flux[axis][old_index];
-            if (exact_history)
-              candidate.previous_mass_flux[axis][target_index] =
-                  block.previous_flux[axis][old_index];
+            cell_coverage[new_cell] = 1U;
+            const auto copy_fields =
+                [&](std::vector<RestartImageField>& target,
+                    const std::vector<RestartImageField>& source_fields) {
+                  for (std::size_t field_index = 0U;
+                       field_index < target.size(); ++field_index) {
+                    const std::size_t components =
+                        target[field_index].components;
+                    for (std::size_t component = 0U; component < components;
+                         ++component)
+                      target[field_index]
+                          .values[new_cell * components + component] =
+                          source_fields[field_index]
+                              .values[old_cell * components + component];
+                  }
+                };
+            copy_fields(candidate.fields, block.fields);
+            if (exact_history) {
+              copy_fields(candidate.previous_fields, block.previous_fields);
+              copy_fields(candidate.accepted_rate_fields,
+                          block.accepted_rate_fields);
+              copy_fields(candidate.previous_rate_fields,
+                          block.previous_rate_fields);
+            }
           }
+      if (!status) break;
+
+      for (std::size_t axis = 0U; axis < 3U && status; ++axis) {
+        Int3 old_owned = block.patch.cells;
+        const std::int32_t old_end =
+            axis == 0U
+                ? block.patch.begin.x + block.patch.cells.x
+                : (axis == 1U ? block.patch.begin.y + block.patch.cells.y
+                              : block.patch.begin.z + block.patch.cells.z);
+        const std::int32_t global_end =
+            axis == 0U ? manifest.global_cells.x
+                       : (axis == 1U ? manifest.global_cells.y
+                                     : manifest.global_cells.z);
+        if (old_end == global_end) {
+          if (axis == 0U)
+            ++old_owned.x;
+          else if (axis == 1U)
+            ++old_owned.y;
+          else
+            ++old_owned.z;
+        }
+        for (std::int32_t z = 0; z < old_owned.z; ++z)
+          for (std::int32_t y = 0; y < old_owned.y; ++y)
+            for (std::int32_t x = 0; x < old_owned.x; ++x) {
+              const Int3 global{block.patch.begin.x + x,
+                                block.patch.begin.y + y,
+                                block.patch.begin.z + z};
+              const Int3 target_local{global.x - expected.target_patch.begin.x,
+                                      global.y - expected.target_patch.begin.y,
+                                      global.z - expected.target_patch.begin.z};
+              const Int3 extent = target_face_extents[axis];
+              if (target_local.x < 0 || target_local.y < 0 ||
+                  target_local.z < 0 || target_local.x >= extent.x ||
+                  target_local.y >= extent.y || target_local.z >= extent.z)
+                continue;
+              const std::size_t old_index = dense_index({x, y, z}, old_owned);
+              const std::size_t target_index =
+                  dense_index(target_local, extent);
+              if (face_coverage[axis][target_index] != 0U) {
+                status = {StatusCode::io_failure, kRestartCoverage};
+                break;
+              }
+              face_coverage[axis][target_index] = 1U;
+              candidate.final_mass_flux[axis][target_index] =
+                  block.flux[axis][old_index];
+              if (exact_history)
+                candidate.previous_mass_flux[axis][target_index] =
+                    block.previous_flux[axis][old_index];
+            }
+      }
     }
-  }
-  if (status &&
-      std::any_of(cell_coverage.begin(), cell_coverage.end(),
-                  [](std::uint8_t value) { return value != 1U; }))
-    status = {StatusCode::io_failure, kRestartCoverage};
-  for (std::size_t axis = 0U; axis < 3U && status; ++axis) {
-    if (std::any_of(face_coverage[axis].begin(), face_coverage[axis].end(),
-                    [](std::uint8_t value) { return value != 1U; }))
+    if (status && std::any_of(cell_coverage.begin(), cell_coverage.end(),
+                              [](std::uint8_t value) { return value != 1U; }))
       status = {StatusCode::io_failure, kRestartCoverage};
-  }
-  status = collective_status(communicator, status);
+    for (std::size_t axis = 0U; axis < 3U && status; ++axis) {
+      if (std::any_of(face_coverage[axis].begin(), face_coverage[axis].end(),
+                      [](std::uint8_t value) { return value != 1U; }))
+        status = {StatusCode::io_failure, kRestartCoverage};
+    }
+    return status;
+  });
   if (!status) return status;
   out = std::move(candidate);
   return {};
