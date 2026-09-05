@@ -75,6 +75,7 @@ def summarize(arguments):
         entries = symbols(arguments.binary)
         starts = [item[0] for item in entries]
         observed = {}
+        observed_ns = {}
         owners = {}
         for path in sorted(arguments.mpi_directory.glob("rank-*.tsv")):
             rank = int(path.stem.split("-")[1])
@@ -85,6 +86,7 @@ def summarize(arguments):
                 key = (int(record["step"]), rank)
                 calls, elapsed = int(record["calls"]), int(record["ns"])
                 observed[key] = observed.get(key, 0) + calls
+                observed_ns[key] = observed_ns.get(key, 0) + elapsed
                 site = int(record["site"], 16) - 1  # A call's return address.
                 index = bisect.bisect_right(starts, site) - 1
                 owner = "unresolved:" + record["module"] + ":" + record["site"]
@@ -98,6 +100,7 @@ def summarize(arguments):
             raise ValueError("MPI and performance step/rank coverage mismatch")
         result["mpi_counts"] = [{"step": row["step"], "rank": row["rank"],
             "observed": observed[(row["step"], row["rank"])],
+            "local_blocking_mpi_ns": observed_ns[(row["step"], row["rank"])],
             "reported_subtotal": row["reported_collective_subtotal"],
             "gap": observed[(row["step"], row["rank"])] - row["reported_collective_subtotal"]}
             for row in rows]
