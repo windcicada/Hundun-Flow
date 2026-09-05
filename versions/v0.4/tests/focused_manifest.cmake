@@ -6,6 +6,9 @@
 # selector.  Small-grid timings are intentionally absent; core_hot_resource is
 # a lifecycle/allocation contract, not a performance acceptance test.
 set(HUNDUN_V04_FOCUSED_TESTS
+  v04_product_restart_storage_mpi_1
+  v04_product_restart_storage_mpi_2
+  v04_product_restart_storage_mpi_4
   v04_product_memory_profile_cartesian_mpi_1
   v04_product_memory_profile_cartesian_mpi_2
   v04_product_memory_profile_cartesian_mpi_4

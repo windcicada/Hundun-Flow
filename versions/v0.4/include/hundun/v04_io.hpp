@@ -122,6 +122,13 @@ struct RestartExpectedField {
   std::uint8_t components{};
 };
 
+// Opt-in compatibility for the pre-0b0eff raw MG bundle's outer ghost width.
+// This never relaxes physical, geometry, field, or payload-integrity checks.
+enum class RestartStorageCompatibility : std::uint8_t {
+  strict,
+  mg_bundle_ghost_v1
+};
+
 struct RestartExpected {
   Int3 global_cells{};
   MeshPatch target_patch{};
@@ -130,6 +137,8 @@ struct RestartExpected {
   PlanFingerprint geometry{};
   Span<const RestartExpectedField> fields{};
   Span<const RestartExpectedField> rate_fields{};
+  PlanFingerprint compatible_storage_plan{};
+  PlanFingerprint compatible_storage_schema{};
 };
 
 struct RestartImageField {
@@ -166,6 +175,8 @@ struct RestartImage {
   double closed_mass_target{};
   RevisionToken final_mass_flux_revision{};
   RevisionToken previous_mass_flux_revision{};
+  // Source plan/schema above remain unchanged when this is true.
+  bool storage_layout_migrated{};
 
   void clear() noexcept;
 };

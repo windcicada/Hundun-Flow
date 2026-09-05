@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_boundary.hpp"
-
-#include "mesh_focus_detail.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -19,6 +15,10 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include "bc_identity_detail.hpp"
+#include "hundun/v04_boundary.hpp"
+#include "mesh_focus_detail.hpp"
 
 namespace hundun::v04 {
 namespace {
@@ -1088,6 +1088,31 @@ std::uint64_t local_hash(const BoundaryBuildData& plan,
 }
 
 }  // namespace
+
+Status detail::boundary_identity_for_registry(const ValidatedModel& model,
+                                              const BoundaryPlan& boundary,
+                                              PlanFingerprint registry,
+                                              PlanFingerprint& out) noexcept
+    try {
+  const auto fields = boundary.transported_fields();
+  if (registry == 0U || boundary.semantic_fingerprint() == 0U ||
+      fields.size != model.transported_scalars.size())
+    return {StatusCode::invalid_plan, kBoundaryRegistry};
+  std::vector<std::pair<std::string, FieldId>> scalars;
+  scalars.reserve(fields.size);
+  for (std::size_t i = 0U; i < fields.size; ++i)
+    scalars.emplace_back(model.transported_scalars[i].stable_name,
+                         fields.data[i].field);
+  std::sort(scalars.begin(), scalars.end());
+  out = semantic_hash(model, boundary.geometry_fingerprint(), registry,
+                      boundary.velocity_field(), boundary.pressure_field(),
+                      boundary.enthalpy_field(), scalars);
+  return {};
+} catch (const std::bad_alloc&) {
+  return {StatusCode::allocation_failure, kBoundaryRegistry};
+} catch (...) {
+  return {StatusCode::invalid_plan, kBoundaryRegistry};
+}
 
 Status BoundaryCompiler::compile(MPI_Comm communicator,
                                  const ValidatedModel& model,

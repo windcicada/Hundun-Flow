@@ -972,12 +972,20 @@ Status read_current_name(const fs::path& directory,
 
 Status validate_expected(const RestartExpected& expected,
                          const Manifest& manifest) noexcept {
+  const bool current_identity =
+      expected.plan == manifest.plan && expected.schema == manifest.schema;
+  const bool compatible_identity =
+      manifest.format_version == kExactHistoryFormatVersion &&
+      expected.compatible_storage_plan != 0U &&
+      expected.compatible_storage_schema != 0U &&
+      expected.compatible_storage_plan == manifest.plan &&
+      expected.compatible_storage_schema == manifest.schema;
   if (!valid_global_patch(expected.global_cells, expected.target_patch) ||
       !same(expected.global_cells, manifest.global_cells) ||
-      expected.plan == 0U || expected.schema == 0U ||
-      expected.geometry == 0U || expected.plan != manifest.plan ||
-      expected.schema != manifest.schema ||
-      expected.geometry != manifest.geometry || expected.fields.data == nullptr ||
+      expected.plan == 0U || expected.schema == 0U || expected.geometry == 0U ||
+      (!current_identity && !compatible_identity) ||
+      expected.geometry != manifest.geometry ||
+      expected.fields.data == nullptr ||
       expected.fields.size != manifest.fields.size()) {
     return {StatusCode::invalid_plan, kRestartMismatch};
   }
@@ -1097,6 +1105,7 @@ void clear_restart_failure_for_test() noexcept {
 #endif
 
 void RestartImage::clear() noexcept {
+  storage_layout_migrated = false;
   global_cells = {};
   patch = {};
   plan = 0U;
@@ -1314,6 +1323,8 @@ Status RestartReader::load(MPI_Comm communicator,
   candidate.patch = expected.target_patch;
   candidate.plan = manifest.plan;
   candidate.schema = manifest.schema;
+  candidate.storage_layout_migrated =
+      manifest.plan != expected.plan || manifest.schema != expected.schema;
   candidate.geometry = manifest.geometry;
   candidate.time = manifest.time;
   candidate.dt = manifest.dt;

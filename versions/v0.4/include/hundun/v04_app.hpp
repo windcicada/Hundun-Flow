@@ -29,6 +29,8 @@ struct ApplicationRunOptions {
   std::uint64_t output_interval{1U};
   std::uint64_t restart_interval{1U};
   LocalTimeLimits time_limits{1.0, 1.0, 1.0, 1.0, 1.0};
+  RestartStorageCompatibility restart_storage_compatibility{
+      RestartStorageCompatibility::strict};
 };
 
 inline constexpr std::size_t kNumericalFailureMassFractionCapacity = 64U;
@@ -275,6 +277,9 @@ struct ApplicationRunReport {
   double maximum_committed_convective_cfl_out{};
   double maximum_committed_convective_cfl_abs{};
   double committed_convective_cfl_limit{};
+  bool restart_storage_migrated{};
+  PlanFingerprint restart_source_plan{};
+  PlanFingerprint restart_source_schema{};
 };
 
 class ApplicationService {
@@ -366,9 +371,13 @@ class ProductDriver {
 
   static Status create(MPI_Comm communicator, CompiledCasePlan&& plan,
                        ProductDriver& out) noexcept;
-  Status restart_expected(RestartExpected& out) noexcept;
+  Status restart_expected(RestartExpected& out,
+                          RestartStorageCompatibility compatibility =
+                              RestartStorageCompatibility::strict) noexcept;
   Status initialize(const DriverInitialState& initial) noexcept;
-  Status initialize_restart(const RestartImage& image) noexcept;
+  Status initialize_restart(const RestartImage& image,
+                            RestartStorageCompatibility compatibility =
+                                RestartStorageCompatibility::strict) noexcept;
   // Add the accepted-flow convective bound without changing the caller's
   // explicit diffusion/acoustic bounds. No-op for a fixed-dt product.
   Status constrain_convective_time_limit(LocalTimeLimits& limits) noexcept;

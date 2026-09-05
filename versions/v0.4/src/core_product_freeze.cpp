@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_product.hpp"
-#include "hundun/v04_app.hpp"
-#include "hundun/v04_initialization.hpp"
-
-#include "common_terminal_audit.h"
-#include "core_product_freeze_detail.hpp"
-#include "field_view_interval_detail.hpp"
-#include "solver_cartesian_detail.hpp"
-#include "solver_piso_detail.hpp"
-
 #include <mpi.h>
 
 #include <algorithm>
 #include <array>
+
+#include "bc_identity_detail.hpp"
+#include "common_terminal_audit.h"
+#include "core_product_freeze_detail.hpp"
+#include "field_view_interval_detail.hpp"
+#include "hundun/v04_app.hpp"
+#include "hundun/v04_initialization.hpp"
+#include "hundun/v04_product.hpp"
+#include "solver_cartesian_detail.hpp"
+#include "solver_piso_detail.hpp"
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 #include <atomic>
 #endif
@@ -2577,6 +2577,9 @@ struct CompiledCasePlan::Impl {
   ProductFields fields;
   PlanFingerprint fingerprint{};
   PlanFingerprint schema_fingerprint{};
+  PlanFingerprint legacy_mg_schema_fingerprint{};
+  PlanFingerprint legacy_mg_fingerprint{};
+  PlanFingerprint legacy_mg_boundary_fingerprint{};
   PlanFingerprint cpu_fingerprint{};
   PlanFingerprint stl_fingerprint{};
   std::uintptr_t state_address{};
@@ -3304,6 +3307,15 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->phases[1U] = ProductFreezePhase::capability_registration;
   status = product_local_stage(communicator, [&]() -> Status {
     candidate->schema_fingerprint = registry.fingerprint();
+    // Reconstruct only the historical schema identity, not its oversized
+    // arena. This frozen compatibility rule must not track future layouts.
+    FieldRegistry legacy_registry = registry;
+    FieldId legacy_mg_field{};
+    status = legacy_registry.require_field("mg_arena", 1U, 1U, legacy_mg_field);
+    if (!status) return status;
+    if (legacy_mg_field != candidate->fields.mg_arena)
+      return {StatusCode::invalid_plan, kProductBinding};
+    candidate->legacy_mg_schema_fingerprint = legacy_registry.fingerprint();
     status = compile_graph(
         candidate->fields, ghosts, candidate->patch.cells, local_cells,
         candidate->ibm_pressure_donors.has_value()
@@ -3435,6 +3447,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   status = product_local_stage(communicator, [&]() -> Status {
     if (status && registry.fingerprint() != registry_before)
       status = {StatusCode::invalid_plan, kProductInstantiation};
+    if (status)
+      status = detail::boundary_identity_for_registry(
+          model, candidate->boundary, candidate->legacy_mg_schema_fingerprint,
+          candidate->legacy_mg_boundary_fingerprint);
     if (status)
       status = ThermodynamicsPlan::compile(
           model.thermophysics,
@@ -4462,20 +4478,27 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   semantic = detail::product_mix(semantic, model.fingerprint);
   semantic = detail::product_mix(semantic, candidate->geometry.fingerprint());
   semantic = detail::product_mix(semantic, candidate->cpu_fingerprint);
-  semantic = detail::product_mix(semantic,
-                                 candidate->boundary.semantic_fingerprint());
-  semantic = detail::product_mix(semantic,
-                                 candidate->equations.semantic_fingerprint());
-  semantic = detail::product_mix(semantic, candidate->piso.fingerprint());
-  semantic = detail::product_mix(semantic, candidate->turbulence.fingerprint());
-  semantic = detail::product_mix(semantic, candidate->schema_fingerprint);
-  semantic = detail::product_mix(semantic, candidate_lineage);
-  semantic = detail::product_mix(semantic, immersed ? 1U : 0U);
-  if (immersed) {
-    semantic = detail::product_mix(
-        semantic, candidate->quadrature->physical_fingerprint());
-  }
-  candidate->fingerprint = semantic == 0U ? 1U : semantic;
+  const auto finish_identity = [&](PlanFingerprint schema,
+                                   PlanFingerprint boundary) noexcept {
+    auto value = detail::product_mix(semantic, boundary);
+    value =
+        detail::product_mix(value, candidate->equations.semantic_fingerprint());
+    value = detail::product_mix(value, candidate->piso.fingerprint());
+    value = detail::product_mix(value, candidate->turbulence.fingerprint());
+    value = detail::product_mix(value, schema);
+    value = detail::product_mix(value, candidate_lineage);
+    value = detail::product_mix(value, immersed ? 1U : 0U);
+    if (immersed)
+      value = detail::product_mix(
+          value, candidate->quadrature->physical_fingerprint());
+    return value == 0U ? 1U : value;
+  };
+  candidate->fingerprint =
+      finish_identity(candidate->schema_fingerprint,
+                      candidate->boundary.semantic_fingerprint());
+  candidate->legacy_mg_fingerprint =
+      finish_identity(candidate->legacy_mg_schema_fingerprint,
+                      candidate->legacy_mg_boundary_fingerprint);
   status = collective_semantic(communicator, candidate->fingerprint);
   const bool auxiliary_workspace_valid =
       piso_spec.pressure_algorithm == LinearAlgorithm::fgmres ||
@@ -5632,8 +5655,11 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   return {};
 }
 
-Status ProductDriver::restart_expected(RestartExpected& out) noexcept {
-  if (implementation_ == nullptr || implementation_->initialized)
+Status ProductDriver::restart_expected(
+    RestartExpected& out, RestartStorageCompatibility compatibility) noexcept {
+  if (implementation_ == nullptr || implementation_->initialized ||
+      (compatibility != RestartStorageCompatibility::strict &&
+       compatibility != RestartStorageCompatibility::mg_bundle_ghost_v1))
     return {StatusCode::invalid_plan, kProductInput};
   const ProductDriver::Impl& runtime = *implementation_;
   const CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
@@ -5646,6 +5672,10 @@ Status ProductDriver::restart_expected(RestartExpected& out) noexcept {
           runtime.restart_expected_fields.size()},
          {runtime.restart_expected_rate_fields.data(),
           runtime.restart_expected_rate_fields.size()}};
+  if (compatibility == RestartStorageCompatibility::mg_bundle_ghost_v1) {
+    out.compatible_storage_plan = product.legacy_mg_fingerprint;
+    out.compatible_storage_schema = product.legacy_mg_schema_fingerprint;
+  }
   return {};
 }
 
@@ -6456,8 +6486,9 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
   return {};
 }
 
-Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
-    try {
+Status ProductDriver::initialize_restart(
+    const RestartImage& image,
+    RestartStorageCompatibility compatibility) noexcept try {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   g_cold_velocity_dependents_published.store(false,
                                              std::memory_order_release);
@@ -6470,8 +6501,17 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
   ProductDriver::Impl& runtime = *implementation_;
   CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
   const bool exact_history = !image.backward_euler_recovery;
+  const bool current_identity = image.plan == runtime.plan.fingerprint() &&
+                                image.schema == product.schema_fingerprint;
+  const bool legacy_identity =
+      compatibility == RestartStorageCompatibility::mg_bundle_ghost_v1 &&
+      exact_history && image.plan == product.legacy_mg_fingerprint &&
+      image.schema == product.legacy_mg_schema_fingerprint;
   Status status =
       !runtime.initialized &&
+              (compatibility == RestartStorageCompatibility::strict ||
+               compatibility ==
+                   RestartStorageCompatibility::mg_bundle_ghost_v1) &&
               std::isfinite(image.time) && std::isfinite(image.dt) &&
               image.dt > 0.0 && std::isfinite(image.pressure_reference) &&
               image.pressure_reference > 0.0 && image.step != 0U &&
@@ -6500,8 +6540,7 @@ Status ProductDriver::initialize_restart(const RestartImage& image) noexcept
   if (status &&
       (!same_int3(image.global_cells, product.geometry.global_cells()) ||
        !same_patch(image.patch, product.patch) ||
-       image.plan != runtime.plan.fingerprint() ||
-       image.schema != product.schema_fingerprint ||
+       (!current_identity && !legacy_identity) ||
        image.geometry != product.geometry.fingerprint() ||
        image.fields.size() != runtime.restart_expected_fields.size()))
     status = {StatusCode::invalid_plan, kProductInput};

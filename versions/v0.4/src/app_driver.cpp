@@ -426,11 +426,16 @@ static Status run_application(MPI_Comm communicator,
   if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kApplicationInput};
   Status status = detail::output_collective_status(
-      communicator, options.case_root.empty() ||
-                            options.run_directory.empty() ||
-                            options.source_root.empty() || options.steps == 0U
-                        ? Status{StatusCode::invalid_case, kApplicationInput}
-                        : Status{});
+      communicator,
+      options.case_root.empty() || options.run_directory.empty() ||
+              options.source_root.empty() || options.steps == 0U ||
+              (options.restart_storage_compatibility !=
+                   RestartStorageCompatibility::strict &&
+               (options.restart_storage_compatibility !=
+                    RestartStorageCompatibility::mg_bundle_ghost_v1 ||
+                options.restart_directory.empty()))
+          ? Status{StatusCode::invalid_case, kApplicationInput}
+          : Status{});
   if (status)
     status = detail::output_collective_status(
         communicator,
@@ -473,7 +478,8 @@ static Status run_application(MPI_Comm communicator,
     report.failure_phase = ApplicationFailurePhase::restart_load;
     RestartExpected expected;
     status = detail::output_collective_status(
-        communicator, driver.restart_expected(expected));
+        communicator, driver.restart_expected(
+                          expected, options.restart_storage_compatibility));
     RestartImage image;
     if (status)
       status = RestartReader::load(communicator, options.restart_directory,
@@ -486,7 +492,11 @@ static Status run_application(MPI_Comm communicator,
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
       restart_backward_euler_recovery = image.backward_euler_recovery;
       report.failure_phase = ApplicationFailurePhase::initialize;
-      status = driver.initialize_restart(image);
+      status = driver.initialize_restart(image,
+                                         options.restart_storage_compatibility);
+      report.restart_storage_migrated = status && image.storage_layout_migrated;
+      report.restart_source_plan = image.plan;
+      report.restart_source_schema = image.schema;
     }
   } else if (status) {
     report.failure_phase = ApplicationFailurePhase::initialize;

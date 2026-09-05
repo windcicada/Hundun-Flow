@@ -46,6 +46,15 @@ add_test(NAME v04_literature_partial_receipt
           "${hundun_repository_root}/docs/verification/v0.4-literature-data-receipt-r4-partial.json")
 
 add_executable(v04_product_mg_capacity_mpi_test mpi/product_mg_capacity_mpi_test.cpp)
+add_executable(v04_product_restart_storage_mpi_test mpi/product_restart_storage_mpi_test.cpp)
+target_link_libraries(v04_product_restart_storage_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_restart_storage_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_restart_storage_mpi_test>" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_restart_storage_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 90)
+endforeach()
 target_link_libraries(v04_product_mg_capacity_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_product_mg_capacity_mpi_${rank_count}

@@ -16,10 +16,11 @@
 
 namespace {
 
-using hundun::v04::ApplicationService;
 using hundun::v04::ApplicationRunOptions;
 using hundun::v04::ApplicationRunReport;
+using hundun::v04::ApplicationService;
 using hundun::v04::CaseValidationReport;
+using hundun::v04::RestartStorageCompatibility;
 using hundun::v04::Status;
 using hundun::v04::StatusCode;
 
@@ -88,7 +89,8 @@ void usage(int rank) {
               << "  hundun validate <case-dir> [--dry-plan]\n"
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
-                 " [--restart-interval <N>]\n"
+                 " [--restart-interval <N>]"
+                 " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
               << "    interval 0 disables Visit/screen/monitor or Restart;"
                  " evidence remains enabled outside the timed step\n"
               << "  hundun init-case --output <case-dir>\n";
@@ -331,11 +333,20 @@ int main(int argc, char* argv[]) {
       } else if (flag == "--restart" &&
                  options.restart_directory.empty()) {
         options.restart_directory = std::string{value};
+      } else if (flag == "--restart-storage-compatibility" &&
+                 options.restart_storage_compatibility ==
+                     RestartStorageCompatibility::strict &&
+                 value == "mg-bundle-ghost-v1") {
+        options.restart_storage_compatibility =
+            RestartStorageCompatibility::mg_bundle_ghost_v1;
       } else {
         parsed = false;
       }
     }
-    if (!parsed || !saw_output || !saw_steps) {
+    if (!parsed || !saw_output || !saw_steps ||
+        (options.restart_storage_compatibility !=
+             RestartStorageCompatibility::strict &&
+         options.restart_directory.empty())) {
       usage(rank);
       result = 2;
     } else {
@@ -343,39 +354,39 @@ int main(int argc, char* argv[]) {
       const Status status =
           ApplicationService::run(MPI_COMM_WORLD, options, report);
       if (status && rank == 0) {
-        std::cout << "COMPLETED steps=" << report.accepted_steps
-                  << " time=" << report.final_time
-                  << " product=" << report.product
-                  << " predictor_limiter_activations="
-                  << report.predictor_limiter_activations
-                  << " predictor_min_theta="
-                  << report.minimum_predictor_theta
-                  << " predictor_low_order_transport_passes="
-                  << report.predictor_low_order_transport_passes
-                  << " predictor_low_order_halo_exchanges="
-                  << report.predictor_low_order_halo_exchanges
-                  << " advective_convective_cfl_out_max="
-                  << report.maximum_advective_convective_cfl_out
-                  << " advective_convective_cfl_abs_max="
-                  << report.maximum_advective_convective_cfl_abs
-                  << " advective_convective_cfl_limit="
-                  << report.advective_convective_cfl_limit
-                  << " committed_convective_cfl_out_max="
-                  << report.maximum_committed_convective_cfl_out
-                  << " committed_convective_cfl_abs_max="
-                  << report.maximum_committed_convective_cfl_abs
-                  << " committed_convective_cfl_limit="
-                  << report.committed_convective_cfl_limit
-                  << " momentum_afc_applicability="
-                  << (report.momentum_predictor_limiter
-                              .correction_metrics_applicable
-                          ? "applicable"
-                          : "not_applicable")
-                  << " momentum_afc_active_faces="
-                  << report.momentum_predictor_limiter
-                         .active_correction_faces
-                  << " momentum_afc_limited_faces="
-                  << report.momentum_predictor_limiter.activations;
+        std::cout
+            << "COMPLETED steps=" << report.accepted_steps
+            << " restart_storage_migrated=" << report.restart_storage_migrated
+            << " restart_source_plan=" << report.restart_source_plan
+            << " restart_source_schema=" << report.restart_source_schema
+            << " time=" << report.final_time << " product=" << report.product
+            << " predictor_limiter_activations="
+            << report.predictor_limiter_activations
+            << " predictor_min_theta=" << report.minimum_predictor_theta
+            << " predictor_low_order_transport_passes="
+            << report.predictor_low_order_transport_passes
+            << " predictor_low_order_halo_exchanges="
+            << report.predictor_low_order_halo_exchanges
+            << " advective_convective_cfl_out_max="
+            << report.maximum_advective_convective_cfl_out
+            << " advective_convective_cfl_abs_max="
+            << report.maximum_advective_convective_cfl_abs
+            << " advective_convective_cfl_limit="
+            << report.advective_convective_cfl_limit
+            << " committed_convective_cfl_out_max="
+            << report.maximum_committed_convective_cfl_out
+            << " committed_convective_cfl_abs_max="
+            << report.maximum_committed_convective_cfl_abs
+            << " committed_convective_cfl_limit="
+            << report.committed_convective_cfl_limit
+            << " momentum_afc_applicability="
+            << (report.momentum_predictor_limiter.correction_metrics_applicable
+                    ? "applicable"
+                    : "not_applicable")
+            << " momentum_afc_active_faces="
+            << report.momentum_predictor_limiter.active_correction_faces
+            << " momentum_afc_limited_faces="
+            << report.momentum_predictor_limiter.activations;
         if (report.momentum_predictor_limiter
                 .correction_metrics_applicable) {
           std::cout << " momentum_afc_retained_l1="

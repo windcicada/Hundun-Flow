@@ -68,6 +68,8 @@ struct Options {
   bool have_visit_interval{};
   bool dry_plan{};
   bool self_test{};
+  RestartStorageCompatibility restart_storage_compatibility{
+      RestartStorageCompatibility::strict};
 };
 
 struct StatisticsSpec {
@@ -169,11 +171,16 @@ bool parse_options(int argc, char** argv, Options& out) {
         out.run_root = value;
       } else if (token == "--restart-root" && out.restart_root.empty()) {
         out.restart_root = value;
+      } else if (token == "--restart-storage-compatibility" &&
+                 out.restart_storage_compatibility ==
+                     RestartStorageCompatibility::strict &&
+                 value == "mg-bundle-ghost-v1") {
+        out.restart_storage_compatibility =
+            RestartStorageCompatibility::mg_bundle_ghost_v1;
       } else if (token == "--steps" && !out.have_steps &&
                  parse_u64(value, out.steps) && out.steps != 0U) {
         out.have_steps = true;
-      } else if (token == "--visit-interval" &&
-                 !out.have_visit_interval &&
+      } else if (token == "--visit-interval" && !out.have_visit_interval &&
                  parse_u64(value, out.visit_interval)) {
         out.have_visit_interval = true;
       } else {
@@ -181,6 +188,10 @@ bool parse_options(int argc, char** argv, Options& out) {
       }
     }
   }
+  if (out.restart_storage_compatibility !=
+          RestartStorageCompatibility::strict &&
+      out.restart_root.empty())
+    return false;
   if (out.self_test)
     return !out.dry_plan && out.spec.empty() && out.case_root.empty() &&
            out.run_root.empty() && out.restart_root.empty() &&
@@ -1548,11 +1559,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::uint64_t starting_step = 0U;
   bool restarted = false;
   bool restart_requires_recovery = false;
+  bool restart_storage_migrated = false;
+  PlanFingerprint restart_source_plan{}, restart_source_schema{};
   RuntimeRunStartAnchor run_start;
   RestartBinding restart_binding;
   if (!options.restart_root.empty()) {
     RestartExpected expected;
-    status = driver.restart_expected(expected);
+    status = driver.restart_expected(expected,
+                                     options.restart_storage_compatibility);
     RestartImage image;
     if (status)
       status = RestartReader::load(communicator, options.restart_root,
@@ -1564,11 +1578,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       run_start.previous_time = image.time;
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
       restart_requires_recovery = image.backward_euler_recovery;
+      restart_storage_migrated = image.storage_layout_migrated;
+      restart_source_plan = image.plan;
+      restart_source_schema = image.schema;
       okay = rank != 0 ||
               read_restart_binding(options.restart_root, image, fingerprint,
                                    restart_binding);
       if (all_true(communicator, okay)) {
-        status = driver.initialize_restart(image);
+        status = driver.initialize_restart(
+            image, options.restart_storage_compatibility);
         restarted = true;
       } else {
         status = {StatusCode::invalid_case, kRunnerInput};
@@ -1669,9 +1687,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (restarted) {
     okay = true;
     if (rank == 0)
-      okay = decode_accumulator(
-          restart_binding.accumulator, fingerprint, snapshot.plan,
-          snapshot.schema, snapshot.step, snapshot.time, accumulator);
+      okay = decode_accumulator(restart_binding.accumulator, fingerprint,
+                                restart_source_plan, restart_source_schema,
+                                snapshot.step, snapshot.time, accumulator);
     if (!all_true(communicator, okay)) {
       if (rank == 0) std::cerr << "restart_accumulator_failure\n";
       return 5;
@@ -1701,6 +1719,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "requested_steps " << options.steps << '\n'
              << "visit_interval " << options.visit_interval << '\n'
              << "restarted " << (restarted ? 1 : 0) << '\n'
+             << "restart_storage_migrated "
+             << (restart_storage_migrated ? 1 : 0) << '\n'
+             << "restart_source_plan " << restart_source_plan << '\n'
+             << "restart_source_schema " << restart_source_schema << '\n'
              << "restart_requires_recovery "
              << (restart_requires_recovery ? 1 : 0) << '\n'
              << "candidate_head " << candidate_identity.head.data() << '\n'
