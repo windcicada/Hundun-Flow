@@ -22,6 +22,7 @@
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_case.hpp"
 #include "io_output_detail.hpp"
+#include "local_timing_detail.hpp"
 
 namespace hundun::v04 {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -419,7 +420,9 @@ Status ApplicationService::validate_run_directories(
 
 static Status run_application(MPI_Comm communicator,
                               const ApplicationRunOptions& options,
-                              ApplicationRunReport& report) noexcept try {
+                              ApplicationRunReport& report,
+                              detail::LocalPhaseTimer<9U>& timing) noexcept
+    try {
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_case, kApplicationInput};
   int rank = 0;
@@ -559,14 +562,17 @@ static Status run_application(MPI_Comm communicator,
   for (std::uint64_t step_index = 0U;
        step_index < options.steps && status; ++step_index) {
     report.failure_phase = ApplicationFailurePhase::time_control;
+    timing.phase(1U);
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     LocalTimeLimits time_limits = options.time_limits;
     status = driver.constrain_convective_time_limit(time_limits);
     if (status) {
       report.failure_phase = ApplicationFailurePhase::advance;
+      timing.phase(2U);
       status = driver.advance(time_limits, step);
     }
+    timing.phase(3U);
     report.attempts = step.attempts;
     report.step_completion = step.completion;
     report.initial_time_proposal = step.initial_time_proposal;
@@ -652,6 +658,7 @@ static Status run_application(MPI_Comm communicator,
     fs::path output_path;
     if (output) {
       report.failure_phase = ApplicationFailurePhase::visit;
+      timing.phase(4U);
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "Visit";
@@ -659,10 +666,11 @@ static Status run_application(MPI_Comm communicator,
       });
     }
     if (status && output)
-      status =
-          VisitWriter::write(communicator, output_path, services, snapshot);
+      status = VisitWriter::write(communicator, output_path, services, snapshot,
+                                  &report.io_failure);
     if (status && output) {
       report.failure_phase = ApplicationFailurePhase::screen;
+      timing.phase(5U);
       std::string screen_text;
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
@@ -690,11 +698,13 @@ static Status run_application(MPI_Comm communicator,
         return Status{};
       });
       if (status)
-        status = ScreenWriter::append(communicator, output_path, services,
-                                      snapshot, screen_text);
+        status =
+            ScreenWriter::append(communicator, output_path, services, snapshot,
+                                 screen_text, &report.io_failure);
     }
     if (status && output) {
       report.failure_phase = ApplicationFailurePhase::monitor;
+      timing.phase(5U);
       std::string monitor_text;
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
@@ -733,12 +743,14 @@ static Status run_application(MPI_Comm communicator,
         return Status{};
       });
       if (status)
-        status = MonitorWriter::append(communicator, output_path, services,
-                                       snapshot, monitor_text);
+        status =
+            MonitorWriter::append(communicator, output_path, services, snapshot,
+                                  monitor_text, &report.io_failure);
     }
     RestartSnapshot restart_snapshot;
     if (status && restart) {
       report.failure_phase = ApplicationFailurePhase::restart;
+      timing.phase(6U);
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "Restart";
@@ -750,6 +762,7 @@ static Status run_application(MPI_Comm communicator,
                                     {1U});
     if (status) {
       report.failure_phase = ApplicationFailurePhase::resources;
+      timing.phase(7U);
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
         return Status{};
@@ -768,6 +781,7 @@ static Status run_application(MPI_Comm communicator,
           evidence_stages{};
       status = collect_stage_timings(communicator, step, evidence_stages);
       if (!status) break;
+      timing.phase(8U);
       RuntimeEvidenceRecord evidence;
       evidence.build = build_identity;
       evidence.binary = binary_identity;
@@ -969,6 +983,7 @@ static Status run_application(MPI_Comm communicator,
       // runs are deliberately incapable of masquerading as benchmark data.
       evidence.statistics_eligible = false;
       report.failure_phase = ApplicationFailurePhase::evidence;
+      timing.phase(8U);
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "evidence.jsonl";
@@ -976,8 +991,9 @@ static Status run_application(MPI_Comm communicator,
       });
       if (status)
         status = EvidenceWriter::append(communicator, output_path, services,
-                                        evidence);
+                                        evidence, &report.io_failure);
     }
+    timing.phase(3U);
   }
   const Status shared_close_status =
       detail::output_collective_status(communicator, shared_resources.close());
@@ -1009,9 +1025,13 @@ Status ApplicationService::run(MPI_Comm communicator,
   // One entry/exit owner for the public report, including setup and catches.
   report = {};
   report.failure_phase = ApplicationFailurePhase::input;
-  const Status outcome = run_application(communicator, options, report);
+  detail::LocalPhaseTimer<9U> timing(report.local_phase_nanoseconds);
+  const Status outcome = run_application(communicator, options, report, timing);
   report.failure = outcome;
   if (outcome) report.failure_phase = ApplicationFailurePhase::none;
+  timing.stop();
+  for (auto elapsed : report.local_phase_nanoseconds)
+    report.local_run_nanoseconds += elapsed;
   return outcome;
 }
 

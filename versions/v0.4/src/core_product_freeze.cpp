@@ -13,6 +13,7 @@
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_initialization.hpp"
 #include "hundun/v04_product.hpp"
+#include "local_timing_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_piso_detail.hpp"
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -9689,8 +9690,7 @@ Status ProductDriver::Impl::execute_attempt(
         PressureEnergyJacobianScope::generic_algebraic_quasi_newton};
   };
   const auto solve_pressure_energy =
-      [&](std::uint8_t corrector,
-          std::uint8_t refinement_iteration,
+      [&](std::uint8_t corrector, std::uint8_t refinement_iteration,
           const PisoIntermediateCertificate& intermediate,
           const PressureCorrectionCertificate& pressure,
           ConstFaceFluxView target_flux,
@@ -9698,6 +9698,8 @@ Status ProductDriver::Impl::execute_attempt(
           LinearIdentity identity, MgCoefficientIdentity coefficients,
           const LinearSolveControl& solve_control,
           PressureEnergyJacobianObservation& jacobian_observation) {
+        detail::LocalPhaseTimer<3U> solve_timer(
+            pressure_energy_globalization.local_solve_nanoseconds);
         jacobian_observation = {};
         Status coupled =
             refinement_iteration == 0U
@@ -9942,10 +9944,12 @@ Status ProductDriver::Impl::execute_attempt(
         if (solve_invoked) {
           jacobian_observation.scope = jacobian_certificate.jacobian_scope;
           jacobian_observation.valid = true;
+          solve_timer.phase(1U);
           coupled = solve_epoch.solve_prepared(
               schur_operator,
               PisoPressureSolveContract::continuity_energy_coupled,
               solve_control, product.reductions, &resources);
+          solve_timer.phase(2U);
           // This accessor is written directly from the LinearSolveResult and
           // avoids copying the full PisoAttemptReport on every hot solve.  An
           // invoked solve without a concrete rank deliberately closes with
@@ -10336,6 +10340,9 @@ Status ProductDriver::Impl::execute_attempt(
           PlanFingerprint direction, double alpha, std::size_t ordinal,
           ConstFaceFluxView baseline_flux,
           PressureEnergyCandidateArtifacts& artifacts) {
+        detail::LocalPhaseTimer<8U> candidate_timer(
+            pressure_energy_globalization.last_loop_work
+                .local_phase_nanoseconds);
         initialize_candidate_sample(alpha, ordinal, corrector, direction,
                                     artifacts);
         const bool full_alpha_zero_oracle =
@@ -10364,6 +10371,7 @@ Status ProductDriver::Impl::execute_attempt(
         const StageId correction_stage =
             corrector == 1U ? kCandidateCorrectionC1Stage
                             : kCandidateCorrectionC2Stage;
+        candidate_timer.phase(1U);
         const StageId state_stage =
             corrector == 1U ? kCandidateStateC1Stage
                             : kCandidateStateC2Stage;
@@ -10403,6 +10411,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!evaluated) return evaluated;
         }
 
+        candidate_timer.phase(2U);
         const double alpha_zero_oracle_tolerance = std::max(
             product.summary.terminal_eos_tolerance,
             256.0 * std::numeric_limits<double>::epsilon());
@@ -10736,6 +10745,7 @@ Status ProductDriver::Impl::execute_attempt(
         // boundary closure mutates face ghosts.  IBM reconstruction is a
         // separate remote-donor authority below; neither route is permitted
         // to borrow the live trial FieldIds.
+        candidate_timer.phase(3U);
         halo_views[0U] = pressure_energy_candidate_velocity;
         halo_views[1U] = pressure_energy_candidate_density;
         halo_views[2U] = pressure_energy_candidate_pressure;
@@ -11145,6 +11155,7 @@ Status ProductDriver::Impl::execute_attempt(
           return Status{evaluated.code,
                         kProductPressureEnergy + 209U};
 
+        candidate_timer.phase(4U);
         RevisionToken flux_revision = detail::product_mix(
             direction, product_double_bits(alpha));
         flux_revision = detail::product_mix(flux_revision, ordinal + 1U);
@@ -11326,6 +11337,7 @@ Status ProductDriver::Impl::execute_attempt(
           }
 #endif
         }
+        candidate_timer.phase(5U);
         const PisoFrozenMomentumExactCandidateInput exact_input{
             as_const(enthalpy_correction),
             as_const(pressure_energy_candidate_pressure_correction),
@@ -11376,6 +11388,7 @@ Status ProductDriver::Impl::execute_attempt(
         certified_sample.mass_flux_provenance =
             artifacts.exact_certificate.candidate_mass_flux_provenance();
 
+        candidate_timer.phase(6U);
         EquationStateView candidate_state = equation_state;
         ConstFieldView candidate_density_semantic =
             semantic_field(as_const(pressure_energy_candidate_density),
@@ -11691,6 +11704,7 @@ Status ProductDriver::Impl::execute_attempt(
         sample.thermodynamically_admissible = true;
         sample.state_and_flux_finite = true;
 
+        candidate_timer.phase(7U);
         bool alpha_zero_pressure_equivalent = true;
         bool alpha_zero_gauge_certified = true;
         if (alpha == 0.0) {
@@ -12760,9 +12774,13 @@ Status ProductDriver::Impl::execute_attempt(
                   ++work->ladder_evaluations;
               }
               const auto begin = std::chrono::steady_clock::now();
+              const auto before_phases = current.local_phase_nanoseconds;
               const Status result = evaluate_pressure_energy_candidate(
                   corrector, frozen, pressure, exact_baseline, loop.direction,
                   alpha, ordinal, baseline_flux, artifacts);
+              for (std::size_t i = 0U; i < before_phases.size(); ++i)
+                total.local_phase_nanoseconds[i] +=
+                    current.local_phase_nanoseconds[i] - before_phases[i];
               const auto elapsed = static_cast<std::uint64_t>(
                   std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now() - begin)

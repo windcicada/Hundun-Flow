@@ -353,6 +353,26 @@ int main(int argc, char* argv[]) {
       ApplicationRunReport report;
       const Status status =
           ApplicationService::run(MPI_COMM_WORLD, options, report);
+      if (rank == 0) {
+        if (report.io_failure.valid)
+          std::cerr << "IO_FAILURE rank=" << report.io_failure.rank
+                    << " operation="
+                    << static_cast<int>(report.io_failure.operation)
+                    << " errno=" << report.io_failure.system_error
+                    << " path=" << report.io_failure.path.data()
+                    << " path_truncated=" << report.io_failure.path_truncated
+                    << '\n';
+        constexpr const char* phases[] = {
+            "setup",       "time_control", "advance",
+            "bookkeeping", "visit",        "screen_monitor",
+            "restart",     "resources",    "evidence"};
+        std::cout << "TIMING_LOCAL rank=0 run_ns="
+                  << report.local_run_nanoseconds;
+        for (std::size_t i = 0U; i < report.local_phase_nanoseconds.size(); ++i)
+          std::cout << ' ' << phases[i]
+                    << "_ns=" << report.local_phase_nanoseconds[i];
+        std::cout << '\n';
+      }
       if (status && rank == 0) {
         std::cout
             << "COMPLETED steps=" << report.accepted_steps

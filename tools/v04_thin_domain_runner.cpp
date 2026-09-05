@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_app.hpp"
-#include "hundun/v04_case.hpp"
-#include "hundun/v04_mpi_runtime.hpp"
-#include "hundun/v04_physics.hpp"
-
-#include "app_evidence_detail.hpp"
-#include "app_identity_detail.hpp"
-
-#include <mpi.h>
-
 #include <fcntl.h>
+#include <mpi.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -36,6 +27,14 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "app_evidence_detail.hpp"
+#include "app_identity_detail.hpp"
+#include "hundun/v04_app.hpp"
+#include "hundun/v04_case.hpp"
+#include "hundun/v04_mpi_runtime.hpp"
+#include "hundun/v04_physics.hpp"
+#include "local_timing_detail.hpp"
 
 namespace {
 
@@ -68,6 +67,7 @@ struct Options {
   bool have_visit_interval{};
   bool dry_plan{};
   bool self_test{};
+  bool observe_performance{};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
 };
@@ -160,6 +160,9 @@ bool parse_options(int argc, char** argv, Options& out) {
     } else if (token == "--self-test") {
       if (out.self_test) return false;
       out.self_test = true;
+    } else if (token == "--observe-performance") {
+      if (out.observe_performance) return false;
+      out.observe_performance = true;
     } else {
       if (index + 1 >= argc) return false;
       const std::string_view value(argv[++index]);
@@ -193,13 +196,14 @@ bool parse_options(int argc, char** argv, Options& out) {
       out.restart_root.empty())
     return false;
   if (out.self_test)
-    return !out.dry_plan && out.spec.empty() && out.case_root.empty() &&
-           out.run_root.empty() && out.restart_root.empty() &&
-           !out.have_steps && !out.have_visit_interval;
+    return !out.observe_performance && !out.dry_plan && out.spec.empty() &&
+           out.case_root.empty() && out.run_root.empty() &&
+           out.restart_root.empty() && !out.have_steps &&
+           !out.have_visit_interval;
   if (out.spec.empty() || out.case_root.empty()) return false;
   if (out.dry_plan)
-    return out.run_root.empty() && out.restart_root.empty() &&
-           !out.have_steps;
+    return !out.observe_performance && out.run_root.empty() &&
+           out.restart_root.empty() && !out.have_steps;
   return !out.run_root.empty() && out.have_steps;
 }
 
@@ -1496,6 +1500,9 @@ bool terminal_audit_valid(const ValidatedModel& model,
 }
 
 int run(MPI_Comm communicator, int rank, const Options& options) {
+  int ranks = 0;
+  if (MPI_Comm_size(communicator, &ranks) != MPI_SUCCESS || ranks <= 0)
+    return 2;
   StatisticsSpec spec;
   std::string parse_error;
   bool okay = parse_spec(options.spec, spec, parse_error);
@@ -1718,6 +1725,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "starting_sample_steps " << accumulator.sample_steps << '\n'
              << "requested_steps " << options.steps << '\n'
              << "visit_interval " << options.visit_interval << '\n'
+             << "observe_performance " << options.observe_performance << '\n'
              << "restarted " << (restarted ? 1 : 0) << '\n'
              << "restart_storage_migrated "
              << (restart_storage_migrated ? 1 : 0) << '\n'
@@ -1764,10 +1772,24 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream force;
   std::ofstream health;
   std::ofstream probe;
+  std::ofstream performance;
   if (rank == 0) {
     force.open(options.run_root / "force.csv", std::ios::out);
     health.open(options.run_root / "health.csv", std::ios::out);
     probe.open(options.run_root / "probe.csv", std::ios::out);
+    if (options.observe_performance) {
+      performance.open(options.run_root / "performance.csv", std::ios::out);
+      performance
+          << "step,rank,full_step_ns,advance_ns,observables_ns,visit_ns,"
+             "evidence_resources_ns,csv_ns,checkpoint_ns,"
+             "candidate_ns,state_copy_ns,velocity_halo_ns,thermo_ns,"
+             "boundary_derived_ns,flux_ns,certificate_ns,residual_ns,"
+             "equivalence_hash_ns,schur_prepare_ns,krylov_ns,recovery_ns,"
+             "baseline_evaluations,extrapolation_evaluations,ladder_"
+             "evaluations,"
+             "incomplete_evaluations,rejected_extrapolations,"
+             "reported_collective_subtotal,structured_control,ibm_control\n";
+    }
     if (force)
       force << "step,time,requested_bdf_order,bdf_order,attempts,"
                "pressure_fx,pressure_fy,pressure_fz,viscous_fx,viscous_fy,"
@@ -1793,7 +1815,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (probe)
       probe << "step,time,station,x_over_d,u,v,w,included,exclusion\n";
     okay = static_cast<bool>(force) && static_cast<bool>(health) &&
-           static_cast<bool>(probe);
+           static_cast<bool>(probe) &&
+           (!options.observe_performance || static_cast<bool>(performance));
   }
   if (!all_true(communicator, okay)) return 6;
 
@@ -1814,9 +1837,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (!std::isfinite(force_scale) || !(force_scale > 0.0)) return 3;
   const std::uint64_t target_step = starting_step + options.steps;
   for (std::uint64_t index = 0U; index < options.steps; ++index) {
+    std::array<std::uint64_t, 6U> local_step_phases{};
+    detail::LocalPhaseTimer<6U> step_timer(local_step_phases);
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+    step_timer.phase(1U);
     const auto end = std::chrono::steady_clock::now();
     const auto local_nanoseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
@@ -1997,10 +2023,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         options.visit_interval != 0U &&
         (step.accepted_step % options.visit_interval == 0U ||
          step.accepted_step == target_step);
+    step_timer.phase(2U);
     if (visit)
       status = VisitWriter::write(communicator,
                                   options.run_root / "Visit", services,
                                   snapshot);
+    step_timer.phase(3U);
     DriverResourceReport global_resources;
     if (status)
       status = append_evidence(
@@ -2015,6 +2043,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       return 6;
     }
 
+    step_timer.phase(4U);
     if (rank == 0) {
       force << step.accepted_step << ',' << std::setprecision(17)
             << step.accepted_time << ','
@@ -2089,6 +2118,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     }
     if (!all_true(communicator, okay)) return 6;
 
+    step_timer.phase(5U);
     const bool save =
         step.accepted_step % spec.checkpoint_interval == 0U ||
         step.accepted_step == target_step;
@@ -2111,6 +2141,62 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         std::cout << "CHECKPOINT step=" << step.accepted_step
                   << " time=" << std::setprecision(17) << step.accepted_time
                   << " samples=" << accumulator.sample_steps << '\n';
+    }
+    step_timer.stop();
+    if (options.observe_performance) {
+      // One diagnostic gather per observed step. Preserve each rank's disjoint
+      // accounting; do not sum independent phase maxima as a wall-clock time.
+      constexpr std::size_t width = 29U;
+      std::array<std::uint64_t, width> local{};
+      local[0U] = step.accepted_step;
+      local[1U] = static_cast<std::uint64_t>(rank);
+      for (auto ns : local_step_phases) local[2U] += ns;
+      std::copy(local_step_phases.begin(), local_step_phases.end(),
+                local.begin() + 3U);
+      const auto& work = step.pressure_energy_globalization.work;
+      local[9U] = work.local_evaluation_nanoseconds;
+      std::copy(work.local_phase_nanoseconds.begin(),
+                work.local_phase_nanoseconds.end(), local.begin() + 10U);
+      const auto& solves =
+          step.pressure_energy_globalization.local_solve_nanoseconds;
+      std::copy(solves.begin(), solves.end(), local.begin() + 18U);
+      local[21U] = work.baseline_evaluations;
+      local[22U] = work.extrapolation_evaluations;
+      local[23U] = work.ladder_evaluations;
+      local[24U] = work.incomplete_evaluations;
+      local[25U] = work.rejected_extrapolations;
+      const auto& counts = step.resources;
+      local[26U] = counts.reduction_collectives +
+                   counts.mg_blocking_collectives +
+                   counts.predictor_blocking_collectives +
+                   counts.structured_control_collectives +
+                   counts.ibm_control_collectives;
+      local[27U] = counts.structured_control_collectives;
+      local[28U] = counts.ibm_control_collectives;
+      std::vector<std::uint64_t> gathered;
+      // Allocate before entering Gather, with one all-rank failure decision.
+      try {
+        if (rank == 0) gathered.resize(width * static_cast<std::size_t>(ranks));
+      } catch (...) {
+        okay = false;
+      }
+      if (!all_true(communicator, okay)) return 6;
+      if (MPI_Gather(local.data(), static_cast<int>(width), MPI_UINT64_T,
+                     gathered.data(), static_cast<int>(width), MPI_UINT64_T, 0,
+                     communicator) != MPI_SUCCESS)
+        return 6;
+      if (rank == 0) {
+        for (int source = 0; source < ranks; ++source) {
+          const auto offset = static_cast<std::size_t>(source) * width;
+          for (std::size_t column = 0U; column < width; ++column)
+            performance << (column == 0U ? "" : ",")
+                        << gathered[offset + column];
+          performance << '\n';
+        }
+        performance.flush();
+        okay = static_cast<bool>(performance);
+      }
+      if (!all_true(communicator, okay)) return 6;
     }
   }
   if (rank == 0) {
@@ -2244,7 +2330,7 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH --dry-plan\n"
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
-         "[--visit-interval N]\n";
+         "[--visit-interval N] [--observe-performance]\n";
 }
 
 }  // namespace

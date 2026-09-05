@@ -151,6 +151,11 @@ struct PressureEnergyCandidateWorkReport {
   std::uint32_t rejected_extrapolations{};
   // Local inclusive evaluation time, not a rank maximum or complete step time.
   std::uint64_t local_evaluation_nanoseconds{};
+  // Disjoint inclusive subphases: state copy/revision, velocity/correction
+  // halo, thermophysics, state halo/boundary/derived transport, flux,
+  // certificate, residual assembly/audit, final equivalence/hash. Not pure
+  // kernel costs.
+  std::array<std::uint64_t, 8U> local_phase_nanoseconds{};
 };
 
 struct PressureEnergyExtrapolationReport {
@@ -204,6 +209,9 @@ struct PressureEnergyGlobalizationAttemptReport {
   PressureEnergyCandidateWorkReport work{};
   PressureEnergyCandidateWorkReport last_loop_work{};
   PressureEnergyExtrapolationReport last_extrapolation{};
+  // Disjoint local preparation, Krylov solve, and close/enthalpy recovery.
+  // Includes all C1/C2/refinement solves in this numerical attempt.
+  std::array<std::uint64_t, 3U> local_solve_nanoseconds{};
   std::array<Status, kPressureEnergyGlobalizationCandidateCount>
       candidate_evaluation_status{};
 };
@@ -280,6 +288,13 @@ struct ApplicationRunReport {
   bool restart_storage_migrated{};
   PlanFingerprint restart_source_plan{};
   PlanFingerprint restart_source_schema{};
+  // Local complete ApplicationService::run interval, including setup, output,
+  // evidence, and cleanup. Not the legacy advance-only evidence step timer.
+  std::uint64_t local_run_nanoseconds{};
+  // Disjoint totals: setup, time control, advance, bookkeeping, Visit,
+  // screen/monitor, restart, resource sampling, evidence encoding/writing.
+  std::array<std::uint64_t, 9U> local_phase_nanoseconds{};
+  IoFailureContext io_failure{};
 };
 
 class ApplicationService {

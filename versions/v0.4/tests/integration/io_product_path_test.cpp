@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include <fcntl.h>
 #include <mpi.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <cmath>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,6 +26,77 @@
 #include "../../src/app_identity_detail.hpp"
 #include "../support/piso_fixture.hpp"
 #include "hundun/v04_io.hpp"
+
+// Interpose the POSIX boundary, not writer internals. Only the selected output
+// path/rank is affected; MPI's own descriptors pass directly to the kernel.
+namespace syscall_probe {
+bool enabled = false;
+bool fired = false;
+int mode = -1;
+int descriptor = -1;
+std::string prefix;
+bool file(const char* path, int flags) noexcept {
+  return enabled && (flags & O_DIRECTORY) == 0 &&
+         std::strncmp(path, prefix.c_str(), prefix.size()) == 0;
+}
+}  // namespace syscall_probe
+
+extern "C" int open(const char* path, int flags, ...) {
+  mode_t permissions = 0;
+  if ((flags & O_CREAT) != 0) {
+    va_list arguments;
+    va_start(arguments, flags);
+    permissions = va_arg(arguments, int);
+    va_end(arguments);
+  }
+  const bool watched = syscall_probe::file(path, flags);
+  if (watched && !syscall_probe::fired &&
+      (syscall_probe::mode == 0 || syscall_probe::mode == 4)) {
+    syscall_probe::fired = true;
+    errno = syscall_probe::mode == 0 ? EINTR : EACCES;
+    return -1;
+  }
+  const int result = static_cast<int>(
+      ::syscall(SYS_openat, AT_FDCWD, path, flags, permissions));
+  if (watched) syscall_probe::descriptor = result;
+  return result;
+}
+extern "C" ssize_t write(int descriptor, const void* data, std::size_t count) {
+  using namespace syscall_probe;
+  if (enabled && descriptor == syscall_probe::descriptor && !fired &&
+      (mode == 1 || mode == 3 || mode == 5 || mode == 8)) {
+    fired = true;
+    if (mode == 3)
+      return ::syscall(SYS_write, descriptor, data,
+                       std::max(std::size_t{1U}, count / 2U));
+    errno = mode == 1 ? EINTR : ENOSPC;
+    return -1;
+  }
+  return ::syscall(SYS_write, descriptor, data, count);
+}
+extern "C" int fsync(int descriptor) {
+  using namespace syscall_probe;
+  if (enabled && descriptor == syscall_probe::descriptor && !fired &&
+      (mode == 2 || mode == 6)) {
+    fired = true;
+    errno = mode == 2 ? EINTR : EIO;
+    return -1;
+  }
+  return static_cast<int>(::syscall(SYS_fsync, descriptor));
+}
+extern "C" int close(int descriptor) {
+  using namespace syscall_probe;
+  const bool fail = enabled && descriptor == syscall_probe::descriptor &&
+                    (mode == 7 || mode == 8);
+  const int result = static_cast<int>(::syscall(SYS_close, descriptor));
+  if (descriptor == syscall_probe::descriptor) syscall_probe::descriptor = -1;
+  if (fail) {
+    fired = true;
+    errno = EIO;
+    return -1;
+  }
+  return result;
+}
 
 // Instrument only this executable: exercise real allocation sites without
 // adding fault controls to the production output API.
@@ -86,6 +162,86 @@ std::string read(const fs::path& path) {
   std::ifstream input(path, std::ios::binary);
   return {std::istreambuf_iterator<char>(input),
           std::istreambuf_iterator<char>()};
+}
+
+template <class Write>
+bool syscall_failures(const fs::path& root, std::string_view name,
+                      Write write) {
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  const auto payload_path = [&](const fs::path& path) {
+    const std::string id = std::to_string(rank);
+    return name == "visit"
+               ? path / ("step-00000000000000000025-rank-" +
+                         std::string(8U - id.size(), '0') + id + ".vti")
+               : path;
+  };
+  const fs::path baseline =
+      root / ("syscall-" + std::string(name) + "-baseline");
+  IoFailureContext context;
+  bool passed = static_cast<bool>(write(baseline, &context)) && !context.valid;
+  const std::string original = read(payload_path(baseline));
+  passed &= !original.empty();
+  // Screen/monitor/evidence have only one filesystem writer: rank zero.
+  const int last_target = name == "visit" ? ranks - 1 : 0;
+  for (int target = 0; target <= last_target;
+       target += std::max(1, last_target)) {
+    for (int mode = 0; mode < 9; ++mode) {
+      const fs::path path =
+          root / ("syscall-" + std::string(name) + "-" +
+                  std::to_string(target) + "-" + std::to_string(mode));
+      syscall_probe::prefix = path.string();
+      syscall_probe::fired = false;
+      syscall_probe::descriptor = -1;
+      syscall_probe::mode = mode;
+      syscall_probe::enabled = rank == target;
+      const Status status = write(path, &context);
+      syscall_probe::enabled = false;
+      bool okay = (rank != target || syscall_probe::fired);
+      if (mode < 4) {
+        okay &=
+            status && !context.valid && read(payload_path(path)) == original;
+      } else {
+        const auto operation = mode == 4 ? IoFailureOperation::open
+                               : (mode == 5 || mode == 8)
+                                   ? IoFailureOperation::write
+                               : mode == 6 ? IoFailureOperation::sync
+                                           : IoFailureOperation::close;
+        const int error = mode == 4                  ? EACCES
+                          : (mode == 5 || mode == 8) ? ENOSPC
+                                                     : EIO;
+        okay &= status.code == StatusCode::io_failure && context.valid &&
+                context.operation == operation &&
+                context.system_error == error && context.rank == target &&
+                !context.path_truncated &&
+                std::string_view(context.path.data()).find(path.string()) == 0U;
+        if (name == "visit")
+          okay &= !fs::exists(path / "step-00000000000000000025.visit");
+      }
+      int agreed = okay ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &agreed, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      passed &= agreed != 0;
+      if (rank == 0)
+        std::cout << "syscall " << name << " target=" << target
+                  << " mode=" << mode
+                  << " status=" << static_cast<int>(status.code) << '/'
+                  << status.detail << " passed=" << agreed << '\n';
+    }
+  }
+  const fs::path root_only =
+      root / ("syscall-" + std::string(name) + "-root-report");
+  syscall_probe::prefix = root_only.string();
+  syscall_probe::mode = 4;
+  syscall_probe::fired = false;
+  syscall_probe::enabled = rank == last_target;
+  // The output pointer is a local consumer choice, not a collective option.
+  const Status root_status = write(root_only, rank == 0 ? &context : nullptr);
+  syscall_probe::enabled = false;
+  passed &= root_status.code == StatusCode::io_failure &&
+            (rank != 0 || (context.valid && context.rank == last_target &&
+                           context.system_error == EACCES));
+  return passed;
 }
 
 template <class Write>
@@ -216,6 +372,24 @@ bool run_case(const fs::path& root, bool stretched,
                                    {fields.data(), fields.size()},
                                    true};
   const fs::path visit = root / (stretched ? "Visit-stretched" : "Visit-uniform");
+  if (fault_kind == "visit-syscalls")
+    return syscall_failures(
+        root, "visit", [&](const fs::path& path, IoFailureContext* error) {
+          return VisitWriter::write(MPI_COMM_WORLD, path, services, snapshot,
+                                    error);
+        });
+  if (fault_kind == "screen-syscalls")
+    return syscall_failures(
+        root, "screen", [&](const fs::path& path, IoFailureContext* error) {
+          return ScreenWriter::append(MPI_COMM_WORLD, path, services, snapshot,
+                                      "continuity=0 eos=0", error);
+        });
+  if (fault_kind == "monitor-syscalls")
+    return syscall_failures(
+        root, "monitor", [&](const fs::path& path, IoFailureContext* error) {
+          return MonitorWriter::append(MPI_COMM_WORLD, path, services, snapshot,
+                                       "{\"mass\":1.0}", error);
+        });
   if (fault_kind == "visit")
     return allocation_failures(root, "visit", [&](const fs::path& path) {
       return VisitWriter::write(MPI_COMM_WORLD, path, services, snapshot);
@@ -357,6 +531,12 @@ bool run_case(const fs::path& root, bool stretched,
   evidence.stages = {timings.data(), timings.size()};
   evidence.startup = true;
   evidence.statistics_eligible = false;
+  if (fault_kind == "evidence-syscalls")
+    return syscall_failures(
+        root, "evidence", [&](const fs::path& path, IoFailureContext* error) {
+          return EvidenceWriter::append(MPI_COMM_WORLD, path, services,
+                                        evidence, error);
+        });
   if (fault_kind == "evidence")
     return allocation_failures(root, "evidence", [&](const fs::path& path) {
       return EvidenceWriter::append(MPI_COMM_WORLD, path, services, evidence);

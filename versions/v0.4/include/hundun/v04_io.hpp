@@ -427,12 +427,31 @@ struct RuntimeEvidenceRecord {
   bool statistics_eligible{};
 };
 
+enum class IoFailureOperation : std::uint8_t {
+  none,
+  open,
+  write,
+  sync,
+  close,
+  create_directory
+};
+
+struct IoFailureContext {
+  bool valid{};
+  IoFailureOperation operation{IoFailureOperation::none};
+  int system_error{};
+  int rank{-1};
+  bool path_truncated{};
+  std::array<char, 512U> path{};
+};
+
 class VisitWriter {
  public:
   static Status write(MPI_Comm communicator,
                       const std::filesystem::path& visit_directory,
                       const IoServicePlan& services,
-                      const CommittedOutputSnapshot& snapshot) noexcept;
+                      const CommittedOutputSnapshot& snapshot,
+                      IoFailureContext* failure = nullptr) noexcept;
 };
 
 class ScreenWriter {
@@ -441,7 +460,8 @@ class ScreenWriter {
                        const std::filesystem::path& screen_file,
                        const IoServicePlan& services,
                        const CommittedOutputSnapshot& snapshot,
-                       std::string_view summary) noexcept;
+                       std::string_view summary,
+                       IoFailureContext* failure = nullptr) noexcept;
 };
 
 class MonitorWriter {
@@ -450,7 +470,8 @@ class MonitorWriter {
                        const std::filesystem::path& monitor_file,
                        const IoServicePlan& services,
                        const CommittedOutputSnapshot& snapshot,
-                       std::string_view json_payload) noexcept;
+                       std::string_view json_payload,
+                       IoFailureContext* failure = nullptr) noexcept;
 };
 
 class EvidenceWriter {
@@ -458,7 +479,8 @@ class EvidenceWriter {
   static Status append(MPI_Comm communicator,
                        const std::filesystem::path& evidence_file,
                        const IoServicePlan& services,
-                       const RuntimeEvidenceRecord& record) noexcept;
+                       const RuntimeEvidenceRecord& record,
+                       IoFailureContext* failure = nullptr) noexcept;
 };
 
 }  // namespace hundun::v04

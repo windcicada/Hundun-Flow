@@ -682,6 +682,16 @@ target_link_libraries(v04_io_product_path_test PRIVATE
   MPI::MPI_C)
 add_test(NAME v04_io_product_path COMMAND v04_io_product_path_test)
 set_tests_properties(v04_io_product_path PROPERTIES TIMEOUT 120)
+foreach(rank_count IN ITEMS 1 2 4)
+  foreach(output_kind IN ITEMS visit evidence screen monitor)
+    add_test(NAME v04_io_${output_kind}_syscalls_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+              ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_io_product_path_test>"
+              "${output_kind}-syscalls" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(v04_io_${output_kind}_syscalls_mpi_${rank_count}
+      PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 45)
+  endforeach()
+endforeach()
 foreach(rank_count IN ITEMS 2 4)
   foreach(output_kind IN ITEMS visit evidence screen monitor)
     add_test(NAME v04_io_${output_kind}_allocation_failure_mpi_${rank_count}

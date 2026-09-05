@@ -221,7 +221,9 @@ Status build_visit_file(const CommittedOutputSnapshot& snapshot,
 Status VisitWriter::write(MPI_Comm communicator,
                           const std::filesystem::path& visit_directory,
                           const IoServicePlan& services,
-                          const CommittedOutputSnapshot& snapshot) noexcept {
+                          const CommittedOutputSnapshot& snapshot,
+                          IoFailureContext* failure) noexcept {
+  detail::IoFailureCapture capture(failure);
   int rank = 0;
   int size = 0;
   if (communicator == MPI_COMM_NULL ||
@@ -233,43 +235,53 @@ Status VisitWriter::write(MPI_Comm communicator,
       services, RuntimeServiceKind::visit, snapshot);
   if (visit_directory.empty())
     status = {StatusCode::invalid_plan, detail::kOutputInput};
-  status = detail::output_collective_status(communicator, status);
+  status =
+      detail::output_collective_status(communicator, status, &capture.context);
   if (!status) return status;
-  status = detail::output_create_directory(communicator, rank, visit_directory);
+  status = detail::output_create_directory(communicator, rank, visit_directory,
+                                           &capture.context);
   if (!status) return status;
   const RuntimeServiceCapacity* capacity =
       detail::output_service(services, RuntimeServiceKind::visit);
   std::vector<std::uint8_t> file;
   std::string extension;
-  status = detail::output_collective_stage(communicator, [&]() -> Status {
-    const Status built = build_visit_file(
-        snapshot, capacity->maximum_staging_bytes_per_rank, file, extension);
-    if (!built) return built;
-    const std::string base = "step-" + padded(snapshot.step, 20U) + "-rank-" +
-                             padded(static_cast<std::uint64_t>(rank), 8U) +
-                             extension;
-    return detail::output_write_file(visit_directory / base, file)
-               ? Status{}
-               : Status{StatusCode::io_failure, detail::kOutputFile};
-  });
+  status = detail::output_collective_stage(
+      communicator,
+      [&]() -> Status {
+        const Status built =
+            build_visit_file(snapshot, capacity->maximum_staging_bytes_per_rank,
+                             file, extension);
+        if (!built) return built;
+        const std::string base =
+            "step-" + padded(snapshot.step, 20U) + "-rank-" +
+            padded(static_cast<std::uint64_t>(rank), 8U) + extension;
+        return detail::output_write_file(visit_directory / base, file, false,
+                                         &capture.context)
+                   ? Status{}
+                   : Status{StatusCode::io_failure, detail::kOutputFile};
+      },
+      &capture.context);
   if (!status) return status;
   std::vector<std::uint8_t>{}.swap(file);
-  return detail::output_collective_stage(communicator, [&]() -> Status {
-    if (rank == 0) {
-      std::string index = "!NBLOCKS " + std::to_string(size) + "\n";
-      for (int source = 0; source < size; ++source)
-        index += "step-" + padded(snapshot.step, 20U) + "-rank-" +
-                 padded(static_cast<std::uint64_t>(source), 8U) + extension +
-                 "\n";
-      if (!detail::output_write_file(
-              visit_directory /
-                  ("step-" + padded(snapshot.step, 20U) + ".visit"),
-              index) ||
-          !detail::output_sync_directory(visit_directory))
-        return {StatusCode::io_failure, detail::kOutputFile};
-    }
-    return {};
-  });
+  return detail::output_collective_stage(
+      communicator,
+      [&]() -> Status {
+        if (rank == 0) {
+          std::string index = "!NBLOCKS " + std::to_string(size) + "\n";
+          for (int source = 0; source < size; ++source)
+            index += "step-" + padded(snapshot.step, 20U) + "-rank-" +
+                     padded(static_cast<std::uint64_t>(source), 8U) +
+                     extension + "\n";
+          if (!detail::output_write_file(
+                  visit_directory /
+                      ("step-" + padded(snapshot.step, 20U) + ".visit"),
+                  index, false, &capture.context) ||
+              !detail::output_sync_directory(visit_directory, &capture.context))
+            return {StatusCode::io_failure, detail::kOutputFile};
+        }
+        return {};
+      },
+      &capture.context);
 }
 
 }  // namespace hundun::v04

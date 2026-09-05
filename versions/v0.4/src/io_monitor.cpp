@@ -19,14 +19,17 @@ Status MonitorWriter::append(MPI_Comm communicator,
                              const std::filesystem::path& monitor_file,
                              const IoServicePlan& services,
                              const CommittedOutputSnapshot& snapshot,
-                             std::string_view json_payload) noexcept {
+                             std::string_view json_payload,
+                             IoFailureContext* failure) noexcept {
+  detail::IoFailureCapture capture(failure);
   int rank = 0;
   if (communicator == MPI_COMM_NULL ||
       MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
     return {StatusCode::invalid_plan, detail::kOutputInput};
   std::filesystem::path parent;
-  Status status =
-      detail::output_collective_stage(communicator, [&]() -> Status {
+  Status status = detail::output_collective_stage(
+      communicator,
+      [&]() -> Status {
         parent = monitor_file.parent_path();
         if (monitor_file.empty() || parent.empty() ||
             json_payload.size() < 2U || json_payload.front() != '{' ||
@@ -36,26 +39,32 @@ Status MonitorWriter::append(MPI_Comm communicator,
           return {StatusCode::invalid_plan, detail::kOutputInput};
         return detail::validate_output_snapshot(
             services, RuntimeServiceKind::monitor, snapshot);
-      });
+      },
+      &capture.context);
   if (!status) return status;
-  status = detail::output_create_directory(communicator, rank, parent);
+  status = detail::output_create_directory(communicator, rank, parent,
+                                           &capture.context);
   if (!status) return status;
-  return detail::output_collective_stage(communicator, [&]() -> Status {
-    if (rank != 0) return {};
-    std::ostringstream line;
-    line.exceptions(std::ios::badbit | std::ios::failbit);
-    line.imbue(std::locale::classic());
-    line << std::setprecision(17) << "{\"step\":" << snapshot.step
-         << ",\"time\":" << snapshot.time << ",\"plan\":"
-         << snapshot.plan << ",\"payload\":" << json_payload << "}\n";
-    const std::string text = line.str();
-    const RuntimeServiceCapacity* capacity =
-        detail::output_service(services, RuntimeServiceKind::monitor);
-    return text.size() <= capacity->maximum_staging_bytes_per_rank &&
-                   detail::output_write_file(monitor_file, text, true)
-               ? Status{}
-               : Status{StatusCode::io_failure, detail::kOutputFile};
-  });
+  return detail::output_collective_stage(
+      communicator,
+      [&]() -> Status {
+        if (rank != 0) return {};
+        std::ostringstream line;
+        line.exceptions(std::ios::badbit | std::ios::failbit);
+        line.imbue(std::locale::classic());
+        line << std::setprecision(17) << "{\"step\":" << snapshot.step
+             << ",\"time\":" << snapshot.time << ",\"plan\":" << snapshot.plan
+             << ",\"payload\":" << json_payload << "}\n";
+        const std::string text = line.str();
+        const RuntimeServiceCapacity* capacity =
+            detail::output_service(services, RuntimeServiceKind::monitor);
+        return text.size() <= capacity->maximum_staging_bytes_per_rank &&
+                       detail::output_write_file(monitor_file, text, true,
+                                                 &capture.context)
+                   ? Status{}
+                   : Status{StatusCode::io_failure, detail::kOutputFile};
+      },
+      &capture.context);
 }
 
 }  // namespace hundun::v04

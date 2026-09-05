@@ -172,7 +172,7 @@ struct DriverHarness {
 };
 
 DriverHarness make_driver(ValidatedModel model, double checkpoint_dt = kFullDt,
-                          bool warm_perturbation = false) {
+                          double warm_amplitude = 0.0) {
   DriverHarness harness;
   harness.model = std::move(model);
   CompiledCasePlan plan;
@@ -186,11 +186,12 @@ DriverHarness make_driver(ValidatedModel model, double checkpoint_dt = kFullDt,
     harness.status = harness.driver.restart_expected(expected);
   if (harness.status) {
     RestartImage image = make_restart_image(expected, checkpoint_dt);
-    if (warm_perturbation) {
+    if (warm_amplitude != 0.0) {
       for (auto &field : image.fields) {
         if (field.role != RestartFieldRole::enthalpy) continue;
         for (double &value : field.values)
-          value = kBaseEnthalpy + 1.0e5 + 1.0e3 * (value - kBaseEnthalpy);
+          value =
+              kBaseEnthalpy + 1.0e5 + warm_amplitude * (value - kBaseEnthalpy);
       }
     }
     harness.status = harness.driver.initialize_restart(image);
@@ -1048,26 +1049,57 @@ bool run_retry_exhaustion_report(int rank) {
                 "advancing state");
 }
 
-bool run_candidate_accounting_certificate(int rank) {
+bool run_candidate_accounting_certificate(
+    int rank, double amplitude = 1.0e3, double dt = kFullDt,
+    bool require_rejected_extrapolation = false) {
   // A separate warm, nonuniform public restart fixture leaves the NASA7 lower
   // temperature boundary inactive. No production candidate result is replaced.
-  auto model = retry_model(kFullDt, kFullDt, 1U, UINT64_C(0x18000c601));
+  auto model = retry_model(dt, dt, 1U, UINT64_C(0x18000c601));
   model.solver.terminal.continuity = 1.0e-13;
-  auto driver = make_driver(std::move(model), kFullDt, true);
+  auto driver = make_driver(std::move(model), dt, amplitude);
   DriverStepReport report;
   if (driver.status)
     driver.status = driver.driver.advance({1, 1, 1, 1, 1}, report);
   const auto &globalization = report.pressure_energy_globalization;
   const auto &work = globalization.work;
   std::uint32_t baselines = 0, ladder = 0, extrapolations = 0, incomplete = 0;
+  std::uint32_t rejected_extrapolations = 0;
+  bool rejected_then_ladder_accepted = false;
   bool valid = work.baseline_evaluations > 0;
+  std::uint64_t phase_sum = 0U;
+  for (auto value : work.local_phase_nanoseconds) phase_sum += value;
+  valid &= phase_sum > 0U && phase_sum <= work.local_evaluation_nanoseconds;
+  if (driver.status)
+    valid &= globalization.local_solve_nanoseconds[0U] > 0U &&
+             globalization.local_solve_nanoseconds[1U] > 0U &&
+             globalization.local_solve_nanoseconds[2U] > 0U;
   for (std::size_t i = 0; i < globalization.trajectory_count; ++i) {
     const auto &iteration = globalization.trajectory[i];
     baselines += iteration.work.baseline_evaluations;
     ladder += iteration.work.ladder_evaluations;
     extrapolations += iteration.work.extrapolation_evaluations;
     incomplete += iteration.work.incomplete_evaluations;
+    rejected_extrapolations += iteration.work.rejected_extrapolations;
     const auto &extrapolation = iteration.extrapolation;
+    if (extrapolation.attempted && extrapolation.complete &&
+        extrapolation.selection_attempted && !extrapolation.selected) {
+      valid &=
+          extrapolation.selection_status.code == StatusCode::rejected_step &&
+          iteration.work.rejected_extrapolations == 1U &&
+          iteration.work.ladder_evaluations > 0U &&
+          iteration.selected.alpha > 0.0 && iteration.selected.alpha <= 1.0 &&
+          iteration.selected.thermodynamically_admissible &&
+          iteration.selected.state_and_flux_finite;
+      rejected_then_ladder_accepted = true;
+    }
+    if (rank == 0)
+      std::cout << "candidate-loop i=" << i
+                << " extrapolated_alpha=" << extrapolation.alpha
+                << " complete=" << extrapolation.complete
+                << " selected_extrapolation=" << extrapolation.selected
+                << " rejected=" << iteration.work.rejected_extrapolations
+                << " ladder=" << iteration.work.ladder_evaluations
+                << " selected_alpha=" << iteration.selected.alpha << '\n';
     valid &= iteration.work.extrapolation_evaluations ==
              static_cast<unsigned>(extrapolation.attempted);
     if (extrapolation.attempted) {
@@ -1091,7 +1123,11 @@ bool run_candidate_accounting_certificate(int rank) {
     valid &= baselines == work.baseline_evaluations &&
              ladder == work.ladder_evaluations &&
              extrapolations == work.extrapolation_evaluations &&
-             incomplete == work.incomplete_evaluations;
+             incomplete == work.incomplete_evaluations &&
+             rejected_extrapolations == work.rejected_extrapolations;
+  if (require_rejected_extrapolation)
+    valid &= driver.status && report.accepted && report.attempts == 1U &&
+             rejected_then_ladder_accepted && work.rejected_extrapolations > 0U;
   if (rank == 0)
     std::cout << "warm-candidate-work status="
               << static_cast<unsigned>(driver.status.code) << '/'
@@ -1117,6 +1153,9 @@ int main(int argc, char **argv) {
   passed &= run_retry_certificate(rank);
   passed &= run_retry_exhaustion_report(rank);
   passed &= run_candidate_accounting_certificate(rank);
+  // The larger warm perturbation produces an actual alpha=2 merit rejection,
+  // followed by alpha=1 acceptance. No candidate or selector is mocked.
+  passed &= run_candidate_accounting_certificate(rank, 1.0e4, 0.09, true);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

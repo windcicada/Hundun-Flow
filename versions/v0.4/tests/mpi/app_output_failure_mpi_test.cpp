@@ -7,6 +7,7 @@
 
 #include <array>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -109,6 +110,57 @@ int main(int argc, char** argv) {
                   << " target=" << target << " consistent=" << passed << '\n';
     }
   }
+  MPI_Barrier(MPI_COMM_WORLD);
+  {
+    ApplicationRunOptions options;
+    options.case_root = root / "case";
+    options.run_directory = root / "real-io-failure";
+    options.source_root = HUNDUN_V04_SOURCE_ROOT;
+    options.steps = 1U;
+    if (rank == 0) {
+      fs::create_directories(options.run_directory);
+      std::ofstream occupied(options.run_directory / "Visit");
+      occupied << "an existing regular file blocks directory creation\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    ApplicationRunReport report;
+    const Status status =
+        ApplicationService::run(MPI_COMM_WORLD, options, report);
+    passed &=
+        status.code == StatusCode::io_failure &&
+        report.failure_phase == ApplicationFailurePhase::visit &&
+        report.accepted_steps == 1U && report.final_time > 0.0 &&
+        report.failed_stage == 0U && report.io_failure.valid &&
+        report.io_failure.rank == 0 && report.io_failure.system_error != 0 &&
+        report.io_failure.operation == IoFailureOperation::create_directory &&
+        fs::path(report.io_failure.path.data()) ==
+            options.run_directory / "Visit";
+    if (rank == 0)
+      std::cout << "app real IO errno=" << report.io_failure.system_error
+                << " accepted_steps=" << report.accepted_steps << '\n';
+  }
+  {
+    ApplicationRunOptions options;
+    options.case_root = root / "case";
+    options.run_directory = root / "timing-success";
+    options.source_root = HUNDUN_V04_SOURCE_ROOT;
+    options.steps = 1U;
+    ApplicationRunReport report;
+    const Status status =
+        ApplicationService::run(MPI_COMM_WORLD, options, report);
+    std::uint64_t accounted = 0U;
+    for (auto value : report.local_phase_nanoseconds) accounted += value;
+    passed &= status && report.accepted_steps == 1U &&
+              accounted == report.local_run_nanoseconds && accounted > 0U;
+    for (auto value : report.local_phase_nanoseconds) passed &= value > 0U;
+    if (rank == 0)
+      std::cout << "app local wall accounted=" << accounted
+                << " run=" << report.local_run_nanoseconds << '\n';
+  }
+  int final_passed = passed ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &final_passed, 1, MPI_INT, MPI_MIN,
+                MPI_COMM_WORLD);
+  passed = final_passed != 0;
   MPI_Barrier(MPI_COMM_WORLD);
   if (rank == 0) fs::remove_all(root);
   MPI_Finalize();

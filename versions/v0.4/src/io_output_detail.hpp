@@ -9,8 +9,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <new>
@@ -28,6 +30,32 @@ inline constexpr std::uint32_t kOutputInput = 10401U;
 inline constexpr std::uint32_t kOutputCapacity = 10402U;
 inline constexpr std::uint32_t kOutputCollective = 10403U;
 inline constexpr std::uint32_t kOutputFile = 10404U;
+
+struct IoFailureCapture {
+  IoFailureContext context{};
+  IoFailureContext* destination;
+  explicit IoFailureCapture(IoFailureContext* out) noexcept : destination(out) {
+    if (out != nullptr) *out = {};
+  }
+  ~IoFailureCapture() noexcept {
+    if (destination != nullptr) *destination = context;
+  }
+};
+
+inline void output_record_failure(IoFailureContext* out,
+                                  IoFailureOperation operation, int error,
+                                  const std::filesystem::path& path) noexcept {
+  if (out == nullptr || out->valid)
+    return;  // Preserve the first failed syscall.
+  out->valid = true;
+  out->operation = operation;
+  out->system_error = error;
+  const std::size_t length = std::strlen(path.c_str());
+  const std::size_t copied = std::min(length, out->path.size() - 1U);
+  std::memcpy(out->path.data(), path.c_str(), copied);
+  out->path[copied] = '\0';
+  out->path_truncated = copied != length;
+}
 
 inline const RuntimeServiceCapacity* output_service(
     const IoServicePlan& plan, RuntimeServiceKind kind) noexcept {
@@ -89,8 +117,9 @@ inline Status validate_output_snapshot(
   return {};
 }
 
-inline Status output_collective_status(MPI_Comm communicator,
-                                       Status local) noexcept {
+inline Status output_collective_status(
+    MPI_Comm communicator, Status local,
+    IoFailureContext* failure = nullptr) noexcept {
   int rank = 0;
   int size = 0;
   if (communicator == MPI_COMM_NULL ||
@@ -108,6 +137,21 @@ inline Status output_collective_status(MPI_Comm communicator,
     wire = (static_cast<std::uint64_t>(local.code) << 32U) | local.detail;
   if (MPI_Bcast(&wire, 1, MPI_UINT64_T, failing, communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kOutputCollective};
+  if (failure != nullptr) {
+    std::array<int, 4U> metadata{
+        {failure->valid ? 1 : 0, static_cast<int>(failure->operation),
+         failure->system_error, failure->path_truncated ? 1 : 0}};
+    if (MPI_Bcast(metadata.data(), static_cast<int>(metadata.size()), MPI_INT,
+                  failing, communicator) != MPI_SUCCESS ||
+        MPI_Bcast(failure->path.data(), static_cast<int>(failure->path.size()),
+                  MPI_CHAR, failing, communicator) != MPI_SUCCESS)
+      return {StatusCode::mpi_failure, kOutputCollective};
+    failure->valid = metadata[0U] != 0;
+    failure->operation = static_cast<IoFailureOperation>(metadata[1U]);
+    failure->system_error = metadata[2U];
+    failure->path_truncated = metadata[3U] != 0;
+    failure->rank = failing;
+  }
   return {static_cast<StatusCode>(wire >> 32U),
           static_cast<std::uint32_t>(wire)};
 }
@@ -115,8 +159,9 @@ inline Status output_collective_status(MPI_Comm communicator,
 // The callback must contain local work only. Catch before the next collective
 // so a failed allocation cannot make one rank leave the collective sequence.
 template <class LocalWork>
-inline Status output_collective_stage(MPI_Comm communicator,
-                                      LocalWork&& work) noexcept {
+inline Status output_collective_stage(
+    MPI_Comm communicator, LocalWork&& work,
+    IoFailureContext* failure = nullptr) noexcept {
   Status status;
   try {
     status = work();
@@ -125,63 +170,110 @@ inline Status output_collective_stage(MPI_Comm communicator,
   } catch (...) {
     status = {StatusCode::io_failure, kOutputFile};
   }
-  return output_collective_status(communicator, status);
+  return output_collective_status(communicator, status, failure);
 }
 
 inline bool output_write_file(const std::filesystem::path& path,
                               const std::uint8_t* data, std::size_t bytes,
-                              bool append) noexcept {
+                              bool append,
+                              IoFailureContext* failure = nullptr) noexcept {
   const int flags = append ? O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC
                            : O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
-  const int descriptor = ::open(path.c_str(), flags, 0644);
-  if (descriptor < 0) return false;
+  int descriptor = -1;
+  do {
+    descriptor = ::open(path.c_str(), flags, 0644);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) {
+    output_record_failure(failure, IoFailureOperation::open, errno, path);
+    return false;
+  }
   std::size_t cursor = 0U;
   bool okay = true;
   while (cursor < bytes) {
     const ssize_t count = ::write(descriptor, data + cursor, bytes - cursor);
+    if (count < 0 && errno == EINTR) continue;
     if (count <= 0) {
+      output_record_failure(failure, IoFailureOperation::write,
+                            count == 0 ? EIO : errno, path);
       okay = false;
       break;
     }
     cursor += static_cast<std::size_t>(count);
   }
-  if (okay && ::fsync(descriptor) != 0) okay = false;
-  if (::close(descriptor) != 0) okay = false;
+  if (okay) {
+    int synced;
+    do {
+      synced = ::fsync(descriptor);
+    } while (synced != 0 && errno == EINTR);
+    if (synced != 0) {
+      output_record_failure(failure, IoFailureOperation::sync, errno, path);
+      okay = false;
+    }
+  }
+  // Never retry close: the descriptor may already have been released/reused.
+  if (::close(descriptor) != 0) {
+    output_record_failure(failure, IoFailureOperation::close, errno, path);
+    okay = false;
+  }
   return okay;
 }
 
 inline bool output_write_file(const std::filesystem::path& path,
                               const std::vector<std::uint8_t>& bytes,
-                              bool append = false) noexcept {
-  return output_write_file(path, bytes.data(), bytes.size(), append);
+                              bool append = false,
+                              IoFailureContext* failure = nullptr) noexcept {
+  return output_write_file(path, bytes.data(), bytes.size(), append, failure);
 }
 
 inline bool output_write_file(const std::filesystem::path& path,
-                              std::string_view text,
-                              bool append = false) noexcept {
-  return output_write_file(
-      path, reinterpret_cast<const std::uint8_t*>(text.data()), text.size(),
-      append);
+                              std::string_view text, bool append = false,
+                              IoFailureContext* failure = nullptr) noexcept {
+  return output_write_file(path,
+                           reinterpret_cast<const std::uint8_t*>(text.data()),
+                           text.size(), append, failure);
 }
 
-inline bool output_sync_directory(const std::filesystem::path& path) noexcept {
-  const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (descriptor < 0) return false;
-  const bool okay = ::fsync(descriptor) == 0;
-  return ::close(descriptor) == 0 && okay;
+inline bool output_sync_directory(
+    const std::filesystem::path& path,
+    IoFailureContext* failure = nullptr) noexcept {
+  int descriptor;
+  do {
+    descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) {
+    output_record_failure(failure, IoFailureOperation::open, errno, path);
+    return false;
+  }
+  int synced;
+  do {
+    synced = ::fsync(descriptor);
+  } while (synced != 0 && errno == EINTR);
+  if (synced != 0)
+    output_record_failure(failure, IoFailureOperation::sync, errno, path);
+  const int closed = ::close(descriptor);
+  if (closed != 0)
+    output_record_failure(failure, IoFailureOperation::close, errno, path);
+  return synced == 0 && closed == 0;
 }
 
-inline Status output_create_directory(MPI_Comm communicator, int rank,
-                                      const std::filesystem::path& path) noexcept {
-  return output_collective_stage(communicator, [&]() -> Status {
-    if (rank == 0) {
-      std::error_code error;
-      std::filesystem::create_directories(path, error);
-      if (error || !output_sync_directory(path))
-        return {StatusCode::io_failure, kOutputFile};
-    }
-    return {};
-  });
+inline Status output_create_directory(
+    MPI_Comm communicator, int rank, const std::filesystem::path& path,
+    IoFailureContext* failure = nullptr) noexcept {
+  return output_collective_stage(
+      communicator,
+      [&]() -> Status {
+        if (rank == 0) {
+          std::error_code error;
+          std::filesystem::create_directories(path, error);
+          if (error)
+            output_record_failure(failure, IoFailureOperation::create_directory,
+                                  error.value(), path);
+          if (error || !output_sync_directory(path, failure))
+            return {StatusCode::io_failure, kOutputFile};
+        }
+        return {};
+      },
+      failure);
 }
 
 inline std::string output_json_escape(std::string_view input) {

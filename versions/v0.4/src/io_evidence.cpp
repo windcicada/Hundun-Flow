@@ -1081,32 +1081,39 @@ Status detail::runtime_encode_evidence_line(MPI_Comm communicator,
 Status EvidenceWriter::append(MPI_Comm communicator,
                               const std::filesystem::path& evidence_file,
                               const IoServicePlan& services,
-                              const RuntimeEvidenceRecord& record) noexcept {
+                              const RuntimeEvidenceRecord& record,
+                              IoFailureContext* failure) noexcept {
+  detail::IoFailureCapture capture(failure);
   int rank = 0;
   if (communicator == MPI_COMM_NULL ||
       MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
     return {StatusCode::invalid_plan, detail::kOutputInput};
   std::filesystem::path parent;
-  Status status =
-      detail::output_collective_stage(communicator, [&]() -> Status {
+  Status status = detail::output_collective_stage(
+      communicator,
+      [&]() -> Status {
         parent = evidence_file.parent_path();
         return evidence_file.empty() || parent.empty()
                    ? Status{StatusCode::invalid_plan, detail::kOutputInput}
                    : Status{};
-      });
+      },
+      &capture.context);
   if (!status) return status;
   std::string text;
   status = detail::runtime_encode_evidence_line(communicator, services, record,
                                                 text);
   if (!status) return status;
-  status = detail::output_create_directory(communicator, rank, parent);
+  status = detail::output_create_directory(communicator, rank, parent,
+                                           &capture.context);
   if (!status) return status;
   if (rank == 0) {
-    status = detail::output_write_file(evidence_file, text, true)
-                 ? Status{}
-                 : Status{StatusCode::io_failure, detail::kOutputFile};
+    status =
+        detail::output_write_file(evidence_file, text, true, &capture.context)
+            ? Status{}
+            : Status{StatusCode::io_failure, detail::kOutputFile};
   }
-  return detail::output_collective_status(communicator, status);
+  return detail::output_collective_status(communicator, status,
+                                          &capture.context);
 }
 
 }  // namespace hundun::v04
