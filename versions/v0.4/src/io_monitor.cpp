@@ -19,24 +19,31 @@ Status MonitorWriter::append(MPI_Comm communicator,
                              const std::filesystem::path& monitor_file,
                              const IoServicePlan& services,
                              const CommittedOutputSnapshot& snapshot,
-                             std::string_view json_payload) noexcept try {
+                             std::string_view json_payload) noexcept {
   int rank = 0;
-  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
-      monitor_file.empty() || monitor_file.parent_path().empty() ||
-      json_payload.size() < 2U || json_payload.front() != '{' ||
-      json_payload.back() != '}' ||
-      json_payload.find('\n') != std::string_view::npos ||
-      json_payload.find('\r') != std::string_view::npos)
+  if (communicator == MPI_COMM_NULL ||
+      MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
     return {StatusCode::invalid_plan, detail::kOutputInput};
-  Status status = detail::validate_output_snapshot(
-      services, RuntimeServiceKind::monitor, snapshot);
-  status = detail::output_collective_status(communicator, status);
+  std::filesystem::path parent;
+  Status status =
+      detail::output_collective_stage(communicator, [&]() -> Status {
+        parent = monitor_file.parent_path();
+        if (monitor_file.empty() || parent.empty() ||
+            json_payload.size() < 2U || json_payload.front() != '{' ||
+            json_payload.back() != '}' ||
+            json_payload.find('\n') != std::string_view::npos ||
+            json_payload.find('\r') != std::string_view::npos)
+          return {StatusCode::invalid_plan, detail::kOutputInput};
+        return detail::validate_output_snapshot(
+            services, RuntimeServiceKind::monitor, snapshot);
+      });
   if (!status) return status;
-  status = detail::output_create_directory(communicator, rank,
-                                           monitor_file.parent_path());
+  status = detail::output_create_directory(communicator, rank, parent);
   if (!status) return status;
-  if (rank == 0) {
+  return detail::output_collective_stage(communicator, [&]() -> Status {
+    if (rank != 0) return {};
     std::ostringstream line;
+    line.exceptions(std::ios::badbit | std::ios::failbit);
     line.imbue(std::locale::classic());
     line << std::setprecision(17) << "{\"step\":" << snapshot.step
          << ",\"time\":" << snapshot.time << ",\"plan\":"
@@ -44,16 +51,11 @@ Status MonitorWriter::append(MPI_Comm communicator,
     const std::string text = line.str();
     const RuntimeServiceCapacity* capacity =
         detail::output_service(services, RuntimeServiceKind::monitor);
-    status = text.size() <= capacity->maximum_staging_bytes_per_rank &&
-                     detail::output_write_file(monitor_file, text, true)
-                 ? Status{}
-                 : Status{StatusCode::io_failure, detail::kOutputFile};
-  }
-  return detail::output_collective_status(communicator, status);
-} catch (const std::bad_alloc&) {
-  return {StatusCode::allocation_failure, detail::kOutputCapacity};
-} catch (...) {
-  return {StatusCode::io_failure, detail::kOutputFile};
+    return text.size() <= capacity->maximum_staging_bytes_per_rank &&
+                   detail::output_write_file(monitor_file, text, true)
+               ? Status{}
+               : Status{StatusCode::io_failure, detail::kOutputFile};
+  });
 }
 
 }  // namespace hundun::v04

@@ -652,6 +652,7 @@ Status validate_record(const IoServicePlan& services,
 
 std::string encode_record(const RuntimeEvidenceRecord& record) {
   std::ostringstream json;
+  json.exceptions(std::ios::badbit | std::ios::failbit);
   json.imbue(std::locale::classic());
   json << std::setprecision(17)
        << "{\"schema\":\"" << detail::kRuntimeEvidenceSchema << "\""
@@ -1042,16 +1043,28 @@ std::uint64_t hash_text(std::string_view text) noexcept {
 
 }  // namespace
 
-Status detail::runtime_encode_evidence_line(
-    MPI_Comm communicator, const IoServicePlan& services,
-    const RuntimeEvidenceRecord& record, std::string& line) noexcept try {
+Status detail::runtime_encode_evidence_line(MPI_Comm communicator,
+                                            const IoServicePlan& services,
+                                            const RuntimeEvidenceRecord& record,
+                                            std::string& line) noexcept {
   line.clear();
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, detail::kOutputInput};
-  Status status = validate_record(services, record);
   std::string candidate;
-  if (status) candidate = encode_record(record);
-  std::uint64_t local_hash = status ? hash_text(candidate) : 0U;
+  Status status =
+      detail::output_collective_stage(communicator, [&]() -> Status {
+        const Status validation = validate_record(services, record);
+        if (!validation) return validation;
+        candidate = encode_record(record);
+        const RuntimeServiceCapacity* capacity =
+            detail::output_service(services, RuntimeServiceKind::evidence);
+        if (capacity == nullptr ||
+            candidate.size() > capacity->maximum_staging_bytes_per_rank)
+          return {StatusCode::invalid_plan, detail::kOutputCapacity};
+        return {};
+      });
+  if (!status) return status;
+  const std::uint64_t local_hash = hash_text(candidate);
   std::uint64_t minimum = local_hash;
   std::uint64_t maximum = local_hash;
   if (MPI_Allreduce(MPI_IN_PLACE, &minimum, 1, MPI_UINT64_T, MPI_MIN,
@@ -1059,37 +1072,34 @@ Status detail::runtime_encode_evidence_line(
       MPI_Allreduce(MPI_IN_PLACE, &maximum, 1, MPI_UINT64_T, MPI_MAX,
                     communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, detail::kOutputCollective};
-  if (status && (minimum == 0U || minimum != maximum))
-    status = {StatusCode::invalid_plan, detail::kOutputInput};
-  const RuntimeServiceCapacity* capacity =
-      detail::output_service(services, RuntimeServiceKind::evidence);
-  if (status &&
-      (capacity == nullptr ||
-       candidate.size() > capacity->maximum_staging_bytes_per_rank))
-    status = {StatusCode::invalid_plan, detail::kOutputCapacity};
-  status = detail::output_collective_status(communicator, status);
-  if (status) line = std::move(candidate);
-  return status;
-} catch (const std::bad_alloc&) {
-  return {StatusCode::allocation_failure, detail::kOutputCapacity};
-} catch (...) {
-  return {StatusCode::io_failure, detail::kOutputFile};
+  if (minimum == 0U || minimum != maximum)
+    return {StatusCode::invalid_plan, detail::kOutputInput};
+  line = std::move(candidate);
+  return {};
 }
 
 Status EvidenceWriter::append(MPI_Comm communicator,
                               const std::filesystem::path& evidence_file,
                               const IoServicePlan& services,
-                              const RuntimeEvidenceRecord& record) noexcept try {
+                              const RuntimeEvidenceRecord& record) noexcept {
   int rank = 0;
-  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
-      evidence_file.empty() || evidence_file.parent_path().empty())
+  if (communicator == MPI_COMM_NULL ||
+      MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
     return {StatusCode::invalid_plan, detail::kOutputInput};
-  std::string text;
-  Status status = detail::runtime_encode_evidence_line(
-      communicator, services, record, text);
+  std::filesystem::path parent;
+  Status status =
+      detail::output_collective_stage(communicator, [&]() -> Status {
+        parent = evidence_file.parent_path();
+        return evidence_file.empty() || parent.empty()
+                   ? Status{StatusCode::invalid_plan, detail::kOutputInput}
+                   : Status{};
+      });
   if (!status) return status;
-  status = detail::output_create_directory(communicator, rank,
-                                           evidence_file.parent_path());
+  std::string text;
+  status = detail::runtime_encode_evidence_line(communicator, services, record,
+                                                text);
+  if (!status) return status;
+  status = detail::output_create_directory(communicator, rank, parent);
   if (!status) return status;
   if (rank == 0) {
     status = detail::output_write_file(evidence_file, text, true)
@@ -1097,10 +1107,6 @@ Status EvidenceWriter::append(MPI_Comm communicator,
                  : Status{StatusCode::io_failure, detail::kOutputFile};
   }
   return detail::output_collective_status(communicator, status);
-} catch (const std::bad_alloc&) {
-  return {StatusCode::allocation_failure, detail::kOutputCapacity};
-} catch (...) {
-  return {StatusCode::io_failure, detail::kOutputFile};
 }
 
 }  // namespace hundun::v04

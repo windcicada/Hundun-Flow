@@ -456,6 +456,20 @@ struct ProductFields {
   std::vector<TransportedScalarRole> scalar_roles;
 };
 
+// These exchange consumers unpack in catalog order. The equation workspaces
+// are compact role-specific arrays, so never concatenate them at this seam.
+void append_scalar_halo_views(const ProductFields& fields,
+                              const std::vector<FieldView>& species,
+                              const std::vector<FieldView>& passive,
+                              std::vector<FieldView>& halo,
+                              std::size_t& count) noexcept {
+  std::size_t si = 0U;
+  std::size_t pi = 0U;
+  for (TransportedScalarRole role : fields.scalar_roles)
+    halo[count++] =
+        role == TransportedScalarRole::species ? species[si++] : passive[pi++];
+}
+
 Status require(FieldRegistry& registry, const char* name,
                std::uint8_t components, std::uint8_t ghosts,
                FieldId& field) noexcept {
@@ -5148,8 +5162,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     halo_views[halo_count++] = molecular_viscosity;
     halo_views[halo_count++] = effective_viscosity;
     halo_views[halo_count++] = conductivity;
-    for (FieldView value : species_trial) halo_views[halo_count++] = value;
-    for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+    append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                             halo_views, halo_count);
     HaloTicket ticket;
     status = product.stage_halos[5U].begin(
         60U, {halo_views.data(), halo_count}, ticket);
@@ -5214,8 +5228,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     std::size_t halo_count = 0U;
     halo_views[halo_count++] = trial_pressure;
     halo_views[halo_count++] = trial_temperature;
-    for (FieldView value : species_trial) halo_views[halo_count++] = value;
-    for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+    append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                             halo_views, halo_count);
     status = product.ibm_rate_donors->exchange(
         161U, {halo_views.data(), halo_count});
     if (status) {
@@ -7494,8 +7508,8 @@ Status ProductDriver::Impl::execute_attempt(
   // Publish predicted h/scalar ghosts before EOS/transport evaluation.
   halo_count = 0U;
   if (status) halo_views[halo_count++] = trial_enthalpy;
-  for (FieldView value : species_trial) halo_views[halo_count++] = value;
-  for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+  append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                           halo_views, halo_count);
   if (status) status = exchange(product.stage_halos[1U], 15U, halo_count);
   if (status) {
     trial_enthalpy = halo_views[0U];
@@ -8758,8 +8772,8 @@ Status ProductDriver::Impl::execute_attempt(
       halo_count = 0U;
       halo_views[halo_count++] = trial_pressure;
       halo_views[halo_count++] = trial_temperature;
-      for (FieldView value : species_trial) halo_views[halo_count++] = value;
-      for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+      append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                               halo_views, halo_count);
       refreshed = product.ibm_rate_donors->exchange(
           161U, {halo_views.data(), halo_count});
       if (refreshed) {
@@ -14009,8 +14023,8 @@ Status ProductDriver::Impl::execute_attempt(
     halo_views[halo_count++] = molecular_viscosity;
     halo_views[halo_count++] = effective_viscosity;
     halo_views[halo_count++] = conductivity;
-    for (FieldView value : species_trial) halo_views[halo_count++] = value;
-    for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+    append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                             halo_views, halo_count);
   }
   if (final_rate_path_active)
     status = exchange(product.stage_halos[5U], 60U,
@@ -14094,8 +14108,8 @@ Status ProductDriver::Impl::execute_attempt(
     halo_count = 0U;
     halo_views[halo_count++] = trial_pressure;
     halo_views[halo_count++] = trial_temperature;
-    for (FieldView value : species_trial) halo_views[halo_count++] = value;
-    for (FieldView value : passive_trial) halo_views[halo_count++] = value;
+    append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                             halo_views, halo_count);
     status = product.ibm_rate_donors->exchange(
         161U, {halo_views.data(), halo_count});
     if (status) {

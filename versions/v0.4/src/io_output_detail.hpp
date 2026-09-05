@@ -3,13 +3,8 @@
 
 #pragma once
 
-#include "hundun/v04_io.hpp"
-
-#include "field_view_interval_detail.hpp"
-
-#include <mpi.h>
-
 #include <fcntl.h>
+#include <mpi.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -18,10 +13,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <stdexcept>
 #include <vector>
+
+#include "field_view_interval_detail.hpp"
+#include "hundun/v04_io.hpp"
 
 namespace hundun::v04::detail {
 
@@ -113,6 +112,22 @@ inline Status output_collective_status(MPI_Comm communicator,
           static_cast<std::uint32_t>(wire)};
 }
 
+// The callback must contain local work only. Catch before the next collective
+// so a failed allocation cannot make one rank leave the collective sequence.
+template <class LocalWork>
+inline Status output_collective_stage(MPI_Comm communicator,
+                                      LocalWork&& work) noexcept {
+  Status status;
+  try {
+    status = work();
+  } catch (const std::bad_alloc&) {
+    status = {StatusCode::allocation_failure, kOutputCapacity};
+  } catch (...) {
+    status = {StatusCode::io_failure, kOutputFile};
+  }
+  return output_collective_status(communicator, status);
+}
+
 inline bool output_write_file(const std::filesystem::path& path,
                               const std::uint8_t* data, std::size_t bytes,
                               bool append) noexcept {
@@ -158,15 +173,15 @@ inline bool output_sync_directory(const std::filesystem::path& path) noexcept {
 
 inline Status output_create_directory(MPI_Comm communicator, int rank,
                                       const std::filesystem::path& path) noexcept {
-  Status status;
-  if (rank == 0) {
-    std::error_code error;
-    std::filesystem::create_directories(path, error);
-    status = !error && output_sync_directory(path)
-                 ? Status{}
-                 : Status{StatusCode::io_failure, kOutputFile};
-  }
-  return output_collective_status(communicator, status);
+  return output_collective_stage(communicator, [&]() -> Status {
+    if (rank == 0) {
+      std::error_code error;
+      std::filesystem::create_directories(path, error);
+      if (error || !output_sync_directory(path))
+        return {StatusCode::io_failure, kOutputFile};
+    }
+    return {};
+  });
 }
 
 inline std::string output_json_escape(std::string_view input) {

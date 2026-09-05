@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_io.hpp"
-
-#include "../../src/app_identity_detail.hpp"
-#include "../support/piso_fixture.hpp"
-
 #include <mpi.h>
 #include <unistd.h>
 
@@ -13,13 +8,69 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
+
+#include "../../src/app_identity_detail.hpp"
+#include "../support/piso_fixture.hpp"
+#include "hundun/v04_io.hpp"
+
+// Instrument only this executable: exercise real allocation sites without
+// adding fault controls to the production output API.
+namespace allocation_probe {
+struct alignas(std::max_align_t) Header {
+  std::size_t bytes;
+  std::size_t epoch;
+};
+thread_local bool enabled = false;
+thread_local std::size_t epoch = 0U;
+thread_local std::size_t calls = 0U;
+thread_local std::size_t fail_at = SIZE_MAX;
+thread_local std::size_t live = 0U;
+thread_local std::size_t peak = 0U;
+thread_local bool fired = false;
+void begin(std::size_t failure = SIZE_MAX) noexcept {
+  ++epoch;
+  calls = live = peak = 0U;
+  fail_at = failure;
+  fired = false;
+  enabled = true;
+}
+void end() noexcept { enabled = false; }
+}  // namespace allocation_probe
+
+void* operator new(std::size_t bytes) {
+  using namespace allocation_probe;
+  if (enabled && calls++ == fail_at) {
+    fired = true;
+    throw std::bad_alloc{};
+  }
+  if (bytes > SIZE_MAX - sizeof(Header)) throw std::bad_alloc{};
+  auto* header = static_cast<Header*>(std::malloc(sizeof(Header) + bytes));
+  if (header == nullptr) throw std::bad_alloc{};
+  *header = {bytes, enabled ? epoch : 0U};
+  if (enabled) {
+    live += bytes;
+    peak = std::max(peak, live);
+  }
+  return header + 1;
+}
+void operator delete(void* pointer) noexcept {
+  using namespace allocation_probe;
+  if (pointer == nullptr) return;
+  auto* header = static_cast<Header*>(pointer) - 1;
+  if (enabled && header->epoch == epoch) live -= header->bytes;
+  std::free(header);
+}
+void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
+void operator delete[](void* pointer) noexcept { ::operator delete(pointer); }
 
 namespace {
 
@@ -35,6 +86,68 @@ std::string read(const fs::path& path) {
   std::ifstream input(path, std::ios::binary);
   return {std::istreambuf_iterator<char>(input),
           std::istreambuf_iterator<char>()};
+}
+
+template <class Write>
+bool allocation_failures(const fs::path& root, std::string_view name,
+                         Write write) {
+  int rank = 0;
+  int ranks = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  const fs::path baseline = root / (std::string(name) + "-0-99999999");
+  allocation_probe::begin();
+  const Status baseline_status = write(baseline);
+  const std::size_t allocation_count = allocation_probe::calls;
+  allocation_probe::end();
+  if (!expect(static_cast<bool>(baseline_status), "fault baseline succeeds"))
+    return false;
+  bool passed = true;
+  for (int failing_rank : {ranks - 1, 0}) {
+    std::uint64_t count = allocation_count;
+    MPI_Bcast(&count, 1, MPI_UINT64_T, failing_rank, MPI_COMM_WORLD);
+    if (rank == 0)
+      std::cout << "inject " << name << " rank=" << failing_rank
+                << " allocation_sites=" << count << std::endl;
+    for (std::uint64_t failure = 0U; failure < count; ++failure) {
+      const std::string ordinal = std::to_string(failure);
+      const fs::path path =
+          root / (std::string(name) + "-" + std::to_string(failing_rank) + "-" +
+                  std::string(8U - ordinal.size(), '0') + ordinal);
+      allocation_probe::begin(rank == failing_rank ? failure : SIZE_MAX);
+      const Status status = write(path);
+      const bool fired = allocation_probe::fired;
+      allocation_probe::end();
+      const std::uint64_t wire =
+          (static_cast<std::uint64_t>(status.code) << 32U) | status.detail;
+      std::uint64_t minimum = wire;
+      std::uint64_t maximum = wire;
+      MPI_Allreduce(MPI_IN_PLACE, &minimum, 1, MPI_UINT64_T, MPI_MIN,
+                    MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &maximum, 1, MPI_UINT64_T, MPI_MAX,
+                    MPI_COMM_WORLD);
+      if (status || (rank == failing_rank && !fired))
+        std::cerr << "failure probe rank=" << rank << " allocation=" << failure
+                  << " code=" << static_cast<unsigned>(status.code) << '/'
+                  << status.detail << " injected=" << fired << '\n';
+      // Standard-library streams may translate bad_alloc to ios failure;
+      // identity validation may translate it to invalid_plan. None may
+      // report success or let ranks leave the collective sequence.
+      passed &= expect(
+          minimum == maximum && !status && (rank != failing_rank || fired),
+          "one-rank bad_alloc returns the same error everywhere");
+      if (rank == 0) {
+        const fs::path published =
+            name == "visit" ? path / "step-00000000000000000025.visit" : path;
+        passed &= expect(
+            !fs::exists(published),
+            "failed output does not publish an index or evidence record");
+      }
+    }
+  }
+  // A failed write must not poison the next collective call.
+  passed &= static_cast<bool>(write(baseline));
+  return passed;
 }
 
 CartesianMeshSpec mesh(bool stretched) {
@@ -61,7 +174,8 @@ CartesianMeshSpec mesh(bool stretched) {
   return spec;
 }
 
-bool run_case(const fs::path& root, bool stretched) {
+bool run_case(const fs::path& root, bool stretched,
+              std::string_view fault_kind = {}) {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   if (!CartesianGeometryCompiler::compile(MPI_COMM_SELF, mesh(stretched), {},
@@ -102,8 +216,25 @@ bool run_case(const fs::path& root, bool stretched) {
                                    {fields.data(), fields.size()},
                                    true};
   const fs::path visit = root / (stretched ? "Visit-stretched" : "Visit-uniform");
+  if (fault_kind == "visit")
+    return allocation_failures(root, "visit", [&](const fs::path& path) {
+      return VisitWriter::write(MPI_COMM_WORLD, path, services, snapshot);
+    });
+  if (fault_kind == "screen")
+    return allocation_failures(root, "screen", [&](const fs::path& path) {
+      return ScreenWriter::append(MPI_COMM_WORLD, path, services, snapshot,
+                                  "continuity=0 eos=0");
+    });
+  if (fault_kind == "monitor")
+    return allocation_failures(root, "monitor", [&](const fs::path& path) {
+      return MonitorWriter::append(MPI_COMM_WORLD, path, services, snapshot,
+                                   "{\"mass\":1.0}");
+    });
+  allocation_probe::begin();
   const Status visit_status =
       VisitWriter::write(MPI_COMM_SELF, visit, services, snapshot);
+  const std::size_t peak = allocation_probe::peak;
+  allocation_probe::end();
   if (!visit_status)
     std::cerr << "visit failed stretched=" << stretched << " code="
               << static_cast<unsigned>(visit_status.code)
@@ -113,6 +244,47 @@ bool run_case(const fs::path& root, bool stretched) {
   const fs::path data = visit /
       ("step-00000000000000000025-rank-00000000" + extension);
   const std::string bytes = read(data);
+  std::uint64_t hash = UINT64_C(1469598103934665603);
+  for (unsigned char value : bytes) {
+    hash ^= value;
+    hash *= UINT64_C(1099511628211);
+  }
+  std::cout << "visit stretched=" << stretched << " bytes=" << bytes.size()
+            << " hash=" << hash << " allocation_peak=" << peak << '\n';
+  passed &= expect(hash == (stretched ? UINT64_C(4264152898443382635)
+                                      : UINT64_C(16284654938302156485)),
+                   "VTI and VTR remain byte-identical to the pre-fix fixtures");
+  passed &=
+      expect(peak <= bytes.size() + 16384U,
+             "Visit stages only one full output buffer plus bounded metadata");
+  if (fault_kind.empty()) {
+    auto tight_capacities = capacities;
+    for (auto& entry : tight_capacities)
+      if (entry.kind == RuntimeServiceKind::visit)
+        entry.maximum_staging_bytes_per_rank = bytes.size();
+    IoServicePlan tight_services;
+    passed &= static_cast<bool>(IoServicePlan::compile(
+        {specs.data(), specs.size()},
+        {tight_capacities.data(), tight_capacities.size()}, local_cells,
+        tight_services));
+    const fs::path tight = root / (stretched ? "tight-vtr" : "tight-vti");
+    const Status tight_status =
+        VisitWriter::write(MPI_COMM_SELF, tight, tight_services, snapshot);
+    passed &= expect(tight_status.code == StatusCode::invalid_plan &&
+                         !fs::exists(tight / "step-00000000000000000025.visit"),
+                     "file-size-only budget rejects live metadata overhead "
+                     "before publication");
+    const double original = pressure.view.unchecked({0, 0, 0}, 0U);
+    pressure.view.unchecked({0, 0, 0}, 0U) =
+        std::numeric_limits<double>::quiet_NaN();
+    const Status nonfinite = VisitWriter::write(
+        MPI_COMM_SELF, root / "nonfinite", services, snapshot);
+    pressure.view.unchecked({0, 0, 0}, 0U) = original;
+    passed &= expect(
+        nonfinite.code == StatusCode::numerical_failure &&
+            !fs::exists(root / "nonfinite" / "step-00000000000000000025.visit"),
+        "single-buffer output still rejects nonfinite field values");
+  }
   passed &= !bytes.empty() &&
             bytes.find(stretched ? "RectilinearGrid" : "ImageData") !=
                 std::string::npos &&
@@ -185,6 +357,10 @@ bool run_case(const fs::path& root, bool stretched) {
   evidence.stages = {timings.data(), timings.size()};
   evidence.startup = true;
   evidence.statistics_eligible = false;
+  if (fault_kind == "evidence")
+    return allocation_failures(root, "evidence", [&](const fs::path& path) {
+      return EvidenceWriter::append(MPI_COMM_WORLD, path, services, evidence);
+    });
   RuntimeEvidenceRecord invalid_simple = evidence;
   invalid_simple.coupling = RuntimeCouplingKind::simple;
   passed &= !EvidenceWriter::append(
@@ -1031,14 +1207,24 @@ bool run_case(const fs::path& root, bool stretched) {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
+  int rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  const std::string_view fault_kind = argc > 1 ? argv[1] : "";
+  int owner_pid = ::getpid();
+  if (!fault_kind.empty()) MPI_Bcast(&owner_pid, 1, MPI_INT, 0, MPI_COMM_WORLD);
   const fs::path root = fs::temp_directory_path() /
-                        ("hundun-v04-io-product-" +
-                         std::to_string(::getpid()));
+                        ("hundun-v04-io-product-" + std::to_string(owner_pid));
   std::error_code error;
-  fs::remove_all(root, error);
-  fs::create_directories(root);
-  const bool passed = run_case(root, false) && run_case(root, true);
-  if (passed) fs::remove_all(root, error);
+  if (fault_kind.empty() || rank == 0) {
+    fs::remove_all(root, error);
+    fs::create_directories(root);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  const bool passed = fault_kind.empty()
+                          ? run_case(root, false) && run_case(root, true)
+                          : run_case(root, false, fault_kind);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (passed && (fault_kind.empty() || rank == 0)) fs::remove_all(root, error);
   if (!passed) std::cerr << "committed output path failure\n";
   MPI_Finalize();
   return passed ? 0 : 1;

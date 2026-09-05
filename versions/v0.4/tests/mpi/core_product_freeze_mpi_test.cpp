@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-#include "hundun/v04_app.hpp"
-
-#include "../support/product_fixture.hpp"
-#include "core_product_freeze_detail.hpp"
-#include "solver_thermophysical_predictor_detail.hpp"
-
 #include <mpi.h>
+#include <unistd.h>
 
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
-#include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <string>
-#include <unistd.h>
 #include <vector>
+
+#include "../support/product_fixture.hpp"
+#include "core_product_freeze_detail.hpp"
+#include "hundun/v04_app.hpp"
+#include "solver_thermophysical_predictor_detail.hpp"
 
 namespace {
 
@@ -276,6 +276,88 @@ ValidatedModel multispecies_open_model(bool immersed = false) {
         "cylinder_ascii.stl", ImmersedFluidSide::outside};
   }
   return model;
+}
+
+bool run_scalar_catalog_order(int rank) {
+  const std::filesystem::path data_root =
+      std::filesystem::path{HUNDUN_V04_SOURCE_ROOT} / "tests" / "data";
+  const std::array<std::array<std::size_t, 3U>, 3U> orders{
+      {{{0U, 1U, 2U}}, {{2U, 0U, 1U}}, {{0U, 2U, 1U}}}};
+  const std::array<double, 3U> values{{0.10, 0.20, 0.05}};
+  using State = std::map<std::string, std::vector<double>>;
+  bool passed = true;
+  for (bool immersed : {false, true}) {
+    State baseline;
+    for (std::size_t permutation = 0U; permutation < orders.size();
+         ++permutation) {
+      ValidatedModel model = multispecies_open_model(immersed);
+      model.solver.coupling = CouplingKind::simple;
+      const auto catalog = model.transported_scalars;
+      std::array<double, 3U> initial_values{};
+      for (std::size_t index = 0U; index < values.size(); ++index) {
+        model.transported_scalars[index] = catalog[orders[permutation][index]];
+        initial_values[index] = values[orders[permutation][index]];
+      }
+      CompiledCasePlan plan;
+      Status status =
+          ProductCompiler::compile(MPI_COMM_WORLD, model, data_root, plan);
+      ProductDriver driver;
+      if (status)
+        status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+      DriverInitialState initial;
+      initial.pressure_reference = 98000.0;
+      initial.temperature = 315.0;
+      initial.velocity = {1.0e-4, 0.0, 0.0};
+      initial.transported_scalars = {initial_values.data(),
+                                     initial_values.size()};
+      if (status) status = driver.initialize(initial);
+      std::map<std::string, FieldId> identities;
+      CommittedOutputSnapshot snapshot;
+      if (status) status = driver.committed_output_snapshot(snapshot);
+      if (status)
+        for (std::size_t index = 0U; index < snapshot.fields.size; ++index) {
+          const auto& field = snapshot.fields.data[index];
+          identities.emplace(std::string(field.stable_name),
+                             field.values.field);
+        }
+      DriverStepReport step;
+      // A second accepted step consumes the final nonadvective rates and BDF
+      // history.
+      for (unsigned index = 0U; index < 2U && status; ++index)
+        status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+      if (status) status = driver.committed_output_snapshot(snapshot);
+      State state;
+      if (status)
+        for (std::size_t index = 0U; index < snapshot.fields.size; ++index) {
+          const auto& field = snapshot.fields.data[index];
+          const std::string name{field.stable_name};
+          passed &=
+              expect(identities.at(name) == field.values.field, rank,
+                     "scalar field identity survives halo and donor exchange");
+          auto& data = state[name];
+          for (std::int32_t z = 0; z < field.values.interior.z; ++z)
+            for (std::int32_t y = 0; y < field.values.interior.y; ++y)
+              for (std::int32_t x = 0; x < field.values.interior.x; ++x)
+                for (std::uint8_t component = 0U;
+                     component < field.values.components; ++component)
+                  data.push_back(field.values.unchecked({x, y, z}, component));
+        }
+      if (!status)
+        std::cerr << "scalar order rank=" << rank << " immersed=" << immersed
+                  << " permutation=" << permutation
+                  << " status=" << static_cast<unsigned>(status.code) << '/'
+                  << status.detail << " stage=" << step.failed_stage << '\n';
+      passed &= expect(status && step.accepted && snapshot.step == 2U, rank,
+                       "each scalar catalog initializes and advances twice");
+      if (permutation == 0U)
+        baseline = std::move(state);
+      else
+        passed &= expect(!state.empty() && state == baseline, rank,
+                         "species-first, passive-first and interleaved "
+                         "catalogs give identical named fields");
+    }
+  }
+  return passed;
 }
 
 bool run_fresh_initialize_invalid_input_contract(int rank) {
@@ -3522,6 +3604,12 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (argc > 1 && std::strcmp(argv[1], "--scalar-catalog-order-only") == 0) {
+    const bool passed =
+        collective(run_scalar_catalog_order(rank), MPI_COMM_WORLD);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if (argc == 2 &&
       std::strcmp(argv[1], "--simple-compile-only") == 0) {
     const bool passed =
