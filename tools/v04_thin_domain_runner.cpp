@@ -1985,7 +1985,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream loop_performance;
   if (options.observe_performance && !local_stage(communicator, [&] {
         loop_performance.open(options.run_root / ("solver-rank-" + std::to_string(rank) + ".csv"));
-        loop_performance << "step,rank,attempt,dt,attempt_status,corrector,refinement,kind,invoked,"
+        loop_performance << "step,rank,attempt,scalar_coupling_sweep,dt,attempt_status,corrector,refinement,kind,invoked,"
             "iterations,A_calls,M_calls,linear_initial,linear_final,prepare_ns,solve_ns,close_ns,"
             "A_ns,M_ns,dot_ns,reduce_ns,update_ns,mg_refill_ns,mg_copy_ns,structured_wait_ns,"
             "structured_control_ns,globalization_valid,baseline_candidates,extrapolated_candidates,"
@@ -2031,7 +2031,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              "spatial_calls,spatial_prepare_ns,spatial_solve_ns,spatial_close_ns,"
              "A_apply_ns,M_apply_ns,arnoldi_dot_ns,arnoldi_reduce_ns,arnoldi_update_ns,"
              "final_momentum_ns,terminal_metrics_ns,boundary_ledger_ns,structured_wait_ns,"
-             "structured_control_ns,dropped_loops\n";
+             "structured_control_ns,dropped_loops,scalar_remap_ns,scalar_coupling_sweeps,scalar_remap_iterations\n";
     }
     if (force)
       force << "step,time,requested_bdf_order,bdf_order,attempts,"
@@ -2122,7 +2122,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
             const auto& g = row.globalization;
             const auto& work = g.work;
             loop_performance << std::setprecision(17) << starting_step + index + 1U << ',' << rank
-                << ',' << row.attempt << ',' << row.dt << ',' << unsigned(row.attempt_status.code)
+                << ',' << row.attempt << ',' << row.scalar_coupling_sweep << ',' << row.dt << ',' << unsigned(row.attempt_status.code)
                 << ',' << unsigned(solve.corrector) << ',' << unsigned(solve.refinement)
                 << ',' << unsigned(solve.kind) << ',' << solve.invoked << ',' << linear.iterations
                 << ',' << linear.operator_applies << ',' << linear.preconditioner_applies
@@ -2494,7 +2494,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (options.observe_performance) {
       // One diagnostic gather per observed step. Preserve each rank's disjoint
       // accounting; do not sum independent phase maxima as a wall-clock time.
-      constexpr std::size_t width = 52U;
+      constexpr std::size_t width = 55U;
       std::array<std::uint64_t, width> local{};
       local[0U] = step.accepted_step;
       local[1U] = static_cast<std::uint64_t>(rank);
@@ -2534,6 +2534,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       local[49U] = step.resources.structured_wait_nanoseconds;
       local[50U] = step.resources.structured_control_nanoseconds;
       local[51U] = step.pressure_energy_performance.dropped_loops;
+      local[52U] = step.scalar_transport.remap_nanoseconds;
+      local[53U] = step.scalar_transport.coupling_sweeps;
+      local[54U] = step.scalar_transport.remap_iterations;
       std::vector<std::uint64_t> gathered;
       // Allocate before entering Gather, with one all-rank failure decision.
       try {

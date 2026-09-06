@@ -36,6 +36,12 @@ foreach(rank_count IN ITEMS 1 2 4)
   endforeach()
 endforeach()
 
+add_test(NAME v04_solver_observation_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/solver_observe_cli_test.py"
+    "${hundun_repository_root}/tools/v04_solver_observe.py")
+set_tests_properties(v04_solver_observation_cli PROPERTIES TIMEOUT 30)
+
 add_executable(v04_mpi_observer_probe mpi/mpi_observer_probe.c)
 target_link_libraries(v04_mpi_observer_probe PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})
 add_library(v04_mpi_observer SHARED "${hundun_repository_root}/tools/v04_mpi_observer.c")
