@@ -40,7 +40,7 @@ O(dt^2)，其空间耗散与时间阶数必须由独立测试验证，不能只�
 - [x] 1/2/4 ranks、非均匀网格、开边界、IBM、变比热与 Sutherland 输运。
 - [x] 真实数值失败回退、V3 精确历史重启、显式方法恢复；旧统计 epoch 回归另核对。
 - [x] 聚焦集成回归、独占 Re3900 短测，不把冷启动步耗时当成长窗口速度。
-- [ ] 分项 DCO 提交、核对并推送 GitHub main，最后启动唯一的 128-rank 长测。
+- [x] 分项 DCO 提交、核对并推送 GitHub main，最后启动唯一的 128-rank 长测。
 
 上述勾选只代表对应回归，完整发布和长测状态在文末更新。
 
@@ -246,3 +246,24 @@ product=12392596218383143750；通过受限方法恢复读取，而非伪造相�
 按 pilot 完整步均值粗略外推剩余 33990 步约 95.5 h；长测的输出周期为 500，
 而 pilot 每 10 步输出一次，因此 I/O 摊销不同，后续 refinement 和流场变化也可能
 改变该估计。这里只给量级，不设置耗时门禁。长测仍须跨过原失败区间并完成统计。
+
+### 推送及长测提交
+
+先将正确性、观测和证据三项提交 fast-forward 推送 main，并通过远端读取核对
+`756b480beb571122d3ba2ba6be4367355708e848`，再于 2026-09-06 21:47:30 +08:00
+启动 `hundun-re3900-scalar-repaired-20260906.service`。本节是后续文档提交；没有
+更改冻结程序（其源码仍为 `0be7c02`）。原始实验日志按字节保留，包括终端尾随
+空格；程序源码的 `git diff --check` 通过，不为满足日志格式检查改写历史证据。
+
+长测目录：
+`/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/long-scalar-repaired-35000-20260906`。
+启动时 MainPID=119112，MPI launcher PID=119120。实查仅此一个 MPI 作业、128 个
+solver ranks，旧长测及所有短测/构建均未运行。只读 pilot checkpoint
+`generation-1010-25805727397523` 已通过精确 V3 读取；长测没有再次方法恢复，保留
+新 epoch=1000 和采样起点=11001。
+
+交付检查已观察到 1011–1019 共 9 个已接受 BDF2 步，无 retry/recovery；service
+仍为 active/running。`health.csv`、`performance.csv`、`conservation.csv`、
+逐求解 CSV 和 `evidence.jsonl` 由程序随推进更新。该状态是“长测已提交并正常
+起步”，**不是长测完成或已经跨过原故障区间的结论**。后续短测前必须暂停此作业，
+不得与其并行启动另一组 MPI 求解器。
