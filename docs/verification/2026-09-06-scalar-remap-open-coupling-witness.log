@@ -1,0 +1,36 @@
+OPEN_SCALAR family=passive reverse=0 defect=1.94357884572766e-17 delta_inventory=6.02896986856139e-06 boundary_advection=-0.048226956672132 boundary_diffusion=4.80227639343846e-06 incoming_correction=5.35744923376991e-05 constant_error=1.66533453693773e-16 minimum=0.15380617064216 before_minimum=0.153806023374436 maximum=0.246193976539646 mass_scale=1 source_alpha=1 theta=0.000126375729419948 passed=1
+OPEN_SCALAR family=passive reverse=1 defect=4.89466084697729e-17 delta_inventory=4.27495291448639e-06 boundary_advection=-0.0341934167374556 boundary_diffusion=6.20657852191009e-06 incoming_correction=0 constant_error=1.66533453693773e-16 minimum=0.153806203473746 before_minimum=0.153806023374436 maximum=0.246193976615708 mass_scale=1 source_alpha=1 theta=0.000136166039260186 passed=1
+SCALAR_OUTER sweep=1 R=1.5239912869238903e-07 Q=2719954983332317195 theta=1 momtheta=0.76305665248003463
+SCALAR_OUTER sweep=2 R=1.4846194857075336e-11 Q=2719954983332317195 theta=1 momtheta=0.76308129185349993
+SCALAR_OUTER sweep=3 R=3.0942118710918619e-15 Q=2719954983332317195 theta=1 momtheta=0.76308129338647468
+OPEN_SCALAR family=EOS reverse=0 defect=1.73859130932687e-16 delta_inventory=7.18896751792899e-06 boundary_advection=-0.0575069291694355 boundary_diffusion=4.81097438937487e-06 incoming_correction=0 constant_error=1.11022302462516e-16 minimum=0.153802985370296 before_minimum=0.153806023374436 maximum=0.246197619683586 mass_scale=1 source_alpha=1 theta=1 passed=1
+SCALAR_OUTER sweep=1 R=1.5240001475693205e-07 Q=9597332346816418463 theta=1 momtheta=0.62957085330873341
+SCALAR_OUTER sweep=2 R=1.4842583849331116e-11 Q=9597332346816418463 theta=1 momtheta=0.6297656124567117
+SCALAR_OUTER sweep=3 R=2.5665219258489062e-14 Q=9597332346816418463 theta=1 momtheta=0.62957050522534763
+SCALAR_OUTER sweep=4 R=2.5529777533579621e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051151457288
+SCALAR_OUTER sweep=5 R=2.5324973008508761e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051131438879
+SCALAR_OUTER sweep=6 R=2.5536406798140151e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051162677036
+SCALAR_OUTER sweep=7 R=2.5301023748958079e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051139431319
+SCALAR_OUTER sweep=8 R=2.5520489012499386e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051167056566
+SCALAR_OUTER sweep=9 R=2.5325073861059221e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051137799236
+SCALAR_OUTER sweep=10 R=2.5551524599304034e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051158788724
+SCALAR_OUTER sweep=11 R=2.5320145394959982e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051100553973
+SCALAR_OUTER sweep=12 R=2.551490178049238e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051189370183
+SCALAR_OUTER sweep=13 R=2.5315129799583746e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051139731535
+SCALAR_OUTER sweep=14 R=2.5552059117957589e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051155317123
+SCALAR_OUTER sweep=15 R=2.5316837430883704e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051143651299
+SCALAR_OUTER sweep=16 R=2.5525309765025276e-14 Q=9597332346816418463 theta=1 momtheta=0.62957051148013532
+open_advance_failure species=1 reverse=1 6/10216 stage=65 sweep=16 c=2 scalar_residual=2.55253e-14 pairing=2.84796e-16 base_c=1.34411e-13 base_e=1.06907e-13
+open_candidate 1.00022 2.36159e-16 1.62553e-16
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[45376,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

@@ -1,0 +1,64 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+      Start 151: v04_core_product_freeze_mpi_1
+ 1/27 Test #151: v04_core_product_freeze_mpi_1 ...............................   Passed    1.52 sec
+      Start 152: v04_scalar_catalog_order_mpi_1
+ 2/27 Test #152: v04_scalar_catalog_order_mpi_1 ..............................   Passed    1.71 sec
+      Start 157: v04_core_open_periodic_target_mpi_1
+ 3/27 Test #157: v04_core_open_periodic_target_mpi_1 .........................   Passed    0.35 sec
+      Start 161: v04_core_product_freeze_mpi_2
+ 4/27 Test #161: v04_core_product_freeze_mpi_2 ...............................   Passed    0.96 sec
+      Start 162: v04_scalar_catalog_order_mpi_2
+ 5/27 Test #162: v04_scalar_catalog_order_mpi_2 ..............................   Passed    1.05 sec
+      Start 167: v04_core_open_periodic_target_mpi_2
+ 6/27 Test #167: v04_core_open_periodic_target_mpi_2 .........................   Passed    0.32 sec
+      Start 171: v04_core_product_freeze_mpi_4
+ 7/27 Test #171: v04_core_product_freeze_mpi_4 ...............................   Passed    5.39 sec
+      Start 172: v04_scalar_catalog_order_mpi_4
+ 8/27 Test #172: v04_scalar_catalog_order_mpi_4 ..............................   Passed    0.81 sec
+      Start 177: v04_core_open_periodic_target_mpi_4
+ 9/27 Test #177: v04_core_open_periodic_target_mpi_4 .........................   Passed    0.34 sec
+      Start 181: v04_core_product_localized_immersed_compile_mpi_2
+10/27 Test #181: v04_core_product_localized_immersed_compile_mpi_2 ...........   Passed    0.44 sec
+      Start 182: v04_core_product_localized_immersed_bind_fail_close_mpi_2
+11/27 Test #182: v04_core_product_localized_immersed_bind_fail_close_mpi_2 ...   Passed    0.45 sec
+      Start 183: v04_core_product_localized_immersed_compile_mpi_4
+12/27 Test #183: v04_core_product_localized_immersed_compile_mpi_4 ...........   Passed    0.40 sec
+      Start 184: v04_core_product_localized_immersed_bind_fail_close_mpi_4
+13/27 Test #184: v04_core_product_localized_immersed_bind_fail_close_mpi_4 ...   Passed    0.42 sec
+      Start 185: v04_io_restart_mpi_4
+14/27 Test #185: v04_io_restart_mpi_4 ........................................   Passed   23.87 sec
+      Start 199: v04_io_visit_allocation_failure_mpi_2
+15/27 Test #199: v04_io_visit_allocation_failure_mpi_2 .......................   Passed    3.26 sec
+      Start 200: v04_io_evidence_allocation_failure_mpi_2
+16/27 Test #200: v04_io_evidence_allocation_failure_mpi_2 ....................   Passed    0.86 sec
+      Start 203: v04_io_visit_allocation_failure_mpi_4
+17/27 Test #203: v04_io_visit_allocation_failure_mpi_4 .......................   Passed    3.34 sec
+      Start 204: v04_io_evidence_allocation_failure_mpi_4
+18/27 Test #204: v04_io_evidence_allocation_failure_mpi_4 ....................   Passed    1.31 sec
+      Start 208: v04_app_driver
+19/27 Test #208: v04_app_driver ..............................................   Passed    1.63 sec
+      Start 215: v04_product_pressure_energy_retry_mpi_1
+20/27 Test #215: v04_product_pressure_energy_retry_mpi_1 .....................   Passed    1.15 sec
+      Start 216: v04_product_pressure_energy_retry_mpi_2
+21/27 Test #216: v04_product_pressure_energy_retry_mpi_2 .....................   Passed    0.96 sec
+      Start 217: v04_product_pressure_energy_retry_mpi_4
+22/27 Test #217: v04_product_pressure_energy_retry_mpi_4 .....................   Passed    0.98 sec
+      Start 218: v04_product_pressure_energy_temporal_convergence
+23/27 Test #218: v04_product_pressure_energy_temporal_convergence ............   Passed    0.66 sec
+      Start 219: v04_product_simple_pressure_energy_temporal_convergence
+24/27 Test #219: v04_product_simple_pressure_energy_temporal_convergence .....   Passed    0.72 sec
+      Start 220: v04_product_restart_method_history
+25/27 Test #220: v04_product_restart_method_history ..........................   Passed    1.23 sec
+      Start 221: v04_product_scalar_splitting_observation
+26/27 Test #221: v04_product_scalar_splitting_observation ....................   Passed    0.62 sec
+      Start 268: v04_bc_apply
+27/27 Test #268: v04_bc_apply ................................................   Passed    0.28 sec
+
+100% tests passed, 0 tests failed out of 27
+
+Label Time Summary:
+v04_focused               = 135.08 sec*proc (14 tests)
+v04_method_observation    =   0.62 sec*proc (1 test)
+
+Total Test time (real) =  55.04 sec

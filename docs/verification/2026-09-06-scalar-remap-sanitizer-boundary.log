@@ -1,0 +1,11 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+    Start 268: v04_bc_apply
+1/1 Test #268: v04_bc_apply .....................   Passed    0.39 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   0.39 sec*proc (1 test)
+
+Total Test time (real) =   0.41 sec

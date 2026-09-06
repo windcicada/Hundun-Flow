@@ -1,0 +1,16 @@
+open_initial_failure phase=compile 2/1503
+open_initial_failure phase=compile 2/1503
+open_initial_failure phase=compile 2/1503
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+open_initial_failure phase=compile 2/1503
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[17029,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

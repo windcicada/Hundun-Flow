@@ -1,0 +1,16 @@
+OPEN_SCALAR family=passive reverse=0 defect=1.94357884572766e-17 delta_inventory=6.02896986856139e-06 boundary_advection=-0.048226956672132 boundary_diffusion=4.80227639343846e-06 incoming_correction=5.35744923376991e-05 constant_error=1.66533453693773e-16 theta=0.000126375729419948 passed=1
+open_advance_failure 6/5792 stage=53
+OPEN_SCALAR family=EOS reverse=0 defect=1.73859130932687e-16 delta_inventory=7.18896751792899e-06 boundary_advection=-0.0575069291694355 boundary_diffusion=4.81097438937487e-06 incoming_correction=0 constant_error=1.11022302462516e-16 theta=1 passed=0
+open_advance_failure 2/10421 stage=44
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[17424,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

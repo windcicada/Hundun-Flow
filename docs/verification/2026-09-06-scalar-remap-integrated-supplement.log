@@ -1,0 +1,49 @@
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+      Start 104: v04_solver_pressure_energy_schur
+ 1/43 Test #104: v04_solver_pressure_energy_schur ............................   Passed    0.34 sec
+      Start 105: v04_solver_pressure_energy_globalization
+ 2/43 Test #105: v04_solver_pressure_energy_globalization ....................   Passed    0.29 sec
+      Start 106: v04_solver_pressure_energy_globalization_mpi_1
+ 3/43 Test #106: v04_solver_pressure_energy_globalization_mpi_1 ..............   Passed    0.28 sec
+      Start 107: v04_solver_pressure_energy_globalization_mpi_2
+ 4/43 Test #107: v04_solver_pressure_energy_globalization_mpi_2 ..............   Passed    0.29 sec
+      Start 108: v04_solver_pressure_energy_globalization_mpi_4
+ 5/43 Test #108: v04_solver_pressure_energy_globalization_mpi_4 ..............   Passed    0.31 sec
+      Start 109: v04_solver_thermophysical_idp
+ 6/43 Test #109: v04_solver_thermophysical_idp ...............................   Passed    0.29 sec
+      Start 110: v04_solver_thermophysical_idp_mpi_2
+ 7/43 Test #110: v04_solver_thermophysical_idp_mpi_2 .........................   Passed    0.30 sec
+      Start 127: v04_solver_ibm_equation_interface
+ 8/43 Test #127: v04_solver_ibm_equation_interface ...........................   Passed    0.39 sec
+      Start 130: v04_solver_equations_mpi_1
+ 9/43 Test #130: v04_solver_equations_mpi_1 ..................................***Failed    2.36 sec
+rank 0 FAIL: limited partition-face pairs have the decomposition-invariant RHS oracle and are conservative, bounded, spatially local, and direction preserving
+rank 0 FAIL: pressure-outlet outflow uses one adjacent budget and publishes exact provisional CFL
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[39973,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+89% tests passed, 1 tests failed out of 9
+
+Label Time Summary:
+v04_focused               =   5.45 sec*proc (7 tests)
+v04_method_observation    =   0.00 sec*proc (0 test)
+
+Total Test time (real) =   4.85 sec
+
+The following tests FAILED:
+	130 - v04_solver_equations_mpi_1 (Failed)               v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

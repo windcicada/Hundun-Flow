@@ -1,0 +1,90 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+      Start   1: v04_scalar_contract_uniform_mpi_1
+ 1/56 Test   #1: v04_scalar_contract_uniform_mpi_1 ...........................   Passed    1.97 sec
+      Start   2: v04_scalar_contract_stretched_mpi_1
+ 2/56 Test   #2: v04_scalar_contract_stretched_mpi_1 .........................   Passed    2.19 sec
+      Start   3: v04_scalar_contract_near_pure_mpi_1
+ 3/56 Test   #3: v04_scalar_contract_near_pure_mpi_1 .........................   Passed    0.72 sec
+      Start   4: v04_scalar_contract_open_mpi_1
+ 4/56 Test   #4: v04_scalar_contract_open_mpi_1 ..............................   Passed    0.36 sec
+      Start   5: v04_scalar_contract_variable_mpi_1
+ 5/56 Test   #5: v04_scalar_contract_variable_mpi_1 ..........................   Passed    4.56 sec
+      Start   6: v04_scalar_contract_ibm_mpi_1
+ 6/56 Test   #6: v04_scalar_contract_ibm_mpi_1 ...............................   Passed   11.24 sec
+      Start   7: v04_scalar_contract_restart_mpi_1
+ 7/56 Test   #7: v04_scalar_contract_restart_mpi_1 ...........................   Passed    1.25 sec
+      Start   8: v04_scalar_contract_uniform_mpi_2
+ 8/56 Test   #8: v04_scalar_contract_uniform_mpi_2 ...........................   Passed    1.54 sec
+      Start   9: v04_scalar_contract_stretched_mpi_2
+ 9/56 Test   #9: v04_scalar_contract_stretched_mpi_2 .........................   Passed    1.63 sec
+      Start  10: v04_scalar_contract_near_pure_mpi_2
+10/56 Test  #10: v04_scalar_contract_near_pure_mpi_2 .........................   Passed    0.59 sec
+      Start  11: v04_scalar_contract_open_mpi_2
+11/56 Test  #11: v04_scalar_contract_open_mpi_2 ..............................   Passed    0.35 sec
+      Start  12: v04_scalar_contract_variable_mpi_2
+12/56 Test  #12: v04_scalar_contract_variable_mpi_2 ..........................   Passed    3.22 sec
+      Start  13: v04_scalar_contract_ibm_mpi_2
+13/56 Test  #13: v04_scalar_contract_ibm_mpi_2 ...............................   Passed    6.33 sec
+      Start  14: v04_scalar_contract_restart_mpi_2
+14/56 Test  #14: v04_scalar_contract_restart_mpi_2 ...........................   Passed    1.13 sec
+      Start  15: v04_scalar_contract_uniform_mpi_4
+15/56 Test  #15: v04_scalar_contract_uniform_mpi_4 ...........................   Passed    1.72 sec
+      Start  16: v04_scalar_contract_stretched_mpi_4
+16/56 Test  #16: v04_scalar_contract_stretched_mpi_4 .........................   Passed    1.91 sec
+      Start  17: v04_scalar_contract_near_pure_mpi_4
+17/56 Test  #17: v04_scalar_contract_near_pure_mpi_4 .........................   Passed    0.71 sec
+      Start  18: v04_scalar_contract_open_mpi_4
+18/56 Test  #18: v04_scalar_contract_open_mpi_4 ..............................   Passed    0.39 sec
+      Start  19: v04_scalar_contract_variable_mpi_4
+19/56 Test  #19: v04_scalar_contract_variable_mpi_4 ..........................   Passed    3.78 sec
+      Start  20: v04_scalar_contract_ibm_mpi_4
+20/56 Test  #20: v04_scalar_contract_ibm_mpi_4 ...............................   Passed    4.45 sec
+      Start  21: v04_scalar_contract_restart_mpi_4
+21/56 Test  #21: v04_scalar_contract_restart_mpi_4 ...........................   Passed    1.39 sec
+      Start 130: v04_solver_equations_mpi_1
+22/56 Test #130: v04_solver_equations_mpi_1 ..................................   Passed    0.38 sec
+      Start 131: v04_solver_equations_mpi_2
+23/56 Test #131: v04_solver_equations_mpi_2 ..................................   Passed    0.33 sec
+      Start 132: v04_solver_equations_mpi_4
+24/56 Test #132: v04_solver_equations_mpi_4 ..................................   Passed    0.33 sec
+      Start 133: v04_solver_piso_mpi_1
+25/56 Test #133: v04_solver_piso_mpi_1 .......................................   Passed    0.48 sec
+      Start 134: v04_solver_piso_mpi_2
+26/56 Test #134: v04_solver_piso_mpi_2 .......................................   Passed    0.39 sec
+      Start 135: v04_solver_piso_mpi_4
+27/56 Test #135: v04_solver_piso_mpi_4 .......................................   Passed    0.39 sec
+      Start 149: v04_core_product_freeze
+28/56 Test #149: v04_core_product_freeze .....................................   Passed    0.44 sec
+      Start 150: v04_core_hot_resource
+29/56 Test #150: v04_core_hot_resource .......................................   Passed    9.78 sec
+      Start 151: v04_core_product_freeze_mpi_1
+30/56 Test #151: v04_core_product_freeze_mpi_1 ...............................***Failed    3.51 sec
+implicit-enthalpy-positive size=1 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.323418922406052e-28
+local-donor-candidate-red size=1 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+rank 0 warm-start lifecycle status=0/0 accepted/attempts=1/1 1/1 warm=1/1/1 cold=0/1/1/0/82529.304856318253 C1 init/final/iter/op/pre/red=82526.555278582513/9.1362876194847228e-11/10/14/10/30 C2 iter/op/pre/red=10/14/10/30 resources=3356/0/0/467/3312/0/0/20/20 terminal2=0/6.7604686063535387e-14/5.2581318469395429e-14/0/0 momentum theta=1/1 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.93592755979268105/0.93592755979268105 0/1/0/4/8.6087107876912558e-15/8.6087107876912558e-15 0/1/0/4/1.6760076621479478e-14/1.6760076621479478e-14
+rank 0 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[35791,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+97% tests passed, 1 tests failed out of 30
+
+Label Time Summary:
+scalar-conservation       = 109.30 sec*proc (21 tests)
+v04_focused               =  18.93 sec*proc (9 tests)
+v04_method_observation    =   0.00 sec*proc (0 test)
+
+Total Test time (real) =  67.52 sec
+
+The following tests FAILED:
+	151 - v04_core_product_freeze_mpi_1 (Failed)            v04_focused

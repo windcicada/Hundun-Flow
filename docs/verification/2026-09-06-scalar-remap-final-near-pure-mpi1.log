@@ -1,0 +1,17 @@
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=0 eos=1 conservation=1 inventory_relative_defect=1.47464904023e-16 constant_error=4.99600361081e-15 eos_error=2.013569353e-16 coupling_sweeps=1 remap_iterations=3 scalar_residual=0 mass_pairing=3.93214594488e-15
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.16853679486e-16 constant_error=3.05311331772e-16 eos_error=2.013569353e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.93214594488e-15
+scalar_advance_failure species=1 uniform=0 dt=0.000125 step=1 status=6/10216 sweeps=16 species_residual=6.9237e-14 remap_residual=4.64974e-17 mass_pairing=2.17734e-16 energy=1.35064e-16
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=EOS_species uniform=0 dt=0.000125 ran=0 history=0 constant=0 bounded=0 eos=0 conservation=0 inventory_relative_defect=9.40727771549e-16 constant_error=2.77555756156e-17 eos_error=2.9149729677e-16 coupling_sweeps=5 remap_iterations=6 scalar_residual=2.13744525186e-15 mass_pairing=2.40870953357e-16
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.17449269253e-16 constant_error=3.88578058619e-16 eos_error=3.1377007417e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=4.64618319801e-15 mass_pairing=4.63245030366e-15
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[22224,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

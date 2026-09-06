@@ -1,0 +1,74 @@
+SCALAR_COUPLING step=4 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=1 R=0 momentum=1 thermo=0
+SCALAR_COUPLING step=6 sweep=1 R=0 momentum=1 thermo=0
+SCALAR_COUPLING step=7 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=8 sweep=1 R=0 momentum=1 thermo=0
+SCALAR_COUPLING step=9 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=10 sweep=1 R=0 momentum=1 thermo=0
+SCALAR_COUPLING step=11 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.46364699654e-16 constant_error=2.63677968348e-15 eos_error=2.013569353e-16 minimum=1e-08 maximum=0.999999989961 coupling_sweeps=1 remap_iterations=3 scalar_residual=0 mass_pairing=4.11426462749e-15
+SCALAR_COUPLING step=4 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=8 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=9 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=10 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_COUPLING step=11 sweep=1 R=0 momentum=1 thermo=1
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.16853679486e-16 constant_error=3.05311331772e-16 eos_error=2.013569353e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.93214594488e-15
+SCALAR_COUPLING step=4 sweep=1 R=5.6485171790545463e-06 momentum=1 thermo=1
+SCALAR_COUPLING step=4 sweep=2 R=2.4703704535215475e-08 momentum=1 thermo=1
+SCALAR_COUPLING step=4 sweep=3 R=1.0803924572676154e-10 momentum=1 thermo=1
+SCALAR_COUPLING step=4 sweep=4 R=4.7274447075341601e-13 momentum=1 thermo=1
+SCALAR_COUPLING step=4 sweep=5 R=2.1367407446904801e-15 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=1 R=2.0854690189143159e-07 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=2 R=3.0138915989896243e-10 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=3 R=6.10514287315605e-13 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=4 R=1.5363626205514433e-15 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=1 R=2.1635457691865065e-07 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=2 R=3.1262143212013398e-10 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=3 R=5.2441697465515704e-13 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=4 R=1.3957486488771657e-15 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=1 R=1.451986371809376e-07 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=2 R=2.0977351890962893e-10 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=3 R=3.0341992844479118e-13 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=4 R=6.7666194998090402e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=8 sweep=1 R=3.9882285258489017e-06 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=2 R=8.1777178250301676e-09 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=3 R=3.6673155827765823e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=4 R=1.9910228243965695e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=5 R=1.9944238671935021e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=6 R=1.9944215481756798e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=7 R=1.9944438181006816e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=8 R=1.9944322880526112e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=9 R=1.994430364791941e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=10 R=1.9944433911661633e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=11 R=1.9944434196246822e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=12 R=1.9944293171023047e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=13 R=1.9944133143563204e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=14 R=1.9944265087952607e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=15 R=1.9944514081197179e-11 momentum=1 thermo=0
+SCALAR_COUPLING step=8 sweep=16 R=1.9944441176394155e-11 momentum=1 thermo=0
+scalar_advance_failure species=1 uniform=0 dt=0.000125 step=4 status=6/10216 sweeps=16 species_residual=1.99444e-11 remap_residual=7.09938e-17 mass_pairing=2.93636e-16 energy=1.39855e-16
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=EOS_species uniform=0 dt=0.000125 ran=0 history=0 constant=0 bounded=0 eos=0 conservation=0 inventory_relative_defect=4.19989874891e-15 constant_error=1.85962356625e-15 eos_error=4.02706720637e-16 minimum=2.39214884239e-09 maximum=0.999999989959 coupling_sweeps=5 remap_iterations=6 scalar_residual=2.13674074469e-15 mass_pairing=4.65051412138e-15
+SCALAR_COUPLING step=4 sweep=1 R=6.0805373591545778e-17 momentum=1 thermo=1
+SCALAR_COUPLING step=5 sweep=1 R=1.9341007767984745e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=6 sweep=1 R=3.0558169079441426e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=7 sweep=1 R=4.641039110509116e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=8 sweep=1 R=6.3471683238645429e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=9 sweep=1 R=7.0883050531296856e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=10 sweep=1 R=8.3067054653719442e-16 momentum=1 thermo=1
+SCALAR_COUPLING step=11 sweep=1 R=9.2923680971424172e-16 momentum=1 thermo=1
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=1 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.17449269253e-16 constant_error=3.88578058619e-16 eos_error=3.1377007417e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=9.29236809714e-16 mass_pairing=4.63245030366e-15
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[23348,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

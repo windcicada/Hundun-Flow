@@ -1,0 +1,42 @@
+OPEN_SCALAR family=passive reverse=0 defect=1.94357884572766e-17 delta_inventory=6.02896986856139e-06 boundary_advection=-0.048226956672132 boundary_diffusion=4.80227639343846e-06 incoming_correction=5.35744923376991e-05 constant_error=1.66533453693773e-16 minimum=0.15380617064216 before_minimum=0.153806023374436 maximum=0.246193976539646 mass_scale=1 source_alpha=1 theta=0.000126375729419948 passed=1
+open_advance_failure species=0 reverse=1 6/5792 stage=53 sweep=1 c=2 base_c=6.01981e-07 base_e=4.68372e-07
+open_candidate 1 6.22583e-07 4.84387e-07
+open_candidate 0.5 6.12282e-07 4.76379e-07
+open_candidate 0.25 6.07131e-07 4.72376e-07
+open_candidate 0.125 6.04556e-07 4.70374e-07
+open_candidate 0.0625 6.03268e-07 4.69373e-07
+open_candidate 0.03125 6.02625e-07 4.68872e-07
+open_candidate 0.015625 6.02303e-07 4.68622e-07
+open_candidate 0.0078125 6.02142e-07 4.68497e-07
+open_candidate 0.00390625 6.02061e-07 4.68434e-07
+open_candidate 0.00195312 6.02021e-07 4.68403e-07
+open_candidate 0.000976562 6.02001e-07 4.68387e-07
+open_candidate 0.000488281 6.01991e-07 4.68379e-07
+open_candidate 0.000244141 6.01986e-07 4.68376e-07
+open_candidate 0.00012207 6.01983e-07 4.68374e-07
+open_candidate 6.10352e-05 6.01982e-07 4.68373e-07
+open_candidate 3.05176e-05 6.01981e-07 4.68372e-07
+open_candidate 1.52588e-05 6.01981e-07 4.68372e-07
+open_candidate 7.62939e-06 6.01981e-07 4.68372e-07
+open_candidate 3.8147e-06 6.01981e-07 4.68372e-07
+open_candidate 1.90735e-06 6.01981e-07 4.68372e-07
+open_candidate 9.53674e-07 6.01981e-07 4.68372e-07
+open_candidate 4.76837e-07 6.01981e-07 4.68372e-07
+open_candidate 2.38419e-07 6.01981e-07 4.68372e-07
+open_candidate 1.19209e-07 6.01981e-07 4.68372e-07
+open_candidate 5.96046e-08 6.01981e-07 4.68372e-07
+OPEN_SCALAR family=EOS reverse=0 defect=1.73859130932687e-16 delta_inventory=7.18896751792899e-06 boundary_advection=-0.0575069291694355 boundary_diffusion=4.81097438937487e-06 incoming_correction=0 constant_error=1.11022302462516e-16 minimum=0.153802985370296 before_minimum=0.153806023374436 maximum=0.246197619683586 mass_scale=1 source_alpha=1 theta=1 passed=0
+FROZEN_DENSITY rank=0 c=-1,0,0 candidate=1.4056121341968844 frozen=1.4056137377647189
+open_advance_failure species=1 reverse=1 2/10421 stage=44 sweep=1 c=0 base_c=0 base_e=0
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[19102,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

@@ -1,0 +1,163 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+Constructing a list of tests
+
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 8
+[HANDLER_OUTPUT] 
+      Start   8: v04_scalar_contract_uniform_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+8: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment"
+
+8: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+8: Test timeout computed to be: 180
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.37902061691e-14 constant_error=9.32587340685e-15 eos_error=2.0131883445e-16 minimum=0.153806186179 maximum=0.246193976135 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.36597693413e-15
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.47835711024e-15 constant_error=8.60422844084e-16 eos_error=2.01347825121e-16 minimum=0.153806064848 maximum=0.24619397638 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=3.33529435304e-16
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.44788938999e-16 constant_error=7.21644966006e-16 eos_error=2.01357622682e-16 minimum=0.153806033851 maximum=0.246193976503 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=6.17018194781e-16
+8: SCALAR_ORDER family=passive order=1.93133441584 accepted=1
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.86200328175e-16 constant_error=1.94289029309e-16 eos_error=2.0131883445e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.36597693413e-15
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.1476885021e-15 constant_error=2.22044604925e-16 eos_error=2.01347825121e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.33529435304e-16
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.28449213611e-15 constant_error=3.88578058619e-16 eos_error=2.01357622682e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=6.17018194781e-16
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.73338639312e-15 constant_error=2.49800180541e-16 eos_error=3.11653846252e-16 minimum=0.153806148166 maximum=0.246193976236 coupling_sweeps=3 remap_iterations=4 scalar_residual=1.95513097454e-15 mass_pairing=2.44028598341e-16
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.89119482189e-13 constant_error=1.1407541578e-14 eos_error=4.67479994536e-16 minimum=0.15380605512 maximum=0.246193976431 coupling_sweeps=3 remap_iterations=3 scalar_residual=9.6563207438e-15 mass_pairing=4.3866393319e-15
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.01129499491e-14 constant_error=6.66133814775e-16 eos_error=4.78201726535e-16 minimum=0.153806031396 maximum=0.246193976528 coupling_sweeps=3 remap_iterations=3 scalar_residual=3.5180394449e-16 mass_pairing=1.21532969665e-15
+8: SCALAR_ORDER family=EOS_species order=1.9541957548 accepted=1
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.348093053e-16 constant_error=2.49800180541e-16 eos_error=3.13705077423e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=7.91197340452e-17 mass_pairing=3.66872763432e-16
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.33833523498e-16 constant_error=4.99600361081e-16 eos_error=3.55284983621e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=8.9444010462e-16 mass_pairing=4.4258036258e-15
+8: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.02907809285e-16 constant_error=4.16333634234e-16 eos_error=4.70755352178e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=2.1740893298e-16 mass_pairing=1.09960258062e-15
+8: STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+[HANDLER_OUTPUT] 
+ 1/16 Test   #8: v04_scalar_contract_uniform_mpi_2 .....
+   Passed    1.55 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 9
+
+[HANDLER_OUTPUT] 
+      Start   9: v04_scalar_contract_stretched_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+9: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--stretched"
+
+9: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+9: Test timeout computed to be: 180
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.17106474073e-15 constant_error=5.19029264012e-15 eos_error=2.013569353e-16 minimum=0.153806171014 maximum=0.246193976081 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.09391572121e-15
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.0190362909e-15 constant_error=1.85962356625e-15 eos_error=2.01357722692e-16 minimum=0.153806060974 maximum=0.246193976354 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.96623032782e-16
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.94357490768e-16 constant_error=1.16573417586e-15 eos_error=2.01357911244e-16 minimum=0.153806032871 maximum=0.24619397649 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=6.86838013326e-16
+9: SCALAR_ORDER family=passive order=1.92084442859 accepted=1
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.10342145941e-16 constant_error=3.60822483003e-16 eos_error=2.013569353e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.09391572121e-15
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.72010099412e-16 constant_error=5.27355936697e-16 eos_error=2.01357722692e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.96623032782e-16
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.04383478452e-16 constant_error=8.32667268469e-16 eos_error=2.01357911244e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=6.86838013326e-16
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.85014365824e-15 constant_error=4.4408920985e-16 eos_error=4.78148416351e-16 minimum=0.153806136542 maximum=0.246193976194 coupling_sweeps=3 remap_iterations=4 scalar_residual=3.14517107126e-15 mass_pairing=3.85314487934e-16
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.17049412586e-13 constant_error=7.21644966006e-15 eos_error=4.78152959568e-16 minimum=0.153806052156 maximum=0.24619397641 coupling_sweeps=3 remap_iterations=3 scalar_residual=1.79127821217e-14 mass_pairing=4.10155012473e-15
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.14461126081e-14 constant_error=7.21644966006e-16 eos_error=4.78222759367e-16 minimum=0.153806030646 maximum=0.246193976518 coupling_sweeps=3 remap_iterations=3 scalar_residual=6.582748492e-16 mass_pairing=1.65559887558e-15
+9: SCALAR_ORDER family=EOS_species order=1.94580266853 accepted=1
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.87481007492e-16 constant_error=4.99600361081e-16 eos_error=4.70715679587e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=7.6920850534e-17 mass_pairing=3.69677608125e-16
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.52450065043e-16 constant_error=5.82867087928e-16 eos_error=4.70725342566e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=8.18837474701e-16 mass_pairing=4.08517709432e-15
+9: SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.08461033509e-16 constant_error=7.21644966006e-16 eos_error=4.70742846992e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=3.1726837626e-16 mass_pairing=1.57449866431e-15
+9: STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+[HANDLER_OUTPUT] 
+ 2/16 Test   #9: v04_scalar_contract_stretched_mpi_2 ...
+   Passed    1.66 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 10
+
+[HANDLER_OUTPUT] 
+      Start  10: v04_scalar_contract_near_pure_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+10: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--near-pure"
+
+10: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+10: Test timeout computed to be: 180
+10: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=1 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.43181191556e-16 constant_error=9.32587340685e-15 eos_error=2.0131883445e-16 minimum=1e-08 maximum=0.999999989949 coupling_sweeps=1 remap_iterations=3 scalar_residual=0 mass_pairing=4.36597693413e-15
+10: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=1 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.86200328175e-16 constant_error=1.94289029309e-16 eos_error=2.0131883445e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.36597693413e-15
+10: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=1 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.15275280916e-14 constant_error=5.55111512313e-16 eos_error=2.91462184872e-16 minimum=1e-08 maximum=0.999999989947 coupling_sweeps=5 remap_iterations=9 scalar_residual=2.46373209074e-15 mass_pairing=3.20578913615e-16
+10: SCALAR_CONTRACT ranks=2 stretched=0 near_pure=1 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.348093053e-16 constant_error=2.49800180541e-16 eos_error=3.13705077423e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=7.91197340452e-17 mass_pairing=3.66872763432e-16
+10: STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+[HANDLER_OUTPUT] 
+ 3/16 Test  #10: v04_scalar_contract_near_pure_mpi_2 ...
+   Passed    0.59 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 11
+
+[HANDLER_OUTPUT] 
+      Start  11: v04_scalar_contract_open_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+11: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--open"
+
+11: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+11: Test timeout computed to be: 180
+11: [wyf-Super-Server:104400] *** Process received signal ***
+11: [wyf-Super-Server:104400] Signal: Segmentation fault (11)
+11: [wyf-Super-Server:104400] Signal code: Address not mapped (1)
+11: [wyf-Super-Server:104400] Failing at address: 0x5584d2c1d1cf
+11: [wyf-Super-Server:104400] [ 0] /lib/x86_64-linux-gnu/libpthread.so.0(+0x153c0)[0x7f88ca7663c0]
+11: [wyf-Super-Server:104400] [ 1] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x2f8c36)[0x5583d18c3c36]
+11: [wyf-Super-Server:104400] [ 2] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x22aab)[0x5583d15edaab]
+11: [wyf-Super-Server:104400] [ 3] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x9f9b)[0x5583d15d4f9b]
+11: [wyf-Super-Server:104400] [ 4] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf3)[0x7f88ca2dc0b3]
+11: [wyf-Super-Server:104400] [ 5] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x75ee)[0x5583d15d25ee]
+11: [wyf-Super-Server:104400] *** End of error message ***
+11: --------------------------------------------------------------------------
+11: mpiexec noticed that process rank 0 with PID 0 on node wyf-Super-Server exited on signal 11 (Segmentation fault).
+11: --------------------------------------------------------------------------
+[HANDLER_OUTPUT] 
+ 4/16 Test  #11: v04_scalar_contract_open_mpi_2 ........
+***Failed    1.53 sec
+[wyf-Super-Server:104400] *** Process received signal ***
+[wyf-Super-Server:104400] Signal: Segmentation fault (11)
+[wyf-Super-Server:104400] Signal code: Address not mapped (1)
+[wyf-Super-Server:104400] Failing at address: 0x5584d2c1d1cf
+[wyf-Super-Server:104400] [ 0] /lib/x86_64-linux-gnu/libpthread.so.0(+0x153c0)[0x7f88ca7663c0]
+[wyf-Super-Server:104400] [ 1] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x2f8c36)[0x5583d18c3c36]
+[wyf-Super-Server:104400] [ 2] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x22aab)[0x5583d15edaab]
+[wyf-Super-Server:104400] [ 3] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x9f9b)[0x5583d15d4f9b]
+[wyf-Super-Server:104400] [ 4] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf3)[0x7f88ca2dc0b3]
+[wyf-Super-Server:104400] [ 5] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_scalar_contract_experiment(+0x75ee)[0x5583d15d25ee]
+[wyf-Super-Server:104400] *** End of error message ***
+--------------------------------------------------------------------------
+mpiexec noticed that process rank 0 with PID 0 on node wyf-Super-Server exited on signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+The following tests passed:
+
+	v04_scalar_contract_uniform_mpi_2
+	v04_scalar_contract_stretched_mpi_2
+	v04_scalar_contract_near_pure_mpi_2
+[HANDLER_OUTPUT] 
+
+75% tests passed, 1 tests failed out of 4
+
+
+Label Time Summary:
+scalar-conservation    =  10.65 sec*proc (4 tests)
+v04_focused            =   0.00 sec*proc (0 test)
+
+Total Test time (real) =   5.33 sec
+
+The following tests FAILED:
+	 11 - v04_scalar_contract_open_mpi_2 (Failed)           scalar-conservation
+[ERROR_MESSAGE] 
+Errors while running CTest
+

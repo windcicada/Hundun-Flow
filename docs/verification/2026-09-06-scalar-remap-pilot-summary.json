@@ -1,0 +1,93 @@
+{
+  "advance_seconds": {
+    "maximum": 10.610004015,
+    "mean": 9.0136322748,
+    "minimum": 8.450102742
+  },
+  "bdf_orders": [
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "first_step": 1001,
+  "full_step_seconds": {
+    "maximum": 20.514350108,
+    "mean": 10.1105122534,
+    "minimum": 8.460841597
+  },
+  "groups": {
+    "C1 spatial": {
+      "candidate_seconds_per_step": 0.32783742855312503,
+      "iterations": 237,
+      "logical_solves": 10,
+      "solve_seconds_per_step": 0.9855244885304688
+    },
+    "C2 diagonal": {
+      "candidate_seconds_per_step": 1.7471599460710938,
+      "iterations": 1436,
+      "logical_solves": 53,
+      "solve_seconds_per_step": 2.8145900011921876
+    }
+  },
+  "last_step": 1010,
+  "loop_drops": 0,
+  "maximum_committed_outflow_CFL": 0.23011947444681294,
+  "maximum_residual": {
+    "closed_mass": 0.0,
+    "continuity": 2.1627058688178316e-07,
+    "energy": 9.55482530582141e-07,
+    "eos": 0.0,
+    "gauge": 0.0
+  },
+  "phase_mean_seconds": {
+    "boundary_ledger_ns": 0.03203471188984375,
+    "candidate_ns": 2.0749973746242185,
+    "checkpoint_ns": 0.9028829525773437,
+    "final_momentum_ns": 0.201296833121875,
+    "krylov_ns": 3.8001144897226564,
+    "structured_control_ns": 0.32171561145390626,
+    "structured_wait_ns": 0.35191913044140627,
+    "terminal_metrics_ns": 0.0053332809421875,
+    "visit_ns": 0.18320686840234374
+  },
+  "ranks": 128,
+  "refinement_solve_calls": [
+    5,
+    4,
+    4,
+    5,
+    4,
+    4,
+    4,
+    4,
+    4,
+    5
+  ],
+  "remaining_33990_steps_hours_at_pilot_mean_full_step": 95.46008652585165,
+  "retries": 0,
+  "run_root": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/scalar-recovery-pilot-20260906",
+  "sampled_peak_node_RSS_GiB": [
+    26.314117431640625,
+    26.31472396850586,
+    26.314964294433594,
+    26.315109252929688,
+    26.315170288085938,
+    26.315170288085938,
+    26.315235137939453,
+    26.315235137939453,
+    26.315235137939453,
+    26.315296173095703
+  ],
+  "scalar_remap_ns": 0,
+  "steps": 10,
+  "temporal_fallbacks": 0,
+  "validation_exit_code": 0,
+  "wall_seconds": 114.12
+}

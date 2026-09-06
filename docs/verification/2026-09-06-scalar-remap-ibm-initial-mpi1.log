@@ -1,0 +1,16 @@
+SCALAR_CONTRACT ranks=1 stretched=0 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=2.75717830936e-12 constant_error=6.38378239159e-16 eos_error=2.01634340761e-16 minimum=0.150960748629 maximum=0.24903926389 coupling_sweeps=1 remap_iterations=3 scalar_residual=0 mass_pairing=4.10610749756e-16
+SCALAR_CONTRACT ranks=1 stretched=0 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.40523061191e-16 constant_error=3.33066907388e-16 eos_error=2.0163434107e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.25672847594e-16
+SCALAR_CONTRACT ranks=1 stretched=0 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=2.16025429476e-12 constant_error=6.10622663544e-16 eos_error=6.18491450794e-16 minimum=0.150960745636 maximum=0.249039263917 coupling_sweeps=3 remap_iterations=6 scalar_residual=4.26693669807e-15 mass_pairing=4.56660275993e-16
+SCALAR_CONTRACT ranks=1 stretched=0 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.58061722001e-16 constant_error=4.4408920985e-16 eos_error=4.70760988129e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=2.1072221226e-16 mass_pairing=1.0257443154e-15
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[46247,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

@@ -1,0 +1,22 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+    Start   3: v04_scalar_contract_near_pure_mpi_1
+1/4 Test   #3: v04_scalar_contract_near_pure_mpi_1 ...   Passed   25.90 sec
+    Start  11: v04_scalar_contract_open_mpi_2
+2/4 Test  #11: v04_scalar_contract_open_mpi_2 ........   Passed    2.92 sec
+    Start  13: v04_scalar_contract_ibm_mpi_2
+3/4 Test  #13: v04_scalar_contract_ibm_mpi_2 .........***Timeout 180.09 sec
+SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.5210165527e-17 constant_error=6.66133814775e-16 eos_error=2.01634338595e-16 minimum=0.150960748629 maximum=0.249039263885 coupling_sweeps=1 remap_iterations=3 scalar_residual=0 mass_pairing=5.07055741304e-16
+SCALAR_CONTRACT ranks=2 stretched=0 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.38725501726e-16 constant_error=3.05311331772e-16 eos_error=2.01636135666e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=5.07055741304e-16
+
+
+67% tests passed, 1 tests failed out of 3
+
+Label Time Summary:
+scalar-conservation    = 391.91 sec*proc (3 tests)
+v04_focused            =   0.00 sec*proc (0 test)
+
+Total Test time (real) = 208.94 sec
+
+The following tests FAILED:
+	 13 - v04_scalar_contract_ibm_mpi_2 (Timeout)           scalar-conservation

@@ -1,0 +1,14 @@
+scalar_initial_failure species=1 variable=1 2/801
+SCALAR_CONTRACT ranks=1 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=0 history=0 constant=0 bounded=0 eos=0 conservation=0 inventory_relative_defect=0 constant_error=0 eos_error=0 minimum=1 maximum=0 coupling_sweeps=0 remap_iterations=0 scalar_residual=0 mass_pairing=0
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[46914,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

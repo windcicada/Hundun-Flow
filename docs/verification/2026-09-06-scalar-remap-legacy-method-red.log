@@ -1,0 +1,16 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 220: v04_product_restart_method_history
+1/1 Test #220: v04_product_restart_method_history ...***Failed    0.91 sec
+method_mass original=1.1030948920068615 saved=1.1030948920069716 restored=1.1030948920069716 source_complete=1
+exact_method status=0/0 attempts=1 proposal_bdf=2 fallback=0
+method_history unsigned_rejected=1 signed_exact_bdf=2 method_recovery_bdf=1,2 rebuilt_rate_payload_equal=1 recovery_attempts=1,1 recovery_status=0/0 passed=1
+FAIL: explicit method recovery advertises only the known legacy method plan
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.93 sec
+
+The following tests FAILED:
+	220 - v04_product_restart_method_history (Failed)

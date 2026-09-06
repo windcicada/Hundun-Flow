@@ -1,0 +1,26 @@
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.49716006869e-07 constant_error=4.91273688397e-15 eos_error=2.013569353e-16 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=3.9229343257e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.49232058338e-07 constant_error=1.80411241502e-15 eos_error=2.01357722692e-16 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.6459955226e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.49111478676e-07 constant_error=1.30451205393e-15 eos_error=2.01357911244e-16 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=6.86825520847e-16
+SCALAR_ORDER family=passive order=1.92104097389 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.03722406318e-16 constant_error=3.60822483003e-16 eos_error=2.013569353e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.9229343257e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.69621673026e-16 constant_error=4.99600361081e-16 eos_error=2.01357722692e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.6459955226e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.02294873353e-16 constant_error=6.66133814775e-16 eos_error=2.01357911244e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=6.86825520847e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.53884275023e-07 constant_error=3.60822483003e-16 eos_error=4.7815648276e-16 coupling_sweeps=7 remap_iterations=6 scalar_residual=8.46657654908e-16 mass_pairing=4.41710084235e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.53521041779e-07 constant_error=4.99600361081e-16 eos_error=4.78173638563e-16 coupling_sweeps=3 remap_iterations=3 scalar_residual=7.2932807289e-16 mass_pairing=4.69740157596e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.53430401067e-07 constant_error=8.04911692853e-16 eos_error=4.78210603048e-16 coupling_sweeps=3 remap_iterations=3 scalar_residual=2.92657560134e-15 mass_pairing=5.34362466169e-16
+SCALAR_ORDER family=EOS_species order=1.94688098761 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.73460237719e-16 constant_error=4.4408920985e-16 eos_error=4.70659394372e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=4.64801020417e-15 mass_pairing=4.60806320572e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.52779264747e-16 constant_error=5.27355936697e-16 eos_error=4.7071308974e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=4.47793672219e-16 mass_pairing=4.51732925476e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.07874744728e-16 constant_error=9.15933995316e-16 eos_error=4.70754372048e-16 coupling_sweeps=1 remap_iterations=0 scalar_residual=6.6540735238e-16 mass_pairing=6.12020277185e-16
+STRICT_SCALAR_ACCEPTANCE FAIL correction_active_checked=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[26179,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
