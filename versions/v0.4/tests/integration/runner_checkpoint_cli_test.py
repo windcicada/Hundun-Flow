@@ -22,6 +22,9 @@ def main():
     parser.add_argument("--mpi", default="mpirun")
     parser.add_argument("--ranks", type=int, default=2)
     parser.add_argument("--first-only", action="store_true")
+    parser.add_argument("--visit", action="store_true")
+    parser.add_argument("--only-index", type=int)
+    parser.add_argument("--target-rank", type=int)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.output is None:
@@ -50,16 +53,21 @@ def main():
                     "checkpoint_interval 1\nrho_ref 1\nu_ref 1\ndiameter 1\n"
                     "span 4\ncylinder_center_x 0\nstation_x_over_d 1.5\nend\n")
     results = []
-    for target in sorted(set((0, args.ranks - 1))):
+    for target in ([args.target_rank] if args.target_rank is not None else sorted(set((0, args.ranks - 1)))):
+        baseline_visit = {}
         def run(index):
             # Fixed width, including the baseline: path-length changes may
             # cross the standard library's small-string allocation threshold.
             path = args.output / ("rank-{}-index-{:07d}".format(target, index))
             env = dict(os.environ, LD_PRELOAD=str(args.probe.resolve()),
                        HUNDUN_TEST_ALLOC_RANK=str(target), HUNDUN_TEST_ALLOC_INDEX=str(index))
+            if args.visit:
+                env["HUNDUN_TEST_VISIT_ALLOC"] = "1"
             command = [args.mpi, "-n", str(args.ranks), str(args.binary.resolve()),
                        "--spec", str(spec.resolve()), "--case-root", str(case.resolve()),
-                       "--run-root", str(path.resolve()), "--steps", "1", "--visit-interval", "0"]
+                       "--run-root", str(path.resolve()), "--steps", "1", "--visit-interval", "1" if args.visit else "0"]
+            if args.visit:
+                command.append("--observe-performance")
             result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, timeout=40,
                                     universal_newlines=True)
@@ -74,11 +82,27 @@ def main():
                 assert result.returncode == 0, result.stdout
             else:
                 assert match[2] == "1", "selected real allocation did not fire"
-                assert result.returncode in (0, 6), result.stdout
-                if result.returncode == 0:
+                assert result.returncode in ((0, 6, 7) if args.visit else (0, 6)), result.stdout
+                if result.returncode == 0 and not args.visit:
                     assert "CHECKPOINT_IO status=0/0" in result.stdout, result.stdout
                     assert list(path.glob("*.complete")), "cleanup warning lost committed marker"
+            if args.visit:
+                finalized = re.findall(r"VISIT_FINALIZE rank=(\d+) accepted_step=1", result.stdout)
+                assert sorted(map(int, finalized)) == list(range(args.ranks)), result.stdout
+                if "visit_status=" in result.stdout:
+                    assert "accepted_step=1 committed_step=1" in result.stdout, result.stdout
+                    times = re.search(r"accepted_time=(\S+) committed_time=(\S+)", result.stdout)
+                    assert times and float(times[1]) == float(times[2]), result.stdout
             if result.returncode == 0:
+                if args.visit:
+                    indices = list((path / "Visit").glob("*.visit"))
+                    assert len(indices) == 1, "Visit was not exercised"
+                    assert indices[0].read_text().startswith("!NBLOCKS {}\n".format(args.ranks))
+                    payload = {p.name: p.read_bytes() for p in (path / "Visit").iterdir() if p.is_file()}
+                    if index < 0:
+                        baseline_visit.update(payload)
+                    else:
+                        assert payload == baseline_visit, "successful Visit changed accepted fields"
                 with (path / "conservation.csv").open() as stream:
                     balances = list(csv.DictReader(stream))
                 assert len(balances) == 1 and balances[0]["step"] == "1"
@@ -94,7 +118,7 @@ def main():
                 assert json.loads(statistics.read_text())["snapshot_step"] == 1
                 accumulator = path / "step-00000000000000000001.accumulator"
                 assert accumulator.read_text().endswith("end\n")
-                if index < 0 and target == 0:
+                if index < 0 and target == 0 and not args.visit:
                     resumed = args.output / "method-recovery"
                     recovery_command = [args.mpi, "-n", str(args.ranks),
                         str(args.binary.resolve()), "--spec", str(spec.resolve()),
@@ -120,10 +144,11 @@ def main():
             return int(match[1])
         count = run(-1)
         assert count > 0
-        for index in range(1 if args.first_only else count):
+        for index in ([args.only_index] if args.only_index is not None else range(1 if args.first_only else count)):
             run(index)
-        print("runner checkpoint ranks={} target={} sites={} tested={}".format(
-            args.ranks, target, count, 1 if args.first_only else count), flush=True)
+        print("runner {} ranks={} target={} sites={} tested={}".format(
+            "visit" if args.visit else "checkpoint", args.ranks, target, count,
+            1 if args.first_only or args.only_index is not None else count), flush=True)
 
 
 if __name__ == "__main__":

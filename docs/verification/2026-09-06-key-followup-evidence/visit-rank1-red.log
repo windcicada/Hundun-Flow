@@ -1,0 +1,24 @@
+ibm_reconstruction policy=strict_quadratic boundary_linear=0/384 surface_linear=0/36 expanded=0
+libc++abi: terminating due to uncaught exception of type std::bad_alloc: std::bad_alloc
+[wyf-Super-Server:242726] *** Process received signal ***
+[wyf-Super-Server:242726] Signal: Aborted (6)
+[wyf-Super-Server:242726] Signal code:  (-6)
+[wyf-Super-Server:242726] [ 0] /lib/x86_64-linux-gnu/libpthread.so.0(+0x153c0)[0x7f65849d33c0]
+[wyf-Super-Server:242726] [ 1] /lib/x86_64-linux-gnu/libc.so.6(gsignal+0xcb)[0x7f658456818b]
+[wyf-Super-Server:242726] [ 2] /lib/x86_64-linux-gnu/libc.so.6(abort+0x12b)[0x7f6584547859]
+[wyf-Super-Server:242726] [ 3] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++abi.so.1(+0x38e66)[0x7f65848b8e66]
+[wyf-Super-Server:242726] [ 4] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++abi.so.1(+0x1c58b)[0x7f658489c58b]
+[wyf-Super-Server:242726] [ 5] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++abi.so.1(+0x38123)[0x7f65848b8123]
+[wyf-Super-Server:242726] [ 6] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++abi.so.1(+0x3ad96)[0x7f65848bad96]
+[wyf-Super-Server:242726] [ 7] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++abi.so.1(+0x3ad2f)[0x7f65848bad2f]
+[wyf-Super-Server:242726] [ 8] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/libv04_checkpoint_allocation_probe.so(_Znam+0x0)[0x7f6584ce8d60]
+[wyf-Super-Server:242726] [ 9] /home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu/libc++.so.1(_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_+0x59)[0x7f6584953509]
+[wyf-Super-Server:242726] [10] /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-periodic-20260906/v04_thin_domain_runner(+0x1fc1f)[0x55b019e8cc1f]
+[wyf-Super-Server:242726] [11] /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-periodic-20260906/v04_thin_domain_runner(+0xfd06)[0x55b019e7cd06]
+[wyf-Super-Server:242726] [12] /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-periodic-20260906/v04_thin_domain_runner(+0xb69f)[0x55b019e7869f]
+[wyf-Super-Server:242726] [13] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf3)[0x7f65845490b3]
+[wyf-Super-Server:242726] [14] /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-periodic-20260906/v04_thin_domain_runner(+0xaede)[0x55b019e77ede]
+[wyf-Super-Server:242726] *** End of error message ***
+--------------------------------------------------------------------------
+mpirun noticed that process rank 1 with PID 0 on node wyf-Super-Server exited on signal 6 (Aborted).
+--------------------------------------------------------------------------

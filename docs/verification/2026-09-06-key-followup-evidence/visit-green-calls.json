@@ -1,0 +1,2540 @@
+[
+  {
+    "target": 0,
+    "index": -1,
+    "returncode": 0,
+    "observation": [
+      "32",
+      "0",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index--000001",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 0,
+    "returncode": 7,
+    "observation": [
+      "1",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000000",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 1,
+    "returncode": 7,
+    "observation": [
+      "2",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000001",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 2,
+    "returncode": 6,
+    "observation": [
+      "3",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000002",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 3,
+    "returncode": 6,
+    "observation": [
+      "4",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000003",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 4,
+    "returncode": 6,
+    "observation": [
+      "8",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000004",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 5,
+    "returncode": 6,
+    "observation": [
+      "9",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000005",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 6,
+    "returncode": 6,
+    "observation": [
+      "10",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000006",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 7,
+    "returncode": 6,
+    "observation": [
+      "11",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000007",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 8,
+    "returncode": 6,
+    "observation": [
+      "12",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000008",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 9,
+    "returncode": 6,
+    "observation": [
+      "10",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000009",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 10,
+    "returncode": 6,
+    "observation": [
+      "11",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000010",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 11,
+    "returncode": 6,
+    "observation": [
+      "12",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000011",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 12,
+    "returncode": 6,
+    "observation": [
+      "13",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000012",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 13,
+    "returncode": 6,
+    "observation": [
+      "14",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000013",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 14,
+    "returncode": 6,
+    "observation": [
+      "15",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000014",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 15,
+    "returncode": 6,
+    "observation": [
+      "16",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000015",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 16,
+    "returncode": 6,
+    "observation": [
+      "17",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000016",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 17,
+    "returncode": 6,
+    "observation": [
+      "18",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000017",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 18,
+    "returncode": 6,
+    "observation": [
+      "19",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000018",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 19,
+    "returncode": 6,
+    "observation": [
+      "20",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000019",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 20,
+    "returncode": 6,
+    "observation": [
+      "21",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000020",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 21,
+    "returncode": 6,
+    "observation": [
+      "22",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000021",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 22,
+    "returncode": 6,
+    "observation": [
+      "26",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000022",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 23,
+    "returncode": 6,
+    "observation": [
+      "27",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000023",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 24,
+    "returncode": 6,
+    "observation": [
+      "28",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000024",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 25,
+    "returncode": 6,
+    "observation": [
+      "29",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000025",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 26,
+    "returncode": 6,
+    "observation": [
+      "30",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000026",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 27,
+    "returncode": 6,
+    "observation": [
+      "31",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000027",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 28,
+    "returncode": 6,
+    "observation": [
+      "32",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000028",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 29,
+    "returncode": 6,
+    "observation": [
+      "33",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000029",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 30,
+    "returncode": 6,
+    "observation": [
+      "34",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000030",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 0,
+    "index": 31,
+    "returncode": 6,
+    "observation": [
+      "32",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-0-index-0000031",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": -1,
+    "returncode": 0,
+    "observation": [
+      "60",
+      "0",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index--000001",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 0,
+    "returncode": 7,
+    "observation": [
+      "1",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000000",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 1,
+    "returncode": 7,
+    "observation": [
+      "2",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000001",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 2,
+    "returncode": 6,
+    "observation": [
+      "3",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000002",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 3,
+    "returncode": 6,
+    "observation": [
+      "7",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000003",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 4,
+    "returncode": 6,
+    "observation": [
+      "8",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000004",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 5,
+    "returncode": 6,
+    "observation": [
+      "9",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000005",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 6,
+    "returncode": 6,
+    "observation": [
+      "10",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000006",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 7,
+    "returncode": 6,
+    "observation": [
+      "11",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000007",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 8,
+    "returncode": 6,
+    "observation": [
+      "9",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000008",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 9,
+    "returncode": 6,
+    "observation": [
+      "10",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000009",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 10,
+    "returncode": 6,
+    "observation": [
+      "11",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000010",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 11,
+    "returncode": 6,
+    "observation": [
+      "12",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000011",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 12,
+    "returncode": 6,
+    "observation": [
+      "13",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000012",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 13,
+    "returncode": 6,
+    "observation": [
+      "14",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000013",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 14,
+    "returncode": 6,
+    "observation": [
+      "18",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000014",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 15,
+    "returncode": 6,
+    "observation": [
+      "19",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000015",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 16,
+    "returncode": 6,
+    "observation": [
+      "20",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000016",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 17,
+    "returncode": 6,
+    "observation": [
+      "21",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000017",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 18,
+    "returncode": 6,
+    "observation": [
+      "22",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000018",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 19,
+    "returncode": 6,
+    "observation": [
+      "23",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000019",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 20,
+    "returncode": 6,
+    "observation": [
+      "24",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000020",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 21,
+    "returncode": 6,
+    "observation": [
+      "25",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000021",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 22,
+    "returncode": 6,
+    "observation": [
+      "26",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000022",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 23,
+    "returncode": 6,
+    "observation": [
+      "24",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000023",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 24,
+    "returncode": 6,
+    "observation": [
+      "25",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000024",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 25,
+    "returncode": 6,
+    "observation": [
+      "26",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000025",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 26,
+    "returncode": 6,
+    "observation": [
+      "27",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000026",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 27,
+    "returncode": 6,
+    "observation": [
+      "28",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000027",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 28,
+    "returncode": 6,
+    "observation": [
+      "29",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000028",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 29,
+    "returncode": 6,
+    "observation": [
+      "30",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000029",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 30,
+    "returncode": 6,
+    "observation": [
+      "31",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000030",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 31,
+    "returncode": 6,
+    "observation": [
+      "32",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000031",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 32,
+    "returncode": 6,
+    "observation": [
+      "33",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000032",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 33,
+    "returncode": 6,
+    "observation": [
+      "34",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000033",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 34,
+    "returncode": 6,
+    "observation": [
+      "35",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000034",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 35,
+    "returncode": 6,
+    "observation": [
+      "36",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000035",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 36,
+    "returncode": 6,
+    "observation": [
+      "37",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000036",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 37,
+    "returncode": 6,
+    "observation": [
+      "38",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000037",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 38,
+    "returncode": 6,
+    "observation": [
+      "39",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000038",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 39,
+    "returncode": 6,
+    "observation": [
+      "40",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000039",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 40,
+    "returncode": 6,
+    "observation": [
+      "41",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000040",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 41,
+    "returncode": 6,
+    "observation": [
+      "42",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000041",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 42,
+    "returncode": 6,
+    "observation": [
+      "43",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000042",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 43,
+    "returncode": 6,
+    "observation": [
+      "44",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000043",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 44,
+    "returncode": 6,
+    "observation": [
+      "45",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000044",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 45,
+    "returncode": 6,
+    "observation": [
+      "46",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000045",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 46,
+    "returncode": 6,
+    "observation": [
+      "47",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000046",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 47,
+    "returncode": 6,
+    "observation": [
+      "48",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000047",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 48,
+    "returncode": 6,
+    "observation": [
+      "49",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000048",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 49,
+    "returncode": 6,
+    "observation": [
+      "50",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000049",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 50,
+    "returncode": 6,
+    "observation": [
+      "51",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000050",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 51,
+    "returncode": 6,
+    "observation": [
+      "52",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000051",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 52,
+    "returncode": 6,
+    "observation": [
+      "53",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000052",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 53,
+    "returncode": 6,
+    "observation": [
+      "54",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000053",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 54,
+    "returncode": 6,
+    "observation": [
+      "55",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000054",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 55,
+    "returncode": 6,
+    "observation": [
+      "56",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000055",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 56,
+    "returncode": 6,
+    "observation": [
+      "57",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000056",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 57,
+    "returncode": 6,
+    "observation": [
+      "58",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000057",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 58,
+    "returncode": 6,
+    "observation": [
+      "59",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000058",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  },
+  {
+    "target": 1,
+    "index": 59,
+    "returncode": 6,
+    "observation": [
+      "60",
+      "1",
+      "1"
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-visit-green-792f32e/statistics.d",
+      "--case-root",
+      "/tmp/hundun-visit-green-792f32e/case",
+      "--run-root",
+      "/tmp/hundun-visit-green-792f32e/rank-1-index-0000059",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "1",
+      "--observe-performance"
+    ]
+  }
+]

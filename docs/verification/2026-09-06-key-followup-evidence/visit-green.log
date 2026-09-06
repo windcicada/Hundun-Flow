@@ -1,0 +1,2 @@
+runner checkpoint ranks=2 target=0 sites=32 tested=32
+runner checkpoint ranks=2 target=1 sites=60 tested=60

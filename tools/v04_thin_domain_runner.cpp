@@ -1917,6 +1917,17 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   });
   if (!okay) return 6;
 
+  // Argument construction happens outside Writer's noexcept boundary. Freeze
+  // the owned path in a local-only stage, then agree before any Writer call.
+  fs::path visit_root;
+  if (!local_stage(communicator, [&] {
+        if (options.visit_interval != 0U)
+          visit_root = options.run_root / "Visit";
+        return true;
+      })) {
+    if (rank == 0) std::cerr << "visit_path_initialization_failure\n";
+    return 6;
+  }
   const double force_scale = 0.5 * spec.rho_ref * spec.u_ref * spec.u_ref *
                              spec.diameter * spec.span;
   if (!std::isfinite(force_scale) || !(force_scale > 0.0)) return 3;
@@ -2114,9 +2125,21 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
          step.accepted_step == target_step);
     step_timer.phase(2U);
     if (visit)
-      status = VisitWriter::write(communicator,
-                                  options.run_root / "Visit", services,
-                                  snapshot);
+      status = VisitWriter::write(communicator, visit_root, services, snapshot);
+    if (!status) {
+      // An output failure ends the run, not the already committed time step.
+      // Query the public committed authority; never retry or roll it back.
+      CommittedOutputSnapshot retained;
+      const Status retained_status = driver.committed_output_snapshot(retained);
+      if (rank == 0)
+        std::cerr << "visit_status=" << static_cast<unsigned>(status.code)
+                  << '/' << status.detail
+                  << " accepted_step=" << step.accepted_step
+                  << " committed_step=" << (retained_status ? retained.step : 0U)
+                  << " accepted_time=" << std::setprecision(17) << step.accepted_time
+                  << " committed_time=" << retained.time << '\n';
+      return 6;
+    }
     step_timer.phase(3U);
     DriverResourceReport global_resources;
     if (status)

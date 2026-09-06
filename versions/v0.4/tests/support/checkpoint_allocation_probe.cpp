@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,10 @@ namespace {
 bool active = false, started = false, fired = false;
 long calls = 0, failure = -1;
 int evidence = -1, complete = -1;
+std::uint64_t accepted_step = 0;
+bool visit_mode() noexcept {
+  return std::getenv("HUNDUN_TEST_VISIT_ALLOC") != nullptr;
+}
 int rank_value() noexcept {
   const char* value = std::getenv("OMPI_COMM_WORLD_RANK");
   if (!value) value = std::getenv("PMI_RANK");
@@ -74,7 +79,10 @@ extern "C" int open(const char* path, int flags, ...) {
 }
 extern "C" int fsync(int fd) {
   const int result = static_cast<int>(::syscall(SYS_fsync, fd));
-  if (result == 0 && fd == evidence) start();
+  if (result == 0 && fd == evidence) {
+    if (visit_mode()) active = false;
+    else start();
+  }
   if (result == 0 && fd == complete) active = false;
   return result;
 }
@@ -85,13 +93,22 @@ extern "C" int close(int fd) {
 }
 extern "C" int MPI_Reduce(const void* send, void* receive, int count,
                           MPI_Datatype type, MPI_Op op, int root, MPI_Comm comm) {
-  if (rank_value() != 0) start();
+  if (!visit_mode() && rank_value() != 0) start();
   return PMPI_Reduce(send, receive, count, type, op, root, comm);
+}
+extern "C" void hundun_v04_observe_step(std::uint64_t step, int entering) {
+  if (visit_mode() && entering == 0) {
+    accepted_step = step;
+    start();
+  }
 }
 extern "C" int MPI_Finalize() {
   active = false;
   if (target())
     std::fprintf(stderr, "CHECKPOINT_ALLOC sites=%ld fired=%d started=%d\n",
                   calls, fired, started);
+  if (visit_mode())
+    std::fprintf(stderr, "VISIT_FINALIZE rank=%d accepted_step=%llu\n",
+                 rank_value(), static_cast<unsigned long long>(accepted_step));
   return PMPI_Finalize();
 }

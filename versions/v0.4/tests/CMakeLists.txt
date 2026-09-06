@@ -41,6 +41,15 @@ foreach(rank_count IN ITEMS 1 2 4)
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 LABELS allocation_audit)
 endforeach()
 
+add_test(NAME v04_runner_visit_allocation_mpi_2
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_checkpoint_cli_test.py"
+    --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+    --probe "$<TARGET_FILE:v04_checkpoint_allocation_probe>"
+    --mpi "${MPIEXEC_EXECUTABLE}" --ranks 2 --visit)
+set_tests_properties(v04_runner_visit_allocation_mpi_2 PROPERTIES
+  PROCESSORS 2 TIMEOUT 240 LABELS allocation_audit)
+
 add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"
