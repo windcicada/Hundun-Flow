@@ -113,6 +113,9 @@ struct RestartSnapshot {
   ConstFaceFluxView previous_mass_flux{};
   double previous_pressure_reference{};
   double closed_mass_target{};
+  // Zero writes legacy unsigned V2 history. A nonzero semantic signature
+  // writes V3 (same physical history plus this integrity-protected identity).
+  PlanFingerprint method_history_signature{};
 };
 
 enum class IoFailureOperation : std::uint8_t {
@@ -177,6 +180,16 @@ enum class RestartStorageCompatibility : std::uint8_t {
   mg_bundle_ghost_v1
 };
 
+// A caller policy, not a statement about what the source file contains.
+enum class RestartHistoryPolicy : std::uint8_t {
+  require_compatible,
+  rebuild_method_history
+};
+
+enum class RestartHistoryCompatibility : std::uint8_t {
+  missing, unknown, compatible, incompatible
+};
+
 struct RestartExpected {
   Int3 global_cells{};
   MeshPatch target_patch{};
@@ -187,6 +200,7 @@ struct RestartExpected {
   Span<const RestartExpectedField> rate_fields{};
   PlanFingerprint compatible_storage_plan{};
   PlanFingerprint compatible_storage_schema{};
+  PlanFingerprint method_history_signature{};
 };
 
 struct RestartImageField {
@@ -212,8 +226,9 @@ struct RestartImage {
   std::array<std::vector<double>, 3U> final_mass_flux;
   // True only for a legacy version-one image whose absent t_{n-1} state is
   // synthesized from t_n.  Callers must insert one backward-Euler recovery
-  // step in that case.  False denotes an exact version-two history and the
-  // next requested/effective scheme may remain BDF2.
+  // step in that case. False denotes complete V2/V3 source history, not proof
+  // of same-method compatibility; use history_compatibility and a separate
+  // RestartHistoryPolicy. Callers must not repurpose this file-format fact.
   bool backward_euler_recovery{true};
   std::vector<RestartImageField> previous_fields;
   std::vector<RestartImageField> accepted_rate_fields;
@@ -225,6 +240,19 @@ struct RestartImage {
   RevisionToken previous_mass_flux_revision{};
   // Source plan/schema above remain unchanged when this is true.
   bool storage_layout_migrated{};
+  // File facts remain unchanged when a caller requests method recovery.
+  std::uint32_t source_format_version{1U};
+  PlanFingerprint method_history_signature{};
+
+  RestartHistoryCompatibility history_compatibility(
+      PlanFingerprint expected_signature) const noexcept {
+    if (backward_euler_recovery) return RestartHistoryCompatibility::missing;
+    if (method_history_signature == 0U || expected_signature == 0U)
+      return RestartHistoryCompatibility::unknown;
+    return method_history_signature == expected_signature
+        ? RestartHistoryCompatibility::compatible
+        : RestartHistoryCompatibility::incompatible;
+  }
 
   void clear() noexcept;
 };
@@ -390,6 +418,11 @@ struct RuntimeRunStartAnchor {
   std::uint64_t previous_step{};
   double previous_time{};
   RuntimeSha256Digest restart_manifest_sha256{};
+  // Optional for historical evidence; new restart producers fill all fields.
+  std::uint32_t source_format_version{};
+  PlanFingerprint source_history_signature{};
+  PlanFingerprint target_history_signature{};
+  RestartHistoryPolicy history_policy{RestartHistoryPolicy::require_compatible};
 };
 
 struct RuntimeEvidenceRecord {

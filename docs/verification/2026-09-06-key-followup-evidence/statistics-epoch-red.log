@@ -1,0 +1,7 @@
+epoch source_samples=2 exact_samples=4 method_start_samples=2 method_end_samples=3
+Traceback (most recent call last):
+  File "versions/v0.4/tests/integration/runner_statistics_epoch_test.py", line 100, in <module>
+    main()
+  File "versions/v0.4/tests/integration/runner_statistics_epoch_test.py", line 83, in main
+    assert recovered_meta["starting_sample_steps"] == "0", "method recovery inherited old samples"
+AssertionError: method recovery inherited old samples

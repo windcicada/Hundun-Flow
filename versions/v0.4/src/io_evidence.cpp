@@ -160,6 +160,17 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
         (first && record.restart_recovery &&
          (record.requested_bdf_order != 1U || record.bdf_order != 1U)))
       return false;
+    if (anchor.source_format_version != 0U) {
+      const bool rebuild = anchor.history_policy == RestartHistoryPolicy::rebuild_method_history;
+      const bool missing = anchor.source_format_version == 1U;
+      if (anchor.source_format_version > 3U || anchor.target_history_signature == 0U ||
+          (anchor.source_format_version < 3U ? anchor.source_history_signature != 0U
+                                            : anchor.source_history_signature == 0U) ||
+          (!rebuild && anchor.history_policy != RestartHistoryPolicy::require_compatible) ||
+          (!rebuild && !missing && anchor.source_history_signature != anchor.target_history_signature) ||
+          (first && record.restart_recovery != (missing || rebuild)))
+        return false;
+    }
   } else {
     return false;
   }
@@ -683,6 +694,14 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
     json << '\"' << record.run_start.restart_manifest_sha256.data() << '\"';
   } else {
     json << "null";
+  }
+  if (record.run_start.source_format_version != 0U) {
+    json << ",\"history\":{\"source_format_version\":" << record.run_start.source_format_version
+         << ",\"source_signature\":" << record.run_start.source_history_signature
+         << ",\"target_signature\":" << record.run_start.target_history_signature
+         << ",\"policy\":\""
+         << (record.run_start.history_policy == RestartHistoryPolicy::rebuild_method_history
+                 ? "rebuild_method_history" : "require_compatible") << "\"}";
   }
   json << '}'
        << ",\"step\":" << record.step

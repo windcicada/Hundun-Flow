@@ -1,0 +1,29 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+      Start   3: v04_thin_domain_runner_self_test
+ 1/10 Test   #3: v04_thin_domain_runner_self_test .....   Passed    0.51 sec
+      Start   9: v04_runner_statistics_epoch_mpi_1
+ 2/10 Test   #9: v04_runner_statistics_epoch_mpi_1 ....   Passed   18.76 sec
+      Start  10: v04_runner_statistics_epoch_mpi_2
+ 3/10 Test  #10: v04_runner_statistics_epoch_mpi_2 ....   Passed   15.67 sec
+      Start  11: v04_runner_statistics_epoch_mpi_4
+ 4/10 Test  #11: v04_runner_statistics_epoch_mpi_4 ....   Passed   13.69 sec
+      Start  12: v04_evidence_workflow
+ 5/10 Test  #12: v04_evidence_workflow ................   Passed    1.09 sec
+      Start  19: v04_product_restart_storage_mpi_1
+ 6/10 Test  #19: v04_product_restart_storage_mpi_1 ....   Passed    1.02 sec
+      Start  20: v04_product_restart_storage_mpi_2
+ 7/10 Test  #20: v04_product_restart_storage_mpi_2 ....   Passed    0.94 sec
+      Start  21: v04_product_restart_storage_mpi_4
+ 8/10 Test  #21: v04_product_restart_storage_mpi_4 ....   Passed    1.04 sec
+      Start 163: v04_io_restart_mpi_4
+ 9/10 Test #163: v04_io_restart_mpi_4 .................   Passed   23.59 sec
+      Start 198: v04_product_restart_method_history
+10/10 Test #198: v04_product_restart_method_history ...   Passed    1.37 sec
+
+100% tests passed, 0 tests failed out of 10
+
+Label Time Summary:
+v04_focused    = 102.50 sec*proc (5 tests)
+
+Total Test time (real) =  77.70 sec

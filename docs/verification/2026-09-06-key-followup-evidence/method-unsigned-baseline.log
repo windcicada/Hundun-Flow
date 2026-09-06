@@ -1,0 +1,3 @@
+ibm_reconstruction policy=strict_quadratic boundary_linear=0/384 surface_linear=0/36 expanded=0
+CHECKPOINT step=2 time=0.00022499999999999999 samples=0
+COMPLETED steps=1 final_step=2 samples=0

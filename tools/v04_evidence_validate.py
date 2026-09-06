@@ -935,6 +935,20 @@ def validate_v6_run_start(record: Dict[str, Any],
                 f"{prefix} lifecycle disagrees with legacy Restart recovery")
     else:
         raise EvidenceError(f"{prefix}.kind is invalid")
+    if "history" in anchor:
+        history = require_object_fields(anchor["history"],
+            ("source_format_version", "source_signature", "target_signature", "policy"),
+            f"{prefix}.history")
+        version = require_integer(history["source_format_version"], f"{prefix}.source_format_version", 1)
+        source = require_integer(history["source_signature"], f"{prefix}.source_signature", 0)
+        target = require_integer(history["target_signature"], f"{prefix}.target_signature", 1)
+        rebuild = history["policy"] == "rebuild_method_history"
+        if (kind != "restart" or version not in (1, 2, 3) or
+                (version < 3 and source != 0) or (version == 3 and source == 0) or
+                history["policy"] not in ("require_compatible", "rebuild_method_history") or
+                (not rebuild and version != 1 and source != target) or
+                (first and record.get("restart_recovery") is not (version == 1 or rebuild))):
+            raise EvidenceError(f"{prefix} has incompatible method/history policy")
     if first and not _v6_close(record["previous_committed_time"],
                                previous_time):
         raise EvidenceError(
@@ -954,7 +968,7 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
      plan, schema, geometry, time, dt, pressure_reference,
      step, controller_state, field_count) = fields
     cursor = header_size + 4 * field_count
-    exact_history = version == 2
+    exact_history = version in (2, 3)
     valid_exact = True
     if exact_history and len(data) >= cursor + struct.calcsize("<ddQQI") + 8:
         (previous_pressure_reference, closed_mass_target,
@@ -973,8 +987,16 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
         cursor += 4 * rate_count
     elif exact_history:
         valid_exact = False
+    method_history_signature = 0
+    if version == 3:
+        if len(data) < cursor + 8:
+            valid_exact = False
+        else:
+            method_history_signature = struct.unpack_from("<Q", data, cursor)[0]
+            valid_exact = valid_exact and method_history_signature != 0
+        cursor += 8
     expected_size = cursor + 40 * rank_count + 8
-    if (magic != b"H4MANI01" or version not in (1, 2) or
+    if (magic != b"H4MANI01" or version not in (1, 2, 3) or
             rank_count == 0 or
             min(cells_x, cells_y, cells_z) <= 0 or
             min(plan, schema, geometry) == 0 or
@@ -998,6 +1020,8 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
         "step": step,
         "time": time,
         "backward_euler_recovery": version == 1,
+        "source_format_version": version,
+        "method_history_signature": method_history_signature,
     }
 
 
@@ -1873,15 +1897,20 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                             raise EvidenceError(
                                 f"line {line_number}: V6/V7/V8 restart evidence "
                                 "requires --run-start-manifest")
+                        history = anchor.get("history")
+                        expected_recovery = restart_authority["backward_euler_recovery"]
+                        if history is not None:
+                            if (history["source_format_version"] != restart_authority["source_format_version"] or
+                                    history["source_signature"] != restart_authority["method_history_signature"]):
+                                raise EvidenceError("run-start history disagrees with the frozen restart manifest")
+                            expected_recovery = expected_recovery or history["policy"] == "rebuild_method_history"
                         if (anchor["restart_manifest_sha256"] !=
                                 restart_authority["sha256"] or
                                 anchor["previous_step"] !=
                                 restart_authority["step"] or
                                 not _v6_close(anchor["previous_time"],
                                               restart_authority["time"]) or
-                                record["restart_recovery"] is not
-                                restart_authority[
-                                    "backward_euler_recovery"]):
+                                record["restart_recovery"] is not expected_recovery):
                             raise EvidenceError(
                                 f"line {line_number}: V6/V7/V8 run-start anchor "
                                 "disagrees with the frozen restart manifest")

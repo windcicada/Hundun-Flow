@@ -28,8 +28,8 @@ int main(int argc, char** argv) {
     if (status) status = driver.restart_expected(expected);
     RestartImage image;
     if (status) status = RestartReader::load(MPI_COMM_WORLD, argv[2], expected, image);
-    image.backward_euler_recovery = true;
-    if (status) status = driver.initialize_restart(image);
+    if (status) status = driver.initialize_restart(image,
+        RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
     DriverStepReport report;
     if (status) {
       detail::arm_pressure_energy_candidate_globalization_once_for_test();

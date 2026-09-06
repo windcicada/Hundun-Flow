@@ -1,0 +1,2 @@
+FAIL: method recovery preserves a complete source's closed mass target
+method_mass original=1.1030948920068615 saved=1.1030949030378103 restored=1.1030948920068622 source_complete=1

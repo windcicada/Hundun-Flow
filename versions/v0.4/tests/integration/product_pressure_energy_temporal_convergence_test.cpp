@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
+#include <filesystem>
+#include <unistd.h>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -1530,11 +1532,141 @@ bool test_product_pressure_energy_temporal_convergence(CouplingKind coupling) {
 
 }  // namespace
 
+// Public ProductDriver/Writer/Reader regression on a nonuniform closed wave.
+// The saved mass target deliberately differs slightly from the instantaneous
+// inventory, within the fixture's physical acceptance tolerance.
+bool test_method_recovery_mass_target() {
+  auto model = temporal_model();
+  const auto create = [&](ProductDriver& driver) {
+    CompiledCasePlan plan;
+    auto s = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
+    return s ? ProductDriver::create(MPI_COMM_SELF, std::move(plan), driver) : s;
+  };
+  ProductDriver source;
+  auto status = create(source);
+  RestartExpected expected;
+  if (status) status = source.restart_expected(expected);
+  if (status) status = source.initialize_restart(compatible_wave(expected, kCoarseDt));
+  DriverStepReport step;
+  const LocalTimeLimits limits{kCoarseDt, kCoarseDt, kCoarseDt, kCoarseDt, kCoarseDt};
+  for (int n = 0; n < 2 && status; ++n) status = source.advance(limits, step);
+  RestartSnapshot saved;
+  if (status) status = source.committed_restart_snapshot(saved);
+  if (!expect(static_cast<bool>(status), "nonuniform restart fixture")) return false;
+  const double original_target = saved.closed_mass_target;
+  // Stay inside BOTH the terminal and predictor closed-mass tolerances (1e-12).
+  // A 1e-8 perturbation is correctly rejected by certify_density_fields (823),
+  // before pressure correction; it is not a legal exact-continuation fixture.
+  saved.closed_mass_target *= 1.0 + 1e-13;
+  saved.method_history_signature = 0U;  // Deliberately retain an unsigned V2 source.
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("hundun-method-history-" + std::to_string(::getpid()));
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  status = RestartWriter::write(MPI_COMM_SELF, directory, saved);
+  ProductDriver recovery;
+  if (status) status = create(recovery);
+  if (status) status = recovery.restart_expected(expected);
+  RestartImage image;
+  if (status) status = RestartReader::load(MPI_COMM_SELF, directory, expected, image);
+  const bool complete_source = status && !image.backward_euler_recovery;
+  ProductDriver unsigned_exact;
+  const auto created = create(unsigned_exact);
+  const auto unknown_history = created ? unsigned_exact.initialize_restart(image) : created;
+  const bool rejected_unknown = created && !unknown_history && !unsigned_exact.initialized();
+  if (status) status = recovery.initialize_restart(image,
+      RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+  const double actual = recovery.closed_mass_target();
+  bool passed = expect(complete_source && status && actual == saved.closed_mass_target,
+      "method recovery preserves a complete source's closed mass target");
+  passed &= expect(!image.backward_euler_recovery,
+                   "method policy does not relabel complete source history as missing");
+  passed &= expect(rejected_unknown,
+      "unsigned complete history is not silently accepted as same-method exact history");
+  std::cerr << std::setprecision(17) << "method_mass original=" << original_target
+            << " saved=" << saved.closed_mass_target << " restored=" << actual
+            << " source_complete=" << complete_source << '\n';
+  passed &= expect(image.source_format_version == 2U &&
+      image.history_compatibility(expected.method_history_signature) == RestartHistoryCompatibility::unknown,
+      "V2 format completeness and unknown method identity remain separate");
+
+  saved.method_history_signature = expected.method_history_signature;
+  const auto signed_root = directory / "signed";
+  status = RestartWriter::write(MPI_COMM_SELF, signed_root, saved);
+  RestartImage signed_image;
+  if (status) status = RestartReader::load(MPI_COMM_SELF, signed_root, expected, signed_image);
+  passed &= expect(status && signed_image.source_format_version == 3U &&
+      signed_image.history_compatibility(expected.method_history_signature) == RestartHistoryCompatibility::compatible,
+      "signed history round-trips independently of physical/schema identity");
+  ProductDriver exact;
+  if (status) status = create(exact);
+  if (status) status = exact.initialize_restart(signed_image);
+  DriverStepReport exact_step;
+  if (status) status = exact.advance(limits, exact_step);
+  passed &= expect(status && exact_step.accepted && exact_step.effective_bdf.order == 2U,
+      "same-method exact continuation retains BDF2");
+  std::cerr << "exact_method status=" << unsigned(status.code) << '/' << status.detail
+            << " attempts=" << exact_step.attempts << " proposal_bdf=" << unsigned(exact_step.proposal.bdf.order)
+            << " fallback=" << exact_step.temporal_method_fallback << '\n';
+
+  auto different = signed_image;
+  different.method_history_signature ^= 1U;
+  for (auto& field : different.accepted_rate_fields)
+    for (auto& value : field.values) value += 1e6;
+  for (auto& field : different.previous_rate_fields)
+    for (auto& value : field.values) value -= 1e6;
+  ProductDriver rejected, rebuilt, pristine;
+  auto local = create(rejected);
+  const auto denied = local ? rejected.initialize_restart(different) : local;
+  passed &= expect(local && !denied && denied.detail == 10213U && !rejected.initialized(),
+      "changed semantic signature cannot silently reuse exact history");
+  local = create(rebuilt);
+  if (local) local = rebuilt.initialize_restart(different, RestartStorageCompatibility::strict,
+      RestartHistoryPolicy::rebuild_method_history);
+  if (local) local = create(pristine);
+  if (local) local = pristine.initialize_restart(signed_image, RestartStorageCompatibility::strict,
+      RestartHistoryPolicy::rebuild_method_history);
+  const auto capture_rates = [](ProductDriver& driver, std::vector<double>& values) {
+    RestartSnapshot snapshot;
+    if (!driver.committed_restart_snapshot(snapshot)) return false;
+    for (auto fields : {snapshot.accepted_rate_fields, snapshot.previous_rate_fields})
+      for (std::size_t f = 0; f < fields.size; ++f) {
+        const auto v = fields.data[f].values;
+        for (int z = 0; z < v.interior.z; ++z)
+          for (int y = 0; y < v.interior.y; ++y)
+            for (int x = 0; x < v.interior.x; ++x) values.push_back(v.unchecked({x,y,z},0));
+      }
+    return true;
+  };
+  std::vector<double> rebuilt_rates, pristine_rates;
+  passed &= expect(local && capture_rates(rebuilt, rebuilt_rates) &&
+      capture_rates(pristine, pristine_rates) && !rebuilt_rates.empty() && rebuilt_rates == pristine_rates,
+      "method recovery rebuilds rates and never overwrites them with stored old rates");
+  DriverStepReport first_recovery, second_recovery;
+  if (local) local = rebuilt.advance(limits, first_recovery);
+  if (local) local = rebuilt.advance(limits, second_recovery);
+  passed &= expect(local && first_recovery.effective_bdf.order == 1U &&
+      second_recovery.effective_bdf.order == 2U && rebuilt.closed_mass_target() == saved.closed_mass_target,
+      "method recovery inserts one BE step then BDF2 without redefining physical mass");
+  std::cerr << "method_history unsigned_rejected=" << rejected_unknown
+            << " signed_exact_bdf=" << unsigned(exact_step.effective_bdf.order)
+            << " method_recovery_bdf=" << unsigned(first_recovery.effective_bdf.order)
+            << ',' << unsigned(second_recovery.effective_bdf.order)
+            << " rebuilt_rate_payload_equal=" << (rebuilt_rates == pristine_rates)
+            << " recovery_attempts=" << first_recovery.attempts << ',' << second_recovery.attempts
+            << " recovery_status=" << unsigned(local.code) << '/' << local.detail
+            << " passed=" << passed << '\n';
+  std::filesystem::remove_all(directory, error);
+  return passed;
+}
+
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   const CouplingKind coupling = argc == 2 && std::string_view(argv[1]) == "--simple"
                                     ? CouplingKind::simple : CouplingKind::piso;
-  const bool passed = argc == 2 && std::string_view(argv[1]) == "--scalar-splitting"
+  const bool passed = argc == 2 && std::string_view(argv[1]) == "--method-recovery"
+      ? test_method_recovery_mass_target()
+      : argc == 2 && std::string_view(argv[1]) == "--scalar-splitting"
       ? test_scalar_splitting_observation()
       : test_product_pressure_energy_temporal_convergence(coupling);
   MPI_Finalize();

@@ -31,6 +31,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -49,6 +50,21 @@ constexpr std::uint32_t kProductBinding = 10208U;
 constexpr std::uint32_t kProductCollective = 10209U;
 constexpr std::uint32_t kProductPressureEnergy = 10210U;
 constexpr std::uint32_t kProductConvectiveCfl = 10211U;
+constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
+// Semantic history contract, independent of Git/build/partition identity.
+// Bump the affected component when its stored state, rate, flux or time
+// interpretation changes. Model/BC/transport parameters remain bound by plan.
+constexpr PlanFingerprint method_history_signature() noexcept {
+  std::uint64_t hash = UINT64_C(1469598103934665603);
+  for (char byte : std::string_view(
+      "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
+      "accepted-ibm-thermal-zero-normal-v2;momentum-rates-v1;"
+      "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v2")) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
 constexpr StageId kIbmGradientDonorStage = 131U;
 constexpr StageId kIbmPressureCorrectionDonorStage = 150U;
@@ -5719,6 +5735,7 @@ Status ProductDriver::restart_expected(
     out.compatible_storage_plan = product.legacy_mg_fingerprint;
     out.compatible_storage_schema = product.legacy_mg_schema_fingerprint;
   }
+  out.method_history_signature = method_history_signature();
   return {};
 }
 
@@ -6532,7 +6549,8 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
 
 Status ProductDriver::initialize_restart(
     const RestartImage& image,
-    RestartStorageCompatibility compatibility) noexcept try {
+    RestartStorageCompatibility compatibility,
+    RestartHistoryPolicy history_policy) noexcept try {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   g_cold_velocity_dependents_published.store(false,
                                              std::memory_order_release);
@@ -6544,7 +6562,12 @@ Status ProductDriver::initialize_restart(
     return {StatusCode::invalid_plan, kProductInput};
   ProductDriver::Impl& runtime = *implementation_;
   CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
-  const bool exact_history = !image.backward_euler_recovery;
+  const bool complete_source_history = !image.backward_euler_recovery;
+  const bool method_recovery =
+      history_policy == RestartHistoryPolicy::rebuild_method_history;
+  const bool exact_history = complete_source_history && !method_recovery;
+  const auto history_compatibility =
+      image.history_compatibility(method_history_signature());
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -6553,13 +6576,17 @@ Status ProductDriver::initialize_restart(
       image.schema == product.legacy_mg_schema_fingerprint;
   Status status =
       !runtime.initialized &&
+              (history_policy == RestartHistoryPolicy::require_compatible ||
+               history_policy == RestartHistoryPolicy::rebuild_method_history) &&
+              (!method_recovery ||
+               compatibility == RestartStorageCompatibility::strict) &&
               (compatibility == RestartStorageCompatibility::strict ||
                compatibility ==
                    RestartStorageCompatibility::mg_bundle_ghost_v1) &&
               std::isfinite(image.time) && std::isfinite(image.dt) &&
               image.dt > 0.0 && std::isfinite(image.pressure_reference) &&
               image.pressure_reference > 0.0 && image.step != 0U &&
-              (!exact_history ||
+              (!complete_source_history ||
                (image.controller_state != 0U &&
                 std::isfinite(image.previous_pressure_reference) &&
                 image.previous_pressure_reference > 0.0 &&
@@ -6575,6 +6602,15 @@ Status ProductDriver::initialize_restart(
   const auto same_int3 = [](Int3 left, Int3 right) noexcept {
     return left.x == right.x && left.y == right.y && left.z == right.z;
   };
+  if (status && exact_history &&
+      history_compatibility != RestartHistoryCompatibility::compatible)
+    status = {StatusCode::invalid_plan, kProductHistoryIncompatible};
+  if (status &&
+      ((image.source_format_version == 1U) != image.backward_euler_recovery ||
+       image.source_format_version < 1U || image.source_format_version > 3U ||
+       (image.source_format_version < 3U && image.method_history_signature != 0U) ||
+       (image.source_format_version == 3U && image.method_history_signature == 0U)))
+    status = {StatusCode::invalid_plan, kProductInput};
   const auto same_patch = [&](MeshPatch left, MeshPatch right) noexcept {
     return same_int3(left.begin, right.begin) &&
            same_int3(left.cells, right.cells) &&
@@ -6612,13 +6648,13 @@ Status ProductDriver::initialize_restart(
   };
   if (status)
     status = validate_fields(image.fields, runtime.restart_expected_fields);
-  if (status && exact_history)
+  if (status && complete_source_history)
     status = validate_fields(image.previous_fields,
                              runtime.restart_expected_fields);
-  if (status && exact_history)
+  if (status && complete_source_history)
     status = validate_fields(image.accepted_rate_fields,
                              runtime.restart_expected_rate_fields);
-  if (status && exact_history)
+  if (status && complete_source_history)
     status = validate_fields(image.previous_rate_fields,
                              runtime.restart_expected_rate_fields);
   const Int3 cells = product.patch.cells;
@@ -6632,7 +6668,7 @@ Status ProductDriver::initialize_restart(
       (image.final_mass_flux[0U].size() != x_faces ||
        image.final_mass_flux[1U].size() != y_faces ||
        image.final_mass_flux[2U].size() != z_faces ||
-       (exact_history &&
+       (complete_source_history &&
         (image.previous_mass_flux[0U].size() != x_faces ||
          image.previous_mass_flux[1U].size() != y_faces ||
          image.previous_mass_flux[2U].size() != z_faces))))
@@ -6641,7 +6677,7 @@ Status ProductDriver::initialize_restart(
     for (double value : face)
       if (status && !std::isfinite(value))
         status = {StatusCode::numerical_failure, kProductInput};
-  if (exact_history)
+  if (complete_source_history)
     for (const std::vector<double>& face : image.previous_mass_flux)
       for (double value : face)
         if (status && !std::isfinite(value))
@@ -6649,6 +6685,14 @@ Status ProductDriver::initialize_restart(
   // All malformed-checkpoint decisions become collective before any rank
   // constructs a view into the checkpoint or enters a later mass reduction.
   status = product.reductions.consensus(status);
+  if (!status) return status;
+  auto restore_contract = detail::product_mix(kFnvOffset,
+      static_cast<std::uint64_t>(history_policy));
+  restore_contract = detail::product_mix(restore_contract,
+      static_cast<std::uint64_t>(compatibility));
+  restore_contract = detail::product_mix(restore_contract, image.source_format_version);
+  restore_contract = detail::product_mix(restore_contract, image.method_history_signature);
+  status = product.reductions.consensus_contract(restore_contract);
   if (!status) return status;
   TimeControllerState controller;
   status = exact_history
@@ -7200,7 +7244,7 @@ Status ProductDriver::initialize_restart(
       exact_history ? image.previous_pressure_reference
                     : image.pressure_reference;
   runtime.closed_mass_target =
-      exact_history ? image.closed_mass_target : global_mass;
+      complete_source_history ? image.closed_mass_target : global_mass;
   runtime.pressure_correction_warm_start_valid = false;
   runtime.predictor_diagnostics = {};
   runtime.balance_history = {};
@@ -15149,7 +15193,8 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           runtime.restart_previous_rate_fields.size()},
          previous_flux,
          runtime.previous_pressure_reference,
-         runtime.closed_mass_target};
+         runtime.closed_mass_target,
+         method_history_signature()};
   return {};
 }
 

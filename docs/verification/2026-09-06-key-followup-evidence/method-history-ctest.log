@@ -1,0 +1,28 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start  16: v04_product_restart_storage_mpi_1
+1/5 Test  #16: v04_product_restart_storage_mpi_1 ....   Passed    1.16 sec
+    Start  17: v04_product_restart_storage_mpi_2
+2/5 Test  #17: v04_product_restart_storage_mpi_2 ....   Passed    1.08 sec
+    Start  18: v04_product_restart_storage_mpi_4
+3/5 Test  #18: v04_product_restart_storage_mpi_4 ....   Passed    1.34 sec
+    Start 160: v04_io_restart_mpi_4
+4/5 Test #160: v04_io_restart_mpi_4 .................   Passed   24.03 sec
+    Start 195: v04_product_restart_method_history
+5/5 Test #195: v04_product_restart_method_history ...***Failed    1.24 sec
+method_mass original=1.1030948920068615 saved=1.1030949030378103 restored=1.1030949030378103 source_complete=1
+FAIL: same-method exact continuation retains BDF2
+FAIL: method recovery inserts one BE step then BDF2 without redefining physical mass
+method_history unsigned_rejected=1 signed_exact_bdf=1 method_recovery_bdf=1,1 rebuilt_rate_payload_equal=1 passed=0
+
+
+80% tests passed, 1 tests failed out of 5
+
+Label Time Summary:
+v04_focused    = 104.80 sec*proc (4 tests)
+
+Total Test time (real) =  28.88 sec
+
+The following tests FAILED:
+	195 - v04_product_restart_method_history (Failed)
+Errors while running CTest

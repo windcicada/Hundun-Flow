@@ -468,7 +468,9 @@ class ProductDriver {
   Status initialize(const DriverInitialState& initial) noexcept;
   Status initialize_restart(const RestartImage& image,
                             RestartStorageCompatibility compatibility =
-                                RestartStorageCompatibility::strict) noexcept;
+                                RestartStorageCompatibility::strict,
+                            RestartHistoryPolicy history_policy =
+                                RestartHistoryPolicy::require_compatible) noexcept;
   // Add the accepted-flow convective bound without changing the caller's
   // explicit diffusion/acoustic bounds. No-op for a fixed-dt product.
   Status constrain_convective_time_limit(LocalTimeLimits& limits) noexcept;

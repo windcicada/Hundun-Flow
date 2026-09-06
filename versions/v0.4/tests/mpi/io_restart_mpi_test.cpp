@@ -399,13 +399,16 @@ bool verify(const RestartImage& image, const MeshPatch& patch) {
   return true;
 }
 
-bool exact_transition(MPI_Comm communicator, const fs::path& directory) {
+bool exact_transition(MPI_Comm communicator, const fs::path& directory,
+                      PlanFingerprint signature = 0U) {
   ExactFixture fixture;
   bool passed = fixture.initialize(communicator);
   Status status;
+  auto snapshot = fixture.snapshot();
+  snapshot.method_history_signature = signature;
   if (passed)
     status = RestartWriter::write(communicator, directory,
-                                  fixture.snapshot(), {1U});
+                                  snapshot, {1U});
   passed = passed && static_cast<bool>(status);
   const std::array<RestartExpectedField, 4U> expected_fields{{
       {RestartFieldRole::velocity, 0U, 3U},
@@ -427,6 +430,11 @@ bool exact_transition(MPI_Comm communicator, const fs::path& directory) {
   if (passed)
     status = RestartReader::load(communicator, directory, expected, image);
   passed = passed && static_cast<bool>(status) &&
+           image.source_format_version == (signature == 0U ? 2U : 3U) &&
+           image.method_history_signature == signature &&
+           image.history_compatibility(signature) ==
+               (signature == 0U ? RestartHistoryCompatibility::unknown
+                                : RestartHistoryCompatibility::compatible) &&
            !image.backward_euler_recovery &&
            image.controller_state == 51U &&
            image.previous_pressure_reference == 101300.0 &&
@@ -871,6 +879,7 @@ int main(int argc, char** argv) {
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);
   passed &= transition(MPI_COMM_WORLD, 4, 4, base / "four-to-four", 4U);
   passed &= exact_transition(MPI_COMM_WORLD, base / "exact-four-to-four");
+  passed &= exact_transition(MPI_COMM_WORLD, base / "signed-four-to-four", UINT64_C(0x391002));
   passed &= failure_boundaries(MPI_COMM_WORLD, base / "failure-boundaries");
   passed &= retention_order(MPI_COMM_WORLD, base / "retention-order");
   passed &= restart_syscalls(MPI_COMM_WORLD, base / "syscalls");

@@ -50,6 +50,16 @@ add_test(NAME v04_runner_visit_allocation_mpi_2
 set_tests_properties(v04_runner_visit_allocation_mpi_2 PROPERTIES
   PROCESSORS 2 TIMEOUT 240 LABELS allocation_audit)
 
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_runner_statistics_epoch_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_statistics_epoch_test.py"
+      --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+      --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}")
+  set_tests_properties(v04_runner_statistics_epoch_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180)
+endforeach()
+
 add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"
@@ -886,6 +896,9 @@ add_test(NAME v04_product_simple_pressure_energy_temporal_convergence
   COMMAND v04_product_pressure_energy_temporal_convergence_test --simple)
 set_tests_properties(v04_product_simple_pressure_energy_temporal_convergence
   PROPERTIES TIMEOUT 180)
+add_test(NAME v04_product_restart_method_history
+  COMMAND v04_product_pressure_energy_temporal_convergence_test --method-recovery)
+set_tests_properties(v04_product_restart_method_history PROPERTIES TIMEOUT 45)
 add_test(NAME v04_product_scalar_splitting_observation
   COMMAND v04_product_pressure_energy_temporal_convergence_test --scalar-splitting)
 set_tests_properties(v04_product_scalar_splitting_observation

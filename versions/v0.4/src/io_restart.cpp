@@ -46,6 +46,7 @@ constexpr std::uint32_t kRestartCoverage = 10308U;
 constexpr std::uint32_t kRestartPublication = 10309U;
 constexpr std::uint32_t kLegacyFormatVersion = 1U;
 constexpr std::uint32_t kExactHistoryFormatVersion = 2U;
+constexpr std::uint32_t kSignedHistoryFormatVersion = 3U;
 constexpr std::array<char, 8U> kRankMagic{{'H', '4', 'R', 'A', 'N', 'K', '0', '1'}};
 constexpr std::array<char, 8U> kManifestMagic{{'H', '4', 'M', 'A', 'N', 'I', '0', '1'}};
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -230,6 +231,7 @@ struct Manifest {
   double closed_mass_target{};
   RevisionToken final_mass_flux_revision{};
   RevisionToken previous_mass_flux_revision{};
+  PlanFingerprint method_history_signature{};
   std::vector<FieldMeta> fields;
   std::vector<FieldMeta> rate_fields;
   std::vector<RankRecord> ranks;
@@ -458,7 +460,14 @@ bool has_exact_history(const RestartSnapshot& snapshot) noexcept {
          snapshot.previous_rate_fields.size != 0U ||
          snapshot.previous_mass_flux.revision != 0U ||
          snapshot.previous_pressure_reference != 0.0 ||
-         snapshot.closed_mass_target != 0.0;
+         snapshot.closed_mass_target != 0.0 ||
+         snapshot.method_history_signature != 0U;
+}
+
+std::uint32_t snapshot_format(const RestartSnapshot& snapshot) noexcept {
+  return !has_exact_history(snapshot) ? kLegacyFormatVersion
+      : snapshot.method_history_signature != 0U ? kSignedHistoryFormatVersion
+                                               : kExactHistoryFormatVersion;
 }
 
 bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
@@ -495,9 +504,7 @@ bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
 
 std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) {
   Encoder encoder;
-  const std::uint32_t version = has_exact_history(snapshot)
-                                    ? kExactHistoryFormatVersion
-                                    : kLegacyFormatVersion;
+  const std::uint32_t version = snapshot_format(snapshot);
   encoder.u32(version);
   encoder.int3(snapshot.global_cells);
   encoder.u64(snapshot.plan);
@@ -515,7 +522,7 @@ std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) {
     encoder.u16(field.values.field);
     encoder.u8(field.values.components);
   }
-  if (version == kExactHistoryFormatVersion) {
+  if (version >= kExactHistoryFormatVersion) {
     encoder.real(snapshot.previous_pressure_reference);
     encoder.real(snapshot.closed_mass_target);
     encoder.u64(snapshot.final_mass_flux.revision);
@@ -531,6 +538,8 @@ std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) {
       encoder.u8(field.values.components);
     }
   }
+  if (version >= kSignedHistoryFormatVersion)
+    encoder.u64(snapshot.method_history_signature);
   return hash_bytes(encoder.data().data(), encoder.data().size());
 }
 
@@ -552,7 +561,7 @@ void encode_common(Encoder& encoder, const RestartSnapshot& snapshot,
     encoder.u16(field.values.field);
     encoder.u8(field.values.components);
   }
-  if (version == kExactHistoryFormatVersion) {
+  if (version >= kExactHistoryFormatVersion) {
     encoder.real(snapshot.previous_pressure_reference);
     encoder.real(snapshot.closed_mass_target);
     encoder.u64(snapshot.final_mass_flux.revision);
@@ -568,6 +577,8 @@ void encode_common(Encoder& encoder, const RestartSnapshot& snapshot,
       encoder.u8(field.values.components);
     }
   }
+  if (version >= kSignedHistoryFormatVersion)
+    encoder.u64(snapshot.method_history_signature);
 }
 
 bool decode_common(Decoder& decoder, std::uint32_t version,
@@ -599,7 +610,7 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
     }
     field.role = static_cast<RestartFieldRole>(role);
   }
-  if (version == kExactHistoryFormatVersion) {
+  if (version >= kExactHistoryFormatVersion) {
     std::uint32_t rate_count = 0U;
     if (!decoder.real(manifest.previous_pressure_reference) ||
         !decoder.real(manifest.closed_mass_target) ||
@@ -633,13 +644,16 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
   } else if (version != kLegacyFormatVersion) {
     return false;
   }
+  if (version >= kSignedHistoryFormatVersion &&
+      (!decoder.u64(manifest.method_history_signature) ||
+       manifest.method_history_signature == 0U))
+    return false;
   return true;
 }
 
 bool rank_block_size(const RestartSnapshot& snapshot, std::size_t& bytes) {
   Encoder header;
-  encode_common(header, snapshot, has_exact_history(snapshot)
-                    ? kExactHistoryFormatVersion : kLegacyFormatVersion);
+  encode_common(header, snapshot, snapshot_format(snapshot));
   // Magic, version/size/rank, patch, and trailing integrity.
   bytes = header.data().size() + 8U + 12U + 24U + 8U;
   const auto add_values = [&](std::size_t count) {
@@ -687,9 +701,7 @@ Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
   if (maximum_bytes != 0U && bytes > maximum_bytes)
     return {StatusCode::allocation_failure, kRestartRankFile};
   Encoder encoder(bytes);
-  const std::uint32_t version = has_exact_history(snapshot)
-                                    ? kExactHistoryFormatVersion
-                                    : kLegacyFormatVersion;
+  const std::uint32_t version = snapshot_format(snapshot);
   encoder.bytes(kRankMagic.data(), kRankMagic.size());
   encoder.u32(version);
   encoder.u32(static_cast<std::uint32_t>(size));
@@ -759,14 +771,14 @@ Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
     return Status{};
   };
   Status status = encode_fields(snapshot.fields);
-  if (status && version == kExactHistoryFormatVersion)
+  if (status && version >= kExactHistoryFormatVersion)
     status = encode_fields(snapshot.previous_fields);
-  if (status && version == kExactHistoryFormatVersion)
+  if (status && version >= kExactHistoryFormatVersion)
     status = encode_fields(snapshot.accepted_rate_fields);
-  if (status && version == kExactHistoryFormatVersion)
+  if (status && version >= kExactHistoryFormatVersion)
     status = encode_fields(snapshot.previous_rate_fields);
   if (status) status = encode_flux(snapshot.final_mass_flux);
-  if (status && version == kExactHistoryFormatVersion)
+  if (status && version >= kExactHistoryFormatVersion)
     status = encode_flux(snapshot.previous_mass_flux);
   if (!status) return status;
   encoder.append_integrity();
@@ -781,9 +793,7 @@ Status encode_manifest(const RestartSnapshot& snapshot, int size,
                        std::vector<std::uint8_t>& out) {
   if (records.size() != static_cast<std::size_t>(size))
     return {StatusCode::invalid_plan, kRestartManifest};
-  const std::uint32_t version = has_exact_history(snapshot)
-                                    ? kExactHistoryFormatVersion
-                                    : kLegacyFormatVersion;
+  const std::uint32_t version = snapshot_format(snapshot);
   Encoder common;
   encode_common(common, snapshot, version);
   if (records.size() > (SIZE_MAX - common.data().size() - 24U) / 40U)
@@ -816,7 +826,8 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
     if (!decoder.bytes(magic.data(), magic.size()) ||
         magic != kManifestMagic || !decoder.u32(version) ||
         (version != kLegacyFormatVersion &&
-         version != kExactHistoryFormatVersion) ||
+         version != kExactHistoryFormatVersion &&
+         version != kSignedHistoryFormatVersion) ||
         !decoder.u32(candidate.rank_count) ||
         candidate.rank_count == 0U ||
         !decode_common(decoder, version, candidate) ||
@@ -859,7 +870,8 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
     if (!decoder.bytes(magic.data(), magic.size()) || magic != kRankMagic ||
         !decoder.u32(version) ||
         (version != kLegacyFormatVersion &&
-         version != kExactHistoryFormatVersion) ||
+         version != kExactHistoryFormatVersion &&
+         version != kSignedHistoryFormatVersion) ||
         !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
         !decoder.u32(candidate.rank) || candidate.rank >= candidate.rank_count ||
         !decode_common(decoder, version, candidate.common) ||
@@ -926,7 +938,7 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
     };
     if (!decode_fields(candidate.common.fields, candidate.fields))
       return {StatusCode::io_failure, kRestartRankFile};
-    if (version == kExactHistoryFormatVersion &&
+    if (version >= kExactHistoryFormatVersion &&
         (!decode_fields(candidate.common.fields, candidate.previous_fields) ||
          !decode_fields(candidate.common.rate_fields,
                         candidate.accepted_rate_fields) ||
@@ -934,7 +946,7 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
                         candidate.previous_rate_fields)))
       return {StatusCode::io_failure, kRestartRankFile};
     if (!decode_flux(candidate.flux) ||
-        (version == kExactHistoryFormatVersion &&
+        (version >= kExactHistoryFormatVersion &&
          !decode_flux(candidate.previous_flux)))
       return {StatusCode::io_failure, kRestartRankFile};
     std::uint64_t integrity = 0U;
@@ -961,6 +973,7 @@ bool same_common(const Manifest& left, const Manifest& right) noexcept {
       left.controller_state != right.controller_state ||
       left.previous_pressure_reference != right.previous_pressure_reference ||
       left.closed_mass_target != right.closed_mass_target ||
+      left.method_history_signature != right.method_history_signature ||
       left.final_mass_flux_revision != right.final_mass_flux_revision ||
       left.previous_mass_flux_revision != right.previous_mass_flux_revision ||
       left.fields.size() != right.fields.size() ||
@@ -1056,7 +1069,7 @@ Status validate_expected(const RestartExpected& expected,
   const bool current_identity =
       expected.plan == manifest.plan && expected.schema == manifest.schema;
   const bool compatible_identity =
-      manifest.format_version == kExactHistoryFormatVersion &&
+      manifest.format_version >= kExactHistoryFormatVersion &&
       expected.compatible_storage_plan != 0U &&
       expected.compatible_storage_schema != 0U &&
       expected.compatible_storage_plan == manifest.plan &&
@@ -1078,7 +1091,7 @@ Status validate_expected(const RestartExpected& expected,
       return {StatusCode::invalid_plan, kRestartMismatch};
     }
   }
-  if (manifest.format_version == kExactHistoryFormatVersion) {
+  if (manifest.format_version >= kExactHistoryFormatVersion) {
     if (expected.rate_fields.data == nullptr ||
         expected.rate_fields.size != manifest.rate_fields.size())
       return {StatusCode::invalid_plan, kRestartMismatch};
@@ -1271,6 +1284,9 @@ void RestartImage::clear() noexcept {
   closed_mass_target = 0.0;
   final_mass_flux_revision = 0U;
   previous_mass_flux_revision = 0U;
+  storage_layout_migrated = false;
+  source_format_version = kLegacyFormatVersion;
+  method_history_signature = 0U;
 }
 
 Status RestartWriter::write(MPI_Comm communicator,
@@ -1323,8 +1339,7 @@ Status RestartWriter::write(MPI_Comm communicator,
     std::size_t required = local_bytes;
     if (rank == 0) {
       Encoder common;
-      encode_common(common, snapshot, has_exact_history(snapshot)
-          ? kExactHistoryFormatVersion : kLegacyFormatVersion);
+      encode_common(common, snapshot, snapshot_format(snapshot));
       std::size_t metadata = 0U;
       if (!checked_multiply(static_cast<std::size_t>(size),
                              64U + sizeof(RankRecord) + 40U, metadata) ||
@@ -1587,12 +1602,14 @@ Status RestartReader::load(MPI_Comm communicator,
     candidate.pressure_reference = manifest.pressure_reference;
     candidate.step = manifest.step;
     candidate.controller_state = manifest.controller_state;
+    candidate.source_format_version = manifest.format_version;
+    candidate.method_history_signature = manifest.method_history_signature;
     if (!detail::runtime_sha256_bytes(
             {manifest_bytes.data(), manifest_bytes.size()},
             candidate.source_manifest_sha256))
       status = {StatusCode::io_failure, kRestartIntegrity};
     const bool exact_history =
-        manifest.format_version == kExactHistoryFormatVersion;
+        manifest.format_version >= kExactHistoryFormatVersion;
     candidate.backward_euler_recovery = !exact_history;
     candidate.previous_pressure_reference =
         manifest.previous_pressure_reference;

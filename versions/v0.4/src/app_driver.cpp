@@ -493,6 +493,9 @@ static Status run_application(MPI_Comm communicator,
       run_start.previous_step = image.step;
       run_start.previous_time = image.time;
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
+      run_start.source_format_version = image.source_format_version;
+      run_start.source_history_signature = image.method_history_signature;
+      run_start.target_history_signature = expected.method_history_signature;
       restart_backward_euler_recovery = image.backward_euler_recovery;
       report.failure_phase = ApplicationFailurePhase::initialize;
       status = driver.initialize_restart(image,

@@ -1,0 +1,5 @@
+method_mass original=1.1030948920068615 saved=1.1030949030378103 restored=1.1030949030378103 source_complete=1
+FAIL: same-method exact continuation retains BDF2
+exact_method status=5/823 attempts=2 proposal_bdf=1 fallback=0
+FAIL: method recovery inserts one BE step then BDF2 without redefining physical mass
+method_history unsigned_rejected=1 signed_exact_bdf=1 method_recovery_bdf=1,1 rebuilt_rate_payload_equal=1 recovery_attempts=2,0 recovery_status=5/823 passed=0

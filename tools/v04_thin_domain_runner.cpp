@@ -55,6 +55,8 @@ constexpr std::string_view kRunMagic =
 constexpr std::string_view kStatisticsMagic =
     "HUNDUN_V04_THIN_DOMAIN_STATISTICS_V1";
 constexpr std::string_view kAccumulatorMagic =
+    "HUNDUN_V04_THIN_DOMAIN_ACCUMULATOR_V2";
+constexpr std::string_view kLegacyAccumulatorMagic =
     "HUNDUN_V04_THIN_DOMAIN_ACCUMULATOR_V1";
 constexpr std::string_view kCheckpointMagic =
     "HUNDUN_V04_THIN_DOMAIN_CHECKPOINT_V1";
@@ -75,6 +77,8 @@ struct Options {
   bool self_test{};
   bool observe_performance{};
   bool restart_method_recovery{};
+  bool have_restart_development_steps{};
+  std::uint64_t restart_development_steps{};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
 };
@@ -102,10 +106,34 @@ struct RuntimeGeometry {
   Bracket centerline_bracket{};
 };
 
+enum class StatisticsResetReason : std::uint8_t {
+  fresh, method_recovery, missing_history, legacy_statistics
+};
+
+const char* reset_reason_name(StatisticsResetReason reason) noexcept {
+  switch (reason) {
+    case StatisticsResetReason::fresh: return "fresh";
+    case StatisticsResetReason::method_recovery: return "method_recovery";
+    case StatisticsResetReason::missing_history: return "missing_history";
+    case StatisticsResetReason::legacy_statistics: return "legacy_statistics";
+  }
+  return "invalid";
+}
+
+struct StatisticsEpoch {
+  std::uint64_t start_step{};
+  std::uint64_t development_steps{};
+  std::uint64_t sampling_start_step{2U};
+  std::uint64_t discarded_samples{};
+  StatisticsResetReason reason{StatisticsResetReason::fresh};
+  RuntimeSha256Digest source_manifest{};
+};
+
 struct Accumulator {
   std::vector<double> profile;
   std::vector<double> centerline;
   std::uint64_t sample_steps{};
+  StatisticsEpoch epoch{};
 };
 
 struct ThermoExtrema {
@@ -193,6 +221,10 @@ bool parse_options(int argc, char** argv, Options& out) {
       } else if (token == "--steps" && !out.have_steps &&
                  parse_u64(value, out.steps) && out.steps != 0U) {
         out.have_steps = true;
+      } else if (token == "--restart-development-steps" &&
+                 !out.have_restart_development_steps &&
+                 parse_u64(value, out.restart_development_steps)) {
+        out.have_restart_development_steps = true;
       } else if (token == "--visit-interval" && !out.have_visit_interval &&
                  parse_u64(value, out.visit_interval)) {
         out.have_visit_interval = true;
@@ -208,6 +240,8 @@ bool parse_options(int argc, char** argv, Options& out) {
   if (out.restart_method_recovery &&
       (out.restart_root.empty() || out.restart_storage_compatibility !=
                                        RestartStorageCompatibility::strict))
+    return false;
+  if (out.have_restart_development_steps && !out.restart_method_recovery)
     return false;
   if (out.self_test)
     return !out.observe_performance && !out.dry_plan && out.spec.empty() &&
@@ -698,6 +732,14 @@ std::string encode_accumulator(std::uint64_t fingerprint,
        << "step " << step << '\n'
        << "time " << time << '\n'
        << "sample_steps " << accumulator.sample_steps << '\n'
+       << "epoch_start_step " << accumulator.epoch.start_step << '\n'
+       << "epoch_development_steps " << accumulator.epoch.development_steps << '\n'
+       << "epoch_sampling_start_step " << accumulator.epoch.sampling_start_step << '\n'
+       << "epoch_discarded_samples " << accumulator.epoch.discarded_samples << '\n'
+       << "epoch_reset_reason " << reset_reason_name(accumulator.epoch.reason) << '\n'
+       << "epoch_source_manifest "
+       << (detail::valid_runtime_sha256(accumulator.epoch.source_manifest)
+               ? accumulator.epoch.source_manifest.data() : "none") << '\n'
        << "profile_size " << accumulator.profile.size() << '\n'
        << "centerline_size " << accumulator.centerline.size() << '\n';
   for (std::size_t index = 0U; index < accumulator.profile.size(); ++index)
@@ -714,8 +756,12 @@ bool decode_accumulator(const fs::path& path, std::uint64_t fingerprint,
                         Accumulator& accumulator) {
   std::ifstream input(path);
   std::string line;
-  if (!input || !std::getline(input, line) || line != kAccumulatorMagic)
+  if (!input || !std::getline(input, line) ||
+      (line != kAccumulatorMagic && line != kLegacyAccumulatorMagic))
     return false;
+  const bool has_epoch = line == kAccumulatorMagic;
+  unsigned epoch_fields = 0U;
+  if (!has_epoch) accumulator.epoch.reason = StatisticsResetReason::legacy_statistics;
   bool have_spec = false;
   bool have_plan = false;
   bool have_schema = false;
@@ -784,11 +830,54 @@ bool decode_accumulator(const fs::path& path, std::uint64_t fingerprint,
       have_centerline_size = parse_u64(value, number) &&
                              number == accumulator.centerline.size();
       if (!have_centerline_size) return false;
+    } else if (has_epoch && key == "epoch_start_step" && !(epoch_fields & 1U)) {
+      if (!parse_u64(value, accumulator.epoch.start_step)) return false;
+      epoch_fields |= 1U;
+    } else if (has_epoch && key == "epoch_development_steps" && !(epoch_fields & 2U)) {
+      if (!parse_u64(value, accumulator.epoch.development_steps)) return false;
+      epoch_fields |= 2U;
+    } else if (has_epoch && key == "epoch_sampling_start_step" && !(epoch_fields & 4U)) {
+      if (!parse_u64(value, accumulator.epoch.sampling_start_step)) return false;
+      epoch_fields |= 4U;
+    } else if (has_epoch && key == "epoch_discarded_samples" && !(epoch_fields & 8U)) {
+      if (!parse_u64(value, accumulator.epoch.discarded_samples)) return false;
+      epoch_fields |= 8U;
+    } else if (has_epoch && key == "epoch_reset_reason" && !(epoch_fields & 16U)) {
+      bool found = false;
+      for (auto reason : {StatisticsResetReason::fresh, StatisticsResetReason::method_recovery,
+                          StatisticsResetReason::missing_history, StatisticsResetReason::legacy_statistics})
+        if (value == reset_reason_name(reason)) { accumulator.epoch.reason = reason; found = true; }
+      if (!found) return false;
+      epoch_fields |= 16U;
+    } else if (has_epoch && key == "epoch_source_manifest" && !(epoch_fields & 32U)) {
+      accumulator.epoch.source_manifest = {};
+      if (value != "none") {
+        if (value.size() != kRuntimeSha256HexCharacters) return false;
+        std::copy(value.begin(), value.end(), accumulator.epoch.source_manifest.begin());
+        if (!detail::valid_runtime_sha256(accumulator.epoch.source_manifest)) return false;
+      }
+      epoch_fields |= 32U;
     } else {
       return false;
     }
   }
-  return ended && have_spec && have_plan && have_schema && have_step &&
+  const auto& epoch = accumulator.epoch;
+  const auto development = std::max(epoch.development_steps, UINT64_C(1));
+  const bool reset = epoch.reason == StatisticsResetReason::method_recovery ||
+                     epoch.reason == StatisticsResetReason::missing_history;
+  const bool source_valid = detail::valid_runtime_sha256(epoch.source_manifest) &&
+      std::any_of(epoch.source_manifest.begin(), epoch.source_manifest.end() - 1,
+                  [](char c) { return c != '0'; });
+  const auto possible_samples = step >= epoch.sampling_start_step
+      ? step - epoch.sampling_start_step + 1U : 0U;
+  return (!has_epoch || (epoch_fields == 63U && epoch.start_step <= step &&
+             development < UINT64_MAX - epoch.start_step &&
+             epoch.sampling_start_step == epoch.start_step + development + 1U &&
+             accumulator.sample_steps <= possible_samples &&
+             (reset ? (source_valid && epoch.start_step > 0U)
+                    : (epoch.start_step == 0U && epoch.discarded_samples == 0U &&
+                       epoch.source_manifest[0] == '\0')))) &&
+         ended && have_spec && have_plan && have_schema && have_step &&
          have_time && have_samples && have_profile_size &&
          have_centerline_size &&
          std::all_of(profile_seen.begin(), profile_seen.end(),
@@ -813,6 +902,10 @@ std::string encode_statistics(const StatisticsSpec& spec,
        << ",\"snapshot_step\":" << snapshot.step
        << ",\"snapshot_time\":" << snapshot.time
        << ",\"sample_steps\":" << accumulator.sample_steps
+       << ",\"statistics_epoch\":{\"start_step\":" << accumulator.epoch.start_step
+       << ",\"development_steps\":" << accumulator.epoch.development_steps
+       << ",\"sampling_start_step\":" << accumulator.epoch.sampling_start_step
+       << ",\"reset_reason\":\"" << reset_reason_name(accumulator.epoch.reason) << "\"}"
        << ",\"profiles\":[";
   const Span<const double> xs = snapshot.geometry->x().centres();
   const Span<const double> ys = snapshot.geometry->y().centres();
@@ -957,6 +1050,7 @@ bool write_checkpoint_observables(
     const Accumulator& local_accumulator) {
   Accumulator global;
   global.sample_steps = local_accumulator.sample_steps;
+  global.epoch = local_accumulator.epoch;
   bool okay = reduce_vector(communicator, rank, local_accumulator.profile,
                             global.profile) &&
               reduce_vector(communicator, rank, local_accumulator.centerline,
@@ -1627,6 +1721,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       run_start.previous_step = image.step;
       run_start.previous_time = image.time;
       run_start.restart_manifest_sha256 = image.source_manifest_sha256;
+      run_start.source_format_version = image.source_format_version;
+      run_start.source_history_signature = image.method_history_signature;
+      run_start.target_history_signature = expected.method_history_signature;
+      run_start.history_policy = options.restart_method_recovery
+          ? RestartHistoryPolicy::rebuild_method_history
+          : RestartHistoryPolicy::require_compatible;
       restart_requires_recovery = image.backward_euler_recovery;
       restart_storage_migrated = image.storage_layout_migrated;
       restart_source_plan = image.plan;
@@ -1636,13 +1736,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                                                  restart_binding);
       });
       if (okay) {
-        // Loading/manifest integrity is unchanged. Deliberately discard only
-        // the old integrator/rate history, never rewrite the source checkpoint
-        // or reinterpret its old spatial rates as this method's exact history.
-        if (options.restart_method_recovery) image.backward_euler_recovery = true;
-        restart_requires_recovery = image.backward_euler_recovery;
+        // The source image remains an immutable description of the file.
+        // Method recovery is a separate consumer policy, not missing history.
+        restart_requires_recovery = image.backward_euler_recovery ||
+                                    options.restart_method_recovery;
         status = driver.initialize_restart(
-            image, options.restart_storage_compatibility);
+            image, options.restart_storage_compatibility,
+            options.restart_method_recovery
+                ? RestartHistoryPolicy::rebuild_method_history
+                : RestartHistoryPolicy::require_compatible);
         restarted = true;
       } else {
         status = {StatusCode::invalid_case, kRunnerInput};
@@ -1742,6 +1844,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (build_identity == 0U || binary_identity == 0U) return 5;
   const Int3 global_cells = snapshot.geometry->global_cells();
   Accumulator accumulator;
+  accumulator.epoch.development_steps = spec.development_steps;
+  accumulator.epoch.sampling_start_step = std::max(spec.development_steps, UINT64_C(1)) + 1U;
   if (!local_stage(communicator, [&] {
   accumulator.profile.assign(spec.station_x_over_d.size() *
                                  static_cast<std::size_t>(global_cells.y) * 6U,
@@ -1763,6 +1867,38 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (MPI_Bcast(&accumulator.sample_steps, 1, MPI_UINT64_T, 0,
                   communicator) != MPI_SUCCESS)
       return 5;
+    std::array<std::uint64_t, 5U> epoch{{accumulator.epoch.start_step,
+        accumulator.epoch.development_steps, accumulator.epoch.sampling_start_step,
+        accumulator.epoch.discarded_samples, static_cast<std::uint64_t>(accumulator.epoch.reason)}};
+    if (MPI_Bcast(epoch.data(), static_cast<int>(epoch.size()), MPI_UINT64_T, 0, communicator) != MPI_SUCCESS ||
+        MPI_Bcast(accumulator.epoch.source_manifest.data(),
+                  static_cast<int>(accumulator.epoch.source_manifest.size()), MPI_CHAR, 0,
+                  communicator) != MPI_SUCCESS) return 5;
+    accumulator.epoch.start_step = epoch[0];
+    accumulator.epoch.development_steps = epoch[1];
+    accumulator.epoch.sampling_start_step = epoch[2];
+    accumulator.epoch.discarded_samples = epoch[3];
+    accumulator.epoch.reason = static_cast<StatisticsResetReason>(epoch[4]);
+  }
+  if (restarted && restart_requires_recovery) {
+    const auto development = options.have_restart_development_steps
+        ? options.restart_development_steps : spec.development_steps;
+    if (!consensus_u64(communicator, development) ||
+        std::max(development, UINT64_C(1)) >= UINT64_MAX - starting_step) {
+      if (rank == 0) std::cerr << "statistics_redevelopment_window_failure\n";
+      return 5;
+    }
+    // Decode and validate the old attachment above, but never mix its values
+    // into a different method's statistics. Retain only source provenance.
+    const auto discarded = accumulator.sample_steps;
+    std::fill(accumulator.profile.begin(), accumulator.profile.end(), 0.0);
+    std::fill(accumulator.centerline.begin(), accumulator.centerline.end(), 0.0);
+    accumulator.sample_steps = 0U;
+    accumulator.epoch = {starting_step, development,
+        starting_step + std::max(development, UINT64_C(1)) + 1U, discarded,
+        options.restart_method_recovery ? StatisticsResetReason::method_recovery
+                                        : StatisticsResetReason::missing_history,
+        run_start.restart_manifest_sha256};
   }
   if (!consensus_u64(communicator, accumulator.sample_steps)) return 5;
 
@@ -1784,6 +1920,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "starting_step " << starting_step << '\n'
              << "starting_time " << snapshot.time << '\n'
              << "starting_sample_steps " << accumulator.sample_steps << '\n'
+             << "statistics_epoch_start_step " << accumulator.epoch.start_step << '\n'
+             << "statistics_development_steps " << accumulator.epoch.development_steps << '\n'
+             << "statistics_sampling_start_step " << accumulator.epoch.sampling_start_step << '\n'
+             << "statistics_reset_reason " << reset_reason_name(accumulator.epoch.reason) << '\n'
+             << "statistics_discarded_samples " << accumulator.epoch.discarded_samples << '\n'
+             << "statistics_source_manifest_sha256 "
+             << (detail::valid_runtime_sha256(accumulator.epoch.source_manifest)
+                    ? accumulator.epoch.source_manifest.data() : "none") << '\n'
              << "requested_steps " << options.steps << '\n'
              << "visit_interval " << options.visit_interval << '\n'
              << "observe_performance " << options.observe_performance << '\n'
@@ -2098,7 +2242,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       return 7;
     }
 
-    const bool in_window = step.accepted_step > spec.development_steps &&
+    const bool in_window = step.accepted_step >= accumulator.epoch.sampling_start_step &&
                            step.accepted_step <= spec.collection_end_step;
     const bool retry = step.attempts != 1U;
     const bool fallback = step.temporal_method_fallback;
@@ -2483,7 +2627,8 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH --dry-plan\n"
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
-         "[--restart-method-recovery] [--visit-interval N] [--observe-performance]\n";
+         "[--restart-method-recovery [--restart-development-steps N]] "
+         "[--visit-interval N] [--observe-performance]\n";
 }
 
 }  // namespace
