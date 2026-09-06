@@ -1,0 +1,16 @@
+method-probe status=0/0 accepted=1 stage=0 diagnostics=1
+linear-prediction C1=5.0877991986706196e-22,1.5467004290285237e-06 C2=5.7016228425490689e-23,1.1245684911849899e-10
+linear-target-gap slot=0 C=1.154225510401124e-17 E=0 observed=1 worst-cell=5770816
+linear-target-gap slot=1 C=1.1543120438137689e-17 E=0 observed=1 worst-cell=3783977
+linear-target-gap slot=2 C=1.1683480018384288e-17 E=0 observed=1 worst-cell=5769909
+linear-target-gap slot=3 C=1.163893453619903e-17 E=0 observed=1 worst-cell=5202643
+linear-target-gap slot=4 C=1.1598509868177745e-17 E=0 observed=1 worst-cell=3219446
+linear-target-gap slot=5 C=1.153140706631115e-17 E=0 observed=1 worst-cell=4386401
+linear-target-gap slot=6 C=1.1522037653694687e-17 E=0 observed=1 worst-cell=1568324
+linear-target-gap slot=7 C=1.1537391627114071e-17 E=0 observed=1 worst-cell=1001517
+linear-target-gap slot=8 C=0 E=0 observed=0 worst-cell=0
+linear-target-gap slot=9 C=0 E=0 observed=0 worst-cell=0
+linear-target-gap slot=10 C=0 E=0 observed=0 worst-cell=0
+linear-target-gap slot=11 C=0 E=0 observed=0 worst-cell=0
+linear-target-gap slot=12 C=0 E=0 observed=0 worst-cell=0
+linear-target-gap slot=13 C=0 E=0 observed=0 worst-cell=0

@@ -1,0 +1,11 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 125: v04_core_product_freeze_mpi_1
+1/1 Test #125: v04_core_product_freeze_mpi_1 ....   Passed    1.26 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   1.26 sec*proc (1 test)
+
+Total Test time (real) =   1.28 sec

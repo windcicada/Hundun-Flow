@@ -1,0 +1,210 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+Constructing a list of tests
+
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 77
+[HANDLER_OUTPUT] 
+    Start  77: v04_solver_thermophysical_coupling
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+77: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_thermophysical_coupling_test
+
+77: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+77: Test timeout computed to be: 120
+[HANDLER_OUTPUT] 
+1/8 Test  #77: v04_solver_thermophysical_coupling ........................
+   Passed    0.48 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 83
+
+[HANDLER_OUTPUT] 
+    Start  83: v04_solver_thermophysical_idp
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+83: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_thermophysical_idp_test
+
+83: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+83: Test timeout computed to be: 120
+83: source_bundle_oracle alpha=0.504881 expected=0.504881 collectives=13
+83: PASS v04_solver_thermophysical_idp
+[HANDLER_OUTPUT] 
+2/8 Test  #83: v04_solver_thermophysical_idp .............................
+   Passed    0.27 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 101
+
+[HANDLER_OUTPUT] 
+    Start 101: v04_solver_ibm_equation_interface
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+101: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_ibm_equation_interface_test
+
+101: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+101: Test timeout computed to be: 120
+101: accepted-IBM-thermal-rate-mismatch=0
+[HANDLER_OUTPUT] 
+3/8 Test #101: v04_solver_ibm_equation_interface .........................
+   Passed    0.36 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 125
+
+[HANDLER_OUTPUT] 
+    Start 125: v04_core_product_freeze_mpi_1
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+125: Test command: /usr/bin/mpiexec "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+
+125: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+125: Test timeout computed to be: 180
+125: implicit-enthalpy-positive size=1 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.323418922406052e-28
+125: local-donor-candidate-red size=1 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+[HANDLER_OUTPUT] 
+4/8 Test #125: v04_core_product_freeze_mpi_1 .............................
+   Passed    1.23 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 134
+
+[HANDLER_OUTPUT] 
+    Start 134: v04_core_product_freeze_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+134: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+
+134: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+134: Test timeout computed to be: 180
+134: implicit-enthalpy-positive size=2 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.3198962118439089e-28
+134: local-donor-candidate-red size=2 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+[HANDLER_OUTPUT] 
+5/8 Test #134: v04_core_product_freeze_mpi_2 .............................
+   Passed    0.85 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 143
+
+[HANDLER_OUTPUT] 
+    Start 143: v04_core_product_freeze_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+143: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+
+143: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+143: Test timeout computed to be: 180
+143: implicit-enthalpy-positive size=4 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.5894038153094513e-29
+143: local-donor-candidate-red size=4 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+[HANDLER_OUTPUT] 
+6/8 Test #143: v04_core_product_freeze_mpi_4 .............................
+   Passed    3.93 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 189
+
+[HANDLER_OUTPUT] 
+    Start 189: v04_product_pressure_energy_temporal_convergence
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+189: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_pressure_energy_temporal_convergence_test
+
+189: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+189: Test timeout computed to be: 180
+189: level=0 dt/N=0.000125/8 BE/BDF2=1/7 max-terminal(eos,C,E,mass,gauge)=2.01353361376e-16,1.44632855588e-13,1.12572219574e-13,1.20775432758e-15,5.49893414204e-17 max-independent-C=1.44529868605e-13 max-C1/C2(iter,rf)=10,5.64653250762e-11/11,7.43998415903e-14 C1/C2-stop(abs,rel)=0,8/8,8 limited(thermo,min-theta/momentum,min-theta)=0,1/1,0.630218538404 min(p,h,rho,T)=101276.252984,321448.990926,1.10271581325,319.95600631
+189: level=1 dt/N=6.25e-05/16 BE/BDF2=1/15 max-terminal(eos,C,E,mass,gauge)=2.01362334407e-16,8.80660276883e-15,6.8656340772e-15,1.20775432758e-15,1.06344060221e-16 max-independent-C=8.90961029465e-15 max-C1/C2(iter,rf)=10,1.52660430714e-10/9,6.41503166454e-14 C1/C2-stop(abs,rel)=0,16/16,16 limited(thermo,min-theta/momentum,min-theta)=0,1/0,1 min(p,h,rho,T)=101275.725898,321448.512895,1.10271171408,319.955530499
+189: level=2 dt/N=3.125e-05/32 BE/BDF2=1/31 max-terminal(eos,C,E,mass,gauge)=2.01362531478e-16,1.22794307894e-13,9.61785465081e-14,6.22798648254e-13,9.86635712015e-17 max-independent-C=1.2266552863e-13 max-C1/C2(iter,rf)=10,2.05114501032e-10/7,8.20751949642e-14 C1/C2-stop(abs,rel)=0,32/32,32 limited(thermo,min-theta/momentum,min-theta)=0,1/1,0.632326631404 min(p,h,rho,T)=101275.587126,321448.387033,1.10271063487,319.955405221
+189: p_abs E(dt,dt/2)=0.370556616009 E(dt/2,dt/4)=0.0949017625141 observed-order=1.96518719723
+189: h E(dt,dt/2)=0.335924501345 E(dt/2,dt/4)=0.0860322816533 observed-order=1.96518702039
+189: rho E(dt,dt/2)=2.88152782162e-06 E(dt/2,dt/4)=7.37976585021e-07 observed-order=1.96518700185
+189: T E(dt,dt/2)=0.000334364284562 E(dt/2,dt/4)=8.5632700765e-05 observed-order=1.96518702043
+189: U E(dt,dt/2)=0.00055304729583 E(dt/2,dt/4)=0.000139090260669 observed-order=1.99138145948
+189: final_phi E(dt,dt/2)=2.09194337722e-05 E(dt/2,dt/4)=5.28460661134e-06 observed-order=1.98497581678
+189: phi-x all(E1,E2,q)=3.68284661213e-05,9.48615886537e-06,1.95692537665 duplicate(E1,E2,q)=4.91273956827e-05,1.26980257381e-05,1.95192355438 interior(E1,E2,q)=3.24698128784e-05,8.34441793638e-06,1.96021574725
+189: phi-y all(E1,E2,q)=6.95726468885e-06,2.32144497862e-09,11.5492814062 duplicate(E1,E2,q)=6.95726468885e-06,2.32144497862e-09,11.5492814062 interior(E1,E2,q)=6.95726468885e-06,2.32144497862e-09,11.5492814062
+189: phi-z all(E1,E2,q)=1.19600918149e-20,2.68135757623e-21,2.15719293492 duplicate(E1,E2,q)=1.21107645082e-20,2.68135757609e-21,2.17525441013 interior(E1,E2,q)=1.18585798358e-20,2.68135757633e-21,2.14489571546
+189: phi_U combined(E1,E2,q)=1.79811084446e-05,4.50858792107e-06,1.99573439776
+189: phi_U-x(E1,E2,q)=3.14329131229e-05,8.09316263087e-06,1.95750049205 delta-mean(levels/E1,E2,q)=-6.19007571763e-05,-6.26995681444e-05,-6.290640681e-05/7.98810968096e-07,2.0683866557e-07,1.94934823954 delta-demeaned(E1,E2,q)=5.33618095613e-06,1.37773702024e-06,1.95350705533
+189: phi_U-y(E1,E2,q)=6.95726468885e-06,2.32144497848e-09,11.5492814063 delta-mean(levels/E1,E2,q)=-7.5894152074e-19,2.05998412772e-18,1.35525271561e-18/2.81892564846e-18,7.04731412116e-19,2 delta-demeaned(E1,E2,q)=4.1822668423e-18,3.40057725632e-18,0.298505445357
+189: phi_U-z(E1,E2,q)=1.90268236717e-21,3.46999104974e-26,15.7427432718 delta-mean(levels/E1,E2,q)=-3.49982875008e-23,1.70312184321e-22,4.7271363138e-24/2.05310471822e-22,1.65585048007e-22,0.310234807418 delta-demeaned(E1,E2,q)=1.13388149913e-20,2.6762399068e-21,2.08299051875
+189: delta-div-coarse(rms,max,normalized-max)=0.000348342403143,0.000488435421552,1
+189: delta-div-fine(rms,max,normalized-max)=0.000351506302174,0.000493263748288,1
+189: delta-div-quarter(rms,max,normalized-max)=0.000352350237507,0.00049454861019,1
+189: mirror-startup ODE terminals=0.904939598148,0.904862855954,0.904843763976 differences=7.67421935818e-05,1.90919778937e-05 self-order=2.00705343217
+189: analytic-branch-history ODE terminals=0.90483355968,0.904836345722,0.904837136667 differences=2.78604192139e-06,7.90944865381e-07 self-order=1.81656792928
+189: coupling witness=34.8903709051,31.6295292173,0.048772233399,0.00180677934838 max-energy=1.12572219574e-13 nonstationary-linear=1
+[HANDLER_OUTPUT] 
+7/8 Test #189: v04_product_pressure_energy_temporal_convergence ..........
+   Passed    0.66 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 190
+
+[HANDLER_OUTPUT] 
+    Start 190: v04_product_simple_pressure_energy_temporal_convergence
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+190: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_pressure_energy_temporal_convergence_test "--simple"
+
+190: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+190: Test timeout computed to be: 180
+190: level=0 dt/N=0.000125/8 BE/BDF2=1/7 max-terminal(eos,C,E,mass,gauge)=2.01361585869e-16,1.434940146e-13,1.11661549737e-13,1.61033910344e-15,5.5940870275e-17 max-independent-C=1.434940146e-13 max-C1/C2(iter,rf)=10,9.59838757929e-11/13,5.39420754027e-14 C1/C2-stop(abs,rel)=0,8/8,8 limited(thermo,min-theta/momentum,min-theta)=0,1/0,1 min(p,h,rho,T)=101276.252989,321448.99093,1.10271581328,319.956006314
+190: level=1 dt/N=6.25e-05/16 BE/BDF2=1/15 max-terminal(eos,C,E,mass,gauge)=2.01362064468e-16,8.90813911782e-15,6.91210553587e-15,1.00646193965e-15,1.01041504407e-16 max-independent-C=9.01114664365e-15 max-C1/C2(iter,rf)=10,1.63498165032e-10/16,8.93808675117e-14 C1/C2-stop(abs,rel)=0,16/16,16 limited(thermo,min-theta/momentum,min-theta)=0,1/0,1 min(p,h,rho,T)=101275.725898,321448.512895,1.10271171408,319.955530499
+190: level=2 dt/N=3.125e-05/32 BE/BDF2=1/31 max-terminal(eos,C,E,mass,gauge)=2.01362307712e-16,1.18312670018e-13,9.27260716613e-14,6.21993478703e-13,5.61787466953e-17 max-independent-C=1.18183890753e-13 max-C1/C2(iter,rf)=10,2.18970219856e-10/18,4.66348349136e-14 C1/C2-stop(abs,rel)=0,32/32,32 limited(thermo,min-theta/momentum,min-theta)=0,1/0,1 min(p,h,rho,T)=101275.587127,321448.387033,1.10271063487,319.955405221
+190: p_abs E(dt,dt/2)=0.370556610789 E(dt/2,dt/4)=0.094901762011 observed-order=1.96518718455
+190: h E(dt,dt/2)=0.335924497256 E(dt/2,dt/4)=0.0860322813877 observed-order=1.96518700728
+190: rho E(dt,dt/2)=2.88152778351e-06 E(dt/2,dt/4)=7.37976580651e-07 observed-order=1.96518699131
+190: T E(dt,dt/2)=0.000334364280483 E(dt/2,dt/4)=8.56327005073e-05 observed-order=1.96518700717
+190: U E(dt,dt/2)=0.000553047285814 E(dt/2,dt/4)=0.000139090258875 observed-order=1.99138145196
+190: final_phi E(dt,dt/2)=2.09195503924e-05 E(dt/2,dt/4)=5.28463852619e-06 observed-order=1.98497514668
+190: phi-x all(E1,E2,q)=3.68286795483e-05,9.48621615428e-06,1.95692502457 duplicate(E1,E2,q)=4.91288440569e-05,1.26984120249e-05,1.95192219972 interior(E1,E2,q)=3.24694979915e-05,8.34433371833e-06,1.96021631698
+190: phi-y all(E1,E2,q)=6.95726479695e-06,2.32144495853e-09,11.5492814411 duplicate(E1,E2,q)=6.95726479695e-06,2.32144495853e-09,11.5492814411 interior(E1,E2,q)=6.95726479695e-06,2.32144495853e-09,11.5492814411
+190: phi-z all(E1,E2,q)=4.71596039001e-24,5.44500031769e-26,6.43647565764 duplicate(E1,E2,q)=4.71663045282e-24,5.44480566891e-26,6.43673220167 interior(E1,E2,q)=4.71551362857e-24,5.44513007967e-26,6.43630459796
+190: phi_U combined(E1,E2,q)=1.79811419086e-05,4.50859137059e-06,1.99573597889
+190: phi_U-x(E1,E2,q)=3.14329747792e-05,8.09316882295e-06,1.95750221812 delta-mean(levels/E1,E2,q)=-6.18999125513e-05,-6.26993156102e-05,-6.29063386859e-05/7.99403058866e-07,2.07023075731e-07,1.94913150713 delta-demeaned(E1,E2,q)=5.33624589005e-06,1.37776115876e-06,1.95349933443
+190: phi_U-y(E1,E2,q)=6.95726479695e-06,2.3214449564e-09,11.5492814424 delta-mean(levels/E1,E2,q)=1.62630325873e-19,8.67361737988e-19,2.2226144536e-18/7.04731412116e-19,1.35525271561e-18,-0.943416471634 delta-demeaned(E1,E2,q)=5.53235340154e-18,6.26378980287e-18,-0.179142482766
+190: phi_U-z(E1,E2,q)=2.97721247813e-25,6.79479503145e-27,5.45338834549 delta-mean(levels/E1,E2,q)=8.6736061794e-26,1.78290437903e-27,-3.08920537472e-29/8.4953157415e-26,1.81379643277e-27,5.54958311585 delta-demeaned(E1,E2,q)=4.67751449461e-24,5.26981162818e-26,6.47184692086
+190: delta-div-coarse(rms,max,normalized-max)=0.000348342403751,0.000488434515849,1
+190: delta-div-fine(rms,max,normalized-max)=0.000351506302367,0.000493263475035,1
+190: delta-div-quarter(rms,max,normalized-max)=0.000352350237565,0.000494548538138,1
+190: mirror-startup ODE terminals=0.904939598148,0.904862855954,0.904843763976 differences=7.67421935818e-05,1.90919778937e-05 self-order=2.00705343217
+190: analytic-branch-history ODE terminals=0.90483355968,0.904836345722,0.904837136667 differences=2.78604192139e-06,7.90944865381e-07 self-order=1.81656792928
+190: coupling witness=34.8903709051,31.6295292173,0.0487722333991,0.00180677933877 max-energy=1.11661549737e-13 nonstationary-linear=1
+[HANDLER_OUTPUT] 
+8/8 Test #190: v04_product_simple_pressure_energy_temporal_convergence ...
+   Passed    0.71 sec
+[HANDLER_VERBOSE_OUTPUT] 
+
+The following tests passed:
+
+	v04_solver_thermophysical_coupling
+	v04_solver_thermophysical_idp
+	v04_solver_ibm_equation_interface
+	v04_core_product_freeze_mpi_1
+	v04_core_product_freeze_mpi_2
+	v04_core_product_freeze_mpi_4
+	v04_product_pressure_energy_temporal_convergence
+	v04_product_simple_pressure_energy_temporal_convergence
+[HANDLER_OUTPUT] 
+
+100% tests passed, 0 tests failed out of 8
+
+
+Label Time Summary:
+v04_focused    =  20.17 sec*proc (6 tests)
+
+Total Test time (real) =   8.51 sec

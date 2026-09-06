@@ -340,6 +340,11 @@ struct PressureEnergyCandidateAlphaDiagnostic {
 };
 
 struct PressureEnergyCandidateGlobalizationDiagnostic {
+  // Linear RHS versus the exact alpha-zero target, before any candidate is
+  // selected. Slots are C1, C2, then the twelve C2 refinements.
+  std::array<std::array<double, 2U>, 14U> linear_target_gap{};
+  std::array<bool, 14U> linear_target_observed{};
+  std::array<std::uint64_t, 14U> linear_target_continuity_worst_cell{};
   bool valid{};
   bool production_candidate_loop{};
   bool baseline_commit{};

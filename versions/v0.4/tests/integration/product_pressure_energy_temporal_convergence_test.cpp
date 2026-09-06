@@ -155,6 +155,7 @@ RestartImage compatible_wave(const RestartExpected& expected,
   constexpr double gamma = 1.4;
   const double sound_speed =
       std::sqrt(gamma * kGasConstant * kBaseTemperature);
+  std::size_t passive_index = 0U;
   for (RestartImageField& field : image.fields) {
     for (std::int32_t z = 0; z < local.z; ++z) {
       for (std::int32_t y = 0; y < local.y; ++y) {
@@ -181,6 +182,9 @@ RestartImage compatible_wave(const RestartExpected& expected,
             field.values[offset] = absolute_pressure;
           else if (field.role == RestartFieldRole::enthalpy)
             field.values[offset] = kHeatCapacity * temperature;
+          else if (field.role == RestartFieldRole::transported_scalar)
+            field.values[offset] = passive_index == 0U
+                ? 0.2 : 0.2 + 0.05 * std::sin(phase);
           else if (field.role == RestartFieldRole::velocity) {
             field.values[offset] =
                 kStreamwiseVelocity +
@@ -192,6 +196,7 @@ RestartImage compatible_wave(const RestartExpected& expected,
         }
       }
     }
+    if (field.role == RestartFieldRole::transported_scalar) ++passive_index;
   }
 
   const Int3 x_faces{local.x + 1, local.y, local.z};
@@ -274,6 +279,7 @@ struct Endpoint {
   std::vector<double> density;
   std::vector<double> temperature;
   std::vector<double> velocity;
+  std::array<std::vector<double>, 2U> passive;
   std::array<std::vector<double>, 3U> flux;
 };
 
@@ -293,6 +299,8 @@ bool capture(ProductDriver& driver, Endpoint& out,
   const ConstFieldView* pressure = nullptr;
   const ConstFieldView* enthalpy = nullptr;
   const ConstFieldView* velocity = nullptr;
+  std::array<const ConstFieldView*, 2U> passive{};
+  std::size_t passive_count = 0U;
   bool pressure_is_absolute = false;
   for (std::size_t index = 0U; index < snapshot.fields.size; ++index) {
     const RestartFieldView& field = snapshot.fields.data[index];
@@ -305,6 +313,10 @@ bool capture(ProductDriver& driver, Endpoint& out,
       enthalpy = &field.values;
     else if (field.role == RestartFieldRole::velocity)
       velocity = &field.values;
+    else if (field.role == RestartFieldRole::transported_scalar) {
+      if (passive_count >= passive.size()) return false;
+      passive[passive_count++] = &field.values;
+    }
   }
   if (pressure == nullptr || enthalpy == nullptr || velocity == nullptr)
     return false;
@@ -340,6 +352,9 @@ bool capture(ProductDriver& driver, Endpoint& out,
         for (std::uint8_t component = 0U; component < 3U; ++component)
           candidate.velocity.push_back(
               velocity->unchecked(cell, component));
+        for (std::size_t scalar = 0U; scalar < passive_count; ++scalar)
+          candidate.passive[scalar].push_back(
+              passive[scalar]->unchecked(cell, 0U));
       }
     }
   }
@@ -446,7 +461,73 @@ struct PhysicalGateSummary {
   double minimum_density{std::numeric_limits<double>::infinity()};
   double minimum_temperature{std::numeric_limits<double>::infinity()};
   bool nonstationary_linear_solve{};
+  bool balance_initialized{};
+  std::uint64_t balance_epoch{};
+  std::array<long double, 3U> initial_inventory{};
 };
+
+// Independent public-snapshot oracle: no solver assembly, material cache or
+// production conservation helper is used. This fixture has an analytic EOS
+// and a periodic unit-volume domain, so every physical boundary integral is 0.
+std::array<long double, 3U> inventory(const Endpoint& endpoint) {
+  const long double volume = kDomainX * kDomainY * kDomainZ /
+      static_cast<long double>(endpoint.density.size());
+  std::array<long double, 3U> out{};
+  for (std::size_t i = 0U; i < endpoint.density.size(); ++i) {
+    const long double rho = endpoint.density[i];
+    long double kinetic = 0.0L;
+    for (std::size_t c = 0U; c < 3U; ++c) {
+      const long double u = endpoint.velocity[3U * i + c];
+      kinetic += 0.5L * u * u;
+    }
+    out[0U] += volume * rho;
+    out[1U] += volume *
+        (rho * endpoint.enthalpy[i] - endpoint.pressure_absolute[i]);
+    out[2U] += volume * rho * kinetic;
+  }
+  return out;
+}
+
+bool independent_balance(const DriverStepReport& report,
+                         const Endpoint& current, const Endpoint& accepted,
+                         const Endpoint& previous,
+                         PhysicalGateSummary& summary) {
+  const auto now = inventory(current);
+  const auto old = inventory(accepted);
+  const auto older = inventory(previous);
+  if (!summary.balance_initialized) {
+    summary.balance_initialized = true;
+    summary.balance_epoch = accepted.step;
+    summary.initial_inventory = old;
+  }
+  const auto& equation = report.terminal_equations;
+  const auto& balance = report.conservation;
+  const auto bdf = report.effective_bdf;
+  const long double mass_rate = bdf.a0 * now[0U] + bdf.a1 * old[0U] +
+                                bdf.a2 * older[0U];
+  const long double energy_rate = bdf.a0 * (now[1U] + now[2U]) +
+      bdf.a1 * (old[1U] + old[2U]) + bdf.a2 * (older[1U] + older[2U]);
+  const long double mass_drift = now[0U] - summary.initial_inventory[0U];
+  const long double energy_drift = now[1U] + now[2U] -
+      summary.initial_inventory[1U] - summary.initial_inventory[2U];
+  return equation.valid && balance.valid &&
+      equation.final_flux == report.piso.final_flux_revision &&
+      balance.epoch_start_step == summary.balance_epoch &&
+      std::abs(equation.mass - now[0U]) < 1.0e-12L &&
+      std::abs(equation.internal_energy - now[1U]) < 1.0e-8L &&
+      std::abs(equation.kinetic_energy - now[2U]) < 1.0e-12L &&
+      std::abs(balance.mass_outflow) < 1.0e-12 &&
+      std::abs(balance.enthalpy_outflow) < 1.0e-8 &&
+      std::abs(balance.kinetic_energy_outflow) < 1.0e-12 &&
+      balance.conductive_heat_input == 0.0 &&
+      balance.viscous_work_input == 0.0 &&
+      std::abs(balance.mass_bdf_rate - mass_rate) < 1.0e-9L &&
+      std::abs(balance.total_energy_bdf_rate - energy_rate) < 1.0e-5L &&
+      std::abs(balance.mass_balance_defect - mass_rate) < 1.0e-9L &&
+      std::abs(balance.total_energy_balance_defect - energy_rate) < 1.0e-5L &&
+      std::abs(balance.cumulative_mass_defect - mass_drift) < 1.0e-12L &&
+      std::abs(balance.cumulative_energy_defect - energy_drift) < 1.0e-7L;
+}
 
 bool physical_step(const ValidatedModel& model, const DriverStepReport& report,
                    const Endpoint& current, const Endpoint& accepted,
@@ -485,6 +566,8 @@ bool physical_step(const ValidatedModel& model, const DriverStepReport& report,
       report.piso.pressure[1U].initial_true_residual > 0.0;
   const double continuity = independent_continuity(
       current, accepted, previous, report.effective_bdf);
+  const bool balance_valid =
+      independent_balance(report, current, accepted, previous, summary);
   summary.maximum_independent_continuity =
       std::max(summary.maximum_independent_continuity, continuity);
   for (const double value : current.pressure_absolute)
@@ -495,7 +578,7 @@ bool physical_step(const ValidatedModel& model, const DriverStepReport& report,
     summary.minimum_density = std::min(summary.minimum_density, value);
   for (const double value : current.temperature)
     summary.minimum_temperature = std::min(summary.minimum_temperature, value);
-  if (!report_valid || !finite_positive(current) ||
+  if (!report_valid || !balance_valid || !finite_positive(current) ||
       !std::isfinite(continuity) || continuity > 2.0e-9) {
     std::cerr << std::setprecision(17)
               << "step status=" << static_cast<unsigned>(report.failure.code)
@@ -517,9 +600,10 @@ bool physical_step(const ValidatedModel& model, const DriverStepReport& report,
               << report.piso.energy_residual << ','
               << report.piso.closed_mass_residual << ','
               << report.piso.gauge_residual
-              << " independent-continuity=" << continuity << '\n';
+              << " independent-continuity=" << continuity
+              << " independent-balance=" << balance_valid << '\n';
   }
-  return report_valid && finite_positive(current) &&
+  return report_valid && balance_valid && finite_positive(current) &&
          std::isfinite(continuity) && continuity <= 2.0e-9;
 }
 
@@ -1266,8 +1350,65 @@ bool coherent_face_local_limiter(
   return true;
 }
 
-bool test_product_pressure_energy_temporal_convergence() {
-  const ValidatedModel model = temporal_model();
+bool test_scalar_splitting_observation() {
+  ValidatedModel model = temporal_model();
+  model.solver.coupling = CouplingKind::simple;
+  model.transported_scalars = {
+      {"constant", TransportedScalarRole::passive_scalar, 1.0, 1.0},
+      {"wave", TransportedScalarRole::passive_scalar, 1.0, 1.0}};
+  std::array<Trajectory, 3U> trajectories{};
+  std::array<double, 3U> mass_drift{};
+  bool passed = true;
+  const auto scalar_mass = [](const Endpoint& endpoint) {
+    long double mass = 0.0L;
+    for (std::size_t cell = 0U; cell < endpoint.density.size(); ++cell)
+      mass += static_cast<long double>(endpoint.density[cell]) *
+              endpoint.passive[1U][cell];
+    return mass * (kDomainX * kDomainY * kDomainZ) /
+           endpoint.density.size();
+  };
+  for (std::size_t level = 0U; level < trajectories.size(); ++level) {
+    if (!run_level(model, kCoarseDt / kRefinement[level], trajectories[level]))
+      return false;
+    const auto& trajectory = trajectories[level];
+    double constant_error = 0.0;
+    for (double q : trajectory.terminal.passive[0U])
+      constant_error = std::max(constant_error, std::abs(q - 0.2));
+    passed &= expect(constant_error < 1.0e-12,
+                     "density correction preserves a uniform passive scalar");
+    mass_drift[level] = static_cast<double>(
+        scalar_mass(trajectory.terminal) - scalar_mass(trajectory.common_start));
+    std::cerr << std::setprecision(12) << "scalar-splitting dt="
+              << kCoarseDt / kRefinement[level]
+              << " constant-error=" << constant_error
+              << " periodic-wave-mass-drift=" << mass_drift[level] << '\n';
+  }
+  const double coarse_fine = rms_difference(trajectories[0U].terminal.passive[1U],
+                                           trajectories[1U].terminal.passive[1U]);
+  const double fine_quarter = rms_difference(trajectories[1U].terminal.passive[1U],
+                                            trajectories[2U].terminal.passive[1U]);
+  const double solution_order = std::log(coarse_fine / fine_quarter) / std::log(2.0);
+  const double coarse_drift_order =
+      std::log(std::abs(mass_drift[0U] / mass_drift[1U])) / std::log(2.0);
+  const double fine_drift_order =
+      std::log(std::abs(mass_drift[1U] / mass_drift[2U])) / std::log(2.0);
+  std::cerr << "scalar-splitting solution-order=" << solution_order
+            << " mass-drift-orders=" << coarse_drift_order << ','
+            << fine_drift_order << '\n';
+  // This is an observation of the split method, not a certificate of exact
+  // finite-dt scalar conservation. Record the nonzero inventory defect without
+  // redefining it as a boundary flux or changing the physical acceptance gates.
+  passed &= expect(std::isfinite(solution_order) && solution_order >= 1.8,
+                   "smooth passive solution retains second-order time convergence");
+  passed &= expect(std::isfinite(coarse_drift_order) && coarse_drift_order >= 1.8 &&
+                   std::isfinite(fine_drift_order) && fine_drift_order >= 1.8,
+                   "the observed inventory splitting error is second order");
+  return passed;
+}
+
+bool test_product_pressure_energy_temporal_convergence(CouplingKind coupling) {
+  ValidatedModel model = temporal_model();
+  model.solver.coupling = coupling;
   std::array<Trajectory, 3U> trajectories{};
   bool passed = true;
   for (std::size_t level = 0U; level < trajectories.size(); ++level)
@@ -1391,7 +1532,11 @@ bool test_product_pressure_energy_temporal_convergence() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const bool passed = test_product_pressure_energy_temporal_convergence();
+  const CouplingKind coupling = argc == 2 && std::string_view(argv[1]) == "--simple"
+                                    ? CouplingKind::simple : CouplingKind::piso;
+  const bool passed = argc == 2 && std::string_view(argv[1]) == "--scalar-splitting"
+      ? test_scalar_splitting_observation()
+      : test_product_pressure_energy_temporal_convergence(coupling);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

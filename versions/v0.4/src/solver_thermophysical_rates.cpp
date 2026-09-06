@@ -324,7 +324,11 @@ Status evaluate_thermophysical_rates(
       kernels, input.material.thermal_conductivity, conduction);
   if (!status) return status;
   if (input.immersed_interface != nullptr) {
-    status = input.immersed_interface->correct_positive_bounded_zero_normal_diffusion(
+    // Persist the target equation's spatial operator. The predictor controls
+    // positivity through its separate source endpoint/blend; changing this
+    // accepted rate to a clipped donor closure would EX2-extrapolate a
+    // different diffusion equation from the one audited at the final state.
+    status = input.immersed_interface->correct_zero_normal_diffusion(
         input.state.temperature.trial,
         input.material.thermal_conductivity, output.diffusion_scratch);
     if (!status) return status;

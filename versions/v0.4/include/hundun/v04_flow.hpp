@@ -1839,6 +1839,16 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
                      PressureEnergyEnthalpyOperator& out,
                      PressureEnergyEnthalpyCertificate& certificate) noexcept;
 
+  // Cell-local quasi-Newton projection: retain the ordinary spatial diagonal
+  // proxy, but include the exact temporal density-enthalpy response. Uses only
+  // kernels, authority.bdf, assembled_diagonal, target_enthalpy, rho_h,
+  // activity and identity; no halo or spatial directional workspace is used.
+  // Workspace is caller-owned, independently revised, and cannot alias inputs.
+  static Status bind_diagonal(
+      const PressureEnergyEnthalpyBinding& binding, FieldView workspace,
+      PressureEnergyDiagonalOperator& out,
+      PressureEnergyDiagonalCertificate& certificate) noexcept;
+
   LinearOperatorCertificate certificate() const noexcept override {
     return certificate_.linear;
   }
@@ -2389,6 +2399,9 @@ struct PisoIntermediateInput {
   // Current attempt-local face mass flux. Corrector one consumes the
   // momentum-predictor revision; corrector two must name the distinct
   // revision published by the first pressure correction.
+  // A fresh SIMPLE C2 rebuilds its internal momentum-predicted flux; this
+  // predecessor remains the fixed-boundary/lineage input. Pressure-only PISO
+  // C2 and typed pressure-energy refinements use it as their incremental base.
   ConstFaceFluxView trial_flux{};
   EquationSystemView momentum_system{};
   BdfCoefficients bdf{};
@@ -2405,6 +2418,9 @@ struct PisoIntermediateInput {
   // normalized BDF history of these committed fluxes. The attempt-local
   // trial_flux remains authoritative only for fixed physical boundaries.
   // Corrector two leaves both views empty.
+  // For SIMPLE the coupler retains C1's BDF offset until the single fresh
+  // C2 momentum refresh; it applies the new U/rAU to that same history before
+  // reusing its preallocated face storage for candidate increments.
   PisoCommittedFaceFluxHistory committed_face_history{};
   BoundaryThermophysicalGhostUse thermophysical_boundary{};
 };
@@ -2857,8 +2873,14 @@ enum class PressureCorrectionFaceKind : std::uint8_t {
 
 struct PressureCorrectionFaceRule {
   PressureCorrectionFaceKind kind{PressureCorrectionFaceKind::invalid};
+  // Geometric global-domain edge, including a periodic seam. This flag by
+  // itself does not grant the physical-boundary finalizer flux ownership.
   bool physical{};
   bool high{};
+
+  bool is_nonperiodic_boundary() const noexcept {
+    return physical && kind != PressureCorrectionFaceKind::periodic;
+  }
 };
 
 // The collective semantic identity is decomposition independent.  The

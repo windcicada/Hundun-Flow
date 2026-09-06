@@ -449,6 +449,102 @@ bool memory_profile(bool immersed, int rank) {
   }
   return passed;
 }
+// Exercise real C++ allocations through the public writer, including root-only
+// publication/cleanup. Every trial starts with one readable generation.
+bool writer_allocations(int rank, int ranks, long first, long requested_last) {
+  using namespace hundun::v04;
+  auto model = test::product_model({8, 8, 8});
+  CompiledCasePlan plan;
+  ProductDriver driver;
+  RestartExpected expected;
+  RestartSnapshot snapshot;
+  DriverStepReport step;
+  Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+  if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  if (status) status = driver.restart_expected(expected);
+  if (status) status = driver.initialize({});
+  if (status) status = driver.advance({1, 1, 1, 1, 1}, step);
+  if (status) status = driver.committed_restart_snapshot(snapshot);
+  if (!status) {
+    std::cerr << "writer fixture rank=" << rank << " status="
+              << static_cast<int>(status.code) << '/' << status.detail << '\n';
+    MPI_Abort(MPI_COMM_WORLD, 2);
+  }
+  int pid = ::getpid();
+  MPI_Bcast(&pid, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("hundun-writer-allocation-" + std::to_string(pid));
+  const auto seed = [&] {
+    if (rank == 0) {
+      std::error_code error;
+      std::filesystem::remove_all(root, error);
+      if (error) MPI_Abort(MPI_COMM_WORLD, 2);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    const auto seeded = RestartWriter::write(MPI_COMM_WORLD, root, snapshot);
+    if (!seeded) {
+      std::cerr << "writer seed rank=" << rank << " status="
+                << static_cast<int>(seeded.code) << '/' << seeded.detail << '\n';
+      MPI_Abort(MPI_COMM_WORLD, 2);
+    }
+  };
+  bool passed = true;
+  for (int target = 0; target < ranks && passed;
+       target += ranks > 1 ? ranks - 1 : 1) {
+    seed();
+    allocations = 0U;
+    counting = rank == target;
+    status = RestartWriter::write(MPI_COMM_WORLD, root, snapshot);
+    counting = false;
+    std::uint64_t count = allocations;
+    MPI_Bcast(&count, 1, MPI_UINT64_T, target, MPI_COMM_WORLD);
+    if (!status || count == 0U || count > 1000000U)
+      MPI_Abort(MPI_COMM_WORLD, 2);
+    const long last = requested_last < 0 ? static_cast<long>(count) - 1
+                                         : requested_last;
+    if (rank == 0)
+      std::cerr << "writer allocation target=" << target << " sites=" << count << '\n';
+    for (long index = first; index <= last && passed; ++index) {
+      seed();
+      if (rank == 0) std::cerr << "writer allocation index=" << index << '\n';
+      injected = false;
+      observing = true;
+      fail_after = rank == target ? index : -1;
+      RestartWriteReport publication;
+      status = RestartWriter::write(MPI_COMM_WORLD, root, snapshot, {1U, &publication});
+      fail_after = -1;
+      observing = false;
+      int failed_rank = injected ? rank : ranks;
+      MPI_Allreduce(MPI_IN_PLACE, &failed_rank, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      std::uint64_t low = (static_cast<std::uint64_t>(status.code) << 32U) | status.detail;
+      std::uint64_t high = low;
+      MPI_Allreduce(MPI_IN_PLACE, &low, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &high, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+      int okay = failed_rank == target && low == high &&
+                 (status.code == StatusCode::allocation_failure ||
+                  (status && publication.publication == RestartPublicationState::durable &&
+                   publication.cleanup_status.code == StatusCode::allocation_failure &&
+                   publication.cleanup_failure.rank == target)) &&
+                 live_count == 0U && comm_count == 0U && request_count == 0U;
+      RestartImage loaded;
+      const Status read = RestartReader::load(MPI_COMM_WORLD, root, expected, loaded);
+      okay &= read && loaded.step == snapshot.step && loaded.time == snapshot.time &&
+              !loaded.backward_euler_recovery;
+      MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      if (rank == 0)
+        std::cout << "writer index=" << index << " target=" << target
+                  << " consistent=" << okay << " status="
+                  << static_cast<int>(status.code) << '/' << status.detail << '\n';
+      passed = okay != 0;
+    }
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+  }
+  return passed;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -457,6 +553,13 @@ int main(int argc, char** argv) {
   int rank = 0, ranks = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  if (argc > 1 && std::strcmp(argv[1], "--writer-allocations") == 0) {
+    const bool passed = writer_allocations(
+        rank, ranks, argc > 2 ? std::strtol(argv[2], nullptr, 10) : 0,
+        argc > 3 ? std::strtol(argv[3], nullptr, 10) : -1);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if (argc > 1 && std::strcmp(argv[1], "--memory-profile") == 0) {
     int passed =
         memory_profile(argc > 2 && std::strcmp(argv[2], "immersed") == 0, rank)

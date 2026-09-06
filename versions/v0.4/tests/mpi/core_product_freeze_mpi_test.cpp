@@ -2504,8 +2504,13 @@ bool run_multispecies_open_product(int rank) {
           128.0 * std::numeric_limits<double>::epsilon() *
               std::max({1.0, std::abs(global_flux[0U]),
                         std::abs(global_flux[2U])});
+  bool linear_target_parity = observed;
+  for (const auto& gap : diagnostic.linear_target_gap)
+    linear_target_parity &= std::isfinite(gap[0U]) && gap[0U] <= 1.0e-12 &&
+                            std::isfinite(gap[1U]) && gap[1U] <= 1.0e-12;
   const bool passed =
       status && step.accepted && terminal && final_boundary && boundary_flux &&
+      linear_target_parity &&
       scalar_roles && local_scalars_finite_and_bounded &&
       local_scalar_changed && restart.final_mass_flux.certificate.valid();
   if (!passed && rank == 0) {
@@ -2547,6 +2552,102 @@ bool run_multispecies_open_product(int rank) {
               << step.thermophysical_predictor.failure.scalar_mask << '/'
               << step.thermophysical_predictor.failure.observed_value << '/'
               << step.thermophysical_predictor.failure.divergence << '\n';
+    for (std::size_t slot = 0U; slot < diagnostic.linear_target_gap.size(); ++slot)
+      std::cerr << "linear-target-gap slot=" << slot << " C="
+                << diagnostic.linear_target_gap[slot][0U] << " E="
+                << diagnostic.linear_target_gap[slot][1U] << '\n';
+  }
+  return passed;
+}
+
+bool run_open_linear_target_parity(int rank) {
+  // Uniform oblique flow is an exact steady solution with open x faces,
+  // symmetry y faces and periodic z. Nonzero w makes a wrongly zeroed
+  // periodic seam observable without IBM, restart history or a long run.
+  bool passed = true;
+  for (CouplingKind coupling : {CouplingKind::piso, CouplingKind::simple}) {
+    ValidatedModel model = test::product_model({8, 8, 8});
+    model.solver.coupling = coupling;
+    model.time.initial_dt = 1.0e-3;
+    model.time.minimum_dt = 1.0e-3;
+    model.time.maximum_dt = 1.0e-3;
+    model.pressure_reference = PressureReferenceKind::boundary_absolute;
+    for (auto& face : model.boundaries) {
+      face.flow_kind = BoundaryKind::symmetry;
+      face.thermal_kind = BoundaryKind::none;
+      face.pressure = 98000.0;
+      face.temperature = 315.0;
+      face.backflow_temperature = 315.0;
+    }
+    model.boundaries[0U].flow_kind = BoundaryKind::velocity_inlet;
+    model.boundaries[0U].velocity = {3.0, 0.0, 0.25};
+    model.boundaries[1U].flow_kind = BoundaryKind::pressure_outlet;
+    model.boundaries[4U].flow_kind = BoundaryKind::periodic;
+    model.boundaries[5U].flow_kind = BoundaryKind::periodic;
+    CompiledCasePlan plan;
+    Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+    ProductDriver driver;
+    if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+    DriverInitialState initial;
+    initial.pressure_reference = 98000.0;
+    initial.temperature = 315.0;
+    initial.velocity = {3.0, 0.0, 0.25};
+    if (status) status = driver.initialize(initial);
+    ThermodynamicsPlan oracle;
+    if (status) status = ThermodynamicsPlan::compile(model.thermophysics, {}, oracle);
+    double enthalpy = 0.0, cp = 0.0, gas = 0.0;
+    if (status) status = oracle.mixture_enthalpy(initial.temperature, {}, enthalpy, cp, gas);
+    double expected_spanwise_flux = std::numeric_limits<double>::quiet_NaN();
+    if (status)
+      expected_spanwise_flux = initial.pressure_reference / (gas * initial.temperature) *
+                              initial.velocity.z * (2.0 / 8.0) * (1.0 / 8.0);
+    if (status) detail::arm_pressure_energy_candidate_globalization_once_for_test();
+    DriverStepReport step;
+    if (status) status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+    detail::PressureEnergyCandidateGlobalizationDiagnostic diagnostic;
+    const bool observed = detail::pressure_energy_candidate_globalization_diagnostic_for_test(diagnostic);
+    detail::clear_pressure_energy_candidate_globalization_for_test();
+    bool parity = observed && diagnostic.linear_target_observed[0U] &&
+                  diagnostic.linear_target_observed[1U];
+    for (const auto& gap : diagnostic.linear_target_gap)
+      parity &= std::isfinite(gap[0U]) && gap[0U] <= 1.0e-12 &&
+                std::isfinite(gap[1U]) && gap[1U] <= 1.0e-12;
+    RestartSnapshot snapshot;
+    if (status) status = driver.committed_restart_snapshot(snapshot);
+    bool uniform_transport = status && std::isfinite(expected_spanwise_flux) &&
+                             expected_spanwise_flux > 0.0;
+    if (status) {
+      const auto flux = snapshot.final_mass_flux.z;
+      for (std::int32_t z = 0; z < flux.extents.z; ++z)
+        for (std::int32_t y = 0; y < flux.extents.y; ++y)
+          for (std::int32_t x = 0; x < flux.extents.x; ++x)
+            uniform_transport &= std::abs(flux.unchecked({x, y, z}) -
+                                           expected_spanwise_flux) <= 1.0e-11;
+      for (std::size_t field = 0U; field < snapshot.fields.size; ++field)
+        if (snapshot.fields.data[field].role == RestartFieldRole::velocity) {
+          const auto velocity = snapshot.fields.data[field].values;
+          for (std::int32_t z = 0; z < velocity.interior.z; ++z)
+            for (std::int32_t y = 0; y < velocity.interior.y; ++y)
+              for (std::int32_t x = 0; x < velocity.interior.x; ++x)
+                uniform_transport &=
+                    std::abs(velocity.unchecked({x, y, z}, 0U) - 3.0) <= 1.0e-10 &&
+                    std::abs(velocity.unchecked({x, y, z}, 1U)) <= 1.0e-10 &&
+                    std::abs(velocity.unchecked({x, y, z}, 2U) - 0.25) <= 1.0e-10;
+        }
+    }
+    passed &= status && step.accepted && step.attempts == 1U && parity &&
+              uniform_transport;
+    if (rank == 0) {
+      std::cerr << std::setprecision(17) << "open-target coupling="
+                << static_cast<unsigned>(coupling) << " status="
+                << static_cast<unsigned>(status.code) << '/' << status.detail
+                << " stage=" << step.failed_stage << " observed=" << observed
+                << " uniform-transport=" << uniform_transport << '\n';
+      for (std::size_t slot = 0U; slot < diagnostic.linear_target_gap.size(); ++slot)
+        std::cerr << "linear-target-gap slot=" << slot << " C="
+                  << diagnostic.linear_target_gap[slot][0U] << " E="
+                  << diagnostic.linear_target_gap[slot][1U] << '\n';
+    }
   }
   return passed;
 }
@@ -3426,7 +3527,26 @@ bool run_simple_coupling_compile(int rank) {
   DriverStepReport step;
   if (runtime)
     runtime = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
-  return expect(runtime && summary.coupling == CouplingKind::simple &&
+  const auto& audit = step.terminal_equations;
+  const bool terminal_equations =
+      audit.valid && audit.final_flux == step.piso.final_flux_revision &&
+      step.conservation.valid && step.conservation.epoch_start_step == 0U &&
+      std::abs(step.conservation.mass_balance_defect) < 1.0e-10 &&
+      std::abs(step.conservation.total_energy_balance_defect) < 1.0e-6 &&
+      std::abs(step.conservation.cumulative_mass_defect) < 1.0e-12 &&
+      std::abs(step.conservation.cumulative_energy_defect) < 1.0e-7 &&
+      std::all_of(audit.momentum_linf.begin(), audit.momentum_linf.end(),
+                  [](double value) { return std::abs(value) < 1.0e-10; }) &&
+      std::all_of(audit.momentum_l1.begin(), audit.momentum_l1.end(),
+                  [](double value) { return std::abs(value) < 1.0e-10; }) &&
+      std::abs(audit.continuity_signed) < 1.0e-10 &&
+      std::abs(audit.energy_signed) < 1.0e-6 &&
+      std::abs(audit.total_equation_defect) < 1.0e-6 &&
+      // The unit-volume analytic air has cv/R=2.5, p=101325 Pa, U=0.
+      std::abs(audit.internal_energy - 253312.5) < 1.0e-7 &&
+      audit.kinetic_energy == 0.0 && audit.mass > 1.0 && audit.mass < 1.3;
+  return expect(runtime && terminal_equations &&
+                    summary.coupling == CouplingKind::simple &&
                     summary.pressure_correctors == 2U && summary.sealed &&
                     step.accepted && step.piso.pressure_solve_calls == 2U &&
                     step.momentum_predictor_solve.predictor_passes == 2U &&
@@ -3435,7 +3555,7 @@ bool run_simple_coupling_compile(int rank) {
                     step.piso.pressure[1U].iterations == 0U &&
                     step.piso.pressure_energy_refinement_solve_calls == 0U,
                 rank,
-                "SIMPLE performs two momentum-pressure outer iterations");
+                "SIMPLE performs two outer iterations and audits final equations");
 }
 
 bool run_simple_immersed_refinement(int rank) {
@@ -3491,6 +3611,13 @@ bool run_simple_immersed_refinement(int rank) {
     linear &= !step.piso.pressure_energy_refinement[index].valid();
 
   const auto& globalization = step.pressure_energy_globalization;
+  const auto& c1_observation = globalization.solve_observations[0U];
+  linear &= expect(globalization.solve_observation_count == 2U + refinement_calls &&
+                   c1_observation.corrector == 1U && c1_observation.refinement == 0U &&
+                   c1_observation.invoked &&
+                   c1_observation.kind == PressureEnergySolveKind::spatial_schur &&
+                   c1_observation.local_nanoseconds[1U] != 0U,
+                   rank, "SIMPLE C1 must account its invoked Krylov solve in solve time");
   const std::uint8_t trajectory_count =
       static_cast<std::uint8_t>(2U + refinement_calls);
   bool trajectory = globalization.valid &&
@@ -3507,12 +3634,14 @@ bool run_simple_immersed_refinement(int rank) {
     trajectory &= iteration.valid &&
                   iteration.corrector == expected_corrector &&
                   iteration.refinement_iteration == expected_refinement &&
-                  (index == 0U
-                       ? !iteration.jacobian_scope_valid
-                       : iteration.jacobian_scope_valid &&
+                  iteration.jacobian_scope_valid &&
                              iteration.jacobian_scope ==
-                                 PressureEnergyJacobianScope::
-                                     ibm_double_diagonal_quasi_newton) &&
+                                 (index != 0U && expected_refinement <=
+                                      kPressureEnergyRefinementCapacity / 2U
+                                      ? PressureEnergyJacobianScope::
+                                            ibm_double_diagonal_quasi_newton
+                                      : PressureEnergyJacobianScope::
+                                            ibm_cartesian_spatial_quasi_newton) &&
                   iteration.baseline.corrector == expected_corrector &&
                   iteration.selected.corrector == expected_corrector &&
                   iteration.baseline.target_time ==
@@ -3594,7 +3723,7 @@ bool run_simple_immersed_refinement(int rank) {
               << step.piso.gauge_residual << " checks=" << linear << '/'
               << trajectory << '/' << terminal << '\n';
   return expect(collective(passed, MPI_COMM_WORLD), rank,
-                "SIMPLE IBM C2 refinements use one diagonal Schur scope and "
+                "SIMPLE IBM C2 reports the diagonal/spatial Schur sequence and "
                 "pass exact trajectory, linear and terminal gates");
 }
 
@@ -3674,6 +3803,12 @@ int main(int argc, char** argv) {
       std::strcmp(argv[1], "--multispecies-open-only") == 0) {
     const bool passed =
         collective(run_multispecies_open_product(rank), MPI_COMM_WORLD);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 &&
+      std::strcmp(argv[1], "--open-linear-target-only") == 0) {
+    const bool passed = collective(run_open_linear_target_parity(rank), MPI_COMM_WORLD);
     MPI_Finalize();
     return passed ? 0 : 1;
   }

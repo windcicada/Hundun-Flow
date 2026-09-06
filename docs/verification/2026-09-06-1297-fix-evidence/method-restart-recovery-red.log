@@ -1,0 +1,45 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 5: v04_runner_checkpoint_allocation_mpi_1
+1/1 Test #5: v04_runner_checkpoint_allocation_mpi_1 ...***Failed    3.46 sec
+Traceback (most recent call last):
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_checkpoint_cli_test.py", line 130, in <module>
+    main()
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_checkpoint_cli_test.py", line 121, in main
+    count = run(-1)
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_checkpoint_cli_test.py", line 108, in run
+    assert recovery.returncode == 0, recovery.stdout
+AssertionError: usage:
+  v04_thin_domain_runner --self-test
+  v04_thin_domain_runner --spec PATH --case-root PATH --dry-plan
+  v04_thin_domain_runner --spec PATH --case-root PATH --run-root PATH [--restart-root PATH] --steps N [--visit-interval N] [--observe-performance]
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[26220,1],0]
+  Exit code:    2
+--------------------------------------------------------------------------
+
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+allocation_audit    =   3.46 sec*proc (1 test)
+
+Total Test time (real) =   3.47 sec
+
+The following tests FAILED:
+	  5 - v04_runner_checkpoint_allocation_mpi_1 (Failed)   allocation_audit
+[ERROR_MESSAGE] 
+Errors while running CTest
+

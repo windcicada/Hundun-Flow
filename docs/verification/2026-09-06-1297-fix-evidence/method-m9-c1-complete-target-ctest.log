@@ -1,0 +1,23 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 125: v04_core_product_freeze_mpi_1
+1/5 Test #125: v04_core_product_freeze_mpi_1 .............................   Passed    1.26 sec
+    Start 134: v04_core_product_freeze_mpi_2
+2/5 Test #134: v04_core_product_freeze_mpi_2 .............................   Passed    0.88 sec
+    Start 143: v04_core_product_freeze_mpi_4
+3/5 Test #143: v04_core_product_freeze_mpi_4 .............................   Passed    3.76 sec
+    Start 189: v04_product_pressure_energy_temporal_convergence
+4/5 Test #189: v04_product_pressure_energy_temporal_convergence ..........   Passed    0.67 sec
+    Start 190: v04_product_simple_pressure_energy_temporal_convergence
+5/5 Test #190: v04_product_simple_pressure_energy_temporal_convergence ...   Passed    0.71 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Label Time Summary:
+v04_focused    =  18.72 sec*proc (4 tests)
+
+Total Test time (real) =   7.29 sec

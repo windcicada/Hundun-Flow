@@ -414,6 +414,178 @@ bool test_c1_uses_normalized_bdf_face_history_not_paired_ex2() {
   return passed;
 }
 
+bool test_simple_new_momentum_sweep_rebuilds_internal_flux() {
+  // A new SIMPLE momentum solution contains a velocity pulse, while C1's
+  // corrected flux and the complete thermodynamic state remain zero/constant.
+  // On the unit cube with four cells per axis, the pulse gives exactly
+  // 1/16 kg/s through each of its two neighbouring x faces. A pressure-only
+  // PISO correction must instead retain its C1 incremental flux.
+  bool passed = true;
+  for (CouplingKind coupling : {CouplingKind::simple, CouplingKind::piso}) {
+    PeriodicPisoFixture fixture;
+    if (!expect(fixture.initialize(4, MPI_COMM_SELF, false, coupling),
+                "momentum-sweep flux fixture compiles"))
+      return false;
+    const BdfCoefficients bdf{1.5, -2.0, 0.5, 2U};
+    fill(fixture.momentum_diagonal, 1.5 / 64.0);
+    fill_face_flux(fixture.phi_h_by_a, 0.0);
+    fill_face_flux(fixture.trial_flux, 0.0);
+    PisoIntermediateInput input = fixture.intermediate_input(bdf, 7401U);
+    PisoIntermediateCertificate first;
+    if (!expect(static_cast<bool>(fixture.coupler.refresh(input, first)),
+                "zero C1 predictor establishes face-history authority"))
+      return false;
+
+    for (std::int32_t z = 0; z < 4; ++z)
+      for (std::int32_t y = 0; y < 4; ++y)
+        fixture.velocity.view.unchecked({1, y, z}, 0U) = 2.0;
+    ++fixture.velocity.view.revision;
+    fill(fixture.momentum_diagonal, 3.0 / 64.0);
+    ++fixture.momentum_diagonal.view.revision;
+    input.corrector = 2U;
+    input.prior_corrector = first.dependency;
+    input.temporal_reference = {};
+    input.committed_face_history = {};
+    input.trial_velocity = as_const(fixture.velocity.view);
+    input.momentum_system.diagonal = fixture.momentum_diagonal.view;
+    ++input.momentum.state;
+    ++input.trial_flux.revision;
+    input.momentum.face_flux = input.trial_flux.revision;
+    PisoIntermediateCertificate second;
+    if (!expect(static_cast<bool>(fixture.coupler.refresh(input, second)),
+                "C2 consumes the new momentum state"))
+      return false;
+    ConstFaceFluxView flux;
+    if (!expect(static_cast<bool>(
+                    fixture.coupler.inspect_intermediate_flux(second, flux)),
+                "C2 exposes its pressure-equation face flux"))
+      return false;
+    const double expected = coupling == CouplingKind::simple ? 1.0 / 16.0 : 0.0;
+    passed &= expect(std::abs(flux.x.unchecked({1, 0, 0}) - expected) < 1.0e-14 &&
+                         std::abs(flux.x.unchecked({2, 0, 0}) - expected) < 1.0e-14 &&
+                         flux.x.unchecked({0, 0, 0}) == 0.0 &&
+                         flux.x.unchecked({3, 0, 0}) == 0.0,
+                     coupling == CouplingKind::simple
+                         ? "SIMPLE C2 includes the new interior momentum pulse"
+                         : "PISO C2 retains the corrected incremental flux");
+
+    OwnedField drho_dp = make_field(6U, fixture.patch.cells, 1U, 0U,
+                                    7501U, 8501U);
+    OwnedField diagonal = make_field(53U, fixture.patch.cells, 1U, 0U,
+                                     7502U, 8502U);
+    OwnedField rhs = make_field(54U, fixture.patch.cells, 1U, 0U,
+                                7503U, 8503U);
+    fill(drho_dp, 1.0e-5);
+    PressureCorrectionInput pressure;
+    pressure.intermediate = second;
+    pressure.pressure_reference = input.pressure_reference;
+    pressure.density_trial = as_const(fixture.density.view);
+    pressure.density_accepted = pressure.density_trial;
+    pressure.density_previous = pressure.density_trial;
+    pressure.drho_dp_h_y = as_const(drho_dp.view);
+    pressure.bdf = bdf;
+    pressure.time = input.momentum.time;
+    pressure.geometry = input.momentum.geometry;
+    pressure.numeric_boundary = input.numeric_boundary;
+    PressureCorrectionCertificate assembled;
+    if (!expect(static_cast<bool>(fixture.coupler.assemble_pressure_system(
+                    pressure, {diagonal.view, rhs.view}, assembled)),
+                "C2 assembles continuity from its own face predictor"))
+      return false;
+    passed &= expect(std::abs(rhs.view.unchecked({0, 0, 0}, 0U) + expected) <
+                             1.0e-14 &&
+                         std::abs(rhs.view.unchecked({2, 0, 0}, 0U) - expected) <
+                             1.0e-14,
+                     "continuity RHS includes precisely the new flux divergence");
+
+    PisoIntermediateCertificate repeated;
+    passed &= expect(fixture.coupler.refresh(input, repeated).code ==
+                         StatusCode::invalid_plan,
+                     "ordinary C2 cannot reuse its consumed C1 authority");
+  }
+  return passed;
+}
+
+bool test_simple_momentum_refresh_preserves_history_with_new_pressure_filter() {
+  bool passed = true;
+  for (bool change_bdf : {false, true}) {
+    PeriodicPisoFixture fixture;
+    if (!expect(fixture.initialize(4, MPI_COMM_SELF, false, CouplingKind::simple) &&
+                    fixture.commit_uniform_flux_history(
+                        MPI_COMM_SELF, {0.0, 0.0, 0.0}, {3.0, 0.0, 0.0},
+                        7601U, 7602U),
+                "SIMPLE pressure-filter fixture commits distinct BDF histories"))
+      return false;
+    const BdfCoefficients bdf{1.5, -2.0, 0.5, 2U};
+    fill(fixture.momentum_diagonal, 1.5 / 64.0);
+    fill_face_flux(fixture.phi_h_by_a, 0.0);
+    PisoIntermediateInput input = fixture.intermediate_input(bdf, 7701U);
+    PisoIntermediateCertificate first;
+    if (!expect(static_cast<bool>(fixture.coupler.refresh(input, first)),
+                "C1 freezes normalized BDF history before the momentum refresh"))
+      return false;
+    passed &= expect(std::abs(fixture.phi_h_by_a.x.unchecked({1, 0, 0}) - 0.25) <
+                         1.0e-14,
+                     "C1 face history is -a1/a0 times accepted mass flux");
+
+    // C2 still has zero velocity, but doubles the momentum diagonal and
+    // introduces a smooth periodic pressure profile. The new flux must use
+    // both the new rAU and the current Rhie--Chow pressure filter; adding
+    // only I(rho*dU) to the old C1 flux would leave the answer at 1/4.
+    constexpr std::array<double, 4U> pressure_profile{0.0, 1.0, 0.0, -1.0};
+    const auto ghosts = fixture.pressure.view.ghosts;
+    for (std::int32_t z = -ghosts.z; z < 4 + ghosts.z; ++z)
+      for (std::int32_t y = -ghosts.y; y < 4 + ghosts.y; ++y)
+        for (std::int32_t x = -ghosts.x; x < 4 + ghosts.x; ++x)
+          fixture.pressure.view.unchecked({x, y, z}, 0U) =
+              pressure_profile[static_cast<std::size_t>((x + 4) % 4)];
+    ++fixture.pressure.view.revision;
+    fill(fixture.momentum_diagonal, 3.0 / 64.0);
+    ++fixture.momentum_diagonal.view.revision;
+    fill_face_flux(fixture.trial_flux, 0.0);
+    for (std::int32_t z = 0; z < 4; ++z)
+      for (std::int32_t y = 0; y < 4; ++y)
+        for (std::int32_t x = 0; x < 5; ++x)
+          fixture.trial_flux.x.unchecked({x, y, z}) = 0.25;
+    ++fixture.trial_flux.revision;
+    input.corrector = 2U;
+    input.prior_corrector = first.dependency;
+    input.temporal_reference = {};
+    input.committed_face_history = {};
+    input.trial_flux = as_const(fixture.trial_flux);
+    input.momentum_system.diagonal = fixture.momentum_diagonal.view;
+    input.thermophysical_boundary.binding.pressure_perturbation =
+        as_const(fixture.pressure.view);
+    ++input.momentum.state;
+    input.momentum.face_flux = input.trial_flux.revision;
+    if (change_bdf) {
+      input.bdf = {3.0, -4.0, 1.0, 2U};
+      input.momentum.dt = fixture_time_step_for_bdf(input.bdf);
+    }
+    PisoIntermediateCertificate second;
+    const Status status = fixture.coupler.refresh(input, second);
+    if (change_bdf) {
+      passed &= expect(status.code == StatusCode::invalid_plan,
+                       "SIMPLE C2 rejects BDF coefficients unlike its C1 history");
+      continue;
+    }
+    if (!expect(static_cast<bool>(status),
+                "SIMPLE refreshes the new momentum and pressure filter"))
+      return false;
+    ConstFaceFluxView flux;
+    if (!expect(static_cast<bool>(
+                    fixture.coupler.inspect_intermediate_flux(second, flux)),
+                "refreshed SIMPLE flux is observable through the public API"))
+      return false;
+    // A=1/16, dx=1/4, rAU=1/3. At x-face 1: history=1/8,
+    // interpolated cell-gradient response=1/24, face pressure response=-1/12.
+    passed &= expect(std::abs(flux.x.unchecked({1, 0, 0}) - 1.0 / 12.0) <
+                         1.0e-14,
+                     "SIMPLE uses new rAU/current pressure with the same BDF history");
+  }
+  return passed;
+}
+
 bool test_c1_backward_euler_uses_only_accepted_face_history() {
   PeriodicPisoFixture fixture;
   bool passed = expect(
@@ -472,7 +644,9 @@ int main(int argc, char** argv) {
   }
   const bool passed = test_variable_step_bdf2_order() &&
                       test_c1_uses_normalized_bdf_face_history_not_paired_ex2() &&
-                      test_c1_backward_euler_uses_only_accepted_face_history();
+                      test_c1_backward_euler_uses_only_accepted_face_history() &&
+                      test_simple_new_momentum_sweep_rebuilds_internal_flux() &&
+                      test_simple_momentum_refresh_preserves_history_with_new_pressure_filter();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

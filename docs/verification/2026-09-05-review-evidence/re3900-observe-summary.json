@@ -1,0 +1,240 @@
+{
+  "schema": "HUNDUN_V04_DIAGNOSTIC_OBSERVATION_V1",
+  "formal_performance_comparison": false,
+  "steps": [
+    {
+      "step": 747,
+      "ranks": 128,
+      "maximum_full_step_ns": 17909251698,
+      "maximum_advance_ns": 17898095774,
+      "mean_advance_ns": 17898073414.367188,
+      "full_step_critical_rank": 5,
+      "critical_rank_phases": {
+        "advance_ns": 17898080323,
+        "observables_ns": 10378218,
+        "visit_ns": 40,
+        "evidence_resources_ns": 750216,
+        "csv_ns": 42861,
+        "checkpoint_ns": 40
+      },
+      "rank_mean_candidate_phases": {
+        "state_copy_ns": 956833.609375,
+        "velocity_halo_ns": 173819452.0234375,
+        "thermo_ns": 336970514.9375,
+        "boundary_derived_ns": 906264410.765625,
+        "flux_ns": 722258471.0546875,
+        "certificate_ns": 291397643.4296875,
+        "residual_ns": 1009604725.3046875,
+        "equivalence_hash_ns": 257371032.8046875,
+        "candidate_ns": 3698693731.734375,
+        "schur_prepare_ns": 620067413.0859375,
+        "krylov_ns": 9941919031.625,
+        "recovery_ns": 29768546.625
+      },
+      "work_counts": {
+        "baseline_evaluations": [
+          12
+        ],
+        "extrapolation_evaluations": [
+          9
+        ],
+        "ladder_evaluations": [
+          3
+        ],
+        "incomplete_evaluations": [
+          0
+        ],
+        "rejected_extrapolations": [
+          0
+        ]
+      },
+      "rank_mean_solve_detail_ns": {
+        "pressure_prepare_ns": 380908.2734375,
+        "pressure_solve_ns": 69497241.6953125,
+        "pressure_close_ns": 40803.421875,
+        "diagonal_prepare_ns": 99628347.8125,
+        "diagonal_solve_ns": 4228572773.5,
+        "diagonal_close_ns": 18971849.0390625,
+        "spatial_prepare_ns": 520058157.0,
+        "spatial_solve_ns": 5643849016.4296875,
+        "spatial_close_ns": 10755894.1640625,
+        "A_apply_ns": 4265482834.5703125,
+        "M_apply_ns": 3899324193.78125,
+        "arnoldi_dot_ns": 278231392.609375,
+        "arnoldi_reduce_ns": 633120647.7890625,
+        "arnoldi_update_ns": 104794987.7109375
+      },
+      "solve_calls_by_kind": {
+        "pressure": [
+          1
+        ],
+        "diagonal": [
+          7
+        ],
+        "spatial": [
+          4
+        ]
+      },
+      "solve_detail_scope": "all attempts; A/M inclusive, Arnoldi partial; no sum of independent maxima"
+    },
+    {
+      "step": 748,
+      "ranks": 128,
+      "maximum_full_step_ns": 16530919298,
+      "maximum_advance_ns": 16520140666,
+      "mean_advance_ns": 16520137064.539062,
+      "full_step_critical_rank": 126,
+      "critical_rank_phases": {
+        "advance_ns": 16520136696,
+        "observables_ns": 10334197,
+        "visit_ns": 30,
+        "evidence_resources_ns": 403724,
+        "csv_ns": 44611,
+        "checkpoint_ns": 40
+      },
+      "rank_mean_candidate_phases": {
+        "state_copy_ns": 842279.5546875,
+        "velocity_halo_ns": 177972291.5703125,
+        "thermo_ns": 360496286.8828125,
+        "boundary_derived_ns": 916111475.03125,
+        "flux_ns": 763349610.1640625,
+        "certificate_ns": 303453362.6953125,
+        "residual_ns": 1072216625.421875,
+        "equivalence_hash_ns": 259049603.2734375,
+        "candidate_ns": 3853540805.3125,
+        "schur_prepare_ns": 619809914.4921875,
+        "krylov_ns": 8519579245.921875,
+        "recovery_ns": 31140199.4296875
+      },
+      "work_counts": {
+        "baseline_evaluations": [
+          12
+        ],
+        "extrapolation_evaluations": [
+          9
+        ],
+        "ladder_evaluations": [
+          4
+        ],
+        "incomplete_evaluations": [
+          0
+        ],
+        "rejected_extrapolations": [
+          1
+        ]
+      },
+      "rank_mean_solve_detail_ns": {
+        "pressure_prepare_ns": 9893972.9921875,
+        "pressure_solve_ns": 51091408.6953125,
+        "pressure_close_ns": 46624.8125,
+        "diagonal_prepare_ns": 97630865.578125,
+        "diagonal_solve_ns": 3940694114.296875,
+        "diagonal_close_ns": 19162775.1484375,
+        "spatial_prepare_ns": 512285075.921875,
+        "spatial_solve_ns": 4527793722.9296875,
+        "spatial_close_ns": 11930799.46875,
+        "A_apply_ns": 3587656457.40625,
+        "M_apply_ns": 3419227046.4453125,
+        "arnoldi_dot_ns": 265123670.5625,
+        "arnoldi_reduce_ns": 492538826.546875,
+        "arnoldi_update_ns": 106169984.015625
+      },
+      "solve_calls_by_kind": {
+        "pressure": [
+          1
+        ],
+        "diagonal": [
+          7
+        ],
+        "spatial": [
+          4
+        ]
+      },
+      "solve_detail_scope": "all attempts; A/M inclusive, Arnoldi partial; no sum of independent maxima"
+    },
+    {
+      "step": 749,
+      "ranks": 128,
+      "maximum_full_step_ns": 29094710528,
+      "maximum_advance_ns": 16714240435,
+      "mean_advance_ns": 16714235055.859375,
+      "full_step_critical_rank": 0,
+      "critical_rank_phases": {
+        "advance_ns": 16714235795,
+        "observables_ns": 10329316,
+        "visit_ns": 2010884377,
+        "evidence_resources_ns": 560829,
+        "csv_ns": 72363,
+        "checkpoint_ns": 10358627848
+      },
+      "rank_mean_candidate_phases": {
+        "state_copy_ns": 743855.234375,
+        "velocity_halo_ns": 173344135.3984375,
+        "thermo_ns": 339257686.21875,
+        "boundary_derived_ns": 886969746.90625,
+        "flux_ns": 714987055.375,
+        "certificate_ns": 294482072.453125,
+        "residual_ns": 992415319.4296875,
+        "equivalence_hash_ns": 258181677.9140625,
+        "candidate_ns": 3660427104.7578125,
+        "schur_prepare_ns": 623130159.078125,
+        "krylov_ns": 8885265467.601562,
+        "recovery_ns": 32439422.890625
+      },
+      "work_counts": {
+        "baseline_evaluations": [
+          12
+        ],
+        "extrapolation_evaluations": [
+          8
+        ],
+        "ladder_evaluations": [
+          4
+        ],
+        "incomplete_evaluations": [
+          0
+        ],
+        "rejected_extrapolations": [
+          0
+        ]
+      },
+      "rank_mean_solve_detail_ns": {
+        "pressure_prepare_ns": 9603371.4609375,
+        "pressure_solve_ns": 53286239.4921875,
+        "pressure_close_ns": 42624.40625,
+        "diagonal_prepare_ns": 101447529.5546875,
+        "diagonal_solve_ns": 3929911211.34375,
+        "diagonal_close_ns": 21265105.7265625,
+        "spatial_prepare_ns": 512079258.0625,
+        "spatial_solve_ns": 4902068016.765625,
+        "spatial_close_ns": 11131692.7578125,
+        "A_apply_ns": 3818424484.71875,
+        "M_apply_ns": 3536640660.6875,
+        "arnoldi_dot_ns": 240447856.6796875,
+        "arnoldi_reduce_ns": 537163573.2734375,
+        "arnoldi_update_ns": 85484022.890625
+      },
+      "solve_calls_by_kind": {
+        "pressure": [
+          1
+        ],
+        "diagonal": [
+          7
+        ],
+        "spatial": [
+          4
+        ]
+      },
+      "solve_detail_scope": "all attempts; A/M inclusive, Arnoldi partial; no sum of independent maxima"
+    }
+  ],
+  "binary_sha256": "37deb9a12d203920e8bb4a541d8f2398f2cb1ca47a5eb8293da42f1d0a0ca4c8",
+  "limits": [
+    "One instrumented window, no repeated-round median",
+    "Full-step timer excludes its own observation gather/write",
+    "PMPI elapsed excludes observer bookkeeping; advance includes it",
+    "Nine blocking MPI primitives, observed only inside driver.advance",
+    "Candidate/solve costs cover all numerical attempts",
+    "Per-rank phase maxima must not be added as whole-step wall time"
+  ]
+}

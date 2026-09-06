@@ -23,6 +23,9 @@ Status fused_krylov_basis_update_for_test(
     FieldView destination, const ConstFieldView* sources,
     const double* scales, std::size_t count) noexcept;
 
+Status krylov_multidot_for_test(const ConstFieldView* basis, std::size_t count,
+                                ConstFieldView right, double* dots) noexcept;
+
 bool krylov_basis_update_inputs_disjoint_for_test(
     FieldView destination, const ConstFieldView* sources,
     std::size_t count) noexcept;

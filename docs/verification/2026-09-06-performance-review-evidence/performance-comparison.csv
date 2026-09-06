@@ -1,0 +1,6 @@
+product,record_type,nx,ny,nz,z_extent_m,mpi_ranks,first_step,last_step,accepted_samples,mean_advance_seconds,mean_business_step_seconds,status,strict_cross_product_ratio_permitted
+Hundun_SIMPLE,current_frozen_long_run,456,256,52,0.031415926535897934,128,750,1296,547,19.401892996548447,19.43183535391956,stopped_before_request_at_attempt_1297,false
+Ordinary_compressible_COAST,historical_native_variable_properties,456,256,104,0.06,128,2,6,5,20.16495005179895,,historical_reference_grid_and_window_differ,false
+Ordinary_compressible_COAST,current_52_layer_match,456,256,52,0.031415926535897934,128,,,,,,pending_same_grid_and_window,false
+Hundun_PISO,current_candidate,456,256,52,0.031415926535897934,128,,,,,,pending_same_grid_and_window,false
+COAST_dedicated_equivalence,current_52_layer_match,456,256,52,0.031415926535897934,128,,,,,,pending_same_grid_and_window,false

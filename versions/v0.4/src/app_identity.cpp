@@ -261,29 +261,20 @@ bool sha256_file(const char* path, DigestText& out) noexcept {
   return valid;
 }
 
-std::string identity_payload(const RuntimeCandidateIdentity& identity) {
-  std::string payload;
-  payload.reserve(420U);
-  payload.append("schema=");
-  payload.append(kRuntimeCandidateIdentitySchema);
-  payload.append("\nevidence_schema=");
-  payload.append(kRuntimeEvidenceSchema);
-  payload.append("\nhead=");
-  payload.append(identity.head.data(), kRuntimeGitObjectHexCharacters);
-  payload.append("\ntree=");
-  payload.append(identity.tree.data(), kRuntimeGitObjectHexCharacters);
-  payload.append("\nbuild_manifest_sha256=");
-  payload.append(identity.build_manifest.data(), kRuntimeSha256HexCharacters);
-  payload.append("\nexecutable_sha256=");
-  payload.append(identity.executable.data(), kRuntimeSha256HexCharacters);
-  payload.push_back('\n');
-  return payload;
-}
-
-DigestText identity_digest(const RuntimeCandidateIdentity& identity) {
-  const std::string payload = identity_payload(identity);
+DigestText identity_digest(const RuntimeCandidateIdentity& identity) noexcept {
+  // Same byte stream as the V2 payload, without heap allocation before MPI.
+  const std::array<std::string_view, 13U> parts{{
+      "schema=", kRuntimeCandidateIdentitySchema,
+      "\nevidence_schema=", kRuntimeEvidenceSchema,
+      "\nhead=", {identity.head.data(), kRuntimeGitObjectHexCharacters},
+      "\ntree=", {identity.tree.data(), kRuntimeGitObjectHexCharacters},
+      "\nbuild_manifest_sha256=",
+      {identity.build_manifest.data(), kRuntimeSha256HexCharacters},
+      "\nexecutable_sha256=",
+      {identity.executable.data(), kRuntimeSha256HexCharacters}, "\n"}};
   Sha256 hash;
-  if (!hash.update(payload)) return {};
+  for (const auto part : parts)
+    if (!hash.update(part)) return {};
   return hex_digest(hash.finish());
 }
 
@@ -349,13 +340,14 @@ bool runtime_sha256_bytes(Span<const std::uint8_t> bytes,
 }
 
 Status runtime_candidate_identity(MPI_Comm communicator,
-                                  RuntimeCandidateIdentity& out) noexcept try {
+                                  RuntimeCandidateIdentity& out,
+                                  std::string_view target_manifest) noexcept try {
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kRuntimeIdentityFailure};
   RuntimeCandidateIdentity local;
   bool valid = copy_git_object(identity_source_commit, local.head) &&
                copy_git_object(identity_source_tree, local.tree) &&
-               copy_digest(identity_build_manifest_sha256,
+               copy_digest(target_manifest.empty() ? identity_build_manifest_sha256 : target_manifest,
                            local.build_manifest) &&
                sha256_file("/proc/self/exe", local.executable);
   if (valid) {

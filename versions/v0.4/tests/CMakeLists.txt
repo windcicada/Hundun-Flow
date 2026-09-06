@@ -23,6 +23,24 @@ add_test(NAME v04_thin_domain_runner_self_test
   COMMAND $<TARGET_FILE:v04_thin_domain_runner> --self-test)
 set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
 
+add_test(NAME v04_target_identity
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/integration/target_identity_test.py"
+          --cmake "${CMAKE_COMMAND}"
+          --module "${hundun_repository_root}/cmake/HundunTargetIdentity.cmake")
+set_tests_properties(v04_target_identity PROPERTIES TIMEOUT 30)
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_runner_checkpoint_allocation_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_checkpoint_cli_test.py"
+      --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+      --probe "$<TARGET_FILE:v04_checkpoint_allocation_probe>"
+      --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}" --first-only)
+  set_tests_properties(v04_runner_checkpoint_allocation_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 LABELS allocation_audit)
+endforeach()
+
 add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"
@@ -95,6 +113,12 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_allocation_failure_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 30)
+  add_test(NAME v04_restart_writer_allocations_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>"
+            ${MPIEXEC_POSTFLAGS} --writer-allocations)
+  set_tests_properties(v04_restart_writer_allocations_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 120 LABELS "allocation_audit")
   foreach(operation IN ITEMS compile create initialize initialize_restart read_restart)
     foreach(geometry IN ITEMS cartesian immersed)
       set(allocation_test v04_product_${operation}_allocations_${geometry}_mpi_${rank_count})
@@ -616,6 +640,14 @@ foreach(rank_count IN ITEMS 1 2 4)
     v04_core_fresh_open_eos_flux_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}"
     TIMEOUT 120)
+  add_test(NAME v04_core_open_periodic_target_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_core_product_freeze_mpi_test>"
+            "--open-linear-target-only"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_core_open_periodic_target_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 120)
   add_test(NAME v04_core_fresh_initialize_contract_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS}
@@ -688,6 +720,13 @@ add_test(NAME v04_io_restart_mpi_4
 set_tests_properties(v04_io_restart_mpi_4 PROPERTIES
   PROCESSORS 4
   TIMEOUT 180)
+
+add_library(v04_checkpoint_allocation_probe SHARED
+  support/checkpoint_allocation_probe.cpp)
+target_link_libraries(v04_checkpoint_allocation_probe PRIVATE MPI::MPI_C)
+target_compile_features(v04_checkpoint_allocation_probe PRIVATE cxx_std_17)
+target_compile_definitions(v04_checkpoint_allocation_probe PRIVATE
+  OMPI_SKIP_MPICXX=1 MPICH_SKIP_MPICXX=1)
 
 add_executable(v04_io_product_path_test
   integration/io_product_path_test.cpp)
@@ -834,6 +873,23 @@ add_test(NAME v04_product_pressure_energy_temporal_convergence
   COMMAND v04_product_pressure_energy_temporal_convergence_test)
 set_tests_properties(v04_product_pressure_energy_temporal_convergence
   PROPERTIES TIMEOUT 180)
+add_test(NAME v04_product_simple_pressure_energy_temporal_convergence
+  COMMAND v04_product_pressure_energy_temporal_convergence_test --simple)
+set_tests_properties(v04_product_simple_pressure_energy_temporal_convergence
+  PROPERTIES TIMEOUT 180)
+add_test(NAME v04_product_scalar_splitting_observation
+  COMMAND v04_product_pressure_energy_temporal_convergence_test --scalar-splitting)
+set_tests_properties(v04_product_scalar_splitting_observation
+  PROPERTIES TIMEOUT 180 LABELS "v04_method_observation")
+
+add_executable(v04_product_method_direction_probe
+  mpi/product_method_direction_probe.cpp)
+target_link_libraries(v04_product_method_direction_probe PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+target_include_directories(v04_product_method_direction_probe PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(v04_product_method_direction_probe PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
 
 add_executable(v04_core_resource_contract_test
   unit/core_resource_contract_test.cpp)
@@ -1408,6 +1464,14 @@ endforeach()
 
 add_executable(v04_product_adaptive_limits_mpi_test
   mpi/product_adaptive_limits_mpi_test.cpp)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_application_identity_no_allocation_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_app_case_allocation_mpi_test>"
+            ${MPIEXEC_POSTFLAGS} --identity-only)
+  set_tests_properties(v04_application_identity_no_allocation_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 45)
+endforeach()
 target_link_libraries(v04_product_adaptive_limits_mpi_test PRIVATE
   hundun_v04_test_core MPI::MPI_C)
 foreach(rank_count IN ITEMS 1 2 4)

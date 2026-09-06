@@ -390,10 +390,56 @@ bool test_single_reduction_norm_arithmetic() {
   return passed;
 }
 
+bool test_multidot() {
+  bool passed = true;
+  for (int width : {1, 5, 29, 255, 256, 257}) {
+    const Int3 cells{width, 3, 2};
+    auto right = make_field(cells, 1U, 3U, 7U, 3000U);
+    fill_field(right.view, .25);
+    std::vector<OwnedField> fields;
+    std::array<ConstFieldView, kMaximumCount> views;
+    for (std::size_t i = 0U; i < kMaximumCount; ++i) {
+      fields.push_back(make_field(cells, 1U, i % 3, i % 5, 4000U + i));
+      fill_field(fields.back().view, .125 + .003 * i);
+      views[i] = as_const(fields.back().view);
+    }
+    for (std::size_t count : {1U, 12U, 32U, 123U}) {
+      std::array<double, kMaximumCount + 1U> dots{};
+      const auto status = detail::krylov_multidot_for_test(
+          views.data(), count, as_const(right.view), dots.data());
+      passed &= expect(static_cast<bool>(status), "multidot accepts padded fields");
+      for (std::size_t i = 0U; i <= count; ++i) {
+        const auto left = i == count ? as_const(right.view) : views[i];
+        double sum = 0.0, correction = 0.0;
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x) {
+              const double product = left.unchecked({x,y,z}, 0U) *
+                                     right.view.unchecked({x,y,z}, 0U);
+              const double next = sum + product;
+              correction += std::abs(sum) >= std::abs(product)
+                  ? (sum - next) + product : (product - next) + sum;
+              sum = next;
+            }
+        const double reference = sum + correction;
+        passed &= expect(std::memcmp(&reference, &dots[i], sizeof(double)) == 0,
+                         "multidot preserves each compensated addition bitwise");
+      }
+    }
+    fields.back().view.unchecked({width - 1, 2, 1}, 0U) =
+        std::numeric_limits<double>::quiet_NaN();
+    std::array<double, kMaximumCount + 1U> dots{};
+    passed &= expect(detail::krylov_multidot_for_test(views.data(), views.size(),
+        as_const(right.view), dots.data()).code == StatusCode::numerical_failure,
+        "multidot retains nonfinite rejection in final basis and partial strip");
+  }
+  return passed;
+}
+
 }  // namespace
 
 int main() {
-  return test_finite_bitwise_equivalence() &&
+  return test_multidot() && test_finite_bitwise_equivalence() &&
                  test_strip_boundaries_and_distinct_layouts() &&
                  test_nonfinite_failure_is_not_published() &&
                  test_nonfinite_active_strip_is_not_published() &&

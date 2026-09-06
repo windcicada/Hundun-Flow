@@ -1,0 +1,6 @@
+level dt=0.000125 index=1 status=0/0 accepted=1 origin/order=3/1 proposed-dt=6.2500000000000001e-05 attempts=2 prior=6/5792 prior-stage=44 residuals=2.01330858720913e-16,1.0858530741903113e-16,1.064380374451482e-16,4.0258477585924702e-16,8.0603111796122902e-19
+FAIL: real ProductDriver trajectory advances
+level dt=6.2500000000000001e-05 index=1 status=0/0 accepted=1 origin/order=3/1 proposed-dt=3.1250000000000001e-05 attempts=2 prior=6/5792 prior-stage=44 residuals=2.0135485089204366e-16,9.1931049784299068e-14,7.5284615883938503e-14,9.6620346206219282e-15,8.1675596039445292e-19
+FAIL: real ProductDriver trajectory advances
+level dt=3.1250000000000001e-05 index=1 status=0/0 accepted=1 origin/order=3/1 proposed-dt=1.5625e-05 attempts=2 prior=6/5792 prior-stage=44 residuals=2.0131636871900075e-16,5.7530672943424836e-15,4.6726866017111423e-15,8.8568650689034336e-15,4.5511862841463098e-18
+FAIL: real ProductDriver trajectory advances

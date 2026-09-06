@@ -1,0 +1,28 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start   6: v04_runner_checkpoint_allocation_mpi_2
+    Start   5: v04_runner_checkpoint_allocation_mpi_1
+    Start   4: v04_target_identity
+1/9 Test   #4: v04_target_identity ............................   Passed    2.40 sec
+    Start   3: v04_thin_domain_runner_self_test
+2/9 Test   #3: v04_thin_domain_runner_self_test ...............   Passed    0.50 sec
+    Start 270: v04_application_identity_no_allocation_mpi_1
+3/9 Test #270: v04_application_identity_no_allocation_mpi_1 ...   Passed    0.44 sec
+    Start   2: v04_performance_observation_accounting
+4/9 Test   #2: v04_performance_observation_accounting .........   Passed    0.04 sec
+5/9 Test   #5: v04_runner_checkpoint_allocation_mpi_1 .........   Passed    4.24 sec
+    Start 271: v04_application_identity_no_allocation_mpi_2
+6/9 Test #271: v04_application_identity_no_allocation_mpi_2 ...   Passed    0.42 sec
+7/9 Test   #6: v04_runner_checkpoint_allocation_mpi_2 .........   Passed    5.83 sec
+    Start   7: v04_runner_checkpoint_allocation_mpi_4
+8/9 Test   #7: v04_runner_checkpoint_allocation_mpi_4 .........   Passed    4.66 sec
+    Start 272: v04_application_identity_no_allocation_mpi_4
+9/9 Test #272: v04_application_identity_no_allocation_mpi_4 ...   Passed    0.48 sec
+
+100% tests passed, 0 tests failed out of 9
+
+Label Time Summary:
+allocation_audit    =  34.56 sec*proc (3 tests)
+v04_focused         =   0.04 sec*proc (1 test)
+
+Total Test time (real) =  10.98 sec

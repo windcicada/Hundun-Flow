@@ -308,6 +308,7 @@ int main(int argc, char* argv[]) {
     result = finish(status, rank);
   } else if (argc >= 7 && std::string_view{argv[1]} == "run") {
     ApplicationRunOptions options;
+    options.target_build_manifest = HUNDUN_RUNTIME_TARGET_MANIFEST;
     options.case_root = argv[2];
     options.source_root = HUNDUN_V04_SOURCE_ROOT;
     bool parsed = true;

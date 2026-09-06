@@ -100,6 +100,25 @@ def main():
                        check=True)
         assert json.loads(current.read_text())["complete"] is False
         checks += 1
+        # Empty reference sets cannot establish literature completeness, even
+        # with a valid extractor and correctly hashed ancillary attachments.
+        empty = root / "empty-references.json"
+        current_document = json.loads(current.read_text())
+        current_document["artifacts"] = [
+            item for item in current_document["artifacts"]
+            if item["kind"] != "reference"]
+        current_document["complete"] = True
+        current_document["incomplete_references"] = []
+        empty.write_text(json.dumps(current_document), encoding="utf-8")
+        unchanged = empty.read_bytes()
+        result = subprocess.run(
+            [sys.executable, str(tool), "receipt-validate", str(empty),
+             "--require-complete"], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, universal_newlines=True)
+        assert result.returncode != 0, "empty references accepted as complete"
+        assert "no reference" in result.stderr, result.stderr
+        assert empty.read_bytes() == unchanged
+        checks += 1
         print("receipt CLI checks={} complete=false history_unchanged=true".format(checks))
 
 

@@ -416,6 +416,7 @@ def validate_receipt(path, require_complete=False, historical=False,
     required_attachments = set()
     supplied_attachments = set()
     extractor_seen = False
+    reference_count = 0
     seen = set()
     for artifact in artifacts:
         if (not isinstance(artifact, dict) or
@@ -452,6 +453,7 @@ def validate_receipt(path, require_complete=False, historical=False,
             supplied_attachments.add(artifact["sha256"])
         if artifact["kind"] == "reference":
             reference = validate_reference(artifact_path)
+            reference_count += 1
             if not reference_complete(reference):
                 # The receipt records its original namespace, not today's location.
                 # Keep that binding immutable even when resolving relocated bytes.
@@ -459,6 +461,8 @@ def validate_receipt(path, require_complete=False, historical=False,
             required_attachments.update(required_attachment_hashes(reference))
     if not extractor_seen:
         raise LiteratureError("{}: extractor is not bound".format(path))
+    if reference_count == 0:
+        raise LiteratureError("{}: no reference is bound".format(path))
     if not required_attachments.issubset(supplied_attachments):
         raise LiteratureError(
             "{}: completed reference attachments are not bound".format(path))

@@ -1,0 +1,31 @@
+restart syscall target=0 mode=0 passed=1
+restart syscall target=0 mode=1 passed=1
+restart syscall target=0 mode=2 passed=1
+restart syscall target=0 mode=3 passed=1
+restart syscall target=0 mode=4 passed=1
+restart syscall target=0 mode=5 passed=1
+restart syscall target=0 mode=6 passed=1
+restart syscall target=0 mode=7 passed=1
+restart syscall target=0 mode=8 passed=1
+restart syscall target=0 mode=9 passed=1
+restart syscall target=0 mode=10 passed=1
+restart reader syscall target=0 mode=7 passed=1
+restart reader syscall target=0 mode=11 passed=1
+restart reader syscall target=0 mode=12 passed=1
+restart reader syscall target=0 mode=13 passed=1
+restart reader syscall target=0 mode=14 passed=1
+restart syscall target=3 mode=0 passed=1
+restart syscall target=3 mode=1 passed=1
+restart syscall target=3 mode=2 passed=1
+restart syscall target=3 mode=3 passed=1
+restart syscall target=3 mode=4 passed=1
+restart syscall target=3 mode=5 passed=1
+restart syscall target=3 mode=6 passed=1
+restart syscall target=3 mode=7 passed=1
+restart syscall target=3 mode=8 passed=1
+restart syscall target=3 mode=9 passed=1
+restart reader syscall target=3 mode=7 passed=1
+restart reader syscall target=3 mode=11 passed=1
+restart reader syscall target=3 mode=12 passed=1
+restart reader syscall target=3 mode=13 passed=1
+restart reader syscall target=3 mode=14 passed=1

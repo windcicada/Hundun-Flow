@@ -1,0 +1,40 @@
+ninja: warning: premature end of file; recovering
+[0/2] Re-checking globbed directories...
+[1/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_evidence_detail.cpp.o
+[2/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_identity.cpp.o
+[3/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_service_plan.cpp.o
+[4/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_driver.cpp.o
+[5/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_topology.cpp.o
+[6/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_surface.cpp.o
+[7/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_reconstruction.cpp.o
+[8/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/parallel_ibm_donor.cpp.o
+[9/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_visit.cpp.o
+[10/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_plan.cpp.o
+[11/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_screen.cpp.o
+[12/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_monitor.cpp.o
+[13/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_evidence.cpp.o
+[14/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_hypre.cpp.o
+[15/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_force.cpp.o
+[16/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_enthalpy.cpp.o
+[17/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_equations.cpp.o
+[18/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_restart.cpp.o
+[19/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_pressure.cpp.o
+[20/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_equations.cpp.o
+[21/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_candidate_boundary.cpp.o
+[22/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_linear_state.cpp.o
+[23/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg_workspace.cpp.o
+[24/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_krylov.cpp.o
+[25/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure.cpp.o
+[26/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_reduction.cpp.o
+[27/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_momentum.cpp.o
+[28/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_species.cpp.o
+[29/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_initialization_projection.cpp.o
+[30/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_rates.cpp.o
+[31/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure_energy.cpp.o
+[32/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_predictor.cpp.o
+[33/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg.cpp.o
+[34/39] Building CXX object versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o
+[35/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/core_product_freeze.cpp.o
+[36/39] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_piso.cpp.o
+[37/39] Linking CXX static library versions/v0.4/libhundun_v04_test_core.a
+[38/39] Linking CXX executable versions/v0.4/tests/v04_core_product_freeze_mpi_test

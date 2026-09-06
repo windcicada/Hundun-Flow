@@ -1,0 +1,41 @@
+open-target coupling=0 status=6/10464 stage=44 observed=1
+linear-target-gap slot=0 C=0 E=0
+linear-target-gap slot=1 C=0 E=0
+linear-target-gap slot=2 C=0 E=0
+linear-target-gap slot=3 C=0 E=0
+linear-target-gap slot=4 C=0 E=0
+linear-target-gap slot=5 C=0 E=0
+linear-target-gap slot=6 C=0 E=0
+linear-target-gap slot=7 C=0 E=0
+linear-target-gap slot=8 C=0 E=0
+linear-target-gap slot=9 C=0 E=0
+linear-target-gap slot=10 C=0 E=0
+linear-target-gap slot=11 C=0 E=0
+linear-target-gap slot=12 C=0 E=0
+linear-target-gap slot=13 C=0 E=0
+open-target coupling=1 status=6/10464 stage=44 observed=1
+linear-target-gap slot=0 C=0 E=0
+linear-target-gap slot=1 C=0 E=0
+linear-target-gap slot=2 C=0 E=0
+linear-target-gap slot=3 C=0 E=0
+linear-target-gap slot=4 C=0 E=0
+linear-target-gap slot=5 C=0 E=0
+linear-target-gap slot=6 C=0 E=0
+linear-target-gap slot=7 C=0 E=0
+linear-target-gap slot=8 C=0 E=0
+linear-target-gap slot=9 C=0 E=0
+linear-target-gap slot=10 C=0 E=0
+linear-target-gap slot=11 C=0 E=0
+linear-target-gap slot=12 C=0 E=0
+linear-target-gap slot=13 C=0 E=0
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[19639,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

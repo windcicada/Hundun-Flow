@@ -1,0 +1,92 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start   3: v04_thin_domain_runner_self_test
+1/9 Test   #3: v04_thin_domain_runner_self_test ...................   Passed    0.42 sec
+    Start   5: v04_runner_checkpoint_allocation_mpi_1
+2/9 Test   #5: v04_runner_checkpoint_allocation_mpi_1 .............   Passed    3.93 sec
+    Start   6: v04_runner_checkpoint_allocation_mpi_2
+3/9 Test   #6: v04_runner_checkpoint_allocation_mpi_2 .............   Passed    6.13 sec
+    Start   7: v04_runner_checkpoint_allocation_mpi_4
+4/9 Test   #7: v04_runner_checkpoint_allocation_mpi_4 .............   Passed    3.03 sec
+    Start  78: v04_solver_pressure_energy_schur
+5/9 Test  #78: v04_solver_pressure_energy_schur ...................   Passed    0.29 sec
+    Start 125: v04_core_product_freeze_mpi_1
+6/9 Test #125: v04_core_product_freeze_mpi_1 ......................***Failed    3.45 sec
+implicit-enthalpy-positive size=1 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.323418922406052e-28
+local-donor-candidate-red size=1 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+simple-immersed-refinement=0/0 accepted/attempts/calls=1/1/7 trajectory=9 residuals=0/1.9971721556003315e-12/7.3471962971785252e-12/0/0 checks=1/0/1
+rank 0 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[31540,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+    Start 134: v04_core_product_freeze_mpi_2
+7/9 Test #134: v04_core_product_freeze_mpi_2 ......................***Failed    1.99 sec
+implicit-enthalpy-positive size=2 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.3198962118439089e-28
+local-donor-candidate-red size=2 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+simple-immersed-refinement=0/0 accepted/attempts/calls=1/1/7 trajectory=9 residuals=0/1.997187897828177e-12/7.3471945794308553e-12/0/0 checks=1/0/1
+rank 0 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+rank 1 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[31548,1],1]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+    Start 143: v04_core_product_freeze_mpi_4
+8/9 Test #143: v04_core_product_freeze_mpi_4 ......................***Failed    3.70 sec
+implicit-enthalpy-positive size=4 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.5894038153094513e-29
+local-donor-candidate-red size=4 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+simple-immersed-refinement=0/0 accepted/attempts/calls=1/1/7 trajectory=9 residuals=0/1.9972181419244849e-12/7.3471851391547521e-12/0/0 checks=1/0/1
+rank 0 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+rank 3 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+rank 1 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+rank 2 FAIL: SIMPLE IBM C2 refinements use one diagonal Schur scope and pass exact trajectory, linear and terminal gates
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[31691,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+    Start 189: v04_product_pressure_energy_temporal_convergence
+9/9 Test #189: v04_product_pressure_energy_temporal_convergence ...   Passed    0.67 sec
+
+67% tests passed, 3 tests failed out of 9
+
+Label Time Summary:
+allocation_audit    =  28.32 sec*proc (3 tests)
+v04_focused         =  23.18 sec*proc (5 tests)
+
+Total Test time (real) =  23.62 sec
+
+The following tests FAILED:
+	125 - v04_core_product_freeze_mpi_1 (Failed)            v04_focused
+	134 - v04_core_product_freeze_mpi_2 (Failed)            v04_focused
+	143 - v04_core_product_freeze_mpi_4 (Failed)            v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

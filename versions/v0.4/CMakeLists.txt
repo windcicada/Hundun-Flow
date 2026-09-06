@@ -41,7 +41,18 @@ set(HUNDUN_SOURCE_TREE "unavailable")
 set(HUNDUN_SOURCE_CLEAN "false")
 set(HUNDUN_SOURCE_DIRTY_SUMMARY "unavailable")
 include("${hundun_repository_root}/cmake/HundunPerformanceSourceMetadata.cmake")
+include("${hundun_repository_root}/cmake/HundunTargetIdentity.cmake")
 find_package(Git QUIET)
+file(GLOB_RECURSE HUNDUN_V04_IDENTITY_INPUTS CONFIGURE_DEPENDS
+  "${hundun_repository_root}/CMakeLists.txt"
+  "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
+  "${hundun_repository_root}/cmake/*"
+  "${hundun_v04_yyjson_root}/*")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${HUNDUN_V04_IDENTITY_INPUTS}
+  "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")
 if(Git_FOUND)
   # Candidate identity is configure-time material, so an ordinary incremental
   # build must reconfigure when either the checked-out Git authority or any
@@ -82,15 +93,6 @@ if(Git_FOUND)
         "${HUNDUN_GIT_REF_PATH}")
     endif()
   endif()
-  file(GLOB_RECURSE HUNDUN_V04_IDENTITY_INPUTS CONFIGURE_DEPENDS
-    "${hundun_repository_root}/CMakeLists.txt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
-    "${hundun_repository_root}/cmake/*"
-    "${hundun_v04_yyjson_root}/*")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    ${HUNDUN_V04_IDENTITY_INPUTS})
   execute_process(
     COMMAND "${GIT_EXECUTABLE}" rev-parse --verify HEAD
     WORKING_DIRECTORY "${hundun_repository_root}"
@@ -128,6 +130,12 @@ if(Git_FOUND)
 endif()
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" HUNDUN_BUILD_TYPE_UPPER)
+set(HUNDUN_C_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${HUNDUN_BUILD_TYPE_UPPER}}")
+string(STRIP "${HUNDUN_C_FLAGS}" HUNDUN_C_FLAGS)
+set(HUNDUN_CORE_IDENTITY_INPUTS ${HUNDUN_V04_IDENTITY_INPUTS})
+list(FILTER HUNDUN_CORE_IDENTITY_INPUTS EXCLUDE REGEX "/src/app_main.cpp$")
+hundun_source_content_digest("${hundun_repository_root}" HUNDUN_CORE_CONTENT
+  ${HUNDUN_CORE_IDENTITY_INPUTS})
 set(HUNDUN_PERFORMANCE_COMPILER_FLAGS
   "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${HUNDUN_BUILD_TYPE_UPPER}}")
 string(STRIP "${HUNDUN_PERFORMANCE_COMPILER_FLAGS}"
@@ -141,12 +149,21 @@ string(SHA256 HUNDUN_SOURCE_HEAD_SHA256
 string(SHA256 HUNDUN_SOURCE_TREE_SHA256
   "hundun-git-tree-v1:${HUNDUN_SOURCE_TREE}")
 set(HUNDUN_BUILD_MANIFEST_CANONICAL
-  "schema=HUNDUN_V04_BUILD_MANIFEST_V1\n")
+  "schema=HUNDUN_V04_BUILD_MANIFEST_V2\n")
 string(APPEND HUNDUN_BUILD_MANIFEST_CANONICAL
   "head=${HUNDUN_SOURCE_HEAD_SHA256}\n"
   "tree=${HUNDUN_SOURCE_TREE_SHA256}\n"
-  "source_clean=${HUNDUN_SOURCE_CLEAN}\n"
-  "dirty_summary=${HUNDUN_SOURCE_DIRTY_SUMMARY}\n"
+  "core_source_clean=${HUNDUN_SOURCE_CLEAN}\n"
+  "core_dirty_summary=${HUNDUN_SOURCE_DIRTY_SUMMARY}\n"
+  "core_source_content_sha256=${HUNDUN_CORE_CONTENT}\n"
+  "c_compiler_id=${CMAKE_C_COMPILER_ID}\n"
+  "c_compiler_version=${CMAKE_C_COMPILER_VERSION}\n"
+  "c_compiler_flags=${HUNDUN_C_FLAGS}\n"
+  "c_standard_default=${CMAKE_C_STANDARD_COMPUTED_DEFAULT}\n"
+  "cxx_standard=17\n"
+  "core_definitions=OMPI_SKIP_MPICXX=1,MPICH_SKIP_MPICXX=1\n"
+  "mpi_c_compile_options=${MPI_C_COMPILE_OPTIONS}\n"
+  "mpi_c_link_flags=${MPI_C_LINK_FLAGS}\n"
   "compiler_id=${CMAKE_CXX_COMPILER_ID}\n"
   "compiler_version=${CMAKE_CXX_COMPILER_VERSION}\n"
   "compiler_flags=${HUNDUN_PERFORMANCE_COMPILER_FLAGS}\n"
@@ -157,8 +174,12 @@ string(APPEND HUNDUN_BUILD_MANIFEST_CANONICAL
   "asan=${HUNDUN_ENABLE_ASAN}\n"
   "ubsan=${HUNDUN_ENABLE_UBSAN}\n"
   "hypre=${HUNDUN_ENABLE_HYPRE}\n")
-string(SHA256 HUNDUN_BUILD_MANIFEST_SHA256
-  "${HUNDUN_BUILD_MANIFEST_CANONICAL}")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+hundun_target_manifest(core none HUNDUN_BUILD_MANIFEST_SHA256)
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/app_main.cpp" HUNDUN_APP_ENTRY)
+hundun_target_manifest(hundun "${HUNDUN_APP_ENTRY}" HUNDUN_APP_MANIFEST versions/v0.4/src/app_main.cpp)
+file(SHA256 "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp" HUNDUN_RUNNER_ENTRY)
+hundun_target_manifest(v04_thin_domain_runner "${HUNDUN_RUNNER_ENTRY}" HUNDUN_RUNNER_MANIFEST tools/v04_thin_domain_runner.cpp)
 foreach(HUNDUN_METADATA_FIELD IN ITEMS
     HUNDUN_SOURCE_COMMIT
     HUNDUN_SOURCE_TREE
@@ -298,6 +319,7 @@ add_executable(hundun
   src/app_main.cpp)
 target_link_libraries(hundun PRIVATE hundun_v04_core)
 target_compile_definitions(hundun PRIVATE
+  HUNDUN_RUNTIME_TARGET_MANIFEST="${HUNDUN_APP_MANIFEST}"
   HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Benchmark observer for segmented Re=3900 thin-domain runs.  It links the
@@ -306,6 +328,8 @@ target_compile_definitions(hundun PRIVATE
 add_executable(v04_thin_domain_runner
   "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")
 target_link_libraries(v04_thin_domain_runner PRIVATE hundun_v04_core)
+target_compile_definitions(v04_thin_domain_runner PRIVATE
+  HUNDUN_RUNTIME_TARGET_MANIFEST="${HUNDUN_RUNNER_MANIFEST}")
 target_include_directories(v04_thin_domain_runner PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src")
 

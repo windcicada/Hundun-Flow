@@ -1,0 +1,118 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 125: v04_core_product_freeze_mpi_1
+1/3 Test #125: v04_core_product_freeze_mpi_1 ....***Failed    3.42 sec
+rank 0 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+rank 0 BE C1 iter/op/pre/red/capture=19/25/19/52/2 C2 iter/op/pre/red/projection=18/24/18/50/2/2/3/11
+rank 0 BDF2 C1 init/iter/op/pre/red/capture=5001.5306083209362/11/16/11/34/2 C2 iter/op/pre/red/projection=0/0/0/0/0/0/0/0 resources=20325/0/0/1602/8160/0/0/96/87 checks=1/0/1 audits=0/0/0/0 terminal=0/4.4965258698701592e-11/3.5153433324452542e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553506/0.0014908624864403855;0/0/0 cert=1:2293668230077323663:4921047830150335007:261:2:0:0;0:0:0:0:0:-1:-1 advective=0/0.00097840015276241788;1.9179469908622336e-05/2.7953181105873819e-05 final=0/1/0/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 0 momentum theta=1/0.99288682317946242 momentum_solve[3] 1/3/1/7/0.013151967471498559/9.1692510512912776e-09 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/1/7/3.5819391155929798/7.7714840308109061e-05 0/1/0/4/1.1892212450757528e-13/1.1892212450757528e-13 0/1/0/4/9.8292268499301204e-14/9.8292268499301204e-14
+rank 0 FAIL: mass-flow resolver advances collectively
+implicit-enthalpy-positive size=1 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.323418922406052e-28
+local-donor-candidate-red size=1 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+rank 0 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.3283255649113239e-09/9/14/9/30 C2 iter/op/pre/red=0/0/0/0 resources=8766/0/0/1239/4656/0/0/52/52 terminal2=0/0/0/0/0 momentum theta=1/0.9999844642399307 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.6063991282864637/0.6063991282864637 0/1/0/4/1.2188324566604403e-15/1.2188324566604403e-15 0/1/0/4/6.1055222519874722e-15/6.1055222519874722e-15
+rank 0 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[3643,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+    Start 134: v04_core_product_freeze_mpi_2
+2/3 Test #134: v04_core_product_freeze_mpi_2 ....***Failed    2.96 sec
+rank 0 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+rank 1 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+rank 1 BE C1 iter/op/pre/red/capture=19/25/19/rank 0 BE C1 iter/op/pre/red/capture=19/25/19/52/2 C2 iter/op/pre/red/projection=19/26/19/54/2/2/3/11
+rank 0 BDF2 C1 init/iter/op/pre/red/capture=5001.530608320847/11/16/11/34/2 C2 iter/op/pre/red/projection=0/052/2 C2 iter/op/pre/red/projection=19/26/19/54/2/2/3/11
+rank 1 BDF2 C1 init/iter/op/pre/red/capture=5001.530608320847/11/16/11/34/2 C2 iter/op/pre/red/projection=0/0/0/0/0/0/0/0 resources=4015/4001/2963872/1685/9464/395/62928/106/97 checks=1/0/1 audits=0/0/0/0 terminal=0/4.4965258993025967e-11//0/0/0/0/0/0 resources=4015/4001/2963872/1685/9464/395/62928/106/97 checks=1/0/1 audits=0/0/0/0 terminal=0/4.4965258993025967e-11/3.5153433555356236e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553501/3.5153433555356236e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553501/0.0014908624864403842;0/0/0 cert=1:14483659494138610138:17923721497808285371:261:20.0014908624864403842;0/0/0 cert=1:3698641075718411694:7774357926950332514:261:2:0:0;0:0:0:0:0;0:0:0:0:0:-1:-1 advective=0/0.00097840015276241788;1.9179469908622329e-05/2.7953181105873796e-05 final=0/1/0:0:0:-1:-1 advective=0/0.00097840015276241788;1.9179469908622329e-05/2.7953181105873796e-05 final=0/1/0/0/0/1/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 1 momentum theta=1/0.99288682317946231 momentum_solve[3] 1/3/1/7/0.013151967471498559/9.1692510512912776e-09 3:6:9.3749999999999992e-06:1:1
+rank 0 momentum theta=1/0.99288682317946231 momentum_solve[3] 1/3/10/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/1//7/0.013151967471498559/9.1692510512912776e-09 0/0/0/1/0/0 0/0/0/1/7/3.5819391155929803/7.7714840307318677e-05 0/1/0/4/1.1689847070849842e-13/1.1689847070849842e-13 0/1/0/4/9.7021593322169213e-14/9.7021593322169213e-14
+0/0 momentum_solve[3] 1/3/1/7/3.5819391155929803/7.7714840307318677e-05 0/1/0/4/1.1689847070849842e-13/1.1689847070849842e-13 0/1/0/4/9.7021593322169213e-14/9.7021593322169213e-14
+rank 1 FAIL: mass-flow resolver advances collectively
+rank 0 FAIL: mass-flow resolver advances collectively
+implicit-enthalpy-positive size=2 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.3198962118439089e-28
+local-donor-candidate-red size=2 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+rank 0 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.0736171451620431e-09/7/10/7/22 C2 iter/op/pre/red=0/0/0/0 resources=1232/1218/1034496/1269/4440/157/19104/50/50 terminal2=0/0/0/0/0 momentum theta=1/0.99998834817994842 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0rank 1 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.0736171451620431e-09/7/10/7/22 C2 iter/op/pre/red=0/0/0/0 resources=1232/1218/1034496/1269/4440/157/19104/50/50 terminal2=0/0/0/0/0 momentum theta=1/0.99998834817994842 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.60639912828612674/0.60639912828612674 /0 momentum_solve[3] 0/1/0/4/0.60639912828612674/0.60639912828612674 0/1/0/4/1.2806550179865847e-15/1.2806550179865847e-15 0/1/0/4/2.9558650410323718e-15/2.9558650410323718e-15
+0/1/0/4/1.2806550179865847e-15/1.2806550179865847e-15 0/1/0/4/2.9558650410323718e-15/2.9558650410323718e-15
+rank 0 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+rank 1 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[3782,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+    Start 143: v04_core_product_freeze_mpi_4
+3/3 Test #143: v04_core_product_freeze_mpi_4 ....***Failed    3.88 sec
+rank 0 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/rank 1 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/rank 2 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+rank 3 mass-flow=5/10461 first=1/1/0/0:0 residuals=0/4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+0/0/0
+4.49653e-11/3.51534e-11/0/0 second=0/7/44/5:10461 residuals=0/0/0/0/0
+rank 3 BE C1 iter/op/pre/red/capture=18/24/18/50/2 C2 iter/op/pre/red/projection=18/24/18/50/rank 0 BE C1 iter/op/pre/red/capture=18/24/18/50/2 C2 iter/op/pre/red/projection=18/24/18/50/2/2/3/11
+rank 0 BDF2 C1 init/iter/op/pre/red/capture=rank 2 BE C1 iter/op/pre/red/capture=18/24/18/50/2 C2 iter/op/pre/red/projection=18/24/18/50/2/2/3/11
+rank 2 BDF2 C1 init/iter/op/pre/red/capture=5001.5305917206879/7/rank 1 BE C1 iter/op/pre/red/capture=18/24/18/50/2 C2 iter/op/pre/red/projection=18/24/18/50/2/2/3/11
+rank 1 BDF2 C1 init/iter/op/pre/red/capture=5001.5305917206879/7/10/7/22/2 C2 iter/op/pre/red/projection=0/0/10/7/22/2 C2 iter/op/pre/red/projection=0/0/0/0/0/0/0/0 resources=3574/2/2/3/11
+rank 3 BDF2 C1 init/iter/op/pre/red/capture=5001.5305917206879/7/10/7/22/2 C2 iter/op/pre/red/projection=0/0/0/0/0/0/0/0 resources=3574/7378/3239040/1632/8200/351/56592/95/86 checks=1/0/5001.5305917206879/7/10/7/22/2 C2 iter/op/pre/red/projection=0/0/0/0/0/0/0/0 resources=3574/7378/3821184/1632/8200/351/56592/95/86 checks=1/0/1 audits=0/0/0/00/0/0/0/0/0 resources=3574/7378/3494336/1632/8200/351/56592/95/86 checks=1/0/1 audits=0/0/0/0 terminal=0/4.4965257684917622e-11/3.5153432565768972e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553571/0.0014908624864403872;0/0/0 cert=1:1806585855309047592:472799130969616003:261:2:0:0;0:0:0:0:0:-1:-1 advective= terminal=0/4.4965257684917622e-11/3.5153432565768972e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553571/0.0014908624864403872;0/0/0 cert=1:13353470110326302367:7615953180373315950:261:2:0:0;0:0:0:0:0:-1:-1 advective=0/0.00097840015276241853;1.9179469908622461e-05/2.795318110587385e-05 final=7378/3565888/1632/8200/351/56592/95/86 checks=1/0/1 audits=0/0/0/0 terminal=0/4.4965257684917622e-11/3.5153432565768972e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553571/0.0014908624864403872;0/0/0 cert=1:18284651093723434422:3871752212079904427:261:2:0:0;0:0:0:0:0:-1:-1 advective=0/0.00097840015276241853;1.9179469908622461e-05/2.795318110587385e-05 final=0/01 audits=0/0/0/0 terminal=0/4.4965257684917622e-11/3.5153432565768972e-11/0/0;0/0/0/0/0 cfl=0.0010229230114553571/0.0014908624864403872;0/0/0 cert=1:7435635598944132533:6176450103172994724:261:2:0:0;0:0:0:0:0:-1:-1 advective=0/0.00097840015276241853;1.9179469908622461e-05/2.795318110587385e-05 final=0/0/0/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0/0.00097840015276241853;1.9179469908622461e-05/2.795318110587385e-05 final=0/0/0/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 1 momentum theta=1/1 momentum_solve[30:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 3 momentum theta=1/1 momentum_solve[3] 1/3/1/7/0.013151967471498573/9.1692510512910989e-090/0/0/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 0 momentum theta=1/1 momentum_solve[3] 1/3/1/7/0/0/0/1/0 base=5:10461/1:1:0:0:0:0:0:0.00050000000000000001/0:7:44:5:10461:3:6:9.3749999999999992e-06:1:1
+rank 2 momentum theta=1/1 momentum_solve[3] 1/3/1/7] 1/3/1/7/0.013151967471498573/9.1692510512910989e-09 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/1/7/3.58194063240779/7.7714612753668899e-05 0/1/0/4/0.013151967471498573/9.1692510512910989e-09 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/ 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/1/7/3.58194063240779/7.7714612753668899e-05 0/1/0/4/1.5851881694430068e-13/1.5851881694430068e-13 0/1/0/4/1.4950520928465033e-13/1.4950520928465033e-13
+/0.013151967471498573/9.1692510512910989e-09 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 1/3/1/7/3.58194063240779/7.7714612753668899e-05 0/1/0/4/1.5851881694430068e-13/1.5851881694430068e-13 0/1/0/4/1.4950520928465033e-13//1.5851881694430068e-13/1.5851881694430068e-13 0/1/0/4/1.4950520928465033e-13/1.4950520928465033e-13
+1.4950520928465033e-13
+1/7/3.58194063240779/7.7714612753668899e-05 0/1/0/4/1.5851881694430068e-13/1.5851881694430068e-13 0/1/0/4/1.4950520928465033e-13/1.4950520928465033e-13
+rank 1 FAIL: mass-flow resolver advances collectively
+rank 0 FAIL: mass-flow resolver advances collectively
+rank 3 FAIL: mass-flow resolver advances collectively
+rank 2 FAIL: mass-flow resolver advances collectively
+implicit-enthalpy-positive size=4 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.5894038153094513e-29
+local-donor-candidate-red size=4 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+rank 2 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.3298601110997005e-09/9/14/9/30 C2 iter/op/pre/red=0rank 3 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.3298601110997005e-09/9/14/9/30 C2 iter/op/pre/red=0/0/0/0 resources=1257/2639/1073376/1279/4472/160/rank 1 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.3298601110997005e-09/9/14/9/30 C2 iter/op/pre/red=0/0/0/0 resources=1257/2639/1206432/1279/4472/160/19392/51/51 terminal2=0/0/0/0/0 momentum theta=1/0.99999223211996557rank 0 warm-start lifecycle status=5/10461 accepted/attempts=1/1 0/7 warm=1/0/0 cold=5/1/0/0/53407.2622607706 C1 init/final/iter/op/pre/red=53407.2622607706/1.3298601110997005e-09/9/14/9/30 C2 iter/op/pre/red=0/0/0/0 resources=1257/2639/1206432/1279/4472/160/19392/51/51 terminal2=0/0/0/0/0 momentum theta=1/0/0/0 resources=1257/2639/1073376/1279/4472/160/19392/51/51 terminal2=0/0/0/0/0 momentum theta=1/0.99999223211996557 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/19392/51/51 terminal2=0/0/0/0/0 momentum theta=1/0.99999223211996557 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.60639912828578979/0.60639912828578979 0/1//0.99999223211996557 momentum_solve[3] 0/1/0/4/0.0031388346508635094/0.0031388346508635094 0/0/0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.60639912828578979/0.60639912828578979 0/1/0/4/7.8394887124160362e-16/7.8394887124160362e-16 0/1/0/40/4/7.8394887124160362e-16/7.8394887124160362e-16 0/1/0/4/2.5422570613589251e-15/2.5422570613589251e-15
+0/1/0/0 0/0/0/1/0/0 momentum_solve[3] 0/1/0/4/0.60639912828578979/0.60639912828578979 0/1/0/4/7.8394887124160362e-16/7.8394887124160362e-16 0/1/0/4/2.5422570613589251e-15/2.5422570613589251e-15/0 momentum_solve[3] 0/1/0/4/0.60639912828578979/0.60639912828578979 0/1/0/4/7.8394887124160362e-16/7.8394887124160362e-16 0/1/0/4/2.5422570613589251e-15/2.5422570613589251e-15
+/2.5422570613589251e-15/2.5422570613589251e-15
+
+rank 3 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+rank 1 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+rank 2 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+rank 0 FAIL: accepted C2 seed is available and consumed on the next C1 while an independent same-state cold path suppresses it coherently
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[3796,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 3 tests failed out of 3
+
+Label Time Summary:
+v04_focused    =  24.84 sec*proc (3 tests)
+
+Total Test time (real) =  10.27 sec
+
+The following tests FAILED:
+	125 - v04_core_product_freeze_mpi_1 (Failed)            v04_focused
+	134 - v04_core_product_freeze_mpi_2 (Failed)            v04_focused
+	143 - v04_core_product_freeze_mpi_4 (Failed)            v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

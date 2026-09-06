@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_linear.hpp"
+#include "local_timing_detail.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_krylov_test_detail.hpp"
@@ -197,6 +198,46 @@ Status local_dot(const BasicFieldView<Left>& left,
              ? Status{}
              : Status{StatusCode::numerical_failure,
                       kLinearSolveNonFinite};
+}
+
+Status local_multidot(const ConstFieldView* basis, std::size_t count,
+                      ConstFieldView right, double* dots) noexcept {
+  if (basis == nullptr || dots == nullptr || count == 0U ||
+      count > kMaximumFgmresBasisUpdateCount)
+    return {StatusCode::invalid_plan, kLinearSolveWorkspace};
+  // Preserve each dot's z/y/x compensated addition order. Only loop tiling
+  // changes: share the right-hand x strip across basis vectors in L1 cache.
+  constexpr std::int32_t width = 256;
+  std::array<double, width> right_strip{};
+  std::array<double, kMaximumFgmresBasisUpdateCount + 1U> sums{}, corrections{};
+  for (std::int32_t z = 0; z < right.interior.z; ++z)
+    for (std::int32_t y = 0; y < right.interior.y; ++y)
+      for (std::int32_t first = 0; first < right.interior.x; first += width) {
+        const auto length = std::min(width, right.interior.x - first);
+        for (std::int32_t x = 0; x < length; ++x)
+          right_strip[x] = right.unchecked({first + x, y, z}, 0U);
+        for (std::size_t i = 0U; i <= count; ++i) {
+          double sum = sums[i], correction = corrections[i];
+          const auto left = i == count ? right : basis[i];
+          for (std::int32_t x = 0; x < length; ++x) {
+            const double product = left.unchecked({first + x, y, z}, 0U) * right_strip[x];
+            if (!std::isfinite(product))
+              return {StatusCode::numerical_failure, kLinearSolveNonFinite};
+            const double next = sum + product;
+            correction += std::abs(sum) >= std::abs(product)
+                ? (sum - next) + product : (product - next) + sum;
+            sum = next;
+          }
+          sums[i] = sum;
+          corrections[i] = correction;
+        }
+      }
+  for (std::size_t i = 0U; i <= count; ++i) {
+    dots[i] = sums[i] + corrections[i];
+    if (!std::isfinite(dots[i]))
+      return {StatusCode::numerical_failure, kLinearSolveNonFinite};
+  }
+  return {};
 }
 
 template <class Left, class Right>
@@ -768,6 +809,7 @@ OperatorApplyStatus apply_operator(const LinearOperator& linear_operator,
                                    std::uint8_t output_slot,
                                    SolverWorkspace& workspace,
                                    LinearSolveResult& result) noexcept {
+  detail::LocalElapsedTimer timer(result.operator_nanoseconds);
   const Status applied = linear_operator.apply(input, output);
   ++result.operator_applies;
   if (!applied) {
@@ -789,6 +831,7 @@ Status apply_preconditioner(LinearPreconditioner& preconditioner,
                             LinearSolveResult& result,
                             const LinearPreconditionerBatchTicket* ticket =
                                 nullptr) noexcept {
+  detail::LocalElapsedTimer timer(result.preconditioner_nanoseconds);
   const Status applied =
       ticket == nullptr
           ? preconditioner.apply(input, output, iteration)
@@ -1198,6 +1241,11 @@ LinearSolveResult finish_success(LinearSolveResult result,
 
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 namespace detail {
+
+Status krylov_multidot_for_test(const ConstFieldView* basis, std::size_t count,
+                                ConstFieldView right, double* dots) noexcept {
+  return local_multidot(basis, count, right, dots);
+}
 
 Status fused_krylov_basis_update_for_test(
     FieldView destination, const ConstFieldView* sources,
@@ -2064,22 +2112,24 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
                             as_const(v))));
       const std::size_t dot_count = static_cast<std::size_t>(column) + 1U;
       Status arithmetic{};
-      for (std::uint32_t row = 0U; row <= column; ++row) {
-        FieldView basis = workspace.vector(
-            static_cast<std::uint8_t>(v_begin + row), shape);
-        arithmetic = merge_status(
-            arithmetic,
-            local_dot(as_const(basis), as_const(ax), scratch.data[row]));
+      {
+        detail::LocalElapsedTimer timer(result.arnoldi_dot_nanoseconds);
+        for (std::uint32_t row = 0U; row <= column; ++row)
+          basis_views[row] = as_const(workspace.vector(
+              static_cast<std::uint8_t>(v_begin + row), shape));
+        arithmetic = local_multidot(basis_views.data(), dot_count, as_const(ax),
+                                    scratch.data);
       }
-      arithmetic = merge_status(
-          arithmetic,
-          local_dot(as_const(ax), as_const(ax), scratch.data[dot_count]));
       callback = merge_status(callback, arithmetic);
       double* const column_h =
           h.data + static_cast<std::size_t>(column) * rows;
-      Status reduced = reductions.checked_sum(
-          {scratch.data, dot_count + 1U},
-          {column_h, dot_count + 1U}, callback);
+      Status reduced;
+      {
+        detail::LocalElapsedTimer timer(result.arnoldi_reduce_nanoseconds);
+        reduced = reductions.checked_sum(
+            {scratch.data, dot_count + 1U},
+            {column_h, dot_count + 1U}, callback);
+      }
       if (!reduced) {
         return finish_failure(
             result, reduced,
@@ -2317,6 +2367,7 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
       if (!cycle_end) {
         Status basis_update_status{};
         if (!explicitly_orthogonalized) {
+          detail::LocalElapsedTimer timer(result.arnoldi_update_nanoseconds);
           basis_update_status = add_scaled_basis(
               ax, basis_views.data(), basis_scales.data(), dot_count);
           basis_update_status =

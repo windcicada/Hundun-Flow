@@ -1788,6 +1788,7 @@ struct PressureVelocityCoupler::Impl {
   PressureGauge pressure_gauge{PressureGauge::absolute_boundary_dirichlet};
   PlanFingerprint equations{};
   PlanFingerprint fingerprint{};
+  CouplingKind coupling{CouplingKind::piso};
   LinearAlgorithm pressure_algorithm{LinearAlgorithm::fgmres};
   MgCorrectionScaling mg_correction_scaling{
       MgCorrectionScaling::residual_minimizing};
@@ -1835,6 +1836,11 @@ struct PressureVelocityCoupler::Impl {
   std::size_t independent_species_count{};
   FieldView frozen_candidate_density{};
   FaceFluxView frozen_candidate_face_aux{};
+  // C1 leaves its BDF face-history offset in face_aux. A fresh SIMPLE C2
+  // consumes it once before this storage becomes a candidate flux offset.
+  // Pressure-only refinements never consume the storage as time history.
+  BdfCoefficients c1_temporal_bdf{};
+  RevisionToken c1_temporal_time{};
   BdfCoefficients frozen_candidate_bdf{};
   RevisionToken frozen_candidate_baseline{};
   PlanFingerprint frozen_candidate_numeric{};
@@ -2339,6 +2345,7 @@ Status PressureVelocityCoupler::bind(
       1U,
       {}};
   candidate->kernels = &equations.kernels();
+  candidate->coupling = plan.coupling_;
   candidate->geometry = services.geometry;
   candidate->boundary = services.boundary;
   candidate->thermodynamics_plan = services.thermodynamics;
@@ -2470,11 +2477,16 @@ Status PressureVelocityCoupler::refresh_impl(
   PisoIntermediateCertificate corrector_one_authorization{};
   PisoStateCorrectionCertificate corrected_c1_authorization{};
   const bool refinement_entry = refinement != nullptr;
+  const bool refresh_momentum_flux =
+      input.corrector == 2U && !refinement_entry &&
+      impl.coupling == CouplingKind::simple;
   std::uint8_t refinement_iteration = 0U;
   PlanFingerprint refinement_collective_lineage = 0U;
   PlanFingerprint refinement_lineage = 0U;
   bool paired_flux_consumed = false;
   if (input.corrector == 1U) {
+    impl.c1_temporal_bdf = {};
+    impl.c1_temporal_time = 0U;
     impl.corrector_one = {};
     impl.corrected_c1 = {};
     impl.refinement_root_c1 = {};
@@ -2724,6 +2736,9 @@ Status PressureVelocityCoupler::refresh_impl(
       !input.trial_flux.certificate.valid() &&
       valid_temporal_reference &&
       valid_committed_face_history &&
+      (!refresh_momentum_flux ||
+       (impl.c1_temporal_time == input.momentum.time &&
+        same_bdf_coefficients(impl.c1_temporal_bdf, input.bdf))) &&
       valid_density_authority &&
       valid_thermophysical_boundary &&
       valid_thermophysical_pressure &&
@@ -2900,9 +2915,9 @@ Status PressureVelocityCoupler::refresh_impl(
                 input.momentum_system.diagonal.unchecked(cell, component);
             impl.workspace.r_au.unchecked(cell, component) = volume / diagonal;
             // The momentum stage now publishes a true converged predictor.
-            // C1 consumes that velocity directly; C2 remains incremental and
-            // consumes the already pressure-corrected C1 velocity.  rAU alone
-            // is reconstructed from the unchanged assembled diagonal.
+            // Consume the supplied velocity and diagonal together. SIMPLE
+            // supplies a new momentum solve for C2; PISO and pressure-only
+            // refinements supply the preceding corrected velocity instead.
             impl.workspace.h_by_a.unchecked(cell, component) =
                 input.trial_velocity.unchecked(cell, component);
           }
@@ -3017,7 +3032,7 @@ Status PressureVelocityCoupler::refresh_impl(
   if (!status) {
     return status;
   }
-  if (input.corrector == 1U) {
+  if (input.corrector == 1U || refresh_momentum_flux) {
     const ConstFaceFieldView temporal_faces[]{
         input.temporal_reference.x, input.temporal_reference.y,
         input.temporal_reference.z};
@@ -3100,11 +3115,15 @@ Status PressureVelocityCoupler::refresh_impl(
                 right_rho * impl.workspace.r_au.unchecked(face, component));
             const double weight = input.bdf.a0 * rho_r_au;
             const double temporal =
-                temporal_faces[axis_index].unchecked(face);
+                input.corrector == 1U
+                    ? temporal_faces[axis_index].unchecked(face)
+                    : 0.0;
             const double accepted =
-                accepted_faces[axis_index].unchecked(face);
+                input.corrector == 1U
+                    ? accepted_faces[axis_index].unchecked(face)
+                    : 0.0;
             const double previous =
-                input.bdf.order == 2U
+                input.corrector == 1U && input.bdf.order == 2U
                     ? previous_faces[axis_index].unchecked(face)
                     : 0.0;
             const double normalized_history =
@@ -3113,6 +3132,10 @@ Status PressureVelocityCoupler::refresh_impl(
                        input.bdf.a2 * previous) /
                           input.bdf.a0
                     : accepted;
+            const double history_offset =
+                refresh_momentum_flux
+                    ? auxiliary_faces[axis_index].unchecked(face)
+                    : normalized_history - temporal;
             const double pressure_gradient_flux =
                 detail::interpolate_face(
                     *impl.kernels, axis, normal,
@@ -3130,13 +3153,14 @@ Status PressureVelocityCoupler::refresh_impl(
                     thermophysical_pressure, axis, face,
                     coefficient_faces[axis_index].unchecked(face));
             const double value =
-                current + weight * (normalized_history - temporal) +
+                current + weight * history_offset +
                 pressure_gradient_flux + pressure_jump_flux;
             if (!std::isfinite(current) || !std::isfinite(rho_r_au) ||
                 !std::isfinite(weight) || weight < 0.0 ||
                 !std::isfinite(temporal) ||
                 !std::isfinite(accepted) || !std::isfinite(previous) ||
                 !std::isfinite(normalized_history) ||
+                !std::isfinite(history_offset) ||
                 !std::isfinite(pressure_gradient_flux) ||
                 !std::isfinite(pressure_jump_flux) ||
                 !std::isfinite(value)) {
@@ -3144,10 +3168,11 @@ Status PressureVelocityCoupler::refresh_impl(
               break;
             }
             output.unchecked(face) = value;
-            // C1 candidate replay keeps only the BDF/history velocity offset
-            // theta frozen.  rho and rho*rAU are refreshed for every alpha.
+            // C1 candidates use the BDF/history offset. A fresh SIMPLE C2
+            // has rebuilt the flux from its new U and rAU; subsequent C2
+            // candidates are increments around that new momentum baseline.
             auxiliary_faces[axis_index].unchecked(face) =
-                normalized_history - temporal;
+                refresh_momentum_flux ? value - current : history_offset;
           }
         }
       }
@@ -3155,12 +3180,18 @@ Status PressureVelocityCoupler::refresh_impl(
     if (status) {
       RevisionToken corrected_revision = kFnvOffset;
       corrected_revision =
-          hash_mix(corrected_revision, input.temporal_reference.revision);
+          hash_mix(corrected_revision,
+                   refresh_momentum_flux
+                       ? corrector_one_authorization.temporal_face_flux
+                       : input.temporal_reference.revision);
       corrected_revision =
-          hash_mix(corrected_revision, accepted_history.revision);
+          hash_mix(corrected_revision,
+                   refresh_momentum_flux
+                       ? corrector_one_authorization.committed_face_history
+                       : accepted_history.revision);
       corrected_revision =
           hash_mix(corrected_revision, previous_history.revision);
-      if (paired_flux_consumed) {
+      if (paired_flux_consumed || refresh_momentum_flux) {
         corrected_revision =
             hash_mix(corrected_revision, input.trial_flux.revision);
       }
@@ -3172,9 +3203,9 @@ Status PressureVelocityCoupler::refresh_impl(
                                    : corrected_revision;
     }
   } else {
-    // Corrector two must use the already corrected C1 face flux as its
-    // incremental base.  Keep the existing workspace/revision authority and
-    // only copy/check its preallocated directional payload.
+    // A pressure-only PISO corrector or typed pressure/enthalpy refinement
+    // uses its predecessor flux as the incremental base. A fresh SIMPLE
+    // momentum sweep is handled above and must not enter this path.
     const ConstFaceFieldView input_faces[]{
         input.trial_flux.x, input.trial_flux.y, input.trial_flux.z};
     const FaceFieldView output_faces[]{
@@ -3410,6 +3441,8 @@ Status PressureVelocityCoupler::refresh_impl(
   candidate.pressure_energy_refinement_lineage = refinement_lineage;
   if (input.corrector == 1U) {
     impl.corrector_one = candidate;
+    impl.c1_temporal_bdf = input.bdf;
+    impl.c1_temporal_time = input.momentum.time;
   } else {
     impl.terminal_lineage_source = candidate;
     impl.current_corrected_c1 = corrected_c1_authorization;
@@ -4491,7 +4524,7 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
           local = impl.pressure_boundary.face_rule_unchecked(
               axis, face, face_rule);
           bool pressure_outlet = false;
-          if (local && face_rule.physical) {
+          if (local && face_rule.is_nonperiodic_boundary()) {
             const BoundaryFacePlan* boundary_face = nullptr;
             local = impl.boundary->face(
                 cartesian_face(axis, face_rule.high), boundary_face);
@@ -4502,10 +4535,12 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
                              BoundaryKind::pressure_outlet;
           }
           if (!local) break;
-          if (open_scope && face_rule.physical && !pressure_outlet) {
+          if (open_scope && face_rule.is_nonperiodic_boundary() &&
+              !pressure_outlet) {
             // Velocity/mass-flow inlets, walls and symmetry faces are owned
-            // exclusively by the boundary finalizer.  Zero is a defined
-            // scratch placeholder, never publication authority.
+            // exclusively by the boundary finalizer. A periodic domain edge
+            // remains a transport face, including in an otherwise open case.
+            // Zero is a scratch placeholder, never publication authority.
             output.unchecked(face) = 0.0;
             continue;
           }
@@ -4629,7 +4664,7 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
             local = impl.pressure_boundary.face_rule_unchecked(
                 axis, face, face_rule);
             bool pressure_outlet = false;
-            if (local && face_rule.physical) {
+            if (local && face_rule.is_nonperiodic_boundary()) {
               const BoundaryFacePlan* boundary_face = nullptr;
               local = impl.boundary->face(
                   cartesian_face(axis, face_rule.high), boundary_face);
@@ -4646,7 +4681,7 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
                     (static_cast<std::uint64_t>(y) +
                      static_cast<std::uint64_t>(output.extents.y) *
                          static_cast<std::uint64_t>(z));
-            if (!face_rule.physical) {
+            if (!face_rule.is_nonperiodic_boundary()) {
               local_nonphysical = hash_mix(local_nonphysical, offset);
               local_nonphysical = hash_mix(
                   local_nonphysical, double_bits(output.unchecked(face)));

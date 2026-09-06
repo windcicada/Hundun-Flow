@@ -1,0 +1,24 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 101: v04_solver_ibm_equation_interface
+1/1 Test #101: v04_solver_ibm_equation_interface ...***Failed    0.41 sec
+accepted-IBM-thermal-rate-mismatch=493.128
+FAIL: persisted energy history and target residual use one IBM thermal operator
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   0.41 sec*proc (1 test)
+
+Total Test time (real) =   0.42 sec
+
+The following tests FAILED:
+	101 - v04_solver_ibm_equation_interface (Failed)        v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

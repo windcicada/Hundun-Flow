@@ -16,6 +16,10 @@ STEP_PHASES = ("advance_ns", "observables_ns", "visit_ns", "evidence_resources_n
 CANDIDATE_PHASES = ("state_copy_ns", "velocity_halo_ns", "thermo_ns",
                     "boundary_derived_ns", "flux_ns", "certificate_ns",
                     "residual_ns", "equivalence_hash_ns")
+SOLVE_DETAIL = tuple(kind + "_" + phase + "_ns" for kind in ("pressure", "diagonal", "spatial")
+                     for phase in ("prepare", "solve", "close"))
+KRYLOV_DETAIL = ("A_apply_ns", "M_apply_ns", "arnoldi_dot_ns",
+                 "arnoldi_reduce_ns", "arnoldi_update_ns")
 
 
 def step_summary(rows):
@@ -27,7 +31,7 @@ def step_summary(rows):
                 sum(row[key] for key in CANDIDATE_PHASES) > row["candidate_ns"]):
             raise ValueError("phase accounting mismatch")
     critical = max(rows, key=lambda row: row["full_step_ns"])
-    return {"step": critical["step"], "ranks": len(rows),
+    result = {"step": critical["step"], "ranks": len(rows),
             "maximum_full_step_ns": critical["full_step_ns"],
             "maximum_advance_ns": max(row["advance_ns"] for row in rows),
             "mean_advance_ns": sum(row["advance_ns"] for row in rows) / len(rows),
@@ -40,6 +44,14 @@ def step_summary(rows):
             "work_counts": {key: sorted({row[key] for row in rows}) for key in
                 ("baseline_evaluations", "extrapolation_evaluations", "ladder_evaluations",
                  "incomplete_evaluations", "rejected_extrapolations")}}
+    if all(key in row for row in rows for key in SOLVE_DETAIL + KRYLOV_DETAIL):
+        result["rank_mean_solve_detail_ns"] = {
+            key: sum(row[key] for row in rows) / len(rows)
+            for key in SOLVE_DETAIL + KRYLOV_DETAIL}
+        result["solve_calls_by_kind"] = {kind: sorted({row[kind + "_calls"] for row in rows})
+                                         for kind in ("pressure", "diagonal", "spatial")}
+        result["solve_detail_scope"] = "all attempts; A/M inclusive, Arnoldi partial; no sum of independent maxima"
+    return result
 
 
 def symbols(binary):
@@ -69,7 +81,9 @@ def summarize(arguments):
                          "Full-step timer excludes its own observation gather/write",
                          "PMPI elapsed excludes observer bookkeeping; advance includes it",
                          "Nine blocking MPI primitives, observed only inside driver.advance",
-                         "Candidate/solve details describe the latest numerical attempt",
+                         ("Candidate/solve costs cover all numerical attempts"
+                          if "pressure_calls" in rows[0] else
+                          "Legacy candidate/solve details describe the latest numerical attempt; SIMPLE C1 is misclassified as preparation"),
                          "Per-rank phase maxima must not be added as whole-step wall time"]}
     if arguments.mpi_directory:
         entries = symbols(arguments.binary)

@@ -1,0 +1,12 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 131: v04_core_open_periodic_target_mpi_1
+1/3 Test #131: v04_core_open_periodic_target_mpi_1 ...   Passed    0.35 sec
+    Start 141: v04_core_open_periodic_target_mpi_2
+2/3 Test #141: v04_core_open_periodic_target_mpi_2 ...   Passed    0.32 sec
+    Start 151: v04_core_open_periodic_target_mpi_4
+3/3 Test #151: v04_core_open_periodic_target_mpi_4 ...   Passed    0.35 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Total Test time (real) =   1.03 sec

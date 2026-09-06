@@ -1,0 +1,323 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+        Start   3: v04_thin_domain_runner_self_test
+  1/156 Test   #3: v04_thin_domain_runner_self_test ..........................   Passed    0.49 sec
+        Start   4: v04_target_identity
+  2/156 Test   #4: v04_target_identity .......................................   Passed    2.39 sec
+        Start   5: v04_runner_checkpoint_allocation_mpi_1
+  3/156 Test   #5: v04_runner_checkpoint_allocation_mpi_1 ....................   Passed    4.97 sec
+        Start   6: v04_runner_checkpoint_allocation_mpi_2
+  4/156 Test   #6: v04_runner_checkpoint_allocation_mpi_2 ....................   Passed    7.69 sec
+        Start   7: v04_runner_checkpoint_allocation_mpi_4
+  5/156 Test   #7: v04_runner_checkpoint_allocation_mpi_4 ....................   Passed    4.17 sec
+        Start  15: v04_product_restart_storage_mpi_1
+  6/156 Test  #15: v04_product_restart_storage_mpi_1 .........................   Passed    0.84 sec
+        Start  16: v04_product_restart_storage_mpi_2
+  7/156 Test  #16: v04_product_restart_storage_mpi_2 .........................   Passed    0.85 sec
+        Start  17: v04_product_restart_storage_mpi_4
+  8/156 Test  #17: v04_product_restart_storage_mpi_4 .........................   Passed    0.92 sec
+        Start  69: v04_solver_low_mach_mms
+  9/156 Test  #69: v04_solver_low_mach_mms ...................................   Passed    1.61 sec
+        Start  70: v04_solver_enthalpy_terms
+ 10/156 Test  #70: v04_solver_enthalpy_terms .................................   Passed    0.94 sec
+        Start  71: v04_solver_source_stage
+ 11/156 Test  #71: v04_solver_source_stage ...................................   Passed    0.28 sec
+        Start  72: v04_solver_species_conservation
+ 12/156 Test  #72: v04_solver_species_conservation ...........................   Passed    0.27 sec
+        Start  73: v04_solver_pressure_storage
+ 13/156 Test  #73: v04_solver_pressure_storage ...............................   Passed    0.28 sec
+        Start  74: v04_solver_closed_gauge_prepare_mpi_1
+ 14/156 Test  #74: v04_solver_closed_gauge_prepare_mpi_1 .....................   Passed    0.27 sec
+        Start  75: v04_solver_closed_gauge_prepare_mpi_2
+ 15/156 Test  #75: v04_solver_closed_gauge_prepare_mpi_2 .....................   Passed    0.28 sec
+        Start  76: v04_solver_closed_gauge_prepare_mpi_4
+ 16/156 Test  #76: v04_solver_closed_gauge_prepare_mpi_4 .....................   Passed    0.30 sec
+        Start  77: v04_solver_thermophysical_coupling
+ 17/156 Test  #77: v04_solver_thermophysical_coupling ........................   Passed    0.46 sec
+        Start  78: v04_solver_pressure_energy_schur
+ 18/156 Test  #78: v04_solver_pressure_energy_schur ..........................   Passed    0.29 sec
+        Start  79: v04_solver_pressure_energy_globalization
+ 19/156 Test  #79: v04_solver_pressure_energy_globalization ..................   Passed    0.28 sec
+        Start  80: v04_solver_pressure_energy_globalization_mpi_1
+ 20/156 Test  #80: v04_solver_pressure_energy_globalization_mpi_1 ............   Passed    0.27 sec
+        Start  81: v04_solver_pressure_energy_globalization_mpi_2
+ 21/156 Test  #81: v04_solver_pressure_energy_globalization_mpi_2 ............   Passed    0.28 sec
+        Start  82: v04_solver_pressure_energy_globalization_mpi_4
+ 22/156 Test  #82: v04_solver_pressure_energy_globalization_mpi_4 ............   Passed    0.30 sec
+        Start  83: v04_solver_thermophysical_idp
+ 23/156 Test  #83: v04_solver_thermophysical_idp .............................   Passed    0.29 sec
+        Start  84: v04_solver_thermophysical_idp_mpi_2
+ 24/156 Test  #84: v04_solver_thermophysical_idp_mpi_2 .......................   Passed    0.28 sec
+        Start  85: v04_solver_thermophysical_ghost_authority_mpi_2
+ 25/156 Test  #85: v04_solver_thermophysical_ghost_authority_mpi_2 ...........   Passed    0.28 sec
+        Start  86: v04_solver_piso_authority
+ 26/156 Test  #86: v04_solver_piso_authority .................................   Passed    0.83 sec
+        Start  87: v04_solver_pressure_boundary_plan
+ 27/156 Test  #87: v04_solver_pressure_boundary_plan .........................   Passed    0.28 sec
+        Start  88: v04_solver_pressure_boundary_plan_mpi_1
+ 28/156 Test  #88: v04_solver_pressure_boundary_plan_mpi_1 ...................   Passed    0.27 sec
+        Start  89: v04_solver_pressure_boundary_plan_mpi_2
+ 29/156 Test  #89: v04_solver_pressure_boundary_plan_mpi_2 ...................   Passed    0.28 sec
+        Start  90: v04_solver_pressure_boundary_plan_mpi_4
+ 30/156 Test  #90: v04_solver_pressure_boundary_plan_mpi_4 ...................   Passed    0.34 sec
+        Start  91: v04_solver_initialization_projection
+ 31/156 Test  #91: v04_solver_initialization_projection ......................   Passed    0.33 sec
+        Start  92: v04_solver_initialization_projection_mpi_1
+ 32/156 Test  #92: v04_solver_initialization_projection_mpi_1 ................   Passed    0.29 sec
+        Start  93: v04_solver_initialization_projection_mpi_2
+ 33/156 Test  #93: v04_solver_initialization_projection_mpi_2 ................   Passed    0.33 sec
+        Start  94: v04_solver_initialization_projection_mpi_4
+ 34/156 Test  #94: v04_solver_initialization_projection_mpi_4 ................   Passed    0.39 sec
+        Start  95: v04_solver_piso_mutation
+ 35/156 Test  #95: v04_solver_piso_mutation ..................................   Passed    0.29 sec
+        Start  96: v04_solver_piso_checkerboard
+ 36/156 Test  #96: v04_solver_piso_checkerboard ..............................   Passed    0.28 sec
+        Start  97: v04_solver_piso_checkerboard_mpi_2
+ 37/156 Test  #97: v04_solver_piso_checkerboard_mpi_2 ........................   Passed    0.28 sec
+        Start  98: v04_solver_piso_checkerboard_mpi_4
+ 38/156 Test  #98: v04_solver_piso_checkerboard_mpi_4 ........................   Passed    0.29 sec
+        Start  99: v04_solver_piso_temporal_order
+ 39/156 Test  #99: v04_solver_piso_temporal_order ............................   Passed    0.29 sec
+        Start 100: v04_solver_ibm_pressure_operator
+ 40/156 Test #100: v04_solver_ibm_pressure_operator ..........................   Passed    0.58 sec
+        Start 101: v04_solver_ibm_equation_interface
+ 41/156 Test #101: v04_solver_ibm_equation_interface .........................   Passed    0.38 sec
+        Start 102: v04_solver_ibm_force_oracle
+ 42/156 Test #102: v04_solver_ibm_force_oracle ...............................   Passed    0.72 sec
+        Start 103: v04_solver_ibm_force_mutation
+ 43/156 Test #103: v04_solver_ibm_force_mutation .............................   Passed    0.58 sec
+        Start 104: v04_solver_equations_mpi_1
+ 44/156 Test #104: v04_solver_equations_mpi_1 ................................   Passed    0.34 sec
+        Start 105: v04_solver_equations_mpi_2
+ 45/156 Test #105: v04_solver_equations_mpi_2 ................................   Passed    0.32 sec
+        Start 106: v04_solver_equations_mpi_4
+ 46/156 Test #106: v04_solver_equations_mpi_4 ................................   Passed    0.33 sec
+        Start 107: v04_solver_piso_mpi_1
+ 47/156 Test #107: v04_solver_piso_mpi_1 .....................................   Passed    0.48 sec
+        Start 108: v04_solver_piso_mpi_2
+ 48/156 Test #108: v04_solver_piso_mpi_2 .....................................   Passed    0.39 sec
+        Start 109: v04_solver_piso_mpi_4
+ 49/156 Test #109: v04_solver_piso_mpi_4 .....................................   Passed    0.38 sec
+        Start 110: v04_solver_ibm_physical_boundary_flux_mpi_1
+ 50/156 Test #110: v04_solver_ibm_physical_boundary_flux_mpi_1 ...............   Passed    1.69 sec
+        Start 111: v04_solver_ibm_physical_boundary_flux_mpi_2
+ 51/156 Test #111: v04_solver_ibm_physical_boundary_flux_mpi_2 ...............   Passed    1.27 sec
+        Start 112: v04_solver_ibm_physical_boundary_flux_mpi_4
+ 52/156 Test #112: v04_solver_ibm_physical_boundary_flux_mpi_4 ...............   Passed    0.82 sec
+        Start 113: v04_solver_ibm_force_mpi_1
+ 53/156 Test #113: v04_solver_ibm_force_mpi_1 ................................   Passed    0.43 sec
+        Start 114: v04_solver_ibm_force_mpi_2
+ 54/156 Test #114: v04_solver_ibm_force_mpi_2 ................................   Passed    0.35 sec
+        Start 115: v04_solver_ibm_force_mpi_4
+ 55/156 Test #115: v04_solver_ibm_force_mpi_4 ................................   Passed    0.34 sec
+        Start 123: v04_core_product_freeze
+ 56/156 Test #123: v04_core_product_freeze ...................................   Passed    0.44 sec
+        Start 125: v04_core_product_freeze_mpi_1
+ 57/156 Test #125: v04_core_product_freeze_mpi_1 .............................   Passed    1.23 sec
+        Start 126: v04_scalar_catalog_order_mpi_1
+ 58/156 Test #126: v04_scalar_catalog_order_mpi_1 ............................   Passed    1.67 sec
+        Start 127: v04_core_temporal_fallback_mpi_1
+ 59/156 Test #127: v04_core_temporal_fallback_mpi_1 ..........................   Passed    0.32 sec
+        Start 128: v04_core_candidate_globalization_red_mpi_1
+ 60/156 Test #128: v04_core_candidate_globalization_red_mpi_1 ................   Passed    0.38 sec
+        Start 129: v04_core_multispecies_open_mpi_1
+ 61/156 Test #129: v04_core_multispecies_open_mpi_1 ..........................   Passed    0.29 sec
+        Start 130: v04_core_fresh_open_eos_flux_mpi_1
+ 62/156 Test #130: v04_core_fresh_open_eos_flux_mpi_1 ........................   Passed    0.28 sec
+        Start 131: v04_core_open_periodic_target_mpi_1
+ 63/156 Test #131: v04_core_open_periodic_target_mpi_1 .......................   Passed    0.31 sec
+        Start 132: v04_core_fresh_initialize_contract_mpi_1
+ 64/156 Test #132: v04_core_fresh_initialize_contract_mpi_1 ..................   Passed    0.29 sec
+        Start 133: v04_core_restart_allocation_contract_mpi_1
+ 65/156 Test #133: v04_core_restart_allocation_contract_mpi_1 ................   Passed    0.29 sec
+        Start 134: v04_core_unsupported_boundary_mpi_1
+ 66/156 Test #134: v04_core_unsupported_boundary_mpi_1 .......................   Passed    0.28 sec
+        Start 135: v04_core_product_freeze_mpi_2
+ 67/156 Test #135: v04_core_product_freeze_mpi_2 .............................   Passed    0.83 sec
+        Start 136: v04_scalar_catalog_order_mpi_2
+ 68/156 Test #136: v04_scalar_catalog_order_mpi_2 ............................   Passed    1.02 sec
+        Start 137: v04_core_temporal_fallback_mpi_2
+ 69/156 Test #137: v04_core_temporal_fallback_mpi_2 ..........................   Passed    0.30 sec
+        Start 138: v04_core_candidate_globalization_red_mpi_2
+ 70/156 Test #138: v04_core_candidate_globalization_red_mpi_2 ................   Passed    0.35 sec
+        Start 139: v04_core_multispecies_open_mpi_2
+ 71/156 Test #139: v04_core_multispecies_open_mpi_2 ..........................   Passed    0.30 sec
+        Start 140: v04_core_fresh_open_eos_flux_mpi_2
+ 72/156 Test #140: v04_core_fresh_open_eos_flux_mpi_2 ........................   Passed    0.30 sec
+        Start 141: v04_core_open_periodic_target_mpi_2
+ 73/156 Test #141: v04_core_open_periodic_target_mpi_2 .......................   Passed    0.31 sec
+        Start 142: v04_core_fresh_initialize_contract_mpi_2
+ 74/156 Test #142: v04_core_fresh_initialize_contract_mpi_2 ..................   Passed    0.31 sec
+        Start 143: v04_core_restart_allocation_contract_mpi_2
+ 75/156 Test #143: v04_core_restart_allocation_contract_mpi_2 ................   Passed    0.30 sec
+        Start 144: v04_core_unsupported_boundary_mpi_2
+ 76/156 Test #144: v04_core_unsupported_boundary_mpi_2 .......................   Passed    0.31 sec
+        Start 145: v04_core_product_freeze_mpi_4
+ 77/156 Test #145: v04_core_product_freeze_mpi_4 .............................   Passed    3.89 sec
+        Start 146: v04_scalar_catalog_order_mpi_4
+ 78/156 Test #146: v04_scalar_catalog_order_mpi_4 ............................   Passed    0.81 sec
+        Start 147: v04_core_temporal_fallback_mpi_4
+ 79/156 Test #147: v04_core_temporal_fallback_mpi_4 ..........................   Passed    0.33 sec
+        Start 148: v04_core_candidate_globalization_red_mpi_4
+ 80/156 Test #148: v04_core_candidate_globalization_red_mpi_4 ................   Passed    0.37 sec
+        Start 149: v04_core_multispecies_open_mpi_4
+ 81/156 Test #149: v04_core_multispecies_open_mpi_4 ..........................   Passed    0.32 sec
+        Start 150: v04_core_fresh_open_eos_flux_mpi_4
+ 82/156 Test #150: v04_core_fresh_open_eos_flux_mpi_4 ........................   Passed    0.33 sec
+        Start 151: v04_core_open_periodic_target_mpi_4
+ 83/156 Test #151: v04_core_open_periodic_target_mpi_4 .......................   Passed    0.34 sec
+        Start 152: v04_core_fresh_initialize_contract_mpi_4
+ 84/156 Test #152: v04_core_fresh_initialize_contract_mpi_4 ..................   Passed    0.38 sec
+        Start 153: v04_core_restart_allocation_contract_mpi_4
+ 85/156 Test #153: v04_core_restart_allocation_contract_mpi_4 ................   Passed    0.33 sec
+        Start 154: v04_core_unsupported_boundary_mpi_4
+ 86/156 Test #154: v04_core_unsupported_boundary_mpi_4 .......................   Passed    0.33 sec
+        Start 159: v04_io_restart_mpi_4
+ 87/156 Test #159: v04_io_restart_mpi_4 ......................................   Passed   21.38 sec
+        Start 160: v04_io_product_path
+ 88/156 Test #160: v04_io_product_path .......................................   Passed    3.21 sec
+        Start 173: v04_io_visit_allocation_failure_mpi_2
+ 89/156 Test #173: v04_io_visit_allocation_failure_mpi_2 .....................   Passed    2.59 sec
+        Start 174: v04_io_evidence_allocation_failure_mpi_2
+ 90/156 Test #174: v04_io_evidence_allocation_failure_mpi_2 ..................   Passed    0.77 sec
+        Start 177: v04_io_visit_allocation_failure_mpi_4
+ 91/156 Test #177: v04_io_visit_allocation_failure_mpi_4 .....................   Passed    2.79 sec
+        Start 178: v04_io_evidence_allocation_failure_mpi_4
+ 92/156 Test #178: v04_io_evidence_allocation_failure_mpi_4 ..................   Passed    0.95 sec
+        Start 182: v04_app_driver
+ 93/156 Test #182: v04_app_driver ............................................   Passed    1.78 sec
+        Start 183: v04_full_half_restart_compare_selftest
+ 94/156 Test #183: v04_full_half_restart_compare_selftest ....................   Passed    1.58 sec
+        Start 184: v04_restart_rank_change_continue
+ 95/156 Test #184: v04_restart_rank_change_continue ..........................   Passed    4.45 sec
+        Start 189: v04_product_pressure_energy_retry_mpi_1
+ 96/156 Test #189: v04_product_pressure_energy_retry_mpi_1 ...................   Passed    1.13 sec
+        Start 190: v04_product_pressure_energy_retry_mpi_2
+ 97/156 Test #190: v04_product_pressure_energy_retry_mpi_2 ...................   Passed    0.95 sec
+        Start 191: v04_product_pressure_energy_retry_mpi_4
+ 98/156 Test #191: v04_product_pressure_energy_retry_mpi_4 ...................   Passed    0.99 sec
+        Start 192: v04_product_pressure_energy_temporal_convergence
+ 99/156 Test #192: v04_product_pressure_energy_temporal_convergence ..........   Passed    0.62 sec
+        Start 193: v04_product_simple_pressure_energy_temporal_convergence
+100/156 Test #193: v04_product_simple_pressure_energy_temporal_convergence ...   Passed    0.70 sec
+        Start 194: v04_product_scalar_splitting_observation
+101/156 Test #194: v04_product_scalar_splitting_observation ..................   Passed    0.71 sec
+        Start 196: v04_solver_linear_lifecycle
+102/156 Test #196: v04_solver_linear_lifecycle ...............................   Passed    0.00 sec
+        Start 197: v04_solver_mg_reuse
+103/156 Test #197: v04_solver_mg_reuse .......................................   Passed    0.29 sec
+        Start 198: v04_solver_mg_chebyshev
+104/156 Test #198: v04_solver_mg_chebyshev ...................................   Passed    0.29 sec
+        Start 199: v04_solver_mg_convergence
+105/156 Test #199: v04_solver_mg_convergence .................................   Passed    2.63 sec
+        Start 200: v04_solver_mg_coarse_use
+106/156 Test #200: v04_solver_mg_coarse_use ..................................   Passed    0.32 sec
+        Start 201: v04_solver_mg_line_relaxation
+107/156 Test #201: v04_solver_mg_line_relaxation .............................   Passed    0.28 sec
+        Start 202: v04_solver_mg_krylov_isolation
+108/156 Test #202: v04_solver_mg_krylov_isolation ............................   Passed    0.28 sec
+        Start 203: v04_solver_krylov_basis_update
+109/156 Test #203: v04_solver_krylov_basis_update ............................   Passed    0.04 sec
+        Start 204: v04_solver_hypre_isolation
+110/156 Test #204: v04_solver_hypre_isolation ................................   Passed    0.28 sec
+        Start 205: v04_solver_hypre_communicator_mpi_2
+111/156 Test #205: v04_solver_hypre_communicator_mpi_2 .......................   Passed    0.28 sec
+        Start 206: v04_solver_hypre_communicator_mpi_4
+112/156 Test #206: v04_solver_hypre_communicator_mpi_4 .......................   Passed    0.30 sec
+        Start 207: v04_solver_mg_mpi_1
+113/156 Test #207: v04_solver_mg_mpi_1 .......................................   Passed    0.38 sec
+        Start 208: v04_solver_mg_mpi_2
+114/156 Test #208: v04_solver_mg_mpi_2 .......................................   Passed    0.37 sec
+        Start 209: v04_solver_mg_mpi_4
+115/156 Test #209: v04_solver_mg_mpi_4 .......................................   Passed    0.49 sec
+        Start 210: v04_solver_mg_update_contract_mpi_2
+116/156 Test #210: v04_solver_mg_update_contract_mpi_2 .......................   Passed    0.28 sec
+        Start 211: v04_solver_mg_update_contract_mpi_4
+117/156 Test #211: v04_solver_mg_update_contract_mpi_4 .......................   Passed    0.31 sec
+        Start 212: v04_solver_mg_odd_partition_mpi_2
+118/156 Test #212: v04_solver_mg_odd_partition_mpi_2 .........................   Passed    0.29 sec
+        Start 213: v04_solver_mg_odd_partition_mpi_4
+119/156 Test #213: v04_solver_mg_odd_partition_mpi_4 .........................   Passed    0.30 sec
+        Start 214: v04_solver_krylov_mpi_1
+120/156 Test #214: v04_solver_krylov_mpi_1 ...................................   Passed    0.29 sec
+        Start 215: v04_solver_reduction_mpi_1
+121/156 Test #215: v04_solver_reduction_mpi_1 ................................   Passed    0.27 sec
+        Start 216: v04_solver_krylov_mpi_2
+122/156 Test #216: v04_solver_krylov_mpi_2 ...................................   Passed    0.29 sec
+        Start 217: v04_solver_reduction_mpi_2
+123/156 Test #217: v04_solver_reduction_mpi_2 ................................   Passed    0.28 sec
+        Start 218: v04_solver_krylov_mpi_4
+124/156 Test #218: v04_solver_krylov_mpi_4 ...................................   Passed    0.33 sec
+        Start 219: v04_solver_reduction_mpi_4
+125/156 Test #219: v04_solver_reduction_mpi_4 ................................   Passed    0.30 sec
+        Start 220: v04_physics_thermo
+126/156 Test #220: v04_physics_thermo ........................................   Passed    0.00 sec
+        Start 221: v04_physics_thermophysical_compiler_1
+127/156 Test #221: v04_physics_thermophysical_compiler_1 .....................   Passed    0.28 sec
+        Start 222: v04_physics_thermophysical_compiler_2
+128/156 Test #222: v04_physics_thermophysical_compiler_2 .....................   Passed    0.28 sec
+        Start 223: v04_physics_thermophysical_compiler_4
+129/156 Test #223: v04_physics_thermophysical_compiler_4 .....................   Passed    0.30 sec
+        Start 224: v04_physics_transport
+130/156 Test #224: v04_physics_transport .....................................   Passed    0.29 sec
+        Start 232: v04_solver_manufactured_cartesian
+131/156 Test #232: v04_solver_manufactured_cartesian .........................   Passed    0.71 sec
+        Start 233: v04_solver_conservation
+132/156 Test #233: v04_solver_conservation ...................................   Passed    0.30 sec
+        Start 234: v04_solver_decomposition_mpi_1
+133/156 Test #234: v04_solver_decomposition_mpi_1 ............................   Passed    0.27 sec
+        Start 235: v04_solver_decomposition_mpi_2
+134/156 Test #235: v04_solver_decomposition_mpi_2 ............................   Passed    0.28 sec
+        Start 236: v04_solver_decomposition_mpi_4
+135/156 Test #236: v04_solver_decomposition_mpi_4 ............................   Passed    0.30 sec
+        Start 237: v04_physics_closed_mass_1
+136/156 Test #237: v04_physics_closed_mass_1 .................................   Passed    0.28 sec
+        Start 238: v04_physics_closed_mass_2
+137/156 Test #238: v04_physics_closed_mass_2 .................................   Passed    0.30 sec
+        Start 239: v04_physics_closed_mass_4
+138/156 Test #239: v04_physics_closed_mass_4 .................................   Passed    0.30 sec
+        Start 245: v04_bc_time_1
+139/156 Test #245: v04_bc_time_1 .............................................   Passed    0.27 sec
+        Start 246: v04_bc_time_2
+140/156 Test #246: v04_bc_time_2 .............................................   Passed    0.28 sec
+        Start 247: v04_bc_time_4
+141/156 Test #247: v04_bc_time_4 .............................................   Passed    0.30 sec
+        Start 278: v04_product_adaptive_limits_mpi_1
+142/156 Test #278: v04_product_adaptive_limits_mpi_1 .........................   Passed    0.36 sec
+        Start 279: v04_product_adaptive_limits_mpi_2
+143/156 Test #279: v04_product_adaptive_limits_mpi_2 .........................   Passed    0.34 sec
+        Start 280: v04_product_adaptive_limits_mpi_4
+144/156 Test #280: v04_product_adaptive_limits_mpi_4 .........................   Passed    0.38 sec
+        Start 281: v04_app_resource_lifecycle_mpi_1
+145/156 Test #281: v04_app_resource_lifecycle_mpi_1 ..........................   Passed    0.80 sec
+        Start 282: v04_app_resource_lifecycle_mpi_2
+146/156 Test #282: v04_app_resource_lifecycle_mpi_2 ..........................   Passed    0.79 sec
+        Start 283: v04_app_resource_lifecycle_mpi_4
+147/156 Test #283: v04_app_resource_lifecycle_mpi_4 ..........................   Passed    1.05 sec
+        Start 284: v04_app_output_failure_mpi_1
+148/156 Test #284: v04_app_output_failure_mpi_1 ..............................   Passed    2.36 sec
+        Start 285: v04_app_output_failure_mpi_2
+149/156 Test #285: v04_app_output_failure_mpi_2 ..............................   Passed    4.09 sec
+        Start 286: v04_app_output_failure_mpi_4
+150/156 Test #286: v04_app_output_failure_mpi_4 ..............................   Passed    4.09 sec
+        Start 287: v04_parallel_halo_mpi_1
+151/156 Test #287: v04_parallel_halo_mpi_1 ...................................   Passed    0.31 sec
+        Start 288: v04_parallel_halo_failure_1
+152/156 Test #288: v04_parallel_halo_failure_1 ...............................   Passed    0.28 sec
+        Start 289: v04_parallel_halo_mpi_2
+153/156 Test #289: v04_parallel_halo_mpi_2 ...................................   Passed    0.28 sec
+        Start 290: v04_parallel_halo_failure_2
+154/156 Test #290: v04_parallel_halo_failure_2 ...............................   Passed    0.28 sec
+        Start 291: v04_parallel_halo_mpi_4
+155/156 Test #291: v04_parallel_halo_mpi_4 ...................................   Passed    0.30 sec
+        Start 292: v04_parallel_halo_failure_4
+156/156 Test #292: v04_parallel_halo_failure_4 ...............................   Passed    0.30 sec
+
+100% tests passed, 0 tests failed out of 156
+
+Label Time Summary:
+allocation_audit          =  37.02 sec*proc (3 tests)
+v04_focused               = 244.51 sec*proc (114 tests)
+v04_method_observation    =   0.71 sec*proc (1 test)
+
+Total Test time (real) = 135.56 sec

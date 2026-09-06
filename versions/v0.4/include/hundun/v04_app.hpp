@@ -28,9 +28,15 @@ struct ApplicationRunOptions {
   std::uint64_t steps{};
   std::uint64_t output_interval{1U};
   std::uint64_t restart_interval{1U};
+  // Caller-supplied operator time scales. The application tightens convection
+  // from the accepted state; remaining entries are NOT automatic physical
+  // diffusion/acoustic estimates. Fixed-dt control does not use these entries.
   LocalTimeLimits time_limits{1.0, 1.0, 1.0, 1.0, 1.0};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
+  // Compile-generated identity of the final CLI target. Empty means the
+  // library core manifest for callers embedding ApplicationService.
+  std::string_view target_build_manifest{};
 };
 
 inline constexpr std::size_t kNumericalFailureMassFractionCapacity = 64U;
@@ -187,6 +193,18 @@ struct PressureEnergyGlobalizationIterationReport {
 inline constexpr std::size_t kPressureEnergyGlobalizationTrajectoryCapacity =
     2U + kPressureEnergyRefinementCapacity;
 
+enum class PressureEnergySolveKind : std::uint8_t {
+  pressure_continuity, diagonal_schur, spatial_schur
+};
+
+struct PressureEnergySolveObservation {
+  std::uint8_t corrector{};
+  std::uint8_t refinement{};
+  PressureEnergySolveKind kind{PressureEnergySolveKind::pressure_continuity};
+  bool invoked{};
+  std::array<std::uint64_t, 3U> local_nanoseconds{};
+};
+
 struct PressureEnergyGlobalizationAttemptReport {
   bool valid{};
   std::uint8_t corrector{};
@@ -212,6 +230,9 @@ struct PressureEnergyGlobalizationAttemptReport {
   // Disjoint local preparation, Krylov solve, and close/enthalpy recovery.
   // Includes all C1/C2/refinement solves in this numerical attempt.
   std::array<std::uint64_t, 3U> local_solve_nanoseconds{};
+  std::uint8_t solve_observation_count{};
+  std::array<PressureEnergySolveObservation,
+             kPressureEnergyGlobalizationTrajectoryCapacity> solve_observations{};
   std::array<Status, kPressureEnergyGlobalizationCandidateCount>
       candidate_evaluation_status{};
 };
@@ -295,6 +316,7 @@ struct ApplicationRunReport {
   // screen/monitor, restart, resource sampling, evidence encoding/writing.
   std::array<std::uint64_t, 9U> local_phase_nanoseconds{};
   IoFailureContext io_failure{};
+  RestartWriteReport restart_output{};
 };
 
 class ApplicationService {
@@ -350,6 +372,57 @@ struct DriverStageTiming {
   std::uint64_t nanoseconds{};
 };
 
+struct PressureEnergyPerformanceTotals {
+  // Sums across ALL numerical attempts in this advance, including rejected
+  // attempts. Last-attempt trajectories above remain a separate diagnostic.
+  PressureEnergyCandidateWorkReport candidate{};
+  std::array<std::uint64_t, 3U> solve_nanoseconds{};
+  std::array<std::uint64_t, 3U> calls_by_kind{};
+  std::array<std::array<std::uint64_t, 3U>, 3U> nanoseconds_by_kind{};
+  // A apply, M apply, main Arnoldi dot, reduction, update (local partial costs).
+  std::array<std::uint64_t, 5U> krylov_nanoseconds{};
+};
+
+// Same-state, same-final-flux observations, not additional acceptance
+// tolerances. Momentum values are cell-integrated forces (N), energy values
+// are powers (W). The total-equation defect is R_E + U.R_m - |U|^2 R_C/2;
+// it is not the physical boundary total-energy balance (discrete product-rule
+// defects must be measured separately).
+struct DriverTerminalEquationReport {
+  bool valid{};
+  RevisionToken final_flux{};
+  std::array<double, 3U> momentum_linf{};
+  std::array<double, 3U> momentum_l1{};
+  double continuity_signed{};
+  double energy_signed{};
+  double energy_l1{};
+  double total_equation_defect{};
+  double mass{};
+  double internal_energy{};
+  double kinetic_energy{};
+};
+
+// Physical external-boundary balance for the current fixed, source-free
+// product: stationary adiabatic IBM walls perform no physical heat/work.
+// All rates are positive outwards except heat/stress input (positive inwards).
+// The cumulative defects compare inventory with a BDF-integrated boundary
+// ledger. A restart starts a new explicitly labelled observation epoch.
+struct DriverConservationReport {
+  bool valid{};
+  std::uint64_t epoch_start_step{};
+  double mass_outflow{};                 // kg/s
+  double enthalpy_outflow{};             // W
+  double kinetic_energy_outflow{};       // W
+  double conductive_heat_input{};        // W, external physical faces
+  double viscous_work_input{};           // W, external physical faces
+  double mass_bdf_rate{};                // kg/s
+  double total_energy_bdf_rate{};        // W
+  double mass_balance_defect{};          // kg/s
+  double total_energy_balance_defect{};  // W
+  double cumulative_mass_defect{};       // kg since epoch_start_step
+  double cumulative_energy_defect{};     // J since epoch_start_step
+};
+
 struct DriverStepReport {
   StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
@@ -373,6 +446,9 @@ struct DriverStepReport {
   std::array<DriverStageTiming, kDriverTimedStageCapacity> stage_timings{};
   std::size_t stage_timing_count{};
   bool accepted{};
+  PressureEnergyPerformanceTotals pressure_energy_performance{};
+  DriverTerminalEquationReport terminal_equations{};
+  DriverConservationReport conservation{};
 };
 
 class ProductDriver {
@@ -398,6 +474,13 @@ class ProductDriver {
   Status constrain_convective_time_limit(LocalTimeLimits& limits) noexcept;
   // Programmatic callers retain authority over explicit physical time scales.
   Status advance(LocalTimeLimits limits, DriverStepReport& report) noexcept;
+  // Synchronous borrowed views. Consume before any advance/initialization,
+  // another snapshot of the same kind, or destruction of the storage owner.
+  // This conservative lifetime also applies after a rejected advance. Writers
+  // validate view metadata, not an owner/epoch lease; stale use is unsupported.
+  // Move construction transfers the owner without moving its storage. Move
+  // assignment invalidates snapshots of the destination's former storage.
+  // Asynchronous use requires a separately owned, budgeted copy of ALL data.
   Status committed_output_snapshot(CommittedOutputSnapshot& out) noexcept;
   Status committed_restart_snapshot(RestartSnapshot& out) noexcept;
   Status committed_surface_force(SurfaceForce& force,

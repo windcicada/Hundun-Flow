@@ -88,6 +88,9 @@ struct RestartFieldView {
   ConstFieldView values{};
 };
 
+// Borrowed synchronous snapshot: neither the metadata spans nor field/flux
+// storage are owned here. See ProductDriver::committed_*_snapshot for lifetime.
+// Copying this structure does NOT freeze the accepted state for asynchronous I/O.
 struct RestartSnapshot {
   Int3 global_cells{};
   MeshPatch patch{};
@@ -112,8 +115,53 @@ struct RestartSnapshot {
   double closed_mass_target{};
 };
 
+enum class IoFailureOperation : std::uint8_t {
+  none, open, write, sync, close, create_directory,
+  read, stat, rename, remove
+};
+
+struct IoFailureContext {
+  bool valid{};
+  IoFailureOperation operation{IoFailureOperation::none};
+  int system_error{};
+  int rank{-1};
+  bool path_truncated{};
+  std::array<char, 512U> path{};
+};
+
+enum class RestartPublicationState : std::uint8_t {
+  not_switched,
+  visible_not_durable,
+  durable
+};
+
+struct RestartWriteReport {
+  RestartPublicationState publication{RestartPublicationState::not_switched};
+  IoFailureContext failure{};
+  // Cleanup runs only after durable publication. Failure is a warning, not
+  // evidence that current is unchanged; callers may continue using the new generation.
+  Status cleanup_status{};
+  IoFailureContext cleanup_failure{};
+  std::size_t rank_payload_bytes{};
+  // Peak bulk byte buffers, gather/record arrays; excludes borrowed fields,
+  // small path strings, allocator bookkeeping, MPI and the solver resident set.
+  std::size_t peak_bulk_staging_bytes{};
+};
+
 struct RestartWriteOptions {
   std::uint32_t keep_last{1U};
+  // Rank-local consumer choice; does not alter the collective sequence.
+  RestartWriteReport* report{};
+  // Zero preserves the legacy caller's unbudgeted contract. Production callers
+  // pass the sealed restart service capacity. Checked before bulk allocation.
+  std::size_t maximum_bulk_staging_bytes{};
+};
+
+struct RestartReadReport {
+  IoFailureContext failure{};
+  std::uint32_t integrity_blocks{};
+  std::uint32_t restoration_blocks{};
+  std::uint64_t rank_file_bytes_read{};
 };
 
 struct RestartExpectedField {
@@ -194,7 +242,8 @@ class RestartReader {
   static Status load(MPI_Comm communicator,
                      const std::filesystem::path& restart_directory,
                      const RestartExpected& expected,
-                     RestartImage& out) noexcept;
+                     RestartImage& out,
+                     RestartReadReport* report = nullptr) noexcept;
 };
 
 struct SnapshotFieldView {
@@ -203,6 +252,7 @@ struct SnapshotFieldView {
   RevisionToken accepted_revision{};
 };
 
+// Borrowed metadata and fields, not an owning image or a checked epoch lease.
 struct CommittedOutputSnapshot {
   const CartesianGeometryPlan* geometry{};
   MeshPatch patch{};
@@ -425,24 +475,6 @@ struct RuntimeEvidenceRecord {
   bool retry{};
   bool restart_recovery{};
   bool statistics_eligible{};
-};
-
-enum class IoFailureOperation : std::uint8_t {
-  none,
-  open,
-  write,
-  sync,
-  close,
-  create_directory
-};
-
-struct IoFailureContext {
-  bool valid{};
-  IoFailureOperation operation{IoFailureOperation::none};
-  int system_error{};
-  int rank{-1};
-  bool path_truncated{};
-  std::array<char, 512U> path{};
 };
 
 class VisitWriter {

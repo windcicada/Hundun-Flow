@@ -1,0 +1,33 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 78: v04_solver_pressure_energy_schur
+1/1 Test #78: v04_solver_pressure_energy_schur ...***Failed    0.32 sec
+FAIL: frozen-spatial Eh must not freeze the density in BDF(rho*h-p)
+analytic-frozen-target-four-block-fd-direction p-only epsilon=0.01 continuity=3.51108e-14 energy=1.68507e-10 energy-action=-29.705 energy-fd=-29.705 cell=(1,2,2)
+analytic-frozen-target-four-block-fd-direction p-only epsilon=0.001 continuity=3.84248e-13 energy=1.88309e-09 energy-action=-24.8912 energy-fd=-24.8912 cell=(2,2,2)
+analytic-frozen-target-four-block-fd-direction p-only epsilon=0.0001 continuity=3.01781e-12 energy=1.60217e-08 energy-action=-17.7462 energy-fd=-17.7462 cell=(2,1,1)
+analytic-frozen-target-four-block-fd-direction h-only epsilon=0.01 continuity=3.74702e-14 energy=5.38696e-13 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+analytic-frozen-target-four-block-fd-direction h-only epsilon=0.001 continuity=3.84415e-13 energy=4.34939e-12 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+analytic-frozen-target-four-block-fd-direction h-only epsilon=0.0001 continuity=3.31273e-12 energy=4.58409e-11 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+analytic-frozen-target-four-block-fd-direction mixed epsilon=0.01 continuity=5.42211e-14 energy=1.95007e-12 energy-action=2592.2 energy-fd=2592.2 cell=(1,2,2)
+analytic-frozen-target-four-block-fd-direction mixed epsilon=0.001 continuity=4.13974e-13 energy=2.57827e-11 energy-action=-1815.41 energy-fd=-1815.41 cell=(2,2,2)
+analytic-frozen-target-four-block-fd-direction mixed epsilon=0.0001 continuity=4.59391e-12 energy=1.60054e-10 energy-action=1850.57 energy-fd=1850.57 cell=(1,1,1)
+analytic-frozen-target-four-block-fd-not-full-refresh cp=3.01781e-12 ep=1.60217e-08 ch=3.31273e-12 eh=4.58409e-11 mixed-c=4.59391e-12 mixed-e=1.60054e-10 cp-platform=3.33056e-12 ep-platform=1.64021e-08 ch-platform=3.55271e-12 eh-platform=5.01902e-11 mixed-c-platform=4.66299e-12 mixed-e-platform=1.57729e-10 schur-identity=0 recovery-continuity=0 recovery-energy=1.17458e-14
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   0.32 sec*proc (1 test)
+
+Total Test time (real) =   0.33 sec
+
+The following tests FAILED:
+	 78 - v04_solver_pressure_energy_schur (Failed)         v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

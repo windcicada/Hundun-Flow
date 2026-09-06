@@ -9,6 +9,7 @@
 #include "bc_identity_detail.hpp"
 #include "common_terminal_audit.h"
 #include "core_product_freeze_detail.hpp"
+#include "core_conservation_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_initialization.hpp"
@@ -451,7 +452,14 @@ struct ProductFields {
   FieldId schur_continuity_response{}, schur_eliminated_enthalpy{};
   FieldId schur_energy_response{};
   FieldId krylov_vectors{}, krylov_scalars{}, mg_arena{};
+  struct ScalarBinding {
+    FieldId field{};
+    TransportedScalarRole role{};
+    std::size_t role_index{};
+    std::size_t catalog_slot{};
+  };
   std::vector<FieldId> scalars;
+  std::vector<ScalarBinding> scalar_bindings;
   std::vector<FieldId> pressure_energy_candidate_species;
   std::vector<FieldId> scalar_nonadvective_rates;
   std::vector<TransportedScalarRole> scalar_roles;
@@ -464,11 +472,25 @@ void append_scalar_halo_views(const ProductFields& fields,
                               const std::vector<FieldView>& passive,
                               std::vector<FieldView>& halo,
                               std::size_t& count) noexcept {
-  std::size_t si = 0U;
-  std::size_t pi = 0U;
-  for (TransportedScalarRole role : fields.scalar_roles)
-    halo[count++] =
-        role == TransportedScalarRole::species ? species[si++] : passive[pi++];
+  for (const auto& binding : fields.scalar_bindings) {
+    const auto view = binding.role == TransportedScalarRole::species
+        ? species[binding.role_index] : passive[binding.role_index];
+    assert(view.field == binding.field);
+    halo[count++] = view;
+  }
+}
+
+void restore_scalar_halo_views(const ProductFields& fields,
+                               const std::vector<FieldView>& halo,
+                               std::size_t base,
+                               std::vector<FieldView>& species,
+                               std::vector<FieldView>& passive) noexcept {
+  for (const auto& binding : fields.scalar_bindings) {
+    const auto view = halo[base + binding.catalog_slot];
+    assert(view.field == binding.field);
+    auto& target = binding.role == TransportedScalarRole::species ? species : passive;
+    target[binding.role_index] = view;
+  }
 }
 
 Status require(FieldRegistry& registry, const char* name,
@@ -660,12 +682,17 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     fields.scalar_nonadvective_rates.reserve(
         model.transported_scalars.size());
     fields.scalar_roles.reserve(model.transported_scalars.size());
+    fields.scalar_bindings.reserve(model.transported_scalars.size());
+    std::size_t species_slot = 0U, passive_slot = 0U;
     for (const TransportedScalarSpec& scalar : model.transported_scalars) {
       FieldId id = 0U;
       status = registry.require_field(scalar.stable_name, 1U, ghosts, id);
       if (!status) return status;
       fields.scalars.push_back(id);
       fields.scalar_roles.push_back(scalar.role);
+      fields.scalar_bindings.push_back({id, scalar.role,
+          scalar.role == TransportedScalarRole::species ? species_slot++ : passive_slot++,
+          fields.scalars.size() - 1U});
       if (scalar.role == TransportedScalarRole::species) {
         FieldId candidate_species = 0U;
         const std::string candidate_name =
@@ -2675,6 +2702,9 @@ struct ProductDriver::Impl {
   ThermophysicalPredictorDiagnostics predictor_diagnostics{};
   MomentumPredictorLimiterReport momentum_predictor_limiter{};
   MomentumPredictorSolveReport momentum_predictor_solve{};
+  DriverTerminalEquationReport terminal_equations{};
+  DriverConservationReport conservation{};
+  detail::ProductBoundaryBalanceHistory balance_history{}, pending_balance{};
   PressureEnergyGlobalizationAttemptReport pressure_energy_globalization{};
   std::array<DriverStageTiming, kDriverTimedStageCapacity> attempt_timings{};
   std::size_t attempt_timing_count{};
@@ -2770,6 +2800,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
   previous_pressure_reference = pressure_reference;
   pressure_reference = pending_pressure_reference.value;
   pressure_correction_warm_start_valid = true;
+  balance_history = pending_balance;
   clear_pending_attempt_side_state();
 }
 
@@ -3306,6 +3337,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   if (!status) return status;
   candidate->phases[1U] = ProductFreezePhase::capability_registration;
+  std::array<std::int32_t, 3U> maximum_patch{
+      candidate->patch.cells.x, candidate->patch.cells.y, candidate->patch.cells.z};
+  int restart_ranks = 0;
+  if (MPI_Allreduce(MPI_IN_PLACE, maximum_patch.data(), 3, MPI_INT32_T,
+                     MPI_MAX, communicator) != MPI_SUCCESS ||
+      MPI_Comm_size(communicator, &restart_ranks) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kProductCollective};
   status = product_local_stage(communicator, [&]() -> Status {
     candidate->schema_fingerprint = registry.fingerprint();
     // Reconstruct only the historical schema identity, not its oversized
@@ -3381,6 +3419,26 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                          static_cast<StageId>(200U + index), snapshot_bytes,
                          staging_bytes, 8U};
     }
+    // V2: two primitive states (5+s), two rates (1+s), two face
+    // histories. The (+1)^3 envelope bounds all owned faces on every rank;
+    // root also holds gathered records, manifest and one verification buffer.
+    std::size_t envelope = 1U, restart_components = 0U, restart_bulk = 0U;
+    std::size_t root_metadata = 0U;
+    for (auto extent : maximum_patch)
+      if (!detail::product_checked_multiply(envelope,
+            static_cast<std::size_t>(extent) + 1U, envelope))
+        return {StatusCode::invalid_plan, kProductAnalysis};
+    if (!detail::product_checked_multiply(candidate->fields.scalars.size(), 4U,
+                                          restart_components) ||
+        !detail::product_checked_add(restart_components, 18U, restart_components) ||
+        !detail::product_field_bytes(envelope, restart_components, restart_bulk) ||
+        !detail::product_checked_multiply(static_cast<std::size_t>(restart_ranks),
+                                          160U, root_metadata) ||
+        !detail::product_checked_add(root_metadata, 65536U, root_metadata) ||
+        !detail::product_checked_add(restart_bulk, root_metadata, restart_bulk))
+      return {StatusCode::invalid_plan, kProductAnalysis};
+    services[static_cast<std::size_t>(RuntimeServiceKind::restart)]
+        .maximum_staging_bytes_per_rank = restart_bulk;
     if (status)
       status = IoServicePlan::compile({snapshots.data(), snapshots.size()},
                                       {services.data(), services.size()},
@@ -5333,16 +5391,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
       molecular_viscosity = halo_views[4U];
       effective_viscosity = halo_views[5U];
       conductivity = halo_views[6U];
-      species_index = 0U;
-      passive_index = 0U;
-      for (std::size_t index = 0U; index < product.fields.scalars.size();
-           ++index) {
-        if (product.fields.scalar_roles[index] ==
-            TransportedScalarRole::species)
-          species_trial[species_index++] = halo_views[index + 7U];
-        else
-          passive_trial[passive_index++] = halo_views[index + 7U];
-      }
+      restore_scalar_halo_views(product.fields, halo_views, 7U,
+                                species_trial, passive_trial);
       std::array<FieldView, 5U> derived{
           trial_temperature, velocity_gradient, molecular_viscosity,
           effective_viscosity, conductivity};
@@ -5390,16 +5440,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     if (status) {
       trial_pressure = halo_views[0U];
       trial_temperature = halo_views[1U];
-      species_index = 0U;
-      passive_index = 0U;
-      for (std::size_t index = 0U; index < product.fields.scalars.size();
-           ++index) {
-        if (product.fields.scalar_roles[index] ==
-            TransportedScalarRole::species)
-          species_trial[species_index++] = halo_views[index + 2U];
-        else
-          passive_trial[passive_index++] = halo_views[index + 2U];
-      }
+      restore_scalar_halo_views(product.fields, halo_views, 2U,
+                                species_trial, passive_trial);
     }
     status = product.reductions.consensus(status);
     if (!status) return status;
@@ -6483,6 +6525,7 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
   std::fill(runtime.passive_ghosts.begin(), runtime.passive_ghosts.end(),
             ThermophysicalGhostHistory{});
   runtime.predictor_diagnostics = {};
+  runtime.balance_history = {};
   runtime.initialized = true;
   return {};
 }
@@ -7160,6 +7203,7 @@ Status ProductDriver::initialize_restart(
       exact_history ? image.closed_mass_target : global_mass;
   runtime.pressure_correction_warm_start_valid = false;
   runtime.predictor_diagnostics = {};
+  runtime.balance_history = {};
   runtime.initialized = true;
   return {};
 } catch (const std::bad_alloc&) {
@@ -7179,6 +7223,9 @@ Status ProductDriver::Impl::execute_attempt(
   predictor_diagnostics = {};
   momentum_predictor_limiter = {};
   momentum_predictor_solve = {};
+  terminal_equations = {};
+  conservation = {};
+  pending_balance = {};
   pressure_energy_globalization = {};
   assert(!pending_force_cache);
   assert(!pending_flux.valid());
@@ -9576,10 +9623,7 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) attempt_stage = 41U;
   if (status)
     status = product.coupler.refresh(intermediate_input, intermediate_one);
-  if (status)
-    status = product.piso.coupling() == CouplingKind::simple
-                 ? inspect_pressure_energy_target_flux(intermediate_one)
-                 : assemble_pressure_energy_residual(intermediate_one);
+  if (status) status = assemble_pressure_energy_residual(intermediate_one);
   PressureCorrectionInput pressure_input;
   pressure_input.intermediate = intermediate_one;
   pressure_input.pressure_reference = pressure_reference_certificate;
@@ -9698,8 +9742,18 @@ Status ProductDriver::Impl::execute_attempt(
           LinearIdentity identity, MgCoefficientIdentity coefficients,
           const LinearSolveControl& solve_control,
           PressureEnergyJacobianObservation& jacobian_observation) {
+        struct CaptureSolve {
+          PressureEnergyGlobalizationAttemptReport& attempt;
+          PressureEnergySolveObservation value;
+          ~CaptureSolve() noexcept {
+            for (std::size_t i = 0U; i < value.local_nanoseconds.size(); ++i)
+              attempt.local_solve_nanoseconds[i] += value.local_nanoseconds[i];
+            if (attempt.solve_observation_count < attempt.solve_observations.size())
+              attempt.solve_observations[attempt.solve_observation_count++] = value;
+          }
+        } capture{pressure_energy_globalization, {corrector, refinement_iteration}};
         detail::LocalPhaseTimer<3U> solve_timer(
-            pressure_energy_globalization.local_solve_nanoseconds);
+            capture.value.local_nanoseconds);
         jacobian_observation = {};
         Status coupled =
             refinement_iteration == 0U
@@ -9797,28 +9851,18 @@ Status ProductDriver::Impl::execute_attempt(
         energy_enthalpy_binding.linearization_policy =
             FrozenConvectionLinearizationPolicy::
                 semismooth_generalized_zero_slope;
-        if (coupled && product.piso.coupling() == CouplingKind::simple &&
-            corrector == 1U && refinement_iteration == 0U) {
-          LinearOperator& exact_pressure_operator =
-              ibm_pressure_operator.has_value()
-                  ? static_cast<LinearOperator&>(*ibm_pressure_operator)
-                  : static_cast<LinearOperator&>(pressure_operator);
-          zero_field(enthalpy_correction);
-          LinearSolveControl simple_solve_control = solve_control;
-          if (simple_solve_control.relative_tolerance >
-              product.piso.pressure_solve().relative_tolerance)
-            simple_solve_control.relative_tolerance =
-                kSimplePressureInexactForcingRelativeToleranceCeiling;
-          coupled = solve_epoch.solve_prepared(
-              exact_pressure_operator,
-              PisoPressureSolveContract::pressure_continuity,
-              simple_solve_control, product.reductions, &resources);
-          return product.reductions.consensus(coupled);
-        }
+        // C1 and C2 are both admitted by the same exact continuity/energy
+        // merit. A pressure-only SIMPLE C1 direction is not a descent
+        // direction for that merit, even on a smooth BDF2 periodic wave.
+        // Build the joint p/h direction here too. SIMPLE still differs from
+        // PISO by its fresh second momentum sweep and reconstructed face flux.
         const bool simple_diagonal_schur =
             detail::product_use_simple_diagonal_schur(
                 product.piso.coupling(), corrector, refinement_iteration,
                 product.ibm_equations.has_value());
+        capture.value.kind = simple_diagonal_schur
+            ? PressureEnergySolveKind::diagonal_schur
+            : PressureEnergySolveKind::spatial_schur;
         PisoCartesianPressureWorkLinearization pressure_work;
         if (coupled && !simple_diagonal_schur &&
             !product.ibm_equations.has_value())
@@ -9862,9 +9906,8 @@ Status ProductDriver::Impl::execute_attempt(
                 diagonal_energy_pressure_certificate);
           energy_pressure_operator = &diagonal_energy_pressure_operator;
           if (coupled)
-            coupled = PressureEnergyDiagonalOperator::bind(
-                {as_const(pressure_energy_e_h), pressure_energy_activity,
-                 identity, 1.0},
+            coupled = PressureEnergyEnthalpyOperator::bind_diagonal(
+                energy_enthalpy_binding, pressure_energy_compiled_enthalpy_local,
                 diagonal_energy_enthalpy_operator,
                 diagonal_energy_enthalpy_certificate);
           energy_enthalpy_operator = &diagonal_energy_enthalpy_operator;
@@ -9942,6 +9985,7 @@ Status ProductDriver::Impl::execute_attempt(
         const bool solve_invoked = static_cast<bool>(coupled);
         int close_lowest_failing_rank = prepare_lowest_failing_rank;
         if (solve_invoked) {
+          capture.value.invoked = true;
           jacobian_observation.scope = jacobian_certificate.jacobian_scope;
           jacobian_observation.valid = true;
           solve_timer.phase(1U);
@@ -9985,8 +10029,7 @@ Status ProductDriver::Impl::execute_attempt(
             g_candidate_globalization_armed.load(std::memory_order_acquire) ||
             g_candidate_globalization_published.load(
                 std::memory_order_acquire);
-        if (coupled && diagnostic_active &&
-            !product.ibm_equations.has_value() && corrector >= 1U &&
+        if (coupled && diagnostic_active && corrector >= 1U &&
             corrector <= pressure_energy_linear_predictions.size()) {
           // Evaluate the two frozen Jacobian rows on the recovered joint
           // direction.  This is diagnostic-only, but it deliberately uses the
@@ -12796,10 +12839,90 @@ Status ProductDriver::Impl::execute_attempt(
             };
         constexpr std::size_t baseline_ordinal =
             kPressureEnergyGlobalizationCandidateCount;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+        const bool inspect_linear_target = g_candidate_globalization_published.load(
+            std::memory_order_acquire);
+        if (inspect_linear_target) {
+          // Ch and its row scaling have no live consumer after the Schur
+          // solve and are rebuilt at the next solve. Candidate energy uses
+          // both residual fields as output/scratch, so retain both RHSs.
+          candidate_status = copy_interior(as_const(pressure_energy_r_c),
+                                            pressure_energy_c_h);
+          if (candidate_status)
+            candidate_status = copy_interior(as_const(pressure_energy_r_e),
+                                              pressure_energy_c_h_row_scale);
+          if (!candidate_status) return candidate_status;
+        }
+#endif
         PressureEnergyCandidateArtifacts baseline_artifacts;
         candidate_status = tracked_evaluate(0.0, baseline_ordinal, nullptr,
                                             baseline_artifacts);
         if (!candidate_status) return candidate_status;
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+        if (inspect_linear_target) {
+          std::array<double, 2U> local_gap{}, global_gap{};
+          std::uint64_t local_worst_cell = UINT64_MAX;
+          Status gap_status;
+          std::size_t flat = 0U;
+          for (std::int32_t z = 0; z < cells.z && gap_status; ++z)
+            for (std::int32_t y = 0; y < cells.y && gap_status; ++y)
+              for (std::int32_t x = 0; x < cells.x; ++x, ++flat) {
+                if (!pressure_energy_active(flat)) continue;
+                const Int3 cell{x, y, z};
+                const double volume = detail::cell_volume(product.equations.kernels(), cell);
+                const double rho = pressure_energy_candidate_density.unchecked(cell, 0U);
+                const auto flux = baseline_artifacts.flux;
+                const double temporal = volume * (effective_bdf.a0 * rho +
+                    effective_bdf.a1 * rho_history.accepted.unchecked(cell, 0U) +
+                    (effective_bdf.order == 2U ? effective_bdf.a2 *
+                        rho_history.previous.unchecked(cell, 0U) : 0.0));
+                const double exact_c = temporal + flux.x.unchecked({x + 1, y, z}) -
+                    flux.x.unchecked(cell) + flux.y.unchecked({x, y + 1, z}) -
+                    flux.y.unchecked(cell) + flux.z.unchecked({x, y, z + 1}) -
+                    flux.z.unchecked(cell);
+                const double scale_c = 2.0 * std::abs(volume * effective_bdf.a0 * rho) +
+                    std::abs(flux.x.unchecked({x + 1, y, z})) + std::abs(flux.x.unchecked(cell)) +
+                    std::abs(flux.y.unchecked({x, y + 1, z})) + std::abs(flux.y.unchecked(cell)) +
+                    std::abs(flux.z.unchecked({x, y, z + 1})) + std::abs(flux.z.unchecked(cell));
+                double scale_e = 0.0;
+                if (!pressure_energy_temporal_scale(attempt_pressure_reference,
+                        as_const(trial_density), as_const(trial_enthalpy),
+                        as_const(trial_pressure), cell, volume, scale_e)) {
+                  gap_status = {StatusCode::invalid_plan, kProductPressureEnergy};
+                  break;
+                }
+                const double c_gap =
+                    std::abs(exact_c - pressure_energy_c_h.unchecked(cell, 0U)) / scale_c;
+                if (c_gap > local_gap[0U]) {
+                  local_gap[0U] = c_gap;
+                  const Int3 global{x + product.patch.begin.x,
+                                    y + product.patch.begin.y,
+                                    z + product.patch.begin.z};
+                  local_worst_cell = diagnostic_global_cell(global, product.geometry.global_cells());
+                }
+                local_gap[1U] = std::max(local_gap[1U],
+                    std::abs(pressure_energy_r_e.unchecked(cell, 0U) -
+                        pressure_energy_c_h_row_scale.unchecked(cell, 0U)) / scale_e);
+              }
+          candidate_status = product.reductions.checked_max(
+              {local_gap.data(), local_gap.size()},
+              {global_gap.data(), global_gap.size()}, gap_status);
+          if (!candidate_status) return candidate_status;
+          if (local_gap[0U] != global_gap[0U]) local_worst_cell = UINT64_MAX;
+          std::uint64_t global_worst_cell = UINT64_MAX;
+          if (MPI_Allreduce(&local_worst_cell, &global_worst_cell, 1,
+                            MPI_UINT64_T, MPI_MIN, communicator) != MPI_SUCCESS)
+            return Status{StatusCode::mpi_failure, kProductPressureEnergy};
+          auto diagnostic = g_candidate_globalization_diagnostic;
+          const std::size_t slot = corrector == 1U ? 0U : 1U + refinement_iteration;
+          if (slot < diagnostic.linear_target_gap.size()) {
+            diagnostic.linear_target_gap[slot] = global_gap;
+            diagnostic.linear_target_observed[slot] = true;
+            diagnostic.linear_target_continuity_worst_cell[slot] = global_worst_cell;
+          }
+          publish_candidate_globalization_diagnostic(diagnostic);
+        }
+#endif
         loop.exact_baseline = baseline_artifacts.exact_certificate;
         const bool exact_baseline_binding =
             loop.exact_baseline.valid() &&
@@ -13443,8 +13566,7 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) attempt_stage = 44U;
   if (status && ibm_pressure_operator.has_value())
     status = ibm_pressure_operator->mask_solid_rhs(pressure_system.rhs);
-  if (status && product.piso.coupling() != CouplingKind::simple)
-    status = form_pressure_energy_blocks();
+  if (status) status = form_pressure_energy_blocks();
   PressureEnergyJacobianObservation jacobian_one;
   if (status)
     status = solve_pressure_energy(
@@ -13639,16 +13761,14 @@ Status ProductDriver::Impl::execute_attempt(
   if (terminal_path_active)
     status = product.coupler.refresh(intermediate_input, intermediate_two,
                                      status);
-  const bool probe_stationary_two =
-      pressure_energy_candidate_scope &&
-      product.piso.coupling() == CouplingKind::simple &&
-      pressure_energy_components_converged(candidate_loop_one);
-  if (status && !probe_stationary_two)
-    status = revise_pressure_energy_workspaces();
+  // A fresh SIMPLE momentum sweep has a new internal face predictor. C1's
+  // terminal gates cannot certify that new C2 baseline. Assemble its ordinary
+  // direction once; the exact candidate loop can still certify a stationary
+  // baseline. Do not consume the one-shot C1->C2 authority for a speculative
+  // stationary probe and then try to refresh C2 a second time on failure.
+  if (status) status = revise_pressure_energy_workspaces();
   if (status)
-    status = probe_stationary_two
-                 ? inspect_pressure_energy_target_flux(intermediate_two)
-                 : assemble_pressure_energy_residual(intermediate_two);
+    status = assemble_pressure_energy_residual(intermediate_two);
   // C2 is a new numeric authority over the same preallocated storage.  Its
   // system and solution views must therefore carry fresh revisions rather
   // than silently overwriting the C1 certificate's fields.
@@ -13665,55 +13785,11 @@ Status ProductDriver::Impl::execute_attempt(
                                         pressure_two.state, 0.0};
   PressureEnergyCandidateLoopResult candidate_loop_two;
   PressureEnergyJacobianObservation jacobian_two;
-  bool stationary_two = false;
-  if (status && probe_stationary_two) {
-    zero_field(pressure_correction);
-    zero_field(enthalpy_correction);
-    status = revise_coupled_trial_views();
-    if (status)
-      status = run_pressure_energy_candidate_loop(
-          2U, 0U, jacobian_two, intermediate_two, pressure_two,
-          pressure_energy_target_flux, 1.0, true, candidate_loop_two);
-    stationary_two =
-        static_cast<bool>(status) && candidate_loop_two.stationary.valid();
-    if (stationary_two)
-      status = solve_epoch.record_stationary(
-          product.piso, pressure_two, candidate_loop_two.stationary,
-          product.coupler);
-    else if (status) {
-      // The exact physical-boundary baseline did not remain terminal after
-      // the fresh SIMPLE momentum sweep. Candidate evaluation revised cold
-      // scratch and live destination identities, so rebuild the original C2
-      // system before taking its ordinary coupled direction.
-      intermediate_input.density = trial_density;
-      intermediate_input.trial_velocity = as_const(trial_velocity);
-      intermediate_input.trial_flux = as_const(provisional_flux);
-      intermediate_input.thermophysical_boundary = {
-          boundary_thermo_certificate,
-          {attempt_pressure_reference, as_const(trial_pressure),
-           as_const(trial_enthalpy),
-           {species_accepted.data(), species_accepted.size()},
-           as_const(trial_density)}};
-      status = product.coupler.refresh(intermediate_input, intermediate_two);
-      if (status) status = revise_pressure_energy_workspaces();
-      if (status)
-        status = assemble_pressure_energy_residual(intermediate_two);
-      if (status) status = revise_pressure_system_workspaces();
-      pressure_input.intermediate = intermediate_two;
-      pressure_input.density_trial = as_const(trial_density);
-      if (status)
-        status = product.coupler.assemble_pressure_system(
-            pressure_input, pressure_system, pressure_two);
-      identity_two = linear_identity(pressure_two);
-      coefficient_two = {pressure_two.state, pressure_two.state, 0.0};
-    }
-  }
   if (status) attempt_stage = 53U;
-  if (status && !stationary_two && ibm_pressure_operator.has_value())
+  if (status && ibm_pressure_operator.has_value())
     status = ibm_pressure_operator->mask_solid_rhs(pressure_system.rhs);
-  if (status && !stationary_two)
-    status = form_pressure_energy_blocks();
-  if (status && !stationary_two)
+  if (status) status = form_pressure_energy_blocks();
+  if (status)
     status = solve_pressure_energy(
         2U, 0U, intermediate_two, pressure_two, pressure_energy_target_flux,
         pressure_energy_frozen_enthalpy, identity_two, coefficient_two,
@@ -13728,7 +13804,7 @@ Status ProductDriver::Impl::execute_attempt(
     const Status observed = solve_epoch.observe(report);
     if (status && !observed) status = observed;
   }
-  if (status && pressure_energy_candidate_scope && !stationary_two) {
+  if (status && pressure_energy_candidate_scope) {
     // Freeze the final C2 trial identities before the baseline is certified;
     // none of these five views may be revised before the exact pending commit.
     status = revise_coupled_trial_views();
@@ -14280,16 +14356,8 @@ Status ProductDriver::Impl::execute_attempt(
     molecular_viscosity = halo_views[4U];
     effective_viscosity = halo_views[5U];
     conductivity = halo_views[6U];
-    species_index = 0U;
-    passive_index = 0U;
-    for (std::size_t index = 0U; index < product.fields.scalars.size();
-         ++index) {
-      if (product.fields.scalar_roles[index] ==
-          TransportedScalarRole::species)
-        species_trial[species_index++] = halo_views[index + 7U];
-      else
-        passive_trial[passive_index++] = halo_views[index + 7U];
-    }
+    restore_scalar_halo_views(product.fields, halo_views, 7U,
+                              species_trial, passive_trial);
     std::array<FieldView, 4U> derived{velocity_gradient,
                                      molecular_viscosity,
                                      effective_viscosity, conductivity};
@@ -14358,16 +14426,8 @@ Status ProductDriver::Impl::execute_attempt(
     if (status) {
       trial_pressure = halo_views[0U];
       trial_temperature = halo_views[1U];
-      species_index = 0U;
-      passive_index = 0U;
-      for (std::size_t index = 0U; index < product.fields.scalars.size();
-           ++index) {
-        if (product.fields.scalar_roles[index] ==
-            TransportedScalarRole::species)
-          species_trial[species_index++] = halo_views[index + 2U];
-        else
-          passive_trial[passive_index++] = halo_views[index + 2U];
-      }
+      restore_scalar_halo_views(product.fields, halo_views, 2U,
+                                species_trial, passive_trial);
     }
   }
   status = product.reductions.consensus(status);
@@ -14551,6 +14611,62 @@ Status ProductDriver::Impl::execute_attempt(
         {species_accepted.data(), species_accepted.size()},
         product.reductions,
         final_flux_writer, pending_flux);
+  // Candidate/flux publication no longer borrows the momentum coefficient
+  // scratch. Reassemble on the final thermodynamic/velocity/transport state,
+  // while a failure can still reject the entire uncommitted time step.
+  if (status) attempt_stage = 64U;
+  if (status)
+    status = runtime_write_view(product.fields.momentum_diagonal,
+                                momentum_diagonal);
+  if (status)
+    status = runtime_write_view(product.fields.momentum_rhs, momentum_rhs);
+  if (status)
+    status = runtime_write_view(product.fields.momentum_residual,
+                                momentum_residual);
+  if (status)
+    status = make_pressure_face_views(product.pressure_face_storage, cells,
+                                      x_coefficient, y_coefficient, z_coefficient);
+  if (status) {
+    assembly.scope = EquationAssemblyScope::final_conservative;
+    assembly.mass_flux = terminal_energy_flux;
+    assembly.face_flux = terminal_energy_flux.revision;
+    assembly.face_flux_authority = terminal_energy_flux.certificate.authority();
+    assembly.face_flux_storage = terminal_energy_flux.certificate.storage();
+    assembly.face_flux_revision_domain =
+        terminal_energy_flux.certificate.revision_domain();
+    assembly.provisional_mass_flux = false;
+    EquationAssemblyCertificate final_momentum;
+    status = assemble_momentum(
+        product.equations.momentum(), equation_state, material,
+        as_const(velocity_gradient), {}, assembly,
+        {momentum_diagonal, momentum_rhs, momentum_residual,
+         x_coefficient, y_coefficient, z_coefficient}, final_momentum);
+  }
+  status = product.reductions.consensus(status);
+  if (status)
+    status = detail::collect_terminal_equations(
+        product.equations.kernels(), equation_state, effective_bdf,
+        terminal_energy_flux, as_const(momentum_residual),
+        as_const(pressure_energy_r_e), pressure_energy_activity.cells,
+        product.reductions, terminal_equations);
+  // Candidate enthalpy physical corners remain cold-initialised thermal
+  // inputs for the next closure. Do not use that field for non-thermal
+  // scratch. The completed momentum HbyA workspace is overwritten in full
+  // by the next momentum predictor before another coupler consumes it.
+  if (status)
+    status = runtime_write_view(product.fields.h_by_a,
+                                momentum_low_order_rhs_delta);
+  if (status)
+    status = runtime_write_view(product.fields.pressure_energy_e_p,
+                                pressure_energy_e_p);
+  if (status)
+    status = detail::collect_boundary_balance(
+        product.equations.kernels(), product.schemes, product.boundary,
+        equation_state, material, as_const(velocity_gradient), effective_bdf,
+        terminal_energy_flux, pressure_energy_activity.cells,
+        momentum_low_order_rhs_delta, pressure_energy_e_p,
+        time.accepted_step(), balance_history, product.reductions,
+        conservation, pending_balance);
   if (status) {
     begin_timed_stage(70U);
     attempt_stage = 70U;
@@ -14689,10 +14805,42 @@ Status ProductDriver::advance(LocalTimeLimits limits,
         implementation_->predictor_diagnostics;
     candidate.pressure_energy_globalization =
         implementation_->pressure_energy_globalization;
+    auto& perf = candidate.pressure_energy_performance;
+    const auto& observed = candidate.pressure_energy_globalization;
+    const auto& work = observed.work;
+    perf.candidate.baseline_evaluations += work.baseline_evaluations;
+    perf.candidate.extrapolation_evaluations += work.extrapolation_evaluations;
+    perf.candidate.ladder_evaluations += work.ladder_evaluations;
+    perf.candidate.incomplete_evaluations += work.incomplete_evaluations;
+    perf.candidate.rejected_extrapolations += work.rejected_extrapolations;
+    perf.candidate.local_evaluation_nanoseconds += work.local_evaluation_nanoseconds;
+    for (std::size_t i = 0U; i < work.local_phase_nanoseconds.size(); ++i)
+      perf.candidate.local_phase_nanoseconds[i] += work.local_phase_nanoseconds[i];
+    for (std::size_t i = 0U; i < 3U; ++i)
+      perf.solve_nanoseconds[i] += observed.local_solve_nanoseconds[i];
+    for (std::size_t i = 0U; i < observed.solve_observation_count; ++i) {
+      const auto& solve = observed.solve_observations[i];
+      const auto kind = static_cast<std::size_t>(solve.kind);
+      perf.calls_by_kind[kind] += solve.invoked ? 1U : 0U;
+      for (std::size_t phase = 0U; phase < 3U; ++phase)
+        perf.nanoseconds_by_kind[kind][phase] += solve.local_nanoseconds[phase];
+    }
+    const auto add_krylov = [&](const LinearSolveResult& solve) {
+      const std::array<std::uint64_t, 5U> ns{solve.operator_nanoseconds,
+          solve.preconditioner_nanoseconds, solve.arnoldi_dot_nanoseconds,
+          solve.arnoldi_reduce_nanoseconds, solve.arnoldi_update_nanoseconds};
+      for (std::size_t i = 0U; i < ns.size(); ++i) perf.krylov_nanoseconds[i] += ns[i];
+    };
+    for (std::size_t i = 0U; i < attempt_report.pressure_solve_calls; ++i)
+      add_krylov(attempt_report.pressure[i]);
+    for (std::size_t i = 0U; i < attempt_report.pressure_energy_refinement_solve_calls; ++i)
+      add_krylov(attempt_report.pressure_energy_refinement[i].solve);
     candidate.momentum_predictor_limiter =
         implementation_->momentum_predictor_limiter;
     candidate.momentum_predictor_solve =
         implementation_->momentum_predictor_solve;
+    candidate.terminal_equations = implementation_->terminal_equations;
+    candidate.conservation = implementation_->conservation;
     const std::uint64_t predictor_calls =
         implementation_->predictor_diagnostics.blocking_collectives;
     predictor_blocking_collectives =

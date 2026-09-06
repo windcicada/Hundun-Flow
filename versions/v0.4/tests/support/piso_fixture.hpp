@@ -163,7 +163,8 @@ class PeriodicPisoFixture {
  public:
   bool initialize(std::int32_t cell_count,
                   MPI_Comm communicator = MPI_COMM_SELF,
-                  bool multispecies = false) {
+                  bool multispecies = false,
+                  CouplingKind coupling = CouplingKind::piso) {
     if (cell_count < 2) {
       return false;
     }
@@ -274,10 +275,12 @@ class PeriodicPisoFixture {
     equation_spec.closed_mass_service_stage = 1U;
     equation_spec.maximum_cells_per_rank =
         static_cast<std::size_t>(global_cells);
+    PisoPlanSpec piso_spec = test_piso_spec();
+    piso_spec.coupling = coupling;
     if (!EquationPlanSet::compile(communicator, schemes, geometry, patch,
                                   boundary, contributions, thermodynamics,
                                   transport, equation_spec, equations) ||
-        !PisoPlan::compile(communicator, equations, test_piso_spec(), piso)) {
+        !PisoPlan::compile(communicator, equations, piso_spec, piso)) {
       return false;
     }
 

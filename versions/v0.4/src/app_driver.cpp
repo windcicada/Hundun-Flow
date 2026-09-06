@@ -534,7 +534,8 @@ static Status run_application(MPI_Comm communicator,
   report.failure_phase = ApplicationFailurePhase::runtime_identity;
   RuntimeCandidateIdentity candidate_identity;
   status = detail::runtime_candidate_identity(communicator,
-                                              candidate_identity);
+                                              candidate_identity,
+                                              options.target_build_manifest);
   if (!status) return status;
   const PlanFingerprint build_identity =
       detail::runtime_sha256_fingerprint(
@@ -757,9 +758,13 @@ static Status run_application(MPI_Comm communicator,
         return driver.committed_restart_snapshot(restart_snapshot);
       });
     }
-    if (status && restart)
+    if (status && restart) {
       status = RestartWriter::write(communicator, output_path, restart_snapshot,
-                                    {1U});
+                                    {1U, &report.restart_output,
+                                     detail::output_service(services, RuntimeServiceKind::restart)
+                                         ->maximum_staging_bytes_per_rank});
+      report.io_failure = report.restart_output.failure;
+    }
     if (status) {
       report.failure_phase = ApplicationFailurePhase::resources;
       timing.phase(7U);

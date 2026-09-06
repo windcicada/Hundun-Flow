@@ -507,6 +507,14 @@ struct LinearSolveResult {
   std::uint64_t recycle_capture_cycle_attempts{};
   std::uint64_t recycle_capture_reduction_calls{};
   std::uint64_t recycle_capture_blocking_operations{};
+  // Local inclusive apply costs (including their internal MPI), disjoint from
+  // each other. Arnoldi costs cover the main orthogonalization batch only;
+  // neither these partial costs nor rank-wise maxima equal total solve time.
+  std::uint64_t operator_nanoseconds{};
+  std::uint64_t preconditioner_nanoseconds{};
+  std::uint64_t arnoldi_dot_nanoseconds{};
+  std::uint64_t arnoldi_reduce_nanoseconds{};
+  std::uint64_t arnoldi_update_nanoseconds{};
 };
 
 struct LinearReductionCounters {

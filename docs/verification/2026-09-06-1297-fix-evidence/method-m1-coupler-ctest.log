@@ -1,0 +1,51 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start  86: v04_solver_piso_authority
+1/8 Test  #86: v04_solver_piso_authority ............   Passed    0.87 sec
+    Start  96: v04_solver_piso_checkerboard
+2/8 Test  #96: v04_solver_piso_checkerboard .........   Passed    0.28 sec
+    Start  97: v04_solver_piso_checkerboard_mpi_2
+3/8 Test  #97: v04_solver_piso_checkerboard_mpi_2 ...   Passed    0.28 sec
+    Start  98: v04_solver_piso_checkerboard_mpi_4
+4/8 Test  #98: v04_solver_piso_checkerboard_mpi_4 ...   Passed    0.31 sec
+    Start  99: v04_solver_piso_temporal_order
+5/8 Test  #99: v04_solver_piso_temporal_order .......Subprocess aborted***Exception:   0.36 sec
+free(): invalid pointer
+[wyf-Super-Server:207786] *** Process received signal ***
+[wyf-Super-Server:207786] Signal: Aborted (6)
+[wyf-Super-Server:207786] Signal code:  (-6)
+[wyf-Super-Server:207786] [ 0] /lib/x86_64-linux-gnu/libpthread.so.0(+0x153c0)[0x7f5740ea83c0]
+[wyf-Super-Server:207786] [ 1] /lib/x86_64-linux-gnu/libc.so.6(gsignal+0xcb)[0x7f5740a3d18b]
+[wyf-Super-Server:207786] [ 2] /lib/x86_64-linux-gnu/libc.so.6(abort+0x12b)[0x7f5740a1c859]
+[wyf-Super-Server:207786] [ 3] /lib/x86_64-linux-gnu/libc.so.6(+0x903ee)[0x7f5740a873ee]
+[wyf-Super-Server:207786] [ 4] /lib/x86_64-linux-gnu/libc.so.6(+0x9847c)[0x7f5740a8f47c]
+[wyf-Super-Server:207786] [ 5] /lib/x86_64-linux-gnu/libc.so.6(+0x99cac)[0x7f5740a90cac]
+[wyf-Super-Server:207786] [ 6] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_piso_temporal_order_test(+0x2691e)[0x559069a8391e]
+[wyf-Super-Server:207786] [ 7] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_piso_temporal_order_test(+0x1c81f)[0x559069a7981f]
+[wyf-Super-Server:207786] [ 8] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf3)[0x7f5740a1e0b3]
+[wyf-Super-Server:207786] [ 9] /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_piso_temporal_order_test(+0x565e)[0x559069a6265e]
+[wyf-Super-Server:207786] *** End of error message ***
+
+    Start 107: v04_solver_piso_mpi_1
+6/8 Test #107: v04_solver_piso_mpi_1 ................   Passed    0.47 sec
+    Start 108: v04_solver_piso_mpi_2
+7/8 Test #108: v04_solver_piso_mpi_2 ................   Passed    0.42 sec
+    Start 109: v04_solver_piso_mpi_4
+8/8 Test #109: v04_solver_piso_mpi_4 ................   Passed    0.38 sec
+
+88% tests passed, 1 tests failed out of 8
+
+Label Time Summary:
+v04_focused    =   4.34 sec*proc (6 tests)
+
+Total Test time (real) =   3.38 sec
+
+The following tests FAILED:
+	 99 - v04_solver_piso_temporal_order (Subprocess aborted) v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

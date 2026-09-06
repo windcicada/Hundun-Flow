@@ -2188,6 +2188,53 @@ Status PressureEnergyDiagonalOperator::apply(FieldView input,
   return {};
 }
 
+Status PressureEnergyEnthalpyOperator::bind_diagonal(
+    const PressureEnergyEnthalpyBinding& binding, FieldView workspace,
+    PressureEnergyDiagonalOperator& out,
+    PressureEnergyDiagonalCertificate& certificate) noexcept {
+  certificate = {};
+  const Int3 cells = binding.assembled_diagonal.interior;
+  const PressureEnergyCellActivity activity{
+      binding.activity.cells, binding.activity.local_fingerprint,
+      binding.activity.collective_fingerprint};
+  const ConstFieldView inputs[]{binding.assembled_diagonal,
+                                binding.target_enthalpy,
+                                binding.density_enthalpy_derivative};
+  if (binding.kernels == nullptr || binding.kernels->fingerprint() == 0U ||
+      !same_shape(binding.kernels->cells(), cells) ||
+      !detail::valid_bdf_coefficients(binding.authority.bdf) ||
+      !valid_activity(activity, cells) || !valid_identity(binding.identity) ||
+      !valid_scalar_view(workspace, cells))
+    return {StatusCode::invalid_plan, kPressureEnergyDiagonalBinding};
+  for (ConstFieldView input : inputs)
+    if (!valid_scalar_view(input, cells) || overlaps(input, as_const(workspace)))
+      return {StatusCode::invalid_plan, kPressureEnergyDiagonalBinding};
+  bool finite = true;
+  for_each_cell(cells, [&](Int3 cell) {
+    if (!active_cell(activity, cells, cell)) {
+      workspace.unchecked(cell, 0U) = 1.0;
+      return;
+    }
+    const double diagonal = binding.assembled_diagonal.unchecked(cell, 0U);
+    const double h = binding.target_enthalpy.unchecked(cell, 0U);
+    const double rho_h = binding.density_enthalpy_derivative.unchecked(cell, 0U);
+    const double volume = detail::cell_volume(*binding.kernels, cell);
+    // Freeze spatial couplings, not the local EOS in the temporal product.
+    // The ordinary enthalpy diagonal already contains a0*V*rho and its
+    // diffusion proxy. Unlike the spatial operator, retain that proxy here.
+    const double corrected = diagonal + binding.authority.bdf.a0 * volume * h * rho_h;
+    finite = finite && std::isfinite(diagonal) && diagonal > 0.0 &&
+        std::isfinite(h) && std::isfinite(rho_h) && rho_h < 0.0 &&
+        std::isfinite(volume) && volume > 0.0 && std::isfinite(corrected);
+    workspace.unchecked(cell, 0U) = corrected;
+  });
+  if (!finite)
+    return {StatusCode::rejected_step, kPressureEnergyDiagonalBinding};
+  return PressureEnergyDiagonalOperator::bind(
+      {as_const(workspace), activity, binding.identity, 1.0},
+      out, certificate);
+}
+
 bool PressureEnergyEnthalpyCertificate::valid() const noexcept {
   return linear.identity.symbolic != 0U && linear.identity.numeric != 0U &&
          linear.identity.hierarchy != 0U && linear.identity.workspace != 0U &&

@@ -173,15 +173,19 @@ inline Status output_collective_stage(
   return output_collective_status(communicator, status, failure);
 }
 
+enum class OutputFileMode { truncate, append, exclusive };
+
 inline bool output_write_file(const std::filesystem::path& path,
                               const std::uint8_t* data, std::size_t bytes,
-                              bool append,
-                              IoFailureContext* failure = nullptr) noexcept {
-  const int flags = append ? O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC
-                           : O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+                              OutputFileMode mode,
+                              IoFailureContext* failure = nullptr,
+                              mode_t permissions = 0644) noexcept {
+  const int disposition = mode == OutputFileMode::exclusive ? O_EXCL
+                          : mode == OutputFileMode::append ? O_APPEND : O_TRUNC;
+  const int flags = O_WRONLY | O_CREAT | disposition | O_CLOEXEC;
   int descriptor = -1;
   do {
-    descriptor = ::open(path.c_str(), flags, 0644);
+    descriptor = ::open(path.c_str(), flags, permissions);
   } while (descriptor < 0 && errno == EINTR);
   if (descriptor < 0) {
     output_record_failure(failure, IoFailureOperation::open, errno, path);
@@ -216,6 +220,15 @@ inline bool output_write_file(const std::filesystem::path& path,
     okay = false;
   }
   return okay;
+}
+
+inline bool output_write_file(const std::filesystem::path& path,
+                              const std::uint8_t* data, std::size_t bytes,
+                              bool append,
+                              IoFailureContext* failure = nullptr) noexcept {
+  return output_write_file(path, data, bytes,
+                           append ? OutputFileMode::append : OutputFileMode::truncate,
+                           failure);
 }
 
 inline bool output_write_file(const std::filesystem::path& path,

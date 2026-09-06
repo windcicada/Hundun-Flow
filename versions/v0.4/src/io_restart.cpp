@@ -6,6 +6,7 @@
 #include "app_identity_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "io_restart_detail.hpp"
+#include "io_output_detail.hpp"
 
 #include <mpi.h>
 
@@ -17,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -103,6 +105,7 @@ std::uint64_t hash_bytes(const std::uint8_t* data, std::size_t size) noexcept {
 
 class Encoder {
  public:
+  explicit Encoder(std::size_t capacity = 0U) { data_.reserve(capacity); }
   void bytes(const void* data, std::size_t size) {
     const auto* begin = static_cast<const std::uint8_t*>(data);
     data_.insert(data_.end(), begin, begin + size);
@@ -134,6 +137,7 @@ class Encoder {
   }
   void append_integrity() { u64(hash_bytes(data_.data(), data_.size())); }
   const std::vector<std::uint8_t>& data() const noexcept { return data_; }
+  std::vector<std::uint8_t> take() noexcept { return std::move(data_); }
 
  private:
   std::vector<std::uint8_t> data_;
@@ -280,7 +284,8 @@ Status consensus_u64(MPI_Comm communicator, std::uint64_t value) noexcept {
 }
 
 template <class LocalWork>
-Status restart_local_stage(MPI_Comm communicator, LocalWork&& work) noexcept {
+Status restart_local_stage(MPI_Comm communicator, LocalWork&& work,
+                           IoFailureContext* failure = nullptr) noexcept {
   Status status;
   try {
     status = work();
@@ -289,35 +294,37 @@ Status restart_local_stage(MPI_Comm communicator, LocalWork&& work) noexcept {
   } catch (...) {
     status = {StatusCode::io_failure, kRestartInput};
   }
-  return collective_status(communicator, status);
+  return failure != nullptr
+             ? detail::output_collective_status(communicator, status, failure)
+             : collective_status(communicator, status);
 }
 
 bool write_file_sync(const fs::path& path,
-                     const std::vector<std::uint8_t>& bytes) noexcept {
-  const int descriptor =
-      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-  if (descriptor < 0) return false;
-  std::size_t cursor = 0U;
-  bool okay = true;
-  while (cursor < bytes.size()) {
-    const ssize_t written =
-        ::write(descriptor, bytes.data() + cursor, bytes.size() - cursor);
-    if (written <= 0) {
-      okay = false;
-      break;
-    }
-    cursor += static_cast<std::size_t>(written);
-  }
-  if (okay && ::fsync(descriptor) != 0) okay = false;
-  if (::close(descriptor) != 0) okay = false;
-  return okay;
+                     const std::vector<std::uint8_t>& bytes,
+                     IoFailureContext* failure = nullptr) noexcept {
+  return detail::output_write_file(path, bytes.data(), bytes.size(),
+                                   detail::OutputFileMode::exclusive, failure);
 }
 
-bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes) {
-  const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (descriptor < 0) return false;
+bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes,
+               IoFailureContext* failure = nullptr) {
+  int descriptor;
+  do {
+    descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) {
+    detail::output_record_failure(failure, IoFailureOperation::open, errno, path);
+    return false;
+  }
   struct stat info {};
-  bool okay = ::fstat(descriptor, &info) == 0 && info.st_size >= 0;
+  int stated;
+  do {
+    stated = ::fstat(descriptor, &info);
+  } while (stated != 0 && errno == EINTR);
+  bool okay = stated == 0 && info.st_size >= 0;
+  if (!okay)
+    detail::output_record_failure(failure, IoFailureOperation::stat,
+                                  stated == 0 ? EIO : errno, path);
   if (okay) {
     try {
       bytes.resize(static_cast<std::size_t>(info.st_size));
@@ -330,21 +337,25 @@ bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes) {
   while (okay && cursor < bytes.size()) {
     const ssize_t count =
         ::read(descriptor, bytes.data() + cursor, bytes.size() - cursor);
+    if (count < 0 && errno == EINTR) continue;
     if (count <= 0) {
+      detail::output_record_failure(failure, IoFailureOperation::read,
+                                    count == 0 ? EIO : errno, path);
       okay = false;
       break;
     }
     cursor += static_cast<std::size_t>(count);
   }
-  if (::close(descriptor) != 0) okay = false;
+  if (::close(descriptor) != 0) {
+    detail::output_record_failure(failure, IoFailureOperation::close, errno, path);
+    okay = false;
+  }
   return okay;
 }
 
-bool sync_directory(const fs::path& path) noexcept {
-  const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (descriptor < 0) return false;
-  const bool okay = ::fsync(descriptor) == 0;
-  return ::close(descriptor) == 0 && okay;
+bool sync_directory(const fs::path& path,
+                     IoFailureContext* failure = nullptr) noexcept {
+  return detail::output_sync_directory(path, failure);
 }
 
 std::string rank_name(std::uint32_t rank) {
@@ -482,7 +493,7 @@ bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
          snapshot.closed_mass_target > 0.0;
 }
 
-std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) noexcept {
+std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) {
   Encoder encoder;
   const std::uint32_t version = has_exact_history(snapshot)
                                     ? kExactHistoryFormatVersion
@@ -625,9 +636,57 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
   return true;
 }
 
+bool rank_block_size(const RestartSnapshot& snapshot, std::size_t& bytes) {
+  Encoder header;
+  encode_common(header, snapshot, has_exact_history(snapshot)
+                    ? kExactHistoryFormatVersion : kLegacyFormatVersion);
+  // Magic, version/size/rank, patch, and trailing integrity.
+  bytes = header.data().size() + 8U + 12U + 24U + 8U;
+  const auto add_values = [&](std::size_t count) {
+    std::size_t payload = 0U;
+    if (!checked_multiply(count, sizeof(double), payload) ||
+        bytes > SIZE_MAX - 8U || payload > SIZE_MAX - bytes - 8U) return false;
+    bytes += 8U + payload;
+    return true;
+  };
+  std::size_t cells = 0U;
+  if (!cell_count(snapshot.patch.cells, cells)) return false;
+  const auto fields = [&](Span<const RestartFieldView> views) {
+    for (std::size_t i = 0U; i < views.size; ++i) {
+      const auto& view = views.data[i];
+      std::size_t values = 0U;
+      if (!checked_multiply(cells, view.values.components, values) ||
+          !add_values(values)) return false;
+    }
+    return true;
+  };
+  if (!fields(snapshot.fields)) return false;
+  const bool exact = has_exact_history(snapshot);
+  if (exact && (!fields(snapshot.previous_fields) ||
+                !fields(snapshot.accepted_rate_fields) ||
+                !fields(snapshot.previous_rate_fields))) return false;
+  for (int history = 0; history < (exact ? 2 : 1); ++history) {
+    for (int axis = 0; axis < 3; ++axis) {
+      Int3 owned = snapshot.patch.cells;
+      if (axis == 0 && snapshot.patch.begin.x + owned.x == snapshot.global_cells.x) ++owned.x;
+      if (axis == 1 && snapshot.patch.begin.y + owned.y == snapshot.global_cells.y) ++owned.y;
+      if (axis == 2 && snapshot.patch.begin.z + owned.z == snapshot.global_cells.z) ++owned.z;
+      std::size_t count = 0U;
+      if (!cell_count(owned, count) || !add_values(count)) return false;
+    }
+  }
+  return true;
+}
+
 Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
-                         std::vector<std::uint8_t>& out) {
-  Encoder encoder;
+                         std::vector<std::uint8_t>& out,
+                         std::size_t maximum_bytes) {
+  std::size_t bytes = 0U;
+  if (!rank_block_size(snapshot, bytes))
+    return {StatusCode::invalid_plan, kRestartInput};
+  if (maximum_bytes != 0U && bytes > maximum_bytes)
+    return {StatusCode::allocation_failure, kRestartRankFile};
+  Encoder encoder(bytes);
   const std::uint32_t version = has_exact_history(snapshot)
                                     ? kExactHistoryFormatVersion
                                     : kLegacyFormatVersion;
@@ -711,7 +770,9 @@ Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
     status = encode_flux(snapshot.previous_mass_flux);
   if (!status) return status;
   encoder.append_integrity();
-  out = encoder.data();
+  if (encoder.data().size() != bytes)
+    return {StatusCode::invalid_plan, kRestartRankFile};
+  out = encoder.take();
   return {};
 }
 
@@ -720,10 +781,14 @@ Status encode_manifest(const RestartSnapshot& snapshot, int size,
                        std::vector<std::uint8_t>& out) {
   if (records.size() != static_cast<std::size_t>(size))
     return {StatusCode::invalid_plan, kRestartManifest};
-  Encoder encoder;
   const std::uint32_t version = has_exact_history(snapshot)
                                     ? kExactHistoryFormatVersion
                                     : kLegacyFormatVersion;
+  Encoder common;
+  encode_common(common, snapshot, version);
+  if (records.size() > (SIZE_MAX - common.data().size() - 24U) / 40U)
+    return {StatusCode::invalid_plan, kRestartManifest};
+  Encoder encoder(common.data().size() + 24U + records.size() * 40U);
   encoder.bytes(kManifestMagic.data(), kManifestMagic.size());
   encoder.u32(version);
   encoder.u32(static_cast<std::uint32_t>(size));
@@ -735,7 +800,7 @@ Status encode_manifest(const RestartSnapshot& snapshot, int size,
     encoder.u64(record.hash);
   }
   encoder.append_integrity();
-  out = encoder.data();
+  out = encoder.take();
   return {};
 }
 
@@ -958,10 +1023,11 @@ Status broadcast_string(MPI_Comm communicator, int rank,
   return collective_status(communicator, status);
 }
 
-Status read_current_name(const fs::path& directory, std::string& out) noexcept
+Status read_current_name(const fs::path& directory, std::string& out,
+                         IoFailureContext* failure) noexcept
     try {
   std::vector<std::uint8_t> bytes;
-  if (!read_file(directory / "current", bytes) || bytes.empty() ||
+  if (!read_file(directory / "current", bytes, failure) || bytes.empty() ||
       bytes.size() > 256U)
     return {StatusCode::io_failure, kRestartDirectory};
   if (bytes.back() == '\n') bytes.pop_back();
@@ -1027,56 +1093,111 @@ Status validate_expected(const RestartExpected& expected,
   return {};
 }
 
-void prune_generations(const fs::path& directory, std::uint32_t keep_last,
-                       const std::string& current) noexcept {
+struct GenerationKey {
+  std::uint64_t step{};
+  std::uint64_t tick{};
+};
+
+bool generation_key(std::string_view name, GenerationKey& key) noexcept {
+  constexpr std::string_view prefix = "generation-";
+  if (name.substr(0U, prefix.size()) != prefix) return false;
+  name.remove_prefix(prefix.size());
+  const auto dash = name.find('-');
+  if (dash == 0U || dash == std::string_view::npos || dash + 1U == name.size())
+    return false;
+  const auto step = std::from_chars(name.data(), name.data() + dash, key.step);
+  const auto tick = std::from_chars(name.data() + dash + 1U,
+                                   name.data() + name.size(), key.tick);
+  return step.ec == std::errc{} && step.ptr == name.data() + dash &&
+         tick.ec == std::errc{} && tick.ptr == name.data() + name.size();
+}
+
+Status prune_generations(const fs::path& directory, std::uint32_t keep_last,
+                          const std::string& current, IoFailureContext* failure) {
   std::error_code error;
-  std::vector<fs::path> generations;
+  struct Generation {
+    fs::path path;
+    GenerationKey key;
+  };
+  std::vector<Generation> generations;
   for (fs::directory_iterator iterator(directory, error), end;
        !error && iterator != end; iterator.increment(error)) {
     const std::string name = iterator->path().filename().string();
-    if (iterator->is_directory(error) && !error &&
-        name.rfind("generation-", 0U) == 0U &&
-        name.find("-pending") == std::string::npos) {
-      generations.push_back(iterator->path());
+    GenerationKey key;
+    if (fs::is_directory(iterator->symlink_status(error)) && !error &&
+        generation_key(name, key)) {
+      generations.push_back({iterator->path(), key});
     }
   }
-  if (error) return;
-  std::sort(generations.begin(), generations.end());
+  if (error) {
+    detail::output_record_failure(failure, IoFailureOperation::read, error.value(), directory);
+    return {StatusCode::io_failure, kRestartPublication};
+  }
+  // Keep current even after a rollback restart; the remaining generations
+  // are ranked by accepted step, with a deterministic numeric tick tie-break.
+  std::sort(generations.begin(), generations.end(),
+            [](const Generation& a, const Generation& b) {
+              return a.key.step < b.key.step ||
+                     (a.key.step == b.key.step && a.key.tick < b.key.tick);
+            });
   while (generations.size() > keep_last) {
     auto selected = generations.begin();
     while (selected != generations.end() &&
-           selected->filename().string() == current)
+           selected->path.filename().string() == current)
       ++selected;
     if (selected == generations.end()) break;
-    fs::remove_all(*selected, error);
-    if (error) return;
+    fs::remove_all(selected->path, error);
+    if (error) {
+      detail::output_record_failure(failure, IoFailureOperation::remove,
+                                    error.value(), selected->path);
+      return {StatusCode::io_failure, kRestartPublication};
+    }
     generations.erase(selected);
   }
-  (void)sync_directory(directory);
+  return sync_directory(directory, failure)
+             ? Status{} : Status{StatusCode::io_failure, kRestartPublication};
 }
 
-bool remove_stale_pending(const fs::path& directory) noexcept {
+bool remove_stale_pending(const fs::path& directory, IoFailureContext* failure) {
   std::error_code error;
   for (fs::directory_iterator iterator(directory, error), end;
        !error && iterator != end; iterator.increment(error)) {
     const std::string name = iterator->path().filename().string();
     if (name.size() >= 8U &&
         name.compare(name.size() - 8U, 8U, "-pending") == 0) {
-      fs::remove_all(iterator->path(), error);
+      std::string_view owned(name.data(), name.size() - 8U);
+      const bool pointer = owned.substr(0U, 8U) == "current-";
+      if (pointer) owned.remove_prefix(8U);
+      GenerationKey key;
+      if (!generation_key(owned, key)) continue;
+      const auto type = iterator->symlink_status(error);
       if (error) return false;
+      if (pointer ? !fs::is_regular_file(type) : !fs::is_directory(type))
+        continue;
+      fs::remove_all(iterator->path(), error);
+      if (error) {
+        detail::output_record_failure(failure, IoFailureOperation::remove,
+                                      error.value(), iterator->path());
+        return false;
+      }
     }
   }
-  return !error && sync_directory(directory);
+  if (error)
+    detail::output_record_failure(failure, IoFailureOperation::read, error.value(), directory);
+  return !error && sync_directory(directory, failure);
 }
 
 Status publish_generation(const fs::path& directory,
                           const fs::path& pending,
                           const std::string& generation,
-                          std::uint32_t keep_last) noexcept {
+                          RestartWriteReport& report) {
   std::error_code error;
   const fs::path final = directory / generation;
   fs::rename(pending, final, error);
-  if (error || !sync_directory(directory))
+  if (error)
+    detail::output_record_failure(&report.failure, IoFailureOperation::rename,
+                                  error.value(), final);
+  if (error || !sync_directory(directory, &report.failure))
     return {StatusCode::io_failure, kRestartPublication};
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
   if (injected(detail::RestartFailurePoint::after_generation_rename, 0))
@@ -1085,16 +1206,23 @@ Status publish_generation(const fs::path& directory,
   const std::string pointer_text = generation + "\n";
   std::vector<std::uint8_t> pointer(pointer_text.begin(), pointer_text.end());
   const fs::path pointer_pending = directory / ("current-" + generation + "-pending");
-  if (!write_file_sync(pointer_pending, pointer))
+  if (!write_file_sync(pointer_pending, pointer, &report.failure))
     return {StatusCode::io_failure, kRestartPublication};
-  fs::rename(pointer_pending, directory / "current", error);
-  if (error || !sync_directory(directory))
+  const auto current = directory / "current";
+  fs::rename(pointer_pending, current, error);
+  if (error) {
+    detail::output_record_failure(&report.failure, IoFailureOperation::rename,
+                                  error.value(), current);
     return {StatusCode::io_failure, kRestartPublication};
+  }
+  report.publication = RestartPublicationState::visible_not_durable;
+  if (!sync_directory(directory, &report.failure))
+    return {StatusCode::io_failure, kRestartPublication};
+  report.publication = RestartPublicationState::durable;
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
   if (injected(detail::RestartFailurePoint::after_current_switch, 0))
     return {StatusCode::io_failure, kRestartPublication};
 #endif
-  prune_generations(directory, keep_last, generation);
   return {};
 }
 
@@ -1148,44 +1276,101 @@ void RestartImage::clear() noexcept {
 Status RestartWriter::write(MPI_Comm communicator,
                             const std::filesystem::path& restart_directory,
                             const RestartSnapshot& snapshot,
-                            RestartWriteOptions options) noexcept try {
+                            RestartWriteOptions options) noexcept {
+  struct Capture {
+    RestartWriteReport value{};
+    RestartWriteReport* destination;
+    ~Capture() noexcept { if (destination != nullptr) *destination = value; }
+  } capture{{}, options.report};
+  auto& report = capture.value;
+  const auto local_stage = [&](auto&& work) noexcept {
+    return restart_local_stage(communicator, std::forward<decltype(work)>(work),
+                               &report.failure);
+  };
   int rank = 0;
   int size = 0;
   if (communicator == MPI_COMM_NULL ||
       MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
-      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0 ||
-      restart_directory.empty() || options.keep_last == 0U) {
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
     return {StatusCode::invalid_plan, kRestartInput};
   }
-  Status status = valid_snapshot(snapshot)
+  Status status = !restart_directory.empty() && options.keep_last != 0U &&
+                          valid_snapshot(snapshot)
                       ? Status{}
                       : Status{StatusCode::invalid_plan, kRestartInput};
   status = collective_status(communicator, status);
   if (!status) return status;
-  status = consensus_u64(communicator, snapshot_signature(snapshot));
+  std::uint64_t signature = 0U;
+  status = local_stage( [&]() -> Status {
+    signature = snapshot_signature(snapshot);
+    return {};
+  });
+  if (!status) return status;
+  status = consensus_u64(communicator, signature);
+  if (!status) return status;
+
+  std::size_t local_bytes = 0U;
+  status = local_stage([&]() -> Status {
+    return rank_block_size(snapshot, local_bytes) ? Status{}
+        : Status{StatusCode::invalid_plan, kRestartInput};
+  });
+  if (!status) return status;
+  std::uint64_t maximum_bytes = local_bytes;
+  if (MPI_Allreduce(MPI_IN_PLACE, &maximum_bytes, 1, MPI_UINT64_T,
+                     MPI_MAX, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kRestartCollective};
+  status = local_stage([&]() -> Status {
+    std::size_t required = local_bytes;
+    if (rank == 0) {
+      Encoder common;
+      encode_common(common, snapshot, has_exact_history(snapshot)
+          ? kExactHistoryFormatVersion : kLegacyFormatVersion);
+      std::size_t metadata = 0U;
+      if (!checked_multiply(static_cast<std::size_t>(size),
+                             64U + sizeof(RankRecord) + 40U, metadata) ||
+          metadata > SIZE_MAX - common.data().size() - 24U ||
+          maximum_bytes > SIZE_MAX - metadata - common.data().size() - 24U)
+        return {StatusCode::invalid_plan, kRestartInput};
+      required = static_cast<std::size_t>(maximum_bytes) + metadata + common.data().size() + 24U;
+    }
+    return options.maximum_bulk_staging_bytes != 0U &&
+                   required > options.maximum_bulk_staging_bytes
+        ? Status{StatusCode::allocation_failure, kRestartRankFile} : Status{};
+  });
   if (!status) return status;
 
   std::string generation;
-  if (rank == 0) {
-    const auto tick = static_cast<std::uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    generation = "generation-" + std::to_string(snapshot.step) + "-" +
-                 std::to_string(tick);
-  }
+  status = local_stage( [&]() -> Status {
+    if (rank == 0) {
+      const auto tick = static_cast<std::uint64_t>(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+      generation = "generation-" + std::to_string(snapshot.step) + "-" +
+                   std::to_string(tick);
+    }
+    return {};
+  });
+  if (!status) return status;
   status = broadcast_string(communicator, rank, generation);
   if (!status) return status;
-  const fs::path pending = restart_directory / (generation + "-pending");
-  if (rank == 0) {
+  fs::path pending;
+  status = local_stage( [&]() -> Status {
+    pending = restart_directory / (generation + "-pending");
+    return {};
+  });
+  if (!status) return status;
+  status = local_stage( [&]() -> Status {
+    if (rank != 0) return {};
     std::error_code error;
     fs::create_directories(restart_directory, error);
-    if (!error && !remove_stale_pending(restart_directory))
+    if (!error && !remove_stale_pending(restart_directory, &report.failure))
       error = std::make_error_code(std::errc::io_error);
     if (!error) fs::create_directory(pending, error);
-    status = !error && sync_directory(restart_directory)
+    if (error) detail::output_record_failure(&report.failure,
+        IoFailureOperation::create_directory, error.value(), pending);
+    return !error && sync_directory(restart_directory, &report.failure)
                  ? Status{}
                  : Status{StatusCode::io_failure, kRestartDirectory};
-  }
-  status = collective_status(communicator, status);
+  });
   if (!status) return status;
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
   if (injected(detail::RestartFailurePoint::after_directory, rank))
@@ -1195,17 +1380,22 @@ Status RestartWriter::write(MPI_Comm communicator,
 #endif
 
   std::vector<std::uint8_t> rank_bytes;
-  status = encode_rank_block(snapshot, size, rank, rank_bytes);
-  if (status &&
-      !write_file_sync(pending / rank_name(static_cast<std::uint32_t>(rank)),
-                       rank_bytes)) {
-    status = {StatusCode::io_failure, kRestartRankFile};
-  }
+  status = local_stage( [&]() -> Status {
+    Status local = encode_rank_block(snapshot, size, rank, rank_bytes,
+                                     options.maximum_bulk_staging_bytes);
+    report.rank_payload_bytes = rank_bytes.size();
+    report.peak_bulk_staging_bytes = rank_bytes.capacity();
+    if (local &&
+        !write_file_sync(pending / rank_name(static_cast<std::uint32_t>(rank)),
+                       rank_bytes, &report.failure)) {
+      local = {StatusCode::io_failure, kRestartRankFile};
+    }
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
-  if (status && injected(detail::RestartFailurePoint::after_rank_file, rank))
-    status = {StatusCode::io_failure, kRestartRankFile};
+    if (local && injected(detail::RestartFailurePoint::after_rank_file, rank))
+      local = {StatusCode::io_failure, kRestartRankFile};
 #endif
-  status = collective_status(communicator, status);
+    return local;
+  });
   if (!status) return status;
 
   const std::array<std::uint64_t, 8U> local_record{{
@@ -1217,15 +1407,23 @@ Status RestartWriter::write(MPI_Comm communicator,
       static_cast<std::uint64_t>(snapshot.patch.cells.z),
       static_cast<std::uint64_t>(rank_bytes.size()),
       hash_bytes(rank_bytes.data(), rank_bytes.size())}};
+  // The durable rank file and its fixed-size record now own the information.
+  // Do not keep our full payload alive while root verifies every rank file.
+  std::vector<std::uint8_t>().swap(rank_bytes);
   std::vector<std::uint64_t> gathered;
-  if (rank == 0) gathered.resize(static_cast<std::size_t>(size) * 8U);
+  status = local_stage( [&]() -> Status {
+    if (rank == 0) gathered.resize(static_cast<std::size_t>(size) * 8U);
+    return {};
+  });
+  if (!status) return status;
   if (MPI_Gather(local_record.data(), static_cast<int>(local_record.size()),
                  MPI_UINT64_T, rank == 0 ? gathered.data() : nullptr,
                  static_cast<int>(local_record.size()), MPI_UINT64_T, 0,
                  communicator) != MPI_SUCCESS) {
     return {StatusCode::mpi_failure, kRestartCollective};
   }
-  if (rank == 0) {
+  status = local_stage( [&]() -> Status {
+    if (rank != 0) return {};
     std::vector<RankRecord> records(static_cast<std::size_t>(size));
     for (int source = 0; source < size; ++source) {
       const std::size_t base = static_cast<std::size_t>(source) * 8U;
@@ -1239,60 +1437,94 @@ Status RestartWriter::write(MPI_Comm communicator,
           gathered[base + 6U], gathered[base + 7U]};
     }
     std::vector<std::uint8_t> manifest_bytes;
-    status = encode_manifest(snapshot, size, records, manifest_bytes);
-    if (status && !write_file_sync(pending / "manifest.bin", manifest_bytes))
-      status = {StatusCode::io_failure, kRestartManifest};
-    for (int source = 0; source < size && status; ++source) {
-      std::vector<std::uint8_t> verify;
+    Status local = encode_manifest(snapshot, size, records, manifest_bytes);
+    if (local && !write_file_sync(pending / "manifest.bin", manifest_bytes, &report.failure))
+      local = {StatusCode::io_failure, kRestartManifest};
+    std::size_t maximum_rank_bytes = 0U;
+    for (const auto& record : records) {
+      if (record.bytes > SIZE_MAX) return {StatusCode::invalid_plan, kRestartInput};
+      maximum_rank_bytes = std::max(maximum_rank_bytes, static_cast<std::size_t>(record.bytes));
+    }
+    const std::size_t metadata_bytes = gathered.capacity() * sizeof(std::uint64_t) +
+        records.capacity() * sizeof(RankRecord) + manifest_bytes.capacity();
+    if (maximum_rank_bytes > SIZE_MAX - metadata_bytes)
+      return {StatusCode::invalid_plan, kRestartInput};
+    const std::size_t peak = maximum_rank_bytes + metadata_bytes;
+    if (options.maximum_bulk_staging_bytes != 0U &&
+        peak > options.maximum_bulk_staging_bytes)
+      return {StatusCode::allocation_failure, kRestartIntegrity};
+    std::vector<std::uint8_t> verify;
+    verify.reserve(maximum_rank_bytes);
+    report.peak_bulk_staging_bytes = std::max(report.peak_bulk_staging_bytes, peak);
+    for (int source = 0; source < size && local; ++source) {
       const RankRecord& record = records[static_cast<std::size_t>(source)];
       if (!read_file(pending / rank_name(static_cast<std::uint32_t>(source)),
-                     verify) ||
+                     verify, &report.failure) ||
           verify.size() != record.bytes ||
           hash_bytes(verify.data(), verify.size()) != record.hash ||
           !verified_integrity(verify)) {
-        status = {StatusCode::io_failure, kRestartIntegrity};
+        local = {StatusCode::io_failure, kRestartIntegrity};
       }
     }
-    if (status && !sync_directory(pending))
-      status = {StatusCode::io_failure, kRestartDirectory};
+    if (local && !sync_directory(pending, &report.failure))
+      local = {StatusCode::io_failure, kRestartDirectory};
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
-    if (status &&
+    if (local &&
         injected(detail::RestartFailurePoint::after_manifest, rank))
-      status = {StatusCode::io_failure, kRestartManifest};
+      local = {StatusCode::io_failure, kRestartManifest};
 #endif
-  }
-  status = collective_status(communicator, status);
+    return local;
+  });
   if (!status) return status;
-  if (rank == 0)
-    status = publish_generation(restart_directory, pending, generation,
-                                options.keep_last);
-  return collective_status(communicator, status);
-} catch (const std::bad_alloc&) {
-  return {StatusCode::allocation_failure, kRestartInput};
-} catch (...) {
-  return {StatusCode::io_failure, kRestartInput};
+  status = local_stage([&]() -> Status {
+    return rank == 0
+               ? publish_generation(restart_directory, pending, generation, report)
+               : Status{};
+  });
+  auto publication = static_cast<std::uint8_t>(report.publication);
+  if (MPI_Bcast(&publication, 1, MPI_UINT8_T, 0, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kRestartCollective};
+  report.publication = static_cast<RestartPublicationState>(publication);
+  if (!status) return status;
+  report.cleanup_status = restart_local_stage(communicator, [&]() -> Status {
+    return rank == 0
+               ? prune_generations(restart_directory, options.keep_last,
+                                   generation, &report.cleanup_failure)
+               : Status{};
+  }, &report.cleanup_failure);
+  // current is durable. A cleanup warning must not be reported as a failed
+  // publication or trigger an attempt to overwrite/re-publish this checkpoint.
+  return report.cleanup_status.code == StatusCode::mpi_failure
+             ? report.cleanup_status : Status{};
 }
 
 Status RestartReader::load(MPI_Comm communicator,
                            const std::filesystem::path& restart_directory,
                            const RestartExpected& expected,
-                           RestartImage& out) noexcept try {
+                           RestartImage& out,
+                           RestartReadReport* report) noexcept try {
+  detail::IoFailureCapture failure_capture(report ? &report->failure : nullptr);
+  if (report) *report = {};
+  const auto local_stage = [&](auto&& work) noexcept {
+    return restart_local_stage(communicator, std::forward<decltype(work)>(work),
+                                &failure_capture.context);
+  };
   int rank = 0;
   int size = 0;
   if (communicator == MPI_COMM_NULL ||
       MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
-      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0 ||
-      restart_directory.empty()) {
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
     return {StatusCode::invalid_plan, kRestartInput};
   }
   std::string generation;
   std::vector<std::uint8_t> manifest_bytes;
-  Status status = restart_local_stage(communicator, [&]() -> Status {
+  Status status = local_stage([&]() -> Status {
+    if (restart_directory.empty()) return {StatusCode::invalid_plan, kRestartInput};
     Status local;
     if (rank == 0) {
-      local = read_current_name(restart_directory, generation);
+      local = read_current_name(restart_directory, generation, &failure_capture.context);
       if (local && !read_file(restart_directory / generation / "manifest.bin",
-                              manifest_bytes))
+                              manifest_bytes, &failure_capture.context))
         local = {StatusCode::io_failure, kRestartManifest};
     }
     return local;
@@ -1310,7 +1542,7 @@ Status RestartReader::load(MPI_Comm communicator,
   if (!status) return status;
 
   fs::path generation_directory;
-  status = restart_local_stage(communicator, [&]() -> Status {
+  status = local_stage([&]() -> Status {
     generation_directory = restart_directory / generation;
     for (std::uint32_t source = static_cast<std::uint32_t>(rank);
          source < manifest.rank_count && status;
@@ -1318,13 +1550,17 @@ Status RestartReader::load(MPI_Comm communicator,
       std::vector<std::uint8_t> bytes;
       RankBlock block;
       const RankRecord record = manifest.ranks[source];
-      if (!read_file(generation_directory / rank_name(source), bytes) ||
+      if (!read_file(generation_directory / rank_name(source), bytes, &failure_capture.context) ||
           bytes.size() != record.bytes ||
           hash_bytes(bytes.data(), bytes.size()) != record.hash) {
         status = {StatusCode::io_failure, kRestartIntegrity};
         break;
       }
       status = parse_rank_block(bytes, block);
+      if (report) {
+        ++report->integrity_blocks;
+        report->rank_file_bytes_read += bytes.size();
+      }
       if (status &&
           (block.rank_count != manifest.rank_count || block.rank != source ||
            !same(block.patch.begin, record.begin) ||
@@ -1338,7 +1574,7 @@ Status RestartReader::load(MPI_Comm communicator,
   if (!status) return status;
 
   RestartImage candidate;
-  status = restart_local_stage(communicator, [&]() -> Status {
+  status = local_stage([&]() -> Status {
     candidate.global_cells = manifest.global_cells;
     candidate.patch = expected.target_patch;
     candidate.plan = manifest.plan;
@@ -1425,13 +1661,37 @@ Status RestartReader::load(MPI_Comm communicator,
     };
     for (std::uint32_t source = 0U; source < manifest.rank_count && status;
          ++source) {
+      // A cell-disjoint block can still own the target's upper interface face.
+      // Filter using manifest-owned face extents as well as cell extents. The
+      // preceding distributed integrity scan still checks EVERY source file.
+      const auto& record = manifest.ranks[source];
+      const auto intersects = [](Int3 a, Int3 na, Int3 b, Int3 nb) {
+        return a.x < b.x + nb.x && b.x < a.x + na.x &&
+               a.y < b.y + nb.y && b.y < a.y + na.y &&
+               a.z < b.z + nb.z && b.z < a.z + na.z;
+      };
+      bool needed = intersects(record.begin, record.cells,
+                                expected.target_patch.begin, expected.target_patch.cells);
+      for (std::size_t axis = 0U; axis < 3U && !needed; ++axis) {
+        Int3 owned = record.cells;
+        if (axis == 0U && record.begin.x + owned.x == manifest.global_cells.x) ++owned.x;
+        if (axis == 1U && record.begin.y + owned.y == manifest.global_cells.y) ++owned.y;
+        if (axis == 2U && record.begin.z + owned.z == manifest.global_cells.z) ++owned.z;
+        needed = intersects(record.begin, owned, expected.target_patch.begin,
+                            target_face_extents[axis]);
+      }
+      if (!needed) continue;
       std::vector<std::uint8_t> bytes;
       RankBlock block;
-      if (!read_file(generation_directory / rank_name(source), bytes)) {
+      if (!read_file(generation_directory / rank_name(source), bytes, &failure_capture.context)) {
         status = {StatusCode::io_failure, kRestartRankFile};
         break;
       }
       status = parse_rank_block(bytes, block);
+      if (report) {
+        ++report->restoration_blocks;
+        report->rank_file_bytes_read += bytes.size();
+      }
       if (!status) break;
       const Int3 begin{
           std::max(block.patch.begin.x, expected.target_patch.begin.x),

@@ -10,6 +10,21 @@
 
 namespace hundun::v04::detail {
 
+class LocalElapsedTimer {
+ public:
+  explicit LocalElapsedTimer(std::uint64_t& total) noexcept
+      : total_(total), begin_(std::chrono::steady_clock::now()) {}
+  ~LocalElapsedTimer() noexcept {
+    const auto ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - begin_).count());
+    total_ = ns > UINT64_MAX - total_ ? UINT64_MAX : total_ + ns;
+  }
+ private:
+  std::uint64_t& total_;
+  std::chrono::steady_clock::time_point begin_;
+};
+
 // Disjoint local elapsed intervals. No allocation, synchronization, or MPI;
 // unwinding and early returns account for the active phase as well.
 template <std::size_t N>

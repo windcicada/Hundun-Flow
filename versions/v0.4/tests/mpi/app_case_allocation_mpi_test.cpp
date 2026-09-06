@@ -4,9 +4,13 @@
 
 #include <mpi.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
 
 #include <array>
 #include <cstdlib>
+#include <cstdarg>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,6 +25,10 @@ long fail_after = -1;
 std::uint64_t allocations = 0U;
 bool counting = false;
 bool injected = false;
+bool identity_probe = false;
+bool identity_active = false;
+bool identity_observed = false;
+std::uint64_t identity_allocations = 0U;
 }  // namespace
 
 void* operator new(std::size_t size) {
@@ -35,6 +43,31 @@ void* operator new(std::size_t size) {
 void* operator new[](std::size_t size) { return ::operator new(size); }
 void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
+
+// Observe the actual startup identity phase via its POSIX input and the next
+// MPI decision. The public ApplicationService remains the exercised seam.
+extern "C" int open(const char* path, int flags, ...) {
+  mode_t mode = 0;
+  if ((flags & O_CREAT) != 0) {
+    va_list args;
+    va_start(args, flags);
+    mode = va_arg(args, int);
+    va_end(args);
+  }
+  if (identity_probe && std::strcmp(path, "/proc/self/exe") == 0) {
+    identity_observed = identity_active = counting = true;
+    allocations = 0U;
+  }
+  return static_cast<int>(::syscall(SYS_openat, AT_FDCWD, path, flags, mode));
+}
+extern "C" int MPI_Allreduce(const void* send, void* receive, int count,
+                             MPI_Datatype type, MPI_Op op, MPI_Comm comm) {
+  if (identity_active) {
+    identity_allocations = allocations;
+    identity_active = counting = false;
+  }
+  return PMPI_Allreduce(send, receive, count, type, op, comm);
+}
 
 int main(int argc, char** argv) {
   using namespace hundun::v04;
@@ -73,6 +106,30 @@ int main(int argc, char** argv) {
             MPI_COMM_WORLD);
   const fs::path root{root_text.data()};
   bool passed = true;
+  if (argc > 1 && std::strcmp(argv[1], "--identity-only") == 0) {
+    ApplicationRunOptions options;
+    options.case_root = root;
+    options.run_directory = root.string() + "-identity";
+    options.source_root = fs::path(HUNDUN_V04_TEST_DATA).parent_path().parent_path();
+    options.steps = 1U;
+    options.output_interval = options.restart_interval = 0U;
+    ApplicationRunReport report;
+    identity_probe = true;
+    const Status status = ApplicationService::run(MPI_COMM_WORLD, options, report);
+    identity_probe = counting = false;
+    int okay = status && report.accepted_steps == 1U && identity_observed &&
+               identity_allocations == 0U;
+    std::cout << "startup identity rank=" << rank << " allocations="
+              << identity_allocations << " status=" << static_cast<int>(status.code)
+              << '/' << status.detail << '\n';
+    MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    if (rank == 0) {
+      fs::remove_all(root);
+      fs::remove_all(options.run_directory);
+    }
+    MPI_Finalize();
+    return okay ? 0 : 1;
+  }
   for (int target = 0; target < ranks && passed; ++target) {
     ValidatedModel baseline;
     allocations = 0U;

@@ -1,0 +1,122 @@
+ninja: warning: premature end of file; recovering
+[0/2] Re-checking globbed directories...
+[1/2] Re-running CMake...
+-- Configuring done (0.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+ninja: warning: premature end of file; recovering
+[0/4] Re-checking globbed directories...
+[1/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/app_mpi_runtime.cpp.o
+[2/114] Building C object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/common_terminal_audit.c.o
+[3/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/bc_nscbc.cpp.o
+[4/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/app_evidence_detail.cpp.o
+[5/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/app_identity.cpp.o
+[6/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/bc_thermo.cpp.o
+[7/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/bc_apply.cpp.o
+[8/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/app_driver.cpp.o
+[9/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/bc_time.cpp.o
+[10/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_field_registry.cpp.o
+[11/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_arena.cpp.o
+[12/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_execution_graph.cpp.o
+[13/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_resource_contract.cpp.o
+[14/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/bc_compile.cpp.o
+[15/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_revision.cpp.o
+[16/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_status.cpp.o
+[17/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/app_case.cpp.o
+[18/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_transaction.cpp.o
+[19/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_decomposition.cpp.o
+[20/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_cartesian.cpp.o
+[21/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_focus.cpp.o
+[22/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/parallel_cpu.cpp.o
+[23/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_ibm_reconstruction.cpp.o
+[24/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_stl_scan.cpp.o
+[25/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_ibm_surface.cpp.o
+[26/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_ibm_topology.cpp.o
+[27/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/mesh_ibm_plan.cpp.o
+[28/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_contribution.cpp.o
+[29/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_derived.cpp.o
+[30/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/parallel_halo.cpp.o
+[31/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/parallel_ibm_donor.cpp.o
+[32/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_thermo.cpp.o
+[33/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_input.cpp.o
+[34/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_transport.cpp.o
+[35/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_wale.cpp.o
+[36/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_vreman.cpp.o
+[37/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/physics_wall_function.cpp.o
+[38/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_service_plan.cpp.o
+[39/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_screen.cpp.o
+[40/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_monitor.cpp.o
+[41/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_visit.cpp.o
+[42/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_cartesian.cpp.o
+[43/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_evidence.cpp.o
+[44/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_hypre.cpp.o
+[45/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_equations.cpp.o
+[46/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_enthalpy.cpp.o
+[47/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/io_restart.cpp.o
+[48/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_ibm_force.cpp.o
+[49/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_candidate_boundary.cpp.o
+[50/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_face_flux.cpp.o
+[51/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_ibm_pressure.cpp.o
+[52/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_ibm_equations.cpp.o
+[53/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_linear_state.cpp.o
+[54/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_mg_workspace.cpp.o
+[55/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_krylov.cpp.o
+[56/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_pressure.cpp.o
+[57/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_diffusion.cpp.o
+[58/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_momentum.cpp.o
+[59/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_reduction.cpp.o
+[60/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_initialization_projection.cpp.o
+[61/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/core_product_freeze.cpp.o
+[62/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_thermophysical_rates.cpp.o
+[63/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_species.cpp.o
+[64/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_evidence_detail.cpp.o
+[65/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_pressure_energy.cpp.o
+[66/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_identity.cpp.o
+[67/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_driver.cpp.o
+[68/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_thermophysical_predictor.cpp.o
+[69/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_mg.cpp.o
+[70/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_reconstruction.cpp.o
+[71/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/parallel_ibm_donor.cpp.o
+[72/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_surface.cpp.o
+[73/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_topology.cpp.o
+[74/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_service_plan.cpp.o
+[75/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_plan.cpp.o
+[76/114] Building C object versions/v0.4/CMakeFiles/hundun_v04_core.dir/__/__/third_party/yyjson/yyjson.c.o
+[77/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_screen.cpp.o
+[78/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_monitor.cpp.o
+[79/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_visit.cpp.o
+[80/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_evidence.cpp.o
+[81/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_hypre.cpp.o
+[82/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_force.cpp.o
+[83/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_enthalpy.cpp.o
+[84/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_equations.cpp.o
+[85/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_restart.cpp.o
+[86/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_core.dir/src/solver_piso.cpp.o
+[87/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_pressure.cpp.o
+[88/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_equations.cpp.o
+[89/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_linear_state.cpp.o
+[90/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_candidate_boundary.cpp.o
+[91/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg_workspace.cpp.o
+[92/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_krylov.cpp.o
+[93/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure.cpp.o
+[94/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_reduction.cpp.o
+[95/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_momentum.cpp.o
+[96/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_species.cpp.o
+[97/114] Linking CXX static library versions/v0.4/libhundun_v04_core.a
+[98/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_initialization_projection.cpp.o
+[99/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_rates.cpp.o
+[100/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure_energy.cpp.o
+[101/114] Building CXX object versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o
+FAILED: [code=1] versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o 
+/home/wyf/.local/bin/clang++ -DHUNDUN_V04_ENABLE_TEST_ACCESS=1 -DHUNDUN_V04_SOURCE_ROOT=\"/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/..\" -DMPICH_SKIP_MPICXX=1 -DOMPI_SKIP_MPICXX=1 -I/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/../src -I/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/include -isystem /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -isystem /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent -isystem /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include -isystem /usr/lib/x86_64-linux-gnu/openmpi/include -stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -march=znver3 -mno-fma -ffp-contract=off -O3 -DNDEBUG -std=c++17 -pthread -MD -MT versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o -MF versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o.d -o versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o -c /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/mpi/core_product_freeze_mpi_test.cpp
+/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/mpi/core_product_freeze_mpi_test.cpp:2601:75: error: no member named 'density' in 'hundun::v04::RestartFieldRole'
+        if (initial_snapshot.fields.data[field].role == RestartFieldRole::density)
+                                                        ~~~~~~~~~~~~~~~~~~^
+1 error generated.
+[102/114] Building CXX object versions/v0.4/tests/CMakeFiles/v04_product_method_direction_probe.dir/mpi/product_method_direction_probe.cpp.o
+[103/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_predictor.cpp.o
+[104/114] Building CXX object versions/v0.4/CMakeFiles/v04_thin_domain_runner.dir/__/__/tools/v04_thin_domain_runner.cpp.o
+[105/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg.cpp.o
+[106/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/core_product_freeze.cpp.o
+[107/114] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_piso.cpp.o
+ninja: build stopped: subcommand failed.

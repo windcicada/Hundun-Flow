@@ -40,6 +40,7 @@ extern "C" void hundun_v04_observe_step(std::uint64_t, int)
 #include "hundun/v04_mpi_runtime.hpp"
 #include "hundun/v04_physics.hpp"
 #include "local_timing_detail.hpp"
+#include "io_output_detail.hpp"
 
 namespace {
 
@@ -73,6 +74,7 @@ struct Options {
   bool dry_plan{};
   bool self_test{};
   bool observe_performance{};
+  bool restart_method_recovery{};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
 };
@@ -168,6 +170,9 @@ bool parse_options(int argc, char** argv, Options& out) {
     } else if (token == "--observe-performance") {
       if (out.observe_performance) return false;
       out.observe_performance = true;
+    } else if (token == "--restart-method-recovery") {
+      if (out.restart_method_recovery) return false;
+      out.restart_method_recovery = true;
     } else {
       if (index + 1 >= argc) return false;
       const std::string_view value(argv[++index]);
@@ -199,6 +204,10 @@ bool parse_options(int argc, char** argv, Options& out) {
   if (out.restart_storage_compatibility !=
           RestartStorageCompatibility::strict &&
       out.restart_root.empty())
+    return false;
+  if (out.restart_method_recovery &&
+      (out.restart_root.empty() || out.restart_storage_compatibility !=
+                                       RestartStorageCompatibility::strict))
     return false;
   if (out.self_test)
     return !out.observe_performance && !out.dry_plan && out.spec.empty() &&
@@ -350,6 +359,19 @@ bool all_true(MPI_Comm communicator, bool local) {
          value == 1;
 }
 
+// Local work only: never wrap a callback that itself communicates. Every rank
+// reaches this decision even when a path, vector or encoder throws locally.
+template <class Work>
+bool local_stage(MPI_Comm communicator, Work&& work) noexcept {
+  bool okay = false;
+  try {
+    okay = work();
+  } catch (...) {
+    okay = false;
+  }
+  return all_true(communicator, okay);
+}
+
 bool consensus_u64(MPI_Comm communicator, std::uint64_t value) {
   std::uint64_t minimum = value;
   std::uint64_t maximum = value;
@@ -361,23 +383,9 @@ bool consensus_u64(MPI_Comm communicator, std::uint64_t value) {
 }
 
 bool write_exclusive(const fs::path& path, std::string_view text) {
-  const int descriptor =
-      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0444);
-  if (descriptor < 0) return false;
-  std::size_t cursor = 0U;
-  bool okay = true;
-  while (cursor < text.size()) {
-    const ssize_t count =
-        ::write(descriptor, text.data() + cursor, text.size() - cursor);
-    if (count <= 0) {
-      okay = false;
-      break;
-    }
-    cursor += static_cast<std::size_t>(count);
-  }
-  if (okay && ::fsync(descriptor) != 0) okay = false;
-  if (::close(descriptor) != 0) okay = false;
-  return okay;
+  return detail::output_write_file(
+      path, reinterpret_cast<const std::uint8_t*>(text.data()), text.size(),
+      detail::OutputFileMode::exclusive, nullptr, 0444);
 }
 
 class EvidenceFile {
@@ -392,8 +400,10 @@ class EvidenceFile {
 
   bool open_exclusive(const fs::path& path) noexcept {
     if (descriptor_ >= 0) return false;
-    descriptor_ = ::open(path.c_str(),
-                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    do {
+      descriptor_ = ::open(path.c_str(),
+                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    } while (descriptor_ < 0 && errno == EINTR);
     return descriptor_ >= 0;
   }
 
@@ -410,7 +420,12 @@ class EvidenceFile {
     return true;
   }
 
-  bool sync() noexcept { return descriptor_ >= 0 && ::fsync(descriptor_) == 0; }
+  bool sync() noexcept {
+    if (descriptor_ < 0) return false;
+    int result;
+    do { result = ::fsync(descriptor_); } while (result != 0 && errno == EINTR);
+    return result == 0;
+  }
 
   bool close() noexcept {
     if (descriptor_ < 0) return false;
@@ -424,15 +439,12 @@ class EvidenceFile {
 };
 
 bool sync_directory(const fs::path& path) {
-  const int descriptor =
-      ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (descriptor < 0) return false;
-  const bool okay = ::fsync(descriptor) == 0;
-  return ::close(descriptor) == 0 && okay;
+  return detail::output_sync_directory(path);
 }
 
 std::string checkpoint_name(std::uint64_t step, std::string_view suffix) {
   std::ostringstream name;
+  name.exceptions(std::ios::badbit | std::ios::failbit);
   name << "step-" << std::setw(20) << std::setfill('0') << step << suffix;
   return name.str();
 }
@@ -583,7 +595,12 @@ bool collect_probes(MPI_Comm communicator, const RuntimeGeometry& runtime,
   const SnapshotFieldView* velocity = find_field(snapshot, "U", 3U);
   if (!all_true(communicator, velocity != nullptr)) return false;
   const ConstFieldView u = velocity->values;
-  std::vector<double> sums(runtime.station_brackets.size() * 4U, 0.0);
+  std::vector<double> sums;
+  if (!local_stage(communicator, [&] {
+        sums.assign(runtime.station_brackets.size() * 4U, 0.0);
+        out.resize(runtime.station_brackets.size() * 3U);
+        return true;
+      })) return false;
   const Bracket y_selected = runtime.centerline_bracket;
   const std::array<std::int32_t, 2U> y_planes{{y_selected.lower,
                                                 y_selected.upper}};
@@ -637,7 +654,6 @@ bool collect_probes(MPI_Comm communicator, const RuntimeGeometry& runtime,
       MPI_Allreduce(MPI_IN_PLACE, sums.data(), static_cast<int>(sums.size()),
                     MPI_DOUBLE, MPI_SUM, communicator) != MPI_SUCCESS)
     return false;
-  out.resize(runtime.station_brackets.size() * 3U);
   for (std::size_t station = 0U; station < runtime.station_brackets.size();
        ++station) {
     const std::size_t source = station * 4U;
@@ -655,12 +671,16 @@ bool collect_probes(MPI_Comm communicator, const RuntimeGeometry& runtime,
 bool reduce_vector(MPI_Comm communicator, int rank,
                    const std::vector<double>& local,
                    std::vector<double>& global) {
-  if (local.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-    return false;
-  if (rank == 0) global.resize(local.size());
-  return MPI_Reduce(local.data(), rank == 0 ? global.data() : nullptr,
+  if (!local_stage(communicator, [&] {
+        if (local.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+          return false;
+        if (rank == 0) global.resize(local.size());
+        return true;
+      })) return false;
+  const bool reduced = MPI_Reduce(local.data(), rank == 0 ? global.data() : nullptr,
                     static_cast<int>(local.size()), MPI_DOUBLE, MPI_SUM, 0,
-                    communicator) == MPI_SUCCESS;
+                       communicator) == MPI_SUCCESS;
+  return all_true(communicator, reduced);
 }
 
 std::string encode_accumulator(std::uint64_t fingerprint,
@@ -669,6 +689,7 @@ std::string encode_accumulator(std::uint64_t fingerprint,
                                std::uint64_t step, double time,
                                const Accumulator& accumulator) {
   std::ostringstream text;
+  text.exceptions(std::ios::badbit | std::ios::failbit);
   text.imbue(std::locale::classic());
   text << std::setprecision(17) << kAccumulatorMagic << '\n'
        << "spec_fingerprint " << fingerprint << '\n'
@@ -782,6 +803,7 @@ std::string encode_statistics(const StatisticsSpec& spec,
                               const CommittedOutputSnapshot& snapshot,
                               const Accumulator& accumulator) {
   std::ostringstream text;
+  text.exceptions(std::ios::badbit | std::ios::failbit);
   text.imbue(std::locale::classic());
   text << std::setprecision(17)
        << "{\"schema\":\"" << kStatisticsMagic << "\""
@@ -940,12 +962,13 @@ bool write_checkpoint_observables(
               reduce_vector(communicator, rank, local_accumulator.centerline,
                             global.centerline);
   if (!all_true(communicator, okay)) return false;
-  if (rank == 0) {
+  return local_stage(communicator, [&] {
+    if (rank != 0) return true;
     const fs::path statistics =
         run_root / checkpoint_name(snapshot.step, ".statistics.json");
     const fs::path accumulator =
         run_root / checkpoint_name(snapshot.step, ".accumulator");
-    okay = write_exclusive(
+    return write_exclusive(
                 statistics,
                 encode_statistics(spec, fingerprint, runtime, snapshot,
                                   global)) &&
@@ -953,11 +976,11 @@ bool write_checkpoint_observables(
                             encode_accumulator(fingerprint, snapshot.plan,
                                                snapshot.schema, snapshot.step,
                                                snapshot.time, global));
-  }
-  return all_true(communicator, okay);
+  });
 }
 
 bool checkpoint(MPI_Comm communicator, int rank, ProductDriver& driver,
+                const IoServicePlan& services,
                 const fs::path& run_root, const StatisticsSpec& spec,
                 std::uint64_t fingerprint, const RuntimeGeometry& runtime,
                 const CommittedOutputSnapshot& snapshot,
@@ -967,17 +990,32 @@ bool checkpoint(MPI_Comm communicator, int rank, ProductDriver& driver,
                                     accumulator))
     return false;
   RestartSnapshot restart;
-  Status status = driver.committed_restart_snapshot(restart);
-  if (status)
-    status = RestartWriter::write(communicator, run_root / "Restart", restart,
-                                  {2U});
+  fs::path restart_root;
+  if (!local_stage(communicator, [&] {
+        restart_root = run_root / "Restart";
+        return static_cast<bool>(driver.committed_restart_snapshot(restart));
+      })) return false;
+  RestartWriteReport publication;
+  const Status status = RestartWriter::write(communicator, restart_root, restart,
+      {2U, &publication, detail::output_service(services, RuntimeServiceKind::restart)
+                            ->maximum_staging_bytes_per_rank});
+  if (rank == 0 && (!status || !publication.cleanup_status)) {
+    const auto& error = status ? publication.cleanup_failure : publication.failure;
+    std::fprintf(stderr,
+        "CHECKPOINT_IO status=%u/%u publication=%u cleanup=%u/%u rank=%d errno=%d path=%s\n",
+        static_cast<unsigned>(status.code), status.detail,
+        static_cast<unsigned>(publication.publication),
+        static_cast<unsigned>(publication.cleanup_status.code), publication.cleanup_status.detail,
+        error.rank, error.system_error, error.path.data());
+  }
   if (!status) return false;
-  bool okay = true;
-  if (rank == 0) {
+  return local_stage(communicator, [&] {
+    if (rank != 0) return true;
     std::string generation;
-    okay = read_current_generation(run_root / "Restart", generation);
+    bool okay = read_current_generation(restart_root, generation);
     if (okay) {
       std::ostringstream marker;
+      marker.exceptions(std::ios::badbit | std::ios::failbit);
       marker.imbue(std::locale::classic());
       marker << std::setprecision(17) << kCheckpointMagic << '\n'
              << "spec_fingerprint " << fingerprint << '\n'
@@ -996,8 +1034,8 @@ bool checkpoint(MPI_Comm communicator, int rank, ProductDriver& driver,
                  marker.str()) &&
              sync_directory(run_root);
     }
-  }
-  return all_true(communicator, okay);
+    return okay;
+  });
 }
 
 DriverInitialState initial_state(const ValidatedModel& model,
@@ -1021,14 +1059,13 @@ DriverInitialState initial_state(const ValidatedModel& model,
 }
 
 bool create_run_root(MPI_Comm communicator, int rank, const fs::path& root) {
-  bool okay = true;
-  if (rank == 0) {
+  return local_stage(communicator, [&] {
+    if (rank != 0) return true;
     std::error_code error;
-    okay = !fs::exists(root, error) && !error &&
+    return !fs::exists(root, error) && !error &&
             fs::create_directories(root, error) && !error &&
             sync_directory(root.parent_path());
-  }
-  return all_true(communicator, okay);
+  });
 }
 
 bool finite_force(const SurfaceForce& force) {
@@ -1510,8 +1547,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     return 2;
   StatisticsSpec spec;
   std::string parse_error;
-  bool okay = parse_spec(options.spec, spec, parse_error);
-  if (!all_true(communicator, okay)) {
+  bool okay = local_stage(communicator, [&] { return parse_spec(options.spec, spec, parse_error); });
+  if (!okay) {
     if (rank == 0) std::cerr << "spec_error=" << parse_error << '\n';
     return 3;
   }
@@ -1530,6 +1567,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                                          {model.transported_scalars.data(),
                                           model.transported_scalars.size()},
                                          thermodynamics);
+  if (!all_true(communicator, static_cast<bool>(status))) return 4;
   CompiledCasePlan plan;
   if (status)
     status = ProductCompiler::compile(communicator, model, options.case_root,
@@ -1593,10 +1631,16 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       restart_storage_migrated = image.storage_layout_migrated;
       restart_source_plan = image.plan;
       restart_source_schema = image.schema;
-      okay = rank != 0 ||
-              read_restart_binding(options.restart_root, image, fingerprint,
-                                   restart_binding);
-      if (all_true(communicator, okay)) {
+      okay = local_stage(communicator, [&] {
+        return rank != 0 || read_restart_binding(options.restart_root, image, fingerprint,
+                                                 restart_binding);
+      });
+      if (okay) {
+        // Loading/manifest integrity is unchanged. Deliberately discard only
+        // the old integrator/rate history, never rewrite the source checkpoint
+        // or reinterpret its old spatial rates as this method's exact history.
+        if (options.restart_method_recovery) image.backward_euler_recovery = true;
+        restart_requires_recovery = image.backward_euler_recovery;
         status = driver.initialize_restart(
             image, options.restart_storage_compatibility);
         restarted = true;
@@ -1606,7 +1650,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     }
   } else if (status) {
     std::vector<double> scalars;
-    const DriverInitialState initial = initial_state(model, scalars);
+    DriverInitialState initial;
+    if (!local_stage(communicator, [&] { initial = initial_state(model, scalars); return true; })) return 5;
     status = driver.initialize(initial);
   }
   if (!status) {
@@ -1619,11 +1664,13 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   CommittedOutputSnapshot snapshot;
   status = driver.committed_output_snapshot(snapshot);
   RuntimeGeometry runtime;
-  okay = static_cast<bool>(status) && prepare_geometry(spec, snapshot, runtime) &&
+  okay = local_stage(communicator, [&] {
+    return static_cast<bool>(status) && prepare_geometry(spec, snapshot, runtime) &&
          find_field(snapshot, "U", 3U) != nullptr &&
          find_field(snapshot, "pi", 1U) != nullptr &&
          find_field(snapshot, "h", 1U) != nullptr;
-  if (!all_true(communicator, okay)) {
+  });
+  if (!okay) {
     if (rank == 0) std::cerr << "snapshot_geometry_failure\n";
     return 5;
   }
@@ -1636,7 +1683,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     int ranks = 0;
     MPI_Comm_size(communicator, &ranks);
     std::vector<std::int32_t> patches;
-    if (rank == 0) patches.resize(static_cast<std::size_t>(ranks) * 6U);
+    if (!local_stage(communicator, [&] {
+          if (rank == 0) patches.resize(static_cast<std::size_t>(ranks) * 6U);
+          return true;
+        })) return 5;
     okay = MPI_Gather(local_patch.data(), 6, MPI_INT32_T,
                       rank == 0 ? patches.data() : nullptr, 6, MPI_INT32_T, 0,
                       communicator) == MPI_SUCCESS;
@@ -1676,7 +1726,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   }
   RuntimeCandidateIdentity candidate_identity;
   status = detail::runtime_candidate_identity(communicator,
-                                              candidate_identity);
+                                              candidate_identity,
+                                              HUNDUN_RUNTIME_TARGET_MANIFEST);
   if (!status) {
     if (rank == 0)
       std::cerr << "candidate_identity_status="
@@ -1691,18 +1742,21 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (build_identity == 0U || binary_identity == 0U) return 5;
   const Int3 global_cells = snapshot.geometry->global_cells();
   Accumulator accumulator;
+  if (!local_stage(communicator, [&] {
   accumulator.profile.assign(spec.station_x_over_d.size() *
                                  static_cast<std::size_t>(global_cells.y) * 6U,
                              0.0);
   accumulator.centerline.assign(
       static_cast<std::size_t>(global_cells.x) * 3U, 0.0);
+    return true;
+  })) return 5;
   if (restarted) {
-    okay = true;
-    if (rank == 0)
-      okay = decode_accumulator(restart_binding.accumulator, fingerprint,
+    okay = local_stage(communicator, [&] {
+      return rank != 0 || decode_accumulator(restart_binding.accumulator, fingerprint,
                                 restart_source_plan, restart_source_schema,
                                 snapshot.step, snapshot.time, accumulator);
-    if (!all_true(communicator, okay)) {
+    });
+    if (!okay) {
       if (rank == 0) std::cerr << "restart_accumulator_failure\n";
       return 5;
     }
@@ -1716,8 +1770,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (rank == 0) std::cerr << "run_root_not_exclusive\n";
     return 6;
   }
-  if (rank == 0) {
+  okay = local_stage(communicator, [&] {
+    if (rank != 0) return true;
     std::ostringstream metadata;
+    metadata.exceptions(std::ios::badbit | std::ios::failbit);
     metadata.imbue(std::locale::classic());
     metadata << std::setprecision(17) << kRunMagic << '\n'
              << "spec_fingerprint " << fingerprint << '\n'
@@ -1738,6 +1794,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "restart_source_schema " << restart_source_schema << '\n'
              << "restart_requires_recovery "
              << (restart_requires_recovery ? 1 : 0) << '\n'
+             << "restart_method_recovery " << options.restart_method_recovery << '\n'
              << "candidate_head " << candidate_identity.head.data() << '\n'
              << "candidate_tree " << candidate_identity.tree.data() << '\n'
              << "build_manifest_sha256 "
@@ -1770,17 +1827,30 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << '\n'
              << "statistics_eligible 0\n"
              << "end\n";
-    okay = write_exclusive(options.run_root / "RUN.meta", metadata.str());
-  }
-  if (!all_true(communicator, okay)) return 6;
+    return write_exclusive(options.run_root / "RUN.meta", metadata.str());
+  });
+  if (!okay) return 6;
 
   std::ofstream force;
   std::ofstream health;
+  std::ofstream conservation;
   std::ofstream probe;
   std::ofstream performance;
-  if (rank == 0) {
+  okay = local_stage(communicator, [&] {
+    if (rank != 0) return true;
     force.open(options.run_root / "force.csv", std::ios::out);
     health.open(options.run_root / "health.csv", std::ios::out);
+    conservation.open(options.run_root / "conservation.csv", std::ios::out);
+    conservation << "step,time,bdf_order,epoch_start_step,final_flux_revision,"
+        "mass_kg,internal_energy_J,kinetic_energy_J,"
+        "momentum_x_linf_N,momentum_y_linf_N,momentum_z_linf_N,"
+        "momentum_x_l1_N,momentum_y_l1_N,momentum_z_l1_N,"
+        "continuity_signed_kg_s,energy_signed_W,energy_l1_W,"
+        "total_equation_defect_W,mass_outflow_kg_s,enthalpy_outflow_W,"
+        "kinetic_energy_outflow_W,conductive_heat_input_W,viscous_work_input_W,"
+        "mass_bdf_rate_kg_s,total_energy_bdf_rate_W,mass_balance_defect_kg_s,"
+        "total_energy_balance_defect_W,cumulative_mass_defect_kg,"
+        "cumulative_energy_defect_J\n";
     probe.open(options.run_root / "probe.csv", std::ios::out);
     if (options.observe_performance) {
       performance.open(options.run_root / "performance.csv", std::ios::out);
@@ -1793,7 +1863,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              "baseline_evaluations,extrapolation_evaluations,ladder_"
              "evaluations,"
              "incomplete_evaluations,rejected_extrapolations,"
-             "reported_collective_subtotal,structured_control,ibm_control\n";
+             "reported_collective_subtotal,structured_control,ibm_control,"
+             "pressure_calls,pressure_prepare_ns,pressure_solve_ns,pressure_close_ns,"
+             "diagonal_calls,diagonal_prepare_ns,diagonal_solve_ns,diagonal_close_ns,"
+             "spatial_calls,spatial_prepare_ns,spatial_solve_ns,spatial_close_ns,"
+             "A_apply_ns,M_apply_ns,arnoldi_dot_ns,arnoldi_reduce_ns,arnoldi_update_ns\n";
     }
     if (force)
       force << "step,time,requested_bdf_order,bdf_order,attempts,"
@@ -1819,23 +1893,29 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 "max_rank_step_ns,included,exclusion\n";
     if (probe)
       probe << "step,time,station,x_over_d,u,v,w,included,exclusion\n";
-    okay = static_cast<bool>(force) && static_cast<bool>(health) &&
+    return static_cast<bool>(force) && static_cast<bool>(health) &&
+           static_cast<bool>(conservation) &&
            static_cast<bool>(probe) &&
            (!options.observe_performance || static_cast<bool>(performance));
-  }
-  if (!all_true(communicator, okay)) return 6;
+  });
+  if (!okay) return 6;
 
-  MPI_Comm node_communicator = MPI_COMM_NULL;
+  struct NodeCommunicator {
+    MPI_Comm value{MPI_COMM_NULL};
+    ~NodeCommunicator() { if (value != MPI_COMM_NULL) MPI_Comm_free(&value); }
+  } node;
+  auto& node_communicator = node.value;
   okay = MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
                              MPI_INFO_NULL,
                              &node_communicator) == MPI_SUCCESS;
   if (!all_true(communicator, okay)) return 6;
 
   EvidenceFile evidence_file;
-  if (rank == 0)
-    okay = evidence_file.open_exclusive(options.run_root / "evidence.jsonl") &&
-           sync_directory(options.run_root);
-  if (!all_true(communicator, okay)) return 6;
+  okay = local_stage(communicator, [&] {
+    return rank != 0 || (evidence_file.open_exclusive(options.run_root / "evidence.jsonl") &&
+           sync_directory(options.run_root));
+  });
+  if (!okay) return 6;
 
   const double force_scale = 0.5 * spec.rho_ref * spec.u_ref * spec.u_ref *
                              spec.diameter * spec.span;
@@ -2053,7 +2133,34 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     }
 
     step_timer.phase(4U);
+    if (!all_true(communicator, step.terminal_equations.valid &&
+        step.conservation.valid && step.terminal_equations.final_flux ==
+            step.piso.final_flux_revision)) return 6;
     if (rank == 0) {
+      const auto& equation = step.terminal_equations;
+      const auto& balance = step.conservation;
+      conservation << step.accepted_step << ',' << std::setprecision(17)
+          << step.accepted_time << ','
+          << static_cast<unsigned>(step.effective_bdf.order) << ','
+          << balance.epoch_start_step << ',' << equation.final_flux << ','
+          << equation.mass << ',' << equation.internal_energy << ','
+          << equation.kinetic_energy;
+      for (double value : equation.momentum_linf) conservation << ',' << value;
+      for (double value : equation.momentum_l1) conservation << ',' << value;
+      conservation << ',' << equation.continuity_signed << ','
+          << equation.energy_signed << ',' << equation.energy_l1 << ','
+          << equation.total_equation_defect << ',' << balance.mass_outflow
+          << ',' << balance.enthalpy_outflow << ','
+          << balance.kinetic_energy_outflow << ','
+          << balance.conductive_heat_input << ',' << balance.viscous_work_input
+          << ',' << balance.mass_bdf_rate << ',' << balance.total_energy_bdf_rate
+          << ',' << balance.mass_balance_defect << ','
+          << balance.total_energy_balance_defect << ','
+          << balance.cumulative_mass_defect << ','
+          << balance.cumulative_energy_defect << '\n';
+      // Publish the lightweight health ledger to the OS every accepted step;
+      // this is not a per-step fsync or a checkpoint durability promise.
+      conservation.flush();
       force << step.accepted_step << ',' << std::setprecision(17)
             << step.accepted_time << ','
             << static_cast<unsigned>(step.proposal.bdf.order) << ','
@@ -2123,6 +2230,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
               << (included ? 1 : 0) << ',' << exclusion << '\n';
       }
       okay = static_cast<bool>(force) && static_cast<bool>(health) &&
+             static_cast<bool>(conservation) &&
              static_cast<bool>(probe);
     }
     if (!all_true(communicator, okay)) return 6;
@@ -2135,13 +2243,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       if (rank == 0) {
         force.flush();
         health.flush();
+        conservation.flush();
         probe.flush();
         okay = static_cast<bool>(force) && static_cast<bool>(health) &&
+               static_cast<bool>(conservation) &&
                static_cast<bool>(probe) && evidence_file.sync();
       }
       if (!all_true(communicator, okay) ||
           !consensus_u64(communicator, accumulator.sample_steps) ||
-          !checkpoint(communicator, rank, driver, options.run_root, spec,
+          !checkpoint(communicator, rank, driver, services, options.run_root, spec,
                       fingerprint, runtime, snapshot, accumulator)) {
         if (rank == 0) std::cerr << "checkpoint_failure\n";
         return 6;
@@ -2155,19 +2265,19 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (options.observe_performance) {
       // One diagnostic gather per observed step. Preserve each rank's disjoint
       // accounting; do not sum independent phase maxima as a wall-clock time.
-      constexpr std::size_t width = 29U;
+      constexpr std::size_t width = 46U;
       std::array<std::uint64_t, width> local{};
       local[0U] = step.accepted_step;
       local[1U] = static_cast<std::uint64_t>(rank);
       for (auto ns : local_step_phases) local[2U] += ns;
       std::copy(local_step_phases.begin(), local_step_phases.end(),
                 local.begin() + 3U);
-      const auto& work = step.pressure_energy_globalization.work;
+      const auto& work = step.pressure_energy_performance.candidate;
       local[9U] = work.local_evaluation_nanoseconds;
       std::copy(work.local_phase_nanoseconds.begin(),
                 work.local_phase_nanoseconds.end(), local.begin() + 10U);
       const auto& solves =
-          step.pressure_energy_globalization.local_solve_nanoseconds;
+          step.pressure_energy_performance.solve_nanoseconds;
       std::copy(solves.begin(), solves.end(), local.begin() + 18U);
       local[21U] = work.baseline_evaluations;
       local[22U] = work.extrapolation_evaluations;
@@ -2182,6 +2292,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                    counts.ibm_control_collectives;
       local[27U] = counts.structured_control_collectives;
       local[28U] = counts.ibm_control_collectives;
+      for (std::size_t kind = 0U; kind < 3U; ++kind) {
+        local[29U + kind * 4U] = step.pressure_energy_performance.calls_by_kind[kind];
+        for (std::size_t phase = 0U; phase < 3U; ++phase)
+          local[30U + kind * 4U + phase] =
+              step.pressure_energy_performance.nanoseconds_by_kind[kind][phase];
+      }
+      std::copy(step.pressure_energy_performance.krylov_nanoseconds.begin(),
+                step.pressure_energy_performance.krylov_nanoseconds.end(), local.begin() + 41U);
       std::vector<std::uint64_t> gathered;
       // Allocate before entering Gather, with one all-rank failure decision.
       try {
@@ -2208,17 +2326,20 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       if (!all_true(communicator, okay)) return 6;
     }
   }
-  if (rank == 0) {
+  okay = local_stage(communicator, [&] {
+    if (rank != 0) return true;
     force.close();
     health.close();
+    conservation.close();
     probe.close();
-    okay = evidence_file.close() &&
+    return evidence_file.close() &&
            ::chmod((options.run_root / "evidence.jsonl").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "force.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "health.csv").c_str(), 0444) == 0 &&
+           ::chmod((options.run_root / "conservation.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "probe.csv").c_str(), 0444) == 0 &&
            sync_directory(options.run_root);
-  }
+  });
   okay = MPI_Comm_free(&node_communicator) == MPI_SUCCESS && okay;
   if (!all_true(communicator, okay)) return 6;
   if (rank == 0)
@@ -2339,7 +2460,7 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH --dry-plan\n"
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
-         "[--visit-interval N] [--observe-performance]\n";
+         "[--restart-method-recovery] [--visit-interval N] [--observe-performance]\n";
 }
 
 }  // namespace

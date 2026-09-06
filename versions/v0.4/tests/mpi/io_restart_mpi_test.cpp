@@ -8,6 +8,11 @@
 
 #include <mpi.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <cerrno>
+#include <cstdarg>
+#include <cstring>
 
 #include <array>
 #include <cmath>
@@ -18,6 +23,101 @@
 #include <iostream>
 #include <string>
 #include <vector>
+
+namespace restart_syscall_probe {
+bool enabled = false, fired = false, close_fired = false, current_renamed = false;
+int mode = 0, descriptor = -1;
+std::string prefix;
+}
+extern "C" int open(const char* path, int flags, ...) {
+  mode_t permissions = 0;
+  if ((flags & O_CREAT) != 0) {
+    va_list args;
+    va_start(args, flags);
+    permissions = va_arg(args, int);
+    va_end(args);
+  }
+  using namespace restart_syscall_probe;
+  const bool watched = enabled && ((flags & O_DIRECTORY) == 0 ||
+                                   (mode == 10 && current_renamed)) &&
+      std::strncmp(path, prefix.c_str(), prefix.size()) == 0;
+  if (watched && !fired && (mode == 0 || mode == 4)) {
+    fired = true;
+    errno = mode == 0 ? EINTR : EACCES;
+    return -1;
+  }
+  const int result = static_cast<int>(
+      ::syscall(SYS_openat, AT_FDCWD, path, flags, permissions));
+  if (watched) descriptor = result;
+  return result;
+}
+extern "C" ssize_t write(int fd, const void* data, std::size_t count) {
+  using namespace restart_syscall_probe;
+  if (enabled && fd == descriptor && !fired &&
+      (mode == 1 || mode == 3 || mode == 5 || mode == 8 || mode == 9)) {
+    fired = true;
+    if (mode == 3) return ::syscall(SYS_write, fd, data, std::max(std::size_t{1}, count / 2));
+    if (mode == 9) return 0;
+    errno = mode == 1 ? EINTR : ENOSPC;
+    return -1;
+  }
+  return ::syscall(SYS_write, fd, data, count);
+}
+extern "C" int fsync(int fd) {
+  using namespace restart_syscall_probe;
+  if (enabled && fd == descriptor && !fired &&
+      (mode == 2 || mode == 6 || (mode == 10 && current_renamed))) {
+    fired = true;
+    errno = mode == 2 ? EINTR : EIO;
+    return -1;
+  }
+  return static_cast<int>(::syscall(SYS_fsync, fd));
+}
+extern "C" int close(int fd) {
+  using namespace restart_syscall_probe;
+  const bool fail = enabled && fd == descriptor && !close_fired &&
+                    (mode == 7 || mode == 8);
+  const int result = static_cast<int>(::syscall(SYS_close, fd));
+  if (fd == descriptor) descriptor = -1;
+  if (fail) {
+    fired = close_fired = true;
+    errno = EIO;
+    return -1;
+  }
+  return result;
+}
+extern "C" ssize_t read(int fd, void* data, std::size_t count) {
+  using namespace restart_syscall_probe;
+  if (enabled && fd == descriptor && !fired && (mode == 11 || mode == 12)) {
+    fired = true;
+    errno = mode == 11 ? EINTR : EIO;
+    return -1;
+  }
+  return ::syscall(SYS_read, fd, data, count);
+}
+static int observed_fstat(int fd, struct stat* out) {
+  using namespace restart_syscall_probe;
+  if (enabled && fd == descriptor && !fired && (mode == 13 || mode == 14)) {
+    fired = true;
+    errno = mode == 13 ? EINTR : EIO;
+    return -1;
+  }
+  return static_cast<int>(::syscall(SYS_fstat, fd, out));
+}
+extern "C" int fstat(int fd, struct stat* out) {
+  return observed_fstat(fd, out);
+}
+extern "C" int __fxstat(int, int fd, struct stat* out) {
+  return observed_fstat(fd, out);
+}
+extern "C" int rename(const char* from, const char* to) {
+  const int result = static_cast<int>(::syscall(SYS_renameat, AT_FDCWD, from, AT_FDCWD, to));
+  using namespace restart_syscall_probe;
+  if (result == 0 && enabled && std::strncmp(to, prefix.c_str(), prefix.size()) == 0 &&
+      std::strlen(to) >= 8U && std::strcmp(to + std::strlen(to) - 8U, "/current") == 0)
+    current_renamed = true;
+  return result;
+}
 
 namespace {
 
@@ -449,9 +549,10 @@ bool transition(MPI_Comm world, int writer_size, int reader_size,
                              kGeometry,
                              {expected_fields.data(), expected_fields.size()}};
     RestartImage image;
+    RestartReadReport observation;
     Status read_status;
     if (local)
-      read_status = RestartReader::load(reader, directory, expected, image);
+      read_status = RestartReader::load(reader, directory, expected, image, &observation);
     if (!read_status) {
       std::cerr << "world rank " << world_rank << " transition "
                 << writer_size << "->" << reader_size << " read status="
@@ -460,6 +561,17 @@ bool transition(MPI_Comm world, int writer_size, int reader_size,
     }
     local = local && static_cast<bool>(read_status) &&
             verify(image, fixture.patch);
+    unsigned integrity_count = 0U, skipped = 0U;
+    const unsigned local_skipped = writer_size - observation.restoration_blocks;
+    MPI_Allreduce(&observation.integrity_blocks, &integrity_count, 1,
+                  MPI_UNSIGNED, MPI_SUM, reader);
+    MPI_Allreduce(&local_skipped, &skipped, 1, MPI_UNSIGNED, MPI_SUM, reader);
+    local &= integrity_count == static_cast<unsigned>(writer_size);
+    if (writer_size == 4 && reader_size == 4) {
+      if (skipped == 0U && world_rank == 0)
+        std::cerr << "restore prefilter decoded every source on every rank\n";
+      local &= skipped > 0U;
+    }
     MPI_Comm_free(&reader);
   }
   MPI_Barrier(world);
@@ -467,6 +579,167 @@ bool transition(MPI_Comm world, int writer_size, int reader_size,
   int passed = 0;
   MPI_Allreduce(&value, &passed, 1, MPI_INT, MPI_MIN, world);
   return passed != 0;
+}
+
+bool restart_syscalls(MPI_Comm communicator, const fs::path& directory) {
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(communicator, &rank);
+  MPI_Comm_size(communicator, &ranks);
+  Fixture fixture;
+  bool passed = fixture.initialize(communicator);
+  const std::array<RestartExpectedField, 4U> fields{{
+      {RestartFieldRole::velocity, 0U, 3U},
+      {RestartFieldRole::pressure_perturbation, 1U, 1U},
+      {RestartFieldRole::enthalpy, 2U, 1U},
+      {RestartFieldRole::independent_species, 3U, 1U}}};
+  const RestartExpected expected{kGlobal, fixture.patch, kPlan, kSchema, kGeometry,
+                                 {fields.data(), fields.size()}};
+  for (int target : {0, ranks - 1}) {
+    for (int mode = 0; mode < 11; ++mode) {
+      if (mode == 10 && target != 0) continue;
+      const auto root = directory / (std::to_string(target) + "-" + std::to_string(mode));
+      passed &= static_cast<bool>(RestartWriter::write(communicator, root, fixture.snapshot(29U)));
+      restart_syscall_probe::prefix = root.string();
+      restart_syscall_probe::mode = mode;
+      restart_syscall_probe::fired = false;
+      restart_syscall_probe::close_fired = restart_syscall_probe::current_renamed = false;
+      restart_syscall_probe::enabled = rank == target;
+      RestartWriteReport report;
+      const auto written = RestartWriter::write(communicator, root, fixture.snapshot(30U), {1U, &report});
+      restart_syscall_probe::enabled = false;
+      int okay = rank != target || restart_syscall_probe::fired;
+      if (mode < 4) {
+        okay &= written && !report.failure.valid &&
+                 report.publication == RestartPublicationState::durable;
+      } else {
+        const auto operation = mode == 4 ? IoFailureOperation::open
+            : (mode == 5 || mode == 8 || mode == 9) ? IoFailureOperation::write
+            : mode == 7 ? IoFailureOperation::close : IoFailureOperation::sync;
+        const int error = mode == 4 ? EACCES : (mode == 5 || mode == 8) ? ENOSPC : EIO;
+        okay &= written.code == StatusCode::io_failure && report.failure.valid &&
+                 report.failure.operation == operation && report.failure.system_error == error &&
+                 report.failure.rank == target &&
+                 report.publication == (mode == 10 ? RestartPublicationState::visible_not_durable
+                                                    : RestartPublicationState::not_switched);
+      }
+      RestartImage restored;
+      const auto read = RestartReader::load(communicator, root, expected, restored);
+      okay &= read && restored.step == (mode < 4 || mode == 10 ? 30U : 29U) &&
+               verify(restored, fixture.patch);
+      MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, communicator);
+      if (rank == 0)
+        std::cout << "restart syscall target=" << target << " mode=" << mode
+                  << " passed=" << okay << '\n';
+      passed &= okay != 0;
+    }
+    for (int mode : {7, 11, 12, 13, 14}) {
+      const auto root = directory / ("reader-" + std::to_string(target) + "-" + std::to_string(mode));
+      passed &= static_cast<bool>(RestartWriter::write(communicator, root, fixture.snapshot(29U)));
+      restart_syscall_probe::prefix = root.string();
+      restart_syscall_probe::mode = mode;
+      restart_syscall_probe::fired = restart_syscall_probe::close_fired = false;
+      restart_syscall_probe::enabled = rank == target;
+      RestartImage image;
+      image.step = 999U;
+      RestartReadReport report;
+      const auto loaded = RestartReader::load(communicator, root, expected, image, &report);
+      restart_syscall_probe::enabled = false;
+      int okay = rank != target || restart_syscall_probe::fired;
+      if (mode == 11 || mode == 13)
+        okay &= loaded && !report.failure.valid && image.step == 29U && verify(image, fixture.patch);
+      else
+        okay &= loaded.code == StatusCode::io_failure && image.step == 999U &&
+                 report.failure.valid && report.failure.rank == target &&
+                 report.failure.system_error == EIO &&
+                 report.failure.operation == (mode == 7 ? IoFailureOperation::close
+                     : mode == 12 ? IoFailureOperation::read : IoFailureOperation::stat);
+      MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, communicator);
+      if (rank == 0) std::cout << "restart reader syscall target=" << target
+                              << " mode=" << mode << " passed=" << okay << '\n';
+      passed &= okay != 0;
+    }
+  }
+  const auto budget_root = directory / "budget";
+  RestartWriteReport budget;
+  passed &= static_cast<bool>(RestartWriter::write(communicator, budget_root, fixture.snapshot(40U), {2U, &budget}));
+  const auto exact_capacity = budget.peak_bulk_staging_bytes;
+  passed &= exact_capacity >= budget.rank_payload_bytes && exact_capacity != 0U;
+  const auto denied = RestartWriter::write(communicator, budget_root, fixture.snapshot(41U),
+      {2U, &budget, exact_capacity - 1U});
+  passed &= denied.code == StatusCode::allocation_failure &&
+            budget.publication == RestartPublicationState::not_switched;
+  RestartImage image;
+  passed &= static_cast<bool>(RestartReader::load(communicator, budget_root, expected, image)) && image.step == 40U;
+  passed &= static_cast<bool>(RestartWriter::write(communicator, budget_root, fixture.snapshot(41U),
+      {2U, &budget, exact_capacity}));
+  return passed;
+}
+
+bool retention_order(MPI_Comm communicator, const fs::path& directory) {
+  int rank = 0;
+  MPI_Comm_rank(communicator, &rank);
+  Fixture fixture;
+  bool passed = fixture.initialize(communicator);
+  for (std::uint32_t keep = 1U; keep <= 3U; ++keep) {
+    const auto root = directory / std::to_string(keep);
+    if (rank == 0) {
+      fs::create_directories(root / "unrelated-pending");
+      fs::create_directories(root / "generation-invalid-pending");
+      fs::create_directory_symlink(root / "unrelated-pending", root / "generation-999-999-pending");
+    }
+    MPI_Barrier(communicator);
+    for (std::uint64_t step : {8U, 9U, 10U, 11U, 98U, 99U, 100U, 101U})
+      passed &= static_cast<bool>(RestartWriter::write(
+          communicator, root, fixture.snapshot(step), {keep}));
+    if (rank == 0) {
+      std::vector<std::uint64_t> retained;
+      for (const auto& entry : fs::directory_iterator(root)) {
+        const auto name = entry.path().filename().string();
+        if (entry.is_directory() && !entry.is_symlink() &&
+            name.rfind("generation-", 0U) == 0U &&
+            name.size() > 11U && name[11U] >= '0' && name[11U] <= '9')
+          retained.push_back(std::stoull(name.substr(11U)));
+      }
+      std::sort(retained.begin(), retained.end());
+      const std::vector<std::uint64_t> expected =
+          keep == 1U ? std::vector<std::uint64_t>{101U}
+          : keep == 2U ? std::vector<std::uint64_t>{100U, 101U}
+                       : std::vector<std::uint64_t>{99U, 100U, 101U};
+      if (retained != expected) {
+        std::cerr << "retention keep=" << keep << " wrong steps:";
+        for (auto step : retained) std::cerr << ' ' << step;
+        std::cerr << '\n';
+        passed = false;
+      }
+      passed &= fs::exists(root / "unrelated-pending") &&
+                fs::exists(root / "generation-invalid-pending") &&
+                fs::is_symlink(root / "generation-999-999-pending");
+    }
+    for (std::uint64_t step = 102U - keep; step <= 101U; ++step) {
+      const auto inspect = directory / ("read-" + std::to_string(keep) + "-" + std::to_string(step));
+      if (rank == 0) {
+        fs::create_directory(inspect);
+        for (const auto& entry : fs::directory_iterator(root)) {
+          const auto name = entry.path().filename().string();
+          if (name.rfind("generation-" + std::to_string(step) + "-", 0U) == 0U) {
+            fs::create_directory_symlink(entry.path(), inspect / name);
+            std::ofstream current(inspect / "current");
+            current << name << '\n';
+          }
+        }
+      }
+      MPI_Barrier(communicator);
+      const std::array<RestartExpectedField, 4U> catalog{{
+          {RestartFieldRole::velocity,0U,3U}, {RestartFieldRole::pressure_perturbation,1U,1U},
+          {RestartFieldRole::enthalpy,2U,1U}, {RestartFieldRole::independent_species,3U,1U}}};
+      RestartExpected expected{kGlobal, fixture.patch, kPlan, kSchema, kGeometry,
+                               {catalog.data(), catalog.size()}};
+      RestartImage image;
+      passed &= static_cast<bool>(RestartReader::load(communicator, inspect, expected, image)) &&
+                image.step == step && verify(image, fixture.patch);
+    }
+  }
+  return passed;
 }
 
 bool failure_boundaries(MPI_Comm communicator, const fs::path& directory) {
@@ -499,10 +772,16 @@ bool failure_boundaries(MPI_Comm communicator, const fs::path& directory) {
                                   expected_fields.size()}};
   for (std::size_t index = 0U; index < points.size() && passed; ++index) {
     detail::set_restart_failure_for_test(points[index], 0);
+    RestartWriteReport publication;
     status = RestartWriter::write(communicator, directory,
-                                  fixture.snapshot(21U + index), {1U});
+                                  fixture.snapshot(21U + index), {1U, &publication});
     detail::clear_restart_failure_for_test();
     passed &= status.code == StatusCode::io_failure;
+    const auto expected_publication =
+        points[index] == detail::RestartFailurePoint::after_current_switch
+            ? RestartPublicationState::durable
+            : RestartPublicationState::not_switched;
+    passed &= publication.publication == expected_publication;
     RestartImage image;
     status = RestartReader::load(communicator, directory, expected, image);
     passed &= static_cast<bool>(status) && verify(image, fixture.patch);
@@ -590,8 +869,11 @@ int main(int argc, char** argv) {
   passed &= transition(MPI_COMM_WORLD, 1, 2, base / "one-to-two", 1U);
   passed &= transition(MPI_COMM_WORLD, 2, 4, base / "two-to-four", 2U);
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);
+  passed &= transition(MPI_COMM_WORLD, 4, 4, base / "four-to-four", 4U);
   passed &= exact_transition(MPI_COMM_WORLD, base / "exact-four-to-four");
   passed &= failure_boundaries(MPI_COMM_WORLD, base / "failure-boundaries");
+  passed &= retention_order(MPI_COMM_WORLD, base / "retention-order");
+  passed &= restart_syscalls(MPI_COMM_WORLD, base / "syscalls");
   if (rank == 0) {
     std::error_code error;
     fs::remove_all(base, error);

@@ -1,0 +1,5 @@
+ibm_reconstruction policy=adaptive_order boundary_linear=0/8840 surface_linear=4/6912 expanded=2448
+Command exited with non-zero status 1
+real 491.28
+user 61986.55
+sys 180.63

@@ -858,6 +858,139 @@ bool run() {
   passed &= expect(maximum_bounded_error < 5.0e-12,
                    "bounded thermal diffusion matches exact per-link oracle");
 
+  // Accepted spatial history must use the same IBM thermal operator as the
+  // target energy equation, not the positivity-only donor-envelope closure.
+  // The preceding fixture proves that these two reconstructions differ.
+  {
+    ThermodynamicsPlan thermodynamics;
+    TransportPlan transport;
+    ContributionRegistry contributions;
+    EquationPlanSet equations;
+    EquationPlanSpec spec;
+    spec.density = 60U;
+    spec.velocity = physical_boundary.velocity_field();
+    spec.pressure_perturbation = physical_boundary.pressure_field();
+    spec.enthalpy = physical_boundary.enthalpy_field();
+    spec.temperature = 59U;
+    spec.effective_viscosity = 61U;
+    spec.pressure_compressibility = 62U;
+    spec.velocity_gradient = 63U;
+    spec.pressure_reference = model.pressure_reference;
+    spec.closed_mass_service_stage = 1U;
+    spec.maximum_cells_per_rank = local_cell_count;
+    const std::array<FieldId, 8U> declared{
+        spec.density, spec.velocity, spec.pressure_perturbation, spec.enthalpy,
+        spec.temperature, spec.effective_viscosity,
+        spec.pressure_compressibility, spec.velocity_gradient};
+    const bool compiled = ThermodynamicsPlan::compile(model.thermophysics, {}, thermodynamics) &&
+        TransportPlan::compile(model.thermophysics, thermodynamics, transport) &&
+        contributions.configure({declared.data(), declared.size()}) &&
+        contributions.freeze() && EquationPlanSet::compile(
+            MPI_COMM_SELF, schemes, fixture.geometry, fixture.patch,
+            physical_boundary, contributions, thermodynamics, transport, spec, equations);
+    if (!expect(compiled, "accepted IBM rate equation plans compile")) return false;
+    auto t = make_force_field(spec.temperature, cells, 1U, ghosts, 2011U, 3011U);
+    auto h = make_force_field(spec.enthalpy, cells, 1U, ghosts, 2012U, 3012U);
+    auto rho = make_force_field(spec.density, cells, 1U, ghosts, 2013U, 3013U);
+    auto u = make_force_field(spec.velocity, cells, 3U, ghosts, 2014U, 3014U);
+    auto p = make_force_field(spec.pressure_perturbation, cells, 1U, ghosts, 2015U, 3015U);
+    auto grad = make_force_field(spec.velocity_gradient, cells, 9U, 0U, 2016U, 3016U);
+    auto mu = make_force_field(spec.effective_viscosity, cells, 1U, 1U, 2017U, 3017U);
+    auto lambda = make_force_field(64U, cells, 1U, 1U, 2018U, 3018U);
+    auto rhs = make_force_field(65U, cells, 1U, 0U, 2019U, 3019U);
+    auto scratch = make_force_field(66U, cells, 1U, 0U, 2020U, 3020U);
+    auto scalar_d = make_force_field(67U, cells, 1U, 1U, 2021U, 3021U);
+    auto target_rate = make_force_field(68U, cells, 1U, 0U, 2022U, 3022U);
+    for (auto* zero : {&u, &p, &grad})
+      std::fill(zero->storage.begin(), zero->storage.end(), 0.0);
+    std::fill(mu.storage.begin(), mu.storage.end(), 1.8e-5);
+    std::fill(lambda.storage.begin(), lambda.storage.end(), 1.0);
+    const double gas_constant = kUniversalGasConstant / 28.96546;
+    for (std::int32_t z = -ghosts; z < cells.z + ghosts; ++z)
+      for (std::int32_t y = -ghosts; y < cells.y + ghosts; ++y)
+        for (std::int32_t x = -ghosts; x < cells.x + ghosts; ++x) {
+          const Int3 cell{x, y, z};
+          const double temperature = 300.0 +
+              100.0 * bounded_transported.view.unchecked(cell, 0U);
+          t.view.unchecked(cell, 0U) = temperature;
+          h.view.unchecked(cell, 0U) = 3.5 * gas_constant * temperature;
+          rho.view.unchecked(cell, 0U) = 101325.0 / (gas_constant * temperature);
+        }
+    const auto history = [](FieldView view) {
+      return PrimitiveHistory{as_const(view), as_const(view), as_const(view)};
+    };
+    EquationStateView state;
+    state.density = history(rho.view);
+    state.velocity = history(u.view);
+    state.pressure_perturbation = history(p.view);
+    state.enthalpy = history(h.view);
+    state.temperature = history(t.view);
+    state.pressure_reference = state.accepted_pressure_reference =
+        state.previous_pressure_reference = 101325.0;
+    EquationMaterialView material;
+    material.molecular_viscosity = material.effective_viscosity = as_const(mu.view);
+    material.thermal_conductivity = as_const(lambda.view);
+    ThermophysicalRateInput input{state, material, as_const(grad.view),
+                                  {1.0, -1.0, 0.0, 1U}, 1U, {}, &interface};
+    ThermophysicalRateOutput output{rhs.view, {}, {}, scratch.view, scalar_d.view};
+    ThermophysicalRateCertificate certificate;
+    passed &= expect(evaluate_thermophysical_rates(equations, input, output, certificate),
+                     "accepted IBM spatial energy rate evaluates");
+    const std::array<ConstFieldView, 1U> reads{as_const(t.view)};
+    const std::array<FieldView, 1U> writes{target_rate.view};
+    passed &= expect(cartesian_diffusion(kernels, as_const(lambda.view),
+        {{reads.data(), reads.size()}, {writes.data(), writes.size()},
+         {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr}) &&
+        interface.correct_zero_normal_diffusion(
+            as_const(t.view), as_const(lambda.view), target_rate.view),
+        "target energy equation's independently checked IBM thermal closure evaluates");
+    double mismatch = 0.0;
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x) {
+          const Int3 cell{x, y, z};
+          if (region.data[flat(cells, cell)] == 0U) continue;
+          mismatch = std::max(mismatch, std::abs(rhs.view.unchecked(cell, 0U) -
+                                                target_rate.view.unchecked(cell, 0U)));
+        }
+    std::cerr << "accepted-IBM-thermal-rate-mismatch=" << mismatch << '\n';
+    passed &= expect(mismatch < 1.0e-10,
+                     "persisted energy history and target residual use one IBM thermal operator");
+    // Frozen-lambda donor Jv: deltaT=T-350 contains both signs, and linearity
+    // plus D(constant)=0 gives the independent identity D(deltaT)=D(T).
+    // This checks the target donor response, not a claim that masked Schur Eh
+    // already includes that response.
+    const auto base_temperature = t.storage;
+    constexpr double epsilon = 1.0e-3;
+    const auto perturbed_diffusion = [&](double factor, FieldView destination) {
+      for (std::size_t i = 0U; i < t.storage.size(); ++i)
+        t.storage[i] = base_temperature[i] + factor * (base_temperature[i] - 350.0);
+      const std::array<FieldView, 1U> destinations{destination};
+      return cartesian_diffusion(kernels, as_const(lambda.view),
+          {{reads.data(), reads.size()}, {destinations.data(), destinations.size()},
+           {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr}) &&
+          interface.correct_zero_normal_diffusion(
+              as_const(t.view), as_const(lambda.view), destination);
+    };
+    passed &= expect(perturbed_diffusion(epsilon, rhs.view) &&
+                     perturbed_diffusion(-epsilon, scratch.view),
+                     "positive target temperatures accept signed donor variations");
+    double derivative_error = 0.0;
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x) {
+          const Int3 cell{x, y, z};
+          if (region.data[flat(cells, cell)] == 0U) continue;
+          const double fd = (rhs.view.unchecked(cell, 0U) -
+                             scratch.view.unchecked(cell, 0U)) / (2.0 * epsilon);
+          derivative_error = std::max(derivative_error,
+              std::abs(fd - target_rate.view.unchecked(cell, 0U)));
+        }
+    std::cerr << "IBM-donor-thermal-Jv-error=" << derivative_error << '\n';
+    passed &= expect(derivative_error < 1.0e-6,
+                     "frozen-material IBM donor thermal derivative matches finite differences");
+  }
+
   OwnedFace x_flux = make_face(CartesianAxis::x, cells, 201U);
   OwnedFace y_flux = make_face(CartesianAxis::y, cells, 201U);
   OwnedFace z_flux = make_face(CartesianAxis::z, cells, 201U);

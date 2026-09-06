@@ -820,6 +820,69 @@ bool test_enthalpy_spatial_binding_rejects_an_empty_contract() {
   return passed;
 }
 
+bool test_enthalpy_diagonal_retains_exact_thermodynamic_time_response() {
+  EnthalpySpatialFixture fixture;
+  if (!expect(make_enthalpy_spatial_fixture(fixture),
+              "enthalpy temporal diagonal fixture compiles")) return false;
+  const Int3 cells = fixture.patch.cells;  // unit-volume cells
+  // Ideal gas, p/R=300, cp=1000, T=300: rho=1 and h=300000.
+  // At fixed pressure rho(h)*h is constant. Its time derivative in the
+  // enthalpy direction vanishes exactly, leaving ONLY the spatial proxy 0.7.
+  OwnedField assembled = shaped_field(20U, 9702U, 9703U, cells, 2.7);
+  OwnedField h = shaped_field(21U, 9704U, 9705U, cells, 300000.0);
+  OwnedField rho_h = shaped_field(22U, 9706U, 9707U, cells, -1.0 / 300000.0);
+  OwnedField workspace = shaped_field(23U, 9708U, 9709U, cells, 0.0);
+  OwnedField direction = shaped_field(24U, 9710U, 9711U, cells, 3.0);
+  OwnedField response = shaped_field(25U, 9712U, 9713U, cells, 0.0);
+  PressureEnergyEnthalpyBinding binding;
+  binding.kernels = &fixture.kernels;
+  binding.authority.bdf = {2.0, -2.0, 0.0, 1U};
+  binding.assembled_diagonal = as_const(assembled.view);
+  binding.target_enthalpy = as_const(h.view);
+  binding.density_enthalpy_derivative = as_const(rho_h.view);
+  binding.identity = {9730U, 9731U, 9732U, 9733U, 9734U};
+  PressureEnergyDiagonalOperator operation;
+  PressureEnergyDiagonalCertificate certificate;
+  bool passed = expect(static_cast<bool>(
+      PressureEnergyEnthalpyOperator::bind_diagonal(
+          binding, workspace.view, operation, certificate)) &&
+      static_cast<bool>(operation.apply(direction.view, response.view)),
+      "temporal-corrected diagonal binds and applies without a halo");
+  passed &= expect(close(response.view.unchecked({0, 0, 0}, 0U), 2.1),
+      "frozen-spatial Eh must not freeze the density in BDF(rho*h-p)");
+  // Changing the enthalpy reference leaves T/rho/cp unchanged, but not the
+  // derivative of rho*h. NASA tables need not use h=cp*T with zero offset.
+  h.view.unchecked({0, 0, 0}, 0U) = 20000.0;
+  ++h.view.revision;
+  ++workspace.view.revision;
+  binding.target_enthalpy = as_const(h.view);
+  passed &= expect(static_cast<bool>(
+      PressureEnergyEnthalpyOperator::bind_diagonal(
+          binding, workspace.view, operation, certificate)) &&
+      static_cast<bool>(operation.apply(direction.view, response.view)) &&
+      close(response.view.unchecked({0, 0, 0}, 0U), 7.7),
+      "enthalpy reference offsets retain their actual local EOS response");
+  PressureEnergyDiagonalCertificate rejected;
+  passed &= expect(PressureEnergyEnthalpyOperator::bind_diagonal(
+      binding, h.view, operation, rejected).code == StatusCode::invalid_plan &&
+      !rejected.valid(), "diagonal workspace may not overwrite target enthalpy");
+  std::vector<std::uint8_t> active(
+      static_cast<std::size_t>(cells.x) * cells.y * cells.z, 1U);
+  active[0U] = 0U;
+  binding.activity.cells = {active.data(), active.size()};
+  binding.activity.local_fingerprint = 9760U;
+  binding.activity.collective_fingerprint = 9761U;
+  h.view.unchecked({0, 0, 0}, 0U) = std::numeric_limits<double>::quiet_NaN();
+  ++workspace.view.revision;
+  passed &= expect(static_cast<bool>(
+      PressureEnergyEnthalpyOperator::bind_diagonal(
+          binding, workspace.view, operation, certificate)) &&
+      static_cast<bool>(operation.apply(direction.view, response.view)) &&
+      close(response.view.unchecked({0, 0, 0}, 0U), 3.0),
+      "inactive IBM enthalpy rows remain identity without reading solid EOS");
+  return passed;
+}
+
 bool test_enthalpy_spatial_target_contract_binds() {
   EnthalpySpatialFixture fixture;
   bool passed = expect(make_enthalpy_spatial_fixture(fixture),
@@ -3273,7 +3336,8 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
     std::vector<double> energy;
   };
   const auto residual = [&](double pressure_factor,
-                            double enthalpy_factor) {
+                            double enthalpy_factor,
+                            bool refresh_face_density = false) {
     ResidualPair result{{}, {}};
     result.continuity.assign(local_cells, 0.0);
     result.energy.assign(local_cells, 0.0);
@@ -3297,7 +3361,18 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
       face_cells(axis, face, left, right);
       const double coefficient =
           face_view(pressure_coefficient, axis).unchecked(face);
-      return -coefficient * (delta_p(right) - delta_p(left));
+      double value = -coefficient * (delta_p(right) - delta_p(left));
+      if (refresh_face_density) {
+        // Deliberately outside the frozen-density spatial Jacobian contract:
+        // candidate mass flux also changes through AI(rho(p,h)*U_star).
+        for (Int3 cell : {left, right}) {
+          const double rho_new = ideal_density_factor *
+              (pressure_reference + p(cell)) / h(cell);
+          value += 0.5 * (rho_new - density.view.unchecked(cell, 0U)) *
+              h_by_a.view.unchecked(cell, static_cast<std::uint8_t>(axis));
+        }
+      }
+      return value;
     };
     const auto target_face_h = [&](CartesianAxis axis, Int3 face) {
       Int3 left;
@@ -3544,6 +3619,32 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
           continuity_signal[2U] > 1.0e-5 && energy_signal[2U] > 1.0e-3,
       "analytic frozen-target directions exercise C_p/C_h and E_p/E_h "
       "without a zero-signal pass");
+
+  // A scope witness, not a demand that a quasi-Newton approximation become
+  // a full Newton method: the omitted density-advection response must remain
+  // visible and must never be certified as an exact full nonlinear Jacobian.
+  constexpr double scope_epsilon = 1.0e-3;
+  const auto frozen_plus = residual(scope_epsilon, scope_epsilon);
+  const auto frozen_minus = residual(-scope_epsilon, -scope_epsilon);
+  const auto refreshed_plus = residual(scope_epsilon, scope_epsilon, true);
+  const auto refreshed_minus = residual(-scope_epsilon, -scope_epsilon, true);
+  double omitted_continuity = 0.0;
+  double omitted_energy = 0.0;
+  for (std::size_t cell = 0U; cell < local_cells; ++cell) {
+    omitted_continuity = std::max(omitted_continuity, std::abs(
+        (refreshed_plus.continuity[cell] - refreshed_minus.continuity[cell] -
+         frozen_plus.continuity[cell] + frozen_minus.continuity[cell]) /
+        (2.0 * scope_epsilon)));
+    omitted_energy = std::max(omitted_energy, std::abs(
+        (refreshed_plus.energy[cell] - refreshed_minus.energy[cell] -
+         frozen_plus.energy[cell] + frozen_minus.energy[cell]) /
+        (2.0 * scope_epsilon)));
+  }
+  std::cout << "density-advection-outside-frozen-Jacobian C=" << omitted_continuity
+            << " E=" << omitted_energy << '\n';
+  passed &= expect(!jacobian.full_nonlinear_jacobian &&
+      omitted_continuity > 1.0e-8 && omitted_energy > 1.0e-4,
+      "full face-density refresh is a nonzero quasi-Newton remainder, not a certified full derivative");
 
   OwnedField schur_action =
       shaped_field(68U, 9229U, 10231U, cells, 0.0);
@@ -4500,6 +4601,7 @@ int main(int argc, char** argv) {
   passed &= test_enthalpy_semismooth_limiter_certificate();
   passed &= test_diagonal_operator_activity_and_identity();
   passed &= test_ibm_double_diagonal_typed_schur_authority();
+  passed &= test_enthalpy_diagonal_retains_exact_thermodynamic_time_response();
   passed &= test_mass_flow_three_cell_pressure_flux_red();
   passed &= test_boundary_constant_h_and_directional_derivative();
   passed &= test_periodic_and_ibm_pressure_flux_semantics();

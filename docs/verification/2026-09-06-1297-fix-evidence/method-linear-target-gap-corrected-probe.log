@@ -1,0 +1,16 @@
+method-probe status=6/10210 accepted=0 stage=54 diagnostics=1
+linear-prediction C1=5.0877991986706196e-22,1.5467004290285237e-06 C2=6.0361048866445875e-23,1.5077859369426768e-10
+linear-target-gap slot=0 C=0.001991788645650128 E=0.00055460844721045123
+linear-target-gap slot=1 C=0.0010723077931812377 E=0.00030063913652980136
+linear-target-gap slot=2 C=1.1629949334955966e-17 E=0
+linear-target-gap slot=3 C=1.1545003217657481e-17 E=0
+linear-target-gap slot=4 C=1.1528006092861164e-17 E=0
+linear-target-gap slot=5 C=1.1660103597634389e-17 E=0
+linear-target-gap slot=6 C=1.1621139192026843e-17 E=0
+linear-target-gap slot=7 C=1.1563638334026355e-17 E=0
+linear-target-gap slot=8 C=1.1509568924275526e-17 E=0
+linear-target-gap slot=9 C=1.1576006304162149e-17 E=0
+linear-target-gap slot=10 C=1.1596252238345575e-17 E=0
+linear-target-gap slot=11 C=1.1711030256280665e-17 E=0
+linear-target-gap slot=12 C=1.1632082056258478e-17 E=0
+linear-target-gap slot=13 C=1.1690443929502455e-17 E=0

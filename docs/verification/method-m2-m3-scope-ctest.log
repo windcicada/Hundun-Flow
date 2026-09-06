@@ -1,0 +1,74 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+Constructing a list of tests
+
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 78
+[HANDLER_OUTPUT] 
+    Start  78: v04_solver_pressure_energy_schur
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+78: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_pressure_energy_schur_test
+
+78: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+78: Test timeout computed to be: 120
+78: analytic-frozen-target-four-block-fd-direction p-only epsilon=0.01 continuity=3.51108e-14 energy=1.68507e-10 energy-action=-29.705 energy-fd=-29.705 cell=(1,2,2)
+78: analytic-frozen-target-four-block-fd-direction p-only epsilon=0.001 continuity=3.84248e-13 energy=1.88309e-09 energy-action=-24.8912 energy-fd=-24.8912 cell=(2,2,2)
+78: analytic-frozen-target-four-block-fd-direction p-only epsilon=0.0001 continuity=3.01781e-12 energy=1.60217e-08 energy-action=-17.7462 energy-fd=-17.7462 cell=(2,1,1)
+78: analytic-frozen-target-four-block-fd-direction h-only epsilon=0.01 continuity=3.74702e-14 energy=5.38696e-13 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+78: analytic-frozen-target-four-block-fd-direction h-only epsilon=0.001 continuity=3.84415e-13 energy=4.34939e-12 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+78: analytic-frozen-target-four-block-fd-direction h-only epsilon=0.0001 continuity=3.31273e-12 energy=4.58409e-11 energy-action=-89.5605 energy-fd=-89.5605 cell=(2,0,3)
+78: analytic-frozen-target-four-block-fd-direction mixed epsilon=0.01 continuity=5.42211e-14 energy=1.95007e-12 energy-action=2592.2 energy-fd=2592.2 cell=(1,2,2)
+78: analytic-frozen-target-four-block-fd-direction mixed epsilon=0.001 continuity=4.13974e-13 energy=2.57827e-11 energy-action=-1815.41 energy-fd=-1815.41 cell=(2,2,2)
+78: analytic-frozen-target-four-block-fd-direction mixed epsilon=0.0001 continuity=4.59391e-12 energy=1.60054e-10 energy-action=1850.57 energy-fd=1850.57 cell=(1,1,1)
+78: density-advection-outside-frozen-Jacobian C=1.61121e-05 E=4.8325
+78: analytic-frozen-target-four-block-fd-not-full-refresh cp=3.01781e-12 ep=1.60217e-08 ch=3.31273e-12 eh=4.58409e-11 mixed-c=4.59391e-12 mixed-e=1.60054e-10 cp-platform=3.33056e-12 ep-platform=1.64021e-08 ch-platform=3.55271e-12 eh-platform=5.01902e-11 mixed-c-platform=4.66299e-12 mixed-e-platform=1.57729e-10 schur-identity=0 recovery-continuity=0 recovery-energy=1.17458e-14
+[HANDLER_OUTPUT] 
+1/2 Test  #78: v04_solver_pressure_energy_schur ....
+   Passed    0.31 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 101
+
+[HANDLER_OUTPUT] 
+    Start 101: v04_solver_ibm_equation_interface
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+101: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_ibm_equation_interface_test
+
+101: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+101: Test timeout computed to be: 120
+101: accepted-IBM-thermal-rate-mismatch=0
+101: IBM-donor-thermal-Jv-error=2.49793e-09
+[HANDLER_OUTPUT] 
+2/2 Test #101: v04_solver_ibm_equation_interface ...
+   Passed    0.38 sec
+[HANDLER_VERBOSE_OUTPUT] 
+
+The following tests passed:
+
+	v04_solver_pressure_energy_schur
+	v04_solver_ibm_equation_interface
+[HANDLER_OUTPUT] 
+
+100% tests passed, 0 tests failed out of 2
+
+
+Label Time Summary:
+v04_focused    =   0.69 sec*proc (2 tests)
+
+Total Test time (real) =   0.70 sec

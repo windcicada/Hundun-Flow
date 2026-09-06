@@ -1,0 +1,48 @@
+ninja: warning: premature end of file; recovering
+[0/2] Re-checking globbed directories...
+[1/2] Re-running CMake...
+-- Configuring done (0.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+ninja: warning: premature end of file; recovering
+[0/4] Re-checking globbed directories...
+[1/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_evidence_detail.cpp.o
+[2/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_identity.cpp.o
+[3/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/app_driver.cpp.o
+[4/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_service_plan.cpp.o
+[5/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_topology.cpp.o
+[6/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_surface.cpp.o
+[7/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_reconstruction.cpp.o
+[8/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/parallel_ibm_donor.cpp.o
+[9/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_visit.cpp.o
+[10/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/mesh_ibm_plan.cpp.o
+[11/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_screen.cpp.o
+[12/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_monitor.cpp.o
+[13/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_evidence.cpp.o
+[14/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_hypre.cpp.o
+[15/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_force.cpp.o
+[16/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_enthalpy.cpp.o
+[17/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_equations.cpp.o
+[18/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/io_restart.cpp.o
+[19/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_pressure.cpp.o
+[20/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_ibm_equations.cpp.o
+[21/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_candidate_boundary.cpp.o
+[22/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_linear_state.cpp.o
+[23/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg_workspace.cpp.o
+[24/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_krylov.cpp.o
+[25/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure.cpp.o
+[26/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_reduction.cpp.o
+[27/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_momentum.cpp.o
+[28/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_species.cpp.o
+[29/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_initialization_projection.cpp.o
+[30/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_rates.cpp.o
+[31/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_pressure_energy.cpp.o
+[32/43] Building CXX object versions/v0.4/tests/CMakeFiles/v04_product_method_direction_probe.dir/mpi/product_method_direction_probe.cpp.o
+[33/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_thermophysical_predictor.cpp.o
+[34/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_mg.cpp.o
+[35/43] Building CXX object versions/v0.4/tests/CMakeFiles/v04_core_product_freeze_mpi_test.dir/mpi/core_product_freeze_mpi_test.cpp.o
+[36/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/core_product_freeze.cpp.o
+[37/43] Building CXX object versions/v0.4/CMakeFiles/hundun_v04_test_core.dir/src/solver_piso.cpp.o
+[38/43] Linking CXX static library versions/v0.4/libhundun_v04_test_core.a
+[39/43] Linking CXX executable versions/v0.4/tests/v04_core_product_freeze_mpi_test
+[40/43] Linking CXX executable versions/v0.4/tests/v04_product_method_direction_probe

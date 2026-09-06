@@ -15,7 +15,8 @@ inline constexpr std::string_view kRuntimeCandidateIdentitySchema =
     "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2";
 
 Status runtime_candidate_identity(MPI_Comm communicator,
-                                  RuntimeCandidateIdentity& out) noexcept;
+                                  RuntimeCandidateIdentity& out,
+                                  std::string_view target_manifest = {}) noexcept;
 bool valid_runtime_candidate_identity(
     const RuntimeCandidateIdentity& identity) noexcept;
 PlanFingerprint runtime_sha256_fingerprint(
