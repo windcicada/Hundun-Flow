@@ -150,6 +150,8 @@ struct MgPlanCounters {
   std::uint64_t collective_logical_bytes{};
   std::uint64_t point_to_point_messages{};
   std::uint64_t point_to_point_bytes{};
+  std::uint64_t refill_nanoseconds{};  // Inclusive update, including checks/communication.
+  std::uint64_t copy_nanoseconds{};    // Subset: inactive-to-active coefficient copies.
 };
 
 struct MgLevelView {

@@ -21,11 +21,16 @@ inline Status collect_terminal_equations(
     BdfCoefficients bdf, ConstFaceFluxView flux,
     ConstFieldView momentum_residual, ConstFieldView energy_residual,
     Span<const std::uint8_t> activity, ReductionEngine& reductions,
-    DriverTerminalEquationReport& out) noexcept {
+    DriverTerminalEquationReport& out, Int3 global_cells, MeshPatch patch,
+    int rank, Span<const std::uint32_t> interface_cells) noexcept {
   out = {};
   const Int3 cells = kernels.cells();
   std::array<long double, 10U> sum{};
   std::array<double, 3U> maximum{};
+  std::array<ReductionMaximumLocation, 3U> worst{};
+  std::array<double, 6U> region_max{};
+  std::array<long double, 8U> region_sum{};
+  std::size_t interface_index = 0U;
   Status local;
   std::size_t flat = 0U;
   for (std::int32_t z = 0; z < cells.z && local; ++z)
@@ -35,6 +40,15 @@ inline Status collect_terminal_equations(
         const Int3 cell{x, y, z};
         const double volume = cell_volume(kernels, cell);
         const double rho = state.density.trial.unchecked(cell, 0U);
+        // EBTopology freezes interface_cells in increasing local flat order.
+        while (interface_index < interface_cells.size &&
+               interface_cells.data[interface_index] < flat) ++interface_index;
+        const std::size_t region = interface_index < interface_cells.size &&
+            interface_cells.data[interface_index] == flat ? 0U : 1U;
+        region_sum[6U + region] += 1.0;
+        const std::uint64_t gid =
+            (static_cast<std::uint64_t>(patch.begin.z + z) * global_cells.y +
+             patch.begin.y + y) * global_cells.x + patch.begin.x + x;
         const double h = state.enthalpy.trial.unchecked(cell, 0U);
         const double p = state.pressure_reference +
                          state.pressure_perturbation.trial.unchecked(cell, 0U);
@@ -60,6 +74,16 @@ inline Status collect_terminal_equations(
           momentum_work += u * residual;
           maximum[component] = std::max(maximum[component], std::abs(residual));
           sum[component] += std::abs(residual);
+          const double correction = std::abs(residual) / (bdf.a0 * rho * volume);
+          auto& selected = worst[component];
+          if (!selected.valid || correction > selected.value ||
+              (correction == selected.value && gid < selected.global_location))
+            selected = {true, correction, gid, rank,
+                {residual, rho * volume, static_cast<double>(patch.begin.x + x),
+                 static_cast<double>(patch.begin.y + y), static_cast<double>(patch.begin.z + z)}};
+          const auto bin = region * 3U + component;
+          region_max[bin] = std::max(region_max[bin], correction);
+          region_sum[bin] += static_cast<long double>(correction) * correction;
         }
         const double internal = (rho * h - p) * volume;
         const double kinetic_energy = rho * kinetic * volume;
@@ -106,6 +130,28 @@ inline Status collect_terminal_equations(
   report.mass = global[7U];
   report.internal_energy = global[8U];
   report.kinetic_energy = global[9U];
+  std::array<double, 8U> local_regions{}, regions{};
+  for (std::size_t i = 0U; i < region_sum.size(); ++i)
+    local_regions[i] = static_cast<double>(region_sum[i]);
+  std::array<double, 6U> region_maximum{};
+  status = reductions.checked_sum({local_regions.data(), 8U}, {regions.data(), 8U}, {});
+  if (status) status = reductions.checked_max({region_max.data(), 6U}, {region_maximum.data(), 6U}, {});
+  if (status) status = reductions.checked_max_locations(
+      {worst.data(), worst.size()}, {report.momentum_worst.data(), report.momentum_worst.size()}, {});
+  if (!status) return status;
+  const double reference = std::sqrt(2.0 * report.kinetic_energy / report.mass);
+  report.momentum_reference_velocity = reference;
+  report.momentum_normalization_valid = std::isfinite(reference) && reference > 0.0;
+  for (std::size_t region = 0U; region < 2U; ++region) {
+    report.momentum_region_cells[region] = static_cast<std::uint64_t>(regions[6U + region]);
+    if (!report.momentum_normalization_valid) continue;
+    for (std::size_t c = 0U; c < 3U; ++c) {
+      report.momentum_normalized_linf[c] = report.momentum_worst[c].value / reference;
+      report.momentum_region_normalized_linf[region][c] = region_maximum[region * 3U + c] / reference;
+      report.momentum_region_normalized_rms[region][c] = regions[6U + region] > 0.0
+          ? std::sqrt(regions[region * 3U + c] / regions[6U + region]) / reference : 0.0;
+    }
+  }
   out = report;
   return {};
 }

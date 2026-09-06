@@ -1,0 +1,1328 @@
+{
+  "schema": "HUNDUN_V04_DIAGNOSTIC_OBSERVATION_V1",
+  "formal_performance_comparison": false,
+  "steps": [
+    {
+      "step": 1,
+      "ranks": 128,
+      "maximum_full_step_ns": 20140861172,
+      "maximum_advance_ns": 10683299613,
+      "mean_advance_ns": 10683168528.789062,
+      "full_step_critical_rank": 0,
+      "critical_rank_phases": {
+        "advance_ns": 10683124557,
+        "observables_ns": 10996781,
+        "visit_ns": 29,
+        "evidence_resources_ns": 811067,
+        "csv_ns": 130875,
+        "checkpoint_ns": 9445797863
+      },
+      "rank_mean_candidate_phases": {
+        "state_copy_ns": 616960.84375,
+        "velocity_halo_ns": 94044216.515625,
+        "thermo_ns": 182894812.921875,
+        "boundary_derived_ns": 495033960.3671875,
+        "flux_ns": 395122648.765625,
+        "certificate_ns": 157294340.65625,
+        "residual_ns": 519329336.84375,
+        "equivalence_hash_ns": 133607394.0078125,
+        "candidate_ns": 1977967840.15625,
+        "schur_prepare_ns": 187719207.65625,
+        "krylov_ns": 5629935108.09375,
+        "recovery_ns": 17623189.3125
+      },
+      "work_counts": {
+        "baseline_evaluations": [
+          6
+        ],
+        "extrapolation_evaluations": [
+          3
+        ],
+        "ladder_evaluations": [
+          4
+        ],
+        "incomplete_evaluations": [
+          0
+        ],
+        "rejected_extrapolations": [
+          1
+        ]
+      },
+      "rank_mean_solve_detail_ns": {
+        "pressure_prepare_ns": 0.0,
+        "pressure_solve_ns": 0.0,
+        "pressure_close_ns": 0.0,
+        "diagonal_prepare_ns": 74442223.0625,
+        "diagonal_solve_ns": 3803224199.421875,
+        "diagonal_close_ns": 15091300.9609375,
+        "spatial_prepare_ns": 113276984.59375,
+        "spatial_solve_ns": 1826710908.671875,
+        "spatial_close_ns": 2531888.3515625,
+        "A_apply_ns": 1977078060.03125,
+        "M_apply_ns": 2631584735.5625,
+        "arnoldi_dot_ns": 208194775.4765625,
+        "arnoldi_reduce_ns": 269719476.8203125,
+        "arnoldi_update_ns": 109925208.9296875
+      },
+      "solve_calls_by_kind": {
+        "pressure": [
+          0
+        ],
+        "diagonal": [
+          5
+        ],
+        "spatial": [
+          1
+        ]
+      },
+      "solve_detail_scope": "all attempts; A/M inclusive, Arnoldi partial; no sum of independent maxima"
+    }
+  ],
+  "binary_sha256": "1473e092407392baa2cdaa3f7221b1c91c1efa7de204e12d9c149605b44a7e07",
+  "limits": [
+    "One instrumented window, no repeated-round median",
+    "Full-step timer excludes its own observation gather/write",
+    "PMPI elapsed excludes observer bookkeeping; advance includes it",
+    "Nine blocking MPI primitives, observed only inside driver.advance",
+    "Candidate/solve costs cover all numerical attempts",
+    "Per-rank phase maxima must not be added as whole-step wall time"
+  ],
+  "mpi_counts": [
+    {
+      "step": 1,
+      "rank": 0,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1540645120,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 1,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1640903971,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 2,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1592741998,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 3,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1635312525,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 4,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1575258494,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 5,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1592631351,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 6,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1656185513,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 7,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1612743701,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 8,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1920349461,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 9,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1901844132,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 10,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1952376295,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 11,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1982752803,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 12,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1979436834,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 13,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2058695556,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 14,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1939873692,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 15,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2002002575,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 16,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1694453360,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 17,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1756273827,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 18,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1718946319,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 19,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1697454561,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 20,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1712956370,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 21,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1689121411,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 22,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1680857423,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 23,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1656926705,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 24,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1795225048,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 25,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1947991464,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 26,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1963492561,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 27,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2040451274,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 28,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2023675358,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 29,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2122120659,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 30,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2092724264,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 31,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2038536322,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 32,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1624058936,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 33,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1759647065,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 34,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1708049987,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 35,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1732608447,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 36,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1712128785,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 37,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1735784586,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 38,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1681415319,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 39,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1671021844,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 40,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1938224762,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 41,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1879735695,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 42,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1904996390,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 43,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1885261427,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 44,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1985642737,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 45,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1969652830,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 46,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2050396401,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 47,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2030185285,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 48,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1699122868,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 49,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1592179156,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 50,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1737308649,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 51,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2524285040,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 52,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1624668137,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 53,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1721734505,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 54,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1721760637,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 55,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1718159381,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 56,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1930890875,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 57,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1930729385,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 58,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1900160212,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 59,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1902620693,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 60,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1875384232,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 61,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1932777644,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 62,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2017350108,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 63,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2009708526,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 64,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1611210380,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 65,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1731682467,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 66,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1796735055,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 67,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2584424083,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 68,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1723458985,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 69,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1672231147,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 70,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1744764560,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 71,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1686521130,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 72,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1920690906,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 73,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1874728478,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 74,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1904202776,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 75,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1912412878,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 76,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1979110849,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 77,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1803112289,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 78,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1971819493,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 79,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1891117001,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 80,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1676313333,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 81,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1762218150,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 82,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1747425806,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 83,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1728631387,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 84,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1689867897,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 85,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1725621843,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 86,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1685373959,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 87,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1664304625,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 88,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1958417485,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 89,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1905610778,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 90,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1929519141,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 91,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1987703440,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 92,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1930750928,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 93,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2002423788,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 94,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1986685317,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 95,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1964728768,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 96,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1660588804,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 97,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1762908978,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 98,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1756796408,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 99,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1775455478,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 100,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1716417947,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 101,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1657099249,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 102,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1704764624,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 103,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1686560725,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 104,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1916797995,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 105,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1921167826,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 106,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1895689224,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 107,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2010701418,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 108,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2001264418,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 109,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2031653510,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 110,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 2054371842,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 111,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1961679420,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 112,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1618536703,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 113,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1655985346,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 114,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1662965377,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 115,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1645805675,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 116,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1630756234,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 117,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1508063891,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 118,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1660458103,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 119,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1623576617,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 120,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1938119909,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 121,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1948939895,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 122,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1955583649,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 123,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1998443819,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 124,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1968138103,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 125,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1992499431,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 126,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1979606883,
+      "reported_subtotal": 5827,
+      "gap": 574
+    },
+    {
+      "step": 1,
+      "rank": 127,
+      "observed": 6401,
+      "local_blocking_mpi_ns": 1937416633,
+      "reported_subtotal": 5827,
+      "gap": 574
+    }
+  ],
+  "mpi_callers_all_rank_sum": [
+    {
+      "owner": "hundun::v04::Status hundun::v04::(anonymous namespace)::packet_collective<hundun::v04::ReductionEngine::Impl>(hundun::v04::ReductionEngine::Impl&, bool)",
+      "kind": "Allreduce",
+      "calls": 343936,
+      "ns": 153005254121
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::raw_collective_status(ompi_communicator_t*, int, int, hundun::v04::Status, int&)",
+      "kind": "Allreduce",
+      "calls": 204800,
+      "ns": 45365970540
+    },
+    {
+      "owner": "hundun::v04::Status hundun::v04::(anonymous namespace)::mg_cycle<hundun::v04::NativeCartesianMgPlan::Impl>(hundun::v04::NativeCartesianMgPlan::Impl&, unsigned long, unsigned char, unsigned short&, hundun::v04::Status&)",
+      "kind": "Allgatherv",
+      "calls": 180480,
+      "ns": 17256008670
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::Impl::collective_candidate_provenance_batch(hundun::v04::PressureVelocityCoupler::Impl::CandidateProvenanceBatchEntry const*, unsigned long, unsigned long*) const",
+      "kind": "Allgather",
+      "calls": 13056,
+      "ns": 3458510912
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::stage_frozen_momentum_flux(hundun::v04::PisoFrozenMomentumStageAuthority const&, hundun::v04::PisoFrozenMomentumVelocityStageCertificate const&, hundun::v04::BasicFieldView<double const>, hundun::v04::FaceFluxView, hundun::v04::PisoFrozenMomentumFluxStageCertificate&) const",
+      "kind": "Allreduce",
+      "calls": 6656,
+      "ns": 3341538929
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::collective_status(ompi_communicator_t*, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 1280,
+      "ns": 3030432065
+    },
+    {
+      "owner": "hundun::v04::ReductionEngine::consensus_contract(unsigned long)",
+      "kind": "Allreduce",
+      "calls": 4864,
+      "ns": 2488475454
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::stage_frozen_momentum_velocity_impl(hundun::v04::PisoFrozenMomentumStageAuthority const&, hundun::v04::PisoFrozenMomentumPressureStageCertificate const&, hundun::v04::HaloEngine const&, hundun::v04::BasicFieldView<double const>, hundun::v04::BasicFieldView<double>*, hundun::v04::BasicFieldView<double>, hundun::v04::PisoFrozenMomentumVelocityStageCertificate&) const",
+      "kind": "Allreduce",
+      "calls": 11648,
+      "ns": 1588372372
+    },
+    {
+      "owner": "hundun::v04::PressureEnergyCandidateBoundaryFinalizer::finalize(hundun::v04::PressureEnergyCandidateBoundaryFinalizeInput const&, hundun::v04::ReductionEngine&, hundun::v04::FinalBoundaryFluxCertificate&)",
+      "kind": "Allgather",
+      "calls": 8320,
+      "ns": 1199259433
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::resolve_static_boundary_values(ompi_communicator_t*, hundun::v04::BoundaryPlan const&, std::__1::array<hundun::v04::BoundaryFaceSpec, 6ul> const&, hundun::v04::CartesianGeometryPlan const&, hundun::v04::MeshPatch, hundun::v04::ThermodynamicsPlan const&, double, hundun::v04::BasicFieldView<double const>, hundun::v04::BasicFieldView<double const>, hundun::v04::BasicFieldView<double const>, hundun::v04::Span<hundun::v04::BasicFieldView<double const> const>, hundun::v04::Span<hundun::v04::BasicFieldView<double const> const>, hundun::v04::Span<double>, std::__1::vector<double, std::__1::allocator<double> >&, std::__1::vector<hundun::v04::Real3, std::__1::allocator<hundun::v04::Real3> >&, std::__1::vector<double, std::__1::allocator<double> > const&, bool, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 2816,
+      "ns": 844973844
+    },
+    {
+      "owner": "hundun::v04::Status hundun::v04::(anonymous namespace)::build_replicated_operator<hundun::v04::NativeCartesianMgPlan::Impl>(hundun::v04::NativeCartesianMgPlan::Impl&, double const*, std::__1::vector<double, std::__1::allocator<double> >&)",
+      "kind": "Allgatherv",
+      "calls": 768,
+      "ns": 611431039
+    },
+    {
+      "owner": "hundun::v04::ReductionEngine::consensus_contract(unsigned long)",
+      "kind": "Bcast",
+      "calls": 2432,
+      "ns": 530484421
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::certify_frozen_momentum_exact_candidate_impl(hundun::v04::PisoFrozenMomentumStageAuthority const&, hundun::v04::PisoFrozenMomentumExactCandidateCertificate const*, hundun::v04::PisoFrozenMomentumPressureStageCertificate const&, hundun::v04::PisoFrozenMomentumVelocityStageCertificate const&, hundun::v04::PisoFrozenMomentumFluxStageCertificate const&, hundun::v04::PisoFrozenMomentumExactCandidateInput, hundun::v04::ReductionEngine&, hundun::v04::PisoFrozenMomentumExactCandidateCertificate&) const",
+      "kind": "Allreduce",
+      "calls": 4992,
+      "ns": 313348989
+    },
+    {
+      "owner": "hundun::v04::ThermophysicalPredictorPlan::predict(ompi_communicator_t*, hundun::v04::Status, hundun::v04::ThermophysicalPredictorInput const&, hundun::v04::ThermophysicalPredictorOutput, hundun::v04::ThermophysicalPredictorSlowPath const&, hundun::v04::ThermophysicalPredictorDiagnostics&, hundun::v04::ThermophysicalPredictorCertificate&) const",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 287831856
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::force_consensus(ompi_communicator_t*, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 256,
+      "ns": 263684787
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::form_frozen_momentum_scaled_pressure(hundun::v04::PisoFrozenMomentumStageAuthority const&, hundun::v04::BasicFieldView<double const>, hundun::v04::HaloEngine const&, double, hundun::v04::BasicFieldView<double>&, hundun::v04::PisoFrozenMomentumPressureStageCertificate&) const",
+      "kind": "Allreduce",
+      "calls": 3328,
+      "ns": 186062015
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::refresh_impl(hundun::v04::PisoPressureEnergyRefinementStateCertificate const*, hundun::v04::PisoIntermediateInput const&, hundun::v04::PisoCoupledStateView const*, hundun::v04::PisoIntermediateCertificate&, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 768,
+      "ns": 185886847
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::Impl::collective_candidate_provenance_batch(hundun::v04::PressureVelocityCoupler::Impl::CandidateProvenanceBatchEntry const*, unsigned long, unsigned long*) const",
+      "kind": "Allreduce",
+      "calls": 13056,
+      "ns": 165836165
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::audit_pending_final(hundun::v04::PisoTerminalAuditInput const&, hundun::v04::PendingFaceFluxView const&, hundun::v04::ReductionEngine&, hundun::v04::PisoAttemptReport&, hundun::v04::PisoTerminalCertificate&, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 138406756
+    },
+    {
+      "owner": "hundun::v04::RemoteDonorExchangePlan::exchange(unsigned short, hundun::v04::Span<hundun::v04::BasicFieldView<double> >)",
+      "kind": "Allreduce",
+      "calls": 7808,
+      "ns": 112152453
+    },
+    {
+      "owner": "hundun::v04::NativeCartesianMgPlan::compile(hundun::v04::NativeCartesianMgSpec const&, hundun::v04::MgRuntimeServices, hundun::v04::MgCoefficientViews, hundun::v04::NativeCartesianMgPlan&, hundun::v04::MgPlanCounters*)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 111554432
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::refresh_pressure_linear_lifecycle(hundun::v04::PressureCorrectionCertificate const&, hundun::v04::LinearIdentity, hundun::v04::MgCoefficientIdentity, hundun::v04::PressureCorrectionSystemView, hundun::v04::PressureLinearOperator&, hundun::v04::NativeCartesianMgPlan&, hundun::v04::MgPlanCounters*, bool) const",
+      "kind": "Allreduce",
+      "calls": 1536,
+      "ns": 98947325
+    },
+    {
+      "owner": "hundun::v04::PressureVelocityCoupler::make_frozen_momentum_stage_authority(hundun::v04::PisoIntermediateCertificate const&, hundun::v04::PressureCorrectionCertificate const&, hundun::v04::PisoFrozenMomentumStageAuthority&) const",
+      "kind": "Allreduce",
+      "calls": 1536,
+      "ns": 34581481
+    },
+    {
+      "owner": "hundun::v04::ProductDriver::Impl::execute_attempt(hundun::v04::StepTime const&, hundun::v04::PisoAttemptReport&, hundun::v04::PreparedAttemptFinish&)::$_70::operator()(unsigned char, hundun::v04::PisoFrozenMomentumStageAuthority const&, hundun::v04::PressureCorrectionCertificate const&, hundun::v04::PisoFrozenMomentumExactCandidateCertificate const*, unsigned long, double, unsigned long, hundun::v04::ConstFaceFluxView, hundun::v04::ProductDriver::Impl::execute_attempt(hundun::v04::StepTime const&, hundun::v04::PisoAttemptReport&, hundun::v04::PreparedAttemptFinish&)::PressureEnergyCandidateArtifacts&) const",
+      "kind": "Allreduce",
+      "calls": 1536,
+      "ns": 22250826
+    },
+    {
+      "owner": "hundun::v04::PisoPressureSolveEpoch::prepare_pressure_energy_refinement_lifecycle(hundun::v04::PisoPlan const&, unsigned char, hundun::v04::PressureCorrectionCertificate const&, hundun::v04::LinearIdentity, hundun::v04::MgCoefficientIdentity, hundun::v04::PressureVelocityCoupler&, hundun::v04::PressureLinearOperator&, hundun::v04::NativeCartesianMgPlan&, hundun::v04::PressureCorrectionSystemView, hundun::v04::BasicFieldView<double>, hundun::v04::SolverWorkspace&, hundun::v04::MgPlanCounters*)",
+      "kind": "Allreduce",
+      "calls": 1024,
+      "ns": 18818166
+    },
+    {
+      "owner": "hundun::v04::TimeControllerState::propose(ompi_communicator_t*, hundun::v04::LocalTimeLimits, hundun::v04::StepTime&, hundun::v04::TimeProposalDiagnostic*)",
+      "kind": "Bcast",
+      "calls": 256,
+      "ns": 16140825
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::collective_status(ompi_communicator_t*, hundun::v04::Status, int&)",
+      "kind": "Allreduce",
+      "calls": 384,
+      "ns": 13486015
+    },
+    {
+      "owner": "hundun::v04::Status hundun::v04::(anonymous namespace)::initialize_replicated_coarse<hundun::v04::NativeCartesianMgPlan::Impl>(hundun::v04::NativeCartesianMgPlan::Impl&, hundun::v04::MgPlanCounters*, unsigned long&, unsigned long&)",
+      "kind": "Allgather",
+      "calls": 128,
+      "ns": 8019166
+    },
+    {
+      "owner": "hundun::v04::ReductionEngine::checked_max_locations(hundun::v04::Span<hundun::v04::ReductionMaximumLocation const>, hundun::v04::Span<hundun::v04::ReductionMaximumLocation>, hundun::v04::Status)",
+      "kind": "Allreduce",
+      "calls": 256,
+      "ns": 4843689
+    },
+    {
+      "owner": "hundun::v04::TimeControllerState::prepare_finish(ompi_communicator_t*, hundun::v04::StepTime const&, hundun::v04::Status, hundun::v04::PreparedTimeFinish&)",
+      "kind": "Bcast",
+      "calls": 256,
+      "ns": 3170420
+    },
+    {
+      "owner": "hundun::v04::(anonymous namespace)::raw_consensus(ompi_communicator_t*, int, int, hundun::v04::Status, int&)",
+      "kind": "Allreduce",
+      "calls": 256,
+      "ns": 2747592
+    },
+    {
+      "owner": "hundun::v04::AttemptTransaction::collective_prepare(ompi_communicator_t*, hundun::v04::Status, hundun::v04::PreparedAttemptFinish&)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 2179078
+    },
+    {
+      "owner": "hundun::v04::TimeControllerState::propose(ompi_communicator_t*, hundun::v04::LocalTimeLimits, hundun::v04::StepTime&, hundun::v04::TimeProposalDiagnostic*)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 2116277
+    },
+    {
+      "owner": "hundun::v04::TimeControllerState::prepare_finish(ompi_communicator_t*, hundun::v04::StepTime const&, hundun::v04::Status, hundun::v04::PreparedTimeFinish&)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 1385367
+    },
+    {
+      "owner": "hundun::v04::evaluate_surface_force(ompi_communicator_t*, hundun::v04::SurfaceQuadraturePlan const&, hundun::v04::FinalSurfaceState const&, hundun::v04::SurfaceForce&)",
+      "kind": "Allreduce",
+      "calls": 128,
+      "ns": 1082420
+    }
+  ]
+}

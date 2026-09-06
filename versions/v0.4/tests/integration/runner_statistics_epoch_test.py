@@ -57,7 +57,8 @@ def main():
         path = root / name
         command = [args.mpi, "-n", str(args.ranks), str(args.binary.resolve()),
                    "--spec", str(spec.resolve()), "--case-root", str(case.resolve()),
-                   "--run-root", str(path.resolve()), "--steps", str(steps), "--visit-interval", "0"]
+                   "--run-root", str(path.resolve()), "--steps", str(steps), "--visit-interval", "0",
+                   "--observe-performance"]
         if source:
             command += ["--restart-root", str((source / "Restart").resolve())]
         if method:
@@ -68,6 +69,29 @@ def main():
                                 stderr=subprocess.STDOUT, timeout=40, universal_newlines=True)
         (root / (name + ".log")).write_text(result.stdout)
         assert result.returncode == 0, result.stdout
+        with (path / "performance.csv").open() as stream:
+            performance = list(csv.DictReader(stream))
+        with (path / "conservation.csv").open() as stream:
+            balances = list(csv.DictReader(stream))
+        for row in balances:
+            assert int(row["ibm_adjacent_cells"]) > 0 and int(row["interior_cells"]) > 0
+            assert row["normalization_valid"] == "0", "zero-velocity normalization invented a reference"
+        for row in performance:
+            assert int(row["final_momentum_ns"]) > 0 and int(row["terminal_metrics_ns"]) > 0
+            assert int(row["boundary_ledger_ns"]) > 0 and row["dropped_loops"] == "0"
+            assert sum(int(row[k]) for k in ("final_momentum_ns", "terminal_metrics_ns", "boundary_ledger_ns")) <= int(row["advance_ns"])
+        for rank in range(args.ranks):
+            with (path / ("solver-rank-{}.csv".format(rank))).open() as stream:
+                loops = list(csv.DictReader(stream))
+            for row in loops:
+                assert row["attempt"] == "1" and row["corrector"] in ("1", "2")
+                assert int(row["mg_copy_ns"]) <= int(row["mg_refill_ns"])
+                assert row["dropped_loops"] == "0"
+        observer = Path(__file__).resolve().parents[4] / "tools" / "v04_solver_observe.py"
+        observed = subprocess.run([sys.executable, str(observer), str(path),
+            "--output", str(root / (name + "-solver-observation.json"))],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=20)
+        assert observed.returncode == 0, observed.stdout
         validator = Path(__file__).resolve().parents[4] / "tools" / "v04_evidence_validate.py"
         check = [sys.executable, str(validator), "runtime", str(path / "evidence.jsonl")]
         if source:

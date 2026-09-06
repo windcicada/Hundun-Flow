@@ -2719,6 +2719,7 @@ struct ProductDriver::Impl {
   MomentumPredictorLimiterReport momentum_predictor_limiter{};
   MomentumPredictorSolveReport momentum_predictor_solve{};
   DriverTerminalEquationReport terminal_equations{};
+  std::array<std::uint64_t, 3U> final_audit_nanoseconds{};
   DriverConservationReport conservation{};
   detail::ProductBoundaryBalanceHistory balance_history{}, pending_balance{};
   PressureEnergyGlobalizationAttemptReport pressure_energy_globalization{};
@@ -2876,6 +2877,8 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
     const HaloRuntimeCounters counters = engine.runtime_counters();
     add(result.structured_control_collectives,
         counters.control_consensus_calls);
+    add(result.structured_wait_nanoseconds, counters.wait_nanoseconds);
+    add(result.structured_control_nanoseconds, counters.control_nanoseconds);
     add(result.structured_exchanges, counters.begin_calls);
     add(result.structured_messages, counters.messages_started);
     add(result.structured_bytes, counters.bytes_packed);
@@ -2942,6 +2945,8 @@ DriverResourceReport resource_difference(DriverResourceReport after,
   result.structured_control_collectives =
       difference(after.structured_control_collectives,
                  before.structured_control_collectives);
+  result.structured_wait_nanoseconds = difference(after.structured_wait_nanoseconds, before.structured_wait_nanoseconds);
+  result.structured_control_nanoseconds = difference(after.structured_control_nanoseconds, before.structured_control_nanoseconds);
   result.ibm_control_collectives =
       difference(after.ibm_control_collectives, before.ibm_control_collectives);
   result.structured_messages = difference(
@@ -7268,6 +7273,7 @@ Status ProductDriver::Impl::execute_attempt(
   momentum_predictor_limiter = {};
   momentum_predictor_solve = {};
   terminal_equations = {};
+  final_audit_nanoseconds = {};
   conservation = {};
   pending_balance = {};
   pressure_energy_globalization = {};
@@ -9789,13 +9795,24 @@ Status ProductDriver::Impl::execute_attempt(
         struct CaptureSolve {
           PressureEnergyGlobalizationAttemptReport& attempt;
           PressureEnergySolveObservation value;
+          ProductDriver::Impl& driver;
+          NativeCartesianMgPlan& mg;
+          DriverResourceReport before;
+          MgPlanCounters mg_before;
           ~CaptureSolve() noexcept {
+            const auto after = driver.resource_snapshot();
+            const auto mg_after = mg.counters();
+            value.structured_wait_nanoseconds = after.structured_wait_nanoseconds - before.structured_wait_nanoseconds;
+            value.structured_control_nanoseconds = after.structured_control_nanoseconds - before.structured_control_nanoseconds;
+            value.mg_refill_nanoseconds = mg_after.refill_nanoseconds - mg_before.refill_nanoseconds;
+            value.mg_copy_nanoseconds = mg_after.copy_nanoseconds - mg_before.copy_nanoseconds;
             for (std::size_t i = 0U; i < value.local_nanoseconds.size(); ++i)
               attempt.local_solve_nanoseconds[i] += value.local_nanoseconds[i];
             if (attempt.solve_observation_count < attempt.solve_observations.size())
               attempt.solve_observations[attempt.solve_observation_count++] = value;
           }
-        } capture{pressure_energy_globalization, {corrector, refinement_iteration}};
+        } capture{pressure_energy_globalization, {corrector, refinement_iteration},
+                  *this, pressure_mg, resource_snapshot(), pressure_mg.counters()};
         detail::LocalPhaseTimer<3U> solve_timer(
             capture.value.local_nanoseconds);
         jacobian_observation = {};
@@ -14659,6 +14676,7 @@ Status ProductDriver::Impl::execute_attempt(
   // scratch. Reassemble on the final thermodynamic/velocity/transport state,
   // while a failure can still reject the entire uncommitted time step.
   if (status) attempt_stage = 64U;
+  detail::LocalPhaseTimer<3U> final_audit_timer(final_audit_nanoseconds);
   if (status)
     status = runtime_write_view(product.fields.momentum_diagonal,
                                 momentum_diagonal);
@@ -14686,13 +14704,20 @@ Status ProductDriver::Impl::execute_attempt(
         {momentum_diagonal, momentum_rhs, momentum_residual,
          x_coefficient, y_coefficient, z_coefficient}, final_momentum);
   }
+  int diagnostic_rank = -1;
+  if (status && MPI_Comm_rank(communicator, &diagnostic_rank) != MPI_SUCCESS)
+    status = {StatusCode::mpi_failure, kProductBinding};
   status = product.reductions.consensus(status);
+  final_audit_timer.phase(1U);
   if (status)
     status = detail::collect_terminal_equations(
         product.equations.kernels(), equation_state, effective_bdf,
         terminal_energy_flux, as_const(momentum_residual),
         as_const(pressure_energy_r_e), pressure_energy_activity.cells,
-        product.reductions, terminal_equations);
+        product.reductions, terminal_equations, product.geometry.global_cells(),
+        product.patch, diagnostic_rank, product.topology.has_value()
+            ? product.topology->interface_cells() : Span<const std::uint32_t>{});
+  final_audit_timer.phase(2U);
   // Candidate enthalpy physical corners remain cold-initialised thermal
   // inputs for the next closure. Do not use that field for non-thermal
   // scratch. The completed momentum HbyA workspace is overwritten in full
@@ -14711,6 +14736,7 @@ Status ProductDriver::Impl::execute_attempt(
         momentum_low_order_rhs_delta, pressure_energy_e_p,
         time.accepted_step(), balance_history, product.reductions,
         conservation, pending_balance);
+  final_audit_timer.stop();
   if (status) {
     begin_timed_stage(70U);
     attempt_stage = 70U;
@@ -14868,7 +14894,24 @@ Status ProductDriver::advance(LocalTimeLimits limits,
       perf.calls_by_kind[kind] += solve.invoked ? 1U : 0U;
       for (std::size_t phase = 0U; phase < 3U; ++phase)
         perf.nanoseconds_by_kind[kind][phase] += solve.local_nanoseconds[phase];
+      if (perf.loop_count == perf.loops.size()) { ++perf.dropped_loops; continue; }
+      auto& loop = perf.loops[perf.loop_count++];
+      loop.attempt = candidate.attempts;
+      loop.dt = proposal.dt;
+      loop.attempt_status = attempt_status;
+      loop.solve = solve;
+      if (solve.refinement == 0U && solve.corrector >= 1U && solve.corrector <= attempt_report.pressure_solve_calls)
+        loop.linear = attempt_report.pressure[solve.corrector - 1U];
+      for (std::size_t j = 0U; j < attempt_report.pressure_energy_refinement_solve_calls; ++j)
+        if (attempt_report.pressure_energy_refinement[j].ordinal == solve.refinement && solve.refinement != 0U)
+          loop.linear = attempt_report.pressure_energy_refinement[j].solve;
+      for (std::size_t j = 0U; j < observed.trajectory_count; ++j)
+        if (observed.trajectory[j].corrector == solve.corrector &&
+            observed.trajectory[j].refinement_iteration == solve.refinement)
+          loop.globalization = observed.trajectory[j];
     }
+    for (std::size_t i = 0U; i < 3U; ++i)
+      perf.final_audit_nanoseconds[i] += implementation_->final_audit_nanoseconds[i];
     const auto add_krylov = [&](const LinearSolveResult& solve) {
       const std::array<std::uint64_t, 5U> ns{solve.operator_nanoseconds,
           solve.preconditioner_nanoseconds, solve.arnoldi_dot_nanoseconds,

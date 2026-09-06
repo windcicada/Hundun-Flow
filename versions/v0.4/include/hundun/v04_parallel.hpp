@@ -152,6 +152,8 @@ struct HaloRuntimeCounters {
   std::uint64_t bytes_packed{};
   std::uint64_t bytes_unpacked{};
   std::uint64_t control_consensus_calls{};
+  std::uint64_t control_nanoseconds{};
+  std::uint64_t wait_nanoseconds{};  // Ordinary/prepared structured MPI_Waitall only.
 };
 
 class HaloEngine {

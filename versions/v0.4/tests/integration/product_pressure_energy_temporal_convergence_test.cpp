@@ -26,6 +26,7 @@ namespace {
 using namespace hundun::v04;
 
 constexpr Int3 kCells{8, 4, 4};
+constexpr std::uint64_t kCellCount = static_cast<std::uint64_t>(kCells.x) * kCells.y * kCells.z;
 constexpr double kPressureReference = 101325.0;
 constexpr double kBaseTemperature = 320.0;
 constexpr double kPressureAmplitude = 50.0;
@@ -1605,6 +1606,20 @@ bool test_method_recovery_mass_target() {
   if (status) status = exact.advance(limits, exact_step);
   passed &= expect(status && exact_step.accepted && exact_step.effective_bdf.order == 2U,
       "same-method exact continuation retains BDF2");
+  const auto& momentum = exact_step.terminal_equations;
+  passed &= expect(momentum.momentum_normalization_valid && momentum.momentum_reference_velocity > 0.0 &&
+      momentum.momentum_region_cells[0] == 0U && momentum.momentum_region_cells[1] == kCellCount,
+      "nonuniform closed flow has a physical velocity reference and complete region counts");
+  for (std::size_t c = 0; c < 3; ++c) {
+    const auto& worst = momentum.momentum_worst[c];
+    const double expected_normalized = std::abs(worst.payload[0]) /
+        (exact_step.effective_bdf.a0 * worst.payload[1] * momentum.momentum_reference_velocity);
+    passed &= expect(worst.valid && worst.global_location < kCellCount && worst.rank == 0 &&
+        std::abs(expected_normalized - momentum.momentum_normalized_linf[c]) <=
+            1e-14 * std::max(1.0, expected_normalized) &&
+        momentum.momentum_region_normalized_linf[1][c] == momentum.momentum_normalized_linf[c],
+        "worst-cell payload independently reconstructs documented force normalization");
+  }
   std::cerr << "exact_method status=" << unsigned(status.code) << '/' << status.detail
             << " attempts=" << exact_step.attempts << " proposal_bdf=" << unsigned(exact_step.proposal.bdf.order)
             << " fallback=" << exact_step.temporal_method_fallback << '\n';

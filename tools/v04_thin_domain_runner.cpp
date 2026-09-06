@@ -1980,6 +1980,17 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream conservation;
   std::ofstream probe;
   std::ofstream performance;
+  std::ofstream loop_performance;
+  if (options.observe_performance && !local_stage(communicator, [&] {
+        loop_performance.open(options.run_root / ("solver-rank-" + std::to_string(rank) + ".csv"));
+        loop_performance << "step,rank,attempt,dt,attempt_status,corrector,refinement,kind,invoked,"
+            "iterations,A_calls,M_calls,linear_initial,linear_final,prepare_ns,solve_ns,close_ns,"
+            "A_ns,M_ns,dot_ns,reduce_ns,update_ns,mg_refill_ns,mg_copy_ns,structured_wait_ns,"
+            "structured_control_ns,globalization_valid,baseline_candidates,extrapolated_candidates,"
+            "ladder_candidates,incomplete_candidates,candidate_ns,baseline_continuity,baseline_energy,"
+            "selected_continuity,selected_energy,selected_alpha,dropped_loops\n";
+        return static_cast<bool>(loop_performance);
+      })) return 6;
   okay = local_stage(communicator, [&] {
     if (rank != 0) return true;
     force.open(options.run_root / "force.csv", std::ios::out);
@@ -1994,7 +2005,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         "kinetic_energy_outflow_W,conductive_heat_input_W,viscous_work_input_W,"
         "mass_bdf_rate_kg_s,total_energy_bdf_rate_W,mass_balance_defect_kg_s,"
         "total_energy_balance_defect_W,cumulative_mass_defect_kg,"
-        "cumulative_energy_defect_J\n";
+        "cumulative_energy_defect_J,normalization_valid,U_rms_m_s,"
+        "momentum_x_normalized,momentum_y_normalized,momentum_z_normalized,"
+        "worst_x_gid,worst_x_rank,worst_y_gid,worst_y_rank,worst_z_gid,worst_z_rank,"
+        "ibm_adjacent_cells,interior_cells,ibm_x_linf,ibm_y_linf,ibm_z_linf,"
+        "interior_x_linf,interior_y_linf,interior_z_linf,ibm_x_rms,ibm_y_rms,ibm_z_rms,"
+        "interior_x_rms,interior_y_rms,interior_z_rms\n";
     probe.open(options.run_root / "probe.csv", std::ios::out);
     if (options.observe_performance) {
       performance.open(options.run_root / "performance.csv", std::ios::out);
@@ -2011,7 +2027,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              "pressure_calls,pressure_prepare_ns,pressure_solve_ns,pressure_close_ns,"
              "diagonal_calls,diagonal_prepare_ns,diagonal_solve_ns,diagonal_close_ns,"
              "spatial_calls,spatial_prepare_ns,spatial_solve_ns,spatial_close_ns,"
-             "A_apply_ns,M_apply_ns,arnoldi_dot_ns,arnoldi_reduce_ns,arnoldi_update_ns\n";
+             "A_apply_ns,M_apply_ns,arnoldi_dot_ns,arnoldi_reduce_ns,arnoldi_update_ns,"
+             "final_momentum_ns,terminal_metrics_ns,boundary_ledger_ns,structured_wait_ns,"
+             "structured_control_ns,dropped_loops\n";
     }
     if (force)
       force << "step,time,requested_bdf_order,bdf_order,attempts,"
@@ -2091,6 +2109,38 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     const auto local_nanoseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
             .count());
+    // Pure local, buffered diagnostic output; agree errors before any later
+    // collective. Also preserve rejected attempts when advance ultimately fails.
+    if (options.observe_performance && !local_stage(communicator, [&] {
+          const auto& perf = step.pressure_energy_performance;
+          for (std::size_t n = 0U; n < perf.loop_count; ++n) {
+            const auto& row = perf.loops[n];
+            const auto& solve = row.solve;
+            const auto& linear = row.linear;
+            const auto& g = row.globalization;
+            const auto& work = g.work;
+            loop_performance << std::setprecision(17) << starting_step + index + 1U << ',' << rank
+                << ',' << row.attempt << ',' << row.dt << ',' << unsigned(row.attempt_status.code)
+                << ',' << unsigned(solve.corrector) << ',' << unsigned(solve.refinement)
+                << ',' << unsigned(solve.kind) << ',' << solve.invoked << ',' << linear.iterations
+                << ',' << linear.operator_applies << ',' << linear.preconditioner_applies
+                << ',' << linear.initial_true_residual << ',' << linear.final_true_residual;
+            for (auto ns : solve.local_nanoseconds) loop_performance << ',' << ns;
+            loop_performance << ',' << linear.operator_nanoseconds << ',' << linear.preconditioner_nanoseconds
+                << ',' << linear.arnoldi_dot_nanoseconds << ',' << linear.arnoldi_reduce_nanoseconds
+                << ',' << linear.arnoldi_update_nanoseconds << ',' << solve.mg_refill_nanoseconds
+                << ',' << solve.mg_copy_nanoseconds << ',' << solve.structured_wait_nanoseconds
+                << ',' << solve.structured_control_nanoseconds << ',' << g.valid
+                << ',' << work.baseline_evaluations << ',' << work.extrapolation_evaluations
+                << ',' << work.ladder_evaluations << ',' << work.incomplete_evaluations
+                << ',' << work.local_evaluation_nanoseconds << ',' << g.baseline.global_normalized_continuity
+                << ',' << g.baseline.global_normalized_energy << ',' << g.selected.global_normalized_continuity
+                << ',' << g.selected.global_normalized_energy << ',' << g.selected.alpha
+                << ',' << perf.dropped_loops << '\n';
+          }
+          loop_performance.flush();
+          return static_cast<bool>(loop_performance);
+        })) return 6;
     std::uint64_t maximum_nanoseconds = 0U;
     okay = MPI_Allreduce(&local_nanoseconds, &maximum_nanoseconds, 1,
                          MPI_UINT64_T, MPI_MAX, communicator) == MPI_SUCCESS;
@@ -2324,7 +2374,17 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
           << ',' << balance.mass_balance_defect << ','
           << balance.total_energy_balance_defect << ','
           << balance.cumulative_mass_defect << ','
-          << balance.cumulative_energy_defect << '\n';
+          << balance.cumulative_energy_defect << ',' << equation.momentum_normalization_valid
+          << ',' << equation.momentum_reference_velocity;
+      for (auto value : equation.momentum_normalized_linf) conservation << ',' << value;
+      for (const auto& worst : equation.momentum_worst)
+        conservation << ',' << worst.global_location << ',' << worst.rank;
+      for (auto count : equation.momentum_region_cells) conservation << ',' << count;
+      for (const auto& region : equation.momentum_region_normalized_linf)
+        for (auto value : region) conservation << ',' << value;
+      for (const auto& region : equation.momentum_region_normalized_rms)
+        for (auto value : region) conservation << ',' << value;
+      conservation << '\n';
       // Publish the lightweight health ledger to the OS every accepted step;
       // this is not a per-step fsync or a checkpoint durability promise.
       conservation.flush();
@@ -2432,7 +2492,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (options.observe_performance) {
       // One diagnostic gather per observed step. Preserve each rank's disjoint
       // accounting; do not sum independent phase maxima as a wall-clock time.
-      constexpr std::size_t width = 46U;
+      constexpr std::size_t width = 52U;
       std::array<std::uint64_t, width> local{};
       local[0U] = step.accepted_step;
       local[1U] = static_cast<std::uint64_t>(rank);
@@ -2467,6 +2527,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       }
       std::copy(step.pressure_energy_performance.krylov_nanoseconds.begin(),
                 step.pressure_energy_performance.krylov_nanoseconds.end(), local.begin() + 41U);
+      std::copy(step.pressure_energy_performance.final_audit_nanoseconds.begin(),
+                step.pressure_energy_performance.final_audit_nanoseconds.end(), local.begin() + 46U);
+      local[49U] = step.resources.structured_wait_nanoseconds;
+      local[50U] = step.resources.structured_control_nanoseconds;
+      local[51U] = step.pressure_energy_performance.dropped_loops;
       std::vector<std::uint64_t> gathered;
       // Allocate before entering Gather, with one all-rank failure decision.
       try {

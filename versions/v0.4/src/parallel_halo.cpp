@@ -4,6 +4,7 @@
 #include "hundun/v04_parallel.hpp"
 
 #include "parallel_halo_detail.hpp"
+#include "local_timing_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -220,6 +221,7 @@ Status raw_collective_status(MPI_Comm communicator, int rank, int size,
 }
 
 Status collective_status(HaloImplData& implementation, Status local) noexcept {
+  detail::LocalElapsedTimer timer(implementation.counters.control_nanoseconds);
   ++implementation.counters.control_consensus_calls;
   return raw_collective_status(implementation.control, implementation.rank,
                                implementation.size, local,
@@ -1319,6 +1321,7 @@ Status HaloEngine::finish(HaloTicket& ticket,
   const int preflight_failure_rank = implementation.lowest_failing_rank;
   Status completion{};
   if (implementation.requests_active) {
+    detail::LocalElapsedTimer timer(implementation.counters.wait_nanoseconds);
     if (MPI_Waitall(static_cast<int>(implementation.requests.size()),
                     implementation.requests.data(),
                     implementation.statuses.data()) != MPI_SUCCESS) {
@@ -1498,6 +1501,7 @@ Status HaloEngine::finish_prepared(HaloTicket& ticket,
         deferred);
   }
   if (implementation.requests_active) {
+    detail::LocalElapsedTimer timer(implementation.counters.wait_nanoseconds);
     if (MPI_Waitall(static_cast<int>(implementation.requests.size()),
                     implementation.requests.data(),
                     implementation.statuses.data()) != MPI_SUCCESS) {

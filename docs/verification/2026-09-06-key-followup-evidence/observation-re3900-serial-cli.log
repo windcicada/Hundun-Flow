@@ -1,0 +1,6 @@
+ibm_reconstruction policy=adaptive_order boundary_linear=0/8840 surface_linear=4/6912 expanded=2448
+CHECKPOINT step=1 time=1.3808912271980337e-05 samples=0
+COMPLETED steps=1 final_step=1 samples=0
+real 40.66
+user 3699.02
+sys 142.67

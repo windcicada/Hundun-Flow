@@ -1,0 +1,5 @@
+Observed CLI contract failure on the pre-observation binary (5ea7046 sources):
+runner_statistics_epoch_test.py --ranks 1 --output /tmp/hundun-observation-contract-red
+exit=1; source calculation completed, but the new observation contract failed:
+KeyError: 'ibm_adjacent_cells'
+This is an absent diagnostic field, not a numerical failure.

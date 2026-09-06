@@ -6,6 +6,7 @@
 
 #include "field_view_interval_detail.hpp"
 #include "solver_mg_detail.hpp"
+#include "local_timing_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -4314,6 +4315,7 @@ Status NativeCartesianMgPlan::update_coefficients(
     return {StatusCode::invalid_plan, kMgPlan};
   }
   Impl& implementation = *implementation_;
+  detail::LocalElapsedTimer refill_timer(implementation.runtime_counters.refill_nanoseconds);
   Status local = validate_borrowed_services(implementation);
   Status agreed = implementation.services.reductions->consensus(local);
   implementation.lowest =
@@ -4450,6 +4452,8 @@ Status NativeCartesianMgPlan::update_coefficients(
       return agreed;
     }
   }
+  {
+  detail::LocalElapsedTimer copy_timer(implementation.runtime_counters.copy_nanoseconds);
   std::copy(implementation.inactive_hierarchy_storage.begin(),
             implementation.inactive_hierarchy_storage.end(),
             implementation.hierarchy_storage.begin());
@@ -4457,6 +4461,7 @@ Status NativeCartesianMgPlan::update_coefficients(
     std::copy(implementation.replicated_operator_inactive.begin(),
               implementation.replicated_operator_inactive.end(),
               implementation.replicated_operator_active.begin());
+  }
   }
   implementation.coefficients = coefficients;
   implementation.spec.identity = next_identity;

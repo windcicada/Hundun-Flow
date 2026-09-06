@@ -203,6 +203,8 @@ struct PressureEnergySolveObservation {
   PressureEnergySolveKind kind{PressureEnergySolveKind::pressure_continuity};
   bool invoked{};
   std::array<std::uint64_t, 3U> local_nanoseconds{};
+  std::uint64_t mg_refill_nanoseconds{}, mg_copy_nanoseconds{};
+  std::uint64_t structured_wait_nanoseconds{}, structured_control_nanoseconds{};
 };
 
 struct PressureEnergyGlobalizationAttemptReport {
@@ -363,6 +365,7 @@ struct DriverResourceReport {
   std::uint64_t preconditioner_applications{};
   std::uint64_t structured_control_collectives{};
   std::uint64_t ibm_control_collectives{};
+  std::uint64_t structured_wait_nanoseconds{}, structured_control_nanoseconds{};
 };
 
 inline constexpr std::size_t kDriverTimedStageCapacity = 10U;
@@ -381,6 +384,20 @@ struct PressureEnergyPerformanceTotals {
   std::array<std::array<std::uint64_t, 3U>, 3U> nanoseconds_by_kind{};
   // A apply, M apply, main Arnoldi dot, reduction, update (local partial costs).
   std::array<std::uint64_t, 5U> krylov_nanoseconds{};
+  // Fixed diagnostic storage, never grows RSS. Overflow is explicit and makes
+  // the detailed observation unusable for attribution, not a solver failure.
+  struct Loop {
+    std::uint32_t attempt{};
+    double dt{};
+    Status attempt_status{};
+    PressureEnergySolveObservation solve{};
+    LinearSolveResult linear{};
+    PressureEnergyGlobalizationIterationReport globalization{};
+  };
+  std::array<Loop, 64U> loops{};
+  std::uint32_t loop_count{}, dropped_loops{};
+  // Disjoint final momentum assembly, terminal metrics, boundary ledger costs.
+  std::array<std::uint64_t, 3U> final_audit_nanoseconds{};
 };
 
 // Same-state, same-final-flux observations, not additional acceptance
@@ -400,6 +417,16 @@ struct DriverTerminalEquationReport {
   double mass{};
   double internal_energy{};
   double kinetic_energy{};
+  // Normalization: |R_m|/(a0*rho*V*U_rms), U_rms=sqrt(2*K/M).
+  // A temporal inertial-force reference, NOT a convergence gate/backward error.
+  bool momentum_normalization_valid{};
+  double momentum_reference_velocity{};
+  std::array<ReductionMaximumLocation, 3U> momentum_worst{};
+  std::array<double, 3U> momentum_normalized_linf{};
+  // 0: active rows touching an IBM control link; 1: all other active rows.
+  std::array<std::uint64_t, 2U> momentum_region_cells{};
+  std::array<std::array<double, 3U>, 2U> momentum_region_normalized_linf{};
+  std::array<std::array<double, 3U>, 2U> momentum_region_normalized_rms{};
 };
 
 // Physical external-boundary balance for the current fixed, source-free
