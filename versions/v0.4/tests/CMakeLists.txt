@@ -5,6 +5,12 @@ find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
 
+# Explicit opt-in acceptance executable: known finite-dt scalar inventory
+# defect must remain RED, never WILL_FAIL or a passing default CTest.
+add_executable(v04_product_scalar_contract_experiment EXCLUDE_FROM_ALL
+  integration/product_scalar_contract_experiment.cpp)
+target_link_libraries(v04_product_scalar_contract_experiment PRIVATE hundun_v04_core)
+
 add_executable(v04_mpi_observer_probe mpi/mpi_observer_probe.c)
 target_link_libraries(v04_mpi_observer_probe PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})
 add_library(v04_mpi_observer SHARED "${hundun_repository_root}/tools/v04_mpi_observer.c")

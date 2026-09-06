@@ -1,0 +1,15 @@
+SCALAR_CONTRACT family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=1.14038349555e-06 constant_error=1.66533453694e-16 eos_error=2.01354576444e-16
+SCALAR_CONTRACT family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=3.01074711935e-07 constant_error=2.77555756156e-16 eos_error=2.01357609935e-16
+SCALAR_CONTRACT family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=7.68584262551e-08 constant_error=5.82867087928e-16 eos_error=2.01357373513e-16
+SCALAR_ORDER family=passive order=2.00845591081 accepted=1
+SCALAR_CONTRACT family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.27065639782e-16 constant_error=1.66533453694e-16 eos_error=2.01354576444e-16
+SCALAR_CONTRACT family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.16238126658e-13 constant_error=2.77555756156e-16 eos_error=2.01357609935e-16
+SCALAR_CONTRACT family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.23143743057e-13 constant_error=5.82867087928e-16 eos_error=2.01357373513e-16
+SCALAR_CONTRACT family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=9.01814192056e-07 constant_error=1.94289029309e-16 eos_error=3.18771643532e-16
+SCALAR_CONTRACT family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=2.361780268e-07 constant_error=5.27355936697e-16 eos_error=4.73741965952e-16
+SCALAR_CONTRACT family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=0 inventory_relative_defect=6.01137582189e-08 constant_error=4.16333634234e-16 eos_error=4.78147160104e-16
+SCALAR_ORDER family=EOS_species order=2.0063898058 accepted=1
+SCALAR_CONTRACT family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=7.3360006904e-16 constant_error=3.60822483003e-16 eos_error=3.1364805128e-16
+SCALAR_CONTRACT family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.92892254611e-13 constant_error=3.33066907388e-16 eos_error=3.55256288635e-16
+SCALAR_CONTRACT family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=9.11314733637e-14 constant_error=4.71844785466e-16 eos_error=4.70758726303e-16
+STRICT_SCALAR_ACCEPTANCE FAIL production_correction_enabled=0
