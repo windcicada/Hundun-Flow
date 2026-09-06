@@ -184,16 +184,18 @@ bool valid_control(LinearAlgorithm algorithm, MgCorrectionScaling scaling,
          control.true_residual_interval > 0U && valid_restart && valid_pair;
 }
 
-PlanFingerprint spec_fingerprint(const EquationPlanSet& equations,
+PlanFingerprint spec_fingerprint(PlanFingerprint semantics,
+                                 PlanFingerprint predictor,
+                                 PlanFingerprint pressure_reference,
                                  const PisoPlanSpec& spec) noexcept {
   std::uint64_t hash = kFnvOffset;
   hash = hash_mix(hash, UINT64_C(0x7630347069736f32));
   // The cold PISO identity is collective and therefore uses the
   // decomposition-independent equation semantics.  The rank-local equation
   // fingerprint is retained separately for bind-time layout validation.
-  hash = hash_mix(hash, equations.semantic_fingerprint());
-  hash = hash_mix(hash, equations.thermophysical_predictor().fingerprint());
-  hash = hash_mix(hash, equations.pressure_reference().fingerprint());
+  hash = hash_mix(hash, semantics);
+  hash = hash_mix(hash, predictor);
+  hash = hash_mix(hash, pressure_reference);
   if (spec.coupling != CouplingKind::piso)
     hash = hash_mix(hash, static_cast<std::uint8_t>(spec.coupling));
   hash = hash_mix(hash, spec.pressure_correctors);
@@ -1691,7 +1693,9 @@ Status PisoPlan::compile(MPI_Comm communicator,
     }
     return consensus;
   }
-  const PlanFingerprint fingerprint = spec_fingerprint(equations, spec);
+  const PlanFingerprint fingerprint = spec_fingerprint(
+      equations.semantic_fingerprint(), equations.thermophysical_predictor().fingerprint(),
+      equations.pressure_reference().fingerprint(), spec);
   PlanFingerprint minimum = fingerprint;
   PlanFingerprint maximum = fingerprint;
   const int minimum_rc = MPI_Allreduce(MPI_IN_PLACE, &minimum, 1,
@@ -1726,6 +1730,9 @@ Status PisoPlan::compile(MPI_Comm communicator,
   candidate.closed_mass_tolerance_ = spec.closed_mass_tolerance;
   candidate.gauge_tolerance_ = spec.gauge_tolerance;
   candidate.fingerprint_ = fingerprint;
+  candidate.legacy_afc_v3_fingerprint_ = spec_fingerprint(
+      equations.legacy_afc_v3_semantic_, equations.legacy_afc_v3_predictor_,
+      equations.legacy_afc_v3_pressure_reference_, spec);
   out = std::move(candidate);
   return {};
 }
@@ -1834,6 +1841,7 @@ struct PressureVelocityCoupler::Impl {
   mutable std::unique_ptr<double[]> frozen_candidate_composition_values{};
   std::unique_ptr<FieldId[]> independent_species_semantic_fields{};
   std::size_t independent_species_count{};
+  bool has_pressure_outlet_boundary{};
   FieldView frozen_candidate_density{};
   FaceFluxView frozen_candidate_face_aux{};
   // C1 leaves its BDF face-history offset in face_aux. A fresh SIMPLE C2
@@ -1847,6 +1855,84 @@ struct PressureVelocityCoupler::Impl {
   bool frozen_candidate_cartesian{};
   mutable PlanFingerprint current_frozen_exact_lineage{};
   mutable PlanFingerprint current_frozen_exact_scratch{};
+
+  // The finalizer prescribes p/T/Y/U on an active backflow branch. Its mass
+  // flux is fixed, not a pressure-Dirichlet flux response. Keep the linear
+  // target and candidate baseline on that same physical branch.
+  Status close_fixed_backflow_predictor(ConstFieldView velocity) noexcept {
+    const FaceFieldView fluxes[]{workspace.phi_h_by_a.x,
+        workspace.phi_h_by_a.y, workspace.phi_h_by_a.z};
+    const FaceFieldView coefficients[]{workspace.x_pressure_coefficient,
+        workspace.y_pressure_coefficient, workspace.z_pressure_coefficient};
+    for (std::size_t f = 0U; f < 6U; ++f) {
+      const auto face = static_cast<CartesianFace>(f);
+      const BoundaryFacePlan* plan = nullptr;
+      if (!boundary->face(face, plan) || plan == nullptr)
+        return {StatusCode::invalid_plan, kPisoCoupler};
+      if (!plan->local_owner || plan->periodic ||
+          plan->flow_kind != BoundaryKind::pressure_outlet ||
+          boundary->allow_backflow().data[plan->flow_parameter] == 0U)
+        continue;
+      const bool high = f % 2U != 0U;
+      const int inner_count = f < 2U ? cells.y : cells.x;
+      const int outer_count = f < 4U ? cells.z : cells.y;
+      bool has_inflow = false;
+      for (int outer = 0; outer < outer_count; ++outer)
+        for (int inner = 0; inner < inner_count; ++inner) {
+          const Int3 owner = f < 2U ? Int3{high ? cells.x-1 : 0, inner, outer}
+              : f < 4U ? Int3{inner, high ? cells.y-1 : 0, outer}
+                        : Int3{inner, outer, high ? cells.z-1 : 0};
+          has_inflow = has_inflow ||
+              (high ? 1.0 : -1.0) * velocity.unchecked(owner, f / 2U) < 0.0;
+        }
+      if (!has_inflow) continue;
+      if (thermodynamics_plan == nullptr)
+        return {StatusCode::invalid_plan, kPisoCoupler};
+      for (std::size_t s = 0U; s < independent_species_count; ++s) {
+        bool found = false;
+        const auto spans = boundary->spans();
+        for (std::size_t j = 0U; j < spans.size; ++j) {
+          const BoundaryIndexSpan& span = spans.data[j];
+          if (span.stage == BoundaryStage::scalar && span.face == face &&
+              span.field == independent_species_semantic_fields[s]) {
+            frozen_candidate_composition_values[s] =
+                boundary->scalar_backflow_targets().data[span.parameter];
+            found = true;
+            break;
+          }
+        }
+        if (!found) return {StatusCode::invalid_plan, kPisoCoupler};
+      }
+      const auto p = plan->flow_parameter;
+      const double temperature = boundary->backflow_temperature_targets().data[p];
+      const Span<const double> composition{frozen_candidate_composition_values.get(),
+                                           independent_species_count};
+      double h = 0.0, cp = 0.0, gas = 0.0;
+      Status status = thermodynamics_plan->mixture_enthalpy(temperature, composition, h, cp, gas);
+      const Real3 prescribed{boundary->backflow_velocity_x().data[p],
+          boundary->backflow_velocity_y().data[p], boundary->backflow_velocity_z().data[p]};
+      ThermoState thermo;
+      if (status) status = thermodynamics_plan->evaluate(
+          boundary->pressure_targets().data[p], h, composition, prescribed, thermo, temperature);
+      if (!status) return status;
+      const auto axis = static_cast<CartesianAxis>(f / 2U);
+      for (int outer = 0; outer < outer_count; ++outer)
+        for (int inner = 0; inner < inner_count; ++inner) {
+          Int3 index = f < 2U ? Int3{high ? cells.x : 0, inner, outer}
+              : f < 4U ? Int3{inner, high ? cells.y : 0, outer}
+                        : Int3{inner, outer, high ? cells.z : 0};
+          Int3 owner = index;
+          if (high) (f < 2U ? owner.x : f < 4U ? owner.y : owner.z)--;
+          if ((high ? 1.0 : -1.0) * velocity.unchecked(owner, f / 2U) >= 0.0)
+            continue;
+          const double speed = f < 2U ? prescribed.x : f < 4U ? prescribed.y : prescribed.z;
+          fluxes[f / 2U].unchecked(index) =
+              thermo.rho * speed * detail::face_area(*kernels, axis, index);
+          coefficients[f / 2U].unchecked(index) = 0.0;
+        }
+    }
+    return {};
+  }
 
   static constexpr std::size_t kCandidateProvenanceBatchCapacity = 4U;
   static constexpr std::uint8_t kCandidateProvenanceNoDependency =
@@ -2348,6 +2434,15 @@ Status PressureVelocityCoupler::bind(
   candidate->coupling = plan.coupling_;
   candidate->geometry = services.geometry;
   candidate->boundary = services.boundary;
+  // flow_kind is global sealed metadata; parameter slots exist only on
+  // owning ranks. This local bind must not introduce a collective after
+  // fallible allocations. Only inspect the global kind for the hot flag.
+  for (std::size_t f = 0U; f < 6U; ++f) {
+    const BoundaryFacePlan* face = nullptr;
+    if (services.boundary->face(static_cast<CartesianFace>(f), face) && face &&
+        !face->periodic && face->flow_kind == BoundaryKind::pressure_outlet)
+      candidate->has_pressure_outlet_boundary = true;
+  }
   candidate->thermodynamics_plan = services.thermodynamics;
   candidate->pressure_reference = &equations.pressure_reference();
   candidate->communicator = services.communicator;
@@ -3272,6 +3367,13 @@ Status PressureVelocityCoupler::refresh_impl(
   }
   if (!status) {
     return status;
+  }
+  if (impl.has_pressure_outlet_boundary) {
+    status = impl.close_fixed_backflow_predictor(input.trial_velocity);
+    int backflow_lowest = -1;
+    status = collective_status(impl.communicator, status, impl.rank, impl.size,
+                               backflow_lowest);
+    if (!status) return status;
   }
   if (input.immersed_interface != nullptr) {
     status = input.immersed_interface->constrain_pressure_predictor(
@@ -4535,6 +4637,18 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
                              BoundaryKind::pressure_outlet;
           }
           if (!local) break;
+          if (pressure_outlet) {
+            const bool high = face_rule.high;
+            const BoundaryFacePlan* plan = nullptr;
+            local = impl.boundary->face(cartesian_face(axis, high), plan);
+            Int3 owner = face;
+            if (high) (axis_index == 0U ? owner.x : axis_index == 1U ? owner.y : owner.z)--;
+            if (local && impl.boundary->allow_backflow().data[plan->flow_parameter] != 0U &&
+                (high ? 1.0 : -1.0) * impl.current_trial_velocity.unchecked(owner, axis_index) < 0.0) {
+              output.unchecked(face) = bases[axis_index].unchecked(face);
+              continue;
+            }
+          }
           if (open_scope && face_rule.is_nonperiodic_boundary() &&
               !pressure_outlet) {
             // Velocity/mass-flow inlets, walls and symmetry faces are owned

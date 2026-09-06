@@ -201,6 +201,9 @@ struct RestartExpected {
   PlanFingerprint compatible_storage_plan{};
   PlanFingerprint compatible_storage_schema{};
   PlanFingerprint method_history_signature{};
+  // Read-only, known historical method identity. Populated only for explicit
+  // method recovery; geometry, physical configuration and storage still match.
+  PlanFingerprint compatible_method_plan{};
 };
 
 struct RestartImageField {

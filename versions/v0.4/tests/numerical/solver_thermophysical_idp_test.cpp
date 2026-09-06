@@ -2422,6 +2422,56 @@ bool test_zero_high_density_uses_conserved_bundle(
   return passed;
 }
 
+bool test_signed_passive_source_interval(
+    Fixture& fixture, ConstFaceFluxView accepted_flux,
+    ConstFaceFluxView previous_flux, std::uintptr_t exchange_plan,
+    MPI_Comm communicator) {
+  bool passed=true;
+  for (const double upper : {2.0,0.5}) {
+    PredictorData data(fixture.patch.cells,300000.0,300000.0,0.0,0.0);
+    fill(data.passive,-0.4); fill(data.passive_previous,-0.4);
+    fill(data.passive_rhs,2.0/kDt);
+    auto call=make_call(fixture,data,accepted_flux,previous_flux,exchange_plan,1003U);
+    call.input.bdf={1.0/kDt,-1.0/kDt,0.0,1U};
+    call.input.density_previous={}; call.input.enthalpy_previous={};
+    call.input.mass_flux_previous={}; call.input.enthalpy_ghosts.previous={};
+    call.input.enthalpy_nonadvective_rhs.previous={};
+    call.species_previous[0U]={}; call.passive_previous[0U]={};
+    call.species_ghosts[0U].previous={}; call.passive_ghosts[0U].previous={};
+    call.species_rates[0U].previous={}; call.passive_rates[0U].previous={};
+    const ScalarAdmissibleInterval interval{-0.5,upper};
+    call.input.passive_intervals={&interval,1U};
+    const auto status=fixture.equations.thermophysical_predictor().predict(
+        communicator,{},call.input,call.output,call.slow_path,
+        call.diagnostics,call.certificate);
+    if(!status) std::cerr<<"signed_source_status="<<unsigned(status.code)<<'/'<<status.detail
+        <<" reason="<<unsigned(call.diagnostics.failure.reason)<<'\n';
+    passed &= expect(status && call.certificate.valid(),
+                     "signed passive/source interval publishes");
+    const double alpha=call.diagnostics.source_endpoint_alpha;
+    // alpha describes the low endpoint; final theta blends its complete
+    // conserved bundle with the high endpoint (whose source alpha is 1).
+    const double effective_alpha=alpha+call.diagnostics.theta*(1.0-alpha);
+    passed &= expect(upper>1.0 ? alpha==1.0 : alpha>=0.0 && alpha<1.0,
+                     "source alpha is constrained only by the requested interval");
+    for(int z=0;z<fixture.patch.cells.z;++z) for(int y=0;y<fixture.patch.cells.y;++y)
+      for(int x=0;x<fixture.patch.cells.x;++x) {
+        const double q=call.output.passive_scalars.data[0U].unchecked({x,y,z},0U);
+        passed &= expect(q>=interval.lower && q<=interval.upper &&
+            close(q,-0.4+2.0*effective_alpha),"source budget retained without clipping or [0,1] normalization");
+      }
+    const auto before=data.high_passive.storage;
+    const ScalarAdmissibleInterval invalid{upper,-0.5};
+    call.input.passive_intervals={&invalid,1U};
+    const auto rejected=fixture.equations.thermophysical_predictor().predict(
+        communicator,{},call.input,call.output,call.slow_path,
+        call.diagnostics,call.certificate);
+    passed &= expect(!rejected && data.high_passive.storage==before,
+                     "reversed passive bounds fail before publishing output");
+  }
+  return passed;
+}
+
 bool test_stale_previous_ghost_is_atomic(
     Fixture& fixture, ConstFaceFluxView accepted_flux,
     ConstFaceFluxView previous_flux, std::uintptr_t exchange_plan,
@@ -2485,6 +2535,8 @@ int main(int argc, char** argv) {
           static_cast<std::uintptr_t>(0x1d7002U);
       passed &= test_fast_path_bit_identity(fixture, accepted_flux,
                                             previous_flux, exchange_plan);
+      passed &= test_signed_passive_source_interval(fixture,accepted_flux,
+          previous_flux,exchange_plan,MPI_COMM_WORLD);
       passed &= test_small_dt_paired_continuity_roundoff(
           fixture, accepted_flux, previous_flux, exchange_plan);
       passed &= test_local_donor_paired_flux(fixture, exchange_plan,

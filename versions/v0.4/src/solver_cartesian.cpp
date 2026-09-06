@@ -675,6 +675,40 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
           centres.data[static_cast<std::size_t>(begins[axis])],
           metric.uniform_width(),
           metric.uniform_inverse_width()};
+      const BoundaryFacePlan* lower = nullptr;
+      const BoundaryFacePlan* upper = nullptr;
+      Status face_status = boundary.face(static_cast<CartesianFace>(2U * axis), lower);
+      if (face_status)
+        face_status = boundary.face(static_cast<CartesianFace>(2U * axis + 1U), upper);
+      if (!face_status || lower == nullptr || upper == nullptr)
+        return {StatusCode::invalid_plan, kKernelPlan};
+      if (geometry.kind() != GeometryKind::uniform && lower->periodic && upper->periodic) {
+        // A periodic ghost carries the opposite end's field AND metric.
+        // Extending the endpoint width produces different TVD/diffusive
+        // fluxes at the two copies of a stretched periodic seam.
+        const auto count = static_cast<std::size_t>(requested_end - requested_begin);
+        const auto n = static_cast<std::int64_t>(centres.size);
+        const double length = faces.data[centres.size] - faces.data[0U];
+        auto& fs = candidate.metric_faces_[axis];
+        auto& cs = candidate.metric_centres_[axis];
+        auto& ws = candidate.metric_widths_[axis];
+        auto& iw = candidate.metric_inverse_widths_[axis];
+        fs.resize(count + 1U); cs.resize(count); ws.resize(count); iw.resize(count);
+        for (std::size_t i = 0U; i <= count; ++i) {
+          const auto global = requested_begin + static_cast<std::int64_t>(i);
+          const auto wrapped = (global % n + n) % n;
+          const double shift = static_cast<double>((global - wrapped) / n) * length;
+          const auto index = static_cast<std::size_t>(wrapped);
+          fs[i] = faces.data[index] + shift;
+          if (i < count) {
+            cs[i] = centres.data[index] + shift;
+            ws[i] = widths.data[index];
+            iw[i] = inverse_widths.data[index];
+          }
+        }
+        candidate.metrics_[axis].cells = count;
+        candidate.metrics_[axis].global_begin = reach;
+      }
     }
     candidate.rebind_metrics();
     out = std::move(candidate);

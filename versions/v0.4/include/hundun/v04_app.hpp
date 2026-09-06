@@ -388,6 +388,7 @@ struct PressureEnergyPerformanceTotals {
   // the detailed observation unusable for attribution, not a solver failure.
   struct Loop {
     std::uint32_t attempt{};
+    std::uint32_t scalar_coupling_sweep{1U};
     double dt{};
     Status attempt_status{};
     PressureEnergySolveObservation solve{};
@@ -450,6 +451,17 @@ struct DriverConservationReport {
   double cumulative_energy_defect{};     // J since epoch_start_step
 };
 
+struct DriverScalarTransportReport {
+  bool active{};
+  std::uint64_t owned_payload_bytes{}; // Separate from halo/MPI and RSS.
+  std::uint32_t coupling_sweeps{};
+  std::uint32_t remap_iterations{};
+  std::uint64_t remap_nanoseconds{};
+  double final_species_residual{};
+  double final_remap_residual{};
+  double mass_pairing_residual{};
+};
+
 struct DriverStepReport {
   StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
@@ -476,6 +488,7 @@ struct DriverStepReport {
   PressureEnergyPerformanceTotals pressure_energy_performance{};
   DriverTerminalEquationReport terminal_equations{};
   DriverConservationReport conservation{};
+  DriverScalarTransportReport scalar_transport{};
 };
 
 class ProductDriver {
@@ -491,7 +504,9 @@ class ProductDriver {
                        ProductDriver& out) noexcept;
   Status restart_expected(RestartExpected& out,
                           RestartStorageCompatibility compatibility =
-                              RestartStorageCompatibility::strict) noexcept;
+                              RestartStorageCompatibility::strict,
+                          RestartHistoryPolicy history_policy =
+                              RestartHistoryPolicy::require_compatible) noexcept;
   Status initialize(const DriverInitialState& initial) noexcept;
   Status initialize_restart(const RestartImage& image,
                             RestartStorageCompatibility compatibility =

@@ -1710,7 +1710,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (!options.restart_root.empty()) {
     RestartExpected expected;
     status = driver.restart_expected(expected,
-                                     options.restart_storage_compatibility);
+        options.restart_storage_compatibility,
+        options.restart_method_recovery ? RestartHistoryPolicy::rebuild_method_history
+                                        : RestartHistoryPolicy::require_compatible);
     RestartImage image;
     if (status)
       status = RestartReader::load(communicator, options.restart_root,

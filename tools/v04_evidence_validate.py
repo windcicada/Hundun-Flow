@@ -223,7 +223,7 @@ PREDICTOR_LOW_STATES = (
 )
 PREDICTOR_CONSTRAINTS = (
     "none", "density", "independent_species", "dependent_species",
-    "enthalpy_lower", "enthalpy_upper",
+    "enthalpy_lower", "enthalpy_upper", "passive_lower", "passive_upper",
 )
 
 

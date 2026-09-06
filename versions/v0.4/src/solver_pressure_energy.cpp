@@ -36,7 +36,7 @@ constexpr std::uint64_t kPressureEnergyDiagonalSchema =
 constexpr std::uint64_t kPressureEnergyPressureFluxSchema =
     UINT64_C(0x7630347065666c78);
 constexpr std::uint64_t kPressureEnergyEnthalpySchema =
-    UINT64_C(0x7630347065656e68);
+    UINT64_C(0x7630347065653032); // v04pee02: conditional outlet derivative.
 // "v04pegl2": the joint Euclidean merit is a different policy from the
 // original componentwise L-infinity globalization and must sign a distinct
 // provenance lineage.
@@ -469,6 +469,7 @@ PlanFingerprint enthalpy_collective_fingerprint(
                                 as_const(binding.workspace.delta_temperature)};
   for (ConstFieldView field : fields)
     hash = mix_collective_view(hash, field);
+  hash = mix_collective_view(hash, binding.boundary_velocity);
   const bool compiled =
       binding.workspace.compiled.local_diagonal.base != nullptr ||
       binding.workspace.compiled.response_stage.base != nullptr ||
@@ -514,6 +515,7 @@ RevisionToken enthalpy_binding_revision(
                                 as_const(binding.workspace.delta_temperature)};
   for (ConstFieldView field : fields)
     hash = mix_local_field(hash, field);
+  hash = mix_local_field(hash, binding.boundary_velocity);
   const bool compiled =
       binding.workspace.compiled.local_diagonal.base != nullptr ||
       binding.workspace.compiled.response_stage.base != nullptr ||
@@ -2340,6 +2342,10 @@ Status PressureEnergyEnthalpyOperator::bind(
           {halo_fields.data(), halo_fields.size()},
           binding.boundary->halo_topology()));
   const bool cell_views_valid =
+      pointers_valid &&
+      (binding.boundary_velocity.base == nullptr ||
+       (detail::valid_cell_view(binding.boundary_velocity, cells, 0U, 3U, 1U) &&
+        binding.boundary_velocity.field == binding.boundary->velocity_field())) &&
       valid_scalar_view(binding.assembled_diagonal, cells) &&
       detail::valid_cell_view(binding.target_enthalpy, cells, 0U, 1U, 2U) &&
       binding.target_enthalpy.field == binding.boundary->enthalpy_field() &&
@@ -2384,6 +2390,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   }
 
   const ConstFieldView cell_views[]{
+      binding.boundary_velocity,
       binding.assembled_diagonal,
       binding.target_enthalpy,
       binding.density_enthalpy_derivative,
@@ -2403,9 +2410,11 @@ Status PressureEnergyEnthalpyOperator::bind(
       as_const(binding.workspace.directional_enthalpy.z)};
   bool aliases = false;
   for (std::size_t left = 0U; left < std::size(cell_views); ++left) {
+    if (cell_views[left].base == nullptr) continue; // Optional branch velocity.
     for (std::size_t right = left + 1U; right < std::size(cell_views);
          ++right) {
-      aliases = aliases || overlaps(cell_views[left], cell_views[right]);
+      if (cell_views[right].base != nullptr)
+        aliases = aliases || overlaps(cell_views[left], cell_views[right]);
     }
     for (ConstFaceFieldView face : face_views) {
       aliases =
@@ -2429,7 +2438,8 @@ Status PressureEnergyEnthalpyOperator::bind(
         as_const(binding.workspace.compiled.thermal_conductance.z)};
     for (ConstFieldView compiled_cell : compiled_cells) {
       for (ConstFieldView cell : cell_views)
-        aliases = aliases || overlaps(compiled_cell, cell);
+        if (cell.base != nullptr)
+          aliases = aliases || overlaps(compiled_cell, cell);
       for (ConstFaceFieldView face : face_views)
         aliases = aliases ||
                   detail::cell_face_views_overlap(compiled_cell, face);
@@ -2440,8 +2450,9 @@ Status PressureEnergyEnthalpyOperator::bind(
     aliases = aliases || overlaps(compiled_cells[0U], compiled_cells[1U]);
     for (std::size_t left = 0U; left < std::size(compiled_faces); ++left) {
       for (ConstFieldView cell : cell_views)
-        aliases = aliases ||
-                  detail::cell_face_views_overlap(cell, compiled_faces[left]);
+        if (cell.base != nullptr)
+          aliases = aliases ||
+                    detail::cell_face_views_overlap(cell, compiled_faces[left]);
       for (std::size_t right = left + 1U;
            right < std::size(compiled_faces); ++right) {
         aliases = aliases || detail::face_views_overlap(compiled_faces[left],
@@ -2587,6 +2598,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.services_ = binding.services;
   candidate.assembled_diagonal_ = binding.assembled_diagonal;
   candidate.target_enthalpy_ = binding.target_enthalpy;
+  candidate.boundary_velocity_ = binding.boundary_velocity;
   candidate.density_enthalpy_derivative_ = binding.density_enthalpy_derivative;
   candidate.heat_capacity_ = binding.heat_capacity;
   candidate.thermal_conductivity_ = binding.thermal_conductivity;
@@ -2705,6 +2717,7 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
   current_binding.authority = certificate_.authority;
   current_binding.assembled_diagonal = assembled_diagonal_;
   current_binding.target_enthalpy = target_enthalpy_;
+  current_binding.boundary_velocity = boundary_velocity_;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
   current_binding.heat_capacity = heat_capacity_;
   current_binding.thermal_conductivity = thermal_conductivity_;
@@ -2864,6 +2877,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   }
   const Int3 cells = certificate_.linear.local_shape;
   const ConstFieldView bound_fields[]{assembled_diagonal_,
+                                      boundary_velocity_,
                                       target_enthalpy_,
                                       density_enthalpy_derivative_,
                                       heat_capacity_,
@@ -2882,6 +2896,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
       as_const(workspace_.directional_enthalpy.z)};
   bool aliases = detail::field_views_overlap(as_const(input), as_const(output));
   for (ConstFieldView field : bound_fields) {
+    if (field.base == nullptr) continue; // Optional branch velocity.
     aliases = aliases || detail::field_views_overlap(as_const(input), field) ||
               detail::field_views_overlap(as_const(output), field);
   }
@@ -2918,6 +2933,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   current_binding.authority = certificate_.authority;
   current_binding.assembled_diagonal = assembled_diagonal_;
   current_binding.target_enthalpy = target_enthalpy_;
+  current_binding.boundary_velocity = boundary_velocity_;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
   current_binding.heat_capacity = heat_capacity_;
   current_binding.thermal_conductivity = thermal_conductivity_;
@@ -3075,11 +3091,12 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   delta_temperature = fields[1U];
 
   status = apply_homogeneous_scalar_boundary_ghosts(
-      BoundaryStage::enthalpy, *boundary_, target_enthalpy_.field, input, 2U);
+      BoundaryStage::enthalpy, *boundary_, target_enthalpy_.field, input,
+      kernels_->reach(), boundary_velocity_);
   if (status) {
     status = apply_homogeneous_scalar_boundary_ghosts(
         BoundaryStage::enthalpy, *boundary_, target_enthalpy_.field,
-        delta_temperature, 1U);
+        delta_temperature, 1U, boundary_velocity_);
   }
   if (!status) {
     failure_ = {status, LinearOperatorStatusScope::rank_local, -1};

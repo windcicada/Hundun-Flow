@@ -60,7 +60,8 @@ bool checked_ghosted_extent(std::int32_t interior, std::int32_t ghosts,
          checked_add(static_cast<std::size_t>(interior), twice_ghosts, out);
 }
 
-bool checked_affine_offset(const FieldView& view,
+template <class View>
+bool checked_affine_offset(const View& view,
                            std::size_t extent_x,
                            std::size_t extent_y,
                            std::size_t extent_z) noexcept {
@@ -85,7 +86,8 @@ bool checked_affine_offset(const FieldView& view,
          maximum_offset <= ptrdiff_max;
 }
 
-bool valid_view(const FieldView& view,
+template <class View>
+bool valid_view(const View& view,
                 const BoundaryIndexSpan& span,
                 Int3 expected_cells) noexcept {
   if (view.base == nullptr || view.interior.x <= 0 || view.interior.y <= 0 ||
@@ -255,7 +257,7 @@ bool valid_homogeneous_scalar_view(const BoundaryPlan& plan,
 bool preflight_homogeneous_scalar_boundary(
     BoundaryStage source_stage, const BoundaryPlan& plan,
     FieldId source_field, const FieldView& variation,
-    std::uint8_t reach) noexcept {
+    std::uint8_t reach, ConstFieldView boundary_velocity) noexcept {
   if (plan.revision() == 0U || plan.semantic_fingerprint() == 0U ||
       plan.local_layout_fingerprint() == 0U ||
       plan.geometry_fingerprint() == 0U ||
@@ -264,6 +266,16 @@ bool preflight_homogeneous_scalar_boundary(
       !declared_scalar_source(source_stage, plan, source_field) ||
       !valid_homogeneous_scalar_view(plan, variation, reach)) {
     return false;
+  }
+  if (boundary_velocity.base != nullptr) {
+    BoundaryIndexSpan velocity_span;
+    velocity_span.component_count = 3U;
+    velocity_span.tangent_inner_count = plan.local_cells().y;
+    velocity_span.tangent_outer_count = plan.local_cells().z;
+    if (boundary_velocity.field != plan.velocity_field() ||
+        boundary_velocity.revision == 0U ||
+        !valid_view(boundary_velocity, velocity_span, plan.local_cells()))
+      return false;
   }
 
   std::array<std::uint8_t, 6U> physical{};
@@ -307,6 +319,13 @@ bool preflight_homogeneous_scalar_boundary(
       return false;
     }
     matched[selected] = 1U;
+    const BoundaryFacePlan* face = nullptr;
+    const bool conditional = boundary_velocity.base != nullptr &&
+        plan.face(span.face, face) && face != nullptr &&
+        face->flow_kind == BoundaryKind::pressure_outlet &&
+        span.value_source == BoundaryValueSource::resolved_scalar &&
+        (source_stage == BoundaryStage::enthalpy ||
+         source_stage == BoundaryStage::scalar);
 
     const auto inner_count =
         static_cast<std::int32_t>(span.tangent_inner_count);
@@ -314,6 +333,12 @@ bool preflight_homogeneous_scalar_boundary(
         static_cast<std::int32_t>(span.tangent_outer_count);
     for (std::int32_t outer = 0; outer < outer_count; ++outer) {
       for (std::int32_t inner = 0; inner < inner_count; ++inner) {
+        const Int3 owner = interior_index(span.face, variation, 1, inner, outer);
+        if (boundary_velocity.base != nullptr) {
+          if (!finite(boundary_velocity.unchecked(owner,
+                           static_cast<std::uint8_t>(selected / 2U))))
+            return false;
+        }
         for (std::int32_t layer = 1;
              layer <= static_cast<std::int32_t>(reach); ++layer) {
           const Int3 source =
@@ -321,6 +346,11 @@ bool preflight_homogeneous_scalar_boundary(
           if (!finite(variation.unchecked(source, 0U))) {
             return false;
           }
+          const bool outflow = conditional && (selected % 2U ? 1.0 : -1.0) *
+              boundary_velocity.unchecked(owner, selected / 2U) >= 0.0;
+          if (outflow && !finite(static_cast<double>(
+                  2.0L * variation.unchecked(owner, 0U) -
+                  variation.unchecked(source, 0U)))) return false;
         }
       }
     }
@@ -337,7 +367,7 @@ bool preflight_homogeneous_scalar_boundary(
 void commit_homogeneous_scalar_boundary(
     BoundaryStage source_stage, const BoundaryPlan& plan,
     FieldId source_field, FieldView variation,
-    std::uint8_t reach) noexcept {
+    std::uint8_t reach, ConstFieldView boundary_velocity) noexcept {
   const Span<const BoundaryIndexSpan> spans = plan.spans();
   for (std::size_t index = 0U; index < spans.size; ++index) {
     const BoundaryIndexSpan& span = spans.data[index];
@@ -349,12 +379,24 @@ void commit_homogeneous_scalar_boundary(
                 span.relation == BoundaryRelation::convective
             ? -1.0
             : 1.0;
+    const BoundaryFacePlan* face = nullptr;
+    const bool conditional = boundary_velocity.base != nullptr &&
+        plan.face(span.face, face) && face != nullptr &&
+        face->flow_kind == BoundaryKind::pressure_outlet &&
+        span.value_source == BoundaryValueSource::resolved_scalar &&
+        (source_stage == BoundaryStage::enthalpy ||
+         source_stage == BoundaryStage::scalar);
     const auto inner_count =
         static_cast<std::int32_t>(span.tangent_inner_count);
     const auto outer_count =
         static_cast<std::int32_t>(span.tangent_outer_count);
     for (std::int32_t outer = 0; outer < outer_count; ++outer) {
       for (std::int32_t inner = 0; inner < inner_count; ++inner) {
+        const Int3 owner = interior_index(span.face, variation, 1, inner, outer);
+        const std::size_t face_number = face_index(span.face);
+        const bool outflow = conditional &&
+            (face_number % 2U ? 1.0 : -1.0) *
+                boundary_velocity.unchecked(owner, face_number / 2U) >= 0.0;
         for (std::int32_t layer = 1;
              layer <= static_cast<std::int32_t>(reach); ++layer) {
           const Int3 source =
@@ -362,7 +404,10 @@ void commit_homogeneous_scalar_boundary(
           const Int3 destination =
               ghost_index(span.face, variation, layer, inner, outer);
           variation.unchecked(destination, 0U) =
-              sign * variation.unchecked(source, 0U);
+              outflow ? static_cast<double>(
+                            2.0L * variation.unchecked(owner, 0U) -
+                            variation.unchecked(source, 0U))
+                      : sign * variation.unchecked(source, 0U);
         }
       }
     }
@@ -804,14 +849,21 @@ Status apply_boundary_ghosts(BoundaryStage stage, const BoundaryPlan& plan,
 
 Status apply_homogeneous_scalar_boundary_ghosts(
     BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, FieldView variation, std::uint8_t reach) noexcept {
+  return apply_homogeneous_scalar_boundary_ghosts(
+      source_stage, plan, source_field, variation, reach, {});
+}
+
+Status apply_homogeneous_scalar_boundary_ghosts(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
     FieldId source_field, FieldView variation,
-    std::uint8_t reach) noexcept {
+    std::uint8_t reach, ConstFieldView boundary_velocity) noexcept {
   if (!preflight_homogeneous_scalar_boundary(
-          source_stage, plan, source_field, variation, reach)) {
+          source_stage, plan, source_field, variation, reach, boundary_velocity)) {
     return {StatusCode::invalid_plan, kApplyHomogeneousAuthority};
   }
   commit_homogeneous_scalar_boundary(source_stage, plan, source_field,
-                                     variation, reach);
+                                     variation, reach, boundary_velocity);
   return {};
 }
 

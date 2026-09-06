@@ -1329,6 +1329,44 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
   return {};
 }
 
+Status IbmEquationInterfacePlan::correct_impermeable_scalar_diffusion(
+    ConstFieldView transported, ConstFieldView diffusivity,
+    FieldView rate) const noexcept {
+  Status status = validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
+  const Int3 cells = kernels_->cells();
+  if (!detail::valid_cell_view(transported, cells, 0U, 1U, 1U) ||
+      !detail::valid_cell_view(diffusivity, cells, 0U, 1U, 1U) ||
+      !detail::valid_cell_view(rate, cells, 0U, 1U))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  const auto links = topology_->links();
+  for (std::size_t index = 0U; index < links.size; ++index) {
+    const auto& link = links.data[index];
+    const InterfaceFace face = interface_face(link);
+    const double transmissibility = detail::positive_transmissibility(
+        *kernels_, diffusivity, face.axis, face.index);
+    const double volume = detail::cell_volume(*kernels_, link.fluid_local_index);
+    // Remove exactly the cut-face term included by cartesian_diffusion.
+    // Fluid-fluid face pairs are untouched and cancel in the global ledger.
+    const double correction = transmissibility *
+        (transported.unchecked(link.fluid_local_index, 0U) -
+         transported.unchecked(link.solid_local_index, 0U)) / volume;
+    const double value = rate.unchecked(link.fluid_local_index, 0U) + correction;
+    if (!std::isfinite(transmissibility) || transmissibility <= 0.0 ||
+        !std::isfinite(volume) || volume <= 0.0 || !std::isfinite(value))
+      return {StatusCode::numerical_failure, kIbmEquationNumerical};
+    rate.unchecked(link.fluid_local_index, 0U) = value;
+  }
+  const auto region = topology_->region();
+  std::size_t flat = 0U;
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x, ++flat)
+        if (region.data[flat] == static_cast<std::uint8_t>(RegionFlag::solid))
+          rate.unchecked({x,y,z},0U) = 0.0;
+  return {};
+}
+
 Status IbmEquationInterfacePlan::correct_positive_bounded_zero_normal_diffusion(
     ConstFieldView transported, ConstFieldView diffusivity,
     FieldView rate) const noexcept {

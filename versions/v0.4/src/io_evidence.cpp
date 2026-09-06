@@ -193,6 +193,10 @@ std::string_view predictor_constraint_name(
       return "enthalpy_lower";
     case 5U:
       return "enthalpy_upper";
+    case 6U:
+      return "passive_lower";
+    case 7U:
+      return "passive_upper";
   }
   return "invalid";
 }
@@ -402,7 +406,7 @@ Status validate_record(const IoServicePlan& services,
                  record.predictor_limiting_cell_z >= 0 &&
                  record.predictor_limiting_rank >= 0 &&
                  record.predictor_constraint >= 1U &&
-                 record.predictor_constraint <= 5U &&
+                 record.predictor_constraint <= 7U &&
                  record.predictor_low_state >= 1U &&
                  record.predictor_low_state <= 7U &&
                  (record.predictor_low_state != 1U ||

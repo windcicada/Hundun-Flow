@@ -619,8 +619,14 @@ class IbmEquationInterfacePlan {
                                    FieldView velocity_gradient,
                                    Real3 wall_velocity = {}) const noexcept;
   Status correct_zero_normal_diffusion(ConstFieldView transported,
-                                       ConstFieldView diffusivity,
-                                       FieldView rate) const noexcept;
+                                      ConstFieldView diffusivity,
+                                      FieldView rate) const noexcept;
+  // Correct an already assembled Cartesian diffusion rate on the binary
+  // fluid control volumes: impermeable scalar cut faces carry exactly zero
+  // flux. This is distinct from the reconstructed thermal Neumann operator.
+  Status correct_impermeable_scalar_diffusion(ConstFieldView transported,
+                                             ConstFieldView diffusivity,
+                                             FieldView rate) const noexcept;
   Status correct_positive_bounded_zero_normal_diffusion(
       ConstFieldView transported, ConstFieldView diffusivity,
       FieldView rate) const noexcept;

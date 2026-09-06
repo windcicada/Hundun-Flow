@@ -116,10 +116,11 @@ PlanFingerprint compute_semantic_fingerprint(
     const SchemePlan& schemes, const CartesianGeometryPlan& geometry,
     const BoundaryPlan& boundary, const ContributionRegistry& contributions,
     const ThermodynamicsPlan& thermodynamics, const TransportPlan& transport,
-    const EquationPlanSpec& spec) noexcept {
+    const EquationPlanSpec& spec,
+    PlanFingerprint limiter_policy = kMomentumPredictorLimiterPolicySchema) noexcept {
   std::uint64_t hash = kFnvOffset;
   hash = hash_mix(hash, UINT64_C(0x7630346571756174));
-  hash = hash_mix(hash, kMomentumPredictorLimiterPolicySchema);
+  hash = hash_mix(hash, limiter_policy);
   hash = hash_mix(hash, static_cast<std::uint8_t>(geometry.kind()));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().x));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().y));
@@ -537,6 +538,8 @@ void EquationPlanSet::reset() noexcept {
   patch_begin_ = {};
   local_cells_ = 0U;
   semantic_fingerprint_ = 0U;
+  legacy_afc_v3_semantic_ = legacy_afc_v3_predictor_ =
+      legacy_afc_v3_pressure_reference_ = 0U;
   thermodynamics_fingerprint_ = 0U;
   transport_fingerprint_ = 0U;
   fingerprint_ = 0U;
@@ -671,6 +674,9 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   patch_begin_ = other.patch_begin_;
   local_cells_ = other.local_cells_;
   semantic_fingerprint_ = other.semantic_fingerprint_;
+  legacy_afc_v3_semantic_ = other.legacy_afc_v3_semantic_;
+  legacy_afc_v3_predictor_ = other.legacy_afc_v3_predictor_;
+  legacy_afc_v3_pressure_reference_ = other.legacy_afc_v3_pressure_reference_;
   thermodynamics_fingerprint_ = other.thermodynamics_fingerprint_;
   transport_fingerprint_ = other.transport_fingerprint_;
   fingerprint_ = other.fingerprint_;
@@ -762,6 +768,14 @@ Status EquationPlanSet::compile(
     candidate.patch_begin_ = patch.begin;
     candidate.local_cells_ = local_cells;
     candidate.semantic_fingerprint_ = semantic;
+    candidate.legacy_afc_v3_semantic_ = compute_semantic_fingerprint(
+        schemes, geometry, boundary, contributions, thermodynamics, transport,
+        spec, UINT64_C(0x7630346d61666333));
+    candidate.legacy_afc_v3_predictor_ = child_fingerprint(
+        candidate.legacy_afc_v3_semantic_, UINT64_C(0x746865726d707265), spec.enthalpy);
+    candidate.legacy_afc_v3_pressure_reference_ = child_fingerprint(
+        candidate.legacy_afc_v3_semantic_, UINT64_C(0x7072657373757265),
+        spec.pressure_compressibility);
     candidate.thermodynamics_fingerprint_ = thermodynamics.fingerprint();
     candidate.transport_fingerprint_ = transport.fingerprint();
     std::uint64_t layout_hash = hash_mix(kFnvOffset, semantic);

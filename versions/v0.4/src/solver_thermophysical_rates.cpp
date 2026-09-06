@@ -506,7 +506,7 @@ Status evaluate_thermophysical_rates(
         kernels, as_const(output.scalar_diffusivity_workspace), diffusion);
     if (!evaluated) return evaluated;
     if (input.immersed_interface != nullptr) {
-      evaluated = input.immersed_interface->correct_zero_normal_diffusion(
+      evaluated = input.immersed_interface->correct_impermeable_scalar_diffusion(
           scalar, as_const(output.scalar_diffusivity_workspace),
           output.diffusion_scratch);
       if (!evaluated) return evaluated;

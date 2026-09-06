@@ -5,11 +5,36 @@ find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
 
-# Explicit opt-in acceptance executable: known finite-dt scalar inventory
-# defect must remain RED, never WILL_FAIL or a passing default CTest.
-add_executable(v04_product_scalar_contract_experiment EXCLUDE_FROM_ALL
+# Retain the original RED executable name for reproducible historical commands.
+# The corrected method is now an ordinary acceptance suite, never WILL_FAIL.
+add_executable(v04_product_scalar_contract_experiment
   integration/product_scalar_contract_experiment.cpp)
 target_link_libraries(v04_product_scalar_contract_experiment PRIVATE hundun_v04_core)
+foreach(rank_count IN ITEMS 1 2 4)
+  foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart)
+    set(scalar_arguments)
+    if(scenario STREQUAL "stretched")
+      set(scalar_arguments --stretched)
+    elseif(scenario STREQUAL "near_pure")
+      set(scalar_arguments --near-pure)
+    elseif(scenario STREQUAL "open")
+      set(scalar_arguments --open)
+    elseif(scenario STREQUAL "variable")
+      set(scalar_arguments --stretched --variable-thermo)
+    elseif(scenario STREQUAL "ibm")
+      set(scalar_arguments --ibm)
+    elseif(scenario STREQUAL "restart")
+      set(scalar_arguments --stretched --restart)
+    endif()
+    add_test(NAME v04_scalar_contract_${scenario}_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
+        ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_scalar_contract_experiment>"
+        ${MPIEXEC_POSTFLAGS} ${scalar_arguments})
+    set_tests_properties(v04_scalar_contract_${scenario}_mpi_${rank_count}
+      PROPERTIES PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 180
+        LABELS "scalar-conservation")
+  endforeach()
+endforeach()
 
 add_executable(v04_mpi_observer_probe mpi/mpi_observer_probe.c)
 target_link_libraries(v04_mpi_observer_probe PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})

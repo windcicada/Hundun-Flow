@@ -1691,10 +1691,40 @@ Status limit_momentum_predictor_correction(
               break;
             }
 
-            const double positive_budget =
-                std::max(0.0, majorant * (upper - low));
-            const double negative_budget =
-                std::min(0.0, majorant * (lower - low));
+            // Form the budget in momentum units, before division. Subtracting
+            // two rounded velocities loses the small budget at an extremum.
+            // A nominally zero transverse component can then veto the whole
+            // vector through the common face alpha. Bound the arithmetic
+            // error using the vector velocity scale, not an empirical speed
+            // floor; the allowance vanishes with the physical state.
+            double velocity_scale = std::max(std::abs(high), std::abs(low));
+            for (std::uint8_t c = 0U; c < 3U; ++c)
+              velocity_scale = std::max(
+                  velocity_scale, std::abs(velocity.unchecked(cell, c)));
+            velocity_scale =
+                std::max({velocity_scale, std::abs(lower), std::abs(upper)});
+            const long double low_rhs =
+                static_cast<long double>(majorant_rhs) + delta;
+            constexpr double gamma64 =
+                (64.0 * std::numeric_limits<double>::epsilon()) /
+                (1.0 - 64.0 * std::numeric_limits<double>::epsilon());
+            const long double arithmetic_budget = gamma64 *
+                (std::abs(static_cast<long double>(majorant_rhs)) +
+                 std::abs(static_cast<long double>(delta)) +
+                 static_cast<long double>(majorant) * velocity_scale);
+            const long double upper_budget =
+                static_cast<long double>(majorant) * upper - low_rhs;
+            const long double lower_budget =
+                static_cast<long double>(majorant) * lower - low_rhs;
+            // Only a cancellation-sized budget needs the arithmetic guard.
+            // Adding it to every budget also relaxes otherwise exact bounds
+            // (e.g. a one-sided outflow with alpha=1/2 acquires negative RHS).
+            const double positive_budget = static_cast<double>(std::max(
+                0.0L, upper_budget + (std::abs(upper_budget) <= arithmetic_budget
+                                         ? arithmetic_budget : 0.0L)));
+            const double negative_budget = static_cast<double>(std::min(
+                0.0L, lower_budget - (std::abs(lower_budget) <= arithmetic_budget
+                                         ? arithmetic_budget : 0.0L)));
             double positive_ratio =
                 positive > 0.0 ? positive_budget / positive : 1.0;
             double negative_ratio =
@@ -2080,7 +2110,7 @@ Status solve_momentum_predictor(
     EquationSystemView system, FieldView velocity, HaloEngine& krylov_halo,
     SolverWorkspace& workspace, ReductionEngine& reductions,
     ResourceCounters* resources,
-    MomentumPredictorSolveReport& report) noexcept {
+    MomentumPredictorSolveReport& report, bool require_composition_accuracy) noexcept {
   report = {};
   const Int3 cells = plan.cells();
   const std::size_t count =
@@ -2191,7 +2221,15 @@ Status solve_momentum_predictor(
 
   const std::uint32_t restart =
       std::min<std::uint32_t>(12U, requirements.maximum_restart);
-  const LinearSolveControl control{1.0e-10, 1.0e-4, 64U, 4U, restart};
+  // A mixture fixed point cannot converge below the inner momentum solve's
+  // truncation noise. Keep the ordinary flow predictor policy; a coupled
+  // composition solve needs a near-roundoff inner equation before certifying
+  // its conservative inventory. This tightens, never relaxes, flow acceptance.
+  const double epsilon=std::numeric_limits<double>::epsilon();
+  const LinearSolveControl control{
+      require_composition_accuracy ? 64.0*epsilon : 1.0e-10,
+      require_composition_accuracy ? 512.0*epsilon : 1.0e-4,
+      64U, 4U, restart};
   for (std::uint8_t component = 0U; component < 3U; ++component) {
     // LinearIdentity is a collective contract.  Boundary ownership and the
     // assembly state certificate intentionally contain rank-local storage

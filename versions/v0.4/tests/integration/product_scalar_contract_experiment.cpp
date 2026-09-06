@@ -1,43 +1,88 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
-// Standalone strict acceptance experiment. NOT registered as a passing CTest,
-// and NOT a production scalar correction. A nonzero exit preserves open defects.
+// Public ProductDriver contract: conservation is checked independently from
+// p/h/Y snapshots, never inferred from the correction's reported residual.
 #include "hundun/v04_app.hpp"
 #include "../support/product_fixture.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 using namespace hundun::v04;
 namespace {
-constexpr Int3 cells{8,4,4};
-constexpr double volume = 1.0 / 128.0;
+Int3 cells{8,4,4};
 constexpr double pressure = 101325.0;
 constexpr double r_a = kUniversalGasConstant / 28.96546;
 constexpr double r_b = kUniversalGasConstant / 40.0;
 constexpr double end_time = 1e-3;
 constexpr double coarse_dt = 1.25e-4;
+bool stretched = false;
+bool near_pure = false;
+bool coupling_probe = false;
+bool open_probe = false;
+bool variable_thermo = false;
+bool immersed = false;
+bool restart_probe = false;
+int rank = 0;
+bool all_pass(bool local) {
+  int value=local ? 1 : 0, result=0;
+  return MPI_Allreduce(&value,&result,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD)==MPI_SUCCESS && result==1;
+}
+double face(int axis, int index) {
+  const int n = axis == 0 ? cells.x : axis == 1 ? cells.y : cells.z;
+  const double length = immersed ? 4.0 : axis == 0 ? 2.0 : axis == 1 ? 1.0 : 0.5;
+  const double f = static_cast<double>(index) / n;
+  const double value = (immersed ? -2.0 : 0.0) + length * (f + (stretched ?
+      0.1 * std::sin(2.0 * std::acos(-1.0) * f) / (2.0 * std::acos(-1.0)) : 0.0));
+  // COAST axes have float32 effective coordinates by contract.
+  return stretched ? static_cast<double>(static_cast<float>(value)) : value;
+}
+double width(int axis, int index) { return face(axis, index + 1) - face(axis, index); }
+bool solid(Int3 global) {
+  if(!immersed) return false;
+  return std::abs(0.5*(face(0,global.x)+face(0,global.x+1)))<1.0 &&
+         std::abs(0.5*(face(1,global.y)+face(1,global.y+1)))<1.0 &&
+         std::abs(0.5*(face(2,global.z)+face(2,global.z+1)))<1.0;
+}
 struct Analytic {
   double q{}, p{}, temperature{}, h{}, rho{}, u{}, v{};
 };
 Analytic initial(int x, bool species, bool uniform) {
   x = (x % cells.x + cells.x) % cells.x;
   const double wave = std::sin(2.0 * std::acos(-1.0) * (x + 0.5) / cells.x);
-  const double q = 0.2 + (uniform ? 0.0 : 0.05 * wave);
+  const double q = uniform ? 0.2 : near_pure ? (x < cells.x / 2 ? 1e-8 : 1.0-1e-8)
+                                                     : 0.2 + 0.05 * wave;
   const double gas = species ? q * r_a + (1.0 - q) * r_b : r_a;
   const double cp = species ? q * 3.5 * r_a + (1.0 - q) * 4.1 * r_b : 3.5 * r_a;
+  const double cp_slope = variable_thermo ? (species ? q*1e-3*r_a+(1-q)*7e-4*r_b : 1e-3*r_a) : 0.0;
   const double p = pressure + 50.0 * wave;
   const double temperature = 320.0 * std::pow(p / pressure, 2.0 / 7.0);
-  return {q, p, temperature, cp * temperature, p / (gas * temperature),
+  return {q, p, temperature, (cp+0.5*cp_slope*temperature) * temperature, p / (gas * temperature),
           0.5 + 0.003 * wave, 0.2 * wave};
 }
 ValidatedModel model(bool species, double dt) {
   auto m = test::product_model(cells);
+  if(immersed) {
+    m.mesh.lower={-2.0,-2.0,-2.0}; m.mesh.upper={2.0,2.0,2.0};
+    m.mesh.minimum_spacing={0.25,0.25,0.25};
+    m.immersed_boundary=ImmersedBoundarySpec{
+        "cylinder_ascii.stl",ImmersedFluidSide::outside};
+  }
+  if (stretched) {
+    m.mesh.kind = GeometryKind::coast_runtime_axes_v1;
+    m.mesh.axes_file = "in-memory-scalar-contract-axes";
+    for (int a = 0; a < 3; ++a) {
+      const int n = a == 0 ? cells.x : a == 1 ? cells.y : cells.z;
+      for (int i = 0; i <= n; ++i) m.mesh.coast_runtime_faces[a].push_back(face(a, i));
+    }
+  }
   m.fingerprint = species ? 0x5343414c02U : 0x5343414c01U;
   m.turbulence = TurbulenceKind::none;
   m.schemes.momentum = m.schemes.enthalpy = ConvectionScheme::central2;
@@ -55,6 +100,14 @@ ValidatedModel model(bool species, double dt) {
   auto& a = m.thermophysics.species.front();
   a.viscosity_reference = 1e-5;
   a.conductivity = 1e-2;
+  if(variable_thermo) {
+    a.nasa7_low[1]=a.nasa7_high[1]=1e-3;
+    a.transport_law=TransportLaw::sutherland;
+    a.transport_reference_temperature=300.0;
+    a.sutherland_temperature=110.4;
+    a.prandtl=0.71;
+    a.conductivity=0.0;
+  }
   m.transported_scalars = {{"constant", TransportedScalarRole::passive_scalar, 1.0, 1.0},
       {species ? "A" : "wave", species ? TransportedScalarRole::species : TransportedScalarRole::passive_scalar, 1.0, 1.0}};
   if (species) {
@@ -63,6 +116,7 @@ ValidatedModel model(bool species, double dt) {
     b.stable_name = "B";
     b.molecular_weight = 40.0;
     b.nasa7_low[0] = b.nasa7_high[0] = 4.1;
+    if(variable_thermo) b.nasa7_low[1]=b.nasa7_high[1]=7e-4;
     m.thermophysics.species.push_back(b);
   }
   return m;
@@ -80,12 +134,16 @@ RestartImage image(const RestartExpected& expected, bool species, bool uniform, 
     auto d = expected.fields.data[n];
     RestartImageField f;
     f.role = d.role; f.field = d.field; f.components = d.components;
-    f.values.resize(128U * d.components);
-    for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y) for (int x=0; x<cells.x; ++x) {
-      auto q = initial(x, species, uniform);
-      auto i = static_cast<std::size_t>((z*cells.y+y)*cells.x+x)*d.components;
+    const Int3 local = r.patch.cells;
+    f.values.resize(static_cast<std::size_t>(local.x)*local.y*local.z*d.components);
+    for (int z=0; z<local.z; ++z) for (int y=0; y<local.y; ++y) for (int x=0; x<local.x; ++x) {
+      auto q = initial(x+r.patch.begin.x, species, uniform);
+      auto i = static_cast<std::size_t>((z*local.y+y)*local.x+x)*d.components;
       switch (d.role) {
-        case RestartFieldRole::velocity: f.values[i]=q.u; f.values[i+1]=q.v; f.values[i+2]=0; break;
+        case RestartFieldRole::velocity:
+          f.values[i]=solid({x+r.patch.begin.x,y+r.patch.begin.y,z+r.patch.begin.z}) ? 0.0 : q.u;
+          f.values[i+1]=solid({x+r.patch.begin.x,y+r.patch.begin.y,z+r.patch.begin.z}) ? 0.0 : q.v;
+          f.values[i+2]=0; break;
         case RestartFieldRole::pressure_absolute: f.values[i]=q.p; break;
         case RestartFieldRole::pressure_perturbation: f.values[i]=q.p-pressure; break;
         case RestartFieldRole::enthalpy: f.values[i]=q.h; break;
@@ -98,12 +156,16 @@ RestartImage image(const RestartExpected& expected, bool species, bool uniform, 
     r.fields.push_back(std::move(f));
   }
   for (int axis=0; axis<3; ++axis) {
-    Int3 ext=cells;
+    Int3 ext=r.patch.cells;
     if (axis==0) ++ext.x; else if (axis==1) ++ext.y; else ++ext.z;
     for (int z=0; z<ext.z; ++z) for (int y=0; y<ext.y; ++y) for (int x=0; x<ext.x; ++x) {
-      auto q=initial(x,species,uniform), left=initial(x-1,species,uniform);
-      r.final_mass_flux[axis].push_back(axis==0 ? 0.5*(q.rho*q.u+left.rho*left.u)*0.25*0.125
-          : axis==1 ? q.rho*q.v*0.25*0.125 : 0.0);
+      const Int3 g{x+r.patch.begin.x,y+r.patch.begin.y,z+r.patch.begin.z};
+      auto q=initial(g.x,species,uniform), left=initial(g.x-1,species,uniform);
+      Int3 lower=g;
+      (axis==0 ? lower.x : axis==1 ? lower.y : lower.z)--;
+      const bool cut=solid(g)||solid(lower);
+      r.final_mass_flux[axis].push_back(cut ? 0.0 : axis==0 ? 0.5*(q.rho*q.u+left.rho*left.u)*width(1,g.y)*width(2,g.z)
+          : axis==1 ? q.rho*q.v*width(0,g.x)*width(2,g.z) : 0.0);
     }
   }
   return r;
@@ -115,7 +177,7 @@ struct Sample {
 };
 bool capture(ProductDriver& d, ThermodynamicsPlan& thermo, bool species, Sample& out) {
   RestartSnapshot r;
-  if (!d.committed_restart_snapshot(r)) return false;
+  if (!all_pass(static_cast<bool>(d.committed_restart_snapshot(r)))) return false;
   ConstFieldView p{}, h{}, constant{}, scalar{};
   unsigned count=0;
   for (std::size_t n=0; n<r.fields.size; ++n) {
@@ -125,62 +187,111 @@ bool capture(ProductDriver& d, ThermodynamicsPlan& thermo, bool species, Sample&
     if (f.role==RestartFieldRole::transported_scalar || f.role==RestartFieldRole::independent_species)
       (count++==0 ? constant : scalar)=f.values;
   }
-  if (!p.base || !h.base || !constant.base || !scalar.base) return false;
-  for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y) for (int x=0; x<cells.x; ++x) {
+  if (!all_pass(p.base && h.base && constant.base && scalar.base)) return false;
+  bool valid=true;
+  for (int z=0; z<r.patch.cells.z; ++z) for (int y=0; y<r.patch.cells.y; ++y) for (int x=0; x<r.patch.cells.x; ++x) {
+    if(solid({x+r.patch.begin.x,y+r.patch.begin.y,z+r.patch.begin.z})) continue;
     Int3 c{x,y,z};
     const double q=scalar.unchecked(c,0), enthalpy=h.unchecked(c,0), absolute=r.pressure_reference+p.unchecked(c,0);
     const double gas=species ? q*r_a+(1-q)*r_b : r_a;
     const double cp=species ? q*3.5*r_a+(1-q)*4.1*r_b : 3.5*r_a;
-    const double temperature=enthalpy/cp, density=absolute/(gas*temperature);
+    const double cp_slope=variable_thermo ? (species ? q*1e-3*r_a+(1-q)*7e-4*r_b : 1e-3*r_a) : 0.0;
+    const double temperature=2.0*enthalpy/(cp+std::sqrt(cp*cp+2.0*cp_slope*enthalpy));
+    const double density=absolute/(gas*temperature);
     ThermoState actual;
-    if (!thermo.evaluate(absolute,enthalpy,species ? Span<const double>{&q,1U} : Span<const double>{}, {}, actual)) return false;
-    if (!std::isfinite(q) || !std::isfinite(density) || density<=0 || temperature<=0) return false;
+    if (!thermo.evaluate(absolute,enthalpy,species ? Span<const double>{&q,1U} : Span<const double>{}, {}, actual) ||
+        !std::isfinite(q) || !std::isfinite(density) || density<=0 || temperature<=0) { valid=false; continue; }
     out.eos_error=std::max({out.eos_error,std::abs(actual.rho-density)/density,
         std::abs(actual.temperature-temperature)/temperature});
     out.constant_error=std::max(out.constant_error,std::abs(constant.unchecked(c,0)-0.2));
     out.minimum=std::min(out.minimum,q); out.maximum=std::max(out.maximum,q);
+    const double volume=width(0,x+r.patch.begin.x)*width(1,y+r.patch.begin.y)*width(2,z+r.patch.begin.z);
     out.mass+=static_cast<long double>(density)*volume;
     out.inventory+=static_cast<long double>(density)*q*volume;
     out.scalar.push_back(q);
   }
+  if(!all_pass(valid)) return false;
+  long double sums[2]{out.mass,out.inventory}, global_sums[2]{};
+  MPI_Allreduce(sums,global_sums,2,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+  out.mass=global_sums[0]; out.inventory=global_sums[1];
+  double maxima[4]{out.constant_error,out.eos_error,-out.minimum,out.maximum}, global_maxima[4]{};
+  MPI_Allreduce(maxima,global_maxima,4,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+  out.constant_error=global_maxima[0]; out.eos_error=global_maxima[1];
+  out.minimum=-global_maxima[2]; out.maximum=global_maxima[3];
   return true;
 }
 struct Result {
-  bool ran{true}, bounded{true}, constant{true}, eos{true}, history{true};
+  bool ran{true}, bounded{true}, constant{true}, eos{true}, history{true}, correction_active{true};
   double maximum_inventory_defect{};
   double maximum_constant_error{}, maximum_eos_error{};
+  double minimum{1.0}, maximum{};
+  unsigned maximum_coupling_sweeps{}, maximum_remap_iterations{};
+  double maximum_scalar_residual{}, maximum_mass_pairing_residual{};
   std::vector<double> terminal;
 };
 Result run(bool species, bool uniform, double dt) {
   Result result;
   auto m=model(species,dt);
   CompiledCasePlan plan; ProductDriver d; ThermodynamicsPlan thermo; RestartExpected expected;
-  auto s=ProductCompiler::compile(MPI_COMM_SELF,m,{},plan);
-  if (s) s=ProductDriver::create(MPI_COMM_SELF,std::move(plan),d);
+  const auto data_root=std::filesystem::path(__FILE__).parent_path().parent_path()/"data";
+  auto s=ProductCompiler::compile(MPI_COMM_WORLD,m,immersed ? data_root : std::filesystem::path{},plan);
+  if (s) s=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),d);
   if (s) s=d.restart_expected(expected);
   if (s) s=d.initialize_restart(image(expected,species,uniform,dt));
   if (s) s=ThermodynamicsPlan::compile(m.thermophysics,{m.transported_scalars.data(),m.transported_scalars.size()},thermo);
   Sample before;
-  if (!s || !capture(d,thermo,species,before)) { result.ran=false; return result; }
-  const auto total=static_cast<unsigned>(std::llround(end_time/dt));
+  if (!all_pass(static_cast<bool>(s)) || !capture(d,thermo,species,before)) {
+    std::cerr<<"scalar_initial_failure species="<<species<<" variable="<<variable_thermo<<' '<<unsigned(s.code)<<'/'<<s.detail<<'\n';
+    result.ran=false; return result;
+  }
+  const auto total=coupling_probe ? 3U : static_cast<unsigned>(std::llround(end_time/dt));
+  std::uint64_t payload_bytes=0U;
   for (unsigned i=0; i<total; ++i) {
     DriverStepReport report;
     s=d.advance({dt,dt,dt,dt,dt},report);
     Sample now;
-    if (!s || !report.accepted || !capture(d,thermo,species,now)) {
+    if (!all_pass(s && report.accepted) || !capture(d,thermo,species,now)) {
       std::cerr << "scalar_advance_failure species=" << species << " uniform=" << uniform
-                << " dt=" << dt << " step=" << i << " status=" << unsigned(s.code) << '/' << s.detail << '\n';
+                << " dt=" << dt << " step=" << i << " status=" << unsigned(s.code) << '/' << s.detail
+                << " sweeps=" << report.scalar_transport.coupling_sweeps
+                << " species_residual=" << report.scalar_transport.final_species_residual
+                << " remap_residual=" << report.scalar_transport.final_remap_residual
+                << " mass_pairing=" << report.scalar_transport.mass_pairing_residual
+                << " energy=" << report.piso.energy_residual << '\n';
       result.ran=false; break;
     }
     result.history &= report.attempts==1U && !report.temporal_method_fallback &&
         report.effective_bdf.order==(i==0 ? 1U : 2U) && report.proposal.dt==dt;
+    result.correction_active &= report.scalar_transport.active;
+    if (i==0U) payload_bytes=report.scalar_transport.owned_payload_bytes;
+    result.correction_active &= payload_bytes!=0U &&
+        report.scalar_transport.owned_payload_bytes==payload_bytes;
+    result.maximum_coupling_sweeps=std::max(result.maximum_coupling_sweeps,
+        report.scalar_transport.coupling_sweeps);
+    result.maximum_remap_iterations=std::max(result.maximum_remap_iterations,
+        report.scalar_transport.remap_iterations);
+    result.maximum_scalar_residual=std::max(result.maximum_scalar_residual,
+        report.scalar_transport.final_species_residual);
+    result.maximum_mass_pairing_residual=std::max(result.maximum_mass_pairing_residual,
+        report.scalar_transport.mass_pairing_residual);
     result.maximum_inventory_defect=std::max(result.maximum_inventory_defect,
         std::abs(static_cast<double>((now.inventory-before.inventory)/before.inventory)));
+    if(species) result.maximum_inventory_defect=std::max(result.maximum_inventory_defect,
+        std::abs(static_cast<double>(((now.mass-now.inventory)-(before.mass-before.inventory))/
+                                      (before.mass-before.inventory))));
     result.maximum_constant_error=std::max(result.maximum_constant_error,now.constant_error);
     if (uniform) for (double q:now.scalar) result.maximum_constant_error=std::max(result.maximum_constant_error,std::abs(q-0.2));
     result.maximum_eos_error=std::max({result.maximum_eos_error,now.eos_error,
         std::abs(report.terminal_equations.mass-static_cast<double>(now.mass))/static_cast<double>(now.mass)});
-    result.bounded &= now.minimum>=before.minimum-1e-12 && now.maximum<=before.maximum+1e-12;
+    // A mass fraction's admissible cone is [0,1], not the arbitrary trace
+    // seed [1e-8,1-1e-8]. Near discontinuities BDF2 is not a strict initial-
+    // extrema principle. Passive envelopes and smooth extrema are separate
+    // checks; always print the actual extrema, including trace excursions.
+    result.bounded &= species && near_pure
+        ? now.minimum>=0.0 && now.maximum<=1.0
+        : now.minimum>=before.minimum-1e-12 && now.maximum<=before.maximum+1e-12;
+    result.minimum=std::min(result.minimum,now.minimum);
+    result.maximum=std::max(result.maximum,now.maximum);
     result.eos &= report.piso.eos_residual<=m.solver.terminal.eos && result.maximum_eos_error<1e-12;
     result.terminal=std::move(now.scalar);
   }
@@ -188,38 +299,323 @@ Result run(bool species, bool uniform, double dt) {
   return result;
 }
 double rms(const std::vector<double>& a,const std::vector<double>& b) {
-  if (a.size()!=b.size() || a.empty()) return std::numeric_limits<double>::quiet_NaN();
+  if (!all_pass(a.size()==b.size() && !a.empty())) return std::numeric_limits<double>::quiet_NaN();
   long double sum=0;
   for (std::size_t i=0; i<a.size(); ++i) { long double v=a[i]-b[i]; sum+=v*v; }
-  return std::sqrt(static_cast<double>(sum/a.size()));
+  long double totals[2]{sum,static_cast<long double>(a.size())}, global[2]{};
+  MPI_Allreduce(totals,global,2,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+  return std::sqrt(static_cast<double>(global[0]/global[1]));
+}
+
+bool open_budget(bool species, bool reverse) {
+  auto m=model(species,coarse_dt);
+  m.pressure_reference=PressureReferenceKind::boundary_absolute;
+  m.schemes.species=m.schemes.passive_scalar=ConvectionScheme::central2;
+  const char* name=species ? "A" : "wave";
+  constexpr double target=0.35;
+  for (int side=0;side<2;++side) {
+    auto& b=m.boundaries[side];
+    b.flow_kind=side==0 && !reverse ? BoundaryKind::velocity_inlet : BoundaryKind::pressure_outlet;
+    b.pressure=pressure; b.temperature=b.backflow_temperature=320.0;
+    b.velocity={0.5,0.0,0.0}; b.direction={1.0,0.0,0.0};
+    b.backflow_velocity={side==0 ? 0.5 : -0.5,0.0,0.0}; b.allow_backflow=reverse;
+    const auto kind=side==0 && !reverse ? ScalarBoundaryKind::dirichlet : ScalarBoundaryKind::zero_gradient;
+    b.scalars={{"constant",kind,0.2,ScalarBoundaryKind::dirichlet,0.2},
+               {name,kind,target,ScalarBoundaryKind::dirichlet,target}};
+  }
+  CompiledCasePlan plan; ProductDriver driver; RestartExpected expected; ThermodynamicsPlan thermo; TransportPlan transport_plan;
+  const char* phase="compile";
+  auto status=ProductCompiler::compile(MPI_COMM_WORLD,m,{},plan);
+  if(status) { phase="create"; status=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver); }
+  if(status) { phase="expected"; status=driver.restart_expected(expected); }
+  if(status) {
+    phase="initialize_restart";
+    auto start=image(expected,species,false,coarse_dt);
+    if(reverse) {
+      for(auto& f:start.fields) if(f.role==RestartFieldRole::velocity)
+        for(std::size_t i=0;i<f.values.size();i+=3U) f.values[i]=-f.values[i];
+      for(double& phi:start.final_mass_flux[0]) phi=-phi;
+    }
+    status=driver.initialize_restart(start);
+  }
+  if(status) status=ThermodynamicsPlan::compile(m.thermophysics,{m.transported_scalars.data(),m.transported_scalars.size()},thermo);
+  if(status) status=TransportPlan::compile(m.thermophysics,thermo,transport_plan);
+  Sample before, after; RestartSnapshot old_snapshot, current;
+  if(!all_pass(static_cast<bool>(status)) || !capture(driver,thermo,species,before) ||
+     !all_pass(static_cast<bool>(driver.committed_restart_snapshot(old_snapshot)))) {
+    std::cerr<<"open_initial_failure phase="<<phase<<' '<<unsigned(status.code)<<'/'<<status.detail<<'\n';return false;
+  }
+  const MeshPatch patch=old_snapshot.patch;
+  std::array<std::vector<double>,2> old_phi;
+  for(int side=0;side<2;++side) {
+    if(side==0 ? patch.begin.x!=0 : patch.begin.x+patch.cells.x!=cells.x) continue;
+    for(int z=0;z<patch.cells.z;++z) for(int y=0;y<patch.cells.y;++y)
+      old_phi[side].push_back((side ? 1.0 : -1.0)*old_snapshot.final_mass_flux.x.unchecked({side ? patch.cells.x : 0,y,z}));
+  }
+  DriverStepReport report;
+  status=driver.advance({coarse_dt,coarse_dt,coarse_dt,coarse_dt,coarse_dt},report);
+  if(!all_pass(status && report.accepted) || !capture(driver,thermo,species,after) ||
+     !all_pass(static_cast<bool>(driver.committed_restart_snapshot(current)))) {
+    std::cerr<<"open_advance_failure species="<<species<<" reverse="<<reverse<<' '<<unsigned(status.code)<<'/'<<status.detail<<" stage="<<report.failed_stage
+        <<" sweep="<<report.scalar_transport.coupling_sweeps<<" c="<<unsigned(report.pressure_energy_globalization.corrector)
+        <<" scalar_residual="<<report.scalar_transport.final_species_residual
+        <<" pairing="<<report.scalar_transport.mass_pairing_residual
+        <<" base_c="<<report.pressure_energy_globalization.baseline.global_normalized_continuity
+        <<" base_e="<<report.pressure_energy_globalization.baseline.global_normalized_energy<<'\n';
+    for(unsigned i=0;i<report.pressure_energy_globalization.sample_count;++i) {
+      const auto& q=report.pressure_energy_globalization.candidates[i];
+      std::cerr<<"open_candidate "<<q.alpha<<' '<<q.global_normalized_continuity<<' '<<q.global_normalized_energy<<'\n';
+    }
+    return false;
+  }
+  long double transport=0.0L,diffusion=0.0L;
+  double inward_correction=0.0;
+  bool valid=true;
+  for(int side=0;side<2;++side) {
+    if(old_phi[side].empty()) continue;
+    std::size_t f=0U;
+    for(int z=0;z<patch.cells.z;++z) for(int y=0;y<patch.cells.y;++y,++f) {
+      const int x=side ? patch.cells.x-1 : 0;
+      const auto cell=static_cast<std::size_t>((z*patch.cells.y+y)*patch.cells.x+x);
+      const double phi=(side ? 1.0 : -1.0)*current.final_mass_flux.x.unchecked({side ? patch.cells.x : 0,y,z});
+      const double delta=phi-old_phi[side][f];
+      const bool dirichlet=reverse ? side==1 : side==0;
+      const double predictor_face=dirichlet ? target : before.scalar[cell];
+      const double correction_face=dirichlet && delta<0.0 ? target : after.scalar[cell];
+      transport+=old_phi[side][f]*predictor_face+delta*correction_face;
+      if(dirichlet) {
+        MolecularTransportState material;
+        const double composition=before.scalar[cell];
+        if(!transport_plan.evaluate(initial(patch.begin.x+x,species,false).temperature,
+            species ? Span<const double>{&composition,1U} : Span<const double>{},material)) { valid=false; continue; }
+        diffusion+=2*material.viscosity*(target-before.scalar[cell])/width(0,patch.begin.x+x)*
+            width(1,patch.begin.y+y)*width(2,patch.begin.z+z);
+        if(delta<0.0) inward_correction+=std::abs(delta);
+      }
+    }
+  }
+  if(!all_pass(valid)) return false;
+  long double local[2]{transport,diffusion},total[2]{};
+  MPI_Allreduce(local,total,2,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+  double incoming=0.0; MPI_Allreduce(&inward_correction,&incoming,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+  const double defect=std::abs(static_cast<double>((after.inventory-before.inventory+
+      coarse_dt*(total[0]-total[1]))/before.inventory));
+  const bool passed=defect<1e-12 && after.constant_error<1e-12 && after.eos_error<1e-12 &&
+      // central2 species has the physical composition cone, not a discrete
+      // maximum principle at a discontinuous prescribed inlet.
+      (species ? after.minimum>=0.0 && after.maximum<=1.0
+               : after.minimum>=before.minimum-1e-12 && after.maximum<=target+1e-12) &&
+      report.effective_bdf.order==1U && report.thermophysical_predictor.mass_flux_scale==1.0 &&
+      report.thermophysical_predictor.source_endpoint_alpha==1.0 &&
+      report.scalar_transport.active;
+  if(rank==0) std::cout<<std::setprecision(15)<<"OPEN_SCALAR family="<<(species?"EOS":"passive")
+      <<" reverse="<<reverse<<" defect="<<defect<<" delta_inventory="<<static_cast<double>(after.inventory-before.inventory)
+      <<" boundary_advection="<<static_cast<double>(total[0])<<" boundary_diffusion="<<static_cast<double>(total[1])
+      <<" incoming_correction="<<incoming<<" constant_error="<<after.constant_error
+      <<" minimum="<<after.minimum<<" before_minimum="<<before.minimum<<" maximum="<<after.maximum
+      <<" mass_scale="<<report.thermophysical_predictor.mass_flux_scale<<" source_alpha="<<report.thermophysical_predictor.source_endpoint_alpha
+      <<" theta="<<report.thermophysical_predictor.theta<<" passed="<<passed<<'\n';
+  return passed;
+}
+std::vector<double> snapshot_payload(const RestartSnapshot& snapshot, bool nondimensional=false,
+                                    bool omit_velocity=false) {
+  std::vector<double> values{snapshot.time,snapshot.dt,snapshot.pressure_reference,
+      snapshot.previous_pressure_reference,snapshot.closed_mass_target};
+  const double rho_ref=pressure/(r_a*320.0), h_ref=3.5*r_a*320.0;
+  if(nondimensional) { values[2]/=pressure; values[3]/=pressure; }
+  for (const auto fields : {snapshot.fields,snapshot.previous_fields,
+                            snapshot.accepted_rate_fields,snapshot.previous_rate_fields})
+    for(std::size_t f=0;f<fields.size;++f) {
+      if(omit_velocity && fields.data[f].role==RestartFieldRole::velocity) continue;
+      const auto v=fields.data[f].values;
+      double scale=1.0;
+      if(nondimensional) switch(fields.data[f].role) {
+        case RestartFieldRole::velocity: scale=0.5; break;
+        case RestartFieldRole::pressure_perturbation:
+        case RestartFieldRole::pressure_absolute: scale=pressure; break;
+        case RestartFieldRole::enthalpy: scale=h_ref; break;
+        case RestartFieldRole::enthalpy_nonadvective_rate: scale=rho_ref*h_ref/coarse_dt; break;
+        case RestartFieldRole::scalar_nonadvective_rate: scale=rho_ref/coarse_dt; break;
+        default: break;
+      }
+      for(int z=0;z<v.interior.z;++z) for(int y=0;y<v.interior.y;++y)
+        for(int x=0;x<v.interior.x;++x) for(std::uint8_t c=0;c<v.components;++c)
+          values.push_back(v.unchecked({x,y,z},c)/scale);
+    }
+  if(!omit_velocity) for (const auto flux : {snapshot.final_mass_flux,snapshot.previous_mass_flux})
+    for (const auto v : {flux.x,flux.y,flux.z})
+      for(int z=0;z<v.extents.z;++z) for(int y=0;y<v.extents.y;++y)
+        for(int x=0;x<v.extents.x;++x) values.push_back(v.unchecked({x,y,z}));
+  return values;
+}
+
+bool restart_contract(bool species) {
+  const auto m=model(species,coarse_dt);
+  const auto create=[&](const ValidatedModel& definition,ProductDriver& driver) {
+    CompiledCasePlan plan;
+    auto s=ProductCompiler::compile(MPI_COMM_WORLD,definition,{},plan);
+    if(s) s=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver);
+    return s;
+  };
+  ProductDriver uninterrupted,restored,recovered,failing;
+  RestartExpected expected;
+  auto s=create(m,uninterrupted);
+  if(s) s=uninterrupted.restart_expected(expected);
+  if(s) s=uninterrupted.initialize_restart(image(expected,species,false,coarse_dt));
+  DriverStepReport report;
+  for(unsigned n=0;n<3 && s;++n) s=uninterrupted.advance({1,1,1,1,1},report);
+  if(!all_pass(static_cast<bool>(s))) return false;
+  int id=static_cast<int>(getpid()); MPI_Bcast(&id,1,MPI_INT,0,MPI_COMM_WORLD);
+  const auto root=std::filesystem::temp_directory_path()/
+      ("hundun-scalar-history-"+std::to_string(id)+(species?"-species":"-passive"));
+  RestartSnapshot snapshot;
+  s=uninterrupted.committed_restart_snapshot(snapshot);
+  const auto stored_payload=snapshot_payload(snapshot);
+  if(s) s=RestartWriter::write(MPI_COMM_WORLD,root,snapshot);
+  RestartImage disk;
+  if(s) s=RestartReader::load(MPI_COMM_WORLD,root,expected,disk);
+  if(s) s=create(m,restored);
+  if(s) s=restored.initialize_restart(disk);
+  if(s) s=restored.committed_restart_snapshot(snapshot);
+  if(!all_pass(static_cast<bool>(s))) return false;
+  bool passed=disk.source_format_version==3U && !disk.backward_euler_recovery &&
+      disk.history_compatibility(expected.method_history_signature)==RestartHistoryCompatibility::compatible;
+  const bool exact_payload=snapshot_payload(snapshot)==stored_payload;
+  passed &= exact_payload;
+  ThermodynamicsPlan thermo;
+  s=ThermodynamicsPlan::compile(m.thermophysics,
+      {m.transported_scalars.data(),m.transported_scalars.size()},thermo);
+  Sample start;
+  if(!all_pass(static_cast<bool>(s)) || !capture(restored,thermo,species,start)) return false;
+  const double mass_target=disk.closed_mass_target;
+  const auto disk_fields=disk.fields;
+  double maximum_difference=0.0;
+  double maximum_flow_difference=0.0;
+  for(unsigned n=0;n<3 && all_pass(passed);++n) {
+    DriverStepReport a,b;
+    s=uninterrupted.advance({1,1,1,1,1},a);
+    if(s) s=restored.advance({1,1,1,1,1},b);
+    RestartSnapshot left,right;
+    if(s) s=uninterrupted.committed_restart_snapshot(left);
+    if(s) s=restored.committed_restart_snapshot(right);
+    if(!all_pass(static_cast<bool>(s))) return false;
+    const auto x=snapshot_payload(left,true,true),y=snapshot_payload(right,true,true);
+    passed &= x.size()==y.size() && left.step==right.step &&
+        a.effective_bdf.order==2U && b.effective_bdf.order==2U &&
+        left.closed_mass_target==mass_target && right.closed_mass_target==mass_target;
+    for(std::size_t i=0;i<std::min(x.size(),y.size());++i) {
+      const double difference=std::abs(x[i]-y[i])/std::max({1.0,std::abs(x[i]),std::abs(y[i])});
+      maximum_difference=std::max(maximum_difference,difference);
+    }
+    const auto flow_x=snapshot_payload(left,true),flow_y=snapshot_payload(right,true);
+    for(std::size_t i=0;i<flow_x.size();++i)
+      maximum_flow_difference=std::max(maximum_flow_difference,
+          std::abs(flow_x[i]-flow_y[i])/std::max({1.0,std::abs(flow_x[i]),std::abs(flow_y[i])}));
+    Sample now;
+    if(!capture(restored,thermo,species,now)) return false;
+    passed &= std::abs(static_cast<double>((now.inventory-start.inventory)/start.inventory))<1e-12 &&
+        now.constant_error<1e-12 && now.eos_error<1e-12;
+  }
+  // Exact file/history restoration is bitwise above. Nonlinear continuation
+  // is compared in physical units (p/p_ref, h/h_ref, U/U_ref, dt*rate/Q_ref),
+  // not an arbitrary mixture of Pa and W/m^3 relative to the number 1.
+  // Regression allowance: two trajectories, three steps, configured closure
+  // accuracy. This is not a mathematical global error bound or a solver gate.
+  const double continuation_tolerance=6.0*std::max({m.thermophysics.temperature_relative_tolerance,
+      m.solver.terminal.eos,m.solver.terminal.continuity});
+  passed &= maximum_difference<continuation_tolerance;
+  // The ordinary momentum predictor retains its 1e-4 inner relative solve
+  // accuracy; only EOS-composition recoupling requests near-roundoff solves.
+  // Do not mislabel an exact history restore as bitwise future U/phi evolution.
+  // p/h/scalars and inventories retain their independent stricter checks.
+  passed &= maximum_flow_difference<(species ? continuation_tolerance : 1e-4);
+  s=create(m,recovered);
+  if(s) s=recovered.initialize_restart(disk,RestartStorageCompatibility::strict,
+                                       RestartHistoryPolicy::rebuild_method_history);
+  if(s) s=recovered.committed_restart_snapshot(snapshot);
+  passed &= s && snapshot.closed_mass_target==mass_target && !disk.backward_euler_recovery;
+  for(std::size_t f=0;f<disk_fields.size();++f) passed &= disk.fields[f].values==disk_fields[f].values;
+  if(s) s=recovered.advance({1,1,1,1,1},report);
+  passed &= s && report.accepted && report.effective_bdf.order==1U;
+  if(s) s=recovered.advance({1,1,1,1,1},report);
+  passed &= s && report.accepted && report.effective_bdf.order==2U;
+  // Force a real numerical attempt to fail, not a malformed CLI/proposal.
+  auto limited=m; limited.solver.pressure.maximum_iterations=1U;
+  s=create(limited,failing);
+  if(s) s=failing.restart_expected(expected);
+  if(s) s=failing.initialize_restart(image(expected,species,false,coarse_dt));
+  if(s) s=failing.committed_restart_snapshot(snapshot);
+  if(!all_pass(static_cast<bool>(s))) return false;
+  const auto before=snapshot_payload(snapshot);
+  const auto old_step=snapshot.step;
+  const auto failure=failing.advance({1,1,1,1,1},report);
+  s=failing.committed_restart_snapshot(snapshot);
+  passed &= !failure && !report.accepted && report.attempts>0U && s &&
+      snapshot.step==old_step && snapshot_payload(snapshot)==before;
+  passed=all_pass(passed);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if(rank==0) { std::error_code error; std::filesystem::remove_all(root,error); }
+  if(rank==0) std::cout<<"SCALAR_RESTART family="<<(species?"EOS":"passive")
+      <<" exact_payload="<<exact_payload<<" scaled_continuation_difference="<<maximum_difference
+      <<" flow_difference="<<maximum_flow_difference
+      <<" continuation_allowance="<<continuation_tolerance<<" failure="<<unsigned(failure.code)<<'/'<<failure.detail
+      <<" passed="<<passed<<'\n';
+  return passed;
 }
 } // namespace
 int main(int argc,char** argv) {
   if (MPI_Init(&argc,&argv)!=MPI_SUCCESS) return 2;
   int size=0; MPI_Comm_size(MPI_COMM_WORLD,&size);
-  if (size!=1) { MPI_Finalize(); return 2; }
+  MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+  if (size!=1 && size!=2 && size!=4) { MPI_Finalize(); return 2; }
+  for (int i=1;i<argc;++i) {
+    if (std::strcmp(argv[i],"--stretched")==0) stretched=true;
+    else if (std::strcmp(argv[i],"--near-pure")==0) near_pure=true;
+    else if (std::strcmp(argv[i],"--coupling-probe")==0) coupling_probe=true;
+    else if (std::strcmp(argv[i],"--open")==0) open_probe=true;
+    else if (std::strcmp(argv[i],"--variable-thermo")==0) variable_thermo=true;
+    else if (std::strcmp(argv[i],"--ibm")==0) { immersed=true; cells={16,16,16}; }
+    else if (std::strcmp(argv[i],"--restart")==0) restart_probe=true;
+    else { MPI_Finalize(); return 2; }
+  }
   bool passed=true;
-  for (bool species:{false,true}) for (bool uniform:{false,true}) {
+  if(immersed && (open_probe || stretched || restart_probe)) { MPI_Finalize(); return 2; }
+  if(restart_probe) for(bool species:{false,true}) passed=restart_contract(species) && passed;
+  if(open_probe) for(bool species:{false,true}) for(bool reverse:{false,true})
+    passed=open_budget(species,reverse) && passed;
+  if(!open_probe && !restart_probe) for (bool species:{false,true}) for (bool uniform:{false,true}) {
+    if (coupling_probe && (!species || uniform)) continue;
     std::array<Result,3U> results;
-    for (std::size_t level=0; level<3; ++level) {
+    for (std::size_t level=0; level<(near_pure || immersed ? 1U : 3U); ++level) {
+      if (coupling_probe && level!=1U) continue;
       const double dt=coarse_dt/static_cast<double>(1U<<level);
       results[level]=run(species,uniform,dt); const auto& r=results[level];
       const bool conservative=r.ran && r.maximum_inventory_defect<1e-12;
-      passed &= r.ran && r.history && r.constant && r.bounded && r.eos && conservative;
-      std::cout << std::setprecision(12) << "SCALAR_CONTRACT family=" << (species?"EOS_species":"passive")
+      passed &= r.ran && r.history && r.constant && r.bounded && r.eos && conservative && r.correction_active;
+      if (rank==0) std::cout << std::setprecision(12) << "SCALAR_CONTRACT ranks=" << size
+                << " stretched=" << stretched << " near_pure=" << near_pure << " family=" << (species?"EOS_species":"passive")
                 << " uniform=" << uniform << " dt=" << dt << " ran=" << r.ran
                 << " history=" << (r.ran && r.history) << " constant=" << (r.ran && r.constant) << " bounded=" << (r.ran && r.bounded)
                 << " eos=" << (r.ran && r.eos) << " conservation=" << conservative
                 << " inventory_relative_defect=" << r.maximum_inventory_defect
-                << " constant_error=" << r.maximum_constant_error << " eos_error=" << r.maximum_eos_error << '\n';
+                << " constant_error=" << r.maximum_constant_error << " eos_error=" << r.maximum_eos_error
+                << " minimum=" << r.minimum << " maximum=" << r.maximum
+                << " coupling_sweeps=" << r.maximum_coupling_sweeps
+                << " remap_iterations=" << r.maximum_remap_iterations
+                << " scalar_residual=" << r.maximum_scalar_residual
+                << " mass_pairing=" << r.maximum_mass_pairing_residual << '\n';
     }
-    if (!uniform) {
+    if (!uniform && !near_pure && !coupling_probe && !immersed) {
       const double order=std::log(rms(results[0].terminal,results[1].terminal)/rms(results[1].terminal,results[2].terminal))/std::log(2.0);
-      const bool second_order=std::isfinite(order) && order>=1.8;
+      const bool second_order=results[0].ran && results[1].ran && results[2].ran &&
+          std::isfinite(order) && order>=1.8;
       passed &= second_order;
-      std::cout << "SCALAR_ORDER family=" << (species?"EOS_species":"passive") << " order=" << order << " accepted=" << second_order << '\n';
+      if (rank==0) std::cout << "SCALAR_ORDER family=" << (species?"EOS_species":"passive") << " order=" << order << " accepted=" << second_order << '\n';
     }
   }
-  std::cout << "STRICT_SCALAR_ACCEPTANCE " << (passed?"PASS":"FAIL") << " production_correction_enabled=0\n";
+  int local=passed?1:0, global=0;
+  MPI_Allreduce(&local,&global,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
+  passed=global!=0;
+  if (rank==0) std::cout << "STRICT_SCALAR_ACCEPTANCE " << (passed?"PASS":"FAIL") << " correction_active_checked=1\n";
   MPI_Finalize(); return passed?0:1;
 }

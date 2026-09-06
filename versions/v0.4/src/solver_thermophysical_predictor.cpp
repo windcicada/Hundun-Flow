@@ -6,6 +6,7 @@
 #include "hundun/v04_parallel.hpp"
 
 #include "solver_equation_detail.hpp"
+#include "solver_scalar_boundary_detail.hpp"
 #include "solver_thermophysical_predictor_detail.hpp"
 
 #include <algorithm>
@@ -93,6 +94,9 @@ ThermophysicalPredictorFailureField failure_field_for_constraint(
     case ThermophysicalAdmissibilityConstraint::enthalpy_lower:
     case ThermophysicalAdmissibilityConstraint::enthalpy_upper:
       return ThermophysicalPredictorFailureField::enthalpy;
+    case ThermophysicalAdmissibilityConstraint::passive_lower:
+    case ThermophysicalAdmissibilityConstraint::passive_upper:
+      return ThermophysicalPredictorFailureField::passive_scalar;
     case ThermophysicalAdmissibilityConstraint::dependent_species:
     case ThermophysicalAdmissibilityConstraint::none:
       return ThermophysicalPredictorFailureField::none;
@@ -214,6 +218,11 @@ std::uint64_t predictor_state_hash(
     }
   }
   mix_view(input.enthalpy_nonadvective_rhs.accepted);
+  hash = hash_mix(hash, input.passive_intervals.size);
+  for (std::size_t i=0U; i<input.passive_intervals.size; ++i) {
+    hash = hash_mix(hash, double_bits(input.passive_intervals.data[i].lower));
+    hash = hash_mix(hash, double_bits(input.passive_intervals.data[i].upper));
+  }
   if (input.bdf.order == 2U) {
     mix_view(input.enthalpy_nonadvective_rhs.previous);
   }
@@ -355,13 +364,14 @@ bool ghost_authority_matches(ThermophysicalGhostAuthority authority,
 }
 
 double first_order_upwind_divergence(const CartesianKernelPlan& kernels,
+                                     const BoundaryPlan& boundary,
                                      ConstFaceFluxView flux,
                                      ConstFieldView quantity,
                                      Int3 cell) noexcept {
   const auto face_value = [&](double mass_flux, Int3 negative,
                               Int3 positive) noexcept {
-    return mass_flux >= 0.0 ? quantity.unchecked(negative, 0U)
-                            : quantity.unchecked(positive, 0U);
+    return detail::scalar_upwind_donor(boundary,quantity,
+                                       mass_flux>=0.0 ? negative : positive);
   };
   const Int3 xp{cell.x + 1, cell.y, cell.z};
   const Int3 xm{cell.x - 1, cell.y, cell.z};
@@ -532,6 +542,20 @@ Status ThermophysicalPredictorPlan::predict(
   };
   const std::size_t species_count = species_.size();
   const std::size_t passive_count = passive_scalars_.size();
+  if (input.passive_intervals.size != 0U &&
+      (input.passive_intervals.size != passive_count ||
+       input.passive_intervals.data == nullptr)) reject_plan();
+  if (local)
+    for (std::size_t i=0U; i<input.passive_intervals.size; ++i)
+      if (!std::isfinite(input.passive_intervals.data[i].lower) ||
+          !std::isfinite(input.passive_intervals.data[i].upper) ||
+          input.passive_intervals.data[i].lower > input.passive_intervals.data[i].upper)
+        reject_plan();
+  const auto passive_admissible = [&](std::size_t i, double value) {
+    return std::isfinite(value) && (input.passive_intervals.size == 0U ||
+        (value >= input.passive_intervals.data[i].lower &&
+         value <= input.passive_intervals.data[i].upper));
+  };
   if (boundary_ == nullptr || species_enthalpy_minimum_.size() != species_count ||
       species_enthalpy_maximum_.size() != species_count ||
       !std::isfinite(dependent_enthalpy_minimum_) ||
@@ -754,7 +778,7 @@ Status ThermophysicalPredictorPlan::predict(
                 const double value = conserved_quantities
                                          ? stored_value / rho
                                          : stored_value;
-                if (!std::isfinite(value)) {
+                if (!passive_admissible(index,value)) {
                   return false;
                 }
               }
@@ -794,7 +818,7 @@ Status ThermophysicalPredictorPlan::predict(
                 return false;
               }
               for (std::size_t index = 0U; index < passive_count; ++index) {
-                if (!std::isfinite(
+                if (!passive_admissible(index,
                         passive_scalars.data[index].unchecked(cell, 0U))) {
                   return false;
                 }
@@ -1044,12 +1068,15 @@ Status ThermophysicalPredictorPlan::predict(
                 const double value = conserved_quantities
                                          ? stored_value / rho
                                          : stored_value;
-                if (!std::isfinite(value)) {
+                if (!passive_admissible(index,value)) {
                   mark_failure(
                       failure, reason,
                       ThermophysicalPredictorFailureField::passive_scalar,
                       static_cast<std::uint32_t>(index),
-                      ThermophysicalAdmissibilityConstraint::none, rank,
+                      !std::isfinite(value) ? ThermophysicalAdmissibilityConstraint::none :
+                      value < input.passive_intervals.data[index].lower ?
+                          ThermophysicalAdmissibilityConstraint::passive_lower :
+                          ThermophysicalAdmissibilityConstraint::passive_upper, rank,
                       global_cell, one_based_substep, true, has_substep, false);
                   if (failure.valid) {
                     record_scalar(failure,
@@ -1329,7 +1356,7 @@ Status ThermophysicalPredictorPlan::predict(
               const double q_previous =
                   second_order ? previous.unchecked(cell, 0U) : 0.0;
               const double divergence = first_order_upwind_divergence(
-                  *kernels_, input.mass_flux_accepted, accepted, cell);
+                  *kernels_, *boundary_, input.mass_flux_accepted, accepted, cell);
               const double rhs =
                   rate_is_zero(rate.accepted)
                       ? 0.0
@@ -1711,13 +1738,13 @@ Status ThermophysicalPredictorPlan::predict(
     // admissible before any outgoing transport is admitted; incoming upwind
     // donor tuples are then convex-cone additions.
     const auto donor_intensive_admissible = [&](Int3 donor) noexcept {
-      const double h = input.enthalpy_accepted.unchecked(donor, 0U);
+      const double h = detail::scalar_upwind_donor(*boundary_,input.enthalpy_accepted,donor);
       double dependent = 1.0;
       double lower = dependent_enthalpy_minimum_;
       double upper = dependent_enthalpy_maximum_;
       for (std::size_t index = 0U; index < species_count; ++index) {
         const double value =
-            input.species_accepted.data[index].unchecked(donor, 0U);
+            detail::scalar_upwind_donor(*boundary_,input.species_accepted.data[index],donor);
         if (!std::isfinite(value) || value < 0.0) return false;
         dependent -= value;
         lower += value * (species_enthalpy_minimum_[index] -
@@ -1731,8 +1758,8 @@ Status ThermophysicalPredictorPlan::predict(
         return false;
       }
       for (std::size_t index = 0U; index < passive_count; ++index) {
-        if (!std::isfinite(input.passive_scalars_accepted.data[index]
-                               .unchecked(donor, 0U))) {
+        if (!std::isfinite(detail::scalar_upwind_donor(*boundary_,
+                             input.passive_scalars_accepted.data[index],donor))) {
           return false;
         }
       }
@@ -1886,6 +1913,13 @@ Status ThermophysicalPredictorPlan::predict(
                 input.passive_scalar_nonadvective_rhs.data[index], cell);
             valid = valid && std::isfinite(base_passive) &&
                     std::isfinite(full_passive);
+            if (input.passive_intervals.size != 0U) {
+              const auto interval=input.passive_intervals.data[index];
+              constrain_source(base_passive-base_rho*interval.lower,
+                               full_passive-base_rho*interval.lower,false);
+              constrain_source(base_rho*interval.upper-base_passive,
+                               base_rho*interval.upper-full_passive,false);
+            }
           }
           if (!valid || !std::isfinite(cell_factor) || cell_factor < 0.0 ||
               cell_factor > 1.0) {
@@ -2064,6 +2098,13 @@ Status ThermophysicalPredictorPlan::predict(
                                     .unchecked(cell, 0U);
             valid = valid && std::isfinite(q_n) && std::isfinite(base) &&
                     std::isfinite(base - amount * q_n);
+            if (input.passive_intervals.size != 0U) {
+              const auto interval=input.passive_intervals.data[index];
+              constrain_factor(base-base_rho*interval.lower,
+                  base-amount*q_n-(base_rho-amount)*interval.lower,false);
+              constrain_factor(base_rho*interval.upper-base,
+                  (base_rho-amount)*interval.upper-(base-amount*q_n),false);
+            }
           }
           if (!valid || !std::isfinite(factor) || factor < 0.0 ||
               factor > 1.0) {
@@ -2250,7 +2291,7 @@ Status ThermophysicalPredictorPlan::predict(
                 destination.unchecked(cell, 0U) =
                     (-input.bdf.a1 * rho_n * accepted.unchecked(cell, 0U) -
                      input.bdf.a2 * rho_nm1 * q_nm1 -
-                     first_order_upwind_divergence(*kernels_, low_flux,
+                     first_order_upwind_divergence(*kernels_, *boundary_, low_flux,
                                                    accepted, cell) +
                      limited_source) /
                     input.bdf.a0;
@@ -2429,6 +2470,19 @@ Status ThermophysicalPredictorPlan::predict(
                   false,
                   ThermophysicalAdmissibilityConstraint::enthalpy_upper,
                   cell);
+        for (std::size_t index=0U; index<input.passive_intervals.size; ++index) {
+          const auto interval=input.passive_intervals.data[index];
+          const double low=rho_low*output.low_order_passive_scalars.data[index].unchecked(cell,0U);
+          const double high_value=output.passive_scalars.data[index].unchecked(cell,0U);
+          const double high=rho_high==0.0 ? high_value : rho_high*high_value;
+          const double scale=std::max({std::abs(low),std::abs(high),
+              std::abs(rho_low*interval.lower),std::abs(rho_low*interval.upper),
+              std::abs(rho_high*interval.lower),std::abs(rho_high*interval.upper)});
+          constrain(low-rho_low*interval.lower, high-rho_high*interval.lower,
+                    scale,false,ThermophysicalAdmissibilityConstraint::passive_lower,cell);
+          constrain(rho_low*interval.upper-low, rho_high*interval.upper-high,
+                    scale,false,ThermophysicalAdmissibilityConstraint::passive_upper,cell);
+        }
       }
     }
   }
@@ -2531,7 +2585,7 @@ Status ThermophysicalPredictorPlan::predict(
                                       density) ||
       selected_integers[7U] > static_cast<std::uint64_t>(
                                   ThermophysicalAdmissibilityConstraint::
-                                      enthalpy_upper) ||
+                                      passive_upper) ||
       selected_integers[8U] != 1U) {
     const bool metadata_constraint_valid =
         selected_integers[7U] >= static_cast<std::uint64_t>(
@@ -2539,7 +2593,7 @@ Status ThermophysicalPredictorPlan::predict(
                                          density) &&
         selected_integers[7U] <= static_cast<std::uint64_t>(
                                      ThermophysicalAdmissibilityConstraint::
-                                         enthalpy_upper);
+                                         passive_upper);
     const auto metadata_constraint = metadata_constraint_valid
                                          ? static_cast<
                                                ThermophysicalAdmissibilityConstraint>(
@@ -2808,6 +2862,15 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     ThermophysicalPredictorOutput output,
     ThermophysicalPredictorCertificate& certificate,
     ThermophysicalPredictorFailure& failure) const noexcept {
+  if (input.passive_intervals.size != 0U &&
+      (input.passive_intervals.size != passive_scalars_.size() ||
+       input.passive_intervals.data == nullptr))
+    return {StatusCode::invalid_plan, kPredictorPlan};
+  for (std::size_t i=0U; i<input.passive_intervals.size; ++i)
+    if (!std::isfinite(input.passive_intervals.data[i].lower) ||
+        !std::isfinite(input.passive_intervals.data[i].upper) ||
+        input.passive_intervals.data[i].lower > input.passive_intervals.data[i].upper)
+      return {StatusCode::invalid_plan, kPredictorPlan};
   double extrapolate_accepted = 0.0;
   double extrapolate_previous = 0.0;
   const bool second_order = input.bdf.order == 2U;

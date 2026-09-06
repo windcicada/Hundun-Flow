@@ -1381,6 +1381,9 @@ bool test_scalar_splitting_observation() {
                      "density correction preserves a uniform passive scalar");
     mass_drift[level] = static_cast<double>(
         scalar_mass(trajectory.terminal) - scalar_mass(trajectory.common_start));
+    passed &= expect(std::abs(mass_drift[level]) <=
+                         1e-12L * std::abs(scalar_mass(trajectory.common_start)),
+                     "finite-dt passive inventory is conserved, not only convergent");
     std::cerr << std::setprecision(12) << "scalar-splitting dt="
               << kCoarseDt / kRefinement[level]
               << " constant-error=" << constant_error
@@ -1391,21 +1394,9 @@ bool test_scalar_splitting_observation() {
   const double fine_quarter = rms_difference(trajectories[1U].terminal.passive[1U],
                                             trajectories[2U].terminal.passive[1U]);
   const double solution_order = std::log(coarse_fine / fine_quarter) / std::log(2.0);
-  const double coarse_drift_order =
-      std::log(std::abs(mass_drift[0U] / mass_drift[1U])) / std::log(2.0);
-  const double fine_drift_order =
-      std::log(std::abs(mass_drift[1U] / mass_drift[2U])) / std::log(2.0);
-  std::cerr << "scalar-splitting solution-order=" << solution_order
-            << " mass-drift-orders=" << coarse_drift_order << ','
-            << fine_drift_order << '\n';
-  // This is an observation of the split method, not a certificate of exact
-  // finite-dt scalar conservation. Record the nonzero inventory defect without
-  // redefining it as a boundary flux or changing the physical acceptance gates.
+  std::cerr << "scalar-conservative solution-order=" << solution_order << '\n';
   passed &= expect(std::isfinite(solution_order) && solution_order >= 1.8,
                    "smooth passive solution retains second-order time convergence");
-  passed &= expect(std::isfinite(coarse_drift_order) && coarse_drift_order >= 1.8 &&
-                   std::isfinite(fine_drift_order) && fine_drift_order >= 1.8,
-                   "the observed inventory splitting error is second order");
   return passed;
 }
 
@@ -1671,6 +1662,49 @@ bool test_method_recovery_mass_target() {
             << " recovery_attempts=" << first_recovery.attempts << ',' << second_recovery.attempts
             << " recovery_status=" << unsigned(local.code) << '/' << local.detail
             << " passed=" << passed << '\n';
+  // A method policy change also changes the sealed Equation/PISO identities.
+  // Use a complete, unsigned V2 fixture with the known historical plan; do
+  // not rewrite its fields, checksum, missing-history flag or physical mass.
+  ProductDriver legacy_recovery;
+  auto migration = create(legacy_recovery);
+  RestartExpected migration_expected;
+  if (migration) migration = legacy_recovery.restart_expected(
+      migration_expected, RestartStorageCompatibility::strict,
+      RestartHistoryPolicy::rebuild_method_history);
+  const bool has_legacy = migration && migration_expected.compatible_method_plan != 0U &&
+      migration_expected.compatible_method_plan != migration_expected.plan &&
+      expected.compatible_method_plan == 0U;
+  passed &= expect(has_legacy, "explicit method recovery advertises only the known legacy method plan");
+  if (has_legacy) {
+    auto legacy_saved = saved;
+    legacy_saved.plan = migration_expected.compatible_method_plan;
+    legacy_saved.method_history_signature = 0U;
+    const auto legacy_root = directory / "legacy-method";
+    migration = RestartWriter::write(MPI_COMM_SELF, legacy_root, legacy_saved);
+    RestartImage legacy_image, refused;
+    const auto strict_read = RestartReader::load(MPI_COMM_SELF, legacy_root, expected, refused);
+    if (migration) migration = RestartReader::load(MPI_COMM_SELF, legacy_root,
+                                                  migration_expected, legacy_image);
+    const auto source_digest = legacy_image.source_manifest_sha256;
+    if (migration) migration = legacy_recovery.initialize_restart(legacy_image,
+        RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+    DriverStepReport recovered;
+    if (migration) migration = legacy_recovery.advance(limits, recovered);
+    passed &= expect(!strict_read && migration && recovered.effective_bdf.order == 1U &&
+        legacy_recovery.closed_mass_target() == legacy_saved.closed_mass_target &&
+        legacy_image.source_format_version == 2U && !legacy_image.backward_euler_recovery &&
+        !legacy_image.storage_layout_migrated && legacy_image.plan == legacy_saved.plan &&
+        legacy_image.source_manifest_sha256 == source_digest,
+        "legacy method requires explicit recovery, preserves source identity and mass, and uses BE");
+    ProductDriver wrong;
+    auto denied_status = create(wrong);
+    auto unrecognized = legacy_image;
+    unrecognized.plan ^= 1U;
+    if (denied_status) denied_status = wrong.initialize_restart(unrecognized,
+        RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+    passed &= expect(!denied_status && !wrong.initialized(),
+        "method recovery does not authorize an arbitrary physical plan mismatch");
+  }
   std::filesystem::remove_all(directory, error);
   return passed;
 }

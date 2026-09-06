@@ -1074,10 +1074,15 @@ Status validate_expected(const RestartExpected& expected,
       expected.compatible_storage_schema != 0U &&
       expected.compatible_storage_plan == manifest.plan &&
       expected.compatible_storage_schema == manifest.schema;
+  const bool compatible_method =
+      manifest.format_version >= kExactHistoryFormatVersion &&
+      expected.compatible_method_plan != 0U &&
+      expected.compatible_method_plan == manifest.plan &&
+      expected.schema == manifest.schema;
   if (!valid_global_patch(expected.global_cells, expected.target_patch) ||
       !same(expected.global_cells, manifest.global_cells) ||
       expected.plan == 0U || expected.schema == 0U || expected.geometry == 0U ||
-      (!current_identity && !compatible_identity) ||
+      (!current_identity && !compatible_identity && !compatible_method) ||
       expected.geometry != manifest.geometry ||
       expected.fields.data == nullptr ||
       expected.fields.size != manifest.fields.size()) {
@@ -1595,7 +1600,9 @@ Status RestartReader::load(MPI_Comm communicator,
     candidate.plan = manifest.plan;
     candidate.schema = manifest.schema;
     candidate.storage_layout_migrated =
-        manifest.plan != expected.plan || manifest.schema != expected.schema;
+        (manifest.plan != expected.plan || manifest.schema != expected.schema) &&
+        manifest.plan == expected.compatible_storage_plan &&
+        manifest.schema == expected.compatible_storage_schema;
     candidate.geometry = manifest.geometry;
     candidate.time = manifest.time;
     candidate.dt = manifest.dt;

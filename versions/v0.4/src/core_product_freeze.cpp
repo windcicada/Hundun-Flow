@@ -17,6 +17,7 @@
 #include "local_timing_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_piso_detail.hpp"
+#include "solver_scalar_mass_remap_detail.hpp"
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
 #include <atomic>
 #endif
@@ -54,15 +55,24 @@ constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
 // Semantic history contract, independent of Git/build/partition identity.
 // Bump the affected component when its stored state, rate, flux or time
 // interpretation changes. Model/BC/transport parameters remain bound by plan.
-constexpr PlanFingerprint method_history_signature() noexcept {
+constexpr PlanFingerprint method_history_signature(bool transported_scalars) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
       "accepted-ibm-thermal-zero-normal-v2;momentum-rates-v1;"
-      "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v2")) {
+      "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
+      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2")) {
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
+  if (transported_scalars)
+    for (char byte : std::string_view(
+        ";scalar-paired-mass-remap-v1;composition-picard-v1;mass-roundoff-closure-v1;"
+        "passive-envelope-v1;physical-donor-v2;composition-inner-accuracy-v1;"
+        "ibm-scalar-impermeable-flux-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
   return hash;
 }
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -747,6 +757,7 @@ bool state_field(FieldId field, const ProductFields& fields) noexcept {
 }
 
 Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
+                     const SchemeSpec& schemes,
                      Int3 local_shape, std::size_t local_cells,
                      RemoteDonorExchangeStats pressure_donors,
                      RemoteDonorExchangeStats candidate_pressure_donors,
@@ -1332,9 +1343,13 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     // not the larger IBM donor-search capacity carried by state fields.
     // Exchanging all four IBM layers here both violated the coupler's sealed
     // halo contract and paid for unused communication on every corrector.
-    constexpr std::uint8_t kCartesianEquationReach = 2U;
+    const std::uint8_t equation_reach =
+        schemes.momentum == ConvectionScheme::central2 &&
+        schemes.enthalpy == ConvectionScheme::central2 &&
+        schemes.species == ConvectionScheme::central2 &&
+        schemes.passive_scalar == ConvectionScheme::central2 ? 1U : 2U;
     const std::array<std::uint8_t, 4U> widths{
-        1U, 1U, std::min(ghosts, kCartesianEquationReach), 1U};
+        1U, 1U, equation_reach, 1U};
     StageSpec stage;
     stage.id = id;
     stage.reads = {reads.data(), reads.size()};
@@ -2624,6 +2639,7 @@ struct CompiledCasePlan::Impl {
   PlanFingerprint legacy_mg_schema_fingerprint{};
   PlanFingerprint legacy_mg_fingerprint{};
   PlanFingerprint legacy_mg_boundary_fingerprint{};
+  PlanFingerprint legacy_afc_v3_fingerprint{};
   PlanFingerprint cpu_fingerprint{};
   PlanFingerprint stl_fingerprint{};
   std::uintptr_t state_address{};
@@ -2641,6 +2657,10 @@ struct ProductDriver::Impl {
   std::optional<IbmPressureOperator> ibm_pressure_operator;
   NativeCartesianMgPlan pressure_mg;
   ConservativeEnthalpyEndpoint enthalpy_endpoint;
+  std::optional<detail::ScalarMassRemap> scalar_remap;
+  detail::ScalarMassRemap::Report scalar_remap_report{};
+  std::uint32_t scalar_coupling_sweep{};
+  std::uint64_t scalar_remap_nanoseconds{};
   MgPlanCounters pressure_mg_counters{};
   ResourceCounters resources{};
   MPI_Comm communicator{MPI_COMM_NULL};
@@ -2886,6 +2906,7 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   };
   const CompiledCasePlan::Impl& product = *plan.implementation_;
   for (const HaloEngine& engine : product.stage_halos) halo(engine);
+  if (scalar_remap.has_value()) halo(scalar_remap->halo());
   halo(product.predictor_donor_halo);
   halo(product.final_velocity_halo);
   halo(product.coupled_state_halo);
@@ -3377,7 +3398,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       return {StatusCode::invalid_plan, kProductBinding};
     candidate->legacy_mg_schema_fingerprint = legacy_registry.fingerprint();
     status = compile_graph(
-        candidate->fields, ghosts, candidate->patch.cells, local_cells,
+        candidate->fields, ghosts, model.schemes, candidate->patch.cells, local_cells,
         candidate->ibm_pressure_donors.has_value()
             ? candidate->ibm_pressure_donors->stats()
             : RemoteDonorExchangeStats{},
@@ -4559,11 +4580,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   semantic = detail::product_mix(semantic, candidate->geometry.fingerprint());
   semantic = detail::product_mix(semantic, candidate->cpu_fingerprint);
   const auto finish_identity = [&](PlanFingerprint schema,
-                                   PlanFingerprint boundary) noexcept {
+                                   PlanFingerprint boundary,
+                                   PlanFingerprint equations,
+                                   PlanFingerprint piso) noexcept {
     auto value = detail::product_mix(semantic, boundary);
-    value =
-        detail::product_mix(value, candidate->equations.semantic_fingerprint());
-    value = detail::product_mix(value, candidate->piso.fingerprint());
+    value = detail::product_mix(value, equations);
+    value = detail::product_mix(value, piso);
     value = detail::product_mix(value, candidate->turbulence.fingerprint());
     value = detail::product_mix(value, schema);
     value = detail::product_mix(value, candidate_lineage);
@@ -4575,10 +4597,15 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   };
   candidate->fingerprint =
       finish_identity(candidate->schema_fingerprint,
-                      candidate->boundary.semantic_fingerprint());
+                      candidate->boundary.semantic_fingerprint(),
+                      candidate->equations.semantic_fingerprint(), candidate->piso.fingerprint());
   candidate->legacy_mg_fingerprint =
       finish_identity(candidate->legacy_mg_schema_fingerprint,
-                      candidate->legacy_mg_boundary_fingerprint);
+                      candidate->legacy_mg_boundary_fingerprint,
+                      candidate->equations.semantic_fingerprint(), candidate->piso.fingerprint());
+  candidate->legacy_afc_v3_fingerprint = finish_identity(
+      candidate->schema_fingerprint, candidate->boundary.semantic_fingerprint(),
+      candidate->equations.legacy_afc_v3_semantic_, candidate->piso.legacy_afc_v3_fingerprint_);
   status = collective_semantic(communicator, candidate->fingerprint);
   const bool auxiliary_workspace_valid =
       piso_spec.pressure_algorithm == LinearAlgorithm::fgmres ||
@@ -4785,6 +4812,14 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
       // staging capacity shared by both routes.
       candidate->halo_views.resize(16U + product.fields.scalars.size());
       candidate->final_dependencies.resize(6U + species);
+      if (!product.fields.scalars.empty()) {
+        candidate->scalar_remap.emplace();
+        status = candidate->scalar_remap->allocate(
+            product.patch,
+            {product.fields.scalars.data(), product.fields.scalars.size()},
+            {product.fields.scalar_roles.data(), product.fields.scalar_roles.size()},
+            product.schemes.required_ghost_width());
+      }
     }
     FieldView pressure_diagonal;
     FieldView pressure_rhs;
@@ -4898,6 +4933,10 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
     }
     return status;
   });
+  if (!status) return status;
+  if (candidate->scalar_remap.has_value())
+    status = candidate->scalar_remap->bind(candidate->communicator,
+                                          product.boundary);
   if (!status) return status;
   candidate->plan = std::move(plan);
   out.implementation_ = candidate.release();
@@ -5182,11 +5221,16 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     status = const_layers.view(StateRole::accepted_n,
                                product.fields.enthalpy, accepted_enthalpy);
   std::size_t species_index = 0U;
+  std::size_t passive_index = 0U;
   for (std::size_t index = 0U;
        index < product.fields.scalars.size() && status; ++index) {
     if (product.fields.scalar_roles[index] !=
-        TransportedScalarRole::species)
+        TransportedScalarRole::species) {
+      status = const_layers.view(StateRole::accepted_n,
+                                  product.fields.scalars[index],
+                                  passive_accepted[passive_index++]);
       continue;
+    }
     status = const_layers.view(StateRole::accepted_n,
                                product.fields.scalars[index],
                                species_accepted[species_index]);
@@ -5195,7 +5239,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
           species_accepted[species_index].unchecked({0, 0, 0}, 0U);
     ++species_index;
   }
-  if (status && species_index != species_accepted.size())
+  if (status && (species_index != species_accepted.size() ||
+                 passive_index != passive_accepted.size()))
     status = {StatusCode::invalid_plan, kProductBinding};
   // The boundary resolver can enter mass-flow collectives.  A rank-local
   // state-layer/view failure must be made uniform before any rank calls it.
@@ -5367,7 +5412,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     status = product.layers.view(StateRole::trial, product.fields.temperature,
                                  trial_temperature);
   species_index = 0U;
-  std::size_t passive_index = 0U;
+  passive_index = 0U;
   for (std::size_t index = 0U;
        index < product.fields.scalars.size() && status; ++index) {
     FieldView scalar;
@@ -5720,8 +5765,13 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
 }
 
 Status ProductDriver::restart_expected(
-    RestartExpected& out, RestartStorageCompatibility compatibility) noexcept {
+    RestartExpected& out, RestartStorageCompatibility compatibility,
+    RestartHistoryPolicy history_policy) noexcept {
   if (implementation_ == nullptr || implementation_->initialized ||
+      (history_policy != RestartHistoryPolicy::require_compatible &&
+       history_policy != RestartHistoryPolicy::rebuild_method_history) ||
+      (history_policy == RestartHistoryPolicy::rebuild_method_history &&
+       compatibility != RestartStorageCompatibility::strict) ||
       (compatibility != RestartStorageCompatibility::strict &&
        compatibility != RestartStorageCompatibility::mg_bundle_ghost_v1))
     return {StatusCode::invalid_plan, kProductInput};
@@ -5740,7 +5790,10 @@ Status ProductDriver::restart_expected(
     out.compatible_storage_plan = product.legacy_mg_fingerprint;
     out.compatible_storage_schema = product.legacy_mg_schema_fingerprint;
   }
-  out.method_history_signature = method_history_signature();
+  out.method_history_signature =
+      method_history_signature(!product.fields.scalars.empty());
+  if (history_policy == RestartHistoryPolicy::rebuild_method_history)
+    out.compatible_method_plan = product.legacy_afc_v3_fingerprint;
   return {};
 }
 
@@ -6572,13 +6625,18 @@ Status ProductDriver::initialize_restart(
       history_policy == RestartHistoryPolicy::rebuild_method_history;
   const bool exact_history = complete_source_history && !method_recovery;
   const auto history_compatibility =
-      image.history_compatibility(method_history_signature());
+      image.history_compatibility(
+          method_history_signature(!product.fields.scalars.empty()));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
       compatibility == RestartStorageCompatibility::mg_bundle_ghost_v1 &&
       exact_history && image.plan == product.legacy_mg_fingerprint &&
       image.schema == product.legacy_mg_schema_fingerprint;
+  const bool known_method_identity = method_recovery && complete_source_history &&
+      compatibility == RestartStorageCompatibility::strict &&
+      image.plan == product.legacy_afc_v3_fingerprint &&
+      image.schema == product.schema_fingerprint;
   Status status =
       !runtime.initialized &&
               (history_policy == RestartHistoryPolicy::require_compatible ||
@@ -6625,7 +6683,7 @@ Status ProductDriver::initialize_restart(
   if (status &&
       (!same_int3(image.global_cells, product.geometry.global_cells()) ||
        !same_patch(image.patch, product.patch) ||
-       (!current_identity && !legacy_identity) ||
+       (!current_identity && !legacy_identity && !known_method_identity) ||
        image.geometry != product.geometry.fingerprint() ||
        image.fields.size() != runtime.restart_expected_fields.size()))
     status = {StatusCode::invalid_plan, kProductInput};
@@ -7267,6 +7325,8 @@ Status ProductDriver::Impl::execute_attempt(
   CompiledCasePlan::Impl& product = *plan.implementation_;
   effective_bdf = step.bdf;
   thermophysical_predictor_calls = 0U;
+  scalar_remap_report = {};
+  scalar_remap_nanoseconds = 0U;
   temporal_method_fallback = false;
   numerical_failure = {};
   predictor_diagnostics = {};
@@ -7727,6 +7787,10 @@ Status ProductDriver::Impl::execute_attempt(
       &enthalpy_endpoint, &resources,
       product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr};
   thermophysical_predictor_calls = 1U;
+  if (scalar_remap.has_value()) status = product.reductions.consensus(status);
+  if (status && scalar_remap.has_value())
+    status = scalar_remap->prepare_passive_intervals(predictor_input,
+                                                    product.reductions);
   status = product.equations.thermophysical_predictor().predict(
       communicator, status, predictor_input, predictor_output,
       predictor_slow_path, predictor_diagnostics, predictor_certificate);
@@ -7773,6 +7837,35 @@ Status ProductDriver::Impl::execute_attempt(
             : requested_collectives + effective_collectives;
   }
 
+  // Preserve the exact conservative predictor basis before EOS changes rho
+  // and before the momentum predictor overwrites the paired flux replica.
+  if (scalar_remap.has_value()) {
+    if (status) {
+      halo_count = 0U;
+      append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                               halo_views, halo_count);
+      status = scalar_remap->capture(
+          product.equations.kernels(), as_const(trial_density),
+          {halo_views.data(), halo_count}, as_const(provisional_flux),
+          effective_bdf.a0);
+      if (status && scalar_coupling_sweep > 1U) {
+        for (std::size_t s = 0U; s < product.fields.scalars.size() && status; ++s)
+          if (product.fields.scalar_roles[s] == TransportedScalarRole::species) {
+            status = transaction.revise_trial(product.fields.scalars[s]);
+            if (status) status = product.layers.view(StateRole::trial,
+                product.fields.scalars[s], halo_views[s]);
+          }
+        if (status) {
+          scalar_remap->copy_solution({halo_views.data(), halo_count},
+                                      TransportedScalarRole::species);
+          restore_scalar_halo_views(product.fields, halo_views, 0U,
+                                    species_trial, passive_trial);
+        }
+      }
+    }
+    status = product.reductions.consensus(status);
+  }
+
   // Publish predicted h/scalar ghosts before EOS/transport evaluation.
   halo_count = 0U;
   if (status) halo_views[halo_count++] = trial_enthalpy;
@@ -7795,9 +7888,17 @@ Status ProductDriver::Impl::execute_attempt(
        index < product.fields.scalars.size() && status; ++index) {
     if (product.fields.scalar_roles[index] ==
         TransportedScalarRole::species)
-      species_trial[species_index++] = halo_views[index + 1U];
+    {
+      species_trial[species_index] = halo_views[index + 1U];
+      species_history[species_index].trial = as_const(species_trial[species_index]);
+      ++species_index;
+    }
     else
-      passive_trial[passive_index++] = halo_views[index + 1U];
+    {
+      passive_trial[passive_index] = halo_views[index + 1U];
+      passive_history[passive_index].trial = as_const(passive_trial[passive_index]);
+      ++passive_index;
+    }
   }
   if (status)
     status = publish_predictor_ghost_authority(
@@ -8900,7 +9001,8 @@ Status ProductDriver::Impl::execute_attempt(
               product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
                   ? product.krylov_workspace
                   : product.auxiliary_krylov_workspace,
-              product.reductions, &resources, momentum_predictor_solve);
+              product.reductions, &resources, momentum_predictor_solve,
+              !species_trial.empty());
         if (prerequisite)
           prerequisite = transaction.revise_trial(product.fields.velocity);
         if (prerequisite)
@@ -8971,6 +9073,17 @@ Status ProductDriver::Impl::execute_attempt(
       refreshed = apply_boundary_ghosts(
           BoundaryStage::enthalpy, product.boundary,
           {&trial_enthalpy, 1U}, boundary_values);
+    // Conditional outlet targets depend on the current velocity/owner state.
+    // Refresh the scalar mirrors together with h before deriving boundary
+    // rho. The candidate path uses the same closure, including at alpha zero.
+    if (refreshed && !product.fields.scalars.empty()) {
+      halo_count = 0U;
+      append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                               halo_views, halo_count);
+      refreshed = apply_boundary_ghosts(
+          BoundaryStage::scalar, product.boundary,
+          {halo_views.data(), halo_count}, boundary_values);
+    }
     if (refreshed) {
       std::vector<BoundaryGhostFieldAuthority>& authorities =
           boundary_thermo_authority_fields;
@@ -9851,6 +9964,7 @@ Status ProductDriver::Impl::execute_attempt(
         energy_enthalpy_binding.geometry = &product.geometry;
         energy_enthalpy_binding.kernels = &product.equations.kernels();
         energy_enthalpy_binding.boundary = &product.boundary;
+        energy_enthalpy_binding.boundary_velocity = as_const(trial_velocity);
         energy_enthalpy_binding.patch = product.patch;
         energy_enthalpy_binding.convection =
             product.equations.thermophysical_predictor()
@@ -12608,6 +12722,14 @@ Status ProductDriver::Impl::execute_attempt(
             loop.replay.sample.global_normalized_continuity,
             loop.replay.sample.global_normalized_energy, merit);
       };
+  // A transported constant inherits the discrete continuity residual. The
+  // scalar remap needs a roundoff-level mass-pairing closure, independently
+  // of the user-facing flow acceptance ceiling. Do not weaken either gate,
+  // or change the zero-scalar production path.
+  const double coupled_continuity_target = scalar_remap.has_value()
+      ? std::min(product.summary.terminal_continuity_tolerance,
+                 16.0 * std::numeric_limits<double>::epsilon())
+      : product.summary.terminal_continuity_tolerance;
   const auto pressure_energy_components_converged =
       [&](const PressureEnergyCandidateLoopResult& loop) noexcept {
         return loop.replay_valid &&
@@ -12617,7 +12739,7 @@ Status ProductDriver::Impl::execute_attempt(
                    loop.replay.sample.global_normalized_continuity) &&
                std::isfinite(loop.replay.sample.global_normalized_energy) &&
                loop.replay.sample.global_normalized_continuity <=
-                   product.summary.terminal_continuity_tolerance &&
+                   coupled_continuity_target &&
                loop.replay.sample.global_normalized_energy <=
                    product.summary.terminal_continuity_tolerance;
       };
@@ -12628,7 +12750,7 @@ Status ProductDriver::Impl::execute_attempt(
         detail::ProductPressureInexactForcingState forcing;
         forcing.previous_merit = previous_merit;
         forcing.terminal_tolerance =
-            product.summary.terminal_continuity_tolerance;
+            coupled_continuity_target;
         forcing.previous_merit_available = previous_merit_available;
         double merit = 0.0;
         if (loop != nullptr && pressure_energy_loop_merit(*loop, merit)) {
@@ -13019,7 +13141,7 @@ Status ProductDriver::Impl::execute_attempt(
             baseline.state_and_flux_finite &&
             baseline_artifacts.alpha_zero_byte_equivalent &&
             baseline.global_normalized_continuity <=
-                product.summary.terminal_continuity_tolerance &&
+                coupled_continuity_target &&
             baseline.global_normalized_energy <=
                 product.summary.terminal_continuity_tolerance;
         if (stationary_only && !baseline_terminal_compatible) {
@@ -14346,6 +14468,47 @@ Status ProductDriver::Impl::execute_attempt(
          terminal.pressure_reference.pressure_reference});
   status = product.reductions.consensus(status);
 
+  if (status && scalar_remap.has_value()) {
+    attempt_stage = 65U;
+    const auto remap_start = std::chrono::steady_clock::now();
+    halo_count = 0U;
+    append_scalar_halo_views(product.fields, species_trial, passive_trial,
+                             halo_views, halo_count);
+    status = scalar_remap->solve(
+        product.equations.kernels(), as_const(trial_density),
+        as_const(trial_velocity), terminal_energy_flux, {halo_views.data(), halo_count},
+        pressure_energy_activity.cells, boundary_values, product.reductions,
+        scalar_remap_report);
+    scalar_remap_nanoseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - remap_start).count());
+    // Keep the exact p/h/EOS-certified composition if its conservative
+    // equation is already closed. Otherwise reject ONLY this uncommitted
+    // coupling iterate; advance() repeats at the SAME time/dt with the new
+    // composition guess. This is not a time-controller retry or a commit.
+    if (status && scalar_remap_report.initial_species_residual >
+                      detail::ScalarMassRemap::composition_tolerance)
+      status = {StatusCode::rejected_step, detail::ScalarMassRemap::kRecouple};
+    if (status) {
+      // A changed passive field also needs a new revision: later rate/ghost
+      // certificates must not describe the pre-remap interior.
+      for (std::size_t s = 0U; s < product.fields.scalars.size() && status; ++s)
+        if (product.fields.scalar_roles[s] == TransportedScalarRole::passive_scalar) {
+          status = transaction.revise_trial(product.fields.scalars[s]);
+          if (status) status = product.layers.view(StateRole::trial,
+              product.fields.scalars[s], halo_views[s]);
+        }
+    }
+    if (status) {
+      scalar_remap->copy_solution({halo_views.data(), halo_count},
+                                  TransportedScalarRole::passive_scalar);
+      restore_scalar_halo_views(product.fields, halo_views, 0U,
+                                species_trial, passive_trial);
+      for (std::size_t s = 0U; s < passive_trial.size(); ++s)
+        passive_history[s].trial = as_const(passive_trial[s]);
+    }
+  }
+
   // Final-state rate histories are committed with the state and feed the
   // next predictor. They do not consume or publish another face flux.
   if (status) attempt_stage = 61U;
@@ -14855,8 +15018,10 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     return status;
   }
   Status last_attempt_status;
+  std::uint32_t scalar_sweep = 0U;
   while (status) {
-    ++candidate.attempts;
+    if (scalar_sweep == 0U) ++candidate.attempts;
+    implementation_->scalar_coupling_sweep = ++scalar_sweep;
     candidate.proposal = proposal;
     PisoAttemptReport attempt_report;
     PreparedAttemptFinish prepared_attempt;
@@ -14897,6 +15062,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
       if (perf.loop_count == perf.loops.size()) { ++perf.dropped_loops; continue; }
       auto& loop = perf.loops[perf.loop_count++];
       loop.attempt = candidate.attempts;
+      loop.scalar_coupling_sweep = scalar_sweep;
       loop.dt = proposal.dt;
       loop.attempt_status = attempt_status;
       loop.solve = solve;
@@ -14928,12 +15094,35 @@ Status ProductDriver::advance(LocalTimeLimits limits,
         implementation_->momentum_predictor_solve;
     candidate.terminal_equations = implementation_->terminal_equations;
     candidate.conservation = implementation_->conservation;
+    if (implementation_->scalar_remap.has_value()) {
+      auto& scalar = candidate.scalar_transport;
+      const auto& remap = implementation_->scalar_remap_report;
+      scalar.active = true;
+      scalar.owned_payload_bytes =
+          implementation_->scalar_remap->owned_payload_bytes();
+      ++scalar.coupling_sweeps;
+      scalar.remap_iterations += remap.iterations;
+      scalar.remap_nanoseconds += implementation_->scalar_remap_nanoseconds;
+      scalar.final_species_residual = remap.initial_species_residual;
+      scalar.final_remap_residual = remap.residual;
+      scalar.mass_pairing_residual = remap.mass_pairing_residual;
+    }
     const std::uint64_t predictor_calls =
         implementation_->predictor_diagnostics.blocking_collectives;
     predictor_blocking_collectives =
         predictor_calls > UINT64_MAX - predictor_blocking_collectives
             ? UINT64_MAX
             : predictor_blocking_collectives + predictor_calls;
+    if (attempt_status.code == StatusCode::rejected_step &&
+        attempt_status.detail == detail::ScalarMassRemap::kRecouple &&
+        prepared_attempt.valid() &&
+        prepared_attempt.decision() == AttemptFinishDecision::reject &&
+        scalar_sweep < detail::ScalarMassRemap::maximum_coupling_sweeps) {
+      implementation_->transaction.commit_reject(prepared_attempt);
+      implementation_->finalize_pending_force_cache();
+      implementation_->discard_pending_attempt_side_state();
+      continue;
+    }
     if (!attempt_status) {
       candidate.failed_stage = implementation_->attempt_stage;
       candidate.failure = attempt_status;
@@ -15053,6 +15242,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
       candidate.numerical_failure.origin_after = next.origin;
     }
     proposal = next;
+    scalar_sweep = 0U;
   }
   candidate.completion.outcome = candidate.completion.stop_reason = status;
   report = candidate;
@@ -15237,7 +15427,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
          previous_flux,
          runtime.previous_pressure_reference,
          runtime.closed_mass_target,
-         method_history_signature()};
+         method_history_signature(!product.fields.scalars.empty())};
   return {};
 }
 

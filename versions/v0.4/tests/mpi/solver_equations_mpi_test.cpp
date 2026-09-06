@@ -1410,8 +1410,11 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   const int jump_status = MPI_Allreduce(
       local_jump_delta.data(), global_jump_delta.data(), 2, MPI_DOUBLE,
       MPI_SUM, world);
-  constexpr std::array<double, 2U> expected_global_jump_delta{
-      0x1.ffffffffffff7p-1, -0x1.ffffffffffff8p-1};
+  // The worked two-cell budget returns equal/opposite unit corrections.
+  // A cancellation-sized transverse budget may carry a roundoff guard; do
+  // not freeze the last bits of the old divided-velocity implementation.
+  // Shared copies must still publish exactly the same alpha below.
+  constexpr std::array<double, 2U> expected_global_jump_delta{1.0, -1.0};
   const bool owns_shared_face_copy =
       dependencies.patch.begin.y == 0 && dependencies.patch.begin.z == 0 &&
       dependencies.patch.begin.x <= 9 &&
@@ -1470,7 +1473,10 @@ bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
           shared_alpha_collective && shared_min == shared_max &&
           shared_min < 1.0 &&
           shared_count == (size == 1 ? 1 : 2) &&
-          global_jump_delta == expected_global_jump_delta &&
+          std::abs(global_jump_delta[0U] - expected_global_jump_delta[0U]) <=
+              5.0e-13 &&
+          std::abs(global_jump_delta[1U] - expected_global_jump_delta[1U]) <=
+              5.0e-13 &&
           std::abs(global_jump_delta[0U] + global_jump_delta[1U]) <=
               5.0e-13 &&
           std::abs(global_sums[1U] - global_sums[0U]) <= 5.0e-13,
@@ -2365,7 +2371,7 @@ bool test_collective_compile_and_self_reference(MPI_Comm world, int rank,
                    rank, "equation compile succeeds collectively");
   passed &= expect(plan.fingerprint() != 0U &&
                        kMomentumPredictorLimiterPolicySchema ==
-                           UINT64_C(0x7630346d61666333) &&
+                           UINT64_C(0x7630346d61666334) &&
                        plan.global_cells().x == 17 &&
                        plan.global_cells().y == 11 &&
                        plan.global_cells().z == 7,

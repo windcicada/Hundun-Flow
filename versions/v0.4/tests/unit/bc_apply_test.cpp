@@ -1233,6 +1233,74 @@ bool test_homogeneous_scalar_hot_path_has_no_allocations(
   return passed;
 }
 
+bool test_conditional_outlet_directional_derivative() {
+  auto definition = model();
+  auto& outlet = definition.boundaries[1U];
+  outlet.allow_backflow = true;
+  outlet.backflow_temperature = 320.0;
+  outlet.backflow_velocity = {-0.5, 0.0, 0.0};
+  for (auto& scalar : outlet.scalars) {
+    scalar.kind = ScalarBoundaryKind::zero_gradient;
+    scalar.backflow_kind = ScalarBoundaryKind::dirichlet;
+    scalar.backflow_value = 0.2;
+  }
+  BoundaryPlan plan;
+  if (!compile_plan_with(MPI_COMM_SELF, definition, kInterior, plan)) return false;
+  OwnedView direction{plan.enthalpy_field(),1U}, velocity{plan.velocity_field(),3U};
+  OwnedView plus{plan.enthalpy_field(),1U}, minus{plan.enthalpy_field(),1U};
+  initialise_interior(direction);
+  initialise_interior(velocity);
+  constexpr double epsilon = 0.125; // Binary exact affine finite difference.
+  for (int z=0;z<kInterior.z;++z) for(int y=0;y<kInterior.y;++y) for(int x=0;x<kInterior.x;++x) {
+    const Int3 cell{x,y,z};
+    velocity.view.unchecked(cell,0U)=y%2 ? -0.5 : 0.5;
+    const double q=direction.view.unchecked(cell,0U);
+    plus.view.unchecked(cell,0U)=300.0+epsilon*q;
+    minus.view.unchecked(cell,0U)=300.0-epsilon*q;
+  }
+  std::vector<double> positive,negative,gradient;
+  std::vector<Real3> vectors;
+  auto p=resolved_values(plan,positive,vectors,gradient);
+  negative=positive;
+  auto n=p; n.scalar={negative.data(),negative.size()};
+  const auto spans=plan.spans();
+  for(std::size_t j=0;j<spans.size;++j) {
+    const auto& span=spans.data[j];
+    if(span.stage!=BoundaryStage::enthalpy || span.face!=CartesianFace::x_max) continue;
+    for(int z=0;z<kInterior.z;++z) for(int y=0;y<kInterior.y;++y) {
+      const auto index=span.resolved_begin+z*span.tangent_inner_count+y;
+      positive[index]=y%2 ? 320.0 : plus.view.unchecked({kInterior.x-1,y,z},0U);
+      negative[index]=y%2 ? 320.0 : minus.view.unchecked({kInterior.x-1,y,z},0U);
+    }
+  }
+  bool passed=static_cast<bool>(apply_boundary_ghosts(BoundaryStage::enthalpy,plan,{&plus.view,1U},p));
+  passed &= static_cast<bool>(apply_boundary_ghosts(BoundaryStage::enthalpy,plan,{&minus.view,1U},n));
+  passed &= static_cast<bool>(apply_homogeneous_scalar_boundary_ghosts(
+      BoundaryStage::enthalpy,plan,plan.enthalpy_field(),direction.view,2U,as_const(velocity.view)));
+  for(int z=0;z<kInterior.z;++z) for(int y=0;y<kInterior.y;++y) for(int layer=1;layer<=2;++layer) {
+    const Int3 ghost{kInterior.x-1+layer,y,z};
+    passed &= expect(direction.view.unchecked(ghost,0U)==
+        (plus.view.unchecked(ghost,0U)-minus.view.unchecked(ghost,0U))/(2.0*epsilon),
+        "conditional outlet derivative matches both physical branches and both ghost layers");
+  }
+  const auto before=direction.storage;
+  velocity.view.unchecked({kInterior.x-1,kInterior.y-1,kInterior.z-1},0U)=
+      std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!apply_homogeneous_scalar_boundary_ghosts(
+      BoundaryStage::enthalpy,plan,plan.enthalpy_field(),direction.view,2U,as_const(velocity.view)) &&
+      unchanged(direction,before),"late invalid branch velocity rejects without ghost writes");
+  velocity.view.unchecked({kInterior.x-1,kInterior.y-1,kInterior.z-1},0U)=0.5;
+  direction.view.unchecked({kInterior.x-1,kInterior.y-1,kInterior.z-1},0U)=
+      std::numeric_limits<double>::max();
+  direction.view.unchecked({kInterior.x-2,kInterior.y-1,kInterior.z-1},0U)=
+      -std::numeric_limits<double>::max();
+  const auto overflow_before=direction.storage;
+  passed &= expect(!apply_homogeneous_scalar_boundary_ghosts(
+      BoundaryStage::enthalpy,plan,plan.enthalpy_field(),direction.view,2U,as_const(velocity.view)) &&
+      unchanged(direction,overflow_before),"finite inputs with overflowing derivative reject before any write");
+  return passed;
+}
+
 bool test_homogeneous_periodic_and_mpi_faces_are_halo_owned(int world_size) {
   bool passed = true;
   BoundaryPlan periodic;
@@ -1323,6 +1391,7 @@ int main(int argc, char** argv) {
     passed &= test_homogeneous_scalar_relations_and_reach(plan);
     passed &= test_homogeneous_scalar_preflight_is_atomic(plan);
     passed &= test_homogeneous_scalar_hot_path_has_no_allocations(plan);
+    passed &= test_conditional_outlet_directional_derivative();
     passed &= test_homogeneous_periodic_and_mpi_faces_are_halo_owned(
         world_size);
   }

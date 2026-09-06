@@ -237,14 +237,15 @@ struct TargetCoupledEnthalpyResidualWorkspace {
   FieldView diffusion{};
 };
 
-// "v04mafc3": direction-preserving, owner-published common-face scalar AFC
+// "v04mafc4": direction-preserving, owner-published common-face scalar AFC
 // with partition-invariant face metrics, the
 // quadratic smooth-extremum allowance and one-sided physical-outflow
-// budgeting.  This policy identity participates in EquationPlanSet semantic
+// budgeting with momentum-unit roundoff-aware budgets. This policy identity
+// participates in EquationPlanSet semantic
 // provenance so legacy global-theta and prior face-local plans can never
 // share an authority lineage.
 inline constexpr PlanFingerprint kMomentumPredictorLimiterPolicySchema =
-    UINT64_C(0x7630346d61666333);
+    UINT64_C(0x7630346d61666334);
 
 struct ConvectiveCflFailureWitness {
   bool valid{};
@@ -543,6 +544,11 @@ struct ThermophysicalGhostHistory {
   ThermophysicalGhostAuthority previous{};
 };
 
+struct ScalarAdmissibleInterval {
+  double lower{};
+  double upper{};
+};
+
 struct ThermophysicalPredictorInput {
   double dt{};
   BdfCoefficients bdf{};
@@ -563,6 +569,9 @@ struct ThermophysicalPredictorInput {
   PredictorRateHistory enthalpy_nonadvective_rhs{};
   Span<const PredictorRateHistory> species_nonadvective_rhs{};
   Span<const PredictorRateHistory> passive_scalar_nonadvective_rhs{};
+  // Optional, rank-consistent physical/source envelope, in passive-field
+  // order. Limiting acts on conservative predictor fluxes, never on q itself.
+  Span<const ScalarAdmissibleInterval> passive_intervals{};
   ThermophysicalGhostHistory enthalpy_ghosts{};
   Span<const ThermophysicalGhostHistory> species_ghosts{};
   Span<const ThermophysicalGhostHistory> passive_scalar_ghosts{};
@@ -671,7 +680,9 @@ enum class ThermophysicalAdmissibilityConstraint : std::uint8_t {
   independent_species,
   dependent_species,
   enthalpy_lower,
-  enthalpy_upper
+  enthalpy_upper,
+  passive_lower,
+  passive_upper
 };
 
 enum class ThermophysicalLowStateKind : std::uint8_t {
@@ -1004,7 +1015,7 @@ class MomentumEquationPlan {
       const EquationAssemblyCertificate&, ConstFaceFluxView,
       MgDomainActivityView, EquationSystemView, FieldView, HaloEngine&,
       SolverWorkspace&, ReductionEngine&, ResourceCounters*,
-      MomentumPredictorSolveReport&) noexcept;
+      MomentumPredictorSolveReport&, bool) noexcept;
   const CartesianKernelPlan* kernels_{};
   Int3 cells_{};
   FieldId density_{};
@@ -1295,6 +1306,8 @@ class EquationPlanSet {
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
+  friend class PisoPlan;
+  friend class ProductCompiler;
   void reset() noexcept;
   void move_from(EquationPlanSet&& other) noexcept;
   void rebind() noexcept;
@@ -1311,6 +1324,11 @@ class EquationPlanSet {
   Int3 patch_begin_{};
   std::size_t local_cells_{};
   PlanFingerprint semantic_fingerprint_{};
+  // Read-only reconstruction of the sole supported prior AFC method identity.
+  // These never certify a current operator or enable old numerical kernels.
+  PlanFingerprint legacy_afc_v3_semantic_{};
+  PlanFingerprint legacy_afc_v3_predictor_{};
+  PlanFingerprint legacy_afc_v3_pressure_reference_{};
   PlanFingerprint thermodynamics_fingerprint_{};
   PlanFingerprint transport_fingerprint_{};
   PlanFingerprint fingerprint_{};
@@ -1746,6 +1764,9 @@ struct PressureEnergyEnthalpyBinding {
   LinearIdentity identity{};
   FrozenConvectionLinearizationPolicy linearization_policy{
       FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope};
+  // Optional for algebraic clients; production supplies the frozen state
+  // that selects conditional outlet h/Y boundary branches.
+  ConstFieldView boundary_velocity{};
 };
 
 struct PressureEnergyEnthalpyCertificate {
@@ -1888,6 +1909,7 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
   PressureEnergyEnthalpyServices services_{};
   ConstFieldView assembled_diagonal_{};
   ConstFieldView target_enthalpy_{};
+  ConstFieldView boundary_velocity_{};
   ConstFieldView density_enthalpy_derivative_{};
   ConstFieldView heat_capacity_{};
   ConstFieldView thermal_conductivity_{};
@@ -2280,6 +2302,7 @@ class PisoPlan {
 
  private:
   friend class PressureVelocityCoupler;
+  friend class ProductCompiler;
   Int3 cells_{};
   PlanFingerprint equations_fingerprint_{};
   PlanFingerprint predictor_fingerprint_{};
@@ -2297,6 +2320,7 @@ class PisoPlan {
   double closed_mass_tolerance_{};
   double gauge_tolerance_{};
   PlanFingerprint fingerprint_{};
+  PlanFingerprint legacy_afc_v3_fingerprint_{};
 };
 
 struct PisoContinuityWitness {
@@ -4386,7 +4410,8 @@ Status solve_momentum_predictor(
     EquationSystemView system, FieldView velocity, HaloEngine& krylov_halo,
     SolverWorkspace& workspace, ReductionEngine& reductions,
     ResourceCounters* resources,
-    MomentumPredictorSolveReport& report) noexcept;
+    MomentumPredictorSolveReport& report,
+    bool require_composition_accuracy = false) noexcept;
 
 Status assemble_enthalpy(
     const EnthalpyEquationPlan& plan, const EquationStateView& state,

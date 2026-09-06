@@ -352,10 +352,18 @@ Status apply_boundary_ghosts(BoundaryStage stage, const BoundaryPlan& plan,
 // `reach` is explicit because coupled operators can require different halo
 // depths for variations of h and T.  The operation performs a complete
 // authority/view/finite-value preflight before its first write.
+// With boundary_velocity supplied, conditional pressure-outlet scalar/h
+// targets use the frozen inflow/outflow branch of that state. An outflow
+// target equals the owner value, so its derivative is not a fixed Dirichlet
+// target. Branch switching itself is intentionally not differentiated.
 Status apply_homogeneous_scalar_boundary_ghosts(
     BoundaryStage source_stage, const BoundaryPlan& plan,
     FieldId source_field, FieldView variation,
     std::uint8_t reach) noexcept;
+Status apply_homogeneous_scalar_boundary_ghosts(
+    BoundaryStage source_stage, const BoundaryPlan& plan,
+    FieldId source_field, FieldView variation,
+    std::uint8_t reach, ConstFieldView boundary_velocity) noexcept;
 
 Status apply_physical_zero_gradient(const BoundaryPlan& plan,
                                     Span<FieldView> fields) noexcept;
