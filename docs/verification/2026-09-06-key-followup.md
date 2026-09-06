@@ -1,8 +1,10 @@
 # 关键问题复核与分项处理
 
 基线：`792f32efdfa71e2726fd0fc94513ee6f58ed0c03`。本轮只修改开发工作区；
-`method-frozen-periodic-20260906` 及其 128-rank 长测保持独立、只读，不停止、
-不替换程序，不修改物性、网格、dt、残差门槛、refinement 上限或 checkpoint 的持久化要求。
+`method-frozen-periodic-20260906` 的程序和输入保持独立、只读，不替换程序，
+不修改物性、网格、dt、残差门槛、refinement 上限或 checkpoint 的持久化要求。
+原定不打断长测，但实际发生主机重启，详见第 4 节。此后遵照用户新增的热负荷约束：
+短测前先确认长测已经暂停，计算任务串行运行，总用核不超过 128；不自动恢复长测。
 
 验证沿用用户确认的真实 runner CLI、ProductDriver、RestartReader/Writer 和公开数值入口。
 每个缺陷先做存在性核对，再以单次配置回归区分实际复现与静态风险。
@@ -168,3 +170,26 @@ EOS 组分在粗 dt 的最大相对库存缺口分别 1.14038e-6、9.01814e-7，
 具体测试矩阵、真实失败证据、最终密度与标量面通量的配套校正设计及开放验收
 见 [独立项目](2026-09-06-scalar-conservation-project.md)。该项仍未修复，不应因
 Re3900 当前没有输运标量便宣称整个程序已经严格守恒。
+
+## 6. 集成后的最后一轮验证
+
+在长测停止、没有其他 MPI 作业的条件下，聚焦 CTest 以 `-j1` 串行执行，
+13/13 PASS（50.65 s）。覆盖 runner 自检、2-rank 统计 epoch CLI、evidence workflow、
+1/2/4-rank ProductDriver 存储重启与压力—能量重试、4-rank restart I/O、
+PISO/SIMPLE 时间收敛及方法历史恢复。日志：
+`2026-09-06-key-followup-evidence/final-focused-regressions.log`。
+
+重试回归额外核对实际被拒绝的第一次 attempt 与随后接受的第二次 attempt：
+1/2/4 ranks 均保留 14/2 条 loop 明细，分别绑定原 dt/减半 dt 和拒绝/接受状态，
+`dropped_loops=0`。原有回退状态与直接小步推进的一致性检查继续通过。
+对应原始测试输出摘录见 `final-retry-observation.log`；没有为观测而改变重试策略。
+
+最终集成 runner 再对 Visit 开启时的 rank 0、rank 1 分别定点注入一次分配失败
+（2 ranks、`--only-index 2`），两项通过；各自包含无故障参考运行。
+见 `final-visit-rank-0.log`、`final-visit-rank-1.log`。这次定点复核不冒充重新完成
+前述 32/60 个点的全扫描，也不把关闭 Visit 的 checkpoint 测试计入该证据。
+
+独立标量实验的严格守恒失败不在 13 项绿色测试内，仍是明确未解决的验收项。
+本轮没有完成全库测试、发布验收或新旧 COAST 的独占长窗口性能对比；MG RHS 缓存
+只是下一项有测量依据的优化候选，尚未实施。最后确认原长测服务 inactive/not-found，
+没有运行中的 mpirun，冻结程序与第 1000 步 checkpoint 保持原位。

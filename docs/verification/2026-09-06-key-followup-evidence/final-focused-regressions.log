@@ -1,0 +1,35 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+      Start   3: v04_thin_domain_runner_self_test
+ 1/13 Test   #3: v04_thin_domain_runner_self_test ..........................   Passed    0.45 sec
+      Start  10: v04_runner_statistics_epoch_mpi_2
+ 2/13 Test  #10: v04_runner_statistics_epoch_mpi_2 .........................   Passed   14.36 sec
+      Start  12: v04_evidence_workflow
+ 3/13 Test  #12: v04_evidence_workflow .....................................   Passed    0.66 sec
+      Start  19: v04_product_restart_storage_mpi_1
+ 4/13 Test  #19: v04_product_restart_storage_mpi_1 .........................   Passed    0.91 sec
+      Start  20: v04_product_restart_storage_mpi_2
+ 5/13 Test  #20: v04_product_restart_storage_mpi_2 .........................   Passed    0.96 sec
+      Start  21: v04_product_restart_storage_mpi_4
+ 6/13 Test  #21: v04_product_restart_storage_mpi_4 .........................   Passed    1.15 sec
+      Start 163: v04_io_restart_mpi_4
+ 7/13 Test #163: v04_io_restart_mpi_4 ......................................   Passed   26.62 sec
+      Start 193: v04_product_pressure_energy_retry_mpi_1
+ 8/13 Test #193: v04_product_pressure_energy_retry_mpi_1 ...................   Passed    1.19 sec
+      Start 194: v04_product_pressure_energy_retry_mpi_2
+ 9/13 Test #194: v04_product_pressure_energy_retry_mpi_2 ...................   Passed    0.98 sec
+      Start 195: v04_product_pressure_energy_retry_mpi_4
+10/13 Test #195: v04_product_pressure_energy_retry_mpi_4 ...................   Passed    1.00 sec
+      Start 196: v04_product_pressure_energy_temporal_convergence
+11/13 Test #196: v04_product_pressure_energy_temporal_convergence ..........   Passed    0.64 sec
+      Start 197: v04_product_simple_pressure_energy_temporal_convergence
+12/13 Test #197: v04_product_simple_pressure_energy_temporal_convergence ...   Passed    0.71 sec
+      Start 198: v04_product_restart_method_history
+13/13 Test #198: v04_product_restart_method_history ........................   Passed    1.01 sec
+
+100% tests passed, 0 tests failed out of 13
+
+Label Time Summary:
+v04_focused    = 122.37 sec*proc (9 tests)
+
+Total Test time (real) =  50.65 sec

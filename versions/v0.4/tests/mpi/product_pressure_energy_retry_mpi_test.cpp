@@ -978,9 +978,27 @@ bool run_retry_certificate(int rank) {
       finite_positive_terminal_state(retry.driver, retry.model, retry_second) &&
       finite_positive_terminal_state(control.driver, control.model,
                                      control_second);
+  const auto& perf = retry_first.pressure_energy_performance;
+  std::array<unsigned, 2U> loops_by_attempt{};
+  bool observation_valid = perf.dropped_loops == 0U;
+  for (std::size_t n = 0U; n < perf.loop_count; ++n) {
+    const auto& loop = perf.loops[n];
+    observation_valid &= loop.attempt >= 1U && loop.attempt <= 2U;
+    if (loop.attempt < 1U || loop.attempt > 2U) continue;
+    ++loops_by_attempt[loop.attempt - 1U];
+    observation_valid &=
+        loop.dt == (loop.attempt == 1U ? kFullDt : kHalfDt) &&
+        static_cast<bool>(loop.attempt_status) == (loop.attempt == 2U);
+  }
+  observation_valid &= loops_by_attempt[0U] != 0U && loops_by_attempt[1U] != 0U;
+  if (rank == 0)
+    std::cout << "retry-observation loops=" << loops_by_attempt[0U] << ','
+              << loops_by_attempt[1U]
+              << " dt/outcome_bound=" << observation_valid << '\n';
   const bool local = probe.passed && first_retry_semantics &&
                      first_control_semantics && same_first && first_terminal &&
-                     second_semantics && same_second && terminal;
+                     second_semantics && same_second && terminal &&
+                     observation_valid;
   if (rank == 0)
     std::cout << std::setprecision(17) << "retry/control first status="
               << static_cast<unsigned>(retry.status.code) << '/'
