@@ -69,6 +69,11 @@ def main():
                                 stderr=subprocess.STDOUT, timeout=40, universal_newlines=True)
         (root / (name + ".log")).write_text(result.stdout)
         assert result.returncode == 0, result.stdout
+        run_meta = metadata(path / "RUN.meta")
+        assert run_meta["expected_ranks"] == str(args.ranks)
+        assert run_meta["requested_steps"] == str(steps)
+        assert run_meta["observation_schema"] == "3"
+        source_hash = hashlib.sha256((path / "RUN.meta").read_bytes()).hexdigest()
         with (path / "performance.csv").open() as stream:
             performance = list(csv.DictReader(stream))
         with (path / "conservation.csv").open() as stream:
@@ -77,6 +82,7 @@ def main():
             assert int(row["ibm_adjacent_cells"]) > 0 and int(row["interior_cells"]) > 0
             assert row["normalization_valid"] == "0", "zero-velocity normalization invented a reference"
         for row in performance:
+            assert row["source_meta_sha256"] == source_hash
             assert int(row["final_momentum_ns"]) > 0 and int(row["terminal_metrics_ns"]) > 0
             assert int(row["boundary_ledger_ns"]) > 0 and row["dropped_loops"] == "0"
             assert sum(int(row[k]) for k in ("final_momentum_ns", "terminal_metrics_ns", "boundary_ledger_ns")) <= int(row["advance_ns"])
@@ -84,6 +90,7 @@ def main():
             with (path / ("solver-rank-{}.csv".format(rank))).open() as stream:
                 loops = list(csv.DictReader(stream))
             for row in loops:
+                assert row["source_meta_sha256"] == source_hash
                 assert row["attempt"] == "1" and row["corrector"] in ("1", "2")
                 assert int(row["mg_copy_ns"]) <= int(row["mg_refill_ns"])
                 assert row["dropped_loops"] == "0"
@@ -92,6 +99,9 @@ def main():
             "--output", str(root / (name + "-solver-observation.json"))],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=20)
         assert observed.returncode == 0, observed.stdout
+        attribution = json.loads((root / (name + "-solver-observation.json")).read_text())
+        assert attribution["complete"] and attribution["validated_steps"] == steps
+        assert attribution["expected_ranks"] == list(range(args.ranks))
         validator = Path(__file__).resolve().parents[4] / "tools" / "v04_evidence_validate.py"
         check = [sys.executable, str(validator), "runtime", str(path / "evidence.jsonl")]
         if source:
@@ -112,25 +122,27 @@ def main():
     assert exact_meta["starting_sample_steps"] == "2"
     assert exact_stats["sample_steps"] == 4
     assert all(row["bdf_order"] == "2" for row in exact_health)
-    recovered, recovered_meta, recovered_health, recovered_stats = run("recovered", 2, source, True)
+    exact_before = inventory(exact)
+    recovered, recovered_meta, recovered_health, recovered_stats = run("recovered", 2, exact, True)
     print("epoch source_samples={} exact_samples={} method_start_samples={} method_end_samples={}".format(
         source_stats["sample_steps"], exact_stats["sample_steps"],
         recovered_meta["starting_sample_steps"], recovered_stats["sample_steps"]), flush=True)
     assert recovered_meta["starting_sample_steps"] == "0", "method recovery inherited old samples"
     assert recovered_stats["sample_steps"] == 0
     assert [row["bdf_order"] for row in recovered_health] == ["1", "2"]
-    assert recovered_meta["statistics_epoch_start_step"] == "5"
-    assert recovered_meta["statistics_sampling_start_step"] == "9"
+    assert recovered_meta["statistics_epoch_start_step"] == "7"
+    assert recovered_meta["statistics_sampling_start_step"] == "11"
     assert recovered_meta["statistics_reset_reason"] == "method_recovery"
-    assert recovered_meta["statistics_discarded_samples"] == "2"
+    assert recovered_meta["statistics_discarded_samples"] == "4"
     assert int(recovered_meta["statistics_source_manifest_sha256"], 16) != 0
     resumed, resumed_meta, resumed_health, resumed_stats = run("resumed", 3, recovered)
-    assert resumed_meta["statistics_epoch_start_step"] == "5"
-    assert resumed_meta["statistics_sampling_start_step"] == "9"
+    assert resumed_meta["statistics_epoch_start_step"] == "7"
+    assert resumed_meta["statistics_sampling_start_step"] == "11"
+    assert all(row["bdf_order"] == "2" for row in resumed_health)
     assert resumed_stats["sample_steps"] == 2, "exact segmentation lost the relative development window"
     validator = Path(__file__).resolve().parents[4] / "tools" / "v04_evidence_validate.py"
-    generation = (source / "Restart" / "current").read_text().strip()
-    manifest = source / "Restart" / generation / "manifest.bin"
+    generation = (exact / "Restart" / "current").read_text().strip()
+    manifest = exact / "Restart" / generation / "manifest.bin"
     for key, value in (("policy", "require_compatible"), ("source_signature", 42),
                        ("source_format_version", 2)):
         rows = [json.loads(line) for line in (recovered / "evidence.jsonl").read_text().splitlines()]
@@ -148,6 +160,7 @@ def main():
     assert override_stats["sample_steps"] == 2
     corrupt = root / "corrupt-source"
     shutil.copytree(str(source), str(corrupt))
+    generation = (source / "Restart" / "current").read_text().strip()
     block = next((corrupt / "Restart" / generation).glob("rank-*"))
     payload = bytearray(block.read_bytes())
     payload[-1] ^= 1
@@ -161,6 +174,7 @@ def main():
     assert rejected.returncode != 0 and "initialize_status=" in rejected.stdout, \
         "method policy bypassed source integrity"
     assert inventory(source) == before, "source checkpoint or attachments were modified"
+    assert inventory(exact) == exact_before, "exact-continuation source was modified by method recovery"
     print("PASS runner statistics epoch ranks={} source_readonly=true".format(args.ranks))
 
 
