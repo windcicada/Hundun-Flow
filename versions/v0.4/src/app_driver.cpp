@@ -46,6 +46,7 @@ namespace fs = std::filesystem;
 constexpr std::uint32_t kApplicationInput = 10501U;
 constexpr std::uint32_t kApplicationPath = 10502U;
 constexpr std::uint32_t kApplicationTemplate = 10503U;
+constexpr std::uint32_t kApplicationAmbiguousInitialState = 10505U;
 
 void local_allocation_checkpoint(ApplicationFailurePhase phase, int rank) {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -432,10 +433,15 @@ static Status run_application(MPI_Comm communicator,
       communicator,
       options.case_root.empty() || options.run_directory.empty() ||
               options.source_root.empty() || options.steps == 0U ||
+              (options.initial_state.has_value() &&
+               (!options.restart_directory.empty() || options.initial_state->start_time != 0.0)) ||
               (options.restart_storage_compatibility !=
                    RestartStorageCompatibility::strict &&
                (options.restart_storage_compatibility !=
                     RestartStorageCompatibility::mg_bundle_ghost_v1 ||
+                options.restart_directory.empty())) ||
+              (options.restart_history_policy != RestartHistoryPolicy::require_compatible &&
+               (options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history ||
                 options.restart_directory.empty()))
           ? Status{StatusCode::invalid_case, kApplicationInput}
           : Status{});
@@ -482,7 +488,8 @@ static Status run_application(MPI_Comm communicator,
     RestartExpected expected;
     status = detail::output_collective_status(
         communicator, driver.restart_expected(
-                          expected, options.restart_storage_compatibility));
+                          expected, options.restart_storage_compatibility,
+                          options.restart_history_policy));
     RestartImage image;
     if (status)
       status = RestartReader::load(communicator, options.restart_directory,
@@ -496,10 +503,13 @@ static Status run_application(MPI_Comm communicator,
       run_start.source_format_version = image.source_format_version;
       run_start.source_history_signature = image.method_history_signature;
       run_start.target_history_signature = expected.method_history_signature;
-      restart_backward_euler_recovery = image.backward_euler_recovery;
+      run_start.history_policy = options.restart_history_policy;
+      restart_backward_euler_recovery = image.backward_euler_recovery ||
+          options.restart_history_policy == RestartHistoryPolicy::rebuild_method_history;
       report.failure_phase = ApplicationFailurePhase::initialize;
       status = driver.initialize_restart(image,
-                                         options.restart_storage_compatibility);
+                                         options.restart_storage_compatibility,
+                                         options.restart_history_policy);
       report.restart_storage_migrated = status && image.storage_layout_migrated;
       report.restart_source_plan = image.plan;
       report.restart_source_schema = image.schema;
@@ -509,27 +519,43 @@ static Status run_application(MPI_Comm communicator,
     std::vector<double> initial_scalars;
     status = detail::output_collective_stage(communicator, [&] {
       local_allocation_checkpoint(report.failure_phase, rank);
-      initial_scalars.assign(model.transported_scalars.size(), 0.0);
+      if (!options.initial_state.has_value())
+        initial_scalars.assign(model.transported_scalars.size(), 0.0);
       return Status{};
     });
     if (!status) return status;
     DriverInitialState initial;
     initial.transported_scalars =
         {initial_scalars.data(), initial_scalars.size()};
-    for (const BoundaryFaceSpec& boundary : model.boundaries) {
-      if (std::isfinite(boundary.temperature) && boundary.temperature > 0.0)
-        initial.temperature = boundary.temperature;
-      if (model.pressure_reference ==
-              PressureReferenceKind::boundary_absolute &&
-          boundary.flow_kind == BoundaryKind::pressure_outlet &&
-          std::isfinite(boundary.pressure) && boundary.pressure > 0.0)
-        initial.pressure_reference = boundary.pressure;
-      if (boundary.flow_kind == BoundaryKind::velocity_inlet ||
-          boundary.flow_kind == BoundaryKind::static_state_inlet ||
-          boundary.flow_kind == BoundaryKind::total_state_inlet)
-        initial.velocity = boundary.velocity;
+    if (options.initial_state.has_value()) initial = *options.initial_state;
+    else {
+      bool have_temperature = false, have_pressure = false, have_velocity = false;
+      const auto hint = [&](double value, double& selected, bool& have) {
+        if (have && value != selected)
+          status = {StatusCode::invalid_case, kApplicationAmbiguousInitialState};
+        selected = value;
+        have = true;
+      };
+      for (const BoundaryFaceSpec& boundary : model.boundaries) {
+        if (std::isfinite(boundary.temperature) && boundary.temperature > 0.0)
+          hint(boundary.temperature, initial.temperature, have_temperature);
+        if (model.pressure_reference == PressureReferenceKind::boundary_absolute &&
+            boundary.flow_kind == BoundaryKind::pressure_outlet &&
+            std::isfinite(boundary.pressure) && boundary.pressure > 0.0)
+          hint(boundary.pressure, initial.pressure_reference, have_pressure);
+        if (boundary.flow_kind == BoundaryKind::velocity_inlet ||
+            boundary.flow_kind == BoundaryKind::static_state_inlet ||
+            boundary.flow_kind == BoundaryKind::total_state_inlet) {
+          if (have_velocity && (initial.velocity.x != boundary.velocity.x ||
+              initial.velocity.y != boundary.velocity.y || initial.velocity.z != boundary.velocity.z))
+            status = {StatusCode::invalid_case, kApplicationAmbiguousInitialState};
+          initial.velocity = boundary.velocity;
+          have_velocity = true;
+        }
+      }
     }
-    status = driver.initialize(initial);
+    status = detail::output_collective_status(communicator, status);
+    if (status) status = driver.initialize(initial);
   }
   if (!status) return status;
   report.accepted_steps = starting_step;

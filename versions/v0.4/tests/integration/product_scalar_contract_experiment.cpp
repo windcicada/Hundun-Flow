@@ -32,6 +32,7 @@ bool variable_thermo = false;
 bool immersed = false;
 bool restart_probe = false;
 bool capacity_probe = false;
+bool capacity_ranges_probe = false;
 int rank = 0;
 bool all_pass(bool local) {
   int value=local ? 1 : 0, result=0;
@@ -453,17 +454,20 @@ std::vector<double> snapshot_payload(const RestartSnapshot& snapshot, bool nondi
 
 bool capacity_contract() {
   bool passed = true;
-  for (unsigned passives : {4U, 5U, 12U})
+  for (unsigned passives : {4U, 5U, 12U, 60U, 61U})
     for (bool mixed : {false, true})
+      for (auto coupling : {CouplingKind::piso, CouplingKind::simple})
       for (auto algorithm : {LinearAlgorithm::fgmres, LinearAlgorithm::bicgstab}) {
+        if (mixed && passives == 61U) continue; // 64-field I/O directory: U/pi/h + 61 scalars.
         auto m = model(mixed, 1e-6);
+        m.solver.coupling = coupling;
         m.time.control = TimeControlKind::adaptive_flow;
         m.transported_scalars.clear();
         std::vector<double> values;
         for (unsigned i = 0U; i < passives; ++i) {
           m.transported_scalars.push_back({"tracer_" + std::to_string(i),
               TransportedScalarRole::passive_scalar, 1.0, 1.0});
-          values.push_back(0.05 + 0.02 * i);
+          values.push_back(i == 0U ? -0.2 : i == 1U ? 1.2 : 0.05 + 0.005 * i);
           if (mixed && i == 1U) {
             m.transported_scalars.push_back({"A", TransportedScalarRole::species, 1.0, 1.0});
             values.push_back(0.2);
@@ -514,7 +518,126 @@ bool capacity_contract() {
         passed &= all_pass(okay);
         if (rank == 0) std::cout << "SCALAR_CAPACITY passives=" << passives
             << " mixed=" << mixed << " algorithm=" << unsigned(algorithm)
+            << " coupling=" << unsigned(coupling)
             << " constants_and_proposal_rollback=" << okay << '\n';
+      }
+  return passed;
+}
+
+bool capacity_ranges_contract() {
+  bool passed = true;
+  for (unsigned passives : {4U, 5U, 12U})
+    for (unsigned ordering : {0U, 1U, 2U})
+      for (auto coupling : {CouplingKind::piso, CouplingKind::simple})
+      for (auto algorithm : {LinearAlgorithm::fgmres, LinearAlgorithm::bicgstab}) {
+        auto m = model(true, coarse_dt);
+        m.solver.coupling = coupling;
+        m.transported_scalars.clear();
+        const unsigned species_slot = ordering == 0U ? 0U : ordering == 1U ? passives : 2U;
+        for (unsigned i = 0; i <= passives; ++i)
+          m.transported_scalars.push_back(i == species_slot
+              ? TransportedScalarSpec{"A", TransportedScalarRole::species, 1.0, 1.0}
+              : TransportedScalarSpec{"tracer_" + std::to_string(i), TransportedScalarRole::passive_scalar, 1.0, 1.0});
+        m.solver.pressure.algorithm = algorithm;
+        m.solver.pressure.krylov_restart = algorithm == LinearAlgorithm::fgmres ? 2U : 0U;
+        m.solver.pressure.mg_correction_scaling = algorithm == LinearAlgorithm::fgmres
+            ? MgCorrectionScaling::residual_minimizing : MgCorrectionScaling::unit_linear;
+        const auto create = [&](bool fail, ProductDriver& driver) {
+          auto definition = m;
+          if (fail) definition.solver.pressure.maximum_iterations = 1U;
+          CompiledCasePlan plan;
+          auto s = ProductCompiler::compile(MPI_COMM_WORLD, definition, {}, plan);
+          if (s) s = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+          RestartExpected expected;
+          if (s) s = driver.restart_expected(expected);
+          if (!s) return s;
+          auto seed = image(expected, true, false, coarse_dt);
+          unsigned scalar = 0U;
+          for (auto& f : seed.fields) {
+            if (f.role != RestartFieldRole::transported_scalar &&
+                f.role != RestartFieldRole::independent_species) continue;
+            std::size_t offset = 0U;
+            for (int z=0;z<seed.patch.cells.z;++z) for (int y=0;y<seed.patch.cells.y;++y)
+              for (int x=0;x<seed.patch.cells.x;++x,++offset) {
+                const auto q = initial(x + seed.patch.begin.x, true, false).q;
+                f.values[offset] = scalar == species_slot ? q : (scalar == 0U ? 0.4 :
+                    0.1 + 0.01 * scalar + (0.4 + 0.02 * scalar) * q);
+              }
+            ++scalar;
+          }
+          return driver.initialize_restart(seed);
+        };
+        ProductDriver driver;
+        auto status = create(false, driver);
+        if (!all_pass(static_cast<bool>(status))) return false;
+        std::vector<long double> original(passives + 1U);
+        std::vector<double> minima(passives + 1U, 1.0), maxima(passives + 1U, -1.0);
+        const auto measure = [&](bool first) {
+          RestartSnapshot snapshot;
+          auto s = driver.committed_restart_snapshot(snapshot);
+          if (!all_pass(static_cast<bool>(s))) return false;
+          ConstFieldView p{}, h{};
+          std::vector<ConstFieldView> scalars;
+          for (std::size_t index=0;index<snapshot.fields.size;++index) {
+            const auto& f = snapshot.fields.data[index];
+            if (f.role == RestartFieldRole::pressure_perturbation) p = f.values;
+            if (f.role == RestartFieldRole::enthalpy) h = f.values;
+            if (f.role == RestartFieldRole::transported_scalar || f.role == RestartFieldRole::independent_species)
+              scalars.push_back(f.values);
+          }
+          if (!all_pass(p.base && h.base && scalars.size() == original.size())) return false;
+          std::vector<long double> inventory(original.size());
+          std::vector<double> limits(2U * original.size(), -std::numeric_limits<double>::max());
+          bool okay = true;
+          for (int z=0;z<snapshot.patch.cells.z;++z) for (int y=0;y<snapshot.patch.cells.y;++y)
+            for (int x=0;x<snapshot.patch.cells.x;++x) {
+              const Int3 c{x,y,z};
+              const double ya = scalars[species_slot].unchecked(c,0U);
+              const double gas = ya*r_a + (1.0-ya)*r_b;
+              const double cp = ya*3.5*r_a + (1.0-ya)*4.1*r_b;
+              const double rho = (snapshot.pressure_reference+p.unchecked(c,0U))*cp/(gas*h.unchecked(c,0U));
+              const double volume = width(0,x+snapshot.patch.begin.x)*width(1,y+snapshot.patch.begin.y)*width(2,z+snapshot.patch.begin.z);
+              okay &= std::isfinite(rho) && rho > 0.0;
+              for (std::size_t i=0;i<scalars.size();++i) {
+                const double q = scalars[i].unchecked(c,0U);
+                okay &= std::isfinite(q);
+                inventory[i] += static_cast<long double>(rho)*volume*q;
+                limits[2U*i] = std::max(limits[2U*i], -q);
+                limits[2U*i+1U] = std::max(limits[2U*i+1U], q);
+              }
+            }
+          MPI_Allreduce(MPI_IN_PLACE, inventory.data(), inventory.size(), MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+          MPI_Allreduce(MPI_IN_PLACE, limits.data(), limits.size(), MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+          for (std::size_t i=0;i<inventory.size();++i) {
+            if (first) { original[i]=inventory[i]; minima[i]=-limits[2U*i]; maxima[i]=limits[2U*i+1U]; }
+            else okay &= std::abs(inventory[i]-original[i]) < 1e-12L*std::abs(original[i]) &&
+                -limits[2U*i] >= minima[i]-1e-12 && limits[2U*i+1U] <= maxima[i]+1e-12;
+          }
+          return all_pass(okay);
+        };
+        bool okay = measure(true);
+        DriverStepReport report;
+        for (unsigned step=0;step<2U && okay;++step) {
+          status = driver.advance({1,1,1,1,1},report);
+          okay = all_pass(status && report.accepted) && measure(false);
+        }
+        ProductDriver failing;
+        status = create(true, failing);
+        RestartSnapshot snapshot;
+        if (status) status = failing.committed_restart_snapshot(snapshot);
+        if (!all_pass(static_cast<bool>(status))) return false;
+        const auto before = snapshot_payload(snapshot);
+        const auto old_step = snapshot.step;
+        const auto failure = failing.advance({1,1,1,1,1},report);
+        status = failing.committed_restart_snapshot(snapshot);
+        okay &= !failure && report.attempts>0U && !report.accepted && status &&
+            snapshot.step == old_step && snapshot_payload(snapshot) == before;
+        passed &= all_pass(okay);
+        if (rank == 0) std::cout << "SCALAR_CAPACITY_RANGES passives=" << passives
+            << " ordering=" << ordering << " algorithm=" << unsigned(algorithm)
+            << " coupling=" << unsigned(coupling)
+            << " inventory_bounds_and_numerical_rollback=" << okay
+            << " failure=" << unsigned(failure.code) << '/' << failure.detail << '\n';
       }
   return passed;
 }
@@ -647,12 +770,13 @@ int main(int argc,char** argv) {
     else if (std::strcmp(argv[i],"--ibm")==0) { immersed=true; cells={16,16,16}; }
     else if (std::strcmp(argv[i],"--restart")==0) restart_probe=true;
     else if (std::strcmp(argv[i],"--capacity")==0) capacity_probe=true;
+    else if (std::strcmp(argv[i],"--capacity-ranges")==0) capacity_ranges_probe=true;
     else { MPI_Finalize(); return 2; }
   }
   bool passed=true;
   if(immersed && (open_probe || stretched || restart_probe)) { MPI_Finalize(); return 2; }
-  if(capacity_probe) {
-    passed = capacity_contract();
+  if(capacity_probe || capacity_ranges_probe) {
+    passed = capacity_ranges_probe ? capacity_ranges_contract() : capacity_contract();
     MPI_Finalize();
     return passed ? 0 : 1;
   }

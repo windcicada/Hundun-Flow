@@ -60,6 +60,7 @@ execute_process(
   COMMAND "${PRODUCT}" run "${PROBE_ROOT}/case"
           --output "${PROBE_ROOT}/run"
           --steps 1 --output-interval 0 --restart-interval 0
+          --initial-state 101325,400,0.1,0,0
   RESULT_VARIABLE run_status
   OUTPUT_VARIABLE run_output
   ERROR_VARIABLE run_error)

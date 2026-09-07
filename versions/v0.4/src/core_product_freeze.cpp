@@ -5837,7 +5837,9 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
   for (std::size_t index = 0U;
        index < product.fields.scalars.size() && status; ++index) {
     const double value = initial.transported_scalars.data[index];
-    if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+    if (!std::isfinite(value) ||
+        (product.fields.scalar_roles[index] == TransportedScalarRole::species &&
+         (value < 0.0 || value > 1.0)))
       status = {StatusCode::numerical_failure, kProductInput};
     if (status && product.fields.scalar_roles[index] ==
                       TransportedScalarRole::species)

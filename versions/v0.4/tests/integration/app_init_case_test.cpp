@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -172,6 +173,91 @@ bool run() {
               text.find("\"face_flux_revision\":0") == std::string::npos &&
               text.find("\"final_flux_revision\":0") == std::string::npos;
   }
+  // The ordinary application must distinguish an exact continuation from an
+  // explicitly requested method recovery, even for an intact current image.
+  ApplicationRunOptions recovery_options = resumed_options;
+  recovery_options.run_directory = root / "run-method-recovery";
+  recovery_options.restart_directory = resumed_options.run_directory / "Restart";
+  recovery_options.restart_history_policy = RestartHistoryPolicy::rebuild_method_history;
+  ApplicationRunReport recovery_report;
+  const auto recovery_status = ApplicationService::run(
+      MPI_COMM_SELF, recovery_options, recovery_report);
+  std::ifstream recovery_evidence(recovery_options.run_directory / "evidence.jsonl");
+  std::string recovery_first, recovery_second;
+  std::getline(recovery_evidence, recovery_first);
+  std::getline(recovery_evidence, recovery_second);
+  const bool recovery_ok = recovery_status && recovery_report.accepted_steps == 6U &&
+      recovery_first.find("\"bdf_order\":1") != std::string::npos &&
+      recovery_first.find("\"restart_recovery\":true") != std::string::npos &&
+      recovery_first.find("\"policy\":\"rebuild_method_history\"") != std::string::npos &&
+      recovery_second.find("\"bdf_order\":2") != std::string::npos &&
+      recovery_second.find("\"restart_recovery\":false") != std::string::npos;
+  if (!recovery_ok) std::cerr << "FAIL: ApplicationService explicit method recovery must use BE then BDF2 and record its policy\n";
+  passed &= recovery_ok;
+  ApplicationRunOptions invalid_recovery = recovery_options;
+  invalid_recovery.restart_directory.clear();
+  invalid_recovery.run_directory = root / "recovery-without-source";
+  ApplicationRunReport invalid_recovery_report;
+  passed &= ApplicationService::run(MPI_COMM_SELF, invalid_recovery, invalid_recovery_report).code == StatusCode::invalid_case &&
+      !fs::exists(invalid_recovery.run_directory);
+
+  ApplicationRunOptions explicit_options = run_options;
+  explicit_options.run_directory = root / "run-explicit-initial";
+  explicit_options.steps = 1U;
+  explicit_options.output_interval = 0U;
+  explicit_options.initial_state = DriverInitialState{};
+  explicit_options.initial_state->temperature = 350.0;
+  ApplicationRunReport explicit_report;
+  auto explicit_status = ApplicationService::run(MPI_COMM_SELF, explicit_options, explicit_report);
+  ValidatedModel explicit_model;
+  CompiledCasePlan explicit_plan;
+  ProductDriver explicit_reader;
+  RestartExpected explicit_expected;
+  RestartImage explicit_image;
+  if (explicit_status) explicit_status = CaseCompiler::load_and_compile(MPI_COMM_SELF, case_root, explicit_model);
+  if (explicit_status) explicit_status = ProductCompiler::compile(MPI_COMM_SELF, explicit_model, case_root, explicit_plan);
+  if (explicit_status) explicit_status = ProductDriver::create(MPI_COMM_SELF, std::move(explicit_plan), explicit_reader);
+  if (explicit_status) explicit_status = explicit_reader.restart_expected(explicit_expected);
+  if (explicit_status) explicit_status = RestartReader::load(MPI_COMM_SELF, explicit_options.run_directory / "Restart", explicit_expected, explicit_image);
+  bool initial_ok = explicit_status && explicit_report.accepted_steps == 1U;
+  bool have_enthalpy = false;
+  for (const auto& f : explicit_image.fields) if (f.role == RestartFieldRole::enthalpy) {
+    have_enthalpy = true;
+    for (double h : f.values) initial_ok &= std::abs(h - 3.5*kUniversalGasConstant/28.96546*350.0) < 1e-6;
+  }
+  initial_ok &= have_enthalpy;
+  if (!initial_ok) std::cerr << "FAIL: explicit application initial temperature must set the EOS-consistent initial enthalpy\n";
+  passed &= initial_ok;
+  explicit_options.restart_directory = run_options.run_directory / "Restart";
+  explicit_options.run_directory = root / "ambiguous-initial-and-restart";
+  passed &= ApplicationService::run(MPI_COMM_SELF, explicit_options, explicit_report).code == StatusCode::invalid_case &&
+      !fs::exists(explicit_options.run_directory);
+
+  const auto conflicting_case = root / "conflicting-initial-hints";
+  passed &= static_cast<bool>(ApplicationService::initialize_case_directory(conflicting_case));
+  {
+    std::ifstream input(conflicting_case / "case.json");
+    std::string definition{std::istreambuf_iterator<char>(input), {}};
+    const auto temperature = definition.find("\"temperature\":300");
+    passed &= temperature != std::string::npos;
+    if (temperature != std::string::npos) definition.replace(temperature, 17U, "\"temperature\":350");
+    std::ofstream output(conflicting_case / "case.json");
+    output << definition;
+  }
+  ApplicationRunOptions conflicting_options = run_options;
+  conflicting_options.case_root = conflicting_case;
+  conflicting_options.run_directory = root / "run-conflicting-hints";
+  ApplicationRunReport conflicting_report;
+  const auto conflicting_status = ApplicationService::run(MPI_COMM_SELF, conflicting_options, conflicting_report);
+  const bool conflict_rejected = conflicting_status.code == StatusCode::invalid_case &&
+      conflicting_report.failure_phase == ApplicationFailurePhase::initialize &&
+      conflicting_report.accepted_steps == 0U && !fs::exists(conflicting_options.run_directory);
+  if (!conflict_rejected) std::cerr << "FAIL: conflicting boundary hints must not silently select the last temperature\n";
+  passed &= conflict_rejected;
+  conflicting_options.initial_state = DriverInitialState{};
+  conflicting_options.run_directory = root / "run-explicit-over-hints";
+  passed &= static_cast<bool>(ApplicationService::run(MPI_COMM_SELF, conflicting_options, conflicting_report));
+
   ApplicationRunOptions benchmark_options = run_options;
   benchmark_options.run_directory = root / "run-no-serialized-output";
   benchmark_options.steps = 2U;

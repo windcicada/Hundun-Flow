@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <cstdint>
+#include <optional>
 
 namespace hundun::v04 {
 
@@ -18,6 +19,16 @@ struct CaseValidationReport {
   PlanFingerprint case_model{};
   PlanFingerprint product{};
   PlanSummary summary{};
+};
+
+struct DriverInitialState {
+  double pressure_reference{101325.0};
+  double temperature{300.0};
+  Real3 velocity{};
+  // Species are mass fractions in [0,1] (including an admissible balance
+  // species); passive scalars are finite signed quantities, not fractions.
+  Span<const double> transported_scalars{};
+  double start_time{};
 };
 
 struct ApplicationRunOptions {
@@ -34,6 +45,14 @@ struct ApplicationRunOptions {
   LocalTimeLimits time_limits{1.0, 1.0, 1.0, 1.0, 1.0};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
+  // Explicit consumer policy. Unknown history remains rejected by default;
+  // rebuilding never relaxes source integrity or physical compatibility.
+  RestartHistoryPolicy restart_history_policy{
+      RestartHistoryPolicy::require_compatible};
+  // Synchronous borrowed scalar values, in the frozen catalog order. Fresh
+  // application evidence starts at t=0. Mutually exclusive with a restart.
+  // If absent, consistent boundary hints/defaults are used, never last-wins.
+  std::optional<DriverInitialState> initial_state{};
   // Compile-generated identity of the final CLI target. Empty means the
   // library core manifest for callers embedding ApplicationService.
   std::string_view target_build_manifest{};
@@ -335,14 +354,6 @@ class ApplicationService {
   static Status run(MPI_Comm communicator,
                     const ApplicationRunOptions& options,
                     ApplicationRunReport& report) noexcept;
-};
-
-struct DriverInitialState {
-  double pressure_reference{101325.0};
-  double temperature{300.0};
-  Real3 velocity{};
-  Span<const double> transported_scalars{};
-  double start_time{};
 };
 
 struct DriverResourceReport {

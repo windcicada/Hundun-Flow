@@ -1615,7 +1615,16 @@ bool test_method_recovery_mass_target() {
             << " attempts=" << exact_step.attempts << " proposal_bdf=" << unsigned(exact_step.proposal.bdf.order)
             << " fallback=" << exact_step.temporal_method_fallback << '\n';
 
-  auto different = signed_image;
+  RestartSnapshot continued;
+  if (status) status = exact.committed_restart_snapshot(continued);
+  const auto continued_root = directory / "same-method-continued";
+  if (status) status = RestartWriter::write(MPI_COMM_SELF, continued_root, continued);
+  RestartImage continued_image;
+  if (status) status = RestartReader::load(MPI_COMM_SELF, continued_root, expected, continued_image);
+  passed &= expect(status && continued_image.closed_mass_target == saved.closed_mass_target,
+      "exact continuation preserves the independent target before method recovery");
+  if (!status) return false;
+  auto different = continued_image;
   different.method_history_signature ^= 1U;
   for (auto& field : different.accepted_rate_fields)
     for (auto& value : field.values) value += 1e6;
@@ -1630,7 +1639,7 @@ bool test_method_recovery_mass_target() {
   if (local) local = rebuilt.initialize_restart(different, RestartStorageCompatibility::strict,
       RestartHistoryPolicy::rebuild_method_history);
   if (local) local = create(pristine);
-  if (local) local = pristine.initialize_restart(signed_image, RestartStorageCompatibility::strict,
+  if (local) local = pristine.initialize_restart(continued_image, RestartStorageCompatibility::strict,
       RestartHistoryPolicy::rebuild_method_history);
   const auto capture_rates = [](ProductDriver& driver, std::vector<double>& values) {
     RestartSnapshot snapshot;
@@ -1654,6 +1663,24 @@ bool test_method_recovery_mass_target() {
   passed &= expect(local && first_recovery.effective_bdf.order == 1U &&
       second_recovery.effective_bdf.order == 2U && rebuilt.closed_mass_target() == saved.closed_mass_target,
       "method recovery inserts one BE step then BDF2 without redefining physical mass");
+  RestartSnapshot new_method;
+  if (local) local = rebuilt.committed_restart_snapshot(new_method);
+  const auto new_method_root = directory / "rebuilt-method";
+  if (local) local = RestartWriter::write(MPI_COMM_SELF, new_method_root, new_method);
+  RestartImage new_method_image;
+  if (local) local = RestartReader::load(MPI_COMM_SELF, new_method_root, expected, new_method_image);
+  ProductDriver exact_after_recovery;
+  if (local) local = create(exact_after_recovery);
+  if (local) local = exact_after_recovery.initialize_restart(new_method_image);
+  std::vector<double> published_new_rates, exact_new_rates;
+  passed &= expect(local && capture_rates(rebuilt, published_new_rates) &&
+      capture_rates(exact_after_recovery, exact_new_rates) && published_new_rates == exact_new_rates,
+      "exact restart after method recovery inherits the rebuilt method's rates");
+  DriverStepReport exact_again;
+  if (local) local = exact_after_recovery.advance(limits, exact_again);
+  passed &= expect(local && exact_again.accepted && exact_again.effective_bdf.order == 2U &&
+      exact_after_recovery.closed_mass_target() == saved.closed_mass_target,
+      "complete chain ends with exact BDF2 and the original physical mass target");
   std::cerr << "method_history unsigned_rejected=" << rejected_unknown
             << " signed_exact_bdf=" << unsigned(exact_step.effective_bdf.order)
             << " method_recovery_bdf=" << unsigned(first_recovery.effective_bdf.order)

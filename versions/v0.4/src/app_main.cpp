@@ -7,7 +7,11 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <array>
+#include <cerrno>
 #include <charconv>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -67,6 +71,9 @@ int finish(Status status, int rank) {
   if (!status && rank == 0) {
     std::cerr << hundun::v04::status_message(status)
               << " detail=" << status.detail << '\n';
+    if (status.detail == 10505U)
+      std::cerr << "conflicting boundary-derived initial state: supply "
+                   "--initial-state p,T,Ux,Uy,Uz[,q...] explicitly\n";
   }
   return status ? 0 : 1;
 }
@@ -90,9 +97,13 @@ void usage(int rank) {
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
                  " [--restart-interval <N>]"
+                 " [--initial-state p,T,Ux,Uy,Uz[,q...]]"
+                 " [--restart-method-recovery]"
                  " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
               << "    interval 0 disables Visit/screen/monitor or Restart;"
                  " evidence remains enabled outside the timed step\n"
+              << "    initial-state is a uniform fresh state (Pa, K, m/s);"
+                 " q values follow the scalar catalog; incompatible with restart\n"
               << "  hundun init-case --output <case-dir>\n";
   }
 }
@@ -250,6 +261,32 @@ bool nonnegative_integer(std::string_view text, std::uint64_t& out) noexcept {
   return true;
 }
 
+// The frozen I/O catalog admits at most 64 fields, including the primary
+// fields. This fixed local buffer also accommodates every legal scalar list;
+// ProductDriver remains authoritative for its exact count and species checks.
+bool initial_state(const char* text, std::array<double, 69U>& values,
+                   hundun::v04::DriverInitialState& out) noexcept {
+  std::size_t count = 0U;
+  const char* cursor = text;
+  for (;;) {
+    if (*cursor == '\0' || count == values.size()) return false;
+    char* end = nullptr;
+    errno = 0;
+    const double value = std::strtod(cursor, &end);
+    if (end == cursor || errno == ERANGE || !std::isfinite(value)) return false;
+    values[count++] = value;
+    if (*end == '\0') break;
+    if (*end != ',') return false;
+    cursor = end + 1;
+  }
+  if (count < 5U || values[0U] <= 0.0 || values[1U] <= 0.0) return false;
+  out.pressure_reference = values[0U];
+  out.temperature = values[1U];
+  out.velocity = {values[2U], values[3U], values[4U]};
+  out.transported_scalars = {values.data() + 5U, count - 5U};
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -314,13 +351,21 @@ int main(int argc, char* argv[]) {
     bool parsed = true;
     bool saw_output = false;
     bool saw_steps = false;
-    for (int index = 3; index < argc && parsed; index += 2) {
-      if (index + 1 >= argc) {
+    std::array<double, 69U> initial_values{};
+    for (int index = 3; index < argc && parsed;) {
+      const std::string_view flag{argv[index++]};
+      if (flag == "--restart-method-recovery") {
+        parsed = options.restart_history_policy ==
+                 hundun::v04::RestartHistoryPolicy::require_compatible;
+        options.restart_history_policy =
+            hundun::v04::RestartHistoryPolicy::rebuild_method_history;
+        continue;
+      }
+      if (index >= argc) {
         parsed = false;
         break;
       }
-      const std::string_view flag{argv[index]};
-      const std::string_view value{argv[index + 1]};
+      const std::string_view value{argv[index++]};
       if (flag == "--output" && !saw_output) {
         options.run_directory = std::string{value};
         saw_output = true;
@@ -334,6 +379,10 @@ int main(int argc, char* argv[]) {
       } else if (flag == "--restart" &&
                  options.restart_directory.empty()) {
         options.restart_directory = std::string{value};
+      } else if (flag == "--initial-state" && !options.initial_state.has_value()) {
+        hundun::v04::DriverInitialState initial;
+        parsed = initial_state(argv[index - 1], initial_values, initial);
+        if (parsed) options.initial_state = initial;
       } else if (flag == "--restart-storage-compatibility" &&
                  options.restart_storage_compatibility ==
                      RestartStorageCompatibility::strict &&
@@ -345,8 +394,9 @@ int main(int argc, char* argv[]) {
       }
     }
     if (!parsed || !saw_output || !saw_steps ||
-        (options.restart_storage_compatibility !=
-             RestartStorageCompatibility::strict &&
+        (options.initial_state.has_value() && !options.restart_directory.empty()) ||
+        ((options.restart_storage_compatibility != RestartStorageCompatibility::strict ||
+          options.restart_history_policy != hundun::v04::RestartHistoryPolicy::require_compatible) &&
          options.restart_directory.empty())) {
       usage(rank);
       result = 2;
