@@ -1904,6 +1904,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   }
   if (!consensus_u64(communicator, accumulator.sample_steps)) return 5;
 
+  RuntimeSha256Digest observation_source{};
   if (!create_run_root(communicator, rank, options.run_root)) {
     if (rank == 0) std::cerr << "run_root_not_exclusive\n";
     return 6;
@@ -1931,6 +1932,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << (detail::valid_runtime_sha256(accumulator.epoch.source_manifest)
                     ? accumulator.epoch.source_manifest.data() : "none") << '\n'
              << "requested_steps " << options.steps << '\n'
+             << "expected_ranks " << ranks << '\n'
+             << "observation_schema 3\n"
+             << "observation_start_ns "
+             << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count() << '\n'
+             << "observation_launcher_pid " << ::getpid() << '\n'
              << "visit_interval " << options.visit_interval << '\n'
              << "observe_performance " << options.observe_performance << '\n'
              << "restarted " << (restarted ? 1 : 0) << '\n'
@@ -1973,9 +1980,20 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << '\n'
              << "statistics_eligible 0\n"
              << "end\n";
-    return write_exclusive(options.run_root / "RUN.meta", metadata.str());
+    const std::string encoded = metadata.str();
+    if (options.observe_performance && !detail::runtime_sha256_bytes(
+          {reinterpret_cast<const std::uint8_t*>(encoded.data()), encoded.size()},
+          observation_source)) return false;
+    return write_exclusive(options.run_root / "RUN.meta", encoded);
   });
   if (!okay) return 6;
+
+  // The full immutable run metadata binds source identity, rank count and
+  // requested range. Allocate/encode on rank 0 in the local stage above;
+  // communicate only after every rank has agreed that stage succeeded.
+  if (options.observe_performance &&
+      MPI_Bcast(observation_source.data(), static_cast<int>(observation_source.size()),
+                MPI_CHAR, 0, communicator) != MPI_SUCCESS) return 6;
 
   std::ofstream force;
   std::ofstream health;
@@ -1990,7 +2008,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
             "A_ns,M_ns,dot_ns,reduce_ns,update_ns,mg_refill_ns,mg_copy_ns,structured_wait_ns,"
             "structured_control_ns,globalization_valid,baseline_candidates,extrapolated_candidates,"
             "ladder_candidates,incomplete_candidates,candidate_ns,baseline_continuity,baseline_energy,"
-            "selected_continuity,selected_energy,selected_alpha,dropped_loops\n";
+            "selected_continuity,selected_energy,selected_alpha,dropped_loops,source_meta_sha256\n";
         return static_cast<bool>(loop_performance);
       })) return 6;
   okay = local_stage(communicator, [&] {
@@ -2031,7 +2049,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              "spatial_calls,spatial_prepare_ns,spatial_solve_ns,spatial_close_ns,"
              "A_apply_ns,M_apply_ns,arnoldi_dot_ns,arnoldi_reduce_ns,arnoldi_update_ns,"
              "final_momentum_ns,terminal_metrics_ns,boundary_ledger_ns,structured_wait_ns,"
-             "structured_control_ns,dropped_loops,scalar_remap_ns,scalar_coupling_sweeps,scalar_remap_iterations\n";
+             "structured_control_ns,dropped_loops,scalar_remap_ns,scalar_coupling_sweeps,scalar_remap_iterations,source_meta_sha256\n";
     }
     if (force)
       force << "step,time,requested_bdf_order,bdf_order,attempts,"
@@ -2138,7 +2156,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 << ',' << work.local_evaluation_nanoseconds << ',' << g.baseline.global_normalized_continuity
                 << ',' << g.baseline.global_normalized_energy << ',' << g.selected.global_normalized_continuity
                 << ',' << g.selected.global_normalized_energy << ',' << g.selected.alpha
-                << ',' << perf.dropped_loops << '\n';
+                << ',' << perf.dropped_loops << ',' << observation_source.data() << '\n';
           }
           loop_performance.flush();
           return static_cast<bool>(loop_performance);
@@ -2555,7 +2573,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
           for (std::size_t column = 0U; column < width; ++column)
             performance << (column == 0U ? "" : ",")
                         << gathered[offset + column];
-          performance << '\n';
+          performance << ',' << observation_source.data() << '\n';
         }
         performance.flush();
         okay = static_cast<bool>(performance);

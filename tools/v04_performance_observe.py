@@ -67,7 +67,8 @@ def symbols(binary):
 
 def summarize(arguments):
     with arguments.performance.open() as stream:
-        rows = [{key: int(value) for key, value in row.items()}
+        rows = [{key: int(value) for key, value in row.items()
+                 if key != "source_meta_sha256"}
                 for row in csv.DictReader(stream)]
     steps = sorted({row["step"] for row in rows})
     if not steps:
@@ -78,6 +79,7 @@ def summarize(arguments):
                         for step in steps],
               "binary_sha256": hashlib.sha256(arguments.binary.read_bytes()).hexdigest(),
               "limits": ["One instrumented window, no repeated-round median",
+                         "Use v04_solver_observe V3 for independent coverage and source-identity validation",
                          "Full-step timer excludes its own observation gather/write",
                          "PMPI elapsed excludes observer bookkeeping; advance includes it",
                          "Nine blocking MPI primitives, observed only inside driver.advance",
