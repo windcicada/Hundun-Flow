@@ -179,3 +179,31 @@ case 和 spec 位于证据目录的 `preopt-frozen` / `postopt-frozen`。
 标量 remap 系数缓存、reach=1、Picard 预测复用没有混入本轮，缺少有标量大规模成本依据。
 64-loop 诊断溢出仍拒绝完整归因；高组成 sweep/retry 需要独立诊断窗口或有界分段设计。
 生产内存硬预算、非对流时间尺度和分段观测不能标记为本轮已实现功能。
+
+## 最终冻结与长测恢复
+
+最终生产源提交 `3024bfd9ab4f54abbf858272d9037733ba303f1d`；
+与 `e649489` 相比，src/include/runner 无新增差异，性能实验已经撤回。
+最后构建的 27 项针对性验收全部通过，167.05 s，见 `final-acceptance.log`。
+完整测试输出与先前失败记录均保留，不把最后 27 项说成仓库全部测试。
+
+冻结目录 `method-frozen-module-reviewed-20260907` 位于上述 trial 根目录。
+程序 SHA256 为 `45b311d391d8f724965671bf47ba347ab38c76738c1540448dd611306359645e`；
+build manifest 的 core/target_source_clean 均为 true。
+`FINAL_ACCEPTED.json` 明确本次是零标量 Re3900 恢复门槛，不是七模块全部能力或科学验收。
+`FROZEN.sha256` 绑定程序、build manifest、case、spec、启动脚本和该门槛记录。
+
+2026-09-07 11:16:54 +0800 已启动
+`hundun-re3900-module-reviewed-20260907.service`，ActiveState=active、SubState=running。
+新 run 为 `long-module-reviewed-35000-20260907`。
+从已验证的 preopt-pilot generation-5510-72559809913240 精确恢复，剩余 29490 步至 35000；
+不从未持久化的 5936 步假装恢复，不使用被撤回的实验程序。
+首次核查有 128 个实际 runner 进程，独占锁不能被第二个作业取得，无并行测试/编译。
+
+RUN.meta 核对：restart_method_recovery=0、restart_requires_recovery=0、
+statistics_epoch_start_step=1000、sampling_start_step=11001。
+继承元数据中的 statistics_reset_reason=method_recovery 指原 epoch 的来源，不是此次重置。
+已确认运行接受到 step=5516、time=0.076169960092241279 s：BDF2、attempt=1、retry=0，
+continuity=1.4727164461916333e-7、energy=6.2309360502208999e-7、EOS=0、
+committed CFL(out)=0.29118850842390626。这里只记录启动核查，不代替长测最终结论。
+Visit/checkpoint 周期仍为 500，下一次为绝对步 6000；现有 step5510 的 Visit 已做字节对照。
