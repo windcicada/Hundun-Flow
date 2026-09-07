@@ -2,11 +2,11 @@
 # Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 function(hundun_add_selected_source_line source_version)
-  set(supported_versions v0.4 v0.3)
-  if(NOT source_version IN_LIST supported_versions)
+  if(NOT source_version STREQUAL "v0.4")
     message(FATAL_ERROR
       "unsupported HUNDUN_SOURCE_VERSION: ${source_version}; "
-      "expected one of: v0.4, v0.3")
+      "this checkout contains only the current implementation (v0.4); "
+      "use Git history for retired implementations")
   endif()
 
   set(source_directory

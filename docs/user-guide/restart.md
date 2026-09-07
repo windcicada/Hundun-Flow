@@ -1,44 +1,32 @@
-# Restart（默认 versions/v0.4）
+# Restart 与方法恢复
 
 ```sh
 hundun run /path/to/case --restart /path/to/old-run/Restart \
   --output /path/to/new-run --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-输出必须使用独立目录。保留 Restart 根目录的 `current`、所指 generation 的
-`manifest.bin` 和全部 rank 文件，不修改或覆盖来源文件。
+输出必须使用独立目录。保留来源根目录的 `current`、所指 generation 的 manifest 和全部载荷、统计附件；不要手工改写文件或校验哈希。
 
-默认严格校验输入/计划、字段目录、几何身份、文件大小与内容哈希。
-当前格式2保存两层已接受场、两层非对流速率和面通量、压力参考及时间控制历史。
-旧格式1缺少完整历史，读取后需要一阶恢复步；这与下面的MG存储兼容是两件事。
-格式2支持读取到不同MPI分区，但局部网格仍须满足产品编译约束；不是任意rank数均可用。
+## 精确续算
 
-## 旧 MG 外层 ghost 布局的显式兼容
+当前 V3 checkpoint 带方法历史签名；默认要求物理 plan、schema、geometry 和历史含义兼容，并验证文件完整性。有效状态、速率、质量目标和 BDF 历史按合同恢复。源格式版本不等于方法版本，也不等于产品版本。
 
-`0b0eff1` 消除了 MG 原始线性 bundle 外层重复的 ghost 分配。
-历史字段目录及依赖它的边界/产品指纹因而不同，但 checkpoint 不包含 MG 工作区。
-对于仅有这项存储布局差异、物理与数值配置保持相同的格式2文件，可显式请求：
+支持满足网格/计划约束的跨分区读取，不承诺任意 rank 数都可用。重启一致性必须在相同有效时间历史下比较。
+
+## 显式方法恢复
 
 ```sh
 hundun run /path/to/case --restart /path/to/old-run/Restart \
-  --restart-storage-compatibility mg-bundle-ghost-v1 \
-  --output /path/to/new-run --steps 1 --output-interval 0 --restart-interval 1
+  --restart-method-recovery --output /path/to/new-run \
+  --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-自定义 `v04_thin_domain_runner` 使用同名兼容选项和原有 `--restart-root` 参数。
-它仍验证旧 checkpoint 完成标记、statistics 和 accumulator 的来源身份；
-下一次输出使用新产品身份，不改写历史统计文件。
+该策略重新构造当前方法速率，保留合法来源的闭域质量目标，先执行必要的 BE 恢复，再恢复 BDF2。完整 V2 无方法签名时不能默认当作同方法历史；V1 确实缺历史的处理与主动恢复分开。
 
-兼容路径根据当前物理配置重建明确的历史目录、边界和产品指纹，要求三者相符，
-并保留全部几何、字段、完整性及数值检查。不能用这个选项加载物性、边界、网格、
-数值策略或其他历史版本不匹配的文件，也不能通过修改manifest绕过拒绝。
-镜像保留来源 plan/schema 与 manifest SHA；运行报告显式记录
-`restart_storage_migrated`。物理场和BDF历史恢复后重新建立工作区；
-新写出的checkpoint使用当前身份，后续无需兼容选项。
+圆柱 runner 使用 `--restart-root`；主动方法恢复会建立新统计 epoch，不混入旧 accumulator 样本，一个 BE 步不表示流场已充分发展。同方法精确续算可以继承有效统计。
 
-已验证：公共接口1/2/4 ranks，原`69d8eee`二进制生成的小算例旧文件续算，
-以及转换后的checkpoint在默认严格路径下2→4 ranks续算。
-这不代表所有历史Re3900文件已经迁移或长期稳定。
+## 已登记存储迁移
 
-旧文档中的 `restart.read`、Checkpoint v3/presence 等属于其他版本接口，
-不是这里默认v0.4命令行的配置项。
+`--restart-storage-compatibility mg-bundle-ghost-v1` 只处理已登记的 MG 外层 ghost 布局差异，不能与主动方法恢复一起使用。未知计划、物性、边界、几何或损坏载荷仍拒绝，不得靠修改 manifest 绕过。
+
+签名组件、已知迁移表及链式回归见[方法历史合同](../verification/v04-method-history-contract.md)；文件提交规则见[Restart 格式](../api/restart-schema.md)。

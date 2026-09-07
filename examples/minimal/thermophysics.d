@@ -1,4 +1,4 @@
-# HUNDUN-FLOW clean-room single-species ideal-gas example.
+# HUNDUN-FLOW clean-room single-species ideal-gas fixture.
 HUNDUN_THERMOPHYSICS_V1
 temperature_bounds 200 3000
 temperature_inversion 1e-12 32

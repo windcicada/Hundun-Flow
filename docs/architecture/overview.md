@@ -1,13 +1,7 @@
 # 架构概览
 
-HUNDUN-FLOW 把配置、运行时、网格、离散算子、流动求解和诊断分开。可执行程序只负责解析命令行、在 rank 0 读取输入、向所有 rank 广播规范化配置，并把控制权交给相应求解驱动。
+当前唯一实现以 `ApplicationService` 和 `ProductDriver` 组织算例编译与时间推进。普通 CLI 和专用 runner 共用产品内核，runner 另外负责试验统计和分模块观测。
 
-实现遵循以下约束：
+模块划分见[实际源码表](modules.md)。实现约束包括：拓扑与几何分离；字段、工作区和通信请求有明确所有者；最终面通量及边界状态保持版本一致；试算不能直接覆盖已接受历史。
 
-1. 拓扑与几何分离。邻接、分区和 Halo 属于拓扑；坐标、体积、面积和法向属于几何。
-2. 状态有明确所有者。字段注册表定义布局和持久化策略，试算状态只有在全体 rank 同意后才提交。
-3. 派生量只认一个权威来源。压力修正、最终通量、浸入边界重构和力诊断共享同一条产品数据路径。
-
-当前实现以 CPU 参考路径为准，不提供生产级 GPU 后端。
-
-schema 3 driver 按 profile 构造可选对象：mesh/boundary、静止 IBM plans、ideal-gas closure、WALE、flow facade，随后才读取 Checkpoint v3。九个合法 profile 共用一个 `hundun` executable；缺少任一 profile 所需对象会在首个时间步前集体拒绝。
+当前生产范围是 CPU/MPI 单相低马赫流动。燃烧、喷雾等规划不构成已集成能力；参见[能力与限制](../releases/current-capabilities.md)。

@@ -54,14 +54,14 @@ function(check_successful_selection case_name expected_version)
   endif()
 endfunction()
 
-function(check_invalid_selection)
-  set(build_dir "${TEST_ROOT}/invalid-v9")
+function(check_invalid_selection requested_version)
+  set(build_dir "${TEST_ROOT}/invalid-${requested_version}")
   execute_process(
     COMMAND "${CMAKE_COMMAND}"
       -S "${HUNDUN_ROOT}"
       -B "${build_dir}"
       -DHUNDUN_BUILD_TESTS=OFF
-      -DHUNDUN_SOURCE_VERSION=v9
+      "-DHUNDUN_SOURCE_VERSION=${requested_version}"
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr)
@@ -69,12 +69,12 @@ function(check_invalid_selection)
 
   if(configure_result EQUAL 0)
     record_failure(
-      "invalid-v9: configure succeeded; unsupported "
+      "invalid-${requested_version}: configure succeeded; unsupported "
       "HUNDUN_SOURCE_VERSION was not rejected")
   elseif(NOT configure_output MATCHES
          "unsupported HUNDUN_SOURCE_VERSION")
     record_failure(
-      "invalid-v9: configure failed without the required diagnostic\n"
+      "invalid-${requested_version}: configure failed without the required diagnostic\n"
       "${configure_output}")
   endif()
 endfunction()
@@ -142,8 +142,8 @@ endfunction()
 
 check_successful_selection(default v0.4)
 check_successful_selection(explicit-v0.4 v0.4 v0.4)
-check_successful_selection(explicit-v0.3 v0.3 v0.3)
-check_invalid_selection()
+check_invalid_selection(v0.3)
+check_invalid_selection(v9)
 check_sanitizer_configuration(
   v0.4-asan HUNDUN_ENABLE_ASAN -fsanitize=address)
 check_sanitizer_configuration(

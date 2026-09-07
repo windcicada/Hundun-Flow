@@ -6,7 +6,7 @@
 
 命名要先把职责说清楚，再考虑缩短。文件名应直接表明所属领域和主要内容，不能靠目录层级补足含义。
 
-产品源码采用扁平目录：
+当前唯一实现位于 `versions/v0.4/`。本文的 `include/`、`src/` 和 `tests/` 均相对此目录；根目录不再放另一套实现。源码保持扁平布局：
 
 ```text
 include/
@@ -23,25 +23,21 @@ src/               实现文件和私有头文件
 | 前缀 | 领域 | 示例 |
 | --- | --- | --- |
 | `app_` | 命令行程序、驱动和装配 | `app_main.cpp` |
-| `cfg_` | 配置、解析和已解析配置 | `cfg_case_config.hpp` |
-| `rt_` | 运行时、MPI、字段存储和重启基础设施 | `rt_mpi_context.hpp` |
-| `exec_` | 执行空间和执行资源 | `exec_execution.hpp` |
-| `mesh_` | 网格拓扑与几何 | `mesh_geometry.hpp` |
-| `bc_` | 边界条件 | `bc_basic_boundary.hpp` |
-| `ib_` | 浸入边界几何、重构和表面量 | `ib_surface.hpp` |
-| `lin_` | 线性代数、求解器和预条件 | `lin_bicgstab.hpp` |
-| `fvm_` | 有限体积离散和离散算子 | `fvm_cell_centered.hpp` |
-| `flow_` | 流动状态、时间推进和压力速度耦合 | `flow_state.hpp` |
-| `diag_` | 诊断、输出和性能记录 | `diag_session.hpp` |
-| `sdk_` | 稳定的扩展接口与加载器 | `sdk_plugin_api.h` |
+| `core_` | 字段、资源、产品推进和状态提交 | `core_product_freeze.cpp` |
+| `mesh_` | 网格、几何、IBM 计划与重构 | `mesh_cartesian.cpp` |
+| `bc_` | 边界与时间控制 | `bc_time.cpp` |
+| `physics_` | 热力学、输运与 LES | `physics_thermo.cpp` |
+| `solver_` | 离散、压力—焓、标量和线性求解 | `solver_krylov.cpp` |
+| `parallel_` | halo、donor 与 CPU 资源 | `parallel_halo.cpp` |
+| `io_` | Restart、Visit 与观测 | `io_restart.cpp` |
+| `v04_` | 兼容公共头文件 | `v04_product.hpp` |
 
-前缀只写一次。领域词已经在前缀中出现，主体名称就不再重复。例如写 `flow_state.hpp`，不写 `flow_flow_state.hpp`；写 `mesh_geometry.hpp`，不写 `mesh_mesh_geometry.hpp`。
+前缀只写一次。领域词已经在前缀中出现，主体名称就不再重复。例如写 `mesh_cartesian.cpp`，不写 `mesh_mesh_cartesian.cpp`。
 
 文件名采用小写蛇形命名。可以使用行业通用缩写，不要自造缩写。名称只描述长期职责，不写临时序号、开发批次或完成状态。
 
 以下前缀等到产品开始提供对应能力时再启用：
 
-- `les_`：大涡模拟模型；
 - `chem_`：化学动力学与物种反应；
 - `comb_`：燃烧模型；
 - `spray_`：喷雾模型；
@@ -54,8 +50,8 @@ src/               实现文件和私有头文件
 公共头文件只放在 `include/hundun/`，扩展名使用 `.hpp`；需要 C ABI 时可以使用 `.h`。包含路径统一写成：
 
 ```cpp
-#include "hundun/flow_state.hpp"
-#include "hundun/sdk_plugin_api.h"
+#include "hundun/v04_field.hpp"
+#include "hundun/v04_product.hpp"
 ```
 
 公共头文件应满足以下要求：
@@ -70,18 +66,18 @@ src/               实现文件和私有头文件
 
 ## 4. 实现文件和私有头文件
 
-实现文件放在 `src/`，扩展名使用 `.cpp`。通常，一个公共头文件对应一个同名实现文件：
+实现文件放在 `src/`，C++ 扩展名使用 `.cpp`；必要的 C 文件单独登记。一个公共头文件可以对应多个职责明确的实现文件：
 
 ```text
-include/hundun/flow_state.hpp
-src/flow_state.cpp
+include/hundun/v04_product.hpp
+src/core_product_freeze.cpp
 ```
 
 仅供实现使用的头文件也放在 `src/`，文件名以 `_detail.hpp` 结尾：
 
 ```text
-src/flow_checkpoint_v2_detail.hpp
-src/ib_surface_bvh_detail.hpp
+src/io_restart_detail.hpp
+src/solver_scalar_mass_remap_detail.hpp
 ```
 
 `_detail.hpp` 不构成公共接口，不得被公共头文件包含。多个实现文件共享私有逻辑时，优先使用职责明确的私有头文件；只在单个实现文件中使用的辅助函数放入匿名命名空间。
@@ -98,7 +94,7 @@ src/ib_surface_bvh_detail.hpp
 
 ### 产品代码与测试支撑的边界
 
-`tests/support/` 只放测试使用的适配器、故障注入、状态观察和测试夹具。这些文件不属于产品，也不会进入 tests-off 构建或产品仓库。
+`tests/support/` 只放测试使用的适配器、故障注入、状态观察和测试夹具。测试随仓库提供，但不进入 tests-off 生产程序；故障注入通过独立 test core 构建。
 
 依赖方向只能从测试指向产品：
 
@@ -114,21 +110,19 @@ src/   -X-> tests/
 
 ## 5. C++ 标识符
 
-命名空间保留完整领域名称，例如：
+当前公共命名空间保持兼容，不为整理目录改名：
 
 ```cpp
-namespace hundun::finite_volume { }
-namespace hundun::immersed { }
-namespace hundun::diagnostics { }
+namespace hundun::v04 { }
 ```
 
-文件名前缀是目录组织规则，不用于缩短命名空间。不得把 `finite_volume` 改成 `fvm`，也不得把 `immersed` 改成 `ib`。
+文件名前缀是目录组织规则，不要求建立同名命名空间；`v04` 是当前接口的兼容名称。
 
 C++ 标识符采用以下形式：
 
 | 对象 | 形式 | 示例 |
 | --- | --- | --- |
-| 类型、类、枚举 | `PascalCase` | `FlowState` |
+| 类型、类、枚举 | `PascalCase` | `ProductDriver` |
 | 函数、方法 | `snake_case` | `advance_one_step` |
 | 局部变量、参数 | `snake_case` | `cell_count` |
 | 私有数据成员 | `snake_case_` | `local_size_` |
@@ -158,20 +152,14 @@ C++ 标识符采用以下形式：
 CMake 目标使用完整、稳定的领域名称，以 `hundun_` 开头：
 
 ```cmake
-hundun_runtime
-hundun_mesh
-hundun_boundary
-hundun_immersed
-hundun_linear
-hundun_fvm
-hundun_flow
-hundun_diagnostics
-hundun_sdk
+hundun_v04_core
+hundun_v04_test_core
+hundun_v04_build_options
 ```
 
 目标名面向构建依赖，文件名前缀面向源码导航，两者不要求逐字相同。可执行程序使用 `hundun`。
 
-根目录 `CMakeLists.txt` 只负责项目声明、全局选项、依赖发现和子目录入口。产品目标及其源码清单放在 `src/CMakeLists.txt`。公共包含目录必须指向 `include/`；`src/` 只能作为目标的私有包含目录。
+根目录 `CMakeLists.txt` 只负责当前源码入口和公共构建选项。目标、依赖发现及源码清单放在 `versions/v0.4/CMakeLists.txt`。公共包含目录指向该实现的 `include/`；`src/` 只能作为目标的私有包含目录。
 
 新增源码必须显式登记，不用递归通配自动收集产品文件。文件增删后，构建清单应能直接显示变化。
 

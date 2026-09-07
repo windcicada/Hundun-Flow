@@ -1,17 +1,17 @@
 # 快速开始
 
-以下命令使用随源码提供的最小模板。它用于确认安装、输入解析和基本运行路径，不代表精度或收敛性验证。
+最小模板位于 `examples/minimal`，与当前公共应用回归使用的输入一致，只用于检查安装和运行路径。
 
 ```sh
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release -j 2
-build/release/src/hundun examples/minimal/case.json --validate
-build/release/src/hundun examples/minimal/case.json --print-resolved
-mpiexec -n 1 build/release/src/hundun examples/minimal/case.json
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DHUNDUN_BUILD_TESTS=OFF
+cmake --build build/release -j 2 --target hundun
+build/release/versions/v0.4/hundun --version
+mpirun -n 1 build/release/versions/v0.4/hundun validate examples/minimal --dry-plan
+mpirun -n 1 build/release/versions/v0.4/hundun run examples/minimal \
+  --output run-minimal --steps 10 --output-interval 10 --restart-interval 10 \
+  --initial-state 101325,300,0.1,0,0
 ```
 
-相对路径以 `case.json` 所在目录为基准。运行前先用 `--validate` 检查结构，再用 `--print-resolved` 查看规范化后的实际配置。
+CLI 接收包含 `case.json` 的目录，不是旧式的 `hundun case.json --validate`。所有数据文件按[当前输入规则](../../versions/v0.4/docs/input-schema.md)放在 case root。输出使用独立目录，不修改来源文件。
 
-模板的输出位于 `examples/minimal/output` 和 `examples/minimal/Restart`。重复运行前，请移动或清理上一次运行生成的目录；程序不会把不完整或不匹配的 Restart 当成有效状态。
-
-`examples/minimal` 是 schema 1 示例。schema 3 用户应从[配置 schema](../api/configuration-schema.md)选择九个 profile 之一，并把 STL 路径写成相对于 case root 的非逃逸路径。先用单 rank 小网格核对 diagnostics 和守恒，再增加 rank 数；不要把 `--validate` 当作科学验收。
+通过配置校验不等于通过精度或稳定性验证。正式计算前还须核对边界、网格、物性、dt、守恒与统计窗口；不要与现有长测并发占满资源。

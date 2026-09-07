@@ -1,16 +1,20 @@
 # 命令行接口
 
 ```text
-hundun <case.json> [--validate|--print-resolved] | hundun --version
+hundun --version
+hundun validate <case-dir> [--dry-plan]
+hundun init-case --output <case-dir>
+hundun run <case-dir> --output <run-dir> --steps <N>
+  [--output-interval <N>] [--restart-interval <N>]
+  [--initial-state p,T,Ux,Uy,Uz[,q...]]
+  [--restart <restart-dir>] [--restart-method-recovery]
+  [--restart-storage-compatibility mg-bundle-ghost-v1]
 ```
 
-| 形式 | 行为 |
-| --- | --- |
-| `hundun --version` | 输出程序版本后退出 |
-| `hundun case.json` | 读取配置并运行 |
-| `hundun case.json --validate` | 完整解析和校验配置，成功时输出 `VALID` |
-| `hundun case.json --print-resolved` | 输出规范化 JSON，不推进时间步 |
+`case-dir` 包含 `case.json` 及其直接引用的数据文件。`validate` 不推进时间步；`init-case` 创建模板。旧式 `hundun case.json`、`--validate` 和 `--print-resolved` 不属于当前 CLI。
 
-成功返回 `0`，配置、I/O、MPI 或求解失败返回非零值。错误消息写到标准错误；正常信息写到标准输出。MPI 运行时，根 rank 负责用户可见的主要错误信息，失败状态会在 communicator 内统一。
+均匀初场使用 Pa、K、m/s；q 按冻结标量目录排列。初场和 restart 互斥。方法恢复必须显式同时给出 restart，不能与存储迁移混用，见[Restart](../user-guide/restart.md)。
 
-CLI 不支持把配置从标准输入传入，也不接受未列出的额外参数。
+普通应用的 `--output-interval 0` 关闭 Visit/screen/monitor，`--restart-interval 0` 关闭 checkpoint；Evidence 仍启用。两项周期缺省均为 1，正式运行应明确指定。成功退出为 0，失败为非零；保留完整标准错误和结构化失败报告。
+
+圆柱专用 `v04_thin_domain_runner` 使用自己的 `--spec`、`--case-root`、`--run-root`、`--restart-root`、`--visit-interval` 参数，不应与普通应用参数混用。

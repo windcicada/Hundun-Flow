@@ -1,24 +1,7 @@
 # 控制方程
 
-当前流动路径面向低马赫数、牛顿流体。质量和动量方程写为
+当前生产路径为单相低马赫理想气体流动，使用有限体积形式推进质量、动量与焓，并通过 EOS 耦合压力、温度、密度和可选组成。动量包含压力梯度及分子/已启用 LES 应力；焓包含与当前离散一致的压力功、热传导等项。
 
-\[
-\frac{\partial \rho}{\partial t}+\nabla\cdot(\rho\mathbf{u})=0,
-\]
+被动标量和参与 EOS 的组分使用守恒库存与最终密度配套处理。被动标量允许有限有符号值；组分还须满足质量分数及组成/EOS 合同。组分输运接口不表示有限速率化学已经接入。
 
-\[
-\frac{\partial (\rho\mathbf{u})}{\partial t}
-+\nabla\cdot(\rho\mathbf{u}\otimes\mathbf{u})
-=-\nabla p+\nabla\cdot\boldsymbol{\tau},
-\]
-
-其中
-
-\[
-\boldsymbol{\tau}=\mu\left(\nabla\mathbf{u}+\nabla\mathbf{u}^{T}
--\frac{2}{3}(\nabla\cdot\mathbf{u})\mathbf{I}\right).
-\]
-
-密度可以是常数、随物质标量变化，或由理想气体闭合得到。低马赫数模型中的压力用于满足质量守恒，不求解声波传播。
-
-被动或物质标量使用守恒输运形式，并带分子扩散。具体启用字段由配置决定。
+当前不把高马赫数、激波、声学、喷雾或反应源作为已完成的生产能力。离散方程、阶段速率和最终残差的一致性应结合[离散说明](discretization.md)、[方法审计](../verification/2026-09-06-method-first-numerical-audit.md)及其后续修复证据检查。

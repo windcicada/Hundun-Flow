@@ -1,13 +1,12 @@
 # HUNDUN-FLOW 文档
 
-建议按使用目的阅读：
+本入口只描述当前产品。源码路径沿用 `versions/v0.4`，不表示还需要选择或构建历史版本。
 
-- 初次安装和运行：从[快速开始](user-guide/quick-start.md)进入。
-- 准备计算输入：查阅[配置说明](user-guide/configuration.md)和[配置 schema](api/configuration-schema.md)。
-- 理解数值结果：阅读[控制方程](numerics/governing-equations.md)、[离散方法](numerics/discretization.md)和[适用范围](numerics/applicability-and-limitations.md)。
-- 核对 Stage 3 的已实现项和延期项：阅读[能力 ledger](numerics/stage3-capability-ledger.md)和[Stage 3 contracts](numerics/stage3-contracts.md)。
-- 恢复计算或排查故障：阅读[Restart](user-guide/restart.md)、[诊断输出](user-guide/diagnostics.md)和[故障排查](user-guide/troubleshooting.md)。
-- 集成公共头文件：先看[模块结构](architecture/modules.md)和[公共 API 兼容性](development/public-api-compatibility.md)。
-- 让外部 AI 或自动化工具操作程序：使用[自动化操作指南](ai-skill/index.md)。
+- 安装和运行：[安装要求](user-guide/installation.md)、[构建](user-guide/build.md)、[快速开始](user-guide/quick-start.md)、[CLI](api/cli.md)。
+- 输入与数值：[配置](api/configuration-schema.md)、[控制方程](numerics/governing-equations.md)、[离散](numerics/discretization.md)、[限制](numerics/applicability-and-limitations.md)。
+- 恢复与排错：[Restart](user-guide/restart.md)、[诊断](user-guide/diagnostics.md)、[故障排查](user-guide/troubleshooting.md)。
+- 开发：[实际模块](architecture/modules.md)、[命名规范](development/naming-and-style.md)、[接口兼容](development/public-api-compatibility.md)。
+- 验证：[当前能力](releases/current-capabilities.md)、[模块验收](verification/2026-09-07-exclusive-module-acceptance.md)、[方法历史合同](verification/v04-method-history-contract.md)。
+- 自动化：[操作指南](ai-skill/index.md)。
 
-正文以中文为权威语言。命令、JSON key、C++ 标识符、单位和数学符号保持源码中的写法。
+带日期的设计、研究、handoff 和验证文件保留当时的提交、路径与结论，仅作为可追溯记录；旧计划不覆盖当前能力声明。历史 receipt、原始附件和校验哈希不因本轮清理而重写。

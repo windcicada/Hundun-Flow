@@ -1,15 +1,9 @@
 # Restart 格式
 
-Restart 是内部二进制事务格式，不是长期稳定的数据交换格式。产品中存在三条兼容路径：被动标量使用 Restart v1，schema 2 流动使用 Checkpoint v2，schema 3 profiles 使用 Checkpoint v3。
+当前产品使用 generation 目录和根目录的 `current` 指针发布 checkpoint，不是退休实现的 profile/presence 格式。
 
-Checkpoint v2 目录包含：
+当前 V3 保存已接受状态、时间与速率历史、面通量、压力参考和闭域质量目标，并带方法历史签名。读取逐阶段验证身份、布局、文件长度、校验和与全 rank 状态；未验证的 owned image 不能发布为已接受状态。
 
-- 一个描述全局状态和每个 rank 文件的 manifest；
-- 每个 rank 的二进制 payload；
-- 所有文件成功发布后写出的完成标记。
+V1 缺历史、V2 无方法签名、V3 精确历史及显式恢复的区别见[方法合同](../verification/v04-method-history-contract.md)。满足约束时可以跨 MPI 分区恢复；不能把“支持重新分区”理解为物理配置可以任意变化。
 
-读取时检查 schema、文件大小、EOF、CRC、语义指纹、网格、边界、字段布局和分区。任何一项失败都会拒绝整次恢复，正式状态保持不变。
-
-该格式当前要求相同 rank 数和相同分区。文件名、字节布局和内部枚举不是公共 API；外部工具不应修改 payload，也不应根据未文档化偏移读取数据。
-
-Checkpoint v3 presence 1--9 精确对应九个 density/IBM/WALE profiles。manifest 记录 numerical config、geometry、optional module 和 flow state 的身份；恢复时必须先构造 presence 要求的对象。Checkpoint v3 仍要求相同 rank 数和 process grid，rank-changing Restart 不受支持。
+checkpoint 的持久化顺序、来源文件只读和一致失败合同不因仓库清理而改变。二进制布局不是外部工具可随意编辑的接口。

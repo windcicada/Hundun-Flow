@@ -1,9 +1,13 @@
 # 当前版本能力
 
-公开产品版本为 `1.0.0`，内部实现/API 源码线仍命名为 `v0.4`。当前分支在 V1.0 Re=3900 预注册门完成前是 release candidate；版本字符串不等于发布接受。
+产品版本为 `1.0.0`，当前实现位于 `versions/v0.4`。仓库不再提供退休源码切换；目录和接口名称为兼容性保留。
 
-候选产品路径覆盖 tensor-stretched Cartesian 网格、MPI 分解、单相低马赫理想气体、固定/自适应时间推进、入口/出口/周期/对称等外边界、静止封闭 STL IBM、WALE/Vreman、exact-history Restart、Visit 和 Evidence V6。
+已接入：笛卡尔均匀/拉伸网格及 COAST 轴坐标输入、MPI、单相低马赫理想气体、SIMPLE/PISO 压力—焓耦合、变物性、静止封闭 STL IBM、WALE/Vreman、固定/变步长 BDF2、被动/组分标量守恒配对、Visit、Restart 和 Evidence。
 
-压力--焓主闭环在同一目标时间层联合更新 `p/h/rho/T/U` 与最终质量通量；每个接受步分别检查 EOS、continuity、energy、closed mass 和 gauge。动量修正采用 common-face owner AFC，并发布 provisional/committed CFL、retained correction 和唯一面聚合证书。IBM 默认可选 `strict_quadratic` 或 `adaptive_order`，线性降阶必须局部、满秩、可审计，最近点复制不是生产 fallback。
+每个接受步检查当前配置要求的 EOS、连续性、能量、闭域质量和压力规约。最终动量残差为带归一化及分区说明的诊断，不能把它写成新增经验接受门槛。方法签名、完整性、存储兼容和主动恢复分开校验；主动方法恢复重新建立统计 epoch。
 
-V1.0 的物理发布范围限于预注册的 Re=3900 `20D x 10D x 3D` 周期薄域中短程门，并明确保留 10% blockage、薄展向域和网格分辨率限制。未完成或未声明的能力包括反应流、喷雾、颗粒、移动/相交/非流形 IBM、AMR、GPU、可压缩激波、长程工程统计和任意复杂几何的统一精度保证。
+[本轮模块验收](../verification/2026-09-07-exclusive-module-acceptance.md)区分了实际通过、未发现反例和待完成工作。零标量 Re3900 与通用组分路径分别验收，不能互相替代。
+
+当前冻结长测：Re=3900，D=0.02 m，Uc=2.89668 m/s，20D×10D×(π/2)D，456×256×52，固定 dt=1.3808912271980336×10⁻⁵ s。长期统计与正式实验对比尚未完成。
+
+未完成或不在范围：曲面标量通用二阶精度、完整进程内存硬预算、自动非对流时间尺度、分段观测，以及反应流、喷雾、颗粒、移动 IBM、AMR、GPU、高马赫数与声学。独立内核或设计文档存在，不等于这些能力已接入 CLI。

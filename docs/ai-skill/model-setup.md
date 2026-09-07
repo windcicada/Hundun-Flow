@@ -1,15 +1,9 @@
 # 模型与配置准备
 
-外部工具修改 JSON 时应遵守以下顺序：
+从[当前模板](../../examples/minimal/README.md)和[input schema](../../versions/v0.4/docs/input-schema.md)准备输入。当前单相低马赫路径使用 JSON schema 1，不按历史 density/IBM/WALE 九个 profile 选择程序。
 
-1. 选择与能力匹配的 `schema_version`；
-2. 明确网格尺寸、原点、长度和 SI 单位；
-3. 选择密度模型并补齐对应热力学字段；
-4. 为六个外边界各写一条记录；
-5. 明确 rank 数和进程网格；
-6. 为 Restart、diagnostics 和性能输出使用互不冲突的目录；
-7. 运行校验和规范化输出。
+明确网格、物性数据、六面边界、离散与时间控制，以及可选标量、LES、IBM。均匀初场用 `--initial-state`；恢复使用 `--restart`，不能同时给出。
 
-schema 3 的浸入边界只使用封闭、静止 STL，壁面速度必须严格为零。当前 `0.2.0 candidate` 已接入 schema 3 driver、Checkpoint v3、组合诊断和 `les.model=wale`。自动化工具仍不得因为 `--validate` 成功就直接启动计算；先把输入映射到 capability ledger 的 profile-1 至 profile-9，并核对 rank、process grid、STL 路径和适用范围。
+有组分时同时核对组成、物性和 EOS；有被动标量时保留实际允许的范围，不擅自限制为质量分数。冻结用户给定的物性、边界和误差标准，发现矛盾应报告，不得以经验值悄悄替换。
 
-工具必须把用户给定的物性、边界和误差标准视为受控输入。发现矛盾时应报告，不得靠经验值悄悄替换。
+校验通过后仍须做对应数值验证，且不得与冻结长测争抢资源。

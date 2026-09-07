@@ -5,9 +5,9 @@
     "kind": "uniform",
     "domain": {
       "lower": [0.0, 0.0, 0.0],
-      "upper": [1.0, 0.5, 0.5]
+      "upper": [1.0, 1.0, 1.0]
     },
-    "exact_cells": [8, 4, 4],
+    "exact_cells": [8, 8, 8],
     "base_spacing": null,
     "minimum_spacing": [0.125, 0.125, 0.125],
     "max_growth_ratio": 1.0,
@@ -17,7 +17,7 @@
       "max_memory_bytes_per_rank": 67108864
     },
     "data_files": [],
-    "stl_file": null
+    "immersed_boundary": null
   },
   "flow": {
     "model": "single_phase_low_mach_compressible",
@@ -26,7 +26,20 @@
   },
   "solver": {
     "coupling": "PISO",
-    "pressure_correctors": 2
+    "pressure_correctors": 2,
+    "pressure_linear": {
+      "absolute_tolerance": 1e-13,
+      "relative_tolerance": 1e-13,
+      "maximum_iterations": 400,
+      "true_residual_interval": 4,
+      "krylov_restart": 12
+    },
+    "terminal_tolerances": {
+      "eos": 1e-10,
+      "continuity": 1e-10,
+      "closed_mass": 1e-10,
+      "gauge": 1e-10
+    }
   },
   "turbulence": {
     "model": "none"

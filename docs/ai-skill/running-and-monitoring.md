@@ -1,11 +1,13 @@
 # 启动与监控
 
-启动前生成一份运行记录，至少包括工作目录、规范化配置 SHA-256、二进制 SHA-256、rank 数、命令、环境和日志路径。
+启动前记录工作目录、配置及程序 SHA-256、build manifest、rank 数、命令、环境和日志路径，确认没有超额占用计算资源。
 
 ```sh
-mpiexec -n 4 /absolute/path/to/hundun /absolute/path/to/case.json
+mpirun -n 4 /absolute/path/to/hundun run /absolute/path/to/case \
+  --output /absolute/path/to/new-run --steps 10 \
+  --output-interval 10 --restart-interval 10
 ```
 
-监控时查看 PID、工作目录、命令行、CPU/内存、标准输出、标准错误和 diagnostics 的更新时间。不要仅凭“暂时没有新行”判断死锁；有些计算阶段不会持续打印进度。
+按 PID、工作目录和命令确认目标进程，再读取 health/Evidence、标准错误和 checkpoint 更新情况。尚未写完的尾行不作为完整接受记录，暂时无新行不自动判定为死锁。
 
-需要停止时，先确认进程确实属于目标计算，再向作业调度器或根 `mpiexec` 发送正常终止请求。不要按程序名批量杀进程，也不要触碰其他工作目录中的计算。
+停止、替换或重启冻结作业须有相应授权；不得按程序名批量杀进程，也不得让两个作业共写目录。专用圆柱 runner 的参数和普通应用不同，见[CLI](../api/cli.md)。
