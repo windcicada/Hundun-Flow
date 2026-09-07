@@ -71,7 +71,7 @@ int finish(Status status, int rank) {
   if (!status && rank == 0) {
     std::cerr << hundun::v04::status_message(status)
               << " detail=" << status.detail << '\n';
-    if (status.detail == 10505U)
+    if (status.code == StatusCode::invalid_case && status.detail == 10505U)
       std::cerr << "conflicting boundary-derived initial state: supply "
                    "--initial-state p,T,Ux,Uy,Uz[,q...] explicitly\n";
   }

@@ -90,6 +90,12 @@ add_test(NAME v04_target_identity
           --module "${hundun_repository_root}/cmake/HundunTargetIdentity.cmake")
 set_tests_properties(v04_target_identity PROPERTIES TIMEOUT 30)
 
+add_test(NAME v04_app_failure_hint_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/app_failure_hint_cli_test.py"
+    --binary "$<TARGET_FILE:hundun>")
+set_tests_properties(v04_app_failure_hint_cli PROPERTIES TIMEOUT 45)
+
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_app_restart_policy_cli_mpi_${rank_count}
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
