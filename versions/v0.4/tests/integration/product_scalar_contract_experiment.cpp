@@ -6,6 +6,7 @@
 #include "../support/product_fixture.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
@@ -33,6 +34,9 @@ bool immersed = false;
 bool restart_probe = false;
 bool capacity_probe = false;
 bool capacity_ranges_probe = false;
+bool signed_probe = false;
+bool observe_cost = false;
+double signed_shift = 0.0;
 int rank = 0;
 bool all_pass(bool local) {
   int value=local ? 1 : 0, result=0;
@@ -60,8 +64,9 @@ struct Analytic {
 Analytic initial(int x, bool species, bool uniform) {
   x = (x % cells.x + cells.x) % cells.x;
   const double wave = std::sin(2.0 * std::acos(-1.0) * (x + 0.5) / cells.x);
-  const double q = uniform ? 0.2 : near_pure ? (x < cells.x / 2 ? 1e-8 : 1.0-1e-8)
-                                                     : 0.2 + 0.05 * wave;
+  const double q = uniform ? 0.2 : signed_probe && !species
+      ? 1e-12 + 0.05 * std::cos(2.0 * std::acos(-1.0) * (x + 0.5) / cells.x) - signed_shift
+      : near_pure ? (x < cells.x / 2 ? 1e-8 : 1.0-1e-8) : 0.2 + 0.05 * wave;
   const double gas = species ? q * r_a + (1.0 - q) * r_b : r_a;
   const double cp = species ? q * 3.5 * r_a + (1.0 - q) * 4.1 * r_b : 3.5 * r_a;
   const double cp_slope = variable_thermo ? (species ? q*1e-3*r_a+(1-q)*7e-4*r_b : 1e-3*r_a) : 0.0;
@@ -175,7 +180,7 @@ RestartImage image(const RestartExpected& expected, bool species, bool uniform, 
 }
 struct Sample {
   std::vector<double> scalar;
-  long double mass{}, inventory{};
+  long double mass{}, inventory{}, absolute_inventory{};
   double constant_error{}, eos_error{}, minimum{1.0}, maximum{};
 };
 bool capture(ProductDriver& d, ThermodynamicsPlan& thermo, bool species, Sample& out) {
@@ -211,12 +216,13 @@ bool capture(ProductDriver& d, ThermodynamicsPlan& thermo, bool species, Sample&
     const double volume=width(0,x+r.patch.begin.x)*width(1,y+r.patch.begin.y)*width(2,z+r.patch.begin.z);
     out.mass+=static_cast<long double>(density)*volume;
     out.inventory+=static_cast<long double>(density)*q*volume;
+    out.absolute_inventory+=static_cast<long double>(density)*std::abs(q)*volume;
     out.scalar.push_back(q);
   }
   if(!all_pass(valid)) return false;
-  long double sums[2]{out.mass,out.inventory}, global_sums[2]{};
-  MPI_Allreduce(sums,global_sums,2,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
-  out.mass=global_sums[0]; out.inventory=global_sums[1];
+  long double sums[3]{out.mass,out.inventory,out.absolute_inventory}, global_sums[3]{};
+  MPI_Allreduce(sums,global_sums,3,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+  out.mass=global_sums[0]; out.inventory=global_sums[1]; out.absolute_inventory=global_sums[2];
   double maxima[4]{out.constant_error,out.eos_error,-out.minimum,out.maximum}, global_maxima[4]{};
   MPI_Allreduce(maxima,global_maxima,4,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
   out.constant_error=global_maxima[0]; out.eos_error=global_maxima[1];
@@ -230,6 +236,8 @@ struct Result {
   double minimum{1.0}, maximum{};
   unsigned maximum_coupling_sweeps{}, maximum_remap_iterations{};
   double maximum_scalar_residual{}, maximum_mass_pairing_residual{};
+  double initial_cancellation{}, maximum_inventory_absolute_defect{};
+  std::array<std::uint64_t, 5U> costs{}; // advance ns, remap ns, Jacobi iterations, sweeps, steps
   std::vector<double> terminal;
 };
 Result run(bool species, bool uniform, double dt) {
@@ -248,10 +256,18 @@ Result run(bool species, bool uniform, double dt) {
     result.ran=false; return result;
   }
   const auto total=coupling_probe ? 3U : static_cast<unsigned>(std::llround(end_time/dt));
+  result.initial_cancellation=static_cast<double>(std::abs(before.inventory)/before.absolute_inventory);
   std::uint64_t payload_bytes=0U;
   for (unsigned i=0; i<total; ++i) {
     DriverStepReport report;
+    const auto begin=std::chrono::steady_clock::now();
     s=d.advance({dt,dt,dt,dt,dt},report);
+    result.costs[0]+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-begin).count());
+    result.costs[1]+=report.scalar_transport.remap_nanoseconds;
+    result.costs[2]+=report.scalar_transport.remap_iterations;
+    result.costs[3]+=report.scalar_transport.coupling_sweeps;
+    result.costs[4]+=report.accepted ? 1U : 0U;
     Sample now;
     if (!all_pass(s && report.accepted) || !capture(d,thermo,species,now)) {
       std::cerr << "scalar_advance_failure species=" << species << " uniform=" << uniform
@@ -277,8 +293,13 @@ Result run(bool species, bool uniform, double dt) {
         report.scalar_transport.final_species_residual);
     result.maximum_mass_pairing_residual=std::max(result.maximum_mass_pairing_residual,
         report.scalar_transport.mass_pairing_residual);
+    // A signed near-zero global inventory is not an error scale. This changes
+    // only independent TEST diagnostics, never the solver residual or field.
+    const long double inventory_scale=signed_probe && !species ? before.absolute_inventory : before.inventory;
     result.maximum_inventory_defect=std::max(result.maximum_inventory_defect,
-        std::abs(static_cast<double>((now.inventory-before.inventory)/before.inventory)));
+        std::abs(static_cast<double>((now.inventory-before.inventory)/inventory_scale)));
+    result.maximum_inventory_absolute_defect=std::max(result.maximum_inventory_absolute_defect,
+        std::abs(static_cast<double>(now.inventory-before.inventory)));
     if(species) result.maximum_inventory_defect=std::max(result.maximum_inventory_defect,
         std::abs(static_cast<double>(((now.mass-now.inventory)-(before.mass-before.inventory))/
                                       (before.mass-before.inventory))));
@@ -771,9 +792,25 @@ int main(int argc,char** argv) {
     else if (std::strcmp(argv[i],"--restart")==0) restart_probe=true;
     else if (std::strcmp(argv[i],"--capacity")==0) capacity_probe=true;
     else if (std::strcmp(argv[i],"--capacity-ranges")==0) capacity_ranges_probe=true;
+    else if (std::strcmp(argv[i],"--signed")==0) signed_probe=true;
+    else if (std::strcmp(argv[i],"--observe-cost")==0) observe_cost=true;
     else { MPI_Finalize(); return 2; }
   }
   bool passed=true;
+  if (signed_probe) {
+    if (near_pure || immersed || coupling_probe || open_probe || restart_probe || capacity_probe || capacity_ranges_probe) {
+      MPI_Finalize(); return 2;
+    }
+    // Define an initial signed profile with a nearly cancelling weighted
+    // inventory. This is fixture construction, never a post-step correction.
+    long double quantity=0.0L, mass=0.0L;
+    for (int x=0; x<cells.x; ++x) {
+      const double weight=initial(x,false,false).rho*width(0,x);
+      quantity+=weight*0.05*std::cos(2.0*std::acos(-1.0)*(x+0.5)/cells.x);
+      mass+=weight;
+    }
+    signed_shift=static_cast<double>(quantity/mass);
+  }
   if(immersed && (open_probe || stretched || restart_probe)) { MPI_Finalize(); return 2; }
   if(capacity_probe || capacity_ranges_probe) {
     passed = capacity_ranges_probe ? capacity_ranges_contract() : capacity_contract();
@@ -792,18 +829,33 @@ int main(int argc,char** argv) {
       results[level]=run(species,uniform,dt); const auto& r=results[level];
       const bool conservative=r.ran && r.maximum_inventory_defect<1e-12;
       passed &= r.ran && r.history && r.constant && r.bounded && r.eos && conservative && r.correction_active;
+      if (signed_probe && !species && !uniform)
+        passed &= r.initial_cancellation<1e-8 && r.minimum<0.0 && r.maximum>0.0;
       if (rank==0) std::cout << std::setprecision(12) << "SCALAR_CONTRACT ranks=" << size
                 << " stretched=" << stretched << " near_pure=" << near_pure << " family=" << (species?"EOS_species":"passive")
                 << " uniform=" << uniform << " dt=" << dt << " ran=" << r.ran
                 << " history=" << (r.ran && r.history) << " constant=" << (r.ran && r.constant) << " bounded=" << (r.ran && r.bounded)
                 << " eos=" << (r.ran && r.eos) << " conservation=" << conservative
                 << " inventory_relative_defect=" << r.maximum_inventory_defect
+                << " inventory_absolute_defect=" << r.maximum_inventory_absolute_defect
+                << " initial_inventory_over_l1=" << r.initial_cancellation
                 << " constant_error=" << r.maximum_constant_error << " eos_error=" << r.maximum_eos_error
                 << " minimum=" << r.minimum << " maximum=" << r.maximum
                 << " coupling_sweeps=" << r.maximum_coupling_sweeps
                 << " remap_iterations=" << r.maximum_remap_iterations
                 << " scalar_residual=" << r.maximum_scalar_residual
                 << " mass_pairing=" << r.maximum_mass_pairing_residual << '\n';
+      if (observe_cost) {
+        std::array<std::uint64_t,5U> sum{}, maximum{};
+        MPI_Reduce(r.costs.data(),sum.data(),5,MPI_UINT64_T,MPI_SUM,0,MPI_COMM_WORLD);
+        MPI_Reduce(r.costs.data(),maximum.data(),5,MPI_UINT64_T,MPI_MAX,0,MPI_COMM_WORLD);
+        if (rank==0) std::cout<<"SCALAR_COST family="<<(species?"EOS_species":"passive")
+            <<" uniform="<<uniform<<" signed="<<signed_probe<<" dt="<<dt
+            <<" steps="<<maximum[4]<<" mean_advance_s="<<double(sum[0])/size/1e9
+            <<" mean_remap_s="<<double(sum[1])/size/1e9<<" max_advance_s="<<double(maximum[0])/1e9
+            <<" max_remap_s="<<double(maximum[1])/1e9<<" jacobi_iterations="<<maximum[2]
+            <<" coupling_sweeps="<<maximum[3]<<" complete="<<r.ran<<'\n';
+      }
     }
     if (!uniform && !near_pure && !coupling_probe && !immersed) {
       const double order=std::log(rms(results[0].terminal,results[1].terminal)/rms(results[1].terminal,results[2].terminal))/std::log(2.0);

@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <string_view>
 
 namespace {
 using namespace hundun::v04;
@@ -21,7 +22,7 @@ bool check(Status s, const char* phase) {
   return static_cast<bool>(s);
 }
 
-std::vector<TriangleInput> surface_for(int shape, int n) {
+std::vector<TriangleInput> surface_for(int shape, int n, int cylinder_facets = 0) {
   if (shape != 2) {
     const auto cube = force_cube();
     std::vector<TriangleInput> result(cube.begin(), cube.end());
@@ -35,11 +36,12 @@ std::vector<TriangleInput> surface_for(int shape, int n) {
     return result;
   }
   std::vector<TriangleInput> result;
-  for (int i = 0; i < 4 * n; ++i) {
-    const double a = 2.0 * pi * i / (4 * n);
+  const int facets = cylinder_facets == 0 ? 4 * n : cylinder_facets;
+  for (int i = 0; i < facets; ++i) {
+    const double a = 2.0 * pi * i / facets;
     // Weld the seam by reusing the first angular coordinate exactly; sin(2pi)
     // is not bitwise zero and would create an open surface in the fixture.
-    const double b = 2.0 * pi * ((i + 1) % (4 * n)) / (4 * n);
+    const double b = 2.0 * pi * ((i + 1) % facets) / facets;
     const Real3 p{radius * std::cos(a), radius * std::sin(a), -0.45};
     const Real3 q{radius * std::cos(b), radius * std::sin(b), -0.45};
     const Real3 r{p.x, p.y, 0.45}, s{q.x, q.y, 0.45};
@@ -53,7 +55,8 @@ std::vector<TriangleInput> surface_for(int shape, int n) {
 
 // Exact Cartesian cell averages of q and Laplacian(q), not point samples.
 // The analytic cube/cylinder walls have grad(q).normal=0. For the cylinder,
-// polygonal STL error decreases with h; it is not a curved cut-volume scheme.
+// the default polygonal STL error decreases with h. The separate geometry
+// experiment freezes its facets instead; neither is a curved cut-volume scheme.
 std::array<double, 2U> exact(int shape, Real3 p, double h) {
   if (shape != 2) {
     const double c = shape == 0 ? 1.0 : 0.8;
@@ -73,7 +76,7 @@ std::array<double, 2U> exact(int shape, Real3 p, double h) {
           16.0 * (x2 + y2) - 8.0 * radius * radius};
 }
 
-bool run(int shape, int n, double& solution_error) {
+bool run(int shape, int n, double& solution_error, int cylinder_facets = 0) {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   StlScanPlan scan;
@@ -82,7 +85,7 @@ bool run(int shape, int n, double& solution_error) {
   BoundaryStencilPlan boundary;
   ImmersedPlanLimits limits;
   limits.stencil.policy = IbmReconstructionPolicy::adaptive_order;
-  const auto triangles = surface_for(shape, n);
+  const auto triangles = surface_for(shape, n, cylinder_facets);
   if (!check(CartesianGeometryCompiler::compile(MPI_COMM_SELF, force_mesh(n), {},
       geometry, patch), "mesh") ||
       !check(StlScanCompiler::compile_triangles(geometry, patch,
@@ -190,6 +193,25 @@ bool run(int shape, int n, double& solution_error) {
     true_residual += std::pow(out[i] - rhs[i], 2);
   }
   solution_error = std::sqrt(error / size);
+  if (shape == 2) {
+    const int facets = cylinder_facets == 0 ? 4 * n : cylinder_facets;
+    const double analytic_volume = pi * radius * radius * 0.9;
+    const double stl_volume = 0.5 * facets * radius * radius *
+                              std::sin(2.0 * pi / facets) * 0.9;
+    const double binary_volume = size * h * h * h;
+    // Analytic q obeys Neumann data on the circle, not exactly on the polygon.
+    // This face-midpoint mismatch is reported separately from the discrete
+    // zero-flux row check; it must not be mistaken for solver non-conservation.
+    const double midpoint_radius = radius * std::cos(pi / facets);
+    const double midpoint_normal_gradient =
+        4.0 * (midpoint_radius * midpoint_radius - radius * radius) * midpoint_radius;
+    std::cout << std::setprecision(17) << "IBM_SCALAR_GEOMETRY n=" << n
+              << " facets=" << facets << " binary_volume=" << binary_volume
+              << " stl_volume=" << stl_volume << " analytic_volume=" << analytic_volume
+              << " binary_minus_stl=" << binary_volume - stl_volume
+              << " stl_minus_analytic=" << stl_volume - analytic_volume
+              << " analytic_midface_normal_gradient=" << midpoint_normal_gradient << '\n';
+  }
   std::cout << std::setprecision(17) << "IBM_SCALAR_MMS shape=" << shape << " n=" << n
             << " active=" << size << " l2=" << solution_error
             << " truncation_l2=" << std::sqrt(truncation / size)
@@ -204,6 +226,26 @@ bool run(int shape, int n, double& solution_error) {
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   bool passed = true;
+  if (argc == 2 && std::string_view(argv[1]) == "--geometry-separation") {
+    // Independent experiment, not a replacement for the existing MMS gates.
+    // First freeze the STL while refining h, then freeze h and vary the STL.
+    double previous = 0.0;
+    for (int n : {24, 48, 96}) {
+      double error = 0.0;
+      if (!run(2, n, error, 1024)) { passed = false; break; }
+      if (previous > 0.0)
+        std::cout << "IBM_SCALAR_FIXED_STL_ORDER facets=1024 n=" << n
+                  << " order=" << std::log(previous / error) / std::log(2.0) << '\n';
+      previous = error;
+    }
+    for (int facets : {48, 96, 192}) {
+      double error = 0.0;
+      if (!run(2, 48, error, facets)) { passed = false; break; }
+    }
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
+  if (argc != 1) { MPI_Finalize(); return 2; }
   for (int shape = 0; shape < 3; ++shape) {
     double previous = 0.0;
     for (int n : {24, 48, 96}) {
