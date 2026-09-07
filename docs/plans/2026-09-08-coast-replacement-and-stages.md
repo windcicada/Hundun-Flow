@@ -24,25 +24,34 @@
 
 | 项目 | 状态 / 完成条件 |
 |---|---|
-| 活动切片 | RHS norm 与实际线性停止阈值观测；局部回归已通过，干净候选构建与生产窗口待验 |
+| 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
+| 下一活动切片 | 默认关闭的 M 内部 MG 层级归因；接口已只读梳理，尚未实现或验收 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | 新 CSV 使用 `observation_schema=4`；读取器兼容 schema 3，但旧数据不能补造缺失阈值 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
-| 本切片退出条件 | 公共 Krylov 与真实 CSV/reader 回归通过；核对 schema 3/4、无 RHS 观测路径、非有限/错阈值拒绝、故障状态；记录确切源码和测试身份；保持数值门槛不变 |
-| 下一动作 | 先完成干净构建和一次有界新观测，再选定**一个**优化。已确认 C2 refinement 自动启用比零初猜差则回退的保护，不重复实现；原始初猜/保护触发率与 MG 层级成本还缺观测，不能从覆盖后的初始残差推断 |
+| 下一切片退出条件 | Native MG 公开接口启用/关闭和 rank-local 开关的数值、状态、通信数量、generation/存储地址等价；1/2/4-rank V/F、replicated/distributed、prepared/direct 与故障恢复通过；阶段时间不重复相加，零热分配 |
+| 下一动作 | 在同一 Native MG 权威内复用逐层 Halo/ReductionEngine 累计量，补平滑/传递/粗解及两处直接 MPI 时间。取得层级成本后只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
-根代理在本节回填本轮测试命令、结果和提交身份；空缺不表示已经通过：
+本轮已闭合切片的身份与边界：
 
 | 本轮验收字段 | 记录 |
 |---|---|
-| 候选代码 / tree / binary | 观测提交 `16fd8f085e845628a545dc7d4d371b3064e9ef38`，tree `8a53030af5f42f63dff6dac7fd3ce134aaa8e0c9`；独立干净 checkout `hundun-flow-criterion-accept-20260908` 构建中，binary 待验 |
-| 已运行测试及原始日志 | Release 7/7、ASan+UBSan Krylov MPI 3/3；最终 observer CLI 88 checks。命令与原始日志见[本切片回归](../verification/2026-09-08-linear-criterion-observation.md)；不是全产品新验收 |
-| 单配置单轮观测窗口 | 尚未运行新性能候选 |
-| 数值不变性、额外开销、是否接受 | 待验证 |
-| 长测后续状态 | 保持上述暂停快照，后续由根代理更新 |
+| 候选代码 / tree / binary | 观测提交 `16fd8f085e845628a545dc7d4d371b3064e9ef38`，tree `8a53030af5f42f63dff6dac7fd3ce134aaa8e0c9`；干净 checkout `hundun-flow-criterion-accept-20260908`；runner hash `8cfc9fe3a613a84e677fe536a353779040b42bf525650ae10373616e23d33545` |
+| 已运行测试及原始日志 | Release 7/7、ASan+UBSan Krylov MPI 3/3、干净 Release 7/7；最终 observer CLI 88 checks。[回归与单轮观测](../verification/2026-09-08-linear-criterion-observation.md)；不是全产品新验收 |
+| 单配置单轮观测窗口 | 9500→9510，128 ranks，仅一轮；70 logical loops，全 rank/步来源完整，10 步 BDF2、无 retry；末次 Visit/checkpoint/关闭检查通过，133 个源文件不变 |
+| 数值不变性、额外开销、是否接受 | 源码只增加观测，公开测试及该物理窗口通过；未做算法 A/B、COAST 比较或全载荷逐单元不变性检验。后 9 步 max-rank advance 均值 9.562760 s，rank-mean M 2.015330 s；不宣称加速 |
+| 长测后续状态 | 原长测仍保留 128 个 SIGSTOP ranks，完整 health=9950，durable checkpoint=9500；新 pilot checkpoint=9510 只属于独立观测目录，不替换较前进的原进程 |
+
+MG 观测的方案边界：复用 `NativeCartesianMgPlan::level_count()/level()` 与现有
+32 层上限，plan-owned 定长 profile 默认关闭；开关和计时允许 rank-local，
+不改变 collective fingerprint 或分支。各非递归阶段之和不超过 apply inclusive；
+Halo/reduction/直接 MPI 是嵌套子项。保留 prepared epoch 入口共识、最终 checked-sum
+汇总与发布，关闭时不调用新计时器。目标测试包括 `v04_solver_mg_mpi_[124]`、
+`v04_solver_mg_update_contract_mpi_[24]` 及现有 reuse/line/coarse/Krylov 隔离入口。
+这是待实现方案，尚无逐层实测或性能收益结论。
 
 ## 3. 基础流动模块台账
 
@@ -57,13 +66,14 @@
 | MPI、事务与公共接口 | MG 可选本地 counters 不再控制 collective；应用七项冷控制一致性、分配失败与共同回退已有针对性验收 | 不能据局部失败矩阵声称所有产品路径已穷举；ESF/parcel/migration 还没有加入当前共同事务 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | I/O、Restart 与完成状态 | 日志 flush/close 统一决定全 rank 完成；读取前大小检查、reader bulk 预算、失败不发布、同方法与 rank relayout 恢复已验 | 普通 CSV close 不等于 fsync；reader bulk 不是产品总峰值/RSS。新增模型身份与持久状态仍需扩展 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | 内存、工作区与生命周期 | 多标量 C++ 唯一分配、恢复/输出交叉存活、销毁重建和 MPI owned 资源已有小型 profile | 全产品硬峰值预算仍缺；MPI/libc、allocator 余量、arena 外数组、halo、image/staging 的同时活跃集合需统一。局部零泄漏计数不等于全进程上限 | [独占验收](../verification/2026-09-07-exclusive-module-acceptance.md) |
-| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot 已存在；逐 loop 来源/覆盖/账目已验 | 当前活动切片补 RHS norm；MG 层级归因、r1 初猜收益待测。64 loops/advance 溢出会拒绝完整证据，尚无分段输出 | [热恢复成本](../verification/2026-09-07-re3900-thermodynamic-recovery.md) |
+| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐 loop 来源/覆盖/账目及 V4 RHS 真实阈值已验 | MG 层级成本、已有 guard 触发率仍不可观测；64 loops/advance 溢出会拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md) |
 | 构建与可执行身份 | 有 Git 身份的干净 checkout 可独立构建，普通最小 CLI 已运行 | 无 `.git` 源归档可构建但 run 在 `invalid_plan/10505` 被身份合同拒绝；归档来源身份尚无运行合同 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 
 两项关键量测限定：
 
 - IBM 标量空间 MMS 的两次观测阶数：对齐壁 `1.974/1.994`，斜壁 `0.861/1.134`，圆柱 `1.653/0.861`。后续固定几何复核没有消除该限制；需要一致的几何/通量离散研究，不能只细分 STL。
 - `48493ed` 的 7001–7250 单轮、128 ranks、1679 loops 的历史观测完整；纯 advance 平均 9.227 s/步，Krylov 3.780 s/步（M 1.866 s 是其子项）、候选装配 2.186 s/步。它记录了修正版方法的成本，未证明比 COAST 更快。CSV 没有 `||b||`，r1 的 `rtol=1e-6` 只是由冻结规则重建，完整停止阈值尚不可恢复。
+- `16fd8f0` 的 9501–9510 新观测确认：r1 实际阈值约 `1.46e-8–1.56e-8`；后 9 步 r2–r6 共 36 loops 都由 atol=`1e-8` 主导。r1 M/apply 与其他 diagonal 相近，下一项选择 MG 内部归因，而不是再加初猜保护或放宽容差。
 
 ## 4. 替代验收的案例与比较身份
 

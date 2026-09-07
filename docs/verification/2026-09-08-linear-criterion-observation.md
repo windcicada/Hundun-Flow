@@ -62,10 +62,98 @@ MPI 测试使用 `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`，
 开发期 RED 仅保存在代理工具 stdout 中；最终 88-check CLI 日志已独立落盘，
 不把不存在的 RED 文件记为完整归档。
 
-## 后续验证边界
+## 干净候选与单轮生产观测
 
-本地回归通过不等于新性能排名。接下来从只读 checkpoint，以同方法精确续算，
-在新目录运行一次有界窗口，验证 V4 完整来源和数量，并记录实际阈值与 A/M 成本。
+观测提交 `16fd8f085e845628a545dc7d4d371b3064e9ef38`，
+tree `8a53030af5f42f63dff6dac7fd3ce134aaa8e0c9`。
+独立干净 checkout `hundun-flow-criterion-accept-20260908` 使用与原冻结程序相同的
+Clang 15/libc++、Release、`-march=znver3 -mno-fma -ffp-contract=off`，
+7/7 选定回归通过（43.99 s）。后续文档提交不是新的已测二进制身份。
+
+- runner SHA-256：`8cfc9fe3a613a84e677fe536a353779040b42bf525650ae10373616e23d33545`。
+- build manifest SHA-256：`d235d3a3974eec4fd88ce62a03ff24ff3ed6fbc5088209c80652dae8b0140f3f`。
+- 只读源为原长测 `generation-9500-139424060480232`，manifest
+  `ed4600dc5068bb3118acd14aeefffcfde527a47383c23c3c36fee709f47aba78`。
+- 新目录 `pilot-criterion-9500-9510-20260908`，128 ranks，10 步，仅一轮；
+  原网格、变物性、固定 dt、门槛、refinement 及持久化设置未改。
+  没有 method-recovery；来源/目标方法签名均为 `12213963202598979269`。
+- 10 步 BDF2，无重试/恢复/降阶；统计 epoch 保留 7000、采样起点 17001、样本数 0。
+  `conservation.csv` 的积分账本按既有公共合同另从重启点 9500 开始，不与统计 epoch 混同。
+  复用旧检查器时一度误将两种 epoch 都写为 7000，纠正检查器后通过，生产实现未改。
+- 全窗口连续性/能量归一化最大值分别为 `2.61757e-7 / 8.80580e-7`；
+  流体温度范围 `299.97904–300.02367 K`，固体占位区域极值及极值位置没有漂移。
+  本观测改动未重复全固体 checkpoint MPI 探针，不把区域极值检查写成全载荷逐单元比较。
+- V4 observer 验证 10 步、70 logical loops、每 loop 128 ranks，来源和覆盖完整；
+  原 Evidence 的 runtime 校验通过。末次 flush/close 成功，程序正常退出。
+- 9510 Visit 的 128 块引用集合、LittleEndian 二进制长度、有限字段、单调坐标、
+  无重叠分区及总计 6,070,272 单元通过检查。末次 checkpoint 有 128 个非空 rank 文件、
+  manifest、完成标记、accumulator/statistics；代次 `generation-9510-146520080763070`。
+  manifest SHA-256 为 `f8bb868eb6c006b06a5b1e1f6ff9718071e0a65b5762ff65e139628806e88ccc`。
+- 133 个源 checkpoint/统计文件及冻结输入/程序哈希复核不变。原长测仍为全体 SIGSTOP，
+  短测期间仅候选的 128 ranks 活跃，未替换原长测或从较早的 pilot 点重启它。
+
+### 新成本数据及口径
+
+进程总墙钟 111.45 s，含启动、恢复与末次输出；不能直接除以十当作纯求解成本。
+重启会按既有合同清除非持久的 warm authority，首步单列；
+旧长测的相同步号因此不是相同求解初猜基线。本轮没有算法 A/B 或 COAST 速度比较。
+
+| 窗口 | mean(max-rank full) | mean(max-rank advance) |
+|---|---:|---:|
+| 首步 9501 | 9.774696 s | 9.762793 s |
+| 9502–9510，9 步 | 10.845357 s | 9.562760 s |
+
+9510 含最终输出，full=20.903768 s、advance=9.452607 s；该步 rank-mean
+Visit/checkpoint 分别 2.159710/9.279872 s。不能将短窗的一次末次输出频率外推为长测均摊成本。
+
+后 9 步每步 rank-mean：Krylov 4.014488 s，内部 A/M 为 1.389056/2.015330 s；
+候选装配 2.278196 s；MG refill/copy 为 0.075388/0.011184 s，copy 包含于 refill；
+Schur prepare 0.227973 s，最终动量 0.201856 s。嵌套子项不得重复加到总墙钟。
+
+| 求解类别（后 9 步） | loops | 平均迭代 | solve ms/loop | A/M ms/apply | breakdown/loop |
+|---|---:|---:|---:|---:|---:|
+| C1 spatial | 9 | 22.667 | 944.296 | 17.263 / 11.394 | 5.000 |
+| C2 r0 diagonal | 9 | 20.111 | 394.856 | 3.534 / 11.490 | 4.667 |
+| r1 diagonal | 9 | 32.333 | 650.022 | 3.559 / 11.313 | 6.444 |
+| r2 diagonal | 9 | 29.111 | 561.479 | 3.554 / 11.060 | 6.333 |
+| r3 diagonal | 9 | 26.889 | 534.483 | 3.567 / 11.287 | 5.667 |
+| r4 diagonal | 9 | 27.556 | 535.345 | 3.564 / 11.122 | 6.111 |
+| r5 diagonal | 8 | 20.500 | 401.784 | 3.566 / 11.345 | 4.375 |
+| r6 diagonal | 1 | 17.000 | 331.797 | 3.594 / 11.398 | 4.000 |
+
+63 logical loops、1609 迭代、2358 A/1609 M；没有 C2 spatial 样本。
+现有 Evidence JSON 与 CSV 按 step/corrector/refinement ordinal 对应，
+工作次数和初末残差精确匹配。breakdown 为既有递推恢复计数，不是物理发散次数。
+
+实际停止阈值带来了两点此前不能从 CSV 直接证实的结论：
+
+- r1 的 rtol=`1e-6`，`||b||=0.014628–0.015590`，门槛为 `1.4628e-8–1.5590e-8`。
+- r2–r6 的全部 36 loops 已由 atol=`1e-8` 主导，单看 rtol 大小会误判实际松紧。
+
+C2 r0 的连续性/能量平均收缩比为 `0.009466 / 1.094405`，r1 为
+`1.187417 / 0.161684`；分量不逐次同时单调收缩，不据此单独判为实现缺陷。
+所有 refinement 的记录初残都等于 RHS 范数；因为已有保护会覆盖初残，
+这不能证明保护触发过多少次。
+
+### 数据身份与后处理限制
+
+外部完整审计目录：
+`/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/criterion-observation-20260908`。
+仓库内保留[紧凑验收收据](data/2026-09-08-linear-criterion/pilot-acceptance.json)。
+`observation.json` / `loops.jsonl` 来自本候选的正式 CLI；VTK/区域检查使用封存的
+`check-pilot-output.py`，成本复算使用事后整理并实际重算的 `summarize-cost.py`。
+
+首份一次性 `cost-summary.json` 经 JS 中转时舍入了 52 个 uint64 身份字段，
+不是求解器或原始 Evidence 的问题。原文件保留只读，不作为身份权威；
+新的 `cost-summary-reproduced.json` 由原生 Python JSON 写出，记录逐项纠正清单。
+全部成本、计数及其他既有字段一致，source history signature 精确保留；
+复算脚本 hash `238e0d491c8ed985c4591900d04ee04bb9f185e4426b84ebfafa492204729f99`，
+复算产物 hash `3ce62a7a7ea7dc361069e3dad0e68cd076d91e87f5b92f5140a3b48a1feb9935`。
+
+## 下一切片与验收边界
+
+本地回归和单轮观测通过不等于新性能排名。下一切片只增加默认关闭的
+M 内部 MG 层级归因，区分平滑、残差、传递、粗解和通信，再据新证据选择一个优化。
 当前 C2 refinement 已有比零初猜差则回退的保护；不能重复实现该功能，
 也不能从覆盖后的 `linear_initial` 反推原始初猜质量。
 数值优化需由新测量定位后单独实验、单独提交；本提交不包含速度提升结论。

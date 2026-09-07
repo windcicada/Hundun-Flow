@@ -1,0 +1,23 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-criterion-accept-20260908/build-accept
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-criterion-accept-20260908/build-accept
+    Start  31: v04_solver_observation_cli
+1/7 Test  #31: v04_solver_observation_cli ..........   Passed    3.97 sec
+    Start  45: v04_runner_statistics_epoch_mpi_1
+2/7 Test  #45: v04_runner_statistics_epoch_mpi_1 ...   Passed   14.79 sec
+    Start  46: v04_runner_statistics_epoch_mpi_2
+3/7 Test  #46: v04_runner_statistics_epoch_mpi_2 ...   Passed   12.95 sec
+    Start  47: v04_runner_statistics_epoch_mpi_4
+4/7 Test  #47: v04_runner_statistics_epoch_mpi_4 ...   Passed   11.35 sec
+    Start 277: v04_solver_krylov_mpi_1
+5/7 Test #277: v04_solver_krylov_mpi_1 .............   Passed    0.29 sec
+    Start 279: v04_solver_krylov_mpi_2
+6/7 Test #279: v04_solver_krylov_mpi_2 .............   Passed    0.30 sec
+    Start 281: v04_solver_krylov_mpi_4
+7/7 Test #281: v04_solver_krylov_mpi_4 .............   Passed    0.33 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Label Time Summary:
+v04_focused    =   2.19 sec*proc (3 tests)
+
+Total Test time (real) =  43.99 sec

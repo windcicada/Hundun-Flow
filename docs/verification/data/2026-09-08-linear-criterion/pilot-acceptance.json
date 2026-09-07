@@ -1,0 +1,104 @@
+{
+  "schema": "HUNDUN_LINEAR_CRITERION_PILOT_ACCEPTANCE_V1",
+  "scope": "Observation-only production pilot; not COAST replacement or scientific acceptance",
+  "accepted": true,
+  "candidate_identity": {
+    "schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2",
+    "head": "16fd8f085e845628a545dc7d4d371b3064e9ef38",
+    "tree": "8a53030af5f42f63dff6dac7fd3ce134aaa8e0c9",
+    "build_manifest_sha256": "d235d3a3974eec4fd88ce62a03ff24ff3ed6fbc5088209c80652dae8b0140f3f",
+    "executable_sha256": "8cfc9fe3a613a84e677fe536a353779040b42bf525650ae10373616e23d33545",
+    "identity_sha256": "b16264abb36e5dec8474d2b8d38dc1622ed88fea10e4a5abdf4b8cd8c3ef3d4b"
+  },
+  "run_start": {
+    "kind": "restart",
+    "previous_step": 9500,
+    "previous_time": 0.1311846665838264,
+    "restart_manifest_sha256": "ed4600dc5068bb3118acd14aeefffcfde527a47383c23c3c36fee709f47aba78",
+    "history": {
+      "source_format_version": 3,
+      "source_signature": 12213963202598979269,
+      "target_signature": 12213963202598979269,
+      "policy": "require_compatible"
+    }
+  },
+  "rounds": 1,
+  "steps": 10,
+  "ranks": 128,
+  "process_wall_seconds": 111.45,
+  "observer": {
+    "schema": "HUNDUN_LOOP_OBSERVATION_V4",
+    "complete": true,
+    "validated_steps": 10,
+    "loop_count": 70
+  },
+  "output": {
+    "schema": "HUNDUN_RE3900_CRITERION_PILOT_AUDIT_V1",
+    "complete": true,
+    "step_range": [
+      9501,
+      9510
+    ],
+    "steps": 10,
+    "ranks": 128,
+    "attempts_per_step": 1,
+    "bdf1_steps": 0,
+    "bdf2_steps": 10,
+    "terminal_maxima": {
+      "eos": 0.0,
+      "continuity": 2.617570949848936e-07,
+      "energy": 8.805795074746012e-07,
+      "closed_mass": 0.0,
+      "gauge": 0.0
+    },
+    "fluid_ranges": {
+      "T": [
+        299.9790418656781,
+        300.023665045917
+      ],
+      "p": [
+        107114.70444352923,
+        107142.07143345375
+      ],
+      "rho": [
+        1.238967326204426,
+        1.2392473944722178
+      ]
+    },
+    "visit_files": 128,
+    "visit_cells": 6070272,
+    "visit_fields": [
+      [
+        "U",
+        3
+      ],
+      [
+        "pi",
+        1
+      ],
+      [
+        "h",
+        1
+      ]
+    ],
+    "checkpoint_rank_files": 128,
+    "completion_generation": "generation-9510-146520080763070",
+    "inherited_statistics_epoch": {
+      "start_step": 7000,
+      "development_steps": 10000,
+      "sampling_start_step": 17001,
+      "reset_reason": "method_recovery"
+    },
+    "checkpoint_all_solid_check": "not repeated for observation-only change; regional extrema checked",
+    "statistical_validation": false
+  },
+  "source_files_unchanged": 133,
+  "checkpoint_manifest_sha256": "f8bb868eb6c006b06a5b1e1f6ff9718071e0a65b5762ff65e139628806e88ccc",
+  "cost_summary": "cost-summary-reproduced.json",
+  "cost_summary_sha256": "3ce62a7a7ea7dc361069e3dad0e68cd076d91e87f5b92f5140a3b48a1feb9935",
+  "cost_script": "summarize-cost.py",
+  "cost_script_sha256": "238e0d491c8ed985c4591900d04ee04bb9f185e4426b84ebfafa492204729f99",
+  "formal_speed_comparison": false,
+  "scientific_acceptance": false,
+  "long_job_state": "SIGSTOP; 128 retained ranks, no replacement or resume"
+}
