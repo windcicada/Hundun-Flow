@@ -1,0 +1,960 @@
+{
+  "first10": {
+    "range": [
+      7001,
+      7010
+    ],
+    "groups": {
+      "C1-r0-spatial": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 239,
+          "A_calls": 357,
+          "M_calls": 239,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 10,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 1.3239037919921874,
+          "solve_ns": 9.996605510414064,
+          "close_ns": 0.0268217291796875,
+          "A_ns": 6.113891585984375,
+          "M_ns": 2.6608294246328126,
+          "dot_ns": 0.15064679584375,
+          "reduce_ns": 0.45290038718750003,
+          "update_ns": 0.083213835859375,
+          "mg_refill_ns": 0.09665836,
+          "mg_copy_ns": 0.014758347796874998,
+          "structured_wait_ns": 0.5674721584296876,
+          "structured_control_ns": 0.0399667758984375,
+          "candidate_ns": 3.3190693561484372
+        },
+        "linear_contraction": {
+          "min": 3.4971029668494164e-05,
+          "mean": 6.908656488837303e-05,
+          "max": 9.767175221203677e-05
+        },
+        "continuity_contraction": {
+          "min": 0.00027338049584526983,
+          "mean": 0.0005249316226898797,
+          "max": 0.000671633623427187
+        },
+        "energy_contraction": {
+          "min": 0.0015774005936355982,
+          "mean": 0.003710983672646868,
+          "max": 0.0058514977455733485
+        },
+        "mean_iterations": 23.9,
+        "rank_mean_solve_s_per_loop": 0.9996605510414064,
+        "rank_mean_M_s_per_apply": 0.011133177508923902,
+        "rank_mean_A_s_per_apply": 0.01712574673945203,
+        "effective_relative_tolerance_reconstructed": [
+          0.0001,
+          0.0001
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 55,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r0-diagonal": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 195,
+          "A_calls": 291,
+          "M_calls": 195,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 10,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.15069671038281252,
+          "solve_ns": 3.8567065313046878,
+          "close_ns": 0.027151650843749996,
+          "A_ns": 1.0398449338046878,
+          "M_ns": 2.18447334040625,
+          "dot_ns": 0.16385746432031253,
+          "reduce_ns": 0.06977421196874999,
+          "update_ns": 0.0895389088203125,
+          "mg_refill_ns": 0.1078495943203125,
+          "mg_copy_ns": 0.0164183747578125,
+          "structured_wait_ns": 0.32272844415625,
+          "structured_control_ns": 0.10108476732031249,
+          "candidate_ns": 3.0414788505000003
+        },
+        "linear_contraction": {
+          "min": 2.9961175824988676e-05,
+          "mean": 4.878334229338974e-05,
+          "max": 7.443856215677918e-05
+        },
+        "continuity_contraction": {
+          "min": 0.005832367092805789,
+          "mean": 0.01011734057122373,
+          "max": 0.014858955346949806
+        },
+        "energy_contraction": {
+          "min": 1.0450744282370033,
+          "mean": 1.1041672138300471,
+          "max": 1.1885244769605734
+        },
+        "mean_iterations": 19.5,
+        "rank_mean_solve_s_per_loop": 0.3856706531304688,
+        "rank_mean_M_s_per_apply": 0.011202427386698717,
+        "rank_mean_A_s_per_apply": 0.0035733502879886176,
+        "effective_relative_tolerance_reconstructed": [
+          0.0001,
+          0.0001
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 40,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r1-diagonal": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 325,
+          "A_calls": 465,
+          "M_calls": 325,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 10,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.1508748635625,
+          "solve_ns": 6.362220804367189,
+          "close_ns": 0.027292000703125,
+          "A_ns": 1.6734333210937502,
+          "M_ns": 3.5690731320078126,
+          "dot_ns": 0.323061732609375,
+          "reduce_ns": 0.12372245376562499,
+          "update_ns": 0.1832878507265625,
+          "mg_refill_ns": 0.1069488188125,
+          "mg_copy_ns": 0.015942326765625,
+          "structured_wait_ns": 0.5508060053515624,
+          "structured_control_ns": 0.166548730515625,
+          "candidate_ns": 3.0123665914296875
+        },
+        "linear_contraction": {
+          "min": 4.0908053627918846e-07,
+          "mean": 7.437574921452751e-07,
+          "max": 9.853240206860922e-07
+        },
+        "continuity_contraction": {
+          "min": 1.079104884124107,
+          "mean": 1.171893834955771,
+          "max": 1.2667643734676857
+        },
+        "energy_contraction": {
+          "min": 0.10095152219056845,
+          "mean": 0.16012802664610365,
+          "max": 0.18389110963709038
+        },
+        "mean_iterations": 32.5,
+        "rank_mean_solve_s_per_loop": 0.6362220804367189,
+        "rank_mean_M_s_per_apply": 0.010981763483100962,
+        "rank_mean_A_s_per_apply": 0.0035987813356854843,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 63,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r2-diagonal": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 281,
+          "A_calls": 404,
+          "M_calls": 281,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 10,
+          "ladder_candidates": 0,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.1520301413125,
+          "solve_ns": 5.7045393680156256,
+          "close_ns": 0.027891206101562503,
+          "A_ns": 1.4577027436640626,
+          "M_ns": 3.0562814214062497,
+          "dot_ns": 0.3720335005078125,
+          "reduce_ns": 0.12213604265625,
+          "update_ns": 0.21712706092187498,
+          "mg_refill_ns": 0.10837553891406249,
+          "mg_copy_ns": 0.0158849105625,
+          "structured_wait_ns": 0.4746553213671875,
+          "structured_control_ns": 0.147934674796875,
+          "candidate_ns": 2.999775927710937
+        },
+        "linear_contraction": {
+          "min": 3.136394929701711e-06,
+          "mean": 5.364796235297383e-06,
+          "max": 8.452385784305066e-06
+        },
+        "continuity_contraction": {
+          "min": 0.28627745932590165,
+          "mean": 0.34630001547197947,
+          "max": 0.4033328692410091
+        },
+        "energy_contraction": {
+          "min": 0.25306185754248667,
+          "mean": 0.31419637313243065,
+          "max": 0.3565264030403731
+        },
+        "mean_iterations": 28.1,
+        "rank_mean_solve_s_per_loop": 0.5704539368015625,
+        "rank_mean_M_s_per_apply": 0.01087644633952402,
+        "rank_mean_A_s_per_apply": 0.003608175108079363,
+        "effective_relative_tolerance_reconstructed": [
+          2.548404869536563e-06,
+          8.63049647197376e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 45,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r3-diagonal": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 263,
+          "A_calls": 379,
+          "M_calls": 263,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 10,
+          "ladder_candidates": 3,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.149797052734375,
+          "solve_ns": 5.0919889841562505,
+          "close_ns": 0.027529026007812506,
+          "A_ns": 1.3577207269531248,
+          "M_ns": 2.85247722503125,
+          "dot_ns": 0.24601792803906253,
+          "reduce_ns": 0.097914372765625,
+          "update_ns": 0.1321259147421875,
+          "mg_refill_ns": 0.106907720515625,
+          "mg_copy_ns": 0.015911813640624998,
+          "structured_wait_ns": 0.4288634632265625,
+          "structured_control_ns": 0.132190994921875,
+          "candidate_ns": 3.5158727843437503
+        },
+        "linear_contraction": {
+          "min": 1.1605591207754646e-05,
+          "mean": 1.8242920722529752e-05,
+          "max": 2.3322370103412443e-05
+        },
+        "continuity_contraction": {
+          "min": 0.13019545817444209,
+          "mean": 0.6242518340794239,
+          "max": 0.9575072276913501
+        },
+        "energy_contraction": {
+          "min": 0.1443997852578605,
+          "mean": 0.6052075150706795,
+          "max": 0.9209575022216036
+        },
+        "mean_iterations": 26.3,
+        "rank_mean_solve_s_per_loop": 0.509198898415625,
+        "rank_mean_M_s_per_apply": 0.010845921007723384,
+        "rank_mean_A_s_per_apply": 0.00358237658826682,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          3.104564651363744e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 48,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r4-diagonal": {
+        "loops": 10,
+        "counts": {
+          "invoked": 10,
+          "iterations": 253,
+          "A_calls": 373,
+          "M_calls": 253,
+          "baseline_candidates": 10,
+          "extrapolated_candidates": 8,
+          "ladder_candidates": 7,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.15479224971875,
+          "solve_ns": 4.861275064109376,
+          "close_ns": 0.0271609416015625,
+          "A_ns": 1.340037135859375,
+          "M_ns": 2.7808640768750004,
+          "dot_ns": 0.16538197239843747,
+          "reduce_ns": 0.10545134434375,
+          "update_ns": 0.0702325394609375,
+          "mg_refill_ns": 0.10960144469531251,
+          "mg_copy_ns": 0.0158001985859375,
+          "structured_wait_ns": 0.4257488336484374,
+          "structured_control_ns": 0.134788202015625,
+          "candidate_ns": 3.860664235367188
+        },
+        "linear_contraction": {
+          "min": 9.100101968077597e-06,
+          "mean": 4.9726600304394604e-05,
+          "max": 0.00014219946583269756
+        },
+        "continuity_contraction": {
+          "min": 0.112898482298517,
+          "mean": 0.19582833595907412,
+          "max": 0.44526260856202204
+        },
+        "energy_contraction": {
+          "min": 0.14185986101219425,
+          "mean": 0.2505902909407804,
+          "max": 0.4772626965238793
+        },
+        "mean_iterations": 25.3,
+        "rank_mean_solve_s_per_loop": 0.48612750641093755,
+        "rank_mean_M_s_per_apply": 0.01099155761610672,
+        "rank_mean_A_s_per_apply": 0.0035925928575318367,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 54,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r5-diagonal": {
+        "loops": 6,
+        "counts": {
+          "invoked": 6,
+          "iterations": 125,
+          "A_calls": 183,
+          "M_calls": 125,
+          "baseline_candidates": 6,
+          "extrapolated_candidates": 6,
+          "ladder_candidates": 1,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.0903412846640625,
+          "solve_ns": 2.3533376944453126,
+          "close_ns": 0.016201711351562502,
+          "A_ns": 0.654446272921875,
+          "M_ns": 1.372619676,
+          "dot_ns": 0.0724843159140625,
+          "reduce_ns": 0.043520515960937506,
+          "update_ns": 0.030485558125,
+          "mg_refill_ns": 0.0645412608125,
+          "mg_copy_ns": 0.009430663640625,
+          "structured_wait_ns": 0.2077388155234375,
+          "structured_control_ns": 0.0651205186875,
+          "candidate_ns": 2.022458469390625
+        },
+        "linear_contraction": {
+          "min": 6.4522588888288e-05,
+          "mean": 0.00012204600053054274,
+          "max": 0.00016696921928701608
+        },
+        "continuity_contraction": {
+          "min": 0.2800234269360075,
+          "mean": 0.34105567855776076,
+          "max": 0.5072706992394893
+        },
+        "energy_contraction": {
+          "min": 0.23498307364888138,
+          "mean": 0.35528592867466857,
+          "max": 0.4399541395329085
+        },
+        "mean_iterations": 20.833333333333332,
+        "rank_mean_solve_s_per_loop": 0.3922229490742188,
+        "rank_mean_M_s_per_apply": 0.010980957408,
+        "rank_mean_A_s_per_apply": 0.00357620914164959,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 30,
+          "convergence_rejections": 0
+        }
+      }
+    },
+    "rank_mean_seconds_per_step": {
+      "full_step_ns": 9.24138179136953,
+      "advance_ns": 9.229736758620312,
+      "observables_ns": 0.0111462706578125,
+      "visit_ns": 5.540390625e-08,
+      "evidence_resources_ns": 0.00039605353125,
+      "csv_ns": 0.00010255552421875,
+      "checkpoint_ns": 9.763203125e-08,
+      "candidate_ns": 2.1771686214890624,
+      "state_copy_ns": 0.0004536484359375,
+      "velocity_halo_ns": 0.10008705519765625,
+      "thermo_ns": 0.20569495303125,
+      "boundary_derived_ns": 0.5149625986992188,
+      "flux_ns": 0.442942575196875,
+      "certificate_ns": 0.168870178565625,
+      "residual_ns": 0.6020662015429687,
+      "equivalence_hash_ns": 0.14206587825546876,
+      "schur_prepare_ns": 0.21724360943671875,
+      "krylov_ns": 3.82266739568125,
+      "recovery_ns": 0.01800482657890625,
+      "pressure_prepare_ns": 0.0,
+      "pressure_solve_ns": 0.0,
+      "pressure_close_ns": 0.0,
+      "diagonal_prepare_ns": 0.0848532302375,
+      "diagonal_solve_ns": 2.8230068446398437,
+      "diagonal_close_ns": 0.0153226536609375,
+      "spatial_prepare_ns": 0.13239037919921876,
+      "spatial_solve_ns": 0.9996605510414063,
+      "spatial_close_ns": 0.00268217291796875,
+      "A_apply_ns": 1.363707672028125,
+      "M_apply_ns": 1.8476618296359375,
+      "arnoldi_dot_ns": 0.14934837096328124,
+      "arnoldi_reduce_ns": 0.10154193286484375,
+      "arnoldi_update_ns": 0.080601166865625,
+      "final_momentum_ns": 0.20388328406640624,
+      "terminal_metrics_ns": 0.0051864035421875,
+      "boundary_ledger_ns": 0.03317609748515625,
+      "structured_wait_ns": 0.2978534445476563,
+      "structured_control_ns": 0.3242094012703125,
+      "scalar_remap_ns": 0.0
+    },
+    "mean_max_rank_full_step_s": 9.241384304,
+    "mean_max_rank_advance_s": 9.2297657703,
+    "max_rank_full_step_s_range": [
+      8.561376504,
+      10.36449679
+    ]
+  },
+  "full250": {
+    "range": [
+      7001,
+      7250
+    ],
+    "groups": {
+      "C1-r0-spatial": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 5779,
+          "A_calls": 8517,
+          "M_calls": 5779,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 250,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 33.83020248060155,
+          "solve_ns": 238.1155285389688,
+          "close_ns": 0.6665980223671878,
+          "A_ns": 147.72135079234383,
+          "M_ns": 64.16485463923432,
+          "dot_ns": 3.911975262601564,
+          "reduce_ns": 8.105328929148437,
+          "update_ns": 2.240141579773437,
+          "mg_refill_ns": 2.702519826882813,
+          "mg_copy_ns": 0.4044515708749999,
+          "structured_wait_ns": 13.494920672257809,
+          "structured_control_ns": 1.130256835351563,
+          "candidate_ns": 83.14003093611724
+        },
+        "linear_contraction": {
+          "min": 3.4971029668494164e-05,
+          "mean": 7.893414099977882e-05,
+          "max": 9.996018497775406e-05
+        },
+        "continuity_contraction": {
+          "min": 0.00027194057042069817,
+          "mean": 0.0004931801409295682,
+          "max": 0.0007739409293447172
+        },
+        "energy_contraction": {
+          "min": 0.0015774005936355982,
+          "mean": 0.0041571355810906905,
+          "max": 0.007661120976089316
+        },
+        "mean_iterations": 23.116,
+        "rank_mean_solve_s_per_loop": 0.9524621141558751,
+        "rank_mean_M_s_per_apply": 0.011103106876489759,
+        "rank_mean_A_s_per_apply": 0.017344293858441214,
+        "effective_relative_tolerance_reconstructed": [
+          0.0001,
+          0.0001
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1205,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r0-diagonal": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 5042,
+          "A_calls": 7458,
+          "M_calls": 5042,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 250,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 3.7818859987734386,
+          "solve_ns": 99.51734563243751,
+          "close_ns": 0.6809560691093749,
+          "A_ns": 26.816134694749998,
+          "M_ns": 56.99948612052342,
+          "dot_ns": 3.911932291500001,
+          "reduce_ns": 1.818790692249999,
+          "update_ns": 2.123367842999999,
+          "mg_refill_ns": 2.7112557705546867,
+          "mg_copy_ns": 0.40634730721875006,
+          "structured_wait_ns": 8.321352858789066,
+          "structured_control_ns": 2.609271339382814,
+          "candidate_ns": 75.80859868838279
+        },
+        "linear_contraction": {
+          "min": 1.533721964007107e-05,
+          "mean": 4.7581696898749284e-05,
+          "max": 8.433447404183829e-05
+        },
+        "continuity_contraction": {
+          "min": 0.005832367092805789,
+          "mean": 0.009449812464286477,
+          "max": 0.014858955346949806
+        },
+        "energy_contraction": {
+          "min": 1.0116707622066397,
+          "mean": 1.1065121970028873,
+          "max": 1.1937602356145114
+        },
+        "mean_iterations": 20.168,
+        "rank_mean_solve_s_per_loop": 0.39806938252975005,
+        "rank_mean_M_s_per_apply": 0.011304935763689692,
+        "rank_mean_A_s_per_apply": 0.003595620098518369,
+        "effective_relative_tolerance_reconstructed": [
+          0.0001,
+          0.0001
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1047,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r1-diagonal": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 8359,
+          "A_calls": 12152,
+          "M_calls": 8359,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 0,
+          "ladder_candidates": 250,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 3.7964037140937483,
+          "solve_ns": 162.45587344604704,
+          "close_ns": 0.6814937646640623,
+          "A_ns": 43.646088579289064,
+          "M_ns": 92.2520353973906,
+          "dot_ns": 7.1770071432499964,
+          "reduce_ns": 3.0643090215937483,
+          "update_ns": 3.723382828812501,
+          "mg_refill_ns": 2.72302462919531,
+          "mg_copy_ns": 0.39747583877343745,
+          "structured_wait_ns": 13.847526152171877,
+          "structured_control_ns": 4.178869094265624,
+          "candidate_ns": 75.49303489046876
+        },
+        "linear_contraction": {
+          "min": 3.041571919701687e-07,
+          "mean": 7.478260312386012e-07,
+          "max": 9.97579539579544e-07
+        },
+        "continuity_contraction": {
+          "min": 1.0781079475867832,
+          "mean": 1.1848959129241974,
+          "max": 1.3069813065339673
+        },
+        "energy_contraction": {
+          "min": 0.10095152219056845,
+          "mean": 0.15806150274782144,
+          "max": 0.21373858373773774
+        },
+        "mean_iterations": 33.436,
+        "rank_mean_solve_s_per_loop": 0.6498234937841881,
+        "rank_mean_M_s_per_apply": 0.011036252589710563,
+        "rank_mean_A_s_per_apply": 0.003591679442008646,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1783,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r2-diagonal": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 6955,
+          "A_calls": 10115,
+          "M_calls": 6955,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 250,
+          "ladder_candidates": 0,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 3.7353261281015637,
+          "solve_ns": 134.00539094624997,
+          "close_ns": 0.6795944731093752,
+          "A_ns": 36.26991919059374,
+          "M_ns": 75.86805514221876,
+          "dot_ns": 5.815959336226562,
+          "reduce_ns": 2.520819680476562,
+          "update_ns": 2.9114688618515614,
+          "mg_refill_ns": 2.661068864695314,
+          "mg_copy_ns": 0.39723144153124995,
+          "structured_wait_ns": 11.406883374554686,
+          "structured_control_ns": 3.5328656067812494,
+          "candidate_ns": 75.59603750822654
+        },
+        "linear_contraction": {
+          "min": 1.2453510526047162e-06,
+          "mean": 5.000618415307429e-06,
+          "max": 8.452385784305066e-06
+        },
+        "continuity_contraction": {
+          "min": 0.25459590426393836,
+          "mean": 0.36022802948748345,
+          "max": 0.5126151665825739
+        },
+        "energy_contraction": {
+          "min": 0.23117753215418754,
+          "mean": 0.31429675349008984,
+          "max": 0.41900868503488553
+        },
+        "mean_iterations": 27.82,
+        "rank_mean_solve_s_per_loop": 0.5360215637849999,
+        "rank_mean_M_s_per_apply": 0.010908419143381563,
+        "rank_mean_A_s_per_apply": 0.003585755728185244,
+        "effective_relative_tolerance_reconstructed": [
+          2.1628240635707685e-06,
+          8.63049647197376e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1415,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r3-diagonal": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 6495,
+          "A_calls": 9382,
+          "M_calls": 6495,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 250,
+          "ladder_candidates": 50,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 3.702455510601564,
+          "solve_ns": 124.26151299812501,
+          "close_ns": 0.6796279045468747,
+          "A_ns": 33.61611249565625,
+          "M_ns": 70.69149966840628,
+          "dot_ns": 5.299353983062499,
+          "reduce_ns": 2.247921019171875,
+          "update_ns": 2.6396902301015626,
+          "mg_refill_ns": 2.637563129374999,
+          "mg_copy_ns": 0.3973918640468748,
+          "structured_wait_ns": 10.656656302148432,
+          "structured_control_ns": 3.2641007247500013,
+          "candidate_ns": 82.96917084247659
+        },
+        "linear_contraction": {
+          "min": 5.020385974665467e-06,
+          "mean": 1.6564019548432913e-05,
+          "max": 2.802629129469738e-05
+        },
+        "continuity_contraction": {
+          "min": 0.12135057558168785,
+          "mean": 0.732794932755882,
+          "max": 1.2841677486187115
+        },
+        "energy_contraction": {
+          "min": 0.0966827850826829,
+          "mean": 0.7059157440888144,
+          "max": 1.0027938019561156
+        },
+        "mean_iterations": 25.98,
+        "rank_mean_solve_s_per_loop": 0.49704605199250007,
+        "rank_mean_M_s_per_apply": 0.010883987631779259,
+        "rank_mean_A_s_per_apply": 0.003583043327185702,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          3.104564651363744e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1313,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r4-diagonal": {
+        "loops": 250,
+        "counts": {
+          "invoked": 250,
+          "iterations": 6251,
+          "A_calls": 9083,
+          "M_calls": 6251,
+          "baseline_candidates": 250,
+          "extrapolated_candidates": 192,
+          "ladder_candidates": 200,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 3.7223385046562485,
+          "solve_ns": 119.3561080365391,
+          "close_ns": 0.6997723845234375,
+          "A_ns": 32.50242014191404,
+          "M_ns": 68.07554739678127,
+          "dot_ns": 4.82778991602344,
+          "reduce_ns": 2.1594469916406243,
+          "update_ns": 2.317307369375,
+          "mg_refill_ns": 2.646474145156252,
+          "mg_copy_ns": 0.39745246091406256,
+          "structured_wait_ns": 10.265424000179683,
+          "structured_control_ns": 3.148715706882813,
+          "candidate_ns": 97.69295141971105
+        },
+        "linear_contraction": {
+          "min": 3.3547067938271444e-06,
+          "mean": 3.901661145766545e-05,
+          "max": 0.0001718242818405071
+        },
+        "continuity_contraction": {
+          "min": 0.09455349652832548,
+          "mean": 0.16016378216891267,
+          "max": 0.4780957366088988
+        },
+        "energy_contraction": {
+          "min": 0.12236271463490397,
+          "mean": 0.2319388984412039,
+          "max": 0.5510327654199587
+        },
+        "mean_iterations": 25.004,
+        "rank_mean_solve_s_per_loop": 0.4774244321461564,
+        "rank_mean_M_s_per_apply": 0.010890345128264482,
+        "rank_mean_A_s_per_apply": 0.0035783794056934975,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 1294,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r5-diagonal": {
+        "loops": 172,
+        "counts": {
+          "invoked": 172,
+          "iterations": 3388,
+          "A_calls": 4964,
+          "M_calls": 3388,
+          "baseline_candidates": 172,
+          "extrapolated_candidates": 172,
+          "ladder_candidates": 6,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 2.5718333672343743,
+          "solve_ns": 64.93469304091403,
+          "close_ns": 0.4668157445781248,
+          "A_ns": 17.78517682284375,
+          "M_ns": 37.019098540726546,
+          "dot_ns": 2.5222258974218756,
+          "reduce_ns": 1.1549242743984376,
+          "update_ns": 1.2221889428984385,
+          "mg_refill_ns": 1.8282370727656247,
+          "mg_copy_ns": 0.27293895328906276,
+          "structured_wait_ns": 5.553811431960937,
+          "structured_control_ns": 1.747731463726563,
+          "candidate_ns": 52.742498482984374
+        },
+        "linear_contraction": {
+          "min": 3.243355356018852e-05,
+          "mean": 0.00013576235533862275,
+          "max": 0.0003060353682899702
+        },
+        "continuity_contraction": {
+          "min": 0.15869748028133432,
+          "mean": 0.34301546966862717,
+          "max": 0.5472728592124151
+        },
+        "energy_contraction": {
+          "min": 0.2156296496517472,
+          "mean": 0.4426351303761284,
+          "max": 0.7643302061467817
+        },
+        "mean_iterations": 19.697674418604652,
+        "rank_mean_solve_s_per_loop": 0.37752728512159317,
+        "rank_mean_M_s_per_apply": 0.0109265343980893,
+        "rank_mean_A_s_per_apply": 0.00358283175319173,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 693,
+          "convergence_rejections": 0
+        }
+      },
+      "C2-r6-diagonal": {
+        "loops": 7,
+        "counts": {
+          "invoked": 7,
+          "iterations": 128,
+          "A_calls": 184,
+          "M_calls": 128,
+          "baseline_candidates": 7,
+          "extrapolated_candidates": 7,
+          "ladder_candidates": 7,
+          "incomplete_candidates": 0
+        },
+        "rank_mean_seconds": {
+          "prepare_ns": 0.1059832952109375,
+          "solve_ns": 2.412514006664063,
+          "close_ns": 0.018869615210937496,
+          "A_ns": 0.6585287788203126,
+          "M_ns": 1.3938631686015626,
+          "dot_ns": 0.09043016579687499,
+          "reduce_ns": 0.04251425190625,
+          "update_ns": 0.0435409392890625,
+          "mg_refill_ns": 0.07636416639843752,
+          "mg_copy_ns": 0.0111206932734375,
+          "structured_wait_ns": 0.2063986989375,
+          "structured_control_ns": 0.063474730578125,
+          "candidate_ns": 3.1536693187109375
+        },
+        "linear_contraction": {
+          "min": 0.00013818915071576172,
+          "mean": 0.0002183508487461632,
+          "max": 0.00030703903379550085
+        },
+        "continuity_contraction": {
+          "min": 0.17462231826426483,
+          "mean": 0.22295476682379117,
+          "max": 0.27325295054286614
+        },
+        "energy_contraction": {
+          "min": 0.2228133979615178,
+          "mean": 0.2509678173595263,
+          "max": 0.2761335023823367
+        },
+        "mean_iterations": 18.285714285714285,
+        "rank_mean_solve_s_per_loop": 0.3446448580948661,
+        "rank_mean_M_s_per_apply": 0.010889556004699708,
+        "rank_mean_A_s_per_apply": 0.0035789607544582207,
+        "effective_relative_tolerance_reconstructed": [
+          1e-06,
+          1e-06
+        ],
+        "absolute_floor": 1e-08,
+        "krylov_recovery": {
+          "norm_breakdown_restarts": 27,
+          "convergence_rejections": 0
+        }
+      }
+    },
+    "rank_mean_seconds_per_step": {
+      "full_step_ns": 9.282760083552125,
+      "advance_ns": 9.227273123871438,
+      "observables_ns": 0.01119037224971875,
+      "visit_ns": 0.00755094064096875,
+      "evidence_resources_ns": 0.00039821067653125,
+      "csv_ns": 0.00010313704990625,
+      "checkpoint_ns": 0.0362442990635625,
+      "candidate_ns": 2.1863839683483124,
+      "state_copy_ns": 0.00042468481928125,
+      "velocity_halo_ns": 0.10019788050646874,
+      "thermo_ns": 0.20227082844875,
+      "boundary_derived_ns": 0.5184594924715625,
+      "flux_ns": 0.446093405332,
+      "certificate_ns": 0.1696401072404375,
+      "residual_ns": 0.6061028747371875,
+      "equivalence_hash_ns": 0.1431682942325625,
+      "schur_prepare_ns": 0.22098571599709374,
+      "krylov_ns": 3.7802358665837814,
+      "recovery_ns": 0.0182949119124375,
+      "pressure_prepare_ns": 0.0,
+      "pressure_solve_ns": 0.0,
+      "pressure_close_ns": 0.0,
+      "diagonal_prepare_ns": 0.0856649060746875,
+      "diagonal_solve_ns": 2.8277737524279063,
+      "diagonal_close_ns": 0.01562851982296875,
+      "spatial_prepare_ns": 0.13532080992240625,
+      "spatial_solve_ns": 0.952462114155875,
+      "spatial_close_ns": 0.00266639208946875,
+      "A_apply_ns": 1.3560629259848438,
+      "M_apply_ns": 1.8658577602955313,
+      "arnoldi_dot_ns": 0.13422669598353126,
+      "arnoldi_reduce_ns": 0.08445621944234374,
+      "arnoldi_update_ns": 0.06888435438040626,
+      "final_momentum_ns": 0.20684437276759374,
+      "terminal_metrics_ns": 0.0046071395139375,
+      "boundary_ledger_ns": 0.0334291898608125,
+      "structured_wait_ns": 0.2950668343330625,
+      "structured_control_ns": 0.32525266256025,
+      "scalar_remap_ns": 0.0
+    },
+    "mean_max_rank_full_step_s": 9.282763024912,
+    "mean_max_rank_advance_s": 9.227301484532,
+    "max_rank_full_step_s_range": [
+      8.229466902,
+      19.667593086
+    ]
+  },
+  "scope": [
+    "One continuous repaired-method run; first10 is a prefix, not a second experiment.",
+    "Counts are logical solves (not sums over 128 replicas); times use rank means unless named max_rank.",
+    "A/M and communication are nested costs; MG copy is inside refill. Do not add them as disjoint wall time.",
+    "Effective relative tolerances are reconstructed from frozen forcing and measured selected residuals.",
+    "The final linear threshold is max(1e-8, rtol*rhs_norm); rhs_norm is not persisted, so its exact absolute value is not claimed.",
+    "No threshold, refinement capacity, solver, or numerical method was changed for this performance observation."
+  ]
+}
