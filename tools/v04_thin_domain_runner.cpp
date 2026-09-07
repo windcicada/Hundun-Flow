@@ -77,6 +77,7 @@ struct Options {
   bool dry_plan{};
   bool self_test{};
   bool observe_performance{};
+  DriverCellTraceWindow trace_window{};
   bool restart_method_recovery{};
   bool have_restart_development_steps{};
   std::uint64_t restart_development_steps{};
@@ -144,6 +145,10 @@ struct ThermoExtrema {
   double temperature_max{};
   double density_min{};
   double density_max{};
+  std::array<std::uint64_t, 2U> region_count{};
+  // Region-major p-/p+/T-/T+/rho-/rho+. Maximums are negated during MIN.
+  std::array<double, 12U> regional{};
+  std::array<std::uint64_t, 12U> region_cell{};
 };
 
 struct RestartBinding {
@@ -222,6 +227,21 @@ bool parse_options(int argc, char** argv, Options& out) {
       } else if (token == "--steps" && !out.have_steps &&
                  parse_u64(value, out.steps) && out.steps != 0U) {
         out.have_steps = true;
+      } else if (token == "--trace-first" && out.trace_window.first_step == 0U &&
+                 parse_u64(value, out.trace_window.first_step) && out.trace_window.first_step != 0U) {
+      } else if (token == "--trace-last" && out.trace_window.last_step == 0U &&
+                 parse_u64(value, out.trace_window.last_step) && out.trace_window.last_step != 0U) {
+      } else if (token == "--trace-cell" && out.trace_window.count < 2U) {
+        const auto first = value.find(',');
+        const auto second = first == std::string_view::npos ? first : value.find(',', first + 1U);
+        std::uint64_t x = 0U, y = 0U, z = 0U;
+        if (first == std::string_view::npos || second == std::string_view::npos ||
+            !parse_u64(value.substr(0U, first), x) ||
+            !parse_u64(value.substr(first + 1U, second - first - 1U), y) ||
+            !parse_u64(value.substr(second + 1U), z) || x > INT_MAX || y > INT_MAX || z > INT_MAX)
+          return false;
+        out.trace_window.cells[out.trace_window.count++] = {
+            static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)};
       } else if (token == "--restart-development-steps" &&
                  !out.have_restart_development_steps &&
                  parse_u64(value, out.restart_development_steps)) {
@@ -234,6 +254,11 @@ bool parse_options(int argc, char** argv, Options& out) {
       }
     }
   }
+  if ((out.trace_window.count == 0U &&
+       (out.trace_window.first_step != 0U || out.trace_window.last_step != 0U)) ||
+      (out.trace_window.count != 0U &&
+       (out.trace_window.first_step == 0U || out.trace_window.last_step < out.trace_window.first_step ||
+        out.self_test || out.dry_plan))) return false;
   if (out.restart_storage_compatibility !=
           RestartStorageCompatibility::strict &&
       out.restart_root.empty())
@@ -479,11 +504,11 @@ class EvidenceFile {
 // local failure even if a subsequent close clears/changes stream state. This
 // function runs on failure exits too, without changing committed solver state.
 bool complete_logs(MPI_Comm communicator, int rank,
-                   const std::array<std::ofstream*, 6U>& streams,
+                   const std::array<std::ofstream*, 7U>& streams,
                    EvidenceFile& evidence) {
-  constexpr std::array<const char*, 7U> names{{"force.csv", "health.csv",
+  constexpr std::array<const char*, 8U> names{{"force.csv", "health.csv",
       "conservation.csv", "probe.csv", "performance.csv", "solver-rank.csv",
-      "evidence.jsonl"}};
+      "cell-trace-rank.csv", "evidence.jsonl"}};
   constexpr std::array<const char*, 3U> operations{{"write", "flush", "close"}};
   std::array<int, 3U> first{{-1, 0, 0}};
   const auto record = [&](std::size_t stream, int operation) noexcept {
@@ -1267,6 +1292,16 @@ bool collect_thermo_extrema(MPI_Comm communicator,
       -std::numeric_limits<double>::infinity(),
       -std::numeric_limits<double>::infinity(),
       -std::numeric_limits<double>::infinity()}};
+  const std::size_t owned = static_cast<std::size_t>(u.interior.x) *
+                            u.interior.y * u.interior.z;
+  const auto activity = snapshot.cell_activity;
+  local_valid = activity.size == 0U ||
+                (activity.data != nullptr && activity.size == owned);
+  if (!all_true(communicator, local_valid)) return false;
+  ThermoExtrema regions;
+  regions.regional.fill(std::numeric_limits<double>::infinity());
+  regions.region_cell.fill(UINT64_MAX);
+  const Int3 global = snapshot.geometry->global_cells();
   std::vector<double> fractions(independent.size(), 0.0);
   for (std::int32_t z = 0; z < u.interior.z; ++z) {
     for (std::int32_t y = 0; y < u.interior.y; ++y) {
@@ -1296,6 +1331,29 @@ bool collect_thermo_extrema(MPI_Comm communicator,
         maximum[0U] = std::max(maximum[0U], absolute);
         maximum[1U] = std::max(maximum[1U], state.temperature);
         maximum[2U] = std::max(maximum[2U], state.rho);
+        const std::size_t flat = static_cast<std::size_t>(x) +
+            static_cast<std::size_t>(u.interior.x) *
+                (static_cast<std::size_t>(y) +
+                 static_cast<std::size_t>(u.interior.y) * z);
+        const std::uint8_t active = activity.size == 0U ? 1U : activity.data[flat];
+        if (active > 1U) { local_valid = false; continue; }
+        const std::size_t region = active == 1U ? 0U : 1U;
+        ++regions.region_count[region];
+        const std::uint64_t global_cell = snapshot.patch.begin.x + x +
+            static_cast<std::uint64_t>(global.x) *
+                (snapshot.patch.begin.y + y +
+                 static_cast<std::uint64_t>(global.y) * (snapshot.patch.begin.z + z));
+        const double values[]{absolute, -absolute, state.temperature,
+                              -state.temperature, state.rho, -state.rho};
+        for (std::size_t k = 0U; k < 6U; ++k) {
+          const std::size_t slot = region * 6U + k;
+          if (values[k] < regions.regional[slot] ||
+              (values[k] == regions.regional[slot] &&
+               global_cell < regions.region_cell[slot])) {
+            regions.regional[slot] = values[k];
+            regions.region_cell[slot] = global_cell;
+          }
+        }
       }
     }
   }
@@ -1313,8 +1371,21 @@ bool collect_thermo_extrema(MPI_Comm communicator,
         return std::isfinite(value) && value > 0.0;
       });
   if (!valid) return false;
+  const auto local_extrema = regions.regional;
+  if (MPI_Allreduce(MPI_IN_PLACE, regions.region_count.data(), 2,
+                    MPI_UINT64_T, MPI_SUM, communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(MPI_IN_PLACE, regions.regional.data(), 12,
+                    MPI_DOUBLE, MPI_MIN, communicator) != MPI_SUCCESS) return false;
+  for (std::size_t k = 0U; k < 12U; ++k)
+    if (local_extrema[k] != regions.regional[k]) regions.region_cell[k] = UINT64_MAX;
+  if (MPI_Allreduce(MPI_IN_PLACE, regions.region_cell.data(), 12,
+                    MPI_UINT64_T, MPI_MIN, communicator) != MPI_SUCCESS) return false;
+  for (std::size_t k = 0U; k < 12U; ++k)
+    regions.regional[k] = regions.region_count[k / 6U] == 0U
+        ? std::numeric_limits<double>::quiet_NaN()
+        : (k % 2U == 0U ? regions.regional[k] : -regions.regional[k]);
   out = {minimum[0U], maximum[0U], minimum[1U], maximum[1U], minimum[2U],
-         maximum[2U]};
+         maximum[2U], regions.region_count, regions.regional, regions.region_cell};
   return true;
 }
 
@@ -1815,6 +1886,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     return 5;
   }
 
+  status = driver.set_cell_trace_window(options.trace_window);
+  if (!status) return 5;
   CommittedOutputSnapshot snapshot;
   status = driver.committed_output_snapshot(snapshot);
   RuntimeGeometry runtime;
@@ -1990,6 +2063,13 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "observation_launcher_pid " << ::getpid() << '\n'
              << "visit_interval " << options.visit_interval << '\n'
              << "observe_performance " << options.observe_performance << '\n'
+             << "trace_cell_count " << options.trace_window.count << '\n'
+             << "trace_first_step " << options.trace_window.first_step << '\n'
+             << "trace_last_step " << options.trace_window.last_step << '\n'
+             << "trace_cell_0 " << options.trace_window.cells[0].x << ','
+             << options.trace_window.cells[0].y << ',' << options.trace_window.cells[0].z << '\n'
+             << "trace_cell_1 " << options.trace_window.cells[1].x << ','
+             << options.trace_window.cells[1].y << ',' << options.trace_window.cells[1].z << '\n'
              << "restarted " << (restarted ? 1 : 0) << '\n'
              << "restart_storage_migrated "
              << (restart_storage_migrated ? 1 : 0) << '\n'
@@ -2051,6 +2131,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream probe;
   std::ofstream performance;
   std::ofstream loop_performance;
+  std::ofstream cell_trace;
   struct NodeCommunicator {
     MPI_Comm value{MPI_COMM_NULL};
     ~NodeCommunicator() { if (value != MPI_COMM_NULL) MPI_Comm_free(&value); }
@@ -2061,6 +2142,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   // All returns below first join explicit log completion. An earlier solver or
   // checkpoint failure remains the primary exit status if closing also fails.
   const int run_result = [&]() -> int {
+  if (options.trace_window.count != 0U && !local_stage(communicator, [&] {
+        cell_trace.open(options.run_root / ("cell-trace-rank-" + std::to_string(rank) + ".csv"));
+        cell_trace << "step,rank,attempt,sweep,stage,i,j,k,active,rho,h,T,pi,rate,rho_n,rho_nm1,h_n,h_nm1,dropped\n";
+        return static_cast<bool>(cell_trace);
+      })) return 6;
   if (options.observe_performance && !local_stage(communicator, [&] {
         loop_performance.open(options.run_root / ("solver-rank-" + std::to_string(rank) + ".csv"));
         loop_performance << "step,rank,attempt,scalar_coupling_sweep,dt,attempt_status,corrector,refinement,kind,invoked,"
@@ -2132,7 +2218,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 "afc_limited_faces,afc_limited_face_fraction,afc_limited,"
                 "thermo_predictor_theta,thermo_predictor_limited,"
                 "pressure_solve_calls,refinement_solve_calls,linear_iterations,"
-                "max_rank_step_ns,included,exclusion\n";
+                "max_rank_step_ns,included,exclusion";
+    if (health) {
+      for (const char* region : {"fluid", "solid_placeholder"}) {
+        health << ',' << region << "_count";
+        for (const char* value : {"p_min", "p_max", "T_min", "T_max", "rho_min", "rho_max"})
+          health << ',' << region << '_' << value << ',' << region << '_' << value << "_cell";
+      }
+      health << '\n';
+    }
     if (probe)
       probe << "step,time,station,x_over_d,u,v,w,included,exclusion\n";
     return static_cast<bool>(force) && static_cast<bool>(health) &&
@@ -2182,6 +2276,24 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     const auto local_nanoseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
             .count());
+    if (!status && rank == 0) {
+      (void)write_numerical_failure(std::cerr, step.numerical_failure);
+      (void)write_step_completion_failure(std::cerr, step.completion);
+    }
+    if (options.trace_window.count != 0U && !local_stage(communicator, [&] {
+          for (std::size_t k = 0U; k < step.cell_trace.count; ++k) {
+            const auto& s = step.cell_trace.samples[k];
+            cell_trace << std::setprecision(17) << s.step << ',' << rank << ','
+                << s.attempt << ',' << s.composition_sweep << ',' << s.stage << ','
+                << s.global_index.x << ',' << s.global_index.y << ',' << s.global_index.z
+                << ',' << unsigned(s.active) << ',' << s.rho << ',' << s.h << ','
+                << s.temperature << ',' << s.pressure << ',' << s.rate << ','
+                << s.rho_accepted << ',' << s.rho_previous << ',' << s.h_accepted
+                << ',' << s.h_previous << ',' << step.cell_trace.dropped << '\n';
+          }
+          cell_trace.flush();
+          return static_cast<bool>(cell_trace);
+        })) return status ? 6 : 7;
     // Pure local, buffered diagnostic output; agree errors before any later
     // collective. Also preserve rejected attempts when advance ultimately fails.
     if (options.observe_performance && !local_stage(communicator, [&] {
@@ -2213,7 +2325,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
           }
           loop_performance.flush();
           return static_cast<bool>(loop_performance);
-        })) return 6;
+        })) return status ? 6 : 7;
     std::uint64_t maximum_nanoseconds = 0U;
     okay = MPI_Allreduce(&local_nanoseconds, &maximum_nanoseconds, 1,
                          MPI_UINT64_T, MPI_MAX, communicator) == MPI_SUCCESS;
@@ -2519,7 +2631,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                  step.piso.pressure_energy_refinement_solve_calls)
           << ',' << global_resources.linear_iterations << ','
           << maximum_nanoseconds << ',' << (included ? 1 : 0) << ','
-          << exclusion << '\n';
+          << exclusion;
+      for (std::size_t region = 0U; region < 2U; ++region) {
+        health << ',' << extrema.region_count[region];
+        for (std::size_t k = 0U; k < 6U; ++k) {
+          const std::size_t slot = region * 6U + k;
+          health << ',' << extrema.regional[slot] << ',' << extrema.region_cell[slot];
+        }
+      }
+      health << '\n';
       for (std::size_t station = 0U;
            station < spec.station_x_over_d.size(); ++station) {
         const std::size_t base = station * 3U;
@@ -2637,7 +2757,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   return 0;
   }();
   const bool logs_complete = complete_logs(communicator, rank,
-      {{&force, &health, &conservation, &probe, &performance, &loop_performance}},
+      {{&force, &health, &conservation, &probe, &performance, &loop_performance, &cell_trace}},
       evidence_file);
   okay = all_true(communicator, run_result == 0 && logs_complete);
   if (okay) okay = local_stage(communicator, [&] {
@@ -2773,7 +2893,8 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
          "[--restart-method-recovery [--restart-development-steps N]] "
-         "[--visit-interval N] [--observe-performance]\n";
+         "[--visit-interval N] [--observe-performance] "
+         "[--trace-cell i,j,k (at most twice) --trace-first N --trace-last N]\n";
 }
 
 }  // namespace

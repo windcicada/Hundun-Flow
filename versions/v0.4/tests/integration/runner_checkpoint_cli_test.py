@@ -94,6 +94,20 @@ def main():
                     times = re.search(r"accepted_time=(\S+) committed_time=(\S+)", result.stdout)
                     assert times and float(times[1]) == float(times[2]), result.stdout
             if result.returncode == 0:
+                with (path / "health.csv").open() as stream:
+                    health_rows = list(csv.DictReader(stream))
+                assert len(health_rows) == 1
+                health = health_rows[0]
+                # The fixture STL is a cube [-1,1]^3 inside the 16^3 domain.
+                assert int(health["solid_placeholder_count"]) == 8**3
+                assert int(health["fluid_count"]) == 16**3 - 8**3
+                for region in ("fluid", "solid_placeholder"):
+                    for value in ("p_min", "p_max", "T_min", "T_max", "rho_min", "rho_max"):
+                        assert math.isfinite(float(health[region + "_" + value]))
+                        cell = int(health[region + "_" + value + "_cell"])
+                        i, j, k = cell % 16, (cell // 16) % 16, cell // 256
+                        solid = all(4 <= v < 12 for v in (i, j, k))
+                        assert solid == (region == "solid_placeholder")
                 if args.visit:
                     indices = list((path / "Visit").glob("*.visit"))
                     assert len(indices) == 1, "Visit was not exercised"

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <optional>
+#include <iosfwd>
 
 namespace hundun::v04 {
 
@@ -84,6 +85,10 @@ enum class NumericalFailureContributor : std::uint8_t {
   previous_nonadvective,
   thermodynamic_inversion,
   derived_state_lifecycle
+};
+
+enum class NumericalCellRegion : std::uint8_t {
+  unknown, fluid, solid_placeholder
 };
 
 struct NumericalFailureContext {
@@ -167,7 +172,14 @@ struct NumericalFailureContext {
   double counterfactual_be_density{};
   double counterfactual_be_enthalpy{};
   bool counterfactual_be_admissible{};
+  NumericalCellRegion runtime_region{NumericalCellRegion::unknown};
+  ThermoInversionDiagnostic inversion{};
 };
+
+// The caller owns the existing MPI failure boundary and prints on root only.
+// A failed log is secondary: this function never changes the numerical record.
+Status write_numerical_failure(std::ostream& stream,
+                               const NumericalFailureContext& failure) noexcept;
 
 // Failure-visible record of the exact frozen-momentum continuity--energy
 // globalization.  Samples already contain global residual norms; copying
@@ -297,6 +309,9 @@ struct StepCompletionReport {
   StepAttemptFailure first_failure{};
   StepAttemptFailure last_failure{};
 };
+
+Status write_step_completion_failure(std::ostream& stream,
+                                     const StepCompletionReport& completion) noexcept;
 
 struct ApplicationRunReport {
   PlanFingerprint case_model{};
@@ -477,6 +492,29 @@ struct DriverScalarTransportReport {
   double mass_pairing_residual{};
 };
 
+struct DriverCellTraceWindow {
+  std::array<Int3, 2U> cells{};
+  std::size_t count{}; // zero disables tracing
+  std::uint64_t first_step{};
+  std::uint64_t last_step{};
+};
+
+struct DriverCellTraceSample {
+  Int3 global_index{};
+  std::uint64_t step{};
+  std::uint32_t attempt{}, composition_sweep{};
+  StageId stage{};
+  std::uint8_t active{};
+  double rho{}, h{}, temperature{}, pressure{}, rate{};
+  double rho_accepted{}, rho_previous{}, h_accepted{}, h_previous{};
+};
+
+struct DriverCellTrace {
+  std::array<DriverCellTraceSample, 96U> samples{};
+  std::size_t count{};
+  std::size_t dropped{};
+};
+
 struct DriverStepReport {
   StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
@@ -504,6 +542,7 @@ struct DriverStepReport {
   DriverTerminalEquationReport terminal_equations{};
   DriverConservationReport conservation{};
   DriverScalarTransportReport scalar_transport{};
+  DriverCellTrace cell_trace{};
 };
 
 class ProductDriver {
@@ -523,6 +562,9 @@ class ProductDriver {
                           RestartHistoryPolicy history_policy =
                               RestartHistoryPolicy::require_compatible) noexcept;
   Status initialize(const DriverInitialState& initial) noexcept;
+  // Collective cold configuration. Same global cells/window on every rank;
+  // samples remain rank-local until the caller's ordinary reporting boundary.
+  Status set_cell_trace_window(const DriverCellTraceWindow& window) noexcept;
   Status initialize_restart(const RestartImage& image,
                             RestartStorageCompatibility compatibility =
                                 RestartStorageCompatibility::strict,

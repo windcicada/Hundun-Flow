@@ -2736,6 +2736,47 @@ struct ProductDriver::Impl {
   std::uint8_t thermophysical_predictor_calls{};
   bool temporal_method_fallback{};
   NumericalFailureContext numerical_failure{};
+  DriverCellTraceWindow trace_window{};
+  DriverCellTrace cell_trace{};
+  void trace_state(const StepTime& step, StageId stage) noexcept {
+    if (trace_window.count == 0U || step.accepted_step + 1U < trace_window.first_step ||
+        step.accepted_step + 1U > trace_window.last_step) return;
+    auto& product = *plan.implementation_;
+    const FieldId ids[]{product.fields.rho, product.fields.enthalpy,
+        product.fields.temperature, product.fields.pressure,
+        product.fields.enthalpy_nonadvective_rate};
+    std::array<ConstFieldView, 5U> trial;
+    std::array<ConstFieldView, 2U> accepted, previous;
+    for (std::size_t k = 0U; k < 5U; ++k)
+      if (!product.layers.view(StateRole::trial, ids[k], trial[k])) {
+        ++cell_trace.dropped;
+        return;
+      }
+    for (std::size_t k = 0U; k < 2U; ++k)
+      if (!product.layers.view(StateRole::accepted_n, ids[k], accepted[k]) ||
+          !product.layers.view(StateRole::accepted_n_minus_one, ids[k], previous[k])) {
+        ++cell_trace.dropped;
+        return;
+      }
+    for (std::size_t k = 0U; k < trace_window.count; ++k) {
+      const Int3 global = trace_window.cells[k];
+      const Int3 c{global.x - product.patch.begin.x, global.y - product.patch.begin.y,
+                   global.z - product.patch.begin.z};
+      const Int3 n = product.patch.cells;
+      if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= n.x || c.y >= n.y || c.z >= n.z) continue;
+      if (cell_trace.count == cell_trace.samples.size()) { ++cell_trace.dropped; continue; }
+      const std::size_t flat = std::size_t(c.x) + std::size_t(n.x) * (c.y + std::size_t(n.y) * c.z);
+      auto& sample = cell_trace.samples[cell_trace.count++];
+      // CSV/report attempts are one-based, matching loop performance records.
+      sample = {global, step.accepted_step + 1U, step.attempt + 1U,
+          scalar_coupling_sweep, stage,
+          product.topology.has_value() ? product.topology->region().data[flat] : std::uint8_t{1U},
+          trial[0].unchecked(c, 0U), trial[1].unchecked(c, 0U), trial[2].unchecked(c, 0U),
+          trial[3].unchecked(c, 0U), trial[4].unchecked(c, 0U),
+          accepted[0].unchecked(c, 0U), previous[0].unchecked(c, 0U),
+          accepted[1].unchecked(c, 0U), previous[1].unchecked(c, 0U)};
+    }
+  }
   ThermophysicalPredictorDiagnostics predictor_diagnostics{};
   MomentumPredictorLimiterReport momentum_predictor_limiter{};
   MomentumPredictorSolveReport momentum_predictor_solve{};
@@ -7797,6 +7838,7 @@ Status ProductDriver::Impl::execute_attempt(
       &enthalpy_endpoint, &resources,
       product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr};
   thermophysical_predictor_calls = 1U;
+  if (status) trace_state(step, 11U);
   if (scalar_remap.has_value()) status = product.reductions.consensus(status);
   if (status && scalar_remap.has_value())
     status = scalar_remap->prepare_passive_intervals(predictor_input,
@@ -7804,6 +7846,7 @@ Status ProductDriver::Impl::execute_attempt(
   status = product.equations.thermophysical_predictor().predict(
       communicator, status, predictor_input, predictor_output,
       predictor_slow_path, predictor_diagnostics, predictor_certificate);
+  if (status) trace_state(step, 12U);
   const bool fallback_eligible =
       !status && status.code == StatusCode::numerical_failure &&
       step.bdf.order == 2U && predictor_diagnostics.failure.valid &&
@@ -8381,11 +8424,20 @@ Status ProductDriver::Impl::execute_attempt(
     }
 
     context.immersed_interface_cell = false;
+    context.runtime_region = NumericalCellRegion::fluid;
     if (product.topology.has_value()) {
+      const std::size_t flat = static_cast<std::size_t>(cell.x) +
+          static_cast<std::size_t>(cells.x) *
+              (static_cast<std::size_t>(cell.y) +
+               static_cast<std::size_t>(cells.y) * cell.z);
+      if (product.topology->region().data[flat] == 0U)
+        context.runtime_region = NumericalCellRegion::solid_placeholder;
       const Span<const ImmersedLink> links = product.topology->links();
       for (std::size_t link = 0U; link < links.size; ++link) {
         const Int3 fluid = links.data[link].fluid_local_index;
-        if (fluid.x == cell.x && fluid.y == cell.y && fluid.z == cell.z) {
+        const Int3 solid = links.data[link].solid_local_index;
+        if ((fluid.x == cell.x && fluid.y == cell.y && fluid.z == cell.z) ||
+            (solid.x == cell.x && solid.y == cell.y && solid.z == cell.z)) {
           context.immersed_interface_cell = true;
           break;
         }
@@ -8398,6 +8450,7 @@ Status ProductDriver::Impl::execute_attempt(
                                   contribution_plan->contributions().size == 0U;
     context.rate_breakdown_complete =
         conduction_status && no_contributions &&
+        context.runtime_region == NumericalCellRegion::fluid &&
         !context.immersed_interface_cell &&
         std::isfinite(context.diffusion_accepted) &&
         std::isfinite(context.viscous_dissipation_accepted);
@@ -8409,6 +8462,17 @@ Status ProductDriver::Impl::execute_attempt(
       context.pressure_work_accepted =
           std::numeric_limits<double>::quiet_NaN();
     }
+    // Replay only the failed cell's public inversion for fixed-size evidence.
+    // Ordinary successful cells pay no diagnostic allocation or extra inversion.
+    // The conduction stencil above borrowed species_values for neighbouring
+    // accepted states; restore the failed trial cell's composition first.
+    for (std::size_t species = 0U; species < species_trial.size(); ++species)
+      species_values[species] = species_trial[species].unchecked(cell, 0U);
+    ThermoState diagnostic_state;
+    (void)product.thermodynamics.evaluate(
+        context.pressure_absolute, context.failed_value,
+        {species_values.data(), species_values.size()}, {}, diagnostic_state,
+        context.temperature_before, &context.inversion);
     numerical_failure = context;
   };
 
@@ -8521,6 +8585,7 @@ Status ProductDriver::Impl::execute_attempt(
       };
   if (status) {
     begin_timed_stage(12U);
+    trace_state(step, 14U);
     attempt_stage = 12U;
   }
   if (status && product.contributions.plan() == nullptr)
@@ -8535,6 +8600,7 @@ Status ProductDriver::Impl::execute_attempt(
   // handoff to the EOS density occurs only after momentum has converged.
   if (status)
     status = update_thermo_from_authority(attempt_pressure_reference, false);
+  if (status) trace_state(step, 15U);
   // normalize_closed_gauge performs a checked_sum after local structural and
   // positivity checks.  Freeze those checks into one rank-consistent
   // prerequisite so no peer can return while another enters the reduction.
@@ -13905,6 +13971,7 @@ Status ProductDriver::Impl::execute_attempt(
   if (!pressure_energy_candidate_scope)
     status = product.reductions.consensus(status);
 
+  if (status) trace_state(step, 46U);
   // Corrector one changes rho. Integral and conditional boundary targets
   // must therefore be refreshed before corrector two forms its HbyA/phiHbyA
   // state; the storage is preallocated and the common velocity/pressure
@@ -14419,6 +14486,7 @@ Status ProductDriver::Impl::execute_attempt(
   PisoTerminalAuditInput audit;
   if (status) {
     begin_timed_stage(60U);
+    trace_state(step, 56U);
     attempt_stage = 60U;
   }
   audit.correction = corrected_two;
@@ -14778,6 +14846,7 @@ Status ProductDriver::Impl::execute_attempt(
                                       passive_history.size()};
   }
   ThermophysicalRateCertificate rate_certificate;
+  if (status) trace_state(step, 61U);
   if (status) attempt_stage = 62U;
   if (status)
     status = evaluate_thermophysical_rates(
@@ -14791,6 +14860,7 @@ Status ProductDriver::Impl::execute_attempt(
          {passive_rate_output.data(), passive_rate_output.size()},
          rate_scratch, scalar_diffusivity},
         rate_certificate);
+  if (status) trace_state(step, 62U);
   // The final conservative mass flux is published only against the complete
   // same-target thermodynamic state.  Omitting h/T would allow a stale
   // pressure-only correction certificate to publish after EOS closure had
@@ -14917,6 +14987,13 @@ Status ProductDriver::Impl::execute_attempt(
   // Finalize the solve report while the epoch is still an attempt-local,
   // stateless validator.  A failure here must participate in transaction
   // consensus rather than being discovered after state rotation.
+  if (status && !pressure_energy_candidate_scope) {
+    // This boundary branch still solves the coupled C2 system. It has no
+    // extra refinement loop, but the exact terminal component audits above
+    // have now passed. Publish that outcome without inventing another solve.
+    report.pressure_energy_refinement_termination =
+        PressureEnergyRefinementTermination::component_residuals_converged;
+  }
   if (status) status = solve_epoch.finalize(report);
   if (status)
     pending_pressure_reference = {
@@ -14997,6 +15074,36 @@ Status ProductDriver::constrain_convective_time_limit(
   return {};
 }
 
+Status ProductDriver::set_cell_trace_window(const DriverCellTraceWindow& window) noexcept {
+  if (implementation_ == nullptr) return {StatusCode::invalid_plan, kProductInput};
+  auto& product = *implementation_->plan.implementation_;
+  const Int3 n = product.geometry.global_cells();
+  bool valid = window.count <= window.cells.size() &&
+      !implementation_->time.has_active_proposal();
+  if (window.count != 0U)
+    valid = valid && window.first_step != 0U && window.last_step >= window.first_step;
+  std::uint64_t hash = detail::product_mix(window.first_step, window.last_step);
+  hash = detail::product_mix(hash, window.count);
+  for (std::size_t k = 0U; k < window.count && k < window.cells.size(); ++k) {
+    const Int3 c = window.cells[k];
+    valid = valid && c.x >= 0 && c.x < n.x && c.y >= 0 && c.y < n.y && c.z >= 0 && c.z < n.z;
+    hash = detail::product_mix(hash, std::uint32_t(c.x));
+    hash = detail::product_mix(hash, std::uint32_t(c.y));
+    hash = detail::product_mix(hash, std::uint32_t(c.z));
+    if (k != 0U) valid = valid && !(c.x == window.cells[0].x &&
+        c.y == window.cells[0].y && c.z == window.cells[0].z);
+  }
+  Status status = product.reductions.consensus(valid ? Status{} : Status{StatusCode::invalid_plan, kProductInput});
+  if (!status) return status;
+  std::uint64_t minimum = 0U, maximum = 0U;
+  if (MPI_Allreduce(&hash, &minimum, 1, MPI_UINT64_T, MPI_MIN, implementation_->communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(&hash, &maximum, 1, MPI_UINT64_T, MPI_MAX, implementation_->communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kProductCommunication};
+  if (minimum != maximum) return {StatusCode::invalid_plan, kProductInput};
+  implementation_->trace_window = window;
+  return {};
+}
+
 Status ProductDriver::advance(LocalTimeLimits limits,
                               DriverStepReport& report) noexcept {
   report = {};
@@ -15008,6 +15115,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     return status;
   }
   DriverStepReport candidate;
+  implementation_->cell_trace.count = implementation_->cell_trace.dropped = 0U;
   candidate.accepted_step = implementation_->time.accepted_step();
   candidate.accepted_time = implementation_->time.time();
   std::uint64_t predictor_blocking_collectives = 0U;
@@ -15103,6 +15211,8 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     candidate.momentum_predictor_solve =
         implementation_->momentum_predictor_solve;
     candidate.terminal_equations = implementation_->terminal_equations;
+    if (implementation_->trace_window.count != 0U)
+      candidate.cell_trace = implementation_->cell_trace;
     candidate.conservation = implementation_->conservation;
     if (implementation_->scalar_remap.has_value()) {
       auto& scalar = candidate.scalar_transport;
@@ -15285,7 +15395,9 @@ Status ProductDriver::committed_output_snapshot(
          runtime.time.time(),
          runtime.time.accepted_step(),
          {runtime.output_fields.data(), runtime.output_fields.size()},
-         true};
+         true,
+         product.topology.has_value() ? product.topology->region()
+                                      : Span<const std::uint8_t>{}};
   return {};
 }
 

@@ -308,6 +308,9 @@ struct CommittedOutputSnapshot {
   std::uint64_t step{};
   Span<const SnapshotFieldView> fields{};
   bool committed{};
+  // Same borrowed lifetime as fields. Empty means all fluid; otherwise x-fast
+  // owned cells, 0 = solid placeholder, 1 = fluid (the frozen EBTopology mask).
+  Span<const std::uint8_t> cell_activity{};
 };
 
 struct StageTimingRecord {

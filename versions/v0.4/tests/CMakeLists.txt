@@ -1200,6 +1200,28 @@ add_executable(v04_physics_thermo_test
 target_link_libraries(v04_physics_thermo_test PRIVATE hundun_v04_test_core)
 add_test(NAME v04_physics_thermo COMMAND v04_physics_thermo_test)
 
+add_executable(v04_app_failure_report_test unit/app_failure_report_test.cpp)
+target_link_libraries(v04_app_failure_report_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_app_failure_report COMMAND v04_app_failure_report_test)
+add_test(NAME v04_thermo_failure_cli_mpi_2
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/thermo_failure_cli_test.py"
+    --runner "$<TARGET_FILE:v04_thin_domain_runner>" --app "$<TARGET_FILE:hundun>"
+    --seed "$<TARGET_FILE:v04_product_ibm_placeholder_test>"
+    --mpi "${MPIEXEC_EXECUTABLE}")
+set_tests_properties(v04_thermo_failure_cli_mpi_2 PROPERTIES TIMEOUT 190 PROCESSORS 2)
+
+add_executable(v04_product_ibm_placeholder_test mpi/product_ibm_placeholder_mpi_test.cpp)
+target_link_libraries(v04_product_ibm_placeholder_test PRIVATE hundun_v04_test_core)
+target_compile_definitions(v04_product_ibm_placeholder_test PRIVATE
+  HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+foreach(ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_ibm_placeholder_mpi_${ranks}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${ranks}
+      "$<TARGET_FILE:v04_product_ibm_placeholder_test>")
+  set_tests_properties(v04_product_ibm_placeholder_mpi_${ranks}
+    PROPERTIES RUN_SERIAL TRUE PROCESSORS ${ranks} TIMEOUT 120)
+endforeach()
+
 add_executable(v04_physics_thermophysical_compiler_test
   mpi/physics_thermophysical_compiler_test.cpp)
 target_include_directories(v04_physics_thermophysical_compiler_test PRIVATE
