@@ -10,6 +10,12 @@ find_program(HUNDUN_V04_PYTHON_EXECUTABLE
 add_executable(v04_product_scalar_contract_experiment
   integration/product_scalar_contract_experiment.cpp)
 target_link_libraries(v04_product_scalar_contract_experiment PRIVATE hundun_v04_core)
+set(scalar_contract_timeout 180)
+if(HUNDUN_ENABLE_ASAN OR HUNDUN_ENABLE_UBSAN)
+  # The IBM fixture advances four fields/problems under full instrumentation;
+  # allow debug checking time without changing any numerical acceptance rule.
+  set(scalar_contract_timeout 600)
+endif()
 foreach(rank_count IN ITEMS 1 2 4)
   foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart capacity capacity_ranges)
     set(scalar_arguments)
@@ -35,7 +41,7 @@ foreach(rank_count IN ITEMS 1 2 4)
         ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_scalar_contract_experiment>"
         ${MPIEXEC_POSTFLAGS} ${scalar_arguments})
     set_tests_properties(v04_scalar_contract_${scenario}_mpi_${rank_count}
-      PROPERTIES PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 180
+      PROPERTIES PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT ${scalar_contract_timeout}
         LABELS "scalar-conservation")
   endforeach()
 endforeach()
