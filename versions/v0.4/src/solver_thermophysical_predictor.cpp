@@ -193,6 +193,10 @@ std::uint64_t predictor_state_hash(
   hash = hash_mix(hash, double_bits(input.bdf.a1));
   hash = hash_mix(hash, double_bits(input.bdf.a2));
   hash = hash_mix(hash, input.bdf.order);
+  if (input.cell_activity.size != 0U) {
+    hash = hash_mix(hash, input.cell_activity.size);
+    hash = hash_mix(hash, reinterpret_cast<std::uintptr_t>(input.cell_activity.data));
+  }
   const auto mix_view = [&](ConstFieldView view) noexcept {
     hash = hash_mix(hash, view.field);
     hash = hash_mix(hash, view.revision);
@@ -502,11 +506,20 @@ void clear_low_bdf_source_base_failure_for_test() noexcept {
 
 Status ThermophysicalPredictorPlan::predict(
     MPI_Comm communicator, Status prerequisite,
-    const ThermophysicalPredictorInput& input,
+    const ThermophysicalPredictorInput& input_data,
     ThermophysicalPredictorOutput output,
     const ThermophysicalPredictorSlowPath& slow_path,
     ThermophysicalPredictorDiagnostics& diagnostics,
     ThermophysicalPredictorCertificate& certificate) const noexcept {
+  ThermophysicalPredictorInput input = input_data;
+  if (slow_path.immersed_interface != nullptr) {
+    const auto activity = slow_path.immersed_interface->cell_activity();
+    if (slow_path.immersed_interface->fingerprint() == 0U ||
+        (input.cell_activity.size != 0U &&
+         (input.cell_activity.data != activity.data || input.cell_activity.size != activity.size)))
+      prerequisite = {StatusCode::invalid_plan, kPredictorPlan};
+    input.cell_activity = activity;
+  }
   int rank = -1;
   int size = 0;
   std::uint32_t blocking_collectives = 0U;
@@ -638,11 +651,32 @@ Status ThermophysicalPredictorPlan::predict(
     if (failure.valid && failure.rank < 0) failure.rank = rank;
   }
 
+  const auto active_cell = [&](Int3 cell) noexcept {
+    return input.cell_activity.size == 0U || input.cell_activity.data[
+        std::size_t(cell.x) + std::size_t(cells_.x) *
+        (std::size_t(cell.y) + std::size_t(cells_.y) * cell.z)] != 0U;
+  };
+  const auto hold_low_intensive = [&](Int3 cell) noexcept {
+    output.low_order_density_workspace.unchecked(cell, 0U) =
+        input.density_accepted.unchecked(cell, 0U);
+    output.low_order_enthalpy_workspace.unchecked(cell, 0U) =
+        input.enthalpy_accepted.unchecked(cell, 0U);
+    for (std::size_t i = 0U; i < input.species_accepted.size; ++i)
+      output.low_order_independent_species.data[i].unchecked(cell, 0U) =
+          input.species_accepted.data[i].unchecked(cell, 0U);
+    for (std::size_t i = 0U; i < input.passive_scalars_accepted.size; ++i)
+      output.low_order_passive_scalars.data[i].unchecked(cell, 0U) =
+          input.passive_scalars_accepted.data[i].unchecked(cell, 0U);
+  };
   const auto audit_paired_mass = [&]() noexcept {
     for (std::int32_t z = 0; z < cells_.z; ++z) {
       for (std::int32_t y = 0; y < cells_.y; ++y) {
         for (std::int32_t x = 0; x < cells_.x; ++x) {
           const Int3 cell{x, y, z};
+          const std::size_t flat = std::size_t(x) + std::size_t(cells_.x) *
+              (y + std::size_t(cells_.y) * z);
+          if (input.cell_activity.size != 0U && input.cell_activity.data[flat] == 0U)
+            continue;
           const double volume = detail::cell_volume(*kernels_, cell);
           const double rho_star =
               output.density_workspace.unchecked(cell, 0U);
@@ -1326,6 +1360,10 @@ Status ThermophysicalPredictorPlan::predict(
         const Int3 cell{x, y, z};
         const double rho_n =
             input.density_accepted.unchecked(cell, 0U);
+        if (!active_cell(cell)) {
+          output.low_order_density_workspace.unchecked(cell, 0U) = rho_n;
+          continue;
+        }
         const double rho_previous =
             second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
         const double divergence =
@@ -1353,6 +1391,11 @@ Status ThermophysicalPredictorPlan::predict(
             for (std::int32_t x = 0; x < end.x; ++x) {
               const Int3 cell{x, y, z};
               const double q_n = accepted.unchecked(cell, 0U);
+              if (!active_cell(cell)) {
+                candidate.unchecked(cell, 0U) =
+                    input.density_accepted.unchecked(cell, 0U) * q_n;
+                continue;
+              }
               const double q_previous =
                   second_order ? previous.unchecked(cell, 0U) : 0.0;
               const double divergence = first_order_upwind_divergence(
@@ -1428,6 +1471,10 @@ Status ThermophysicalPredictorPlan::predict(
           for (std::int32_t y = 0; y < end.y; ++y) {
             for (std::int32_t x = 0; x < end.x; ++x) {
               const Int3 cell{x, y, z};
+              if (!active_cell(cell)) {
+                hold_low_intensive(cell);
+                continue;
+              }
               const double rho =
                   output.low_order_density_workspace.unchecked(cell, 0U);
               output.low_order_enthalpy_workspace.unchecked(cell, 0U) /=
@@ -1566,6 +1613,10 @@ Status ThermophysicalPredictorPlan::predict(
       for (std::int32_t y = 0; y < end.y && local; ++y) {
         for (std::int32_t x = 0; x < end.x && local; ++x) {
           const Int3 cell{x, y, z};
+          if (!active_cell(cell)) {
+            hold_low_intensive(cell);
+            continue;
+          }
           const Int3 global_cell{cell.x + patch_begin_.x,
                                  cell.y + patch_begin_.y,
                                  cell.z + patch_begin_.z};
@@ -1769,6 +1820,7 @@ Status ThermophysicalPredictorPlan::predict(
                                                ConstFieldView previous,
                                                Int3 cell) noexcept {
       const double rho_n = input.density_accepted.unchecked(cell, 0U);
+      if (!active_cell(cell)) return rho_n * accepted.unchecked(cell, 0U);
       const double rho_nm1 =
           second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
       const double q_n = accepted.unchecked(cell, 0U);
@@ -1781,6 +1833,7 @@ Status ThermophysicalPredictorPlan::predict(
         [&](ConstFieldView accepted, ConstFieldView previous,
             PredictorRateHistory rate, Int3 cell) noexcept {
       const double rho_n = input.density_accepted.unchecked(cell, 0U);
+      if (!active_cell(cell)) return rho_n * accepted.unchecked(cell, 0U);
       const double rho_nm1 =
           second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
       const double q_n = accepted.unchecked(cell, 0U);
@@ -1801,8 +1854,9 @@ Status ThermophysicalPredictorPlan::predict(
           const double rho_nm1 =
               second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
           const double base_rho =
-              (-input.bdf.a1 * rho_n - input.bdf.a2 * rho_nm1) /
-              input.bdf.a0;
+              active_cell(cell)
+                  ? (-input.bdf.a1 * rho_n - input.bdf.a2 * rho_nm1) / input.bdf.a0
+                  : rho_n;
           output.low_order_density_workspace.unchecked(cell, 0U) = base_rho;
           local_base_valid =
               local_base_valid && std::isfinite(rho_n) && rho_n > 0.0 &&
@@ -1848,6 +1902,7 @@ Status ThermophysicalPredictorPlan::predict(
       for (std::int32_t y = 0; y < end.y && local; ++y) {
         for (std::int32_t x = 0; x < end.x; ++x) {
           const Int3 cell{x, y, z};
+          if (!active_cell(cell)) continue;
           const double base_rho =
               output.low_order_density_workspace.unchecked(cell, 0U);
           bool valid = std::isfinite(base_rho) && base_rho > 0.0;
@@ -2025,6 +2080,10 @@ Status ThermophysicalPredictorPlan::predict(
       for (std::int32_t y = 0; y < end.y && local; ++y) {
         for (std::int32_t x = 0; x < end.x; ++x) {
           const Int3 cell{x, y, z};
+          if (!active_cell(cell)) {
+            output.low_order_density_workspace.unchecked(cell, 0U) = 1.0;
+            continue;
+          }
           const double volume = detail::cell_volume(*kernels_, cell);
           const double outgoing = outgoing_mass_flux(
               input.mass_flux_accepted, cell);
@@ -2257,6 +2316,10 @@ Status ThermophysicalPredictorPlan::predict(
         for (std::int32_t x = 0; x < end.x; ++x) {
           const Int3 cell{x, y, z};
           const double rho_n = input.density_accepted.unchecked(cell, 0U);
+          if (!active_cell(cell)) {
+            output.low_order_density_workspace.unchecked(cell, 0U) = rho_n;
+            continue;
+          }
           const double rho_nm1 =
               second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
           output.low_order_density_workspace.unchecked(cell, 0U) =
@@ -2275,6 +2338,10 @@ Status ThermophysicalPredictorPlan::predict(
                 const Int3 cell{x, y, z};
                 const double rho_n =
                     input.density_accepted.unchecked(cell, 0U);
+                if (!active_cell(cell)) {
+                  destination.unchecked(cell, 0U) = rho_n * accepted.unchecked(cell, 0U);
+                  continue;
+                }
                 const double rho_nm1 =
                     second_order
                         ? input.density_previous.unchecked(cell, 0U)
@@ -2386,6 +2453,7 @@ Status ThermophysicalPredictorPlan::predict(
         const double rho_low =
             output.low_order_density_workspace.unchecked(cell, 0U);
         const double rho_high = output.density_workspace.unchecked(cell, 0U);
+        if (!active_cell(cell)) continue;
         // Density is the sole strict inequality.  A zero high endpoint must
         // therefore select an inward theta rather than masquerade as an
         // admissible zero-margin constraint.
@@ -2668,6 +2736,10 @@ Status ThermophysicalPredictorPlan::predict(
     for (std::int32_t y = 0; y < end.y && local; ++y) {
       for (std::int32_t x = 0; x < end.x && local; ++x) {
         const Int3 cell{x, y, z};
+        // Both endpoint paths represent the same stationary placeholder.
+        // Keep the already held high output bitwise unchanged (rho*q/rho
+        // and the global affine blend need not reproduce the same bits).
+        if (!active_cell(cell)) continue;
         const double rho_low =
             output.low_order_density_workspace.unchecked(cell, 0U);
         const double rho_high = output.density_workspace.unchecked(cell, 0U);
@@ -2862,6 +2934,13 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     ThermophysicalPredictorOutput output,
     ThermophysicalPredictorCertificate& certificate,
     ThermophysicalPredictorFailure& failure) const noexcept {
+  if (input.cell_activity.size != 0U &&
+      (input.cell_activity.data == nullptr || input.cell_activity.size !=
+          std::size_t(cells_.x) * cells_.y * cells_.z))
+    return {StatusCode::invalid_plan, kPredictorPlan};
+  for (std::size_t i = 0U; i < input.cell_activity.size; ++i)
+    if (input.cell_activity.data[i] > 1U)
+      return {StatusCode::invalid_plan, kPredictorPlan};
   if (input.passive_intervals.size != 0U &&
       (input.passive_intervals.size != passive_scalars_.size() ||
        input.passive_intervals.data == nullptr))
@@ -3328,6 +3407,15 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         const double rho_n = input.density_accepted.unchecked(cell, 0U);
         const double rho_nm1 =
             second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
+        const std::size_t flat = std::size_t(x) + std::size_t(cells_.x) *
+            (y + std::size_t(cells_.y) * z);
+        if (input.cell_activity.size != 0U) {
+          const auto active = input.cell_activity.data[flat];
+          if (active == 0U) {
+            output.density_workspace.unchecked(cell, 0U) = rho_n;
+            continue;
+          }
+        }
         const double mass_rate_n = flux_divergence_density(
             *kernels_, input.mass_flux_accepted, cell);
         const double mass_rate_nm1 =
@@ -3443,6 +3531,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
               second_order ? input.density_previous.unchecked(cell, 0U) : 0.0;
           const double rho_star =
               output.density_workspace.unchecked(cell, 0U);
+          const std::size_t flat = std::size_t(x) + std::size_t(cells_.x) *
+              (y + std::size_t(cells_.y) * z);
+          if (input.cell_activity.size != 0U && input.cell_activity.data[flat] == 0U) {
+            predicted.unchecked(cell, 0U) = accepted.unchecked(cell, 0U);
+            continue;
+          }
           const double rhs_n = rate_is_zero(nonadvective_rhs.accepted)
                                    ? 0.0
                                    : nonadvective_rhs.accepted.unchecked(cell,

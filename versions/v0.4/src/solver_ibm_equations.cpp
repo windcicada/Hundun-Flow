@@ -85,6 +85,18 @@ InterfaceFace interface_face(const ImmersedLink& link) noexcept {
   return result;
 }
 
+double fluid_material_conductance(const CartesianKernelPlan& kernels,
+                                 ConstFieldView diffusivity,
+                                 const ImmersedLink& link,
+                                 InterfaceFace face) noexcept {
+  const std::int32_t normal = face.axis == CartesianAxis::x ? face.index.x
+      : (face.axis == CartesianAxis::y ? face.index.y : face.index.z);
+  return diffusivity.unchecked(link.fluid_local_index, 0U) *
+         detail::face_area(kernels, face.axis, face.index) /
+         (detail::centre_coordinate(kernels, face.axis, normal) -
+          detail::centre_coordinate(kernels, face.axis, normal - 1));
+}
+
 bool positive_face(ImmersedFaceDirection direction) noexcept {
   return direction == ImmersedFaceDirection::x_positive ||
          direction == ImmersedFaceDirection::y_positive ||
@@ -824,6 +836,19 @@ Status IbmEquationInterfacePlan::zero_interface_flux(
     const InterfaceFace face = interface_face(links.data[index]);
     select(flux, face.axis).unchecked(face.index) = 0.0;
   }
+  // Inactive cells are storage placeholders, not fluid control volumes.
+  // Retiring only cut faces leaves old solid-solid fluxes in BDF history.
+  const Int3 cells = kernels_->cells();
+  const auto region = topology_->region();
+  std::size_t flat = 0U;
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x, ++flat)
+        if (region.data[flat] == 0U) {
+          flux.x.unchecked({x, y, z}) = flux.x.unchecked({x + 1, y, z}) = 0.0;
+          flux.y.unchecked({x, y, z}) = flux.y.unchecked({x, y + 1, z}) = 0.0;
+          flux.z.unchecked({x, y, z}) = flux.z.unchecked({x, y, z + 1}) = 0.0;
+        }
   return {};
 }
 
@@ -1315,8 +1340,15 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
         boundary_->reconstruction(), row.zero_normal_value_row, transported,
         0U, 0.0, 0.0, ghost);
     const double solid = transported.unchecked(link.solid_local_index, 0U);
+    const double fluid = transported.unchecked(link.fluid_local_index, 0U);
+    const double fluid_conductance =
+        fluid_material_conductance(*kernels_, diffusivity, link, face);
+    // Remove the Cartesian solid-material face, then insert the existing
+    // link reconstruction with fluid-side material authority. An adiabatic,
+    // non-conjugate placeholder is not a second material in series.
     const double correction =
-        transmissibility * (ghost - solid) / volume;
+        (transmissibility * (fluid - solid) +
+         fluid_conductance * (ghost - fluid)) / volume;
     const double value = rate.unchecked(link.fluid_local_index, 0U) + correction;
     if (!status || !std::isfinite(transmissibility) ||
         transmissibility <= 0.0 || !std::isfinite(volume) || volume <= 0.0 ||
@@ -1410,8 +1442,12 @@ Status IbmEquationInterfacePlan::correct_positive_bounded_zero_normal_diffusion(
         0U, ghost);
     const double solid = transported.unchecked(link.solid_local_index, 0U);
     const double current = rate.unchecked(link.fluid_local_index, 0U);
+    const double fluid = transported.unchecked(link.fluid_local_index, 0U);
+    const double fluid_conductance =
+        fluid_material_conductance(*kernels_, diffusivity, link, face);
     const double correction =
-        transmissibility * (ghost - solid) / volume;
+        (transmissibility * (fluid - solid) +
+         fluid_conductance * (ghost - fluid)) / volume;
     const double value = current + correction;
     if (!status || !std::isfinite(transmissibility) ||
         transmissibility <= 0.0 || !std::isfinite(volume) || volume <= 0.0 ||

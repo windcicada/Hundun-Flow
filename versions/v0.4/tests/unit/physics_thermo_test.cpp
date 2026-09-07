@@ -567,6 +567,139 @@ bool test_conserved_enthalpy_bounds() {
   return passed;
 }
 
+bool test_native_air_near_reference_inverse() {
+  ThermophysicalSpec spec;
+  if (!expect(static_cast<bool>(detail::parse_thermophysical_text(
+                  kCoastNativeAirText, spec)),
+              "native-air near-reference input parses")) return false;
+  spec.data_file = "thermophysics.d";
+  spec.minimum_temperature = 273.15;
+  spec.maximum_temperature_iterations = 200U;
+  ThermodynamicsPlan plan;
+  if (!expect(static_cast<bool>(ThermodynamicsPlan::compile(spec, {}, plan)),
+              "Re3900 near-reference thermodynamics compiles")) return false;
+  // A legitimate sensible enthalpy between the 273.15 K and 300 K states.
+  // It is not required to equal h(T) at any exactly representable double T.
+  ThermoState state;
+  ThermoInversionDiagnostic diagnostic;
+  const Status status = plan.evaluate(107136.1006180746, 7.0, {}, {}, state,
+                                      273.2472993645976, &diagnostic);
+  if (!status) {
+    std::cerr.precision(17);
+    std::cerr << "near-reference inversion outcome="
+              << static_cast<unsigned>(diagnostic.outcome)
+              << " iterations=" << diagnostic.iterations
+              << " T_bracket=" << diagnostic.lower_temperature << ','
+              << diagnostic.upper_temperature
+              << " adjacent=" << (std::nextafter(diagnostic.lower_temperature,
+                                                 diagnostic.upper_temperature) ==
+                                   diagnostic.upper_temperature)
+              << " residual=" << diagnostic.residual << '\n';
+  }
+  if (!expect(static_cast<bool>(status),
+              "native-air legal near-zero h inverts without false failure"))
+    return false;
+  bool passed = expect(state.temperature > 273.15 && state.temperature < 273.16,
+                       "near-reference inverse stays in the physical bracket");
+  passed &= expect(diagnostic.accepted && diagnostic.iterations < 200U &&
+                       diagnostic.outcome ==
+                           ThermoInversionOutcome::representable_temperature_limit &&
+                       std::nextafter(diagnostic.lower_temperature,
+                                      diagnostic.upper_temperature) ==
+                           diagnostic.upper_temperature &&
+                       std::abs(diagnostic.residual) <= diagnostic.roundoff_bound &&
+                       diagnostic.roundoff_bound < 1.0e-8,
+                   "adjacent-only acceptance has a finite derived error bound");
+  const auto check_range = [&](const ThermodynamicsPlan& tested,
+                               Span<const double> fractions) {
+    double lower = 0.0, upper = 0.0, cp = 0.0, gas = 0.0;
+    bool ok = static_cast<bool>(tested.mixture_enthalpy(
+                  tested.minimum_temperature(), fractions, lower, cp, gas)) &&
+              static_cast<bool>(tested.mixture_enthalpy(
+                  tested.maximum_temperature(), fractions, upper, cp, gas));
+    const double inputs[]{lower, std::nextafter(lower, upper),
+                          lower + 0.03125, lower + 7.0,
+                          std::nextafter(upper, lower), upper};
+    const double hints[]{std::numeric_limits<double>::quiet_NaN(),
+                         -1.0, 5999.0, 273.2472993645976};
+    for (double enthalpy : inputs) {
+      for (double hint : hints) {
+        ThermoState result;
+        ThermoInversionDiagnostic evidence;
+        Status evaluated;
+        std::size_t allocations = 0U;
+        {
+          allocation_observer::Guard guard;
+          evaluated = tested.evaluate(107136.1006180746, enthalpy, fractions,
+                                      {}, result, hint, &evidence);
+          allocations = allocation_observer::count.load();
+        }
+        ok &= expect(evaluated && evidence.accepted && allocations == 0U &&
+                         result.temperature >= tested.minimum_temperature() &&
+                         result.temperature <= tested.maximum_temperature(),
+                     "endpoints/adjacent h/poor and absent hints invert without allocation");
+        if (evaluated) {
+          double observed = 0.0;
+          tested.mixture_enthalpy(result.temperature, fractions, observed, cp, gas);
+          ok &= expect(std::abs(observed - enthalpy) <=
+                           std::max(1e-12 * std::max(1.0, std::abs(enthalpy)),
+                                    evidence.roundoff_bound),
+                       "returned state satisfies ordinary or representability bound");
+        }
+      }
+    }
+    for (double enthalpy : {std::nextafter(lower, -INFINITY),
+                            std::nextafter(upper, INFINITY)}) {
+      ThermoState sentinel;
+      sentinel.rho = 17.0;
+      sentinel.temperature = -77.0;
+      ThermoInversionDiagnostic evidence;
+      const Status rejected = tested.evaluate(101325.0, enthalpy, fractions,
+                                               {}, sentinel, 300.0, &evidence);
+      ok &= expect(!rejected && rejected.detail == 804U &&
+                       !evidence.accepted && evidence.outcome ==
+                           ThermoInversionOutcome::enthalpy_out_of_range &&
+                       sentinel.rho == 17.0 && sentinel.temperature == -77.0,
+                   "one-ulp out of range rejects without changing state output");
+    }
+    return ok;
+  };
+  passed &= check_range(plan, {});
+  ThermophysicalSpec mixture = base_spec();
+  mixture.minimum_temperature = 273.15;
+  mixture.maximum_temperature_iterations = 200U;
+  mixture.species = {varying_species("A", 28.0, 3.5, 1e-4),
+                     varying_species("B", 32.0, 3.7, 2e-4)};
+  for (auto& species : mixture.species) {
+    const double t = mixture.minimum_temperature;
+    const double reference = species.nasa7_low[0] * t +
+                             0.5 * species.nasa7_low[1] * t * t;
+    species.nasa7_low[5] -= reference;
+    species.nasa7_high[5] -= reference;
+  }
+  const std::array<TransportedScalarSpec, 1U> catalog{
+      TransportedScalarSpec{"A", TransportedScalarRole::species}};
+  ThermodynamicsPlan mixed_plan;
+  const Status compiled = ThermodynamicsPlan::compile(
+      mixture, {catalog.data(), catalog.size()}, mixed_plan);
+  passed &= expect(static_cast<bool>(compiled), "near-reference mixture compiles");
+  const double y = 0.37;
+  if (compiled) passed &= check_range(mixed_plan, {&y, 1U});
+  spec.maximum_temperature_iterations = 1U;
+  ThermodynamicsPlan capped;
+  passed &= expect(static_cast<bool>(ThermodynamicsPlan::compile(spec, {}, capped)),
+                   "iteration-limited native plan compiles");
+  ThermoState unchanged;
+  unchanged.temperature = -12.0;
+  passed &= expect(!capped.evaluate(101325.0, 7.0, {}, {}, unchanged,
+                                    5000.0, &diagnostic) &&
+                       diagnostic.outcome == ThermoInversionOutcome::iteration_limit &&
+                       diagnostic.iterations == 1U && !diagnostic.accepted &&
+                       unchanged.temperature == -12.0,
+                   "unresolved wide bracket keeps original iteration cap and output");
+  return passed;
+}
+
 bool test_nasa7_inversion_and_validation() {
   ThermophysicalSpec spec = base_spec();
   spec.species.push_back(varying_species("A", 24.0, 3.2, 4.0e-4));
@@ -987,6 +1120,7 @@ int main() {
   bool passed = test_constant_cp_path();
   passed &= test_conserved_enthalpy_bounds();
   passed &= test_nasa7_inversion_and_validation();
+  passed &= test_native_air_near_reference_inverse();
   passed &= test_thermophysical_text_contract();
   if (passed) {
     std::cout << "v0.4 thermodynamics tests passed\n";

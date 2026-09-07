@@ -81,6 +81,31 @@ struct ThermoState {
   double mach{};
 };
 
+enum class ThermoInversionOutcome : std::uint8_t {
+  not_attempted,
+  invalid_input,
+  enthalpy_out_of_range,
+  iteration_limit,
+  representable_temperature_limit,
+  converged
+};
+
+// Optional, allocation-free evidence of the thermal inversion only. A later
+// pressure/velocity check may still reject the complete state. Unlike state
+// outputs this record is deliberately published on failure as well as success.
+struct ThermoInversionDiagnostic {
+  ThermoInversionOutcome outcome{ThermoInversionOutcome::not_attempted};
+  std::uint32_t iterations{};
+  bool accepted{};
+  double input_enthalpy{};
+  double minimum_enthalpy{};
+  double maximum_enthalpy{};
+  double lower_temperature{};
+  double upper_temperature{};
+  double residual{};
+  double roundoff_bound{};
+};
+
 class ThermodynamicsPlan {
  public:
   ThermodynamicsPlan() noexcept = default;
@@ -97,12 +122,14 @@ class ThermodynamicsPlan {
                   Span<const double> independent_mass_fractions,
                   Real3 velocity, ThermoState& out,
                   double temperature_hint =
-                      std::numeric_limits<double>::quiet_NaN()) const noexcept;
+                      std::numeric_limits<double>::quiet_NaN(),
+                  ThermoInversionDiagnostic* diagnostic = nullptr) const noexcept;
   Status evaluate_thermal(
       double h, Span<const double> independent_mass_fractions,
       ThermalRevisionTuple revisions, ThermalState& out,
       double temperature_hint =
-          std::numeric_limits<double>::quiet_NaN()) const noexcept;
+          std::numeric_limits<double>::quiet_NaN(),
+      ThermoInversionDiagnostic* diagnostic = nullptr) const noexcept;
   Status complete_state(double p_abs, const ThermalState& thermal,
                         ThermalRevisionTuple revisions, Real3 velocity,
                         ThermoState& out) const noexcept;
@@ -114,7 +141,8 @@ class ThermodynamicsPlan {
       Span<const double> independent_mass_fractions, Real3 velocity,
       ThermoState& out,
       double temperature_hint =
-          std::numeric_limits<double>::quiet_NaN()) const noexcept;
+          std::numeric_limits<double>::quiet_NaN(),
+      ThermoInversionDiagnostic* diagnostic = nullptr) const noexcept;
   // Complete one ideal-gas thermophysical state from the predictor's density
   // authority.  Thermal inversion is performed once at fixed h/Y; p_abs is
   // then rebased from rho/(drho/dp)|h,Y.
@@ -123,7 +151,8 @@ class ThermodynamicsPlan {
       Span<const double> independent_mass_fractions, Real3 velocity,
       double& pressure_absolute, ThermoState& out,
       double temperature_hint =
-          std::numeric_limits<double>::quiet_NaN()) const noexcept;
+          std::numeric_limits<double>::quiet_NaN(),
+      ThermoInversionDiagnostic* diagnostic = nullptr) const noexcept;
   Status mixture_enthalpy(double temperature,
                           Span<const double> independent_mass_fractions,
                           double& enthalpy, double& cp,
@@ -166,7 +195,8 @@ class ThermodynamicsPlan {
   Status evaluate_thermal_impl(
       double h, Span<const double> independent_mass_fractions,
       ThermalRevisionTuple revisions, bool require_certificate,
-      ThermalState& out, double temperature_hint) const noexcept;
+      ThermalState& out, double temperature_hint,
+      ThermoInversionDiagnostic* diagnostic) const noexcept;
   Status evaluate_pressure_impl(double p_abs, const ThermalState& thermal,
                                 ThermalRevisionTuple revisions,
                                 bool require_certificate,
@@ -181,6 +211,9 @@ class ThermodynamicsPlan {
                             Span<const double> independent_mass_fractions,
                             double dependent, double& enthalpy, double& cp,
                             double& gas_constant) const noexcept;
+  double enthalpy_evaluation_error(
+      double temperature, Span<const double> independent_mass_fractions,
+      double dependent) const noexcept;
 
   std::vector<double> inverse_molecular_weight_;
   std::array<std::vector<double>, 7U> nasa_low_;

@@ -59,7 +59,8 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars) noe
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
-      "accepted-ibm-thermal-zero-normal-v2;momentum-rates-v1;"
+      "accepted-ibm-thermal-zero-normal-v3;momentum-rates-v1;"
+      "thermal-inverse-representable-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
       "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2")) {
     hash ^= static_cast<unsigned char>(byte);
@@ -7741,6 +7742,8 @@ Status ProductDriver::Impl::execute_attempt(
   predictor_input.geometry = product.geometry.topology_revision();
   predictor_input.boundary = product.boundary.revision();
   predictor_input.transport = product.transport.fingerprint();
+  predictor_input.cell_activity = product.topology.has_value()
+      ? product.topology->region() : Span<const std::uint8_t>{};
   predictor_input.density_accepted = rho_history.accepted;
   predictor_input.density_previous =
       effective_bdf.order == 2U ? rho_history.previous : ConstFieldView{};

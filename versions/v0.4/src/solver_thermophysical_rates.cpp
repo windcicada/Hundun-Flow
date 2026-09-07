@@ -555,6 +555,21 @@ Status evaluate_thermophysical_rates(
     if (!status) return status;
   }
 
+  if (input.immersed_interface != nullptr) {
+    const auto activity = input.immersed_interface->cell_activity();
+    std::size_t flat = 0U;
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x, ++flat)
+          if (activity.data[flat] == 0U) {
+            const Int3 c{x, y, z};
+            output.enthalpy_nonadvective_rhs.unchecked(c, 0U) = 0.0;
+            for (std::size_t k = 0U; k < output.species_nonadvective_rhs.size; ++k)
+              output.species_nonadvective_rhs.data[k].unchecked(c, 0U) = 0.0;
+            for (std::size_t k = 0U; k < output.passive_scalar_nonadvective_rhs.size; ++k)
+              output.passive_scalar_nonadvective_rhs.data[k].unchecked(c, 0U) = 0.0;
+          }
+  }
   std::uint64_t rates = mix(state_hash, plans.fingerprint());
   rates = mix(rates, output.enthalpy_nonadvective_rhs.revision);
   rates = mix(rates, output.diffusion_scratch.revision);

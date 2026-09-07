@@ -9,7 +9,9 @@
 | 组件 | 当前版本 | 约束对象 |
 |---|---|---|
 | history / bdf2-ex2 / rho-h-p / scalar-split | v1 | 历史格式含义、时间权重、状态量定义 |
-| accepted-ibm-thermal-zero-normal | v2 | 已接受热速率的 IBM 边界处理 |
+| accepted-ibm-thermal-zero-normal | v3 | link 热重建使用流体侧物性，不借用固体占位导热系数 |
+| thermal-inverse-representable | v1 | NASA 相邻可表示温度终止及浮点误差界 |
+| stationary-ibm-placeholder | v1 | 无固体传热模型的占位状态不独立推进，非对流速率与固体内部面通量为零 |
 | momentum-rates | v1 | 动量非对流速率 |
 | simple-fresh-flux / c1-joint-target | v2 | SIMPLE 新通量、C1 联立目标 |
 | open-periodic-flux | v3 | 开口及周期面通量 |

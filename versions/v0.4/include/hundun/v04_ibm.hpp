@@ -597,6 +597,9 @@ class IbmEquationInterfacePlan {
                         IbmEquationInterfacePlan& out) noexcept;
 
   Status zero_interface_flux(FaceFluxView flux) const noexcept;
+  Span<const std::uint8_t> cell_activity() const noexcept {
+    return topology_ == nullptr ? Span<const std::uint8_t>{} : topology_->region();
+  }
   Status validate_interface_flux(ConstFaceFluxView flux,
                                  double absolute_tolerance = 0.0) const
       noexcept;

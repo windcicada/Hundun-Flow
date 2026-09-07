@@ -576,6 +576,10 @@ struct ThermophysicalPredictorInput {
   Span<const ThermophysicalGhostHistory> species_ghosts{};
   Span<const ThermophysicalGhostHistory> passive_scalar_ghosts{};
   KernelCounters* counters{};
+  // Frozen owned-cell activity, x-fast, 0=stationary non-conjugate solid.
+  // Empty means all fluid. Placeholder values are carried, not integrated.
+  // Borrowed geometry storage and its values remain immutable for this plan.
+  Span<const std::uint8_t> cell_activity{};
 };
 
 struct ThermophysicalPredictorOutput {

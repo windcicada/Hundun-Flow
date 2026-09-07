@@ -1073,6 +1073,28 @@ bool run() {
     std::cerr << "IBM-donor-thermal-Jv-error=" << derivative_error << '\n';
     passed &= expect(derivative_error < 1.0e-6,
                      "frozen-material IBM donor thermal derivative matches finite differences");
+    // A non-conjugate solid placeholder is not a material on the fluid side
+    // of an adiabatic wall. Keep all fluid states and coefficients fixed.
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x)
+          if (region.data[flat(cells, {x, y, z})] == 0U)
+            lambda.view.unchecked({x, y, z}, 0U) = 2.0;
+    passed &= expect(perturbed_diffusion(0.0, rhs.view),
+                     "legal solid placeholder conductivity perturbation evaluates");
+    double placeholder_response = 0.0;
+    for (std::int32_t z = 0; z < cells.z; ++z)
+      for (std::int32_t y = 0; y < cells.y; ++y)
+        for (std::int32_t x = 0; x < cells.x; ++x) {
+          const Int3 cell{x, y, z};
+          if (region.data[flat(cells, cell)] == 0U) continue;
+          placeholder_response = std::max(placeholder_response,
+              std::abs(rhs.view.unchecked(cell, 0U) -
+                       target_rate.view.unchecked(cell, 0U)));
+        }
+    std::cerr << "IBM-solid-material-fluid-response=" << placeholder_response << '\n';
+    passed &= expect(placeholder_response < 1.0e-10,
+                     "adiabatic fluid equation is independent of solid placeholder material");
   }
 
   OwnedFace x_flux = make_face(CartesianAxis::x, cells, 201U);

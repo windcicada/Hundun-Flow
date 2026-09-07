@@ -1981,6 +1981,48 @@ bool test_implicit_endpoint_inactive_face(Fixture& fixture,
   return passed;
 }
 
+bool test_inactive_limited_bundle(Fixture& fixture,
+                                  ConstFaceFluxView accepted_flux,
+                                  ConstFaceFluxView previous_flux,
+                                  std::uintptr_t exchange_plan) {
+  PredictorData data(fixture.patch.cells, 300000.0, 300000.0, -900000.0, 0.0);
+  const Int3 cell{1, 1, 1};
+  data.rho.view.unchecked(cell, 0U) = 1.23456789;
+  data.rho_previous.view.unchecked(cell, 0U) = 0.8;
+  data.enthalpy_previous.view.unchecked(cell, 0U) = 290000.0;
+  const auto n = fixture.patch.cells;
+  std::vector<std::uint8_t> active(std::size_t(n.x) * n.y * n.z, 1U);
+  active[std::size_t(cell.x) + std::size_t(n.x) * (cell.y + std::size_t(n.y) * cell.z)] = 0U;
+  auto call = make_call(fixture, data, accepted_flux, previous_flux, exchange_plan, 904U);
+  call.input.cell_activity = {active.data(), active.size()};
+  const auto before_h = data.high_enthalpy.storage;
+  const auto before_rho = data.density_workspace.storage;
+  active.back() = 2U;
+  const Status invalid = fixture.equations.thermophysical_predictor().predict(
+      MPI_COMM_SELF, {}, call.input, call.output, call.slow_path,
+      call.diagnostics, call.certificate);
+  if (!expect(invalid.code == StatusCode::invalid_plan &&
+              data.high_enthalpy.storage == before_h && data.density_workspace.storage == before_rho,
+              "invalid activity rejects before candidate writes")) return false;
+  active.back() = 0U;
+  const Status status = fixture.equations.thermophysical_predictor().predict(
+      MPI_COMM_SELF, {}, call.input, call.output, call.slow_path,
+      call.diagnostics, call.certificate);
+  if (!expect(bool(status), "inactive limited bundle advances") ||
+      !expect(call.diagnostics.limited, "fluid cells activate low endpoint")) return false;
+  const double drift = call.output.enthalpy.unchecked(cell, 0U) -
+                       data.enthalpy.view.unchecked(cell, 0U);
+  std::cerr << "inactive-low-endpoint-h-drift=" << drift << '\n';
+  return expect(same_bits(call.output.density_workspace.unchecked(cell, 0U),
+                          data.rho.view.unchecked(cell, 0U)) &&
+                drift == 0.0 &&
+                same_bits(call.output.independent_species.data[0].unchecked(cell, 0U),
+                          data.species.view.unchecked(cell, 0U)) &&
+                same_bits(call.output.passive_scalars.data[0].unchecked(cell, 0U),
+                          data.passive.view.unchecked(cell, 0U)),
+                "inactive rho/h/species/passive remain accepted through low endpoint");
+}
+
 bool test_limited_conserved_bundle(Fixture& fixture,
                                    ConstFaceFluxView accepted_flux,
                                    ConstFaceFluxView previous_flux,
@@ -2535,6 +2577,8 @@ int main(int argc, char** argv) {
           static_cast<std::uintptr_t>(0x1d7002U);
       passed &= test_fast_path_bit_identity(fixture, accepted_flux,
                                             previous_flux, exchange_plan);
+      passed &= test_inactive_limited_bundle(fixture, accepted_flux,
+                                             previous_flux, exchange_plan);
       passed &= test_signed_passive_source_interval(fixture,accepted_flux,
           previous_flux,exchange_plan,MPI_COMM_WORLD);
       passed &= test_small_dt_paired_continuity_roundoff(

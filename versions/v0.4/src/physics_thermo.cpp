@@ -542,6 +542,35 @@ Status ThermodynamicsPlan::mixture_enthalpy(
   return {};
 }
 
+double ThermodynamicsPlan::enthalpy_evaluation_error(
+    double temperature, Span<const double> fractions,
+    double dependent) const noexcept {
+  // Bound evaluation of the *stored* NASA coefficients, not uncertainty in
+  // their physical fit. Each monomial has at most 8 rounded operations,
+  // followed by 5 additions, gas/fraction products and the species sum.
+  // gamma_(32+Ns) also covers forming this positive bound in double. Called
+  // only when the inverse bracket has no interior representable temperature.
+  double magnitude = 0.0;
+  const auto add_species = [&](std::size_t species, double fraction) {
+    const auto& a = temperature <= temperature_switch_[species]
+                        ? nasa_low_ : nasa_high_;
+    double power = temperature;
+    double terms = std::abs(a[5U][species]);
+    for (std::size_t k = 0U; k < 5U; ++k) {
+      terms += std::abs(a[k][species]) * power / static_cast<double>(k + 1U);
+      power *= temperature;
+    }
+    magnitude += fraction * universal_gas_constant_ *
+                 inverse_molecular_weight_[species] * terms;
+  };
+  for (std::size_t i = 0U; i < fractions.size; ++i)
+    add_species(independent_to_species_[i], fractions.data[i]);
+  add_species(dependent_species_, dependent);
+  const double n = static_cast<double>(32U + species_count());
+  const double nu = n * std::numeric_limits<double>::epsilon();
+  return nu / (1.0 - nu) * magnitude;
+}
+
 Status ThermodynamicsPlan::species_enthalpy_bounds(
     std::size_t full_species_index, double& at_minimum,
     double& at_maximum) const noexcept {
@@ -575,12 +604,13 @@ Status ThermodynamicsPlan::independent_species_enthalpy_bounds(
 Status ThermodynamicsPlan::evaluate(
     double p_abs, double h,
     Span<const double> independent_mass_fractions, Real3 velocity,
-    ThermoState& out, double temperature_hint) const noexcept {
+    ThermoState& out, double temperature_hint,
+    ThermoInversionDiagnostic* diagnostic) const noexcept {
   ThermalState thermal;
   const ThermalRevisionTuple one_shot{};
   const Status evaluated = evaluate_thermal_impl(
       h, independent_mass_fractions, one_shot, false, thermal,
-      temperature_hint);
+      temperature_hint, diagnostic);
   if (!evaluated) {
     return evaluated;
   }
@@ -590,15 +620,21 @@ Status ThermodynamicsPlan::evaluate(
 Status ThermodynamicsPlan::evaluate_thermal(
     double h, Span<const double> independent_mass_fractions,
     ThermalRevisionTuple revisions, ThermalState& out,
-    double temperature_hint) const noexcept {
+    double temperature_hint, ThermoInversionDiagnostic* diagnostic) const noexcept {
   return evaluate_thermal_impl(h, independent_mass_fractions, revisions, true,
-                               out, temperature_hint);
+                               out, temperature_hint, diagnostic);
 }
 
 Status ThermodynamicsPlan::evaluate_thermal_impl(
     double h, Span<const double> independent_mass_fractions,
     ThermalRevisionTuple revisions, bool require_certificate,
-    ThermalState& out, double temperature_hint) const noexcept {
+    ThermalState& out, double temperature_hint,
+    ThermoInversionDiagnostic* diagnostic) const noexcept {
+  if (diagnostic != nullptr) {
+    *diagnostic = {};
+    diagnostic->input_enthalpy = h;
+    diagnostic->outcome = ThermoInversionOutcome::invalid_input;
+  }
   if (!finite(h) || (require_certificate && !valid_tuple(revisions))) {
     return {StatusCode::numerical_failure, kThermoInput};
   }
@@ -630,6 +666,13 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
       return {StatusCode::numerical_failure, kThermoRange};
     }
     const double temperature = (h - constant_enthalpy_offset_) / cp;
+    if (diagnostic != nullptr) {
+      diagnostic->minimum_enthalpy = cp * minimum_temperature_ + constant_enthalpy_offset_;
+      diagnostic->maximum_enthalpy = cp * maximum_temperature_ + constant_enthalpy_offset_;
+      diagnostic->lower_temperature = minimum_temperature_;
+      diagnostic->upper_temperature = maximum_temperature_;
+      diagnostic->outcome = ThermoInversionOutcome::enthalpy_out_of_range;
+    }
     if (!finite(temperature) || temperature < minimum_temperature_ ||
         temperature > maximum_temperature_) {
       return {StatusCode::numerical_failure, kThermoInversion};
@@ -658,6 +701,13 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
     candidate.revisions_ = revisions;
     candidate.certified_ = true;
     out = candidate;
+    if (diagnostic != nullptr) {
+      diagnostic->outcome = ThermoInversionOutcome::converged;
+      diagnostic->accepted = true;
+      diagnostic->lower_temperature = temperature;
+      diagnostic->upper_temperature = temperature;
+      diagnostic->residual = cp * temperature + constant_enthalpy_offset_ - h;
+    }
     return {};
   }
 
@@ -675,6 +725,13 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
                                 independent_mass_fractions, dependent, high_h,
                                 high_cp, high_r);
   }
+  if (diagnostic != nullptr) {
+    diagnostic->minimum_enthalpy = low_h;
+    diagnostic->maximum_enthalpy = high_h;
+    diagnostic->lower_temperature = minimum_temperature_;
+    diagnostic->upper_temperature = maximum_temperature_;
+    diagnostic->outcome = ThermoInversionOutcome::enthalpy_out_of_range;
+  }
   if (!status || h < low_h || h > high_h) {
     return {StatusCode::numerical_failure, kThermoInversion};
   }
@@ -686,6 +743,7 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
   double cp = 0.0;
   double gas = 0.0;
   bool converged = false;
+  bool representation_limited = false;
   if (h == low_h) {
     temperature = lower;
     evaluated_h = low_h;
@@ -710,12 +768,14 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
     }
     for (std::uint32_t iteration = 0U; iteration < maximum_iterations_;
          ++iteration) {
+      if (diagnostic != nullptr) diagnostic->iterations = iteration + 1U;
       status = mixture_properties(temperature, independent_mass_fractions,
                                   dependent, evaluated_h, cp, gas);
       if (!status) {
         return status;
       }
       const double residual = evaluated_h - h;
+      if (diagnostic != nullptr) diagnostic->residual = residual;
       const double scale =
           std::max({1.0, std::abs(h), std::abs(evaluated_h)});
       if (std::abs(residual) <= relative_tolerance_ * scale) {
@@ -727,6 +787,43 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
       } else {
         lower = temperature;
       }
+      if (diagnostic != nullptr) {
+        diagnostic->lower_temperature = lower;
+        diagnostic->upper_temperature = upper;
+      }
+      if (std::nextafter(lower, upper) == upper) {
+        double hl = 0.0, cpl = 0.0, rl = 0.0;
+        double hu = 0.0, cpu = 0.0, ru = 0.0;
+        status = mixture_properties(lower, independent_mass_fractions,
+                                    dependent, hl, cpl, rl);
+        if (status)
+          status = mixture_properties(upper, independent_mass_fractions,
+                                      dependent, hu, cpu, ru);
+        if (!status) return status;
+        // Do not cross a polynomial branch jump or accept an out-of-range h.
+        // For a smooth monotone bracket, its h width is at most cp*dT plus
+        // endpoint evaluation errors (and the rounded subtraction error).
+        const double error = enthalpy_evaluation_error(
+            lower, independent_mass_fractions, dependent) +
+            enthalpy_evaluation_error(upper, independent_mass_fractions,
+                                      dependent);
+        const double bound = error + (upper - lower) * std::max(cpl, cpu) +
+            4.0 * std::numeric_limits<double>::epsilon() *
+                std::max({std::abs(hl), std::abs(hu), std::abs(h)});
+        const bool use_lower = std::abs(hl - h) <= std::abs(hu - h);
+        temperature = use_lower ? lower : upper;
+        evaluated_h = use_lower ? hl : hu;
+        cp = use_lower ? cpl : cpu;
+        gas = use_lower ? rl : ru;
+        representation_limited = true;
+        converged = finite(bound) && hl <= h && h <= hu &&
+                    hu - hl <= bound && std::abs(evaluated_h - h) <= bound;
+        if (diagnostic != nullptr) {
+          diagnostic->residual = evaluated_h - h;
+          diagnostic->roundoff_bound = bound;
+        }
+        break;
+      }
       double next = temperature - residual / cp;
       if (!finite(next) || next <= lower || next >= upper) {
         next = 0.5 * (lower + upper);
@@ -735,6 +832,11 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
     }
   }
   if (!converged) {
+    if (diagnostic != nullptr) {
+      diagnostic->outcome = std::nextafter(lower, upper) == upper
+          ? ThermoInversionOutcome::representable_temperature_limit
+          : ThermoInversionOutcome::iteration_limit;
+    }
     return {StatusCode::numerical_failure, kThermoInversion};
   }
 
@@ -762,6 +864,15 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
   candidate.revisions_ = revisions;
   candidate.certified_ = true;
   out = candidate;
+  if (diagnostic != nullptr) {
+    diagnostic->outcome = representation_limited
+        ? ThermoInversionOutcome::representable_temperature_limit
+        : ThermoInversionOutcome::converged;
+    diagnostic->accepted = true;
+    diagnostic->lower_temperature = lower;
+    diagnostic->upper_temperature = upper;
+    diagnostic->residual = evaluated_h - h;
+  }
   return {};
 }
 
@@ -860,21 +971,24 @@ Status ThermodynamicsPlan::complete_state_impl(
 Status ThermodynamicsPlan::evaluate_from_reference_pressure(
     double p_ref, double pi, double h,
     Span<const double> independent_mass_fractions, Real3 velocity,
-    ThermoState& out, double temperature_hint) const noexcept {
+    ThermoState& out, double temperature_hint,
+    ThermoInversionDiagnostic* diagnostic) const noexcept {
+  if (diagnostic != nullptr) *diagnostic = {};
   const double absolute_pressure = p_ref + pi;
   if (!finite(p_ref) || !finite(pi) || !finite(absolute_pressure) ||
       absolute_pressure <= 0.0) {
     return {StatusCode::numerical_failure, kThermoInput};
   }
   return evaluate(absolute_pressure, h, independent_mass_fractions, velocity,
-                  out, temperature_hint);
+                  out, temperature_hint, diagnostic);
 }
 
 Status ThermodynamicsPlan::evaluate_from_density(
     double density, double h,
     Span<const double> independent_mass_fractions, Real3 velocity,
     double& pressure_absolute, ThermoState& out,
-    double temperature_hint) const noexcept {
+    double temperature_hint, ThermoInversionDiagnostic* diagnostic) const noexcept {
+  if (diagnostic != nullptr) *diagnostic = {};
   if (!finite(density) || density <= 0.0) {
     return {StatusCode::numerical_failure, kThermoInput};
   }
@@ -882,7 +996,7 @@ Status ThermodynamicsPlan::evaluate_from_density(
   const ThermalRevisionTuple one_shot{};
   Status status = evaluate_thermal_impl(
       h, independent_mass_fractions, one_shot, false, thermal,
-      temperature_hint);
+      temperature_hint, diagnostic);
   if (!status) return status;
   const double p_abs = density / thermal.drho_dp_hY_;
   if (!finite(p_abs) || p_abs <= 0.0) {
@@ -1037,7 +1151,7 @@ Status ClosedMassPlan::solve(MPI_Comm communicator,
     ThermalState thermal;
     const Status evaluated = thermodynamics.evaluate_thermal_impl(
         enthalpy, Span<const double>{composition.data(), independent}, {},
-        false, thermal, std::numeric_limits<double>::quiet_NaN());
+        false, thermal, std::numeric_limits<double>::quiet_NaN(), nullptr);
     if (!evaluated) {
       local = evaluated;
       break;
@@ -1251,7 +1365,7 @@ Status ClosedMassPlan::solve_fields(
         ThermalState thermal;
         const Status evaluated = thermodynamics.evaluate_thermal_impl(
             enthalpy, {composition.data(), independent}, {}, false, thermal,
-            std::numeric_limits<double>::quiet_NaN());
+            std::numeric_limits<double>::quiet_NaN(), nullptr);
         if (!evaluated) {
           local = evaluated;
           break;
