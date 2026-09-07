@@ -136,6 +136,24 @@ bool run() {
   if (!passed) return false;
 
   const Int3 cells = fixture.patch.cells;
+  const auto interface_cells = fixture.topology.interface_cells();
+  std::vector<std::uint8_t> interface_membership(
+      static_cast<std::size_t>(cells.x) * cells.y * cells.z, 0U);
+  for (std::size_t i = 0; i < interface_cells.size; ++i) {
+    const auto cell = interface_cells.data[i];
+    if (!expect(cell < interface_membership.size(), "interface cell index is in range")) return false;
+    passed &= expect(interface_membership[cell]++ == 0U,
+                     "interface cell list has no duplicate owners");
+  }
+  const auto all_links = fixture.topology.links();
+  for (std::size_t i = 0; i < all_links.size; ++i)
+    passed &= expect(interface_membership[flat(cells, all_links.data[i].fluid_local_index)] == 1U,
+                     "interface list covers every cut-face owner");
+  const auto interface_only = [&](const ForceOwnedField& value) {
+    for (std::size_t i = 0; i < interface_membership.size(); ++i)
+      if (interface_membership[i] == 0U && value.storage[i] != 0.0) return false;
+    return true;
+  };
   // Unbound public objects must reject before touching borrowed plans or data.
   // Also exercise a fresh destination after a failed compile (not a previously
   // valid plan, which the transactional compile deliberately preserves).
@@ -428,6 +446,11 @@ bool run() {
                  expected_pressure_work_rate[index]));
   passed &= expect(maximum_pressure_work_error < 5.0e-12,
                    "IBM pressure-work correction matches the link-level oracle");
+  std::fill(pressure_work_rate.storage.begin(), pressure_work_rate.storage.end(), 0.0);
+  passed &= expect(interface.correct_pressure_work(as_const(pressure.view),
+                       as_const(velocity.view), pressure_work_rate.view) &&
+                       interface_only(pressure_work_rate),
+                   "zero-based pressure work is supported only on unique interface cells");
 
   for (std::int32_t z = 0; z < cells.z; ++z)
     for (std::int32_t y = 0; y < cells.y; ++y)
@@ -782,6 +805,10 @@ bool run() {
         std::abs(diffusion_rate.storage[index] - expected_rate[index]));
   passed &= expect(maximum_error < 5.0e-12,
                    "zero-normal diffusion replacement has correct sign and units");
+  std::fill(diffusion_rate.storage.begin(), diffusion_rate.storage.end(), 0.0);
+  passed &= expect(interface.correct_zero_normal_diffusion(as_const(transported.view),
+                       as_const(viscosity.view), diffusion_rate.view) && interface_only(diffusion_rate),
+                   "zero-based thermal correction is supported only on unique interface cells");
 
   // The thermal route keeps every donor strictly positive but deliberately
   // makes the quadratic data non-smooth.  A negative quadratic weight then

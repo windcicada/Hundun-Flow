@@ -243,6 +243,26 @@ extern "C" int MPI_Barrier(MPI_Comm comm) {
 }
 
 namespace {
+void add_scalar_fixture(hundun::v04::ValidatedModel& model) {
+  using namespace hundun::v04;
+  auto second = model.thermophysics.species.front();
+  second.stable_name = "B";
+  second.molecular_weight = 40.0;
+  model.thermophysics.species.push_back(second);
+  for (unsigned i=0;i<5U;++i) {
+    model.transported_scalars.push_back({"tracer_" + std::to_string(i),
+        TransportedScalarRole::passive_scalar, 1.0, 1.0});
+    if (i == 0U) model.transported_scalars.push_back({"air", TransportedScalarRole::species, 1.0, 1.0});
+  }
+}
+
+hundun::v04::DriverInitialState fixture_initial(const hundun::v04::ValidatedModel& model) {
+  static constexpr std::array<double, 6U> values{{0.1, 0.2, 0.3, 0.4, 0.5, 0.6}};
+  hundun::v04::DriverInitialState result;
+  result.transported_scalars = {values.data(), model.transported_scalars.size()};
+  return result;
+}
+
 hundun::v04::Status prepare_restart_image(
     const hundun::v04::ValidatedModel& model,
     const std::filesystem::path& case_root, hundun::v04::RestartImage& image,
@@ -259,7 +279,7 @@ hundun::v04::Status prepare_restart_image(
   Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan);
   if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
   if (status) status = driver.restart_expected(expected);
-  if (status) status = driver.initialize({});
+  if (status) status = driver.initialize(fixture_initial(model));
   DriverStepReport step;
   if (status) status = driver.advance({1, 1, 1, 1, 1}, step);
   RestartSnapshot snapshot;
@@ -277,10 +297,11 @@ hundun::v04::Status prepare_restart_image(
 
 // Requested, simultaneously live C++ storage: no views, allocator overhead,
 // libc/MPI malloc, stacks, input model or observer table are counted twice.
-bool memory_profile(bool immersed, int rank) {
+bool memory_profile(bool immersed, bool scalars, int rank) {
   using namespace hundun::v04;
   ValidatedModel model =
       test::product_model(immersed ? Int3{16, 16, 16} : Int3{8, 8, 8});
+  if (scalars) add_scalar_fixture(model);
   std::filesystem::path case_root;
   if (immersed) {
     model.mesh.lower = {-2.0, -2.0, -2.0};
@@ -372,13 +393,14 @@ bool memory_profile(bool immersed, int rank) {
       });
     }
     if (status)
-      status = stage("initialize", [&] { return driver.initialize({}); });
+      status = stage("initialize", [&] { return driver.initialize(fixture_initial(model)); });
     DriverStepReport report;
     for (unsigned step_index = 0; step_index < 2U && status; ++step_index) {
       status = stage(step_index == 0U ? "advance_cold" : "advance_warm", [&] {
         return driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, report);
       });
       if (status) {
+        if (scalars) passed &= report.scalar_transport.owned_payload_bytes > 0U;
         std::uint64_t total = 0U;
         for (auto calls : collective_calls) total += calls;
         const auto& resources = report.resources;
@@ -429,12 +451,24 @@ bool memory_profile(bool immersed, int rank) {
                                             snapshot)
                      : local;
       });
+    RestartImage image;
     if (status)
       status = stage("restart_read", [&] {
-        RestartImage image;
         return RestartReader::load(MPI_COMM_WORLD, restart_path, expected,
                                    image);
       });
+    if (status) {
+      // Exercise owned image + a newly constructed driver, after destruction
+      // of the old driver; borrowed snapshot/expected views are not reused.
+      driver = ProductDriver{};
+      status = stage("rebuild_with_image", [&] {
+        Status local = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan);
+        if (local) local = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+        return local;
+      });
+      if (status) status = stage("restore_with_image", [&] { return driver.initialize_restart(image); });
+      if (status) status = stage("advance_restored", [&] { return driver.advance({1,1,1,1,1}, report); });
+    }
     passed &= status && report.accepted;
   }
   peak_bytes = live_bytes;
@@ -561,8 +595,9 @@ int main(int argc, char** argv) {
     return passed ? 0 : 1;
   }
   if (argc > 1 && std::strcmp(argv[1], "--memory-profile") == 0) {
+    const bool scalars = argc > 2 && std::strstr(argv[2], "scalars") != nullptr;
     int passed =
-        memory_profile(argc > 2 && std::strcmp(argv[2], "immersed") == 0, rank)
+        memory_profile(argc > 2 && std::strncmp(argv[2], "immersed", 8U) == 0, scalars, rank)
             ? 1
             : 0;
     MPI_Allreduce(MPI_IN_PLACE, &passed, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
@@ -577,7 +612,8 @@ int main(int argc, char** argv) {
   const bool restore = argc > 3 && std::strcmp(argv[3], "initialize_restart") == 0;
   const bool read_restart =
       argc > 3 && std::strcmp(argv[3], "read_restart") == 0;
-  const bool immersed = argc > 4 && std::strcmp(argv[4], "immersed") == 0;
+  const bool immersed = argc > 4 && std::strncmp(argv[4], "immersed", 8U) == 0;
+  const bool scalars = argc > 4 && std::strstr(argv[4], "scalars") != nullptr;
   const char* operation = read_restart ? "read_restart"
                           : restore    ? "initialize_restart"
                           : initialize ? "initialize"
@@ -589,6 +625,7 @@ int main(int argc, char** argv) {
     if (!passed) break;
     ValidatedModel model =
         test::product_model(immersed ? Int3{16, 16, 16} : Int3{8, 8, 8});
+    if (scalars) add_scalar_fixture(model);
     std::filesystem::path case_root;
     if (immersed) {
       model.mesh.lower = {-2.0, -2.0, -2.0};
@@ -598,7 +635,7 @@ int main(int argc, char** argv) {
           "cylinder_ascii.stl", ImmersedFluidSide::outside};
       case_root = HUNDUN_V04_TEST_DATA_ROOT;
     }
-    DriverInitialState initial;
+    DriverInitialState initial = fixture_initial(model);
     initial.velocity = {0.1, 0.0, 0.0};
     RestartImage image;
     std::filesystem::path restart_root;

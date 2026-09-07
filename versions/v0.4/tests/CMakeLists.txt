@@ -11,7 +11,7 @@ add_executable(v04_product_scalar_contract_experiment
   integration/product_scalar_contract_experiment.cpp)
 target_link_libraries(v04_product_scalar_contract_experiment PRIVATE hundun_v04_core)
 foreach(rank_count IN ITEMS 1 2 4)
-  foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart capacity)
+  foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart capacity capacity_ranges)
     set(scalar_arguments)
     if(scenario STREQUAL "stretched")
       set(scalar_arguments --stretched)
@@ -27,6 +27,8 @@ foreach(rank_count IN ITEMS 1 2 4)
       set(scalar_arguments --stretched --restart)
     elseif(scenario STREQUAL "capacity")
       set(scalar_arguments --capacity)
+    elseif(scenario STREQUAL "capacity_ranges")
+      set(scalar_arguments --capacity-ranges)
     endif()
     add_test(NAME v04_scalar_contract_${scenario}_mpi_${rank_count}
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
@@ -70,6 +72,12 @@ add_test(NAME v04_target_identity
 set_tests_properties(v04_target_identity PROPERTIES TIMEOUT 30)
 
 foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_app_restart_policy_cli_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/app_restart_policy_cli_test.py"
+      --binary "$<TARGET_FILE:hundun>" --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}")
+  set_tests_properties(v04_app_restart_policy_cli_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 120)
   add_test(NAME v04_runner_checkpoint_allocation_mpi_${rank_count}
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_checkpoint_cli_test.py"
@@ -178,7 +186,7 @@ foreach(rank_count IN ITEMS 1 2 4)
   set_tests_properties(v04_restart_writer_allocations_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 120 LABELS "allocation_audit")
   foreach(operation IN ITEMS compile create initialize initialize_restart read_restart)
-    foreach(geometry IN ITEMS cartesian immersed)
+    foreach(geometry IN ITEMS cartesian immersed cartesian-scalars)
       set(allocation_test v04_product_${operation}_allocations_${geometry}_mpi_${rank_count})
       add_test(NAME ${allocation_test}
         COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
@@ -199,7 +207,7 @@ target_link_libraries(v04_product_memory_profile_mpi_test PRIVATE
 target_compile_definitions(v04_product_memory_profile_mpi_test PRIVATE
   HUNDUN_V04_TEST_DATA_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/data")
 foreach(rank_count IN ITEMS 1 2 4)
-  foreach(geometry IN ITEMS cartesian immersed)
+  foreach(geometry IN ITEMS cartesian immersed cartesian-scalars immersed-scalars)
     add_test(NAME v04_product_memory_profile_${geometry}_mpi_${rank_count}
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
               ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_memory_profile_mpi_test>"
@@ -479,6 +487,11 @@ target_link_libraries(v04_solver_ibm_equation_interface_test PRIVATE
 add_test(NAME v04_solver_ibm_equation_interface
   COMMAND v04_solver_ibm_equation_interface_test)
 set_tests_properties(v04_solver_ibm_equation_interface PROPERTIES TIMEOUT 120)
+
+add_executable(v04_solver_ibm_scalar_mms_test numerical/solver_ibm_scalar_mms_test.cpp)
+target_link_libraries(v04_solver_ibm_scalar_mms_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+add_test(NAME v04_solver_ibm_scalar_mms COMMAND v04_solver_ibm_scalar_mms_test)
+set_tests_properties(v04_solver_ibm_scalar_mms PROPERTIES TIMEOUT 600 LABELS "v04_focused;scalar-conservation")
 
 add_executable(v04_solver_ibm_force_oracle_test
   numerical/solver_ibm_force_oracle_test.cpp)
