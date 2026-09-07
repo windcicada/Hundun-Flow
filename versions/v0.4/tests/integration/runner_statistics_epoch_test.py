@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -72,7 +73,7 @@ def main():
         run_meta = metadata(path / "RUN.meta")
         assert run_meta["expected_ranks"] == str(args.ranks)
         assert run_meta["requested_steps"] == str(steps)
-        assert run_meta["observation_schema"] == "3"
+        assert run_meta["observation_schema"] == "4"
         source_hash = hashlib.sha256((path / "RUN.meta").read_bytes()).hexdigest()
         with (path / "performance.csv").open() as stream:
             performance = list(csv.DictReader(stream))
@@ -94,6 +95,17 @@ def main():
                 assert row["attempt"] == "1" and row["corrector"] in ("1", "2")
                 assert int(row["mg_copy_ns"]) <= int(row["mg_refill_ns"])
                 assert row["dropped_loops"] == "0"
+                assert row["linear_criterion_valid"] in ("0", "1")
+                if row["invoked"] == "1":
+                    assert row["linear_criterion_valid"] == "1", "successful invoked solve lost its criterion"
+                rhs, atol, rtol, limit = (float(row[key]) for key in (
+                    "linear_rhs_norm", "linear_atol", "linear_rtol", "linear_residual_limit"))
+                assert all(math.isfinite(value) for value in (rhs, atol, rtol, limit))
+                if row["linear_criterion_valid"] == "1":
+                    assert rhs >= 0 and atol >= 0 and rtol >= 0 and (atol > 0 or rtol > 0)
+                    assert math.isclose(limit, max(atol, rtol * rhs), rel_tol=8 * sys.float_info.epsilon)
+                else:
+                    assert (rhs, atol, rtol, limit) == (0, 0, 0, 0)
         observer = Path(__file__).resolve().parents[4] / "tools" / "v04_solver_observe.py"
         observed = subprocess.run([sys.executable, str(observer), str(path),
             "--output", str(root / (name + "-solver-observation.json"))],
@@ -102,6 +114,7 @@ def main():
         attribution = json.loads((root / (name + "-solver-observation.json")).read_text())
         assert attribution["complete"] and attribution["validated_steps"] == steps
         assert attribution["expected_ranks"] == list(range(args.ranks))
+        assert attribution["schema"] == "HUNDUN_LOOP_OBSERVATION_V4"
         validator = Path(__file__).resolve().parents[4] / "tools" / "v04_evidence_validate.py"
         check = [sys.executable, str(validator), "runtime", str(path / "evidence.jsonl")]
         if source:

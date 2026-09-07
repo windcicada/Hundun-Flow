@@ -1,0 +1,15 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang
+    Start 277: v04_solver_krylov_mpi_1
+1/3 Test #277: v04_solver_krylov_mpi_1 ..........   Passed    0.71 sec
+    Start 279: v04_solver_krylov_mpi_2
+2/3 Test #279: v04_solver_krylov_mpi_2 ..........   Passed    0.56 sec
+    Start 281: v04_solver_krylov_mpi_4
+3/3 Test #281: v04_solver_krylov_mpi_4 ..........   Passed    0.54 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Label Time Summary:
+v04_focused    =   3.98 sec*proc (3 tests)
+
+Total Test time (real) =   1.82 sec

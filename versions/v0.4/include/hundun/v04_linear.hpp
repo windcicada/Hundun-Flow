@@ -517,6 +517,14 @@ struct LinearSolveResult {
   std::uint64_t arnoldi_dot_nanoseconds{};
   std::uint64_t arnoldi_reduce_nanoseconds{};
   std::uint64_t arnoldi_update_nanoseconds{};
+  // Canonical FP64 residual criterion, distinct from the supplemental audit's
+  // convergence_limit above. An initial guess can change ||b-Ax0|| but not
+  // ||b||. Unavailable (including preflight/norm failures) leaves all zeros.
+  bool true_residual_criterion_valid{};
+  double rhs_norm{};
+  double absolute_tolerance{};
+  double relative_tolerance{};
+  double true_residual_limit{};
 };
 
 struct LinearReductionCounters {

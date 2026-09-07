@@ -20,6 +20,127 @@ def write(path, records):
         writer.writerows(records)
 
 
+def check_linear_criterion(script, checks, root, base, total):
+    root.mkdir()
+    (root / "conservation.csv").write_text("step,rank\n7,0\n")
+    criterion = dict(linear_criterion_valid=1, linear_rhs_norm=100.0,
+                     linear_atol=0.0001, linear_rtol=0.001,
+                     linear_residual_limit=0.1)
+    observed = dict(base, linear_initial=0.5, **criterion)
+
+    def run(rows, schema=4, accepted=True, reason=None):
+        metadata = ("HUNDUN_V04_THIN_DOMAIN_RUN_V1\nstarting_step 6\n"
+                    "requested_steps 1\nexpected_ranks {}\nobservation_schema {}\n"
+                    "end\n").format(len(rows), schema)
+        (root / "RUN.meta").write_text(metadata)
+        identity = hashlib.sha256(metadata.encode()).hexdigest()
+        for path in root.glob("solver-rank-*.csv"):
+            path.unlink()
+        for rank, row in enumerate(rows):
+            write(root / "solver-rank-{}.csv".format(rank),
+                  [dict(row, rank=rank, source_meta_sha256=identity)])
+        write(root / "performance.csv", [dict(total, rank=rank,
+              pressure_calls=row["invoked"], A_apply_ns=row["A_ns"],
+              M_apply_ns=row["M_ns"], source_meta_sha256=identity)
+              for rank, row in enumerate(rows)])
+        result = subprocess.run([sys.executable, script, str(root)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=10)
+        assert (result.returncode == 0) == accepted, result.stderr or result.stdout
+        if reason:
+            assert reason in result.stderr, result.stderr
+        checks.append("criterion accepted" if accepted else "criterion rejected")
+        return json.loads(result.stdout) if accepted else None
+
+    # The public threshold uses the actual RHS, not the warm-start residual.
+    result = run([observed])
+    loop = result["loops"][0]
+    assert result["schema"] == "HUNDUN_LOOP_OBSERVATION_V4" and result["complete"]
+    assert loop["linear_criterion_available"]
+    assert loop["linear_criterion"] == dict(rhs_norm=100.0, atol=0.0001,
+                                            rtol=0.001, residual_limit=0.1)
+    assert loop["linear_contraction"] == [0.02]
+    sidecar = root / "criterion-details.jsonl"
+    streamed = subprocess.run([sys.executable, script, str(root),
+        "--details-output", str(sidecar)], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
+    assert streamed.returncode == 0, streamed.stderr
+    streamed = json.loads(streamed.stdout)
+    assert streamed["complete"] and streamed["loops"] == []
+    assert [json.loads(line) for line in sidecar.read_text().splitlines()] == result["loops"]
+    assert streamed["details"]["sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    checks.append("criterion streamed details match")
+
+    # Old frozen observations stay complete without inventing a criterion.
+    old = run([base], schema=3)
+    assert old["schema"] == "HUNDUN_LOOP_OBSERVATION_V3" and old["complete"]
+    assert not old["loops"][0]["linear_criterion_available"]
+    assert old["loops"][0]["linear_criterion"] is None
+    extended = run([observed], schema=3)
+    assert extended["loops"][0]["linear_criterion"] == loop["linear_criterion"]
+    run([base], accepted=False, reason="criterion")
+    for key in criterion:
+        incomplete = {k: v for k, v in observed.items() if k != key}
+        run([incomplete], accepted=False, reason="criterion")
+        run([incomplete], schema=3, accepted=False, reason="criterion")
+
+    unavailable = dict(base, **dict.fromkeys(criterion, 0))
+    for invoked in (0, 1):
+        missing = run([dict(unavailable, invoked=invoked)])
+        assert missing["complete"]
+        assert not missing["loops"][0]["linear_criterion_available"]
+        assert missing["loops"][0]["linear_criterion"] is None
+    for key in criterion:
+        if key != "linear_criterion_valid":
+            run([dict(unavailable, **{key: criterion[key]})], accepted=False, reason="criterion")
+    for key in criterion:
+        for value in ("nan", "inf", -1):
+            run([dict(observed, **{key: value})], accepted=False)
+    for key, value in (("linear_criterion_valid", 2),
+                       ("linear_residual_limit", 0), ("linear_residual_limit", 0.10001),
+                       ("linear_residual_limit", 0.0005)):
+        run([dict(observed, **{key: value})], accepted=False, reason="criterion")
+    # Match the public solver controls, which allow either tolerance to be
+    # zero and do not cap rtol. A zero RHS can then have a zero limit.
+    for edge, expected in (
+            (dict(observed, linear_atol=1, linear_rtol=0, linear_residual_limit=1),
+             dict(rhs_norm=100.0, atol=1.0, rtol=0.0, residual_limit=1.0)),
+            (dict(observed, linear_atol=0),
+             dict(rhs_norm=100.0, atol=0.0, rtol=0.001, residual_limit=0.1)),
+            (dict(observed, linear_atol=0, linear_rhs_norm=0, linear_residual_limit=0),
+             dict(rhs_norm=0.0, atol=0.0, rtol=0.001, residual_limit=0.0)),
+            (dict(observed, linear_rtol=1, linear_residual_limit=100),
+             dict(rhs_norm=100.0, atol=0.0001, rtol=1.0, residual_limit=100.0)),
+            (dict(observed, linear_rtol=2, linear_residual_limit=200),
+             dict(rhs_norm=100.0, atol=0.0001, rtol=2.0, residual_limit=200.0))):
+        valid = run([edge])
+        assert valid["loops"][0]["linear_criterion_available"]
+        assert valid["loops"][0]["linear_criterion"] == expected
+    run([dict(unavailable, linear_criterion_valid=1)], accepted=False, reason="criterion")
+    run([dict(observed, linear_rhs_norm=0, linear_atol=0,
+              linear_residual_limit=5e-324)], accepted=False, reason="criterion")
+    run([dict(observed, linear_rhs_norm=0, linear_atol=5e-324,
+              linear_residual_limit=0)], accepted=False, reason="criterion")
+    run([dict(observed, linear_rhs_norm=0, linear_atol=5e-324,
+              linear_residual_limit=5e-324)])
+    run([dict(observed, linear_rhs_norm=1e308, linear_rtol=2,
+              linear_residual_limit=1e308)], accepted=False, reason="criterion")
+    run([dict(observed, linear_residual_limit=0.10000000000000002)])
+    run([dict(observed, linear_rhs_norm=0, linear_residual_limit=0.0001)])
+    # A failed solve with a valid diagnostic criterion is still readable.
+    failed = run([dict(observed, linear_final=10)])
+    assert failed["complete"] and failed["loops"][0]["linear_contraction"] == [20.0]
+    run([observed, observed])
+    # Both ranks can be individually legal while describing different criteria.
+    for changed in (dict(observed, linear_rhs_norm=200, linear_residual_limit=0.2),
+                    dict(observed, linear_atol=0.01),
+                    dict(observed, linear_rtol=0.002, linear_residual_limit=0.2),
+                    dict(observed, linear_residual_limit=0.10000000000000002),
+                    unavailable):
+        run([observed, changed], accepted=False, reason="per-rank linear criterion")
+    run([observed, base], schema=3, accepted=False, reason="per-rank loop schema")
+
+
 def main():
     script = sys.argv[1]
     with tempfile.TemporaryDirectory(prefix="hundun-observe-") as directory:
@@ -58,6 +179,7 @@ def main():
         old = run([base], [total], True)
         assert old["loops"][0]["scalar_coupling_sweep"] == 1
         assert old["rank_step_mean_ns"]["scalar_remap_ns"] == 0
+        check_linear_criterion(script, checks, root / "criterion", base, total)
         loops = [dict(base, scalar_coupling_sweep=i) for i in (1, 2)]
         summed = dict(total, pressure_calls=2, A_apply_ns=60, M_apply_ns=40,
                       scalar_remap_ns=9)

@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import math
+import sys
 from collections import defaultdict
 from contextlib import ExitStack
 from pathlib import Path
@@ -17,6 +18,8 @@ ADDED = ("final_momentum_ns", "terminal_metrics_ns", "boundary_ledger_ns",
          "structured_wait_ns", "structured_control_ns", "scalar_remap_ns")
 FLOATS = ("dt", "linear_initial", "linear_final", "baseline_continuity",
           "baseline_energy", "selected_continuity", "selected_energy", "selected_alpha")
+CRITERION_FLOATS = ("linear_rhs_norm", "linear_atol", "linear_rtol", "linear_residual_limit")
+CRITERION = ("linear_criterion_valid",) + CRITERION_FLOATS
 SOURCE = "source_meta_sha256"
 
 
@@ -41,9 +44,10 @@ def metadata(root, legacy_ranks):
         if key in values:
             raise ValueError("duplicate metadata key: " + key)
         values[key] = value
-    if values.get("observation_schema") not in (None, "3"):
+    schema = values.get("observation_schema")
+    if schema not in (None, "3", "4"):
         raise ValueError("unsupported observation schema")
-    bound = values.get("observation_schema") == "3"
+    bound = schema in ("3", "4")
     if bound:
         ranks = int(values["expected_ranks"])
         if legacy_ranks is not None and legacy_ranks != ranks:
@@ -56,10 +60,10 @@ def metadata(root, legacy_ranks):
     count = int(values["requested_steps"])
     if ranks <= 0 or ranks > 2**31 - 1 or first <= 0 or count <= 0 or first + count - 1 > 2**64 - 1:
         raise ValueError("invalid frozen rank/step range")
-    return ranks, first, first + count - 1, bound, file_hash(path)
+    return ranks, first, first + count - 1, bound, file_hash(path), schema
 
 
-def checked_rows(stream, source, loop, rank=None):
+def checked_rows(stream, source, loop, rank=None, require_criterion=False):
     def lines():
         for line in stream:
             if not line.endswith("\n"):
@@ -75,6 +79,8 @@ def checked_rows(stream, source, loop, rank=None):
         raise ValueError("missing/duplicate CSV columns: " + stream.name)
     if source is not None and SOURCE not in header:
         raise ValueError("missing source identity: " + stream.name)
+    if loop and (require_criterion or set(CRITERION).intersection(header)) and not set(CRITERION).issubset(header):
+        raise ValueError("missing/partial linear criterion columns: " + stream.name)
     for raw in reader:
         if None in raw or any(v is None or v == "" for v in raw.values()):
             raise ValueError("malformed CSV row: " + stream.name)
@@ -84,8 +90,9 @@ def checked_rows(stream, source, loop, rank=None):
                 if source is not None and value != source:
                     raise ValueError("source identity mismatch: " + stream.name)
                 continue
-            number = float(value) if key in FLOATS else int(value)
-            if not math.isfinite(number) or number < 0 or (key not in FLOATS and number > 2**64 - 1):
+            floating = key in FLOATS or key in CRITERION_FLOATS
+            number = float(value) if floating else int(value)
+            if not math.isfinite(number) or number < 0 or (not floating and number > 2**64 - 1):
                 raise ValueError("invalid count/time/residual: " + key)
             row[key] = number
         if row["step"] == 0 or (rank is not None and row["rank"] != rank):
@@ -99,6 +106,24 @@ def checked_rows(stream, source, loop, rank=None):
                 raise ValueError("invalid loop discriminator")
             if row["globalization_valid"] and not set(FLOATS[3:7]).issubset(row):
                 raise ValueError("missing physical residuals")
+            if "linear_criterion_valid" in row:
+                if row["linear_criterion_valid"] not in (0, 1):
+                    raise ValueError("invalid linear criterion flag")
+                if not row["linear_criterion_valid"]:
+                    if any(row[k] != 0 for k in CRITERION_FLOATS):
+                        raise ValueError("unavailable linear criterion must have zero fields")
+                else:
+                    if row["linear_atol"] == 0 and row["linear_rtol"] == 0:
+                        raise ValueError("linear criterion needs at least one positive tolerance")
+                    expected = max(row["linear_atol"], row["linear_rtol"] * row["linear_rhs_norm"])
+                    # Permit binary64 multiplication/decimal round-trip rounding,
+                    # including subnormal results, while preserving exact zero;
+                    # this is not a solver tolerance.
+                    limit = row["linear_residual_limit"]
+                    if ((limit == 0) != (expected == 0) or not math.isclose(limit, expected,
+                            rel_tol=8 * sys.float_info.epsilon,
+                            abs_tol=8 * sys.float_info.min * sys.float_info.epsilon)):
+                        raise ValueError("linear criterion limit does not match max(atol, rtol * rhs_norm)")
         yield row
 
 
@@ -152,11 +177,19 @@ def summarize_step(step, loop_rows, performance, expected_ranks):
         timings = [k for k in group[0] if k.endswith("_ns")]
         if any(set(row) != set(group[0]) for row in group):
             raise ValueError("inconsistent per-rank loop schema")
+        criterion = None
+        if "linear_criterion_valid" in group[0]:
+            if any(any(row[k] != group[0][k] for k in CRITERION) for row in group):
+                raise ValueError("inconsistent per-rank linear criterion")
+            if group[0]["linear_criterion_valid"]:
+                criterion = {k[len("linear_"):]: group[0][k] for k in CRITERION_FLOATS}
         summaries.append({"step": step, "attempt": key[0], "scalar_coupling_sweep": key[1],
             "corrector": key[2], "refinement": key[3], "kind": ("pressure", "diagonal", "spatial")[key[4]],
             "ranks": len(group), "counts_by_rank": {k: sorted({r[k] for r in group}) for k in COUNTS},
             "rank_mean_ns": {k: sum(r[k] for r in group) / len(group) for k in timings},
             "rank_max_ns": {k: max(r[k] for r in group) for k in timings},
+            "linear_criterion_available": criterion is not None,
+            "linear_criterion": criterion,
             "linear_contraction": [ratio(r["linear_final"], r["linear_initial"]) for r in group],
             "physical_contraction": [{"rank": r["rank"],
                 "continuity": ratio(r["selected_continuity"], r["baseline_continuity"]),
@@ -172,7 +205,9 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
     totals, samples = dict.fromkeys(ADDED, 0), 0
     paths = sorted(root.glob("solver-rank-*.csv"))
     try:
-        ranks, first, last, bound, source = metadata(root, expected_ranks)
+        ranks, first, last, bound, source, schema = metadata(root, expected_ranks)
+        if schema == "4":
+            result["schema"] = "HUNDUN_LOOP_OBSERVATION_V4"
         result.update(expected_rank_count=ranks, expected_step_range=[first, last])
         if len(paths) != ranks:
             raise ValueError("per-rank files do not cover the frozen rank set")
@@ -189,7 +224,7 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
         with ExitStack() as stack:
             streams = [stack.enter_context((root / "solver-rank-{}.csv".format(r)).open()) for r in range(ranks)]
             streams.append(stack.enter_context((root / "performance.csv").open()))
-            groups = [step_groups(checked_rows(s, source if bound else None, True, r), 64)
+            groups = [step_groups(checked_rows(s, source if bound else None, True, r, schema == "4"), 64)
                       for r, s in enumerate(streams[:-1])]
             groups.append(step_groups(checked_rows(streams[-1], source if bound else None, False), ranks))
             for step in range(first, last + 1):
@@ -223,6 +258,7 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
     result["rank_step_mean_ns"] = {k: totals[k] / samples for k in ADDED} if samples else {}
     result["scope"] = [
         "complete means the frozen requested diagnostic window, not scientific acceptance",
+        "linear_criterion reports max(atol, rtol * rhs_norm); availability and contraction are not acceptance gates",
         "partial results contain only validated whole steps, never a complete attribution",
         "M/A include communication; MG copy is within refill and solve preparation",
         "Structured wait/control excludes IBM donor and MG-specific MPI",

@@ -1024,6 +1024,120 @@ class AcceptingConvergenceAudit final : public LinearConvergenceAudit {
   std::uint32_t evaluations_{};
 };
 
+bool test_reported_true_residual_criterion(MPI_Comm communicator, int rank) {
+  bool passed = true;
+  for (const auto algorithm : {LinearAlgorithm::pcg, LinearAlgorithm::fgmres,
+                               LinearAlgorithm::bicgstab}) {
+    SolveFixture fixture;
+    const bool initialized = initialize_fixture(
+        communicator, algorithm, algorithm == LinearAlgorithm::fgmres ? 4U : 0U,
+        fixture);
+    if (!all_true(initialized, communicator)) return false;
+    TridiagonalOperator op(communicator, fixture.local, fixture.expected,
+                           0.0, 1.0, 0.0, true);
+    ScalingPreconditioner preconditioner(
+        fixture.expected, 1.0, algorithm != LinearAlgorithm::bicgstab);
+    auto selected = control(20U, algorithm == LinearAlgorithm::fgmres ? 4U : 0U);
+    selected.absolute_tolerance = 0.125;
+    selected.relative_tolerance = 0.0625;
+    const auto solve = [&]() {
+      const auto call = invocation(fixture, selected);
+      if (algorithm == LinearAlgorithm::pcg)
+        return solve_pcg(op, preconditioner, call, fixture.workspace, fixture.reductions);
+      if (algorithm == LinearAlgorithm::fgmres)
+        return solve_fgmres(op, preconditioner, call, fixture.workspace, fixture.reductions);
+      return solve_bicgstab(op, preconditioner, call, fixture.workspace, fixture.reductions);
+    };
+    // 67 independent equations x_i=2: ||b||=sqrt(268). Warm/exact guesses
+    // change the initial residual, but never the canonical RHS-scaled gate.
+    const double expected_norm = std::sqrt(268.0);
+    for (double seed : {0.0, 1.5, 2.0}) {
+      for (int c = 0; c < fixture.local.cells; ++c) {
+        fixture.rhs.view.unchecked({c, 0, 0}, 0U) = 2.0;
+        fixture.solution.view.unchecked({c, 0, 0}, 0U) = seed;
+      }
+      LinearSolveResult result;
+      std::size_t allocations = 0U;
+      {
+        allocation_observer::Guard guard;
+        result = solve();
+        allocations = allocation_observer::count.load(std::memory_order_relaxed);
+      }
+      passed &= expect(result.status && result.true_residual_criterion_valid &&
+          std::abs(result.rhs_norm - expected_norm) < 1e-13 &&
+          result.absolute_tolerance == 0.125 && result.relative_tolerance == 0.0625 &&
+          std::abs(result.true_residual_limit - expected_norm / 16.0) < 1e-14 &&
+          std::abs(result.initial_true_residual - std::abs(2.0 - seed) * std::sqrt(67.0)) < 1e-13 &&
+          result.final_true_residual <= result.true_residual_limit && allocations == 0U,
+          rank, "public result reports RHS criterion independently of initial guess without allocation");
+    }
+    selected.relative_tolerance = 1e-6;
+    for (int c = 0; c < fixture.local.cells; ++c)
+      fixture.solution.view.unchecked({c, 0, 0}, 0U) = 0.0;
+    const auto absolute = solve();
+    passed &= expect(absolute.status && absolute.true_residual_criterion_valid &&
+        absolute.true_residual_limit == 0.125 && absolute.relative_tolerance == 1e-6,
+        rank, "reported criterion retains the absolute floor");
+    for (int c = 0; c < fixture.local.cells; ++c) {
+      fixture.rhs.view.unchecked({c, 0, 0}, 0U) = 0.0;
+      fixture.solution.view.unchecked({c, 0, 0}, 0U) = 9.0;
+    }
+    const auto zero = solve();
+    passed &= expect(zero.status && zero.termination == LinearTermination::zero_rhs &&
+        zero.true_residual_criterion_valid && zero.rhs_norm == 0.0 &&
+        zero.true_residual_limit == 0.125,
+        rank, "zero-RHS fast path still reports its valid absolute criterion");
+    // The public control admits pure absolute/relative tolerances and rtol>=1.
+    // Observability must not silently narrow that existing solver contract.
+    for (const auto& edge : {std::array<double, 3>{1.0, 0.0, 2.0},
+                             {0.0, 1e-6, 2.0}, {0.0, 1e-6, 0.0},
+                             {0.0, 1.0, 2.0}, {0.0, 1.5, 2.0}}) {
+      selected.absolute_tolerance = edge[0];
+      selected.relative_tolerance = edge[1];
+      for (int c = 0; c < fixture.local.cells; ++c) {
+        fixture.rhs.view.unchecked({c, 0, 0}, 0U) = edge[2];
+        fixture.solution.view.unchecked({c, 0, 0}, 0U) = edge[2];
+      }
+      const auto boundary = solve();
+      passed &= expect(boundary.status && boundary.true_residual_criterion_valid &&
+          boundary.absolute_tolerance == edge[0] &&
+          boundary.relative_tolerance == edge[1] &&
+          std::abs(boundary.rhs_norm - edge[2] * std::sqrt(67.0)) < 1e-13 &&
+          boundary.true_residual_limit ==
+              std::max(edge[0], edge[1] * boundary.rhs_norm), rank,
+          "criterion preserves all existing legal public tolerance boundaries");
+    }
+    selected.absolute_tolerance = 1.0;
+    selected.relative_tolerance = std::numeric_limits<double>::max();
+    const auto before_overflow = snapshot_solution(fixture.solution.view);
+    const auto overflow = solve();
+    passed &= expect(!overflow.status && !overflow.true_residual_criterion_valid &&
+        overflow.rhs_norm == 0.0 && overflow.absolute_tolerance == 0.0 &&
+        overflow.relative_tolerance == 0.0 && overflow.true_residual_limit == 0.0 &&
+        same_solution(fixture.solution.view, before_overflow), rank,
+        "unrepresentable residual limit remains a failure with unavailable criterion");
+    selected.relative_tolerance = 1e-6;
+    selected.absolute_tolerance = -1.0;
+    const auto before = snapshot_solution(fixture.solution.view);
+    const auto rejected = solve();
+    passed &= expect(!rejected.status && !rejected.true_residual_criterion_valid &&
+        rejected.rhs_norm == 0.0 && rejected.absolute_tolerance == 0.0 &&
+        rejected.relative_tolerance == 0.0 && rejected.true_residual_limit == 0.0 &&
+        same_solution(fixture.solution.view, before), rank,
+        "preflight failure leaves criterion unavailable and caller solution unchanged");
+    selected.absolute_tolerance = 0.125;
+    if (fixture.local.rank == fixture.local.size - 1)
+      fixture.rhs.view.unchecked({0, 0, 0}, 0U) = std::numeric_limits<double>::quiet_NaN();
+    const auto nonfinite = solve();
+    passed &= expect(!nonfinite.status && !nonfinite.true_residual_criterion_valid &&
+        nonfinite.rhs_norm == 0.0 && nonfinite.absolute_tolerance == 0.0 &&
+        nonfinite.relative_tolerance == 0.0 && nonfinite.true_residual_limit == 0.0 &&
+        same_solution(fixture.solution.view, before), rank,
+        "rank-local nonfinite RHS fails consistently without inventing a threshold");
+  }
+  return all_true(passed, communicator);
+}
+
 bool test_pcg_spd_and_zero_rhs(MPI_Comm communicator, int rank) {
   SolveFixture fixture;
   bool passed = expect(initialize_fixture(communicator, LinearAlgorithm::pcg,
@@ -2078,6 +2192,14 @@ bool test_fgmres_supplemental_convergence_audit(MPI_Comm communicator,
           audited.convergence_rejections == 1U &&
           audited.final_convergence_metric == 0.5 &&
           audited.convergence_limit == 1.0 &&
+          audited.true_residual_criterion_valid &&
+          audited.rhs_norm == baseline.rhs_norm &&
+          audited.absolute_tolerance == selected.absolute_tolerance &&
+          audited.relative_tolerance == selected.relative_tolerance &&
+          audited.true_residual_limit == baseline.true_residual_limit &&
+          audited.true_residual_limit ==
+              std::max(selected.absolute_tolerance,
+                       selected.relative_tolerance * audited.rhs_norm) &&
           residual_is_accepted(oracle, selected),
       rank,
       "FGMRES keeps the canonical true-residual gate and continues after one native audit rejection");
@@ -2315,6 +2437,11 @@ bool same_ordinary_result(const LinearSolveResult& left,
          left.convergence_rejections == right.convergence_rejections &&
          left.final_convergence_metric == right.final_convergence_metric &&
          left.convergence_limit == right.convergence_limit &&
+         left.true_residual_criterion_valid == right.true_residual_criterion_valid &&
+         left.rhs_norm == right.rhs_norm &&
+         left.absolute_tolerance == right.absolute_tolerance &&
+         left.relative_tolerance == right.relative_tolerance &&
+         left.true_residual_limit == right.true_residual_limit &&
          left.lowest_failing_rank == right.lowest_failing_rank;
 }
 
@@ -4311,6 +4438,7 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   bool passed = size == 1 || size == 2 || size == 4;
+  passed &= test_reported_true_residual_criterion(MPI_COMM_WORLD, rank);
   passed &= test_pcg_spd_and_zero_rhs(MPI_COMM_WORLD, rank);
   passed &= test_nonsymmetric_solvers(MPI_COMM_WORLD, rank);
   passed &= test_rejections_are_transactional(MPI_COMM_WORLD, rank, size);

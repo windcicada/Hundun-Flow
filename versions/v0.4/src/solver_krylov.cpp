@@ -1108,9 +1108,17 @@ Status compute_true_residual_norm_in_place(
 }
 
 double convergence_limit(const LinearSolveInvocation& invocation,
-                         double rhs_norm) noexcept {
-  return std::max(invocation.control.absolute_tolerance,
-                  invocation.control.relative_tolerance * rhs_norm);
+                         double rhs_norm, LinearSolveResult& result) noexcept {
+  const double limit = std::max(invocation.control.absolute_tolerance,
+                               invocation.control.relative_tolerance * rhs_norm);
+  if (std::isfinite(limit)) {
+    result.true_residual_criterion_valid = true;
+    result.rhs_norm = rhs_norm;
+    result.absolute_tolerance = invocation.control.absolute_tolerance;
+    result.relative_tolerance = invocation.control.relative_tolerance;
+    result.true_residual_limit = limit;
+  }
+  return limit;
 }
 
 Status audit_convergence(const LinearSolveInvocation& invocation,
@@ -1312,6 +1320,7 @@ LinearSolveResult solve_pcg(const LinearOperator& linear_operator,
     return finish_failure(result, status, LinearTermination::non_finite,
                           resources, reductions, initial_calls);
   }
+  const double tolerance = convergence_limit(invocation, rhs_norm, result);
   if (rhs_norm == 0.0) {
     fill_field(x, 0.0);
     status = revise(workspace, 0U, x);
@@ -1351,7 +1360,6 @@ LinearSolveResult solve_pcg(const LinearOperator& linear_operator,
   }
   result.final_true_residual = result.initial_true_residual;
   result.recursive_residual = result.initial_true_residual;
-  const double tolerance = convergence_limit(invocation, rhs_norm);
   if (!std::isfinite(tolerance)) {
     return finish_failure(
         result, {StatusCode::numerical_failure, kLinearSolveNonFinite},
@@ -1545,6 +1553,7 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
     return finish_failure(result, status, LinearTermination::non_finite,
                           resources, reductions, initial_calls);
   }
+  const double tolerance = convergence_limit(invocation, rhs_norm, result);
   if (rhs_norm == 0.0) {
     fill_field(x, 0.0);
     status = revise(workspace, x_slot, x);
@@ -1626,7 +1635,6 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
   }
   result.final_true_residual = result.initial_true_residual;
   result.recursive_residual = result.initial_true_residual;
-  const double tolerance = convergence_limit(invocation, rhs_norm);
   if (!std::isfinite(tolerance)) {
     if (reset_initial_guess) {
       const Status selected =
@@ -2611,6 +2619,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
     return finish_failure(result, status, LinearTermination::non_finite,
                           resources, reductions, initial_calls);
   }
+  const double tolerance = convergence_limit(invocation, rhs_norm, result);
   if (rhs_norm == 0.0) {
     fill_field(x, 0.0);
     status = revise(workspace, 0U, x);
@@ -2664,7 +2673,6 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
   }
   result.final_true_residual = result.initial_true_residual;
   result.recursive_residual = result.initial_true_residual;
-  const double tolerance = convergence_limit(invocation, rhs_norm);
   if (!std::isfinite(tolerance)) {
     return finish_failure(
         result, {StatusCode::numerical_failure, kLinearSolveNonFinite},

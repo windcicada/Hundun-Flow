@@ -1,0 +1,21 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 46: v04_runner_statistics_epoch_mpi_2
+1/1 Test #46: v04_runner_statistics_epoch_mpi_2 ...***Failed    3.26 sec
+Traceback (most recent call last):
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py", line 193, in <module>
+    main()
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py", line 129, in main
+    source, source_meta, _, source_stats = run("source", 5)
+  File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py", line 76, in run
+    assert run_meta["observation_schema"] == "4"
+AssertionError
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   3.27 sec
+
+The following tests FAILED:
+	 46 - v04_runner_statistics_epoch_mpi_2 (Failed)
+Errors while running CTest

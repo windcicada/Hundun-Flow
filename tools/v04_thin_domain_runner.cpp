@@ -2056,7 +2056,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                     ? accumulator.epoch.source_manifest.data() : "none") << '\n'
              << "requested_steps " << options.steps << '\n'
              << "expected_ranks " << ranks << '\n'
-             << "observation_schema 3\n"
+             << "observation_schema 4\n"
              << "observation_start_ns "
              << std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count() << '\n'
@@ -2150,7 +2150,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (options.observe_performance && !local_stage(communicator, [&] {
         loop_performance.open(options.run_root / ("solver-rank-" + std::to_string(rank) + ".csv"));
         loop_performance << "step,rank,attempt,scalar_coupling_sweep,dt,attempt_status,corrector,refinement,kind,invoked,"
-            "iterations,A_calls,M_calls,linear_initial,linear_final,prepare_ns,solve_ns,close_ns,"
+            "iterations,A_calls,M_calls,linear_initial,linear_final,linear_criterion_valid,"
+            "linear_rhs_norm,linear_atol,linear_rtol,linear_residual_limit,prepare_ns,solve_ns,close_ns,"
             "A_ns,M_ns,dot_ns,reduce_ns,update_ns,mg_refill_ns,mg_copy_ns,structured_wait_ns,"
             "structured_control_ns,globalization_valid,baseline_candidates,extrapolated_candidates,"
             "ladder_candidates,incomplete_candidates,candidate_ns,baseline_continuity,baseline_energy,"
@@ -2309,7 +2310,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 << ',' << unsigned(solve.corrector) << ',' << unsigned(solve.refinement)
                 << ',' << unsigned(solve.kind) << ',' << solve.invoked << ',' << linear.iterations
                 << ',' << linear.operator_applies << ',' << linear.preconditioner_applies
-                << ',' << linear.initial_true_residual << ',' << linear.final_true_residual;
+                << ',' << linear.initial_true_residual << ',' << linear.final_true_residual
+                << ',' << linear.true_residual_criterion_valid << ',' << linear.rhs_norm
+                << ',' << linear.absolute_tolerance << ',' << linear.relative_tolerance
+                << ',' << linear.true_residual_limit;
             for (auto ns : solve.local_nanoseconds) loop_performance << ',' << ns;
             loop_performance << ',' << linear.operator_nanoseconds << ',' << linear.preconditioner_nanoseconds
                 << ',' << linear.arnoldi_dot_nanoseconds << ',' << linear.arnoldi_reduce_nanoseconds
