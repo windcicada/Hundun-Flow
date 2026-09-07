@@ -70,6 +70,17 @@ add_test(NAME v04_thin_domain_runner_self_test
   COMMAND $<TARGET_FILE:v04_thin_domain_runner> --self-test)
 set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
 
+add_library(v04_runner_log_failure_probe SHARED support/runner_log_failure_probe.c)
+target_link_libraries(v04_runner_log_failure_probe PRIVATE ${CMAKE_DL_LIBS})
+add_test(NAME v04_runner_log_completion_mpi_2
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_log_close_cli_test.py"
+    --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+    --probe "$<TARGET_FILE:v04_runner_log_failure_probe>"
+    --mpi "${MPIEXEC_EXECUTABLE}" --ranks 2)
+set_tests_properties(v04_runner_log_completion_mpi_2 PROPERTIES
+  PROCESSORS 2 TIMEOUT 180 RUN_SERIAL TRUE LABELS io_failure_audit)
+
 add_test(NAME v04_target_identity
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/integration/target_identity_test.py"

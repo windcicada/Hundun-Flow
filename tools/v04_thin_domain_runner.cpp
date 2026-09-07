@@ -11,6 +11,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -468,9 +469,58 @@ class EvidenceFile {
     return ::close(descriptor) == 0;
   }
 
+  bool is_open() const noexcept { return descriptor_ >= 0; }
+
  private:
   int descriptor_{-1};
 };
+
+// Buffered log completion, NOT a checkpoint durability barrier. Keep the first
+// local failure even if a subsequent close clears/changes stream state. This
+// function runs on failure exits too, without changing committed solver state.
+bool complete_logs(MPI_Comm communicator, int rank,
+                   const std::array<std::ofstream*, 6U>& streams,
+                   EvidenceFile& evidence) {
+  constexpr std::array<const char*, 7U> names{{"force.csv", "health.csv",
+      "conservation.csv", "probe.csv", "performance.csv", "solver-rank.csv",
+      "evidence.jsonl"}};
+  constexpr std::array<const char*, 3U> operations{{"write", "flush", "close"}};
+  std::array<int, 3U> first{{-1, 0, 0}};
+  const auto record = [&](std::size_t stream, int operation) noexcept {
+    if (first[0U] < 0)
+      first = {{static_cast<int>(stream), operation, errno == 0 ? EIO : errno}};
+  };
+  for (std::size_t i = 0U; i < streams.size(); ++i) {
+    auto& stream = *streams[i];
+    if (!stream.is_open()) continue;  // Disabled outputs are not failed outputs.
+    errno = 0;
+    if (!stream) record(i, 0);
+    try {
+      stream.flush();
+      if (!stream) record(i, 1);
+    } catch (...) { record(i, 1); }
+    errno = 0;
+    try {
+      stream.close();
+      if (!stream) record(i, 2);
+    } catch (...) { record(i, 2); }
+  }
+  errno = 0;
+  if (evidence.is_open() && !evidence.close()) record(streams.size(), 2);
+  int owner = first[0U] < 0 ? INT_MAX : rank;
+  int first_rank = INT_MAX;
+  if (MPI_Allreduce(&owner, &first_rank, 1, MPI_INT, MPI_MIN, communicator) != MPI_SUCCESS)
+    return false;
+  if (first_rank == INT_MAX) return true;
+  if (MPI_Bcast(first.data(), static_cast<int>(first.size()), MPI_INT,
+                first_rank, communicator) != MPI_SUCCESS) return false;
+  if (rank == 0)
+    std::cerr << "log_completion_failure rank=" << first_rank
+              << " stream=" << names[static_cast<std::size_t>(first[0U])]
+              << " operation=" << operations[static_cast<std::size_t>(first[1U])]
+              << " errno=" << first[2U] << '\n';
+  return false;
+}
 
 bool sync_directory(const fs::path& path) {
   return detail::output_sync_directory(path);
@@ -2001,6 +2051,16 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream probe;
   std::ofstream performance;
   std::ofstream loop_performance;
+  struct NodeCommunicator {
+    MPI_Comm value{MPI_COMM_NULL};
+    ~NodeCommunicator() { if (value != MPI_COMM_NULL) MPI_Comm_free(&value); }
+  } node;
+  auto& node_communicator = node.value;
+  EvidenceFile evidence_file;
+  const std::uint64_t target_step = starting_step + options.steps;
+  // All returns below first join explicit log completion. An earlier solver or
+  // checkpoint failure remains the primary exit status if closing also fails.
+  const int run_result = [&]() -> int {
   if (options.observe_performance && !local_stage(communicator, [&] {
         loop_performance.open(options.run_root / ("solver-rank-" + std::to_string(rank) + ".csv"));
         loop_performance << "step,rank,attempt,scalar_coupling_sweep,dt,attempt_status,corrector,refinement,kind,invoked,"
@@ -2082,17 +2142,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   });
   if (!okay) return 6;
 
-  struct NodeCommunicator {
-    MPI_Comm value{MPI_COMM_NULL};
-    ~NodeCommunicator() { if (value != MPI_COMM_NULL) MPI_Comm_free(&value); }
-  } node;
-  auto& node_communicator = node.value;
   okay = MPI_Comm_split_type(communicator, MPI_COMM_TYPE_SHARED, 0,
                              MPI_INFO_NULL,
                              &node_communicator) == MPI_SUCCESS;
   if (!all_true(communicator, okay)) return 6;
 
-  EvidenceFile evidence_file;
   okay = local_stage(communicator, [&] {
     return rank != 0 || (evidence_file.open_exclusive(options.run_root / "evidence.jsonl") &&
            sync_directory(options.run_root));
@@ -2113,7 +2167,6 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   const double force_scale = 0.5 * spec.rho_ref * spec.u_ref * spec.u_ref *
                              spec.diameter * spec.span;
   if (!std::isfinite(force_scale) || !(force_scale > 0.0)) return 3;
-  const std::uint64_t target_step = starting_step + options.steps;
   for (std::uint64_t index = 0U; index < options.steps; ++index) {
     std::array<std::uint64_t, 6U> local_step_phases{};
     detail::LocalPhaseTimer<6U> step_timer(local_step_phases);
@@ -2581,22 +2634,26 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       if (!all_true(communicator, okay)) return 6;
     }
   }
-  okay = local_stage(communicator, [&] {
+  return 0;
+  }();
+  const bool logs_complete = complete_logs(communicator, rank,
+      {{&force, &health, &conservation, &probe, &performance, &loop_performance}},
+      evidence_file);
+  okay = all_true(communicator, run_result == 0 && logs_complete);
+  if (okay) okay = local_stage(communicator, [&] {
     if (rank != 0) return true;
-    force.close();
-    health.close();
-    conservation.close();
-    probe.close();
-    return evidence_file.close() &&
-           ::chmod((options.run_root / "evidence.jsonl").c_str(), 0444) == 0 &&
+    return ::chmod((options.run_root / "evidence.jsonl").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "force.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "health.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "conservation.csv").c_str(), 0444) == 0 &&
            ::chmod((options.run_root / "probe.csv").c_str(), 0444) == 0 &&
            sync_directory(options.run_root);
   });
-  okay = MPI_Comm_free(&node_communicator) == MPI_SUCCESS && okay;
-  if (!all_true(communicator, okay)) return 6;
+  if (node_communicator != MPI_COMM_NULL)
+    okay = MPI_Comm_free(&node_communicator) == MPI_SUCCESS && okay;
+  const bool completed = all_true(communicator, okay);
+  if (run_result != 0) return run_result;
+  if (!completed) return 6;
   if (rank == 0)
     std::cout << "COMPLETED steps=" << options.steps
               << " final_step=" << target_step
