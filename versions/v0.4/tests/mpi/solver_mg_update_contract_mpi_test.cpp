@@ -3,6 +3,7 @@
 
 #include "hundun/v04_linear.hpp"
 #include "hundun/v04_parallel.hpp"
+#include "solver_mg_detail.hpp"
 
 #include <mpi.h>
 
@@ -133,9 +134,11 @@ struct Fixture {
   NativeCartesianMgSpec spec{};
   NativeCartesianMgPlan plan;
 
-  bool create() {
+  bool create(bool isotropic = false) {
+    auto mesh = mesh_spec();
+    if (isotropic) mesh.upper = {2.0, 1.0, 0.5};
     if (!CartesianGeometryCompiler::compile(
-            MPI_COMM_WORLD, mesh_spec(), GeometryBudget{}, geometry, patch)) {
+            MPI_COMM_WORLD, mesh, GeometryBudget{}, geometry, patch)) {
       return false;
     }
     constexpr RevisionDomainIdentity domain = 701U;
@@ -243,6 +246,36 @@ bool test_divergent_update_contract(int rank, int size) {
           fixture.correction.storage == output_before,
       rank,
       "unchanged/changed rank divergence rejects collectively and atomically");
+  return all_true(passed);
+}
+
+bool test_rank_local_optional_counters(int rank, int size) {
+  Fixture fixture;
+  bool passed = expect(fixture.create(true), rank, "optional-counter fixture compiles");
+  if (!all_true(passed)) return false;
+  passed &= expect(detail::mg_replicated_coarse_enabled_for_test(fixture.plan), rank,
+                   "optional-counter fixture exercises replicated coarse");
+  if (!all_true(passed)) return false;
+  const auto address = fixture.plan.hierarchy_storage_address();
+  for (int omitted : {0, size - 1}) {
+    const auto previous = fixture.plan.counters();
+    const auto numeric = fixture.plan.numeric_fingerprint();
+    MgPlanCounters external;
+    auto identity = fixture.spec.identity;
+    identity.numeric += static_cast<std::uint64_t>(omitted + 1);
+    const Status status = fixture.plan.update_coefficients(identity,
+        MgCoefficientIdentity{static_cast<std::uint64_t>(31 + omitted),
+                              static_cast<std::uint64_t>(41 + omitted), 0.1},
+        fixture.coefficients(), rank == omitted ? nullptr : &external);
+    passed &= expect(status && fixture.plan.numeric_fingerprint() != numeric &&
+        fixture.plan.counters().numeric_refreshes == previous.numeric_refreshes + 1U &&
+        fixture.plan.hierarchy_storage_address() == address &&
+        external.numeric_refreshes == (rank == omitted ? 0U : 1U), rank,
+        "rank-local null counters preserve collective refresh and fixed storage");
+    passed &= expect(fixture.plan.apply(as_const(fixture.residual.view), fixture.correction.view, 0U).code
+        == StatusCode::ok, rank, "refreshed plan remains applicable");
+  }
+  if (rank == 0) std::cout << "rank_local_optional_counters ranks=" << size << " passed=" << passed << '\n';
   return all_true(passed);
 }
 
@@ -369,6 +402,7 @@ int main(int argc, char** argv) {
   bool passed = expect(size == 2 || size == 4, rank,
                        "update contract RED runs at 2 or 4 ranks");
   passed &= test_divergent_update_contract(rank, size);
+  passed &= test_rank_local_optional_counters(rank, size);
   passed &= test_reversed_runtime_communicators(rank, size);
   passed &= test_rank_local_null_reduction_preflight(rank, size);
   passed = all_true(passed);

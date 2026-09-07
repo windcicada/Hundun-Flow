@@ -47,6 +47,7 @@ constexpr std::uint32_t kApplicationInput = 10501U;
 constexpr std::uint32_t kApplicationPath = 10502U;
 constexpr std::uint32_t kApplicationTemplate = 10503U;
 constexpr std::uint32_t kApplicationAmbiguousInitialState = 10505U;
+constexpr std::uint32_t kApplicationControlMismatch = 10506U;
 
 void local_allocation_checkpoint(ApplicationFailurePhase phase, int rank) {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -445,6 +446,24 @@ static Status run_application(MPI_Comm communicator,
                 options.restart_directory.empty()))
           ? Status{StatusCode::invalid_case, kApplicationInput}
           : Status{});
+  if (!status) return status;
+  // These controls determine collective order, not local storage identity.
+  // Check once before filesystem/product work; do not add hot halo checks.
+  const std::array<std::uint64_t, 7U> control{{
+      options.steps, options.output_interval, options.restart_interval,
+      options.restart_directory.empty() ? 0U : 1U,
+      static_cast<std::uint64_t>(options.restart_storage_compatibility),
+      static_cast<std::uint64_t>(options.restart_history_policy),
+      options.initial_state.has_value() ? 1U : 0U}};
+  auto minimum = control, maximum = control;
+  const int min_status = MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
+      static_cast<int>(minimum.size()), MPI_UINT64_T, MPI_MIN, communicator);
+  const int max_status = MPI_Allreduce(MPI_IN_PLACE, maximum.data(),
+      static_cast<int>(maximum.size()), MPI_UINT64_T, MPI_MAX, communicator);
+  if (min_status != MPI_SUCCESS || max_status != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kApplicationControlMismatch};
+  if (minimum != maximum)
+    return {StatusCode::invalid_case, kApplicationControlMismatch};
   if (status)
     status = detail::output_collective_status(
         communicator,

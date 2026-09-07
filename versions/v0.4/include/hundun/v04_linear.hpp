@@ -878,6 +878,8 @@ class NativeCartesianMgPlan final : public LinearPreconditioner {
                         MgCoefficientViews coefficients,
                         NativeCartesianMgPlan& out,
                         MgPlanCounters* counters = nullptr) noexcept;
+  // Optional counters are a rank-local sink; presence/address need not agree
+  // and never select a collective branch.
   Status update_coefficients(LinearIdentity next_identity,
                              MgCoefficientIdentity identity,
                              MgCoefficientViews coefficients,

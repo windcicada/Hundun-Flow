@@ -4412,15 +4412,16 @@ Status NativeCartesianMgPlan::update_coefficients(
       counters == nullptr ? 0U : counters->blocking_collectives;
   std::uint64_t next_external_bytes =
       counters == nullptr ? 0U : counters->collective_logical_bytes;
-  if (counters != nullptr && implementation.replicated_coarse) {
+  if (implementation.replicated_coarse) {
     const std::size_t logical_bytes =
         implementation.replicated_global_cells *
         kReplicatedOperatorWidth * sizeof(double);
-    local = add_counter(counters->blocking_collectives, 1U,
-                        next_external_collectives) &&
-                    add_counter(counters->collective_logical_bytes,
-                                static_cast<std::uint64_t>(logical_bytes),
-                                next_external_bytes)
+    local = counters == nullptr ||
+                (add_counter(counters->blocking_collectives, 1U,
+                             next_external_collectives) &&
+                 add_counter(counters->collective_logical_bytes,
+                             static_cast<std::uint64_t>(logical_bytes),
+                             next_external_bytes))
                 ? Status{}
                 : Status{StatusCode::invalid_plan, kMgCounter};
     agreed = consensus(implementation, local);

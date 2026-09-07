@@ -32,6 +32,10 @@ struct DriverInitialState {
 };
 
 struct ApplicationRunOptions {
+  // Paths must refer to the same logical shared inputs/run/checkpoint across
+  // ranks; local mount spellings are not compared as raw bytes. At the cold
+  // run entry, steps, intervals, restart/initial-state presence and recovery
+  // policies must agree. time_limits are rank-local physical candidates.
   std::filesystem::path case_root;
   std::filesystem::path run_directory;
   std::filesystem::path source_root;

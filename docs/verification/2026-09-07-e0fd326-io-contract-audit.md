@@ -70,6 +70,34 @@ Writer 回读的超大 fstat 长度注入也被拒绝，current 仍指向前一�
 运行 arena 外数组和 halo。这些阶段仍须在后续总峰值模型中按同时存活关系加入，
 不能把这里的 reader 预算当成完整运行内存验收。
 
+## 3. MPI 公共接口：合同核查与防御性修正
+
+`NativeCartesianMgPlan::update_coefficients()` 的可选 `counters` 是本地统计接收器，
+不属于算子/层级的全局身份。原代码确实在 `counters != nullptr && replicated_coarse`
+内调用 consensus，可能使不同 rank 的 collective 顺序错位。
+现在只让指针控制本地计数运算；replicated coarse 分支中的结果汇总由所有 rank 参加。
+原有生命周期合同、系数检查、层级发布及 prepared epoch 汇总均保留。
+此项旧路径属于静态确认的通信风险；未故意提交会挂起的旧 MPI 作业，也未用 timeout
+充当复现证据。
+
+公共 MG 回归在真实 replicated coarse 路径中分别让 rank 0、最后一个 rank 传空指针；
+所有 rank 成功刷新且仍能 apply，内部刷新次数正确、外部可选计数仅写入非空接收器，
+层级持久地址不变。2/4 ranks 两项通过，见 `mg-contracts-green.log`。
+最初测试夹具走了各向异性线松弛，路径断言正确报失败；改用等距夹具后确认进入
+replicated coarse，并非放宽路径断言使测试通过。
+
+普通 `ApplicationService::run()` 现在在冷入口比较七个控制量：steps、两个输出周期、
+是否 restart、两种恢复策略、是否显式初态。有效但不同的控制量一致返回
+`invalid_case/10506`，不会先编译产品、生成输出或推进。
+路径需要指向同一逻辑共享资源，但挂载路径拼写、内存地址、局部 patch/workspace
+不做逐位一致要求；`LocalTimeLimits` 保持 rank-local 候选尺度。
+
+`app_control_contract_mpi_test --missing-case` 用共同缺失输入安全确认旧入口没有先做
+控制检查，七种情况均进入后续输入读取而非目标 cold rejection；避免故意运行错序循环。
+修正后以真实合法 case 测七类控制差异，2/4 ranks 均在 input 阶段一致拒绝，
+accepted_steps/attempts=0 且没有输出目录；不同本地时间尺度的一步运行正常接受。
+见 `app-contract-red.log`、`control-contracts-green.log` 中应用两项的记录。
+
 ## 独立运行与构建观察
 
 本轮开始前，冻结服务 `hundun-re3900-module-reviewed-20260907.service`
