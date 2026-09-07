@@ -1,0 +1,63 @@
+diff --git a/versions/v0.4/src/core_product_freeze.cpp b/versions/v0.4/src/core_product_freeze.cpp
+index 0d8ec06..d6ef02b 100644
+--- a/versions/v0.4/src/core_product_freeze.cpp
++++ b/versions/v0.4/src/core_product_freeze.cpp
+@@ -11678,19 +11678,34 @@ Status ProductDriver::Impl::execute_attempt(
+               candidate_material, candidate_gradient, candidate_assembly,
+               pressure_energy_r_e, residual_workspace, artifacts.energy);
+           if (assembled && product.ibm_equations.has_value()) {
++            if (!product.topology.has_value())
++              return Status{StatusCode::invalid_plan, kProductBinding};
++            // Both zero-based IBM rates are supported only on interface
++            // owners. Reuse the topology's unique cell list, not its links
++            // (several cut faces can belong to one cell). Keep clearing the
++            // full scratch field and keep the two corrections in their
++            // original arithmetic order; no donor or material is cached.
++            const auto subtract_interface_rate = [&]() noexcept {
++              const auto owners = product.topology->interface_cells();
++              const std::size_t plane =
++                  static_cast<std::size_t>(cells.x) * cells.y;
++              for (std::size_t i = 0U; i < owners.size; ++i) {
++                const std::size_t flat = owners.data[i];
++                const Int3 cell{
++                    static_cast<std::int32_t>(flat % cells.x),
++                    static_cast<std::int32_t>((flat / cells.x) % cells.y),
++                    static_cast<std::int32_t>(flat / plane)};
++                pressure_energy_r_e.unchecked(cell, 0U) -=
++                    detail::cell_volume(product.equations.kernels(), cell) *
++                    pressure_energy_e_p.unchecked(cell, 0U);
++              }
++            };
+             zero_field(pressure_energy_e_p);
+             assembled = product.ibm_equations->correct_pressure_work(
+                 as_const(pressure_energy_candidate_pressure),
+                 as_const(pressure_energy_candidate_velocity),
+                 pressure_energy_e_p);
+-            for (std::int32_t z = 0; z < cells.z && assembled; ++z)
+-              for (std::int32_t y = 0; y < cells.y && assembled; ++y)
+-                for (std::int32_t x = 0; x < cells.x; ++x) {
+-                  const Int3 cell{x, y, z};
+-                  pressure_energy_r_e.unchecked(cell, 0U) -=
+-                      detail::cell_volume(product.equations.kernels(), cell) *
+-                      pressure_energy_e_p.unchecked(cell, 0U);
+-                }
++            if (assembled) subtract_interface_rate();
+             if (assembled) {
+               zero_field(pressure_energy_e_p);
+               assembled =
+@@ -11700,14 +11715,7 @@ Status ProductDriver::Impl::execute_attempt(
+                           pressure_energy_candidate_thermal_conductivity),
+                       pressure_energy_e_p);
+             }
+-            for (std::int32_t z = 0; z < cells.z && assembled; ++z)
+-              for (std::int32_t y = 0; y < cells.y && assembled; ++y)
+-                for (std::int32_t x = 0; x < cells.x; ++x) {
+-                  const Int3 cell{x, y, z};
+-                  pressure_energy_r_e.unchecked(cell, 0U) -=
+-                      detail::cell_volume(product.equations.kernels(), cell) *
+-                      pressure_energy_e_p.unchecked(cell, 0U);
+-                }
++            if (assembled) subtract_interface_rate();
+           }
+           if (assembled && product.topology.has_value()) {
+             const Span<const std::uint8_t> active =
