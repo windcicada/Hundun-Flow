@@ -165,6 +165,20 @@ struct RestartReadReport {
   std::uint32_t integrity_blocks{};
   std::uint32_t restoration_blocks{};
   std::uint64_t rank_file_bytes_read{};
+  std::size_t retained_image_bytes{};
+  std::size_t new_image_bytes{};
+  // Preallocation upper bound for unique bulk buffers alive during load,
+  // including the caller's unchanged out. Not an allocator or process RSS cap.
+  std::size_t peak_bulk_bytes{};
+};
+
+struct RestartReadLimits {
+  // Rank-local capacities: a failure on any rank is returned by all ranks.
+  // Zero is invalid, never an unbounded read. Embedders can explicitly raise
+  // these finite limits for a larger checkpoint/target partition.
+  std::size_t maximum_bulk_bytes{1024U * 1024U * 1024U};
+  std::size_t maximum_manifest_bytes{8U * 1024U * 1024U};
+  std::uint32_t maximum_source_ranks{65536U};
 };
 
 struct RestartExpectedField {
@@ -274,7 +288,8 @@ class RestartReader {
                      const std::filesystem::path& restart_directory,
                      const RestartExpected& expected,
                      RestartImage& out,
-                     RestartReadReport* report = nullptr) noexcept;
+                     RestartReadReport* report = nullptr,
+                     RestartReadLimits limits = {}) noexcept;
 };
 
 struct SnapshotFieldView {

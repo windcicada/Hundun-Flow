@@ -13,6 +13,8 @@
 #include <cerrno>
 #include <cstdarg>
 #include <cstring>
+#include <cstdlib>
+#include <new>
 
 #include <array>
 #include <cmath>
@@ -23,6 +25,28 @@
 #include <iostream>
 #include <string>
 #include <vector>
+
+// Avoid sys/stat.h's optimized inline fstat definition: this test interposes
+// fstat/__fxstat themselves below. Use the ordinary libc FIFO entry point.
+extern "C" int mkfifo(const char*, mode_t) noexcept;
+
+namespace restart_allocation_probe {
+bool armed = false;
+unsigned oversized = 0U;
+}
+void* operator new(std::size_t bytes) {
+  if (restart_allocation_probe::armed && bytes > 16U * 1024U * 1024U) {
+    ++restart_allocation_probe::oversized;
+    throw std::bad_alloc();  // Never exhaust memory to test an untrusted length.
+  }
+  if (void* value = std::malloc(bytes == 0U ? 1U : bytes)) return value;
+  throw std::bad_alloc();
+}
+void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
+void operator delete(void* value) noexcept { std::free(value); }
+void operator delete[](void* value) noexcept { std::free(value); }
+void operator delete(void* value, std::size_t) noexcept { std::free(value); }
+void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
 
 namespace restart_syscall_probe {
 bool enabled = false, fired = false, close_fired = false, current_renamed = false;
@@ -102,7 +126,12 @@ static int observed_fstat(int fd, struct stat* out) {
     errno = mode == 13 ? EINTR : EIO;
     return -1;
   }
-  return static_cast<int>(::syscall(SYS_fstat, fd, out));
+  const int result = static_cast<int>(::syscall(SYS_fstat, fd, out));
+  if (result == 0 && enabled && fd == descriptor && !fired && mode == 15) {
+    fired = true;
+    out->st_size += static_cast<off_t>(UINT64_C(1) << 40U);
+  }
+  return result;
 }
 extern "C" int fstat(int fd, struct stat* out) {
   return observed_fstat(fd, out);
@@ -399,6 +428,64 @@ bool verify(const RestartImage& image, const MeshPatch& patch) {
   return true;
 }
 
+bool read_budget_boundaries(MPI_Comm communicator, const fs::path& directory,
+                            const RestartExpected& expected, RestartImage& image) {
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(communicator, &rank);
+  MPI_Comm_size(communicator, &ranks);
+  RestartReadReport measured;
+  bool passed = static_cast<bool>(RestartReader::load(communicator, directory, expected, image, &measured));
+  passed &= measured.retained_image_bytes == measured.new_image_bytes &&
+            measured.peak_bulk_bytes > 2U * measured.new_image_bytes;
+  RestartReadLimits limits;
+  limits.maximum_bulk_bytes = measured.peak_bulk_bytes;
+  passed &= static_cast<bool>(RestartReader::load(communicator, directory, expected, image, nullptr, limits));
+  const auto saved = image;
+  const auto same_payload = [&] {
+    bool equal = image.step == saved.step && image.time == saved.time && image.dt == saved.dt &&
+        image.closed_mass_target == saved.closed_mass_target && image.plan == saved.plan &&
+        image.schema == saved.schema && image.geometry == saved.geometry &&
+        image.controller_state == saved.controller_state &&
+        image.source_manifest_sha256 == saved.source_manifest_sha256 &&
+        image.method_history_signature == saved.method_history_signature &&
+        image.final_mass_flux == saved.final_mass_flux && image.previous_mass_flux == saved.previous_mass_flux;
+    const std::array<const std::vector<RestartImageField>*, 4U> a{{&image.fields, &image.previous_fields,
+        &image.accepted_rate_fields, &image.previous_rate_fields}};
+    const std::array<const std::vector<RestartImageField>*, 4U> b{{&saved.fields, &saved.previous_fields,
+        &saved.accepted_rate_fields, &saved.previous_rate_fields}};
+    for (std::size_t layer = 0; layer < a.size(); ++layer) {
+      equal &= a[layer]->size() == b[layer]->size();
+      for (std::size_t f = 0; equal && f < a[layer]->size(); ++f)
+        equal &= (*a[layer])[f].role == (*b[layer])[f].role &&
+            (*a[layer])[f].field == (*b[layer])[f].field &&
+            (*a[layer])[f].components == (*b[layer])[f].components &&
+            (*a[layer])[f].values == (*b[layer])[f].values;
+    }
+    return equal;
+  };
+  for (int mode = 0; mode < 4; ++mode) {
+    limits = {};
+    if (rank == ranks - 1) {
+      if (mode == 0) limits.maximum_bulk_bytes = measured.peak_bulk_bytes - 1U;
+      if (mode == 1) limits.maximum_manifest_bytes = 1U;
+      if (mode == 2) limits.maximum_source_ranks = static_cast<std::uint32_t>(ranks - 1);
+      if (mode == 3) limits.maximum_bulk_bytes = 0U;
+    }
+    const auto* before = image.fields[0U].values.data();
+    const Status denied = RestartReader::load(communicator, directory, expected, image, nullptr, limits);
+    const std::uint64_t wire = (std::uint64_t(denied.code) << 32U) | denied.detail;
+    auto low = wire, high = wire;
+    MPI_Allreduce(MPI_IN_PLACE, &low, 1, MPI_UINT64_T, MPI_MIN, communicator);
+    MPI_Allreduce(MPI_IN_PLACE, &high, 1, MPI_UINT64_T, MPI_MAX, communicator);
+    passed &= !denied && low == high && before == image.fields[0U].values.data() && same_payload();
+    if (mode == 0) passed &= denied.code == StatusCode::allocation_failure && denied.detail == 10310U;
+  }
+  if (rank == 0) std::cout << "read_budget version=" << image.source_format_version
+      << " new=" << measured.new_image_bytes << " retained=" << measured.retained_image_bytes
+      << " peak=" << measured.peak_bulk_bytes << " passed=" << passed << '\n';
+  return passed;
+}
+
 bool exact_transition(MPI_Comm communicator, const fs::path& directory,
                       PlanFingerprint signature = 0U) {
   ExactFixture fixture;
@@ -508,6 +595,7 @@ bool exact_transition(MPI_Comm communicator, const fs::path& directory,
                    image.previous_mass_flux[axis][index] ==
                        face_value(axis, global);
         }
+  passed &= read_budget_boundaries(communicator, directory, expected, image);
   const int local = passed ? 1 : 0;
   int global = 0;
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, communicator);
@@ -680,6 +768,20 @@ bool restart_syscalls(MPI_Comm communicator, const fs::path& directory) {
   passed &= static_cast<bool>(RestartReader::load(communicator, budget_root, expected, image)) && image.step == 40U;
   passed &= static_cast<bool>(RestartWriter::write(communicator, budget_root, fixture.snapshot(41U),
       {2U, &budget, exact_capacity}));
+  restart_syscall_probe::prefix = budget_root.string();
+  restart_syscall_probe::mode = 15;
+  restart_syscall_probe::fired = false;
+  restart_syscall_probe::enabled = rank == 0;
+  restart_allocation_probe::oversized = 0U;
+  restart_allocation_probe::armed = true;
+  const auto oversized_verify = RestartWriter::write(communicator, budget_root, fixture.snapshot(42U),
+      {2U, &budget, exact_capacity});
+  restart_allocation_probe::armed = restart_syscall_probe::enabled = false;
+  passed &= oversized_verify.code == StatusCode::io_failure &&
+      budget.publication == RestartPublicationState::not_switched &&
+      restart_allocation_probe::oversized == 0U && (rank != 0 || restart_syscall_probe::fired);
+  passed &= static_cast<bool>(RestartReader::load(communicator, budget_root, expected, image)) && image.step == 41U;
+  if (rank == 0) std::cout << "writer oversized verification preflight=" << passed << '\n';
   return passed;
 }
 
@@ -748,6 +850,126 @@ bool retention_order(MPI_Comm communicator, const fs::path& directory) {
     }
   }
   return passed;
+}
+
+bool read_preallocation_bounds(MPI_Comm communicator, const fs::path& directory) {
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(communicator, &rank);
+  MPI_Comm_size(communicator, &ranks);
+  Fixture fixture;
+  if (!fixture.initialize(communicator)) return false;
+  const std::array<RestartExpectedField, 4U> fields{{
+      {RestartFieldRole::velocity, 0U, 3U}, {RestartFieldRole::pressure_perturbation, 1U, 1U},
+      {RestartFieldRole::enthalpy, 2U, 1U}, {RestartFieldRole::independent_species, 3U, 1U}}};
+  const RestartExpected expected{kGlobal, fixture.patch, kPlan, kSchema, kGeometry,
+                                  {fields.data(), fields.size()}};
+  if (!RestartWriter::write(communicator, directory, fixture.snapshot(60U))) return false;
+  RestartImage image;
+  if (!RestartReader::load(communicator, directory, expected, image)) return false;
+  bool passed = read_budget_boundaries(communicator, directory, expected, image);
+  const double* original = image.fields[0U].values.data();
+  std::string generation;
+  { std::ifstream current(directory / "current"); std::getline(current, generation); }
+  const auto file = directory / generation /
+      ("rank-0000000" + std::to_string(ranks - 1) + ".bin");
+  if (rank == 0) {
+    const int fd = ::open(file.c_str(), O_WRONLY);
+    if (fd < 0 || ::ftruncate(fd, static_cast<off_t>(UINT64_C(1) << 40U)) != 0)
+      MPI_Abort(communicator, 2);
+    ::close(fd);
+  }
+  MPI_Barrier(communicator);
+  restart_allocation_probe::oversized = 0U;
+  restart_allocation_probe::armed = true;
+  RestartReadReport report;
+  const Status status = RestartReader::load(communicator, directory, expected, image, &report);
+  restart_allocation_probe::armed = false;
+  passed &= status.code == StatusCode::io_failure &&
+      restart_allocation_probe::oversized == 0U &&
+      image.step == 60U && image.fields[0U].values.data() == original &&
+      verify(image, fixture.patch) && fs::file_size(file) == (UINT64_C(1) << 40U);
+  std::cerr << "read_preallocation rank=" << rank << " status=" << unsigned(status.code)
+            << '/' << status.detail << " oversized_allocations="
+            << restart_allocation_probe::oversized << " passed=" << passed << '\n';
+  return passed;
+}
+
+bool read_malformed_metadata(MPI_Comm communicator, const fs::path& directory) {
+  int rank = 0, ranks = 0;
+  MPI_Comm_rank(communicator, &rank);
+  MPI_Comm_size(communicator, &ranks);
+  Fixture fixture;
+  if (!fixture.initialize(communicator)) return false;
+  const std::array<RestartExpectedField, 4U> fields{{
+      {RestartFieldRole::velocity, 0U, 3U}, {RestartFieldRole::pressure_perturbation, 1U, 1U},
+      {RestartFieldRole::enthalpy, 2U, 1U}, {RestartFieldRole::independent_species, 3U, 1U}}};
+  const RestartExpected expected{kGlobal, fixture.patch, kPlan, kSchema, kGeometry,
+                                  {fields.data(), fields.size()}};
+  const auto original = directory / "original";
+  if (!RestartWriter::write(communicator, original, fixture.snapshot(61U))) return false;
+  RestartImage image;
+  if (!RestartReader::load(communicator, original, expected, image)) return false;
+  bool passed = true;
+  std::string generation;
+  { std::ifstream current(original / "current"); std::getline(current, generation); }
+  const auto rank_file = "rank-0000000" + std::to_string(ranks - 1) + ".bin";
+  for (int mode = 0; mode < 7; ++mode) {
+    const auto root = directory / std::to_string(mode);
+    if (rank == 0) {
+      fs::copy(original, root, fs::copy_options::recursive);
+      const auto manifest_path = root / generation / "manifest.bin";
+      if (mode <= 1) {
+        const auto file = mode == 0 ? root / "current" : manifest_path;
+        const int fd = ::open(file.c_str(), O_WRONLY);
+        if (fd < 0 || ::ftruncate(fd, static_cast<off_t>(UINT64_C(1) << 40U)) != 0)
+          MPI_Abort(communicator, 2);
+        ::close(fd);
+      } else if (mode <= 3) {
+        std::ifstream input(manifest_path, std::ios::binary);
+        std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), {});
+        input.close();
+        if (mode == 2) {
+          // Legal integrity hash but an incorrect last-rank expected length.
+          const std::size_t offset = bytes.size() - 8U - 40U + 24U;
+          std::uint64_t size = 0U;
+          for (unsigned n = 0; n < 8; ++n) size |= std::uint64_t(bytes[offset + n]) << (8U * n);
+          ++size;
+          for (unsigned n = 0; n < 8; ++n) bytes[offset + n] = (size >> (8U * n)) & 255U;
+        } else {
+          for (unsigned n = 12U; n < 16U; ++n) bytes[n] = 255U;
+        }
+        std::uint64_t hash = UINT64_C(1469598103934665603);
+        for (std::size_t n = 0; n < bytes.size() - 8U; ++n) {
+          hash ^= bytes[n]; hash *= UINT64_C(1099511628211);
+        }
+        if (hash == 0U) hash = 1U;
+        for (unsigned n = 0; n < 8; ++n) bytes[bytes.size() - 8U + n] = (hash >> (8U * n)) & 255U;
+        std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      } else {
+        const auto file = mode == 6 ? root / "current" : root / generation / rank_file;
+        fs::remove(file);
+        if (mode == 4) {
+          if (::mkfifo(file.c_str(), 0600) != 0) MPI_Abort(communicator, 2);
+        } else if (mode == 5) {
+          std::ofstream empty(file);
+        } else fs::create_directory(file);
+      }
+    }
+    MPI_Barrier(communicator);
+    const auto* before = image.fields[0U].values.data();
+    restart_allocation_probe::oversized = 0U;
+    restart_allocation_probe::armed = true;
+    const Status status = RestartReader::load(communicator, root, expected, image);
+    restart_allocation_probe::armed = false;
+    passed &= status.code == StatusCode::io_failure && restart_allocation_probe::oversized == 0U &&
+        image.step == 61U && before == image.fields[0U].values.data() && verify(image, fixture.patch);
+    if (rank == 0) std::cout << "read_malformed mode=" << mode << " status=" << unsigned(status.code)
+        << '/' << status.detail << " passed=" << passed << '\n';
+  }
+  // Only independent copies were malformed; the original checkpoint is still readable.
+  const Status intact = RestartReader::load(communicator, original, expected, image);
+  return passed && intact && image.step == 61U && verify(image, fixture.patch);
 }
 
 bool failure_boundaries(MPI_Comm communicator, const fs::path& directory) {
@@ -874,6 +1096,16 @@ int main(int argc, char** argv) {
   }
   MPI_Barrier(MPI_COMM_WORLD);
   bool passed = true;
+  passed &= read_preallocation_bounds(MPI_COMM_WORLD, base / "read-bounds");
+  passed &= read_malformed_metadata(MPI_COMM_WORLD, base / "read-malformed");
+  if (argc > 1 && std::strcmp(argv[1], "--read-bounds-only") == 0) {
+    const int local = passed ? 1 : 0;
+    int global = 0;
+    MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    if (rank == 0) fs::remove_all(base);
+    MPI_Finalize();
+    return global ? 0 : 1;
+  }
   passed &= transition(MPI_COMM_WORLD, 1, 2, base / "one-to-two", 1U);
   passed &= transition(MPI_COMM_WORLD, 2, 4, base / "two-to-four", 2U);
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);

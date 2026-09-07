@@ -33,6 +33,43 @@ root 流的 close 状态；performance 和逐 rank 的 solver 日志依赖析构
 `close-red-checkout/results.json`、`force-close-eio.log` 记录 RED；
 `close-green/results.json` 和每次 CLI 日志记录 GREEN。
 
+## 2. Restart 读取上限：实际复现并修正
+
+原 `read_file()` 在核对清单长度前按 `fstat.st_size` resize。
+四 rank 回归将独立 rank 3 文件扩成 1 TiB 稀疏文件；测试分配器在
+16 MiB 以上直接拒绝并计数，避免实际耗尽内存。旧代码返回
+`allocation_failure/10301`，rank 3 记录一次超大分配尝试。
+修正后全 rank 返回 `io_failure/10306`，超大分配尝试为零。
+
+`io_restart.cpp` 的修改边界：
+
+- `read_file` 在 resize 前检查普通文件、可表示长度、期望长度和容量。
+  非阻塞打开使 FIFO 能在 fstat 阶段拒绝；读满后再检查 EOF，拒绝读期间追加。
+  Writer 回读也使用清单期望长度和已预留的最大 rank 容量。
+- `current` 在读取前限制为 256 B。manifest 有独立字节和 source-rank 数上限；
+  解析 rank 目录前核对 40 B/record 与文件剩余长度，不能由恶意计数触发大分配。
+  现有 64 个状态/64 个速率目录上限保留。
+- `plan_read_bulk` 在 rank 读取和新 image 分配前计算独立 bulk 预算。
+  包含旧 out 的实际容量、清单、原始 rank 字节、解析块、新 image 和覆盖数组。
+  原始 manifest 完成完整性检查、解析和 SHA-256 后释放；恢复遍历重新核对
+  rank 文件长度/哈希/公共头，与完整来源扫描保持一致。
+- `RestartReadLimits` 是显式、可配置、rank-local 容量，任一 rank 超限时统一失败。
+  默认 bulk=1 GiB、manifest=8 MiB、来源 ranks=65536；零值非法。
+  `RestartReadReport` 区分 retained/new image 和 peak bulk 上界。
+
+实际四 rank `v04_io_restart_mpi_test` 全套通过，日志为证据目录下
+`restart-green.log`：V1/V2/V3、1→2/2→4/4→1/4→4 恢复、原有持久化和保留代次
+测试、单 rank 系统调用故障，新增稀疏超大 current/manifest/rank、错误清单长度、
+恶意计数、FIFO、空 rank 文件和 directory-as-current；全部在大分配前拒绝。
+Writer 回读的超大 fstat 长度注入也被拒绝，current 仍指向前一个持久化步骤。
+预算等于报告上界时成功；仅 rank 3 减少 1 B 时全体拒绝，旧 out 的完整字段/通量
+载荷与存储地址保持不变。被修改的是独立测试副本，原测试 checkpoint 仍可读取。
+
+预算边界必须说明：这是读取函数的 bulk 分配规划上界，不是进程 RSS 或全产品
+硬预算；不包括小路径字符串、分配器/MPI 内部资源、ProductDriver 恢复物性暂存、
+运行 arena 外数组和 halo。这些阶段仍须在后续总峰值模型中按同时存活关系加入，
+不能把这里的 reader 预算当成完整运行内存验收。
+
 ## 独立运行与构建观察
 
 本轮开始前，冻结服务 `hundun-re3900-module-reviewed-20260907.service`

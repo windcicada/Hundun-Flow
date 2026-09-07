@@ -44,6 +44,8 @@ constexpr std::uint32_t kRestartIntegrity = 10306U;
 constexpr std::uint32_t kRestartMismatch = 10307U;
 constexpr std::uint32_t kRestartCoverage = 10308U;
 constexpr std::uint32_t kRestartPublication = 10309U;
+constexpr std::uint32_t kRestartReadBudget = 10310U;
+constexpr std::size_t kCurrentMaximumBytes = 256U;
 constexpr std::uint32_t kLegacyFormatVersion = 1U;
 constexpr std::uint32_t kExactHistoryFormatVersion = 2U;
 constexpr std::uint32_t kSignedHistoryFormatVersion = 3U;
@@ -207,6 +209,7 @@ struct FieldMeta {
   FieldId field{};
   std::uint8_t components{};
 };
+constexpr std::size_t kCommonMetadataBound = 128U * sizeof(FieldMeta);
 
 struct RankRecord {
   Int3 begin{};
@@ -249,6 +252,112 @@ struct RankBlock {
   std::array<std::vector<double>, 3U> flux;
   std::array<std::vector<double>, 3U> previous_flux;
 };
+
+struct BulkBytes {
+  std::size_t value{};
+  bool add(std::size_t count, std::size_t width = 1U) noexcept {
+    std::size_t bytes = 0U;
+    if (!checked_multiply(count, width, bytes) || bytes > SIZE_MAX - value) return false;
+    value += bytes;
+    return true;
+  }
+};
+
+bool retained_image_bytes(const RestartImage& image, std::size_t& out) noexcept {
+  BulkBytes bytes;
+  for (const auto* catalog : {&image.fields, &image.previous_fields,
+                              &image.accepted_rate_fields, &image.previous_rate_fields}) {
+    if (!bytes.add(catalog->capacity(), sizeof(RestartImageField))) return false;
+    for (const auto& field : *catalog)
+      if (!bytes.add(field.values.capacity(), sizeof(double))) return false;
+  }
+  for (const auto* flux : {&image.final_mass_flux, &image.previous_mass_flux})
+    for (const auto& axis : *flux)
+      if (!bytes.add(axis.capacity(), sizeof(double))) return false;
+  out = bytes.value;
+  return true;
+}
+
+// A source block owns only authoritative faces; a target image also stores its
+// lower/upper partition interface faces. Count physical allocations, not views.
+struct ReadLayout {
+  std::size_t owned{}, encoded{}, coverage{};
+};
+
+bool read_layout(const Manifest& manifest, const MeshPatch& patch,
+                 bool target, ReadLayout& out) noexcept {
+  std::size_t cells = 0U;
+  if (!cell_count(patch.cells, cells)) return false;
+  const bool exact = manifest.format_version >= kExactHistoryFormatVersion;
+  const std::size_t layers = exact ? 2U : 1U;
+  BulkBytes values, descriptors, vectors, coverage;
+  if (!coverage.add(cells)) return false;
+  const auto fields = [&](const std::vector<FieldMeta>& catalog, std::size_t copies) {
+    for (const auto& field : catalog) {
+      std::size_t count = 0U;
+      if (!checked_multiply(cells, field.components, count) ||
+          !values.add(count, sizeof(double) * copies)) return false;
+    }
+    return descriptors.add(catalog.size(), sizeof(RestartImageField) * copies) &&
+           vectors.add(catalog.size(), copies);
+  };
+  if (!fields(manifest.fields, layers) ||
+      (exact && !fields(manifest.rate_fields, 2U))) return false;
+  for (int axis = 0; axis < 3; ++axis) {
+    Int3 extents = patch.cells;
+    auto& extent = axis == 0 ? extents.x : (axis == 1 ? extents.y : extents.z);
+    const int begin = axis == 0 ? patch.begin.x : (axis == 1 ? patch.begin.y : patch.begin.z);
+    const int global = axis == 0 ? manifest.global_cells.x :
+                       (axis == 1 ? manifest.global_cells.y : manifest.global_cells.z);
+    if (target || begin + extent == global) {
+      if (extent == INT_MAX) return false;
+      ++extent;
+    }
+    std::size_t faces = 0U;
+    if (!cell_count(extents, faces) || !values.add(faces, sizeof(double) * layers) ||
+        !vectors.add(layers) || !coverage.add(faces)) return false;
+  }
+  BulkBytes owned{values.value};
+  if (!owned.add(descriptors.value)) return false;
+  // Common header: 80 + four bytes per field, optional 36 + rates, optional signature.
+  BulkBytes encoded{52U + 80U + manifest.fields.size() * 4U};
+  if ((exact && (!encoded.add(36U) || !encoded.add(manifest.rate_fields.size(), 4U))) ||
+      (manifest.format_version >= kSignedHistoryFormatVersion && !encoded.add(8U)) ||
+      !encoded.add(vectors.value, 8U) || !encoded.add(values.value)) return false;
+  out = {owned.value, encoded.value, target ? coverage.value : 0U};
+  return true;
+}
+
+Status plan_read_bulk(const Manifest& manifest, const RestartExpected& expected,
+                      std::size_t retained, RestartReadLimits limits,
+                      RestartReadReport& report) noexcept {
+  ReadLayout target;
+  if (!read_layout(manifest, expected.target_patch, true, target))
+    return {StatusCode::allocation_failure, kRestartReadBudget};
+  std::size_t largest_block = 0U;
+  for (const auto& record : manifest.ranks) {
+    ReadLayout source;
+    if (!read_layout(manifest, MeshPatch{record.begin, record.cells, {}, {}}, false, source) ||
+        record.bytes != source.encoded)
+      return {StatusCode::io_failure, kRestartManifest};
+    BulkBytes block{source.encoded};
+    // Includes bytes + decoded values + catalogs at the same time. A malformed
+    // common header may use all 64+64 metadata slots before it is compared.
+    if (!block.add(source.owned) || !block.add(kCommonMetadataBound))
+      return {StatusCode::allocation_failure, kRestartReadBudget};
+    largest_block = std::max(largest_block, block.value);
+  }
+  BulkBytes peak{retained};
+  if (!peak.add(manifest.fields.capacity(), sizeof(FieldMeta)) ||
+      !peak.add(manifest.rate_fields.capacity(), sizeof(FieldMeta)) ||
+      !peak.add(manifest.ranks.capacity(), sizeof(RankRecord)) ||
+      !peak.add(target.owned) || !peak.add(target.coverage) || !peak.add(largest_block))
+    return {StatusCode::allocation_failure, kRestartReadBudget};
+  report.new_image_bytes = target.owned;
+  report.peak_bulk_bytes = std::max(report.peak_bulk_bytes, peak.value);
+  return report.peak_bulk_bytes <= limits.maximum_bulk_bytes ? Status{} :
+      Status{StatusCode::allocation_failure, kRestartReadBudget};
+}
 
 Status collective_status(MPI_Comm communicator, Status local) noexcept {
   int rank = 0;
@@ -309,10 +418,12 @@ bool write_file_sync(const fs::path& path,
 }
 
 bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes,
+               std::size_t maximum_bytes, std::uint64_t expected_bytes,
                IoFailureContext* failure = nullptr) {
   int descriptor;
   do {
-    descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    // O_NONBLOCK lets fstat reject a FIFO without waiting for an external writer.
+    descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   } while (descriptor < 0 && errno == EINTR);
   if (descriptor < 0) {
     detail::output_record_failure(failure, IoFailureOperation::open, errno, path);
@@ -323,10 +434,16 @@ bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes,
   do {
     stated = ::fstat(descriptor, &info);
   } while (stated != 0 && errno == EINTR);
-  bool okay = stated == 0 && info.st_size >= 0;
+  const bool representable = stated == 0 && info.st_size >= 0 &&
+      static_cast<std::uintmax_t>(info.st_size) <= SIZE_MAX;
+  bool okay = representable && S_ISREG(info.st_mode) &&
+      static_cast<std::uintmax_t>(info.st_size) <= maximum_bytes &&
+      (expected_bytes == 0U || static_cast<std::uintmax_t>(info.st_size) == expected_bytes);
   if (!okay)
     detail::output_record_failure(failure, IoFailureOperation::stat,
-                                  stated == 0 ? EIO : errno, path);
+        stated != 0 ? errno : (!representable ? EOVERFLOW :
+        (!S_ISREG(info.st_mode) ? EINVAL :
+         (static_cast<std::uintmax_t>(info.st_size) > maximum_bytes ? EFBIG : EINVAL))), path);
   if (okay) {
     try {
       bytes.resize(static_cast<std::size_t>(info.st_size));
@@ -347,6 +464,16 @@ bool read_file(const fs::path& path, std::vector<std::uint8_t>& bytes,
       break;
     }
     cursor += static_cast<std::size_t>(count);
+  }
+  if (okay) {
+    std::uint8_t extra = 0U;
+    ssize_t count;
+    do { count = ::read(descriptor, &extra, 1U); } while (count < 0 && errno == EINTR);
+    if (count != 0) {
+      detail::output_record_failure(failure, IoFailureOperation::read,
+                                    count < 0 ? errno : EIO, path);
+      okay = false;  // Detect growth after the preallocation fstat as well.
+    }
   }
   if (::close(descriptor) != 0) {
     detail::output_record_failure(failure, IoFailureOperation::close, errno, path);
@@ -815,7 +942,7 @@ Status encode_manifest(const RestartSnapshot& snapshot, int size,
 }
 
 Status parse_manifest(const std::vector<std::uint8_t>& bytes,
-                      Manifest& out) noexcept {
+                      Manifest& out, std::uint32_t maximum_ranks) noexcept {
   if (!verified_integrity(bytes))
     return {StatusCode::io_failure, kRestartIntegrity};
   try {
@@ -829,12 +956,18 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
          version != kExactHistoryFormatVersion &&
          version != kSignedHistoryFormatVersion) ||
         !decoder.u32(candidate.rank_count) ||
-        candidate.rank_count == 0U ||
+        candidate.rank_count == 0U || candidate.rank_count > maximum_ranks ||
         !decode_common(decoder, version, candidate) ||
         !valid_global_patch(candidate.global_cells,
                             MeshPatch{{0, 0, 0}, candidate.global_cells, {}, {}})) {
       return {StatusCode::io_failure, kRestartManifest};
     }
+    // Each record is exactly 40 encoded bytes, followed by one integrity word.
+    // Reject malicious counts before allocating the rank directory.
+    if (decoder.remaining() < 8U ||
+        candidate.rank_count != (decoder.remaining() - 8U) / 40U ||
+        (decoder.remaining() - 8U) % 40U != 0U)
+      return {StatusCode::io_failure, kRestartManifest};
     candidate.ranks.resize(candidate.rank_count);
     for (RankRecord& record : candidate.ranks) {
       if (!decoder.int3(record.begin) || !decoder.int3(record.cells) ||
@@ -858,8 +991,11 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
   }
 }
 
+bool same_common(const Manifest& left, const Manifest& right) noexcept;
+
 Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
-                        RankBlock& out) noexcept {
+                        RankBlock& out, const Manifest& expected,
+                        std::uint32_t source) noexcept {
   if (!verified_integrity(bytes))
     return {StatusCode::io_failure, kRestartIntegrity};
   try {
@@ -880,6 +1016,11 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         !valid_global_patch(candidate.common.global_cells, candidate.patch)) {
       return {StatusCode::io_failure, kRestartRankFile};
     }
+    const auto& record = expected.ranks[source];
+    if (candidate.rank != source || candidate.rank_count != expected.rank_count ||
+        !same(candidate.patch.begin, record.begin) || !same(candidate.patch.cells, record.cells) ||
+        !same_common(candidate.common, expected))
+      return {StatusCode::io_failure, kRestartMismatch};
     std::size_t cells = 0U;
     if (!cell_count(candidate.patch.cells, cells))
       return {StatusCode::io_failure, kRestartRankFile};
@@ -896,7 +1037,8 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         std::size_t expected_values = 0U;
         std::uint64_t stored_values = 0U;
         if (!checked_multiply(cells, meta.components, expected_values) ||
-            !decoder.u64(stored_values) || stored_values != expected_values)
+            !decoder.u64(stored_values) || stored_values != expected_values ||
+            expected_values > decoder.remaining() / sizeof(double))
           return false;
         field.values.resize(expected_values);
         for (double& value : field.values)
@@ -928,7 +1070,8 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         std::size_t expected_values = 0U;
         std::uint64_t stored_values = 0U;
         if (!cell_count(owned, expected_values) ||
-            !decoder.u64(stored_values) || stored_values != expected_values)
+            !decoder.u64(stored_values) || stored_values != expected_values ||
+            expected_values > decoder.remaining() / sizeof(double))
           return false;
         flux[axis].resize(expected_values);
         for (double& value : flux[axis])
@@ -995,12 +1138,16 @@ bool same_common(const Manifest& left, const Manifest& right) noexcept {
 }
 
 Status broadcast_bytes(MPI_Comm communicator, int rank,
-                       std::vector<std::uint8_t>& bytes) noexcept {
+                       std::vector<std::uint8_t>& bytes,
+                       std::size_t maximum_bytes = SIZE_MAX) noexcept {
   std::uint64_t size = rank == 0 ? bytes.size() : 0U;
   if (MPI_Bcast(&size, 1, MPI_UINT64_T, 0, communicator) != MPI_SUCCESS ||
       size == 0U || size > static_cast<std::uint64_t>(INT_MAX))
     return {StatusCode::mpi_failure, kRestartCollective};
   Status status;
+  status = collective_status(communicator, size <= maximum_bytes ? Status{} :
+      Status{StatusCode::allocation_failure, kRestartReadBudget});
+  if (!status) return status;
   try {
     if (rank != 0) bytes.resize(static_cast<std::size_t>(size));
   } catch (...) {
@@ -1025,7 +1172,7 @@ Status broadcast_string(MPI_Comm communicator, int rank,
   }
   status = collective_status(communicator, status);
   if (!status) return status;
-  status = broadcast_bytes(communicator, rank, bytes);
+  status = broadcast_bytes(communicator, rank, bytes, kCurrentMaximumBytes);
   if (status && rank != 0) {
     try {
       value.assign(bytes.begin(), bytes.end());
@@ -1040,8 +1187,7 @@ Status read_current_name(const fs::path& directory, std::string& out,
                          IoFailureContext* failure) noexcept
     try {
   std::vector<std::uint8_t> bytes;
-  if (!read_file(directory / "current", bytes, failure) || bytes.empty() ||
-      bytes.size() > 256U)
+  if (!read_file(directory / "current", bytes, kCurrentMaximumBytes, 0U, failure) || bytes.empty())
     return {StatusCode::io_failure, kRestartDirectory};
   if (bytes.back() == '\n') bytes.pop_back();
   if (bytes.empty()) return {StatusCode::io_failure, kRestartDirectory};
@@ -1479,7 +1625,7 @@ Status RestartWriter::write(MPI_Comm communicator,
     for (int source = 0; source < size && local; ++source) {
       const RankRecord& record = records[static_cast<std::size_t>(source)];
       if (!read_file(pending / rank_name(static_cast<std::uint32_t>(source)),
-                     verify, &report.failure) ||
+                     verify, maximum_rank_bytes, record.bytes, &report.failure) ||
           verify.size() != record.bytes ||
           hash_bytes(verify.data(), verify.size()) != record.hash ||
           !verified_integrity(verify)) {
@@ -1522,7 +1668,8 @@ Status RestartReader::load(MPI_Comm communicator,
                            const std::filesystem::path& restart_directory,
                            const RestartExpected& expected,
                            RestartImage& out,
-                           RestartReadReport* report) noexcept try {
+                           RestartReadReport* report,
+                           RestartReadLimits limits) noexcept try {
   detail::IoFailureCapture failure_capture(report ? &report->failure : nullptr);
   if (report) *report = {};
   const auto local_stage = [&](auto&& work) noexcept {
@@ -1536,15 +1683,39 @@ Status RestartReader::load(MPI_Comm communicator,
       MPI_Comm_size(communicator, &size) != MPI_SUCCESS || size <= 0) {
     return {StatusCode::invalid_plan, kRestartInput};
   }
+  RestartReadReport budget;
+  Status status = local_stage([&]() -> Status {
+    if (limits.maximum_bulk_bytes == 0U || limits.maximum_manifest_bytes == 0U ||
+        limits.maximum_source_ranks == 0U)
+      return {StatusCode::invalid_plan, kRestartReadBudget};
+    BulkBytes initial;
+    if (!retained_image_bytes(out, budget.retained_image_bytes) ||
+        !initial.add(budget.retained_image_bytes) || !initial.add(kCurrentMaximumBytes))
+      return {StatusCode::allocation_failure, kRestartReadBudget};
+    budget.peak_bulk_bytes = initial.value;
+    return initial.value <= limits.maximum_bulk_bytes ? Status{} :
+        Status{StatusCode::allocation_failure, kRestartReadBudget};
+  });
+  const auto publish_budget = [&]() noexcept {
+    if (!report) return;
+    report->retained_image_bytes = budget.retained_image_bytes;
+    report->new_image_bytes = budget.new_image_bytes;
+    report->peak_bulk_bytes = budget.peak_bulk_bytes;
+  };
+  publish_budget();
+  if (!status) return status;
+  const auto manifest_limit = std::min({limits.maximum_manifest_bytes,
+      limits.maximum_bulk_bytes - budget.retained_image_bytes - kCurrentMaximumBytes,
+      static_cast<std::size_t>(INT_MAX)});
   std::string generation;
   std::vector<std::uint8_t> manifest_bytes;
-  Status status = local_stage([&]() -> Status {
+  status = local_stage([&]() -> Status {
     if (restart_directory.empty()) return {StatusCode::invalid_plan, kRestartInput};
     Status local;
     if (rank == 0) {
       local = read_current_name(restart_directory, generation, &failure_capture.context);
       if (local && !read_file(restart_directory / generation / "manifest.bin",
-                              manifest_bytes, &failure_capture.context))
+                              manifest_bytes, manifest_limit, 0U, &failure_capture.context))
         local = {StatusCode::io_failure, kRestartManifest};
     }
     return local;
@@ -1552,13 +1723,33 @@ Status RestartReader::load(MPI_Comm communicator,
   if (!status) return status;
   status = broadcast_string(communicator, rank, generation);
   if (!status) return status;
-  status = broadcast_bytes(communicator, rank, manifest_bytes);
+  status = broadcast_bytes(communicator, rank, manifest_bytes, manifest_limit);
   status = collective_status(communicator, status);
   if (!status) return status;
   Manifest manifest;
-  status = parse_manifest(manifest_bytes, manifest);
-  if (status) status = validate_expected(expected, manifest);
-  status = collective_status(communicator, status);
+  RuntimeSha256Digest source_digest{};
+  status = local_stage([&]() -> Status {
+    BulkBytes parsing{budget.retained_image_bytes};
+    // The encoded file itself bounds the rank directory count. Check this
+    // conservative metadata allocation bound before invoking the parser.
+    if (!parsing.add(manifest_bytes.capacity()) || !parsing.add(kCommonMetadataBound) ||
+        !parsing.add(manifest_bytes.size() / 40U, sizeof(RankRecord)))
+      return {StatusCode::allocation_failure, kRestartReadBudget};
+    budget.peak_bulk_bytes = std::max(budget.peak_bulk_bytes, parsing.value);
+    if (parsing.value > limits.maximum_bulk_bytes)
+      return {StatusCode::allocation_failure, kRestartReadBudget};
+    Status local = parse_manifest(manifest_bytes, manifest, limits.maximum_source_ranks);
+    if (local) local = validate_expected(expected, manifest);
+    if (local && !detail::runtime_sha256_bytes(
+          {manifest_bytes.data(), manifest_bytes.size()}, source_digest))
+      local = {StatusCode::io_failure, kRestartIntegrity};
+    if (!local) return local;
+    // The digest and parsed manifest suffice for all following integrity checks.
+    // Do not keep another raw manifest allocation alive beside the new image.
+    std::vector<std::uint8_t>().swap(manifest_bytes);
+    return plan_read_bulk(manifest, expected, budget.retained_image_bytes, limits, budget);
+  });
+  publish_budget();
   if (!status) return status;
 
   fs::path generation_directory;
@@ -1570,13 +1761,14 @@ Status RestartReader::load(MPI_Comm communicator,
       std::vector<std::uint8_t> bytes;
       RankBlock block;
       const RankRecord record = manifest.ranks[source];
-      if (!read_file(generation_directory / rank_name(source), bytes, &failure_capture.context) ||
+      if (!read_file(generation_directory / rank_name(source), bytes,
+                      static_cast<std::size_t>(record.bytes), record.bytes, &failure_capture.context) ||
           bytes.size() != record.bytes ||
           hash_bytes(bytes.data(), bytes.size()) != record.hash) {
         status = {StatusCode::io_failure, kRestartIntegrity};
         break;
       }
-      status = parse_rank_block(bytes, block);
+      status = parse_rank_block(bytes, block, manifest, source);
       if (report) {
         ++report->integrity_blocks;
         report->rank_file_bytes_read += bytes.size();
@@ -1611,10 +1803,7 @@ Status RestartReader::load(MPI_Comm communicator,
     candidate.controller_state = manifest.controller_state;
     candidate.source_format_version = manifest.format_version;
     candidate.method_history_signature = manifest.method_history_signature;
-    if (!detail::runtime_sha256_bytes(
-            {manifest_bytes.data(), manifest_bytes.size()},
-            candidate.source_manifest_sha256))
-      status = {StatusCode::io_failure, kRestartIntegrity};
+    candidate.source_manifest_sha256 = source_digest;
     const bool exact_history =
         manifest.format_version >= kExactHistoryFormatVersion;
     candidate.backward_euler_recovery = !exact_history;
@@ -1707,11 +1896,13 @@ Status RestartReader::load(MPI_Comm communicator,
       if (!needed) continue;
       std::vector<std::uint8_t> bytes;
       RankBlock block;
-      if (!read_file(generation_directory / rank_name(source), bytes, &failure_capture.context)) {
+      if (!read_file(generation_directory / rank_name(source), bytes,
+                      static_cast<std::size_t>(record.bytes), record.bytes, &failure_capture.context) ||
+          hash_bytes(bytes.data(), bytes.size()) != record.hash) {
         status = {StatusCode::io_failure, kRestartRankFile};
         break;
       }
-      status = parse_rank_block(bytes, block);
+      status = parse_rank_block(bytes, block, manifest, source);
       if (report) {
         ++report->restoration_blocks;
         report->rank_file_bytes_read += bytes.size();
