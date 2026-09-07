@@ -46,13 +46,17 @@ mpirun -n 1 build/release/versions/v0.4/hundun run examples/minimal \
 
 最小算例只验证输入和运行路径，不是圆柱算例或科学精度证明。输出目录应独立。需要回归时使用 `-DHUNDUN_BUILD_TESTS=ON`；运行测试前先确认没有占满机器的长测，不与它并发争抢资源。
 
+目前运行证据要求有效的 Git commit/tree 身份。无 `.git` 的源码归档可构建、校验输入，但正式 `run` 会在 `runtime_identity` 阶段拒绝；请从 Git checkout 构建。归档来源身份尚待单独定义，不能用占位 SHA 绕过。
+
 ## 已完成验证与结论
 
 2026-09-07 的[模块验收报告](docs/verification/2026-09-07-exclusive-module-acceptance.md)记录了多标量容量、IBM 公共接口、初始化、方法恢复、统计 epoch、观测完整性和分配失败路径的检查。相关 1/2/4-rank MPI 与 ASan/UBSan 回归已完成，最终针对性验收为 27/27；这不是仓库全部测试或长期物理验收。
 
+之后的 [I/O 与入口合同核查](docs/verification/2026-09-07-e0fd326-io-contract-audit.md)修正了末次日志关闭、Restart 分配前读取上限和 MPI 冷入口合同，干净 checkout 的针对性回归为 26/26。新增的[有符号标量、IBM 固定几何实验及 C2 成本分析](docs/verification/experiments/2026-09-07-c2-scalar-followup.md)单独记录；没有据此修改生产数值门槛或宣称曲面二阶。
+
 同一 Re3900 窗口、128 ranks、各一轮的[局部性能实验](docs/verification/experiments/2026-09-07-sparse-ibm-candidate.md)未显示总耗时收益，已撤回实验代码。当前没有据此宣称快于 COAST。
 
-当前冻结圆柱长测采用 D=0.02 m、Uc=2.89668 m/s、Re=3900，计算域为 20D×10D×(π/2)D，网格 456×256×52，固定 dt=1.3808912271980336×10⁻⁵ s。变物性、守恒门槛及 checkpoint 合同保持不变。长测仍在进行，不能提前宣称统计收敛或实验吻合；它对应验收报告中的冻结程序，不会随 main 更新而自动替换。
+冻结圆柱长测采用 D=0.02 m、Uc=2.89668 m/s、Re=3900，计算域为 20D×10D×(π/2)D，网格 456×256×52，固定 dt=1.3808912271980336×10⁻⁵ s。变物性、守恒门槛及 checkpoint 合同保持不变。该冻结程序于 2026-09-07 尝试第 7232 步时退出（stage 15、status 5/804），已接受到 7231 步，最新持久化 checkpoint 为 7000 步；本轮未重启。数值根因尚未确定，不能把它归因于末次日志关闭缺口，也不能宣称统计收敛或实验吻合。
 
 后续工作包括曲面标量精度、完整内存预算、非对流时间尺度、长日志分段观测，以及在测量支持下逐项优化。燃烧与喷雾应在独立接口和回归闭合后再接入生产路径。
 

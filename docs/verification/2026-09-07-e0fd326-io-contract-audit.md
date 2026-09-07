@@ -112,3 +112,93 @@ accepted_steps/attempts=0 且没有输出目录；不同本地时间尺度的一
 当前运行证据身份要求有效 Git commit/tree，而归档构建记录为 unavailable。
 本轮未伪造 Git 身份，也未把旧冻结程序的验收标签移给此构建。
 这是与旧入口清理无关的归档运行限制，需要单独定义归档来源身份合同。
+
+## 最终干净 checkout 回归
+
+验证的代码提交为 `33bbc6d95b6f47f0d66aa5815dac32da3c659224`。
+从该提交创建新的 detached `clean-checkout`，使用全新 `clean-build`；
+两者均在本轮证据目录下，没有复用 `build-review-fixes` 对象文件。
+configure 与生产/测试目标构建通过，见 `clean-configure.log`、`clean-build.log`。
+
+工具链：CMake 3.31.12、Ninja、Clang 15.0.6 + libc++、C 编译器 GCC 7.5.0、
+Open MPI 2.1.1（CMake 检测的 MPI 接口版本 3.1）。Release、tests=ON、
+HYPRE/ASan/UBSan=OFF；C++ 额外参数为：
+
+```text
+-stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -march=znver3 -mno-fma -ffp-contract=off
+```
+
+未使用 fast-math。构建最多 4 个作业；MPI 回归串行、每次最多 4 ranks，
+使用现有独占锁。冻结长测在开始前已失败，不与运行中的长测争抢算力。
+
+`clean-ctest.log`：26/26 通过，实际耗时 444.10 s，覆盖：
+
+- 本轮日志关闭 CLI（内部 39 个正常/故障场景）、读取上限与原 Restart 全套、
+  Application/MG 2/4-rank 合同、有符号标量 1/2/4 ranks；
+- V3 observer、性能对账、runner self-test、target identity；
+- 普通应用同方法→方法恢复→再次精确续算 1/2/4 ranks、统计新 epoch 1/2/4 ranks；
+- checkpoint 和启用 Visit 的真实 CLI 分配失败、应用初始化/驱动/输入解析、
+  跨 rank 重启续算及比较器。
+
+这是针对性验收，不是仓库全部 CTest 或本轮 sanitizer 验收。
+39 个日志场景已包含在 26 项中的一项，不把两者相加当成独立测试总数。
+
+README 最小算例按显式初态 `101325,300,0.1,0,0`、10 步、两个输出周期均为 10
+实际执行：`--version`、`validate --dry-plan`、`run` 均 exit 0，输出 Visit 和 Restart，
+见 `clean-version.log`、`clean-minimal-validate.log`、`clean-minimal-run.log` 和
+`clean-minimal-run/`。这仅是文档/入口检查，不是 Re3900 或科学精度证明。
+
+## 交付边界与提交
+
+| 类别 | 提交 | 内容 |
+| --- | --- | --- |
+| 正确性 | `ce9580a` | 运行器日志显式结束与全 rank 完成状态 |
+| 正确性 | `e70fc1c` | Reader/Writer 回读分配前检查与 reader bulk 预算 |
+| 接口防御 | `4b0dab6` | rank-local MG counters；应用冷入口控制合同 |
+| 独立实验/观测 | `33bbc6d` | 有符号标量、固定几何实验、已有 C2 数据分析 |
+| 诊断正确性 | `9a2e128` | 按 StatusCode 和 detail 一起选择初态冲突提示 |
+
+生产数值算子没有随实验改变。第 4–7 项的量测、方法设计和剩余限制见
+[独立后续报告](experiments/2026-09-07-c2-scalar-followup.md)。
+新增公共读取容量的说明见 [Restart API](../api/restart-schema.md)。
+本轮没有推送 GitHub，也没有重新提交长测。
+
+## 归档检查发现的诊断缺口与最终补验
+
+在 `33bbc6d` 的全新源码归档中，三个目标 `hundun`、`v04_thin_domain_runner`、
+`v04_product_scalar_contract_experiment` 构建通过；最小输入 validate 通过。
+普通 CLI 的 run 在 `runtime_identity` 阶段返回 invalid_plan/10505，
+committed_step=0、attempts=0，却同时提示“conflicting boundary-derived initial state”。
+当时命令已经给出合法 `--initial-state`，故提示确实误导。
+
+根因是 `app_main.cpp::finish()` 只看 detail=10505；初态冲突使用
+invalid_case/10505，而 `app_identity.cpp` 的身份失败使用 invalid_plan/10505。
+最小 diff 只给提示条件加上 `status.code == StatusCode::invalid_case`。
+没有更改错误编号、身份接受条件或任何数值方法。
+
+新增公共 CLI 回归 `app_failure_hint_cli_test.py`：真实冲突初态仍应给出提示，
+真实无 Git 身份的归档程序不应误提示初态。`failure-hint-red.log` 记录第二个断言
+在旧代码失败；修正后 `failure-hint-green.log` 两个场景都通过。
+
+最终代码提交为 `9a2e1280dc3c3f9ce71fc575e0e11e97108b0f12`。
+重新创建干净 `release-checkout` 和无 `.git` 的 `release-source`，各用独立新 build；
+两者均 configure 并构建上述三个目标成功。所有日志仍在本轮证据目录，
+以 `release-checkout-*`、`release-source-*` 命名。这些目录名称不代表正式发布或科学验收。
+
+| 对象 | 实际检查 | 结果 |
+| --- | --- | --- |
+| 新 checkout | hint、普通重启链 2 ranks、runner self-test、target identity、有符号标量 | 5/5，25.02 s |
+| 新 checkout | README 最小算例，显式初态，10 步与 Visit/Restart | exit 0，`release-minimal-run.log` |
+| 新归档 | 有符号标量公共 ProductDriver 路径 | 1/1，2.20 s；`release-source-ctest.log` |
+| 新归档 | 最小输入 `validate --dry-plan` | exit 0，`release-source-validate.log` |
+| 新归档 | 普通 CLI 身份失败诊断 | 严格拒绝、零步/零尝试、没有错误初态提示 |
+| 新归档 | 圆柱 runner 一步请求 | `candidate_identity_status=2/10505`，exit 5，不打印完成 |
+
+第 1–3 项的生产源文件在 `33bbc6d` 到 `9a2e128` 之间完全未变；
+26 项主回归与后续 5 项补验按各自提交记录，不把重叠测试或归档拒绝当作额外成功样本。
+后续提交只更新本文、读取 API 和 README/构建说明，没有重建或替换冻结程序。
+
+未解决的是**归档正式运行的来源身份合同**，不是这个提示条件。
+需要明确随包来源元数据和实际内容校验规则后再接入；本轮没有用占位 SHA、
+移除身份校验或照搬旧验收标签。完整产品峰值、MG 层级归因、曲面标量方法、
+同物理时间动量 dt 细化及长测第 7232 步的数值根因仍未闭合。
