@@ -584,6 +584,8 @@ struct IbmCellEquationView {
 // boundary authority.
 class IbmEquationInterfacePlan {
  public:
+  // An unbound/default object rejects Status-returning hot calls with
+  // invalid_plan before touching outputs. These methods do not do MPI consensus.
   static Status compile(const CartesianKernelPlan& kernels,
                         const EBTopology& topology,
                         const BoundaryStencilPlan& boundary,
@@ -618,6 +620,9 @@ class IbmEquationInterfacePlan {
   Status correct_velocity_gradient(ConstFieldView velocity,
                                    FieldView velocity_gradient,
                                    Real3 wall_velocity = {}) const noexcept;
+  // All three diffusion corrections require rate storage to be disjoint
+  // from transported and diffusivity, including partial/ghost overlap.
+  // The two read-only inputs may share storage.
   Status correct_zero_normal_diffusion(ConstFieldView transported,
                                       ConstFieldView diffusivity,
                                       FieldView rate) const noexcept;

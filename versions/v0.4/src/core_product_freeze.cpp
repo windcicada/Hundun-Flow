@@ -4016,6 +4016,11 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     if (!same_storage || !disjoint_replicas)
       status = {StatusCode::invalid_plan, kProductBinding};
   }
+  std::size_t scalar_reduction_capacity = 0U;
+  if (status)
+    status = detail::ScalarMassRemap::reduction_requirement(
+        {candidate->fields.scalar_roles.data(), candidate->fields.scalar_roles.size()},
+        scalar_reduction_capacity);
   status = product_collective_status(communicator, status);
   if (status)
     status = ReductionEngine::compile(
@@ -4024,7 +4029,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             std::max<std::size_t>(
                 candidate->krylov_requirements.reduction_capacity,
                 candidate->auxiliary_krylov_requirements.reduction_capacity),
-            8U),
+            std::max<std::size_t>(8U, scalar_reduction_capacity)),
         candidate->reductions);
   // Freeze the incompatible-cold-start projection only after every borrowed
   // address (halos, reductions, linear/MG workspaces, cell fields, and face

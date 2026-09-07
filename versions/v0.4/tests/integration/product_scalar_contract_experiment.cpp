@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -30,6 +31,7 @@ bool open_probe = false;
 bool variable_thermo = false;
 bool immersed = false;
 bool restart_probe = false;
+bool capacity_probe = false;
 int rank = 0;
 bool all_pass(bool local) {
   int value=local ? 1 : 0, result=0;
@@ -449,6 +451,74 @@ std::vector<double> snapshot_payload(const RestartSnapshot& snapshot, bool nondi
   return values;
 }
 
+bool capacity_contract() {
+  bool passed = true;
+  for (unsigned passives : {4U, 5U, 12U})
+    for (bool mixed : {false, true})
+      for (auto algorithm : {LinearAlgorithm::fgmres, LinearAlgorithm::bicgstab}) {
+        auto m = model(mixed, 1e-6);
+        m.time.control = TimeControlKind::adaptive_flow;
+        m.transported_scalars.clear();
+        std::vector<double> values;
+        for (unsigned i = 0U; i < passives; ++i) {
+          m.transported_scalars.push_back({"tracer_" + std::to_string(i),
+              TransportedScalarRole::passive_scalar, 1.0, 1.0});
+          values.push_back(0.05 + 0.02 * i);
+          if (mixed && i == 1U) {
+            m.transported_scalars.push_back({"A", TransportedScalarRole::species, 1.0, 1.0});
+            values.push_back(0.2);
+          }
+        }
+        m.solver.pressure.algorithm = algorithm;
+        m.solver.pressure.krylov_restart = algorithm == LinearAlgorithm::fgmres ? 2U : 0U;
+        m.solver.pressure.mg_correction_scaling = algorithm == LinearAlgorithm::fgmres
+            ? MgCorrectionScaling::residual_minimizing : MgCorrectionScaling::unit_linear;
+        CompiledCasePlan plan;
+        ProductDriver driver;
+        auto status = ProductCompiler::compile(MPI_COMM_WORLD, m, {}, plan);
+        if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+        DriverInitialState initial;
+        initial.transported_scalars = {values.data(), values.size()};
+        if (status) status = driver.initialize(initial);
+        DriverStepReport report;
+        if (status) status = driver.advance({1,1,1,1,1}, report);
+        if (!all_pass(static_cast<bool>(status))) {
+          if (rank == 0) std::cout << "SCALAR_CAPACITY passives=" << passives
+              << " mixed=" << mixed << " algorithm=" << unsigned(algorithm)
+              << " status=" << unsigned(status.code) << '/' << status.detail << '\n';
+          return false;
+        }
+        RestartSnapshot snapshot;
+        status = driver.committed_restart_snapshot(snapshot);
+        bool okay = status && report.accepted;
+        std::size_t scalar = 0U;
+        for (std::size_t f = 0U; f < snapshot.fields.size; ++f) {
+          const auto& field = snapshot.fields.data[f];
+          if (field.role != RestartFieldRole::transported_scalar &&
+              field.role != RestartFieldRole::independent_species) continue;
+          const auto v = field.values;
+          for (int z=0;z<v.interior.z;++z) for (int y=0;y<v.interior.y;++y)
+            for (int x=0;x<v.interior.x;++x)
+              okay &= std::abs(v.unchecked({x,y,z},0U)-values[scalar]) < 1e-12;
+          ++scalar;
+        }
+        okay &= scalar == values.size();
+        // Public failure path: an invalid proposal must preserve all history.
+        // Numerical-attempt rollback is separately covered by --restart.
+        const auto before = snapshot_payload(snapshot);
+        const auto before_step = snapshot.step;
+        const auto failure = driver.advance({0,0,0,0,0}, report);
+        status = driver.committed_restart_snapshot(snapshot);
+        okay &= !failure && status && snapshot.step == before_step &&
+            snapshot_payload(snapshot) == before;
+        passed &= all_pass(okay);
+        if (rank == 0) std::cout << "SCALAR_CAPACITY passives=" << passives
+            << " mixed=" << mixed << " algorithm=" << unsigned(algorithm)
+            << " constants_and_proposal_rollback=" << okay << '\n';
+      }
+  return passed;
+}
+
 bool restart_contract(bool species) {
   const auto m=model(species,coarse_dt);
   const auto create=[&](const ValidatedModel& definition,ProductDriver& driver) {
@@ -576,10 +646,16 @@ int main(int argc,char** argv) {
     else if (std::strcmp(argv[i],"--variable-thermo")==0) variable_thermo=true;
     else if (std::strcmp(argv[i],"--ibm")==0) { immersed=true; cells={16,16,16}; }
     else if (std::strcmp(argv[i],"--restart")==0) restart_probe=true;
+    else if (std::strcmp(argv[i],"--capacity")==0) capacity_probe=true;
     else { MPI_Finalize(); return 2; }
   }
   bool passed=true;
   if(immersed && (open_probe || stretched || restart_probe)) { MPI_Finalize(); return 2; }
+  if(capacity_probe) {
+    passed = capacity_contract();
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if(restart_probe) for(bool species:{false,true}) passed=restart_contract(species) && passed;
   if(open_probe) for(bool species:{false,true}) for(bool reverse:{false,true})
     passed=open_budget(species,reverse) && passed;

@@ -11,7 +11,7 @@ add_executable(v04_product_scalar_contract_experiment
   integration/product_scalar_contract_experiment.cpp)
 target_link_libraries(v04_product_scalar_contract_experiment PRIVATE hundun_v04_core)
 foreach(rank_count IN ITEMS 1 2 4)
-  foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart)
+  foreach(scenario IN ITEMS uniform stretched near_pure open variable ibm restart capacity)
     set(scalar_arguments)
     if(scenario STREQUAL "stretched")
       set(scalar_arguments --stretched)
@@ -25,6 +25,8 @@ foreach(rank_count IN ITEMS 1 2 4)
       set(scalar_arguments --ibm)
     elseif(scenario STREQUAL "restart")
       set(scalar_arguments --stretched --restart)
+    elseif(scenario STREQUAL "capacity")
+      set(scalar_arguments --capacity)
     endif()
     add_test(NAME v04_scalar_contract_${scenario}_mpi_${rank_count}
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}

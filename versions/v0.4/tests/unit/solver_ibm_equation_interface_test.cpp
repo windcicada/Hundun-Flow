@@ -136,6 +136,63 @@ bool run() {
   if (!passed) return false;
 
   const Int3 cells = fixture.patch.cells;
+  // Unbound public objects must reject before touching borrowed plans or data.
+  // Also exercise a fresh destination after a failed compile (not a previously
+  // valid plan, which the transactional compile deliberately preserves).
+  IbmEquationInterfacePlan empty, failed_compile;
+  passed &= expect(IbmEquationInterfacePlan::compile(
+      kernels, fixture.topology, fixture.boundary, unbound_metric,
+      failed_compile).code == StatusCode::invalid_plan,
+      "fresh compile failure leaves an unbound object");
+  auto sentinel = make_force_field(90U, cells, 3U, 0U, 1U, 901U);
+  std::fill(sentinel.storage.begin(), sentinel.storage.end(), 7.25);
+  const auto untouched = sentinel.storage;
+  for (const auto* invalid : {&empty, &failed_compile}) {
+    const auto rejects = [&](Status s) {
+      return expect(s.code == StatusCode::invalid_plan &&
+                        sentinel.storage == untouched,
+                    "unbound IBM public call rejects without writing output");
+    };
+    passed &= rejects(invalid->zero_interface_flux({}));
+    passed &= rejects(invalid->validate_interface_flux({}, 0.0));
+    passed &= rejects(invalid->constrain_pressure_predictor(sentinel.view, {}));
+    passed &= rejects(invalid->constrain_corrected_state(sentinel.view, {}));
+    passed &= rejects(invalid->constrain_momentum({}, {}, {}, {}, {}, {}, nullptr,
+                                                {sentinel.view, sentinel.view, sentinel.view}));
+    passed &= rejects(invalid->correct_pressure_gradient({}, sentinel.view));
+    passed &= rejects(invalid->correct_pressure_work({}, {}, sentinel.view));
+    passed &= rejects(invalid->correct_velocity_gradient({}, sentinel.view, {}));
+    passed &= rejects(invalid->correct_zero_normal_diffusion({}, {}, sentinel.view));
+    passed &= rejects(invalid->correct_impermeable_scalar_diffusion({}, {}, sentinel.view));
+    passed &= rejects(invalid->correct_positive_bounded_zero_normal_diffusion({}, {}, sentinel.view));
+  }
+  // Different base addresses can still overlap through strides/ghost storage.
+  // Both transported/rate and diffusivity/rate overlap must reject pre-write.
+  auto shared = make_force_field(91U, cells, 1U,
+      fixture.boundary.maximum_halo_reach(), 1U, 902U);
+  auto other = make_force_field(92U, cells, 1U,
+      fixture.boundary.maximum_halo_reach(), 1U, 903U);
+  std::fill(shared.storage.begin(), shared.storage.end(), 2.0);
+  std::fill(other.storage.begin(), other.storage.end(), 3.0);
+  const auto original_shared = shared.storage;
+  FieldView offset = shared.view;
+  ++offset.base;
+  offset.ghosts = {0U, 0U, 0U};
+  using Diffusion = Status (IbmEquationInterfacePlan::*)(
+      ConstFieldView, ConstFieldView, FieldView) const noexcept;
+  for (Diffusion operation : {&IbmEquationInterfacePlan::correct_zero_normal_diffusion,
+                             &IbmEquationInterfacePlan::correct_impermeable_scalar_diffusion,
+                             &IbmEquationInterfacePlan::correct_positive_bounded_zero_normal_diffusion}) {
+    for (bool source_overlap : {false, true}) {
+      const auto s = (interface.*operation)(
+          as_const(source_overlap ? shared.view : other.view),
+          as_const(source_overlap ? other.view : shared.view), offset);
+      passed &= expect(s.code == StatusCode::invalid_plan &&
+                           shared.storage == original_shared,
+                       "partial diffusion input/output overlap rejects without writes");
+    }
+  }
+  if (!passed) return false;
   const std::size_t local_cell_count =
       static_cast<std::size_t>(cells.x) * cells.y * cells.z;
   const std::uint8_t ghosts = fixture.boundary.maximum_halo_reach();

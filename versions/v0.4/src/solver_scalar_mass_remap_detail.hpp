@@ -48,6 +48,21 @@ class ScalarMassRemap {
     double mass_pairing_residual{};
   };
 
+  // Declare this consumer's batch requirement before the shared engine is
+  // frozen; it must not depend on which pressure Krylov method is selected.
+  static Status reduction_requirement(Span<const TransportedScalarRole> roles,
+                                      std::size_t& out) noexcept {
+    if (roles.size != 0U && roles.data == nullptr)
+      return {StatusCode::invalid_plan, kInvalid};
+    std::size_t passives = 0U;
+    for (std::size_t i = 0U; i < roles.size; ++i)
+      if (roles.data[i] == TransportedScalarRole::passive_scalar) ++passives;
+    if (passives > std::numeric_limits<std::size_t>::max() / 2U)
+      return {StatusCode::invalid_plan, kInvalid};
+    out = 2U * passives;
+    return {};
+  }
+
   // Local allocation and collective communication binding are separate so
   // the caller can agree bad_alloc before any rank enters HaloEngine::reserve.
   Status allocate(const MeshPatch& patch, Span<const FieldId> fields,

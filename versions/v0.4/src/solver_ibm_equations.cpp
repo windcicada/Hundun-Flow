@@ -850,6 +850,7 @@ Status IbmEquationInterfacePlan::constrain_pressure_predictor(
     FieldView h_by_a, FaceFluxView phi_h_by_a) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status || !detail::valid_cell_view(h_by_a, cells, 0U, 3U) ||
       !detail::valid_flux_view(phi_h_by_a, cells))
@@ -879,6 +880,7 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     IbmCellEquationView system) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status ||
       !detail::valid_cell_view(velocity, cells, 0U, 3U,
@@ -1128,6 +1130,7 @@ Status IbmEquationInterfacePlan::correct_pressure_gradient(
     ConstFieldView pressure, FieldView gradient) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status ||
       !detail::valid_cell_view(pressure, cells, 0U, 1U,
@@ -1176,6 +1179,7 @@ Status IbmEquationInterfacePlan::correct_pressure_work(
     noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status ||
       !detail::valid_cell_view(pressure, cells, 0U, 1U,
@@ -1234,6 +1238,7 @@ Status IbmEquationInterfacePlan::correct_velocity_gradient(
   if (!detail::valid_cell_view(velocity, cells, 0U, 3U,
                               boundary_->maximum_halo_reach()) ||
       !detail::valid_cell_view(velocity_gradient, cells, 0U, 9U) ||
+      detail::field_views_overlap(velocity, as_const(velocity_gradient)) ||
       !std::isfinite(wall_velocity.x) || !std::isfinite(wall_velocity.y) ||
       !std::isfinite(wall_velocity.z))
     return {StatusCode::invalid_plan, kIbmEquationApply};
@@ -1283,12 +1288,15 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
     FieldView rate) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status ||
       !detail::valid_cell_view(transported, cells, 0U, 1U,
                               boundary_->maximum_halo_reach()) ||
       !detail::valid_cell_view(diffusivity, cells, 0U, 1U, 1U) ||
-      !detail::valid_cell_view(rate, cells, 0U, 1U))
+      !detail::valid_cell_view(rate, cells, 0U, 1U) ||
+      detail::field_views_overlap(transported, as_const(rate)) ||
+      detail::field_views_overlap(diffusivity, as_const(rate)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
   const Span<const ImmersedLink> links = topology_->links();
@@ -1337,7 +1345,9 @@ Status IbmEquationInterfacePlan::correct_impermeable_scalar_diffusion(
   const Int3 cells = kernels_->cells();
   if (!detail::valid_cell_view(transported, cells, 0U, 1U, 1U) ||
       !detail::valid_cell_view(diffusivity, cells, 0U, 1U, 1U) ||
-      !detail::valid_cell_view(rate, cells, 0U, 1U))
+      !detail::valid_cell_view(rate, cells, 0U, 1U) ||
+      detail::field_views_overlap(transported, as_const(rate)) ||
+      detail::field_views_overlap(diffusivity, as_const(rate)))
     return {StatusCode::invalid_plan, kIbmEquationApply};
   const auto links = topology_->links();
   for (std::size_t index = 0U; index < links.size; ++index) {
@@ -1372,12 +1382,15 @@ Status IbmEquationInterfacePlan::correct_positive_bounded_zero_normal_diffusion(
     FieldView rate) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
   const Int3 cells = kernels_->cells();
   if (!status ||
       !detail::valid_cell_view(transported, cells, 0U, 1U,
                                boundary_->maximum_halo_reach()) ||
       !detail::valid_cell_view(diffusivity, cells, 0U, 1U, 1U) ||
-      !detail::valid_cell_view(rate, cells, 0U, 1U))
+      !detail::valid_cell_view(rate, cells, 0U, 1U) ||
+      detail::field_views_overlap(transported, as_const(rate)) ||
+      detail::field_views_overlap(diffusivity, as_const(rate)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
   const Span<const ImmersedLink> links = topology_->links();
