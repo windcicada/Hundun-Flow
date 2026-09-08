@@ -50,6 +50,7 @@ constexpr std::size_t kCurrentMaximumBytes = 256U;
 constexpr std::uint32_t kLegacyFormatVersion = 1U;
 constexpr std::uint32_t kExactHistoryFormatVersion = 2U;
 constexpr std::uint32_t kSignedHistoryFormatVersion = 3U;
+constexpr std::uint32_t kCellRecordFormatVersion = 4U;
 constexpr std::array<char, 8U> kRankMagic{{'H', '4', 'R', 'A', 'N', 'K', '0', '1'}};
 constexpr std::array<char, 8U> kManifestMagic{{'H', '4', 'M', 'A', 'N', 'I', '0', '1'}};
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -239,6 +240,8 @@ struct Manifest {
   std::vector<FieldMeta> fields;
   std::vector<FieldMeta> rate_fields;
   std::vector<RankRecord> ranks;
+  PlanFingerprint cell_record_identity{};
+  std::uint32_t cell_record_bytes{};
 };
 
 struct RankBlock {
@@ -252,6 +255,7 @@ struct RankBlock {
   std::vector<RestartImageField> previous_rate_fields;
   std::array<std::vector<double>, 3U> flux;
   std::array<std::vector<double>, 3U> previous_flux;
+  std::vector<std::uint8_t> cell_records;
 };
 
 struct BulkBytes {
@@ -266,6 +270,8 @@ struct BulkBytes {
 
 bool retained_image_bytes(const RestartImage& image, std::size_t& out) noexcept {
   BulkBytes bytes;
+  if (!bytes.add(image.cell_records.capacity()))
+    return false;
   for (const auto* catalog : {&image.fields, &image.previous_fields,
                               &image.accepted_rate_fields, &image.previous_rate_fields}) {
     if (!bytes.add(catalog->capacity(), sizeof(RestartImageField))) return false;
@@ -318,13 +324,21 @@ bool read_layout(const Manifest& manifest, const MeshPatch& patch,
     if (!cell_count(extents, faces) || !values.add(faces, sizeof(double) * layers) ||
         !vectors.add(layers) || !coverage.add(faces)) return false;
   }
+  if (manifest.format_version >= kCellRecordFormatVersion &&
+      (!values.add(cells, manifest.cell_record_bytes) || !vectors.add(1U)))
+    return false;
   BulkBytes owned{values.value};
   if (!owned.add(descriptors.value)) return false;
   // Common header: 80 + four bytes per field, optional 36 + rates, optional signature.
   BulkBytes encoded{52U + 80U + manifest.fields.size() * 4U};
-  if ((exact && (!encoded.add(36U) || !encoded.add(manifest.rate_fields.size(), 4U))) ||
-      (manifest.format_version >= kSignedHistoryFormatVersion && !encoded.add(8U)) ||
-      !encoded.add(vectors.value, 8U) || !encoded.add(values.value)) return false;
+  if ((exact &&
+       (!encoded.add(36U) || !encoded.add(manifest.rate_fields.size(), 4U))) ||
+      (manifest.format_version >= kSignedHistoryFormatVersion &&
+       !encoded.add(8U)) ||
+      (manifest.format_version >= kCellRecordFormatVersion &&
+       !encoded.add(12U)) ||
+      !encoded.add(vectors.value, 8U) || !encoded.add(values.value))
+    return false;
   out = {owned.value, encoded.value, target ? coverage.value : 0U};
   return true;
 }
@@ -601,6 +615,8 @@ bool has_exact_history(const RestartSnapshot& snapshot) noexcept {
 }
 
 std::uint32_t snapshot_format(const RestartSnapshot& snapshot) noexcept {
+  if (snapshot.cell_records.identity != 0U)
+    return kCellRecordFormatVersion;
   return !has_exact_history(snapshot) ? kLegacyFormatVersion
       : snapshot.method_history_signature != 0U ? kSignedHistoryFormatVersion
                                                : kExactHistoryFormatVersion;
@@ -616,6 +632,18 @@ bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
       !expected_face_extents(snapshot.final_mass_flux, snapshot.patch.cells)) {
     return false;
   }
+  const auto &records = snapshot.cell_records;
+  if (records.identity != 0U) {
+    std::size_t cells = 0U, bytes = 0U;
+    if (!has_exact_history(snapshot) ||
+        snapshot.method_history_signature == 0U || records.record_bytes == 0U ||
+        !cell_count(snapshot.patch.cells, cells) ||
+        !checked_multiply(cells, records.record_bytes, bytes) ||
+        records.values.data == nullptr || records.values.size != bytes)
+      return false;
+  } else if (records.record_bytes != 0U || records.values.size != 0U ||
+             records.values.data != nullptr)
+    return false;
   if (!has_exact_history(snapshot)) return true;
   return snapshot.controller_state != 0U &&
          valid_field_catalog(snapshot.previous_fields,
@@ -676,6 +704,10 @@ std::uint64_t snapshot_signature(const RestartSnapshot& snapshot) {
   }
   if (version >= kSignedHistoryFormatVersion)
     encoder.u64(snapshot.method_history_signature);
+  if (version >= kCellRecordFormatVersion) {
+    encoder.u64(snapshot.cell_records.identity);
+    encoder.u32(snapshot.cell_records.record_bytes);
+  }
   return hash_bytes(encoder.data().data(), encoder.data().size());
 }
 
@@ -715,6 +747,10 @@ void encode_common(Encoder& encoder, const RestartSnapshot& snapshot,
   }
   if (version >= kSignedHistoryFormatVersion)
     encoder.u64(snapshot.method_history_signature);
+  if (version >= kCellRecordFormatVersion) {
+    encoder.u64(snapshot.cell_records.identity);
+    encoder.u32(snapshot.cell_records.record_bytes);
+  }
 }
 
 bool decode_common(Decoder& decoder, std::uint32_t version,
@@ -788,6 +824,11 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
       (!decoder.u64(manifest.method_history_signature) ||
        manifest.method_history_signature == 0U))
     return false;
+  if (version >= kCellRecordFormatVersion &&
+      (!decoder.u64(manifest.cell_record_identity) ||
+       !decoder.u32(manifest.cell_record_bytes) ||
+       manifest.cell_record_identity == 0U || manifest.cell_record_bytes == 0U))
+    return false;
   return true;
 }
 
@@ -828,6 +869,12 @@ bool rank_block_size(const RestartSnapshot& snapshot, std::size_t& bytes) {
       std::size_t count = 0U;
       if (!cell_count(owned, count) || !add_values(count)) return false;
     }
+  }
+  if (snapshot.cell_records.identity != 0U) {
+    if (bytes > SIZE_MAX - 8U ||
+        snapshot.cell_records.values.size > SIZE_MAX - bytes - 8U)
+      return false;
+    bytes += 8U + snapshot.cell_records.values.size;
   }
   return true;
 }
@@ -920,6 +967,11 @@ Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
   if (status) status = encode_flux(snapshot.final_mass_flux);
   if (status && version >= kExactHistoryFormatVersion)
     status = encode_flux(snapshot.previous_mass_flux);
+  if (status && version >= kCellRecordFormatVersion) {
+    encoder.u64(snapshot.cell_records.values.size);
+    encoder.bytes(snapshot.cell_records.values.data,
+                  snapshot.cell_records.values.size);
+  }
   if (!status) return status;
   encoder.append_integrity();
   if (encoder.data().size() != bytes)
@@ -963,16 +1015,18 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
     std::array<char, 8U> magic{};
     std::uint32_t version = 0U;
     Manifest candidate;
-    if (!decoder.bytes(magic.data(), magic.size()) ||
-        magic != kManifestMagic || !decoder.u32(version) ||
+    if (!decoder.bytes(magic.data(), magic.size()) || magic != kManifestMagic ||
+        !decoder.u32(version) ||
         (version != kLegacyFormatVersion &&
          version != kExactHistoryFormatVersion &&
-         version != kSignedHistoryFormatVersion) ||
-        !decoder.u32(candidate.rank_count) ||
-        candidate.rank_count == 0U || candidate.rank_count > maximum_ranks ||
+         version != kSignedHistoryFormatVersion &&
+         version != kCellRecordFormatVersion) ||
+        !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
+        candidate.rank_count > maximum_ranks ||
         !decode_common(decoder, version, candidate) ||
-        !valid_global_patch(candidate.global_cells,
-                            MeshPatch{{0, 0, 0}, candidate.global_cells, {}, {}})) {
+        !valid_global_patch(
+            candidate.global_cells,
+            MeshPatch{{0, 0, 0}, candidate.global_cells, {}, {}})) {
       return {StatusCode::io_failure, kRestartManifest};
     }
     // Each record is exactly 40 encoded bytes, followed by one integrity word.
@@ -1020,9 +1074,11 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         !decoder.u32(version) ||
         (version != kLegacyFormatVersion &&
          version != kExactHistoryFormatVersion &&
-         version != kSignedHistoryFormatVersion) ||
+         version != kSignedHistoryFormatVersion &&
+         version != kCellRecordFormatVersion) ||
         !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
-        !decoder.u32(candidate.rank) || candidate.rank >= candidate.rank_count ||
+        !decoder.u32(candidate.rank) ||
+        candidate.rank >= candidate.rank_count ||
         !decode_common(decoder, version, candidate.common) ||
         !decoder.int3(candidate.patch.begin) ||
         !decoder.int3(candidate.patch.cells) ||
@@ -1105,6 +1161,18 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         (version >= kExactHistoryFormatVersion &&
          !decode_flux(candidate.previous_flux)))
       return {StatusCode::io_failure, kRestartRankFile};
+    if (version >= kCellRecordFormatVersion) {
+      std::size_t expected_bytes = 0U;
+      std::uint64_t encoded_bytes = 0U;
+      if (!checked_multiply(cells, candidate.common.cell_record_bytes,
+                            expected_bytes) ||
+          !decoder.u64(encoded_bytes) || encoded_bytes != expected_bytes ||
+          expected_bytes > decoder.remaining())
+        return {StatusCode::io_failure, kRestartRankFile};
+      candidate.cell_records.resize(expected_bytes);
+      if (!decoder.bytes(candidate.cell_records.data(), expected_bytes))
+        return {StatusCode::io_failure, kRestartRankFile};
+    }
     std::uint64_t integrity = 0U;
     if (!decoder.u64(integrity) || decoder.remaining() != 0U) {
       return {StatusCode::io_failure, kRestartRankFile};
@@ -1120,16 +1188,17 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
 
 bool same_common(const Manifest& left, const Manifest& right) noexcept {
   if (left.format_version != right.format_version ||
-      !same(left.global_cells, right.global_cells) ||
-      left.plan != right.plan || left.schema != right.schema ||
-      left.geometry != right.geometry || left.time != right.time ||
-      left.dt != right.dt ||
+      !same(left.global_cells, right.global_cells) || left.plan != right.plan ||
+      left.schema != right.schema || left.geometry != right.geometry ||
+      left.time != right.time || left.dt != right.dt ||
       left.pressure_reference != right.pressure_reference ||
       left.step != right.step ||
       left.controller_state != right.controller_state ||
       left.previous_pressure_reference != right.previous_pressure_reference ||
       left.closed_mass_target != right.closed_mass_target ||
       left.method_history_signature != right.method_history_signature ||
+      left.cell_record_identity != right.cell_record_identity ||
+      left.cell_record_bytes != right.cell_record_bytes ||
       left.final_mass_flux_revision != right.final_mass_flux_revision ||
       left.previous_mass_flux_revision != right.previous_mass_flux_revision ||
       left.fields.size() != right.fields.size() ||
@@ -1243,6 +1312,8 @@ Status validate_expected(const RestartExpected& expected,
       expected.plan == 0U || expected.schema == 0U || expected.geometry == 0U ||
       (!current_identity && !compatible_identity && !compatible_method) ||
       expected.geometry != manifest.geometry ||
+      expected.cell_record_identity != manifest.cell_record_identity ||
+      expected.cell_record_bytes != manifest.cell_record_bytes ||
       expected.fields.data == nullptr ||
       expected.fields.size != manifest.fields.size()) {
     return {StatusCode::invalid_plan, kRestartMismatch};
@@ -1451,6 +1522,9 @@ void RestartImage::clear() noexcept {
   storage_layout_migrated = false;
   source_format_version = kLegacyFormatVersion;
   method_history_signature = 0U;
+  cell_record_identity = 0U;
+  cell_record_bytes = 0U;
+  cell_records.clear();
 }
 
 Status RestartWriter::write(MPI_Comm communicator,
@@ -1816,6 +1890,8 @@ Status RestartReader::load(MPI_Comm communicator,
     candidate.controller_state = manifest.controller_state;
     candidate.source_format_version = manifest.format_version;
     candidate.method_history_signature = manifest.method_history_signature;
+    candidate.cell_record_identity = manifest.cell_record_identity;
+    candidate.cell_record_bytes = manifest.cell_record_bytes;
     candidate.source_manifest_sha256 = source_digest;
     const bool exact_history =
         manifest.format_version >= kExactHistoryFormatVersion;
@@ -1829,6 +1905,12 @@ Status RestartReader::load(MPI_Comm communicator,
     std::size_t target_cells = 0U;
     if (!cell_count(expected.target_patch.cells, target_cells))
       status = {StatusCode::invalid_plan, kRestartInput};
+    if (status && manifest.format_version >= kCellRecordFormatVersion) {
+      std::size_t bytes = 0U;
+      if (!checked_multiply(target_cells, manifest.cell_record_bytes, bytes))
+        return {StatusCode::allocation_failure, kRestartReadBudget};
+      candidate.cell_records.resize(bytes);
+    }
     const auto allocate_fields = [&](const std::vector<FieldMeta>& metadata,
                                      std::vector<RestartImageField>& fields) {
       fields.resize(metadata.size());
@@ -1952,6 +2034,11 @@ Status RestartReader::load(MPI_Comm communicator,
               break;
             }
             cell_coverage[new_cell] = 1U;
+            if (manifest.format_version >= kCellRecordFormatVersion) {
+              const auto width = manifest.cell_record_bytes;
+              std::copy_n(block.cell_records.data() + old_cell * width, width,
+                          candidate.cell_records.data() + new_cell * width);
+            }
             const auto copy_fields =
                 [&](std::vector<RestartImageField>& target,
                     const std::vector<RestartImageField>& source_fields) {

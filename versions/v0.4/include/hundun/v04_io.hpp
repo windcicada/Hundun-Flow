@@ -90,9 +90,17 @@ struct RestartFieldView {
   ConstFieldView values{};
 };
 
-// Borrowed synchronous snapshot: neither the metadata spans nor field/flux
-// storage are owned here. See ProductDriver::committed_*_snapshot for lifetime.
-// Copying this structure does NOT freeze the accepted state for asynchronous I/O.
+// Fixed-width, model-defined little-endian records, one per local cell in
+// x-fastest order. Integer histories must not pass through FP64 fields.
+struct RestartCellRecordsView {
+  PlanFingerprint identity{};
+  std::uint32_t record_bytes{};
+  Span<const std::uint8_t> values{};
+};
+
+// Borrowed synchronous snapshot: metadata, fields, fluxes, and model records
+// remain owned by the driver. Copying this view does not freeze accepted state
+// for asynchronous I/O. See ProductDriver::committed_*_snapshot for lifetime.
 struct RestartSnapshot {
   Int3 global_cells{};
   MeshPatch patch{};
@@ -117,7 +125,9 @@ struct RestartSnapshot {
   double closed_mass_target{};
   // Zero writes legacy unsigned V2 history. A nonzero semantic signature
   // writes V3 (same physical history plus this integrity-protected identity).
+  // Nonempty model cell records select V4 and require a nonzero signature.
   PlanFingerprint method_history_signature{};
+  RestartCellRecordsView cell_records{};
 };
 
 enum class IoFailureOperation : std::uint8_t {
@@ -220,6 +230,8 @@ struct RestartExpected {
   // Read-only, known historical method identity. Populated only for explicit
   // method recovery; geometry, physical configuration and storage still match.
   PlanFingerprint compatible_method_plan{};
+  PlanFingerprint cell_record_identity{};
+  std::uint32_t cell_record_bytes{};
 };
 
 struct RestartImageField {
@@ -262,6 +274,10 @@ struct RestartImage {
   // File facts remain unchanged when a caller requests method recovery.
   std::uint32_t source_format_version{1U};
   PlanFingerprint method_history_signature{};
+
+  PlanFingerprint cell_record_identity{};
+  std::uint32_t cell_record_bytes{};
+  std::vector<std::uint8_t> cell_records;
 
   RestartHistoryCompatibility history_compatibility(
       PlanFingerprint expected_signature) const noexcept {

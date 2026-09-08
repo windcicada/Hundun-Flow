@@ -442,13 +442,20 @@ bool read_budget_boundaries(MPI_Comm communicator, const fs::path& directory,
   passed &= static_cast<bool>(RestartReader::load(communicator, directory, expected, image, nullptr, limits));
   const auto saved = image;
   const auto same_payload = [&] {
-    bool equal = image.step == saved.step && image.time == saved.time && image.dt == saved.dt &&
-        image.closed_mass_target == saved.closed_mass_target && image.plan == saved.plan &&
-        image.schema == saved.schema && image.geometry == saved.geometry &&
+    bool equal =
+        image.step == saved.step && image.time == saved.time &&
+        image.dt == saved.dt &&
+        image.closed_mass_target == saved.closed_mass_target &&
+        image.plan == saved.plan && image.schema == saved.schema &&
+        image.geometry == saved.geometry &&
         image.controller_state == saved.controller_state &&
+        image.cell_record_identity == saved.cell_record_identity &&
+        image.cell_record_bytes == saved.cell_record_bytes &&
+        image.cell_records == saved.cell_records &&
         image.source_manifest_sha256 == saved.source_manifest_sha256 &&
         image.method_history_signature == saved.method_history_signature &&
-        image.final_mass_flux == saved.final_mass_flux && image.previous_mass_flux == saved.previous_mass_flux;
+        image.final_mass_flux == saved.final_mass_flux &&
+        image.previous_mass_flux == saved.previous_mass_flux;
     const std::array<const std::vector<RestartImageField>*, 4U> a{{&image.fields, &image.previous_fields,
         &image.accepted_rate_fields, &image.previous_rate_fields}};
     const std::array<const std::vector<RestartImageField>*, 4U> b{{&saved.fields, &saved.previous_fields,
@@ -486,13 +493,38 @@ bool read_budget_boundaries(MPI_Comm communicator, const fs::path& directory,
   return passed;
 }
 
-bool exact_transition(MPI_Comm communicator, const fs::path& directory,
-                      PlanFingerprint signature = 0U) {
+std::vector<std::uint8_t> model_records(const MeshPatch &patch) {
+  std::vector<std::uint8_t> records(std::size_t(patch.cells.x) * patch.cells.y *
+                                    patch.cells.z * 8U);
+  std::size_t cell = 0U;
+  for (int z = 0; z < patch.cells.z; ++z)
+    for (int y = 0; y < patch.cells.y; ++y)
+      for (int x = 0; x < patch.cells.x; ++x, ++cell) {
+        const auto global =
+            (std::uint64_t(z + patch.begin.z) * kGlobal.y + y + patch.begin.y) *
+                kGlobal.x +
+            x + patch.begin.x;
+        const auto counter = UINT64_MAX - global;
+        for (unsigned byte = 0; byte < 8; ++byte)
+          records[8U * cell + byte] = std::uint8_t(counter >> (8U * byte));
+      }
+  return records;
+}
+
+bool exact_transition(MPI_Comm communicator, const fs::path &directory,
+                      PlanFingerprint signature = 0U,
+                      bool cell_records = false) {
   ExactFixture fixture;
   bool passed = fixture.initialize(communicator);
   Status status;
   auto snapshot = fixture.snapshot();
   snapshot.method_history_signature = signature;
+  std::vector<std::uint8_t> records;
+  if (cell_records) {
+    records = model_records(fixture.base.patch);
+    snapshot.cell_records = {
+        UINT64_C(0x5443525245433031), 8U, {records.data(), records.size()}};
+  }
   if (passed)
     status = RestartWriter::write(communicator, directory,
                                   snapshot, {1U});
@@ -505,25 +537,28 @@ bool exact_transition(MPI_Comm communicator, const fs::path& directory,
   const std::array<RestartExpectedField, 2U> expected_rates{{
       {RestartFieldRole::enthalpy_nonadvective_rate, 10U, 1U},
       {RestartFieldRole::scalar_nonadvective_rate, 11U, 1U}}};
-  const RestartExpected expected{
-      kGlobal,
-      fixture.base.patch,
-      kPlan,
-      kSchema,
-      kGeometry,
-      {expected_fields.data(), expected_fields.size()},
-      {expected_rates.data(), expected_rates.size()}};
+  RestartExpected expected{kGlobal,
+                           fixture.base.patch,
+                           kPlan,
+                           kSchema,
+                           kGeometry,
+                           {expected_fields.data(), expected_fields.size()},
+                           {expected_rates.data(), expected_rates.size()}};
+  if (cell_records) {
+    expected.cell_record_identity = snapshot.cell_records.identity;
+    expected.cell_record_bytes = 8U;
+  }
   RestartImage image;
   if (passed)
     status = RestartReader::load(communicator, directory, expected, image);
   passed = passed && static_cast<bool>(status) &&
-           image.source_format_version == (signature == 0U ? 2U : 3U) &&
+           image.source_format_version ==
+               (cell_records ? 4U : (signature == 0U ? 2U : 3U)) &&
            image.method_history_signature == signature &&
            image.history_compatibility(signature) ==
                (signature == 0U ? RestartHistoryCompatibility::unknown
                                 : RestartHistoryCompatibility::compatible) &&
-           !image.backward_euler_recovery &&
-           image.controller_state == 51U &&
+           !image.backward_euler_recovery && image.controller_state == 51U &&
            image.previous_pressure_reference == 101300.0 &&
            image.closed_mass_target == 3.5 &&
            image.final_mass_flux_revision == 2U &&
@@ -595,11 +630,84 @@ bool exact_transition(MPI_Comm communicator, const fs::path& directory,
                    image.previous_mass_flux[axis][index] ==
                        face_value(axis, global);
         }
+  if (cell_records)
+    passed &= image.cell_record_identity == snapshot.cell_records.identity &&
+              image.cell_record_bytes == 8U && image.cell_records == records;
   passed &= read_budget_boundaries(communicator, directory, expected, image);
   const int local = passed ? 1 : 0;
   int global = 0;
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, communicator);
   return global != 0;
+}
+
+bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
+                        const fs::path &directory) {
+  int rank = 0;
+  MPI_Comm_rank(world, &rank);
+  MPI_Comm writer = MPI_COMM_NULL, reader = MPI_COMM_NULL;
+  MPI_Comm_split(world, rank < writer_size ? 0 : MPI_UNDEFINED, rank, &writer);
+  bool passed = true;
+  constexpr PlanFingerprint identity = UINT64_C(0x5443525245433031);
+  if (writer != MPI_COMM_NULL) {
+    ExactFixture fixture;
+    passed = fixture.initialize(writer);
+    auto records = model_records(fixture.base.patch);
+    auto snapshot = fixture.snapshot();
+    snapshot.method_history_signature = UINT64_C(0x391003);
+    snapshot.cell_records = {identity, 8U, {records.data(), records.size()}};
+    if (passed)
+      passed =
+          static_cast<bool>(RestartWriter::write(writer, directory, snapshot));
+    MPI_Comm_free(&writer);
+  }
+  MPI_Barrier(world);
+  MPI_Comm_split(world, rank < reader_size ? 0 : MPI_UNDEFINED, rank, &reader);
+  if (reader != MPI_COMM_NULL) {
+    ExactFixture fixture;
+    passed &= fixture.initialize(reader);
+    const std::array<RestartExpectedField, 4U> fields{
+        {{RestartFieldRole::velocity, 0U, 3U},
+         {RestartFieldRole::pressure_perturbation, 1U, 1U},
+         {RestartFieldRole::enthalpy, 2U, 1U},
+         {RestartFieldRole::independent_species, 3U, 1U}}};
+    const std::array<RestartExpectedField, 2U> rates{
+        {{RestartFieldRole::enthalpy_nonadvective_rate, 10U, 1U},
+         {RestartFieldRole::scalar_nonadvective_rate, 11U, 1U}}};
+    RestartExpected expected{kGlobal,
+                             fixture.base.patch,
+                             kPlan,
+                             kSchema,
+                             kGeometry,
+                             {fields.data(), fields.size()},
+                             {rates.data(), rates.size()}};
+    expected.cell_record_identity = identity;
+    expected.cell_record_bytes = 8U;
+    RestartImage image;
+    const auto status = RestartReader::load(reader, directory, expected, image);
+    passed &= status &&
+              image.cell_records == model_records(fixture.base.patch) &&
+              image.cell_record_identity == identity &&
+              image.cell_record_bytes == 8U &&
+              image.history_compatibility(UINT64_C(0x391003)) ==
+                  RestartHistoryCompatibility::compatible;
+    const auto saved = image.cell_records;
+    for (int mismatch = 0; mismatch < 2; ++mismatch) {
+      auto wrong = expected;
+      if (rank == reader_size - 1) {
+        if (mismatch == 0)
+          wrong.cell_record_identity ^= 1U;
+        else
+          ++wrong.cell_record_bytes;
+      }
+      const auto denied = RestartReader::load(reader, directory, wrong, image);
+      passed &= !denied && image.cell_records == saved;
+    }
+    MPI_Comm_free(&reader);
+  }
+  MPI_Barrier(world);
+  int okay = passed ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, world);
+  return okay != 0;
 }
 
 bool transition(MPI_Comm world, int writer_size, int reader_size,
@@ -1106,12 +1214,18 @@ int main(int argc, char** argv) {
     MPI_Finalize();
     return global ? 0 : 1;
   }
+  passed &=
+      record_repartition(MPI_COMM_WORLD, 1, 4, base / "records-one-to-four");
+  passed &=
+      record_repartition(MPI_COMM_WORLD, 4, 1, base / "records-four-to-one");
   passed &= transition(MPI_COMM_WORLD, 1, 2, base / "one-to-two", 1U);
   passed &= transition(MPI_COMM_WORLD, 2, 4, base / "two-to-four", 2U);
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);
   passed &= transition(MPI_COMM_WORLD, 4, 4, base / "four-to-four", 4U);
   passed &= exact_transition(MPI_COMM_WORLD, base / "exact-four-to-four");
   passed &= exact_transition(MPI_COMM_WORLD, base / "signed-four-to-four", UINT64_C(0x391002));
+  passed &= exact_transition(MPI_COMM_WORLD, base / "records-four-to-four",
+                             UINT64_C(0x391003), true);
   passed &= failure_boundaries(MPI_COMM_WORLD, base / "failure-boundaries");
   passed &= retention_order(MPI_COMM_WORLD, base / "retention-order");
   passed &= restart_syscalls(MPI_COMM_WORLD, base / "syscalls");
