@@ -45,6 +45,7 @@ class ScalarMassRemap {
     unsigned iterations{};
     double initial_species_residual{};
     double residual{};
+    double convergence_residual{}; // Residual beyond binary64 quantization.
     double mass_pairing_residual{};
   };
 
@@ -59,7 +60,7 @@ class ScalarMassRemap {
       if (roles.data[i] == TransportedScalarRole::passive_scalar) ++passives;
     if (passives > std::numeric_limits<std::size_t>::max() / 2U)
       return {StatusCode::invalid_plan, kInvalid};
-    out = 2U * passives;
+    out = std::max(std::size_t{4U}, 2U * passives);
     return {};
   }
 
@@ -286,7 +287,7 @@ class ScalarMassRemap {
             {views_.data(), views_.size()}, boundary_values);
       status = reductions.consensus(status);
       if (!status) return status;
-      double maximum[3U]{};
+      double maximum[4U]{};
       std::size_t i = 0U;
       for (int z = 0; z < cells_.z && local; ++z)
         for (int y = 0; y < cells_.y && local; ++y)
@@ -333,6 +334,18 @@ class ScalarMassRemap {
                                         std::abs(rhs);
               const double norm = scale == 0.0L ? 0.0 :
                   static_cast<double>(std::abs(residual) / scale);
+              // A subnormal (or zero) q cannot resolve less than half the
+              // binary64 spacing. Extended-precision donor products can be
+              // nonzero even when rhs/diagonal correctly rounds to zero.
+              // Keep the raw norm as evidence; only subtract the unavoidable
+              // quantization error for the termination test. In ordinary
+              // rows this floor is negligible, not a mixture-mass tolerance.
+              const long double quantization =
+                  0.5L * static_cast<long double>(diagonal) *
+                  std::numeric_limits<double>::denorm_min();
+              const double convergence_norm = scale == 0.0L ? 0.0 :
+                  static_cast<double>(std::max(0.0L,
+                      std::abs(residual) - quantization) / scale);
               const double value = active ? static_cast<double>(rhs / diagonal) : q;
               if (!std::isfinite(value) || !std::isfinite(norm)) {
                 local = {StatusCode::rejected_step, kInvalid};
@@ -341,6 +354,7 @@ class ScalarMassRemap {
               next_[s * count_ + i] = value;
               if (active) {
                 maximum[0U] = std::max(maximum[0U], norm);
+                maximum[3U] = std::max(maximum[3U], convergence_norm);
                 if (roles_[s] == TransportedScalarRole::species)
                   // Composition coupling is normalized by mixture mass,
                   // i.e. absolute mass-fraction error, including trace species.
@@ -351,14 +365,15 @@ class ScalarMassRemap {
               }
             }
           }
-      double global[3U]{};
-      status = reductions.checked_max({maximum, 3U}, {global, 3U}, local);
+      double global[4U]{};
+      status = reductions.checked_max({maximum, 4U}, {global, 4U}, local);
       if (!status) return status;
       if (iteration == 0U) report.initial_species_residual = global[1U];
       report.iterations = iteration;
       report.residual = global[0U];
+      report.convergence_residual = global[3U];
       report.mass_pairing_residual = global[2U];
-      if (report.residual <= tolerance) return {};
+      if (report.convergence_residual <= tolerance) return {};
       for (std::size_t s = 0U; s < views_.size(); ++s) {
         i = 0U;
         for (int z = 0; z < cells_.z; ++z)

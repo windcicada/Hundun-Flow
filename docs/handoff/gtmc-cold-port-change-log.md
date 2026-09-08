@@ -40,6 +40,44 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G21: G20's 42.82 s probe reproduced norm=1 in trace-CH4 rows with q=0
+  and next=0; extended-precision RHS is nonzero below binary64 range. Global
+  absolute composition error was 2.77412637507e-17 and mass pairing
+  1.68844377692e-15. This is an unrepresentable update, not failed physical
+  mass closure. A real ScalarMassRemap regression with unit cell mass, zero
+  inventory, fixed inlet fractions 0.2/0.3 and denorm_min correction flux
+  reproduced 10215 / residual=1 / iteration=127 in 0.37 s.
+  `src/solver_scalar_mass_remap_detail.hpp` now retains raw residual while
+  separately computing residual beyond the unavoidable bound
+  diagonal*denorm_min/2 in long double. The 32-epsilon relative gate applies
+  to this excess; no mixture-mass tolerance, clipping, normalization or
+  iteration-cap increase is used. Ordinary rows have negligible floor.
+  Reduction capacity explicitly includes the fourth norm component.
+  `include/hundun/v04_app.hpp::DriverScalarTransportReport` and
+  `src/core_product_freeze.cpp::advance` retain both raw and convergence
+  residuals. `tests/mpi/solver_scalar_mass_remap_mpi_test.cpp` plus
+  `tests/CMakeLists.txt` exercise actual underflow closure and verify ordinary
+  representable influx still requires an update to exact 0.0002/0.0003.
+  MPI 1/2/4 pass (1.13 s total). The G20 probe and its includes are removed;
+  logs remain in terminal-diagnostic-v1. Stored equation/history semantics
+  are unchanged; this recognizes attainable floating-point convergence.
+  Broader scalar conservation and full GTMC reruns remain pending.
+
+- G20 (diagnostic only, no numerical repair): 9a418ce formal short-100 failed
+  before any accepted step after 4:15.56. Final retry reports stage 53 / 5792,
+  masking an earlier failure after the now-complete terminal audit. A separate
+  fixed-dt=7.0231924461358171e-9 case/restart reproduced stage 65 / 10215 in
+  41.66 s, one attempt. Terminal audit is available and passes: EOS=0,
+  C=1.67053076098e-15, E=1.57039423988e-15, gauge/mass=0,
+  committed absolute CFL=0.00472513880 < 0.3. The source
+  `src/solver_scalar_mass_remap_detail.hpp` temporarily records the globally
+  worst final-iteration cell/species, q/next/RHS/diagonal/masses/six correction
+  fluxes under HUNDUN_GTMC_REMAP_PROBE / [DEBUG-gtmc-remap], with direct
+  cstdio/cstdlib includes. Purpose: distinguish trace-species relative-error
+  stagnation, fixed-source flux pairing, and outlet donor noncontraction.
+  Remove after diagnosis. Formal v3 tolerances/input remain untouched;
+  diagnostic-only artifacts live outside source in terminal-diagnostic-v1.
+
 - G19: clean 25f4812 formal-v3 single-step reached both pressure-energy gates
   (C=1.67053076098e-15, E=2.92562756237e-11, attempt 7, dt=7.02319244614e-9),
   then failed stage 60 / invalid_plan 1503 after 3:40.56, zero accepted steps.
@@ -56,7 +94,7 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
   pressure audit is unchanged. The mandatory nonempty witness and all terminal
   tolerances remain intact. No stored-history semantics or probe added.
   Real terminal-product plus existing outlet/patch regressions pass on MPI
-  1/2/4 (0.39/0.41/0.43 s). Full-size rerun pending; this is not acceptance.
+  1/2/4 (0.39/0.41/0.42 s). Full-size rerun pending; this is not acceptance.
 
 - G18: clean ae435c4 passed native import but actual formal-v3 one-step failed
   after 5:50.20, zero accepted steps (stage 54 / 10210, nine attempts). G17

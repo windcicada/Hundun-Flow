@@ -492,6 +492,7 @@ struct DriverScalarTransportReport {
   std::uint64_t remap_nanoseconds{};
   double final_species_residual{};
   double final_remap_residual{};
+  double final_remap_convergence_residual{}; // Beyond binary64 quantization.
   double mass_pairing_residual{};
 };
 

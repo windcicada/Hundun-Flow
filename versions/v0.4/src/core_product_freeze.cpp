@@ -15405,6 +15405,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
       scalar.remap_nanoseconds += implementation_->scalar_remap_nanoseconds;
       scalar.final_species_residual = remap.initial_species_residual;
       scalar.final_remap_residual = remap.residual;
+      scalar.final_remap_convergence_residual = remap.convergence_residual;
       scalar.mass_pairing_residual = remap.mass_pairing_residual;
     }
     const std::uint64_t predictor_calls =

@@ -896,6 +896,18 @@ foreach(rank_count IN ITEMS 1 2 4)
     PROPERTIES TIMEOUT 120)
 endforeach()
 
+add_executable(v04_solver_scalar_mass_remap_mpi_test
+  mpi/solver_scalar_mass_remap_mpi_test.cpp)
+target_link_libraries(v04_solver_scalar_mass_remap_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_scalar_mass_remap_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      $<TARGET_FILE:v04_solver_scalar_mass_remap_mpi_test>)
+  set_tests_properties(v04_solver_scalar_mass_remap_mpi_${rank_count}
+    PROPERTIES TIMEOUT 120)
+endforeach()
+
 add_executable(v04_app_init_case_test
   integration/app_init_case_test.cpp)
 target_link_libraries(v04_app_init_case_test PRIVATE
