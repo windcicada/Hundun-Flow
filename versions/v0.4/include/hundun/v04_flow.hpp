@@ -535,6 +535,8 @@ struct PredictorRateHistory {
   // means an exactly zero registered non-advective rate.
   ConstFieldView accepted{};
   ConstFieldView previous{};
+  // Target-step coupled source, added once without EX2 extrapolation.
+  ConstFieldView current{};
 };
 
 struct ThermophysicalGhostAuthority {
@@ -595,6 +597,7 @@ struct ThermophysicalPredictorInput {
   // Empty means all fluid. Placeholder values are carried, not integrated.
   // Borrowed geometry storage and its values remain immutable for this plan.
   Span<const std::uint8_t> cell_activity{};
+  ConservativeMassSourceView mass_source{};
 };
 
 struct ThermophysicalPredictorOutput {
@@ -959,6 +962,7 @@ class ThermophysicalPredictorPlan {
   RevisionToken geometry_revision_{};
   RevisionToken boundary_revision_{};
   PlanFingerprint transport_fingerprint_{};
+  PlanFingerprint mass_source_identity_{};
   PlanFingerprint fingerprint_{};
 };
 

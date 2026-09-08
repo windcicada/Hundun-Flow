@@ -6,6 +6,7 @@
 #include "hundun/v04_parallel.hpp"
 
 #include "solver_equation_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
 #include "solver_thermophysical_predictor_detail.hpp"
 
@@ -203,6 +204,16 @@ std::uint64_t predictor_state_hash(
     hash = hash_mix(hash, view.storage_identity);
     hash = hash_mix(hash, view.revision_domain);
   };
+  if (input.mass_source.identity != 0U) {
+    hash = hash_mix(hash, input.mass_source.identity);
+    hash = hash_mix(hash, input.mass_source.time);
+    mix_view(input.mass_source.rate);
+    mix_view(input.enthalpy_nonadvective_rhs.current);
+    for (std::size_t i = 0; i < input.species_nonadvective_rhs.size; ++i)
+      mix_view(input.species_nonadvective_rhs.data[i].current);
+    for (std::size_t i = 0; i < input.passive_scalar_nonadvective_rhs.size; ++i)
+      mix_view(input.passive_scalar_nonadvective_rhs.data[i].current);
+  }
   mix_view(input.density_accepted);
   mix_view(input.enthalpy_accepted);
   if (input.bdf.order == 2U) {
@@ -701,7 +712,8 @@ Status ThermophysicalPredictorPlan::predict(
           const double storage =
               volume * (input.bdf.a0 * rho_star + input.bdf.a1 * rho_n +
                         input.bdf.a2 * rho_nm1);
-          const double residual = storage + integral;
+          const double source = volume * detail::mass_source_rate(input.mass_source, cell);
+          const double residual = storage + integral - source;
           // The paired identity is a cancellation of three BDF storage
           // history terms and six oriented face terms.  Its backward-error
           // scale must retain those operands: using the already-cancelled
@@ -716,7 +728,7 @@ Status ThermophysicalPredictorPlan::predict(
               std::abs(flux_y_positive) + std::abs(flux_y_negative) +
               std::abs(flux_z_positive) + std::abs(flux_z_negative);
           const double scale =
-              std::max(1.0, storage_term_magnitude + flux_term_magnitude);
+              std::max(1.0, storage_term_magnitude + flux_term_magnitude + std::abs(source));
           if (!std::isfinite(volume) || !(volume > 0.0) ||
               !std::isfinite(residual) || !std::isfinite(scale) ||
               std::abs(residual) >
@@ -1164,6 +1176,20 @@ Status ThermophysicalPredictorPlan::predict(
     diagnostics.blocking_collectives = blocking_collectives;
     certificate = high_certificate;
     return {};
+  }
+  // Coupled sources are an indivisible exchange with another physical model.
+  // Scaling/clipping only their gas-side endpoint would break that exchange.
+  // Reject the attempt; the driver retries every model at the reduced dt.
+  if (mass_source_identity_ != 0U) {
+    if (!locally_high_admissible) {
+      capture_tuple_failure(as_const(output.density_workspace), as_const(output.enthalpy),
+                            output.independent_species, output.passive_scalars,
+                            ThermophysicalPredictorFailureReason::high_quantity_bdf, 0U);
+      local = {StatusCode::numerical_failure, kPredictorNumerical};
+    }
+    consensus = collective_status(communicator, local, rank, size, failure, failure);
+    ++blocking_collectives;
+    return publish_failure(consensus);
   }
   const int local_high_nonenthalpy =
       local && tuple_nonenthalpy_admissible(
@@ -2953,7 +2979,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   double extrapolate_accepted = 0.0;
   double extrapolate_previous = 0.0;
   const bool second_order = input.bdf.order == 2U;
-  if (kernels_ == nullptr || fingerprint_ == 0U || input.time == 0U ||
+  if (!detail::valid_mass_source(input.mass_source, mass_source_identity_, input.time, cells_) ||
+      kernels_ == nullptr || fingerprint_ == 0U || input.time == 0U ||
       input.geometry != geometry_revision_ ||
       input.boundary != boundary_revision_ ||
       input.transport != transport_fingerprint_ ||
@@ -3014,6 +3041,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
             input.mass_flux_accepted.certificate.revision_domain() ||
         input.mass_flux_previous.revision ==
             input.mass_flux_accepted.revision)) ||
+      !valid_rate(input.enthalpy_nonadvective_rhs.current, cells_, false) ||
+      (mass_source_identity_ == 0U && !empty_field(input.enthalpy_nonadvective_rhs.current)) ||
       !valid_rate(input.enthalpy_nonadvective_rhs.accepted, cells_, false) ||
       (second_order
            ? !valid_rate(input.enthalpy_nonadvective_rhs.previous, cells_,
@@ -3043,6 +3072,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
              : !empty_field(input.species_previous.data[i])) ||
         !detail::valid_cell_view(output.independent_species.data[i], cells_,
                                  0U, 1U) ||
+        !valid_rate(rate.current, cells_, false) ||
+        (mass_source_identity_ == 0U && !empty_field(rate.current)) ||
         !valid_rate(rate.accepted, cells_, false) ||
         (second_order ? !valid_rate(rate.previous, cells_, false)
                       : !empty_field(rate.previous))) {
@@ -3075,6 +3106,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
              : !empty_field(input.passive_scalars_previous.data[i])) ||
         !detail::valid_cell_view(output.passive_scalars.data[i], cells_, 0U,
                                  1U) ||
+        !valid_rate(rate.current, cells_, false) ||
+        (mass_source_identity_ == 0U && !empty_field(rate.current)) ||
         !valid_rate(rate.accepted, cells_, false) ||
         (second_order ? !valid_rate(rate.previous, cells_, false)
                       : !empty_field(rate.previous))) {
@@ -3163,7 +3196,15 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     }
     return false;
   };
-  if (aliases_any_output(input.density_accepted) ||
+  const auto source_aliases_output = [&](ConstFieldView view) noexcept {
+    return aliases_any_output(view) || (view.base != nullptr &&
+        (detail::cell_face_views_overlap(view, as_const(output.paired_mass_flux.x)) ||
+         detail::cell_face_views_overlap(view, as_const(output.paired_mass_flux.y)) ||
+         detail::cell_face_views_overlap(view, as_const(output.paired_mass_flux.z))));
+  };
+  if (source_aliases_output(input.mass_source.rate) ||
+      source_aliases_output(input.enthalpy_nonadvective_rhs.current) ||
+      aliases_any_output(input.density_accepted) ||
       aliases_any_output(input.enthalpy_accepted) ||
       aliases_any_output(input.enthalpy_nonadvective_rhs.accepted) ||
       (second_order &&
@@ -3173,7 +3214,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     return {StatusCode::invalid_plan, kPredictorPlan};
   }
   for (std::size_t i = 0U; i < species_.size(); ++i) {
-    if (aliases_any_output(input.species_accepted.data[i]) ||
+    if (source_aliases_output(input.species_nonadvective_rhs.data[i].current) ||
+        aliases_any_output(input.species_accepted.data[i]) ||
         aliases_any_output(
             input.species_nonadvective_rhs.data[i].accepted) ||
         (second_order &&
@@ -3184,7 +3226,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     }
   }
   for (std::size_t i = 0U; i < passive_scalars_.size(); ++i) {
-    if (aliases_any_output(input.passive_scalars_accepted.data[i]) ||
+    if (source_aliases_output(input.passive_scalar_nonadvective_rhs.data[i].current) ||
+        aliases_any_output(input.passive_scalars_accepted.data[i]) ||
         aliases_any_output(
             input.passive_scalar_nonadvective_rhs.data[i].accepted) ||
         (second_order &&
@@ -3245,7 +3288,11 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   }
 
   const KernelBox box{{0, 0, 0}, cells_};
-  if (!detail::finite_field_box(input.density_accepted, box, 0U, 1U) ||
+  if ((input.mass_source.identity != 0U &&
+       !detail::finite_field_box(input.mass_source.rate, box, 0U, 1U)) ||
+      (!rate_is_zero(input.enthalpy_nonadvective_rhs.current) &&
+       !detail::finite_field_box(input.enthalpy_nonadvective_rhs.current, box, 0U, 1U)) ||
+      !detail::finite_field_box(input.density_accepted, box, 0U, 1U) ||
       (second_order &&
        !detail::finite_field_box(input.density_previous, box, 0U, 1U)) ||
       !detail::finite_face_flux(input.mass_flux_accepted, box) ||
@@ -3306,6 +3353,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
          !detail::finite_face_neighbour_slabs(
              input.species_previous.data[i], box, 0U, 1U,
              species_reach_)) ||
+        (!rate_is_zero(rate.current) &&
+         !detail::finite_field_box(rate.current, box, 0U, 1U)) ||
         (!rate_is_zero(rate.accepted) &&
          !detail::finite_field_box(rate.accepted, box, 0U, 1U)) ||
         (second_order && !rate_is_zero(rate.previous) &&
@@ -3340,6 +3389,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
          !detail::finite_face_neighbour_slabs(
              input.passive_scalars_previous.data[i], box, 0U, 1U,
              passive_scalar_reach_)) ||
+        (!rate_is_zero(rate.current) &&
+         !detail::finite_field_box(rate.current, box, 0U, 1U)) ||
         (!rate_is_zero(rate.accepted) &&
          !detail::finite_field_box(rate.accepted, box, 0U, 1U)) ||
         (second_order && !rate_is_zero(rate.previous) &&
@@ -3426,7 +3477,8 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         const double rho_star =
             (-input.bdf.a1 * rho_n - input.bdf.a2 * rho_nm1 -
              extrapolate_accepted * mass_rate_n -
-             extrapolate_previous * mass_rate_nm1) /
+             extrapolate_previous * mass_rate_nm1 +
+             detail::mass_source_rate(input.mass_source, cell)) /
             input.bdf.a0;
         if (!std::isfinite(rho_n) || rho_n <= 0.0 ||
             (second_order &&
@@ -3558,7 +3610,9 @@ Status ThermophysicalPredictorPlan::predict_high_local(
               (-input.bdf.a1 * rho_n * accepted.unchecked(cell, 0U) -
                input.bdf.a2 * rho_nm1 * previous_quantity -
                extrapolate_accepted * transport_n -
-               extrapolate_previous * transport_nm1) /
+               extrapolate_previous * transport_nm1 +
+               (rate_is_zero(nonadvective_rhs.current) ? 0.0 :
+                nonadvective_rhs.current.unchecked(cell, 0U))) /
               input.bdf.a0;
           // An exactly zero high density cannot represent an intensive
           // quantity.  Store its conserved numerator as a slow-path-only

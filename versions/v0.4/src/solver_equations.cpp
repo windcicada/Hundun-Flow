@@ -545,6 +545,7 @@ void EquationPlanSet::reset() noexcept {
   thermophysical_predictor_.geometry_revision_ = 0U;
   thermophysical_predictor_.boundary_revision_ = 0U;
   thermophysical_predictor_.transport_fingerprint_ = 0U;
+  thermophysical_predictor_.mass_source_identity_ = 0U;
   thermophysical_predictor_.fingerprint_ = 0U;
   global_cells_ = {};
   patch_begin_ = {};
@@ -681,6 +682,8 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
       other.thermophysical_predictor_.boundary_revision_;
   thermophysical_predictor_.transport_fingerprint_ =
       other.thermophysical_predictor_.transport_fingerprint_;
+  thermophysical_predictor_.mass_source_identity_ =
+      other.thermophysical_predictor_.mass_source_identity_;
   thermophysical_predictor_.fingerprint_ =
       other.thermophysical_predictor_.fingerprint_;
   global_cells_ = other.global_cells_;
@@ -935,6 +938,7 @@ Status EquationPlanSet::compile(
         geometry.topology_revision();
     candidate.thermophysical_predictor_.boundary_revision_ =
         boundary.revision();
+    candidate.thermophysical_predictor_.mass_source_identity_ = spec.mass_source_identity;
     candidate.thermophysical_predictor_.transport_fingerprint_ =
         transport.fingerprint();
     for (const ScalarEquationSpec& scalar :

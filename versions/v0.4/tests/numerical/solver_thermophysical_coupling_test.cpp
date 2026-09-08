@@ -143,7 +143,7 @@ struct Fixture {
 };
 
 bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
-                  Fixture& out, bool stretched = false) {
+                  Fixture& out, bool stretched = false, PlanFingerprint source_identity = 0U) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -228,6 +228,7 @@ bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
   spec.scalars = {scalars.data(), scalars.size()};
   spec.closed_mass_service_stage =
       pressure_reference == PressureReferenceKind::closed_mass ? 1U : 0U;
+  spec.mass_source_identity = source_identity;
   spec.maximum_cells_per_rank = static_cast<std::size_t>(n) * n * n;
   return static_cast<bool>(EquationPlanSet::compile(
       MPI_COMM_SELF, out.schemes, out.geometry, out.patch, out.boundary,
@@ -511,11 +512,11 @@ bool test_predictor_mms_orders() {
   return passed;
 }
 
-bool test_bdf2_predictor_and_mutations() {
+bool test_bdf2_predictor_and_mutations(bool source_enabled = false) {
   Fixture fixture;
   constexpr std::int32_t n = 4;
   bool passed = expect(make_fixture(n, PressureReferenceKind::closed_mass,
-                                    fixture),
+                                    fixture, false, source_enabled ? 0x50415243U : 0U),
                        "predictor fixture compiles");
   if (!passed) {
     return false;
@@ -580,7 +581,7 @@ bool test_bdf2_predictor_and_mutations() {
 
   const std::array<ConstFieldView, 1U> species_n{as_const(y_n.view)};
   const std::array<ConstFieldView, 1U> species_nm1{as_const(y_nm1.view)};
-  const std::array<PredictorRateHistory, 1U> species_rhs{{
+  std::array<PredictorRateHistory, 1U> species_rhs{{
       {as_const(y_rhs_n.view), as_const(y_rhs_nm1.view)},
   }};
   std::array<FieldView, 1U> species_output{y_star.view};
@@ -608,6 +609,17 @@ bool test_bdf2_predictor_and_mutations() {
       h_star.view, {species_output.data(), species_output.size()},
       rho_work.view, work_n.view, work_nm1.view, {}, low_rho.view, low_h.view,
       {&low_y.view, 1U}, {}, paired_flux};
+  OwnedField mass_source = make_field(90U, cells, 0U, 801U);
+  OwnedField enthalpy_source = make_field(91U, cells, 0U, 802U);
+  OwnedField species_source = make_field(92U, cells, 0U, 803U);
+  fill(mass_source, 0.2);
+  fill(enthalpy_source, 10000.0);
+  fill(species_source, 0.1);
+  if (source_enabled) {
+    input.mass_source = {as_const(mass_source.view), 0x50415243U, input.time};
+    input.enthalpy_nonadvective_rhs.current = as_const(enthalpy_source.view);
+    species_rhs[0].current = as_const(species_source.view);
+  }
   ThermophysicalPredictorDiagnostics diagnostics;
   ThermophysicalPredictorCertificate certificate;
   passed &= expect(static_cast<bool>(
@@ -620,12 +632,36 @@ bool test_bdf2_predictor_and_mutations() {
     for (std::int32_t y = 0; y < cells.y; ++y) {
       for (std::int32_t x = 0; x < cells.x; ++x) {
         passed &= expect(close(h_star.view.unchecked({x, y, z}, 0U),
-                               4510000.0 / 15.0) &&
+                               source_enabled ? 4520000.0 / 15.2 : 4510000.0 / 15.0) &&
                              close(y_star.view.unchecked({x, y, z}, 0U),
-                                   3.55 / 15.0),
+                                   source_enabled ? 3.65 / 15.2 : 3.55 / 15.0),
                          "BDF2 conservative predictor matches oracle");
       }
     }
+  }
+
+  if (source_enabled) {
+    const auto accepted_before = rho_n.bytes;
+    const auto marker = certificate;
+    const auto output_before = h_star.bytes;
+    fill(enthalpy_source, std::numeric_limits<double>::quiet_NaN());
+    Status invalid = fixture.equations.thermophysical_predictor().predict(
+        MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
+    passed &= expect(!invalid && h_star.bytes == output_before && certificate.state == marker.state,
+                     "nonfinite current source rejects before predictor mutation");
+    fill(enthalpy_source, 10000.0);
+    ++input.mass_source.time;
+    invalid = fixture.equations.thermophysical_predictor().predict(
+        MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
+    passed &= expect(!invalid && h_star.bytes == output_before && certificate.state == marker.state,
+                     "stale current source cannot be consumed by another step");
+    --input.mass_source.time;
+    fill(species_source, -1e6);
+    const Status rejected = fixture.equations.thermophysical_predictor().predict(
+        MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
+    return passed && expect(!rejected && rho_n.bytes == accepted_before &&
+                            certificate.state == marker.state,
+                            "inadmissible coupled source rejects without clipping or committing");
   }
 
   const std::vector<double> h_snapshot = h_star.bytes;
@@ -1030,7 +1066,8 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
-  const bool passed = test_bdf2_predictor_and_mutations();
+  const bool passed = test_bdf2_predictor_and_mutations() &&
+                      test_bdf2_predictor_and_mutations(true);
   const bool mms_passed = test_predictor_mms_orders();
   const bool rates_passed = test_nonadvective_rate_path();
   MPI_Finalize();
