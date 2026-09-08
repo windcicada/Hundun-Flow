@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | MG层级归因已完成；单stage写入实验无总成本收益，已撤回。FGMRES恢复原因的Native可选sink已通过RED→GREEN及ASan/UBSan 1/2/4-rank；当前做干净调用方验收，再接ProductDriver/runner，不引入下一算法改动 |
+| 当前活动切片 | MG层级归因已完成；单stage写入实验无总成本收益，已撤回。FGMRES恢复原因Native可选sink已通过RED→GREEN、ASan/UBSan 1/2/4-rank和独立干净14/14；下一步接ProductDriver/runner，不引入下一算法改动 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | MG关闭仍为 `observation_schema=4`；显式MG观测为5，读取器兼容3/4。旧数据不能补造缺失阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | 将现有norm_breakdown_restarts与实际分支、真实残差重建和额外A/M工作对齐；需要新观测时保持定长、默认关闭和失败回退；有局部证据后再选择一个最小优化 |
-| 下一动作 | 验收定长默认关闭的恢复原因观测，再取得目标loop的实测占比。当前尚无Re3900两类原因细分，不重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
+| 下一动作 | 将已验Native观测接入逐loop有界输出，再取得目标loop的实测占比。当前尚无Re3900两类原因细分，不重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -91,6 +91,8 @@ Native开关仍可rank-local；runner因文件/通信分支要求两个观测开
 两类恢复restart、普通长度restart和五类A。RED捕获缺失观测，Release与ASan/UBSan
 各1/2/4-rank通过；仅root/非零rank开启时解、归约和外部A/M工作不变。
 非注入单位算子用例实际出现1次happy restart，不能把总计数统称数值失败。
+代码提交`74e262d`独立干净生产构建及Krylov/PISO等14/14通过（4.84 s），
+runner hash为`6ebc5559d54276cf17385e72eb02c7b0002925b0e0168c3334b58e9b15e0a78c`。
 当前尚未接入ProductDriver/Evidence/runner，也未测目标原因比例或改变算法。
 
 ## 3. 基础流动模块台账

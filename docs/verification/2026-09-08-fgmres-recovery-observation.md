@@ -78,10 +78,38 @@ ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_
 `LD_LIBRARY_PATH=/home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu`。
 所有 MPI 测试串行，原长测 128 ranks 保持 SIGSTOP，没有新 128-rank 窗口或长测恢复。
 
+## 干净候选验收
+
+DCO 代码提交 `74e262dabea39d3d35bfc5681873bf9a5b4a1f26`，tree
+`12a9df543650ecb8afbcc805eaabc67141a3daa0`。独立 checkout
+`/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908`
+构建前后 Git 干净。全新 `build-accept` 使用 Ninja、Clang 15.0.6/libc++、
+Release、`-march=znver3 -mno-fma -ffp-contract=off`；tests 开启，
+ASan/UBSan/HYPRE 关闭，未出现开发目录的 Ninja 日志恢复提示。
+
+生产 runner 和八个相关测试目标编译成功。选择器
+`^(v04_solver_(krylov_.*|mg_krylov_isolation|piso_.*))$` 串行 **14/14**
+通过（4.84 s），覆盖公开 Krylov、basis update、MG/Krylov 隔离，以及
+PISO authority、mutation、checkerboard、时间阶数和 1/2/4-rank 调用方。
+这是本次接口切片的接受，不是全部产品/COAST 替代验收。
+
+- runner SHA-256：`6ebc5559d54276cf17385e72eb02c7b0002925b0e0168c3334b58e9b15e0a78c`。
+- manifest SHA-256：`53ea52f18b886049d7ab5b72219c176b9768ce3e400a3650b69b9cb2343d85ec`。
+- core content SHA-256：`c73050058fc134710541e65cdd9b67a8f846b24285aa1ff661d2962dba66b38c`。
+- `core_source_clean/target_source_clean=true`；manifest head/tree 的既有带前缀
+  SHA-256 已独立重算一致，归档 manifest 与原件 SHA-256 相同。
+
+原始 [干净测试日志](data/2026-09-08-fgmres-recovery-observation/clean-acceptance.log)、
+[构建 manifest](data/2026-09-08-fgmres-recovery-observation/clean-build-manifest.txt)
+和 [范围明确的验收记录](data/2026-09-08-fgmres-recovery-observation/NATIVE_ACCEPTANCE.json)
+一并归档。生产 runner 本轮只编译，没有用它启动新 CFD；旧冻结程序未替换。
+CodeGraphF 已显式同步三个源码文件，现在可以检索新增类型；之前的空命中
+不能作为不存在该类型的证据。
+
 ## 下一边界
 
-先对本切片 DCO 提交做独立干净构建及相关 Krylov/PISO 调用方验收，再接入
-ProductDriver 的逐 loop 出口和显式 runner 观测。后续接线必须保留失败尝试、
+Native 切片已接受，下一步接入 ProductDriver 的逐 loop 出口和显式 runner 观测。
+后续接线必须保留失败尝试、
 完整 rank/step/attempt/sweep 身份及 64-loop 溢出拒绝，默认关闭且无热路径分配。
 未启用不能伪造为有效零计数；旧 Evidence/CSV 不回填原因字段。
 

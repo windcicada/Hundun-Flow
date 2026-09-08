@@ -1,0 +1,266 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept
+
+[HANDLER_VERBOSE_OUTPUT] 
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/DartConfiguration.tcl
+
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/DartConfiguration.tcl
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept
+
+[HANDLER_VERBOSE_OUTPUT] 
+Constructing a list of tests
+
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 152
+[HANDLER_OUTPUT] 
+      Start 152: v04_solver_piso_authority
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+152: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_authority_test
+
+152: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+152: Test timeout computed to be: 60
+152: full-refresh missing norms C_p/C_h/E_p/E_h=0.0937906/0.111995/47181.7/56306.3
+152: full-refresh epsilon=0.0008 mismatch-relative-error Cp/Ch/Ep/Eh=0.000265431/5.74242e-07/0.000264915/7.68262e-09
+152: full-refresh epsilon=0.0004 mismatch-relative-error Cp/Ch/Ep/Eh=6.63579e-05/1.43563e-07/6.62287e-05/1.92189e-09
+152: full-refresh epsilon=0.0002 mismatch-relative-error Cp/Ch/Ep/Eh=1.65894e-05/3.59891e-08/1.65572e-05/4.9303e-10
+152: full-refresh epsilon=0.0001 mismatch-relative-error Cp/Ch/Ep/Eh=4.14744e-06/8.91984e-09/4.13935e-06/2.43101e-10
+152: full-refresh epsilon=5e-05 mismatch-relative-error Cp/Ch/Ep/Eh=1.03696e-06/2.16322e-09/1.03477e-06/4.71275e-10
+152: full-refresh epsilon=2.5e-05 mismatch-relative-error Cp/Ch/Ep/Eh=2.58735e-07/1.09038e-09/2.58715e-07/8.23565e-10
+152: full-refresh finest norms fd Cp/Ch/Ep/Eh=8065.99/3.51183/4.0492e+09/316.222 frozen=8065.99/3.51005/4.0492e+09/56514.7 mismatch=0.0937906/0.111995/47181.7/56306.3
+152: full-refresh mixed mismatch-relative-error C/E=5.30333e-07/1.66135e-07
+152: full-refresh C2 byte-copy equal=1 face-FD-norm=0
+[HANDLER_OUTPUT] 
+ 1/14 Test #152: v04_solver_piso_authority ............
+   Passed    0.88 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 161
+
+[HANDLER_OUTPUT] 
+      Start 161: v04_solver_piso_mutation
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+161: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_mutation_test
+
+161: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+161: Test timeout computed to be: 60
+[HANDLER_OUTPUT] 
+ 2/14 Test #161: v04_solver_piso_mutation .............
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 162
+
+[HANDLER_OUTPUT] 
+      Start 162: v04_solver_piso_checkerboard
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+162: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_checkerboard_test
+
+162: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+162: Test timeout computed to be: 60
+[HANDLER_OUTPUT] 
+ 3/14 Test #162: v04_solver_piso_checkerboard .........
+   Passed    0.28 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 163
+
+[HANDLER_OUTPUT] 
+      Start 163: v04_solver_piso_checkerboard_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+163: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_checkerboard_test"
+
+163: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+163: Test timeout computed to be: 60
+[HANDLER_OUTPUT] 
+ 4/14 Test #163: v04_solver_piso_checkerboard_mpi_2 ...
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 164
+
+[HANDLER_OUTPUT] 
+      Start 164: v04_solver_piso_checkerboard_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+164: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_checkerboard_test"
+
+164: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+164: Test timeout computed to be: 60
+[HANDLER_OUTPUT] 
+ 5/14 Test #164: v04_solver_piso_checkerboard_mpi_4 ...
+   Passed    0.30 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 165
+
+[HANDLER_OUTPUT] 
+      Start 165: v04_solver_piso_temporal_order
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+165: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_temporal_order_test
+
+165: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+165: Test timeout computed to be: 60
+[HANDLER_OUTPUT] 
+ 6/14 Test #165: v04_solver_piso_temporal_order .......
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 174
+
+[HANDLER_OUTPUT] 
+      Start 174: v04_solver_piso_mpi_1
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+174: Test command: /usr/bin/mpiexec "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_mpi_test"
+
+174: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+174: Test timeout computed to be: 180
+[HANDLER_OUTPUT] 
+ 7/14 Test #174: v04_solver_piso_mpi_1 ................
+   Passed    0.49 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 175
+
+[HANDLER_OUTPUT] 
+      Start 175: v04_solver_piso_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+175: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_mpi_test"
+
+175: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+175: Test timeout computed to be: 180
+[HANDLER_OUTPUT] 
+ 8/14 Test #175: v04_solver_piso_mpi_2 ................
+   Passed    0.40 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 176
+
+[HANDLER_OUTPUT] 
+      Start 176: v04_solver_piso_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+176: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_piso_mpi_test"
+
+176: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+176: Test timeout computed to be: 180
+[HANDLER_OUTPUT] 
+ 9/14 Test #176: v04_solver_piso_mpi_4 ................
+   Passed    0.38 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 270
+
+[HANDLER_OUTPUT] 
+      Start 270: v04_solver_mg_krylov_isolation
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+270: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_mg_krylov_isolation_test
+
+270: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+270: Test timeout computed to be: 10000000
+[HANDLER_OUTPUT] 
+10/14 Test #270: v04_solver_mg_krylov_isolation .......
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 271
+
+[HANDLER_OUTPUT] 
+      Start 271: v04_solver_krylov_basis_update
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+271: Test command: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_krylov_basis_update_test
+
+271: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+271: Test timeout computed to be: 10000000
+[HANDLER_OUTPUT] 
+11/14 Test #271: v04_solver_krylov_basis_update .......
+   Passed    0.04 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 282
+
+[HANDLER_OUTPUT] 
+      Start 282: v04_solver_krylov_mpi_1
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+282: Test command: /usr/bin/mpiexec "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+
+282: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+282: Test timeout computed to be: 90
+282: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+[HANDLER_OUTPUT] 
+12/14 Test #282: v04_solver_krylov_mpi_1 ..............
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 284
+
+[HANDLER_OUTPUT] 
+      Start 284: v04_solver_krylov_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+284: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+
+284: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+284: Test timeout computed to be: 90
+284: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+[HANDLER_OUTPUT] 
+13/14 Test #284: v04_solver_krylov_mpi_2 ..............
+   Passed    0.29 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 286
+
+[HANDLER_OUTPUT] 
+      Start 286: v04_solver_krylov_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+286: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+
+286: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-recovery-accept-20260908/build-accept/versions/v0.4/tests
+286: Test timeout computed to be: 90
+286: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+[HANDLER_OUTPUT] 
+14/14 Test #286: v04_solver_krylov_mpi_4 ..............
+   Passed    0.33 sec
+[HANDLER_VERBOSE_OUTPUT] 
+
+The following tests passed:
+
+	v04_solver_piso_authority
+	v04_solver_piso_mutation
+	v04_solver_piso_checkerboard
+	v04_solver_piso_checkerboard_mpi_2
+	v04_solver_piso_checkerboard_mpi_4
+	v04_solver_piso_temporal_order
+	v04_solver_piso_mpi_1
+	v04_solver_piso_mpi_2
+	v04_solver_piso_mpi_4
+	v04_solver_mg_krylov_isolation
+	v04_solver_krylov_basis_update
+	v04_solver_krylov_mpi_1
+	v04_solver_krylov_mpi_2
+	v04_solver_krylov_mpi_4
+[HANDLER_OUTPUT] 
+
+100% tests passed, 0 tests failed out of 14
+
+
+Label Time Summary:
+v04_focused    =   7.01 sec*proc (11 tests)
+
+Total Test time (real) =   4.84 sec
