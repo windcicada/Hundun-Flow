@@ -1,0 +1,48 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept
+      Start  15: v04_scalar_contract_variable_mpi_2
+ 1/19 Test  #15: v04_scalar_contract_variable_mpi_2 ........   Passed    3.26 sec
+      Start  17: v04_scalar_contract_restart_mpi_2
+ 2/19 Test  #17: v04_scalar_contract_restart_mpi_2 .........   Passed    1.40 sec
+      Start  20: v04_scalar_contract_signed_mpi_2
+ 3/19 Test  #20: v04_scalar_contract_signed_mpi_2 ..........   Passed    1.61 sec
+      Start  55: v04_product_restart_storage_mpi_1
+ 4/19 Test  #55: v04_product_restart_storage_mpi_1 .........   Passed    0.81 sec
+      Start  56: v04_product_restart_storage_mpi_2
+ 5/19 Test  #56: v04_product_restart_storage_mpi_2 .........   Passed    0.72 sec
+      Start  57: v04_product_restart_storage_mpi_4
+ 6/19 Test  #57: v04_product_restart_storage_mpi_4 .........   Passed    0.79 sec
+      Start  58: v04_product_mg_capacity_mpi_1
+ 7/19 Test  #58: v04_product_mg_capacity_mpi_1 .............   Passed    0.35 sec
+      Start  59: v04_product_mg_capacity_mpi_2
+ 8/19 Test  #59: v04_product_mg_capacity_mpi_2 .............   Passed    0.33 sec
+      Start  60: v04_product_mg_capacity_mpi_4
+ 9/19 Test  #60: v04_product_mg_capacity_mpi_4 .............   Passed    0.33 sec
+      Start 187: v04_core_product_freeze_mpi_1
+10/19 Test #187: v04_core_product_freeze_mpi_1 .............   Passed    1.48 sec
+      Start 197: v04_core_product_freeze_mpi_2
+11/19 Test #197: v04_core_product_freeze_mpi_2 .............   Passed    1.02 sec
+      Start 207: v04_core_product_freeze_mpi_4
+12/19 Test #207: v04_core_product_freeze_mpi_4 .............   Passed    3.56 sec
+      Start 247: v04_product_fresh_projection
+13/19 Test #247: v04_product_fresh_projection ..............   Passed    0.97 sec
+      Start 248: v04_product_fresh_projection_mpi_1
+14/19 Test #248: v04_product_fresh_projection_mpi_1 ........   Passed    0.92 sec
+      Start 249: v04_product_fresh_projection_mpi_2
+15/19 Test #249: v04_product_fresh_projection_mpi_2 ........   Passed    0.63 sec
+      Start 250: v04_product_fresh_projection_mpi_4
+16/19 Test #250: v04_product_fresh_projection_mpi_4 ........   Passed    0.55 sec
+      Start 251: v04_product_pressure_energy_retry_mpi_1
+17/19 Test #251: v04_product_pressure_energy_retry_mpi_1 ...   Passed    1.15 sec
+      Start 252: v04_product_pressure_energy_retry_mpi_2
+18/19 Test #252: v04_product_pressure_energy_retry_mpi_2 ...   Passed    0.98 sec
+      Start 253: v04_product_pressure_energy_retry_mpi_4
+19/19 Test #253: v04_product_pressure_energy_retry_mpi_4 ...   Passed    0.98 sec
+
+100% tests passed, 0 tests failed out of 19
+
+Label Time Summary:
+scalar-conservation    =  12.53 sec*proc (3 tests)
+v04_focused            =  37.90 sec*proc (16 tests)
+
+Total Test time (real) =  21.85 sec

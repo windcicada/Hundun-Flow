@@ -59,7 +59,29 @@ MPI 全部由主任务串行调度，原128-rank长测保持SIGSTOP，未替换�
 Fresh组另有ASan+UBSan 4/4通过（59.73 s）。连同前述相关12项，本轮影响范围内
 19个不同Release测试均通过；不是全仓库测试通过的声明。
 Release增量目录仍有历史Ninja末尾恢复提示，不能作为干净发布身份；本轮生产runner
-已成功构建，但未运行新生产窗口。候选提交后仍需独立干净验收。
+已成功构建，但未运行新生产窗口。
+
+## 独立干净验收
+
+在 detached `d199f9681971e89b3fe1872f95f4b92f2d477b81` 的独立 checkout
+`hundun-flow-mg-driver-accept-20260908` 重新 configure/build，构建前后 Git 均干净。
+树为 `3068596aa0e4e5798a3b348f3b070211cc2d9cfe`。Clang 15/libc++、Release、
+`-march=znver3 -mno-fma -ffp-contract=off`，测试开启，ASan/UBSan/HYPRE 关闭。
+生产 runner 及相关测试 target 均构建成功；没有增量目录的 Ninja 恢复提示。
+
+同一相关组 **19/19 通过，21.85 s**，MPI 串行调度。
+[stdout](data/2026-09-08-product-mg-profile/clean-acceptance-19.txt)、
+[逐测试原始日志](data/2026-09-08-product-mg-profile/clean-acceptance-LastTest.log) 和
+[runner manifest](data/2026-09-08-product-mg-profile/clean-acceptance-runner-manifest.txt)
+已保存。这是 ProductDriver 观测接线及 Fresh 夹具合同的验收，不包含后续 runner MG CSV
+实现，不把验收标签自动转移给新二进制，也不是全仓库或生产性能验收。
+
+- runner SHA-256：`56e9b662a849f38fce25f6dc8dab79dd1c4ecca5c0e3da688c9622a6cb1f942d`
+- manifest SHA-256：`689ce95fe91ad985bc8f7825418e2f9cc2cf0532a4a35fe97cd76db484242fb7`
+- core content SHA-256：`5a7e8c45b71f962d71f867b6f030ed9052c8785c2f816f7a887725a84e89104c`
+
+manifest 中的 head/tree 是带 `hundun-git-head-v1:` / `hundun-git-tree-v1:` 前缀的
+SHA-256，不是原始 Git SHA；独立重算与 manifest 一致。source clean 两项均为 true。
 
 ## 下一步边界
 

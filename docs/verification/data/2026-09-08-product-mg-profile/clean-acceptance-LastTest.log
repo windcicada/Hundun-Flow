@@ -1,0 +1,410 @@
+Start testing: Sep 08 09:17 CST
+----------------------------------------------------------
+15/362 Testing: v04_scalar_contract_variable_mpi_2
+15/362 Test: v04_scalar_contract_variable_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--stretched" "--variable-thermo"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_scalar_contract_variable_mpi_2" start time: Sep 08 09:17 CST
+Output:
+----------------------------------------------------------
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.1889954114e-13 inventory_absolute_defect=2.6232651034e-14 initial_inventory_over_l1=1 constant_error=2.1371793224e-15 eos_error=1.1473666112e-13 minimum=0.153806171137 maximum=0.246193976054 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=3.76380405786e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.3566821267e-13 inventory_absolute_defect=2.99323012123e-14 initial_inventory_over_l1=1 constant_error=7.93809462607e-15 eos_error=1.30840052154e-13 minimum=0.153806060992 maximum=0.24619397634 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.56090560773e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.0210838738e-13 inventory_absolute_defect=2.25280406309e-14 initial_inventory_over_l1=1 constant_error=1.98174809896e-14 eos_error=8.35363409908e-14 minimum=0.153806032877 maximum=0.246193976483 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=4.71585171063e-15
+SCALAR_ORDER family=passive order=1.92399365134 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.15116910107e-13 inventory_absolute_defect=2.53969751045e-14 initial_inventory_over_l1=1 constant_error=2.49800180541e-16 eos_error=1.1473666112e-13 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.76380405786e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.4202465532e-13 inventory_absolute_defect=3.13333343646e-14 initial_inventory_over_l1=1 constant_error=4.71844785466e-16 eos_error=1.30840052154e-13 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.56090560773e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=8.48509336122e-14 inventory_absolute_defect=1.87197262899e-14 initial_inventory_over_l1=1 constant_error=6.10622663544e-16 eos_error=8.35363409908e-14 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=4.71585171063e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.08955730782e-13 inventory_absolute_defect=3.07827222913e-14 initial_inventory_over_l1=1 constant_error=2.27595720048e-15 eos_error=1.00223908059e-13 minimum=0.153806136646 maximum=0.246193976172 coupling_sweeps=3 remap_iterations=4 scalar_residual=2.8743607925e-15 mass_pairing=4.68777233102e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.33330671153e-13 inventory_absolute_defect=9.4174261488e-14 initial_inventory_over_l1=1 constant_error=1.75137682135e-14 eos_error=6.10126764239e-14 minimum=0.153806052174 maximum=0.246193976399 coupling_sweeps=3 remap_iterations=3 scalar_residual=1.60118080358e-14 mass_pairing=4.58669071802e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.5867197203e-13 inventory_absolute_defect=4.48288053814e-14 initial_inventory_over_l1=1 constant_error=2.91433543964e-15 eos_error=1.23907491966e-13 minimum=0.153806030651 maximum=0.246193976512 coupling_sweeps=3 remap_iterations=3 scalar_residual=2.30993382895e-15 mass_pairing=4.70817817705e-15
+SCALAR_ORDER family=EOS_species order=1.94732010336 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=8.68779908439e-14 inventory_absolute_defect=2.45183918741e-14 initial_inventory_over_l1=1 constant_error=3.88578058619e-16 eos_error=9.52194889507e-14 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=8.19550807059e-16 mass_pairing=4.10462016609e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.55386407775e-14 inventory_absolute_defect=1.28917872471e-14 initial_inventory_over_l1=1 constant_error=6.38378239159e-16 eos_error=4.84725240293e-14 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=9.54695819577e-16 mass_pairing=4.76518253655e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.61418536622e-13 inventory_absolute_defect=4.56968718508e-14 initial_inventory_over_l1=1 constant_error=8.60422844084e-16 eos_error=1.55927795745e-13 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=9.42420687619e-16 mass_pairing=4.76602486962e-15
+STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+<end of output>
+Test time =   3.26 sec
+----------------------------------------------------------
+Test Passed.
+"v04_scalar_contract_variable_mpi_2" end time: Sep 08 09:17 CST
+"v04_scalar_contract_variable_mpi_2" time elapsed: 00:00:03
+----------------------------------------------------------
+
+17/362 Testing: v04_scalar_contract_restart_mpi_2
+17/362 Test: v04_scalar_contract_restart_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--stretched" "--restart"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_scalar_contract_restart_mpi_2" start time: Sep 08 09:17 CST
+Output:
+----------------------------------------------------------
+SCALAR_RESTART family=passive exact_payload=1 scaled_continuation_difference=8.29629e-13 flow_difference=3.96003e-09 continuation_allowance=6e-12 failure=6/604 passed=1
+SCALAR_RESTART family=EOS exact_payload=1 scaled_continuation_difference=1.65129e-15 flow_difference=1.72733e-13 continuation_allowance=6e-12 failure=6/604 passed=1
+STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+<end of output>
+Test time =   1.40 sec
+----------------------------------------------------------
+Test Passed.
+"v04_scalar_contract_restart_mpi_2" end time: Sep 08 09:18 CST
+"v04_scalar_contract_restart_mpi_2" time elapsed: 00:00:01
+----------------------------------------------------------
+
+20/362 Testing: v04_scalar_contract_signed_mpi_2
+20/362 Test: v04_scalar_contract_signed_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_scalar_contract_experiment" "--stretched" "--signed"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_scalar_contract_signed_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.2955299048e-16 inventory_absolute_defect=1.89900286912e-17 initial_inventory_over_l1=3.07606856547e-11 constant_error=4.9682480352e-15 eos_error=2.013569353e-16 minimum=-0.0486302146144 maximum=0.0437575967536 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=3.97835542613e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.86956111901e-15 inventory_absolute_defect=1.0290386224e-16 initial_inventory_over_l1=3.07606856547e-11 constant_error=1.80411241502e-15 eos_error=2.01357722692e-16 minimum=-0.0486302149311 maximum=0.0437577021577 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=5.39982854241e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.20135369245e-16 inventory_absolute_defect=7.89416177995e-18 initial_inventory_over_l1=3.07606856547e-11 constant_error=1.27675647832e-15 eos_error=2.01357911244e-16 minimum=-0.0486302150787 maximum=0.043757728982 coupling_sweeps=1 remap_iterations=2 scalar_residual=0 mass_pairing=6.86838013326e-16
+SCALAR_ORDER family=passive order=1.93980590434 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.8293723488e-16 inventory_absolute_defect=4.03594258708e-17 initial_inventory_over_l1=1 constant_error=3.05311331772e-16 eos_error=2.013569353e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=3.97835542613e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=1.61314029145e-16 inventory_absolute_defect=3.55889363118e-17 initial_inventory_over_l1=1 constant_error=4.71844785466e-16 eos_error=2.01357722692e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=5.39982854241e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=passive uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=5.57166125037e-16 inventory_absolute_defect=1.22921421306e-16 initial_inventory_over_l1=1 constant_error=4.99600361081e-16 eos_error=2.01357911244e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=0 mass_pairing=6.86838013326e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.91451845273e-15 inventory_absolute_defect=8.23424444948e-16 initial_inventory_over_l1=1 constant_error=3.60822483003e-16 eos_error=4.78208965132e-16 minimum=0.153806136542 maximum=0.246193976194 coupling_sweeps=3 remap_iterations=4 scalar_residual=3.14517107126e-15 mass_pairing=3.95310369821e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.17524980181e-13 inventory_absolute_defect=8.97087580002e-14 initial_inventory_over_l1=1 constant_error=7.04991620637e-15 eos_error=4.78206820575e-16 minimum=0.153806052156 maximum=0.24619397641 coupling_sweeps=3 remap_iterations=3 scalar_residual=1.79130799225e-14 mass_pairing=4.19295852309e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=0 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=2.0893410386e-14 inventory_absolute_defect=5.90291162304e-15 initial_inventory_over_l1=1 constant_error=9.71445146547e-16 eos_error=4.78206717648e-16 minimum=0.153806030646 maximum=0.246193976518 coupling_sweeps=3 remap_iterations=3 scalar_residual=6.22201523386e-16 mass_pairing=1.64612599647e-15
+SCALAR_ORDER family=EOS_species order=1.94580266683 accepted=1
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=0.000125 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=4.42534523506e-16 inventory_absolute_defect=1.25279561031e-16 initial_inventory_over_l1=1 constant_error=4.16333634234e-16 eos_error=3.55298629877e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=1.0716587579e-16 mass_pairing=4.70621679498e-16
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=6.25e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=3.17395487975e-16 inventory_absolute_defect=8.98532550447e-17 initial_inventory_over_l1=1 constant_error=5.82867087928e-16 eos_error=4.70725342566e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=8.33384498764e-16 mass_pairing=4.10296701594e-15
+SCALAR_CONTRACT ranks=2 stretched=1 near_pure=0 family=EOS_species uniform=1 dt=3.125e-05 ran=1 history=1 constant=1 bounded=1 eos=1 conservation=1 inventory_relative_defect=6.98844545017e-16 inventory_absolute_defect=1.97839791424e-16 initial_inventory_over_l1=1 constant_error=6.38378239159e-16 eos_error=4.70758237604e-16 minimum=0.2 maximum=0.2 coupling_sweeps=1 remap_iterations=0 scalar_residual=3.32731438152e-16 mass_pairing=1.62841498183e-15
+STRICT_SCALAR_ACCEPTANCE PASS correction_active_checked=1
+<end of output>
+Test time =   1.61 sec
+----------------------------------------------------------
+Test Passed.
+"v04_scalar_contract_signed_mpi_2" end time: Sep 08 09:18 CST
+"v04_scalar_contract_signed_mpi_2" time elapsed: 00:00:01
+----------------------------------------------------------
+
+55/362 Testing: v04_product_restart_storage_mpi_1
+55/362 Test: v04_product_restart_storage_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_restart_storage_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_restart_storage_mpi_1" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+restart storage compatibility PASS
+<end of output>
+Test time =   0.81 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_restart_storage_mpi_1" end time: Sep 08 09:18 CST
+"v04_product_restart_storage_mpi_1" time elapsed: 00:00:00
+----------------------------------------------------------
+
+56/362 Testing: v04_product_restart_storage_mpi_2
+56/362 Test: v04_product_restart_storage_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_restart_storage_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_restart_storage_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+restart storage compatibility PASS
+<end of output>
+Test time =   0.72 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_restart_storage_mpi_2" end time: Sep 08 09:18 CST
+"v04_product_restart_storage_mpi_2" time elapsed: 00:00:00
+----------------------------------------------------------
+
+57/362 Testing: v04_product_restart_storage_mpi_4
+57/362 Test: v04_product_restart_storage_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_restart_storage_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_restart_storage_mpi_4" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+restart storage compatibility PASS
+<end of output>
+Test time =   0.79 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_restart_storage_mpi_4" end time: Sep 08 09:18 CST
+"v04_product_restart_storage_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+58/362 Testing: v04_product_mg_capacity_mpi_1
+58/362 Test: v04_product_mg_capacity_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_mg_capacity_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_mg_capacity_mpi_1" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+MG capacity rank=0 bundle_doubles=48384 outer_doubles=48384 owner_allocated_bytes=11554688
+MG bounded level views rank=0 levels=4 slots= valid=1
+<end of output>
+Test time =   0.35 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_mg_capacity_mpi_1" end time: Sep 08 09:18 CST
+"v04_product_mg_capacity_mpi_1" time elapsed: 00:00:00
+----------------------------------------------------------
+
+59/362 Testing: v04_product_mg_capacity_mpi_2
+59/362 Test: v04_product_mg_capacity_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_mg_capacity_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_mg_capacity_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+MG capacity rank=0 bundle_doubles=26880 outer_doubles=26880 owner_allocated_bytes=6680448
+MG bounded level views rank=0 levels=4 slots= valid=1
+MG capacity rank=1 bundle_doubles=26880 outer_doubles=26880 owner_allocated_bytes=6680448
+MG bounded level views rank=1 levels=4 slots= valid=1
+<end of output>
+Test time =   0.33 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_mg_capacity_mpi_2" end time: Sep 08 09:18 CST
+"v04_product_mg_capacity_mpi_2" time elapsed: 00:00:00
+----------------------------------------------------------
+
+60/362 Testing: v04_product_mg_capacity_mpi_4
+60/362 Test: v04_product_mg_capacity_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_mg_capacity_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_mg_capacity_mpi_4" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+MG capacity rank=0 bundle_doubles=15680 outer_doubles=15680 owner_allocated_bytes=3879296
+MG bounded level views rank=0 levels=4 slots= valid=1
+MG capacity rank=1 bundle_doubles=15680 outer_doubles=15680 owner_allocated_bytes=3879296
+MG bounded level views rank=1 levels=4 slots= valid=1
+MG capacity rank=2 bundle_doubles=15680 outer_doubles=15680 owner_allocated_bytes=3879296
+MG bounded level views rank=2 levels=4 slots= valid=1
+MG capacity rank=3 bundle_doubles=15680 outer_doubles=15680 owner_allocated_bytes=3879296
+MG bounded level views rank=3 levels=4 slots= valid=1
+<end of output>
+Test time =   0.33 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_mg_capacity_mpi_4" end time: Sep 08 09:18 CST
+"v04_product_mg_capacity_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+187/362 Testing: v04_core_product_freeze_mpi_1
+187/362 Test: v04_core_product_freeze_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_core_product_freeze_mpi_1" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+implicit-enthalpy-positive size=1 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.323418922406052e-28
+local-donor-candidate-red size=1 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+<end of output>
+Test time =   1.48 sec
+----------------------------------------------------------
+Test Passed.
+"v04_core_product_freeze_mpi_1" end time: Sep 08 09:18 CST
+"v04_core_product_freeze_mpi_1" time elapsed: 00:00:01
+----------------------------------------------------------
+
+197/362 Testing: v04_core_product_freeze_mpi_2
+197/362 Test: v04_core_product_freeze_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_core_product_freeze_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+implicit-enthalpy-positive size=2 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.3198962118439089e-28
+local-donor-candidate-red size=2 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+<end of output>
+Test time =   1.02 sec
+----------------------------------------------------------
+Test Passed.
+"v04_core_product_freeze_mpi_2" end time: Sep 08 09:18 CST
+"v04_core_product_freeze_mpi_2" time elapsed: 00:00:01
+----------------------------------------------------------
+
+207/362 Testing: v04_core_product_freeze_mpi_4
+207/362 Test: v04_core_product_freeze_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_core_product_freeze_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_core_product_freeze_mpi_4" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+implicit-enthalpy-positive size=4 h-min/base/peak=200933.24368773258/200934.24368773249/200935.24368773249 dt/U/phi=0.0060000000000000001/0.00037500000000000001/5.1707573705220703e-06 solve=0.010589765386169132/0.010589765386169132 terminal=0/1.3297757082466686e-13/3.4883874480862948e-11/0/1.5894038153094513e-29
+local-donor-candidate-red size=4 status=6/10211 low/scale/theta=6/0.88659374999998697/0.78178561587214246 terminal=0/0/0/0/0 rollback=1
+<end of output>
+Test time =   3.56 sec
+----------------------------------------------------------
+Test Passed.
+"v04_core_product_freeze_mpi_4" end time: Sep 08 09:18 CST
+"v04_core_product_freeze_mpi_4" time elapsed: 00:00:03
+----------------------------------------------------------
+
+247/362 Testing: v04_product_fresh_projection
+247/362 Test: v04_product_fresh_projection
+Command: "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_fresh_projection_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_fresh_projection" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.97 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_fresh_projection" end time: Sep 08 09:18 CST
+"v04_product_fresh_projection" time elapsed: 00:00:00
+----------------------------------------------------------
+
+248/362 Testing: v04_product_fresh_projection_mpi_1
+248/362 Test: v04_product_fresh_projection_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_fresh_projection_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_fresh_projection_mpi_1" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.92 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_fresh_projection_mpi_1" end time: Sep 08 09:18 CST
+"v04_product_fresh_projection_mpi_1" time elapsed: 00:00:00
+----------------------------------------------------------
+
+249/362 Testing: v04_product_fresh_projection_mpi_2
+249/362 Test: v04_product_fresh_projection_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_fresh_projection_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_fresh_projection_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.63 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_fresh_projection_mpi_2" end time: Sep 08 09:18 CST
+"v04_product_fresh_projection_mpi_2" time elapsed: 00:00:00
+----------------------------------------------------------
+
+250/362 Testing: v04_product_fresh_projection_mpi_4
+250/362 Test: v04_product_fresh_projection_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_fresh_projection_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_fresh_projection_mpi_4" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.55 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_fresh_projection_mpi_4" end time: Sep 08 09:18 CST
+"v04_product_fresh_projection_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+251/362 Testing: v04_product_pressure_energy_retry_mpi_1
+251/362 Test: v04_product_pressure_energy_retry_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_1" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908338169e-14/1.0460406810870782e-10/0/2.4294555600856023e-32 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714286467246095e-08/5.4073846732826095e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=70/85
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384613495099614e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001450080592753 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001450080592753
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0060974987792746 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0060974987792746
+candidate-loop i=3 extrapolated_alpha=1.025122322581465 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.025122322581465
+candidate-loop i=4 extrapolated_alpha=1.0580625257236693 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0580625257236693
+candidate-loop i=5 extrapolated_alpha=1.1292512753606125 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.1292512753606125
+candidate-loop i=6 extrapolated_alpha=1.3042045678460812 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.3042045678460812
+candidate-loop i=7 extrapolated_alpha=1.8891962098200208 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.8891962098200208
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+candidate-loop i=9 extrapolated_alpha=1.0040868971907759 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0040868971907759
+warm-candidate-work status=0/0 baseline=10 extrapolation=8 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   1.15 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_1" end time: Sep 08 09:18 CST
+"v04_product_pressure_energy_retry_mpi_1" time elapsed: 00:00:01
+----------------------------------------------------------
+
+252/362 Testing: v04_product_pressure_energy_retry_mpi_2
+252/362 Test: v04_product_pressure_energy_retry_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_2" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/1.2687156813780412e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.4073846728786893e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=90/108
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001357076477417 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001357076477417
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0055573199903851 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0055573199903851
+candidate-loop i=3 extrapolated_alpha=1.0169532438415794 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0169532438415794
+candidate-loop i=4 extrapolated_alpha=1.0407498450995283 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0407498450995283
+candidate-loop i=5 extrapolated_alpha=1.090024989868605 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.090024989868605
+candidate-loop i=6 extrapolated_alpha=1.2034284034319145 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2034284034319145
+candidate-loop i=7 extrapolated_alpha=1.5192237111066726 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5192237111066726
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   0.98 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_2" end time: Sep 08 09:18 CST
+"v04_product_pressure_energy_retry_mpi_2" time elapsed: 00:00:00
+----------------------------------------------------------
+
+253/362 Testing: v04_product_pressure_energy_retry_mpi_4
+253/362 Test: v04_product_pressure_energy_retry_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-driver-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_4" start time: Sep 08 09:18 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908212711e-14/1.0460406810870792e-10/0/1.1860467074584553e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714287331642688e-08/5.4073846735877291e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=94/114
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384597744234758e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001177869577977 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001177869577977
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0062044622551241 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0062044622551241
+candidate-loop i=3 extrapolated_alpha=1.0183935058560609 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0183935058560609
+candidate-loop i=4 extrapolated_alpha=1.044500271230395 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.044500271230395
+candidate-loop i=5 extrapolated_alpha=1.0988682293033274 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0988682293033274
+candidate-loop i=6 extrapolated_alpha=1.2258391820639332 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2258391820639332
+candidate-loop i=7 extrapolated_alpha=1.5937698014524755 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5937698014524755
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   0.98 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_4" end time: Sep 08 09:18 CST
+"v04_product_pressure_energy_retry_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 08 09:18 CST
+
+scalar-conservation =  12.53 sec*proc
+
+v04_focused =  37.90 sec*proc
+
