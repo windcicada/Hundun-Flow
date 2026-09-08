@@ -333,8 +333,11 @@ int main(int argc, char **argv) {
         int total = 0;
         MPI_Allreduce(&enriched, &total, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
         // Initial gas/field mean is exactly .01 everywhere. The actual
-        // trilinear deposition enriches eight cells before TCR observes eta.
-        ok = agree(valid && total == 8);
+        // trilinear deposition enriches eight interior or four wall-adjacent
+        // cells before TCR observes eta.
+        const int expected =
+            model.boundaries[0].flow_kind == BoundaryKind::slip ? 4 : 8;
+        ok = agree(valid && total == expected);
         if (!ok && rank == 0)
           std::cerr << "TCR post-source enriched cells=" << total << '\n';
       }

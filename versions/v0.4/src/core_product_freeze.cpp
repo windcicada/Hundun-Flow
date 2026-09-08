@@ -8276,6 +8276,102 @@ Status ProductDriver::Impl::execute_attempt(
     status = history(product.fields.enthalpy_nonadvective_rate,
                      enthalpy_rate_history);
 
+  // Reuse the native scalar/thermal boundary relations for each stochastic
+  // realization. In particular, fixed T resolves h from that realization's Y,
+  // and pressure-outlet outflow uses its own interior state.
+  const auto close_esf_boundaries = [&](Span<FieldView> ensemble,
+                                        FieldView cache, FieldView mean_h,
+                                        Span<FieldView> mean_scalars,
+                                        ConstFieldView density) noexcept {
+    bool physical = false;
+    for (const auto &b : product.boundary_specs)
+      physical |= b.flow_kind != BoundaryKind::periodic;
+    if (!physical)
+      return Status{};
+    std::array<ConstFieldView, UINT8_MAX> species{}, passives{}, mean_species{};
+    std::array<FieldView, UINT8_MAX> scalar_aliases{};
+    std::size_t ns = 0, np = 0;
+    for (std::size_t i = 0; i < mean_scalars.size; ++i)
+      if (product.fields.scalar_roles[i] == TransportedScalarRole::species)
+        mean_species[ns++] = as_const(mean_scalars.data[i]);
+      else
+        passives[np++] = as_const(mean_scalars.data[i]);
+    const auto mapping = product.reaction.species_indices();
+    const auto alias = [](FieldView field, std::size_t component,
+                          FieldId semantic) noexcept {
+      field.base += component * field.component_stride;
+      field.components = 1;
+      field.field = semantic;
+      return field;
+    };
+    const auto resolve = [&](ConstFieldView h,
+                             Span<const ConstFieldView> species) noexcept {
+      return resolve_static_boundary_values(
+          communicator, product.boundary, product.boundary_specs,
+          product.geometry, product.patch, product.thermodynamics,
+          pressure_reference, density, velocity_history.accepted, h, species,
+          {passives.data(), np}, {species_values.data(), species_values.size()},
+          boundary_scalars, boundary_vectors, boundary_normal_gradients, false);
+    };
+    Status closed;
+    for (std::size_t f = 0; f < ensemble.size && closed; ++f) {
+      const auto field = ensemble.data[f];
+      auto h = alias(field, mapping.size + 1, product.fields.enthalpy);
+      std::size_t si = 0;
+      for (std::size_t i = 0; i < mean_scalars.size; ++i) {
+        auto q = mean_scalars.data[i];
+        if (product.fields.scalar_roles[i] == TransportedScalarRole::species) {
+          q = alias(field, mapping.data[si], q.field);
+          species[si++] = as_const(q);
+        }
+        scalar_aliases[i] = q;
+      }
+      closed = resolve(as_const(h), {species.data(), ns});
+      if (closed)
+        closed = apply_boundary_ghosts(
+            BoundaryStage::scalar, product.boundary,
+            {scalar_aliases.data(), mean_scalars.size}, boundary_values);
+      if (closed)
+        closed =
+            apply_boundary_ghosts(BoundaryStage::enthalpy, product.boundary,
+                                  {&h, 1}, boundary_values);
+      if (closed) {
+        // The dependent species has no independent boundary equation.
+        // Complete only physical face ghosts; exchanged faces stay intact.
+        const auto spans = product.boundary.spans();
+        for (std::size_t b = 0; b < spans.size; ++b) {
+          const auto &span = spans.data[b];
+          if (span.stage != BoundaryStage::enthalpy)
+            continue;
+          const unsigned face = static_cast<unsigned>(span.face);
+          for (unsigned o = 0; o < span.tangent_outer_count; ++o)
+            for (unsigned i = 0; i < span.tangent_inner_count; ++i)
+              for (unsigned layer = 0; layer < span.ghost_layers; ++layer) {
+                auto c = boundary_first_ghost_cell(span.face, cells, i, o);
+                const int shift = (face % 2 ? 1 : -1) * int(layer);
+                if (face < 2)
+                  c.x += shift;
+                else if (face < 4)
+                  c.y += shift;
+                else
+                  c.z += shift;
+                double sum = 0;
+                for (std::size_t a = 0; a < mapping.size; ++a)
+                  sum += field.unchecked(c, mapping.data[a]);
+                field.unchecked(c, product.reaction.dependent_index()) =
+                    1 - sum;
+              }
+        }
+      }
+    }
+    if (closed)
+      closed = apply_physical_zero_gradient(product.boundary, {&cache, 1});
+    // The caller's remaining native stages consume mean boundary targets.
+    if (closed)
+      closed = resolve(as_const(mean_h), {mean_species.data(), ns});
+    return closed;
+  };
+
   // Predictor halo: accepted h and all accepted transported scalars.
   std::size_t halo_count = 0U;
   FieldView accepted_enthalpy_mutable;
@@ -8339,6 +8435,15 @@ Status ProductDriver::Impl::execute_attempt(
         BoundaryStage::scalar, product.boundary,
         {halo_views.data() + 1U, product.fields.scalars.size()},
         boundary_values);
+  }
+  if (status && product.esf.enabled()) {
+    const auto first = 1 + product.fields.scalars.size();
+    const auto nf = product.fields.esf_fields.size();
+    status = close_esf_boundaries(
+        {halo_views.data() + first, nf}, halo_views[first + nf],
+        accepted_enthalpy_mutable,
+        {halo_views.data() + 1, product.fields.scalars.size()},
+        rho_history.accepted);
   }
   if (status) enthalpy_history.accepted = as_const(accepted_enthalpy_mutable);
   species_index = 0U;
@@ -8665,11 +8770,42 @@ Status ProductDriver::Impl::execute_attempt(
         post_esf_read[f] =
             as_const(exchanged[1 + product.fields.scalars.size() + f]);
       post_cache = exchanged[count - 1];
-      status = product.esf.source_diffusion(
-          product.equations.kernels(), as_const(post_cache), as_const(post_h),
-          {post_species_read.data(), ns}, post_h_rate,
-          {post_species_rates.data(), ns}, {post_passive_read.data(), np},
-          {post_passive_rates.data(), np}, post_diffusivity);
+      status = resolve_static_boundary_values(
+          communicator, product.boundary, product.boundary_specs,
+          product.geometry, product.patch, product.thermodynamics,
+          pressure_reference, as_const(post_rho), velocity_history.accepted,
+          as_const(post_h), {post_species_read.data(), ns},
+          {post_passive_read.data(), np},
+          {species_values.data(), species_values.size()}, boundary_scalars,
+          boundary_vectors, boundary_normal_gradients, false);
+      std::array<FieldView, UINT8_MAX> post_scalar_aliases{};
+      std::size_t si = 0, pi = 0;
+      for (std::size_t i = 0; i < product.fields.scalars.size(); ++i)
+        post_scalar_aliases[i] =
+            product.fields.scalar_roles[i] == TransportedScalarRole::species
+                ? post_species[si++]
+                : post_passives[pi++];
+      if (status)
+        status = apply_boundary_ghosts(
+            BoundaryStage::scalar, product.boundary,
+            {post_scalar_aliases.data(), product.fields.scalars.size()},
+            boundary_values);
+      if (status)
+        status =
+            apply_boundary_ghosts(BoundaryStage::enthalpy, product.boundary,
+                                  {&post_h, 1}, boundary_values);
+      if (status)
+        status = close_esf_boundaries(
+            {exchanged.data() + 1 + product.fields.scalars.size(), nf},
+            post_cache, post_h,
+            {post_scalar_aliases.data(), product.fields.scalars.size()},
+            as_const(post_rho));
+      if (status)
+        status = product.esf.source_diffusion(
+            product.equations.kernels(), as_const(post_cache), as_const(post_h),
+            {post_species_read.data(), ns}, post_h_rate,
+            {post_species_rates.data(), ns}, {post_passive_read.data(), np},
+            {post_passive_rates.data(), np}, post_diffusivity);
       for (std::size_t i = 0; i < ns; ++i)
         species_rate_history[i].accepted = as_const(post_species_rates[i]);
       for (std::size_t i = 0; i < np; ++i)

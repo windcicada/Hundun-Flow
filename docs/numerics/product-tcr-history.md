@@ -1,12 +1,12 @@
 # 产品 TCR 历史与重启记录
 
 当前产品入口是 `reaction.model=esf_tpdf` 下的 `ensemble.tcr`。本增量支持
-周期域、无 IBM、backward_euler 的 `shadow` 和 `experimental`；`validated`
+周期及原生物理边界、无 IBM、backward_euler 的 `shadow` 和 `experimental`；`validated`
 仍因缺少科学验收证据而拒绝。它不代表 Stage 5/6 全部接线已完成。
 
 ## 统计与反馈的时间位置
 
-每次尝试从已接受的 MeanState 与所有随机场取得 PH 状态，以同一气相后端查询
+每次尝试从已接受的 MeanState 与所有随机场取得 PH 状态；P8 组合先沉积本步气液交换，再从源后状态查询，以同一气相后端查询
 净组分质量生成速率。进度速率为 `sum(progress_weights[s] * omega[s]) / rho`，
 MeanState 的查询给出 PSR 参照速率，随机场速率等权平均。
 反应物名称解析到已冻结的物种顺序，计算 `eta=sum(X_reactants)` 和

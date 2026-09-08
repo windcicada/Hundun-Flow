@@ -1948,6 +1948,10 @@ foreach(spray_ranks IN ITEMS 1 2 4)
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-ibm")
   set_tests_properties(v04_product_spray_ibm_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_esf_wall_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-wall")
+  set_tests_properties(v04_product_spray_esf_wall_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
   add_test(NAME v04_product_spray_esf_mpi_${spray_ranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf")
@@ -2021,7 +2025,7 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
+set(coupled_cli_cases reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
   list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera)
 endif()
@@ -2030,7 +2034,7 @@ foreach(coupled_case IN LISTS coupled_cli_cases)
   if(coupled_case MATCHES "^reacting-spray-")
     set(coupled_initial_state "101325,400,0,0,0,0.01")
   endif()
-  if(coupled_case STREQUAL "reacting-spray-outlet")
+  if(coupled_case MATCHES "^reacting-spray-(esf-)?outlet$")
     set(coupled_initial_state "101325,400,0.3,0,0,0.01")
   endif()
   if(coupled_case STREQUAL "reacting-spray-esf-passive")

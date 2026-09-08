@@ -32,9 +32,6 @@ public:
         model.time.scheme != TimeScheme::backward_euler ||
         model.immersed_boundary || spec_.tcr.mode == TcrMode::validated)
       return invalid();
-    for (const auto &boundary : model.boundaries)
-      if (boundary.flow_kind != BoundaryKind::periodic)
-        return invalid();
     if (!spec_.initial_species_offsets.empty() &&
         spec_.initial_species_offsets.size() != spec_.fields * (ns_ - 1))
       return invalid();
