@@ -65,7 +65,8 @@ public:
   }
   Status stage_restore(const RestartImage &image) noexcept {
     discard();
-    if (image.cell_record_identity != identity_ ||
+    if (!image.cell_record_lengths.empty() ||
+        image.cell_record_identity != identity_ ||
         image.cell_record_bytes != (enabled() ? record_bytes : 0U) ||
         image.cell_records.size() != accepted_bytes_.size())
       return invalid();

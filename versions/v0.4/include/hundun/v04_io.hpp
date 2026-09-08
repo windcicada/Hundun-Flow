@@ -90,12 +90,17 @@ struct RestartFieldView {
   ConstFieldView values{};
 };
 
-// Fixed-width, model-defined little-endian records, one per local cell in
-// x-fastest order. Integer histories must not pass through FP64 fields.
+// Model-defined little-endian records, one per local cell in x-fastest
+// order. Integer histories must not pass through FP64 fields. V4 uses a
+// fixed width; V5 carries variable_cell_bytes alongside the concatenated
+// values.
 struct RestartCellRecordsView {
   PlanFingerprint identity{};
   std::uint32_t record_bytes{};
   Span<const std::uint8_t> values{};
+  // V5: record_bytes=0 and one byte count per cell. Values concatenate
+  // these variable records in x-fastest cell order; empty cells are allowed.
+  Span<const std::uint32_t> variable_cell_bytes{};
 };
 
 // Borrowed synchronous snapshot: metadata, fields, fluxes, and model records
@@ -125,7 +130,8 @@ struct RestartSnapshot {
   double closed_mass_target{};
   // Zero writes legacy unsigned V2 history. A nonzero semantic signature
   // writes V3 (same physical history plus this integrity-protected identity).
-  // Nonempty model cell records select V4 and require a nonzero signature.
+  // Model cell records require a nonzero signature: V4 for fixed width,
+  // V5 for variable_cell_bytes, including a collection of empty cell records.
   PlanFingerprint method_history_signature{};
   RestartCellRecordsView cell_records{};
 };
@@ -278,6 +284,7 @@ struct RestartImage {
   PlanFingerprint cell_record_identity{};
   std::uint32_t cell_record_bytes{};
   std::vector<std::uint8_t> cell_records;
+  std::vector<std::uint32_t> cell_record_lengths;
 
   RestartHistoryCompatibility history_compatibility(
       PlanFingerprint expected_signature) const noexcept {

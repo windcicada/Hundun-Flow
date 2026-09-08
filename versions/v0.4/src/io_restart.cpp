@@ -51,6 +51,7 @@ constexpr std::uint32_t kLegacyFormatVersion = 1U;
 constexpr std::uint32_t kExactHistoryFormatVersion = 2U;
 constexpr std::uint32_t kSignedHistoryFormatVersion = 3U;
 constexpr std::uint32_t kCellRecordFormatVersion = 4U;
+constexpr std::uint32_t kVariableCellRecordFormatVersion = 5U;
 constexpr std::array<char, 8U> kRankMagic{{'H', '4', 'R', 'A', 'N', 'K', '0', '1'}};
 constexpr std::array<char, 8U> kManifestMagic{{'H', '4', 'M', 'A', 'N', 'I', '0', '1'}};
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -256,6 +257,8 @@ struct RankBlock {
   std::array<std::vector<double>, 3U> flux;
   std::array<std::vector<double>, 3U> previous_flux;
   std::vector<std::uint8_t> cell_records;
+  std::vector<std::uint32_t> cell_record_lengths;
+  std::vector<std::size_t> cell_record_offsets;
 };
 
 struct BulkBytes {
@@ -270,7 +273,8 @@ struct BulkBytes {
 
 bool retained_image_bytes(const RestartImage& image, std::size_t& out) noexcept {
   BulkBytes bytes;
-  if (!bytes.add(image.cell_records.capacity()))
+  if (!bytes.add(image.cell_records.capacity()) ||
+      !bytes.add(image.cell_record_lengths.capacity(), sizeof(std::uint32_t)))
     return false;
   for (const auto* catalog : {&image.fields, &image.previous_fields,
                               &image.accepted_rate_fields, &image.previous_rate_fields}) {
@@ -327,8 +331,15 @@ bool read_layout(const Manifest& manifest, const MeshPatch& patch,
   if (manifest.format_version >= kCellRecordFormatVersion &&
       (!values.add(cells, manifest.cell_record_bytes) || !vectors.add(1U)))
     return false;
+  const bool variable =
+      manifest.format_version == kVariableCellRecordFormatVersion;
+  if (variable && !values.add(cells, sizeof(std::uint32_t)))
+    return false;
   BulkBytes owned{values.value};
   if (!owned.add(descriptors.value)) return false;
+  if (variable && !(target ? coverage.add(cells + 1, sizeof(std::size_t))
+                           : owned.add(cells + 1, sizeof(std::size_t))))
+    return false;
   // Common header: 80 + four bytes per field, optional 36 + rates, optional signature.
   BulkBytes encoded{52U + 80U + manifest.fields.size() * 4U};
   if ((exact &&
@@ -343,17 +354,29 @@ bool read_layout(const Manifest& manifest, const MeshPatch& patch,
   return true;
 }
 
-Status plan_read_bulk(const Manifest& manifest, const RestartExpected& expected,
+Status plan_read_bulk(const Manifest &manifest, const RestartExpected &expected,
                       std::size_t retained, RestartReadLimits limits,
-                      RestartReadReport& report) noexcept {
+                      RestartReadReport &report,
+                      std::size_t variable_target_bytes = 0U) noexcept {
   ReadLayout target;
   if (!read_layout(manifest, expected.target_patch, true, target))
     return {StatusCode::allocation_failure, kRestartReadBudget};
+  if (variable_target_bytes > SIZE_MAX - target.owned)
+    return {StatusCode::allocation_failure, kRestartReadBudget};
+  target.owned += variable_target_bytes;
   std::size_t largest_block = 0U;
   for (const auto& record : manifest.ranks) {
     ReadLayout source;
-    if (!read_layout(manifest, MeshPatch{record.begin, record.cells, {}, {}}, false, source) ||
-        record.bytes != source.encoded)
+    if (!read_layout(manifest, MeshPatch{record.begin, record.cells, {}, {}},
+                     false, source))
+      return {StatusCode::io_failure, kRestartManifest};
+    if (manifest.format_version == kVariableCellRecordFormatVersion) {
+      if (record.bytes < source.encoded || record.bytes > SIZE_MAX ||
+          record.bytes - source.encoded > SIZE_MAX - source.owned)
+        return {StatusCode::io_failure, kRestartManifest};
+      source.owned += std::size_t(record.bytes) - source.encoded;
+      source.encoded = std::size_t(record.bytes);
+    } else if (record.bytes != source.encoded)
       return {StatusCode::io_failure, kRestartManifest};
     BulkBytes block{source.encoded};
     // Includes bytes + decoded values + catalogs at the same time. A malformed
@@ -616,7 +639,9 @@ bool has_exact_history(const RestartSnapshot& snapshot) noexcept {
 
 std::uint32_t snapshot_format(const RestartSnapshot& snapshot) noexcept {
   if (snapshot.cell_records.identity != 0U)
-    return kCellRecordFormatVersion;
+    return snapshot.cell_records.record_bytes == 0U
+               ? kVariableCellRecordFormatVersion
+               : kCellRecordFormatVersion;
   return !has_exact_history(snapshot) ? kLegacyFormatVersion
       : snapshot.method_history_signature != 0U ? kSignedHistoryFormatVersion
                                                : kExactHistoryFormatVersion;
@@ -636,13 +661,28 @@ bool valid_snapshot(const RestartSnapshot& snapshot) noexcept {
   if (records.identity != 0U) {
     std::size_t cells = 0U, bytes = 0U;
     if (!has_exact_history(snapshot) ||
-        snapshot.method_history_signature == 0U || records.record_bytes == 0U ||
-        !cell_count(snapshot.patch.cells, cells) ||
-        !checked_multiply(cells, records.record_bytes, bytes) ||
-        records.values.data == nullptr || records.values.size != bytes)
+        snapshot.method_history_signature == 0U ||
+        !cell_count(snapshot.patch.cells, cells))
+      return false;
+    if (records.record_bytes == 0U) {
+      if (records.variable_cell_bytes.size != cells ||
+          !records.variable_cell_bytes.data)
+          return false;
+      for (std::size_t i = 0; i < cells; ++i) {
+          if (records.variable_cell_bytes.data[i] > SIZE_MAX - bytes)
+            return false;
+          bytes += records.variable_cell_bytes.data[i];
+      }
+    } else if (records.variable_cell_bytes.size != 0U ||
+               records.variable_cell_bytes.data != nullptr ||
+               !checked_multiply(cells, records.record_bytes, bytes))
+      return false;
+    if (records.values.size != bytes || (bytes != 0U && !records.values.data))
       return false;
   } else if (records.record_bytes != 0U || records.values.size != 0U ||
-             records.values.data != nullptr)
+             records.values.data != nullptr ||
+             records.variable_cell_bytes.size != 0U ||
+             records.variable_cell_bytes.data != nullptr)
     return false;
   if (!has_exact_history(snapshot)) return true;
   return snapshot.controller_state != 0U &&
@@ -827,7 +867,10 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
   if (version >= kCellRecordFormatVersion &&
       (!decoder.u64(manifest.cell_record_identity) ||
        !decoder.u32(manifest.cell_record_bytes) ||
-       manifest.cell_record_identity == 0U || manifest.cell_record_bytes == 0U))
+       manifest.cell_record_identity == 0U ||
+       (version == kVariableCellRecordFormatVersion
+            ? manifest.cell_record_bytes != 0U
+            : manifest.cell_record_bytes == 0U)))
     return false;
   return true;
 }
@@ -875,6 +918,13 @@ bool rank_block_size(const RestartSnapshot& snapshot, std::size_t& bytes) {
         snapshot.cell_records.values.size > SIZE_MAX - bytes - 8U)
       return false;
     bytes += 8U + snapshot.cell_records.values.size;
+    if (snapshot_format(snapshot) == kVariableCellRecordFormatVersion) {
+      std::size_t lengths = 0;
+      if (!checked_multiply(cells, sizeof(std::uint32_t), lengths) ||
+          lengths > SIZE_MAX - bytes)
+        return false;
+      bytes += lengths;
+    }
   }
   return true;
 }
@@ -969,8 +1019,13 @@ Status encode_rank_block(const RestartSnapshot& snapshot, int size, int rank,
     status = encode_flux(snapshot.previous_mass_flux);
   if (status && version >= kCellRecordFormatVersion) {
     encoder.u64(snapshot.cell_records.values.size);
-    encoder.bytes(snapshot.cell_records.values.data,
-                  snapshot.cell_records.values.size);
+    if (snapshot_format(snapshot) == kVariableCellRecordFormatVersion)
+      for (std::size_t i = 0;
+           i < snapshot.cell_records.variable_cell_bytes.size; ++i)
+        encoder.u32(snapshot.cell_records.variable_cell_bytes.data[i]);
+    if (snapshot.cell_records.values.size != 0U)
+      encoder.bytes(snapshot.cell_records.values.data,
+                    snapshot.cell_records.values.size);
   }
   if (!status) return status;
   encoder.append_integrity();
@@ -1020,7 +1075,8 @@ Status parse_manifest(const std::vector<std::uint8_t>& bytes,
         (version != kLegacyFormatVersion &&
          version != kExactHistoryFormatVersion &&
          version != kSignedHistoryFormatVersion &&
-         version != kCellRecordFormatVersion) ||
+         version != kCellRecordFormatVersion &&
+         version != kVariableCellRecordFormatVersion) ||
         !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
         candidate.rank_count > maximum_ranks ||
         !decode_common(decoder, version, candidate) ||
@@ -1075,7 +1131,8 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
         (version != kLegacyFormatVersion &&
          version != kExactHistoryFormatVersion &&
          version != kSignedHistoryFormatVersion &&
-         version != kCellRecordFormatVersion) ||
+         version != kCellRecordFormatVersion &&
+         version != kVariableCellRecordFormatVersion) ||
         !decoder.u32(candidate.rank_count) || candidate.rank_count == 0U ||
         !decoder.u32(candidate.rank) ||
         candidate.rank >= candidate.rank_count ||
@@ -1164,15 +1221,33 @@ Status parse_rank_block(const std::vector<std::uint8_t>& bytes,
     if (version >= kCellRecordFormatVersion) {
       std::size_t expected_bytes = 0U;
       std::uint64_t encoded_bytes = 0U;
-      if (!checked_multiply(cells, candidate.common.cell_record_bytes,
-                            expected_bytes) ||
-          !decoder.u64(encoded_bytes) || encoded_bytes != expected_bytes ||
+      if (!decoder.u64(encoded_bytes))
+        return {StatusCode::io_failure, kRestartRankFile};
+      if (version == kVariableCellRecordFormatVersion) {
+        if (cells > decoder.remaining() / sizeof(std::uint32_t))
+          return {StatusCode::io_failure, kRestartRankFile};
+        candidate.cell_record_lengths.resize(cells);
+        candidate.cell_record_offsets.resize(cells + 1);
+        for (std::size_t i = 0; i < cells; ++i) {
+          auto &n = candidate.cell_record_lengths[i];
+          if (!decoder.u32(n) || n > SIZE_MAX - expected_bytes)
+            return {StatusCode::io_failure, kRestartRankFile};
+          candidate.cell_record_offsets[i] = expected_bytes;
+          expected_bytes += n;
+        }
+        candidate.cell_record_offsets[cells] = expected_bytes;
+      } else if (!checked_multiply(cells, candidate.common.cell_record_bytes,
+                                   expected_bytes))
+        return {StatusCode::io_failure, kRestartRankFile};
+      if (encoded_bytes != expected_bytes ||
           expected_bytes > decoder.remaining())
         return {StatusCode::io_failure, kRestartRankFile};
       candidate.cell_records.resize(expected_bytes);
-      if (!decoder.bytes(candidate.cell_records.data(), expected_bytes))
+      if (expected_bytes != 0U &&
+          !decoder.bytes(candidate.cell_records.data(), expected_bytes))
         return {StatusCode::io_failure, kRestartRankFile};
     }
+
     std::uint64_t integrity = 0U;
     if (!decoder.u64(integrity) || decoder.remaining() != 0U) {
       return {StatusCode::io_failure, kRestartRankFile};
@@ -1525,6 +1600,7 @@ void RestartImage::clear() noexcept {
   cell_record_identity = 0U;
   cell_record_bytes = 0U;
   cell_records.clear();
+  cell_record_lengths.clear();
 }
 
 Status RestartWriter::write(MPI_Comm communicator,
@@ -1873,6 +1949,73 @@ Status RestartReader::load(MPI_Comm communicator,
   if (!status) return status;
 
   RestartImage candidate;
+  std::vector<std::size_t> target_record_offsets;
+  if (manifest.format_version == kVariableCellRecordFormatVersion) {
+    // First collect only the lengths owned by the target patch. The initial
+    // budget already includes these arrays and the largest decoded block.
+    // Allocate the exact target payload only after this bounded census.
+    status = local_stage([&]() -> Status {
+      std::size_t cells = 0U;
+      if (!cell_count(expected.target_patch.cells, cells))
+        return {StatusCode::invalid_plan, kRestartInput};
+      candidate.cell_record_lengths.resize(cells);
+      target_record_offsets.resize(cells + 1);
+      const auto index = [](Int3 p, Int3 n) {
+        return (std::size_t(p.z) * n.y + p.y) * n.x + p.x;
+      };
+      for (std::uint32_t source = 0; source < manifest.rank_count; ++source) {
+        const auto &record = manifest.ranks[source];
+        const auto &target = expected.target_patch;
+        const Int3 begin{std::max(record.begin.x, target.begin.x),
+                         std::max(record.begin.y, target.begin.y),
+                         std::max(record.begin.z, target.begin.z)};
+        const Int3 end{std::min(record.begin.x + record.cells.x,
+                                target.begin.x + target.cells.x),
+                       std::min(record.begin.y + record.cells.y,
+                                target.begin.y + target.cells.y),
+                       std::min(record.begin.z + record.cells.z,
+                                target.begin.z + target.cells.z)};
+        if (begin.x >= end.x || begin.y >= end.y || begin.z >= end.z)
+          continue;
+        std::vector<std::uint8_t> bytes;
+        RankBlock block;
+        if (!read_file(generation_directory / rank_name(source), bytes,
+                       std::size_t(record.bytes), record.bytes,
+                       &failure_capture.context) ||
+            hash_bytes(bytes.data(), bytes.size()) != record.hash)
+          return {StatusCode::io_failure, kRestartRankFile};
+        const auto parsed = parse_rank_block(bytes, block, manifest, source);
+        if (report)
+          report->rank_file_bytes_read += bytes.size();
+        if (!parsed)
+          return parsed;
+        for (int z = begin.z; z < end.z; ++z)
+          for (int y = begin.y; y < end.y; ++y)
+            for (int x = begin.x; x < end.x; ++x) {
+              const auto old = index(
+                  {x - record.begin.x, y - record.begin.y, z - record.begin.z},
+                  record.cells);
+              const auto current = index(
+                  {x - target.begin.x, y - target.begin.y, z - target.begin.z},
+                  target.cells);
+              candidate.cell_record_lengths[current] =
+                  block.cell_record_lengths[old];
+            }
+      }
+      for (std::size_t i = 0; i < cells; ++i) {
+        if (candidate.cell_record_lengths[i] >
+            SIZE_MAX - target_record_offsets[i])
+          return {StatusCode::allocation_failure, kRestartReadBudget};
+        target_record_offsets[i + 1] =
+            target_record_offsets[i] + candidate.cell_record_lengths[i];
+      }
+      return plan_read_bulk(manifest, expected, budget.retained_image_bytes,
+                            limits, budget, target_record_offsets.back());
+    });
+    publish_budget();
+    if (!status)
+      return status;
+  }
   status = local_stage([&]() -> Status {
     candidate.global_cells = manifest.global_cells;
     candidate.patch = expected.target_patch;
@@ -1907,7 +2050,10 @@ Status RestartReader::load(MPI_Comm communicator,
       status = {StatusCode::invalid_plan, kRestartInput};
     if (status && manifest.format_version >= kCellRecordFormatVersion) {
       std::size_t bytes = 0U;
-      if (!checked_multiply(target_cells, manifest.cell_record_bytes, bytes))
+      if (manifest.format_version == kVariableCellRecordFormatVersion)
+        bytes = target_record_offsets.back();
+      else if (!checked_multiply(target_cells, manifest.cell_record_bytes,
+                                 bytes))
         return {StatusCode::allocation_failure, kRestartReadBudget};
       candidate.cell_records.resize(bytes);
     }
@@ -2035,9 +2181,21 @@ Status RestartReader::load(MPI_Comm communicator,
             }
             cell_coverage[new_cell] = 1U;
             if (manifest.format_version >= kCellRecordFormatVersion) {
-              const auto width = manifest.cell_record_bytes;
-              std::copy_n(block.cell_records.data() + old_cell * width, width,
-                          candidate.cell_records.data() + new_cell * width);
+              std::size_t width = manifest.cell_record_bytes;
+              std::size_t source_offset = old_cell * width,
+                          target_offset = new_cell * width;
+              if (manifest.format_version == kVariableCellRecordFormatVersion) {
+                width = block.cell_record_lengths[old_cell];
+                if (width != candidate.cell_record_lengths[new_cell]) {
+                  status = {StatusCode::io_failure, kRestartMismatch};
+                  break;
+                }
+                source_offset = block.cell_record_offsets[old_cell];
+                target_offset = target_record_offsets[new_cell];
+              }
+              if (width != 0U)
+                std::copy_n(block.cell_records.data() + source_offset, width,
+                            candidate.cell_records.data() + target_offset);
             }
             const auto copy_fields =
                 [&](std::vector<RestartImageField>& target,

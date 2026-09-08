@@ -135,6 +135,18 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - 目标身份测试在宿主 Clang 和 GCC rootfs 通过；两套真实产品重新配置/构建均成功。
   GCC 测试 fixture 初次因 PATH 缺少已有 /tmp/make 失败，加入该已有工具后复核通过。
 
+## 喷雾变长持久状态的原生入口
+
+- Restart V5 为每个单元提供 u32 长度表与拼接模型字节，不固定每个单元的 parcel 数量。
+  V1–V4 保持原格式；V4 TCR 专用恢复拒绝意外的变长记录。
+- 读入先统计目标分区长度、确认精确载荷预算，再恢复字段/字节；保留旧图像、模型长度/
+  临时偏移、最大源块等均计入峰值上限。详情见 [V5 合同](../numerics/restart-variable-cell-records.md)。
+- 1→4、4→1、4→4 分区恢复，混合/全空集合、单 rank 长度和身份不符、整数及预算边界通过。
+  Clang 最终 focused 13/13 PASS（40.38 s），GCC Restart+原 ESF/TCR/Cantera CLI 4/4 PASS；
+  另一个 GCC 构建身份 fixture 由工具 PATH 修正后单独 1/1 PASS。
+- 此增量只提供原生持久化入口，尚未将 parcel/TAB/注射器与气相源消费及共同事务发布。
+  V5 运行证据与产品安装会随实际喷雾配置接入；当前 CLI 验证仍是 ESF V3/TCR V4。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

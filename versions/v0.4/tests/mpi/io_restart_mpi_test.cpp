@@ -451,6 +451,7 @@ bool read_budget_boundaries(MPI_Comm communicator, const fs::path& directory,
         image.controller_state == saved.controller_state &&
         image.cell_record_identity == saved.cell_record_identity &&
         image.cell_record_bytes == saved.cell_record_bytes &&
+        image.cell_record_lengths == saved.cell_record_lengths &&
         image.cell_records == saved.cell_records &&
         image.source_manifest_sha256 == saved.source_manifest_sha256 &&
         image.method_history_signature == saved.method_history_signature &&
@@ -640,8 +641,32 @@ bool exact_transition(MPI_Comm communicator, const fs::path &directory,
   return global != 0;
 }
 
+std::vector<std::uint8_t> variable_records(const MeshPatch &patch,
+                                           std::vector<std::uint32_t> &lengths,
+                                           bool empty = false) {
+  auto fixed = model_records(patch);
+  std::vector<std::uint8_t> values;
+  lengths.clear();
+  std::size_t cell = 0;
+  for (int z = 0; z < patch.cells.z; ++z)
+    for (int y = 0; y < patch.cells.y; ++y)
+      for (int x = 0; x < patch.cells.x; ++x, ++cell) {
+        const auto global =
+            (std::uint64_t(z + patch.begin.z) * kGlobal.y + y + patch.begin.y) *
+                kGlobal.x +
+            x + patch.begin.x;
+        const unsigned records = empty ? 0 : global % 5;
+        lengths.push_back(8U * records);
+        for (unsigned r = 0; r < records; ++r)
+          values.insert(values.end(), fixed.begin() + 8 * cell,
+                        fixed.begin() + 8 * cell + 8);
+      }
+  return values;
+}
+
 bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
-                        const fs::path &directory) {
+                        const fs::path &directory, bool variable = false,
+                        bool empty = false) {
   int rank = 0;
   MPI_Comm_rank(world, &rank);
   MPI_Comm writer = MPI_COMM_NULL, reader = MPI_COMM_NULL;
@@ -652,9 +677,25 @@ bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
     ExactFixture fixture;
     passed = fixture.initialize(writer);
     auto records = model_records(fixture.base.patch);
+    std::vector<std::uint32_t> lengths;
+    if (variable)
+      records = variable_records(fixture.base.patch, lengths, empty);
     auto snapshot = fixture.snapshot();
     snapshot.method_history_signature = UINT64_C(0x391003);
-    snapshot.cell_records = {identity, 8U, {records.data(), records.size()}};
+    snapshot.cell_records = {
+        identity, variable ? 0U : 8U, {records.data(), records.size()}};
+    if (variable)
+      snapshot.cell_records.variable_cell_bytes = {lengths.data(),
+                                                   lengths.size()};
+    if (variable) {
+      int writer_rank = 0;
+      MPI_Comm_rank(writer, &writer_rank);
+      if (writer_rank == writer_size - 1)
+        ++lengths[0];
+      passed &= !RestartWriter::write(writer, directory, snapshot);
+      if (writer_rank == writer_size - 1)
+        --lengths[0];
+    }
     if (passed)
       passed =
           static_cast<bool>(RestartWriter::write(writer, directory, snapshot));
@@ -681,15 +722,24 @@ bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
                              {fields.data(), fields.size()},
                              {rates.data(), rates.size()}};
     expected.cell_record_identity = identity;
-    expected.cell_record_bytes = 8U;
+    expected.cell_record_bytes = variable ? 0U : 8U;
+    std::vector<std::uint32_t> lengths;
     RestartImage image;
     const auto status = RestartReader::load(reader, directory, expected, image);
-    passed &= status &&
-              image.cell_records == model_records(fixture.base.patch) &&
-              image.cell_record_identity == identity &&
-              image.cell_record_bytes == 8U &&
-              image.history_compatibility(UINT64_C(0x391003)) ==
-                  RestartHistoryCompatibility::compatible;
+    passed &=
+        status &&
+        image.cell_records ==
+            (variable ? variable_records(fixture.base.patch, lengths, empty)
+                      : model_records(fixture.base.patch)) &&
+        image.cell_record_identity == identity &&
+        image.cell_record_bytes == (variable ? 0U : 8U) &&
+        image.history_compatibility(UINT64_C(0x391003)) ==
+            RestartHistoryCompatibility::compatible;
+    if (variable)
+      passed &= image.cell_record_lengths == lengths &&
+                image.source_format_version == 5U;
+    if (variable && writer_size == reader_size)
+      passed &= read_budget_boundaries(reader, directory, expected, image);
     const auto saved = image.cell_records;
     for (int mismatch = 0; mismatch < 2; ++mismatch) {
       auto wrong = expected;
@@ -1218,6 +1268,14 @@ int main(int argc, char** argv) {
       record_repartition(MPI_COMM_WORLD, 1, 4, base / "records-one-to-four");
   passed &=
       record_repartition(MPI_COMM_WORLD, 4, 1, base / "records-four-to-one");
+  passed &= record_repartition(MPI_COMM_WORLD, 1, 4,
+                               base / "variable-one-to-four", true);
+  passed &= record_repartition(MPI_COMM_WORLD, 4, 1,
+                               base / "variable-four-to-one", true);
+  passed &= record_repartition(MPI_COMM_WORLD, 4, 4,
+                               base / "variable-four-to-four", true);
+  passed &= record_repartition(MPI_COMM_WORLD, 4, 4, base / "variable-empty",
+                               true, true);
   passed &= transition(MPI_COMM_WORLD, 1, 2, base / "one-to-two", 1U);
   passed &= transition(MPI_COMM_WORLD, 2, 4, base / "two-to-four", 2U);
   passed &= transition(MPI_COMM_WORLD, 4, 1, base / "four-to-one", 3U);
