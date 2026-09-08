@@ -256,6 +256,7 @@ set(hundun_v04_core_sources
   src/core_execution_graph.cpp
   src/core_field_registry.cpp
   src/core_product_freeze.cpp
+  src/core_spray_advance.cpp
   src/core_resource_contract.cpp
   src/core_revision.cpp
   src/core_status.cpp

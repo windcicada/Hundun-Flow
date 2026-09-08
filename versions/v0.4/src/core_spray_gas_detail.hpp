@@ -66,6 +66,9 @@ public:
     available_ = true;
     return {};
   }
+  bool bound_to(portable::Revision revision, double duration) const noexcept {
+    return available_ && revision_ == revision && duration_ == duration;
+  }
   spray::detail::ParcelGridCouplingStencil
   stencil(spray::Vector3 position) const noexcept {
     return geometry_ ? spray::detail::build_parcel_grid_coupling_stencil(

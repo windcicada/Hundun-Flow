@@ -326,6 +326,17 @@ add_test(NAME v04_models_spray_film_bridge COMMAND v04_models_spray_film_bridge_
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset")
 set_tests_properties(v04_models_spray_film_bridge PROPERTIES TIMEOUT 15)
 
+add_executable(v04_product_spray_advance_test mpi/product_spray_advance_test.cpp)
+target_include_directories(v04_product_spray_advance_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_product_spray_advance_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(spray_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_spray_advance_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_product_spray_advance_test>
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_spray_advance_mpi_${spray_ranks} PROPERTIES TIMEOUT 30)
+endforeach()
+
 # Small portable validation cases: each manifest configuration is one test.
 # No Allrun, repetitions or implicit resource escalation.
 foreach(portable_validation IN ITEMS v1 v2 v2_tab)

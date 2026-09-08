@@ -56,11 +56,6 @@ struct CompositionCellCandidate {
   tcr::detail::Trial tcr{};
   double heat_release_report_j_per_m3{};
 };
-struct BreakupEnergyLedger {
-  double deformation_consumed_j{}, surface_increase_j{},
-      bulk_kinetic_increase_j{}, residual_j{};
-  std::size_t event_count{};
-};
 struct CompositionReport {
   Status status{Status::invalid_input};
   std::string_view model_id{"portable_source_transport_reaction_v1"};

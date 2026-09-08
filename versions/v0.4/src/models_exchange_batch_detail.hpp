@@ -35,6 +35,11 @@ struct CellExchange {
   const double *gas_species_mass_delta_kg{};
   std::size_t species_count{};
 };
+struct BreakupEnergyLedger {
+  double deformation_consumed_j{}, surface_increase_j{},
+      bulk_kinetic_increase_j{}, residual_j{};
+  std::size_t event_count{};
+};
 struct ExchangeBatchReport {
   Status status{Status::invalid_input};
   std::size_t failure_index{};
