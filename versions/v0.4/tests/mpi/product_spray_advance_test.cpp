@@ -41,7 +41,11 @@ std::uint64_t id(Int3 p, Int3 n) {
   return std::uint64_t(p.x) +
          std::uint64_t(n.x) * (std::uint64_t(p.y) + std::uint64_t(n.y) * p.z);
 }
-bool run(int rank, int ranks, const char *path) {
+bool run(int rank, int ranks, const char *path, int boundary = 0) {
+  const bool exact_face = boundary > 2;
+  if (exact_face)
+    boundary -= 2;
+  const std::array<bool, 3> periodic{boundary == 0, true, true};
   Gas gas;
   const auto loaded = spray::detail::load_liquid_asset(
       path, UINT64_C(6004043157121730787), gas.gas_identity());
@@ -106,15 +110,17 @@ bool run(int rank, int ranks, const char *path) {
   const std::size_t independent = 0;
   detail::ProductParcelGas sampler;
   std::array<ConstFieldView, 1> species{as_const(fields[3])};
-  if (!sampler.configure(geometry, patch, {true, true, true},
+  if (!sampler.configure(geometry, patch, periodic,
                          gas.gas_identity().composition_fingerprint,
-                         {&independent, 1}, 1) ||
+                         {&independent, 1}, 1, boundary != 0) ||
       !sampler.bind(revision, duration, 100000, as_const(fields[0]),
                     as_const(fields[1]), as_const(fields[2]),
                     {species.data(), species.size()}))
     return false;
   detail::ProductParcelGeometry events;
-  if (!events.configure(geometry, {true, true, true}))
+  if (!events.configure(
+          geometry, periodic,
+          {boundary == 2, boundary == 2, false, false, false, false}))
     return false;
   spray::detail::FilmEnvironmentBridge film(asset, gas, sampler, revision);
   detail::ProductParcelAdvance advance(sampler, events, asset, film);
@@ -136,7 +142,7 @@ bool run(int rank, int ranks, const char *path) {
   auto &p = initial.parcel;
   p.id = {std::uint64_t(rank + 1), UINT64_C(9007199254740997)};
   p.position_m = {geometry.x().faces().data[patch.begin.x + patch.cells.x] -
-                      1e-6,
+                      (exact_face ? 0. : 1e-6),
                   geometry.y().centres().data[patch.begin.y],
                   geometry.z().centres().data[patch.begin.z]};
   p.velocity_m_per_s = {20, 0, 0};
@@ -178,7 +184,7 @@ bool run(int rank, int ranks, const char *path) {
     std::cerr << "prepare rank " << rank << " detail " << status.detail << '\n';
   const auto parcels = advance.parcels();
   const auto exchange = advance.exchange();
-  double local[6]{}, global[6]{};
+  double local[11]{}, global[11]{};
   local[0] = parcels.size;
   for (std::size_t i = 0; i < parcels.size; ++i) {
     const auto &v = parcels.data[i];
@@ -186,6 +192,9 @@ bool run(int rank, int ranks, const char *path) {
         spray::detail::evaluate_liquid_enthalpy(asset, v.parcel.temperature_k);
     const double m = v.parcel.droplet_mass_kg * v.parcel.multiplicity;
     local[1] += m;
+    local[6] += m * v.parcel.velocity_m_per_s[0];
+    if (boundary)
+      ok &= v.parcel.position_m[0] >= 0 && v.parcel.position_m[0] <= 1;
     local[2] += m * hliq.liquid_enthalpy_j_per_kg;
     for (double u : v.parcel.velocity_m_per_s)
       local[2] += .5 * m * u * u;
@@ -199,25 +208,44 @@ bool run(int rank, int ranks, const char *path) {
     for (std::size_t i = 0; i < exchange.cell_count; ++i) {
       const auto &v = exchange.cells[i];
       local[3] += v.gas.gas_mass_delta_kg;
+      local[7] += v.gas.gas_momentum_delta_kg_m_per_s[0];
       local[4] += v.gas.gas_thermochemical_enthalpy_delta_j +
                   v.gas.gas_kinetic_energy_delta_j;
       ok &= v.gas_species_mass_delta_kg[0] == v.gas.gas_mass_delta_kg &&
             v.gas_species_mass_delta_kg[1] == 0;
     }
     local[5] = exchange.external.mass_kg;
+    for (const auto &ledger : {exchange.wall, exchange.outlet}) {
+      local[8] += ledger.mass_kg;
+      local[9] += ledger.thermochemical_enthalpy_j + ledger.kinetic_energy_j;
+      local[10] += ledger.momentum_kg_m_per_s[0];
+    }
   } else
     ok = false;
-  MPI_Allreduce(local, global, 6, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(local, global, 11, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   const double injected = 10 * mass,
                initial_energy =
                    ranks * mass * (-100000 + 200) + injected * (-100000 + 2);
-  ok &= global[0] == ranks + 1 && global[3] > 0 &&
-        std::abs(global[1] + global[3] - (ranks * mass + injected)) < 2e-22 &&
-        std::abs(global[2] + global[4] - initial_energy) < 2e-15 &&
+  const int exits =
+      boundary == 1 ? patch.process_grid.y * patch.process_grid.z : 0;
+  ok &= global[0] == ranks + 1 - exits && global[3] > 0 &&
+        std::abs(global[6] + global[7] + global[10] -
+                 (ranks * mass * 20 + injected * 2)) < 2e-20 &&
+        std::abs(global[1] + global[3] + global[8] -
+                 (ranks * mass + injected)) < 2e-22 &&
+        std::abs(global[2] + global[4] + global[9] - initial_energy) < 2e-15 &&
         std::abs(global[5] - injected) < 2e-23;
   if (rank == 0)
     ok &=
         injector.committed_state().next_ordinal == 0 && injector.trial_active();
+  if (boundary) {
+    if (!ok)
+      std::cerr << "physical boundary " << boundary << " rank " << rank
+                << " status " << status.detail << " count " << global[0]
+                << " mass " << global[1] + global[3] + global[8] << " momentum "
+                << global[6] + global[7] + global[10] << '\n';
+    return ok;
+  }
   std::vector<detail::ProductParcelAdvance::Parcel> reference;
   if (parcels.size)
     reference.assign(parcels.data, parcels.data + parcels.size);
@@ -290,7 +318,9 @@ int main(int argc, char **argv) {
   int rank = 0, ranks = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &ranks);
-  int local = argc == 2 && run(rank, ranks, argv[1]), global = 0;
+  int local = argc >= 2 &&
+              run(rank, ranks, argv[1], argc > 2 ? std::atoi(argv[2]) : 0),
+      global = 0;
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
   MPI_Finalize();
   return global ? 0 : 1;

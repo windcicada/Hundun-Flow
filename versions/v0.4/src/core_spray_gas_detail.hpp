@@ -17,7 +17,8 @@ class ProductParcelGas final : public spray::detail::ParcelGasStateProvider,
 public:
   Status configure(const CartesianGeometryPlan &geometry, MeshPatch patch,
                    std::array<bool, 3> periodic, PlanFingerprint composition,
-                   Span<const std::size_t> independent, std::size_t dependent) {
+                   Span<const std::size_t> independent, std::size_t dependent,
+                   bool trial_boundary_continuation = false) {
     const auto ns = independent.size + 1;
     if (!geometry.fingerprint() || !composition || !independent.data ||
         independent.size == 0 || ns > 255 || dependent >= ns)
@@ -32,6 +33,7 @@ public:
     geometry_ = &geometry;
     patch_ = patch;
     periodic_ = periodic;
+    trial_boundary_continuation_ = trial_boundary_continuation;
     composition_ = composition;
     dependent_ = dependent;
     indices_.assign(independent.data, independent.data + independent.size);
@@ -96,7 +98,25 @@ public:
         (pass != spray::detail::ParcelPass::predictor &&
          pass != spray::detail::ParcelPass::corrector))
       return out;
-    const auto weights = stencil(parcel.position_m);
+    // Event-aware integration probes its unconstrained endpoint before it can
+    // truncate the interval at a wall/outlet. Continue only that PH query by
+    // the existing one-sided end-cell value, at most one boundary cell wide.
+    // Public deposition stencils and owner location remain domain constrained.
+    auto position = parcel.position_m;
+    if (trial_boundary_continuation_)
+      for (unsigned d = 0; d < 3; ++d) {
+        if (periodic_[d])
+          continue;
+        const auto faces =
+            geometry_->axis(static_cast<CartesianAxis>(d)).faces();
+        const double low = faces.data[0], high = faces.data[faces.size - 1];
+        if (!std::isfinite(position[d]) ||
+            position[d] < low - (faces.data[1] - low) ||
+            position[d] > high + (high - faces.data[faces.size - 2]))
+          return out;
+        position[d] = std::clamp(position[d], low, high);
+      }
+    const auto weights = stencil(position);
     if (!weights.succeeded())
       return out;
     std::fill(scratch_.begin(), scratch_.end(), 0);
@@ -163,6 +183,10 @@ public:
         if (x >= high)
           x = low;
       }
+      // A rebound can end exactly on the upper physical wall; its owner is
+      // the adjacent interior cell. Outlet parcels are removed before locate.
+      if (!periodic_[d] && x == high)
+        x = std::nextafter(high, low);
       if (!std::isfinite(x) || x < low || x >= high)
         return invalid();
       cell[d] = int(std::upper_bound(faces.data, faces.data + faces.size, x) -
@@ -213,6 +237,6 @@ private:
   std::vector<std::size_t> indices_;
   std::vector<ConstFieldView> species_;
   mutable std::vector<double> scratch_;
-  bool available_{};
+  bool available_{}, trial_boundary_continuation_{};
 };
 } // namespace hundun::v04::detail

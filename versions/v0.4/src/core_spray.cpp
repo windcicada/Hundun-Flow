@@ -26,15 +26,29 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
   if (enabled() || !reaction.gas_query() ||
       model.time.scheme != TimeScheme::backward_euler)
     return invalid();
-  // The initial native gas/ESF transport contract is periodic.
-  // Physical-boundary and IBM sampling must be admitted with their own field
-  // continuation rules.
-  for (const auto &boundary : model.boundaries)
-    if (boundary.flow_kind != BoundaryKind::periodic)
+  std::array<bool, 6> walls{};
+  for (unsigned d = 0; d < 3; ++d) {
+    periodic_[d] = model.boundaries[2 * d].flow_kind == BoundaryKind::periodic;
+    if (periodic_[d] !=
+        (model.boundaries[2 * d + 1].flow_kind == BoundaryKind::periodic))
       return invalid();
+  }
+  for (unsigned face = 0; face < 6; ++face) {
+    switch (model.boundaries[face].flow_kind) {
+    case BoundaryKind::no_slip_wall:
+    case BoundaryKind::slip:
+    case BoundaryKind::symmetry:
+      walls[face] = true;
+      break;
+    case BoundaryKind::moving_wall:
+      // The current event law has a stationary wall energy/impulse ledger.
+      return invalid();
+    default:
+      break;
+    }
+  }
   if (model.immersed_boundary)
     return invalid();
-  periodic_ = {true, true, true};
   spec_ = *model.spray;
   maximum_bytes_ = model.mesh.limits.max_memory_bytes_per_rank;
   const auto ns = reaction.gas_identity().species_names.size();
@@ -63,12 +77,12 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
   geometry_ = &geometry;
   patch_ = patch;
   rank_ = rank;
-  auto status =
-      gas_.configure(geometry, patch, periodic_,
-                     reaction.gas_identity().composition_fingerprint,
-                     reaction.species_indices(), reaction.dependent_index());
+  auto status = gas_.configure(geometry, patch, periodic_,
+                               reaction.gas_identity().composition_fingerprint,
+                               reaction.species_indices(),
+                               reaction.dependent_index(), true);
   if (status)
-    status = events_.configure(geometry, periodic_);
+    status = events_.configure(geometry, periodic_, walls);
   if (!status)
     return status;
   spray::detail::LiquidPropertyService liquid(&asset_.pack, 1);
@@ -147,8 +161,20 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
           const int r = v % count;
           return r < 0 ? r + count : r;
         };
-        const Int3 g{wrap(x + patch.begin.x, n.x), wrap(y + patch.begin.y, n.y),
-                     wrap(z + patch.begin.z, n.z)};
+        int index[]{x + patch.begin.x, y + patch.begin.y, z + patch.begin.z};
+        const int extent[]{n.x, n.y, n.z};
+        bool physical_ghost = false;
+        for (unsigned d = 0; d < 3; ++d) {
+          if (periodic_[d])
+            index[d] = wrap(index[d], extent[d]);
+          else if (index[d] < 0 || index[d] >= extent[d])
+            physical_ghost = true;
+        }
+        // Sampling/deposition use one-sided interior cell values at physical
+        // boundaries. Preserve the native gas solver's physical ghost closure.
+        if (physical_ghost)
+          continue;
+        const Int3 g{index[0], index[1], index[2]};
         halo_cells_.push_back(std::uint64_t(g.x) +
                               std::uint64_t(n.x) * (std::uint64_t(g.y) +
                                                     std::uint64_t(n.y) * g.z));

@@ -128,7 +128,7 @@ std::vector<double> snapshot(const RestartSnapshot &s,
     v.push_back(s.cell_records.variable_cell_bytes.data[i]);
   return v;
 }
-bool inventory(const RestartSnapshot &s, int rank) {
+bool inventory(const RestartSnapshot &s, int rank, bool wall) {
   ConstFieldView h, p, u, Y, passive;
   for (std::size_t i = 0; i < s.fields.size; ++i) {
     auto f = s.fields.data[i];
@@ -222,6 +222,9 @@ bool inventory(const RestartSnapshot &s, int rank) {
       local[0] += mass;
       local[1] += mass * (-1e5 + 1000 * (T - 298.15) + K);
       local[6] += 1;
+      if (wall)
+        valid &=
+            real(row + 16) < 1 && real(row + 16) > .9998 && real(row + 40) < 0;
     }
     for (std::uint64_t i = 0; i < injectors; ++i, row += 24)
       if (u64(row) != UINT64_C(9007199254740997) || u64(row + 16) != s.step ||
@@ -246,7 +249,7 @@ bool inventory(const RestartSnapshot &s, int rank) {
                   << " gas_target_error=" << global[5] - s.closed_mass_target
                   << " parcels=" << global[6] << '\n';
   return std::abs(dm) < 1e-10 && std::abs(dE) < 1e-5 &&
-         std::abs(global[2] - 2 * injected) < 1e-9 &&
+         (wall || std::abs(global[2] - 2 * injected) < 1e-9) &&
          std::abs(global[3]) < 1e-9 && std::abs(global[4]) < 1e-9 &&
          std::abs(global[5] - s.closed_mass_target) < 1e-10 &&
          global[6] == s.step &&
@@ -334,7 +337,8 @@ int main(int argc, char **argv) {
         status = reference.committed_restart_snapshot(s);
         ok = agree(bool(status));
         if (ok)
-          ok = agree(inventory(s, rank));
+          ok = agree(inventory(
+              s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip));
       }
     }
     if (ok) {
@@ -408,7 +412,8 @@ int main(int argc, char **argv) {
       status = reference.committed_restart_snapshot(s);
       ok = agree(bool(status));
       if (ok)
-        ok = agree(inventory(s, rank));
+        ok = agree(inventory(
+            s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip));
     }
     if (ok) {
       int pid = int(getpid());
@@ -526,6 +531,12 @@ int main(int argc, char **argv) {
       if (rank == 0)
         std::filesystem::remove_all(root);
     }
+    if (!ok && rank == 0)
+      for (const auto &failure :
+           report.pressure_energy_globalization.candidate_evaluation_status)
+        if (!failure)
+          std::cerr << "candidate rejection " << unsigned(failure.code) << ':'
+                    << failure.detail << '\n';
     if (!ok && rank == 0)
       std::cerr << "native spray product failure " << unsigned(status.code)
                 << ':' << status.detail << '\n';

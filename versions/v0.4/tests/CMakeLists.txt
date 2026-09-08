@@ -335,6 +335,14 @@ foreach(spray_ranks IN ITEMS 1 2 4)
       ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_product_spray_advance_test>
       "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_spray_advance_mpi_${spray_ranks} PROPERTIES TIMEOUT 30)
+  foreach(spray_boundary IN ITEMS 1 2 3 4)
+    add_test(NAME v04_product_spray_boundary_${spray_boundary}_mpi_${spray_ranks}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+        ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_product_spray_advance_test>
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset"
+        ${spray_boundary} ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(v04_product_spray_boundary_${spray_boundary}_mpi_${spray_ranks} PROPERTIES TIMEOUT 30)
+  endforeach()
 endforeach()
 
 # Small portable validation cases: each manifest configuration is one test.
@@ -1932,6 +1940,10 @@ foreach(spray_ranks IN ITEMS 1 2 4)
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-mean")
   set_tests_properties(v04_product_spray_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_wall_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-wall")
+  set_tests_properties(v04_product_spray_wall_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
   add_test(NAME v04_product_spray_esf_mpi_${spray_ranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf")
@@ -2005,7 +2017,7 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
+set(coupled_cli_cases reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
   list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera)
 endif()
@@ -2013,6 +2025,9 @@ foreach(coupled_case IN LISTS coupled_cli_cases)
   set(coupled_initial_state "101325,300,0,0,0,0.25")
   if(coupled_case MATCHES "^reacting-spray-")
     set(coupled_initial_state "101325,400,0,0,0,0.01")
+  endif()
+  if(coupled_case STREQUAL "reacting-spray-outlet")
+    set(coupled_initial_state "101325,400,0.3,0,0,0.01")
   endif()
   if(coupled_case STREQUAL "reacting-spray-esf-passive")
     set(coupled_initial_state "101325,400,0,0,0,0.01,-2")

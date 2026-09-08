@@ -207,6 +207,32 @@ bool test_native_gas_sampler() {
   passed &= expect(sampler.locate(wrapped, revision, location) &&
                        location.global_cell == 17,
                    "periodic image resolves to the same physical owner");
+  auto probe = p;
+  const auto faces = geometry.y().faces();
+  probe.position_m[1] = faces.data[0] - .25 * (faces.data[1] - faces.data[0]);
+  passed &= expect(sampler.sample(probe, .05, ParcelPass::predictor, revision,
+                                  ys.data(), ys.size())
+                           .status != portable::Status::success,
+                   "strict gas sampler rejects an outside-domain probe");
+  passed &=
+      bool(sampler.configure(geometry, patch, {true, false, false}, 100,
+                             {mapping.data(), mapping.size()}, 1, true)) &&
+      bool(sampler.bind(revision, .1, 101325, views[0], views[1], views[2],
+                        {views.data() + 3, 2}));
+  const auto extended = sampler.sample(probe, .05, ParcelPass::predictor,
+                                       revision, ys.data(), ys.size());
+  passed &= expect(extended.status == portable::Status::success &&
+                       near(ys[0], .3 + .01 * geometry.y().centres().data[0]) &&
+                       !sampler.stencil(probe.position_m).succeeded() &&
+                       !sampler.locate(probe.position_m, revision, location),
+                   "bounded trial continuation is not an accepted owner or "
+                   "deposition permission");
+  probe.position_m[1] = faces.data[0] - 2 * (faces.data[1] - faces.data[0]);
+  passed &= expect(sampler.sample(probe, .05, ParcelPass::corrector, revision,
+                                  ys.data(), ys.size())
+                           .status != portable::Status::success,
+                   "trial continuation cannot mask an unbounded domain escape");
+  ys = before;
   for (double &v : buffers[3])
     v = std::numeric_limits<double>::quiet_NaN();
   passed &= expect(sampler.sample(p, .05, ParcelPass::corrector, revision,
