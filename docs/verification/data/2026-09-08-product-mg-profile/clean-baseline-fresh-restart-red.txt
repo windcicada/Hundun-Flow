@@ -1,0 +1,28 @@
+Internal ctest changing into directory: /tmp/hundun-mg-driver-baseline-20260908
+Test project /tmp/hundun-mg-driver-baseline-20260908
+    Start 248: v04_product_fresh_projection_mpi_1
+1/1 Test #248: v04_product_fresh_projection_mpi_1 ...***Failed    2.95 sec
+rank 0 FAIL: distributed Restart skips Fresh and restores U/non-interface flux bytes exactly, with zero IBM interface flux
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[55097,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:Errors while running CTest
+
+v04_focused    =   2.95 sec*proc (1 test)
+
+Total Test time (real) =   2.95 sec
+
+The following tests FAILED:
+	248 - v04_product_fresh_projection_mpi_1 (Failed)       v04_focused

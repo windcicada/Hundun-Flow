@@ -350,13 +350,13 @@ bool distributed_restart_skips_fresh(const ValidatedModel &model,
             if (axis == 0U) --low.x;
             if (axis == 1U) --low.y;
             if (axis == 2U) --low.z;
-            const bool interface = cube_solid(model, restart.patch, low) !=
-                                   cube_solid(model, restart.patch, {x, y, z});
-            // The owning fluid rank reapplies impermeability.  Duplicated
-            // partition faces may retain either sign of zero; every other
-            // checkpoint byte, including negative zeros, is authoritative.
+            const bool touches_solid = cube_solid(model, restart.patch, low) ||
+                                       cube_solid(model, restart.patch, {x, y, z});
+            // Legacy recovery retires inactive solid-solid flux as well as
+            // enforcing interface impermeability. Duplicated partition faces
+            // may retain either zero sign. Fluid-fluid bytes stay authoritative.
             local_exact &=
-                interface ? faces[axis].unchecked({x, y, z}) == 0.0
+                touches_solid ? faces[axis].unchecked({x, y, z}) == 0.0
                           : same_bits(faces[axis].unchecked({x, y, z}),
                                       image.final_mass_flux[axis][face]);
           }
@@ -376,8 +376,8 @@ bool distributed_restart_skips_fresh(const ValidatedModel &model,
       derived.rate_layers_bitwise_equal;
   passed = collective(local_exact);
   return expect(passed, rank,
-                "distributed Restart skips Fresh and restores U/non-interface "
-                "flux bytes exactly, with zero IBM interface flux");
+                "distributed Restart skips Fresh and restores U/fluid-fluid "
+                "flux bytes exactly, with zero solid-adjacent flux");
 }
 
 bool distributed_ibm_fresh(int rank) {

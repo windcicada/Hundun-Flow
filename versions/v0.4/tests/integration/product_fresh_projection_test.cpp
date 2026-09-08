@@ -437,6 +437,7 @@ bool restart_matches_image(ProductDriver &driver, const RestartImage &image,
                                                  restored.final_mass_flux.y,
                                                  restored.final_mass_flux.z};
   std::size_t canonicalized_interfaces = 0U;
+  std::size_t canonicalized_solid_faces = 0U;
   for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
     std::size_t face = 0U;
     for (std::int32_t z = 0; z < faces[axis].extents.z; ++z)
@@ -446,20 +447,24 @@ bool restart_matches_image(ProductDriver &driver, const RestartImage &image,
           if (axis == 0U) --low.x;
           if (axis == 1U) --low.y;
           if (axis == 2U) --low.z;
-          const bool interface = cube_solid(model, restored.patch, low) !=
-                                 cube_solid(model, restored.patch, {x, y, z});
+          const bool low_solid = cube_solid(model, restored.patch, low);
+          const bool high_solid = cube_solid(model, restored.patch, {x, y, z});
+          const bool interface = low_solid != high_solid;
           const double original = image.final_mass_flux[axis][face];
-          // Restart must reimpose the impermeable IBM interface.  Its
-          // canonical +0 is not an invocation of the Fresh projection.
-          const double expected = interface ? 0.0 : original;
+          // Legacy recovery retires inactive interior flux and reimposes
+          // impermeability. Neither operation invokes the Fresh projection.
+          const double expected = low_solid || high_solid ? 0.0 : original;
           passed &= same_bits(faces[axis].unchecked({x, y, z}), expected);
           canonicalized_interfaces += interface && std::signbit(original);
+          canonicalized_solid_faces += low_solid && high_solid && std::signbit(original);
         }
   }
   passed &= canonicalized_interfaces == 192U;
+  // The 8^3 solid cube has 3*7*8*8 interior faces; half carry source -0.
+  passed &= canonicalized_solid_faces == 672U;
   return expect(passed,
                 "Restart skips Fresh projection and restores velocity and "
-                "non-interface flux bytes exactly; IBM flux is canonical zero");
+                "fluid-fluid flux bytes exactly; solid-adjacent flux is canonical zero");
 }
 
 bool restart_skips_fresh_projection(const ValidatedModel &model,

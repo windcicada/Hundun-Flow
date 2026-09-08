@@ -1,0 +1,29 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 247: v04_product_fresh_projection
+1/7 Test #247: v04_product_fresh_projection ..............***Failed    0.99 sec
+FAIL: Restart skips Fresh projection and restores velocity and non-interface flux bytes exactly; IBM flux is canonical zero
+
+    Start 248: v04_product_fresh_projection_mpi_1
+2/7 Test #248: v04_product_fresh_projection_mpi_1 ........   Passed    0.93 sec
+    Start 249: v04_product_fresh_projection_mpi_2
+3/7 Test #249: v04_product_fresh_projection_mpi_2 ........   Passed    0.65 sec
+    Start 250: v04_product_fresh_projection_mpi_4
+4/7 Test #250: v04_product_fresh_projection_mpi_4 ........   Passed    0.55 sec
+    Start 251: v04_product_pressure_energy_retry_mpi_1
+5/7 Test #251: v04_product_pressure_energy_retry_mpi_1 ...   Passed    1.15 sec
+    Start 252: v04_product_pressure_energy_retry_mpi_2
+6/7 Test #252: v04_product_pressure_energy_retry_mpi_2 ...   Passed    0.97 sec
+    Start 253: v04_product_pressure_energy_retry_mpi_4
+7/7 Test #253: v04_product_pressure_energy_retry_mpi_4 ...   Passed    0.98 sec
+
+86% tests passed, 1 tests failed out of 7
+
+Label Time Summary:
+v04_focused    =  12.42 sec*proc (7 tests)
+
+Total Test time (real) =   6.23 sec
+
+The following tests FAILED:
+	247 - v04_product_fresh_projection (Failed)             v04_focused
+Errors while running CTest
