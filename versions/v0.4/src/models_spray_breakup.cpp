@@ -351,4 +351,108 @@ BreakupChildReport generate_supplied_diameter_children(
   return report;
 }
 
+TabRepresentativeSplitReport generate_tab_representative_children(
+    const TabRepresentativeSplitInput& input) noexcept {
+  TabRepresentativeSplitReport report;
+  const double radius = 0.5 * input.parent.droplet_diameter_m;
+  const double rho = input.liquid_density_kg_per_m3;
+  const double sigma = input.surface_tension_n_per_m;
+  if (!valid_tab_trigger(input.tab_trigger) ||
+      !input.tab_trigger.breakup_requested ||
+      input.child_parcel_count < 2U || input.child_parcel_count % 2U != 0U ||
+      input.child_parcel_count > kMaximumBreakupChildParcels ||
+      !std::isfinite(rho) || rho <= 0.0 || !std::isfinite(sigma) || sigma <= 0.0 ||
+      !finite_vector(input.breakup_axis) ||
+      !std::isfinite(radius) || radius <= 0.0 ||
+      std::abs(input.tab_trigger.candidate.deformation - 1.0) > 1e-10) return report;
+  const double stiffness = 8.0 * sigma / (rho * radius * radius * radius);
+  if (!within_tolerance(input.tab_trigger.stiffness_per_s2 - stiffness,
+                        input.tab_trigger.stiffness_per_s2, stiffness, 1e-10))
+    return report;
+  const double axis_length = std::sqrt(dot(input.breakup_axis, input.breakup_axis));
+  if (!std::isfinite(axis_length) || axis_length <= 0.0) return report;
+  Vector3 axis = input.breakup_axis;
+  for (double& value : axis) value /= axis_length;
+  // Choose a well-conditioned transverse basis deterministically. The RNG
+  // address is used only for child identities, not a new dispersion model.
+  const Vector3 reference = std::abs(axis[0]) < 0.8 ? Vector3{1, 0, 0}
+                                                  : Vector3{0, 1, 0};
+  Vector3 normal{axis[1]*reference[2]-axis[2]*reference[1],
+                 axis[2]*reference[0]-axis[0]*reference[2],
+                 axis[0]*reference[1]-axis[1]*reference[0]};
+  const double normal_length = std::sqrt(dot(normal, normal));
+  for (double& value : normal) value /= normal_length;
+  const double rate = input.tab_trigger.candidate.deformation_rate_per_s;
+  const double inverse_size_ratio = 7.0/3.0 +
+      rho * radius * radius * radius * rate * rate / (8.0 * sigma);
+  const double energy_per_drop = (10.0/3.0) * kPi/5.0 * rho *
+      std::pow(radius, 5) * (rate * rate + stiffness);
+  BreakupChildInput supplied;
+  supplied.parent = input.parent;
+  supplied.tab_trigger = input.tab_trigger;
+  supplied.accepted_step = input.accepted_step;
+  supplied.breakup_ordinal = input.breakup_ordinal;
+  supplied.parameters = {input.child_parcel_count, kMaximumBreakupChildParcels,
+      2.0 * radius / inverse_size_ratio, rho, sigma,
+      input.liquid_absolute_thermochemical_enthalpy_j_per_kg, energy_per_drop};
+  auto split = generate_supplied_diameter_children(supplied);
+  if (!split.succeeded()) { report.status = split.status; return report; }
+  const double transverse_speed = 0.5 * radius * rate;
+  long double kinetic = 0.0L;
+  std::array<long double, 3> child_momentum{};
+  for (std::uint32_t i = 0; i < split.candidate.child_count; ++i) {
+    auto& child = split.candidate.children[i];
+    for (std::size_t d = 0; d < 3; ++d)
+      child.velocity_m_per_s[d] += (i % 2U ? -1.0 : 1.0) * transverse_speed * normal[d];
+    kinetic += 0.5L * child.droplet_mass_kg * child.multiplicity *
+        dot(child.velocity_m_per_s, child.velocity_m_per_s);
+    for (std::size_t d = 0; d < 3; ++d)
+      child_momentum[d] += static_cast<long double>(child.droplet_mass_kg) *
+          child.multiplicity * child.velocity_m_per_s[d];
+    if (validate_parcel_state(child) != ParcelStateStatus::success) return report;
+  }
+  auto& budget = split.conservation;
+  for (std::size_t d = 0; d < 3; ++d) {
+    budget.children_total_momentum_kg_m_per_s[d] = static_cast<double>(child_momentum[d]);
+    budget.momentum_residual_kg_m_per_s[d] =
+        budget.children_total_momentum_kg_m_per_s[d] - budget.parent_total_momentum_kg_m_per_s[d];
+    if (!within_tolerance(budget.momentum_residual_kg_m_per_s[d],
+                          budget.children_total_momentum_kg_m_per_s[d],
+                          budget.parent_total_momentum_kg_m_per_s[d],
+                          kAbsoluteMomentumToleranceKgMPerS)) {
+      report.status = BreakupChildStatus::conservation_failure;
+      return report;
+    }
+  }
+  budget.children_bulk_kinetic_energy_j = static_cast<double>(kinetic);
+  budget.bulk_kinetic_energy_residual_j = budget.children_bulk_kinetic_energy_j -
+      budget.parent_bulk_kinetic_energy_j;
+  const double dispersion = 0.5 * budget.parent_total_mass_kg *
+      transverse_speed * transverse_speed;
+  const double residual = budget.surface_energy_increase_j + dispersion -
+      budget.supplied_deformation_energy_j;
+  if (!std::isfinite(residual) ||
+      !within_tolerance(residual, budget.surface_energy_increase_j + dispersion,
+                        budget.supplied_deformation_energy_j, kAbsoluteEnergyToleranceJ) ||
+      !within_tolerance(budget.bulk_kinetic_energy_residual_j - dispersion,
+                        budget.children_bulk_kinetic_energy_j,
+                        budget.parent_bulk_kinetic_energy_j, kAbsoluteEnergyToleranceJ)) {
+    report.status = BreakupChildStatus::conservation_failure;
+    return report;
+  }
+  // No heat or gas source absorbs a residual. Dispersion consumes the exact
+  // non-surface part of the oscillation budget; children start undeformed.
+  budget.unassigned_deformation_energy_j = -residual;
+  budget.energy_disposition = BreakupEnergyDisposition::balanced;
+  split.model_id = report.model_id;
+  report.status = BreakupChildStatus::success;
+  report.representative_diameter_m = supplied.parameters.supplied_uniform_child_diameter_m;
+  report.transverse_speed_m_per_s = std::abs(transverse_speed);
+  report.deformation_energy_j = budget.supplied_deformation_energy_j;
+  report.transverse_kinetic_energy_j = dispersion;
+  report.total_energy_residual_j = residual;
+  report.split = split;
+  return report;
+}
+
 }  // namespace hundun::v04::spray::detail

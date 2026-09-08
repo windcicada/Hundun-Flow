@@ -66,9 +66,24 @@ worktree 工作；不得写产品主线/旧供体，不提交、不改中央文�
 | P3 TCR | P2 | 待实施 | 统计映射、根可接受性/历史、折点/拒绝、证据准入 | cell/revision；branch history；真实统计反馈 |
 | P4 物性/气膜 | P1 | 待实施 | 焓积分、包读取/身份、两套合成包、完整气膜 | 气相采样；资产身份；用户真实燃料验收 |
 | P5 轨迹/事件 | P4/P6 | 待实施 | 自适应蒸发、重采样、统一事件/出口 H+K | 几何/采样/沉积；parcel accepted clocks；真实边界 |
-| P6 TAB | 冻结接口 | 待实施 | 粒径预测、表面/变形/体动能、子候选与 ID | 共同父子替换；TAB/ordinal；产品破碎预算 |
+| P6 TAB | 冻结接口 | 实现/本地验证完成 | 粒径预测、成对速度扰动、表面/变形/体动能、子候选与 ID | 共同父子替换；TAB/ordinal；产品破碎预算 |
 | P7 生命周期 | P5/P6 组合 | 待实施 | 定位预检、容量、普通值快照、1/2/4 rank | 分区/共同提交/Restart；injector/parcel/RNG；恢复一致性 |
-| P8 组合 | P1–P7 | 待实施 | cell/ID/segment 有序汇总、非线性 K、公共源、共同候选 | rho*h-p/压力功/PISO/执行图；全参与者状态；联立验收 |
+| P8 组合 | P1–P7 | 汇总核通过，组合待依赖 | cell/ID/segment 有序汇总、非线性 K、公共源、共同候选 | rho*h-p/压力功/PISO/执行图；全参与者状态；联立验收 |
+
+接口冻结 DCO：`5149e92`。P6 来源：
+[O'Rourke–Amsden 原始报告](https://digital.library.unt.edu/ark:/67531/metadc1106123/m2/1/high_res_d/6118786.pdf)
+PDF p7，式14、19–22；独立实现 K=10/3、Cb=1/2、Ck=8、y=1 的代表等径模型，
+偶数2..16子 parcel 成对横向速度闭合预算；不兼容阈值明确拒绝。
+P6 RED 为新增函数链接缺失，GREEN 为 `^v04_models_spray_breakup$` 1/1 PASS。
+P8 汇总核 RED 为新接口链接缺失；`^v04_models_exchange_batch$` 1/1 PASS：
+两滴→单元动能解析预算、顺序/重试、重复项、revision、容量、权重及出口分账。
+该核固定容量，无场写入，借用候选在下一次调用（即使失败）后失效。
+
+OpenFOAM 测试问题参考固定为
+`43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4`（只读 ls-remote 核实）。
+仅参考 [chemistry 测试组织](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/chemistry)
+和 [Lagrangian 问题分类](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/Lagrangian)；
+不复制其实现、字典或脚本，不运行上游测试。
 
 所有 P→I 失败由产品适配映射为整次尝试拒绝；不得部分源发布。
 V1/V2 仅在包全部完成后运行：合成小算例，最多 12³/4 ranks，每配置一轮，

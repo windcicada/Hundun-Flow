@@ -114,4 +114,41 @@ struct BreakupChildReport {
 [[nodiscard]] BreakupChildReport generate_supplied_diameter_children(
     const BreakupChildInput& input) noexcept;
 
+// O'Rourke/Amsden (1987), LA-UR-87-2105-Rev, equations 14, 19--22.
+// K=10/3, Cb=1/2, Ck=8, y=1. Equal-size representatives replace the
+// original size distribution; opposite transverse velocity pairs preserve
+// momentum and the TAB surface/oscillation/kinetic energy budget.
+struct TabRepresentativeSplitInput {
+  SprayParcelState parent{};
+  TabBreakupReport tab_trigger{};
+  std::uint64_t accepted_step{};
+  std::uint64_t breakup_ordinal{};
+  std::uint32_t child_parcel_count{2U};
+  double liquid_density_kg_per_m3{};
+  double surface_tension_n_per_m{};
+  double liquid_absolute_thermochemical_enthalpy_j_per_kg{};
+  Vector3 breakup_axis{1.0, 0.0, 0.0};
+};
+
+struct TabRepresentativeSplitReport {
+  BreakupChildStatus status{BreakupChildStatus::invalid_input};
+  std::string_view model_id{"tab_representative_equal_children_v1"};
+  double oscillation_energy_multiplier{10.0 / 3.0};
+  double deformation_threshold{1.0};
+  double displacement_scale{0.5};
+  double stiffness_coefficient{8.0};
+  double representative_diameter_m{};
+  double transverse_speed_m_per_s{};
+  double deformation_energy_j{};
+  double transverse_kinetic_energy_j{};
+  double total_energy_residual_j{};
+  BreakupChildReport split{};
+  [[nodiscard]] bool succeeded() const noexcept {
+    return status == BreakupChildStatus::success && split.succeeded();
+  }
+};
+
+[[nodiscard]] TabRepresentativeSplitReport generate_tab_representative_children(
+    const TabRepresentativeSplitInput& input) noexcept;
+
 }  // namespace hundun::v04::spray::detail

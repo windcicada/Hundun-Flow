@@ -268,6 +268,7 @@ set(hundun_v04_core_sources
   src/mesh_ibm_topology.cpp
   src/mesh_stl_scan.cpp
   src/models_combustion.cpp
+  src/models_exchange_batch.cpp
   src/models_spray.cpp
   src/models_spray_breakup.cpp
   src/models_spray_mechanics.cpp

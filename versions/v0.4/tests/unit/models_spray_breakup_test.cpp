@@ -346,6 +346,49 @@ bool test_failures_publish_no_partial_children() {
 
 int main() {
   bool passed = true;
+  TabRepresentativeSplitInput tab;
+  tab.parent = parent_parcel();
+  tab.tab_trigger = breakup_trigger();
+  tab.tab_trigger.candidate.deformation_rate_per_s = 0.0;
+  tab.liquid_density_kg_per_m3 = 800.0;
+  tab.surface_tension_n_per_m = 0.025;
+  tab.liquid_absolute_thermochemical_enthalpy_j_per_kg = -2.0e5;
+  const auto bag = generate_tab_representative_children(tab);
+  passed &= expect(bag.succeeded() &&
+      near(bag.representative_diameter_m, 4.2857142857142857e-5, 1e-13, 1e-20) &&
+      near(bag.total_energy_residual_j, 0.0, 0.0, 1e-18),
+      "TAB bag limit r/r32=7/3 closes surface and deformation energy");
+  // Worked SI example: r=50 um, rho=800, sigma=.025, ydot=20000/s.
+  // rho*r^3*ydot^2/(8*sigma)=.2; d32=3.94736842105263e-5 m;
+  // transverse speed=.5 m/s, Ekin=5.235987755982989e-9 J (100 drops).
+  tab.tab_trigger.candidate.deformation_rate_per_s = 20000.0;
+  tab.child_parcel_count = 4;
+  const auto moving = generate_tab_representative_children(tab);
+  const auto retry = generate_tab_representative_children(tab);
+  passed &= expect(moving.succeeded() &&
+      near(moving.representative_diameter_m, 3.9473684210526316e-5, 1e-13, 1e-20) &&
+      near(moving.transverse_speed_m_per_s, 0.5) &&
+      near(moving.transverse_kinetic_energy_j, 5.235987755982989e-9, 1e-13, 1e-22) &&
+      near(moving.total_energy_residual_j, 0, 0, 1e-18) &&
+      same_candidate(moving.split.candidate, retry.split.candidate),
+      "TAB rate response, dispersion energy and retry identity match independent values");
+  Vector3 total_p{};
+  for (std::uint32_t i=0; i<moving.split.candidate.child_count; ++i) {
+    const auto& child=moving.split.candidate.children[i];
+    for (std::size_t j=0;j<3;++j)
+      total_p[j]+=child.droplet_mass_kg*child.multiplicity*child.velocity_m_per_s[j];
+  }
+  for (std::size_t j=0;j<3;++j)
+    passed &= expect(near(total_p[j], tab.parent.droplet_mass_kg *
+        tab.parent.multiplicity*tab.parent.velocity_m_per_s[j],1e-13,1e-22),
+        "paired TAB child dispersion conserves momentum");
+  tab.tab_trigger.candidate.deformation = 0.9;
+  passed &= expect(!generate_tab_representative_children(tab).succeeded(),
+      "TAB representative closure rejects non-unit trigger without child publication");
+  tab.tab_trigger.candidate.deformation = 1.0;
+  tab.child_parcel_count=3;
+  passed &= expect(!generate_tab_representative_children(tab).split.candidate.available,
+      "unpaired child count rejects before publication");
   passed &= test_conservative_uniform_split();
   passed &= test_breakup_rng_domain_and_retry_determinism();
   passed &= test_energy_disposition_and_multiplicity_scaling();

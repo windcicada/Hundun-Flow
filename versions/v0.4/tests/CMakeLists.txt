@@ -282,6 +282,12 @@ add_executable(v04_models_combustion_test
 target_link_libraries(v04_models_combustion_test PRIVATE hundun_v04_test_core)
 add_test(NAME v04_models_combustion COMMAND v04_models_combustion_test)
 
+add_executable(v04_models_exchange_batch_test unit/models_exchange_batch_test.cpp)
+target_include_directories(v04_models_exchange_batch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_exchange_batch_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_exchange_batch COMMAND v04_models_exchange_batch_test)
+set_tests_properties(v04_models_exchange_batch PROPERTIES TIMEOUT 15)
+
 add_executable(v04_models_combustion_allocation_test
   unit/models_combustion_allocation_test.cpp)
 target_link_libraries(v04_models_combustion_allocation_test PRIVATE hundun_v04_test_core)
