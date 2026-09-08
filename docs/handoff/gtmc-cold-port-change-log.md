@@ -6,6 +6,14 @@ not a physical validation or exact continuation of COAST's PDF solution;
 **the requested GTMC short and medium runs have not passed yet**. Unit tests and
 geometry probes below are not acceptance runs.
 
+Actual candidate `f10f15a077961a1be01027f613e317e7759eaf50` was built clean
+with GCC 11.4 Release/tests OFF and run on 64 local ranks. The 100-step request
+failed before the first new commit; a separate one-step replay reproduced the
+same failure. Further advancement requires an explicit outlet-model decision,
+because the imported COAST zero-gradient/mass-closure outlet is not the current
+Hundun pressure-outlet contract. Detailed receipts are outside the source tree:
+`/home/administrator/gtmc-hundun-port-20260908/candidate-f10f15a/RUN_STATUS.md`.
+
 Baseline: `86542bb96678ec844ae5ac95d8f6391993da239e`, Hundun-Flow v0.4.
 All code changes are local and unpushed. This ledger is updated with each
 integration stage so mainline synchronization does not rely on chat history.
@@ -113,6 +121,30 @@ passed. The short/medium windows remain outstanding.
 
 ## Latest verified checkpoints
 
+- Actual short-run failure and minimal replay (candidate f10f15a): both ended
+  at step 20000, first numerical_failure/985 in predictor stage 10 at
+  dt=4.4948431655269229e-7, last rejected_step/10464 in stage 44 on attempt 9
+  at dt=1.7557981115339543e-9. No new step or Evidence row was committed.
+  Wall times were 36.09/36.63 s, zero swap. Executable SHA-256
+  `a48c2e5990b5898ead1c4f2fb5089704af49574fdfb1c39a7be37ccddd8bebd7`;
+  target manifest SHA-256
+  `d08b929a947e7319823791bde3dde1bd6460b0577a494ec33f8462ca6ab87cee`.
+  `core_product_freeze.cpp::evaluate_pressure_energy_candidate` maps the
+  finalizer status to 10210+254=10464. The only rejected_step returns in
+  `solver_candidate_boundary.cpp::prepare_physical_boundary_flux` are the
+  pressure-outlet backflow checks; with this case's allow_backflow=false,
+  line 646 rejects negative outward mechanical flux. The frozen COAST input
+  explicitly selects zeroGradientOutlet/marker -2 and documents its mass-
+  closure path, not the pressure/characteristic -60 path. The previously
+  documented allow_backflow=false observation was incomplete: ghost closure
+  remains extrapolated, but final physical-flux acceptance rejects reversal.
+  No rejection guard or numerical tolerance was relaxed.
+- Source inspection also identifies an outstanding per-patch finalizer seam:
+  `resolve_static_boundary_values` uses individual air-patch capacities, but
+  `prepare_physical_boundary_flux` still recomputes one mass-flow capacity for
+  the complete Cartesian face. Its finalization must gain patch membership
+  and a focused regression before GTMC acceptance can be claimed. This is a
+  source-inspection finding, not yet a separately executed failing fixture.
 - Pre-candidate consistent-build regression batch passed 6/6:
   imported-marker MPI 1/2 ranks (0.67/0.60 s), app init/run/restart/diagnostics
   (8.23 s), resolved Vreman (0.34 s), compiled patch inlets (0.43 s), and case
