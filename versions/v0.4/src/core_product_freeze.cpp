@@ -59,7 +59,8 @@ constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
 // interpretation changes. Model/BC/transport parameters remain bound by plan.
 constexpr PlanFingerprint method_history_signature(bool transported_scalars,
                                                    bool reacting = false,
-                                                   bool esf = false) noexcept {
+                                                   bool esf = false,
+                                                   bool tcr = false) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
@@ -87,6 +88,12 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
     for (char byte : std::string_view(
              ";esf-native-transport-iem-two-half-chemistry-be-v1;"
              "esf-mean-reconciliation-v1;esf-shared-gamma-total-h-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (tcr)
+    for (char byte : std::string_view(
+             ";tcr-accepted-ph-statistics-v1;branch-history-bytes-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -3003,6 +3010,7 @@ struct ProductDriver::Impl {
 };
 
 void ProductDriver::Impl::clear_pending_attempt_side_state() noexcept {
+  plan.implementation_->esf.tcr_history.discard();
   pending_pressure_reference = {};
   pending_force_cache = false;
   trial_enthalpy_ghost = {};
@@ -3056,6 +3064,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
   pressure_reference = pending_pressure_reference.value;
   pressure_correction_warm_start_valid = true;
   balance_history = pending_balance;
+  plan.implementation_->esf.tcr_history.commit();
   clear_pending_attempt_side_state();
 }
 
@@ -6136,9 +6145,12 @@ Status ProductDriver::restart_expected(
   }
   out.method_history_signature = method_history_signature(
       !product.fields.scalars.empty(), product.reaction.enabled(),
-      product.esf.enabled());
+      product.esf.enabled(), product.esf.tcr_history.enabled());
   if (history_policy == RestartHistoryPolicy::rebuild_method_history)
     out.compatible_method_plan = product.legacy_afc_v3_fingerprint;
+  const auto records = product.esf.tcr_history.snapshot();
+  out.cell_record_identity = records.identity;
+  out.cell_record_bytes = records.record_bytes;
   return {};
 }
 
@@ -6974,7 +6986,7 @@ Status ProductDriver::initialize_restart(
   const auto history_compatibility =
       image.history_compatibility(method_history_signature(
           !product.fields.scalars.empty(), product.reaction.enabled(),
-          product.esf.enabled()));
+          product.esf.enabled(), product.esf.tcr_history.enabled()));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -7018,9 +7030,11 @@ Status ProductDriver::initialize_restart(
     status = {StatusCode::invalid_plan, kProductHistoryIncompatible};
   if (status &&
       ((image.source_format_version == 1U) != image.backward_euler_recovery ||
-       image.source_format_version < 1U || image.source_format_version > 3U ||
-       (image.source_format_version < 3U && image.method_history_signature != 0U) ||
-       (image.source_format_version == 3U && image.method_history_signature == 0U)))
+       image.source_format_version < 1U || image.source_format_version > 4U ||
+       (image.source_format_version < 3U &&
+        image.method_history_signature != 0U) ||
+       (image.source_format_version >= 3U &&
+        image.method_history_signature == 0U)))
     status = {StatusCode::invalid_plan, kProductInput};
   const auto same_patch = [&](MeshPatch left, MeshPatch right) noexcept {
     return same_int3(left.begin, right.begin) &&
@@ -7093,6 +7107,8 @@ Status ProductDriver::initialize_restart(
       for (double value : face)
         if (status && !std::isfinite(value))
           status = {StatusCode::numerical_failure, kProductInput};
+  if (status)
+    status = product.esf.tcr_history.stage_restore(image);
   // All malformed-checkpoint decisions become collective before any rank
   // constructs a view into the checkpoint or enters a later mass reduction.
   status = product.reductions.consensus(status);
@@ -7679,6 +7695,7 @@ Status ProductDriver::initialize_restart(
                : runtime.final_flux_writer.initialize_restored(
                      product.final_flux, restored_flux);
   if (!status) return status;
+  product.esf.tcr_history.commit();
   runtime.time = std::move(controller);
   runtime.pressure_reference = image.pressure_reference;
   runtime.previous_pressure_reference =
@@ -8155,9 +8172,10 @@ Status ProductDriver::Impl::execute_attempt(
           product.equations.kernels(), product.reaction, product.thermodynamics,
           {esf_accepted.data(), product.fields.esf_fields.size()},
           {esf_trial.data(), product.fields.esf_fields.size()}, esf_transport,
-          rho_history.accepted, pressure_history.accepted, pressure_reference,
-          accepted_flux, time.time(), step.dt, step.accepted_step,
-          step.generation,
+          rho_history.accepted, pressure_history.accepted,
+          {species_accepted.data(), species_accepted.size()},
+          enthalpy_history.accepted, pressure_reference, accepted_flux,
+          time.time(), step.dt, step.accepted_step, step.generation,
           {esf_sources.data(), product.fields.reaction_sources.size()});
     if (status)
       for (std::size_t s = 0; s < species_rate_history.size(); ++s)
@@ -16052,9 +16070,10 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
       previous_flux,
       runtime.previous_pressure_reference,
       runtime.closed_mass_target,
-      method_history_signature(!product.fields.scalars.empty(),
-                               product.reaction.enabled(),
-                               product.esf.enabled())};
+      method_history_signature(
+          !product.fields.scalars.empty(), product.reaction.enabled(),
+          product.esf.enabled(), product.esf.tcr_history.enabled())};
+  out.cell_records = product.esf.tcr_history.snapshot();
   return {};
 }
 

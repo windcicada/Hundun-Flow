@@ -169,7 +169,7 @@ ideal_gas_reactant_mole_fraction_v1(const ReactantMappingInput &q) noexcept {
       !std::isfinite(r.input.rate_ratio))
     return {};
   r.status = Status::success;
-  r.mapping_identity = 0x5443524d4f4c0001ULL;
+  r.mapping_identity = kReactantMoleFractionMappingIdentity;
   return r;
 }
 bool valid_history(const History &h) noexcept {

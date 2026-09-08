@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "core_reaction_detail.hpp"
+#include "core_tcr_history_detail.hpp"
 #include "models_esf_detail.hpp"
 
 namespace hundun::v04::detail {
-// Owns only prepared scratch. Persistent fields live in native StateLayers;
+// Persistent fields live in native StateLayers; typed TCR histories are staged
+// alongside them.
 // the native attempt transaction is the sole acceptance authority.
 class ProductEsf {
 public:
@@ -23,7 +25,7 @@ public:
     enthalpy_scheme_ = model.schemes.enthalpy;
     if (!gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
         model.time.scheme != TimeScheme::backward_euler ||
-        model.immersed_boundary || spec_.tcr.mode != TcrMode::off)
+        model.immersed_boundary || spec_.tcr.mode == TcrMode::validated)
       return invalid();
     for (const auto &boundary : model.boundaries)
       if (boundary.flow_kind != BoundaryKind::periodic)
@@ -38,11 +40,34 @@ public:
       if (std::abs(sum) > 1e-14)
         return invalid();
     }
-    const std::size_t per_cell = 4 * spec_.fields * stride_ + 4;
-    if (count_ > SIZE_MAX / (sizeof(double) * per_cell) ||
-        count_ * sizeof(double) * per_cell >
-            model.mesh.limits.max_memory_bytes_per_rank)
+    const bool tcr = spec_.tcr.mode != TcrMode::off;
+    if (tcr) {
+      if (spec_.tcr.progress_weights.size() != ns_)
+        return invalid();
+      for (const auto &name : spec_.tcr.reactants) {
+        const auto &names = gas.gas_identity().species_names;
+        const auto found = std::find(names.begin(), names.end(), name);
+        if (found == names.end())
+          return invalid();
+        const auto index = std::size_t(found - names.begin());
+        if (std::find(reactants_.begin(), reactants_.end(), index) !=
+            reactants_.end())
+          return invalid();
+        reactants_.push_back(index);
+      }
+    }
+    const std::size_t per_cell =
+        sizeof(double) * (4 * spec_.fields * stride_ + 4) +
+        (tcr ? 2 * (sizeof(tcr::detail::History) +
+                    ProductTcrHistory::record_bytes)
+             : 0);
+
+    if (count_ > SIZE_MAX / per_cell ||
+        count_ * per_cell > model.mesh.limits.max_memory_bytes_per_rank)
       return {StatusCode::allocation_failure, 10215};
+    if (tcr)
+      tcr_history.configure(gas.fingerprint(), count_,
+                            spec_.tcr.initialization_sign);
     workspace_ = std::make_unique<esf::detail::Workspace>(ns_);
     rates_.resize(count_ * spec_.fields * stride_);
     gradients_.resize(3 * rates_.size());
@@ -98,6 +123,7 @@ public:
     return {};
   }
   bool enabled() const noexcept { return bool(workspace_); }
+  ProductTcrHistory tcr_history;
   double offset(std::size_t f, std::size_t s) const noexcept {
     return spec_.initial_species_offsets.empty()
                ? 0
@@ -194,11 +220,13 @@ public:
                  const ThermodynamicsPlan &thermo,
                  Span<const ConstFieldView> accepted, Span<FieldView> trial,
                  ConstFieldView cache, ConstFieldView rho, ConstFieldView pi,
+                 Span<const ConstFieldView> mean_species, ConstFieldView mean_h,
                  double pressure_reference, ConstFaceFluxView flux, double time,
                  double dt, std::uint64_t step, RevisionToken generation,
                  Span<FieldView> sources) noexcept {
     if (accepted.size != spec_.fields || trial.size != spec_.fields ||
-        sources.size != ns_ - 1 || !(dt > 0) || !std::isfinite(dt))
+        sources.size != ns_ - 1 || mean_species.size != ns_ - 1 || !(dt > 0) ||
+        !std::isfinite(dt))
       return invalid();
     auto scratch = scratch_view(rho, 1);
     KernelInvocation call{{}, {&scratch, 1}, {{0, 0, 0}, cells_}, 0, 0,
@@ -272,6 +300,49 @@ public:
           request.deterministic_rates = rates_.data() + slot(i, 0, 0);
           request.gradients = gradients_.data() + 3 * slot(i, 0, 0);
           request.random = {spec_.seed, step, 1, 0, 0, 1};
+          if (tcr_history.enabled()) {
+            double sum = 0;
+            for (std::size_t a = 0; a < mapping.size; ++a) {
+              means_[mapping.data[a]] = mean_species.data[a].unchecked(cell, 0);
+              sum += means_[mapping.data[a]];
+            }
+            means_[gas.dependent_index()] = 1 - sum;
+            means_[ns_] = mean_h.unchecked(cell, 0);
+            const double pressure = pressure_reference + pi.unchecked(cell, 0);
+            std::array<double, 4> rates{};
+            double psr_rate{};
+            status = progress_rate(gas, thermo, means_.data(), pressure,
+                                   revision, psr_rate);
+            for (std::size_t f = 0; f < spec_.fields && status; ++f)
+              status = progress_rate(gas, thermo, tuple_.data() + f * stride_,
+                                     pressure, revision, rates[f]);
+            if (!status)
+              return status;
+            const auto &identity = gas.gas_identity();
+            const auto mapped =
+                tcr::detail::ideal_gas_reactant_mole_fraction_v1(
+                    {revision, revision, identity.composition_fingerprint,
+                     identity.composition_fingerprint, means_.data(),
+                     identity.molecular_weights_kg_per_kmol.data(), ns_,
+                     reactants_.data(), reactants_.size(), rates.data(),
+                     spec_.fields, psr_rate, spec_.tcr.weak_rate_threshold});
+            const auto &history = tcr_history.accepted(i);
+            tcr::detail::TrialRequest tcr_request;
+            tcr_request.expected_revision = history.revision;
+            tcr_request.mapping = mapped;
+            tcr_request.mode = spec_.tcr.mode == TcrMode::shadow
+                                   ? tcr::detail::Mode::shadow
+                                   : tcr::detail::Mode::experimental;
+            tcr_request.initialization_sign =
+                history.initialized ? 0 : spec_.tcr.initialization_sign;
+            const auto candidate = tcr::detail::prepare(history, tcr_request);
+            if (!candidate.available)
+              return {StatusCode::numerical_failure,
+                      10220U + static_cast<std::uint32_t>(candidate.status)};
+            if (!tcr_history.stage(i, candidate, step))
+              return numerical();
+            request.tcr_control = candidate.mixer_control;
+          }
           auto moved = workspace_->advance(request);
           if (moved.status != portable::Status::success)
             return numerical();
@@ -307,6 +378,7 @@ public:
               trial.data[f].unchecked(cell, c) =
                   reacted.candidate.values[f * stride_ + c];
         }
+    tcr_history.seal();
     return {};
   }
   Status reconcile(Span<FieldView> fields, Span<const ConstFieldView> species,
@@ -426,6 +498,45 @@ private:
     sample = v;
     return {};
   }
+  Status progress_rate(const ProductReactionSources &gas,
+                       const ThermodynamicsPlan &thermo, const double *row,
+                       double pressure, portable::Revision revision,
+                       double &rate) noexcept {
+    portable::GasSample sample;
+    auto status = query(gas, thermo, row, pressure, revision, sample);
+    if (!status)
+      return status;
+    double total = 0, magnitude = 0;
+    rate = 0;
+    for (std::size_t a = 0; a < ns_; ++a) {
+      const double value = query_rates_[a];
+      if (!std::isfinite(value))
+        return numerical();
+      total += value;
+      magnitude += std::abs(value);
+      rate += spec_.tcr.progress_weights[a] * value / sample.density_kg_per_m3;
+    }
+    if (!std::isfinite(rate) || !std::isfinite(magnitude) ||
+        std::abs(total) > 1e-12 + 1e-10 * magnitude)
+      return numerical();
+    const auto &identity = gas.gas_identity();
+    for (std::size_t e = 0; e < identity.element_names.size(); ++e) {
+      total = magnitude = 0;
+      for (std::size_t a = 0; a < ns_; ++a) {
+        const double value =
+            query_rates_[a] *
+            identity.element_counts[a * identity.element_names.size() + e] /
+            identity.molecular_weights_kg_per_kmol[a];
+        total += value;
+        magnitude += std::abs(value);
+      }
+      if (!std::isfinite(magnitude) ||
+          std::abs(total) > 1e-12 + 1e-10 * magnitude)
+        return numerical();
+    }
+    return {};
+  }
+  std::vector<std::size_t> reactants_;
   EsfSpec spec_;
   Int3 cells_{};
   std::size_t ns_{}, stride_{}, count_{};

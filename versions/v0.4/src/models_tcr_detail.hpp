@@ -42,6 +42,8 @@ struct Statistics {
 };
 Statistics statistics(const double *scalar, const double *rates,
                       std::size_t count) noexcept;
+inline constexpr std::uint64_t kReactantMoleFractionMappingIdentity =
+    0x5443524d4f4c0001ULL;
 struct MappingReport {
   Status status{Status::mapping_unavailable};
   AlgebraInput input{};

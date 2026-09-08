@@ -5,6 +5,7 @@
 #include "hundun/v04_portable.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <mpi.h>
@@ -70,18 +71,27 @@ class EsfGas final : public portable::GasQueryProvider,
                      public portable::GasAdvanceProvider {
 public:
   chemistry::detail::AnalyticIsomerBackend backend;
-  bool fail_half{};
+  bool fail_half{}, zero_progress{};
   unsigned half_calls{};
+  std::uint64_t advance_calls{}, fail_query_after_halves{};
   const portable::GasIdentity &gas_identity() const noexcept override {
     return backend.gas_identity();
   }
   portable::Status query_gas(const portable::GasQuery &q,
                              portable::GasQueryOutput &out) noexcept override {
-    return backend.query_gas(q, out);
+    if (fail_query_after_halves != 0 &&
+        advance_calls >= fail_query_after_halves)
+      return portable::Status::provider_failure;
+    const auto status = backend.query_gas(q, out);
+    if (status == portable::Status::success && zero_progress)
+      for (std::size_t s = 0; s < q.species_count; ++s)
+        out.net_mass_rates_kg_per_m3_s[s] = 0;
+    return status;
   }
   portable::Status
   advance_gas(const portable::GasAdvanceQuery &q,
               portable::GasAdvanceOutput &out) noexcept override {
+    ++advance_calls;
     if (fail_half && ++half_calls == 3)
       return portable::Status::provider_failure;
     return backend.advance_gas(q, out);
@@ -144,6 +154,23 @@ std::vector<double> physical_values(const RestartSnapshot &s,
                 (reference_density > 0
                      ? std::sqrt(s.pressure_reference * reference_density)
                      : 1.0));
+  for (std::size_t i = 0; i < s.cell_records.values.size;) {
+    const auto offset = i % s.cell_records.record_bytes;
+    // Rollback and exact restore compare every byte. For subsequent solves,
+    // compare the six floating history quantities numerically; counters and
+    // signs remain byte exact, including uint64 values above 2^53.
+    if (reference_density > 0 && s.cell_records.record_bytes == 120 &&
+        ((offset >= 24 && offset < 56) || (offset >= 80 && offset < 96))) {
+      std::uint64_t bits = 0;
+      for (unsigned b = 0; b < 8; ++b)
+        bits |= std::uint64_t(s.cell_records.values.data[i + b]) << (8 * b);
+      double value;
+      std::memcpy(&value, &bits, 8);
+      values.push_back(value);
+      i += 8;
+    } else
+      values.push_back(s.cell_records.values.data[i++]);
+  }
   return values;
 }
 bool collective(bool okay) {
@@ -184,6 +211,7 @@ int main(int argc, char **argv) {
       status = CaseCompiler::load_and_compile(MPI_COMM_WORLD, case_root, model);
     EsfGas esf_gas;
     const bool esf = model.reaction.mode == ReactionMode::esf_tpdf;
+    const bool tcr = esf && model.reaction.esf->tcr.mode != TcrMode::off;
     CompiledCasePlan plan;
     if (status)
       status = ProductCompiler::compile(
@@ -293,7 +321,12 @@ int main(int argc, char **argv) {
       const double gamma = 1e-5 / 0.7; // Synthetic fixture: mu(300 K)/Pr.
       const double tau = model.reaction.mixing_c_z *
                          std::pow(std::cbrt(volume), 2) / (2 * gamma / rho);
-      const double dt = snap.dt, relaxation = std::exp(-dt / (2 * tau)),
+      const double control =
+          tcr && model.reaction.esf->tcr.mode == TcrMode::experimental
+              ? 1.0 / 3.0
+              : 1.0;
+      const double dt = snap.dt,
+                   relaxation = std::exp(-std::cbrt(control) * dt / (2 * tau)),
                    half = std::exp(-dt);
       double density_delta = 0, expected_variance = 0;
       for (double offset : model.reaction.esf->initial_species_offsets) {
@@ -335,6 +368,46 @@ int main(int argc, char **argv) {
     if (!okay && rank == 0)
       std::cerr << "first-step physical oracle failed, Y=" << accepted_y
                 << "\n";
+    if (okay && tcr) {
+      // Public product record ABI: little-endian step/input revision,
+      // initialized flag, eta/R, signed root and kappa. A -> B gives eta=1/4,
+      // R=1, negative root=-1/2 and kappa=1/3, independently of field variance.
+      const auto records = snap.cell_records;
+      const auto u64 = [&](std::size_t offset) {
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < 8; ++i)
+          value |= std::uint64_t(records.values.data[offset + i]) << (8 * i);
+        return value;
+      };
+      const auto real = [&](std::size_t offset) {
+        const auto bits = u64(offset);
+        double value;
+        std::memcpy(&value, &bits, 8);
+        return value;
+      };
+      okay &= records.identity != 0 && records.record_bytes == 120U &&
+              records.values.size > 0;
+      if (okay)
+        for (std::size_t cell = 0; cell < records.values.size;
+             cell += records.record_bytes)
+          okay &= u64(cell) == 1 && u64(cell + 8) == 2 &&
+                  records.values.data[cell + 20] == 1 &&
+                  std::abs(real(cell + 24) - .25) < 2e-12 &&
+                  std::abs(real(cell + 32) - 1) < 2e-12 &&
+                  std::abs(real(cell + 40) + .5) < 2e-12 &&
+                  std::abs(real(cell + 48) - 1.0 / 3.0) < 2e-12;
+      if (!okay && rank == 0)
+        std::cerr << "TCR record oracle: identity=" << records.identity
+                  << " width=" << records.record_bytes
+                  << " bytes=" << records.values.size
+                  << " step=" << (records.values.size ? u64(0) : 0)
+                  << " input=" << (records.values.size ? u64(8) : 0)
+                  << " eta=" << (records.values.size ? real(24) : 0)
+                  << " R=" << (records.values.size ? real(32) : 0)
+                  << " root=" << (records.values.size ? real(40) : 0)
+                  << " kappa=" << (records.values.size ? real(48) : 0) << "\n";
+      okay = collective(okay);
+    }
     // Compare a real disk restart with uninterrupted continuation.
     IsomerGas restored_gas;
     EsfGas restored_esf;
@@ -369,6 +442,16 @@ int main(int argc, char **argv) {
         okay = collective(!rejected);
         image.fields[field].values[0] = value;
       }
+      if (status && tcr) {
+        for (const auto offset : {0U, 64U}) {
+          const auto old = image.cell_records[offset];
+          if (rank == 0)
+            image.cell_records[offset] ^= 1U; // wrong step or mapping identity
+          const auto rejected = restored.initialize_restart(image);
+          okay = collective(okay && !rejected);
+          image.cell_records[offset] = old;
+        }
+      }
       if (status)
         status = restored.initialize_restart(image);
       if (status) {
@@ -381,6 +464,8 @@ int main(int argc, char **argv) {
         std::cerr << "restart status " << unsigned(status.code) << ":"
                   << status.detail << "\n";
       okay = collective(okay && bool(status));
+      if (!okay && rank == 0)
+        std::cerr << "restart exact payload/rejection failed\n";
     }
     if (okay) {
       status = driver.advance({1, 1, 1, 1, 1}, report);
@@ -449,7 +534,28 @@ int main(int argc, char **argv) {
       if (okay)
         okay = collective(bool(driver.committed_restart_snapshot(snap)) &&
                           accepted == physical_values(snap));
+      if (!okay && rank == 0)
+        std::cerr << "half failure rollback failed\n";
       esf_gas.fail_half = false;
+      if (okay && tcr) {
+        // Fail only after every cell has completed chemistry and staged its
+        // TCR history, at the final ensemble reconciliation query.
+        const auto cells = snap.patch.cells;
+        esf_gas.fail_query_after_halves =
+            rank == 0 ? esf_gas.advance_calls +
+                            8 * std::uint64_t(cells.x) * cells.y * cells.z
+                      : 0;
+        status = driver.advance({1, 1, 1, 1, 1}, report);
+        okay = collective(!status && !report.accepted &&
+                          esf_gas.advance_calls >=
+                              esf_gas.fail_query_after_halves);
+        if (okay)
+          okay = collective(bool(driver.committed_restart_snapshot(snap)) &&
+                            accepted == physical_values(snap));
+        esf_gas.fail_query_after_halves = 0;
+        if (!okay && rank == 0)
+          std::cerr << "late TCR transaction rollback failed\n";
+      }
       if (okay) {
         status = driver.advance({1, 1, 1, 1, 1}, report);
         if (status)
@@ -472,10 +578,95 @@ int main(int argc, char **argv) {
           same = std::abs(a[i] - b[i]) <=
                  model.solver.terminal.eos *
                      std::max({1., std::abs(a[i]), std::abs(b[i])});
+        if ((!status || !same) && rank == 0) {
+          std::cerr << "retry comparison failed " << unsigned(status.code)
+                    << ":" << status.detail << "\n";
+          for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+            if (std::abs(a[i] - b[i]) >
+                model.solver.terminal.eos *
+                    std::max({1., std::abs(a[i]), std::abs(b[i])})) {
+              std::cerr << "first mismatch " << i << " of " << a.size()
+                        << " values " << a[i] << " " << b[i] << "\n";
+              break;
+            }
+        }
         okay = collective(bool(status) && same);
       }
     }
-    if (okay && esf) {
+    if (okay && tcr) {
+      RestartSnapshot before, after;
+      status = driver.committed_restart_snapshot(before);
+      const auto saved = physical_values(before);
+      const auto records = before.cell_records.values;
+      const std::vector<std::uint8_t> saved_history(
+          records.data, records.data + records.size);
+      esf_gas.zero_progress = true;
+      if (status)
+        status = driver.advance({1, 1, 1, 1, 1}, report);
+      const bool shadow = model.reaction.esf->tcr.mode == TcrMode::shadow;
+      okay = collective(shadow ? bool(status) && report.accepted
+                               : !status && !report.accepted);
+      if (okay)
+        okay = collective(bool(driver.committed_restart_snapshot(after)));
+      if (okay && !shadow)
+        okay = collective(physical_values(after) == saved);
+      if (okay && shadow) {
+        okay &= after.step == before.step + 1;
+        for (std::size_t i = 0; i < saved_history.size(); ++i)
+          if (i % 120 >= 20)
+            okay &= saved_history[i] == after.cell_records.values.data[i];
+        okay = collective(okay);
+      }
+      esf_gas.zero_progress = false;
+      if (!okay && rank == 0)
+        std::cerr << "TCR weak denominator mode contract failed\n";
+    }
+    if (okay && tcr) {
+      EsfGas counter_gas;
+      CompiledCasePlan counter_plan;
+      ProductDriver counter_driver;
+      status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
+                                        counter_plan, counter_gas.bindings());
+      if (status)
+        status = ProductDriver::create(MPI_COMM_WORLD, std::move(counter_plan),
+                                       counter_driver);
+      RestartExpected expected;
+      if (status)
+        status = counter_driver.restart_expected(expected);
+      RestartImage image;
+      if (status)
+        status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
+      constexpr std::uint64_t large_revision = UINT64_C(9007199254740993);
+      if (status) {
+        for (std::size_t cell = 0; cell < image.cell_records.size();
+             cell += 120)
+          for (unsigned b = 0; b < 8; ++b)
+            image.cell_records[cell + 8 + b] =
+                std::uint8_t(large_revision >> (8 * b));
+        status = counter_driver.initialize_restart(image);
+      }
+      if (status)
+        status = counter_driver.advance({1, 1, 1, 1, 1}, report);
+      RestartSnapshot result;
+      if (status)
+        status = counter_driver.committed_restart_snapshot(result);
+      okay = collective(bool(status));
+      if (okay) {
+        for (std::size_t cell = 0; cell < result.cell_records.values.size;
+             cell += 120) {
+          std::uint64_t value = 0;
+          for (unsigned b = 0; b < 8; ++b)
+            value |=
+                std::uint64_t(result.cell_records.values.data[cell + 8 + b])
+                << (8 * b);
+          okay &= value == large_revision + 1;
+        }
+        okay = collective(okay);
+      }
+      if (!okay && rank == 0)
+        std::cerr << "TCR integer history continuation failed\n";
+    }
+    if (okay && esf && !tcr) {
       // Restart carries a zero-mean sinusoidal composition disturbance across
       // patch boundaries. The discrete Fourier eigenvalue is independent of
       // the production Halo and diffusion kernels.
