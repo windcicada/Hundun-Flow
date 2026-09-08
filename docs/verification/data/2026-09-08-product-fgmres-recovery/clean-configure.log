@@ -1,0 +1,24 @@
+-- The C compiler identification is GNU 7.5.0
+-- The CXX compiler identification is Clang 15.0.6
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /home/wyf/.local/bin/clang++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found MPI_C: /usr/lib/libmpi.so (found suitable version "3.1", minimum required is "3")
+-- Found MPI: TRUE (found suitable version "3.1", minimum required is "3") found components: C
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - found
+-- Found Threads: TRUE
+-- Configuring done (1.4s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/wyf/code_dev/.worktrees/hundun-flow-product-recovery-accept-20260908/build-accept

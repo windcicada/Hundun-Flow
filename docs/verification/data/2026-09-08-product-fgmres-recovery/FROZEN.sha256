@@ -1,0 +1,13 @@
+345cca4802286a7ae1b2bd39b7c25afceeedb8a13fc60b5fdf71f80d92f0f67a  frozen/v04_thin_domain_runner
+c352d1c4ff748b5ed33d3d068115d8de54f3b8e61e5efe70cfb3ffb10a3b2e21  frozen/v04_thin_domain_runner.build-manifest.txt
+83948d1a0ef50a7fa88186ec24d7423b2861b8855bbf8306627e52bf53ad3287  frozen/v04_solver_observe.py
+ba24ad6f5768c0639bb0527b79bdffd32f4af07d9c9f08578a29b6f0dcd34945  launch-pilot.sh
+26d5bb3471f002b9bd49627336fcb41fed12037ae4e0ef38941d1c97ce6e8554  check-pilot-output.py
+426e2cf66971de75efbcea60869baf51d0605b0a91ad7d9e355e8aacdcf97211  summarize-cost.py
+cc074f94ef5cf86aea9c99e0bb0fc91fb5506e9149b6a0ea0d914e4413af666e  finalize-observation.py
+faf5a3e3485254749c050dc6572cc4b84c293de71fe807df5523902645d10858  LOCAL_ACCEPTED.json
+4fd34403e4e5988803478e050c0f4bee3abba0e05716b83d20d108ab8f669bf1  /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-thermodynamic-48493ed-20260907/statistics-long-20plus50D.d
+0ead67febf73269f50f80b1bc520ee93b5355f4905631608805c9ba04b62b605  /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-thermodynamic-48493ed-20260907/case/axes.dat
+8053fe7028736e9487ca8e0bc886d5c2c3cd0de8b5967691a463102bdcdbdb57  /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-thermodynamic-48493ed-20260907/case/case.json
+627c1301bb4a02f24450329a2b3f7a111b81be51299d9fb4a12c1ce2908ecda0  /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-thermodynamic-48493ed-20260907/case/cylinder_D0p02.stl
+2496620193a94bf9ef82916cbd89cfa7f1e3814ec50b07e291bf534e3728bc3e  /home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/method-frozen-thermodynamic-48493ed-20260907/case/thermophysics.d

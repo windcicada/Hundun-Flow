@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | MG层级归因已完成；单stage写入实验无总成本收益，已撤回。FGMRES恢复原因Native已验，ProductDriver/runner V6已接线，开发Release 8/8、ASan/UBSan 4/4及真实非FGMRES合同通过；正在做独立干净验收，不引入下一算法改动 |
+| 当前活动切片 | FGMRES恢复原因接线已闭合：干净31/31、单轮128-rank 9500→9510通过，源/末输出及旧非计时工作列不变。后九步347次恢复全部是unsafe丢列，happy为0；下一步仅做后续列显式重正交化保留方向的局部假设验证，尚未改生产算法 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | 仅performance为 `observation_schema=4`；显式MG为5，新恢复观测为6（MG可选），读取器兼容3–5。旧数据不能补造缺失原因、阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | 将现有norm_breakdown_restarts与实际分支、真实残差重建和额外A/M工作对齐；需要新观测时保持定长、默认关闭和失败回退；有局部证据后再选择一个最小优化 |
-| 下一动作 | 完成接线的干净候选验收，再以新原因观测配置取得目标loop的实测占比。当前尚无Re3900两类原因细分，不重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
+| 下一动作 | 公开FGMRES小算子验证后续unsafe列能否显式重正交化保留方向；保留真实/物理残差、非有限性、MPI与回退合同，先看A/M/归约代价。通过局部证明才建立一个独立性能实验；不重复已结束配置，不放宽容差 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -100,7 +100,13 @@ runner hash为`6ebc5559d54276cf17385e72eb02c7b0002925b0e0168c3334b58e9b15e0a78c`
 28项拒绝检查。实际BiCGStab CLI独立验证恢复unavailable而非伪造零样本。
 每个solve记录新增96字节，保持14-slot attempt和64-slot step上限；关闭仍有固定
 初始化/拷贝成本。新列复用既有stream，root/非零rank关闭失败和checkpoint字节
-等价均已验。下一步干净候选，不把此开发结果当128-rank或COAST替代证据。
+等价均已验。DCO候选`7c03a54`独立干净31/31通过，191.10 s；含真实BiCGStab
+的ASan/UBSan runner扩展也通过。新128-rank单轮窗口已接受，总进程113.58 s；
+70 loops完整，末次128份Visit/checkpoint及统计与旧MG窗口逐字节一致，源133文件不变。
+后九步347次unsafe丢列占1609次Arnoldi的21.57%，C2-r1有58次；没有happy restart。
+这是工作量比例，不是可直接消除的时间或速度收益。r1单次M并不更贵，下一局部假设
+针对保留已付A/M成本的方向；目前只是明确了下一实验，不将新算法混进已验观测提交。
+原长测仍保留128个SIGSTOP ranks，pilot的9510不替换原9950之后的内存状态。
 
 ## 3. 基础流动模块台账
 

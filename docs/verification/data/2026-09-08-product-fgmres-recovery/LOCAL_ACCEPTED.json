@@ -1,0 +1,49 @@
+{
+  "schema": "HUNDUN_FGMRES_OBSERVATION_LOCAL_ACCEPTANCE_V1",
+  "scope": "Observation-only local acceptance; 128-rank diagnostic pilot pending; not COAST replacement",
+  "accepted_at": "2026-09-08T13:14:32+08:00",
+  "source_commit": "7c03a54a9f1061d1de0e0922ed38a3bcc8f2412f",
+  "source_tree": "9d502ca0023b10704aa721d94cbbb5a33e7b6db6",
+  "source_clean": true,
+  "source_checkout": "/home/wyf/code_dev/.worktrees/hundun-flow-product-recovery-accept-20260908",
+  "runner_sha256": "345cca4802286a7ae1b2bd39b7c25afceeedb8a13fc60b5fdf71f80d92f0f67a",
+  "runner_build_manifest_sha256": "c352d1c4ff748b5ed33d3d068115d8de54f3b8e61e5efe70cfb3ffb10a3b2e21",
+  "core_source_content_sha256": "f5fd1d2f609024154c5c38718690549fdbf7cecceef9577b3c257158fc66ea4a",
+  "manifest_head_tree_verified": true,
+  "clean_release_tests": {
+    "passed": 31,
+    "total": 31,
+    "wall_seconds": 191.1,
+    "log_sha256": "b3728f294af35718dfb5de0c45e107e212b66b00692c67b6c83ea928f73d9666"
+  },
+  "development_tests": {
+    "expanded_release": "8/8; 74.12 seconds",
+    "sanitizers": "4/4; 181.74 seconds",
+    "bicgstab_cli_extension_release": "1/1; 16.99 seconds",
+    "bicgstab_cli_extension_sanitized": "1/1; 88.59 seconds",
+    "asan": true,
+    "ubsan": true,
+    "lsan": false
+  },
+  "observer_cli_rejection_checks": 28,
+  "legacy_observer_cli_checks": 88,
+  "mg_observer_cli_rejection_checks": 33,
+  "retained_method_signature": "12213963202598979269",
+  "source_generation": "generation-9500-139424060480232",
+  "source_manifest_sha256": "ed4600dc5068bb3118acd14aeefffcfde527a47383c23c3c36fee709f47aba78",
+  "source_integrity_files": 133,
+  "pilot": {
+    "start_step": 9500,
+    "end_step": 9510,
+    "ranks": 128,
+    "rounds": 1,
+    "method_recovery": false,
+    "performance": true,
+    "mg_cost": true,
+    "fgmres_recovery": true
+  },
+  "long_job_state": "All 128 ranks SIGSTOP; original lock and process state retained",
+  "long_job_service": "hundun-re3900-thermodynamic-long-20260907.service",
+  "two_phase_integration_deferred": true,
+  "algorithm_changed": false
+}

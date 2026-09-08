@@ -1,0 +1,117 @@
+{
+  "schema": "HUNDUN_FGMRES_OBSERVATION_PILOT_ACCEPTANCE_V1",
+  "scope": "Observation-only acceptance, not an algorithm speedup or COAST replacement acceptance.",
+  "source_commit": "7c03a54a9f1061d1de0e0922ed38a3bcc8f2412f",
+  "source_tree": "9d502ca0023b10704aa721d94cbbb5a33e7b6db6",
+  "runner_sha256": "345cca4802286a7ae1b2bd39b7c25afceeedb8a13fc60b5fdf71f80d92f0f67a",
+  "runner_build_manifest_sha256": "c352d1c4ff748b5ed33d3d068115d8de54f3b8e61e5efe70cfb3ffb10a3b2e21",
+  "retained_method_signature": "12213963202598979269",
+  "source_generation": "generation-9500-139424060480232",
+  "output_generation": "generation-9510-168455369402501",
+  "window": {
+    "start_step": 9500,
+    "end_step": 9510,
+    "ranks": 128,
+    "rounds": 1,
+    "method_recovery": false,
+    "performance": true,
+    "mg_cost": true,
+    "fgmres_recovery": true
+  },
+  "process_wall_seconds": 113.58,
+  "clean_release_tests": {
+    "passed": 31,
+    "total": 31,
+    "wall_seconds": 191.1,
+    "log_sha256": "b3728f294af35718dfb5de0c45e107e212b66b00692c67b6c83ea928f73d9666"
+  },
+  "physical_audit": {
+    "steps": 10,
+    "ranks": 128,
+    "bdf1_steps": 0,
+    "bdf2_steps": 10,
+    "terminal_maxima": {
+      "eos": 0.0,
+      "continuity": 2.617570949848936e-07,
+      "energy": 8.805795074746012e-07,
+      "closed_mass": 0.0,
+      "gauge": 0.0
+    },
+    "fluid_ranges": {
+      "T": [
+        299.9790418656781,
+        300.023665045917
+      ],
+      "p": [
+        107114.70444352923,
+        107142.07143345375
+      ],
+      "rho": [
+        1.238967326204426,
+        1.2392473944722178
+      ]
+    }
+  },
+  "payload_equivalence": {
+    "comparison_root": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-mg-9500-9510-20260908",
+    "rank_checkpoint": {
+      "files": 128,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "f487753213a00961924b399fb92eee9efb0927377a0ba258e43a889a4ed7e067"
+    },
+    "manifest": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "4505302d06335db637afa0b002810b8b12f4e702cce041da7156cbc204c39f40"
+    },
+    "visit": {
+      "files": 128,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "ecd3e349ca01b38d5612818df42b6810bdd96db7bc30d61e6f6827428b82008a"
+    },
+    "accumulator": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "1cf2b46c939a51e96c407337eb541af4af8ea4fdd92128d51129d5d19710720b"
+    },
+    "statistics": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "eb8352343d3901b365765f54ceaa31f6399bcbcb41d04d694b3495c4636b77e4"
+    },
+    "completion_difference": "Only restart_generation differs; each names its own verified generation.",
+    "old_non_timing_solver_columns_equal": true
+  },
+  "runtime_validation": {
+    "command": [
+      "/usr/bin/python3.6",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-product-recovery-accept-20260908/tools/v04_evidence_validate.py",
+      "runtime",
+      "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-fgmres-9500-9510-20260908/evidence.jsonl",
+      "--run-start-manifest",
+      "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/long-thermodynamic-35000-20260907/Restart/generation-9500-139424060480232/manifest.bin"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "source_files_unchanged": 133,
+  "artifacts_sha256": {
+    "finalize-observation.py": "cc074f94ef5cf86aea9c99e0bb0fc91fb5506e9149b6a0ea0d914e4413af666e",
+    "fgmres-observation-20260908/summarize-cost.py": "426e2cf66971de75efbcea60869baf51d0605b0a91ad7d9e355e8aacdcf97211",
+    "fgmres-observation-20260908/cost-summary.json": "afd1de4b45dd395ccfdd7adb6dabdbd76b7105eb1114caf1ce78ab6d7890ccbe",
+    "fgmres-observation-20260908/observation.json": "136edb0b736df70f4254b88a8627c207c21ede7b81b6b0d32547cd02b23e12f8",
+    "fgmres-observation-20260908/loops.jsonl": "83580911e0de6a9957019f7c0d22a0c18e09a789444673977dd41ed81061d385",
+    "fgmres-observation-20260908/pilot-output-verified.json": "08bb1e8169fd0e09552932aa5857f889b693bbc6803c4ff61160538946c88830",
+    "fgmres-observation-20260908/SOURCE.sha256": "70bb974019348b4a4f67755b14f2c5db6ca4a0ac4e78b9b46ce0140ff3e0037b",
+    "fgmres-observation-20260908/FROZEN.sha256": "e1c6ec799fd90f03541025f09a7b485045d39e9665d87771a924096ed96d432a",
+    "/home/wyf/code_dev/.worktrees/hundun-flow-product-recovery-accept-20260908/build-accept/Testing/Temporary/LastTest.log": "265fefd0c629358845e3b9d76d42c16f1a692b5081e269604792721f80df0623",
+    "pilot-fgmres-9500-9510-20260908.log": "16df13074c07fc1b16fc34ea21998e12c04764fc7c9d31f9ce2c6afe5f4db3ee"
+  },
+  "limitations": [
+    "Single ten-step observation window; no timing A/B or speedup claim.",
+    "Solid regional extrema checked; no new source-to-final solid-only payload comparison.",
+    "Original long-run processes remain paused beyond this pilot endpoint; do not replace them.",
+    "Stage 6/two-phase integration remains deferred."
+  ]
+}
