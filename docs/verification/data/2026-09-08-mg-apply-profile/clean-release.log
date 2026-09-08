@@ -1,0 +1,41 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-profile-accept-20260908/build-accept
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-mg-profile-accept-20260908/build-accept
+      Start 260: v04_solver_mg_reuse
+ 1/16 Test #260: v04_solver_mg_reuse ...................   Passed    0.31 sec
+      Start 261: v04_solver_mg_chebyshev
+ 2/16 Test #261: v04_solver_mg_chebyshev ...............   Passed    0.30 sec
+      Start 262: v04_solver_mg_convergence
+ 3/16 Test #262: v04_solver_mg_convergence .............   Passed    2.81 sec
+      Start 263: v04_solver_mg_coarse_use
+ 4/16 Test #263: v04_solver_mg_coarse_use ..............   Passed    0.32 sec
+      Start 264: v04_solver_mg_line_relaxation
+ 5/16 Test #264: v04_solver_mg_line_relaxation .........   Passed    0.32 sec
+      Start 265: v04_solver_mg_krylov_isolation
+ 6/16 Test #265: v04_solver_mg_krylov_isolation ........   Passed    0.28 sec
+      Start 270: v04_solver_mg_mpi_1
+ 7/16 Test #270: v04_solver_mg_mpi_1 ...................   Passed    0.39 sec
+      Start 271: v04_solver_mg_mpi_2
+ 8/16 Test #271: v04_solver_mg_mpi_2 ...................   Passed    0.37 sec
+      Start 272: v04_solver_mg_mpi_4
+ 9/16 Test #272: v04_solver_mg_mpi_4 ...................   Passed    0.50 sec
+      Start 273: v04_solver_mg_update_contract_mpi_2
+10/16 Test #273: v04_solver_mg_update_contract_mpi_2 ...   Passed    0.29 sec
+      Start 274: v04_solver_mg_update_contract_mpi_4
+11/16 Test #274: v04_solver_mg_update_contract_mpi_4 ...   Passed    0.30 sec
+      Start 275: v04_solver_mg_odd_partition_mpi_2
+12/16 Test #275: v04_solver_mg_odd_partition_mpi_2 .....   Passed    0.29 sec
+      Start 276: v04_solver_mg_odd_partition_mpi_4
+13/16 Test #276: v04_solver_mg_odd_partition_mpi_4 .....   Passed    0.31 sec
+      Start 277: v04_solver_krylov_mpi_1
+14/16 Test #277: v04_solver_krylov_mpi_1 ...............   Passed    0.29 sec
+      Start 279: v04_solver_krylov_mpi_2
+15/16 Test #279: v04_solver_krylov_mpi_2 ...............   Passed    0.29 sec
+      Start 281: v04_solver_krylov_mpi_4
+16/16 Test #281: v04_solver_krylov_mpi_4 ...............   Passed    0.33 sec
+
+100% tests passed, 0 tests failed out of 16
+
+Label Time Summary:
+v04_focused    =  13.26 sec*proc (16 tests)
+
+Total Test time (real) =   7.72 sec

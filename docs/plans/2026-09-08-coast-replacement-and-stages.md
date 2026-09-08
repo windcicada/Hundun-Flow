@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 层已实现并通过 16 项 Release 回归，干净构建及产品接线尚待完成 |
+| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 观测 `18d572c`，干净候选 `be721a7`：Release 16/16、ASan/UBSan 4/4、干净 Release 16/16；产品接线与测量尚待完成 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | 新 CSV 使用 `observation_schema=4`；读取器兼容 schema 3，但旧数据不能补造缺失阈值 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | Native MG 公开接口启用/关闭和 rank-local 开关的数值、状态、通信数量、generation/存储地址等价；1/2/4-rank V/F、replicated/distributed、prepared/direct 与故障恢复通过；阶段时间不重复相加，零热分配 |
-| 下一动作 | 完成 Native 层干净验收后，接入 compact 每-loop 摘要和每-step 层级 sidecar；验证完整性/失败关闭，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
+| 下一动作 | 接入 compact 每-loop 摘要和每-step 层级 sidecar；验证完整性/失败关闭，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 

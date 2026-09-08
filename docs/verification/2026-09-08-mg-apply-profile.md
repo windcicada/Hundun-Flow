@@ -1,7 +1,8 @@
 # MG 内部成本观测
 
 开发基线 `da56300a9040211b2b50851470b1f2f8c984fb2d`。
-本切片进行中，尚未接入生产 runner，也没有新的逐层生产测量或加速结论。
+Native 库级切片已通过下列局部/干净验收，尚未接入生产 runner，
+也没有新的逐层生产测量或加速结论。
 依据是 [9501–9510 单轮观测](2026-09-08-linear-criterion-observation.md)：
 C2 r1 工作更多，但单次 M 成本与其他 diagonal 轮接近。
 要区分细层平滑、粗层求解、层间传递及通信，先补成本来源。
@@ -63,6 +64,29 @@ ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_
 `LD_LIBRARY_PATH=/home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu`。
 计数饱和与重复 Halo 冷归属防护经过静态核查，未借私有变异接口伪造饱和回归；
 不将这些分支记为已实际触发。库级测试不证明生产规模额外开销为零。
+
+## 干净候选验收
+
+观测代码 DCO 提交 `18d572cee1d648e1ce95986f4bec92db7fadb46f`；
+独立 checkout 固定在仅多一项目标台账更新的
+`be721a7a581ae073cd703addffc692aab0a95617`，
+tree `595f95a3d215a847f8c7ce40739aeb6f36f15615`。
+位置 `/home/wyf/code_dev/.worktrees/hundun-flow-mg-profile-accept-20260908`，
+构建前后 Git 工作区干净，全新 `build-accept` 未出现增量目录的 Ninja 恢复提示。
+
+使用与前轮冻结候选一致的 Clang 15/libc++、Release、
+`-march=znver3 -mno-fma -ffp-contract=off`，测试开启、sanitizer/HYPRE 关闭。
+生产 `v04_thin_domain_runner` 和 10 个相关测试目标构建成功；
+同一 Release selector 的 16/16 干净回归通过（7.72 s）。
+
+- runner SHA-256：`3782892c8e92e69512b2b4cc9ca01e6500c3ecd8b834d0c8f33cb59a0b3c265c`。
+- build manifest SHA-256：`1e5d270cedb0992a37150cb1ec212925dd9e5df644269670b3c56a2fd57c0851`。
+- `core_source_clean/target_source_clean=true`；core content SHA-256：
+  `5893084f5e9b6292f9d526bfa227986c00b6278a30e1c41458f02317a23b2bde`。
+- manifest 的 head/tree 按既有带前缀 SHA-256 编码，已由上述 Git commit/tree
+  独立重算一致；不将 64 字符摘要误称为 Git commit SHA。
+- 本轮没有 128-rank 新 pilot、COAST 比较或长测恢复。原服务仍为 128 ranks
+  SIGSTOP、原冻结二进制未替换；本地提交尚未推送 GitHub。
 
 通信采样只接受冻结 instance identity；不要求失败后的 Halo 仍为 ready，
 因此同身份 poisoned 对象可以保留失败成本。计数倒退或输入已饱和时标记不完整。
