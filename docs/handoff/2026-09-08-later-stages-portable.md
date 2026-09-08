@@ -67,7 +67,7 @@ worktree 工作；不得写产品主线/旧供体，不提交、不改中央文�
 | P4 物性/气膜 | P1 | 待实施 | 焓积分、包读取/身份、两套合成包、完整气膜 | 气相采样；资产身份；用户真实燃料验收 |
 | P5 轨迹/事件 | P4/P6 | 待实施 | 自适应蒸发、重采样、统一事件/出口 H+K | 几何/采样/沉积；parcel accepted clocks；真实边界 |
 | P6 TAB | 冻结接口 | 实现/本地验证完成 | 粒径预测、成对速度扰动、表面/变形/体动能、子候选与 ID | 共同父子替换；TAB/ordinal；产品破碎预算 |
-| P7 生命周期 | P5/P6 组合 | 待实施 | 定位预检、容量、普通值快照、1/2/4 rank | 分区/共同提交/Restart；injector/parcel/RNG；恢复一致性 |
+| P7 生命周期 | P5/P6 组合 | 独立实现通过，事件组合待 P5 | 定位预检、容量、普通值快照、1/2/4 rank | 分区/共同提交/Restart；injector/parcel/RNG；恢复一致性 |
 | P8 组合 | P1–P7 | 汇总核通过，组合待依赖 | cell/ID/segment 有序汇总、非线性 K、公共源、共同候选 | rho*h-p/压力功/PISO/执行图；全参与者状态；联立验收 |
 
 接口冻结 DCO：`5149e92`。P6 来源：
@@ -78,6 +78,12 @@ P6 RED 为新增函数链接缺失，GREEN 为 `^v04_models_spray_breakup$` 1/1 
 P8 汇总核 RED 为新接口链接缺失；`^v04_models_exchange_batch$` 1/1 PASS：
 两滴→单元动能解析预算、顺序/重试、重复项、revision、容量、权重及出口分账。
 该核固定容量，无场写入，借用候选在下一次调用（即使失败）后失效。
+P6/汇总核 DCO：`bbd2505`。
+P7 新 seam 链接 RED 后实现；根代理复核
+`^v04_models_spray_(parcel|migration_mpi_[124])$` **4/4 PASS**。
+checked migration 在发送/接收方均验证坐标、cell、owner与跨rank revision；
+旧 prepare 仅保留低层范围检查。快照不含 trial，恢复是 owning 候选、冷准备可分配，
+实际容器/Restart 发布仍由后续产品事务承担。
 
 OpenFOAM 测试问题参考固定为
 `43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4`（只读 ls-remote 核实）。

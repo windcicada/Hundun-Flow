@@ -5,6 +5,7 @@
 
 #include "hundun/v04_mesh.hpp"
 #include "hundun/v04_spray.hpp"
+#include "hundun/v04_portable.hpp"
 
 #include <mpi.h>
 #include <cstddef>
@@ -26,7 +27,42 @@ enum class MigrationDetail : std::uint32_t {
   capacity_exceeded,
   duplicate_id,
   communication_failure,
-  allocation_failure
+  allocation_failure,
+  location_mismatch,
+  stale_revision,
+  location_unavailable
+};
+
+struct ParcelLocation {
+  portable::Revision revision{};
+  std::uint64_t global_cell{};
+  int owner_rank{-1};
+};
+
+class ParcelLocationProvider {
+public:
+  virtual ~ParcelLocationProvider() = default;
+  virtual Status locate(const Vector3& position_m, portable::Revision revision,
+                        ParcelLocation& candidate) const noexcept = 0;
+};
+
+// Uniform Cartesian value fixture. The domain is half-open in every axis;
+// points on an outer upper face are outlet events, never clamped into a cell.
+struct CartesianParcelLocationInput {
+  portable::Revision revision{};
+  Vector3 origin_m{};
+  Vector3 cell_width_m{1.0, 1.0, 1.0};
+  Int3 global_cells{};
+  int rank_count{};
+};
+class CartesianParcelLocationProvider final : public ParcelLocationProvider {
+public:
+  explicit CartesianParcelLocationProvider(CartesianParcelLocationInput input) noexcept
+      : input_(input) {}
+  Status locate(const Vector3& position_m, portable::Revision revision,
+                ParcelLocation& candidate) const noexcept override;
+private:
+  CartesianParcelLocationInput input_{};
 };
 
 struct ParcelMigrationReport {
@@ -62,6 +98,13 @@ class ParcelMigrationPlan {
                    std::size_t maximum_ids_per_auditor) noexcept;
   Status prepare(Span<const ParcelMigrationValue> trial,
                  ParcelMigrationReport& report) noexcept;
+  // Portable composition uses this checked seam. A failed query, stale
+  // geometry revision or position/cell/owner mismatch discards every candidate
+  // collectively before any caller can publish. Provider is borrowed per call.
+  Status prepare_checked(Span<const ParcelMigrationValue> trial,
+                         const ParcelLocationProvider& location,
+                         portable::Revision revision,
+                         ParcelMigrationReport& report) noexcept;
   Span<const ParcelMigrationValue> candidates() const noexcept {
     return available_ ? Span<const ParcelMigrationValue>{candidates_.data(),
                                                          candidates_.size()}

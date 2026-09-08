@@ -5,6 +5,7 @@
 
 #include "hundun/v04_spray.hpp"
 #include "hundun/v04_status.hpp"
+#include "hundun/v04_portable.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -211,6 +212,7 @@ public:
   [[nodiscard]] InjectorCommittedState committed_state() const noexcept {
     return committed_;
   }
+  [[nodiscard]] const InjectorSpec& configured_spec() const noexcept { return spec_; }
   [[nodiscard]] const InjectionReport& trial_report() const noexcept {
     return report_;
   }
@@ -226,5 +228,44 @@ private:
   bool trial_active_{};
   InjectionReport report_{};
 };
+
+struct InjectorValueSnapshot {
+  InjectorSpec spec{};
+  InjectorCommittedState accepted{};
+};
+
+// Ordinary owning values only. No trial arrays, migration buffers or pointers.
+// The caller supplies clocks/lineage from its accepted state, never from a trial.
+struct ParcelLifecycleSnapshot {
+  std::uint32_t snapshot_version{1U};
+  portable::Revision accepted_revision{};
+  double accepted_time_s{};
+  std::uint64_t parcel_rng_seed{};
+  std::uint32_t parcel_rng_algorithm_version{1U};
+  ParcelSoASnapshot parcels{};
+  std::vector<std::uint64_t> breakup_ordinals; // same sorted full-ID order as parcels
+  std::vector<InjectorValueSnapshot> injectors;
+};
+
+struct ParcelLifecycleCandidate {
+  Status status{StatusCode::invalid_plan, 0U};
+  bool available{};
+  std::size_t failure_index{};
+  ParcelLifecycleSnapshot values{};
+};
+
+[[nodiscard]] ParcelLifecycleCandidate export_parcel_lifecycle(
+    const ParcelContainer& parcels,
+    Span<const DeterministicInjector* const> injectors,
+    Span<const std::uint64_t> accepted_breakup_ordinals,
+    portable::Revision accepted_revision, double accepted_time_s,
+    std::uint64_t parcel_rng_seed) noexcept;
+
+// Cold restore preparation may allocate owning output. It validates the entire
+// value set and explicit target capacities before returning a usable candidate.
+// It does not install any state in a container or define a disk/Restart format.
+[[nodiscard]] ParcelLifecycleCandidate prepare_parcel_lifecycle_restore(
+    const ParcelLifecycleSnapshot& snapshot, portable::Revision expected_revision,
+    std::size_t maximum_parcels, std::size_t maximum_injectors) noexcept;
 
 } // namespace hundun::v04::spray::detail

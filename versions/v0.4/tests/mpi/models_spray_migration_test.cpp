@@ -177,6 +177,42 @@ int main(int argc, char** argv) {
          "ID audit capacity failure withdraws already received candidates");
   expect(static_cast<bool>(audit_limited.prepare({}, report)) && report.available,
          "empty retry works after audit-stage failure");
+  struct Location final : ParcelLocationProvider {
+    bool stale{};
+    Status locate(const Vector3& position, hundun::v04::portable::Revision revision,
+                  ParcelLocation& out) const noexcept override {
+      out = {revision, 0U, 0};
+      out.global_cell = static_cast<std::uint64_t>(position[0]);
+      if (stale) ++out.revision.input_revision;
+      return {};
+    }
+  } locator;
+  input = original;
+  for (auto& v : input) { v.parcel.owner_global_cell = 0; v.parcel.position_m = {0.0,0.0,0.0}; }
+  const hundun::v04::portable::Revision revision{11, 37, 1};
+  CartesianParcelLocationProvider cartesian({revision,{0,0,0},{1,1,1},cells,ranks});
+  ParcelLocation located;
+  expect(static_cast<bool>(cartesian.locate({1.25,2.25,3.25},revision,located)) &&
+      located.global_cell==209U, "Cartesian physical position maps to x-fast cell 209");
+  expect(!cartesian.locate({8.0,0,0},revision,located) && located.owner_rank==-1,
+      "upper-domain outlet is not silently clamped into a cell");
+  hot_allocations=0;
+  count_hot_allocations=true;
+  const auto located_status=migration.prepare_checked({input.data(), input.size()},
+      cartesian, revision, report);
+  count_hot_allocations=false;
+  expect(static_cast<bool>(located_status) && hot_allocations==0,
+      "checked Cartesian migration validates endpoint position and owner without hot allocations");
+  locator.stale=true;
+  expect(!migration.prepare_checked({input.data(), input.size()}, locator, revision, report) &&
+      !report.available && migration.candidates().size==0 &&
+      report.status.detail==static_cast<std::uint32_t>(MigrationDetail::stale_revision),
+      "stale geometry response withdraws all candidates collectively");
+  locator.stale=false;
+  if(rank==0) input[0].parcel.position_m[0]=1.0;
+  expect(!migration.prepare_checked({input.data(), input.size()}, locator, revision, report) &&
+      !report.available && migration.candidates().size==0,
+      "wrong position/cell mapping cannot migrate under a plausible owner field");
   int local = passed ? 1 : 0, global = 0;
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
   MPI_Finalize();

@@ -825,4 +825,75 @@ bool DeterministicInjector::candidate_at(
   return true;
 }
 
+ParcelLifecycleCandidate prepare_parcel_lifecycle_restore(
+    const ParcelLifecycleSnapshot& snapshot, portable::Revision expected_revision,
+    std::size_t maximum_parcels, std::size_t maximum_injectors) noexcept {
+  ParcelLifecycleCandidate report;
+  report.status = failure(StatusCode::invalid_case, ParcelOperationDetail::invalid_snapshot);
+  if (snapshot.snapshot_version != 1U ||
+      snapshot.accepted_revision != expected_revision ||
+      snapshot.accepted_revision.algorithm_version != 1U ||
+      snapshot.parcel_rng_algorithm_version != 1U ||
+      !std::isfinite(snapshot.accepted_time_s) || snapshot.accepted_time_s < 0.0 ||
+      !valid_ordered_snapshot(snapshot.parcels) ||
+      snapshot.breakup_ordinals.size() != snapshot.parcels.size()) return report;
+  if (snapshot.parcels.size() > maximum_parcels ||
+      snapshot.injectors.size() > maximum_injectors) {
+    report.status = failure(StatusCode::invalid_plan, ParcelOperationDetail::capacity_exceeded);
+    return report;
+  }
+  for (std::size_t i=0; i<snapshot.injectors.size(); ++i) {
+    report.failure_index=i;
+    if (!valid_injector_spec(snapshot.injectors[i].spec, snapshot.injectors[i].accepted))
+      return report;
+    for (std::size_t j=0; j<i; ++j)
+      if (snapshot.injectors[j].spec.injector_id == snapshot.injectors[i].spec.injector_id)
+        return report;
+  }
+  try { report.values = snapshot; }
+  catch (...) {
+    report.values = {};
+    report.status = failure(StatusCode::allocation_failure, ParcelOperationDetail::invalid_snapshot);
+    return report;
+  }
+  report.status={}; report.available=true; report.failure_index=0;
+  return report;
+}
+
+ParcelLifecycleCandidate export_parcel_lifecycle(
+    const ParcelContainer& parcels,
+    Span<const DeterministicInjector* const> injectors,
+    Span<const std::uint64_t> accepted_breakup_ordinals,
+    portable::Revision accepted_revision, double accepted_time_s,
+    std::uint64_t parcel_rng_seed) noexcept {
+  ParcelLifecycleCandidate failure_report;
+  failure_report.status = failure(StatusCode::invalid_case, ParcelOperationDetail::invalid_snapshot);
+  if ((injectors.size && !injectors.data) ||
+      (accepted_breakup_ordinals.size && !accepted_breakup_ordinals.data) ||
+      accepted_breakup_ordinals.size != parcels.committed_size()) return failure_report;
+  ParcelLifecycleSnapshot values;
+  values.accepted_revision=accepted_revision; values.accepted_time_s=accepted_time_s;
+  values.parcel_rng_seed=parcel_rng_seed;
+  const auto status=parcels.snapshot_committed(values.parcels);
+  if (!status) { failure_report.status=status; return failure_report; }
+  try {
+    if (accepted_breakup_ordinals.size)
+      values.breakup_ordinals.assign(accepted_breakup_ordinals.data,
+          accepted_breakup_ordinals.data+accepted_breakup_ordinals.size);
+    values.injectors.reserve(injectors.size);
+    for (std::size_t i=0; i<injectors.size; ++i) {
+      if (!injectors.data[i] || !injectors.data[i]->configured()) {
+        failure_report.failure_index=i; return failure_report;
+      }
+      values.injectors.push_back({injectors.data[i]->configured_spec(),
+                                 injectors.data[i]->committed_state()});
+    }
+  } catch (...) {
+    failure_report.status=failure(StatusCode::allocation_failure, ParcelOperationDetail::invalid_snapshot);
+    return failure_report;
+  }
+  return prepare_parcel_lifecycle_restore(values, accepted_revision,
+                                          parcels.capacity(), injectors.size);
+}
+
 } // namespace hundun::v04::spray::detail

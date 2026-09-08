@@ -286,4 +286,87 @@ Status ParcelMigrationPlan::prepare(Span<const ParcelMigrationValue> input,
   return {};
 }
 
+Status ParcelMigrationPlan::prepare_checked(
+    Span<const ParcelMigrationValue> input, const ParcelLocationProvider& location,
+    portable::Revision revision, ParcelMigrationReport& report) noexcept {
+  discard(); report = {};
+  if (communicator_ == MPI_COMM_NULL) return report.status;
+  Status local;
+  if ((input.size && !input.data) || input.size > local_capacity_ ||
+      revision.algorithm_version != 1U) local = invalid(MigrationDetail::invalid_plan);
+  // All ranks must request the same accepted clock/geometry revision before
+  // invoking geometry; no rank advances to the exchange on local success only.
+  std::uint64_t clock[]{revision.accepted_step, revision.input_revision,
+                        revision.algorithm_version}, minimum[3]{}, maximum[3]{};
+  if (MPI_Allreduce(clock, minimum, 3, MPI_UINT64_T, MPI_MIN, communicator_) != MPI_SUCCESS ||
+      MPI_Allreduce(clock, maximum, 3, MPI_UINT64_T, MPI_MAX, communicator_) != MPI_SUCCESS)
+    local = mpi_failure();
+  if (!std::equal(minimum, minimum+3, maximum))
+    local = invalid(MigrationDetail::stale_revision);
+  if (local) for (std::size_t i=0; i<input.size; ++i) {
+    if (!valid(input.data[i])) { local=invalid(MigrationDetail::invalid_value); break; }
+    ParcelLocation located;
+    if (!location.locate(input.data[i].parcel.position_m, revision, located)) {
+      local=invalid(MigrationDetail::location_unavailable); break;
+    }
+    if (located.revision != revision) { local=invalid(MigrationDetail::stale_revision); break; }
+    if (located.global_cell != input.data[i].parcel.owner_global_cell ||
+        located.owner_rank < 0 || located.owner_rank != owner(located.global_cell)) {
+      local=invalid(MigrationDetail::location_mismatch); break;
+    }
+  }
+  int failing=-1;
+  auto status=consensus(local, failing);
+  if (!status) { report.status=status; report.lowest_failing_rank=failing; return status; }
+  status=prepare(input, report);
+  if (!status) return status;
+  // A receiver's geometry must agree too; an incoming candidate is not yet
+  // an accepted parcel and is withdrawn globally if any receiver rejects it.
+  for (const auto& value : candidates_) {
+    ParcelLocation located;
+    if (!location.locate(value.parcel.position_m, revision, located)) {
+      local=invalid(MigrationDetail::location_unavailable); break;
+    }
+    if (located.revision != revision) { local=invalid(MigrationDetail::stale_revision); break; }
+    if (located.global_cell != value.parcel.owner_global_cell || located.owner_rank != rank_) {
+      local=invalid(MigrationDetail::location_mismatch); break;
+    }
+  }
+  status=consensus(local, failing);
+  if (!status) {
+    discard(); report={}; report.status=status; report.lowest_failing_rank=failing;
+  }
+  return status;
+}
+
+Status CartesianParcelLocationProvider::locate(
+    const Vector3& position, portable::Revision revision, ParcelLocation& candidate) const noexcept {
+  candidate={};
+  if (revision != input_.revision) return invalid(MigrationDetail::stale_revision);
+  MeshPatch patch;
+  if (revision.algorithm_version != 1U ||
+      !hundun::v04::detail::make_mesh_patch(0,input_.rank_count,input_.global_cells,patch))
+    return invalid(MigrationDetail::invalid_plan);
+  const int counts[]{input_.global_cells.x,input_.global_cells.y,input_.global_cells.z};
+  const int partitions[]{patch.process_grid.x,patch.process_grid.y,patch.process_grid.z};
+  int cell[3]{}, owner_cell[3]{};
+  for (std::size_t d=0;d<3;++d) {
+    if (!std::isfinite(position[d]) || !std::isfinite(input_.origin_m[d]) ||
+        !std::isfinite(input_.cell_width_m[d]) || input_.cell_width_m[d]<=0.0)
+      return invalid(MigrationDetail::invalid_value);
+    const double coordinate=(position[d]-input_.origin_m[d])/input_.cell_width_m[d];
+    if (!std::isfinite(coordinate) || coordinate<0 || coordinate>=counts[d])
+      return invalid(MigrationDetail::location_unavailable);
+    cell[d]=static_cast<int>(std::floor(coordinate));
+    owner_cell[d]=owner_coordinate(cell[d],counts[d],partitions[d]);
+  }
+  ParcelLocation result;
+  result.revision=revision;
+  result.global_cell=static_cast<std::uint64_t>(cell[0])+static_cast<std::uint64_t>(counts[0])*
+      (static_cast<std::uint64_t>(cell[1])+static_cast<std::uint64_t>(counts[1])*cell[2]);
+  result.owner_rank=owner_cell[0]+partitions[0]*(owner_cell[1]+partitions[1]*owner_cell[2]);
+  candidate=result;
+  return {};
+}
+
 }  // namespace hundun::v04::spray::detail

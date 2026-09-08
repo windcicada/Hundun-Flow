@@ -499,6 +499,67 @@ bool test_cone_zero_flow_and_capacity_failure() {
 
 int main() {
   bool passed = test_container_transaction_and_snapshot();
+  ParcelContainer container;
+  DeterministicInjector injector;
+  passed &= expect(static_cast<bool>(container.reserve(2)) &&
+      static_cast<bool>(container.begin_trial()) &&
+      static_cast<bool>(container.stage_add(parcel(1,2,0))) &&
+      static_cast<bool>(container.stage_tab_state({1,2},0.25,12.0)) &&
+      static_cast<bool>(container.commit_trial()) &&
+      static_cast<bool>(injector.reserve(3)) &&
+      static_cast<bool>(injector.configure(base_injector(),{0.25,9})),
+      "accepted lifecycle fixture");
+  const DeterministicInjector* injectors[]{&injector};
+  const std::uint64_t ordinals[]{7};
+  const hundun::v04::portable::Revision revision{12,31,1};
+  const auto snapshot=export_parcel_lifecycle(container,{injectors,1},{ordinals,1},
+      revision,0.125,43);
+  const auto restore=prepare_parcel_lifecycle_restore(snapshot.values,revision,2,1);
+  passed &= expect(snapshot.available && restore.available &&
+      restore.values.parcels.tab_deformation[0]==0.25 &&
+      restore.values.parcels.tab_deformation_rate_per_s[0]==12.0 &&
+      restore.values.breakup_ordinals[0]==7 &&
+      restore.values.injectors[0].accepted==InjectorCommittedState{0.25,9} &&
+      restore.values.parcel_rng_seed==43 && restore.values.accepted_time_s==0.125,
+      "owning restore candidate covers TAB, breakup, injector and accepted RNG clocks");
+  // Live trial values are never exported. Restoring accepted injector counters
+  // reproduces the same next accepted-step candidate IDs and residual exactly.
+  passed &= expect(static_cast<bool>(container.begin_trial()) &&
+      static_cast<bool>(container.stage_tab_state({1,2},9.0,99.0)), "unaccepted TAB trial");
+  const auto original_injection=injector.begin_trial(13,1.0);
+  const auto during_trial=export_parcel_lifecycle(container,{injectors,1},{ordinals,1},
+      revision,0.125,43);
+  passed &= expect(original_injection.succeeded() && during_trial.available &&
+      same_snapshot_bytes(during_trial.values.parcels,snapshot.values.parcels) &&
+      during_trial.values.injectors[0].accepted==snapshot.values.injectors[0].accepted,
+      "active trial TAB and injection candidates do not enter accepted snapshots");
+  DeterministicInjector restored_injector;
+  passed &= expect(static_cast<bool>(restored_injector.reserve(3)) &&
+      static_cast<bool>(restored_injector.configure(restore.values.injectors[0].spec,
+          restore.values.injectors[0].accepted)) &&
+      restored_injector.begin_trial(13,1.0).succeeded(), "restored injector prepares retry");
+  for(std::size_t i=0;i<injector.candidate_count();++i) {
+    SprayParcelState a,b;
+    passed &= expect(injector.candidate_at(i,a) && restored_injector.candidate_at(i,b) &&
+        same_parcel(a,b), "continuous and restored injection candidate identities match exactly");
+  }
+  passed &= expect(static_cast<bool>(container.rollback_trial()) &&
+      static_cast<bool>(injector.rollback_trial()), "unaccepted trial rollback");
+  auto corrupt=snapshot.values;
+  corrupt.parcels.tab_deformation[0]=std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!prepare_parcel_lifecycle_restore(corrupt,revision,2,1).available,
+      "nonfinite TAB history rejects the entire restore candidate");
+  corrupt=snapshot.values;
+  corrupt.injectors[0].accepted.residual_mass_kg=-1;
+  passed &= expect(!prepare_parcel_lifecycle_restore(corrupt,revision,2,1).available,
+      "invalid injector remainder rejects the entire restore candidate");
+  corrupt=snapshot.values;
+  corrupt.parcel_rng_algorithm_version=2;
+  passed &= expect(!prepare_parcel_lifecycle_restore(corrupt,revision,2,1).available &&
+      !prepare_parcel_lifecycle_restore(snapshot.values,{12,32,1},2,1).available &&
+      !prepare_parcel_lifecycle_restore(snapshot.values,revision,0,1).available &&
+      !prepare_parcel_lifecycle_restore(snapshot.values,revision,2,0).available,
+      "unknown RNG, stale revision and capacity shortages cannot publish partial restore");
   passed &= test_injector_residual_retry_and_identity();
   passed &= test_micro_mass_residual_scale();
   passed &= test_cone_zero_flow_and_capacity_failure();
