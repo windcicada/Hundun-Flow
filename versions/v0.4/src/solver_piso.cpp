@@ -8669,6 +8669,13 @@ Status PressureVelocityCoupler::audit_pending_final(
           const double fyp = flux.y.unchecked({ix, iy + 1, iz});
           const double fzm = flux.z.unchecked(cell);
           const double fzp = flux.z.unchecked({ix, iy, iz + 1});
+          const auto fixed_source = [&](CartesianAxis axis, Int3 face,
+                                        double value) noexcept {
+            double expected = 0.0;
+            return impl.immersed_interface != nullptr &&
+                impl.immersed_interface->prescribed_face_flux(axis, face, expected) &&
+                value == expected;
+          };
           const double compressibility =
               closed ? input.drho_dp_h_y.unchecked(cell, 0U) : 0.0;
           double eos_residual = 0.0;
@@ -8705,6 +8712,12 @@ Status PressureVelocityCoupler::audit_pending_final(
               impl.continuity_activity.z_faces
                       .data[face_offset(flux.z.extents,
                                         {ix, iy, iz + 1})] == 0U;
+          const bool source_xm = inactive_xm && fixed_source(CartesianAxis::x, cell, fxm);
+          const bool source_xp = inactive_xp && fixed_source(CartesianAxis::x, {ix + 1, iy, iz}, fxp);
+          const bool source_ym = inactive_ym && fixed_source(CartesianAxis::y, cell, fym);
+          const bool source_yp = inactive_yp && fixed_source(CartesianAxis::y, {ix, iy + 1, iz}, fyp);
+          const bool source_zm = inactive_zm && fixed_source(CartesianAxis::z, cell, fzm);
+          const bool source_zp = inactive_zp && fixed_source(CartesianAxis::z, {ix, iy, iz + 1}, fzp);
           if (!std::isfinite(rho) || !(rho > 0.0) ||
               !std::isfinite(volume) || !(volume > 0.0) ||
               !std::isfinite(fxm) || !std::isfinite(fxp) ||
@@ -8713,28 +8726,27 @@ Status PressureVelocityCoupler::audit_pending_final(
             local = {StatusCode::numerical_failure, kPisoNumerical};
             continue;
           }
-          // The IBM activity authority excludes solid cells and seals every
-          // inactive fluid/solid control face to zero mass flux.  A non-zero
-          // value there is an authority violation, not a flux that may be
-          // silently omitted from the CFL reconstruction.
-          if ((inactive_xm && fxm != 0.0) ||
-              (inactive_xp && fxp != 0.0) ||
-              (inactive_ym && fym != 0.0) ||
-              (inactive_yp && fyp != 0.0) ||
-              (inactive_zm && fzm != 0.0) ||
-              (inactive_zp && fzp != 0.0)) {
+          // A prescribed inlet carries physical mass across a pressure-graph
+          // cut. Only its exact frozen source value may be nonzero there; the
+          // cut remains inactive for pressure correction but counts in CFL.
+          if ((inactive_xm && fxm != 0.0 && !source_xm) ||
+              (inactive_xp && fxp != 0.0 && !source_xp) ||
+              (inactive_ym && fym != 0.0 && !source_ym) ||
+              (inactive_yp && fyp != 0.0 && !source_yp) ||
+              (inactive_zm && fzm != 0.0 && !source_zm) ||
+              (inactive_zp && fzp != 0.0 && !source_zp)) {
             local = {StatusCode::invalid_plan, kPisoCoupler};
             continue;
           }
           const std::array<double, 6U> cell_flux{{
               fxm, fxp, fym, fyp, fzm, fzp}};
           const std::array<std::uint8_t, 6U> cell_active{{
-              static_cast<std::uint8_t>(!inactive_xm),
-              static_cast<std::uint8_t>(!inactive_xp),
-              static_cast<std::uint8_t>(!inactive_ym),
-              static_cast<std::uint8_t>(!inactive_yp),
-              static_cast<std::uint8_t>(!inactive_zm),
-              static_cast<std::uint8_t>(!inactive_zp),
+              static_cast<std::uint8_t>(!inactive_xm || source_xm),
+              static_cast<std::uint8_t>(!inactive_xp || source_xp),
+              static_cast<std::uint8_t>(!inactive_ym || source_ym),
+              static_cast<std::uint8_t>(!inactive_yp || source_yp),
+              static_cast<std::uint8_t>(!inactive_zm || source_zm),
+              static_cast<std::uint8_t>(!inactive_zp || source_zp),
           }};
           detail::CellConvectiveCflResult cell_cfl;
           const detail::CellConvectiveCflStatus cell_cfl_status =
@@ -9479,8 +9491,16 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
     else
       active_faces = activity.z_faces;
     if (active_faces.size != 0U &&
-        active_faces.data[offset(source.extents, face)] == 0U)
-      return 0.0;
+        active_faces.data[offset(source.extents, face)] == 0U) {
+      double expected = 0.0;
+      if (impl.immersed_interface != nullptr)
+        impl.immersed_interface->prescribed_face_flux(axis, face, expected);
+      // Fail the numerical audit on a corrupted predictor instead of silently
+      // repairing it while evaluating convergence. Fixed sources have no
+      // pressure-correction response, irrespective of application_scale.
+      return source.unchecked(face) == expected ? expected :
+          std::numeric_limits<double>::quiet_NaN();
+    }
     return source.unchecked(face) +
            impl.pressure_boundary.mass_flux_response_unchecked(
                correction, axis, face, coefficient.unchecked(face),

@@ -61,6 +61,9 @@ struct ApplicationRunOptions {
   // Compile-generated identity of the final CLI target. Empty means the
   // library core manifest for callers embedding ApplicationService.
   std::string_view target_build_manifest{};
+  // Optional small committed-state ledger, independent of Visit output.
+  // Zero preserves the historical application output behavior.
+  std::uint64_t diagnostics_interval{};
 };
 
 inline constexpr std::size_t kNumericalFailureMassFractionCapacity = 64U;
@@ -460,8 +463,8 @@ struct DriverTerminalEquationReport {
   std::array<std::array<double, 3U>, 2U> momentum_region_normalized_rms{};
 };
 
-// Physical external-boundary balance for the current fixed, source-free
-// product: stationary adiabatic IBM walls perform no physical heat/work.
+// Physical boundary balance, including prescribed IBM inlets. Stationary
+// adiabatic IBM walls perform no physical heat/work.
 // All rates are positive outwards except heat/stress input (positive inwards).
 // The cumulative defects compare inventory with a BDF-integrated boundary
 // ledger. A restart starts a new explicitly labelled observation epoch.
@@ -471,8 +474,8 @@ struct DriverConservationReport {
   double mass_outflow{};                 // kg/s
   double enthalpy_outflow{};             // W
   double kinetic_energy_outflow{};       // W
-  double conductive_heat_input{};        // W, external physical faces
-  double viscous_work_input{};           // W, external physical faces
+  double conductive_heat_input{};        // W, physical boundary faces
+  double viscous_work_input{};           // W, including prescribed IBM inlets
   double mass_bdf_rate{};                // kg/s
   double total_energy_bdf_rate{};        // W
   double mass_balance_defect{};          // kg/s

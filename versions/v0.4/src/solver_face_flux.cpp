@@ -4,6 +4,7 @@
 #include "hundun/v04_execution.hpp"
 
 #include "hundun/v04_boundary.hpp"
+#include "hundun/v04_ibm.hpp"
 #include "hundun/v04_mesh.hpp"
 
 #include "core_arena_detail.hpp"
@@ -268,6 +269,17 @@ Status overwrite_pending_face_flux_for_test(PendingFaceFluxView& pending,
         for (std::int32_t x = 0; x < face.extents.x; ++x)
           face.unchecked({x, y, z}) = value;
   return {};
+}
+
+Status constrain_pending_face_flux_for_test(
+    PendingFaceFluxView& pending,
+    const IbmEquationInterfacePlan& immersed_interface) noexcept {
+  if (!pending.valid() ||
+      !PendingFaceFluxAccess::lease_valid(pending)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  return immersed_interface.constrain_interface_flux(
+      PendingFaceFluxAccess::raw(pending));
 }
 #endif
 

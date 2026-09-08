@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <charconv>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>

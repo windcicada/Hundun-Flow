@@ -433,6 +433,7 @@ Status AssemblyEpoch::record(
         candidate_.geometry == certificate.geometry &&
         candidate_.face_flux == certificate.face_flux &&
         candidate_.state == certificate.state &&
+        candidate_.inlet_sources == certificate.inlet_sources &&
         candidate_.dt == certificate.dt;
     if (!same_cells || !same_certificate) {
       return fail({StatusCode::invalid_plan, kAssemblyEpoch});

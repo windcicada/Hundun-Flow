@@ -31,7 +31,8 @@ enum class GeometryKind : std::uint8_t {
 enum class TurbulenceKind : std::uint8_t {
   none,
   wale,
-  vreman_wall_function
+  vreman_wall_function,
+  vreman
 };
 enum class TimeControlKind : std::uint8_t {
   fixed,
@@ -129,6 +130,10 @@ struct ImmersedBoundarySpec {
   ImmersedFluidSide fluid_side{ImmersedFluidSide::outside};
   IbmReconstructionPolicy reconstruction_policy{
       IbmReconstructionPolicy::strict_quadratic};
+  // Optional frozen binary 0=solid, 1=fluid Cartesian cell authority.
+  // This selects explicit Cartesian face wall geometry instead of STL scans.
+  std::optional<std::filesystem::path> marker_file;
+  PlanFingerprint marker_fingerprint{};
 };
 
 struct ScalarBoundarySpec {
@@ -170,6 +175,24 @@ struct BoundaryFaceSpec {
   double mach_limit{0.95};
   bool allow_backflow{};
   std::vector<ScalarBoundarySpec> scalars;
+};
+
+struct PatchInletSpec {
+  std::int32_t label{};
+  // x_min, x_max, y_min, y_max, z_min, z_max; for an immersed patch
+  // this is the direction from its fluid owner toward the solid donor.
+  std::uint8_t face{};
+  bool immersed{};
+  BoundaryFaceSpec boundary;
+};
+
+struct PatchInletsSpec {
+  // Dense little-endian int32 labels, global owned cells in x-fast order.
+  // Positive labels select fluid owners; immersed sources require the
+  // corresponding negative label in the immediately adjacent solid cell.
+  std::filesystem::path labels_file;
+  PlanFingerprint labels_fingerprint{};
+  std::vector<PatchInletSpec> patches;
 };
 
 struct SchemeSpec {
@@ -262,6 +285,7 @@ struct ValidatedModel {
   std::vector<TransportedScalarSpec> transported_scalars;
   std::vector<std::filesystem::path> data_files;
   std::optional<ImmersedBoundarySpec> immersed_boundary;
+  std::optional<PatchInletsSpec> patch_inlets;
   PlanFingerprint fingerprint{};
 };
 

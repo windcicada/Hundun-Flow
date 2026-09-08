@@ -21,6 +21,7 @@ class BoundaryPlan;
 class CartesianGeometryPlan;
 class FaceFluxStorage;
 class FinalFaceFluxWriter;
+class IbmEquationInterfacePlan;
 class PressureVelocityCoupler;
 class ProductDriver;
 class SchemePlan;
@@ -284,6 +285,9 @@ class PendingFaceFluxView {
 namespace detail {
 Status overwrite_pending_face_flux_for_test(PendingFaceFluxView& pending,
                                             double value) noexcept;
+Status constrain_pending_face_flux_for_test(
+    PendingFaceFluxView& pending,
+    const IbmEquationInterfacePlan& immersed_interface) noexcept;
 }  // namespace detail
 #endif
 
@@ -467,6 +471,13 @@ Status cartesian_provisional_face_divergence(
 Status cartesian_convection(const CartesianKernelPlan& plan,
                             ConvectionScheme scheme, ConstFaceFluxView flux,
                             const KernelInvocation& invocation) noexcept;
+// One-face form of the exact Cartesian reconstruction used by the
+// conservative convection kernels.  Boundary adapters use this to replace a
+// sparse face value without duplicating scheme arithmetic.
+Status reconstruct_cartesian_convection_face(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFieldView transported, std::uint8_t component, CartesianAxis axis,
+    Int3 face, double mass_rate, double& value) noexcept;
 // Conservative target-layer divergence using an attempt-local, deliberately
 // uncommitted flux.  This is distinct from both predictor semantics and the
 // final published-flux authority boundary.
@@ -476,6 +487,15 @@ Status cartesian_target_convection(
 Status cartesian_provisional_convection(
     const CartesianKernelPlan& plan, ConvectionScheme scheme,
     ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept;
+
+// One sparse face whose nonlinear value is owned by an external fixed-state
+// authority rather than by the Cartesian cell reconstruction.  Entries are
+// stored in x/y/z traversal order (axis, z, y, x); the borrowed schedule must
+// outlive every frozen/compiled derivative certificate that references it.
+struct FrozenConvectionFixedFace {
+  CartesianAxis axis{};
+  Int3 index{};
+};
 
 // Exact face values frozen from the same reconstruction used by
 // cartesian_target_convection.  reconstruction is the rank-invariant semantic
@@ -490,11 +510,17 @@ struct FrozenConvectionFaceField {
   PlanFingerprint reconstruction{};
   PlanFingerprint local_binding{};
   bool exact_target_reconstruction{};
+  Span<const FrozenConvectionFixedFace> fixed_faces{};
+  // Rank-local authority for the fixed values and schedule.  It deliberately
+  // does not enter the collective reconstruction fingerprint.
+  PlanFingerprint fixed_face_authority{};
 
   bool valid() const noexcept {
     return x.base != nullptr && y.base != nullptr && z.base != nullptr &&
            revision != 0U && reconstruction != 0U && local_binding != 0U &&
-           exact_target_reconstruction;
+           exact_target_reconstruction &&
+           (fixed_faces.size == 0U) == (fixed_face_authority == 0U) &&
+           (fixed_faces.size == 0U || fixed_faces.data != nullptr);
   }
 };
 
@@ -586,6 +612,18 @@ Status freeze_cartesian_target_convection_faces(
     ConstFaceFluxView target_flux, ConstFieldView transported,
     std::uint8_t component, FrozenConvectionContext context,
     FrozenConvectionFaceOutput output,
+    FrozenConvectionFaceField& frozen) noexcept;
+
+// Reseals an already-frozen field after its listed sparse values were replaced
+// by a fixed-state authority.  Every non-listed byte is rechecked against the
+// Cartesian reconstruction before publication.  On failure frozen is cleared,
+// so an ordinary certificate can never survive a post-freeze mutation.
+Status seal_fixed_cartesian_target_convection_faces(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux, ConstFieldView transported,
+    std::uint8_t component, FrozenConvectionContext context,
+    Span<const FrozenConvectionFixedFace> fixed_faces,
+    PlanFingerprint fixed_face_authority,
     FrozenConvectionFaceField& frozen) noexcept;
 
 // Directional face values obtained by applying one explicit linearization

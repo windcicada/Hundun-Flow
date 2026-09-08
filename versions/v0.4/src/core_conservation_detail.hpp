@@ -164,7 +164,8 @@ inline Status collect_boundary_balance(
     Span<const std::uint8_t> activity, FieldView kinetic, FieldView scratch,
     std::uint64_t accepted_step, const ProductBoundaryBalanceHistory& history,
     ReductionEngine& reductions, DriverConservationReport& out,
-    ProductBoundaryBalanceHistory& pending) noexcept {
+    ProductBoundaryBalanceHistory& pending,
+    const IbmEquationInterfacePlan* immersed_interface = nullptr) noexcept {
   out = {};
   pending = {};
   const Int3 cells = kernels.cells();
@@ -194,15 +195,21 @@ inline Status collect_boundary_balance(
       }
   std::array<long double, 11U> sum{};
   const KernelBox box{{0, 0, 0}, cells};
-  const auto convection = [&](ConstFieldView field, ConvectionScheme scheme) {
+  const auto convection = [&](ConstFieldView field, ConvectionScheme scheme,
+                              IbmInterfaceInletFieldKind inlet_field) {
     const std::array<ConstFieldView, 1U> reads{field};
     const std::array<FieldView, 1U> writes{scratch};
-    return cartesian_convection(
+    Status status = cartesian_convection(
         kernels, scheme, flux,
         {{reads.data(), reads.size()}, {writes.data(), writes.size()},
          box, 0U, 0U, 1U, flux.revision, nullptr});
+    if (status && immersed_interface != nullptr)
+      status = immersed_interface->add_source_convection_correction(
+          {inlet_field, 0U}, scheme, field, 1.0, scratch, box);
+    return status;
   };
-  if (local) local = convection(state.enthalpy.trial, schemes.enthalpy());
+  if (local) local = convection(state.enthalpy.trial, schemes.enthalpy(),
+                                IbmInterfaceInletFieldKind::enthalpy);
   if (local)
     for (std::int32_t z = 0; z < cells.z; ++z)
       for (std::int32_t y = 0; y < cells.y; ++y)
@@ -211,7 +218,8 @@ inline Status collect_boundary_balance(
           if (fluid(cell))
             sum[7U] += cell_volume(kernels, cell) * scratch.unchecked(cell, 0U);
         }
-  if (local) local = convection(as_const(kinetic), schemes.momentum());
+  if (local) local = convection(as_const(kinetic), schemes.momentum(),
+                                IbmInterfaceInletFieldKind::kinetic_energy);
   const std::array<ConstFieldView, 3U> density{
       state.density.trial, state.density.accepted, state.density.previous};
   const std::array<ConstFieldView, 3U> enthalpy{
@@ -249,7 +257,13 @@ inline Status collect_boundary_balance(
                      flux.z.unchecked({x, y, z + 1}) - flux.z.unchecked(cell);
           sum[8U] += volume * scratch.unchecked(cell, 0U);
         }
-  // Only true external faces contribute. Periodic and partition faces cancel
+  if (local && immersed_interface != nullptr) {
+    double inlet_work = 0.0;
+    local = immersed_interface->inlet_viscous_work_input(
+        state.velocity.trial, material.effective_viscosity, inlet_work);
+    if (local) sum[10U] += inlet_work;
+  }
+  // Below, only true external faces contribute. Periodic and partition faces cancel
   // in the conservative transport sums; stationary adiabatic IBM walls have
   // zero physical work/heat, irrespective of Cartesian ghost truncation error.
   for (std::uint8_t axis_index = 0U; axis_index < 3U && local; ++axis_index) {

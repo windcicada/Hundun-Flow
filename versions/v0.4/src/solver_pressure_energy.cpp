@@ -36,7 +36,7 @@ constexpr std::uint64_t kPressureEnergyDiagonalSchema =
 constexpr std::uint64_t kPressureEnergyPressureFluxSchema =
     UINT64_C(0x7630347065666c78);
 constexpr std::uint64_t kPressureEnergyEnthalpySchema =
-    UINT64_C(0x7630347065653032); // v04pee02: conditional outlet derivative.
+    UINT64_C(0x7630347065653033); // v04pee03: fixed IBM inlet derivative.
 // "v04pegl2": the joint Euclidean merit is a different policy from the
 // original componentwise L-infinity globalization and must sign a distinct
 // provenance lineage.
@@ -436,6 +436,32 @@ bool valid_enthalpy_authority(
          authority.transport_semantics != 0U;
 }
 
+const IbmEquationInterfacePlan* inlet_source_interface(
+    const PressureEnergyEnthalpyBinding& binding) noexcept {
+  return binding.immersed_interface != nullptr &&
+                 binding.immersed_interface->has_inlet_sources()
+             ? binding.immersed_interface
+             : nullptr;
+}
+
+PlanFingerprint inlet_source_fingerprint(
+    const PressureEnergyEnthalpyBinding& binding) noexcept {
+  const IbmEquationInterfacePlan* source = inlet_source_interface(binding);
+  return source == nullptr ? 0U : source->fingerprint();
+}
+
+bool inlet_source_activity_matches(
+    const IbmEquationInterfacePlan& source,
+    PressureContinuityActivityView activity) noexcept {
+  const Span<const std::uint8_t> expected = source.cell_activity();
+  if (expected.data == nullptr || activity.cells.data == nullptr ||
+      expected.size != activity.cells.size) {
+    return false;
+  }
+  return std::memcmp(expected.data, activity.cells.data,
+                     expected.size * sizeof(std::uint8_t)) == 0;
+}
+
 PlanFingerprint enthalpy_collective_fingerprint(
     const PressureEnergyEnthalpyBinding& binding) noexcept {
   std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyEnthalpySchema);
@@ -487,6 +513,11 @@ PlanFingerprint enthalpy_collective_fingerprint(
   hash = hash_mix(hash, binding.services.enthalpy_variation_field);
   hash = hash_mix(hash, binding.services.temperature_variation_field);
   hash = hash_mix(hash, binding.activity.collective_fingerprint);
+  // Prescribed IBM links are rank-local: a decomposition may own source faces
+  // on only a subset of ranks.  Their exact plan fingerprint belongs in the
+  // local binding revision, while equation_semantics already carries the
+  // case-wide inlet model.  Mixing local presence here would make an otherwise
+  // valid collective Krylov contract disagree across ranks.
   return nonzero_hash(hash);
 }
 
@@ -505,6 +536,7 @@ RevisionToken enthalpy_binding_revision(
   hash = hash_mix(hash, binding.services.halo->instance_identity());
   hash = hash_mix(hash, binding.services.halo_stage);
   hash = hash_mix(hash, binding.activity.local_fingerprint);
+  hash = hash_mix(hash, inlet_source_fingerprint(binding));
   hash = hash_mix(hash, directional_branch_authority);
   const ConstFieldView fields[]{binding.assembled_diagonal,
                                 binding.target_enthalpy,
@@ -743,6 +775,7 @@ PlanFingerprint compiled_enthalpy_local_binding(
   hash = hash_mix(hash, branches.revision);
   hash = hash_mix(hash, branches.branch_authority);
   hash = hash_mix(hash, branches.local_binding);
+  hash = hash_mix(hash, inlet_source_fingerprint(binding));
   hash = mix_local_field(
       hash, as_const(binding.workspace.compiled.local_diagonal));
   hash = mix_local_field(hash,
@@ -1761,6 +1794,9 @@ Status PressureEnergyPressureFluxOperator::apply_after_exchange(
         minus_is_local_interior = cell.z > 0;
         plus_is_local_interior = plus.z < cells.z;
       }
+      // This is the pressure/Jv graph, not the nonlinear energy residual.
+      // A prescribed IBM source contributes its fixed phi*h_in to the latter,
+      // but remains cut here because d(phi_source)/d(p) is exactly zero.
       const bool minus_active = active_face(activity_, axis, cells, cell);
       const bool plus_active = active_face(activity_, axis, cells, plus);
       const double minus_response =
@@ -2270,6 +2306,7 @@ bool PressureEnergyEnthalpyCertificate::valid() const noexcept {
                  static_cast<std::size_t>(linear.local_shape.z) &&
          ((activity_local_fingerprint == 0U) ==
           (activity_collective_fingerprint == 0U)) &&
+         ((inlet_sources == 0U) == !fixed_inlet_source_variation) &&
          ((linearization_policy ==
                FrozenConvectionLinearizationPolicy::classical_active_branch &&
            generalized_face_count == 0U) ||
@@ -2383,10 +2420,27 @@ Status PressureEnergyEnthalpyOperator::bind(
       !compiled_present ||
       (binding.convection == ConvectionScheme::limited_central2 &&
        valid_compiled_enthalpy_workspace(binding.workspace.compiled, cells));
+  const IbmEquationInterfacePlan* inlet_sources =
+      inlet_source_interface(binding);
+  const bool inlet_source_binding_valid =
+      inlet_sources == nullptr ||
+      (inlet_sources->fingerprint() != 0U &&
+       inlet_source_activity_matches(*inlet_sources, binding.activity));
   if (!pointers_valid || !geometry_valid || !boundary_valid ||
       !semantics_valid || !services_valid || !halo_valid || !cell_views_valid ||
-      !face_views_valid || !compiled_views_valid) {
+      !face_views_valid || !compiled_views_valid ||
+      !inlet_source_binding_valid) {
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
+  }
+  if (inlet_sources != nullptr) {
+    const Status source_flux =
+        inlet_sources->validate_interface_flux(binding.target_flux);
+    if (!source_flux) return source_flux;
+    const Status source_enthalpy =
+        inlet_sources->validate_frozen_source_face_values(
+            {IbmInterfaceInletFieldKind::enthalpy, 0U},
+            binding.frozen_face_enthalpy);
+    if (!source_enthalpy) return source_enthalpy;
   }
 
   const ConstFieldView cell_views[]{
@@ -2522,7 +2576,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   }
 
   FrozenConvectionFaceDirectionalDerivative directional;
-  const Status directional_status =
+  Status directional_status =
       differentiate_frozen_cartesian_target_convection_faces(
           *binding.kernels, binding.convection, binding.target_flux,
           binding.target_enthalpy, 0U, binding.convection_context,
@@ -2593,6 +2647,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.geometry_ = binding.geometry;
   candidate.kernels_ = binding.kernels;
   candidate.boundary_ = binding.boundary;
+  candidate.immersed_interface_ = inlet_sources;
   candidate.patch_ = binding.patch;
   candidate.convection_ = binding.convection;
   candidate.services_ = binding.services;
@@ -2674,6 +2729,8 @@ Status PressureEnergyEnthalpyOperator::bind(
       binding.activity.local_fingerprint;
   candidate.certificate_.activity_collective_fingerprint =
       binding.activity.collective_fingerprint;
+  candidate.certificate_.inlet_sources =
+      inlet_sources == nullptr ? 0U : inlet_sources->fingerprint();
   candidate.certificate_.active_cells = active_cells;
   candidate.certificate_.inactive_cells = cell_count(cells) - active_cells;
   candidate.certificate_.generalized_face_count =
@@ -2682,6 +2739,8 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.certificate_.exact_cartesian_spatial_response = true;
   candidate.certificate_.exact_temperature_space_conduction = true;
   candidate.certificate_.ibm_spatial_derivative = false;
+  candidate.certificate_.fixed_inlet_source_variation =
+      inlet_sources != nullptr;
   candidate.certificate_.inactive_rows_identity = true;
   candidate.certificate_.inactive_interfaces_zero = true;
   candidate.certificate_.allocation_free_apply = true;
@@ -2711,6 +2770,7 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
   current_binding.geometry = geometry_;
   current_binding.kernels = kernels_;
   current_binding.boundary = boundary_;
+  current_binding.immersed_interface = immersed_interface_;
   current_binding.patch = patch_;
   current_binding.convection = convection_;
   current_binding.services = services_;
@@ -2927,6 +2987,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   current_binding.geometry = geometry_;
   current_binding.kernels = kernels_;
   current_binding.boundary = boundary_;
+  current_binding.immersed_interface = immersed_interface_;
   current_binding.patch = patch_;
   current_binding.convection = convection_;
   current_binding.services = services_;
@@ -3014,6 +3075,8 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
       activity_.local_fingerprint == certificate_.activity_local_fingerprint &&
       activity_.collective_fingerprint ==
           certificate_.activity_collective_fingerprint &&
+      inlet_source_fingerprint(current_binding) ==
+          certificate_.inlet_sources &&
       enthalpy_collective_fingerprint(current_binding) ==
           certificate_.linear.collective_fingerprint &&
       enthalpy_binding_revision(current_binding,

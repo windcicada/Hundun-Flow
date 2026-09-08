@@ -7,9 +7,11 @@
 #include "mesh_focus_detail.hpp"
 #include "solver_equation_detail.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
@@ -30,6 +32,13 @@ std::uint64_t mix(std::uint64_t hash, std::uint64_t value) noexcept {
   hash ^= value;
   hash *= kFnvPrime;
   return hash;
+}
+
+std::uint64_t double_bits(double value) noexcept {
+  std::uint64_t bits = 0U;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
 }
 
 bool same_patch(MeshPatch left, MeshPatch right) noexcept {
@@ -156,6 +165,48 @@ ConstFaceFieldView select(ConstFaceFluxView flux,
   return axis == CartesianAxis::x
              ? flux.x
              : (axis == CartesianAxis::y ? flux.y : flux.z);
+}
+
+FaceFieldView select(FrozenConvectionFaceOutput values,
+                     CartesianAxis axis) noexcept {
+  return axis == CartesianAxis::x
+             ? values.x
+             : (axis == CartesianAxis::y ? values.y : values.z);
+}
+
+bool valid_source_face_values(FrozenConvectionFaceOutput values,
+                              Int3 cells) noexcept {
+  const auto valid = [&](FaceFieldView view, CartesianAxis axis) noexcept {
+    Int3 expected = cells;
+    if (axis == CartesianAxis::x)
+      ++expected.x;
+    else if (axis == CartesianAxis::y)
+      ++expected.y;
+    else
+      ++expected.z;
+    detail::FieldStorageInterval interval;
+    return detail::face_storage_interval(view, interval) &&
+           view.axis == axis && view.extents.x == expected.x &&
+           view.extents.y == expected.y && view.extents.z == expected.z &&
+           view.storage_identity != 0U && view.revision_domain != 0U;
+  };
+  return valid(values.x, CartesianAxis::x) &&
+         valid(values.y, CartesianAxis::y) &&
+         valid(values.z, CartesianAxis::z) &&
+         !detail::face_views_overlap(values.x, values.y) &&
+         !detail::face_views_overlap(values.x, values.z) &&
+         !detail::face_views_overlap(values.y, values.z);
+}
+
+bool same_index(Int3 left, Int3 right) noexcept {
+  return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+bool inside(KernelBox box, Int3 cell) noexcept {
+  return cell.x >= box.begin.x && cell.y >= box.begin.y &&
+         cell.z >= box.begin.z && cell.x < box.begin.x + box.cells.x &&
+         cell.y < box.begin.y + box.cells.y &&
+         cell.z < box.begin.z + box.cells.z;
 }
 
 bool valid_plan_inputs(const CartesianKernelPlan& kernels,
@@ -699,8 +750,30 @@ Status IbmEquationInterfacePlan::compile(
     const CartesianKernelPlan& kernels, const EBTopology& topology,
     const BoundaryStencilPlan& boundary,
     IbmEquationInterfacePlan& out) noexcept {
-  return compile(kernels, topology, boundary, topology.interface_metric(),
-                 out);
+  return compile_sources(
+      kernels, topology, boundary, topology.interface_metric(), {}, {}, 0U,
+      false, out);
+}
+
+Status IbmEquationInterfacePlan::compile(
+    const CartesianKernelPlan& kernels, const EBTopology& topology,
+    const BoundaryStencilPlan& boundary,
+    Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+    IbmEquationInterfacePlan& out) noexcept {
+  return compile_sources(kernels, topology, boundary,
+                         topology.interface_metric(), mass_flux_sources, {},
+                         0U, false, out);
+}
+
+Status IbmEquationInterfacePlan::compile(
+    const CartesianKernelPlan& kernels, const EBTopology& topology,
+    const BoundaryStencilPlan& boundary,
+    Span<const IbmInterfaceInletState> inlet_states,
+    std::size_t independent_species_count,
+    IbmEquationInterfacePlan& out) noexcept {
+  return compile_sources(kernels, topology, boundary,
+                         topology.interface_metric(), {}, inlet_states,
+                         independent_species_count, true, out);
 }
 
 Status IbmEquationInterfacePlan::compile(
@@ -708,7 +781,45 @@ Status IbmEquationInterfacePlan::compile(
     const BoundaryStencilPlan& boundary,
     const IbmInterfaceMetricPlan& metric,
     IbmEquationInterfacePlan& out) noexcept {
-  if (!valid_plan_inputs(kernels, topology, boundary, metric))
+  return compile_sources(kernels, topology, boundary, metric, {}, {}, 0U,
+                         false, out);
+}
+
+Status IbmEquationInterfacePlan::compile(
+    const CartesianKernelPlan& kernels, const EBTopology& topology,
+    const BoundaryStencilPlan& boundary,
+    const IbmInterfaceMetricPlan& metric,
+    Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+    IbmEquationInterfacePlan& out) noexcept {
+  return compile_sources(kernels, topology, boundary, metric,
+                         mass_flux_sources, {}, 0U, false, out);
+}
+
+Status IbmEquationInterfacePlan::compile(
+    const CartesianKernelPlan& kernels, const EBTopology& topology,
+    const BoundaryStencilPlan& boundary,
+    const IbmInterfaceMetricPlan& metric,
+    Span<const IbmInterfaceInletState> inlet_states,
+    std::size_t independent_species_count,
+    IbmEquationInterfacePlan& out) noexcept {
+  return compile_sources(kernels, topology, boundary, metric, {},
+                         inlet_states, independent_species_count, true, out);
+}
+
+Status IbmEquationInterfacePlan::compile_sources(
+    const CartesianKernelPlan& kernels, const EBTopology& topology,
+    const BoundaryStencilPlan& boundary,
+    const IbmInterfaceMetricPlan& metric,
+    Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+    Span<const IbmInterfaceInletState> inlet_states,
+    std::size_t independent_species_count, bool inlet_state_bound,
+    IbmEquationInterfacePlan& out) noexcept {
+  if (!valid_plan_inputs(kernels, topology, boundary, metric) ||
+      (mass_flux_sources.size != 0U && mass_flux_sources.data == nullptr) ||
+      (inlet_states.size != 0U && inlet_states.data == nullptr) ||
+      (inlet_state_bound
+           ? mass_flux_sources.size != 0U
+           : inlet_states.size != 0U || independent_species_count != 0U))
     return {StatusCode::invalid_plan, kIbmEquationPlan};
   std::uint64_t fingerprint = kFnvOffset;
   fingerprint = mix(fingerprint, kernels.fingerprint());
@@ -722,7 +833,8 @@ Status IbmEquationInterfacePlan::compile(
   candidate.topology_ = &topology;
   candidate.boundary_ = &boundary;
   candidate.metric_ = &metric;
-  candidate.fingerprint_ = fingerprint;
+  candidate.independent_species_count_ = independent_species_count;
+  candidate.inlet_state_bound_ = inlet_state_bound;
   try {
     const Span<const BoundaryStencilLink> links = boundary.links();
     const Span<const QuadraticAffineRow> rows =
@@ -734,6 +846,190 @@ Status IbmEquationInterfacePlan::compile(
         boundary.reconstruction().donor_global_cells();
     const Span<const ImmersedLink> topology_links = topology.links();
     const Span<const IbmInterfaceLinkMetric> physical_links = metric.links();
+    const std::size_t source_count = inlet_state_bound
+                                         ? inlet_states.size
+                                         : mass_flux_sources.size;
+    if (source_count != 0U) {
+      for (std::size_t index = 1U; index < topology_links.size; ++index)
+        if (topology_links.data[index - 1U].global_link >=
+            topology_links.data[index].global_link)
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+    }
+    const auto resolve_topology_link =
+        [&](std::uint64_t global_link, std::size_t& resolved) noexcept {
+          std::size_t begin = 0U;
+          std::size_t end = topology_links.size;
+          while (begin < end) {
+            const std::size_t middle = begin + (end - begin) / 2U;
+            if (topology_links.data[middle].global_link < global_link)
+              begin = middle + 1U;
+            else
+              end = middle;
+          }
+          resolved = begin;
+          return begin < topology_links.size && begin <= UINT32_MAX &&
+                 topology_links.data[begin].global_link == global_link;
+        };
+    if (!inlet_state_bound && mass_flux_sources.size != 0U) {
+      std::vector<IbmInterfaceMassFluxSource> ordered_sources(
+          mass_flux_sources.data,
+          mass_flux_sources.data + mass_flux_sources.size);
+      std::sort(ordered_sources.begin(), ordered_sources.end(),
+                [](const IbmInterfaceMassFluxSource& left,
+                   const IbmInterfaceMassFluxSource& right) noexcept {
+                  return left.global_link < right.global_link;
+                });
+      candidate.prescribed_interface_fluxes_.reserve(ordered_sources.size());
+      fingerprint = mix(fingerprint, UINT64_C(0x69626d736f757263));
+      fingerprint = mix(fingerprint, ordered_sources.size());
+      for (std::size_t source_index = 0U;
+           source_index < ordered_sources.size(); ++source_index) {
+        IbmInterfaceMassFluxSource source = ordered_sources[source_index];
+        if (!std::isfinite(source.face_mass_flux) ||
+            (source_index != 0U &&
+             ordered_sources[source_index - 1U].global_link ==
+                 source.global_link))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        if (source.face_mass_flux == 0.0) source.face_mass_flux = 0.0;
+        std::size_t topology_link = 0U;
+        if (!resolve_topology_link(source.global_link, topology_link))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        candidate.prescribed_interface_fluxes_.push_back(
+            {static_cast<std::uint32_t>(topology_link),
+             source.face_mass_flux});
+        fingerprint = mix(fingerprint, source.global_link);
+        fingerprint = mix(fingerprint, double_bits(source.face_mass_flux));
+      }
+    } else if (inlet_state_bound) {
+      std::vector<IbmInterfaceInletState> ordered_states;
+      if (inlet_states.size != 0U)
+        ordered_states.assign(inlet_states.data,
+                              inlet_states.data + inlet_states.size);
+      std::sort(ordered_states.begin(), ordered_states.end(),
+                [](const IbmInterfaceInletState& left,
+                   const IbmInterfaceInletState& right) noexcept {
+                  return left.global_link < right.global_link;
+                });
+      candidate.prescribed_interface_fluxes_.reserve(ordered_states.size());
+      if (independent_species_count != 0U &&
+          ordered_states.size() >
+              std::numeric_limits<std::size_t>::max() /
+                  independent_species_count)
+        return {StatusCode::invalid_plan, kIbmEquationPlan};
+      candidate.prescribed_independent_species_.reserve(
+          ordered_states.size() * independent_species_count);
+      fingerprint = mix(fingerprint, UINT64_C(0x69626d696e6c6574));
+      fingerprint = mix(fingerprint, ordered_states.size());
+      fingerprint = mix(fingerprint, independent_species_count);
+      for (std::size_t source_index = 0U;
+           source_index < ordered_states.size(); ++source_index) {
+        const IbmInterfaceInletState& source = ordered_states[source_index];
+        if (!std::isfinite(source.face_mass_flux) ||
+            !std::isfinite(source.velocity.x) ||
+            !std::isfinite(source.velocity.y) ||
+            !std::isfinite(source.velocity.z) ||
+            !std::isfinite(source.enthalpy) ||
+            source.independent_species.size != independent_species_count ||
+            (independent_species_count != 0U &&
+             source.independent_species.data == nullptr) ||
+            (source_index != 0U &&
+             ordered_states[source_index - 1U].global_link ==
+                 source.global_link))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        std::size_t topology_link = 0U;
+        if (!resolve_topology_link(source.global_link, topology_link))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        const ImmersedFaceDirection direction =
+            topology_links.data[topology_link].direction;
+        const bool fluid_on_positive_side =
+            direction == ImmersedFaceDirection::x_negative ||
+            direction == ImmersedFaceDirection::y_negative ||
+            direction == ImmersedFaceDirection::z_negative;
+        if (fluid_on_positive_side ? !(source.face_mass_flux > 0.0)
+                                   : !(source.face_mass_flux < 0.0))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        const double normal_velocity =
+            direction == ImmersedFaceDirection::x_negative ||
+                    direction == ImmersedFaceDirection::x_positive
+                ? source.velocity.x
+                : (direction == ImmersedFaceDirection::y_negative ||
+                           direction == ImmersedFaceDirection::y_positive
+                       ? source.velocity.y
+                       : source.velocity.z);
+        // The Cartesian mass flux and velocity component use the same
+        // negative-to-positive axis orientation.  A prescribed inlet must
+        // therefore drive both quantities from the solid side into the fluid
+        // side; accepting opposite signs would bind mutually inconsistent
+        // convective and momentum states to one source face.
+        if (source.face_mass_flux > 0.0 ? !(normal_velocity > 0.0)
+                                        : !(normal_velocity < 0.0))
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        const std::size_t species_begin =
+            candidate.prescribed_independent_species_.size();
+        for (std::size_t species = 0U;
+             species < independent_species_count; ++species) {
+          const double value = source.independent_species.data[species];
+          if (!std::isfinite(value))
+            return {StatusCode::invalid_plan, kIbmEquationPlan};
+          candidate.prescribed_independent_species_.push_back(value);
+        }
+        candidate.prescribed_interface_fluxes_.push_back(
+            {static_cast<std::uint32_t>(topology_link), source.face_mass_flux,
+             source.velocity, source.enthalpy, species_begin, true});
+        fingerprint = mix(fingerprint, source.global_link);
+        fingerprint = mix(fingerprint, double_bits(source.face_mass_flux));
+        fingerprint = mix(fingerprint, double_bits(source.velocity.x));
+        fingerprint = mix(fingerprint, double_bits(source.velocity.y));
+        fingerprint = mix(fingerprint, double_bits(source.velocity.z));
+        fingerprint = mix(fingerprint, double_bits(source.enthalpy));
+        for (std::size_t species = 0U;
+             species < independent_species_count; ++species)
+          fingerprint = mix(
+              fingerprint,
+              double_bits(source.independent_species.data[species]));
+      }
+    }
+    if (inlet_state_bound && !candidate.prescribed_interface_fluxes_.empty()) {
+      candidate.prescribed_source_faces_.reserve(
+          candidate.prescribed_interface_fluxes_.size());
+      for (const PrescribedInterfaceFlux& source :
+           candidate.prescribed_interface_fluxes_) {
+        if (source.topology_link >= topology_links.size)
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        const InterfaceFace face =
+            interface_face(topology_links.data[source.topology_link]);
+        candidate.prescribed_source_faces_.push_back({face.axis, face.index});
+      }
+      std::sort(candidate.prescribed_source_faces_.begin(),
+                candidate.prescribed_source_faces_.end(),
+                [](const FrozenConvectionFixedFace& left,
+                   const FrozenConvectionFixedFace& right) noexcept {
+                  const auto left_axis =
+                      static_cast<std::uint8_t>(left.axis);
+                  const auto right_axis =
+                      static_cast<std::uint8_t>(right.axis);
+                  if (left_axis != right_axis) return left_axis < right_axis;
+                  if (left.index.z != right.index.z)
+                    return left.index.z < right.index.z;
+                  if (left.index.y != right.index.y)
+                    return left.index.y < right.index.y;
+                  return left.index.x < right.index.x;
+                });
+      for (std::size_t index = 1U;
+           index < candidate.prescribed_source_faces_.size(); ++index) {
+        const FrozenConvectionFixedFace& prior =
+            candidate.prescribed_source_faces_[index - 1U];
+        const FrozenConvectionFixedFace& current =
+            candidate.prescribed_source_faces_[index];
+        if (prior.axis == current.axis && prior.index.x == current.index.x &&
+            prior.index.y == current.index.y &&
+            prior.index.z == current.index.z) {
+          return {StatusCode::invalid_plan, kIbmEquationPlan};
+        }
+      }
+    }
+    if (fingerprint == 0U) fingerprint = 1U;
+    candidate.fingerprint_ = fingerprint;
     candidate.wall_linearization_.reserve(links.size);
     for (std::size_t index = 0U; index < links.size; ++index) {
       const std::uint32_t row_index =
@@ -824,7 +1120,7 @@ Status IbmEquationInterfacePlan::compile(
   }
 }
 
-Status IbmEquationInterfacePlan::zero_interface_flux(
+Status IbmEquationInterfacePlan::constrain_interface_flux(
     FaceFluxView flux) const noexcept {
   Status status =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
@@ -832,6 +1128,17 @@ Status IbmEquationInterfacePlan::zero_interface_flux(
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
   const Span<const ImmersedLink> links = topology_->links();
+  for (std::size_t index = 0U;
+       index < prescribed_interface_fluxes_.size(); ++index) {
+    const PrescribedInterfaceFlux& source =
+        prescribed_interface_fluxes_[index];
+    if (source.topology_link >= links.size ||
+        !std::isfinite(source.face_mass_flux) ||
+        (index != 0U &&
+         prescribed_interface_fluxes_[index - 1U].topology_link >=
+             source.topology_link))
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
   for (std::size_t index = 0U; index < links.size; ++index) {
     const InterfaceFace face = interface_face(links.data[index]);
     select(flux, face.axis).unchecked(face.index) = 0.0;
@@ -849,7 +1156,19 @@ Status IbmEquationInterfacePlan::zero_interface_flux(
           flux.y.unchecked({x, y, z}) = flux.y.unchecked({x, y + 1, z}) = 0.0;
           flux.z.unchecked({x, y, z}) = flux.z.unchecked({x, y, z + 1}) = 0.0;
         }
+  // Solid-cell retirement above also touches every immersed source face.
+  // Reapply prescribed Cartesian fluxes last so these values are the sole
+  // continuity authority on their links.
+  for (const PrescribedInterfaceFlux& source : prescribed_interface_fluxes_) {
+    const InterfaceFace face = interface_face(links.data[source.topology_link]);
+    select(flux, face.axis).unchecked(face.index) = source.face_mass_flux;
+  }
   return {};
+}
+
+Status IbmEquationInterfacePlan::zero_interface_flux(
+    FaceFluxView flux) const noexcept {
+  return constrain_interface_flux(flux);
 }
 
 Status IbmEquationInterfacePlan::validate_interface_flux(
@@ -862,11 +1181,459 @@ Status IbmEquationInterfacePlan::validate_interface_flux(
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
   const Span<const ImmersedLink> links = topology_->links();
+  for (std::size_t index = 0U;
+       index < prescribed_interface_fluxes_.size(); ++index) {
+    const PrescribedInterfaceFlux& source =
+        prescribed_interface_fluxes_[index];
+    if (source.topology_link >= links.size ||
+        !std::isfinite(source.face_mass_flux) ||
+        (index != 0U &&
+         prescribed_interface_fluxes_[index - 1U].topology_link >=
+             source.topology_link))
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
+  std::size_t source_index = 0U;
   for (std::size_t index = 0U; index < links.size; ++index) {
     const InterfaceFace face = interface_face(links.data[index]);
     const double value = select(flux, face.axis).unchecked(face.index);
-    if (!std::isfinite(value) || std::abs(value) > absolute_tolerance)
+    double expected = 0.0;
+    if (source_index < prescribed_interface_fluxes_.size() &&
+        prescribed_interface_fluxes_[source_index].topology_link == index) {
+      expected = prescribed_interface_fluxes_[source_index].face_mass_flux;
+      ++source_index;
+    }
+    if (!std::isfinite(value) ||
+        std::abs(value - expected) > absolute_tolerance)
       return {StatusCode::numerical_failure, kIbmEquationNumerical};
+  }
+  return {};
+}
+
+bool IbmEquationInterfacePlan::prescribed_face_flux(
+    CartesianAxis axis, Int3 face, double& phi) const noexcept {
+  if (!validate_bound(*this, kernels_, topology_, boundary_, metric_))
+    return false;
+  const Span<const ImmersedLink> links = topology_->links();
+  for (const PrescribedInterfaceFlux& source :
+       prescribed_interface_fluxes_) {
+    if (source.topology_link >= links.size ||
+        !std::isfinite(source.face_mass_flux))
+      return false;
+    const InterfaceFace candidate =
+        interface_face(links.data[source.topology_link]);
+    if (candidate.axis == axis && same_index(candidate.index, face)) {
+      phi = source.face_mass_flux;
+      return true;
+    }
+  }
+  return false;
+}
+
+Status IbmEquationInterfacePlan::override_source_face_values(
+    IbmInterfaceInletField field,
+    IbmInterfaceInletEvaluation evaluation,
+    FrozenConvectionFaceOutput values) const noexcept {
+  const Status bound =
+      validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!bound) return bound;
+  if (!valid_source_face_values(values, kernels_->cells()) ||
+      (evaluation != IbmInterfaceInletEvaluation::value &&
+       evaluation != IbmInterfaceInletEvaluation::fixed_state_variation))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  if (prescribed_interface_fluxes_.empty()) return {};
+  const bool valid_field = [&]() noexcept {
+    switch (field.kind) {
+      case IbmInterfaceInletFieldKind::velocity:
+        return field.component < 3U;
+      case IbmInterfaceInletFieldKind::enthalpy:
+        return field.component == 0U;
+      case IbmInterfaceInletFieldKind::independent_species:
+        return field.component < independent_species_count_;
+      case IbmInterfaceInletFieldKind::kinetic_energy:
+        return field.component == 0U;
+    }
+    return false;
+  }();
+  if (!inlet_state_bound_ || !valid_field)
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+
+  const Span<const ImmersedLink> links = topology_->links();
+  for (std::size_t index = 0U;
+       index < prescribed_interface_fluxes_.size(); ++index) {
+    const PrescribedInterfaceFlux& source =
+        prescribed_interface_fluxes_[index];
+    if (source.topology_link >= links.size || !source.has_inlet_state ||
+        !std::isfinite(source.velocity.x) ||
+        !std::isfinite(source.velocity.y) ||
+        !std::isfinite(source.velocity.z) ||
+        !std::isfinite(source.enthalpy) ||
+        source.independent_species_begin >
+            prescribed_independent_species_.size() ||
+        independent_species_count_ >
+            prescribed_independent_species_.size() -
+                source.independent_species_begin ||
+        (index != 0U &&
+         prescribed_interface_fluxes_[index - 1U].topology_link >=
+             source.topology_link))
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
+
+  for (const PrescribedInterfaceFlux& source :
+       prescribed_interface_fluxes_) {
+    double prescribed = 0.0;
+    if (evaluation == IbmInterfaceInletEvaluation::value) {
+      switch (field.kind) {
+        case IbmInterfaceInletFieldKind::velocity:
+          prescribed = field.component == 0U
+                           ? source.velocity.x
+                           : (field.component == 1U ? source.velocity.y
+                                                   : source.velocity.z);
+          break;
+        case IbmInterfaceInletFieldKind::enthalpy:
+          prescribed = source.enthalpy;
+          break;
+        case IbmInterfaceInletFieldKind::independent_species:
+          prescribed = prescribed_independent_species_[
+              source.independent_species_begin + field.component];
+          break;
+        case IbmInterfaceInletFieldKind::kinetic_energy:
+          prescribed =
+              0.5 * (source.velocity.x * source.velocity.x +
+                     source.velocity.y * source.velocity.y +
+                     source.velocity.z * source.velocity.z);
+          break;
+      }
+    }
+    const InterfaceFace face =
+        interface_face(links.data[source.topology_link]);
+    select(values, face.axis).unchecked(face.index) = prescribed;
+  }
+  return {};
+}
+
+Status IbmEquationInterfacePlan::freeze_source_convection_faces(
+    IbmInterfaceInletField field, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux, ConstFieldView transported,
+    std::uint8_t component, FrozenConvectionContext context,
+    FrozenConvectionFaceOutput output,
+    FrozenConvectionFaceField& frozen) const noexcept {
+  frozen = {};
+  const Status bound =
+      validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!bound) return bound;
+  if (!has_inlet_sources() || prescribed_source_faces_.size() !=
+                                  prescribed_interface_fluxes_.size()) {
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
+  const std::uint8_t expected_component =
+      field.kind == IbmInterfaceInletFieldKind::velocity
+          ? static_cast<std::uint8_t>(field.component)
+          : 0U;
+  if (field.component > std::numeric_limits<std::uint8_t>::max() ||
+      component != expected_component) {
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
+  Status status = validate_interface_flux(target_flux);
+  if (status) {
+    status = freeze_cartesian_target_convection_faces(
+        *kernels_, scheme, target_flux, transported, component, context,
+        output, frozen);
+  }
+  if (status) {
+    status = override_source_face_values(
+        field, IbmInterfaceInletEvaluation::value, output);
+  }
+  if (status) {
+    status = seal_fixed_cartesian_target_convection_faces(
+        *kernels_, scheme, target_flux, transported, component, context,
+        {prescribed_source_faces_.data(), prescribed_source_faces_.size()},
+        fingerprint_, frozen);
+  }
+  if (status) status = validate_frozen_source_face_values(field, frozen);
+  if (!status) frozen = {};
+  return status;
+}
+
+Status IbmEquationInterfacePlan::validate_frozen_source_face_values(
+    IbmInterfaceInletField field,
+    const FrozenConvectionFaceField& frozen) const noexcept {
+  const Status bound =
+      validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!bound) return bound;
+  const bool valid_field = [&]() noexcept {
+    switch (field.kind) {
+      case IbmInterfaceInletFieldKind::velocity:
+        return field.component < 3U;
+      case IbmInterfaceInletFieldKind::enthalpy:
+      case IbmInterfaceInletFieldKind::kinetic_energy:
+        return field.component == 0U;
+      case IbmInterfaceInletFieldKind::independent_species:
+        return field.component < independent_species_count_;
+    }
+    return false;
+  }();
+  const auto valid_face = [&](ConstFaceFieldView view,
+                              CartesianAxis axis) noexcept {
+    Int3 expected = kernels_->cells();
+    if (axis == CartesianAxis::x)
+      ++expected.x;
+    else if (axis == CartesianAxis::y)
+      ++expected.y;
+    else
+      ++expected.z;
+    detail::FieldStorageInterval interval;
+    return detail::face_storage_interval(view, interval) &&
+           view.axis == axis && same_index(view.extents, expected) &&
+           view.storage_identity != 0U && view.revision_domain != 0U;
+  };
+  if (!has_inlet_sources() || !valid_field || !frozen.valid() ||
+      !valid_face(frozen.x, CartesianAxis::x) ||
+      !valid_face(frozen.y, CartesianAxis::y) ||
+      !valid_face(frozen.z, CartesianAxis::z) ||
+      frozen.fixed_face_authority != fingerprint_ ||
+      frozen.fixed_faces.data != prescribed_source_faces_.data() ||
+      frozen.fixed_faces.size != prescribed_source_faces_.size() ||
+      prescribed_source_faces_.size() !=
+          prescribed_interface_fluxes_.size()) {
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  }
+
+  const Span<const ImmersedLink> links = topology_->links();
+  for (const PrescribedInterfaceFlux& source :
+       prescribed_interface_fluxes_) {
+    if (source.topology_link >= links.size || !source.has_inlet_state ||
+        source.independent_species_begin >
+            prescribed_independent_species_.size() ||
+        independent_species_count_ >
+            prescribed_independent_species_.size() -
+                source.independent_species_begin) {
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    }
+    double expected = 0.0;
+    switch (field.kind) {
+      case IbmInterfaceInletFieldKind::velocity:
+        expected = field.component == 0U
+                       ? source.velocity.x
+                       : (field.component == 1U ? source.velocity.y
+                                                : source.velocity.z);
+        break;
+      case IbmInterfaceInletFieldKind::enthalpy:
+        expected = source.enthalpy;
+        break;
+      case IbmInterfaceInletFieldKind::independent_species:
+        expected = prescribed_independent_species_[
+            source.independent_species_begin + field.component];
+        break;
+      case IbmInterfaceInletFieldKind::kinetic_energy:
+        expected = 0.5 * (source.velocity.x * source.velocity.x +
+                          source.velocity.y * source.velocity.y +
+                          source.velocity.z * source.velocity.z);
+        break;
+    }
+    const InterfaceFace face =
+        interface_face(links.data[source.topology_link]);
+    const ConstFaceFieldView values =
+        face.axis == CartesianAxis::x
+            ? frozen.x
+            : (face.axis == CartesianAxis::y ? frozen.y : frozen.z);
+    const double actual = values.unchecked(face.index);
+    if (!std::isfinite(expected) || !std::isfinite(actual) ||
+        double_bits(actual) != double_bits(expected)) {
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    }
+  }
+  return {};
+}
+
+Status IbmEquationInterfacePlan::add_source_convection_correction(
+    IbmInterfaceInletField field, ConvectionScheme scheme,
+    ConstFieldView transported, double scale, FieldView output,
+    KernelBox box) const noexcept {
+  return add_source_convection_correction_impl(
+      field, &scheme, transported, scale, output, box);
+}
+
+Status IbmEquationInterfacePlan::add_source_first_order_upwind_correction(
+    IbmInterfaceInletField field, ConstFieldView transported, double scale,
+    FieldView output, KernelBox box) const noexcept {
+  return add_source_convection_correction_impl(
+      field, nullptr, transported, scale, output, box);
+}
+
+Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
+    IbmInterfaceInletField field, const ConvectionScheme* scheme,
+    ConstFieldView transported, double scale, FieldView output,
+    KernelBox box) const noexcept {
+  const Status bound =
+      validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!bound) return bound;
+  const Int3 cells = kernels_->cells();
+  if (box.begin.x == 0 && box.begin.y == 0 && box.begin.z == 0 &&
+      box.cells.x == 0 && box.cells.y == 0 && box.cells.z == 0)
+    box = {{0, 0, 0}, cells};
+  if (!detail::valid_kernel_box(box, cells) || !std::isfinite(scale) ||
+      (scheme != nullptr &&
+       static_cast<std::uint8_t>(*scheme) >
+           static_cast<std::uint8_t>(ConvectionScheme::tvd2)))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+
+  const std::uint8_t transported_component =
+      field.kind == IbmInterfaceInletFieldKind::velocity
+          ? static_cast<std::uint8_t>(field.component)
+          : 0U;
+  const std::uint8_t output_component = transported_component;
+  const std::uint8_t required_ghost_width =
+      scheme == nullptr || *scheme == ConvectionScheme::central2 ? 1U : 2U;
+  if (!detail::valid_cell_view(transported, cells, transported_component, 1U,
+                               required_ghost_width) ||
+      !detail::valid_cell_view(output, cells, output_component, 1U) ||
+      detail::field_views_overlap(transported, output))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  if (prescribed_interface_fluxes_.empty()) return {};
+
+  const bool valid_field = [&]() noexcept {
+    switch (field.kind) {
+      case IbmInterfaceInletFieldKind::velocity:
+        return field.component < 3U;
+      case IbmInterfaceInletFieldKind::enthalpy:
+      case IbmInterfaceInletFieldKind::kinetic_energy:
+        return field.component == 0U;
+      case IbmInterfaceInletFieldKind::independent_species:
+        return field.component < independent_species_count_;
+    }
+    return false;
+  }();
+  if (!inlet_state_bound_ || !valid_field)
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+
+  const Span<const ImmersedLink> links = topology_->links();
+  const auto prescribed_value = [&](const PrescribedInterfaceFlux& source,
+                                    double& value) noexcept {
+    if (source.topology_link >= links.size || !source.has_inlet_state ||
+        !std::isfinite(source.face_mass_flux) ||
+        source.independent_species_begin >
+            prescribed_independent_species_.size() ||
+        independent_species_count_ >
+            prescribed_independent_species_.size() -
+                source.independent_species_begin)
+      return false;
+    switch (field.kind) {
+      case IbmInterfaceInletFieldKind::velocity:
+        value = field.component == 0U
+                    ? source.velocity.x
+                    : (field.component == 1U ? source.velocity.y
+                                             : source.velocity.z);
+        break;
+      case IbmInterfaceInletFieldKind::enthalpy:
+        value = source.enthalpy;
+        break;
+      case IbmInterfaceInletFieldKind::independent_species:
+        value = prescribed_independent_species_[
+            source.independent_species_begin + field.component];
+        break;
+      case IbmInterfaceInletFieldKind::kinetic_energy:
+        value = 0.5 * (source.velocity.x * source.velocity.x +
+                       source.velocity.y * source.velocity.y +
+                       source.velocity.z * source.velocity.z);
+        break;
+    }
+    return std::isfinite(value);
+  };
+  const auto correction = [&](const PrescribedInterfaceFlux& source,
+                              double& value) noexcept -> Status {
+    if (source.topology_link >= links.size)
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    const ImmersedLink& link = links.data[source.topology_link];
+    double prescribed = 0.0;
+    if (!prescribed_value(source, prescribed))
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    double ordinary = 0.0;
+    if (scheme == nullptr) {
+      ordinary = transported.unchecked(link.solid_local_index,
+                                       transported_component);
+    } else {
+      const InterfaceFace face = interface_face(link);
+      const Status reconstructed = reconstruct_cartesian_convection_face(
+          *kernels_, *scheme, transported, transported_component, face.axis,
+          face.index, source.face_mass_flux, ordinary);
+      if (!reconstructed) return reconstructed;
+    }
+    const double volume = detail::cell_volume(*kernels_, link.fluid_local_index);
+    const double sign = positive_face(link.direction) ? 1.0 : -1.0;
+    value = scale * sign * source.face_mass_flux *
+            (prescribed - ordinary) / volume;
+    if (!std::isfinite(ordinary) || !std::isfinite(volume) || volume <= 0.0 ||
+        !std::isfinite(value))
+      return {StatusCode::numerical_failure, kIbmEquationNumerical};
+    return {};
+  };
+  const auto first_for_cell = [&](std::size_t index) noexcept {
+    const Int3 cell = links.data[prescribed_interface_fluxes_[index]
+                                     .topology_link]
+                          .fluid_local_index;
+    for (std::size_t prior = 0U; prior < index; ++prior) {
+      const PrescribedInterfaceFlux& candidate =
+          prescribed_interface_fluxes_[prior];
+      if (candidate.topology_link < links.size &&
+          same_index(links.data[candidate.topology_link].fluid_local_index,
+                     cell))
+        return false;
+    }
+    return true;
+  };
+  const auto cell_correction = [&](std::size_t index,
+                                   double& value) noexcept -> Status {
+    const Int3 cell = links.data[prescribed_interface_fluxes_[index]
+                                     .topology_link]
+                          .fluid_local_index;
+    long double accumulated = 0.0L;
+    for (const PrescribedInterfaceFlux& source :
+         prescribed_interface_fluxes_) {
+      if (source.topology_link >= links.size)
+        return {StatusCode::invalid_plan, kIbmEquationApply};
+      if (!same_index(links.data[source.topology_link].fluid_local_index,
+                      cell))
+        continue;
+      double term = 0.0;
+      const Status evaluated = correction(source, term);
+      if (!evaluated) return evaluated;
+      accumulated += static_cast<long double>(term);
+    }
+    value = static_cast<double>(accumulated);
+    return std::isfinite(value)
+               ? Status{}
+               : Status{StatusCode::numerical_failure,
+                        kIbmEquationNumerical};
+  };
+
+  // Preflight complete cell aggregates so a multi-face inlet cannot partially
+  // modify the caller's output on arithmetic failure.
+  for (std::size_t index = 0U;
+       index < prescribed_interface_fluxes_.size(); ++index) {
+    const PrescribedInterfaceFlux& source =
+        prescribed_interface_fluxes_[index];
+    if (source.topology_link >= links.size)
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    const Int3 cell = links.data[source.topology_link].fluid_local_index;
+    if (!inside(box, cell) || !first_for_cell(index)) continue;
+    double change = 0.0;
+    const Status evaluated = cell_correction(index, change);
+    const double candidate = output.unchecked(cell, output_component) + change;
+    if (!evaluated) return evaluated;
+    if (!std::isfinite(output.unchecked(cell, output_component)) ||
+        !std::isfinite(candidate))
+      return {StatusCode::numerical_failure, kIbmEquationNumerical};
+  }
+  for (std::size_t index = 0U;
+       index < prescribed_interface_fluxes_.size(); ++index) {
+    const PrescribedInterfaceFlux& source =
+        prescribed_interface_fluxes_[index];
+    const Int3 cell = links.data[source.topology_link].fluid_local_index;
+    if (!inside(box, cell) || !first_for_cell(index)) continue;
+    double change = 0.0;
+    const Status evaluated = cell_correction(index, change);
+    if (!evaluated) return evaluated;
+    output.unchecked(cell, output_component) += change;
   }
   return {};
 }
@@ -889,12 +1656,26 @@ Status IbmEquationInterfacePlan::constrain_pressure_predictor(
         if (region.data[flat] == static_cast<std::uint8_t>(RegionFlag::solid))
           for (std::uint8_t component = 0U; component < 3U; ++component)
             h_by_a.unchecked({x, y, z}, component) = 0.0;
-  return zero_interface_flux(phi_h_by_a);
+  return constrain_interface_flux(phi_h_by_a);
 }
 
 Status IbmEquationInterfacePlan::constrain_corrected_state(
     FieldView velocity, FaceFluxView flux) const noexcept {
   return constrain_pressure_predictor(velocity, flux);
+}
+
+const IbmEquationInterfacePlan::PrescribedInterfaceFlux*
+IbmEquationInterfacePlan::inlet_for_link(
+    std::uint32_t topology_link) const noexcept {
+  const auto found = std::lower_bound(
+      prescribed_interface_fluxes_.begin(), prescribed_interface_fluxes_.end(),
+      topology_link, [](const PrescribedInterfaceFlux& source,
+                        std::uint32_t index) {
+        return source.topology_link < index;
+      });
+  return found != prescribed_interface_fluxes_.end() &&
+                 found->topology_link == topology_link && found->has_inlet_state
+             ? &*found : nullptr;
 }
 
 Status IbmEquationInterfacePlan::constrain_momentum(
@@ -976,10 +1757,15 @@ Status IbmEquationInterfacePlan::constrain_momentum(
         resolved_wall_transmissibility <= 0.0)
       return {StatusCode::numerical_failure, kIbmEquationNumerical};
     double normal_derivative[3]{};
+    const auto* inlet = inlet_for_link(row.topology_link);
+    const Real3 boundary_velocity = inlet != nullptr ? inlet->velocity : Real3{};
+    const double boundary_components[3]{boundary_velocity.x,
+                                        boundary_velocity.y,
+                                        boundary_velocity.z};
     for (std::uint8_t component = 0U; component < 3U; ++component) {
       status = evaluate_quadratic_row(
           boundary_->reconstruction(), row.wall_normal_gradient_row,
-          velocity, component, 0.0, 0.0,
+          velocity, component, boundary_components[component], 0.0,
           normal_derivative[component]);
       if (!status || !std::isfinite(normal_derivative[component]))
         return status ? Status{StatusCode::numerical_failure,
@@ -1007,7 +1793,7 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     }
     bool equilibrium_wall = false;
     double wall_drag_coefficient = 0.0;
-    if (wall_treatment != nullptr &&
+    if (inlet == nullptr && wall_treatment != nullptr &&
         wall_treatment->wall_treatment() ==
             WallTreatmentKind::equilibrium_wall_function) {
       WallFunctionSample sample;
@@ -1267,8 +2053,6 @@ Status IbmEquationInterfacePlan::correct_velocity_gradient(
       !std::isfinite(wall_velocity.x) || !std::isfinite(wall_velocity.y) ||
       !std::isfinite(wall_velocity.z))
     return {StatusCode::invalid_plan, kIbmEquationApply};
-  const double wall_components[3U]{wall_velocity.x, wall_velocity.y,
-                                   wall_velocity.z};
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
   if (wall_linearization_.size() != rows.size)
@@ -1282,6 +2066,11 @@ Status IbmEquationInterfacePlan::correct_velocity_gradient(
     const std::uint8_t derivative = static_cast<std::uint8_t>(face.axis);
     const double donor_weight =
         wall_linearization_[index].solid_pressure_derivative_weight;
+    const auto* inlet = inlet_for_link(row.topology_link);
+    const Real3 boundary_velocity = inlet != nullptr ? inlet->velocity
+                                                    : wall_velocity;
+    const double wall_components[3U]{boundary_velocity.x, boundary_velocity.y,
+                                     boundary_velocity.z};
     for (std::uint8_t component = 0U; component < 3U; ++component) {
       double ghost = 0.0;
       status = evaluate_quadratic_row(
@@ -1305,6 +2094,54 @@ Status IbmEquationInterfacePlan::correct_velocity_gradient(
                                   gradient_component) = corrected;
     }
   }
+  return {};
+}
+
+Status IbmEquationInterfacePlan::inlet_viscous_work_input(
+    ConstFieldView velocity, ConstFieldView effective_viscosity,
+    double& input) const noexcept {
+  Status status = validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
+  if (!has_inlet_sources()) {
+    input = 0.0;
+    return {};
+  }
+  const Int3 cells = kernels_->cells();
+  if (!detail::valid_cell_view(velocity, cells, 0U, 3U,
+                               boundary_->maximum_halo_reach()) ||
+      !detail::valid_cell_view(effective_viscosity, cells, 0U, 1U,
+                               boundary_->maximum_halo_reach()))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  long double work = 0.0L;
+  const auto rows = boundary_->links();
+  for (std::size_t index = 0U; index < rows.size; ++index) {
+    const auto& row = rows.data[index];
+    const auto* inlet = inlet_for_link(row.topology_link);
+    if (inlet == nullptr) continue;
+    const auto& physical = metric_->links().data[row.topology_link];
+    const double u[3]{inlet->velocity.x, inlet->velocity.y, inlet->velocity.z};
+    double mu = 0.0, derivative[3]{};
+    status = evaluate_positive_bounded_quadratic_row(
+        boundary_->reconstruction(), row.wall_value_row,
+        effective_viscosity, 0U, mu);
+    for (std::uint8_t c = 0U; c < 3U && status; ++c)
+      status = evaluate_quadratic_row(
+          boundary_->reconstruction(), row.wall_normal_gradient_row,
+          velocity, c, u[c], 0.0, derivative[c]);
+    if (!status) return status;
+    for (std::uint8_t c = 0U; c < 3U; ++c) {
+      double normal_stress = 0.0;
+      for (std::uint8_t d = 0U; d < 3U; ++d)
+        normal_stress += physical.normal_second_moment[3U * c + d] * derivative[d];
+      // constrain_momentum inserts positive outward viscous residual;
+      // physical traction/work into the fluid has the opposite sign.
+      work -= u[c] * mu * (physical.physical_quadrature_area * derivative[c] +
+                           (1.0 / 3.0) * normal_stress);
+    }
+  }
+  if (!std::isfinite(static_cast<double>(work)))
+    return {StatusCode::numerical_failure, kIbmEquationNumerical};
+  input = static_cast<double>(work);
   return {};
 }
 
@@ -1336,11 +2173,16 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
         *kernels_, diffusivity, face.axis, face.index);
     const double volume = detail::cell_volume(*kernels_, link.fluid_local_index);
     double ghost = 0.0;
-    status = evaluate_quadratic_row(
-        boundary_->reconstruction(), row.zero_normal_value_row, transported,
-        0U, 0.0, 0.0, ghost);
+    if (inlet_for_link(row.topology_link) != nullptr)
+      ghost = transported.unchecked(link.fluid_local_index, 0U);
+    else
+      status = evaluate_quadratic_row(
+          boundary_->reconstruction(), row.zero_normal_value_row, transported,
+          0U, 0.0, 0.0, ghost);
     const double solid = transported.unchecked(link.solid_local_index, 0U);
     const double fluid = transported.unchecked(link.fluid_local_index, 0U);
+    // The prescribed state sets advective h/Y. The inlet's diffusive thermal
+    // and species flux is explicitly zero, not a fitted solid-wall ghost.
     const double fluid_conductance =
         fluid_material_conductance(*kernels_, diffusivity, link, face);
     // Remove the Cartesian solid-material face, then insert the existing
@@ -1437,9 +2279,12 @@ Status IbmEquationInterfacePlan::correct_positive_bounded_zero_normal_diffusion(
         *kernels_, diffusivity, face.axis, face.index);
     const double volume = detail::cell_volume(*kernels_, link.fluid_local_index);
     double ghost = 0.0;
-    status = evaluate_positive_bounded_quadratic_row(
-        boundary_->reconstruction(), row.zero_normal_value_row, transported,
-        0U, ghost);
+    if (inlet_for_link(row.topology_link) != nullptr)
+      ghost = transported.unchecked(link.fluid_local_index, 0U);
+    else
+      status = evaluate_positive_bounded_quadratic_row(
+          boundary_->reconstruction(), row.zero_normal_value_row, transported,
+          0U, ghost);
     const double solid = transported.unchecked(link.solid_local_index, 0U);
     const double current = rate.unchecked(link.fluid_local_index, 0U);
     const double fluid = transported.unchecked(link.fluid_local_index, 0U);

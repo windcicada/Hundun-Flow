@@ -8,6 +8,7 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -489,6 +490,7 @@ struct MomentumPredictorLimiterWorkspace {
   FieldView cell_ratios{};
   std::array<FaceFluxView, 3U> high_order_faces{};
   FaceFluxView common_face_alpha{};
+  const IbmEquationInterfacePlan* immersed_interface{};
 };
 
 struct MomentumPredictorSolveReport {
@@ -508,6 +510,7 @@ struct EquationAssemblyCertificate {
   RevisionToken face_flux{};
   RevisionToken state{};
   double dt{};
+  PlanFingerprint inlet_sources{};
 
   bool valid() const noexcept {
     return plan != 0U && time != 0U && geometry != 0U && face_flux != 0U &&
@@ -921,6 +924,7 @@ class ThermophysicalPredictorPlan {
   Status predict_high_local(
       const ThermophysicalPredictorInput& input,
       ThermophysicalPredictorOutput output,
+      const IbmEquationInterfacePlan* immersed_interface,
       ThermophysicalPredictorCertificate& certificate,
       ThermophysicalPredictorFailure& failure) const noexcept;
   const CartesianKernelPlan* kernels_{};
@@ -1768,6 +1772,9 @@ struct PressureEnergyEnthalpyBinding {
   LinearIdentity identity{};
   FrozenConvectionLinearizationPolicy linearization_policy{
       FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope};
+  // Optional prescribed IBM inlet authority.  Its target h is part of the
+  // nonlinear residual, but the frozen-state directional face value is zero.
+  const IbmEquationInterfacePlan* immersed_interface{};
   // Optional for algebraic clients; production supplies the frozen state
   // that selects conditional outlet h/Y boundary branches.
   ConstFieldView boundary_velocity{};
@@ -1804,6 +1811,7 @@ struct PressureEnergyEnthalpyCertificate {
   std::uintptr_t halo_instance{};
   PlanFingerprint activity_local_fingerprint{};
   PlanFingerprint activity_collective_fingerprint{};
+  PlanFingerprint inlet_sources{};
   std::size_t active_cells{};
   std::size_t inactive_cells{};
   std::uint64_t generalized_face_count{};
@@ -1812,6 +1820,7 @@ struct PressureEnergyEnthalpyCertificate {
   bool exact_cartesian_spatial_response{};
   bool exact_temperature_space_conduction{};
   bool ibm_spatial_derivative{};
+  bool fixed_inlet_source_variation{};
   bool inactive_rows_identity{};
   bool inactive_interfaces_zero{};
   bool allocation_free_apply{};
@@ -1908,6 +1917,7 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
   const CartesianGeometryPlan* geometry_{};
   const CartesianKernelPlan* kernels_{};
   const BoundaryPlan* boundary_{};
+  const IbmEquationInterfacePlan* immersed_interface_{};
   MeshPatch patch_{};
   ConvectionScheme convection_{ConvectionScheme::limited_central2};
   PressureEnergyEnthalpyServices services_{};

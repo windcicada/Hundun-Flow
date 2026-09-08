@@ -646,8 +646,17 @@ Status ThermophysicalPredictorPlan::predict(
   }
 
   ThermophysicalPredictorCertificate high_certificate;
+  if (local && slow_path.immersed_interface != nullptr) {
+    local = slow_path.immersed_interface->validate_interface_flux(
+        input.mass_flux_accepted);
+    if (local && second_order)
+      local = slow_path.immersed_interface->validate_interface_flux(
+          input.mass_flux_previous);
+  }
   if (local) {
-    local = predict_high_local(input, output, high_certificate, failure);
+    local = predict_high_local(input, output,
+                               slow_path.immersed_interface,
+                               high_certificate, failure);
     if (failure.valid && failure.rank < 0) failure.rank = rank;
   }
 
@@ -1432,14 +1441,28 @@ Status ThermophysicalPredictorPlan::predict(
                          input.enthalpy_nonadvective_rhs,
                          output.low_order_enthalpy_workspace) &&
       bdf_candidate_finite;
+  if (local && slow_path.immersed_interface != nullptr)
+    local = slow_path.immersed_interface
+                ->add_source_first_order_upwind_correction(
+                    {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                    input.enthalpy_accepted, -1.0 / input.bdf.a0,
+                    output.low_order_enthalpy_workspace);
   for (std::size_t index = 0U; index < species_count; ++index) {
     bdf_candidate_finite =
         build_bdf_quantity(
             input.species_accepted.data[index],
             input.species_previous.data[index],
             input.species_nonadvective_rhs.data[index],
-            output.low_order_independent_species.data[index]) &&
+        output.low_order_independent_species.data[index]) &&
         bdf_candidate_finite;
+    if (local && slow_path.immersed_interface != nullptr)
+      local = slow_path.immersed_interface
+                  ->add_source_first_order_upwind_correction(
+                      {IbmInterfaceInletFieldKind::independent_species,
+                       index},
+                      input.species_accepted.data[index],
+                      -1.0 / input.bdf.a0,
+                      output.low_order_independent_species.data[index]);
   }
   for (std::size_t index = 0U; index < passive_count; ++index) {
     bdf_candidate_finite =
@@ -1452,7 +1475,7 @@ Status ThermophysicalPredictorPlan::predict(
   }
 
   const bool locally_bdf_admissible =
-      bdf_candidate_finite &&
+      local && bdf_candidate_finite &&
       tuple_admissible(as_const(output.low_order_density_workspace),
                        as_const(output.low_order_enthalpy_workspace),
                        output.low_order_independent_species,
@@ -2371,13 +2394,28 @@ Status ThermophysicalPredictorPlan::predict(
                              input.enthalpy_previous,
                              input.enthalpy_nonadvective_rhs,
                              output.low_order_enthalpy_workspace);
-      for (std::size_t index = 0U; index < species_count; ++index)
+      if (slow_path.immersed_interface != nullptr)
+        local = slow_path.immersed_interface
+                    ->add_source_first_order_upwind_correction(
+                        {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                        input.enthalpy_accepted, -1.0 / input.bdf.a0,
+                        output.low_order_enthalpy_workspace);
+      for (std::size_t index = 0U; index < species_count && local; ++index) {
         build_limited_quantity(
             input.species_accepted.data[index],
             input.species_previous.data[index],
             input.species_nonadvective_rhs.data[index],
             output.low_order_independent_species.data[index]);
-      for (std::size_t index = 0U; index < passive_count; ++index)
+        if (slow_path.immersed_interface != nullptr)
+          local = slow_path.immersed_interface
+                      ->add_source_first_order_upwind_correction(
+                          {IbmInterfaceInletFieldKind::independent_species,
+                           index},
+                          input.species_accepted.data[index],
+                          -1.0 / input.bdf.a0,
+                          output.low_order_independent_species.data[index]);
+      }
+      for (std::size_t index = 0U; index < passive_count && local; ++index)
         build_limited_quantity(
             input.passive_scalars_accepted.data[index],
             input.passive_scalars_previous.data[index],
@@ -2932,6 +2970,7 @@ Status ThermophysicalPredictorPlan::predict(
 Status ThermophysicalPredictorPlan::predict_high_local(
     const ThermophysicalPredictorInput& input,
     ThermophysicalPredictorOutput output,
+    const IbmEquationInterfacePlan* immersed_interface,
     ThermophysicalPredictorCertificate& certificate,
     ThermophysicalPredictorFailure& failure) const noexcept {
   if (input.cell_activity.size != 0U &&
@@ -3474,6 +3513,7 @@ Status ThermophysicalPredictorPlan::predict_high_local(
                                     PredictorRateHistory nonadvective_rhs,
                                     ConvectionScheme convection,
                                     FieldView predicted,
+                                    const IbmInterfaceInletField* inlet_field,
                                     ThermophysicalPredictorFailureField
                                         field_kind,
                                     std::uint32_t field_index) noexcept -> Status {
@@ -3498,6 +3538,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
       }
       return status;
     }
+    if (immersed_interface != nullptr && inlet_field != nullptr) {
+      status = immersed_interface->add_source_convection_correction(
+          *inlet_field, convection, accepted, 1.0,
+          output.accepted_advection_workspace, box);
+      if (!status) return status;
+    }
     if (second_order) {
       const std::array<ConstFieldView, 1U> previous_reads{previous};
       const std::array<FieldView, 1U> previous_writes{
@@ -3519,6 +3565,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
               {-1, -1, -1}, 0U, false, false, false);
         }
         return status;
+      }
+      if (immersed_interface != nullptr && inlet_field != nullptr) {
+        status = immersed_interface->add_source_convection_correction(
+            *inlet_field, convection, previous, 1.0,
+            output.previous_advection_workspace, box);
+        if (!status) return status;
       }
     }
 
@@ -3618,19 +3670,25 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     return {};
   };
 
+  const IbmInterfaceInletField enthalpy_inlet{
+      IbmInterfaceInletFieldKind::enthalpy, 0U};
   Status status = predict_quantity(
       input.enthalpy_accepted, input.enthalpy_previous,
       input.enthalpy_nonadvective_rhs, enthalpy_convection_, output.enthalpy,
+      &enthalpy_inlet,
       ThermophysicalPredictorFailureField::enthalpy, 0U);
   if (!status) {
     return status;
   }
   for (std::size_t i = 0U; i < species_.size(); ++i) {
+    const IbmInterfaceInletField species_inlet{
+        IbmInterfaceInletFieldKind::independent_species, i};
     status = predict_quantity(input.species_accepted.data[i],
                               input.species_previous.data[i],
                               input.species_nonadvective_rhs.data[i],
                               species_convection_,
                               output.independent_species.data[i],
+                              &species_inlet,
                               ThermophysicalPredictorFailureField::
                                   independent_species,
                               static_cast<std::uint32_t>(i));
@@ -3644,6 +3702,7 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         input.passive_scalars_previous.data[i],
         input.passive_scalar_nonadvective_rhs.data[i],
         passive_scalar_convection_, output.passive_scalars.data[i],
+        nullptr,
         ThermophysicalPredictorFailureField::passive_scalar,
         static_cast<std::uint32_t>(i));
     if (!status) {
@@ -3674,6 +3733,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   candidate.paired_face_flux_revision_domain =
       output.paired_mass_flux.x.revision_domain;
   candidate.state = predictor_state_hash(input, output);
+  if (immersed_interface != nullptr &&
+      immersed_interface->has_inlet_sources()) {
+    candidate.state =
+        hash_mix(candidate.state, immersed_interface->fingerprint());
+    if (candidate.state == 0U) candidate.state = 1U;
+  }
   candidate.order = input.bdf.order;
   certificate = candidate;
   return {};

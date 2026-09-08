@@ -537,6 +537,34 @@ z 2
           projected_model.mesh.focus_regions[0U].upper.z ==
               static_cast<double>(static_cast<float>(0.06)),
       "COAST float32 domain projection clips boundary-touching focus regions");
+
+  std::string non_binary_endpoint_mesh{kCoastRuntimeAxesMesh};
+  passed &= expect(
+      replace_once(non_binary_endpoint_mesh, "\"upper\":[1,1,1]",
+                   "\"upper\":[1,0.13710429672,1]"),
+      "COAST non-binary32 endpoint fixture mutation");
+  constexpr std::string_view non_binary_endpoint_axes = R"data(
+COAST_RUNTIME_AXES 1
+grid 2 2 1
+x 3
+0 0.1 1
+y 3
+0 0.04 0.13710429672
+z 2
+0 1
+)data";
+  ScratchCase non_binary_endpoint("coast-runtime-axes-non-binary-endpoint");
+  non_binary_endpoint.write("case.json", case_json(non_binary_endpoint_mesh));
+  non_binary_endpoint.write("thermophysics.d", kPlaceholderThermophysics);
+  non_binary_endpoint.write("axes.dat", non_binary_endpoint_axes);
+  ValidatedModel non_binary_endpoint_model;
+  const Status non_binary_endpoint_status =
+      compile(non_binary_endpoint.root(), non_binary_endpoint_model);
+  passed &= expect(
+      non_binary_endpoint_status &&
+          non_binary_endpoint_model.mesh.upper.y ==
+              static_cast<double>(static_cast<float>(0.13710429672)),
+      "COAST decimal endpoints normalize to their float32 authority");
   return passed;
 }
 
@@ -1386,6 +1414,21 @@ bool test_defaults_and_enums() {
                                TurbulenceKind::vreman_wall_function,
                        "omitted turbulence selects the production default");
   ScratchCase simple("simple-coupling");
+  ScratchCase resolved("resolved-vreman");
+  resolved.write("case.json", case_json(kUniformMesh,
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+      R"json({"coupling":"PISO","pressure_correctors":2})json",
+      R"json({"model":"vreman"})json"));
+  resolved.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel resolved_model, restored_vreman;
+  std::vector<std::uint8_t> resolved_wire;
+  passed &= expect(compile(resolved.root(), resolved_model) &&
+      resolved_model.turbulence == TurbulenceKind::vreman &&
+      resolved_model.fingerprint != default_model.fingerprint &&
+      hundun::v04::detail::serialize_model_for_test(resolved_model, resolved_wire) &&
+      hundun::v04::detail::deserialize_model_for_test(resolved_wire, restored_vreman) &&
+      restored_vreman.turbulence == TurbulenceKind::vreman,
+      "resolved Vreman is explicit, hashed and round-trips without changing the default");
   simple.write(
       "case.json",
       case_json(
@@ -1487,6 +1530,119 @@ bool test_immersed_reconstruction_policy_is_typed_and_hashed() {
   return passed;
 }
 
+bool test_patch_inlets_case_and_wire() {
+  constexpr std::string_view inlet = R"json({"flow_kind":"mass_flow_inlet","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0.01,"pressure":101325,"temperature":295,"total_pressure":101325,"total_temperature":295,"backflow_temperature":295,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]})json";
+  std::string json = case_json(kCoastRuntimeAxesMesh);
+  bool passed = expect(replace_once(json, "\"flow_kind\":\"velocity_inlet\"",
+      "\"flow_kind\":\"mass_flow_inlet\"") &&
+      replace_once(json, "\"mass_flow_rate\":0", "\"mass_flow_rate\":0.01"),
+      "patch inlet parent boundary fixture");
+  json.pop_back();
+  json += ",\"patch_inlets\":{\"labels_file\":\"labels.d\",\"patches\":[{\"label\":7,\"face\":\"x_min\",\"immersed\":false,\"boundary\":";
+  json += inlet;
+  json += "}]}}";
+  ScratchCase scratch("patch-inlets");
+  scratch.write("case.json", json);
+  scratch.write("axes.dat", kCoastRuntimeAxes);
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  std::string labels(16U, '\0');
+  labels[0] = labels[8] = 7;
+  scratch.write("labels.d", labels);
+  ValidatedModel model;
+  passed &= expect(compile(scratch.root(), model) && model.patch_inlets &&
+      model.patch_inlets->patches.size() == 1U &&
+      model.patch_inlets->patches.front().label == 7 &&
+      model.patch_inlets->patches.front().boundary.mass_flow_rate == 0.01 &&
+      model.patch_inlets->labels_fingerprint != 0U,
+      "patch inlet compiles with typed state and exact label-file identity");
+  if (!passed) return false;
+  const auto original_fingerprint = model.fingerprint;
+  std::vector<std::uint8_t> wire;
+  ValidatedModel restored;
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire) &&
+      !wire.empty() && wire.front() == 19U &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.patch_inlets &&
+      restored.patch_inlets->labels_fingerprint == model.patch_inlets->labels_fingerprint,
+      "patch inlet envelope preserves the base case wire and inlet identity");
+  model.patch_inlets->patches.push_back(model.patch_inlets->patches.front());
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire).code ==
+      StatusCode::invalid_case, "duplicate patch labels fail before wire publication");
+  model.patch_inlets->patches.pop_back();
+  model.patch_inlets->patches.front().immersed = true;
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire).code ==
+      StatusCode::invalid_case, "immersed inlet requires immersed geometry");
+
+  labels[4] = 7;
+  scratch.write("labels.d", labels);
+  ValidatedModel changed;
+  passed &= expect(compile(scratch.root(), changed) &&
+      changed.fingerprint != original_fingerprint,
+      "changed patch membership changes the complete case identity");
+  labels[4] = 8;
+  scratch.write("labels.d", labels);
+  changed.fingerprint = original_fingerprint;
+  passed &= expect(compile(scratch.root(), changed).code == StatusCode::invalid_case &&
+      changed.fingerprint == original_fingerprint,
+      "undeclared nonzero labels are rejected transactionally");
+  labels.resize(15U);
+  scratch.write("labels.d", labels);
+  passed &= expect(compile(scratch.root(), changed).code == StatusCode::invalid_case,
+      "truncated int32 label file is rejected");
+  return passed;
+}
+
+bool test_imported_marker_case_and_wire() {
+  std::string mesh{kCoastRuntimeAxesMesh};
+  bool passed = expect(replace_once(mesh, "\"immersed_boundary\":null",
+      R"json("immersed_boundary":{"stl_file":"body.stl","fluid_side":"inside","reconstruction_policy":"adaptive_order","geometry_mode":"imported_cartesian_marker","marker_file":"marker.d"})json"),
+      "imported Cartesian marker fixture");
+  ScratchCase scratch("imported-marker");
+  const std::string json = case_json(mesh);
+  scratch.write("case.json", json);
+  scratch.write("axes.dat", kCoastRuntimeAxes);
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  scratch.write("body.stl", "provenance only at case-parse layer\n");
+  std::string marker{"\1\0\1\1", 4U};
+  scratch.write("marker.d", marker);
+  ValidatedModel model;
+  passed &= expect(compile(scratch.root(), model) && model.immersed_boundary &&
+      model.immersed_boundary->marker_file == fs::path{"marker.d"} &&
+      model.immersed_boundary->marker_fingerprint != 0U,
+      "explicit marker authority is typed and hashed");
+  if (!passed) return false;
+  const auto fingerprint = model.fingerprint;
+  std::vector<std::uint8_t> wire;
+  ValidatedModel restored;
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire) &&
+      wire.front() == 19U &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.immersed_boundary &&
+      restored.immersed_boundary->marker_file == model.immersed_boundary->marker_file &&
+      restored.immersed_boundary->marker_fingerprint ==
+          model.immersed_boundary->marker_fingerprint,
+      "marker-only extension round-trips without patch metadata");
+  marker[1] = 1;
+  scratch.write("marker.d", marker);
+  passed &= expect(compile(scratch.root(), restored) &&
+      restored.fingerprint != fingerprint, "marker content changes case identity");
+  marker[1] = 2;
+  scratch.write("marker.d", marker);
+  restored.fingerprint = fingerprint;
+  passed &= expect(compile(scratch.root(), restored).code == StatusCode::invalid_case &&
+      restored.fingerprint == fingerprint, "nonbinary marker rejects transactionally");
+  marker.resize(3U);
+  scratch.write("marker.d", marker);
+  passed &= expect(compile(scratch.root(), restored).code == StatusCode::invalid_case,
+      "truncated marker rejects");
+  std::string invalid = json;
+  replace_once(invalid, "imported_cartesian_marker", "automatic_marker_guess");
+  scratch.write("case.json", invalid);
+  passed &= expect(compile(scratch.root(), restored).code == StatusCode::invalid_case,
+      "unknown imported geometry mode rejects");
+  return passed;
+}
+
 bool test_field_registry() {
   FieldRegistry registry;
   FieldId first = 99;
@@ -1550,6 +1706,8 @@ int main(int argc, char** argv) {
   passed &= test_valid_fixture();
   passed &= test_tensor_normalization_and_fingerprint();
   passed &= test_coast_runtime_axes_case();
+  passed &= test_patch_inlets_case_and_wire();
+  passed &= test_imported_marker_case_and_wire();
   passed &= test_coast_native_air_requires_coast_axes_wire();
   passed &= test_coast_runtime_axes_strictness_and_fingerprint();
   passed &= test_every_typed_mesh_field_affects_fingerprint();

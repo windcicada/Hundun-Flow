@@ -52,6 +52,9 @@ constexpr std::uint8_t kCoastAxesWireVersion = 15U;
 constexpr std::uint8_t kCoastAxesPressureAlgorithmWireVersion = 16U;
 constexpr std::uint8_t kCoastAxesSimpleWireVersion = 17U;
 constexpr std::uint8_t kCoastAxesSimplePressureAlgorithmWireVersion = 18U;
+// An envelope around an unchanged base case wire, followed by explicit import
+// geometry and inlet-patch extensions. Existing case wires remain unchanged.
+constexpr std::uint8_t kPatchInletsWireVersion = 19U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -426,8 +429,10 @@ bool root_has_case_keys(yyjson_val* root) {
     }
   }
   const bool has_turbulence = yyjson_obj_get(root, "turbulence") != nullptr;
+  const bool has_patch_inlets = yyjson_obj_get(root, "patch_inlets") != nullptr;
   return yyjson_obj_size(root) == required.size() +
-                                         (has_turbulence ? 1U : 0U);
+                                         (has_turbulence ? 1U : 0U) +
+                                         (has_patch_inlets ? 1U : 0U);
 }
 
 bool parse_immersed_fluid_side(std::string_view value,
@@ -505,6 +510,10 @@ bool parse_turbulence(std::string_view value, TurbulenceKind& out) noexcept {
   }
   if (value == "vreman_wall_function") {
     out = TurbulenceKind::vreman_wall_function;
+    return true;
+  }
+  if (value == "vreman") {
+    out = TurbulenceKind::vreman;
     return true;
   }
   return false;
@@ -1362,6 +1371,13 @@ Status open_direct_file(int root_descriptor, std::string_view name,
                          descriptor, metadata);
 }
 
+double coast_binary32_value(double value) noexcept {
+  // The runtime axes are float32 authorities.  The volatile store makes the
+  // narrowing observable even when LTO can see an earlier equivalent cast.
+  volatile const float narrowed = static_cast<float>(value);
+  return static_cast<double>(narrowed);
+}
+
 Status parse_coast_runtime_axes(
     std::string_view text, const CartesianMeshSpec& declared,
     std::array<std::vector<double>, 3U>& out) {
@@ -1415,7 +1431,7 @@ Status parse_coast_runtime_axes(
       if (!(input >> coordinate)) {
         return invalid_case(detail_json_value);
       }
-      coordinate = static_cast<double>(static_cast<float>(coordinate));
+      coordinate = coast_binary32_value(coordinate);
       if (!std::isfinite(coordinate) ||
           (index != 0U && !(previous < coordinate))) {
         return invalid_case(detail_json_value);
@@ -1428,13 +1444,13 @@ Status parse_coast_runtime_axes(
     return invalid_case(detail_json_value);
   }
   const std::array<double, 3U> declared_lower{
-      static_cast<double>(static_cast<float>(declared.lower.x)),
-      static_cast<double>(static_cast<float>(declared.lower.y)),
-      static_cast<double>(static_cast<float>(declared.lower.z))};
+      coast_binary32_value(declared.lower.x),
+      coast_binary32_value(declared.lower.y),
+      coast_binary32_value(declared.lower.z)};
   const std::array<double, 3U> declared_upper{
-      static_cast<double>(static_cast<float>(declared.upper.x)),
-      static_cast<double>(static_cast<float>(declared.upper.y)),
-      static_cast<double>(static_cast<float>(declared.upper.z))};
+      coast_binary32_value(declared.upper.x),
+      coast_binary32_value(declared.upper.y),
+      coast_binary32_value(declared.upper.z)};
   for (std::size_t axis = 0U; axis < out.size(); ++axis) {
     if (!std::isfinite(declared_lower[axis]) ||
         !std::isfinite(declared_upper[axis]) ||
@@ -1703,6 +1719,120 @@ bool read_boundary(WireReader& reader, BoundaryFaceSpec& face) {
   return valid_boundary(face);
 }
 
+bool valid_patch_inlets(const ValidatedModel& model) {
+  if (!model.patch_inlets) return true;
+  const PatchInletsSpec& inlets = *model.patch_inlets;
+  fs::path path;
+  if (!model.mesh.has_exact_cells ||
+      !valid_direct_name(inlets.labels_file.generic_string(), ".d", path) ||
+      inlets.labels_fingerprint == 0U ||
+      inlets.patches.empty() || inlets.patches.size() > 256U)
+    return false;
+  std::set<std::int32_t> labels;
+  for (const PatchInletSpec& patch : inlets.patches) {
+    const BoundaryFaceSpec& inlet = patch.boundary;
+    if (patch.label <= 0 || !labels.insert(patch.label).second ||
+        patch.face >= 6U || !valid_boundary(inlet) ||
+        inlet.flow_kind != BoundaryKind::mass_flow_inlet ||
+        !(inlet.mass_flow_rate > 0.0) || !(inlet.temperature > 0.0) ||
+        inlet.allow_backflow ||
+        (patch.immersed && !model.immersed_boundary) ||
+        (!patch.immersed &&
+         model.boundaries[patch.face].flow_kind !=
+             BoundaryKind::mass_flow_inlet) ||
+        inlet.scalars.size() != model.transported_scalars.size())
+      return false;
+    const double normal_component = patch.face < 2U ? inlet.direction.x :
+        (patch.face < 4U ? inlet.direction.y : inlet.direction.z);
+    if (!((patch.face % 2U == 0U ? normal_component : -normal_component) > 0.0))
+      return false;
+    double species_sum = 0.0;
+    for (const auto& catalog : model.transported_scalars) {
+      const auto found = std::find_if(inlet.scalars.begin(), inlet.scalars.end(),
+          [&](const ScalarBoundarySpec& scalar) {
+            return scalar.stable_name == catalog.stable_name;
+          });
+      if (found == inlet.scalars.end() ||
+          found->kind != ScalarBoundaryKind::dirichlet)
+        return false;
+      if (catalog.role == TransportedScalarRole::species) {
+        if (found->value < 0.0 || found->value > 1.0) return false;
+        species_sum += found->value;
+      }
+    }
+    if (species_sum > 1.0) return false;
+  }
+  return true;
+}
+
+bool parse_patch_inlets(yyjson_val* value, PatchInletsSpec& out) {
+  if (!object_has_exact_keys(value, {"labels_file", "patches"})) return false;
+  const auto path = string_value(value, "labels_file");
+  yyjson_val* patches = yyjson_obj_get(value, "patches");
+  if (!path || !valid_direct_name(*path, ".d", out.labels_file) ||
+      !yyjson_is_arr(patches) || yyjson_arr_size(patches) == 0U ||
+      yyjson_arr_size(patches) > 256U)
+    return false;
+  constexpr std::array<std::string_view, 6U> names{
+      "x_min", "x_max", "y_min", "y_max", "z_min", "z_max"};
+  for (std::size_t index = 0; index < yyjson_arr_size(patches); ++index) {
+    yyjson_val* item = yyjson_arr_get(patches, index);
+    if (!object_has_exact_keys(item, {"label", "face", "immersed", "boundary"}))
+      return false;
+    const auto face = string_value(item, "face");
+    yyjson_val* immersed = yyjson_obj_get(item, "immersed");
+    std::uint32_t label = 0;
+    PatchInletSpec patch;
+    if (!parse_uint32(yyjson_obj_get(item, "label"), label) || label == 0U ||
+        label > INT32_MAX || !face || !yyjson_is_bool(immersed) ||
+        !parse_boundary_face(yyjson_obj_get(item, "boundary"), patch.boundary))
+      return false;
+    const auto found = std::find(names.begin(), names.end(), *face);
+    if (found == names.end()) return false;
+    patch.label = static_cast<std::int32_t>(label);
+    patch.face = static_cast<std::uint8_t>(found - names.begin());
+    patch.immersed = yyjson_get_bool(immersed);
+    out.patches.push_back(std::move(patch));
+  }
+  std::sort(out.patches.begin(), out.patches.end(),
+      [](const PatchInletSpec& a, const PatchInletSpec& b) {
+        return a.label < b.label;
+      });
+  return true;
+}
+
+void write_patch_inlets(WireWriter& writer, const PatchInletsSpec& value) {
+  writer.text(value.labels_file.generic_string());
+  writer.u64(value.labels_fingerprint);
+  writer.u16(static_cast<std::uint16_t>(value.patches.size()));
+  for (const PatchInletSpec& patch : value.patches) {
+    writer.i32(patch.label);
+    writer.byte(patch.face);
+    writer.byte(patch.immersed ? 1U : 0U);
+    write_boundary(writer, patch.boundary);
+  }
+}
+
+bool read_patch_inlets(WireReader& reader, PatchInletsSpec& value) {
+  std::string path;
+  std::uint16_t count = 0U;
+  if (!reader.text(path) || !valid_direct_name(path, ".d", value.labels_file) ||
+      !reader.u64(value.labels_fingerprint) ||
+      !reader.u16(count) || count == 0U || count > 256U)
+    return false;
+  for (std::uint16_t index = 0U; index < count; ++index) {
+    PatchInletSpec patch;
+    std::uint8_t immersed = 0U;
+    if (!reader.i32(patch.label) || !reader.byte(patch.face) ||
+        !reader.byte(immersed) || immersed > 1U ||
+        !read_boundary(reader, patch.boundary))
+      return false;
+    patch.immersed = immersed != 0U;
+    value.patches.push_back(std::move(patch));
+  }
+  return true;
+}
+
 void write_solver(WireWriter &writer, const SolverSpec &value, bool extended) {
   writer.real(value.pressure.absolute_tolerance);
   writer.real(value.pressure.relative_tolerance);
@@ -1918,6 +2048,11 @@ bool unique_reference_paths(const ValidatedModel& model) {
         !insert(model.mesh.axes_file)) {
       return false;
     }
+    if (model.patch_inlets && !insert(model.patch_inlets->labels_file))
+      return false;
+    if (model.immersed_boundary && model.immersed_boundary->marker_file &&
+        !insert(*model.immersed_boundary->marker_file))
+      return false;
     for (const fs::path& path : model.data_files) {
       if (!insert(path)) {
         return false;
@@ -1932,17 +2067,33 @@ bool unique_reference_paths(const ValidatedModel& model) {
 Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
+    const bool marker_geometry = model.immersed_boundary &&
+        model.immersed_boundary->marker_file.has_value();
+    if (marker_geometry) {
+      fs::path marker_path;
+      if (!model.mesh.has_exact_cells ||
+          model.immersed_boundary->marker_fingerprint == 0U ||
+          !valid_direct_name(model.immersed_boundary->marker_file->generic_string(),
+                             ".d", marker_path))
+        return invalid_case(detail_wire);
+    } else if (model.immersed_boundary &&
+               model.immersed_boundary->marker_fingerprint != 0U) {
+      return invalid_case(detail_wire);
+    }
     if (!valid_canonical_mesh(model.mesh) ||
         static_cast<std::uint8_t>(model.pressure_reference) >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
         !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
         !valid_time(model.time) ||
+        !valid_patch_inlets(model) ||
         !valid_transported_scalars(model.transported_scalars) ||
         model.mesh.focus_regions.size() > detail::kMaxFocusRegions ||
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
-        model.data_files.size() + (model.immersed_boundary.has_value() ? 1U : 0U) +
+        model.data_files.size() + (marker_geometry ? 1U : 0U) +
+                (model.patch_inlets ? 1U : 0U) +
+                (model.immersed_boundary.has_value() ? 1U : 0U) +
                 (model.mesh.kind == GeometryKind::coast_runtime_axes_v1 ? 2U
                                                                         : 1U) >
             detail::kMaxReferencedFiles ||
@@ -1983,6 +2134,8 @@ Status serialize_model(const ValidatedModel& model,
     const bool simple = model.solver.coupling == CouplingKind::simple;
     const bool coast_axes =
         model.mesh.kind == GeometryKind::coast_runtime_axes_v1;
+    const bool extensions = model.patch_inlets || marker_geometry;
+    if (extensions) writer.byte(kPatchInletsWireVersion);
     writer.byte(
         coast_axes
             ? (simple ? (extended_solver
@@ -2059,6 +2212,15 @@ Status serialize_model(const ValidatedModel& model,
         !writer.text(model.immersed_boundary->stl_file.generic_string())) {
       return invalid_case(detail_wire);
     }
+    if (extensions) {
+      writer.byte(marker_geometry ? 1U : 0U);
+      if (marker_geometry) {
+        writer.text(model.immersed_boundary->marker_file->generic_string());
+        writer.u64(model.immersed_boundary->marker_fingerprint);
+      }
+      writer.byte(model.patch_inlets ? 1U : 0U);
+      if (model.patch_inlets) write_patch_inlets(writer, *model.patch_inlets);
+    }
     writer.u64(model.fingerprint);
     std::vector<std::uint8_t> candidate = std::move(writer).take();
     if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
@@ -2086,7 +2248,10 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t has_stl = 0U;
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
-    if (!reader.byte(version) ||
+    if (!reader.byte(version)) return invalid_case(detail_wire);
+    const bool patch_wire = version == kPatchInletsWireVersion;
+    if (patch_wire && !reader.byte(version)) return invalid_case(detail_wire);
+    if (
         (version != kLegacyWireVersion &&
          version != kLegacyPressureAlgorithmWireVersion &&
          version != kWireVersion &&
@@ -2105,7 +2270,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
                           GeometryKind::coast_runtime_axes_v1))) ||
         !reader.byte(turbulence) ||
         turbulence >
-            static_cast<std::uint8_t>(TurbulenceKind::vreman_wall_function) ||
+            static_cast<std::uint8_t>(TurbulenceKind::vreman) ||
         !reader.byte(pressure_reference) ||
         pressure_reference >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass)) {
@@ -2230,7 +2395,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
                                       IbmReconstructionPolicy::adaptive_order))) ||
         (has_stl == 0U && fluid_side != 0U) ||
         (has_stl == 0U && reconstruction_policy != 0U) ||
-        static_cast<std::size_t>(data_count) + (has_stl != 0U ? 1U : 0U) +
+        static_cast<std::size_t>(data_count) +
+                (has_stl != 0U ? 1U : 0U) +
                 (coast_axes_wire(version) ? 2U : 1U) >
             detail::kMaxReferencedFiles) {
       return invalid_case(detail_wire);
@@ -2259,6 +2425,35 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       model.immersed_boundary = ImmersedBoundarySpec{
           std::move(parsed), static_cast<ImmersedFluidSide>(fluid_side),
           static_cast<IbmReconstructionPolicy>(reconstruction_policy)};
+    }
+    if (patch_wire) {
+      std::uint8_t marker_geometry = 0U;
+      std::uint8_t has_inlets = 0U;
+      if (!reader.byte(marker_geometry) || marker_geometry > 1U)
+        return invalid_case(detail_wire);
+      if (marker_geometry != 0U) {
+        std::string path;
+        fs::path parsed;
+        if (!model.immersed_boundary || !model.mesh.has_exact_cells ||
+            !reader.text(path) || !valid_direct_name(path, ".d", parsed) ||
+            !reader.u64(model.immersed_boundary->marker_fingerprint) ||
+            model.immersed_boundary->marker_fingerprint == 0U)
+          return invalid_case(detail_wire);
+        model.immersed_boundary->marker_file = std::move(parsed);
+      }
+      if (!reader.byte(has_inlets) || has_inlets > 1U ||
+          (marker_geometry == 0U && has_inlets == 0U))
+        return invalid_case(detail_wire);
+      if (has_inlets != 0U) {
+        model.patch_inlets.emplace();
+        if (!read_patch_inlets(reader, *model.patch_inlets) ||
+            !valid_patch_inlets(model))
+          return invalid_case(detail_wire);
+      }
+      if (static_cast<std::size_t>(data_count) + marker_geometry + has_inlets +
+          (has_stl != 0U ? 1U : 0U) + (coast_axes_wire(version) ? 2U : 1U) >
+          detail::kMaxReferencedFiles)
+        return invalid_case(detail_wire);
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
         !unique_reference_paths(model) ||
@@ -2480,13 +2675,13 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
     if (coast_axes_schema) {
       model.mesh.lower = {
-          static_cast<double>(static_cast<float>(model.mesh.lower.x)),
-          static_cast<double>(static_cast<float>(model.mesh.lower.y)),
-          static_cast<double>(static_cast<float>(model.mesh.lower.z))};
+          coast_binary32_value(model.mesh.lower.x),
+          coast_binary32_value(model.mesh.lower.y),
+          coast_binary32_value(model.mesh.lower.z)};
       model.mesh.upper = {
-          static_cast<double>(static_cast<float>(model.mesh.upper.x)),
-          static_cast<double>(static_cast<float>(model.mesh.upper.y)),
-          static_cast<double>(static_cast<float>(model.mesh.upper.z))};
+          coast_binary32_value(model.mesh.upper.x),
+          coast_binary32_value(model.mesh.upper.y),
+          coast_binary32_value(model.mesh.upper.z)};
     }
 
     yyjson_val* max_global_cells = yyjson_obj_get(limits, "max_global_cells");
@@ -2565,6 +2760,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* immersed_boundary =
         yyjson_obj_get(mesh, "immersed_boundary");
     yyjson_val* stl_file = nullptr;
+    std::optional<std::string_view> marker_file;
     ImmersedFluidSide immersed_fluid_side{ImmersedFluidSide::outside};
     IbmReconstructionPolicy immersed_reconstruction_policy{
         IbmReconstructionPolicy::strict_quadratic};
@@ -2574,8 +2770,18 @@ Status compile_on_root(const fs::path& case_root, int rank,
       const bool explicit_policy = object_has_exact_keys(
           immersed_boundary,
           {"stl_file", "fluid_side", "reconstruction_policy"});
-      if (!legacy_strict && !explicit_policy) {
+      const bool imported_geometry = object_has_exact_keys(
+          immersed_boundary, {"stl_file", "fluid_side", "reconstruction_policy",
+                              "geometry_mode", "marker_file"});
+      if (!legacy_strict && !explicit_policy && !imported_geometry) {
         return invalid_case(detail_json_schema);
+      }
+      if (imported_geometry) {
+        const auto mode = string_value(immersed_boundary, "geometry_mode");
+        marker_file = string_value(immersed_boundary, "marker_file");
+        if (!mode || *mode != "imported_cartesian_marker" || !marker_file ||
+            !model.mesh.has_exact_cells)
+          return invalid_case(detail_json_value);
       }
       stl_file = yyjson_obj_get(immersed_boundary, "stl_file");
       const auto fluid_side = string_value(immersed_boundary, "fluid_side");
@@ -2583,7 +2789,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
           string_value(immersed_boundary, "reconstruction_policy");
       if (!yyjson_is_str(stl_file) || !fluid_side.has_value() ||
           !parse_immersed_fluid_side(*fluid_side, immersed_fluid_side) ||
-          (explicit_policy &&
+          ((explicit_policy || imported_geometry) &&
            (!reconstruction_policy.has_value() ||
             !parse_ibm_reconstruction_policy(
                 *reconstruction_policy,
@@ -2605,6 +2811,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
     const std::size_t data_file_count = yyjson_arr_size(data_files);
     const std::size_t total_reference_count =
         data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U) +
+        (marker_file ? 1U : 0U) +
+        (yyjson_obj_get(root, "patch_inlets") != nullptr ? 1U : 0U) +
         (coast_axes_schema ? 2U : 1U);
     if (data_file_count > detail::kMaxReferencedFiles ||
         total_reference_count > detail::kMaxReferencedFiles) {
@@ -2785,6 +2993,102 @@ Status compile_on_root(const fs::path& case_root, int rank,
           static_cast<std::uint8_t>(immersed_reconstruction_policy));
     } else {
       hash.text("no-immersed-boundary");
+    }
+
+    if (marker_file) {
+      fs::path relative;
+      UniqueFd descriptor;
+      struct stat metadata {};
+      const Status opened = open_direct_file(root_descriptor.get(), *marker_file,
+          ".d", rank, relative, descriptor, metadata);
+      if (!opened) return opened;
+      if (!referenced_targets.insert({metadata.st_dev, metadata.st_ino}).second)
+        return invalid_case(detail_reference_path);
+      const std::uint64_t cells = static_cast<std::uint64_t>(model.mesh.exact_cells.x) *
+          model.mesh.exact_cells.y * model.mesh.exact_cells.z;
+      if (cells > detail::kMaxReferencedFileBytes || metadata.st_size < 0 ||
+          static_cast<std::uint64_t>(metadata.st_size) != cells)
+        return invalid_case(detail_json_value);
+      std::string marker;
+      const Status read = read_bounded_text(descriptor, metadata,
+          detail::kMaxReferencedFileBytes, detail_reference_missing,
+          detail_reference_too_large, marker);
+      if (!read) return read;
+      if (marker.size() != cells || std::any_of(marker.begin(), marker.end(),
+          [](unsigned char cell) { return cell > 1U; }))
+        return invalid_case(detail_json_value);
+      Hash64 marker_hash;
+      marker_hash.bytes(marker.data(), marker.size());
+      model.immersed_boundary->marker_file = std::move(relative);
+      model.immersed_boundary->marker_fingerprint = marker_hash.finish();
+      hash.text("imported-cartesian-marker-v1");
+      hash.text(model.immersed_boundary->marker_file->generic_string());
+      hash.integer(model.immersed_boundary->marker_fingerprint);
+    }
+
+    if (yyjson_val* input = yyjson_obj_get(root, "patch_inlets")) {
+      model.patch_inlets.emplace();
+      PatchInletsSpec& inlets = *model.patch_inlets;
+      if (!parse_patch_inlets(input, inlets) || !model.mesh.has_exact_cells)
+        return invalid_case(detail_json_value);
+      UniqueFd descriptor;
+      struct stat metadata {};
+      fs::path relative;
+      const Status opened = open_direct_file(root_descriptor.get(),
+          inlets.labels_file.generic_string(), ".d", rank, relative,
+          descriptor, metadata);
+      if (!opened) return opened;
+      if (!referenced_targets.insert({metadata.st_dev, metadata.st_ino}).second)
+        return invalid_case(detail_reference_path);
+      const std::uint64_t cells = static_cast<std::uint64_t>(model.mesh.exact_cells.x) *
+          model.mesh.exact_cells.y * model.mesh.exact_cells.z;
+      if (cells > detail::kMaxReferencedFileBytes / 4U || metadata.st_size < 0 ||
+          static_cast<std::uint64_t>(metadata.st_size) != cells * 4U)
+        return invalid_case(detail_json_value);
+      std::string labels;
+      const Status read = read_bounded_text(descriptor, metadata,
+          detail::kMaxReferencedFileBytes, detail_reference_missing,
+          detail_reference_too_large, labels);
+      if (!read) return read;
+      if (labels.size() != cells * 4U) return invalid_case(detail_json_value);
+      Hash64 labels_hash;
+      labels_hash.bytes(labels.data(), labels.size());
+      inlets.labels_fingerprint = labels_hash.finish();
+      if (!valid_patch_inlets(model)) return invalid_case(detail_json_value);
+      std::vector<std::uint64_t> positive(inlets.patches.size(), 0U);
+      std::vector<std::uint64_t> negative(inlets.patches.size(), 0U);
+      for (std::size_t offset = 0U; offset < labels.size(); offset += 4U) {
+        std::uint32_t raw = 0U;
+        for (unsigned byte = 0U; byte < 4U; ++byte)
+          raw |= static_cast<std::uint32_t>(
+              static_cast<unsigned char>(labels[offset + byte])) << (8U * byte);
+        const std::int64_t label = raw <= INT32_MAX ? raw :
+            static_cast<std::int64_t>(raw) - INT64_C(4294967296);
+        if (label == 0) continue;
+        const std::int64_t magnitude = label < 0 ? -label : label;
+        const auto found = std::lower_bound(inlets.patches.begin(), inlets.patches.end(),
+            magnitude, [](const PatchInletSpec& patch, std::int64_t value) {
+              return patch.label < value;
+            });
+        if (found == inlets.patches.end() || found->label != magnitude ||
+            (label < 0 && !found->immersed))
+          return invalid_case(detail_json_value);
+        const auto index = static_cast<std::size_t>(found - inlets.patches.begin());
+        ++(label > 0 ? positive[index] : negative[index]);
+      }
+      for (std::size_t index = 0U; index < positive.size(); ++index)
+        if (positive[index] == 0U ||
+            (inlets.patches[index].immersed && positive[index] != negative[index]))
+          return invalid_case(detail_json_value);
+      hash.text("patch-inlets-v1");
+      hash.text(inlets.labels_file.generic_string());
+      hash.integer(inlets.labels_fingerprint);
+      for (const PatchInletSpec& patch : inlets.patches) {
+        hash.integer(patch.label);
+        hash.integer(patch.face);
+        hash.integer(static_cast<std::uint8_t>(patch.immersed ? 1U : 0U));
+        hash_boundary(hash, patch.boundary);
+      }
     }
 
     model.fingerprint = hash.finish();

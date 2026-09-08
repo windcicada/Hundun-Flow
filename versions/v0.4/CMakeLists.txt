@@ -247,6 +247,7 @@ set(hundun_v04_core_sources
   src/mesh_cartesian.cpp
   src/mesh_decomposition.cpp
   src/mesh_focus.cpp
+  src/mesh_ibm_import.cpp
   src/mesh_ibm_plan.cpp
   src/mesh_ibm_reconstruction.cpp
   src/mesh_ibm_surface.cpp
@@ -333,6 +334,13 @@ target_compile_definitions(v04_thin_domain_runner PRIVATE
   HUNDUN_RUNTIME_TARGET_MANIFEST="${HUNDUN_RUNNER_MANIFEST}")
 target_include_directories(v04_thin_domain_runner PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+# Offline, audited GTMC mean-field transfer bridge.  It deliberately writes a
+# legacy V1 restart so the first solver step performs backward-Euler history
+# recovery instead of treating synthesized history as an exact checkpoint.
+add_executable(v04_coast_restart_import
+  "${hundun_repository_root}/tools/v04_coast_restart_import.cpp")
+target_link_libraries(v04_coast_restart_import PRIVATE hundun_v04_core)
 
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the
