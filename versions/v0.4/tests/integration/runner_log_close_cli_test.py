@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--ranks', type=int, default=2)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--first-only', action='store_true')
+    parser.add_argument('--mg-only', action='store_true')
     args = parser.parse_args()
     output = args.output or Path(tempfile.mkdtemp(prefix='hundun-log-close-')) / 'audit'
     output.mkdir(parents=True, exist_ok=False)
@@ -66,6 +67,8 @@ def main():
                    '--run-root', str(root.resolve()), '--steps', '1', '--visit-interval', '0']
         if observe:
             command.append('--observe-performance')
+            if args.mg_only:
+                command.append('--observe-mg-cost')
         result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, universal_newlines=True, timeout=45)
         (output / (name + '.log')).write_text(result.stdout)
@@ -82,7 +85,8 @@ def main():
             baseline_payload = payload
         assert payload == baseline_payload, 'I/O completion changed accepted checkpoint bytes'
         assert (root / 'step-00000000000000000001.complete').is_file()
-        active_failure = (flush_error or close_error) and (observe or stream != 'performance.csv')
+        observation_stream = stream == 'performance.csv' or stream.startswith(('solver-rank-', 'mg-rank-'))
+        active_failure = (flush_error or close_error) and (observe or not observation_stream)
         if active_failure:
             assert exits[target][3] == bool(flush_error), row
             assert exits[target][4] == bool(close_error), row
@@ -99,13 +103,17 @@ def main():
         return exits[target][1]
 
     run('baseline-off', 'force.csv', 0, False)
-    run('force-close-eio', 'force.csv', 0, False, close_error=errno.EIO)
+    if not args.mg_only:
+        run('force-close-eio', 'force.csv', 0, False, close_error=errno.EIO)
     if args.first_only:
         return
-    run('disabled-observer', 'performance.csv', 0, False, close_error=errno.ENOSPC)
-    for index, stream in enumerate(('force.csv', 'health.csv', 'conservation.csv', 'probe.csv',
-                                    'performance.csv', 'solver-rank-{}.csv'.format(args.ranks - 1))):
-        target = args.ranks - 1 if stream.startswith('solver-') else 0
+    disabled = 'mg-rank-0.csv' if args.mg_only else 'performance.csv'
+    run('disabled-observer', disabled, 0, False, close_error=errno.ENOSPC)
+    streams = (('mg-rank-0.csv', 'mg-rank-{}.csv'.format(args.ranks - 1)) if args.mg_only else
+               ('force.csv', 'health.csv', 'conservation.csv', 'probe.csv',
+                'performance.csv', 'solver-rank-{}.csv'.format(args.ranks - 1)))
+    for index, stream in enumerate(streams):
+        target = int(stream.split('-')[-1].split('.')[0]) if '-rank-' in stream else 0
         count = run('baseline-{}'.format(index), stream, target, True)
         # The baseline's last libc flush belongs to filebuf close. The repaired
         # code may add an earlier explicit flush; select that final-stage call.

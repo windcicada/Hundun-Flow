@@ -1,0 +1,102 @@
+Start testing: Sep 08 10:00 CST
+----------------------------------------------------------
+45/365 Testing: v04_runner_mg_profile_mpi_1
+45/365 Test: v04_runner_mg_profile_mpi_1
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_1" start time: Sep 08 10:00 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=1 steps=2 apply_attempts=[6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-c80qroai/audit
+<end of output>
+Test time =   9.45 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_1" end time: Sep 08 10:00 CST
+"v04_runner_mg_profile_mpi_1" time elapsed: 00:00:09
+----------------------------------------------------------
+
+46/365 Testing: v04_runner_statistics_epoch_mpi_1
+46/365 Test: v04_runner_statistics_epoch_mpi_1
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_1" start time: Sep 08 10:00 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=1 source_readonly=true
+<end of output>
+Test time =  13.97 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_1" end time: Sep 08 10:00 CST
+"v04_runner_statistics_epoch_mpi_1" time elapsed: 00:00:13
+----------------------------------------------------------
+
+47/365 Testing: v04_runner_mg_profile_mpi_2
+47/365 Test: v04_runner_mg_profile_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_2" start time: Sep 08 10:00 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=2 steps=2 apply_attempts=[6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-sbg27wz2/audit
+<end of output>
+Test time =   9.54 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_2" end time: Sep 08 10:00 CST
+"v04_runner_mg_profile_mpi_2" time elapsed: 00:00:09
+----------------------------------------------------------
+
+48/365 Testing: v04_runner_statistics_epoch_mpi_2
+48/365 Test: v04_runner_statistics_epoch_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_2" start time: Sep 08 10:00 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=2 source_readonly=true
+<end of output>
+Test time =  13.40 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_2" end time: Sep 08 10:01 CST
+"v04_runner_statistics_epoch_mpi_2" time elapsed: 00:00:13
+----------------------------------------------------------
+
+49/365 Testing: v04_runner_mg_profile_mpi_4
+49/365 Test: v04_runner_mg_profile_mpi_4
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_4" start time: Sep 08 10:01 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=4 steps=2 apply_attempts=[6, 6, 6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-wvt7odgo/audit
+<end of output>
+Test time =   4.38 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_4" end time: Sep 08 10:01 CST
+"v04_runner_mg_profile_mpi_4" time elapsed: 00:00:04
+----------------------------------------------------------
+
+50/365 Testing: v04_runner_statistics_epoch_mpi_4
+50/365 Test: v04_runner_statistics_epoch_mpi_4
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_4" start time: Sep 08 10:01 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=4 source_readonly=true
+<end of output>
+Test time =  11.15 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_4" end time: Sep 08 10:01 CST
+"v04_runner_statistics_epoch_mpi_4" time elapsed: 00:00:11
+----------------------------------------------------------
+
+End testing: Sep 08 10:01 CST

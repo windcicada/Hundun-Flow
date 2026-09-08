@@ -1,0 +1,14 @@
+ibm_reconstruction policy=strict_quadratic boundary_linear=0/384 surface_linear=0/36 expanded=0
+CHECKPOINT step=1 time=0.0001 samples=0
+log_completion_failure rank=1 stream=mg-rank.csv operation=flush errno=5
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[8256,1],1]
+  Exit code:    6
+--------------------------------------------------------------------------

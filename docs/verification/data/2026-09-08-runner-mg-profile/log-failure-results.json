@@ -1,0 +1,530 @@
+[
+  {
+    "name": "baseline-off",
+    "returncode": 0,
+    "exits": [
+      [
+        0,
+        2,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/baseline-off",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0"
+    ]
+  },
+  {
+    "name": "disabled-observer",
+    "returncode": 0,
+    "exits": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/disabled-observer",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0"
+    ]
+  },
+  {
+    "name": "baseline-0",
+    "returncode": 0,
+    "exits": [
+      [
+        0,
+        2,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/baseline-0",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "close-0-5",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        2,
+        1,
+        0,
+        1
+      ],
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/close-0-5",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "flush-0-5",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        2,
+        1,
+        1,
+        0
+      ],
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/flush-0-5",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "close-0-28",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        2,
+        1,
+        0,
+        1
+      ],
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/close-0-28",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "flush-0-28",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        2,
+        1,
+        1,
+        0
+      ],
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/flush-0-28",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "first-error-0",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        2,
+        1,
+        1,
+        1
+      ],
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/first-error-0",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "baseline-1",
+    "returncode": 0,
+    "exits": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        2,
+        1,
+        0,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/baseline-1",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "close-1-5",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        6,
+        2,
+        1,
+        0,
+        1
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/close-1-5",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "flush-1-5",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        6,
+        2,
+        1,
+        1,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/flush-1-5",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "close-1-28",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        6,
+        2,
+        1,
+        0,
+        1
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/close-1-28",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "flush-1-28",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        6,
+        2,
+        1,
+        1,
+        0
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/flush-1-28",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  },
+  {
+    "name": "first-error-1",
+    "returncode": 6,
+    "exits": [
+      [
+        6,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        6,
+        2,
+        1,
+        1,
+        1
+      ]
+    ],
+    "command": [
+      "mpirun",
+      "-n",
+      "2",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner",
+      "--spec",
+      "/tmp/hundun-mg-log-failure-20260908/statistics.d",
+      "--case-root",
+      "/tmp/hundun-mg-log-failure-20260908/case",
+      "--run-root",
+      "/tmp/hundun-mg-log-failure-20260908/first-error-1",
+      "--steps",
+      "1",
+      "--visit-interval",
+      "0",
+      "--observe-performance",
+      "--observe-mg-cost"
+    ]
+  }
+]

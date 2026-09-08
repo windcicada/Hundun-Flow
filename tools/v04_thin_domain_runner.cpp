@@ -23,6 +23,7 @@
 #include <iostream>
 #include <limits>
 #include <locale>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -77,6 +78,7 @@ struct Options {
   bool dry_plan{};
   bool self_test{};
   bool observe_performance{};
+  bool observe_mg_cost{};
   DriverCellTraceWindow trace_window{};
   bool restart_method_recovery{};
   bool have_restart_development_steps{};
@@ -204,6 +206,9 @@ bool parse_options(int argc, char** argv, Options& out) {
     } else if (token == "--observe-performance") {
       if (out.observe_performance) return false;
       out.observe_performance = true;
+    } else if (token == "--observe-mg-cost") {
+      if (out.observe_mg_cost) return false;
+      out.observe_mg_cost = true;
     } else if (token == "--restart-method-recovery") {
       if (out.restart_method_recovery) return false;
       out.restart_method_recovery = true;
@@ -269,6 +274,7 @@ bool parse_options(int argc, char** argv, Options& out) {
     return false;
   if (out.have_restart_development_steps && !out.restart_method_recovery)
     return false;
+  if (out.observe_mg_cost && !out.observe_performance) return false;
   if (out.self_test)
     return !out.observe_performance && !out.dry_plan && out.spec.empty() &&
            out.case_root.empty() && out.run_root.empty() &&
@@ -448,6 +454,154 @@ bool write_exclusive(const fs::path& path, std::string_view text) {
       detail::OutputFileMode::exclusive, nullptr, 0444);
 }
 
+// Independent cold authority for rank/level coverage, not inferred from logs.
+// One bounded wire per rank; no field storage and no hot-path communication.
+bool write_mg_layout(MPI_Comm communicator, int rank, int ranks,
+                     const ProductDriver& driver, const fs::path& root,
+                     RuntimeSha256Digest& digest) {
+  constexpr std::size_t width = 1U + 8U * kMgMaximumLevels;
+  static_assert(width <= INT_MAX);
+  std::array<std::int32_t, width> wire{};
+  std::vector<std::int32_t> gathered;
+  if (!local_stage(communicator, [&] {
+        const auto view = driver.pressure_mg_profile();
+        if (!view.enabled || view.level_count == 0U ||
+            view.level_count > kMgMaximumLevels || ranks <= 0) return false;
+        wire[0] = static_cast<std::int32_t>(view.level_count);
+        for (std::size_t n = 0U; n < view.level_count; ++n) {
+          MgLevelView level;
+          if (!driver.pressure_mg_level(n, level)) return false;
+          const std::array<std::int32_t, 8U> entry{{
+              level.global_shape.x, level.global_shape.y, level.global_shape.z,
+              level.local_shape.x, level.local_shape.y, level.local_shape.z,
+              static_cast<std::int32_t>(level.coarsening), level.line_axis_mask}};
+          std::copy(entry.begin(), entry.end(), wire.begin() + 1U + 8U * n);
+        }
+        if (rank == 0) {
+          if (static_cast<std::size_t>(ranks) > gathered.max_size() / width)
+            return false;
+          gathered.resize(static_cast<std::size_t>(ranks) * width);
+        }
+        return true;
+      })) return false;
+  const bool gathered_ok = MPI_Gather(wire.data(), static_cast<int>(width), MPI_INT32_T,
+      rank == 0 ? gathered.data() : nullptr, static_cast<int>(width), MPI_INT32_T,
+      0, communicator) == MPI_SUCCESS;
+  if (!all_true(communicator, gathered_ok)) return false;
+  return local_stage(communicator, [&] {
+    if (rank != 0) return true;
+    std::ostringstream text;
+    text.exceptions(std::ios::badbit | std::ios::failbit);
+    text.imbue(std::locale::classic());
+    text << "HUNDUN_MG_LAYOUT_V1\nexpected_ranks " << ranks
+         << "\nmaximum_levels " << kMgMaximumLevels << '\n';
+    for (int r = 0; r < ranks; ++r) {
+      const auto offset = static_cast<std::size_t>(r) * width;
+      const auto count = gathered[offset];
+      text << "rank " << r << ' ' << count << '\n';
+      for (std::int32_t n = 0; n < count; ++n) {
+        text << "level " << r << ' ' << n;
+        for (std::size_t c = 0U; c < 8U; ++c)
+          text << ' ' << gathered[offset + 1U + 8U * static_cast<std::size_t>(n) + c];
+        text << '\n';
+      }
+    }
+    text << "end\n";
+    const std::string encoded = text.str();
+    return detail::runtime_sha256_bytes(
+        {reinterpret_cast<const std::uint8_t*>(encoded.data()), encoded.size()}, digest) &&
+        write_exclusive(root / "mg-layout.meta", encoded);
+  });
+}
+
+void write_mg_loop(std::ostream& out, const MgSolveProfile& mg) {
+  out << ',' << mg.enabled << ',' << mg.complete << ',' << mg.attempts
+      << ',' << mg.successes << ',' << mg.failures << ',' << mg.apply_nanoseconds
+      << ',' << mg.reduction_nanoseconds << ',' << mg.halo_wait_nanoseconds
+      << ',' << mg.halo_control_nanoseconds << ',' << mg.halo_control_calls;
+  for (const auto* phase : {&mg.pre_smooth, &mg.residual, &mg.restriction,
+                           &mg.prolongation, &mg.post_smooth, &mg.terminal, &mg.direct_mpi})
+    out << ',' << phase->calls << ',' << phase->nanoseconds;
+  out << ',' << mg.finest_pre_smooth_nanoseconds
+      << ',' << mg.finest_post_smooth_nanoseconds;
+}
+
+// A value copy is needed before advance: the public view is borrowed, not history.
+MgApplyProfile mg_snapshot(const ProductDriver& driver) noexcept {
+  const auto view = driver.pressure_mg_profile();
+  MgApplyProfile result;
+  if (view.cumulative != nullptr) result = *view.cumulative;
+  else {
+    result.enabled = view.enabled;
+    result.level_count = view.level_count;
+  }
+  result.complete = result.complete && view.enabled &&
+      view.initialized == (view.cumulative != nullptr) &&
+      result.enabled && result.level_count == view.level_count &&
+      view.level_count != 0U && view.level_count <= kMgMaximumLevels;
+  return result;
+}
+
+// Only observation can become incomplete. Counter discontinuities never alter
+// the accepted state or the numerical Status. Compute all deltas before writing
+// any complete flag, so a later bad level also invalidates the total row.
+void write_mg_step(std::ostream& out, std::uint64_t step, int rank,
+                   const ProductDriver& driver, const MgApplyProfile& before,
+                   const RuntimeSha256Digest& source) {
+  auto change = mg_snapshot(driver);
+  change.complete = change.complete && before.complete && before.enabled &&
+      before.level_count == change.level_count;
+  const auto subtract = [&](std::uint64_t& value, std::uint64_t old) noexcept {
+    if (old == UINT64_MAX || value == UINT64_MAX || value < old) {
+      change.complete = false;
+      value = 0U;
+    } else value -= old;
+  };
+  subtract(change.attempts, before.attempts);
+  subtract(change.successes, before.successes);
+  subtract(change.failures, before.failures);
+  subtract(change.apply_nanoseconds, before.apply_nanoseconds);
+  subtract(change.reduction_nanoseconds, before.reduction_nanoseconds);
+  for (std::size_t n = 0U; n < std::min(change.level_count, kMgMaximumLevels); ++n) {
+    auto& now = change.levels[n];
+    const auto& old = before.levels[n];
+    subtract(now.visits, old.visits);
+    const auto phase = [&](MgPhaseProfile& value, const MgPhaseProfile& first) noexcept {
+      subtract(value.calls, first.calls);
+      subtract(value.nanoseconds, first.nanoseconds);
+    };
+    phase(now.pre_smooth, old.pre_smooth);
+    phase(now.residual, old.residual);
+    phase(now.restriction, old.restriction);
+    phase(now.prolongation, old.prolongation);
+    phase(now.post_smooth, old.post_smooth);
+    phase(now.terminal, old.terminal);
+    phase(now.direct_mpi, old.direct_mpi);
+    subtract(now.halo_wait_nanoseconds, old.halo_wait_nanoseconds);
+    subtract(now.halo_control_nanoseconds, old.halo_control_nanoseconds);
+    subtract(now.halo_control_calls, old.halo_control_calls);
+  }
+  const bool initialized = driver.pressure_mg_profile().initialized;
+  const MgLevelApplyProfile empty;
+  // Total (-1) and level rows have disjoint columns, avoiding repeated totals.
+  for (int n = -1; n < static_cast<int>(std::min(change.level_count, kMgMaximumLevels)); ++n) {
+    const bool total = n == -1;
+    const auto& level = total ? empty : change.levels[static_cast<std::size_t>(n)];
+    out << step << ',' << rank << ',' << n << ',' << initialized << ',' << change.complete
+        << ',' << (total ? change.attempts : 0U)
+        << ',' << (total ? change.successes : 0U)
+        << ',' << (total ? change.failures : 0U)
+        << ',' << (total ? change.apply_nanoseconds : 0U)
+        << ',' << (total ? change.reduction_nanoseconds : 0U)
+        << ',' << level.visits;
+    for (const auto* p : {&level.pre_smooth, &level.residual, &level.restriction,
+                         &level.prolongation, &level.post_smooth, &level.terminal, &level.direct_mpi})
+      out << ',' << p->calls << ',' << p->nanoseconds;
+    out << ',' << level.halo_wait_nanoseconds << ',' << level.halo_control_nanoseconds
+        << ',' << level.halo_control_calls << ',' << source.data() << '\n';
+  }
+}
+
 class EvidenceFile {
  public:
   EvidenceFile() = default;
@@ -504,11 +658,11 @@ class EvidenceFile {
 // local failure even if a subsequent close clears/changes stream state. This
 // function runs on failure exits too, without changing committed solver state.
 bool complete_logs(MPI_Comm communicator, int rank,
-                   const std::array<std::ofstream*, 7U>& streams,
+                   const std::array<std::ofstream*, 8U>& streams,
                    EvidenceFile& evidence) {
-  constexpr std::array<const char*, 8U> names{{"force.csv", "health.csv",
+  constexpr std::array<const char*, 9U> names{{"force.csv", "health.csv",
       "conservation.csv", "probe.csv", "performance.csv", "solver-rank.csv",
-      "cell-trace-rank.csv", "evidence.jsonl"}};
+      "cell-trace-rank.csv", "mg-rank.csv", "evidence.jsonl"}};
   constexpr std::array<const char*, 3U> operations{{"write", "flush", "close"}};
   std::array<int, 3U> first{{-1, 0, 0}};
   const auto record = [&](std::size_t stream, int operation) noexcept {
@@ -1768,7 +1922,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     return 3;
   }
   const std::uint64_t fingerprint = spec_fingerprint(spec);
-  if (!consensus_u64(communicator, fingerprint)) {
+  // Observation flags change cold/step communication branches, but are not
+  // scientific identity and must not change restart/statistics fingerprints.
+  const auto control = mix(mix(fingerprint, options.observe_performance),
+                           options.observe_mg_cost);
+  if (!consensus_u64(communicator, control)) {
     if (rank == 0) std::cerr << "spec_consensus_failure\n";
     return 3;
   }
@@ -1888,6 +2046,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
 
   status = driver.set_cell_trace_window(options.trace_window);
   if (!status) return 5;
+  if (options.observe_mg_cost && !all_true(communicator,
+      static_cast<bool>(driver.set_pressure_mg_profiling(true)))) return 5;
   CommittedOutputSnapshot snapshot;
   status = driver.committed_output_snapshot(snapshot);
   RuntimeGeometry runtime;
@@ -2032,6 +2192,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     if (rank == 0) std::cerr << "run_root_not_exclusive\n";
     return 6;
   }
+  RuntimeSha256Digest mg_layout_digest{};
+  if (options.observe_mg_cost && !write_mg_layout(communicator, rank, ranks,
+        driver, options.run_root, mg_layout_digest)) return 6;
   okay = local_stage(communicator, [&] {
     if (rank != 0) return true;
     std::ostringstream metadata;
@@ -2056,13 +2219,14 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                     ? accumulator.epoch.source_manifest.data() : "none") << '\n'
              << "requested_steps " << options.steps << '\n'
              << "expected_ranks " << ranks << '\n'
-             << "observation_schema 4\n"
+             << "observation_schema " << (options.observe_mg_cost ? 5 : 4) << '\n'
              << "observation_start_ns "
              << std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count() << '\n'
              << "observation_launcher_pid " << ::getpid() << '\n'
              << "visit_interval " << options.visit_interval << '\n'
              << "observe_performance " << options.observe_performance << '\n'
+             << "observe_mg_cost " << options.observe_mg_cost << '\n'
              << "trace_cell_count " << options.trace_window.count << '\n'
              << "trace_first_step " << options.trace_window.first_step << '\n'
              << "trace_last_step " << options.trace_window.last_step << '\n'
@@ -2108,8 +2272,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "ibm_surface_expanded_search_groups "
              << summary.ibm_surface_reconstruction.expanded_search_groups
              << '\n'
-             << "statistics_eligible 0\n"
-             << "end\n";
+             << "statistics_eligible 0\n";
+    if (options.observe_mg_cost)
+      metadata << "mg_layout_sha256 " << mg_layout_digest.data() << '\n';
+    metadata << "end\n";
     const std::string encoded = metadata.str();
     if (options.observe_performance && !detail::runtime_sha256_bytes(
           {reinterpret_cast<const std::uint8_t*>(encoded.data()), encoded.size()},
@@ -2132,6 +2298,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   std::ofstream performance;
   std::ofstream loop_performance;
   std::ofstream cell_trace;
+  std::ofstream mg_performance;
   struct NodeCommunicator {
     MPI_Comm value{MPI_COMM_NULL};
     ~NodeCommunicator() { if (value != MPI_COMM_NULL) MPI_Comm_free(&value); }
@@ -2155,8 +2322,25 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
             "A_ns,M_ns,dot_ns,reduce_ns,update_ns,mg_refill_ns,mg_copy_ns,structured_wait_ns,"
             "structured_control_ns,globalization_valid,baseline_candidates,extrapolated_candidates,"
             "ladder_candidates,incomplete_candidates,candidate_ns,baseline_continuity,baseline_energy,"
-            "selected_continuity,selected_energy,selected_alpha,dropped_loops,source_meta_sha256\n";
-        return static_cast<bool>(loop_performance);
+            "selected_continuity,selected_energy,selected_alpha,dropped_loops";
+        if (options.observe_mg_cost) {
+          loop_performance << ",mg_enabled,mg_complete,mg_attempts,mg_successes,mg_failures,"
+              "mg_apply_ns,mg_reduction_ns,mg_halo_wait_ns,mg_halo_control_ns,mg_halo_control_calls,"
+              "mg_pre_smooth_calls,mg_pre_smooth_ns,mg_residual_calls,mg_residual_ns,"
+              "mg_restriction_calls,mg_restriction_ns,mg_prolongation_calls,mg_prolongation_ns,"
+              "mg_post_smooth_calls,mg_post_smooth_ns,mg_terminal_calls,mg_terminal_ns,"
+              "mg_direct_mpi_calls,mg_direct_mpi_ns,mg_finest_pre_smooth_ns,mg_finest_post_smooth_ns";
+          mg_performance.open(options.run_root / ("mg-rank-" + std::to_string(rank) + ".csv"));
+          mg_performance << "step,rank,level,initialized,complete,attempts,successes,failures,"
+              "apply_ns,reduction_ns,visits,pre_smooth_calls,pre_smooth_ns,residual_calls,residual_ns,"
+              "restriction_calls,restriction_ns,prolongation_calls,prolongation_ns,"
+              "post_smooth_calls,post_smooth_ns,terminal_calls,terminal_ns,"
+              "direct_mpi_calls,direct_mpi_ns,halo_wait_ns,halo_control_ns,halo_control_calls,"
+              "source_meta_sha256\n";
+        }
+        loop_performance << ",source_meta_sha256\n";
+        return static_cast<bool>(loop_performance) &&
+            (!options.observe_mg_cost || static_cast<bool>(mg_performance));
       })) return 6;
   okay = local_stage(communicator, [&] {
     if (rank != 0) return true;
@@ -2262,9 +2446,11 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   const double force_scale = 0.5 * spec.rho_ref * spec.u_ref * spec.u_ref *
                              spec.diameter * spec.span;
   if (!std::isfinite(force_scale) || !(force_scale > 0.0)) return 3;
+  std::optional<MgApplyProfile> mg_before;
   for (std::uint64_t index = 0U; index < options.steps; ++index) {
     std::array<std::uint64_t, 6U> local_step_phases{};
     detail::LocalPhaseTimer<6U> step_timer(local_step_phases);
+    if (options.observe_mg_cost) mg_before = mg_snapshot(driver);
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     if (options.observe_performance && hundun_v04_observe_step)
@@ -2325,10 +2511,18 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 << ',' << work.local_evaluation_nanoseconds << ',' << g.baseline.global_normalized_continuity
                 << ',' << g.baseline.global_normalized_energy << ',' << g.selected.global_normalized_continuity
                 << ',' << g.selected.global_normalized_energy << ',' << g.selected.alpha
-                << ',' << perf.dropped_loops << ',' << observation_source.data() << '\n';
+                << ',' << perf.dropped_loops;
+            if (options.observe_mg_cost) write_mg_loop(loop_performance, solve.mg_apply);
+            loop_performance << ',' << observation_source.data() << '\n';
+          }
+          if (options.observe_mg_cost) {
+            write_mg_step(mg_performance, starting_step + index + 1U, rank,
+                          driver, *mg_before, observation_source);
+            mg_performance.flush();
           }
           loop_performance.flush();
-          return static_cast<bool>(loop_performance);
+          return static_cast<bool>(loop_performance) &&
+              (!options.observe_mg_cost || static_cast<bool>(mg_performance));
         })) return status ? 6 : 7;
     std::uint64_t maximum_nanoseconds = 0U;
     okay = MPI_Allreduce(&local_nanoseconds, &maximum_nanoseconds, 1,
@@ -2761,7 +2955,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   return 0;
   }();
   const bool logs_complete = complete_logs(communicator, rank,
-      {{&force, &health, &conservation, &probe, &performance, &loop_performance, &cell_trace}},
+      {{&force, &health, &conservation, &probe, &performance, &loop_performance,
+        &cell_trace, &mg_performance}},
       evidence_file);
   okay = all_true(communicator, run_result == 0 && logs_complete);
   if (okay) okay = local_stage(communicator, [&] {
@@ -2897,7 +3092,7 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
          "[--restart-method-recovery [--restart-development-steps N]] "
-         "[--visit-interval N] [--observe-performance] "
+         "[--visit-interval N] [--observe-performance [--observe-mg-cost]] "
          "[--trace-cell i,j,k (at most twice) --trace-first N --trace-last N]\n";
 }
 

@@ -1,0 +1,51 @@
+Start testing: Sep 08 09:43 CST
+----------------------------------------------------------
+45/365 Testing: v04_runner_mg_profile_mpi_1
+45/365 Test: v04_runner_mg_profile_mpi_1
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_1" start time: Sep 08 09:43 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=1 steps=2 layout/loop/level identities and checkpoint parity PASS
+<end of output>
+Test time =   4.14 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_1" end time: Sep 08 09:43 CST
+"v04_runner_mg_profile_mpi_1" time elapsed: 00:00:04
+----------------------------------------------------------
+
+47/365 Testing: v04_runner_mg_profile_mpi_2
+47/365 Test: v04_runner_mg_profile_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_2" start time: Sep 08 09:43 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=2 steps=2 layout/loop/level identities and checkpoint parity PASS
+<end of output>
+Test time =   3.16 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_2" end time: Sep 08 09:43 CST
+"v04_runner_mg_profile_mpi_2" time elapsed: 00:00:03
+----------------------------------------------------------
+
+49/365 Testing: v04_runner_mg_profile_mpi_4
+49/365 Test: v04_runner_mg_profile_mpi_4
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_4" start time: Sep 08 09:43 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=4 steps=2 layout/loop/level identities and checkpoint parity PASS
+<end of output>
+Test time =   2.75 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_4" end time: Sep 08 09:43 CST
+"v04_runner_mg_profile_mpi_4" time elapsed: 00:00:02
+----------------------------------------------------------
+
+End testing: Sep 08 09:43 CST
