@@ -3302,7 +3302,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return {StatusCode::invalid_plan, kProductInput};
   }
   Status status = product_collective_status(
-      communicator, model.fingerprint == 0U || out.implementation_ != nullptr
+      communicator, model.fingerprint == 0U || out.implementation_ != nullptr ||
+                            model.spray.has_value()
                         ? Status{StatusCode::invalid_plan, kProductInput}
                         : Status{});
   if (!status) return status;

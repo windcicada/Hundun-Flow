@@ -155,6 +155,17 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - Clang focused 7/7 PASS，覆盖当前步源的代数、IDP、压力能量重试及 ESF/TCR CLI 续算。
   日志 `build-coupling-evidence/passive-current-{red,green,final}.log`。
 
+## 喷雾冻结配置入口
+
+- `SpraySpec` 保存液体根目录资产/FNV-1a64、整数 seed、parcel/segment 容量、子步控制、
+  TAB 开关与点/锥注射器物理参数。液滴单体质量后续由资产密度和配置直径确定。
+- 严格 JSON 与 wire 的独立 64 标志位支持该可选节，旧无喷雾 wire 字节不变。资产在根目录
+  以有界文件读取并核对精确字节身份；模型指纹包含资产和全部喷雾参数。
+- 独立 JSON/wire 测试覆盖 >2^53 整数、未知字段、重复 ID、非法时间控制/方向、路径越界和
+  资产字节改变。Clang focused 24/24 PASS，包括各反应模式 MPI 和 ESF/TCR CLI 回归。
+- 当前 ProductCompiler 仍明确拒绝 spray 配置，待生命周期和所有气相消费者共同接通后解除。
+  此配置增量不代表已运行两相产品，更不代表完整合并完成。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

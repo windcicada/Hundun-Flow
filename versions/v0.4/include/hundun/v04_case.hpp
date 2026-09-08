@@ -136,6 +136,31 @@ struct ReactionSpec {
   std::optional<EsfSpec> esf;
 };
 
+struct SprayInjectionSpec {
+  std::uint64_t id{};
+  Real3 origin_m{};
+  Real3 axis{1.0, 0.0, 0.0};
+  double cone_half_angle_rad{}; // zero is a point injector
+  double speed_m_per_s{};
+  double mass_flow_rate_kg_per_s{};
+  double represented_mass_per_parcel_kg{};
+  double droplet_diameter_m{};
+  double temperature_k{};
+};
+
+struct SpraySpec {
+  std::filesystem::path liquid_file;
+  std::uint64_t liquid_fingerprint{}; // FNV-1a64 of exact liquid asset bytes
+  std::uint64_t seed{};
+  std::uint32_t maximum_local_parcels{1024};
+  std::uint32_t maximum_local_segments{8192};
+  double maximum_substep_s{1e-4};
+  double minimum_substep_s{1e-12};
+  double relative_tolerance{1e-6};
+  bool tab_breakup{};
+  std::vector<SprayInjectionSpec> injectors;
+};
+
 struct CaseSpec {
   std::filesystem::path root;
 };
@@ -306,6 +331,7 @@ struct ValidatedModel {
   std::vector<std::filesystem::path> data_files;
   std::optional<ImmersedBoundarySpec> immersed_boundary;
   ReactionSpec reaction;
+  std::optional<SpraySpec> spray;
   PlanFingerprint fingerprint{};
 };
 

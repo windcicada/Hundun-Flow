@@ -1487,6 +1487,74 @@ bool test_immersed_reconstruction_policy_is_typed_and_hashed() {
   return passed;
 }
 
+bool test_spray_json() {
+  ScratchCase scratch("spray-json");
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  const fs::path fixture = fs::path(__FILE__).parent_path().parent_path() /
+                           "fixtures/synthetic-liquid-alpha.asset";
+  std::ifstream file(fixture, std::ios::binary);
+  const std::string liquid((std::istreambuf_iterator<char>(file)), {});
+  if (!expect(!liquid.empty(), "independent liquid asset fixture reads"))
+    return false;
+  std::uint64_t hash = UINT64_C(14695981039346656037);
+  for (unsigned char c : liquid) {
+    hash ^= c;
+    hash *= UINT64_C(1099511628211);
+  }
+  scratch.write("liquid.asset", liquid);
+  std::string json = case_json(kUniformMesh);
+  json.insert(json.rfind('}'), R"json(,"spray": {
+    "liquid_file":"liquid.asset", "liquid_fingerprint":)json" +
+                                   std::to_string(hash) + R"json(,
+    "seed":9007199254740993, "maximum_local_parcels":128, "maximum_local_segments":1024,
+    "maximum_substep_s":0.0001, "minimum_substep_s":1e-12, "relative_tolerance":1e-6,
+    "tab_breakup":true, "injectors":[{
+      "id":9007199254740997, "origin_m":[0.1,0.2,0.3], "axis":[1,0,0],
+      "cone_half_angle_rad":0.1, "speed_m_per_s":2, "mass_flow_rate_kg_per_s":1e-5,
+      "represented_mass_per_parcel_kg":1e-9, "droplet_diameter_m":1e-4, "temperature_k":300
+    }]})json");
+  scratch.write("case.json", json);
+  ValidatedModel model;
+  bool passed = expect(
+      bool(compile(scratch.root(), model)) && model.spray &&
+          model.spray->seed == UINT64_C(9007199254740993) &&
+          model.spray->liquid_fingerprint == hash &&
+          model.spray->injectors.size() == 1 &&
+          model.spray->injectors[0].id == UINT64_C(9007199254740997),
+      "strict spray JSON preserves exact identity and injector parameters");
+  if (!passed)
+    return false;
+  const auto identity = model.fingerprint;
+  for (const auto &mutation : std::vector<std::pair<std::string, std::string>>{
+           {"9007199254740993", "9007199254740993.0"},
+           {"9007199254740997", "-1"},
+           {"liquid.asset", "../liquid.asset"},
+           {"\"tab_breakup\":true", "\"tab_breakup\":true,\"unknown\":1"},
+           {"\"minimum_substep_s\":1e-12", "\"minimum_substep_s\":1"},
+           {"\"axis\":[1,0,0]", "\"axis\":[0,0,0]"}}) {
+    auto changed = json;
+    if (!replace_once(changed, mutation.first, mutation.second))
+      return false;
+    scratch.write("case.json", changed);
+    passed &=
+        expect(!compile(scratch.root(), model) && model.fingerprint == identity,
+               "malformed spray controls reject without replacing the model");
+  }
+  scratch.write("case.json", json);
+  scratch.write("liquid.asset", liquid + "\n");
+  passed &=
+      expect(!compile(scratch.root(), model) && model.fingerprint == identity,
+             "changed liquid bytes reject the pinned asset identity");
+  scratch.write("liquid.asset", liquid);
+  auto changed = json;
+  replace_once(changed, "\"speed_m_per_s\":2", "\"speed_m_per_s\":3");
+  scratch.write("case.json", changed);
+  passed &= expect(bool(compile(scratch.root(), model)) &&
+                       model.fingerprint != identity,
+                   "injection physics participates in frozen case identity");
+  return passed;
+}
+
 bool test_reaction_wire() {
   ScratchCase scratch("reaction-wire");
   scratch.write("case.json", case_json(kUniformMesh));
@@ -1526,6 +1594,47 @@ bool test_reaction_wire() {
       recovered.reaction.esf->tcr.progress_weights == model.reaction.esf->tcr.progress_weights &&
       recovered.reaction.esf->tcr.initialization_sign == 1,
       "ESF fields, integer RNG seed, and TCR mapping survive broadcast");
+  model.spray.emplace();
+  auto &spray = *model.spray;
+  spray.liquid_file = "liquid.asset";
+  spray.liquid_fingerprint = UINT64_C(18446744073709551577);
+  spray.seed = UINT64_C(9007199254740993);
+  spray.tab_breakup = true;
+  spray.injectors.push_back({UINT64_C(9007199254740997),
+                             {0.1, 0.2, 0.3},
+                             {1, 0, 0},
+                             .1,
+                             2,
+                             1e-5,
+                             1e-9,
+                             1e-4,
+                             300});
+  passed &= expect(
+      bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+          bool(hundun::v04::detail::deserialize_model_for_test(bytes,
+                                                               recovered)) &&
+          recovered.spray && recovered.spray->seed == spray.seed &&
+          recovered.spray->liquid_fingerprint == spray.liquid_fingerprint &&
+          recovered.spray->liquid_file == spray.liquid_file &&
+          recovered.spray->maximum_local_segments ==
+              spray.maximum_local_segments &&
+          recovered.spray->tab_breakup &&
+          recovered.spray->injectors.size() == 1 &&
+          recovered.spray->injectors[0].id == spray.injectors[0].id &&
+          recovered.spray->injectors[0].origin_m.y == .2 &&
+          recovered.spray->injectors[0].mass_flow_rate_kg_per_s == 1e-5,
+      "spray asset, exact integer lineage, injector physics survive broadcast");
+  const auto spray_bytes = bytes;
+  spray.injectors.push_back(spray.injectors[0]);
+  passed &=
+      expect(!hundun::v04::detail::serialize_model_for_test(model, bytes) &&
+                 bytes == spray_bytes,
+             "duplicate injector IDs cannot enter a frozen case wire");
+  spray.injectors.pop_back();
+  spray.minimum_substep_s = 1;
+  passed &= expect(!hundun::v04::detail::serialize_model_for_test(model, bytes),
+                   "inverted parcel interval controls are rejected");
+  spray.minimum_substep_s = 1e-12;
   if (!bytes.empty()) bytes.pop_back();
   recovered.fingerprint = 91;
   passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bytes, recovered) &&
@@ -1609,6 +1718,7 @@ int main(int argc, char** argv) {
   passed &= test_defaults_and_enums();
   passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();
   passed &= test_reaction_wire();
+  passed &= test_spray_json();
   passed &= test_field_registry();
   passed &= test_field_id_overflow();
   const int finalize_status = MPI_Finalize();

@@ -5,6 +5,7 @@
 
 #include "app_case_detail.hpp"
 #include "app_reaction_detail.hpp"
+#include "app_spray_detail.hpp"
 #include "physics_input_detail.hpp"
 #include "yyjson.h"
 
@@ -54,6 +55,7 @@ constexpr std::uint8_t kCoastAxesPressureAlgorithmWireVersion = 16U;
 constexpr std::uint8_t kCoastAxesSimpleWireVersion = 17U;
 constexpr std::uint8_t kCoastAxesSimplePressureAlgorithmWireVersion = 18U;
 constexpr std::uint8_t kReactionWireFlag = 128U;
+constexpr std::uint8_t kSprayWireFlag = 64U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -428,9 +430,10 @@ bool root_has_case_keys(yyjson_val* root) {
     }
   }
   const bool has_turbulence = yyjson_obj_get(root, "turbulence") != nullptr;
-  return yyjson_obj_size(root) == required.size() +
-                                         (has_turbulence ? 1U : 0U) +
-      (yyjson_obj_get(root, "reaction") != nullptr ? 1U : 0U);
+  return yyjson_obj_size(root) ==
+         required.size() + (has_turbulence ? 1U : 0U) +
+             (yyjson_obj_get(root, "reaction") != nullptr ? 1U : 0U) +
+             (yyjson_obj_get(root, "spray") != nullptr ? 1U : 0U);
 }
 
 bool parse_immersed_fluid_side(std::string_view value,
@@ -865,6 +868,66 @@ bool parse_esf(yyjson_val* value, EsfSpec& out) {
       !finite_real(yyjson_obj_get(tcr, "weak_rate_threshold"), out.tcr.weak_rate_threshold)) return false;
   out.tcr.initialization_sign = int(sign);
   return detail::valid_esf_spec(out);
+}
+
+bool parse_spray(yyjson_val *value, SpraySpec &s) {
+  if (!object_has_exact_keys(
+          value,
+          {"liquid_file", "liquid_fingerprint", "seed", "maximum_local_parcels",
+           "maximum_local_segments", "maximum_substep_s", "minimum_substep_s",
+           "relative_tolerance", "tab_breakup", "injectors"}))
+    return false;
+  const auto file = string_value(value, "liquid_file");
+  auto *identity = yyjson_obj_get(value, "liquid_fingerprint");
+  auto *seed = yyjson_obj_get(value, "seed");
+  auto *tab = yyjson_obj_get(value, "tab_breakup");
+  auto *injectors = yyjson_obj_get(value, "injectors");
+  if (!file || !yyjson_is_uint(identity) || !yyjson_is_uint(seed) ||
+      !yyjson_is_bool(tab) || !yyjson_is_arr(injectors) ||
+      yyjson_arr_size(injectors) > 64 ||
+      !parse_uint32(yyjson_obj_get(value, "maximum_local_parcels"),
+                    s.maximum_local_parcels) ||
+      !parse_uint32(yyjson_obj_get(value, "maximum_local_segments"),
+                    s.maximum_local_segments) ||
+      !finite_real(yyjson_obj_get(value, "maximum_substep_s"),
+                   s.maximum_substep_s) ||
+      !finite_real(yyjson_obj_get(value, "minimum_substep_s"),
+                   s.minimum_substep_s) ||
+      !finite_real(yyjson_obj_get(value, "relative_tolerance"),
+                   s.relative_tolerance))
+    return false;
+  s.liquid_file = std::string(*file);
+  s.liquid_fingerprint = yyjson_get_uint(identity);
+  s.seed = yyjson_get_uint(seed);
+  s.tab_breakup = yyjson_get_bool(tab);
+  for (std::size_t i = 0; i < yyjson_arr_size(injectors); ++i) {
+    auto *item = yyjson_arr_get(injectors, i);
+    if (!object_has_exact_keys(item,
+                               {"id", "origin_m", "axis", "cone_half_angle_rad",
+                                "speed_m_per_s", "mass_flow_rate_kg_per_s",
+                                "represented_mass_per_parcel_kg",
+                                "droplet_diameter_m", "temperature_k"}))
+      return false;
+    auto *id = yyjson_obj_get(item, "id");
+    SprayInjectionSpec v;
+    if (!yyjson_is_uint(id) ||
+        !parse_real3(yyjson_obj_get(item, "origin_m"), v.origin_m) ||
+        !parse_real3(yyjson_obj_get(item, "axis"), v.axis) ||
+        !finite_real(yyjson_obj_get(item, "cone_half_angle_rad"),
+                     v.cone_half_angle_rad) ||
+        !finite_real(yyjson_obj_get(item, "speed_m_per_s"), v.speed_m_per_s) ||
+        !finite_real(yyjson_obj_get(item, "mass_flow_rate_kg_per_s"),
+                     v.mass_flow_rate_kg_per_s) ||
+        !finite_real(yyjson_obj_get(item, "represented_mass_per_parcel_kg"),
+                     v.represented_mass_per_parcel_kg) ||
+        !finite_real(yyjson_obj_get(item, "droplet_diameter_m"),
+                     v.droplet_diameter_m) ||
+        !finite_real(yyjson_obj_get(item, "temperature_k"), v.temperature_k))
+      return false;
+    v.id = yyjson_get_uint(id);
+    s.injectors.push_back(v);
+  }
+  return detail::valid_spray_spec(s);
 }
 
 bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
@@ -2013,7 +2076,12 @@ bool unique_reference_paths(const ValidatedModel& model) {
         return false;
       }
     }
-    return !model.immersed_boundary.has_value() || insert(model.immersed_boundary->stl_file);
+    return (!model.spray || insert(model.spray->liquid_file)) &&
+           (model.reaction.representation !=
+                ReactionSpec::Representation::direct_cantera ||
+            insert(model.reaction.mechanism_file)) &&
+           (!model.immersed_boundary.has_value() ||
+            insert(model.immersed_boundary->stl_file));
   } catch (...) {
     return false;
   }
@@ -2023,6 +2091,7 @@ Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
     if (!detail::valid_reaction_spec(model.reaction) ||
+        (model.spray && !detail::valid_spray_spec(*model.spray)) ||
         !valid_canonical_mesh(model.mesh) ||
         static_cast<std::uint8_t>(model.pressure_reference) >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
@@ -2033,8 +2102,12 @@ Status serialize_model(const ValidatedModel& model,
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
-        model.data_files.size() + (model.reaction.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) +
-        (model.immersed_boundary.has_value() ? 1U : 0U) +
+        model.data_files.size() + (model.spray ? 1U : 0U) +
+                (model.reaction.representation ==
+                         ReactionSpec::Representation::direct_cantera
+                     ? 1U
+                     : 0U) +
+                (model.immersed_boundary.has_value() ? 1U : 0U) +
                 (model.mesh.kind == GeometryKind::coast_runtime_axes_v1 ? 2U
                                                                         : 1U) >
             detail::kMaxReferencedFiles ||
@@ -2075,19 +2148,20 @@ Status serialize_model(const ValidatedModel& model,
     const bool simple = model.solver.coupling == CouplingKind::simple;
     const bool coast_axes =
         model.mesh.kind == GeometryKind::coast_runtime_axes_v1;
-    writer.byte((model.reaction.mode != ReactionMode::none ? kReactionWireFlag : 0U) | (
-        coast_axes
-            ? (simple ? (extended_solver
-                             ? kCoastAxesSimplePressureAlgorithmWireVersion
-                             : kCoastAxesSimpleWireVersion)
-                      : (extended_solver
-                             ? kCoastAxesPressureAlgorithmWireVersion
-                             : kCoastAxesWireVersion))
-            : (simple ? (extended_solver
-                             ? kSimplePressureAlgorithmWireVersion
-                             : kSimpleWireVersion)
-                      : (extended_solver ? kPressureAlgorithmWireVersion
-                                         : kWireVersion))));
+    writer.byte(
+        (model.spray ? kSprayWireFlag : 0U) |
+        (model.reaction.mode != ReactionMode::none ? kReactionWireFlag : 0U) |
+        (coast_axes
+             ? (simple
+                    ? (extended_solver
+                           ? kCoastAxesSimplePressureAlgorithmWireVersion
+                           : kCoastAxesSimpleWireVersion)
+                    : (extended_solver ? kCoastAxesPressureAlgorithmWireVersion
+                                       : kCoastAxesWireVersion))
+             : (simple ? (extended_solver ? kSimplePressureAlgorithmWireVersion
+                                          : kSimpleWireVersion)
+                       : (extended_solver ? kPressureAlgorithmWireVersion
+                                          : kWireVersion))));
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
@@ -2176,6 +2250,8 @@ Status serialize_model(const ValidatedModel& model,
         writer.real(e.tcr.weak_rate_threshold);
       }
     }
+    if (model.spray && !detail::write_spray(writer, *model.spray))
+      return invalid_case(detail_wire);
     writer.u64(model.fingerprint);
     std::vector<std::uint8_t> candidate = std::move(writer).take();
     if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
@@ -2205,7 +2281,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
     const bool has_reaction = (version & kReactionWireFlag) != 0U;
-    version &= ~kReactionWireFlag;
+    const bool has_spray = (version & kSprayWireFlag) != 0U;
+    version &= ~(kReactionWireFlag | kSprayWireFlag);
     if ((version != kLegacyWireVersion &&
          version != kLegacyPressureAlgorithmWireVersion &&
          version != kWireVersion &&
@@ -2413,8 +2490,21 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
           (r.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) > detail::kMaxReferencedFiles)
         return invalid_case(detail_wire);
     }
+    if (has_spray) {
+      model.spray.emplace();
+      if (!detail::read_spray(reader, *model.spray))
+        return invalid_case(detail_wire);
+    }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
         !unique_reference_paths(model) ||
+        model.data_files.size() + (model.spray ? 1U : 0U) +
+                (model.reaction.representation ==
+                         ReactionSpec::Representation::direct_cantera
+                     ? 1U
+                     : 0U) +
+                (model.immersed_boundary ? 1U : 0U) +
+                (coast_axes_wire(version) ? 2U : 1U) >
+            detail::kMaxReferencedFiles ||
         !reader.finished()) {
       return invalid_case(detail_wire);
     }
@@ -2717,6 +2807,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
       return invalid_case(detail_json_value);
     }
 
+    if (auto *spray = yyjson_obj_get(root, "spray")) {
+      model.spray.emplace();
+      if (!parse_spray(spray, *model.spray))
+        return invalid_case(detail_json_value);
+    }
     yyjson_val* data_files = yyjson_obj_get(mesh, "data_files");
     yyjson_val* immersed_boundary =
         yyjson_obj_get(mesh, "immersed_boundary");
@@ -2760,9 +2855,12 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
     const std::size_t data_file_count = yyjson_arr_size(data_files);
     const std::size_t total_reference_count =
-        data_file_count + (model.reaction.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) +
-        (yyjson_is_str(stl_file) ? 1U : 0U) +
-        (coast_axes_schema ? 2U : 1U);
+        data_file_count + (model.spray ? 1U : 0U) +
+        (model.reaction.representation ==
+                 ReactionSpec::Representation::direct_cantera
+             ? 1U
+             : 0U) +
+        (yyjson_is_str(stl_file) ? 1U : 0U) + (coast_axes_schema ? 2U : 1U);
     if (data_file_count > detail::kMaxReferencedFiles ||
         total_reference_count > detail::kMaxReferencedFiles) {
       return invalid_case(detail_reference_count);
@@ -2979,6 +3077,33 @@ Status compile_on_root(const fs::path& case_root, int rank,
         const auto hashed = hash_bounded_file(descriptor, metadata, hash);
         if (!hashed) return hashed;
       }
+    }
+    if (model.spray) {
+      const auto &spray = *model.spray;
+      fs::path relative;
+      UniqueFd descriptor;
+      struct stat metadata {};
+      const auto opened = open_direct_file(
+          root_descriptor.get(), spray.liquid_file.generic_string(), ".asset",
+          rank, relative, descriptor, metadata);
+      if (!opened)
+        return opened;
+      if (!referenced_targets
+               .insert(std::make_pair(metadata.st_dev, metadata.st_ino))
+               .second)
+        return invalid_case(detail_reference_path);
+      std::string content;
+      const auto read = read_bounded_text(descriptor, metadata, 65536,
+                                          detail_reference_missing,
+                                          detail_reference_too_large, content);
+      if (!read)
+        return read;
+      Hash64 liquid;
+      liquid.bytes(content.data(), content.size());
+      if (liquid.finish() != spray.liquid_fingerprint)
+        return invalid_case(detail_json_value);
+      detail::hash_spray(hash, spray);
+      hash.text(content);
     }
     model.fingerprint = hash.finish();
     return serialize_model(model, payload);
