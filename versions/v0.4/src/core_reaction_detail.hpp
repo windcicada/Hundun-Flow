@@ -24,9 +24,13 @@ public:
     if (!valid_reaction_spec(model.reaction))
       return invalid();
     if (model.reaction.mode == ReactionMode::none)
-      return bindings.gas_query == nullptr ? Status{} : invalid();
+      return bindings.gas_query == nullptr && bindings.gas_advance == nullptr &&
+                     bindings.chemistry_identity == nullptr
+                 ? Status{}
+                 : invalid();
     if (model.reaction.mode != ReactionMode::finite_rate_mean &&
-        model.reaction.mode != ReactionMode::pasr_algebraic_v1)
+        model.reaction.mode != ReactionMode::pasr_algebraic_v1 &&
+        model.reaction.mode != ReactionMode::esf_tpdf)
       return invalid();
     mode_ = model.reaction.mode;
     mixing_c_z_ = model.reaction.mixing_c_z;
@@ -36,9 +40,12 @@ public:
       if (r.representation == ReactionSpec::Representation::analytic_isomer) {
         const bool reversed = model.thermophysics.species.size() == 2 &&
                               model.thermophysics.species[0].stable_name == "B";
-        owned_provider_ =
+        auto backend =
             std::make_unique<chemistry::detail::AnalyticIsomerBackend>(
                 r.analytic_rate_s, reversed, r.analytic_cp_j_per_kg_k);
+        advance_provider_ = backend.get();
+        closure_ = backend->closure_identity();
+        owned_provider_ = std::move(backend);
       } else if (r.representation ==
                  ReactionSpec::Representation::direct_cantera) {
 #if defined(HUNDUN_V04_REACTING_CANTERA)
@@ -53,8 +60,10 @@ public:
             std::make_shared<chemistry::CanteraBackendRuntime>(config);
         cantera_pool_ = std::make_unique<chemistry::CanteraWorkspacePool>(
             cantera_runtime_, 1U);
-        owned_provider_ =
-            chemistry::make_cantera_backend(config, *cantera_pool_);
+        auto backend = chemistry::make_cantera_backend(config, *cantera_pool_);
+        advance_provider_ = backend.get();
+        closure_ = backend->closure_identity();
+        owned_provider_ = std::move(backend);
 #else
         (void)case_root;
         return invalid();
@@ -87,6 +96,19 @@ public:
           std::abs(gas.molecular_weights_kg_per_kmol[i] -
                    spec.molecular_weight) > 1e-12 * spec.molecular_weight)
         return invalid();
+    }
+    if (bindings.gas_advance != nullptr ||
+        bindings.chemistry_identity != nullptr) {
+      if (bindings.gas_advance == nullptr ||
+          bindings.chemistry_identity == nullptr ||
+          !portable::same_gas_identity(gas,
+                                       bindings.gas_advance->gas_identity()) ||
+          bindings.chemistry_identity->fingerprint != gas.closure_fingerprint ||
+          combustion::chemistry_identity_fingerprint(
+              *bindings.chemistry_identity) != gas.closure_fingerprint)
+        return invalid();
+      advance_provider_ = bindings.gas_advance;
+      closure_ = *bindings.chemistry_identity;
     }
     identity_ = gas;
     for (const auto &s : model.transported_scalars)
@@ -150,6 +172,22 @@ public:
     return {};
   }
   bool enabled() const noexcept { return provider_ != nullptr; }
+  bool esf_enabled() const noexcept { return mode_ == ReactionMode::esf_tpdf; }
+  portable::GasQueryProvider *gas_query() const noexcept { return provider_; }
+  portable::GasAdvanceProvider *gas_advance() const noexcept {
+    return advance_provider_;
+  }
+  const portable::GasIdentity &gas_identity() const noexcept {
+    return identity_;
+  }
+  const combustion::ChemistryIdentity &chemistry_identity() const noexcept {
+    return closure_;
+  }
+  Span<const std::size_t> species_indices() const noexcept {
+    return {species_.data(), species_.size()};
+  }
+  std::size_t dependent_index() const noexcept { return dependent_; }
+
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   Status bind(Span<const FieldId> conserved,
               Span<const FieldId> source) noexcept {
@@ -161,15 +199,18 @@ public:
       auto &v = views_[i];
       v.conserved_quantity = conserved.data[i];
       v.explicit_source_field = source.data[i];
-      v.stage = 1;
+      v.stage = esf_enabled() ? 2U : 1U;
       v.units.si_exponents = {1, -3, -1, 0, 0, 0, 0};
-      v.capability = ContributionCapability::chemistry;
+      v.capability = esf_enabled() ? ContributionCapability::reacting
+                                   : ContributionCapability::chemistry;
       v.source_identity = fingerprint_;
     }
     return {};
   }
   Span<const EquationContributionView> contributions() const noexcept {
-    return {views_.data(), views_.size()};
+    return esf_enabled() ? Span<const EquationContributionView>{}
+                         : Span<const EquationContributionView>{views_.data(),
+                                                                views_.size()};
   }
   Status prepare(const EquationStateView &state,
                  const ThermodynamicsPlan &thermodynamics,
@@ -177,7 +218,7 @@ public:
                  const CartesianKernelPlan &kernels, StateLayers &layers,
                  Int3 cells, Span<const std::uint8_t> activity,
                  std::uint64_t step) noexcept {
-    if (!enabled())
+    if (!enabled() || esf_enabled())
       return {};
     if (!portable::same_gas_identity(identity_, provider_->gas_identity()) ||
         state.independent_species.size != species_.size() ||
@@ -336,6 +377,8 @@ private:
 #endif
   std::unique_ptr<portable::GasQueryProvider> owned_provider_;
   portable::GasQueryProvider *provider_{};
+  portable::GasAdvanceProvider *advance_provider_{};
+  combustion::ChemistryIdentity closure_;
   portable::GasIdentity identity_;
   PlanFingerprint fingerprint_{};
   ReactionMode mode_{ReactionMode::none};

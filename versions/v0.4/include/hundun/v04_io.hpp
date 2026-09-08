@@ -80,7 +80,9 @@ enum class RestartFieldRole : std::uint8_t {
   independent_species,
   transported_scalar,
   enthalpy_nonadvective_rate,
-  scalar_nonadvective_rate
+  scalar_nonadvective_rate,
+  stochastic_field,
+  stochastic_transport
 };
 
 struct RestartFieldView {

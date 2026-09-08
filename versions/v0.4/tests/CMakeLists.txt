@@ -1948,3 +1948,11 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
     set_tests_properties(v04_product_cantera_case_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS ${rank_count})
   endforeach()
 endif()
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_esf_case_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-esf" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_esf_case_mpi_${rank_count} PROPERTIES TIMEOUT 60 PROCESSORS ${rank_count})
+endforeach()

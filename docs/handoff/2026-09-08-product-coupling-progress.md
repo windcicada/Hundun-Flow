@@ -49,7 +49,7 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
   非有限源与过期时间身份拒绝，并覆盖原有 IDP 路径。
 - 这些是实际方程的质量源消费入口；产品喷雾尚未提供该源，尚未形成完整两相接线。
 
-## ESF 接线准备（仍拒绝产品启动）
+## ESF 持续场与过滤化学源接线（周期域增量验收）
 
 - ESF/TCR 配置进入严格 JSON、模型指纹和跨 rank wire。字段数仅 2/4，seed 用 uint64
   保存；测试使用超过 2^53 的 seed，确认没有浮点化。TCR reactants/progress weights/
@@ -57,8 +57,20 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - ESF 化学报告补充两次半区间的等权组分质量密度增量，单位 kg/m³，可直接向 MeanState
   输出过滤化学源；失败不发布这个借用结果。新增元素/总质量/形成焓收支检查通过，
   ESF 与 P8 相关测试 6/6 PASS。
-- `reacting-esf` 是进行中的产品验收夹具。Case/wire 检查通过，ProductCompiler 的 ESF
-  能力门保持拒绝，直到持续场、空间输运、均值一致性和共同事务实际接入。
+- `reacting-esf` 已从公共 ProductCompiler / ProductDriver 进入原生状态层：四个全组分加
+  总焓随机场与共同输运缓存同时提交和回退，accepted/previous 写入 Restart V3；Philox
+  地址由 seed 与 accepted step 重建，没有保存浮点 RNG 游标。
+- 当前步使用原生已提交质量通量、配置的对流重构及中心扩散/梯度算子，经过 IEM 后执行
+  两个连续化学半区间。过滤组分密度增量进入预测器 current 源，不写入旧 EX2 化学速率历史。
+  原生压力能量闭合后统一平移场均值到 MeanState，越界时整步拒绝，不逐场裁剪。
+- 区间积分当前明确要求 backward_euler；BDF2、非周期物理边界、IBM 和 TCR 非 off
+  仍明确拒绝。未将这个增量作为完整 Stage 5/6 合并验收。
+- Clang focused 26/26 PASS；GCC11/Cantera 产品矩阵 15/15 PASS。ESF 1/2/4 ranks
+  对独立解析两半区间的密度加权源、等权均值、方差衰减作检查；真实磁盘重启后继续计算。
+  rank 0 第三次 chemistry 调用失败后所有已接受场/历史/两层通量精确保持，清除故障后
+  与不中断路径等价；非有限重启随机场在安装任何状态前被拒绝。
+- 尚须统一非均匀 MeanState 的总焓/组分扩散与随机场共同扩散率，并验证非零空间梯度、
+  湍流随机项和物理/IBM 边界。当前均匀反应验收不能代替这些空间耦合证据。
 - 接线参考 HUNDUN governance 只读提交 `8ffdf2b` 的
   `docs/numerics/stage5-esf-tcr-equations.md`、`stage5-coast-esf-semantic-audit.md`，
   以及 ESF transport/element consistency 的公开算法实现。保留当前供体 P8 的

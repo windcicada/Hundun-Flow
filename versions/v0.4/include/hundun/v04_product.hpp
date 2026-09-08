@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "hundun/v04_combustion.hpp"
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "hundun/v04_io.hpp"
@@ -95,6 +96,8 @@ class CompiledCasePlan {
 // collectively before a provider can supply a product source.
 struct ProductCouplingBindings {
   portable::GasQueryProvider* gas_query{};
+  portable::GasAdvanceProvider *gas_advance{};
+  const combustion::ChemistryIdentity *chemistry_identity{};
 };
 
 class ProductCompiler {

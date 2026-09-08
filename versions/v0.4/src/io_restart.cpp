@@ -553,6 +553,14 @@ bool valid_field_catalog(Span<const RestartFieldView> fields,
       case RestartFieldRole::transported_scalar:
         if (rates || field.values.components != 1U) return false;
         break;
+      case RestartFieldRole::stochastic_field:
+        if (rates || field.values.components < 2U)
+        return false;
+        break;
+      case RestartFieldRole::stochastic_transport:
+        if (rates || field.values.components != 2U)
+        return false;
+        break;
       case RestartFieldRole::enthalpy_nonadvective_rate:
         if (!rates || enthalpy_rate || field.values.components != 1U)
           return false;
@@ -731,8 +739,12 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
     std::uint8_t role = 0U;
     if (!decoder.u8(role) || !decoder.u16(field.field) ||
         !decoder.u8(field.components) ||
-        role > static_cast<std::uint8_t>(
-                   RestartFieldRole::transported_scalar) ||
+        (role >
+             static_cast<std::uint8_t>(RestartFieldRole::transported_scalar) &&
+         role !=
+             static_cast<std::uint8_t>(RestartFieldRole::stochastic_field) &&
+         role != static_cast<std::uint8_t>(
+                     RestartFieldRole::stochastic_transport)) ||
         field.components == 0U) {
       return false;
     }

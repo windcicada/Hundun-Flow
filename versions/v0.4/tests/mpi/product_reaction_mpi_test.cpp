@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "../../src/models_chemistry_adapter_detail.hpp"
 #include "../support/product_fixture.hpp"
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_portable.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <mpi.h>
 #include <unistd.h>
 #include <vector>
@@ -63,6 +65,30 @@ public:
 
 private:
   portable::GasIdentity identity_;
+};
+class EsfGas final : public portable::GasQueryProvider,
+                     public portable::GasAdvanceProvider {
+public:
+  chemistry::detail::AnalyticIsomerBackend backend;
+  bool fail_half{};
+  unsigned half_calls{};
+  const portable::GasIdentity &gas_identity() const noexcept override {
+    return backend.gas_identity();
+  }
+  portable::Status query_gas(const portable::GasQuery &q,
+                             portable::GasQueryOutput &out) noexcept override {
+    return backend.query_gas(q, out);
+  }
+  portable::Status
+  advance_gas(const portable::GasAdvanceQuery &q,
+              portable::GasAdvanceOutput &out) noexcept override {
+    if (fail_half && ++half_calls == 3)
+      return portable::Status::provider_failure;
+    return backend.advance_gas(q, out);
+  }
+  ProductCouplingBindings bindings() noexcept {
+    return {this, this, &backend.closure_identity()};
+  }
 };
 std::vector<double> physical_values(const RestartSnapshot &s,
                                     double reference_density = 0) {
@@ -156,12 +182,15 @@ int main(int argc, char **argv) {
     const std::filesystem::path case_root = argc > 1 ? argv[1] : "";
     if (!case_root.empty())
       status = CaseCompiler::load_and_compile(MPI_COMM_WORLD, case_root, model);
+    EsfGas esf_gas;
+    const bool esf = model.reaction.mode == ReactionMode::esf_tpdf;
     CompiledCasePlan plan;
     if (status)
-      status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root, plan,
-                                        case_root.empty()
-                                            ? ProductCouplingBindings{&gas}
-                                            : ProductCouplingBindings{});
+      status = ProductCompiler::compile(
+          MPI_COMM_WORLD, model, case_root, plan,
+          esf ? esf_gas.bindings()
+              : (case_root.empty() ? ProductCouplingBindings{&gas}
+                                   : ProductCouplingBindings{}));
     okay = collective(static_cast<bool>(status));
     if (!okay && rank == 0)
       std::cerr << "reaction compile failed " << unsigned(status.code) << ":"
@@ -251,8 +280,64 @@ int main(int argc, char **argv) {
                               (pressure - initial.pressure_reference)) < 1e-5 &&
                      std::abs(pressure / (R * temperature) - rho0) < 1e-10);
     }
-    // Compare a real disk restart with uninterrupted BDF2 continuation.
+    if (okay && esf) {
+      const double R = kUniversalGasConstant /
+                       model.thermophysics.species[0].molecular_weight;
+      const double rho = initial.pressure_reference / (R * initial.temperature);
+      const double volume =
+          (model.mesh.upper.x - model.mesh.lower.x) *
+          (model.mesh.upper.y - model.mesh.lower.y) *
+          (model.mesh.upper.z - model.mesh.lower.z) /
+          (model.mesh.exact_cells.x * model.mesh.exact_cells.y *
+           model.mesh.exact_cells.z);
+      const double gamma = 1e-5 / 0.7; // Synthetic fixture: mu(300 K)/Pr.
+      const double tau = model.reaction.mixing_c_z *
+                         std::pow(std::cbrt(volume), 2) / (2 * gamma / rho);
+      const double dt = snap.dt, relaxation = std::exp(-dt / (2 * tau)),
+                   half = std::exp(-dt);
+      double density_delta = 0, expected_variance = 0;
+      for (double offset : model.reaction.esf->initial_species_offsets) {
+        const double y0 = 0.25 + offset * relaxation, ym = y0 * half,
+                     ye = ym * half;
+        const double t0 = initial.temperature - 100 * offset * relaxation;
+        const double tm = t0 + 100 * (y0 - ym);
+        density_delta += (initial.pressure_reference / (R * t0) * (ym - y0) +
+                          initial.pressure_reference / (R * tm) * (ye - ym)) /
+                         4;
+        expected_variance += std::pow(offset * relaxation * half * half, 2) / 4;
+      }
+      okay &= std::abs(accepted_y - (0.25 + density_delta / rho)) < 2e-12;
+      std::vector<ConstFieldView> ensemble;
+      for (std::size_t i = 0; i < snap.fields.size; ++i)
+        if (snap.fields.data[i].role == RestartFieldRole::stochastic_field)
+          ensemble.push_back(snap.fields.data[i].values);
+      okay &= ensemble.size() == 4;
+      if (ensemble.size() == 4) {
+        const auto cells = ensemble[0].interior;
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x) {
+              double mean = 0, variance = 0;
+              for (auto field : ensemble) {
+                okay &= field.components == 3;
+                const double a = field.unchecked({x, y, z}, 0),
+                             b = field.unchecked({x, y, z}, 1);
+                mean += a / 4;
+                variance += std::pow(a - accepted_y, 2) / 4;
+                okay &= a >= 0 && b >= 0 && std::abs(a + b - 1) < 2e-12;
+              }
+              okay &= std::abs(mean - accepted_y) < 2e-12;
+              okay &= std::abs(variance - expected_variance) < 2e-12;
+            }
+      }
+      okay = collective(okay);
+    }
+    if (!okay && rank == 0)
+      std::cerr << "first-step physical oracle failed, Y=" << accepted_y
+                << "\n";
+    // Compare a real disk restart with uninterrupted continuation.
     IsomerGas restored_gas;
+    EsfGas restored_esf;
     ProductDriver restored;
     if (okay) {
       status = RestartWriter::write(MPI_COMM_WORLD, root, snap);
@@ -260,8 +345,9 @@ int main(int argc, char **argv) {
       if (status)
         status = ProductCompiler::compile(
             MPI_COMM_WORLD, model, case_root, restored_plan,
-            case_root.empty() ? ProductCouplingBindings{&restored_gas}
-                              : ProductCouplingBindings{});
+            esf ? restored_esf.bindings()
+                : (case_root.empty() ? ProductCouplingBindings{&restored_gas}
+                                     : ProductCouplingBindings{}));
       if (status)
         status = ProductDriver::create(MPI_COMM_WORLD, std::move(restored_plan),
                                        restored);
@@ -271,6 +357,18 @@ int main(int argc, char **argv) {
       RestartImage image;
       if (status)
         status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
+      if (status && esf) {
+        // Native restore must reject a rank-local invalid field before any
+        // primary state is installed, then accept the intact image.
+        const std::size_t field = 3 + model.transported_scalars.size();
+        const double value = image.fields[field].values[0];
+        if (rank == 0)
+          image.fields[field].values[0] =
+              std::numeric_limits<double>::quiet_NaN();
+        const auto rejected = restored.initialize_restart(image);
+        okay = collective(!rejected);
+        image.fields[field].values[0] = value;
+      }
       if (status)
         status = restored.initialize_restart(image);
       if (status) {
@@ -279,6 +377,9 @@ int main(int argc, char **argv) {
         okay = collective(bool(status) &&
                           physical_values(check) == physical_values(snap));
       }
+      if (!status && rank == 0)
+        std::cerr << "restart status " << unsigned(status.code) << ":"
+                  << status.detail << "\n";
       okay = collective(okay && bool(status));
     }
     if (okay) {
@@ -314,6 +415,9 @@ int main(int argc, char **argv) {
                                               std::abs(recovered[i])});
         same = std::abs(continuous[i] - recovered[i]) <= tolerance;
       }
+      if ((!status || !same) && rank == 0)
+        std::cerr << "continuation " << unsigned(status.code) << ":"
+                  << status.detail << " equal=" << same << "\n";
       okay = collective(bool(status) && same);
     }
     // One failing rank must reject every rank and preserve every accepted
@@ -336,6 +440,40 @@ int main(int argc, char **argv) {
       okay = collective(!status && !report.accepted);
       if (okay) okay = collective(bool(restored.committed_restart_snapshot(before)) &&
                                  accepted == physical_values(before));
+    }
+    if (okay && esf) {
+      const auto accepted = physical_values(snap);
+      esf_gas.fail_half = rank == 0;
+      status = driver.advance({1, 1, 1, 1, 1}, report);
+      okay = collective(!status && !report.accepted);
+      if (okay)
+        okay = collective(bool(driver.committed_restart_snapshot(snap)) &&
+                          accepted == physical_values(snap));
+      esf_gas.fail_half = false;
+      if (okay) {
+        status = driver.advance({1, 1, 1, 1, 1}, report);
+        if (status)
+          status = restored.advance({1, 1, 1, 1, 1}, report);
+        RestartSnapshot retried, continuous;
+        if (status)
+          status = driver.committed_restart_snapshot(retried);
+        if (status)
+          status = restored.committed_restart_snapshot(continuous);
+        const auto a = physical_values(
+            retried, initial.pressure_reference *
+                         model.thermophysics.species[0].molecular_weight /
+                         (kUniversalGasConstant * initial.temperature));
+        const auto b = physical_values(
+            continuous, initial.pressure_reference *
+                            model.thermophysics.species[0].molecular_weight /
+                            (kUniversalGasConstant * initial.temperature));
+        bool same = a.size() == b.size();
+        for (std::size_t i = 0; i < a.size() && same; ++i)
+          same = std::abs(a[i] - b[i]) <=
+                 model.solver.terminal.eos *
+                     std::max({1., std::abs(a[i]), std::abs(b[i])});
+        okay = collective(bool(status) && same);
+      }
     }
     if (rank == 0)
       std::cout << (okay ? "PASS" : "FAIL")
