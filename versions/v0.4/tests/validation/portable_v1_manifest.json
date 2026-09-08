@@ -1,0 +1,1160 @@
+{
+  "format": "hundun-portable-v1-manifest-v1",
+  "scope": "Prescribed-state portable single-physics checks, not product CFD, real-fuel validation, or COAST replacement acceptance",
+  "execution_gate": "Do not execute until root confirms P1-P8 implementation completion",
+  "execution": {
+    "program": "portable_v1",
+    "one_invocation_per_configuration": true,
+    "repetitions": 1,
+    "timeout_means_failure": true,
+    "no_resource_escalation": true,
+    "maximum_ranks": 4,
+    "maximum_spatial_extent": [
+      12,
+      12,
+      12
+    ],
+    "default_rank_count": 1,
+    "full_ctest": false
+  },
+  "reference_generation": {
+    "arithmetic": "Python decimal 60-digit exp, ln and sqrt; sine/cosine from 45-term decimal Taylor sums. Values registered before any harness execution.",
+    "production_implementation_used_for_reference": false
+  },
+  "provenance": [
+    {
+      "kind": "HUNDUN code donor",
+      "revision": "8ffdf2b5673374fb14639fc4dce09a1b586ee5db",
+      "parts": [
+        "Philox address v1",
+        "IEM equation",
+        "TCR root history concepts"
+      ],
+      "excluded": [
+        "driver",
+        "field storage",
+        "schema",
+        "checkpoint"
+      ]
+    },
+    {
+      "kind": "author theory",
+      "document": "Coast_software/docs/TCR_Model/Thesis_Part2.md",
+      "equations": [
+        "2.80",
+        "2.88",
+        "2.90",
+        "2.91"
+      ],
+      "usage": "equations only, no implementation copied"
+    },
+    {
+      "kind": "published equations",
+      "model": "TAB",
+      "document": "O'Rourke and Amsden 1987 LA-UR-87-2105-Rev",
+      "equations": [
+        "14",
+        "19",
+        "20",
+        "21",
+        "22"
+      ],
+      "doi": "10.4271/872089"
+    },
+    {
+      "kind": "published equations",
+      "model": "A-S",
+      "title": "Droplet vaporization model for spray combustion calculations",
+      "doi": "10.1016/0017-9310(89)90043-4",
+      "limit": "Re=0 Sherwood 2 and constant-film d-squared law"
+    },
+    {
+      "kind": "OpenFOAM",
+      "used": false,
+      "note": "No OpenFOAM implementation, dictionaries, scripts, output or fixture is copied; these cases have independent analytic references."
+    }
+  ],
+  "cases": [
+    {
+      "id": "chemistry_alpha_steps_1",
+      "argv": [
+        "chemistry",
+        "alpha",
+        "1"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "alpha",
+        "mechanism_sha256": "bd156f5dfa9a7a528525696097015cbf4afad6a5f27bf330c62516169b4dd1c1",
+        "rate_per_s": 2,
+        "cp_j_per_kg_k": 1000,
+        "reversed_species_order": false,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 101850,
+        "duration_s": 0.5,
+        "steps": 1
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.36787944117144233,
+        "temperature_k": 363.2120558828558,
+        "enthalpy_j_per_kg": 101850
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "chemistry_alpha_steps_2",
+      "argv": [
+        "chemistry",
+        "alpha",
+        "2"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "alpha",
+        "mechanism_sha256": "bd156f5dfa9a7a528525696097015cbf4afad6a5f27bf330c62516169b4dd1c1",
+        "rate_per_s": 2,
+        "cp_j_per_kg_k": 1000,
+        "reversed_species_order": false,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 101850,
+        "duration_s": 0.5,
+        "steps": 2
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.36787944117144233,
+        "temperature_k": 363.2120558828558,
+        "enthalpy_j_per_kg": 101850
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "chemistry_alpha_steps_4",
+      "argv": [
+        "chemistry",
+        "alpha",
+        "4"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "alpha",
+        "mechanism_sha256": "bd156f5dfa9a7a528525696097015cbf4afad6a5f27bf330c62516169b4dd1c1",
+        "rate_per_s": 2,
+        "cp_j_per_kg_k": 1000,
+        "reversed_species_order": false,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 101850,
+        "duration_s": 0.5,
+        "steps": 4
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.36787944117144233,
+        "temperature_k": 363.2120558828558,
+        "enthalpy_j_per_kg": 101850
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "chemistry_beta_steps_1",
+      "argv": [
+        "chemistry",
+        "beta",
+        "1"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "beta",
+        "mechanism_sha256": "7f3b7689de32e783e83d67f3e0dd78efba12ac768fb3b18922ae4aca29ad4ffe",
+        "rate_per_s": 3,
+        "cp_j_per_kg_k": 1200,
+        "reversed_species_order": true,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 102220,
+        "duration_s": 0.5,
+        "steps": 1
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.22313016014842982,
+        "temperature_k": 364.7391533209642,
+        "enthalpy_j_per_kg": 102220
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "chemistry_beta_steps_2",
+      "argv": [
+        "chemistry",
+        "beta",
+        "2"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "beta",
+        "mechanism_sha256": "7f3b7689de32e783e83d67f3e0dd78efba12ac768fb3b18922ae4aca29ad4ffe",
+        "rate_per_s": 3,
+        "cp_j_per_kg_k": 1200,
+        "reversed_species_order": true,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 102220,
+        "duration_s": 0.5,
+        "steps": 2
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.22313016014842982,
+        "temperature_k": 364.7391533209642,
+        "enthalpy_j_per_kg": 102220
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "chemistry_beta_steps_4",
+      "argv": [
+        "chemistry",
+        "beta",
+        "4"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "pack": "beta",
+        "mechanism_sha256": "7f3b7689de32e783e83d67f3e0dd78efba12ac768fb3b18922ae4aca29ad4ffe",
+        "rate_per_s": 3,
+        "cp_j_per_kg_k": 1200,
+        "reversed_species_order": true,
+        "initial_p_pa": 101325,
+        "initial_t_k": 300,
+        "initial_reactant_y": 1,
+        "initial_h_j_per_kg": 102220,
+        "duration_s": 0.5,
+        "steps": 4
+      },
+      "reference": {
+        "reactant_mass_fraction": 0.22313016014842982,
+        "temperature_k": 364.7391533209642,
+        "enthalpy_j_per_kg": 102220
+      },
+      "tolerance": {
+        "reactant_mass_fraction": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "temperature_k": {
+          "absolute": 1e-9,
+          "relative": 1e-12
+        },
+        "enthalpy_j_per_kg": {
+          "absolute": 1e-8,
+          "relative": 1e-13
+        }
+      },
+      "formula": "Y_A(t)=exp(-k*t); T(t)=300+100000/cp*(1-Y_A(t)); total h is constant"
+    },
+    {
+      "id": "iem_n2_steps_1",
+      "argv": [
+        "iem",
+        "2",
+        "1"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 2,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 1
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "iem_n2_steps_2",
+      "argv": [
+        "iem",
+        "2",
+        "2"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 2,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 2
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "iem_n2_steps_4",
+      "argv": [
+        "iem",
+        "2",
+        "4"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 2,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 4
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "iem_n4_steps_1",
+      "argv": [
+        "iem",
+        "4",
+        "1"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 4,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 1
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "iem_n4_steps_2",
+      "argv": [
+        "iem",
+        "4",
+        "2"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 4,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 2
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "iem_n4_steps_4",
+      "argv": [
+        "iem",
+        "4",
+        "4"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "fields": 4,
+        "species": 2,
+        "alternating_y": [
+          [
+            0.2,
+            0.8
+          ],
+          [
+            0.8,
+            0.2
+          ]
+        ],
+        "alternating_h_j_per_kg": [
+          100,
+          300
+        ],
+        "tau_s": 1,
+        "tcr_control": 1,
+        "turbulent_diffusivity_m2_s": 0,
+        "duration_s": 2,
+        "steps": 4
+      },
+      "reference": {
+        "species_variance": 0.012180175491295141,
+        "mean_y": 0.5,
+        "mean_h_j_per_kg": 200
+      },
+      "tolerance": {
+        "variance": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "mean_y": {
+          "absolute": 1e-14,
+          "relative": 1e-13
+        },
+        "mean_h": {
+          "absolute": 1e-11,
+          "relative": 1e-13
+        }
+      },
+      "formula": "variance(t)=0.09*exp(-t/tau); mean preserved"
+    },
+    {
+      "id": "tcr_root_tracking",
+      "argv": [
+        "tcr"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "eta": 0.25,
+        "rate_ratio_sequence": [
+          0.5,
+          0.75,
+          1
+        ],
+        "initialization_sign": -1,
+        "mode": "experimental"
+      },
+      "reference": {
+        "control_sequence": [
+          0.13962038997193676,
+          0.22570811482256822,
+          0.3333333333333333
+        ],
+        "branch_sign": -1
+      },
+      "tolerance": {
+        "control": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        }
+      },
+      "formula": "(1-eta)*control^2-control+eta*R=0; lower admissible branch selected by accepted history"
+    },
+    {
+      "id": "heating_steps_10",
+      "argv": [
+        "heating",
+        "10"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 950,
+        "k_w_m_k": 0.05,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "vapor_mw_kg_kmol": 28,
+        "carrier_mw_kg_kmol": 28,
+        "p_pa": 100000,
+        "psat_pa": 10000,
+        "far_vapor_y": 0.1,
+        "duration_s": 0.001,
+        "steps": 10
+      },
+      "reference": {
+        "temperature_k": 371.42625262116536,
+        "gas_mass_delta_kg": 0,
+        "thermal_budget_residual_j": 0
+      },
+      "tolerance": {
+        "temperature_k": {
+          "absolute": 0.00006,
+          "relative": 1e-12
+        },
+        "thermal_budget": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, saturated Nu=2, dT/dt=12*k/(rho_l*cp_l*d^2)*(Tgas-T); Tgas-(Tgas-T0)*exp(-a*t). Fixed predictor/corrector uses Heun update; registered error bounds decrease ~4x."
+    },
+    {
+      "id": "heating_steps_20",
+      "argv": [
+        "heating",
+        "20"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 950,
+        "k_w_m_k": 0.05,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "vapor_mw_kg_kmol": 28,
+        "carrier_mw_kg_kmol": 28,
+        "p_pa": 100000,
+        "psat_pa": 10000,
+        "far_vapor_y": 0.1,
+        "duration_s": 0.001,
+        "steps": 20
+      },
+      "reference": {
+        "temperature_k": 371.42625262116536,
+        "gas_mass_delta_kg": 0,
+        "thermal_budget_residual_j": 0
+      },
+      "tolerance": {
+        "temperature_k": {
+          "absolute": 0.000015,
+          "relative": 1e-12
+        },
+        "thermal_budget": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, saturated Nu=2, dT/dt=12*k/(rho_l*cp_l*d^2)*(Tgas-T); Tgas-(Tgas-T0)*exp(-a*t). Fixed predictor/corrector uses Heun update; registered error bounds decrease ~4x."
+    },
+    {
+      "id": "heating_steps_40",
+      "argv": [
+        "heating",
+        "40"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 950,
+        "k_w_m_k": 0.05,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "vapor_mw_kg_kmol": 28,
+        "carrier_mw_kg_kmol": 28,
+        "p_pa": 100000,
+        "psat_pa": 10000,
+        "far_vapor_y": 0.1,
+        "duration_s": 0.001,
+        "steps": 40
+      },
+      "reference": {
+        "temperature_k": 371.42625262116536,
+        "gas_mass_delta_kg": 0,
+        "thermal_budget_residual_j": 0
+      },
+      "tolerance": {
+        "temperature_k": {
+          "absolute": 0.000004,
+          "relative": 1e-12
+        },
+        "thermal_budget": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, saturated Nu=2, dT/dt=12*k/(rho_l*cp_l*d^2)*(Tgas-T); Tgas-(Tgas-T0)*exp(-a*t). Fixed predictor/corrector uses Heun update; registered error bounds decrease ~4x."
+    },
+    {
+      "id": "evaporation_steps_10",
+      "argv": [
+        "evaporation",
+        "10"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "latent_heat_j_kg": 250000,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 350,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "k_w_m_k": 0.05,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "surface_y": 0.2,
+        "far_y": 0.02,
+        "p_pa": 100000,
+        "vapor_h_j_kg": 1020000,
+        "duration_s": 0.01,
+        "steps": 10
+      },
+      "reference": {
+        "diameter_squared_rate_m2_s": -3.463523737543514e-8,
+        "diameter_squared_m2": 9.653647626245649e-9,
+        "mass_budget_residual_kg": 0
+      },
+      "tolerance": {
+        "diameter_squared_rate": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "diameter_squared": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "mass_budget": {
+          "absolute": 1e-22,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, Sh*=2, Bm=(.2-.02)/(1-.2)=.225; d(d^2)/dt=-8*rho_g*D/rho_l*ln(1+Bm). Prescribed constant film, not coupled thermal equilibrium or real-fuel validation."
+    },
+    {
+      "id": "evaporation_steps_20",
+      "argv": [
+        "evaporation",
+        "20"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "latent_heat_j_kg": 250000,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 350,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "k_w_m_k": 0.05,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "surface_y": 0.2,
+        "far_y": 0.02,
+        "p_pa": 100000,
+        "vapor_h_j_kg": 1020000,
+        "duration_s": 0.01,
+        "steps": 20
+      },
+      "reference": {
+        "diameter_squared_rate_m2_s": -3.463523737543514e-8,
+        "diameter_squared_m2": 9.653647626245649e-9,
+        "mass_budget_residual_kg": 0
+      },
+      "tolerance": {
+        "diameter_squared_rate": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "diameter_squared": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "mass_budget": {
+          "absolute": 1e-22,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, Sh*=2, Bm=(.2-.02)/(1-.2)=.225; d(d^2)/dt=-8*rho_g*D/rho_l*ln(1+Bm). Prescribed constant film, not coupled thermal equilibrium or real-fuel validation."
+    },
+    {
+      "id": "evaporation_steps_40",
+      "argv": [
+        "evaporation",
+        "40"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 750,
+        "liquid_cp_j_kg_k": 2200,
+        "latent_heat_j_kg": 250000,
+        "multiplicity": 4,
+        "initial_t_k": 350,
+        "gas_t_k": 350,
+        "gas_rho_kg_m3": 0.8,
+        "gas_mu_pa_s": 0.00002,
+        "k_w_m_k": 0.05,
+        "diffusivity_m2_s": 0.00002,
+        "gas_cp_j_kg_k": 1100,
+        "surface_y": 0.2,
+        "far_y": 0.02,
+        "p_pa": 100000,
+        "vapor_h_j_kg": 1020000,
+        "duration_s": 0.01,
+        "steps": 40
+      },
+      "reference": {
+        "diameter_squared_rate_m2_s": -3.463523737543514e-8,
+        "diameter_squared_m2": 9.653647626245649e-9,
+        "mass_budget_residual_kg": 0
+      },
+      "tolerance": {
+        "diameter_squared_rate": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "diameter_squared": {
+          "absolute": 1e-20,
+          "relative": 1e-12
+        },
+        "mass_budget": {
+          "absolute": 1e-22,
+          "relative": 1e-12
+        }
+      },
+      "formula": "Re=0, Sh*=2, Bm=(.2-.02)/(1-.2)=.225; d(d^2)/dt=-8*rho_g*D/rho_l*ln(1+Bm). Prescribed constant film, not coupled thermal equilibrium or real-fuel validation."
+    },
+    {
+      "id": "ballistic",
+      "argv": [
+        "ballistic"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "x0_m": [
+          1,
+          2,
+          3
+        ],
+        "velocity_m_s": [
+          2,
+          -1,
+          0.5
+        ],
+        "duration_s": 2,
+        "characteristic_length_m": 0.4,
+        "cfl": 0.5
+      },
+      "reference": {
+        "position_m": [
+          5,
+          0,
+          4
+        ]
+      },
+      "tolerance": {
+        "position": {
+          "absolute": 1e-12,
+          "relative": 1e-12
+        }
+      },
+      "formula": "x=x0+u*t"
+    },
+    {
+      "id": "static_ibm_rebound",
+      "argv": [
+        "rebound"
+      ],
+      "timeout_s": 10,
+      "ranks": 1,
+      "input": {
+        "mesh_cells": [
+          4,
+          4,
+          4
+        ],
+        "mesh_lower": [
+          0,
+          0,
+          0
+        ],
+        "mesh_upper": [
+          4,
+          4,
+          4
+        ],
+        "solid_cube_lower": [
+          1,
+          1,
+          1
+        ],
+        "solid_cube_upper": [
+          2,
+          2,
+          2
+        ],
+        "triangles": 12,
+        "x0_m": [
+          3,
+          1.5,
+          1.5
+        ],
+        "velocity_m_s": [
+          -2,
+          0.5,
+          0
+        ],
+        "duration_s": 1,
+        "normal_restitution": 0.5,
+        "tangential_restitution": 0.25
+      },
+      "reference": {
+        "collision_time_s": 0.5,
+        "outgoing_velocity_m_s": [
+          1,
+          0.125,
+          0
+        ],
+        "position_m": [
+          2.5,
+          1.8125,
+          1.5
+        ]
+      },
+      "tolerance": {
+        "time": {
+          "absolute": 1e-12,
+          "relative": 1e-12
+        },
+        "position": {
+          "absolute": 1e-12,
+          "relative": 1e-12
+        }
+      },
+      "formula": "plane x=2 hit then prescribed normal/tangential restitution; zero acceleration"
+    },
+    {
+      "id": "tab_oscillator",
+      "argv": [
+        "tab_oscillator"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "initial_y": 0.2,
+        "initial_y_dot_per_s": 0.3,
+        "forcing_per_s2": 0,
+        "damping_per_s": 0,
+        "stiffness_per_s2": 4,
+        "duration_s": 0.4,
+        "threshold": 10
+      },
+      "reference": {
+        "deformation": 0.24694475550436149,
+        "deformation_rate_per_s": -0.07793042355565948
+      },
+      "tolerance": {
+        "deformation": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "rate": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        }
+      },
+      "formula": "y=.2*cos(2t)+.15*sin(2t); ydot=-.4*sin(2t)+.3*cos(2t)"
+    },
+    {
+      "id": "tab_representative_split",
+      "argv": [
+        "tab_split"
+      ],
+      "timeout_s": 5,
+      "ranks": 1,
+      "input": {
+        "diameter_m": 0.0001,
+        "liquid_density_kg_m3": 800,
+        "sigma_n_m": 0.025,
+        "y": 1,
+        "y_dot_per_s": 20000,
+        "multiplicity": 100,
+        "child_parcels": 4,
+        "liquid_h_j_kg": -200000,
+        "velocity_m_s": [
+          20,
+          -3,
+          4
+        ]
+      },
+      "reference": {
+        "representative_diameter_m": 0.000039473684210526316,
+        "transverse_speed_m_s": 0.5,
+        "transverse_kinetic_energy_j": 5.235987755982989e-9,
+        "total_energy_residual_j": 0
+      },
+      "tolerance": {
+        "diameter": {
+          "absolute": 1e-18,
+          "relative": 1e-12
+        },
+        "speed": {
+          "absolute": 1e-14,
+          "relative": 1e-12
+        },
+        "kinetic_energy": {
+          "absolute": 1e-21,
+          "relative": 1e-12
+        },
+        "energy_residual": {
+          "absolute": 1e-18,
+          "relative": 0
+        }
+      },
+      "formula": "TAB r/r32=7/3+rho*r^3*ydot^2/(8*sigma)=38/15; transverse speed=Cb*r*ydot=.5"
+    }
+  ]
+}

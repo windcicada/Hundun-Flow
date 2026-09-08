@@ -14,18 +14,24 @@ struct Revision {
   std::uint64_t input_revision{};
   std::uint32_t algorithm_version{1};
 };
-inline bool operator==(const Revision& a, const Revision& b) noexcept {
+inline bool operator==(const Revision &a, const Revision &b) noexcept {
   return a.accepted_step == b.accepted_step &&
          a.input_revision == b.input_revision &&
          a.algorithm_version == b.algorithm_version;
 }
-inline bool operator!=(const Revision& a, const Revision& b) noexcept {
+inline bool operator!=(const Revision &a, const Revision &b) noexcept {
   return !(a == b);
 }
 
 enum class Status : std::uint8_t {
-  success, invalid_input, identity_mismatch, stale_revision,
-  capacity_exceeded, provider_failure, unavailable, conservation_failure
+  success,
+  invalid_input,
+  identity_mismatch,
+  stale_revision,
+  capacity_exceeded,
+  provider_failure,
+  unavailable,
+  conservation_failure
 };
 
 // Construct/validate identity in preparation. Existing composition and closure
@@ -41,8 +47,22 @@ struct GasIdentity {
   std::uint64_t composition_fingerprint{};
   std::uint64_t closure_fingerprint{};
 };
+inline bool same_gas_identity(const GasIdentity &a,
+                              const GasIdentity &b) noexcept {
+  return a.mechanism_sha256 == b.mechanism_sha256 && a.phase == b.phase &&
+         a.species_names == b.species_names &&
+         a.element_names == b.element_names &&
+         a.element_counts == b.element_counts &&
+         a.molecular_weights_kg_per_kmol == b.molecular_weights_kg_per_kmol &&
+         a.enthalpy_reference == b.enthalpy_reference &&
+         a.composition_fingerprint == b.composition_fingerprint &&
+         a.closure_fingerprint == b.closure_fingerprint;
+}
 
-enum class GasStateCoordinates : std::uint8_t { pressure_enthalpy, pressure_temperature };
+enum class GasStateCoordinates : std::uint8_t {
+  pressure_enthalpy,
+  pressure_temperature
+};
 struct GasQuery {
   Revision revision{};
   std::uint64_t composition_fingerprint{};
@@ -50,7 +70,7 @@ struct GasQuery {
   double pressure_pa{};
   double enthalpy_j_per_kg{};
   double temperature_k{};
-  const double* mass_fractions{};
+  const double *mass_fractions{};
   std::size_t species_count{};
 };
 struct GasSample {
@@ -66,16 +86,37 @@ struct GasSample {
 // be consumed. Providers report third-party allocations separately.
 struct GasQueryOutput {
   GasSample sample{};
-  double* diffusivities_m2_per_s{};
-  double* species_enthalpies_j_per_kg{};
-  double* net_mass_rates_kg_per_m3_s{};
+  double *diffusivities_m2_per_s{};
+  double *species_enthalpies_j_per_kg{};
+  double *net_mass_rates_kg_per_m3_s{};
   std::size_t capacity{};
 };
 class GasQueryProvider {
 public:
   virtual ~GasQueryProvider() = default;
-  virtual const GasIdentity& gas_identity() const noexcept = 0;
-  virtual Status query_gas(const GasQuery&, GasQueryOutput&) noexcept = 0;
+  virtual const GasIdentity &gas_identity() const noexcept = 0;
+  virtual Status query_gas(const GasQuery &, GasQueryOutput &) noexcept = 0;
+};
+
+struct GasAdvanceQuery {
+  GasQuery state{}; // PH coordinates, full composition, revision-bound
+  double start_time_s{}, duration_s{};
+};
+struct GasAdvanceOutput {
+  GasSample final_sample{};
+  double *final_mass_fractions{};
+  double *integrated_species_density_delta_kg_per_m3{};
+  std::size_t capacity{};
+  double completed_duration_s{};
+  std::uint32_t internal_step_count{};
+  double integrated_heat_release_j_per_m3{};
+};
+class GasAdvanceProvider {
+public:
+  virtual ~GasAdvanceProvider() = default;
+  virtual const GasIdentity &gas_identity() const noexcept = 0;
+  virtual Status advance_gas(const GasAdvanceQuery &,
+                             GasAdvanceOutput &) noexcept = 0;
 };
 
 // All exchange values are interval-integrated extensive totals, new minus old.

@@ -1,209 +1,139 @@
-# Stage 4–6 统一分支与主线移植交接
+# HUNDUN-FLOW 可移植模块实施包台账
 
-统一入口为 `codex/stage4-6-coast-replacement`，后续 Stage 4/5/6 开发与主线移植
-均从该分支推进，不再分别合并旧 Stage 分支。目标为约定业务范围内替代 COAST；
-本次完成代码归集，不宣称完整 Stage 接受或 COAST 替代接受。
-主线工作树只读，不修改其 driver、准入、字段、schema、Restart 或验收台账。
+交付入口：`codex/stage4-6-coast-replacement`。本任务只完成移植前模块，
+不修改主线，不自动合并或推送，不宣称产品燃烧/喷雾验收或完整替代 COAST。
+本文件取代原分 Stage 的后续开发台账；旧记录仍可从基线 Git 历史读取。
 
-## 身份与边界
+## 基线、归属与提交
 
-| 对象 | 本轮开始时记录 |
+| 项目 | 记录 |
 | --- | --- |
-| 本任务 | 复用自己的 `/home/wyf/code_dev/.worktrees/hundun-flow-stage6-two-phase`；由 `codex/stage6-two-phase` 新建 `codex/stage4-6-coast-replacement`，旧 ref 保留 |
-| HEAD / tree / parent | `216ac889bc3f600cdcb7af9467e2dfb5beea37de` / `d1e926f84f1f19d5e698b3b860c1901634c57554` / `86542bb96678ec844ae5ac95d8f6391993da239e` |
-| dirty / untracked | 统一前两份 CMake 与 public_headers 测试已修改；combustion、parcel、mechanics、transfer、source、breakup、migration、transaction 新文件及本交接未提交；全部保留并收拢 |
-| 主线只读快照 | 建立统一分支时 `codex/v04-restart-receipt-observability@461d7631aa251969ddfc4e639bcadb74c640070c`；tree `e1e46205ca609ad32e35875bb30097c1b787b008`；parent `2ea65b60e8b45264232037e0bf2430d84e884186`。主线仍在独立推进，不将此快照当最终接入 head |
-| 主线范围 | 2026-09-08 台账仍将两相**产品接入**暂挂；本任务按用户新指示继续独立模块开发，不改变主线范围 |
-| README | 独立文档工作树的改动暂停，未混入本分支，未提交或推送 |
+| 自有 worktree | `/home/wyf/code_dev/.worktrees/hundun-flow-stage6-two-phase` |
+| 开工 HEAD | `3d281086182865493a2daca63f4686e79147acf7` |
+| tree / parent | `8006da6602526ca976c28d440e71b78e20bc609c` / `e8939c863d2deea1c1047a5742fc9cd358a3116f` |
+| 开工 dirty / untracked | 均为空；没有覆盖既有用户修改 |
+| 产品共同祖先 | `86542bb96678ec844ae5ac95d8f6391993da239e` |
+| 主线观察 | 统一分支建立时为 `codex/v04-restart-receipt-observability@461d7631aa251969ddfc4e639bcadb74c640070c`；只是历史快照，不作为新的接入 head |
+| 独立队列 | A `/tmp/hundun-portable-queue-a`：P1→P4→气膜桥；B `/tmp/hundun-portable-queue-b`：P2→P3及验证输入；C `/tmp/hundun-portable-queue-c`：P6→P7→P5。均从同一冻结提交分支，只显式归集局部文件 |
+| DCO 节点 | `5149e92` 接口冻结/物性拆分；`bbd2505` TAB/单元汇总；`b15aefa` 生命周期/定位快照。后续归集节点见下方验证记录及本文件 Git 历史 |
 
-V04-2 是旧任务阶段名；本轮以实际主线快照和当前接口为依据，不沿用旧 accepted 标签。
+协调者独占公开头、中央 CMake、模块间合同和本文件；worker 不提交主线，
+不合并 governance 历史、旧 driver/schema/checkpoint，也不碰 Halo 优化。
 
-## 兼容性清单
+## 共同合同
 
-| 分类 | 供体/行为 | 处理 |
+- TCI closure：finite-rate mean、PaSR、ESF/TCR；chemistry representation：
+  direct Cantera 与解析验收 provider。FGM 只保留表示边界，无表模型实现。
+- `GasIdentity` 逐字段绑定机理 SHA、phase、组分顺序、元素矩阵、分子量、焓参考及
+  原有两个指纹；不改变旧指纹含义。查询与推进 provider 均声明完整身份；
+  backend/query 配对及跨 rank 身份不一致明确拒绝。
+- 普通值/借用视图/provider 输入，candidate/report 输出。完整 Ns 组成支持
+  `(p,h,Y)`、`(p,T,Y)`；parcel 不直接调用 Cantera。材料到 vapor species 的映射
+  同时绑定液体内容身份与气相身份，不只传裸索引。
+- 交换采用区间积分总量：kg、kg·m/s、J，新状态减旧状态；体积量/瞬时率另作显式转换。
+  multiplicity 已含在 parcel 交换中，沉积权重只用一次；同一气源作用于每个 ESF，不乘除 N。
+- 热路径 HUNDUN 缓冲预分配、容量不足拒绝。旧 vector backend 桥和普通值快照属于冷准备，
+  可分配；Cantera/CVODE/solverStats、MPI 内部资源行为不宣称零分配。
+- revision、accepted step、算法版本、区间及 RNG 地址固定重试。任何模块失败，
+  整组候选不可用；借用候选在下一次 prepare（即使失败）后失效。无隐式换模型、
+  裁剪归一化、补造时间尺度或部分发布。
+- 快照只含已接受普通值：fields、TCR 历史、parcel/TAB/ordinal、injector 余量/ordinal、
+  ESF/parcel RNG 和 clocks。完整验证后生成 owning 恢复候选；无产品磁盘格式或 Restart section。
+
+## 实施包与移植记录
+
+下列代码已归集并通过模块 focused 检查；V1/V2 尚待执行。所有 P→I 的产品适配
+均将失败映射为本次尝试整体拒绝，而非部分 source admission。
+
+| 包 / 依赖 | 移植前实现 | 移植后消费接口、持久状态与验收 |
 | --- | --- | --- |
-| Stage 4 显式移植 | governance `6407cd7c591ce088db7f1dd7e296d77acd18da1c` 的 chem_composition、chem_reports、backend/service/workspace 与 chem_cantera_backend | 合并纯声明到 `v04_chemistry.hpp`；`v04_cantera.hpp` + `models_cantera.cpp` 使用独立配置值，不引入 cfg_resolved_case_v4 或旧 schema |
-| 直接移植 | Stage 5 finite-rate/PaSR、命名时间尺度与 candidate/report；Stage 6 值类型、SN/RM、简化蒸发、TAB 振子 | 从 `codex/stage5-stage6-portable@a20b85b` 显式取文件；不合并治理历史 |
-| 模块内重写 | SoA 容器、injector、真实 A–S、共享 stencil、轨迹、IBM 事件、候选迁移 | 新建 `models_spray_*` 局部模块；仅值输入、候选输出和聚焦测试 |
-| accepted-head 适配 | Stage 4 backend 到 Stage 5 representation/rate-query 的映射、ESF 字段与 TCR mapper、气膜物性查询 | 独立 Cantera backend 已归集，但尚未连接 Stage 5/6 或主线；接入前核对 thermo/transport/源项区间 |
-| 产品重写 | driver、ContributionRegistry、压力/焓/密度顺序、field/halo、common-source、schema/Restart/diagnostics | 保留给主线接受后的适配任务；局部 finish 测试不代表这些面已接入 |
+| P1 / 冻结接口 | 独立 Cantera 与解析 backend；representation/rate-query；净质量生成率、组分焓、thermo/transport；有界查询/推进批量；完整身份、异常与 pool 生命周期；finite-rate/PaSR/ensemble | 主线物性及 Ns−1 视图、单位体积率/积分转换、机理身份持久化、化学源准入与反应流时序 |
+| P2 / P1 | Philox/Wiener counter；N=2/4 持续候选；外部确定性通量/梯度、零湍流随机退化、通量修正、exact IEM、均值/元素/方差；真实解析/Cantera 桥连接 | 最终面通量 kg/(m²·s)、梯度、边界和 accepted field storage；RNG 与 cell/revision；真实空间输运验收 |
+| P3 / P2 | 具名 TCR 根/统计映射、accepted/trial 历史、折点证据、off/shadow 无反馈；实验反馈未解拒绝；validated 缺科学证据拒绝 | cell/revision、跨步分支/折点历史、真实统计反馈与持久化；独立科学证据的产品准入 |
+| P4 / P1 | 严格 SI 资产加载/范围/来源/FNV 内容身份；绝对液相焓积分、潜热与气相焓一致性；两套合成包、不同相关式和组分顺序；one-third full-Y film 与中立采样桥 | 主线气相 p/h/Y/速度采样；冻结真实燃料资产及材料映射；真实燃料独立验收 |
+| P5 / P4/P6 | 固定一次 predictor/corrector 外层；整步/两半步误差及有界细分；碰撞后重采样；跨 cell、完全蒸发、出口、壁面、破碎统一事件；实际 Δm/ΔP/ΔH/ΔK；动态 TAB 与子滴剩余时间 | 几何/IBM/边界查询、真实气相采样与沉积；accepted parcel clocks；真实边界与步长收敛 |
+| P6 / 冻结接口 | 公开 TAB 方程、代表等径子 parcel、成对横向速度；表面/形变/体动能分账；完整 parent ID+step+ordinal；保留独立给定粒径模型 | 共同事务父删子建、所有权；TAB/ordinal/ID 持久化；真实破碎预算 |
+| P7 / P5/P6 | 坐标→cell/owner 双端预检、容量与全局 ID；18-lane v2 普通值候选迁移；accepted lifecycle snapshot 与恢复 | 真实分区/MPI 调度、共同提交、产品 Restart；injector/TAB/RNG/clock 全状态；连续/恢复一致性 |
+| P8 / P1–P7 | cell/ID/segment 确定性汇总；先求实际交换和，再算单元非线性 ΔK；完整身份/区间/global ID 审计（含消失父滴/全部子滴）；候选源路由、共同接受/拒绝和普通值快照；壁面/出口/TAB 能量单列 | `rho*h-p`/压力功、源准入、两次 PISO 与执行图；真实 field/Halo/stencil；所有产品参与者一致提交与回退 |
 
-旧供体提交：Stage 5 `25287ece`；Stage 6 `a3cdd925`。本分支已有 DCO 提交
-`216ac88 feat(v0.4): add portable spray kernels`。供体简化蒸发为 Spalding/d²，
-与真实 A–S 分开命名；其旧 `cp*T` 能量报告不能直接用作产品总热化学焓源。
-SplitMix parcel RNG 与 Stage 5 历史供体中的 Philox 身份分别记录，不互相冒充。
+P8 是规定气相状态上的普通数组组合器，顺序明确为
+source → transport/IEM/TCR → 两个连续 chemistry 半区间；**不是 Strang 分裂或第二套流动 driver**。
+cell inventory density 与 EOS 查询 density 分开报告，不能据此宣称已实现联立压力/密度闭合。
+源路由是最多 4 ranks、固定全局容量的参考 Allgatherv 普通值通道，每个 cell 唯一 owner；
+不复制全局气相库存，不是 field Halo 或可扩展生产通信实现。当前 P8 每轨迹段沉积到一个
+cell；真实跨分区加权 stencil 的归一性/所有权留给产品适配，不静默接受缺失权重。
 
-统一代码 DCO 提交：`e8939c8 feat(v0.4): consolidate Stage 4-6 portable development modules`。
-本文件的后续 DCO 提交只封存交接记录，不改变已测试的模型源码。
+PaSR 保留 `finite_rate_mean_shadow` 基线，`kappa=0/1` 精确退化；
+`tau_mix=C_Z*Delta²/[2(D+nu_t/Sc_t)]`，显式报告 C_Z，不构造 RANS epsilon。
+κ 同时缩放物种反应增量和形成焓放热报告；总热化学焓不重复加放热。
+TPDF 每场两半区间：PaSR 2 次、N=4 ensemble 8 次 chemistry 调用。
 
-Stage 4 seal `033a685c`、Stage 5 framework `41b2aac9` / seal `02b57cce`、
-field follow-up `coast/stage5-field-validation@8ffdf2b` 是只读供体身份，
-不是本分支祖先或新验收。历史 ESF 输运/IEM/Philox/TCR 与 field executor 尚未整体移植；
-它们和旧反应流 driver 的重写继续在本统一分支完成，不能将归集当成功能齐备。
+## 来源与科学边界
 
-## 当前实施包台账（2026-09-08）
+| 来源 | 固定身份 / 用途 |
+| --- | --- |
+| HUNDUN governance 只读供体 | Stage 4 `6407cd7c591ce088db7f1dd7e296d77acd18da1c`；ESF/TCR `8ffdf2b5673374fb14639fc4dce09a1b586ee5db`。只移植纯算法/测试行为，无历史合并 |
+| TAB 原始方程 | [O'Rourke–Amsden 原始报告](https://digital.library.unt.edu/ark:/67531/metadc1106123/m2/1/high_res_d/6118786.pdf)，PDF p7 式14、19–22，K=10/3、Cb=1/2、Ck=8、y=1；代表粒径/等径子 parcel 是本实现明确约定 |
+| A–S | [Abramzon–Sirignano 1989](https://doi.org/10.1016/0017-9310(89)90043-4)；解析低 Re/恒定膜极限与独立参考，不以 OpenFOAM 输出作真值 |
+| TCR | 作者理论文档 `Coast_software/docs/TCR_Model/Thesis_Part2.md` 式2.80、2.88、2.90、2.91；只读方程，不复制 COAST 实现。统计映射版本 `ideal_gas_reactant_mole_fraction_v1`；不继承旧 oracle 指纹作为 validated 证据 |
+| OpenFOAM 仅问题组织参考 | 固定 `43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4` 的 [chemistry](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/chemistry) / [Lagrangian](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/Lagrangian)，未复制实现、字典或脚本，未运行上游测试 |
 
-当前任务基线：`codex/stage4-6-coast-replacement@3d281086182865493a2daca63f4686e79147acf7`；
-tree `8006da6602526ca976c28d440e71b78e20bc609c`，parent `e8939c863d2deea1c1047a5742fc9cd358a3116f`。
-开工时 tracked/untracked 均为空。主线与 pressure-enthalpy 工作树只读，不自动合并或推送。
+合成 alpha：k=2/s、cp=1000 J/(kg·K)、A/B 顺序、常 cp/Antoine；
+beta：k=3/s、cp=1200、B/A 顺序、多项式 cp/Clausius。资产位于
+`versions/v0.4/tests/fixtures/synthetic-liquid-{alpha,beta}.asset`，
+原始字节 FNV1a64 分别为 `6004043157121730787`、`668675689539421851`。
+机理 SHA 是合成方程规范的 SHA，不是假称真实燃料机理。真实 Cantera conformance 使用
+独立合成机理 `synthetic-mechanism-v2.yaml`，SHA
+`c518a07cada5f1bddcdb308f0a2f695d92cc6373e173ffd87e96312530b52aee`。
 
-共同接口冻结：`v04_portable.hpp` 的 Revision、GasIdentity、GasQueryProvider、
-ExchangeDelta；已有 composition/closure 指纹含义不变。数组均为完整 Ns；显式
-SHA/phase/组分顺序/元素矩阵/焓参考映射在准备阶段校验。查询支持 p,h,Y 与 p,T,Y，
-parcel 不接触 Cantera；HUNDUN 容量预分配，第三方内部资源行为单列。
-候选失败不可用；accepted step/revision/算法版本确定重试；快照只含已接受普通值。
-所有交换为区间积分总量、新减旧，multiplicity 与沉积权重各一次。
+## 验证与执行入口
 
-协调者独占公开头、中央 CMake、共同源合同、本台账和归集提交。
-worker 独占其局部 cpp/detail.hpp 与 focused tests，在相同冻结提交的独立临时
-worktree 工作；不得写产品主线/旧供体，不提交、不改中央文件。接口变更先由协调者处理。
-物性/气膜已从 transfer 拆入 `models_spray_properties.cpp`，原 transfer selector 1/1 PASS。
+RED 先于实现：新增 seam 缺声明/符号；失配 backend/query、跨 rank 区间/机理、
+损坏 RNG snapshot、不同 next revision、无反应时负 EOS density、伪造 ΔK、
+陈旧采样位置及丢失 TAB 预算均出现预期失败，再实现 GREEN。解析参考在
+`tests/validation/portable_v1_manifest.json` / `portable_v2_manifest.json`
+中预登记公式、常数和绝对+相对容差；不从被测实现生成参考。
 
-| 包 | 依赖 | 状态 | 实现与验收出口 | 移植后消费接口 / 持久状态 / 产品验收 |
-| --- | --- | --- | --- | --- |
-| P1 化学 | 冻结接口 | 待实施 | direct+解析 provider、显式映射、区间/净率/焓、批量容量和失败 | Ns−1/物性、源准入；机制身份；真实反应时序 |
-| P2 ESF | P1 真实组合 | 待实施 | Philox/Wiener、N=2/4 输运、exact IEM、通量修正 | 通量/梯度/边界；accepted fields/RNG；真实空间输运 |
-| P3 TCR | P2 | 待实施 | 统计映射、根可接受性/历史、折点/拒绝、证据准入 | cell/revision；branch history；真实统计反馈 |
-| P4 物性/气膜 | P1 | 待实施 | 焓积分、包读取/身份、两套合成包、完整气膜 | 气相采样；资产身份；用户真实燃料验收 |
-| P5 轨迹/事件 | P4/P6 | 待实施 | 自适应蒸发、重采样、统一事件/出口 H+K | 几何/采样/沉积；parcel accepted clocks；真实边界 |
-| P6 TAB | 冻结接口 | 实现/本地验证完成 | 粒径预测、成对速度扰动、表面/变形/体动能、子候选与 ID | 共同父子替换；TAB/ordinal；产品破碎预算 |
-| P7 生命周期 | P5/P6 组合 | 独立实现通过，事件组合待 P5 | 定位预检、容量、普通值快照、1/2/4 rank | 分区/共同提交/Restart；injector/parcel/RNG；恢复一致性 |
-| P8 组合 | P1–P7 | 汇总核通过，组合待依赖 | cell/ID/segment 有序汇总、非线性 K、公共源、共同候选 | rho*h-p/压力功/PISO/执行图；全参与者状态；联立验收 |
-
-接口冻结 DCO：`5149e92`。P6 来源：
-[O'Rourke–Amsden 原始报告](https://digital.library.unt.edu/ark:/67531/metadc1106123/m2/1/high_res_d/6118786.pdf)
-PDF p7，式14、19–22；独立实现 K=10/3、Cb=1/2、Ck=8、y=1 的代表等径模型，
-偶数2..16子 parcel 成对横向速度闭合预算；不兼容阈值明确拒绝。
-P6 RED 为新增函数链接缺失，GREEN 为 `^v04_models_spray_breakup$` 1/1 PASS。
-P8 汇总核 RED 为新接口链接缺失；`^v04_models_exchange_batch$` 1/1 PASS：
-两滴→单元动能解析预算、顺序/重试、重复项、revision、容量、权重及出口分账。
-该核固定容量，无场写入，借用候选在下一次调用（即使失败）后失效。
-P6/汇总核 DCO：`bbd2505`。
-P7 新 seam 链接 RED 后实现；根代理复核
-`^v04_models_spray_(parcel|migration_mpi_[124])$` **4/4 PASS**。
-checked migration 在发送/接收方均验证坐标、cell、owner与跨rank revision；
-旧 prepare 仅保留低层范围检查。快照不含 trial，恢复是 owning 候选、冷准备可分配，
-实际容器/Restart 发布仍由后续产品事务承担。
-
-OpenFOAM 测试问题参考固定为
-`43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4`（只读 ls-remote 核实）。
-仅参考 [chemistry 测试组织](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/chemistry)
-和 [Lagrangian 问题分类](https://github.com/OpenFOAM/OpenFOAM-dev/tree/43eea1d4b6ae2fdf67a638cf0f452bc2ece123c4/test/Lagrangian)；
-不复制其实现、字典或脚本，不运行上游测试。
-
-所有 P→I 失败由产品适配映射为整次尝试拒绝；不得部分源发布。
-V1/V2 仅在包全部完成后运行：合成小算例，最多 12³/4 ranks，每配置一轮，
-显式超时与预登记绝对+相对容差。真实燃料、field/Halo、schema/Checkpoint/Restart/
-diagnostics/CLI、产品共同提交与 COAST 替代验收均只登记，不实施。
-以下是基线历史证据，不代表当前 P1–P8 已完成。
-
-## 基线切片与退出条件（历史）
-
-| 切片 | 当前工作 | 本地退出条件 / 后续适配 |
-| --- | --- | --- |
-| Stage 4 backend | 组分/元素身份、总焓值与 interval/service 接口；独立 Cantera runtime/lane/thermo/transport/integrate 实现 | 纯值测试与一个现有 backend conformance selector 已适配；真实 interval/物理场数值验收未重跑 |
-| Stage 5 fast path | 已显式移植并验证；新增分配失败状态 | 有界 kappa、0/1 精确退化、质量/元素/能量、失败无部分结果、PaSR 2 与 N=4 TPDF 2N 调用 |
-| S0 容器与注入 | SoA、TAB 续算态、稳定 ID、注入余量、trial/preflight/commit/rollback | 值快照与 retry 一致性、容量及热路径分配检查；产品持久化另行适配 |
-| S0 力学 | stencil、受限轨迹、静态 IBM 反弹、出口收支 | 解析极限/有限性/权重与最早事件；field/halo 采样接线另行适配 |
-| S0 候选迁移与共同完成 | 17-lane 无填充打包、全局 ID 审核、固定字段与 parcel 共同 accept/reject 测试 | 小型 1/2/4-rank；无 driver 调用、无 chemistry/inert_source 准入变更 |
-| S1 传递与蒸发 | 液体性质包、one-third film、A–S、预测–校正积分；已验证 | 相变/传热与机械能分开报告；陈旧表面温度样本明确拒绝 |
-| S1 气相源代数 | 新增 `closed_isobaric_exchange_v1` 候选核 | 在固定热力学压力、无外力/壁面/出口功的交换子问题中封闭总 H+K；热通量与实际液滴焓差超过显式预算则拒绝 |
-| S2 common-source | 已完成 N=2/4 纯值映射 | 同一物理源用于每个随机场；均值/方差、物种与焓预算、任一场失败整组撤回；无 parcel 循环或生产字段写入 |
-| S2 子滴候选 | 给定统一粒径的守恒拆分，稳定子 ID、质量/动量/体动能/热化学焓预算 | 不预测 TAB 子滴粒径；表面能与变形能缺额单列，不能视为完整能量闭合的 breakup 模型 |
-| S2 产品组合 | 尚未形成产品组合 | 完整 TAB、持久化与真实 CLI 仍需完成；不继承历史 seal |
-
-## 验证约定
-
-按已确认的纯值/候选接口执行 RED→GREEN，不测试内部私有方法。
-仅运行本次模型的 focused selectors、公共头与小型 MPI 合同，禁止 full ctest、
-Stage 3/4 数值回归、正式火焰/喷雾计算、COAST 对比及性能长测。Halo P0 不在本任务测试范围。
-
-Clang/libc++ 构建目录：`/tmp/hundun-flow-stage6-two-phase-build-libcxx`。
-系统 GCC 7 缺少既有源码所需的 `<filesystem>`，不因此更改产品源码。
+当前增量 focused 32 项及真实 backend selector 已通过；最终精确 HEAD 重验记录待补。
+V1/V2 只在 P1–P8 完成后执行；空间夹具 4³、最多4 ranks，每配置一轮，
+单项5/10/20秒超时，超时记失败，不扩容重跑。无 full ctest、既有流动回归、
+正式火焰/喷雾长算、COAST 比较或 OpenFOAM Allrun。
 
 ```sh
 cmake -S versions/v0.4 -B /tmp/hundun-flow-stage6-two-phase-build-libcxx \
-  -DHUNDUN_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
+  -DHUNDUN_BUILD_TESTS=ON -DHUNDUN_BUILD_PORTABLE_CANTERA=OFF -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER=/home/wyf/.local/bin/clang \
   -DCMAKE_CXX_COMPILER=/home/wyf/.local/bin/clang++ \
   -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++
+# 只构建对应 v04_models_*_test / v04_public_headers_test 与 v04_portable_v1/v2 目标。
+LD_LIBRARY_PATH=/home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu \
+ctest --test-dir /tmp/hundun-flow-stage6-two-phase-build-libcxx --output-on-failure \
+  -R '^v04_(models_(chemistry(_adapter)?|combustion(_allocation|_common_source)?|spray(_breakup|_parcel|_mechanics|_source|_transfer|_properties|_film_bridge|_events|_migration_mpi_[124]|_transaction_mpi_[124])?|esf(_reaction|_backend)?|tcr|exchange_batch|exchange_routing_mpi_[124]|portable_composition_mpi_[124])|public_headers)$'
+# 完成门后，分别执行：
+# ctest ... -L '^portable_v1$' --output-on-failure
+# ctest ... -L '^portable_v2$' --output-on-failure
 git diff --check
 ```
 
-本轮 RED 证据：移植测试先于头/实现时缺声明或符号；Stage 5 分配失败注入使旧
-`noexcept` 路径以 exit 90 终止，修复后返回 `workspace_failure`；陈旧 A–S 气膜表面温度
-测试在修复前输出明确 FAIL。S1 总 H+K 代数与 S2 common-source 新接口均先 RED 后 GREEN。
-容器、力学和 transfer 子切片另有各自严格编译与 ASan/UBSan 快测；本轮根代理也独立运行了
-common-source 与气相源代数的 ASan/UBSan，均 exit 0。
+Cantera 使用既有只读 Jammy/GCC11 兼容 rootfs 与已验证3.2.0依赖包，不下载/重建依赖。
+`HUNDUN_BUILD_PORTABLE_CANTERA=ON` 单独构建纯模型静态库，不链接产品 driver/core。
+本机源映射到 `/mnt`、依赖包到 `/tmp/cantera`、合成机理到 `/tmp/mechanism`，
+构建目录 `/tmp/hundun-unified-cantera.XGRtBh` 映射到 `/tmp/build`：
 
 ```sh
-cmake --build /tmp/hundun-flow-stage6-two-phase-build-libcxx --target \
-  v04_models_chemistry_test v04_models_spray_breakup_test \
-  v04_models_combustion_test v04_models_combustion_allocation_test \
-  v04_models_combustion_common_source_test v04_models_spray_test \
-  v04_models_spray_parcel_test v04_models_spray_mechanics_test \
-  v04_models_spray_source_test v04_models_spray_transfer_test \
-  v04_models_spray_migration_test v04_models_spray_transaction_test \
-  v04_public_headers_test -j4
-LD_LIBRARY_PATH=/home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu \
-  ctest --test-dir /tmp/hundun-flow-stage6-two-phase-build-libcxx \
-  -R '^v04_(models_chemistry|models_combustion(_allocation|_common_source)?|models_spray(_breakup|_parcel|_mechanics|_source|_transfer|_migration_mpi_[124]|_transaction_mpi_[124])?|public_headers)$' \
-  --output-on-failure
+cmake -S /mnt/versions/v0.4 -B /tmp/build -DCMAKE_MAKE_PROGRAM=/tmp/make \
+  -DCMAKE_C_COMPILER=/usr/bin/gcc-11 -DCMAKE_CXX_COMPILER=/usr/bin/g++-11 \
+  -DHUNDUN_BUILD_TESTS=ON -DHUNDUN_BUILD_PORTABLE_CANTERA=ON \
+  -DHUNDUN_CANTERA_PACKAGE_ROOT=/tmp/cantera \
+  -DHUNDUN_PORTABLE_CANTERA_TEST_MECHANISM=/tmp/mechanism/synthetic-mechanism-v2.yaml \
+  -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/build --target v04_models_cantera_backend_test -j2
+ctest --test-dir /tmp/build -R '^v04_models_cantera_backend$' --output-on-failure
 ```
 
-统一组合上述 **17/17 PASS**。子滴测试第一次组合运行暴露 `pow(d,3)` 与连乘的
-浮点逐位相等误断言；改为 1e-14 相对/1e-24 kg 绝对容差后通过，没有改变模型公式。
+## 只登记、不实施的接入项
 
-Cantera 目标 `hundun_v04_portable_cantera` 默认关闭，不链接产品 core，不扩展准入。
-从供体保留 `HundunPortableCantera.cmake` 中的依赖包 hash、license、ABI 与符号链接检查，
-以及 `third_party/cantera/` 元数据和 license；未复制二进制、机理或第三方源码。
-在兼容 Ubuntu 22.04/GCC 11/libstdc++ 环境下：
-
-```sh
-cmake -S versions/v0.4 -B <backend-build> -DHUNDUN_BUILD_TESTS=ON \
-  -DHUNDUN_BUILD_PORTABLE_CANTERA=ON \
-  -DHUNDUN_CANTERA_PACKAGE_ROOT=<verified-package> \
-  -DHUNDUN_PORTABLE_CANTERA_TEST_MECHANISM=<synthetic-mechanism-v2.yaml>
-cmake --build <backend-build> --target v04_models_cantera_backend_test -j2
-ctest --test-dir <backend-build> -R '^v04_models_cantera_backend$' --output-on-failure
-```
-
-本机宿主 glibc 2.31 不兼容固定包；复用 P0 的只读 Jammy rootfs，以 bwrap 隔离，
-仅统一源码只读挂载和 `/tmp/hundun-unified-cantera.XGRtBh` 构建输出可写，
-无网络、无安装、无重建依赖包。使用独立挂载的 CMake/make 与 rootfs gcc-11/g++-11。
-最终日志：该目录 `Testing/Temporary/LastTest.log`，selector **1/1 PASS**。
-验证仅覆盖 backend 身份、工作区隔离/容量/生命周期与无 schema 的 solver controls 拒绝，
-不代表 interval/thermo/transport 数值重新接受。无 schema 控制校验先 RED
-（非法 tolerance 被准入）再 GREEN（工厂在领取 lane 前拒绝且不消耗 lane）。
-
-## 后续单分支接入顺序
-
-主线仍只读；合并权由主线任务在 accepted head 上执行，不自动 merge/rebase/push。
-共同产品祖先为 `86542bb96678ec844ae5ac95d8f6391993da239e`，
-本分支是其线性后继，无 governance merge，旧分支无需再合入。
-
-1. Stage 4：backend 身份/焓基准/源区间适配 → 化学准入 → 真实 mean reacting driver。
-2. Stage 5：finite-rate/PaSR → 完整 ESF/IEM/TCR → 共同回退与持久化。
-3. Stage 6：主线恢复两相接入范围后，再接 parcel/gas/ESF 公共源与 Restart。
-4. 冻结 COAST 业务案例和物理/性能/I/O 验收；不得把本分支提交或单测作为替代接受。
-
-合并前先核对 CMake 与公开头，当前主线会继续演进，不承诺未来无冲突。
-本次没有改 flow/product driver、ContributionRegistry、field/halo、schema、
-checkpoint/Restart、diagnostics 或 Halo P0，没有启动 full ctest/长算/COAST 比较。
-
-## 移植时不可省略的检查
-
-- Stage 5 是完整 Ns 值接口，主线是 Ns−1 视图；native-air 的参考平移与生成焓基准须显式转换。
-  当前 vector 版本报告分配失败，但不是批量零热分配的产品工作区。
-- A–S 使用 [PeleMP 公开方程](https://amrex-combustion.github.io/PeleMP/Equations.html)
-  中的气膜/Stefan/Nu0/Sh0 形式，来源为 [Abramzon–Sirignano](https://doi.org/10.1016/0017-9310(89)90043-4)。
-  Ranz–Marshall 独立核保留，二者基准传递关联式不冒充同一实现。
-- A–S 常系数事件步与有限子步积分可能产生 `thermal_exchange_state_residual_j`；
-  必须显式检验、细化或拒绝，不用 `gas_h=-parcel_h` 隐去误差。气相源核要求先按单元累计
-  实际 Δm/ΔP/ΔH/ΔK，再做非线性气相动能修正；产品的 rho*h-p/压力功约定仍需适配。
-- stencil 在首/末单元中心之外显式夹持；IBM 反弹是分段事件处理，碰撞后未重新查询加速度。
-  出口能量需液体焓服务；目前出口 ledger 仅质量/动量。两者均不是完整联立轨迹 driver。
-- 17-lane 迁移验证 global-cell 范围与当前 Cartesian owner，不代替位置到网格的几何定位。
-  模型局部共同完成 helper 只验证已准备参与者的共同提交，不证明化学准入、源项物理或 PISO 时序。
-- 容器快照包含 parcel/TAB 值，injector 余量与 ordinal 可查询；尚无产品持久化编码、机制包加载、
-  field/halo 采样、driver/schema/Restart/diagnostics 接线及真实双 surrogate CLI 验收。
+主线 source admission/ContributionRegistry、最终面质量通量/场/Halo/边界、
+化学—输运—喷雾—压力/焓/密度顺序、全部参与者共同提交与回退、
+schema/Checkpoint/Restart/diagnostics/CLI，以及恢复两相接入范围后的真实耦合算例和
+COAST 替代验收。FGM、稠密/多组分液滴、液膜、碰并、移动 IBM、AMR、Halo 优化不在本次范围。

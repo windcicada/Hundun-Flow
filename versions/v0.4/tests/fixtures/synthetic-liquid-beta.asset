@@ -1,0 +1,18 @@
+HUNDUN_LIQUID_ASSET_V1
+units SI
+source HUNDUN-independent-synthetic-beta-not-real-fuel
+gas_sha 7f3b7689de32e783e83d67f3e0dd78efba12ac768fb3b18922ae4aca29ad4ffe
+gas_phase synthetic-isomers-v1-ratebits-4613937818241073152
+gas_species 2 B A
+enthalpy_reference absolute-standard-formation-298.15K-v1
+vapor B
+molecular_weight 28
+temperature_range 280 400
+liquid_reference 298.15 -300000
+density cubic 298.15 900 -0.5 0 0
+cp cubic 298.15 500 2 0 0
+latent cubic 298.15 300000 700 -1 0
+surface_tension cubic 298.15 0.030 -0.00001 0 0
+viscosity constant 298.15 0.002 0 0 0
+saturation clausius 8000 298.15 300000 28
+end

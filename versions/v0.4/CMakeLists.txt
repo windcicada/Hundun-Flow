@@ -32,7 +32,8 @@ if(HUNDUN_BUILD_PORTABLE_CANTERA)
   # Intentionally separate: enabling this target does not link chemistry into
   # hundun_v04_core, authorize a source contribution, or enable reacting CLI.
   add_library(hundun_v04_portable_cantera STATIC EXCLUDE_FROM_ALL
-    src/models_cantera.cpp)
+    src/models_cantera.cpp src/models_combustion.cpp src/models_chemistry_adapter.cpp
+    src/models_spray_properties.cpp)
   target_include_directories(hundun_v04_portable_cantera PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(hundun_v04_portable_cantera PRIVATE
@@ -268,7 +269,12 @@ set(hundun_v04_core_sources
   src/mesh_ibm_topology.cpp
   src/mesh_stl_scan.cpp
   src/models_combustion.cpp
+  src/models_esf.cpp
+  src/models_tcr.cpp
+  src/models_chemistry_adapter.cpp
   src/models_exchange_batch.cpp
+  src/models_exchange_routing.cpp
+  src/models_portable_composition.cpp
   src/models_spray.cpp
   src/models_spray_breakup.cpp
   src/models_spray_mechanics.cpp
@@ -278,6 +284,8 @@ set(hundun_v04_core_sources
   src/models_spray_transaction.cpp
   src/models_spray_transfer.cpp
   src/models_spray_properties.cpp
+  src/models_spray_film_bridge.cpp
+  src/models_spray_events.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp
   src/parallel_ibm_donor.cpp
