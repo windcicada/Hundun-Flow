@@ -66,6 +66,13 @@ public:
     available_ = true;
     return {};
   }
+  Status bind_location_revision(portable::Revision revision) noexcept {
+    if (revision.algorithm_version != 1 || !revision.input_revision)
+      return invalid();
+    available_ = false;
+    revision_ = revision;
+    return {};
+  }
   bool bound_to(portable::Revision revision, double duration) const noexcept {
     return available_ && revision_ == revision && duration_ == duration;
   }

@@ -943,7 +943,7 @@ def validate_v6_run_start(record: Dict[str, Any],
         source = require_integer(history["source_signature"], f"{prefix}.source_signature", 0)
         target = require_integer(history["target_signature"], f"{prefix}.target_signature", 1)
         rebuild = history["policy"] == "rebuild_method_history"
-        if (kind != "restart" or version not in (1, 2, 3, 4) or
+        if (kind != "restart" or version not in (1, 2, 3, 4, 5) or
                 (version < 3 and source != 0) or (version >= 3 and source == 0) or
                 history["policy"] not in ("require_compatible", "rebuild_method_history") or
                 (not rebuild and version != 1 and source != target) or
@@ -968,7 +968,7 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
      plan, schema, geometry, time, dt, pressure_reference,
      step, controller_state, field_count) = fields
     cursor = header_size + 4 * field_count
-    exact_history = version in (2, 3, 4)
+    exact_history = version in (2, 3, 4, 5)
     valid_exact = True
     if exact_history and len(data) >= cursor + struct.calcsize("<ddQQI") + 8:
         (previous_pressure_reference, closed_mass_target,
@@ -988,22 +988,23 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
     elif exact_history:
         valid_exact = False
     method_history_signature = 0
-    if version in (3, 4):
+    if version in (3, 4, 5):
         if len(data) < cursor + 8:
             valid_exact = False
         else:
             method_history_signature = struct.unpack_from("<Q", data, cursor)[0]
             valid_exact = valid_exact and method_history_signature != 0
         cursor += 8
-    if version == 4:
+    if version in (4, 5):
         if len(data) < cursor + 12:
             valid_exact = False
         else:
             model_identity, cell_record_bytes = struct.unpack_from("<QI", data, cursor)
-            valid_exact = valid_exact and model_identity != 0 and cell_record_bytes != 0
+            valid_exact = valid_exact and model_identity != 0 and (
+                cell_record_bytes != 0 if version == 4 else cell_record_bytes == 0)
         cursor += 12
     expected_size = cursor + 40 * rank_count + 8
-    if (magic != b"H4MANI01" or version not in (1, 2, 3, 4) or
+    if (magic != b"H4MANI01" or version not in (1, 2, 3, 4, 5) or
             rank_count == 0 or
             min(cells_x, cells_y, cells_z) <= 0 or
             min(plan, schema, geometry) == 0 or

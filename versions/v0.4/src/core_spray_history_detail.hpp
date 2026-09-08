@@ -66,6 +66,7 @@ public:
                           sizeof(std::uint8_t));
     if (fixed > maximum_bytes)
       return {StatusCode::allocation_failure, 10241};
+    const auto supplied_budget = maximum_bytes;
     maximum_bytes -= fixed;
     if (maximum_payload_ > maximum_bytes / 2 ||
         capacity >
@@ -75,6 +76,11 @@ public:
              2 * capacity * sizeof(Parcel)) /
                 (2 * sizeof(std::uint32_t) + sizeof(std::size_t) + tcr_width_))
       return {StatusCode::allocation_failure, 10241};
+    owned_bytes_ =
+        fixed + 2 * maximum_payload_ + 2 * capacity * sizeof(Parcel) +
+        count_ * (2 * sizeof(std::uint32_t) + sizeof(std::size_t) + tcr_width_);
+    if (owned_bytes_ > supplied_budget)
+      return invalid();
     if (injectors.size)
       injectors_.assign(injectors.data, injectors.data + injectors.size);
     for (std::size_t i = 0; i < injectors_.size(); ++i) {
@@ -105,6 +111,10 @@ public:
       return invalid();
     identity_ = identity;
     return {};
+  }
+  std::uint64_t owned_bytes() const noexcept { return owned_bytes_; }
+  std::size_t maximum_payload_bytes() const noexcept {
+    return maximum_payload_;
   }
   bool enabled() const noexcept { return identity_ != 0; }
   Span<const Parcel> accepted_parcels() const noexcept {
@@ -462,7 +472,8 @@ private:
   MeshPatch patch_{};
   Int3 global_{};
   std::size_t count_{}, capacity_{}, maximum_payload_{};
-  std::uint64_t material_{}, step_{}, pending_step_{}, global_count_{};
+  std::uint64_t material_{}, step_{}, pending_step_{}, global_count_{},
+      owned_bytes_{};
   std::uint32_t tcr_width_{};
   std::vector<Injector *> injectors_;
   std::vector<spray::detail::InjectorCommittedState> injector_states_;

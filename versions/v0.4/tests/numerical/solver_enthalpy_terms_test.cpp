@@ -182,7 +182,7 @@ struct Fixture {
 };
 
 bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
-                  bool unity_lewis = false) {
+                  bool unity_lewis = false, bool current_source = false) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -219,12 +219,24 @@ bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
       !TransportPlan::compile(thermo, out.thermodynamics, out.transport)) {
     return false;
   }
-  const std::array<FieldId, 8U> declared{0U, 1U, 2U, 3U,
-                                         4U, 5U, 6U, 7U};
-  if (!out.contributions.configure({declared.data(), declared.size()}) ||
-      !out.contributions.freeze()) {
+  const std::array<FieldId, 9U> declared{0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 9U};
+  if (!out.contributions.configure({declared.data(), declared.size()},
+                                   {0, 0, current_source ? 12345U : 0U}))
     return false;
+  if (current_source) {
+    ContributionSpec source;
+    source.conserved_quantity = 3;
+    source.explicit_source = 9;
+    source.stage = 2;
+    source.reads = {&enthalpy, 1};
+    source.units.si_exponents = {1, -1, -3, 0, 0, 0, 0};
+    source.capability = ContributionCapability::parcel_exchange;
+    source.source_identity = 12345;
+    if (!out.contributions.register_contribution(source))
+      return false;
   }
+  if (!out.contributions.freeze())
+    return false;
   EquationPlanSpec spec;
   spec.density = 0U;
   spec.velocity = 1U;
@@ -584,7 +596,8 @@ bool same_certificate(const EquationAssemblyCertificate& left,
          left.dt == right.dt;
 }
 
-bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false) {
+bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
+                                              bool current_source = false) {
   constexpr std::int32_t n = 6;
   constexpr double velocity_x = 4.0;
   constexpr double enthalpy_slope = 3.0;
@@ -596,8 +609,9 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false) {
   const Int3 oracle_cell{3, 3, 3};
 
   Fixture fixture;
-  bool passed = expect(make_fixture(n, fixture, false, unity_lewis),
-                       "enthalpy production fixture compiles");
+  bool passed =
+      expect(make_fixture(n, fixture, false, unity_lewis, current_source),
+             "enthalpy production fixture compiles");
   if (!passed) {
     return false;
   }
@@ -1019,6 +1033,55 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false) {
           same_certificate(residual_certificate,
                            published_residual_certificate),
       "residual-only seam rejects a partial box atomically");
+  if (current_source) {
+    OwnedField source = make_field(9U, cells, 1U, 0U, 627U);
+    std::fill(source.bytes.begin(), source.bytes.end(), 128.);
+    EquationContributionView contribution;
+    contribution.explicit_source_density = as_const(source.view);
+    contribution.conserved_quantity = 3;
+    contribution.units.si_exponents = {1, -1, -3, 0, 0, 0, 0};
+    contribution.stage = 2;
+    contribution.explicit_source_field = 9;
+    contribution.capability = ContributionCapability::parcel_exchange;
+    contribution.source_identity = 12345;
+    auto current_context = context;
+    current_context.contribution_stage = 2;
+    EquationAssemblyCertificate full_source, target_source;
+    const auto full = assemble_enthalpy(
+        fixture.equations.enthalpy(), state, material, as_const(gradients.view),
+        {&contribution, 1}, current_context, system, full_source);
+    const auto target = assemble_target_coupled_enthalpy_residual(
+        fixture.equations.enthalpy(), state, material, as_const(gradients.view),
+        current_context, target_residual.view, target_workspace, target_source,
+        {&contribution, 1});
+    passed &= expect(bool(full) && bool(target) &&
+                         bitwise_equal(residual.bytes, target_residual.bytes) &&
+                         same_certificate(full_source, target_source),
+                     "current parcel enthalpy source reaches the certified "
+                     "target residual exactly");
+    passed &= expect(
+        close(target_residual.view.unchecked(oracle_cell, 0),
+              published_target_residual[std::size_t(oracle_cell.x) +
+                                        std::size_t(n) * (oracle_cell.y +
+                                                          n * oracle_cell.z)] -
+                  128 * volume),
+        "independent source oracle subtracts 128 W/m3 times actual cell volume "
+        "once");
+    const auto saved = target_residual.bytes;
+    auto aliased = contribution;
+    aliased.explicit_source_density = as_const(target_residual.view);
+    aliased.explicit_source_density.field = 9;
+    const auto rejected_source = assemble_target_coupled_enthalpy_residual(
+        fixture.equations.enthalpy(), state, material, as_const(gradients.view),
+        current_context, target_residual.view, target_workspace, target_source,
+        {&aliased, 1});
+    passed &= expect(
+        !rejected_source && bitwise_equal(saved, target_residual.bytes) &&
+            same_certificate(full_source, target_source),
+        "source/output alias rejects before target residual publication");
+    target_residual.bytes = published_target_residual;
+    residual_certificate = published_residual_certificate;
+  }
   context = final_context;
   const KernelBox lower{{0, 0, 0}, {cells.x / 2, cells.y, cells.z}};
   const KernelBox upper{{cells.x / 2, 0, 0},
@@ -1202,6 +1265,7 @@ int main(int argc, char** argv) {
   passed &= test_viscous_dissipation_uses_complete_tau();
   passed &= test_production_enthalpy_assembly_oracle();
   passed &= test_production_enthalpy_assembly_oracle(true);
+  passed &= test_production_enthalpy_assembly_oracle(false, true);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

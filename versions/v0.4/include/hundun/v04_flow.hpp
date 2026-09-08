@@ -1079,11 +1079,11 @@ class EnthalpyEquationPlan {
       Span<const EquationContributionView>, const EquationAssemblyContext&,
       EquationSystemView, EquationAssemblyCertificate&) noexcept;
   friend Status assemble_target_coupled_enthalpy_residual(
-      const EnthalpyEquationPlan&, const EquationStateView&,
-      const EquationMaterialView&, ConstFieldView,
-      const EquationAssemblyContext&, FieldView,
-      TargetCoupledEnthalpyResidualWorkspace,
-      EquationAssemblyCertificate&) noexcept;
+      const EnthalpyEquationPlan &, const EquationStateView &,
+      const EquationMaterialView &, ConstFieldView,
+      const EquationAssemblyContext &, FieldView,
+      TargetCoupledEnthalpyResidualWorkspace, EquationAssemblyCertificate &,
+      Span<const EquationContributionView>) noexcept;
   friend Status assemble_enthalpy_impl(
       const EnthalpyEquationPlan&, const EquationStateView&,
       const EquationMaterialView&, ConstFieldView,
@@ -4458,15 +4458,16 @@ Status assemble_enthalpy(
     EquationAssemblyCertificate& certificate) noexcept;
 
 // Candidate-only residual seam.  It accepts exactly a full-domain,
-// target-coupled, non-provisional flux and a contribution stage with no
-// registered energy sources/sinks.  The successful residual is bitwise equal
-// to assemble_enthalpy() for the same inputs and empty contributions.
+// target-coupled, non-provisional flux and the same admitted energy sources/
+// sinks as full assembly. The successful residual is bitwise equal to
+// assemble_enthalpy() for the same inputs and contributions.
 Status assemble_target_coupled_enthalpy_residual(
-    const EnthalpyEquationPlan& plan, const EquationStateView& state,
-    const EquationMaterialView& material, ConstFieldView velocity_gradient,
-    const EquationAssemblyContext& context, FieldView residual,
+    const EnthalpyEquationPlan &plan, const EquationStateView &state,
+    const EquationMaterialView &material, ConstFieldView velocity_gradient,
+    const EquationAssemblyContext &context, FieldView residual,
     TargetCoupledEnthalpyResidualWorkspace workspace,
-    EquationAssemblyCertificate& certificate) noexcept;
+    EquationAssemblyCertificate &certificate,
+    Span<const EquationContributionView> contributions = {}) noexcept;
 
 Status assemble_species(
     const SpeciesEquationPlan& plan, std::size_t species,

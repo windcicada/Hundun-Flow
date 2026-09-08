@@ -1293,16 +1293,18 @@ Status assemble_enthalpy(
 }
 
 Status assemble_target_coupled_enthalpy_residual(
-    const EnthalpyEquationPlan& plan, const EquationStateView& state,
-    const EquationMaterialView& material, ConstFieldView velocity_gradient,
-    const EquationAssemblyContext& context, FieldView residual,
+    const EnthalpyEquationPlan &plan, const EquationStateView &state,
+    const EquationMaterialView &material, ConstFieldView velocity_gradient,
+    const EquationAssemblyContext &context, FieldView residual,
     TargetCoupledEnthalpyResidualWorkspace workspace,
-    EquationAssemblyCertificate& certificate) noexcept {
+    EquationAssemblyCertificate &certificate,
+    Span<const EquationContributionView> contributions) noexcept {
   Span<const CompiledContribution> selected_descriptors{};
   if (!detail::select_contribution_stage(
           {plan.contributions_.data(), plan.contributions_.size()},
           context.contribution_stage, selected_descriptors) ||
-      selected_descriptors.size != 0U) {
+      !valid_contributions(contributions, selected_descriptors,
+                           context.contribution_stage, plan.cells_)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
 
@@ -1390,6 +1392,12 @@ Status assemble_target_coupled_enthalpy_residual(
     }
   }
 
+  for (std::size_t i = 0; i < contributions.size; ++i) {
+    if (aliases_output(contributions.data[i].explicit_source_density) ||
+        (contributions.data[i].has_implicit_sink &&
+         aliases_output(contributions.data[i].implicit_sink_density)))
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  }
   const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
                  box.begin.z + box.cells.z};
   for (std::int32_t z = box.begin.z; z < end.z; ++z) {
@@ -1398,8 +1406,8 @@ Status assemble_target_coupled_enthalpy_residual(
         const Int3 cell{x, y, z};
         EnthalpyCellTerms terms;
         const Status cell_status = evaluate_enthalpy_cell_terms(
-            *plan.kernels_, state, material, velocity_gradient, {}, context,
-            cell, false, terms);
+            *plan.kernels_, state, material, velocity_gradient, contributions,
+            context, cell, false, terms);
         if (!cell_status) return cell_status;
         workspace.pressure_work.unchecked(cell, 0U) = terms.pressure_work;
         workspace.viscous_dissipation.unchecked(cell, 0U) =
@@ -1446,6 +1454,13 @@ Status assemble_target_coupled_enthalpy_residual(
         terms.pressure_work = workspace.pressure_work.unchecked(cell, 0U);
         terms.viscous_dissipation =
             workspace.viscous_dissipation.unchecked(cell, 0U);
+        for (std::size_t i = 0; i < contributions.size; ++i) {
+          terms.source +=
+              contributions.data[i].explicit_source_density.unchecked(cell, 0U);
+          if (contributions.data[i].has_implicit_sink)
+            terms.sink +=
+                contributions.data[i].implicit_sink_density.unchecked(cell, 0U);
+        }
         form_enthalpy_linear_terms(*plan.kernels_, material, context, cell,
                                    rho, terms);
         EnthalpyCellSystem cell_system;
@@ -1458,10 +1473,14 @@ Status assemble_target_coupled_enthalpy_residual(
       }
     }
   }
-  certificate = {plan.fingerprint_, context.scope, context.time,
-                 context.geometry, context.face_flux,
-                 state_revision(state, material, velocity_gradient, {}),
-                 context.dt};
+  certificate = {
+      plan.fingerprint_,
+      context.scope,
+      context.time,
+      context.geometry,
+      context.face_flux,
+      state_revision(state, material, velocity_gradient, contributions),
+      context.dt};
   return {};
 }
 

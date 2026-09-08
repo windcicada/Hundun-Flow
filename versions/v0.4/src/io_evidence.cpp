@@ -163,7 +163,7 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
     if (anchor.source_format_version != 0U) {
       const bool rebuild = anchor.history_policy == RestartHistoryPolicy::rebuild_method_history;
       const bool missing = anchor.source_format_version == 1U;
-      if (anchor.source_format_version > 4U ||
+      if (anchor.source_format_version > 5U ||
           anchor.target_history_signature == 0U ||
           (anchor.source_format_version < 3U
                ? anchor.source_history_signature != 0U

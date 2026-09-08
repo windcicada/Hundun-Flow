@@ -13,9 +13,12 @@ function(checked label)
     message(FATAL_ERROR "${label} (${status}): ${output}${error}")
   endif()
 endfunction()
+if(NOT DEFINED INITIAL_STATE)
+  set(INITIAL_STATE "101325,300,0,0,0,0.25")
+endif()
 checked("coupled fresh CLI" "${PRODUCT}" run "${CASE_ROOT}"
   --output "${PROBE_ROOT}/fresh" --steps 2 --output-interval 1 --restart-interval 1
-  --initial-state 101325,300,0,0,0,0.25)
+  --initial-state "${INITIAL_STATE}")
 checked("fresh evidence" "${PYTHON}" "${VALIDATOR}" runtime "${PROBE_ROOT}/fresh/evidence.jsonl")
 file(READ "${PROBE_ROOT}/fresh/Restart/current" generation)
 string(STRIP "${generation}" generation)

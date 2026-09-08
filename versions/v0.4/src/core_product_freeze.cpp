@@ -12,6 +12,7 @@
 #include "core_esf_detail.hpp"
 #include "core_product_freeze_detail.hpp"
 #include "core_reaction_detail.hpp"
+#include "core_spray_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_initialization.hpp"
@@ -57,10 +58,10 @@ constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
 // Semantic history contract, independent of Git/build/partition identity.
 // Bump the affected component when its stored state, rate, flux or time
 // interpretation changes. Model/BC/transport parameters remain bound by plan.
-constexpr PlanFingerprint method_history_signature(bool transported_scalars,
-                                                   bool reacting = false,
-                                                   bool esf = false,
-                                                   bool tcr = false) noexcept {
+constexpr PlanFingerprint
+method_history_signature(bool transported_scalars, bool reacting = false,
+                         bool esf = false, bool tcr = false,
+                         bool spray = false) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
@@ -94,6 +95,13 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
   if (tcr)
     for (char byte : std::string_view(
              ";tcr-accepted-ph-statistics-v1;branch-history-bytes-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (spray)
+    for (char byte :
+         std::string_view(";spray-native-as-tab-be-v1;parcel-current-source-v1;"
+                          "parcel-cell-history-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -575,7 +583,9 @@ struct ProductFields {
   };
   std::vector<FieldId> esf_fields;
   std::uint8_t esf_components{};
-  FieldId esf_transport{}, coupled_mass_source{}, coupled_enthalpy_source{};
+  FieldId esf_transport{}, coupled_mass_source{}, coupled_enthalpy_source{},
+      coupled_momentum_source{};
+  std::vector<FieldId> coupled_species_sources, coupled_total_species_sources;
   std::vector<FieldId> reaction_conserved, reaction_sources;
   std::vector<FieldId> scalars;
   std::vector<ScalarBinding> scalar_bindings;
@@ -828,6 +838,18 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
           fields.reaction_conserved.push_back(id);
           fields.reaction_sources.push_back(source);
         }
+        if (model.spray) {
+          FieldId source{}, total{};
+          status = registry.require_field("parcel_source_" + scalar.stable_name,
+                                          1U, 0U, source);
+          if (status)
+            status = registry.require_field(
+                "current_source_" + scalar.stable_name, 1U, 0U, total);
+          if (!status)
+            return status;
+          fields.coupled_species_sources.push_back(source);
+          fields.coupled_total_species_sources.push_back(total);
+        }
       }
       FieldId rate = 0U;
       const std::string rate_name = "rhs_nonadv_" + scalar.stable_name;
@@ -854,12 +876,22 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     }
     status =
         require(registry, "esf_transport", 2U, ghosts, fields.esf_transport);
+    if (!status)
+      return status;
+  }
+  if (model.reaction.esf || model.spray) {
     if (status)
       status = require(registry, "coupled_mass_source", 1U, 0U,
                        fields.coupled_mass_source);
     if (status)
       status = require(registry, "coupled_enthalpy_source", 1U, 0U,
                        fields.coupled_enthalpy_source);
+    if (!status)
+      return status;
+  }
+  if (model.spray) {
+    status = require(registry, "coupled_momentum_source", 3U, 0U,
+                     fields.coupled_momentum_source);
     if (!status)
       return status;
   }
@@ -1278,6 +1310,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
         {{fields.esf_transport, StateVisibility::accepted}, ghosts, true});
     declarations.push_back(
         {{fields.esf_transport, StateVisibility::trial}, ghosts, false});
+  }
+  if (fields.coupled_mass_source) {
     declarations.push_back(
         {{fields.coupled_mass_source, StateVisibility::workspace}, 0U, false});
     declarations.push_back(
@@ -1285,6 +1319,18 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
          0U,
          false});
   }
+  if (fields.coupled_momentum_source) {
+    declarations.push_back(
+        {{fields.coupled_momentum_source, StateVisibility::workspace},
+         0U,
+         false});
+    declarations.push_back(
+        {{fields.pressure, StateVisibility::accepted}, ghosts, true});
+  }
+  for (FieldId field : fields.coupled_species_sources)
+    declarations.push_back({{field, StateVisibility::workspace}, 0U, false});
+  for (FieldId field : fields.coupled_total_species_sources)
+    declarations.push_back({{field, StateVisibility::workspace}, 0U, false});
   ExecutionGraphCompiler compiler;
   Status status = compiler.configure({declarations.data(), declarations.size()});
   if (!status) return status;
@@ -1339,12 +1385,25 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
         {fields.esf_transport, StateVisibility::accepted});
     predictor_ghosts.push_back(
         {fields.esf_transport, StateVisibility::accepted});
+  }
+  if (fields.coupled_mass_source) {
     predictor_writes.push_back(
         {fields.coupled_mass_source, StateVisibility::workspace});
     predictor_writes.push_back(
         {fields.coupled_enthalpy_source, StateVisibility::workspace});
-    for (FieldId source : fields.reaction_sources)
-      predictor_writes.push_back({source, StateVisibility::workspace});
+    if (!fields.esf_fields.empty())
+      for (FieldId source : fields.reaction_sources)
+        predictor_writes.push_back({source, StateVisibility::workspace});
+  }
+  if (fields.coupled_momentum_source) {
+    predictor_reads.push_back({fields.velocity, StateVisibility::accepted});
+    predictor_reads.push_back({fields.pressure, StateVisibility::accepted});
+    predictor_writes.push_back(
+        {fields.coupled_momentum_source, StateVisibility::workspace});
+    for (FieldId field : fields.coupled_species_sources)
+      predictor_writes.push_back({field, StateVisibility::workspace});
+    for (FieldId field : fields.coupled_total_species_sources)
+      predictor_writes.push_back({field, StateVisibility::workspace});
   }
   status = register_mutating(
       10U, std::move(predictor_reads), std::move(predictor_writes),
@@ -1385,8 +1444,11 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   }
   if (status) {
     StageSpec momentum;
-    const std::array reads{trial_rho, trial_u, trial_pi, trial_mu_eff,
-                           trial_grad, work_h_by_a};
+    std::vector<FieldAccessSpec> reads{trial_rho,    trial_u,    trial_pi,
+                                       trial_mu_eff, trial_grad, work_h_by_a};
+    if (!fields.coupled_species_sources.empty())
+      reads.push_back(
+          {fields.coupled_momentum_source, StateVisibility::workspace});
     const std::array writes{trial_u, work_momentum_diagonal,
                             work_momentum_rhs, work_momentum_residual,
                             work_h_by_a};
@@ -1446,6 +1508,13 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
         work_pressure_gradient, work_pressure_correction, work_drho_dp,
         work_drho_dh,
         work_pressure_energy_e_p, work_pressure_energy_e_h};
+    if (!fields.coupled_species_sources.empty()) {
+      reads.push_back({fields.coupled_mass_source, StateVisibility::workspace});
+      reads.push_back(
+          {fields.coupled_enthalpy_source, StateVisibility::workspace});
+      reads.push_back(
+          {fields.coupled_momentum_source, StateVisibility::workspace});
+    }
     std::vector<FieldAccessSpec> writes{
         trial_rho, trial_u, trial_pi, trial_h, trial_t,
         work_r_au, work_h_by_a, work_drho_dp, work_drho_dh,
@@ -1605,6 +1674,13 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
         trial_mu_eff, work_lambda, work_predictor_n};
     std::vector<FieldAccessSpec> writes{
         trial_h_rate, work_predictor_n, work_scalar_diffusivity};
+    if (!fields.coupled_species_sources.empty()) {
+      reads.push_back({fields.coupled_mass_source, StateVisibility::workspace});
+      reads.push_back(
+          {fields.coupled_enthalpy_source, StateVisibility::workspace});
+      reads.push_back(
+          {fields.coupled_momentum_source, StateVisibility::workspace});
+    }
     std::vector<FieldAccessSpec> ghosts_force{
         trial_pi, trial_h, trial_t, trial_grad, trial_mu, trial_mu_eff,
         work_lambda};
@@ -2748,6 +2824,7 @@ struct CompiledCasePlan::Impl {
   ContributionRegistry contributions;
   detail::ProductReactionSources reaction;
   detail::ProductEsf esf;
+  detail::ProductSpray spray;
   TurbulencePlan turbulence;
   EquationPlanSet equations;
   PisoPlan piso;
@@ -2909,7 +2986,7 @@ struct ProductDriver::Impl {
              terminal_audit != 0U;
     }
   } pending_pressure_reference{};
-  double closed_mass_target{};
+  double closed_mass_target{}, pending_closed_mass_target{};
   bool initialized{};
   bool pressure_mg_initialized{};
   bool pressure_correction_warm_start_valid{};
@@ -3011,6 +3088,8 @@ struct ProductDriver::Impl {
 
 void ProductDriver::Impl::clear_pending_attempt_side_state() noexcept {
   plan.implementation_->esf.tcr_history.discard();
+  plan.implementation_->spray.discard();
+  pending_closed_mass_target = 0;
   pending_pressure_reference = {};
   pending_force_cache = false;
   trial_enthalpy_ghost = {};
@@ -3065,6 +3144,10 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
   pressure_correction_warm_start_valid = true;
   balance_history = pending_balance;
   plan.implementation_->esf.tcr_history.commit();
+  if (plan.implementation_->spray.enabled()) {
+    plan.implementation_->spray.commit();
+    closed_mass_target = pending_closed_mass_target;
+  }
   clear_pending_attempt_side_state();
 }
 
@@ -3302,8 +3385,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return {StatusCode::invalid_plan, kProductInput};
   }
   Status status = product_collective_status(
-      communicator, model.fingerprint == 0U || out.implementation_ != nullptr ||
-                            model.spray.has_value()
+      communicator, model.fingerprint == 0U || out.implementation_ != nullptr
                         ? Status{StatusCode::invalid_plan, kProductInput}
                         : Status{});
   if (!status) return status;
@@ -3327,6 +3409,15 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = product_local_stage(communicator, [&] {
       return candidate->esf.configure(model, candidate->reaction,
                                       candidate->patch.cells);
+    });
+  if (status)
+    status = product_local_stage(communicator, [&] {
+      int rank = 0;
+      if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
+        return Status{StatusCode::mpi_failure, kProductCollective};
+      return candidate->spray.configure_local(
+          model, case_root, candidate->reaction, candidate->geometry,
+          candidate->patch, rank, candidate->esf.tcr_history.snapshot());
     });
   CpuExecutionRequest cpu_request;
   cpu_request.threads_per_rank = 1U;
@@ -3615,6 +3706,22 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
   }
   if (!status) return status;
+  if (status && candidate->spray.enabled()) {
+    std::vector<RemoteDonorFieldSpec> fields;
+    status = product_local_stage(communicator, [&] {
+      fields = {{candidate->fields.pressure, 1},
+                {candidate->fields.enthalpy, 1},
+                {candidate->fields.velocity, 3}};
+      for (FieldId scalar : candidate->fields.reaction_conserved)
+        fields.push_back({scalar, 1});
+      return Status{};
+    });
+    if (status)
+      status = candidate->spray.configure_collective(
+          communicator, {fields.data(), fields.size()});
+  }
+  if (!status)
+    return status;
   candidate->phases[1U] = ProductFreezePhase::capability_registration;
   std::array<std::int32_t, 3U> maximum_patch{
       candidate->patch.cells.x, candidate->patch.cells.y, candidate->patch.cells.z};
@@ -3719,6 +3826,22 @@ Status ProductCompiler::compile(MPI_Comm communicator,
              envelope, candidate->esf.tcr_history.snapshot().record_bytes,
              model_record_bytes)))
       return {StatusCode::invalid_plan, kProductAnalysis};
+    if (candidate->spray.enabled()) {
+      std::size_t records = 0, parcels = 0, injectors = 0;
+      if (!detail::product_checked_multiply(
+              envelope,
+              28U + candidate->esf.tcr_history.snapshot().record_bytes,
+              records) ||
+          !detail::product_checked_multiply(
+              model.spray->maximum_local_parcels,
+              detail::ProductSprayHistory::parcel_bytes, parcels) ||
+          !detail::product_checked_multiply(
+              model.spray->injectors.size(),
+              detail::ProductSprayHistory::injector_bytes, injectors) ||
+          !detail::product_checked_add(records, parcels, records) ||
+          !detail::product_checked_add(records, injectors, model_record_bytes))
+        return {StatusCode::invalid_plan, kProductAnalysis};
+    }
     if (!detail::product_checked_multiply(candidate->fields.scalars.size(), 4U,
                                           restart_components) ||
         !detail::product_checked_add(restart_components, model_components,
@@ -3786,6 +3909,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = ArenaLayout::compile(candidate->schema,
                                     {requests.data(), requests.size()},
                                     candidate->layout);
+    if (status && candidate->spray.enabled()) {
+      const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
+      const auto model_bytes = candidate->spray.owned_bytes();
+      if (model_bytes > limit || candidate->layout.total_doubles() >
+              (limit - model_bytes) / sizeof(double))
+        status = {StatusCode::allocation_failure, kProductAllocation};
+    }
     if (status)
       status = StateLayers::allocate(candidate->layout, candidate->layers);
     if (!status) {
@@ -3828,7 +3958,27 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           {declared.data(), declared.size()},
           {candidate->esf.enabled() ? 0U : candidate->reaction.fingerprint(),
            candidate->esf.enabled() ? candidate->reaction.fingerprint() : 0U,
-           0U});
+           candidate->spray.fingerprint()});
+      if (status && candidate->spray.enabled()) {
+        const FieldId reads[]{candidate->fields.rho, candidate->fields.velocity,
+                              candidate->fields.pressure,
+                              candidate->fields.enthalpy};
+        ContributionSpec source;
+        source.conserved_quantity = candidate->fields.velocity;
+        source.explicit_source = candidate->fields.coupled_momentum_source;
+        source.stage = 1U;
+        source.units.si_exponents = {1, -2, -2, 0, 0, 0, 0};
+        source.reads = {reads, 4};
+        source.capability = ContributionCapability::parcel_exchange;
+        source.source_identity = candidate->spray.fingerprint();
+        status = candidate->contributions.register_contribution(source);
+        source.conserved_quantity = candidate->fields.enthalpy;
+        source.explicit_source = candidate->fields.coupled_enthalpy_source;
+        source.units.si_exponents = {1, -1, -3, 0, 0, 0, 0};
+        source.stage = 2U; // current exchange is excluded from stored EX2 rates
+        if (status)
+          status = candidate->contributions.register_contribution(source);
+      }
       if (status) status = candidate->reaction.bind(
           {candidate->fields.reaction_conserved.data(), candidate->fields.reaction_conserved.size()},
           {candidate->fields.reaction_sources.data(), candidate->fields.reaction_sources.size()});
@@ -3885,7 +4035,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     EquationPlanSpec equation_spec;
     equation_spec.unity_lewis_total_enthalpy = candidate->esf.enabled();
     equation_spec.mass_source_identity =
-        candidate->esf.enabled() ? candidate->reaction.fingerprint() : 0U;
+        candidate->spray.enabled() ? candidate->spray.fingerprint()
+        : candidate->esf.enabled() ? candidate->reaction.fingerprint()
+                                   : 0U;
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
     equation_spec.pressure_perturbation = candidate->fields.pressure;
@@ -6164,10 +6316,13 @@ Status ProductDriver::restart_expected(
   }
   out.method_history_signature = method_history_signature(
       !product.fields.scalars.empty(), product.reaction.enabled(),
-      product.esf.enabled(), product.esf.tcr_history.enabled());
+      product.esf.enabled(), product.esf.tcr_history.enabled(),
+      product.spray.enabled());
   if (history_policy == RestartHistoryPolicy::rebuild_method_history)
     out.compatible_method_plan = product.legacy_afc_v3_fingerprint;
-  const auto records = product.esf.tcr_history.snapshot();
+  const auto records = product.spray.enabled()
+                           ? product.spray.history.snapshot()
+                           : product.esf.tcr_history.snapshot();
   out.cell_record_identity = records.identity;
   out.cell_record_bytes = records.record_bytes;
   return {};
@@ -7005,7 +7160,8 @@ Status ProductDriver::initialize_restart(
   const auto history_compatibility =
       image.history_compatibility(method_history_signature(
           !product.fields.scalars.empty(), product.reaction.enabled(),
-          product.esf.enabled(), product.esf.tcr_history.enabled()));
+          product.esf.enabled(), product.esf.tcr_history.enabled(),
+          product.spray.enabled()));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -7049,7 +7205,7 @@ Status ProductDriver::initialize_restart(
     status = {StatusCode::invalid_plan, kProductHistoryIncompatible};
   if (status &&
       ((image.source_format_version == 1U) != image.backward_euler_recovery ||
-       image.source_format_version < 1U || image.source_format_version > 4U ||
+       image.source_format_version < 1U || image.source_format_version > 5U ||
        (image.source_format_version < 3U &&
         image.method_history_signature != 0U) ||
        (image.source_format_version >= 3U &&
@@ -7126,8 +7282,20 @@ Status ProductDriver::initialize_restart(
       for (double value : face)
         if (status && !std::isfinite(value))
           status = {StatusCode::numerical_failure, kProductInput};
-  if (status)
-    status = product.esf.tcr_history.stage_restore(image);
+  if (status) {
+    if (product.spray.enabled()) {
+      status = product.spray.stage_restore(image);
+      if (status)
+        status = product.esf.tcr_history.stage_restore_records(
+            product.spray.history.prepared_tcr_records(), image.step);
+      status = product_collective_status(runtime.communicator, status);
+      if (status)
+        status = product.spray.validate_restored_positions();
+      if (status)
+        status = product.spray.preflight_commit();
+    } else
+      status = product.esf.tcr_history.stage_restore(image);
+  }
   // All malformed-checkpoint decisions become collective before any rank
   // constructs a view into the checkpoint or enters a later mass reduction.
   status = product.reductions.consensus(status);
@@ -7715,6 +7883,8 @@ Status ProductDriver::initialize_restart(
                      product.final_flux, restored_flux);
   if (!status) return status;
   product.esf.tcr_history.commit();
+  if (product.spray.enabled())
+    product.spray.commit();
   runtime.time = std::move(controller);
   runtime.pressure_reference = image.pressure_reference;
   runtime.previous_pressure_reference =
@@ -8173,11 +8343,120 @@ Status ProductDriver::Impl::execute_attempt(
     }
   }
   ConservativeMassSourceView coupled_mass_source;
+  FieldView spray_mass, spray_enthalpy, spray_momentum;
+  std::array<FieldView, UINT8_MAX> spray_sources{}, combined_sources{};
+  std::array<EquationContributionView, 1> momentum_sources{},
+      enthalpy_sources{};
+  Span<const EquationContributionView> momentum_contributions,
+      enthalpy_contributions;
+  double attempt_closed_mass_target = closed_mass_target;
+  if (status && product.spray.enabled()) {
+    std::array<FieldView, UINT8_MAX> inputs{};
+    FieldView pressure, enthalpy, velocity;
+    status = product.layers.view(StateRole::accepted_n, product.fields.pressure,
+                                 pressure);
+    if (status)
+      status = product.layers.view(StateRole::accepted_n,
+                                   product.fields.enthalpy, enthalpy);
+    if (status)
+      status = product.layers.view(StateRole::accepted_n,
+                                   product.fields.velocity, velocity);
+    for (std::size_t i = 0;
+         i < product.fields.reaction_conserved.size() && status; ++i)
+      status =
+          product.layers.view(StateRole::accepted_n,
+                              product.fields.reaction_conserved[i], inputs[i]);
+    status = product.reductions.consensus(status);
+    if (status)
+      status = product.spray.prepare(
+          {step.accepted_step, step.generation, 1}, step.dt, pressure_reference,
+          rho_history.accepted, pressure, enthalpy, velocity,
+          {inputs.data(), product.fields.reaction_conserved.size()});
+    if (status)
+      status =
+          runtime_write_view(product.fields.coupled_mass_source, spray_mass);
+    if (status)
+      status = runtime_write_view(product.fields.coupled_enthalpy_source,
+                                  spray_enthalpy);
+    if (status)
+      status = runtime_write_view(product.fields.coupled_momentum_source,
+                                  spray_momentum);
+    for (std::size_t i = 0;
+         i < product.fields.coupled_species_sources.size() && status; ++i) {
+      status = runtime_write_view(product.fields.coupled_species_sources[i],
+                                  spray_sources[i]);
+      if (status)
+        status =
+            runtime_write_view(product.fields.coupled_total_species_sources[i],
+                               combined_sources[i]);
+    }
+    double mass_delta = 0;
+    const auto exchange = product.spray.exchange();
+    if (status &&
+        (!exchange.available ||
+         exchange.cell_count != std::size_t(cells.x) * cells.y * cells.z))
+      status = {StatusCode::invalid_plan, kProductBinding};
+    std::size_t index = 0;
+    for (int z = 0; z < cells.z && status; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x, ++index) {
+          const Int3 cell{x, y, z};
+          const auto &row = exchange.cells[index];
+          const double scale = 1. / (row.volume_m3 * step.dt);
+          spray_mass.unchecked(cell, 0) = row.gas.gas_mass_delta_kg * scale;
+          spray_enthalpy.unchecked(cell, 0) =
+              row.gas.gas_thermochemical_enthalpy_delta_j * scale;
+          for (unsigned d = 0; d < 3; ++d)
+            spray_momentum.unchecked(cell, d) =
+                row.gas.gas_momentum_delta_kg_m_per_s[d] * scale;
+          for (std::size_t s = 0;
+               s < product.fields.coupled_species_sources.size(); ++s)
+            spray_sources[s].unchecked(cell, 0) =
+                row.gas_species_mass_delta_kg[product.reaction.species_indices()
+                                                  .data[s]] *
+                scale;
+          mass_delta += row.gas.gas_mass_delta_kg;
+        }
+    status = product.reductions.consensus(status);
+    if (status) {
+      double global_delta = 0;
+      if (MPI_Allreduce(&mass_delta, &global_delta, 1, MPI_DOUBLE, MPI_SUM,
+                        communicator) != MPI_SUCCESS)
+        status = {StatusCode::mpi_failure, kProductCollective};
+      attempt_closed_mass_target += global_delta;
+      if (!std::isfinite(attempt_closed_mass_target) ||
+          attempt_closed_mass_target <= 0)
+        status = {StatusCode::rejected_step, kProductBinding};
+    }
+    if (status) {
+      coupled_mass_source = {as_const(spray_mass), product.spray.fingerprint(),
+                             step.generation};
+      auto &source = momentum_sources[0];
+      source.explicit_source_density = as_const(spray_momentum);
+      source.conserved_quantity = product.fields.velocity;
+      source.units.si_exponents = {1, -2, -2, 0, 0, 0, 0};
+      source.stage = 1;
+      source.explicit_source_field = product.fields.coupled_momentum_source;
+      source.capability = ContributionCapability::parcel_exchange;
+      source.source_identity = product.spray.fingerprint();
+      momentum_contributions = {momentum_sources.data(), 1};
+      enthalpy_sources[0] = source;
+      enthalpy_sources[0].explicit_source_density = as_const(spray_enthalpy);
+      enthalpy_sources[0].conserved_quantity = product.fields.enthalpy;
+      enthalpy_sources[0].units.si_exponents = {1, -1, -3, 0, 0, 0, 0};
+      enthalpy_sources[0].stage = 2;
+      enthalpy_sources[0].explicit_source_field =
+          product.fields.coupled_enthalpy_source;
+      enthalpy_contributions = {enthalpy_sources.data(), 1};
+      for (std::size_t s = 0; s < species_rate_history.size(); ++s)
+        species_rate_history[s].current = as_const(spray_sources[s]);
+    }
+  }
   std::array<FieldView, UINT8_MAX> esf_sources{};
   if (status && product.esf.enabled()) {
     FieldView mass;
     status = runtime_write_view(product.fields.coupled_mass_source, mass);
-    if (status) {
+    if (status && !product.spray.enabled()) {
       fill_field(mass, 0.0);
       coupled_mass_source = {as_const(mass), product.reaction.fingerprint(),
                              step.generation};
@@ -8200,6 +8479,21 @@ Status ProductDriver::Impl::execute_attempt(
       for (std::size_t s = 0; s < species_rate_history.size(); ++s)
         species_rate_history[s].current = as_const(esf_sources[s]);
   }
+  if (status && product.spray.enabled() && product.esf.enabled()) {
+    for (std::size_t s = 0; s < species_rate_history.size(); ++s) {
+      for (int z = 0; z < cells.z; ++z)
+        for (int y = 0; y < cells.y; ++y)
+          for (int x = 0; x < cells.x; ++x) {
+            const Int3 cell{x, y, z};
+            combined_sources[s].unchecked(cell, 0) =
+                spray_sources[s].unchecked(cell, 0) +
+                esf_sources[s].unchecked(cell, 0);
+          }
+      species_rate_history[s].current = as_const(combined_sources[s]);
+    }
+  }
+  if (status && product.spray.enabled())
+    status = product.spray.stage(product.esf.tcr_history.prepared_snapshot());
   ThermophysicalPredictorInput predictor_input;
   predictor_input.mass_source = coupled_mass_source;
   predictor_input.dt = step.dt;
@@ -8231,6 +8525,9 @@ Status ProductDriver::Impl::execute_attempt(
       enthalpy_rate_history.accepted,
       effective_bdf.order == 2U ? enthalpy_rate_history.previous
                                 : ConstFieldView{}};
+  if (product.spray.enabled())
+    predictor_input.enthalpy_nonadvective_rhs.current =
+        as_const(spray_enthalpy);
   predictor_input.species_nonadvective_rhs = {
       species_rate_history.data(), species_rate_history.size()};
   predictor_input.passive_scalar_nonadvective_rhs = {
@@ -9060,7 +9357,7 @@ Status ProductDriver::Impl::execute_attempt(
                        communicator, product.closed_mass,
                        product.thermodynamics, predictor_certificate,
                        product.equations.pressure_reference().service_stage(),
-                       closed_cells, closed_mass_target,
+                       closed_cells, attempt_closed_mass_target,
                        attempt_pressure_reference, closed_result,
                        pressure_reference_certificate);
     }
@@ -9333,6 +9630,7 @@ Status ProductDriver::Impl::execute_attempt(
   FaceFieldView y_coefficient;
   FaceFieldView z_coefficient;
   EquationStateView equation_state;
+  equation_state.mass_source = coupled_mass_source;
   EquationMaterialView material;
   EquationAssemblyContext assembly;
   EquationSystemView momentum_system;
@@ -9430,8 +9728,9 @@ Status ProductDriver::Impl::execute_attempt(
         if (prerequisite)
           prerequisite = assemble_momentum_predictor(
               product.equations.momentum(), equation_state, material,
-              as_const(velocity_gradient), {}, assembly, momentum_system,
-              momentum_low_order_rhs_delta, momentum_certificate);
+              as_const(velocity_gradient), momentum_contributions, assembly,
+              momentum_system, momentum_low_order_rhs_delta,
+              momentum_certificate);
         // Equation kernels are rank-local. Resolve a local failure before the
         // next halo collective so every rank follows the same rollback path.
         prerequisite = product.reductions.consensus(prerequisite);
@@ -10186,11 +10485,14 @@ Status ProductDriver::Impl::execute_attempt(
           assembly.provisional_mass_flux = false;
         }
         EquationAssemblyCertificate energy_certificate;
+        auto enthalpy_assembly = assembly;
+        if (product.spray.enabled())
+          enthalpy_assembly.contribution_stage = 2;
         if (assembled)
           assembled = assemble_enthalpy(
               product.equations.enthalpy(), equation_state, material,
-              as_const(velocity_gradient), {}, assembly,
-              pressure_energy_system, energy_certificate);
+              as_const(velocity_gradient), enthalpy_contributions,
+              enthalpy_assembly, pressure_energy_system, energy_certificate);
         if (assembled && product.ibm_equations.has_value()) {
           zero_field(pressure_energy_e_p);
           assembled = product.ibm_equations->correct_pressure_work(
@@ -12194,14 +12496,16 @@ Status ProductDriver::Impl::execute_attempt(
             product.ibm_equations.has_value() ? &*product.ibm_equations
                                               : nullptr;
         candidate_assembly.wall_treatment = nullptr;
+        if (product.spray.enabled())
+          candidate_assembly.contribution_stage = 2;
         const auto assemble_candidate_energy = [&]() noexcept {
           const TargetCoupledEnthalpyResidualWorkspace residual_workspace{
               pressure_energy_e_h, pressure_energy_r_c,
               pressure_energy_e_p};
           Status assembled = assemble_target_coupled_enthalpy_residual(
-              product.equations.enthalpy(), candidate_state,
-              candidate_material, candidate_gradient, candidate_assembly,
-              pressure_energy_r_e, residual_workspace, artifacts.energy);
+              product.equations.enthalpy(), candidate_state, candidate_material,
+              candidate_gradient, candidate_assembly, pressure_energy_r_e,
+              residual_workspace, artifacts.energy, enthalpy_contributions);
           if (assembled && product.ibm_equations.has_value()) {
             zero_field(pressure_energy_e_p);
             assembled = product.ibm_equations->correct_pressure_work(
@@ -12387,7 +12691,7 @@ Status ProductDriver::Impl::execute_attempt(
               double absolute_pi = 0.0;
               double compressibility_moment = 0.0;
               double compressibility_weight = 0.0;
-              const int terminal = hf_coast_common_terminal_cell_v1(
+              const int terminal = hf_coast_common_terminal_cell_v2(
                   rho, rho, rho_n, rho_nm1, volume, effective_bdf.a0,
                   effective_bdf.a1, effective_bdf.a2,
                   artifacts.flux.x.unchecked(cell),
@@ -12396,12 +12700,14 @@ Status ProductDriver::Impl::execute_attempt(
                   artifacts.flux.y.unchecked({x, y + 1, z}),
                   artifacts.flux.z.unchecked(cell),
                   artifacts.flux.z.unchecked({x, y, z + 1}),
+                  coupled_mass_source.identity
+                      ? coupled_mass_source.rate.unchecked(cell, 0)
+                      : 0.,
                   pressure_energy_candidate_pressure.unchecked(cell, 0U),
                   pressure_reference_kind == PressureReferenceKind::closed_mass
                       ? 1
                       : 0,
-                  pressure_energy_candidate_compressibility.unchecked(cell,
-                                                                        0U),
+                  pressure_energy_candidate_compressibility.unchecked(cell, 0U),
                   &eos_residual, &continuity_residual, &mass, &volume_sum,
                   &absolute_pi, &compressibility_moment,
                   &compressibility_weight);
@@ -14966,7 +15272,7 @@ Status ProductDriver::Impl::execute_attempt(
   audit.step_dt = step.dt;
   audit.convective_cfl_limit = product.time.spec().convective_cfl;
   audit.mass_source = coupled_mass_source;
-  audit.closed_mass_target = closed_mass_target;
+  audit.closed_mass_target = attempt_closed_mass_target;
   audit.boundary_closure_residual = local_boundary_closure_residual;
   audit.boundary_closure_samples = local_boundary_closure_samples;
   audit.energy_residual = local_normalized_energy_residual;
@@ -15428,9 +15734,10 @@ Status ProductDriver::Impl::execute_attempt(
     EquationAssemblyCertificate final_momentum;
     status = assemble_momentum(
         product.equations.momentum(), equation_state, material,
-        as_const(velocity_gradient), {}, assembly,
-        {momentum_diagonal, momentum_rhs, momentum_residual,
-         x_coefficient, y_coefficient, z_coefficient}, final_momentum);
+        as_const(velocity_gradient), momentum_contributions, assembly,
+        {momentum_diagonal, momentum_rhs, momentum_residual, x_coefficient,
+         y_coefficient, z_coefficient},
+        final_momentum);
   }
   int diagnostic_rank = -1;
   if (status && MPI_Comm_rank(communicator, &diagnostic_rank) != MPI_SUCCESS)
@@ -15478,6 +15785,11 @@ Status ProductDriver::Impl::execute_attempt(
     // have now passed. Publish that outcome without inventing another solve.
     report.pressure_energy_refinement_termination =
         PressureEnergyRefinementTermination::component_residuals_converged;
+  }
+  if (status && product.spray.enabled()) {
+    status = product.spray.preflight_commit();
+    if (status)
+      pending_closed_mass_target = attempt_closed_mass_target;
   }
   if (status) status = solve_epoch.finalize(report);
   if (status)
@@ -16091,8 +16403,11 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
       runtime.closed_mass_target,
       method_history_signature(
           !product.fields.scalars.empty(), product.reaction.enabled(),
-          product.esf.enabled(), product.esf.tcr_history.enabled())};
-  out.cell_records = product.esf.tcr_history.snapshot();
+          product.esf.enabled(), product.esf.tcr_history.enabled(),
+          product.spray.enabled())};
+  out.cell_records = product.spray.enabled()
+                         ? product.spray.history.snapshot()
+                         : product.esf.tcr_history.snapshot();
   return {};
 }
 

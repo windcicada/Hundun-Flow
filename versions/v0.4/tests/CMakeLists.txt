@@ -1925,6 +1925,15 @@ foreach(sanitizer_test IN LISTS HUNDUN_V04_FOCUSED_SANITIZER_TESTS)
   endif()
 endforeach()
 
+add_executable(v04_product_spray_mpi_test mpi/product_spray_mpi_test.cpp)
+target_link_libraries(v04_product_spray_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(spray_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_spray_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-mean")
+  set_tests_properties(v04_product_spray_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+endforeach()
+
 add_executable(v04_product_reaction_mpi_test mpi/product_reaction_mpi_test.cpp)
 target_link_libraries(v04_product_reaction_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
 foreach(reaction_ranks IN ITEMS 1 2 4)
@@ -1988,17 +1997,22 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-esf reacting-tcr-experimental)
+set(coupled_cli_cases reacting-esf reacting-tcr-experimental reacting-spray-mean)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
   list(APPEND coupled_cli_cases reacting-cantera-esf)
 endif()
 foreach(coupled_case IN LISTS coupled_cli_cases)
+  set(coupled_initial_state "101325,300,0,0,0,0.25")
+  if(coupled_case STREQUAL "reacting-spray-mean")
+    set(coupled_initial_state "101325,400,0,0,0,0.01")
+  endif()
   add_test(NAME v04_coupled_restart_cli_${coupled_case}
     COMMAND "${CMAKE_COMMAND}"
       "-DPRODUCT=$<TARGET_FILE:hundun>"
       "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
       "-DNUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
       "-DCASE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${coupled_case}"
+      "-DINITIAL_STATE=${coupled_initial_state}"
       "-DPROBE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/coupled-cli-${coupled_case}"
       "-DPYTHON=${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "-DVALIDATOR=${hundun_repository_root}/tools/v04_evidence_validate.py"
