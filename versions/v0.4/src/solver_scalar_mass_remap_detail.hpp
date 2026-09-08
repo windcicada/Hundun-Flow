@@ -5,6 +5,7 @@
 
 #include "hundun/v04_flow.hpp"
 #include "solver_cartesian_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
 
 #include <algorithm>
@@ -153,13 +154,27 @@ class ScalarMassRemap {
     if (intervals_.empty()) return {};
     Status local;
     if (input.passive_scalars_accepted.size != intervals_.size() ||
-        input.passive_scalar_nonadvective_rhs.size != intervals_.size())
+        input.passive_scalar_nonadvective_rhs.size != intervals_.size() ||
+        !input.passive_scalars_accepted.data ||
+        !input.passive_scalar_nonadvective_rhs.data || !boundary_ ||
+        !std::isfinite(input.dt) || input.dt <= 0 ||
+        !valid_cell_view(input.density_accepted, cells_, 0U, 1U, 0U) ||
+        !valid_mass_source(input.mass_source, input.mass_source.identity,
+                           input.time, cells_))
       local = {StatusCode::invalid_plan, kInvalid};
     std::fill(bounds_local_.begin(), bounds_local_.end(),
               -std::numeric_limits<double>::max());
     for (std::size_t s = 0U; s < intervals_.size() && local; ++s) {
       const auto q = input.passive_scalars_accepted.data[s];
       const auto rate = input.passive_scalar_nonadvective_rhs.data[s].accepted;
+      const auto current =
+          input.passive_scalar_nonadvective_rhs.data[s].current;
+      if (!valid_cell_view(q, cells_, 0U, 1U, 1U) ||
+          (rate.base && !valid_cell_view(rate, cells_, 0U, 1U, 0U)) ||
+          (current.base && !valid_cell_view(current, cells_, 0U, 1U, 0U))) {
+        local = {StatusCode::invalid_plan, kInvalid};
+        break;
+      }
       const auto include = [&](double value) {
         if (!std::isfinite(value)) { local = {StatusCode::rejected_step, kInvalid}; return; }
         bounds_local_[2U*s] = std::max(bounds_local_[2U*s], -value);
@@ -174,9 +189,23 @@ class ScalarMassRemap {
             // Include the explicit physical/source endpoint. This permits
             // signed/source-driven passives without imposing [0,1]. A stable
             // source-free diffusion step does not enlarge the global range.
-            if (rate.base)
-              include(value + input.dt * rate.unchecked(c,0U) /
-                                input.density_accepted.unchecked(c,0U));
+            if (!current.base && !input.mass_source.identity && rate.base) {
+              include(value + input.dt * rate.unchecked(c, 0U) /
+                                  input.density_accepted.unchecked(c, 0U));
+            } else if (current.base || input.mass_source.identity) {
+              const double rho = input.density_accepted.unchecked(c, 0U);
+              const double mass =
+                  rho + input.dt * mass_source_rate(input.mass_source, c);
+              if (!std::isfinite(rho) || rho <= 0 || !std::isfinite(mass) ||
+                  mass <= 0) {
+                local = {StatusCode::rejected_step, kInvalid};
+              } else {
+                const double rhs =
+                    (rate.base ? rate.unchecked(c, 0U) : 0.0) +
+                    (current.base ? current.unchecked(c, 0U) : 0.0);
+                include((rho * value + input.dt * rhs) / mass);
+              }
+            }
             for (int f = 0; f < 6; ++f) {
               const BoundaryFacePlan* face = nullptr;
               const int axis = f/2, n = axis==0 ? x : axis==1 ? y : z;

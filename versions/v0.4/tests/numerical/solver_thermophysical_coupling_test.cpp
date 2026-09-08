@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "../../src/solver_scalar_mass_remap_detail.hpp"
 #include "hundun/v04_flow.hpp"
 
 #include <mpi.h>
@@ -512,6 +513,62 @@ bool test_predictor_mms_orders() {
                          observed_order(e32, e64) >= 1.8,
                      "uniform/stretched predictor order >= 1.8");
   }
+  return passed;
+}
+
+// Source endpoints define the admissible passive range before the predictor.
+// Injected gas may dilute a signed passive even when its own source is zero.
+bool test_passive_exchange_intervals() {
+  Fixture fixture;
+  if (!make_fixture(4, PressureReferenceKind::closed_mass, fixture))
+    return false;
+  detail::ScalarMassRemap remap;
+  const FieldId field = 91;
+  const TransportedScalarRole role = TransportedScalarRole::passive_scalar;
+  ReductionEngine reductions;
+  if (!remap.allocate(fixture.patch, {&field, 1}, {&role, 1}, 2) ||
+      !remap.bind(MPI_COMM_SELF, fixture.boundary) ||
+      !ReductionEngine::compile(MPI_COMM_SELF, ReductionMode::reproducible_tree,
+                                2, reductions))
+    return false;
+  auto rho = make_field(kDensity, fixture.patch.cells, 0, 890);
+  auto q = make_field(field, fixture.patch.cells, 2, 891);
+  auto source = make_field(92, fixture.patch.cells, 0, 892);
+  auto mass = make_field(93, fixture.patch.cells, 0, 893);
+  fill(rho, 2.0);
+  fill(q, -3.0);
+  fill(source, 4.0);
+  fill(mass, 1.0);
+  const auto accepted = as_const(q.view);
+  PredictorRateHistory rates{};
+  rates.current = as_const(source.view);
+  ThermophysicalPredictorInput input;
+  input.dt = .5;
+  input.time = 894;
+  input.density_accepted = as_const(rho.view);
+  input.passive_scalars_accepted = {&accepted, 1};
+  input.passive_scalar_nonadvective_rhs = {&rates, 1};
+  input.mass_source = {as_const(mass.view), 0x50415243U, input.time};
+  bool passed = true;
+  for (const bool current : {true, false}) {
+    rates.current = current ? as_const(source.view) : ConstFieldView{};
+    const auto status = remap.prepare_passive_intervals(input, reductions);
+    const double endpoint = current ? -1.6 : -2.4;
+    passed &=
+        expect(status && input.passive_intervals.size == 1 &&
+                   close(input.passive_intervals.data[0].lower, -3) &&
+                   close(input.passive_intervals.data[0].upper, endpoint),
+               "passive bounds include conservative exchange and gas dilution");
+  }
+  if (!passed)
+    return false;
+  const auto prior = input.passive_intervals.data[0];
+  fill(mass, -4.0); // zero endpoint inventory must reject, never clip.
+  const auto rejected = remap.prepare_passive_intervals(input, reductions);
+  passed &= expect(
+      !rejected && input.passive_intervals.data[0].lower == prior.lower &&
+          input.passive_intervals.data[0].upper == prior.upper,
+      "invalid exchange inventory preserves published passive intervals");
   return passed;
 }
 
@@ -1087,7 +1144,8 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
-  const bool passed = test_bdf2_predictor_and_mutations() &&
+  const bool passed = test_passive_exchange_intervals() &&
+                      test_bdf2_predictor_and_mutations() &&
                       test_bdf2_predictor_and_mutations(true);
   const bool mms_passed = test_predictor_mms_orders();
   const bool rates_passed =
