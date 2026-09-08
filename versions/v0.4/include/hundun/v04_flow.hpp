@@ -1398,7 +1398,7 @@ inline constexpr double kPressureEnergyAitkenMaximumAlpha = 2.0;
 // A pure, already-globally-reduced sample.  The policy below neither evaluates
 // candidate fields nor performs MPI communication; its caller is responsible
 // for synchronously producing p/h/rho/T/U and final mass-flux provenance.
-// Merit is the Euclidean norm of the two normalized residuals.  This permits
+// Merit is the weighted Euclidean norm of the two normalized residuals. This permits
 // a coupled Newton direction to exchange residual between blocks while still
 // requiring joint descent.  A candidate must satisfy
 // merit(alpha) <= (1-c*alpha)*merit(0), as well as strict decrease.
@@ -1413,6 +1413,10 @@ struct PressureEnergyGlobalizationSample {
   PlanFingerprint correction_direction{};
   PlanFingerprint state_provenance{};
   PlanFingerprint mass_flux_provenance{};
+  // Merit = hypot(C, energy_merit_weight * E). Use C_target/E_target
+  // when the two terminal gates differ; raw residuals remain unmodified.
+  // One preserves the legacy joint-L2 policy and its provenance.
+  double energy_merit_weight{1.0};
 };
 
 enum class PressureEnergyGlobalizationScope : std::uint8_t {
@@ -1449,6 +1453,7 @@ struct PressureEnergyGlobalizationSelectionCertificate {
   bool armijo_sufficient_decrease{};
   bool full_nonlinear_newton{};
   bool extrapolated{};
+  double energy_merit_weight{1.0};
 
   bool valid() const noexcept;
 };

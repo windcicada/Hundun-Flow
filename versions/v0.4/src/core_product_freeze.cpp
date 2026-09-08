@@ -10743,12 +10743,22 @@ Status ProductDriver::Impl::execute_attempt(
             }
         return fingerprint == 0U ? PlanFingerprint{1U} : fingerprint;
       };
+  // A transported constant needs roundoff-level continuity pairing; energy
+  // retains the case terminal tolerance. Keep these independent gates and
+  // use their ratio only in the globalization merit, never in raw metrics.
+  const double coupled_continuity_target = scalar_remap.has_value()
+      ? std::min(product.summary.terminal_continuity_tolerance,
+                 16.0 * std::numeric_limits<double>::epsilon())
+      : product.summary.terminal_continuity_tolerance;
+  const double energy_merit_weight = coupled_continuity_target /
+      product.summary.terminal_continuity_tolerance;
   const auto initialize_candidate_sample =
       [&](double alpha, std::size_t ordinal, std::uint8_t corrector,
           PlanFingerprint direction,
           PressureEnergyCandidateArtifacts& artifacts) noexcept {
         artifacts = {};
         PressureEnergyGlobalizationSample& sample = artifacts.sample;
+        sample.energy_merit_weight = energy_merit_weight;
         sample.alpha = alpha;
         sample.global_normalized_continuity =
             std::numeric_limits<double>::infinity();
@@ -12955,16 +12965,9 @@ Status ProductDriver::Impl::execute_attempt(
         merit = 0.0;
         return loop.replay_valid && detail::product_pressure_coupled_merit(
             loop.replay.sample.global_normalized_continuity,
-            loop.replay.sample.global_normalized_energy, merit);
+            loop.replay.sample.energy_merit_weight *
+                loop.replay.sample.global_normalized_energy, merit);
       };
-  // A transported constant inherits the discrete continuity residual. The
-  // scalar remap needs a roundoff-level mass-pairing closure, independently
-  // of the user-facing flow acceptance ceiling. Do not weaken either gate,
-  // or change the zero-scalar production path.
-  const double coupled_continuity_target = scalar_remap.has_value()
-      ? std::min(product.summary.terminal_continuity_tolerance,
-                 16.0 * std::numeric_limits<double>::epsilon())
-      : product.summary.terminal_continuity_tolerance;
   const auto pressure_energy_components_converged =
       [&](const PressureEnergyCandidateLoopResult& loop) noexcept {
         return loop.replay_valid &&
@@ -12992,7 +12995,8 @@ Status ProductDriver::Impl::execute_attempt(
           forcing.normalized_continuity =
               loop->replay.sample.global_normalized_continuity;
           forcing.normalized_energy =
-              loop->replay.sample.global_normalized_energy;
+              loop->replay.sample.energy_merit_weight *
+                  loop->replay.sample.global_normalized_energy;
           forcing.residual_available = true;
         }
         return detail::product_pressure_inexact_forcing_control(
@@ -13617,6 +13621,8 @@ Status ProductDriver::Impl::execute_attempt(
                       loop.selection.selected_halvings];
         const PressureEnergyGlobalizationSample& replay = loop.replay.sample;
         const bool matching_replay =
+            replay.energy_merit_weight == expected.energy_merit_weight &&
+            replay.energy_merit_weight == energy_merit_weight &&
             replay.alpha == expected.alpha &&
             replay.corrector == expected.corrector &&
             replay.target_time == expected.target_time &&
@@ -13637,6 +13643,7 @@ Status ProductDriver::Impl::execute_attempt(
              loop.replay.alpha_zero_byte_equivalent) &&
             (loop.stationary.valid() ||
              (loop.selection.valid() &&
+              loop.selection.energy_merit_weight == energy_merit_weight &&
               replay.state_provenance ==
                   loop.selection.candidate_state_provenance &&
               replay.mass_flux_provenance ==

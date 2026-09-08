@@ -83,7 +83,18 @@ double pressure_energy_globalization_merit(
   // descent.  hypot is the overflow-safe Euclidean merit for the two already
   // normalized residuals.
   return std::hypot(sample.global_normalized_continuity,
-                    sample.global_normalized_energy);
+                    sample.energy_merit_weight * sample.global_normalized_energy);
+}
+
+bool valid_merit_weight(double weight) noexcept {
+  return std::isfinite(weight) && weight > 0.0;
+}
+
+std::uint64_t mix_merit_policy(std::uint64_t hash, double weight) noexcept {
+  // v04pewt1: tolerance-aware L2, distinct from both legacy ladder schemas.
+  if (weight == 1.0) return hash;
+  return hash_mix(hash_mix(hash, UINT64_C(0x7630347065777431)),
+                  double_bits(weight));
 }
 
 PlanFingerprint pressure_energy_globalization_selection_provenance(
@@ -91,6 +102,7 @@ PlanFingerprint pressure_energy_globalization_selection_provenance(
     const PressureEnergyGlobalizationSample& selected,
     std::uint8_t selected_halvings) noexcept {
   std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyGlobalizationSchema);
+  hash = mix_merit_policy(hash, baseline.energy_merit_weight);
   hash = hash_mix(hash, baseline.corrector);
   hash = hash_mix(hash, baseline.target_time);
   hash = hash_mix(hash, baseline.correction_direction);
@@ -114,6 +126,7 @@ PlanFingerprint pressure_energy_extrapolation_selection_provenance(
     const PressureEnergyGlobalizationSample& selected) noexcept {
   std::uint64_t hash =
       hash_mix(kFnvOffset, kPressureEnergyExtrapolationSchema);
+  hash = mix_merit_policy(hash, baseline.energy_merit_weight);
   hash = hash_mix(hash, baseline.corrector);
   hash = hash_mix(hash, baseline.target_time);
   hash = hash_mix(hash, baseline.correction_direction);
@@ -152,6 +165,7 @@ Status certify_pressure_energy_globalization_selection(
     return {StatusCode::rejected_step, kPressureEnergyGlobalization};
 
   PressureEnergyGlobalizationSelectionCertificate selected_certificate;
+  selected_certificate.energy_merit_weight = baseline.energy_merit_weight;
   selected_certificate.scope = PressureEnergyGlobalizationScope::
       frozen_momentum_continuity_energy_globalization;
   selected_certificate.alpha = selected.alpha;
@@ -940,9 +954,9 @@ bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
                 alpha <= kPressureEnergyAitkenMaximumAlpha
           : std::isfinite(alpha) && alpha == expected_alpha;
   const double expected_baseline_merit = std::hypot(
-      baseline_normalized_continuity, baseline_normalized_energy);
+      baseline_normalized_continuity, energy_merit_weight * baseline_normalized_energy);
   const double expected_candidate_merit = std::hypot(
-      candidate_normalized_continuity, candidate_normalized_energy);
+      candidate_normalized_continuity, energy_merit_weight * candidate_normalized_energy);
   const double expected_armijo =
       (1.0 - kPressureEnergyGlobalizationArmijoCoefficient * alpha) *
       baseline_merit;
@@ -956,7 +970,7 @@ bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
       candidate_state_provenance == baseline_state_provenance ||
       candidate_mass_flux_provenance == baseline_mass_flux_provenance ||
       selected_halvings >= kPressureEnergyGlobalizationCandidateCount ||
-      !valid_alpha ||
+      !valid_alpha || !valid_merit_weight(energy_merit_weight) ||
       !std::isfinite(baseline_normalized_continuity) ||
       baseline_normalized_continuity < 0.0 ||
       !std::isfinite(baseline_normalized_energy) ||
@@ -979,6 +993,7 @@ bool PressureEnergyGlobalizationSelectionCertificate::valid() const noexcept {
   }
 
   PressureEnergyGlobalizationSample baseline;
+  baseline.energy_merit_weight = energy_merit_weight;
   baseline.alpha = 0.0;
   baseline.global_normalized_continuity = baseline_normalized_continuity;
   baseline.global_normalized_energy = baseline_normalized_energy;
@@ -1988,6 +2003,7 @@ Status select_pressure_energy_globalization(
     PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept {
   certificate = {};
   const bool valid_baseline =
+      valid_merit_weight(baseline.energy_merit_weight) &&
       baseline.alpha == 0.0 &&
       std::isfinite(baseline.global_normalized_continuity) &&
       baseline.global_normalized_continuity >= 0.0 &&
@@ -2016,6 +2032,7 @@ Status select_pressure_energy_globalization(
         !std::isfinite(sample.global_normalized_energy) ||
         sample.global_normalized_energy >= 0.0;
     const bool matching_context =
+        same_bits(sample.energy_merit_weight, baseline.energy_merit_weight) &&
         sample.alpha == expected_alpha &&
         sample.corrector == baseline.corrector &&
         sample.target_time == baseline.target_time &&
@@ -2069,6 +2086,7 @@ Status select_pressure_energy_globalization(
   }
 
   PressureEnergyGlobalizationSelectionCertificate selected_certificate;
+  selected_certificate.energy_merit_weight = baseline.energy_merit_weight;
   selected_certificate.scope = PressureEnergyGlobalizationScope::
       frozen_momentum_continuity_energy_globalization;
   selected_certificate.alpha = selected->alpha;
@@ -2117,6 +2135,7 @@ Status select_pressure_energy_extrapolation(
     PressureEnergyGlobalizationSelectionCertificate& certificate) noexcept {
   certificate = {};
   const bool valid_baseline =
+      valid_merit_weight(baseline.energy_merit_weight) &&
       baseline.alpha == 0.0 &&
       std::isfinite(baseline.global_normalized_continuity) &&
       baseline.global_normalized_continuity >= 0.0 &&
@@ -2135,6 +2154,7 @@ Status select_pressure_energy_extrapolation(
       !std::isfinite(candidate.global_normalized_energy) ||
       candidate.global_normalized_energy >= 0.0;
   const bool matching_candidate =
+      same_bits(candidate.energy_merit_weight, baseline.energy_merit_weight) &&
       std::isfinite(candidate.alpha) && candidate.alpha > 1.0 &&
       candidate.alpha <= kPressureEnergyAitkenMaximumAlpha &&
       candidate.corrector == baseline.corrector &&

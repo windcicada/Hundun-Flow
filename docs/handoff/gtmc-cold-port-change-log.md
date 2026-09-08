@@ -40,6 +40,29 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G18: clean ae435c4 passed native import but actual formal-v3 one-step failed
+  after 5:50.20, zero accepted steps (stage 54 / 10210, nine attempts). G17
+  reduced energy to 7.3898770144e-12, below its 1e-10 gate; continuity stalled
+  at 8.3106765680e-14 above the unchanged scalar-pairing 16-epsilon gate.
+  The full-alpha trial improves C to 2.6501587219e-14 while E increases only
+  to 7.3907623741e-12. A direct real-selector regression using this captured
+  tuple failed in 0.36 s. Root cause: equal-weight merit ignores unequal
+  component terminal targets, letting already-converged energy roundoff
+  dominate continuity descent. `versions/v0.4/include/hundun/v04_flow.hpp`
+  adds a default-one energy merit weight to samples/selection certificates;
+  `src/solver_pressure_energy.cpp` validates matching positive finite weights,
+  signs the distinct v04pewt1 policy, and revalidates weighted merit without
+  changing raw residual evidence. Default-one legacy provenance is preserved.
+  `src/core_product_freeze.cpp` sets weight=C_target/E_target, binds it on
+  candidate replay, and uses the same scaled energy in Aitken/inexact forcing.
+  Both independent terminal gates, physics and refinement capacity are intact.
+  `tests/numerical/solver_pressure_energy_globalization_test.cpp` covers the
+  captured tuple, raw evidence, weight tampering, invalid/foreign weights,
+  extrapolation, and preserved legacy rejection/provenance. All four serial /
+  MPI 1/2/4 selector tests pass (1.44 s). Product/full GTMC reruns pending.
+  This changes selection policy, not stored rate/flux/history interpretation;
+  method-history signature is deliberately unchanged per its contract.
+
 - G17: the shortened G16 full-size probe reproduced the same failure in
   1:51.68 (one attempt instead of nine), with worst energy cell (85,80,90),
   on the internal methane source plane, residual -6.4836 W. Source inspection
