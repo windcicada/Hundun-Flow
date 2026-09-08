@@ -6,7 +6,7 @@
 暂时不加入两相模块。** Stage 6/S0–S2 暂挂，历史源码和方案保留只读；
 即使燃烧验收结束，也须用户恢复该范围后才接入两相。Stage 4/5 燃烧仍安排在基础流动验收之后。
 
-目标是在用户当前明确的业务范围内，完成 HUNDUN-FLOW 的 COAST 替代验收：先验收基础流动的正确性、稳定性、性能、模块合同与 I/O，再接入并完成已有 Stage 4 燃烧、Stage 5 ESF/TPDF/TCR 与 Stage 6 稀相喷雾。完成标准是实际 CLI 推进、共同事务、输出和 Restart 的组合行为通过约定案例；历史 seal、配置解析成功或纯核测试不自动成为当前产品验收。
+目标是在用户当前明确的业务范围内，完成 HUNDUN-FLOW 的 COAST 替代验收：先验收基础流动的正确性、稳定性、性能、模块合同与 I/O，再接入并完成已有 Stage 4 燃烧、Stage 5 ESF/TPDF/TCR。Stage 6 稀相喷雾仅保留后续方案，等待用户恢复范围。完成标准是实际 CLI 推进、共同事务、输出和 Restart 的组合行为通过约定案例；历史 seal、配置解析成功或纯核测试不自动成为当前产品验收。
 
 本文件是持续更新的目标台账，不是发布收据。它集中记录当前工作、退出条件、源码来源和未关闭项。详细推导和原始失败留在链接的证据报告中；旧报告中的“正在运行”“尚未测试”和下一候选仅描述当时状态，以本文件的当前状态及后续验收收据为准。
 
@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 观测 `18d572c`，干净候选 `be721a7`：Release 16/16、ASan/UBSan 4/4、干净 Release 16/16；产品接线与测量尚待完成 |
+| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 观测已验。ProductDriver 冷配置/几何及200字节每-loop摘要已通过1/2/4-rank重试/回滚和sanitizer，runner输出与生产测量尚待完成 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | 新 CSV 使用 `observation_schema=4`；读取器兼容 schema 3，但旧数据不能补造缺失阈值 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
-| 下一切片退出条件 | Native MG 公开接口启用/关闭和 rank-local 开关的数值、状态、通信数量、generation/存储地址等价；1/2/4-rank V/F、replicated/distributed、prepared/direct 与故障恢复通过；阶段时间不重复相加，零热分配 |
-| 下一动作 | 接入 compact 每-loop 摘要和每-step 层级 sidecar；验证完整性/失败关闭，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
+| 下一切片退出条件 | 在runner接入每-loop摘要及每-step层级sidecar，冷布局独立绑定完整rank/level身份；跨重试/组成sweep对账，输出关闭失败与partial不假报完整；不复制32层数据到每个loop |
+| 下一动作 | 完成候选干净验收、runner/observer接线与真实CLI回归，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -57,6 +57,12 @@ Halo/reduction/直接 MPI 是嵌套子项。保留 prepared epoch 入口共识�
 `v04_solver_mg_update_contract_mpi_[24]` 及现有 reuse/line/coarse/Krylov 隔离入口。
 Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-profile.md)
 已落地；尚无产品逐层实测或性能收益结论，不能把公开接口回归当成替代验收。
+
+[ProductDriver 接线](../verification/2026-09-08-product-mg-profile.md) 使用一个4664字节
+固定baseline和200字节每-loop摘要；关闭仍有固定存储/报告拷贝成本，不宣称零开销。
+扩大回归发现并实测确认两个[旧Restart夹具](../verification/2026-09-08-restart-inactive-flux-fixture.md)
+把solid-solid负零错误地当成权威流体通量；独立干净基线也失败。修正的是测试区域合同，
+没有改变生产normalizer或方法签名。
 
 ## 3. 基础流动模块台账
 
@@ -155,7 +161,7 @@ Stage 5 一维收据的最终科学状态为 `SOFTWARE_PASS_ATTRIBUTION_COMPLETE
 | S0 Stage 6 力学（暂挂） | 用户恢复范围 + C4；SoA/ID、轨迹、stencil、注入、物性、migration、IBM rebound | ballistic/Stokes/Galilean、插值、ownership/rollback、Restart、small 1/2/4-rank 合同 |
 | S1 Stage 6 交换（暂挂） | S0 + Stage 4；film sampling、A–S、事件终止、gas/parcel 事务 | 单滴加热、d² oracle、A–S 亚步收敛；单/多 parcel 质量/动量/总热化学焓闭合；第二次 PISO 源项账本 |
 | S2 Stage 6 组合（暂挂） | S1 + Stage 5；TAB 子滴、ESF common-source、driver/schema/Restart/diagnostics | 子滴守恒；每 parcel 只算一次交换；N=2/4 共用气源；injector/TAB/RNG/迁移持久化；两个 surrogate 的有界 smoke、失败矩阵和实际 CLI |
-| A0 替代接受 | B0、C1–C4、S0–S2 | 对冻结业务案例逐项给出接受/拒绝和准确证据身份；新代码引入的问题已关闭，业务限制已说明；不得只用 development seal 宣称全部替代 |
+| A0 当前范围替代接受 | B0、C1–C4；S0–S2暂挂，不计入本阶段退出条件 | 对冻结流动/燃烧业务案例逐项给出接受/拒绝和准确证据身份；新代码引入的问题已关闭，业务限制已说明；不得只用 development seal 宣称全部替代，也不据此声称两相已完成 |
 
 ## 8. 待确认的外部输入与维护规则
 
