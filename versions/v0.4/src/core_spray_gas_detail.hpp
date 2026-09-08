@@ -6,6 +6,7 @@
 #include "solver_cartesian_detail.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace hundun::v04::detail {
@@ -30,7 +31,16 @@ public:
         return invalid();
       seen[independent.data[i]] = true;
     }
+    surface_ = nullptr;
+    fluid_mask_ = {};
     geometry_ = &geometry;
+    minimum_width_ = std::numeric_limits<double>::infinity();
+    for (unsigned d = 0; d < 3; ++d) {
+      const auto faces = geometry.axis(static_cast<CartesianAxis>(d)).faces();
+      for (std::size_t i = 1; i < faces.size; ++i)
+        minimum_width_ =
+            std::min(minimum_width_, faces.data[i] - faces.data[i - 1]);
+    }
     patch_ = patch;
     periodic_ = periodic;
     trial_boundary_continuation_ = trial_boundary_continuation;
@@ -39,6 +49,25 @@ public:
     indices_.assign(independent.data, independent.data + independent.size);
     species_.resize(independent.size);
     scratch_.resize(ns);
+    return {};
+  }
+  // Borrow the immutable native topology mask after its complete donor
+  // fringe has been exchanged. Its 0/1 values describe cell centres, while
+  // visibility against the actual surface constrains physical query points.
+  Status bind_immersed(const ImmersedSurfacePlan &surface, ConstFieldView mask,
+                       PlanFingerprint geometry) noexcept {
+    if (!geometry_ || geometry != geometry_->fingerprint() ||
+        !surface.fingerprint() || !valid_cell_view(mask, patch_.cells, 0, 1, 0))
+      return invalid();
+    for (int z = -mask.ghosts.z; z < patch_.cells.z + mask.ghosts.z; ++z)
+      for (int y = -mask.ghosts.y; y < patch_.cells.y + mask.ghosts.y; ++y)
+        for (int x = -mask.ghosts.x; x < patch_.cells.x + mask.ghosts.x; ++x) {
+          const double value = mask.unchecked({x, y, z}, 0);
+          if (value != 0 && value != 1)
+            return invalid();
+        }
+    surface_ = &surface;
+    fluid_mask_ = mask;
     return {};
   }
   Status bind(portable::Revision revision, double duration,
@@ -80,9 +109,62 @@ public:
   }
   spray::detail::ParcelGridCouplingStencil
   stencil(spray::Vector3 position) const noexcept {
-    return geometry_ ? spray::detail::build_parcel_grid_coupling_stencil(
-                           *geometry_, patch_, position, periodic_)
-                     : spray::detail::ParcelGridCouplingStencil{};
+    auto result = geometry_ ? spray::detail::build_parcel_grid_coupling_stencil(
+                                  *geometry_, patch_, position, periodic_)
+                            : spray::detail::ParcelGridCouplingStencil{};
+    if (!surface_ || !result.succeeded())
+      return result;
+    canonical_position(position);
+    unsigned count = 0, largest = 0;
+    double sum = 0;
+    for (unsigned i = 0; i < result.entry_count; ++i) {
+      auto entry = result.entries[i];
+      if (entry.weight == 0)
+        continue;
+      Int3 local{};
+      if (!local_index(fluid_mask_, entry.global_index, local))
+        return {};
+      if (fluid_mask_.unchecked(local, 0) == 0)
+        continue;
+      const int index[]{entry.global_index.x, entry.global_index.y,
+                        entry.global_index.z};
+      spray::Vector3 centre{};
+      for (unsigned d = 0; d < 3; ++d) {
+        const auto &axis = geometry_->axis(static_cast<CartesianAxis>(d));
+        centre[d] = axis.centres().data[index[d]];
+        if (periodic_[d]) {
+          const auto faces = axis.faces();
+          const double length = faces.data[faces.size - 1] - faces.data[0];
+          centre[d] += std::round((position[d] - centre[d]) / length) * length;
+        }
+      }
+      SurfaceSegmentIntersection hit;
+      if (centre != position &&
+          !surface_->first_segment_intersection(
+              {centre[0], centre[1], centre[2]},
+              {position[0], position[1], position[2]}, hit))
+        return {};
+      // A query on the surface is permitted. A donor across the wall is not.
+      if (hit.triangle != kInvalidSurfaceTriangle &&
+          hit.segment_fraction <
+              1 - 4096 * std::numeric_limits<double>::epsilon())
+        continue;
+      result.entries[count] = entry;
+      if (count == 0 || entry.weight > result.entries[largest].weight)
+        largest = count;
+      sum += entry.weight;
+      ++count;
+    }
+    if (count == 0 || !(sum > 0) || !std::isfinite(sum))
+      return {};
+    result.entry_count = count;
+    double normalized = 0;
+    for (unsigned i = 0; i < count; ++i) {
+      result.entries[i].weight /= sum;
+      normalized += result.entries[i].weight;
+    }
+    result.entries[largest].weight += 1 - normalized;
+    return result;
   }
   spray::detail::ParcelGasSample
   sample(const spray::SprayParcelState &parcel, double elapsed,
@@ -116,7 +198,17 @@ public:
           return out;
         position[d] = std::clamp(position[d], low, high);
       }
-    const auto weights = stencil(position);
+    auto weights = stencil(position);
+    if (!weights.succeeded() && surface_ && trial_boundary_continuation_) {
+      canonical_position(position);
+      ClosestSurfacePoint point;
+      if (!surface_->closest_point({position[0], position[1], position[2]},
+                                   point) ||
+          point.triangle == kInvalidSurfaceTriangle ||
+          point.squared_distance > minimum_width_ * minimum_width_)
+        return out;
+      weights = stencil({point.point.x, point.point.y, point.point.z});
+    }
     if (!weights.succeeded())
       return out;
     std::fill(scratch_.begin(), scratch_.end(), 0);
@@ -167,9 +259,12 @@ public:
       return {StatusCode::invalid_plan,
               static_cast<std::uint32_t>(
                   spray::detail::MigrationDetail::stale_revision)};
-    const auto weights = stencil(position);
-    if (!weights.succeeded())
+    if (!stencil(position).succeeded())
       return invalid();
+    // A fluid physical point can occupy a cell whose centre is solid. Owner
+    // routing follows physical cell faces, not the filtered donor list.
+    const auto weights = spray::detail::build_parcel_grid_coupling_stencil(
+        *geometry_, patch_, position, periodic_);
     std::array<int, 3> cell{};
     for (unsigned d = 0; d < 3; ++d) {
       const auto faces = geometry_->axis(static_cast<CartesianAxis>(d)).faces();
@@ -205,6 +300,22 @@ public:
   }
 
 private:
+  void canonical_position(spray::Vector3 &position) const noexcept {
+    for (unsigned d = 0; d < 3; ++d) {
+      if (!periodic_[d])
+        continue;
+      const auto faces = geometry_->axis(static_cast<CartesianAxis>(d)).faces();
+      const double low = faces.data[0], high = faces.data[faces.size - 1];
+      if (position[d] < low || position[d] >= high) {
+        double offset = std::fmod(position[d] - low, high - low);
+        if (offset < 0)
+          offset += high - low;
+        position[d] = low + offset;
+        if (position[d] >= high)
+          position[d] = low;
+      }
+    }
+  }
   bool local_index(ConstFieldView view, Int3 global, Int3 &out) const noexcept {
     const auto n = geometry_->global_cells();
     int index[]{global.x - patch_.begin.x, global.y - patch_.begin.y,
@@ -228,6 +339,9 @@ private:
   static Status invalid() noexcept { return {StatusCode::invalid_plan, 10240}; }
   const CartesianGeometryPlan *geometry_{};
   MeshPatch patch_{};
+  const ImmersedSurfacePlan *surface_{};
+  ConstFieldView fluid_mask_{};
+  double minimum_width_{};
   std::array<bool, 3> periodic_{};
   PlanFingerprint composition_{};
   std::size_t dependent_{};

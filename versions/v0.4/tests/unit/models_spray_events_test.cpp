@@ -61,8 +61,13 @@ struct Physics final : ParcelIntervalProvider {
       e.thermal_exchange_to_gas_j += 1;
     }
     for (int d = 0; d < 3; ++d) {
-      e.parcel_momentum_delta_kg_m_per_s[d] =
-          m1 * r.parcel.velocity_m_per_s[d] - m0 * s.velocity_m_per_s[d];
+      // The manufactured provider's state budget must remain accurate even
+      // when the temporal-refinement test requests zero relative tolerance.
+      e.parcel_momentum_delta_kg_m_per_s[d] = static_cast<double>(
+          (static_cast<long double>(m1) - m0) * s.velocity_m_per_s[d] +
+          static_cast<long double>(m1) *
+              (static_cast<long double>(r.parcel.velocity_m_per_s[d]) -
+               s.velocity_m_per_s[d]));
       e.gas_momentum_delta_kg_m_per_s[d] =
           -e.parcel_momentum_delta_kg_m_per_s[d];
       e.drag_momentum_to_parcel_kg_m_per_s[d] =
@@ -288,6 +293,10 @@ int main() {
   in.position_absolute_tolerance_m = 1e-4;
   in.velocity_absolute_tolerance_m_per_s = 1e-8;
   const auto refined = integrate_parcel_events(in);
+  if (!refined.available)
+    std::cerr << "refinement status=" << unsigned(refined.status)
+              << " time=" << refined.failure_time_s
+              << " segment=" << refined.failure_segment << '\n';
   ok &= check(refined.available && refined.rejected_substeps > 0 &&
                   std::abs(refined.parcel.position_m[0] - 2.5) < .01,
               "whole versus two half steps refines first-order state error "
@@ -456,6 +465,54 @@ int main() {
               physical_input.duration_s - evolved_split.advanced_duration_s,
       "dynamically located TAB threshold carries trial history directly into "
       "conservative children");
+  struct PerDropletMass final : ParcelIntervalProvider {
+    ParcelIntervalReport
+    advance(const SprayParcelState &s, double t, double dt, ParcelPass pass,
+            hundun::v04::portable::Revision rev) const noexcept override {
+      Physics physics;
+      physics.evaporation = 0x1p-70;
+      auto r = physics.advance(s, t, dt, pass, rev);
+      r.initial_liquid_absolute_enthalpy_j_per_kg = 1000000;
+      r.liquid_absolute_enthalpy_j_per_kg = 1000000;
+      auto &e = r.exchange;
+      e.parcel_liquid_mass_delta_kg =
+          (r.parcel.droplet_mass_kg - s.droplet_mass_kg) * s.multiplicity;
+      e.gas_mass_delta_kg = e.vapor_mass_to_gas_kg =
+          -e.parcel_liquid_mass_delta_kg;
+      e.parcel_thermochemical_enthalpy_delta_j =
+          e.parcel_liquid_mass_delta_kg * 1000000;
+      e.thermal_exchange_to_gas_j =
+          e.vapor_absolute_thermochemical_enthalpy_to_gas_j =
+              -e.parcel_thermochemical_enthalpy_delta_j;
+      e.parcel_kinetic_energy_delta_j = 0;
+      for (unsigned d = 0; d < 3; ++d) {
+        e.parcel_momentum_delta_kg_m_per_s[d] =
+            e.parcel_liquid_mass_delta_kg * s.velocity_m_per_s[d];
+        e.gas_momentum_delta_kg_m_per_s[d] =
+            -e.parcel_momentum_delta_kg_m_per_s[d];
+        e.drag_momentum_to_parcel_kg_m_per_s[d] =
+            e.parcel_momentum_delta_kg_m_per_s[d];
+        e.parcel_kinetic_energy_delta_j += .5 * e.parcel_liquid_mass_delta_kg *
+                                           s.velocity_m_per_s[d] *
+                                           s.velocity_m_per_s[d];
+      }
+      return r;
+    }
+  } tiny_mass;
+  ParcelEventsInput tiny;
+  tiny.accepted_parcel = parcel();
+  tiny.accepted_parcel.droplet_mass_kg = 0x1p-30;
+  tiny.accepted_parcel.multiplicity = 238732.414637843;
+  tiny.accepted_parcel.velocity_m_per_s = {1000000, 0, 0};
+  tiny.interval = &tiny_mass;
+  tiny.geometry = &geometry;
+  tiny.duration_s = tiny.initial_substep_s = 1;
+  const auto mass_increment = integrate_parcel_events(tiny);
+  ok &= check(mass_increment.available &&
+                  mass_increment.exchange.parcel_liquid_mass_delta_kg ==
+                      -0x1p-70 * 238732.414637843,
+              "small mass, momentum and enthalpy increments avoid rounded "
+              "extensive-inventory cancellation");
   Physics boosted;
   boosted.acceleration = 0x1p-23;
   ParcelEventsInput boost;

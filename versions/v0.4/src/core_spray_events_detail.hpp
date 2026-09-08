@@ -101,6 +101,12 @@ public:
       ParcelEvent event;
       event.elapsed_time_s = t0 + fraction * (t1 - t0);
       event.identity = 6 * begin.owner_global_cell + 2 * d + unsigned(upper);
+      event.has_contact_position = true;
+      for (unsigned c = 0; c < 3; ++c)
+        event.contact_position_m[c] =
+            begin.position_m[c] +
+            fraction * (end.position_m[c] - begin.position_m[c]);
+      event.contact_position_m[d] = face;
       int next[3]{cell[0], cell[1], cell[2]};
       next[d] += upper ? 1 : -1;
       if (next[d] < 0 || next[d] >= extent[d]) {
@@ -182,7 +188,9 @@ public:
                                    0,
                                    fluid_normal,
                                    1,
-                                   false};
+                                   false,
+                                   point,
+                                   true};
         break;
       }
     }

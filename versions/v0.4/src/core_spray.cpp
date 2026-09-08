@@ -20,7 +20,9 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                      const ProductReactionSources &reaction,
                                      const CartesianGeometryPlan &geometry,
                                      MeshPatch patch, int rank,
-                                     RestartCellRecordsView tcr) {
+                                     RestartCellRecordsView tcr,
+                                     const ImmersedSurfacePlan *surface,
+                                     const EBTopology *topology) {
   if (!model.spray)
     return {};
   if (enabled() || !reaction.gas_query() ||
@@ -47,8 +49,12 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
       break;
     }
   }
-  if (model.immersed_boundary)
+  if (model.immersed_boundary.has_value() != (surface != nullptr) ||
+      (surface != nullptr) != (topology != nullptr) ||
+      (surface && (topology->surface_fingerprint() != surface->fingerprint() ||
+                   topology->geometry_fingerprint() != geometry.fingerprint())))
     return invalid();
+  surface_ = surface;
   spec_ = *model.spray;
   maximum_bytes_ = model.mesh.limits.max_memory_bytes_per_rank;
   const auto ns = reaction.gas_identity().species_names.size();
@@ -82,7 +88,9 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                reaction.species_indices(),
                                reaction.dependent_index(), true);
   if (status)
-    status = events_.configure(geometry, periodic_, walls);
+    status = events_.configure(geometry, periodic_, walls, surface,
+                               topology ? topology->fluid_side()
+                                        : ImmersedFluidSide::outside);
   if (!status)
     return status;
   spray::detail::LiquidPropertyService liquid(&asset_.pack, 1);
@@ -180,6 +188,36 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                                     std::uint64_t(n.y) * g.z));
         halo_indices_.push_back({x, y, z});
       }
+  if (topology) {
+    const std::uint64_t sy = std::uint64_t(patch.cells.x) + 4,
+                        sz = sy * (std::uint64_t(patch.cells.y) + 4),
+                        count = sz * (std::uint64_t(patch.cells.z) + 4);
+    if (count > SIZE_MAX / sizeof(double) ||
+        count > (maximum_bytes_ - local_bytes_) / sizeof(double))
+      return {StatusCode::allocation_failure, 10342};
+    fluid_mask_storage_.assign(std::size_t(count), 0.);
+    local_bytes_ += fluid_mask_storage_.capacity() * sizeof(double);
+    fluid_mask_.base = fluid_mask_storage_.data() + 2 + 2 * sy + 2 * sz;
+    fluid_mask_.interior = patch.cells;
+    fluid_mask_.ghosts = {2, 2, 2};
+    fluid_mask_.components = 1;
+    fluid_mask_.stride_y = sy;
+    fluid_mask_.stride_z = sz;
+    fluid_mask_.component_stride = count;
+    fluid_mask_.field = 1;
+    fluid_mask_.revision = 1;
+    fluid_mask_.revision_domain = identity;
+    fluid_mask_.storage_identity =
+        reinterpret_cast<std::uintptr_t>(fluid_mask_storage_.data());
+    for (int z = 0; z < patch.cells.z; ++z)
+      for (int y = 0; y < patch.cells.y; ++y)
+        for (int x = 0; x < patch.cells.x; ++x)
+          fluid_mask_.unchecked({x, y, z}, 0) =
+              topology->is_fluid_global(
+                  {x + patch.begin.x, y + patch.begin.y, z + patch.begin.z})
+                  ? 1.
+                  : 0.;
+  }
   identity_ = identity;
   return {};
 }
@@ -232,6 +270,55 @@ ProductSpray::configure_collective(MPI_Comm comm,
     return status;
   local_bytes_ += fringe + restore;
   status = halo_.bind(comm);
+  if (status && surface_) {
+    // A separate cold exchange seals the binary topology mask, including
+    // periodic corners. Do not infer remote fluid flags from local EB halos.
+    RemoteDonorExchangePlan mask_halo;
+    const RemoteDonorFieldSpec field{fluid_mask_.field, 1};
+    status = RemoteDonorExchangePlan::analyze_cells(
+        comm, geometry_->global_cells(), patch_, targets, {&field, 1}, 10,
+        mask_halo);
+    if (status) {
+      const auto stats = mask_halo.stats();
+      const auto transient =
+          (stats.received_cells + stats.supplied_cells) * 256 +
+          2 * stats.bytes_per_exchange;
+      status = agree(transient > maximum_bytes_ - local_bytes_
+                         ? Status{StatusCode::allocation_failure, 10342}
+                         : Status{});
+    }
+    if (status)
+      status = mask_halo.bind(comm);
+    if (status)
+      status = agree(mask_halo.preflight_exchange(10, {&fluid_mask_, 1}));
+    if (status)
+      status = mask_halo.exchange(10, {&fluid_mask_, 1});
+    if (status)
+      status = agree(gas_.bind_immersed(*surface_, as_const(fluid_mask_),
+                                        geometry_->fingerprint()));
+    if (status) {
+      Status local;
+      for (const auto &input : spec_.injectors) {
+        // Raw ownership was checked on every rank before the mask existed.
+        // Only this rank's injector locations can read its sealed mask fringe.
+        const auto raw = spray::detail::build_parcel_grid_coupling_stencil(
+            *geometry_, patch_,
+            {input.origin_m.x, input.origin_m.y, input.origin_m.z}, periodic_);
+        bool nearby = false;
+        for (unsigned i = 0; i < raw.entry_count; ++i)
+          nearby |= raw.entries[i].owner_rank == rank_;
+        if (!nearby)
+          continue;
+        spray::detail::ParcelLocation location;
+        local =
+            gas_.locate({input.origin_m.x, input.origin_m.y, input.origin_m.z},
+                        {0, 1, 1}, location);
+        if (!local)
+          break;
+      }
+      status = agree(local);
+    }
+  }
   if (status)
     status = restore_migration_.configure(comm, geometry_->global_cells(),
                                           patch_, np, ns);

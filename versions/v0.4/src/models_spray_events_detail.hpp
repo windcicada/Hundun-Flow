@@ -51,6 +51,9 @@ struct ParcelIntervalReport {
   double elapsed_duration_s{};
   double initial_liquid_absolute_enthalpy_j_per_kg{};
   double liquid_absolute_enthalpy_j_per_kg{};
+  // Caloric slope at both endpoint temperatures, supplied by the liquid
+  // service. Used solely to bound binary64 endpoint quantization, not LTE.
+  double liquid_heat_capacity_bound_j_per_kg_k{};
   bool complete_evaporation{};
   TransferExchangeCandidate exchange{};
 };
@@ -73,6 +76,8 @@ struct ParcelEvent {
   Vector3 wall_normal{};
   double restitution{1.0};
   bool applied{};
+  Vector3 contact_position_m{};
+  bool has_contact_position{};
 };
 struct ParcelEventQueryReport {
   bool available{};

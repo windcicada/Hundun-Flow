@@ -597,6 +597,76 @@ bool compile_cube_surface(const CartesianGeometryPlan& geometry,
          static_cast<bool>(ImmersedSurfaceCompiler::compile(scan, surface));
 }
 
+bool test_native_ibm_gas_sampler() {
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  ImmersedSurfacePlan surface;
+  if (!compile_geometry(uniform_mesh(), geometry, patch) ||
+      !compile_cube_surface(geometry, patch, surface))
+    return false;
+  const auto n = patch.cells;
+  const std::size_t count = std::size_t(n.x) * n.y * n.z;
+  std::array<std::vector<double>, 5> data;
+  std::array<ConstFieldView, 5> views{};
+  for (unsigned f = 0; f < 5; ++f) {
+    const unsigned components = f == 2 ? 3 : 1;
+    data[f].assign(count * components, f == 1   ? 101000.
+                                       : f == 3 ? .01
+                                       : f == 4 ? 1.
+                                                : 0.);
+    auto &v = views[f];
+    v.base = data[f].data();
+    v.interior = n;
+    v.components = components;
+    v.stride_y = n.x;
+    v.stride_z = std::size_t(n.x) * n.y;
+    v.component_stride = count;
+    v.field = f + 1;
+    v.revision = 1;
+    v.storage_identity = f + 101;
+    v.revision_domain = 10;
+  }
+  // The cube contains the cell centred at (1.5, 1.5, 1.5). No gas state is
+  // admissible there; masked sampling must never even read its NaNs.
+  const auto solid = std::size_t(1 + n.x * (1 + n.y));
+  data[4][solid] = 0;
+  for (unsigned f = 0; f < 4; ++f)
+    for (unsigned c = 0; c < views[f].components; ++c)
+      data[f][solid + count * c] = std::numeric_limits<double>::quiet_NaN();
+  hundun::v04::detail::ProductParcelGas sampler;
+  const std::size_t species = 0;
+  const portable::Revision revision{0, 1, 1};
+  bool ok = bool(sampler.configure(geometry, patch, {}, 100, {&species, 1}, 1,
+                                   true)) &&
+            bool(sampler.bind(revision, .1, 100000, views[0], views[1],
+                              views[2], {&views[3], 1}));
+  ok &= bool(sampler.bind_immersed(surface, views[4], geometry.fingerprint()));
+  auto p = parcel({.9, 1.5, 1.5}, {1, 0, 0});
+  double y[2]{};
+  const auto value =
+      sampler.sample(p, .05, ParcelPass::predictor, revision, y, 2);
+  auto weights = sampler.stencil(p.position_m);
+  ok &= expect(
+      value.status == portable::Status::success && near(y[0], .01) &&
+          weights.succeeded() && weights.entry_count == 1 &&
+          weights.entries[0].global_cell != solid &&
+          weights.entries[0].weight == 1,
+      "IBM gas sampling and deposition share a positive fluid-only stencil");
+  p.position_m[0] = .5;
+  ok &= expect(sampler.stencil(p.position_m).succeeded(),
+               "fluid cell centre needs no zero-length ray query");
+  p.position_m[0] = 1.1;
+  spray::detail::ParcelLocation location;
+  ok &= expect(
+      sampler.sample(p, .05, ParcelPass::corrector, revision, y, 2).status ==
+              portable::Status::success &&
+          !sampler.stencil(p.position_m).succeeded() &&
+          !sampler.locate(p.position_m, revision, location),
+      "IBM trial gas extends from the visible fluid surface without admitting "
+      "solid positions");
+  return ok;
+}
+
 ParcelTrajectoryCandidate straight_candidate(Vector3 position,
                                               Vector3 velocity,
                                               double duration) {
@@ -714,6 +784,13 @@ bool test_native_event_geometry() {
                  near(result.parcel.velocity_m_per_s, {-1, 0, 0}) &&
                  near(result.wall_exchange.momentum_kg_m_per_s[0], 2e-8, 1e-22),
              "native IBM surface collision wins over coincident cell crossing");
+  input.duration_s = input.initial_substep_s = .25 + 5e-13;
+  result = integrate_parcel_events(input);
+  ok &= expect(result.available && result.parcel.position_m[0] == 1 &&
+                   result.parcel.velocity_m_per_s[0] == -1,
+               "native wall contact within event-time tolerance lands on the "
+               "actual surface");
+  input.duration_s = input.initial_substep_s = .5;
   auto stale = revision;
   ++stale.input_revision;
   auto end = input.accepted_parcel;
@@ -902,6 +979,7 @@ int main(int argc, char** argv) {
   bool passed = test_shared_stencil();
   passed &= test_periodic_stencil();
   passed &= test_native_gas_sampler();
+  passed &= test_native_ibm_gas_sampler();
   passed &= test_trajectory_candidates();
   passed &= test_static_ibm_rebound();
   passed &= test_native_event_geometry();

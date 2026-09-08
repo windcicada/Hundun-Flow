@@ -12,7 +12,9 @@ public:
   Status configure_local(const ValidatedModel &, const std::filesystem::path &,
                          const ProductReactionSources &,
                          const CartesianGeometryPlan &, MeshPatch, int rank,
-                         RestartCellRecordsView tcr);
+                         RestartCellRecordsView tcr,
+                         const ImmersedSurfacePlan *surface = nullptr,
+                         const EBTopology *topology = nullptr);
   Status configure_collective(MPI_Comm, Span<const RemoteDonorFieldSpec>);
   Status configure_source_transport(Span<const RemoteDonorFieldSpec>);
   Status exchange_source_transport(Span<FieldView>, RevisionToken boundary,
@@ -62,6 +64,9 @@ private:
   std::uint64_t owned_bytes_{}, maximum_bytes_{}, local_bytes_{};
   const CartesianGeometryPlan *geometry_{};
   MeshPatch patch_{};
+  const ImmersedSurfacePlan *surface_{};
+  std::vector<double> fluid_mask_storage_;
+  FieldView fluid_mask_{};
   SpraySpec spec_;
   spray::detail::LiquidAsset asset_;
   ProductParcelGas gas_;

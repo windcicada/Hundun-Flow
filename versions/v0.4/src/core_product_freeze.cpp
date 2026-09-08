@@ -3497,15 +3497,6 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       return candidate->esf.configure(model, candidate->reaction,
                                       candidate->patch.cells);
     });
-  if (status)
-    status = product_local_stage(communicator, [&] {
-      int rank = 0;
-      if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
-        return Status{StatusCode::mpi_failure, kProductCollective};
-      return candidate->spray.configure_local(
-          model, case_root, candidate->reaction, candidate->geometry,
-          candidate->patch, rank, candidate->esf.tcr_history.snapshot());
-    });
   CpuExecutionRequest cpu_request;
   cpu_request.threads_per_rank = 1U;
   cpu_request.pure_mpi = true;
@@ -3618,6 +3609,19 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
   }
   if (!status) return status;
+  if (status)
+    status = product_local_stage(communicator, [&] {
+      int rank = 0;
+      if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
+        return Status{StatusCode::mpi_failure, kProductCollective};
+      return candidate->spray.configure_local(
+          model, case_root, candidate->reaction, candidate->geometry,
+          candidate->patch, rank, candidate->esf.tcr_history.snapshot(),
+          candidate->surface ? &*candidate->surface : nullptr,
+          candidate->topology ? &*candidate->topology : nullptr);
+    });
+  if (!status)
+    return status;
   candidate->phases[0U] = ProductFreezePhase::geometry_and_decomposition;
   std::size_t local_cells = 0U;
   std::size_t maximum_cells_per_rank = 0U;

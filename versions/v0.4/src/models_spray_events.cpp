@@ -29,6 +29,45 @@ double kinetic_delta(const SprayParcelState &before,
   }
   return static_cast<double>(delta);
 }
+double specific_inventory_delta(const SprayParcelState &before,
+                                const SprayParcelState &after, double old_value,
+                                double new_value) noexcept {
+  const long double m0 = before.droplet_mass_kg, m1 = after.droplet_mass_kg;
+  return static_cast<double>(
+      static_cast<long double>(before.multiplicity) *
+      ((m1 - m0) * old_value +
+       m1 * (static_cast<long double>(new_value) - old_value)));
+}
+double ulp(double value) noexcept {
+  const double magnitude = std::abs(value);
+  return std::nextafter(magnitude, std::numeric_limits<double>::infinity()) -
+         magnitude;
+}
+double momentum_roundoff(const SprayParcelState &before,
+                         const SprayParcelState &after, unsigned d) noexcept {
+  return static_cast<double>(
+      static_cast<long double>(before.multiplicity) *
+      (ulp(before.droplet_mass_kg) * std::abs(before.velocity_m_per_s[d]) +
+       ulp(after.droplet_mass_kg) * std::abs(after.velocity_m_per_s[d]) +
+       before.droplet_mass_kg * ulp(before.velocity_m_per_s[d]) +
+       after.droplet_mass_kg * ulp(after.velocity_m_per_s[d])));
+}
+double enthalpy_roundoff(const SprayParcelState &before,
+                         const ParcelIntervalReport &report) noexcept {
+  const auto &after = report.parcel;
+  const double cp = report.liquid_heat_capacity_bound_j_per_kg_k;
+  return static_cast<double>(
+      static_cast<long double>(before.multiplicity) *
+      (ulp(before.droplet_mass_kg) *
+           std::abs(report.initial_liquid_absolute_enthalpy_j_per_kg) +
+       ulp(after.droplet_mass_kg) *
+           std::abs(report.liquid_absolute_enthalpy_j_per_kg) +
+       before.droplet_mass_kg *
+           (ulp(report.initial_liquid_absolute_enthalpy_j_per_kg) +
+            cp * ulp(before.temperature_k)) +
+       after.droplet_mass_kg * (ulp(report.liquid_absolute_enthalpy_j_per_kg) +
+                                cp * ulp(after.temperature_k))));
+}
 bool near(double a, double b, double absolute, double relative) {
   return std::isfinite(a) && std::isfinite(b) &&
          std::abs(a - b) <=
@@ -68,7 +107,9 @@ bool valid_interval(const ParcelIntervalReport &r, double dt,
   if (!r.available || !r.exchange.available || r.revision != revision ||
       !std::isfinite(r.elapsed_duration_s) || r.elapsed_duration_s < 0 ||
       r.elapsed_duration_s > dt ||
-      !std::isfinite(r.liquid_absolute_enthalpy_j_per_kg))
+      !std::isfinite(r.liquid_absolute_enthalpy_j_per_kg) ||
+      !std::isfinite(r.liquid_heat_capacity_bound_j_per_kg_k) ||
+      r.liquid_heat_capacity_bound_j_per_kg_k < 0)
     return false;
   const auto &e = r.exchange;
   const double scalars[]{e.parcel_liquid_mass_delta_kg,
@@ -99,7 +140,14 @@ bool valid_interval(const ParcelIntervalReport &r, double dt,
          validate_parcel_state(r.parcel) == ParcelStateStatus::success;
 }
 bool accurate(const ParcelIntervalReport &a, const ParcelIntervalReport &b,
-              const ParcelEventsInput &in) {
+              const ParcelEventsInput &in, const SprayParcelState &before) {
+  // Adaptive truncation tolerances cannot resolve less than one ULP of the
+  // endpoint state. This forward-error allowance vanishes with machine
+  // precision and is derived from mass/U/T/h and the liquid caloric slope.
+  const double ea = enthalpy_roundoff(before, a),
+               eb = enthalpy_roundoff(before, b);
+  if (!std::isfinite(ea + eb))
+    return false;
   if (a.complete_evaporation != b.complete_evaporation ||
       !near(a.elapsed_duration_s, b.elapsed_duration_s,
             in.event_time_tolerance_s, in.relative_tolerance) ||
@@ -108,30 +156,36 @@ bool accurate(const ParcelIntervalReport &a, const ParcelIntervalReport &b,
       !near(a.parcel.temperature_k, b.parcel.temperature_k,
             in.temperature_absolute_tolerance_k, in.relative_tolerance))
     return false;
-  for (std::size_t d = 0; d < 3; ++d)
+  for (std::size_t d = 0; d < 3; ++d) {
+    const double ma = momentum_roundoff(before, a.parcel, d),
+                 mb = momentum_roundoff(before, b.parcel, d);
+    if (!std::isfinite(ma + mb))
+      return false;
     if (!near(a.parcel.position_m[d], b.parcel.position_m[d],
               in.position_absolute_tolerance_m, in.relative_tolerance) ||
         !near(a.parcel.velocity_m_per_s[d], b.parcel.velocity_m_per_s[d],
               in.velocity_absolute_tolerance_m_per_s, in.relative_tolerance) ||
         !near(a.exchange.parcel_momentum_delta_kg_m_per_s[d],
               b.exchange.parcel_momentum_delta_kg_m_per_s[d],
-              in.momentum_absolute_tolerance_kg_m_per_s,
+              in.momentum_absolute_tolerance_kg_m_per_s + ma + mb,
               in.relative_tolerance) ||
         !near(b.exchange.momentum_quadrature_residual_kg_m_per_s[d], 0,
-              in.momentum_absolute_tolerance_kg_m_per_s +
+              in.momentum_absolute_tolerance_kg_m_per_s + mb +
                   in.relative_tolerance *
                       std::abs(b.exchange.parcel_momentum_delta_kg_m_per_s[d]),
               0))
       return false;
+  }
   return near(a.exchange.parcel_thermochemical_enthalpy_delta_j,
               b.exchange.parcel_thermochemical_enthalpy_delta_j,
-              in.energy_absolute_tolerance_j, in.relative_tolerance) &&
+              in.energy_absolute_tolerance_j + ea + eb,
+              in.relative_tolerance) &&
          near(a.exchange.parcel_kinetic_energy_delta_j,
               b.exchange.parcel_kinetic_energy_delta_j,
               in.energy_absolute_tolerance_j, in.relative_tolerance) &&
          near(
              b.exchange.thermal_exchange_state_residual_j, 0,
-             in.energy_absolute_tolerance_j +
+             in.energy_absolute_tolerance_j + eb +
                  in.relative_tolerance *
                      std::max(
                          std::abs(
@@ -147,15 +201,18 @@ bool consistent(const SprayParcelState &begin, const ParcelIntervalReport &r,
       end.liquid_material_fingerprint != begin.liquid_material_fingerprint ||
       !std::isfinite(r.initial_liquid_absolute_enthalpy_j_per_kg))
     return false;
-  const double old_mass = begin.droplet_mass_kg * begin.multiplicity,
-               new_mass = end.droplet_mass_kg * end.multiplicity;
-  if (!near(e.parcel_liquid_mass_delta_kg, new_mass - old_mass,
+  // Multiplicity is unchanged. Form the small per-droplet difference first;
+  // subtracting rounded extensive inventories can lose the evaporated mass.
+  const double mass_delta =
+      (end.droplet_mass_kg - begin.droplet_mass_kg) * begin.multiplicity;
+  if (!near(e.parcel_liquid_mass_delta_kg, mass_delta,
             in.mass_absolute_tolerance_kg, in.relative_tolerance) ||
       !near(e.parcel_kinetic_energy_delta_j, kinetic_delta(begin, end),
             in.energy_absolute_tolerance_j, in.relative_tolerance) ||
       !near(e.parcel_thermochemical_enthalpy_delta_j,
-            new_mass * r.liquid_absolute_enthalpy_j_per_kg -
-                old_mass * r.initial_liquid_absolute_enthalpy_j_per_kg,
+            specific_inventory_delta(
+                begin, end, r.initial_liquid_absolute_enthalpy_j_per_kg,
+                r.liquid_absolute_enthalpy_j_per_kg),
             in.energy_absolute_tolerance_j, in.relative_tolerance) ||
       !near(e.thermal_exchange_state_residual_j,
             e.parcel_thermochemical_enthalpy_delta_j +
@@ -164,8 +221,8 @@ bool consistent(const SprayParcelState &begin, const ParcelIntervalReport &r,
     return false;
   for (std::size_t d = 0; d < 3; ++d)
     if (!near(e.parcel_momentum_delta_kg_m_per_s[d],
-              new_mass * end.velocity_m_per_s[d] -
-                  old_mass * begin.velocity_m_per_s[d],
+              specific_inventory_delta(begin, end, begin.velocity_m_per_s[d],
+                                       end.velocity_m_per_s[d]),
               in.momentum_absolute_tolerance_kg_m_per_s, in.relative_tolerance))
       return false;
   return true;
@@ -210,6 +267,26 @@ bool valid_children(const BreakupChildReport &r, const SprayParcelState &parent,
     if (!near(static_cast<double>(momentum[d]), m * parent.velocity_m_per_s[d],
               1e-22, 1e-12))
       return false;
+  return true;
+}
+bool place_contact(SprayParcelState &state, const ParcelEvent &event,
+                   const ParcelEventsInput &input) noexcept {
+  if (!event.has_contact_position)
+    return true;
+  if (!finite3(event.contact_position_m))
+    return false;
+  for (unsigned d = 0; d < 3; ++d) {
+    const double tolerance =
+        input.position_absolute_tolerance_m +
+        input.event_time_tolerance_s * std::abs(state.velocity_m_per_s[d]) +
+        4 * ulp(event.contact_position_m[d]);
+    if (std::abs(state.position_m[d] - event.contact_position_m[d]) > tolerance)
+      return false;
+  }
+  // Reintegrated state may be just across the surface within the declared
+  // event localization error. Only position is constrained; m/U/T/H and all
+  // accumulated exchanges keep their actual integrated values.
+  state.position_m = event.contact_position_m;
   return true;
 }
 bool apply_wall(SprayParcelState &state, const ParcelEvent &event,
@@ -289,9 +366,12 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
       refined.elapsed_duration_s += step / 2;
       refined.initial_liquid_absolute_enthalpy_j_per_kg =
           first.initial_liquid_absolute_enthalpy_j_per_kg;
+      refined.liquid_heat_capacity_bound_j_per_kg_k =
+          std::max(refined.liquid_heat_capacity_bound_j_per_kg_k,
+                   first.liquid_heat_capacity_bound_j_per_kg_k);
       add(refined.exchange, first.exchange);
     }
-    if (!accurate(whole, refined, in)) {
+    if (!accurate(whole, refined, in, state)) {
       ++result.rejected_substeps;
       if (step / 2 < in.minimum_substep_s)
         return reject(ParcelEventsStatus::minimum_step, in.revision);
@@ -432,6 +512,8 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
             kind == ParcelEventKind::physical_outlet) {
           if (result.event_count + located_count > in.maximum_events)
             return reject(ParcelEventsStatus::capacity_exceeded, in.revision);
+          if (!place_contact(state, located_events[0], in))
+            return reject(ParcelEventsStatus::event_failure, in.revision);
           located_events[0].applied = true;
           for (std::size_t i = 0; i < located_count; ++i)
             result.events[result.event_count++] = located_events[i];
@@ -481,6 +563,21 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
         break;
       }
       continue;
+    }
+    if (count) {
+      std::sort(events.begin(), events.begin() + count,
+                [](const auto &a, const auto &b) {
+                  return a.kind != b.kind ? a.kind < b.kind
+                                          : a.identity < b.identity;
+                });
+      if (!place_contact(refined.parcel, events[0], in)) {
+        ++result.rejected_substeps;
+        if (step / 2 < in.minimum_substep_s)
+          return reject(ParcelEventsStatus::event_failure, in.revision);
+        step /= 2;
+        located_count = 0;
+        continue;
+      }
     }
     if (refined.elapsed_duration_s <= 0)
       return reject(ParcelEventsStatus::event_failure, in.revision);
@@ -672,6 +769,15 @@ ParcelIntervalReport FixedAsParcelIntervalProvider::advance(
       return out;
     h = final.liquid_absolute_enthalpy_j_per_kg;
   }
+  const auto initial_liquid = before.liquid->evaluate(
+      {state.liquid_material_fingerprint, state.temperature_k});
+  const auto final_liquid = before.liquid->evaluate(
+      {state.liquid_material_fingerprint, final_state.temperature_k});
+  if (!initial_liquid.succeeded() || !final_liquid.succeeded())
+    return out;
+  out.liquid_heat_capacity_bound_j_per_kg_k =
+      std::max(initial_liquid.properties.cp_j_per_kg_k,
+               final_liquid.properties.cp_j_per_kg_k);
   out.available = true;
   out.revision = revision;
   out.parcel = final_state;
@@ -681,11 +787,20 @@ ParcelIntervalReport FixedAsParcelIntervalProvider::advance(
   out.complete_evaporation = result.has_terminal_event;
   out.liquid_absolute_enthalpy_j_per_kg = h;
   out.exchange = result.exchange;
+  for (unsigned d = 0; d < 3; ++d) {
+    out.exchange.parcel_momentum_delta_kg_m_per_s[d] =
+        specific_inventory_delta(state, out.parcel, state.velocity_m_per_s[d],
+                                 out.parcel.velocity_m_per_s[d]);
+    out.exchange.momentum_closure_residual_kg_m_per_s[d] =
+        out.exchange.parcel_momentum_delta_kg_m_per_s[d] +
+        out.exchange.gas_momentum_delta_kg_m_per_s[d];
+    out.exchange.momentum_quadrature_residual_kg_m_per_s[d] =
+        -out.exchange.momentum_closure_residual_kg_m_per_s[d];
+  }
   out.exchange.parcel_kinetic_energy_delta_j = kinetic_delta(state, out.parcel);
   out.exchange.parcel_thermochemical_enthalpy_delta_j =
-      state.multiplicity *
-      (out.parcel.droplet_mass_kg * h -
-       state.droplet_mass_kg * before.liquid_absolute_enthalpy_j_per_kg);
+      specific_inventory_delta(state, out.parcel,
+                               before.liquid_absolute_enthalpy_j_per_kg, h);
   out.exchange.thermal_exchange_state_residual_j =
       out.exchange.parcel_thermochemical_enthalpy_delta_j +
       out.exchange.thermal_exchange_to_gas_j;

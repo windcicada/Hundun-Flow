@@ -128,7 +128,7 @@ std::vector<double> snapshot(const RestartSnapshot &s,
     v.push_back(s.cell_records.variable_cell_bytes.data[i]);
   return v;
 }
-bool inventory(const RestartSnapshot &s, int rank, bool wall) {
+bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
   ConstFieldView h, p, u, Y, passive;
   for (std::size_t i = 0; i < s.fields.size; ++i) {
     auto f = s.fields.data[i];
@@ -160,6 +160,12 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall) {
     for (int y = 0; y < h.interior.y; ++y)
       for (int x = 0; x < h.interior.x; ++x) {
         Int3 c{x, y, z};
+        const double px = (x + s.patch.begin.x + .5) / s.global_cells.x,
+                     py = (y + s.patch.begin.y + .5) / s.global_cells.y,
+                     pz = (z + s.patch.begin.z + .5) / s.global_cells.z;
+        if (ibm && px > .375 && px < .625 && py > .375 && py < .625 &&
+            pz > .375 && pz < .625)
+          continue;
         const double H = h.unchecked(c, 0),
                      P = s.pressure_reference + p.unchecked(c, 0);
         const double T = 298.15 + (H - 1e5 * Y.unchecked(c, 0)) / 1000,
@@ -222,6 +228,9 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall) {
       local[0] += mass;
       local[1] += mass * (-1e5 + 1000 * (T - 298.15) + K);
       local[6] += 1;
+      if (ibm)
+        valid &= real(row + 16) < .375 && real(row + 16) > .3748 &&
+                 real(row + 40) < 0;
       if (wall)
         valid &=
             real(row + 16) < 1 && real(row + 16) > .9998 && real(row + 40) < 0;
@@ -235,10 +244,12 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall) {
     return false;
   MPI_Allreduce(local.data(), global.data(), 8, MPI_DOUBLE, MPI_SUM,
                 MPI_COMM_WORLD);
-  const double initial_mass = 101325 * 28 / (kUniversalGasConstant * 400);
+  const double initial_mass =
+      101325 * 28 / (kUniversalGasConstant * 400) * (ibm ? 63. / 64 : 1);
   const double injected = 1e-4 * s.step,
-               expected_energy =
-                   initial_mass * 102850 - 101325 + injected * (-1e5 + 2);
+               expected_energy = initial_mass * 102850 -
+                                 101325 * (ibm ? 63. / 64 : 1) +
+                                 injected * (-1e5 + 2);
   const double dm = global[0] - initial_mass - injected,
                dE = global[1] - expected_energy;
   if (rank == 0)
@@ -249,7 +260,7 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall) {
                   << " gas_target_error=" << global[5] - s.closed_mass_target
                   << " parcels=" << global[6] << '\n';
   return std::abs(dm) < 1e-10 && std::abs(dE) < 1e-5 &&
-         (wall || std::abs(global[2] - 2 * injected) < 1e-9) &&
+         (wall || ibm || std::abs(global[2] - 2 * injected) < 1e-9) &&
          std::abs(global[3]) < 1e-9 && std::abs(global[4]) < 1e-9 &&
          std::abs(global[5] - s.closed_mass_target) < 1e-10 &&
          global[6] == s.step &&
@@ -338,7 +349,8 @@ int main(int argc, char **argv) {
         ok = agree(bool(status));
         if (ok)
           ok = agree(inventory(
-              s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip));
+              s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip,
+              model.immersed_boundary.has_value()));
       }
     }
     if (ok) {
@@ -413,7 +425,8 @@ int main(int argc, char **argv) {
       ok = agree(bool(status));
       if (ok)
         ok = agree(inventory(
-            s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip));
+            s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip,
+            model.immersed_boundary.has_value()));
     }
     if (ok) {
       int pid = int(getpid());
