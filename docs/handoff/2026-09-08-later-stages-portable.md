@@ -15,7 +15,7 @@
 | 产品共同祖先 | `86542bb96678ec844ae5ac95d8f6391993da239e` |
 | 主线观察 | 统一分支建立时为 `codex/v04-restart-receipt-observability@461d7631aa251969ddfc4e639bcadb74c640070c`；只是历史快照，不作为新的接入 head |
 | 独立队列 | A `/tmp/hundun-portable-queue-a`：P1→P4→气膜桥；B `/tmp/hundun-portable-queue-b`：P2→P3及验证输入；C `/tmp/hundun-portable-queue-c`：P6→P7→P5。均从同一冻结提交分支，只显式归集局部文件 |
-| DCO 节点 | `5149e92` 接口冻结/物性拆分；`bbd2505` TAB/单元汇总；`b15aefa` 生命周期/定位快照。后续归集节点见下方验证记录及本文件 Git 历史 |
+| DCO 节点 | `5149e92` 接口冻结/物性拆分；`bbd2505` TAB/单元汇总；`b15aefa` 生命周期/定位快照。`bb4b2c7` P1–P8 归集；`6102cf0` V1/V2、TAB组合与跨rank复验。最终文档封存提交见本文件 Git 历史 |
 
 协调者独占公开头、中央 CMake、模块间合同和本文件；worker 不提交主线，
 不合并 governance 历史、旧 driver/schema/checkpoint，也不碰 Halo 优化。
@@ -42,7 +42,7 @@
 
 ## 实施包与移植记录
 
-下列代码已归集并通过模块 focused 检查；V1/V2 尚待执行。所有 P→I 的产品适配
+P1–P8 已完成移植前实现，focused、V1/V2 均通过；交付表述为“移植前模块交付完成”。所有 P→I 的产品适配
 均将失败映射为本次尝试整体拒绝，而非部分 source admission。
 
 | 包 / 依赖 | 移植前实现 | 移植后消费接口、持久状态与验收 |
@@ -94,24 +94,54 @@ RED 先于实现：新增 seam 缺声明/符号；失配 backend/query、跨 ran
 `tests/validation/portable_v1_manifest.json` / `portable_v2_manifest.json`
 中预登记公式、常数和绝对+相对容差；不从被测实现生成参考。
 
-当前增量 focused 32 项及真实 backend selector 已通过；最终精确 HEAD 重验记录待补。
+验证源码节点 `6102cf0`；之后仅封存本台账。最终交付 HEAD 为本文件所在分支的
+`git rev-parse HEAD`，交付前在该精确 HEAD 重建并重跑下列选择器。
+
+| 检查 | 结果 |
+| --- | --- |
+| focused / public headers | 32/32 PASS；含 1/2/4-rank 普通值合同 |
+| Stage V1 | 23/23 PASS：合成0D、IEM、TCR、单滴加热/蒸发、弹道/反弹/TAB |
+| Stage V2 | 25/25 PASS：两套资产真实膜查询→A–S→事件→公共源→迁移、解析双parcel预算、故障/恢复，以及6项真实TAB组合 |
+| 跨配置复验 | alpha/beta喷雾和解析封闭交换各N=2/4，六组在1/2/4 ranks的规范化物理状态指纹一致；指纹只作可重复性观测，不代替解析真值 |
+| Cantera conformance | 1/1 PASS；包括持续ESF N=2/4、区间推进、PaSR和气膜。纯A的D_A=0合法，未伪造正扩散率 |
+| 干净构建与改动边界 | 新建构建目录从源码构建指定目标；`git diff --check` PASS；修改仅局部model/public合同、focused/validation输入、最小CMake与本台账 |
+
+V2 TAB 保留单独的形变/表面/体动能预算，不注入gas H；新child的breakup ordinal从0起，
+父ordinal只参与出生ID；未破碎parcel保留自己的ordinal。连续/恢复采用完整值精确对比。
+测试日志留在构建目录 `Testing/Temporary/LastTest.log` 和 `portable-final.xml`；
+不向仓库提交生成的运行输出。
 V1/V2 只在 P1–P8 完成后执行；空间夹具 4³、最多4 ranks，每配置一轮，
 单项5/10/20秒超时，超时记失败，不扩容重跑。无 full ctest、既有流动回归、
 正式火焰/喷雾长算、COAST 比较或 OpenFOAM Allrun。
 
 ```sh
-cmake -S versions/v0.4 -B /tmp/hundun-flow-stage6-two-phase-build-libcxx \
+cmake -S versions/v0.4 -B /tmp/hundun-portable-delivery.S8sh7F \
   -DHUNDUN_BUILD_TESTS=ON -DHUNDUN_BUILD_PORTABLE_CANTERA=OFF -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER=/home/wyf/.local/bin/clang \
   -DCMAKE_CXX_COMPILER=/home/wyf/.local/bin/clang++ \
   -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++
-# 只构建对应 v04_models_*_test / v04_public_headers_test 与 v04_portable_v1/v2 目标。
+cmake --build /tmp/hundun-portable-delivery.S8sh7F --target \
+  v04_models_chemistry_test v04_models_chemistry_adapter_test \
+  v04_models_combustion_test v04_models_combustion_allocation_test \
+  v04_models_combustion_common_source_test v04_models_spray_test \
+  v04_models_spray_parcel_test v04_models_spray_mechanics_test \
+  v04_models_spray_source_test v04_models_spray_transfer_test \
+  v04_models_spray_breakup_test v04_models_spray_properties_test \
+  v04_models_spray_film_bridge_test v04_models_spray_events_test \
+  v04_models_spray_migration_test v04_models_spray_transaction_test \
+  v04_models_esf_test v04_models_esf_reaction_test v04_models_esf_backend_test \
+  v04_models_tcr_test v04_models_exchange_batch_test v04_models_exchange_routing_test \
+  v04_models_portable_composition_test v04_public_headers_test \
+  v04_portable_v1 v04_portable_v2 v04_portable_v2_tab -j4
 LD_LIBRARY_PATH=/home/wyf/.local/opt/hundun-toolchain/clang/lib/x86_64-unknown-linux-gnu \
-ctest --test-dir /tmp/hundun-flow-stage6-two-phase-build-libcxx --output-on-failure \
+ctest --test-dir /tmp/hundun-portable-delivery.S8sh7F --output-on-failure --timeout 30 \
   -R '^v04_(models_(chemistry(_adapter)?|combustion(_allocation|_common_source)?|spray(_breakup|_parcel|_mechanics|_source|_transfer|_properties|_film_bridge|_events|_migration_mpi_[124]|_transaction_mpi_[124])?|esf(_reaction|_backend)?|tcr|exchange_batch|exchange_routing_mpi_[124]|portable_composition_mpi_[124])|public_headers)$'
-# 完成门后，分别执行：
-# ctest ... -L '^portable_v1$' --output-on-failure
-# ctest ... -L '^portable_v2$' --output-on-failure
+# 使用相同 LD_LIBRARY_PATH；可将两标签与上述 focused 正则合并为一次选择运行。
+ctest --test-dir /tmp/hundun-portable-delivery.S8sh7F -L '^portable_v1$' --output-on-failure
+ctest --test-dir /tmp/hundun-portable-delivery.S8sh7F -L '^portable_v2$' --output-on-failure \
+  --output-junit /tmp/hundun-portable-delivery.S8sh7F/portable-final.xml
+python3 versions/v0.4/tests/validation/compare_portable_v2.py \
+  /tmp/hundun-portable-delivery.S8sh7F/portable-final.xml
 git diff --check
 ```
 
