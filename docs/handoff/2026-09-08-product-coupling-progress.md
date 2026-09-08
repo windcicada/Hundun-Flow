@@ -49,6 +49,21 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
   非有限源与过期时间身份拒绝，并覆盖原有 IDP 路径。
 - 这些是实际方程的质量源消费入口；产品喷雾尚未提供该源，尚未形成完整两相接线。
 
+## ESF 接线准备（仍拒绝产品启动）
+
+- ESF/TCR 配置进入严格 JSON、模型指纹和跨 rank wire。字段数仅 2/4，seed 用 uint64
+  保存；测试使用超过 2^53 的 seed，确认没有浮点化。TCR reactants/progress weights/
+  初始分支设置可序列化；这不等同于启用 validated 科学反馈。
+- ESF 化学报告补充两次半区间的等权组分质量密度增量，单位 kg/m³，可直接向 MeanState
+  输出过滤化学源；失败不发布这个借用结果。新增元素/总质量/形成焓收支检查通过，
+  ESF 与 P8 相关测试 6/6 PASS。
+- `reacting-esf` 是进行中的产品验收夹具。Case/wire 检查通过，ProductCompiler 的 ESF
+  能力门保持拒绝，直到持续场、空间输运、均值一致性和共同事务实际接入。
+- 接线参考 HUNDUN governance 只读提交 `8ffdf2b` 的
+  `docs/numerics/stage5-esf-tcr-equations.md`、`stage5-coast-esf-semantic-audit.md`，
+  以及 ESF transport/element consistency 的公开算法实现。保留当前供体 P8 的
+  source→transport/IEM/TCR→两次连续 chemistry 半区间顺序，不移植旧 driver/历史。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

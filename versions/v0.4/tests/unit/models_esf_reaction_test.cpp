@@ -83,11 +83,17 @@ int main() {
     return 1;
   if (!near(r.ensemble_heat_release_j_per_m3, 3.1606027941427884, 1e-12, 1e-13))
     return 2;
+  if (!r.mean_integrated_species_density_delta_kg_per_m3 ||
+      !near(r.mean_integrated_species_density_delta_kg_per_m3[0], -0.5 * (1 - std::exp(-1.0))) ||
+      !near(r.mean_integrated_species_density_delta_kg_per_m3[0] +
+            r.mean_integrated_species_density_delta_kg_per_m3[1], 0.0) ||
+      !near(-10 * r.mean_integrated_species_density_delta_kg_per_m3[0],
+            r.ensemble_heat_release_j_per_m3)) return 10;
   backend.calls = 0;
   backend.fail_on = 3;
   auto failed = workspace.react(q, backend);
   if (failed.status != portable::Status::provider_failure ||
-      failed.candidate.values || values[0] != 0.2 ||
+      failed.candidate.values || failed.mean_integrated_species_density_delta_kg_per_m3 || values[0] != 0.2 ||
       workspace.valid(r.candidate))
     return 3;
   backend.calls = 0;

@@ -824,6 +824,49 @@ bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
          valid_time(out);
 }
 
+bool parse_esf(yyjson_val* value, EsfSpec& out) {
+  if (!object_has_exact_keys(value, {"fields", "seed", "initial_species_offsets", "tcr"}) ||
+      !parse_uint32(yyjson_obj_get(value, "fields"), out.fields)) return false;
+  auto* seed = yyjson_obj_get(value, "seed");
+  auto* offsets = yyjson_obj_get(value, "initial_species_offsets");
+  if (!yyjson_is_uint(seed) || !yyjson_is_arr(offsets) || yyjson_arr_size(offsets) > 1024) return false;
+  out.seed = yyjson_get_uint(seed);
+  for (std::size_t i = 0; i < yyjson_arr_size(offsets); ++i) {
+    double v{};
+    if (!finite_real(yyjson_arr_get(offsets, i), v)) return false;
+    out.initial_species_offsets.push_back(v);
+  }
+  auto* tcr = yyjson_obj_get(value, "tcr");
+  const auto mode = string_value(tcr, "mode");
+  if (!mode) return false;
+  if (*mode == "off") return object_has_exact_keys(tcr, {"mode"}) && detail::valid_esf_spec(out);
+  if (*mode == "shadow") out.tcr.mode = TcrMode::shadow;
+  else if (*mode == "experimental") out.tcr.mode = TcrMode::experimental;
+  else if (*mode == "validated") out.tcr.mode = TcrMode::validated;
+  else return false;
+  if (!object_has_exact_keys(tcr, {"mode", "reactants", "progress_weights", "initialization_sign", "weak_rate_threshold"})) return false;
+  auto* reactants = yyjson_obj_get(tcr, "reactants");
+  auto* weights = yyjson_obj_get(tcr, "progress_weights");
+  if (!yyjson_is_arr(reactants) || yyjson_arr_size(reactants) > 255 ||
+      !yyjson_is_arr(weights) || yyjson_arr_size(weights) > 255) return false;
+  for (std::size_t i = 0; i < yyjson_arr_size(reactants); ++i) {
+    auto* name = yyjson_arr_get(reactants, i);
+    if (!yyjson_is_str(name)) return false;
+    out.tcr.reactants.emplace_back(yyjson_get_str(name), yyjson_get_len(name));
+  }
+  for (std::size_t i = 0; i < yyjson_arr_size(weights); ++i) {
+    double v{};
+    if (!finite_real(yyjson_arr_get(weights, i), v)) return false;
+    out.tcr.progress_weights.push_back(v);
+  }
+  double sign{};
+  if (!finite_real(yyjson_obj_get(tcr, "initialization_sign"), sign) ||
+      sign < -1 || sign > 1 || std::trunc(sign) != sign ||
+      !finite_real(yyjson_obj_get(tcr, "weak_rate_threshold"), out.tcr.weak_rate_threshold)) return false;
+  out.tcr.initialization_sign = int(sign);
+  return detail::valid_esf_spec(out);
+}
+
 bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
   const auto model = string_value(value, "model");
   const auto representation = string_value(value, "representation");
@@ -832,31 +875,38 @@ bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
   if (!model || !representation || !sha || !phase) return false;
   if (*model == "finite_rate_mean") out.mode = ReactionMode::finite_rate_mean;
   else if (*model == "pasr_algebraic_v1") out.mode = ReactionMode::pasr_algebraic_v1;
+  else if (*model == "esf_tpdf") out.mode = ReactionMode::esf_tpdf;
   else return false;
   out.mechanism_sha256.assign(sha->data(), sha->size());
   out.phase.assign(phase->data(), phase->size());
   const bool pasr = out.mode == ReactionMode::pasr_algebraic_v1;
+  const bool esf = out.mode == ReactionMode::esf_tpdf;
+  const std::size_t keys = esf ? 8U : pasr ? 7U : 6U;
   if (*representation == "analytic_isomer") {
     out.representation = ReactionSpec::Representation::analytic_isomer;
-    if (yyjson_obj_size(value) != (pasr ? 7U : 6U) ||
+    if (yyjson_obj_size(value) != keys ||
         !finite_real(yyjson_obj_get(value, "rate_s"), out.analytic_rate_s) ||
         !finite_real(yyjson_obj_get(value, "cp_j_per_kg_k"), out.analytic_cp_j_per_kg_k)) return false;
   } else if (*representation == "direct_cantera") {
     out.representation = ReactionSpec::Representation::direct_cantera;
     const auto file = string_value(value, "mechanism_file");
     auto* solver = yyjson_obj_get(value, "chemistry_solver");
-    if (yyjson_obj_size(value) != (pasr ? 7U : 6U) || !file ||
+    if (yyjson_obj_size(value) != keys || !file ||
         !object_has_exact_keys(solver, {"relative_tolerance", "absolute_tolerance", "maximum_internal_steps"}) ||
         !finite_real(yyjson_obj_get(solver, "relative_tolerance"), out.relative_tolerance) ||
         !finite_real(yyjson_obj_get(solver, "absolute_tolerance"), out.absolute_tolerance) ||
         !parse_uint32(yyjson_obj_get(solver, "maximum_internal_steps"), out.maximum_internal_steps)) return false;
     out.mechanism_file = std::string(*file);
   } else return false;
-  if (pasr) {
+  if (pasr || esf) {
     auto* mixing = yyjson_obj_get(value, "mixing");
     if (!object_has_exact_keys(mixing, {"c_z", "turbulent_schmidt"}) ||
         !finite_real(yyjson_obj_get(mixing, "c_z"), out.mixing_c_z) ||
         !finite_real(yyjson_obj_get(mixing, "turbulent_schmidt"), out.turbulent_schmidt)) return false;
+  }
+  if (esf) {
+    out.esf.emplace();
+    if (!parse_esf(yyjson_obj_get(value, "ensemble"), *out.esf)) return false;
   }
   return detail::valid_reaction_spec(out);
 }
@@ -2111,6 +2161,20 @@ Status serialize_model(const ValidatedModel& model,
       writer.real(r.relative_tolerance); writer.real(r.absolute_tolerance);
       writer.u32(r.maximum_internal_steps);
       writer.real(r.mixing_c_z); writer.real(r.turbulent_schmidt);
+      if (r.esf) {
+        const auto& e = *r.esf;
+        writer.u32(e.fields); writer.u64(e.seed);
+        writer.u32(static_cast<std::uint32_t>(e.initial_species_offsets.size()));
+        for (double v : e.initial_species_offsets) writer.real(v);
+        writer.byte(static_cast<std::uint8_t>(e.tcr.mode));
+        writer.u32(static_cast<std::uint32_t>(e.tcr.reactants.size()));
+        for (const auto& name : e.tcr.reactants)
+          if (!writer.text(name)) return invalid_case(detail_wire);
+        writer.u32(static_cast<std::uint32_t>(e.tcr.progress_weights.size()));
+        for (double v : e.tcr.progress_weights) writer.real(v);
+        writer.u32(static_cast<std::uint32_t>(e.tcr.initialization_sign + 1));
+        writer.real(e.tcr.weak_rate_threshold);
+      }
     }
     writer.u64(model.fingerprint);
     std::vector<std::uint8_t> candidate = std::move(writer).take();
@@ -2328,6 +2392,22 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       r.mode = static_cast<ReactionMode>(mode);
       r.representation = static_cast<ReactionSpec::Representation>(representation);
       r.mechanism_file = std::move(mechanism_file);
+      if (r.mode == ReactionMode::esf_tpdf) {
+        r.esf.emplace(); auto& e = *r.esf;
+        std::uint32_t count{}, sign{}; std::uint8_t tcr_mode{};
+        if (!reader.u32(e.fields) || !reader.u64(e.seed) || !reader.u32(count) || count > 1024) return invalid_case(detail_wire);
+        e.initial_species_offsets.resize(count);
+        for (double& v : e.initial_species_offsets) if (!reader.real(v)) return invalid_case(detail_wire);
+        if (!reader.byte(tcr_mode) || !reader.u32(count) || count > 255) return invalid_case(detail_wire);
+        e.tcr.mode = static_cast<TcrMode>(tcr_mode);
+        e.tcr.reactants.resize(count);
+        for (auto& name : e.tcr.reactants) if (!reader.text(name)) return invalid_case(detail_wire);
+        if (!reader.u32(count) || count > 255) return invalid_case(detail_wire);
+        e.tcr.progress_weights.resize(count);
+        for (double& v : e.tcr.progress_weights) if (!reader.real(v)) return invalid_case(detail_wire);
+        if (!reader.u32(sign) || sign > 2 || !reader.real(e.tcr.weak_rate_threshold)) return invalid_case(detail_wire);
+        e.tcr.initialization_sign = int(sign) - 1;
+      }
       if (r.mode == ReactionMode::none || !detail::valid_reaction_spec(r) ||
           std::size_t(data_count) + (has_stl ? 1U : 0U) + (coast_axes_wire(version) ? 2U : 1U) +
           (r.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) > detail::kMaxReferencedFiles)
@@ -2874,6 +2954,18 @@ Status compile_on_root(const fs::path& case_root, int rank,
       hash.real(r.relative_tolerance); hash.real(r.absolute_tolerance);
       hash.integer(r.maximum_internal_steps); hash.real(r.mixing_c_z);
       hash.real(r.turbulent_schmidt);
+      if (r.esf) {
+        const auto& e = *r.esf;
+        hash.integer(e.fields); hash.integer(e.seed);
+        hash.integer(e.initial_species_offsets.size());
+        for (double v : e.initial_species_offsets) hash.real(v);
+        hash.integer(static_cast<std::uint8_t>(e.tcr.mode));
+        hash.integer(e.tcr.reactants.size());
+        for (const auto& name : e.tcr.reactants) hash.text(name);
+        hash.integer(e.tcr.progress_weights.size());
+        for (double v : e.tcr.progress_weights) hash.real(v);
+        hash.integer(e.tcr.initialization_sign + 1); hash.real(e.tcr.weak_rate_threshold);
+      }
       if (r.representation == ReactionSpec::Representation::direct_cantera) {
         fs::path relative;
         UniqueFd descriptor;

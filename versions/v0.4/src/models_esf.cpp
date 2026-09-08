@@ -104,7 +104,7 @@ portable::Status correct_species_flux(const double *y, const double *raw,
 Workspace::Workspace(std::size_t ns)
     : capacity_(checked_capacity(ns)), candidate_(4 * (ns + 1)),
       transported_(4 * (ns + 1)), means_(ns + 1), variances_(ns + 1),
-      next_y_(ns), species_delta_(ns) {}
+      next_y_(ns), species_delta_(ns), mean_species_delta_(ns) {}
 Report Workspace::advance(const Request &q) noexcept {
   Report r;
   const auto &a = q.accepted;
@@ -294,6 +294,7 @@ Report Workspace::react(const ReactionRequest &q,
     return std::isfinite(x) && std::isfinite(y) &&
            std::abs(x - y) <= 1e-10 + 2e-12 * std::abs(y);
   };
+  std::fill(mean_species_delta_.begin(), mean_species_delta_.end(), 0.0);
   for (std::size_t f = 0; f < n; ++f) {
     r.failure_field = f;
     if (!fraction_tuple(a.values + f * c, ns) ||
@@ -366,8 +367,14 @@ Report Workspace::react(const ReactionRequest &q,
           return r;
         }
       }
-      for (std::size_t s = 0; s < ns; ++s)
+      for (std::size_t s = 0; s < ns; ++s) {
+        mean_species_delta_[s] += species_delta_[s] / double(n);
+        if (!std::isfinite(mean_species_delta_[s])) {
+          r.status = portable::Status::conservation_failure;
+          return r;
+        }
         transported_[f * c + s] = next_y_[s];
+      }
       // Closed chemistry conserves its PH enthalpy coordinate exactly; the
       // validated EOS round-trip must not inject floating-point drift.
       density = sample.density_kg_per_m3;
@@ -397,6 +404,7 @@ Report Workspace::react(const ReactionRequest &q,
   r.candidate.generation = generation_;
   r.means = means_.data();
   r.variances = variances_.data();
+  r.mean_integrated_species_density_delta_kg_per_m3 = mean_species_delta_.data();
   return r;
 }
 } // namespace hundun::v04::esf::detail

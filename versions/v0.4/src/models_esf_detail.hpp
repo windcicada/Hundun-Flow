@@ -62,6 +62,9 @@ struct Report {
   std::uint32_t chemistry_call_count{};
   std::array<double, 4> final_densities_kg_per_m3{};
   double ensemble_heat_release_j_per_m3{};
+  // Equal-weight sum of both validated chemical half-intervals, Ns entries.
+  // Borrowed under candidate generation; null on a failed reaction.
+  const double* mean_integrated_species_density_delta_kg_per_m3{};
 };
 struct ReactionRequest {
   View accepted{};
@@ -88,7 +91,7 @@ private:
   std::uint64_t generation_{};
   std::size_t capacity_{};
   std::vector<double> candidate_, transported_, means_, variances_;
-  std::vector<double> next_y_, species_delta_;
+  std::vector<double> next_y_, species_delta_, mean_species_delta_;
 };
 // Shared IEM/TCR relaxation: exp[-cbrt(control) dt/(2 tau)].
 portable::Status iem_factor(double dt, double tau, double control,

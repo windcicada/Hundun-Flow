@@ -100,6 +100,23 @@ enum class ReactionMode : std::uint8_t {
   esf_tpdf
 };
 
+enum class TcrMode : std::uint8_t { off, shadow, experimental, validated };
+struct TcrSpec {
+  TcrMode mode{TcrMode::off};
+  std::vector<std::string> reactants;
+  std::vector<double> progress_weights;
+  int initialization_sign{};
+  double weak_rate_threshold{1e-12};
+};
+struct EsfSpec {
+  std::uint32_t fields{2};
+  std::uint64_t seed{};
+  // Field-major independent-species offsets about the gas initial mean.
+  // Empty initializes every stochastic field to that mean.
+  std::vector<double> initial_species_offsets;
+  TcrSpec tcr;
+};
+
 struct ReactionSpec {
   ReactionMode mode{ReactionMode::none};
   std::string mechanism_sha256;
@@ -116,6 +133,7 @@ struct ReactionSpec {
   std::uint32_t maximum_internal_steps{2000};
   double mixing_c_z{1.0};
   double turbulent_schmidt{0.7};
+  std::optional<EsfSpec> esf;
 };
 
 struct CaseSpec {

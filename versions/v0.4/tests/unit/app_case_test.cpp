@@ -1507,6 +1507,25 @@ bool test_reaction_wire() {
       recovered.reaction.mechanism_sha256 == model.reaction.mechanism_sha256 &&
       recovered.reaction.phase == model.reaction.phase,
       "reaction configuration survives rank broadcast without becoming inert");
+  model.reaction.mode = hundun::v04::ReactionMode::esf_tpdf;
+  model.reaction.esf.emplace();
+  model.reaction.esf->fields = 4;
+  model.reaction.esf->seed = UINT64_C(18446744073709551601);
+  model.reaction.esf->initial_species_offsets = {0.01, -0.01, 0.02, -0.02};
+  model.reaction.esf->tcr.mode = hundun::v04::TcrMode::experimental;
+  model.reaction.esf->tcr.reactants = {"air"};
+  model.reaction.esf->tcr.progress_weights = {0.0, 1.0};
+  model.reaction.esf->tcr.initialization_sign = 1;
+  passed &= expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.reaction.esf &&
+      recovered.reaction.esf->fields == 4 &&
+      recovered.reaction.esf->seed == model.reaction.esf->seed &&
+      recovered.reaction.esf->initial_species_offsets == model.reaction.esf->initial_species_offsets &&
+      recovered.reaction.esf->tcr.reactants == model.reaction.esf->tcr.reactants &&
+      recovered.reaction.esf->tcr.progress_weights == model.reaction.esf->tcr.progress_weights &&
+      recovered.reaction.esf->tcr.initialization_sign == 1,
+      "ESF fields, integer RNG seed, and TCR mapping survive broadcast");
   if (!bytes.empty()) bytes.pop_back();
   recovered.fingerprint = 91;
   passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bytes, recovered) &&

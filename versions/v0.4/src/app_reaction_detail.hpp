@@ -6,7 +6,28 @@
 #include <limits>
 
 namespace hundun::v04::detail {
+inline bool valid_esf_spec(const EsfSpec& e) {
+  if ((e.fields != 2 && e.fields != 4) || e.initial_species_offsets.size() > 1024)
+    return false;
+  for (double value : e.initial_species_offsets)
+    if (!std::isfinite(value) || value < -1 || value > 1) return false;
+  const auto& t = e.tcr;
+  if (!std::isfinite(t.weak_rate_threshold) || t.weak_rate_threshold <= 0 ||
+      t.initialization_sign < -1 || t.initialization_sign > 1) return false;
+  if (t.mode == TcrMode::off)
+    return t.reactants.empty() && t.progress_weights.empty() && t.initialization_sign == 0;
+  if ((t.mode != TcrMode::shadow && t.mode != TcrMode::experimental && t.mode != TcrMode::validated) ||
+      t.reactants.empty() || t.reactants.size() > 255 ||
+      t.progress_weights.empty() || t.progress_weights.size() > 255) return false;
+  for (const auto& name : t.reactants)
+    if (name.empty() || name.size() > 255 || name.find('\0') != std::string::npos) return false;
+  for (double value : t.progress_weights)
+    if (!std::isfinite(value)) return false;
+  return true;
+}
 inline bool valid_reaction_spec(const ReactionSpec &r) {
+  if ((r.mode == ReactionMode::esf_tpdf) != r.esf.has_value() ||
+      (r.esf && !valid_esf_spec(*r.esf))) return false;
   if (r.mode == ReactionMode::none)
     return r.mechanism_sha256.empty() && r.phase.empty() &&
            r.mechanism_file.empty() &&
