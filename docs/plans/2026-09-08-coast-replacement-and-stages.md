@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 观测已验。ProductDriver 冷配置/几何及200字节每-loop摘要已通过1/2/4-rank重试/回滚和sanitizer，runner输出与生产测量尚待完成 |
+| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native/ProductDriver 已验，后者独立干净19/19通过。runner schema 5、独立布局、逐层/逐轮账目及CLI/关闭失败/sanitizer已通过开发回归，待源码提交后的干净验收与生产测量 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
-| 兼容性 | 新 CSV 使用 `observation_schema=4`；读取器兼容 schema 3，但旧数据不能补造缺失阈值 |
+| 兼容性 | MG关闭仍为 `observation_schema=4`；显式MG观测为5，读取器兼容3/4。旧数据不能补造缺失阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | 在runner接入每-loop摘要及每-step层级sidecar，冷布局独立绑定完整rank/level身份；跨重试/组成sweep对账，输出关闭失败与partial不假报完整；不复制32层数据到每个loop |
-| 下一动作 | 完成候选干净验收、runner/observer接线与真实CLI回归，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
+| 下一动作 | runner观测分项提交后执行候选干净验收，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -64,6 +64,12 @@ Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-
 把solid-solid负零错误地当成权威流体通量；独立干净基线也失败。修正的是测试区域合同，
 没有改变生产normalizer或方法签名。
 
+[Runner/observer 接线](../verification/2026-09-08-runner-mg-profile.md) 的开发回归已完成：
+CLI与统计恢复链6/6，ASan+UBSan CLI 3/3；root及非零rank的新增日志关闭失败一致返回，
+checkpoint字节不变。新observer有33项拒绝检查，旧88项保留。
+Native开关仍可rank-local；runner因文件/通信分支要求两个观测开关冷入口一致。
+生产规模的MG成本尚未测量，不用16³夹具推算Re3900加速。
+
 ## 3. 基础流动模块台账
 
 状态含义：**已修并验证**限定于已引用的历史候选和用例，本次仅只读复核；**实测限制**有数值证据；**静态缺口**由接口或调用链确认；**待测优化**尚无收益结论。后续代码变化只使受影响的证据重新待验，不抹去历史失败和通过记录。
@@ -77,7 +83,7 @@ Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-
 | MPI、事务与公共接口 | MG 可选本地 counters 不再控制 collective；应用七项冷控制一致性、分配失败与共同回退已有针对性验收 | 不能据局部失败矩阵声称所有产品路径已穷举；ESF/parcel/migration 还没有加入当前共同事务 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | I/O、Restart 与完成状态 | 日志 flush/close 统一决定全 rank 完成；读取前大小检查、reader bulk 预算、失败不发布、同方法与 rank relayout 恢复已验 | 普通 CSV close 不等于 fsync；reader bulk 不是产品总峰值/RSS。新增模型身份与持久状态仍需扩展 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | 内存、工作区与生命周期 | 多标量 C++ 唯一分配、恢复/输出交叉存活、销毁重建和 MPI owned 资源已有小型 profile | 全产品硬峰值预算仍缺；MPI/libc、allocator 余量、arena 外数组、halo、image/staging 的同时活跃集合需统一。局部零泄漏计数不等于全进程上限 | [独占验收](../verification/2026-09-07-exclusive-module-acceptance.md) |
-| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐 loop 来源/覆盖/账目及 V4 RHS 真实阈值已验 | MG 层级成本、已有 guard 触发率仍不可观测；64 loops/advance 溢出会拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md) |
+| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐 loop 来源/覆盖/账目及 V4 RHS 真实阈值已验；MG层级接线已开发回归 | MG生产规模成本待测；已有guard触发率仍不可观测；64 loops/advance 溢出会拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md)、[MG接线](../verification/2026-09-08-runner-mg-profile.md) |
 | 构建与可执行身份 | 有 Git 身份的干净 checkout 可独立构建，普通最小 CLI 已运行 | 无 `.git` 源归档可构建但 run 在 `invalid_plan/10505` 被身份合同拒绝；归档来源身份尚无运行合同 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 
 两项关键量测限定：
