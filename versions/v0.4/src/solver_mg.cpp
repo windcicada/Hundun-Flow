@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,8 @@ constexpr std::uint32_t kMgApply = 7104U;
 constexpr std::uint32_t kMgCounter = 7105U;
 constexpr std::size_t kReplicatedCoarseCellLimit = 4096U;
 constexpr std::size_t kReplicatedOperatorWidth = 7U;
+static_assert(kMgMaximumLevels == detail::kMgMaximumLevels,
+              "MG observation and compiled hierarchy share the level bound");
 
 std::uint64_t mix(std::uint64_t hash, std::uint64_t value) noexcept {
   hash ^= value;
@@ -589,6 +592,8 @@ struct NativeCartesianMgPlan::Impl {
   std::vector<double> prolongation_extension_receive;
   Strategy strategy{};
   MgPlanCounters runtime_counters{};
+  MgApplyProfile apply_profile{};
+  std::array<bool, kMgMaximumLevels> profile_halo_slots{};
   // A small point-smoother coarse level may be replicated on every rank.
   // All descriptor maps, packed layouts, and numeric workspaces are cold-owned
   // here so that the eligible apply path has no ownership or allocation work.
@@ -645,6 +650,140 @@ struct NativeCartesianMgPlan::Impl {
 };
 
 namespace {
+
+void profile_add(MgApplyProfile& profile, std::uint64_t& total,
+                 std::uint64_t value) noexcept {
+  if (value > UINT64_MAX - total) {
+    total = UINT64_MAX;
+    profile.complete = false;
+  } else {
+    total += value;
+  }
+}
+
+class MgProfileElapsedTimer {
+ public:
+  MgProfileElapsedTimer(MgApplyProfile& profile, std::uint64_t& total) noexcept
+      : profile_(profile), total_(total), begin_(Clock::now()) {}
+  ~MgProfileElapsedTimer() noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now() - begin_).count();
+    if (elapsed < 0) {
+      profile_.complete = false;
+    } else {
+      profile_add(profile_, total_, static_cast<std::uint64_t>(elapsed));
+    }
+  }
+  MgProfileElapsedTimer(const MgProfileElapsedTimer&) = delete;
+  MgProfileElapsedTimer& operator=(const MgProfileElapsedTimer&) = delete;
+
+ private:
+  using Clock = std::chrono::steady_clock;
+  MgApplyProfile& profile_;
+  std::uint64_t& total_;
+  Clock::time_point begin_;
+};
+
+template <class Implementation, class Work>
+auto observe_mg_phase(Implementation& implementation, std::size_t level,
+                      MgPhaseProfile MgLevelApplyProfile::*member,
+                      Work&& work) noexcept -> decltype(work()) {
+  auto& profile = implementation.apply_profile;
+  if (!profile.enabled) return work();
+  auto& phase = profile.levels[level].*member;
+  profile_add(profile, phase.calls, 1U);
+  MgProfileElapsedTimer elapsed(profile, phase.nanoseconds);
+  return work();
+}
+
+template <class Implementation>
+const HaloEngine* profile_halo(const Implementation& implementation,
+                               std::size_t level) noexcept {
+  const HaloEngine* halo = implementation.finest_halo_object;
+  std::uintptr_t identity = implementation.finest_halo_identity;
+  if (level != 0U) {
+    if (level > implementation.level_halo_table.size() ||
+        level > implementation.level_halo_identities.size()) return nullptr;
+    halo = implementation.level_halo_table[level - 1U];
+    identity = implementation.level_halo_identities[level - 1U];
+  }
+  // Objects must still outlive the plan. A moved/rebound (but live) object
+  // cannot provide counters for the frozen plan. A poisoned Halo retaining
+  // the same identity can still report the cost of the failed application.
+  return halo != nullptr && identity != 0U &&
+                 halo->instance_identity() == identity
+             ? halo : nullptr;
+}
+
+template <class Implementation>
+bool profile_reduction_valid(const Implementation& implementation) noexcept {
+  return implementation.reductions_object != nullptr &&
+         implementation.reductions_identity != 0U &&
+         implementation.services.reductions == implementation.reductions_object &&
+         implementation.reductions_object->instance_identity() ==
+             implementation.reductions_identity;
+}
+
+void profile_delta(MgApplyProfile& profile, std::uint64_t& total,
+                   std::uint64_t before, std::uint64_t after) noexcept {
+  if (after < before || before == UINT64_MAX || after == UINT64_MAX) {
+    profile.complete = false;
+    return;
+  }
+  profile_add(profile, total, after - before);
+}
+
+template <class Implementation, class Work>
+Status observe_mg_apply(Implementation* implementation, Work&& work) noexcept {
+  if (implementation == nullptr || !implementation->apply_profile.enabled)
+    return work();
+  auto& profile = implementation->apply_profile;
+  MgProfileElapsedTimer elapsed(profile, profile.apply_nanoseconds);
+  profile_add(profile, profile.attempts, 1U);
+  const std::size_t levels =
+      std::min(implementation->levels.size(), profile.levels.size());
+  if (levels != profile.level_count) profile.complete = false;
+  std::array<HaloRuntimeCounters, kMgMaximumLevels> halo_before{};
+  std::array<const HaloEngine*, kMgMaximumLevels> halos{};
+  for (std::size_t level = 0U; level < levels; ++level) {
+    if (implementation->profile_halo_slots[level])
+      halos[level] = profile_halo(*implementation, level);
+    if (halos[level] != nullptr) {
+      halo_before[level] = halos[level]->runtime_counters();
+    } else {
+      profile.complete = false;
+    }
+  }
+  const bool reduction_valid = profile_reduction_valid(*implementation);
+  const std::uint64_t reduction_before =
+      reduction_valid
+          ? implementation->reductions_object->counters().wall_nanoseconds : 0U;
+  const Status status = work();
+  for (std::size_t level = 0U; level < levels; ++level) {
+    if (halos[level] == nullptr ||
+        profile_halo(*implementation, level) != halos[level]) {
+      profile.complete = false;
+      continue;
+    }
+    const auto after = halos[level]->runtime_counters();
+    const auto& before = halo_before[level];
+    auto& target = profile.levels[level];
+    profile_delta(profile, target.halo_wait_nanoseconds,
+                  before.wait_nanoseconds, after.wait_nanoseconds);
+    profile_delta(profile, target.halo_control_nanoseconds,
+                  before.control_nanoseconds, after.control_nanoseconds);
+    profile_delta(profile, target.halo_control_calls,
+                  before.control_consensus_calls, after.control_consensus_calls);
+  }
+  if (reduction_valid && profile_reduction_valid(*implementation)) {
+    profile_delta(profile, profile.reduction_nanoseconds, reduction_before,
+                  implementation->reductions_object->counters().wall_nanoseconds);
+  } else {
+    profile.complete = false;
+  }
+  profile_add(profile, status ? profile.successes : profile.failures, 1U);
+  return status;
+}
 
 template <class Implementation>
 Status validate_borrowed_services(const Implementation& implementation) noexcept {
@@ -3579,17 +3718,25 @@ Status extend_prolongation_face_halos(
     // Fixed blocking pairs have no request lifecycle to leak on an MPI error.
     // The first sends the minimum plane toward minus and receives the plus
     // neighbor's minimum plane; the second is the exact maximum-plane dual.
-    int mpi_status = MPI_Sendrecv(
-        send_min, static_cast<int>(count), MPI_DOUBLE, minus, plus_tag,
-        receive_max, static_cast<int>(count), MPI_DOUBLE, plus, plus_tag,
-        implementation.communicator, MPI_STATUS_IGNORE);
+    int mpi_status = observe_mg_phase(
+        implementation, coarse_index, &MgLevelApplyProfile::direct_mpi,
+        [&]() noexcept {
+          return MPI_Sendrecv(
+              send_min, static_cast<int>(count), MPI_DOUBLE, minus, plus_tag,
+              receive_max, static_cast<int>(count), MPI_DOUBLE, plus, plus_tag,
+              implementation.communicator, MPI_STATUS_IGNORE);
+        });
     if (mpi_status != MPI_SUCCESS && local) {
       local = {StatusCode::mpi_failure, kMgCollective};
     }
-    mpi_status = MPI_Sendrecv(
-        send_max, static_cast<int>(count), MPI_DOUBLE, plus, minus_tag,
-        receive_min, static_cast<int>(count), MPI_DOUBLE, minus, minus_tag,
-        implementation.communicator, MPI_STATUS_IGNORE);
+    mpi_status = observe_mg_phase(
+        implementation, coarse_index, &MgLevelApplyProfile::direct_mpi,
+        [&]() noexcept {
+          return MPI_Sendrecv(
+              send_max, static_cast<int>(count), MPI_DOUBLE, plus, minus_tag,
+              receive_min, static_cast<int>(count), MPI_DOUBLE, minus, minus_tag,
+              implementation.communicator, MPI_STATUS_IGNORE);
+        });
     if (mpi_status != MPI_SUCCESS && local) {
       local = {StatusCode::mpi_failure, kMgCollective};
     }
@@ -3776,13 +3923,16 @@ Status replicated_coarse_solve(Implementation& implementation,
       implementation,
       implementation.replicated_global_cells * sizeof(double));
   if (!local && deferred) deferred = local;
-  const int mpi_status = MPI_Allgatherv(
-      implementation.replicated_rhs_local.data(),
-      implementation.replicated_rhs_counts[implementation.rank], MPI_DOUBLE,
-      implementation.replicated_rhs_gather.data(),
-      implementation.replicated_rhs_counts.data(),
-      implementation.replicated_rhs_displacements.data(), MPI_DOUBLE,
-      implementation.communicator);
+  const int mpi_status = observe_mg_phase(
+      implementation, level_index, &MgLevelApplyProfile::direct_mpi, [&]() noexcept {
+        return MPI_Allgatherv(
+            implementation.replicated_rhs_local.data(),
+            implementation.replicated_rhs_counts[implementation.rank], MPI_DOUBLE,
+            implementation.replicated_rhs_gather.data(),
+            implementation.replicated_rhs_counts.data(),
+            implementation.replicated_rhs_displacements.data(), MPI_DOUBLE,
+            implementation.communicator);
+      });
   if (mpi_status != MPI_SUCCESS && deferred) {
     deferred = {StatusCode::mpi_failure, kMgCollective};
   }
@@ -3937,6 +4087,9 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
       level >= implementation.levels.size()) {
     return {StatusCode::invalid_plan, kMgApply};
   }
+  if (implementation.apply_profile.enabled)
+    profile_add(implementation.apply_profile,
+                implementation.apply_profile.levels[level].visits, 1U);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   ++implementation.matrix_work.cycle_level_calls[level];
   Status injected = inject_cycle_failure(
@@ -3952,18 +4105,25 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
         deferred);
     if (!injected) return injected;
 #endif
-    if (replicated_coarse_route_enabled(implementation)) {
-      return replicated_coarse_solve(
-          implementation, level, implementation.spec.policy.coarse_sweeps,
-          false, stage, deferred);
-    }
-    return smooth(implementation, level,
-                  implementation.spec.policy.coarse_sweeps, false, false,
-                  stage, deferred);
+    return observe_mg_phase(implementation, level,
+                            &MgLevelApplyProfile::terminal, [&]() noexcept {
+      if (replicated_coarse_route_enabled(implementation)) {
+        return replicated_coarse_solve(
+            implementation, level, implementation.spec.policy.coarse_sweeps,
+            false, stage, deferred);
+      }
+      return smooth(implementation, level,
+                    implementation.spec.policy.coarse_sweeps, false, false,
+                    stage, deferred);
+    });
   }
-  Status status = smooth(implementation, level,
-                         implementation.spec.policy.pre_sweeps, false, true,
-                         stage, deferred);
+  Status status = observe_mg_phase(implementation, level,
+                                  &MgLevelApplyProfile::pre_smooth,
+                                  [&]() noexcept {
+    return smooth(implementation, level,
+                  implementation.spec.policy.pre_sweeps, false, true,
+                  stage, deferred);
+  });
   if (status) {
     if (implementation.levels[level].view.line_axis_mask == 0U) {
       // Every production point path writes rhs - A*x in its retained final
@@ -3979,10 +4139,18 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
       constexpr bool chebyshev = false;
 #endif
       if (!point_retained_defect_enabled(implementation) && !chebyshev) {
-        status = finish_residual(implementation, level);
+        status = observe_mg_phase(implementation, level,
+                                  &MgLevelApplyProfile::residual,
+                                  [&]() noexcept {
+          return finish_residual(implementation, level);
+        });
       }
     } else {
-      status = compute_residual(implementation, level, stage);
+      status = observe_mg_phase(implementation, level,
+                                &MgLevelApplyProfile::residual,
+                                [&]() noexcept {
+        return compute_residual(implementation, level, stage);
+      });
     }
   }
   if (status) {
@@ -3991,7 +4159,12 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
         implementation, detail::MgCycleFailurePhase::restriction, level,
         deferred);
 #endif
-    if (status) status = restrict_residual(implementation, level, stage);
+    if (status)
+      status = observe_mg_phase(implementation, level,
+                                &MgLevelApplyProfile::restriction,
+                                [&]() noexcept {
+        return restrict_residual(implementation, level, stage);
+      });
   }
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) ++implementation.matrix_work.cycle_restrictions;
@@ -4026,7 +4199,11 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
       deferred);
   if (!status) return status;
 #endif
-  status = prolongate_add(implementation, level, stage, deferred);
+  status = observe_mg_phase(implementation, level,
+                            &MgLevelApplyProfile::prolongation,
+                            [&]() noexcept {
+    return prolongate_add(implementation, level, stage, deferred);
+  });
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) ++implementation.matrix_work.cycle_prolongations;
 #endif
@@ -4040,9 +4217,13 @@ Status mg_cycle(Implementation& implementation, std::size_t level,
 #endif
   }
   if (status) {
-    status = smooth(implementation, level,
+    status = observe_mg_phase(implementation, level,
+                              &MgLevelApplyProfile::post_smooth,
+                              [&]() noexcept {
+      return smooth(implementation, level,
                     implementation.spec.policy.post_sweeps, true, false,
                     stage, deferred);
+    });
   }
   return status;
 }
@@ -4805,7 +4986,9 @@ Status NativeCartesianMgPlan::apply(ConstFieldView residual,
                                     FieldView correction,
                                     std::uint32_t iteration) noexcept {
   (void)iteration;
-  return apply_impl(residual, correction, false);
+  return observe_mg_apply(implementation_, [&]() noexcept {
+    return apply_impl(residual, correction, false);
+  });
 }
 
 Status NativeCartesianMgPlan::prepare_batch(
@@ -4834,58 +5017,60 @@ Status NativeCartesianMgPlan::prepare_batch(
 Status NativeCartesianMgPlan::apply_prepared(
     ConstFieldView residual, FieldView correction, std::uint32_t iteration,
     const LinearPreconditionerBatchTicket& ticket) noexcept {
-  if (implementation_ == nullptr) {
-    return {StatusCode::invalid_plan, kMgApply};
-  }
-  Impl& implementation = *implementation_;
-  const std::uintptr_t owner = reinterpret_cast<std::uintptr_t>(
-      static_cast<const LinearPreconditioner*>(this));
-  const bool valid_ticket =
-      ticket.owner == owner && ticket.workspace != nullptr &&
-      ticket.workspace->fingerprint() != 0U && ticket.slot_count != 0U &&
-      ticket.maximum_applications != 0U &&
-      ticket.preconditioner_fingerprint ==
-          make_collective_preconditioner_fingerprint(
-              implementation.symbolic, implementation.generation,
-              implementation.runtime_counters.numeric_refreshes) &&
-      ticket.preconditioner_generation == implementation.generation &&
-      ticket.preconditioner_application_base <=
-          implementation.runtime_counters.applications &&
-      ticket.preconditioner_application_base <=
-          std::numeric_limits<std::uint64_t>::max() -
-              ticket.maximum_applications &&
-      implementation.runtime_counters.applications <
-          ticket.preconditioner_application_base +
-              ticket.maximum_applications &&
-      iteration < ticket.maximum_applications;
-  // prepare_batch() already cold-certified every borrowed service identity;
-  // the ticket binds that proof to the exact plan generation and application
-  // budget.  Do not rescan the hierarchy on every Krylov application.
-  Status local = valid_ticket
-                     ? Status{}
-                     : Status{StatusCode::invalid_plan, kMgApply};
-  if (local) {
-    local = !valid_field(residual, implementation.spec.patch.cells) ||
-                    !valid_field(as_const(correction),
-                                 implementation.spec.patch.cells) ||
-                    detail::field_views_overlap(residual, correction) ||
-                    implementation.services.workspace->overlaps_storage(
-                        residual) ||
-                    implementation.services.workspace->overlaps_storage(
-                        correction)
-                ? Status{StatusCode::invalid_plan, kMgApply}
-                : Status{};
-  }
-  const Status epoch = enter_prepared_halo_epoch(implementation);
-  if (local && !epoch) local = epoch;
-  implementation.lowest = -1;
-  const Status agreed = consensus(implementation, local);
-  if (!agreed) {
-    close_prepared_halo_epoch(implementation, false,
-                              implementation.lowest);
-    return agreed;
-  }
-  return apply_impl(residual, correction, true);
+  return observe_mg_apply(implementation_, [&]() noexcept -> Status {
+    if (implementation_ == nullptr) {
+      return {StatusCode::invalid_plan, kMgApply};
+    }
+    Impl& implementation = *implementation_;
+    const std::uintptr_t owner = reinterpret_cast<std::uintptr_t>(
+        static_cast<const LinearPreconditioner*>(this));
+    const bool valid_ticket =
+        ticket.owner == owner && ticket.workspace != nullptr &&
+        ticket.workspace->fingerprint() != 0U && ticket.slot_count != 0U &&
+        ticket.maximum_applications != 0U &&
+        ticket.preconditioner_fingerprint ==
+            make_collective_preconditioner_fingerprint(
+                implementation.symbolic, implementation.generation,
+                implementation.runtime_counters.numeric_refreshes) &&
+        ticket.preconditioner_generation == implementation.generation &&
+        ticket.preconditioner_application_base <=
+            implementation.runtime_counters.applications &&
+        ticket.preconditioner_application_base <=
+            std::numeric_limits<std::uint64_t>::max() -
+                ticket.maximum_applications &&
+        implementation.runtime_counters.applications <
+            ticket.preconditioner_application_base +
+                ticket.maximum_applications &&
+        iteration < ticket.maximum_applications;
+    // prepare_batch() already cold-certified every borrowed service identity;
+    // the ticket binds that proof to the exact plan generation and application
+    // budget.  Do not rescan the hierarchy on every Krylov application.
+    Status local = valid_ticket
+                       ? Status{}
+                       : Status{StatusCode::invalid_plan, kMgApply};
+    if (local) {
+      local = !valid_field(residual, implementation.spec.patch.cells) ||
+                      !valid_field(as_const(correction),
+                                   implementation.spec.patch.cells) ||
+                      detail::field_views_overlap(residual, correction) ||
+                      implementation.services.workspace->overlaps_storage(
+                          residual) ||
+                      implementation.services.workspace->overlaps_storage(
+                          correction)
+                  ? Status{StatusCode::invalid_plan, kMgApply}
+                  : Status{};
+    }
+    const Status epoch = enter_prepared_halo_epoch(implementation);
+    if (local && !epoch) local = epoch;
+    implementation.lowest = -1;
+    const Status agreed = consensus(implementation, local);
+    if (!agreed) {
+      close_prepared_halo_epoch(implementation, false,
+                                implementation.lowest);
+      return agreed;
+    }
+    return apply_impl(residual, correction, true);
+  });
 }
 
 std::size_t NativeCartesianMgPlan::level_count() const noexcept {
@@ -4958,6 +5143,40 @@ double NativeCartesianMgPlan::last_cycle_final_residual() const noexcept {
 MgPlanCounters NativeCartesianMgPlan::counters() const noexcept {
   return implementation_ == nullptr ? MgPlanCounters{}
                                     : implementation_->runtime_counters;
+}
+
+Status NativeCartesianMgPlan::set_apply_profiling(bool enabled) noexcept {
+  if (implementation_ == nullptr) return {StatusCode::invalid_plan, kMgPlan};
+  implementation_->apply_profile = {};
+  implementation_->apply_profile.enabled = enabled;
+  implementation_->apply_profile.level_count = implementation_->levels.size();
+  implementation_->profile_halo_slots = {};
+  if (enabled) {
+    // Qualify attribution once at the cold opt-in boundary. Duplicate borrowed
+    // halos cannot be charged to two levels, even if a future solver accepts
+    // that service layout. This affects telemetry only, never solver validity.
+    const std::size_t levels = std::min(implementation_->levels.size(),
+                                        implementation_->profile_halo_slots.size());
+    for (std::size_t level = 0U; level < levels; ++level) {
+      const auto* halo = profile_halo(*implementation_, level);
+      implementation_->profile_halo_slots[level] = halo != nullptr;
+      if (halo == nullptr) implementation_->apply_profile.complete = false;
+      for (std::size_t previous = 0U; halo != nullptr && previous < level;
+           ++previous) {
+        if (halo == profile_halo(*implementation_, previous)) {
+          implementation_->profile_halo_slots[previous] = false;
+          implementation_->profile_halo_slots[level] = false;
+          implementation_->apply_profile.complete = false;
+        }
+      }
+    }
+  }
+  return {};
+}
+
+const MgApplyProfile& NativeCartesianMgPlan::apply_profile() const noexcept {
+  static const MgApplyProfile empty{};
+  return implementation_ == nullptr ? empty : implementation_->apply_profile;
 }
 
 int NativeCartesianMgPlan::lowest_failing_rank() const noexcept {

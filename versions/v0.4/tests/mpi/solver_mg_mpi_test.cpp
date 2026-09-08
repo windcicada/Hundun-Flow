@@ -1929,6 +1929,158 @@ bool test_boundary_topology_contract_is_bidirectional(int rank) {
   return all_true(passed);
 }
 
+bool test_apply_profile_observes_one_v_cycle(int rank) {
+  Fixture fixture;
+  bool passed = expect(initialize(fixture, {}, 64.0, {24, 12, 8}, 2U),
+                       rank, "MG apply-profile fixture initializes");
+  if (!all_true(passed)) return false;
+  NativeCartesianMgPlan plan;
+  passed &= expect(static_cast<bool>(NativeCartesianMgPlan::compile(
+                       mg_spec(fixture), services(fixture),
+                       coefficient_views(fixture), plan)) &&
+                       plan.level_count() == 2U && plan.line_axis_mask() == 0U,
+                   rank, "MG apply-profile compiles a two-level point V-cycle");
+  if (!all_true(passed)) return false;
+  const auto zero_work = [](const MgApplyProfile& profile) noexcept {
+    if (profile.attempts != 0U || profile.successes != 0U ||
+        profile.failures != 0U || profile.apply_nanoseconds != 0U ||
+        profile.reduction_nanoseconds != 0U) return false;
+    for (const auto& level : profile.levels) {
+      if (level.visits != 0U || level.halo_wait_nanoseconds != 0U ||
+          level.halo_control_nanoseconds != 0U ||
+          level.halo_control_calls != 0U) return false;
+      for (const auto phase : {level.pre_smooth, level.residual,
+                              level.restriction, level.prolongation,
+                              level.post_smooth, level.terminal,
+                              level.direct_mpi})
+        if (phase.calls != 0U || phase.nanoseconds != 0U) return false;
+    }
+    return true;
+  };
+  passed &= expect(!plan.apply_profile().enabled &&
+                       plan.apply_profile().complete &&
+                       zero_work(plan.apply_profile()),
+                   rank, "MG apply profile defaults to disabled with zero work");
+  const Status baseline = plan.apply(as_const(fixture.residual.view),
+                                      fixture.correction.view, 0U);
+  const std::uint64_t baseline_correction = checksum(fixture.correction.view);
+  const double baseline_initial = plan.last_cycle_initial_residual();
+  const double baseline_final = plan.last_cycle_final_residual();
+  passed &= expect(static_cast<bool>(baseline) && zero_work(plan.apply_profile()),
+                   rank, "disabled MG application leaves profile counters zero");
+  if (!all_true(passed)) return false;
+  fill(fixture.correction, -7.0);
+  const std::array<HaloRuntimeCounters, 2U> halo_before{
+      fixture.halo.runtime_counters(), fixture.coarse_halos[0U].runtime_counters()};
+  const LinearReductionCounters reductions_before = fixture.reductions.counters();
+  const MgPlanCounters plan_before = plan.counters();
+  Status enabled{};
+  Status applied{};
+  std::size_t allocations = 0U;
+  {
+    allocation_observer::Guard guard;
+    enabled = plan.set_apply_profiling(true);
+    if (enabled)
+      applied = plan.apply(as_const(fixture.residual.view),
+                            fixture.correction.view, 0U);
+    allocations = allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  const MgApplyProfile& profile = plan.apply_profile();
+  const std::array<HaloRuntimeCounters, 2U> halo_after{
+      fixture.halo.runtime_counters(), fixture.coarse_halos[0U].runtime_counters()};
+  const LinearReductionCounters reductions_after = fixture.reductions.counters();
+  const MgPlanCounters plan_after = plan.counters();
+  bool phases_match = true;
+  bool halo_matches = true;
+  std::uint64_t phase_nanoseconds = 0U;
+  std::uint64_t halo_wait_nanoseconds = 0U;
+  std::uint64_t halo_control_nanoseconds = 0U;
+  std::uint64_t direct_mpi_calls = 0U;
+  std::uint64_t direct_mpi_nanoseconds = 0U;
+  for (std::size_t index = 0U; index < profile.levels.size(); ++index) {
+    const auto& level = profile.levels[index];
+    const std::uint64_t fine = index == 0U ? 1U : 0U;
+    const std::uint64_t terminal = index == 1U ? 1U : 0U;
+    // Point pre-smoothing retains its defect: no separate residual pass.
+    phases_match &= level.visits == fine + terminal &&
+        level.pre_smooth.calls == fine && level.residual.calls == 0U &&
+        level.restriction.calls == fine && level.prolongation.calls == fine &&
+        level.post_smooth.calls == fine && level.terminal.calls == terminal;
+    phase_nanoseconds += level.pre_smooth.nanoseconds + level.residual.nanoseconds +
+        level.restriction.nanoseconds + level.prolongation.nanoseconds +
+        level.post_smooth.nanoseconds + level.terminal.nanoseconds;
+    if (index < halo_before.size()) {
+      halo_matches &= level.halo_wait_nanoseconds ==
+          halo_after[index].wait_nanoseconds - halo_before[index].wait_nanoseconds &&
+          level.halo_control_nanoseconds ==
+          halo_after[index].control_nanoseconds - halo_before[index].control_nanoseconds &&
+          level.halo_control_calls == halo_after[index].control_consensus_calls -
+                                         halo_before[index].control_consensus_calls;
+    } else {
+      halo_matches &= level.halo_wait_nanoseconds == 0U &&
+                     level.halo_control_nanoseconds == 0U &&
+                     level.halo_control_calls == 0U;
+    }
+    halo_wait_nanoseconds += level.halo_wait_nanoseconds;
+    halo_control_nanoseconds += level.halo_control_nanoseconds;
+    direct_mpi_calls += level.direct_mpi.calls;
+    direct_mpi_nanoseconds += level.direct_mpi.nanoseconds;
+  }
+  passed &= expect(static_cast<bool>(enabled) && static_cast<bool>(applied) &&
+                       profile.enabled && profile.complete && profile.level_count == 2U &&
+                       profile.attempts == 1U && profile.successes == 1U &&
+                       profile.failures == 0U && profile.apply_nanoseconds > 0U &&
+                       phases_match && phase_nanoseconds <= profile.apply_nanoseconds &&
+                       allocations == 0U &&
+                       checksum(fixture.correction.view) == baseline_correction &&
+                       bitwise_same(plan.last_cycle_initial_residual(), baseline_initial) &&
+                       bitwise_same(plan.last_cycle_final_residual(), baseline_final),
+                   rank, "enabled MG profile reports one V-cycle with disjoint phases, identical correction and zero allocation");
+  // These communication categories are nested costs. Compare each category
+  // with apply time separately; adding them could count shared time twice.
+  passed &= expect(halo_matches &&
+                       profile.reduction_nanoseconds ==
+                           reductions_after.wall_nanoseconds - reductions_before.wall_nanoseconds &&
+                       profile.reduction_nanoseconds > 0U &&
+                       halo_wait_nanoseconds <= profile.apply_nanoseconds &&
+                       halo_control_nanoseconds <= profile.apply_nanoseconds &&
+                       profile.reduction_nanoseconds <= profile.apply_nanoseconds &&
+                       direct_mpi_nanoseconds <= profile.apply_nanoseconds,
+                   rank, "MG profile exactly attributes per-level Halo and reduction time as nested apply costs");
+  const Int3 grid = fixture.patch.process_grid;
+  const bool single_rank = grid.x * grid.y * grid.z == 1;
+  const std::uint64_t replicated_calls =
+      plan_after.blocking_collectives - plan_before.blocking_collectives;
+  passed &= expect(replicated_calls == (single_rank ? 0U : 1U), rank,
+                   "small coarse solve reports exactly one replicated collective only with multiple ranks");
+  if (plan_after.point_to_point_messages == plan_before.point_to_point_messages) {
+    // With no prolongation extension, the only direct MPI operation is the
+    // coarse RHS Allgatherv. The public work counter is an independent oracle.
+    const auto& coarse = profile.levels[1U];
+    passed &= expect(direct_mpi_calls == replicated_calls &&
+                         coarse.direct_mpi.calls == replicated_calls &&
+                         coarse.direct_mpi.nanoseconds == direct_mpi_nanoseconds &&
+                         (single_rank ? direct_mpi_nanoseconds == 0U
+                                      : direct_mpi_nanoseconds > 0U) &&
+                         direct_mpi_nanoseconds <= coarse.terminal.nanoseconds,
+                     rank, "replicated coarse direct MPI matches public collective work inside the terminal phase");
+  } else {
+    // The 2x2x1 partition adds a dual Sendrecv pair to the one coarse
+    // Allgatherv. Those calls belong to coarse storage, but run in two phases.
+    const auto& coarse = profile.levels[1U];
+    passed &= expect(same(grid, {2, 2, 1}) &&
+                         plan_after.point_to_point_messages -
+                             plan_before.point_to_point_messages == 1U &&
+                         direct_mpi_calls == 3U && coarse.direct_mpi.calls == 3U &&
+                         coarse.direct_mpi.nanoseconds == direct_mpi_nanoseconds &&
+                         direct_mpi_nanoseconds > 0U &&
+                         direct_mpi_nanoseconds <= coarse.terminal.nanoseconds +
+                             profile.levels[0U].prolongation.nanoseconds,
+                     rank, "4-rank coarse direct MPI covers one gather and the prolongation pair within their owning phases");
+  }
+  return all_true(passed);
+}
+
 bool test_prepared_apply_equivalence(int rank, int size) {
   Fixture direct_fixture;
   Fixture prepared_fixture;
@@ -1960,6 +2112,23 @@ bool test_prepared_apply_equivalence(int rank, int size) {
           prepared.certificate().status_scope ==
               LinearPreconditionerStatusScope::collective,
       rank, "Native-MG certificate claims only the collective prepared lifecycle");
+  if (rank == 0)
+    passed &= expect(static_cast<bool>(prepared.set_apply_profiling(true)),
+                     rank, "prepared MG profiling can be enabled on one rank");
+  if (!all_true(passed)) return false;
+  const auto profile_matches = [&](std::uint64_t attempts,
+                                   std::uint64_t successes,
+                                   std::uint64_t failures) noexcept {
+    const auto& profile = prepared.apply_profile();
+    if (rank == 0)
+      return profile.enabled && profile.complete &&
+             profile.level_count == prepared.level_count() &&
+             profile.attempts == attempts && profile.successes == successes &&
+             profile.failures == failures && profile.apply_nanoseconds > 0U;
+    return !profile.enabled && profile.complete && profile.attempts == 0U &&
+           profile.successes == 0U && profile.failures == 0U &&
+           profile.apply_nanoseconds == 0U && profile.reduction_nanoseconds == 0U;
+  };
 
   const LinearReductionCounters direct_before =
       direct_fixture.reductions.counters();
@@ -1982,10 +2151,18 @@ bool test_prepared_apply_equivalence(int rank, int size) {
   std::size_t allocations = 0U;
   Status cold_status{};
   Status prepared_status{};
+  LinearReductionCounters prepared_apply_reductions_before{};
+  std::array<HaloRuntimeCounters, kMgMaximumLevels> prepared_apply_halo_before{};
   {
     allocation_observer::Guard guard;
     cold_status = prepared.prepare_batch(descriptor, ticket);
     if (cold_status) {
+      // Cold prepare is outside the observed apply epoch.
+      prepared_apply_reductions_before = prepared_fixture.reductions.counters();
+      prepared_apply_halo_before[0U] = prepared_fixture.halo.runtime_counters();
+      for (std::size_t level = 1U; level < prepared.level_count(); ++level)
+        prepared_apply_halo_before[level] =
+            prepared_fixture.coarse_halos[level - 1U].runtime_counters();
       prepared_status = prepared.apply_prepared(
           as_const(prepared_fixture.residual.view),
           prepared_fixture.correction.view, 0U, ticket);
@@ -2048,6 +2225,36 @@ bool test_prepared_apply_equivalence(int rank, int size) {
           prepared_halo_delta.begin_calls > 0U,
       rank,
       "prepared Native-MG performs no per-Halo control consensus");
+  passed &= expect(profile_matches(1U, 1U, 0U) &&
+                       !direct.apply_profile().enabled &&
+                       direct.apply_profile().attempts == 0U &&
+                       direct.apply_profile().apply_nanoseconds == 0U,
+                   rank, "rank-local prepared profile records one successful application without changing direct baseline");
+  if (rank == 0) {
+    const auto& profile = prepared.apply_profile();
+    bool halo_exact = true;
+    std::uint64_t wait_nanoseconds = 0U;
+    for (std::size_t level = 0U; level < prepared.level_count(); ++level) {
+      const HaloRuntimeCounters after = level == 0U
+          ? prepared_fixture.halo.runtime_counters()
+          : prepared_fixture.coarse_halos[level - 1U].runtime_counters();
+      const auto& before = prepared_apply_halo_before[level];
+      const auto& observed = profile.levels[level];
+      halo_exact &= observed.halo_wait_nanoseconds ==
+          after.wait_nanoseconds - before.wait_nanoseconds &&
+          observed.halo_control_nanoseconds == after.control_nanoseconds - before.control_nanoseconds &&
+          observed.halo_control_calls == after.control_consensus_calls - before.control_consensus_calls &&
+          observed.halo_control_calls == 0U && observed.halo_control_nanoseconds == 0U;
+      wait_nanoseconds += observed.halo_wait_nanoseconds;
+    }
+    passed &= expect(halo_exact &&
+                         profile.reduction_nanoseconds == prepared_after.wall_nanoseconds -
+                             prepared_apply_reductions_before.wall_nanoseconds &&
+                         profile.reduction_nanoseconds > 0U &&
+                         profile.reduction_nanoseconds <= profile.apply_nanoseconds &&
+                         wait_nanoseconds <= profile.apply_nanoseconds,
+                     rank, "prepared profile matches Halo and reduction counters from apply entry, excluding cold prepare");
+  }
 
   fill(prepared_fixture.correction, -71.0);
   const std::uint64_t failure_checksum =
@@ -2086,6 +2293,26 @@ bool test_prepared_apply_equivalence(int rank, int size) {
           failure_halo.control_consensus_calls == 0U,
       rank,
       "prepared Native-MG defers a rank-local Halo failure through the fixed schedule and publishes no ghost certificate or correction");
+  passed &= expect(profile_matches(2U, 1U, 1U), rank,
+                   "prepared profile records a failed application without reporting success");
+
+  LinearPreconditionerBatchTicket invalid_ticket;
+  const MgPlanCounters before_invalid = prepared.counters();
+  Status invalid{};
+  {
+    allocation_observer::Guard guard;
+    invalid = prepared.apply_prepared(
+        as_const(prepared_fixture.residual.view), prepared_fixture.correction.view,
+        1U, rank == size - 1 ? invalid_ticket : ticket);
+    failure_allocations = allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  passed &= expect(invalid.code == StatusCode::invalid_plan &&
+                       identical(packed(invalid)) &&
+                       prepared.lowest_failing_rank() == size - 1 &&
+                       same(prepared.counters(), before_invalid) &&
+                       checksum(prepared_fixture.correction.view) == failure_checksum &&
+                       failure_allocations == 0U && profile_matches(3U, 1U, 2U),
+                   rank, "prepared profile records a single-rank invalid ticket with no correction write or allocation");
 
   const Status recovered = prepared.apply_prepared(
       as_const(prepared_fixture.residual.view),
@@ -2094,22 +2321,19 @@ bool test_prepared_apply_equivalence(int rank, int size) {
       static_cast<bool>(recovered) &&
           prepared.counters().applications ==
               prepared_plan_before.applications + 2U &&
-          finite(prepared_fixture.correction.view),
+          finite(prepared_fixture.correction.view) &&
+          checksum(prepared_fixture.correction.view) == prepared_checksum &&
+          profile_matches(4U, 2U, 2U),
       rank,
       "prepared Native-MG retries successfully on the same persistent requests after a deferred failure");
 
-  LinearPreconditionerBatchTicket invalid_ticket;
-  const MgPlanCounters before_invalid = prepared.counters();
-  const Status invalid = prepared.apply_prepared(
-      as_const(prepared_fixture.residual.view), prepared_fixture.correction.view,
-      0U, invalid_ticket);
+  const MgPlanCounters before_exhausted = prepared.counters();
   const Status over_boundary = prepared.apply_prepared(
       as_const(prepared_fixture.residual.view), prepared_fixture.correction.view,
       2U, ticket);
   passed &= expect(
-      invalid.code == StatusCode::invalid_plan &&
-          over_boundary.code == StatusCode::invalid_plan &&
-          same(prepared.counters(), before_invalid),
+      over_boundary.code == StatusCode::invalid_plan &&
+          same(prepared.counters(), before_exhausted),
       rank,
       "Native-MG rejects invalid/exhausted tickets and the application-counter boundary before hot work");
 
@@ -2491,6 +2715,9 @@ bool test_fixed_cycle_generic_scientific_work(int rank, int size) {
       // separate replicated/distributed equivalence matrix covers the
       // all-gather terminal route and its exact recursive call counts.
       detail::set_mg_replicated_coarse_mode_for_test(plan, 1U);
+      passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)), rank,
+                       "generic fixed-cycle public profiling enables");
+      if (!all_true(passed)) return false;
 
       const HaloRuntimeCounters halo_before = halo_counters(fixture);
       Status applied{};
@@ -2502,6 +2729,30 @@ bool test_fixed_cycle_generic_scientific_work(int rank, int size) {
         allocations =
             allocation_observer::count.load(std::memory_order_relaxed);
       }
+      const auto& profile = plan.apply_profile();
+      bool profile_schedule = true;
+      std::uint64_t phase_nanoseconds = 0U;
+      for (std::size_t level = 0U; level < profile.levels.size(); ++level) {
+        const auto& observed = profile.levels[level];
+        const std::uint64_t visits = level >= levels ? 0U
+            : cycle == MgCycleKind::v_cycle ? 1U
+                                           : static_cast<std::uint64_t>(level + 1U);
+        const std::uint64_t nonterminal = level + 1U < levels ? visits : 0U;
+        const std::uint64_t terminal = level + 1U == levels ? visits : 0U;
+        profile_schedule &= observed.visits == visits &&
+            observed.pre_smooth.calls == nonterminal && observed.residual.calls == 0U &&
+            observed.restriction.calls == nonterminal && observed.prolongation.calls == nonterminal &&
+            observed.post_smooth.calls == nonterminal && observed.terminal.calls == terminal;
+        phase_nanoseconds += observed.pre_smooth.nanoseconds + observed.residual.nanoseconds +
+            observed.restriction.nanoseconds + observed.prolongation.nanoseconds +
+            observed.post_smooth.nanoseconds + observed.terminal.nanoseconds;
+      }
+      passed &= expect(profile.enabled && profile.complete && profile.level_count == levels &&
+                           profile.attempts == 1U && profile.successes == 1U &&
+                           profile.failures == 0U && profile_schedule &&
+                           profile.apply_nanoseconds > 0U &&
+                           phase_nanoseconds <= profile.apply_nanoseconds && allocations == 0U,
+                       rank, "public V/F profile matches independent per-level visits and nonrecursive phase time with zero allocation");
       const detail::MgMatrixWorkCounters work =
           detail::mg_matrix_work_counters_for_test(plan);
       const HaloRuntimeCounters halo =
@@ -2888,6 +3139,7 @@ int main(int argc, char** argv) {
   passed &= test_point_row_boundary_and_small_x_oracle(rank);
   passed &= test_chebyshev_point_row_reference_oracle(rank);
   passed &= test_boundary_topology_contract_is_bidirectional(rank);
+  passed &= test_apply_profile_observes_one_v_cycle(rank);
   passed &= test_prepared_apply_equivalence(rank, size);
   passed &= test_progress_and_hot_reuse(rank);
   passed &= test_collective_failure_is_transactional(rank, size);

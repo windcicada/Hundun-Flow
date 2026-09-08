@@ -18,6 +18,8 @@
 #include <limits>
 #include <new>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace allocation_observer {
@@ -110,6 +112,10 @@ using namespace hundun::v04;
 
 constexpr Int3 kCells{16, 12, 8};
 
+static_assert(std::is_same_v<
+              decltype(std::declval<const NativeCartesianMgPlan&>().apply_profile()),
+              const MgApplyProfile&>);
+
 bool expect(bool condition, std::string_view description) {
   if (!condition) {
     std::cerr << "FAIL: " << description << '\n';
@@ -126,6 +132,41 @@ bool same(MgPlanCounters left, MgPlanCounters right) noexcept {
          left.collective_logical_bytes == right.collective_logical_bytes &&
          left.point_to_point_messages == right.point_to_point_messages &&
          left.point_to_point_bytes == right.point_to_point_bytes;
+}
+
+bool same(const MgApplyProfile& left, const MgApplyProfile& right) noexcept {
+  if (left.enabled != right.enabled || left.complete != right.complete ||
+      left.level_count != right.level_count || left.attempts != right.attempts ||
+      left.successes != right.successes || left.failures != right.failures ||
+      left.apply_nanoseconds != right.apply_nanoseconds ||
+      left.reduction_nanoseconds != right.reduction_nanoseconds) return false;
+  for (std::size_t index = 0U; index < left.levels.size(); ++index) {
+    const auto& a = left.levels[index];
+    const auto& b = right.levels[index];
+    if (a.visits != b.visits ||
+        a.halo_wait_nanoseconds != b.halo_wait_nanoseconds ||
+        a.halo_control_nanoseconds != b.halo_control_nanoseconds ||
+        a.halo_control_calls != b.halo_control_calls) return false;
+    const std::array<MgPhaseProfile, 7U> a_phases{{
+        a.pre_smooth, a.residual, a.restriction, a.prolongation,
+        a.post_smooth, a.terminal, a.direct_mpi}};
+    const std::array<MgPhaseProfile, 7U> b_phases{{
+        b.pre_smooth, b.residual, b.restriction, b.prolongation,
+        b.post_smooth, b.terminal, b.direct_mpi}};
+    for (std::size_t phase = 0U; phase < a_phases.size(); ++phase) {
+      if (a_phases[phase].calls != b_phases[phase].calls ||
+          a_phases[phase].nanoseconds != b_phases[phase].nanoseconds) return false;
+    }
+  }
+  return true;
+}
+
+bool zero_profile_work(const MgApplyProfile& profile) noexcept {
+  MgApplyProfile zero{};
+  zero.enabled = profile.enabled;
+  zero.complete = profile.complete;
+  zero.level_count = profile.level_count;
+  return same(profile, zero);
 }
 
 CartesianMeshSpec uniform_mesh() {
@@ -328,17 +369,45 @@ bool test_coarsening_selection() {
 }
 
 bool test_reuse_policy_and_hot_lifetime() {
+  NativeCartesianMgPlan empty;
+  bool passed = expect(
+      empty.set_apply_profiling(true).code == StatusCode::invalid_plan &&
+          empty.set_apply_profiling(false).code == StatusCode::invalid_plan &&
+          same(empty.apply_profile(), MgApplyProfile{}),
+      "empty plan rejects profiling setters and publishes zero work");
   Fixture fixture;
   if (!expect(fixture.create(uniform_mesh()), "reuse fixture compiles")) {
     return false;
   }
   NativeCartesianMgPlan plan;
   MgPlanCounters external{};
-  bool passed = expect(
+  passed &= expect(
       static_cast<bool>(NativeCartesianMgPlan::compile(
           fixture.spec, fixture.services, fixture.coefficients(), plan,
           &external)),
       "baseline hierarchy compiles");
+  if (!passed) return false;
+  passed &= expect(!plan.apply_profile().enabled &&
+                       plan.apply_profile().complete &&
+                       zero_profile_work(plan.apply_profile()),
+                   "compiled plan profiling defaults to off");
+  OwnedField residual = field(kCells, 1U, 0U, 20U, 600U);
+  OwnedField correction = field(kCells, 1U, 0U, 21U, 601U);
+  for (double& value : residual.storage) value = 1.0;
+  passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)) &&
+                       static_cast<bool>(plan.apply(
+                           as_const(residual.view), correction.view, 0U)),
+                   "profiling epoch records a successful apply before updates");
+  const MgApplyProfile before_updates = plan.apply_profile();
+  const MgApplyProfile* const profile_address = &plan.apply_profile();
+  const MgLevelApplyProfile* const level_slots = plan.apply_profile().levels.data();
+  passed &= expect(before_updates.enabled && before_updates.complete &&
+                       before_updates.level_count == plan.level_count() &&
+                       before_updates.attempts == 1U &&
+                       before_updates.successes == 1U &&
+                       before_updates.failures == 0U &&
+                       before_updates.apply_nanoseconds > 0U,
+                   "profile contains a nonzero observation epoch");
   const auto hierarchy_address = plan.hierarchy_storage_address();
   const auto workspace_address = plan.workspace_storage_address();
   const auto symbolic = plan.symbolic_fingerprint();
@@ -422,6 +491,83 @@ bool test_reuse_policy_and_hot_lifetime() {
                            hot_hierarchy_address &&
                        plan.workspace_storage_address() == hot_workspace_address,
                    "100 unchanged hot updates allocate nothing and preserve addresses");
+  passed &= expect(same(plan.apply_profile(), before_updates) &&
+                       &plan.apply_profile() == profile_address &&
+                       plan.apply_profile().levels.data() == level_slots,
+                   "unchanged, numeric and hierarchy updates preserve profile epoch and level slots");
+
+  const auto certificate = plan.certificate();
+  const auto reductions_before = fixture.reductions.counters();
+  Status reset{};
+  {
+    allocation_observer::Guard guard;
+    reset = plan.set_apply_profiling(true);
+  }
+  passed &= expect(static_cast<bool>(reset) &&
+                       allocation_observer::count.load(std::memory_order_relaxed) == 0U &&
+                       plan.apply_profile().enabled && plan.apply_profile().complete &&
+                       plan.apply_profile().level_count == plan.level_count() &&
+                       zero_profile_work(plan.apply_profile()) &&
+                       same(plan.counters(), before_hot) &&
+                       plan.certificate().collective_fingerprint ==
+                           certificate.collective_fingerprint &&
+                       fixture.reductions.counters().wall_nanoseconds ==
+                           reductions_before.wall_nanoseconds,
+                   "re-enabling starts a zero epoch without allocation or solver work");
+
+  residual.storage[0U] = std::numeric_limits<double>::quiet_NaN();
+  const auto untouched = correction.storage;
+  const Status numeric_failure = plan.apply(
+      as_const(residual.view), correction.view, 1U);
+  passed &= expect(numeric_failure.code == StatusCode::numerical_failure &&
+                       correction.storage == untouched &&
+                       plan.apply_profile().complete &&
+                       plan.apply_profile().attempts == 1U &&
+                       plan.apply_profile().successes == 0U &&
+                       plan.apply_profile().failures == 1U &&
+                       plan.apply_profile().apply_nanoseconds > 0U,
+                   "numerical failure preserves correction and remains completely observed");
+  passed &= expect(static_cast<bool>(plan.set_apply_profiling(false)) &&
+                       !plan.apply_profile().enabled &&
+                       plan.apply_profile().complete &&
+                       zero_profile_work(plan.apply_profile()),
+                   "disabling clears the entire observation epoch");
+  const Status unprofiled_failure = plan.apply(
+      as_const(residual.view), correction.view, 2U);
+  passed &= expect(unprofiled_failure.code == numeric_failure.code &&
+                       unprofiled_failure.detail == numeric_failure.detail &&
+                       correction.storage == untouched &&
+                       zero_profile_work(plan.apply_profile()),
+                   "disabled apply retains the same numerical status and leaves profile zero");
+
+  passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)),
+                   "profiling re-enables before plan ownership changes");
+  // A rejected public view records work without another numerical cycle.
+  passed &= expect(plan.apply({}, correction.view, 3U).code == StatusCode::invalid_plan &&
+                       plan.apply_profile().complete &&
+                       plan.apply_profile().failures == 1U,
+                   "invalid input on valid services is a completely observed failed apply");
+  const MgApplyProfile before_move = plan.apply_profile();
+  NativeCartesianMgPlan moved(std::move(plan));
+  passed &= expect(same(moved.apply_profile(), before_move) &&
+                       same(plan.apply_profile(), MgApplyProfile{}) &&
+                       plan.set_apply_profiling(true).code == StatusCode::invalid_plan,
+                   "move construction transfers the epoch and empties the source");
+  plan = std::move(moved);
+  passed &= expect(same(plan.apply_profile(), before_move) &&
+                       same(moved.apply_profile(), MgApplyProfile{}),
+                   "move assignment transfers the complete profile epoch");
+  NativeCartesianMgSpec invalid_spec = fixture.spec;
+  invalid_spec.geometry = nullptr;
+  passed &= expect(!NativeCartesianMgPlan::compile(
+                       invalid_spec, fixture.services, fixture.coefficients(), plan) &&
+                       same(plan.apply_profile(), before_move),
+                   "failed recompile preserves the existing profile epoch");
+  passed &= expect(static_cast<bool>(NativeCartesianMgPlan::compile(
+                       fixture.spec, fixture.services, fixture.coefficients(), plan)) &&
+                       !plan.apply_profile().enabled && plan.apply_profile().complete &&
+                       zero_profile_work(plan.apply_profile()),
+                   "successful recompile replaces the plan with profiling off");
   return passed;
 }
 
@@ -440,19 +586,45 @@ bool test_level_halo_pointer_table_is_plan_owned() {
     return passed;
   }
 
-  for (HaloEngine*& pointer : fixture.coarse_halo_pointers) {
-    pointer = &fixture.halo;
-  }
   OwnedField residual = field(kCells, 1U, 0U, 20U, 600U);
   OwnedField correction = field(kCells, 1U, 0U, 21U, 601U);
   for (double& value : residual.storage) {
     value = 1.0;
   }
+  passed &= expect(static_cast<bool>(plan.apply(
+                       as_const(residual.view), correction.view, 0U)),
+                   "unprofiled caller pointer-table baseline applies");
+  const auto expected = correction.storage;
+  passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)),
+                   "profiling enables before caller pointer-table mutation");
+  for (HaloEngine*& pointer : fixture.coarse_halo_pointers) {
+    pointer = &fixture.halo;
+  }
   passed &= expect(
       static_cast<bool>(plan.apply(as_const(residual.view), correction.view,
-                                   0U)),
-      "caller pointer-table mutation cannot alter compiled plan services");
+                                   1U)) && correction.storage == expected &&
+          plan.apply_profile().enabled && plan.apply_profile().complete &&
+          plan.apply_profile().attempts == 1U &&
+          plan.apply_profile().successes == 1U &&
+          plan.apply_profile().failures == 0U,
+      "caller pointer-table mutation preserves correction and complete profile attribution");
   return passed;
+}
+
+bool expect_profiled_service_rejection(NativeCartesianMgPlan& plan) {
+  OwnedField residual = field(kCells, 1U, 0U, 20U, 600U);
+  OwnedField correction = field(kCells, 1U, 0U, 21U, 601U);
+  for (double& value : correction.storage) value = -7.0;
+  const auto untouched = correction.storage;
+  const Status rejected = plan.apply(
+      as_const(residual.view), correction.view, 0U);
+  const auto& profile = plan.apply_profile();
+  return expect(rejected.code == StatusCode::invalid_plan &&
+                    correction.storage == untouched && profile.enabled &&
+                    !profile.complete && profile.attempts == 1U &&
+                    profile.successes == 0U && profile.failures == 1U &&
+                    profile.apply_nanoseconds > 0U,
+                "changed communication-service identity rejects without correction write and marks observation incomplete");
 }
 
 bool test_borrowed_service_rebinding_is_rejected() {
@@ -493,6 +665,8 @@ bool test_borrowed_service_rebinding_is_rejected() {
                              fixture.spec, fixture.services,
                              fixture.coefficients(), plan)),
                      "reduction-rebind plan compiles");
+    passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)),
+                     "profiling enables before reduction-service rebind");
     ReductionEngine replacement;
     passed &= expect(static_cast<bool>(ReductionEngine::compile(
                          MPI_COMM_SELF, ReductionMode::mpi_allreduce, 4U,
@@ -508,6 +682,7 @@ bool test_borrowed_service_rebinding_is_rejected() {
         fixture.coefficients(), nullptr);
     passed &= expect(rejected.code == StatusCode::invalid_plan,
                      "rebound reduction engine is rejected pre-use");
+    passed &= expect_profiled_service_rejection(plan);
   }
   {
     Fixture fixture;
@@ -517,6 +692,8 @@ bool test_borrowed_service_rebinding_is_rejected() {
                              fixture.spec, fixture.services,
                              fixture.coefficients(), plan)),
                      "halo-move plan compiles");
+    passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)),
+                     "profiling enables before finest-halo move");
     HaloEngine moved = std::move(fixture.halo);
     LinearIdentity next = fixture.spec.identity;
     next.numeric = 612U;
@@ -527,6 +704,7 @@ bool test_borrowed_service_rebinding_is_rejected() {
         fixture.coefficients(), nullptr);
     passed &= expect(rejected.code == StatusCode::invalid_plan && moved.ready(),
                      "moved finest halo service is rejected pre-use");
+    passed &= expect_profiled_service_rejection(plan);
   }
   {
     Fixture fixture;
@@ -538,6 +716,8 @@ bool test_borrowed_service_rebinding_is_rejected() {
                          !fixture.coarse_halos.empty(),
                      "coarse-halo-move plan compiles");
     if (!fixture.coarse_halos.empty()) {
+      passed &= expect(static_cast<bool>(plan.set_apply_profiling(true)),
+                       "profiling enables before coarse-halo move");
       HaloEngine moved = std::move(fixture.coarse_halos[0U]);
       LinearIdentity next = fixture.spec.identity;
       next.numeric = 712U;
@@ -548,6 +728,7 @@ bool test_borrowed_service_rebinding_is_rejected() {
           fixture.coefficients(), nullptr);
       passed &= expect(rejected.code == StatusCode::invalid_plan && moved.ready(),
                        "moved coarse halo service is rejected pre-use");
+      passed &= expect_profiled_service_rejection(plan);
     }
   }
   return passed;

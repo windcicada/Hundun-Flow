@@ -184,6 +184,47 @@ struct MgDomainActivityView {
 
 inline constexpr std::size_t kMgMaximumLevels = 32U;
 
+struct MgPhaseProfile {
+  std::uint64_t calls{};
+  std::uint64_t nanoseconds{};
+};
+
+struct MgLevelApplyProfile {
+  std::uint64_t visits{};
+  MgPhaseProfile pre_smooth{};
+  MgPhaseProfile residual{};
+  MgPhaseProfile restriction{};
+  MgPhaseProfile prolongation{};
+  MgPhaseProfile post_smooth{};
+  MgPhaseProfile terminal{};
+  // Nested communication costs, NOT additional disjoint phases. Halo costs
+  // belong to the halo's level (prolongation can borrow a coarser halo).
+  // direct_mpi also includes prolongation extensions on this coarse level;
+  // it is not necessarily a subset of this level's terminal phase alone.
+  MgPhaseProfile direct_mpi{};
+  std::uint64_t halo_wait_nanoseconds{};
+  std::uint64_t halo_control_nanoseconds{};
+  std::uint64_t halo_control_calls{};
+};
+
+// Rank-local, opt-in cumulative observation between set_apply_profiling calls.
+// The six cycle phases are nonrecursive, disjoint subsets of apply_nanoseconds;
+// entry/exit checks, initialization and final projection are outside them.
+// pre_smooth includes a retained defect when the smoother computes it. residual
+// counts only a separate residual pass. Communication times are nested subsets.
+// Saturation/counter discontinuity clears complete; it never fails a solve.
+struct MgApplyProfile {
+  bool enabled{};
+  bool complete{true};
+  std::size_t level_count{};
+  std::uint64_t attempts{};
+  std::uint64_t successes{};
+  std::uint64_t failures{};
+  std::uint64_t apply_nanoseconds{};
+  std::uint64_t reduction_nanoseconds{};
+  std::array<MgLevelApplyProfile, kMgMaximumLevels> levels{};
+};
+
 enum class MgWorkspaceSlot : std::uint8_t {
   solution,
   rhs,
@@ -914,6 +955,15 @@ class NativeCartesianMgPlan final : public LinearPreconditioner {
   double last_cycle_initial_residual() const noexcept;
   double last_cycle_final_residual() const noexcept;
   MgPlanCounters counters() const noexcept;
+  // Call only at a quiescent boundary. Enabling/disabling resets this local
+  // observation epoch, with no allocation, collective or certificate change.
+  // Disabled apply paths perform no additional clock reads. The borrowed
+  // profile is invalidated by move, destruction or successful compile replacing
+  // this plan; subsequent calls update it. Copy it before computing a delta.
+  // Move transfers the observation epoch to the destination; successful compile
+  // creates a new disabled epoch. Failed compile retains the existing epoch.
+  Status set_apply_profiling(bool enabled) noexcept;
+  const MgApplyProfile& apply_profile() const noexcept;
   int lowest_failing_rank() const noexcept;
 
  private:

@@ -1,0 +1,31 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 271: v04_solver_mg_mpi_2
+1/1 Test #271: v04_solver_mg_mpi_2 ..............***Failed    2.44 sec
+rank 0 FAIL: rank-local prepared profile records one successful application without changing direct baseline
+rank 0 FAIL: prepared profile records a failed application without reporting success
+rank 0 FAIL: prepared profile records a single-rank invalid ticket with no correction write or allocation
+rank 0 FAIL: prepared Native-MG retries successfully on the same persistent requests after a deferred failure
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[9230,1],1]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   4.88 sec*proc (1 test)
+
+Total Test time (real) =   2.46 sec
+
+The following tests FAILED:
+	271 - v04_solver_mg_mpi_2 (Failed)                      v04_focused
+Errors while running CTest
