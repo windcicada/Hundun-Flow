@@ -40,6 +40,64 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G22 (diagnostic only): clean 0a9ed82 accepted the first real GTMC step,
+  20001 at t=0.015465336638081572, dt=3.5115962230679085e-9. Its evidence row
+  passed runtime validation against the exact initial manifest. Short-100
+  then failed the second step at stage 40 / 802 (composition); predictor
+  theta=0 and high margin=-1.4821969375237396e-323. A two-step replay preserved
+  the native 20001 checkpoint (generation-20001-2080879002468335, manifest SHA
+  c48880d4f7da078f2112197e3752584de53c80407ec06bdc30c902a4b7192b01).
+  Exact restart from it reproduces stage 40/802 in 20.21 s. Temporary
+  `src/solver_thermophysical_predictor.cpp` probe under
+  HUNDUN_GTMC_SPECIES_PROBE / [DEBUG-gtmc-species] records any negative species
+  certified by the predictor, including rhoY, endpoints/rates and selected
+  theta. Purpose: distinguish density-product underflow in admissibility,
+  boundary reconstruction, and inter-stage field mismatch. No physical
+  acceptance guard is relaxed. Remove probe/includes after diagnosis.
+  The first step's development energy ledger also reports -391.97986645 W
+  balance defect (-1.37647501854e-6 J accumulated); this remains an audit item,
+  not a physical validation claim. Short and medium tests have not passed.
+  G22 follow-up: the 20.24 s predictor probe reproduced 802 with no negative
+  certified predictor species, falsifying that proposed cause. Its code and
+  includes were removed without changing predictor numerics. The probe now
+  sat in `src/physics_thermo.cpp::ThermodynamicsPlan::composition`, printing only invalid
+  tuples and a bounded diagnostic stack under the same environment flag,
+  prefix [DEBUG-gtmc-thermo-composition]. Temporary cstdio/cstdlib/execinfo
+  includes support it and must be removed after locating the actual caller.
+  G22 root-cause confirmation: the 19.89 s invalid-composition/stack probe
+  identifies `src/bc_thermo.cpp::evaluate_cell`, reached through
+  `BoundaryThermophysicalFaceClosure::close` from ProductDriver's stage-40
+  `refresh_coupled_state`. A follow-up ghost/owner probe reproduced it in
+  19.99 s on rank 16 at local cell (23,-2,21), reflected owner (23,1,21),
+  local shape (39,62,38). CH4 ghost=-0x0.000000000060cp-1022 and
+  owner=+0x0.000000000060cp-1022, with exactly zero arithmetic face mean.
+  All six retries preserve that antisymmetry. This is an admissible physical
+  owner and imposed pure-air face, but a nonphysical Dirichlet stencil value.
+  `src/bc_apply.cpp::apply_span<dirichlet>` correctly computes 2*face-owner;
+  `bc_thermo.cpp::evaluate_cell` incorrectly assumes this stencil must also
+  be a physical EOS composition for the intended inlet use case. Its current
+  public contract explicitly rejects nonphysical ghost p/h/Y, so fixing the
+  conflict requires distinguishing physical boundary-face thermodynamics
+  from discrete ghost extension, including downstream/certificate semantics.
+  A diagnostic harness reusing the real BC unit fixture and apply/close chain
+  reproduces the same 802 in 0.34 s with ordinary, non-subnormal values:
+  owner=0.8, prescribed face=0.35, ghost=-0.1. This rules out underflow as the
+  general cause. Harness/logs/probe patch are outside the source in
+  `/home/administrator/gtmc-hundun-port-20260908/species-diagnostic-v1/`.
+  All predictor, thermodynamics-stack, and ghost probes/includes have now
+  been removed from source; no production numerical fix was applied for G22.
+  Do not clip ghost or interior Y, relax EOS bounds, or silently replace
+  derived ghost values by face properties under the old certificate contract.
+  The existing acceptance-build executable still contains the final probe
+  and is DIAGNOSTIC ONLY until a fresh clean-source rebuild. No run is active.
+  Proposed next step: explicit physical face-state authority, boundary
+  consumers using that state, preserved stencil mirrors and strict physical
+  EOS, with regression/certificate tests before further full GTMC runs.
+  After probe cleanup, rebuilt `v04_bc_thermo_test`; existing serial/MPI-2
+  contract tests pass (0.35/0.37 s). The separate diagnostic red loop repeated
+  the identical 802 in 0.34 s. Existing tests therefore do not cover this
+  valid-face/nonphysical-mirror integration conflict. Source diff is docs-only.
+
 - G21: G20's 42.82 s probe reproduced norm=1 in trace-CH4 rows with q=0
   and next=0; extended-precision RHS is nonzero below binary64 range. Global
   absolute composition error was 2.77412637507e-17 and mass pairing
