@@ -9,9 +9,10 @@ geometry probes below are not acceptance runs.
 Actual candidate `f10f15a077961a1be01027f613e317e7759eaf50` was built clean
 with GCC 11.4 Release/tests OFF and run on 64 local ranks. The 100-step request
 failed before the first new commit; a separate one-step replay reproduced the
-same failure. Further advancement requires an explicit outlet-model decision,
-because the imported COAST zero-gradient/mass-closure outlet is not the current
-Hundun pressure-outlet contract. Detailed receipts are outside the source tree:
+same failure. The user subsequently authorized implementing the original
+COAST zero-gradient/mass-closure outlet semantics for development testing.
+This implementation is in progress; no new GTMC step has yet passed.
+Detailed receipts are outside the source tree:
 `/home/administrator/gtmc-hundun-port-20260908/candidate-f10f15a/RUN_STATUS.md`.
 
 Baseline: `86542bb96678ec844ae5ac95d8f6391993da239e`, Hundun-Flow v0.4.
@@ -36,6 +37,70 @@ Twenty air patches and 250 internal fuel faces must retain their membership.
 Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ## Change inventory
+
+### Outlet/patch development candidate follow-up
+
+- G12: COAST `s76/SRC.Coast/boundary2_dp.F90`, `bndry2dp.F90`,
+  `Calcmassflowrate.F90` were read on the remote host. Marker -2 uses Neumann
+  pressure correction and scales the existing signed outlet flux pool by
+  `(flow + summ)/flow`, with `summ` equal to minus the global continuity defect
+  including density storage. It is not the -60 characteristic/backflow model.
+  `include/hundun/v04_case.hpp`, `src/app_case.cpp`, `src/bc_compile.cpp` add
+  explicit `zero_gradient_mass_outlet` (enum appended, existing wire layout
+  unchanged). Absolute pressure remains the EOS reference, not a Dirichlet
+  correction. U/h/Y extrapolate. Old pressure-outlet/backflow behavior is kept.
+  `src/core_product_freeze.cpp` enables the new finalizer path;
+  `src/solver_piso.cpp` routes the new outlet as a mechanical transport face.
+  `include/hundun/v04_flow.hpp` and `src/solver_piso.cpp` provide privately
+  certified candidate BDF mass storage to `src/solver_candidate_boundary.cpp`.
+  The latter rescales the positive net signed outlet pool, preserving local
+  reverse flow, with no area fallback or clipping; unclosable pools reject
+  atomically. A focused regression exposed that the existing `pressure_input`
+  is deliberately corrector-2-only, so candidate history is separately bound
+  at each successful pressure assembly. A second regression exposed the
+  predictor's homogeneous-Neumann => fixed-flux shortcut; the new adjustable
+  outlet now bypasses that shortcut without changing pressure response.
+  Focused regression results are recorded below; actual GTMC gates remain open.
+- G13: the two-patch real finalizer regression requested 0.125/0.250 kg/s but
+  returned 0.1875/0.1875: the finalizer merged separately metered inlets on one
+  Cartesian face. `v04_flow.hpp::PhysicalMassFlowPatch` introduces an immutable
+  deep-copied membership/target binding. `solver_candidate_boundary.cpp`
+  validates matching collective descriptors, local support ownership,
+  non-overlap and parent total, fingerprints membership, and independently
+  normalizes each patch using candidate EOS inlet density. Unlabelled faces
+  stay zero. `core_product_freeze.cpp` passes the compiled label support and
+  reserves enough reduction scalars for the global patch catalog. Its
+  `method_history_signature` increments labelled-mass-inlets v1 to v2, so
+  checkpoints from the old merged-patch finalizer are not treated as compatible.
+  `tests/mpi/solver_mass_balanced_outlet_mpi_test.cpp`,
+  `tests/support/candidate_boundary_fixture.hpp`, `tests/CMakeLists.txt` contain
+  the real-chain MPI 1/2 regression. These tests are not GTMC acceptance.
+- G14: rebuilding the legacy PISO MPI regression with GCC 11 failed because
+  `tests/mpi/solver_piso_mpi_test.cpp::test_exact_eos_correction_collective_transaction`
+  used a local constexpr variable as a lambda default argument. The test now
+  passes that reference explicitly at each call. No production numerical code
+  or test tolerance changed. The new parser/wire roundtrip in
+  `tests/unit/app_case_test.cpp` passed on 2026-09-08.
+- Focused verification: the new outlet/patch MPI 1/2 tests passed including
+  nonzero BE density storage, Neumann pressure/pressure-correction ghosts,
+  uniform signed reverse-flow scaling, and atomic zero/negative-pool rejection.
+  Existing pressure-boundary tests (serial and MPI 1/2/4), IBM physical boundary
+  flux MPI 1/2/4, app initialization/restart, and core patch-inlet tests passed.
+  Legacy `v04_solver_piso_mpi_1` passed, but MPI 2/4 failed the existing negative-
+  density / injected-Halo provenance assertions. A separate worktree at
+  `18ce94c`, built with the same GCC 11 RelWithDebInfo configuration and only
+  the identical G14 test compilation repair, reproduced those same failing
+  groups. Both versions report candidate-boundary/frozen-candidate/exact-EOS
+  groups passing. This is a verified pre-existing test-suite issue, not a
+  passing regression suite; do not conceal it in mainline synchronization.
+- Input v3 is a copy of the failed v2 with only `y_max.flow_kind` changed to
+  `zero_gradient_mass_outlet`; all geometry, species, time controls and solver
+  tolerances are unchanged. case.json SHA-256:
+  `978089748ce71bafb436bd89ee49b21d597c81ce9fc422e1eb8befa552b51ebd`.
+  Its updated `mean_field_case_receipt.json` links the unchanged v2 source
+  fingerprint and the user's authorization. A new native import is required;
+  the v2 checkpoint must not be relabelled as a v3 restart.
+
 
 | ID | Cause / evidence | Files and symbols | Verification / synchronization notes |
 |---|---|---|---|

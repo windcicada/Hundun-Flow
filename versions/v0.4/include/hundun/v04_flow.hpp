@@ -3705,6 +3705,15 @@ struct FreshPhysicalBoundaryFluxClosureInput {
   FaceFluxView final_flux{};
 };
 
+// Each rank supplies the same ordered patch descriptors, with only its owned
+// boundary face indices. Binding copies these views; empty local support is valid.
+struct PhysicalMassFlowPatch {
+  CartesianFace face{};
+  Real3 direction{};
+  double mass_flow_rate{};
+  Span<const Int3> local_faces{};
+};
+
 struct PressureEnergyCandidateBoundaryFinalizerBinding {
   MPI_Comm communicator{MPI_COMM_NULL};
   const CartesianGeometryPlan* geometry{};
@@ -3720,6 +3729,7 @@ struct PressureEnergyCandidateBoundaryFinalizerBinding {
   StageId candidate_pressure_correction_donor_stage{};
   FieldId candidate_pressure_correction_field{};
   std::uint8_t candidate_pressure_correction_donor_reach{};
+  Span<const PhysicalMassFlowPatch> mass_flow_patches{};
 };
 
 // Deep same-target physical-face module.  It has its own issuer identity:
@@ -4155,6 +4165,9 @@ class PressureVelocityCoupler {
  private:
   friend class PressureEnergyCandidateBoundaryFinalizer;
   friend class PressureEnergyPressureFluxOperator;
+  Status candidate_local_mass_storage(
+      const PisoFrozenMomentumStageAuthority& authority,
+      ConstFieldView density, double& local_rate) const noexcept;
   enum class StateCorrectionContract : std::uint8_t {
     pressure_unsealed,
     pressure_sealed,

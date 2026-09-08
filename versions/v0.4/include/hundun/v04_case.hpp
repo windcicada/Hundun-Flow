@@ -67,8 +67,14 @@ enum class BoundaryKind : std::uint8_t {
   periodic,
   adiabatic_wall,
   isothermal_wall,
-  heat_flux_wall
+  heat_flux_wall,
+  // Zero normal gradients and signed outlet-flux mass closure (COAST -2).
+  zero_gradient_mass_outlet
 };
+inline bool is_candidate_transport_outlet(BoundaryKind kind) noexcept {
+  return kind == BoundaryKind::pressure_outlet ||
+         kind == BoundaryKind::zero_gradient_mass_outlet;
+}
 enum class ScalarBoundaryKind : std::uint8_t {
   dirichlet,
   normal_flux,

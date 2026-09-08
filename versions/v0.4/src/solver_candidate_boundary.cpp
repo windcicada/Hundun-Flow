@@ -348,6 +348,7 @@ bool supported(const BoundaryPlan& boundary) noexcept {
       case BoundaryKind::velocity_inlet:
       case BoundaryKind::mass_flow_inlet:
       case BoundaryKind::pressure_outlet:
+      case BoundaryKind::zero_gradient_mass_outlet:
       case BoundaryKind::no_slip_wall:
       case BoundaryKind::moving_wall:
       case BoundaryKind::slip:
@@ -408,6 +409,11 @@ struct PressureEnergyCandidateBoundaryFinalizer::Impl {
   std::vector<std::uint64_t> collective_hashes;
   std::vector<HaloFieldSpec> halo_contract;
   std::vector<double> composition;
+  bool has_mass_balanced_outlet{};
+  std::vector<PhysicalMassFlowPatch> mass_flow_patches;
+  std::array<std::vector<std::int32_t>, 6U> face_patch;
+  std::vector<double> patch_local_capacity;
+  std::vector<double> patch_global_capacity;
   PlanFingerprint fingerprint{};
 };
 
@@ -420,6 +426,7 @@ struct PhysicalBoundaryFluxEngineInput {
   Span<const ConstFieldView> independent_species{};
   ConstFaceFluxView mechanical_flux{};
   RevisionToken final_flux_revision{};
+  double local_mass_storage_rate{};
 };
 
 struct PhysicalBoundaryFluxEngineResult {
@@ -429,6 +436,13 @@ struct PhysicalBoundaryFluxEngineResult {
   std::array<double, 8U> global_mass_target{};
   std::array<double, 6U> global_achieved{};
 };
+
+std::size_t boundary_flat(CartesianFace face, Int3 cells, Int3 index) noexcept {
+  const auto slot = static_cast<std::size_t>(face);
+  return slot < 2U ? static_cast<std::size_t>(index.z) * cells.y + index.y
+      : slot < 4U ? static_cast<std::size_t>(index.z) * cells.x + index.x
+                  : static_cast<std::size_t>(index.y) * cells.x + index.x;
+}
 
 template <class Implementation>
 Status prepare_physical_boundary_flux(
@@ -474,6 +488,7 @@ Status prepare_physical_boundary_flux(
   std::array<double, 6U> local_capacity{};
   std::array<double, 8U> local_mass_target{};
   std::array<double, 6U> global_capacity{};
+  std::fill(impl.patch_local_capacity.begin(), impl.patch_local_capacity.end(), 0.0);
   std::uint64_t local_inlet_hash =
       mix(kFnvOffset, UINT64_C(0x696e6c6574666c78));
   std::uint64_t local_outlet_hash =
@@ -602,8 +617,18 @@ Status prepare_physical_boundary_flux(
             local_inlet_hash = mix(local_inlet_hash, double_bits(value));
           } else if (face_plan->flow_kind ==
                      BoundaryKind::mass_flow_inlet) {
-            const Real3 direction = vector_parameter(
-                *impl.boundary, face_plan->flow_parameter, false, true);
+            const auto slot = static_cast<std::size_t>(face);
+            const auto& membership = impl.face_patch[slot];
+            const auto patch_index = membership.empty() ? -1
+                : membership[boundary_flat(face, cells, face_index)];
+            local_mass_target[slot] = mass_targets.data[face_plan->flow_parameter];
+            if (!membership.empty() && patch_index < 0) {
+              destination.unchecked(face_index) = 0.0;
+              return true;
+            }
+            const Real3 direction = patch_index < 0 ? vector_parameter(
+                *impl.boundary, face_plan->flow_parameter, false, true)
+                : impl.mass_flow_patches[patch_index].direction;
             ThermoState thermo;
             local = configured_thermo(face, *face_plan, owner, false,
                                       direction, thermo);
@@ -619,6 +644,8 @@ Status prepare_physical_boundary_flux(
                        kCandidateBoundaryNumerical};
             if (!local) return false;
             local_capacity[static_cast<std::size_t>(face)] += capacity;
+            if (patch_index >= 0)
+              impl.patch_local_capacity[patch_index] += capacity;
             local_mass_target[static_cast<std::size_t>(face)] =
                 mass_targets.data[face_plan->flow_parameter];
             destination.unchecked(face_index) =
@@ -684,6 +711,12 @@ Status prepare_physical_boundary_flux(
               local_outlet_hash = mix(local_outlet_hash,
                                       double_bits(provisional));
             }
+          } else if (face_plan->flow_kind ==
+                     BoundaryKind::zero_gradient_mass_outlet) {
+            // U/h/Y and pressure corrections are extrapolated. Retain signed
+            // mechanical flux here; the global continuity closure is below.
+            destination.unchecked(face_index) =
+                mechanical_faces[axis_index].unchecked(face_index);
           } else {
             destination.unchecked(face_index) = 0.0;
           }
@@ -700,6 +733,16 @@ Status prepare_physical_boundary_flux(
       {local_mass_target.data(), local_mass_target.size()},
       {result.global_mass_target.data(), result.global_mass_target.size()});
   if (!local) return local;
+
+  if (!impl.mass_flow_patches.empty()) {
+    local = reductions.checked_sum(
+        {impl.patch_local_capacity.data(), impl.patch_local_capacity.size()},
+        {impl.patch_global_capacity.data(), impl.patch_global_capacity.size()});
+    if (!local) return local;
+    for (const double capacity : impl.patch_global_capacity)
+      if (!finite_positive(capacity))
+        return {StatusCode::numerical_failure, kCandidateBoundaryNumerical};
+  }
 
   std::array<double, 6U> local_achieved{};
   for (std::size_t axis_index = 0U; axis_index < 3U && local; ++axis_index) {
@@ -725,14 +768,20 @@ Status prepare_physical_boundary_flux(
           if (!local) return false;
           if (!control_face_active) return true;
           const std::size_t face_slot = static_cast<std::size_t>(face);
+          const auto& membership = impl.face_patch[face_slot];
+          const auto patch_index = membership.empty() ? -1
+              : membership[boundary_flat(face, cells, index)];
+          if (!membership.empty() && patch_index < 0) return true;
           if (!finite_positive(global_capacity[face_slot]) ||
               !finite_positive(result.global_mass_target[face_slot])) {
             local = {StatusCode::numerical_failure,
                      kCandidateBoundaryNumerical};
             return false;
           }
-          const double scale = result.global_mass_target[face_slot] /
-                               global_capacity[face_slot];
+          const double scale = patch_index < 0
+              ? result.global_mass_target[face_slot] / global_capacity[face_slot]
+              : impl.mass_flow_patches[patch_index].mass_flow_rate /
+                    impl.patch_global_capacity[patch_index];
           const double value = destination.unchecked(index) * scale;
           if (!std::isfinite(value)) {
             local = {StatusCode::numerical_failure,
@@ -774,6 +823,66 @@ Status prepare_physical_boundary_flux(
   }
   local = reductions.consensus(local);
   if (!local) return local;
+
+  if (impl.has_mass_balanced_outlet) {
+    long double divergence = input.local_mass_storage_rate;
+    const auto activity = impl.immersed_interface == nullptr
+        ? Span<const std::uint8_t>{} : impl.immersed_interface->cell_activity();
+    std::size_t flat = 0U;
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x, ++flat) {
+          if (activity.size != 0U && activity.data[flat] == 0U) continue;
+          const Int3 cell{x, y, z};
+          divergence += prepared.x.unchecked({x + 1, y, z}) - prepared.x.unchecked(cell)
+              + prepared.y.unchecked({x, y + 1, z}) - prepared.y.unchecked(cell)
+              + prepared.z.unchecked({x, y, z + 1}) - prepared.z.unchecked(cell);
+        }
+    double values[2]{static_cast<double>(divergence), 0.0}, global[2]{};
+    const auto each_outlet = [&](auto&& operation) {
+      for (std::size_t axis = 0U; axis < 3U; ++axis)
+        for_each_boundary_face_storage_order(static_cast<CartesianAxis>(axis), cells,
+            [&](Int3 face, bool high) noexcept {
+              const BoundaryFacePlan* plan = nullptr;
+              const Status found = impl.boundary->face(
+                  selected_face(static_cast<CartesianAxis>(axis), high), plan);
+              if (!found || plan == nullptr) {
+                local = {StatusCode::invalid_plan, kCandidateBoundaryFinalizer};
+                return false;
+              }
+              if (plan->local_owner && !plan->periodic &&
+                  plan->flow_kind == BoundaryKind::zero_gradient_mass_outlet)
+                operation(axis, face, high);
+              return true;
+            });
+    };
+    each_outlet([&](std::size_t axis, Int3 face, bool high) {
+      values[1] += outward_sign(high) * prepared_faces[axis].unchecked(face);
+    });
+    if (!std::isfinite(values[0]) || !std::isfinite(values[1]))
+      local = {StatusCode::numerical_failure, kCandidateBoundaryNumerical};
+    local = reductions.checked_sum({values, 2U}, {global, 2U}, local);
+    if (!local) return local;
+    // COAST's positive existing-flow pool is scaled by (flow + summ)/flow,
+    // where summ is minus the global continuity residual. No area fallback
+    // and no local reverse-flow clipping are introduced.
+    const double scale = global[1] > 1e-25
+        ? (global[1] - global[0]) / global[1] : 1.0;
+    if (!finite_positive(scale) ||
+        (global[1] <= 1e-25 && std::abs(global[0]) > 1e-25))
+      return {StatusCode::rejected_step, kCandidateBoundaryNumerical};
+    each_outlet([&](std::size_t axis, Int3 face, bool) {
+      const double value = prepared_faces[axis].unchecked(face) * scale;
+      if (!std::isfinite(value)) {
+        local = {StatusCode::numerical_failure, kCandidateBoundaryNumerical};
+        return;
+      }
+      prepared_faces[axis].unchecked(face) = value;
+      local_outlet_hash = mix(local_outlet_hash, double_bits(value));
+    });
+    local = reductions.consensus(local);
+    if (!local) return local;
+  }
 
   result.prepared = prepared;
   result.local_inlet_hash = local_inlet_hash;
@@ -882,6 +991,46 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
             binding.communicator, binding.geometry, binding.patch,
             binding.immersed_interface) &&
         complete_candidate_donor));
+  std::uint64_t patch_collective = kFnvOffset;
+  patch_collective = mix(patch_collective, binding.mass_flow_patches.size);
+  local_valid &= binding.mass_flow_patches.size <= 256U &&
+      (binding.mass_flow_patches.size == 0U || binding.mass_flow_patches.data != nullptr);
+  std::array<double, 6U> patch_targets{};
+  if (local_valid)
+    for (std::size_t i = 0U; i < binding.mass_flow_patches.size; ++i) {
+      const auto& p = binding.mass_flow_patches.data[i];
+      const auto slot = static_cast<std::size_t>(p.face);
+      if (slot >= 6U || !finite_positive(p.mass_flow_rate) ||
+          !std::isfinite(p.direction.x) || !std::isfinite(p.direction.y) ||
+          !std::isfinite(p.direction.z) ||
+          (p.local_faces.size != 0U && p.local_faces.data == nullptr)) {
+        local_valid = false;
+        break;
+      }
+      const BoundaryFacePlan* plan = nullptr;
+      local_valid &= static_cast<bool>(binding.boundary->face(p.face, plan));
+      if (!plan || plan->flow_kind != BoundaryKind::mass_flow_inlet ||
+          outward_sign(slot % 2U != 0U) * component(p.direction,
+              static_cast<CartesianAxis>(slot / 2U)) >= 0.0) {
+        local_valid = false;
+        break;
+      }
+      patch_targets[slot] += p.mass_flow_rate;
+      patch_collective = mix(patch_collective, slot);
+      patch_collective = mix(patch_collective, double_bits(p.mass_flow_rate));
+      patch_collective = mix(patch_collective, double_bits(p.direction.x));
+      patch_collective = mix(patch_collective, double_bits(p.direction.y));
+      patch_collective = mix(patch_collective, double_bits(p.direction.z));
+    }
+  if (local_valid)
+    for (std::size_t slot = 0U; slot < 6U; ++slot) {
+      if (patch_targets[slot] == 0.0) continue;
+      const BoundaryFacePlan* plan = nullptr;
+      binding.boundary->face(static_cast<CartesianFace>(slot), plan);
+      const double target = binding.boundary->mass_flow_targets().data[plan->flow_parameter];
+      local_valid &= std::abs(target - patch_targets[slot]) <=
+          64.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, target);
+    }
   int local_flag = local_valid ? 1 : 0;
   int global_flag = 0;
   if (MPI_Allreduce(&local_flag, &global_flag, 1, MPI_INT, MPI_MIN,
@@ -891,11 +1040,11 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
   if (global_flag == 0) {
     return {StatusCode::invalid_plan, kCandidateBoundaryFinalizer};
   }
-  const std::uint64_t local_activity_collective =
+  const std::uint64_t local_activity_collective = mix(patch_collective,
       binding.immersed_physical_boundary_flux == nullptr
           ? PlanFingerprint{0U}
           : binding.immersed_physical_boundary_flux
-                ->collective_fingerprint();
+                ->collective_fingerprint());
   std::uint64_t minimum_activity_collective = 0U;
   std::uint64_t maximum_activity_collective = 0U;
   const int minimum_activity_status = MPI_Allreduce(
@@ -931,6 +1080,36 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
           5U + binding.thermodynamics->independent_species_count());
       candidate->composition.resize(
           binding.thermodynamics->independent_species_count());
+      candidate->patch_local_capacity.resize(binding.mass_flow_patches.size);
+      candidate->patch_global_capacity.resize(binding.mass_flow_patches.size);
+      for (std::size_t i = 0U; i < binding.mass_flow_patches.size; ++i) {
+        const auto& p = binding.mass_flow_patches.data[i];
+        candidate->mass_flow_patches.push_back(p);
+        candidate->mass_flow_patches.back().local_faces = {};
+        const auto slot = static_cast<std::size_t>(p.face);
+        const Int3 cells = binding.patch.cells;
+        auto& map = candidate->face_patch[slot];
+        if (map.empty()) map.assign(slot < 2U ? cells.y * cells.z
+            : slot < 4U ? cells.x * cells.z : cells.x * cells.y, -1);
+        const BoundaryFacePlan* plan = nullptr;
+        binding.boundary->face(p.face, plan);
+        for (std::size_t j = 0U; j < p.local_faces.size; ++j) {
+          const Int3 f = p.local_faces.data[j];
+          const auto axis = static_cast<CartesianAxis>(slot / 2U);
+          const bool high = slot % 2U != 0U;
+          const Int3 owner = owner_cell(axis, high, f, cells);
+          const int expected = high ? (slot < 2U ? cells.x : slot < 4U ? cells.y : cells.z) : 0;
+          if (!plan->local_owner || owner.x < 0 || owner.x >= cells.x ||
+              owner.y < 0 || owner.y >= cells.y || owner.z < 0 || owner.z >= cells.z ||
+              (slot < 2U ? f.x : slot < 4U ? f.y : f.z) != expected) {
+            allocation_failure_kind = 1;
+            continue;
+          }
+          auto& entry = map[boundary_flat(p.face, cells, f)];
+          if (entry != -1) allocation_failure_kind = 1;
+          entry = static_cast<std::int32_t>(i);
+        }
+      }
     } catch (...) {
       allocation_failure_kind = 2;
     }
@@ -953,6 +1132,12 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
   candidate->geometry = binding.geometry;
   candidate->patch = binding.patch;
   candidate->boundary = binding.boundary;
+  for (std::size_t face = 0U; face < 6U; ++face) {
+    const BoundaryFacePlan* plan = nullptr;
+    binding.boundary->face(static_cast<CartesianFace>(face), plan);
+    candidate->has_mass_balanced_outlet |=
+        plan->flow_kind == BoundaryKind::zero_gradient_mass_outlet;
+  }
   candidate->kernels = binding.kernels;
   candidate->thermodynamics = binding.thermodynamics;
   candidate->transport = binding.transport;
@@ -971,6 +1156,12 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
   std::uint64_t fingerprint = mix(kFnvOffset, UINT64_C(0x70656362666e6472));
   fingerprint = mix(fingerprint, binding.geometry->fingerprint());
   fingerprint = mix(fingerprint, binding.boundary->semantic_fingerprint());
+  if (!candidate->mass_flow_patches.empty()) {
+    fingerprint = mix(fingerprint, patch_collective);
+    for (const auto& map : candidate->face_patch)
+      for (const auto member : map)
+        fingerprint = mix(fingerprint, static_cast<std::uint32_t>(member));
+  }
   fingerprint = mix(fingerprint, binding.kernels->fingerprint());
   fingerprint = mix(fingerprint, binding.thermodynamics->fingerprint());
   fingerprint = mix(fingerprint, binding.transport->fingerprint());
@@ -1438,13 +1629,20 @@ Status PressureEnergyCandidateBoundaryFinalizer::finalize(
   local = reductions.consensus(local);
   if (!local) return local;
 
+  double local_mass_storage = 0.0;
+  if (impl.has_mass_balanced_outlet) {
+    local = impl.coupler->candidate_local_mass_storage(
+        input.authority, input.density, local_mass_storage);
+    local = reductions.consensus(local);
+    if (!local) return local;
+  }
   const PhysicalBoundaryFluxEngineInput physical_input{
       input.absolute_pressure_reference,
       input.pressure_perturbation,
       input.velocity,
       input.thermophysical_boundary.binding.independent_species,
       input.mechanical_flux,
-      input.final_flux.revision};
+      input.final_flux.revision, local_mass_storage};
   PhysicalBoundaryFluxEngineResult physical;
   local = prepare_physical_boundary_flux(impl, physical_input, reductions,
                                          physical);

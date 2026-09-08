@@ -77,7 +77,7 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
       hash *= UINT64_C(1099511628211);
     }
   if (inlet_patches)
-    for (char byte : std::string_view(";labelled-mass-inlets-v1;ibm-prescribed-state-convection-v1")) {
+    for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -223,6 +223,7 @@ bool product_candidate_boundary_supported(
       case BoundaryKind::velocity_inlet:
       case BoundaryKind::mass_flow_inlet:
       case BoundaryKind::pressure_outlet:
+      case BoundaryKind::zero_gradient_mass_outlet:
       case BoundaryKind::no_slip_wall:
       case BoundaryKind::moving_wall:
       case BoundaryKind::slip:
@@ -4180,7 +4181,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             std::max<std::size_t>(
                 candidate->krylov_requirements.reduction_capacity,
                 candidate->auxiliary_krylov_requirements.reduction_capacity),
-            std::max<std::size_t>(8U, scalar_reduction_capacity)),
+            std::max<std::size_t>(candidate->patch_inlets.patches.size(),
+                std::max<std::size_t>(8U, scalar_reduction_capacity))),
         candidate->reductions);
   // Freeze the incompatible-cold-start projection only after every borrowed
   // address (halos, reductions, linear/MG workspaces, cell fields, and face
@@ -4379,6 +4381,40 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = candidate->reductions.consensus(status);
   }
   if (status && product_candidate_boundary_supported(candidate->boundary)) {
+    std::vector<PhysicalMassFlowPatch> external_patches;
+    std::vector<std::vector<Int3>> external_support;
+    status = product_local_stage(communicator, [&]() -> Status {
+      const auto& inlets = candidate->patch_inlets;
+      external_support.resize(inlets.patches.size());
+      for (std::size_t i = 0U; i < inlets.patches.size(); ++i) {
+        const auto& inlet = inlets.patches[i];
+        if (inlet.immersed) continue;
+        const auto face = static_cast<CartesianFace>(inlet.face);
+        const BoundaryFacePlan* plan = nullptr;
+        Status local = candidate->boundary.face(face, plan);
+        if (!local || !plan) return {StatusCode::invalid_plan, kProductBinding};
+        const Int3 cells = candidate->patch.cells;
+        if (plan->local_owner) {
+          const int inner_count = inlet.face < 2U ? cells.y : cells.x;
+          const int outer_count = inlet.face >= 4U ? cells.y : cells.z;
+          const auto& map = inlets.face_patch[inlet.face];
+          for (int outer = 0; outer < outer_count; ++outer)
+            for (int inner = 0; inner < inner_count; ++inner) {
+              if (map[static_cast<std::size_t>(outer) * inner_count + inner] !=
+                  static_cast<std::int32_t>(i)) continue;
+              Int3 f = boundary_owner_cell(face, cells, inner, outer);
+              if (inlet.face % 2U != 0U)
+                (inlet.face < 2U ? f.x : inlet.face < 4U ? f.y : f.z)++;
+              external_support[i].push_back(f);
+            }
+        }
+        external_patches.push_back({face, inlet.boundary.direction,
+            inlet.boundary.mass_flow_rate,
+            {external_support[i].data(), external_support[i].size()}});
+      }
+      return {};
+    });
+    if (!status) return status;
     const PressureEnergyCandidateBoundaryFinalizerBinding finalizer_binding{
         communicator,
         &candidate->geometry,
@@ -4404,7 +4440,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             : FieldId{0U},
         candidate->ibm_candidate_pressure_donors.has_value()
             ? candidate->ibm_candidate_pressure_donors->reach()
-            : std::uint8_t{0U}};
+            : std::uint8_t{0U},
+        {external_patches.data(), external_patches.size()}};
     status = PressureEnergyCandidateBoundaryFinalizer::bind(
         finalizer_binding, candidate->candidate_boundary_finalizer);
   }

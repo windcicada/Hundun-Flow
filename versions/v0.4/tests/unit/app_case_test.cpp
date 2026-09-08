@@ -1530,6 +1530,28 @@ bool test_immersed_reconstruction_policy_is_typed_and_hashed() {
   return passed;
 }
 
+bool test_mass_balanced_outlet_case_and_wire() {
+  ScratchCase scratch("mass-balanced-outlet");
+  std::string json = case_json(kCoastRuntimeAxesMesh);
+  bool passed = expect(replace_once(json, "\"flow_kind\":\"pressure_outlet\"",
+      "\"flow_kind\":\"zero_gradient_mass_outlet\"") &&
+      replace_once(json, "\"allow_backflow\":true", "\"allow_backflow\":false"),
+      "explicit mass-balanced outlet fixture");
+  scratch.write("case.json", json);
+  scratch.write("axes.dat", kCoastRuntimeAxes);
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel model, restored;
+  std::vector<std::uint8_t> wire;
+  passed &= expect(compile(scratch.root(), model) &&
+      model.boundaries[1].flow_kind == hundun::v04::BoundaryKind::zero_gradient_mass_outlet &&
+      hundun::v04::detail::serialize_model_for_test(model, wire) &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.boundaries[1].flow_kind == hundun::v04::BoundaryKind::zero_gradient_mass_outlet &&
+      restored.fingerprint == model.fingerprint,
+      "new outlet kind survives parser/wire identity roundtrip");
+  return passed;
+}
+
 bool test_patch_inlets_case_and_wire() {
   constexpr std::string_view inlet = R"json({"flow_kind":"mass_flow_inlet","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0.01,"pressure":101325,"temperature":295,"total_pressure":101325,"total_temperature":295,"backflow_temperature":295,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]})json";
   std::string json = case_json(kCoastRuntimeAxesMesh);
@@ -1707,6 +1729,7 @@ int main(int argc, char** argv) {
   passed &= test_tensor_normalization_and_fingerprint();
   passed &= test_coast_runtime_axes_case();
   passed &= test_patch_inlets_case_and_wire();
+  passed &= test_mass_balanced_outlet_case_and_wire();
   passed &= test_imported_marker_case_and_wire();
   passed &= test_coast_native_air_requires_coast_axes_wire();
   passed &= test_coast_runtime_axes_strictness_and_fingerprint();

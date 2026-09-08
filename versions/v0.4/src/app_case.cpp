@@ -562,13 +562,14 @@ bool parse_linear_algorithm(std::string_view value,
 }
 
 bool parse_boundary_kind(std::string_view value, BoundaryKind& out) noexcept {
-  constexpr std::array<std::pair<std::string_view, BoundaryKind>, 16U> values{{
+  constexpr std::array<std::pair<std::string_view, BoundaryKind>, 17U> values{{
       {"none", BoundaryKind::none},
       {"velocity_inlet", BoundaryKind::velocity_inlet},
       {"mass_flow_inlet", BoundaryKind::mass_flow_inlet},
       {"static_state_inlet", BoundaryKind::static_state_inlet},
       {"total_state_inlet", BoundaryKind::total_state_inlet},
       {"pressure_outlet", BoundaryKind::pressure_outlet},
+      {"zero_gradient_mass_outlet", BoundaryKind::zero_gradient_mass_outlet},
       {"nscbc_inlet", BoundaryKind::nscbc_inlet},
       {"nscbc_outlet", BoundaryKind::nscbc_outlet},
       {"no_slip_wall", BoundaryKind::no_slip_wall},
@@ -1116,7 +1117,7 @@ bool valid_boundary(const BoundaryFaceSpec& face) {
            std::isfinite(value.z);
   };
   if (static_cast<std::uint8_t>(face.flow_kind) >
-          static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+          static_cast<std::uint8_t>(BoundaryKind::zero_gradient_mass_outlet) ||
       static_cast<std::uint8_t>(face.thermal_kind) >
           static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
       !finite3(face.velocity) || !finite3(face.direction) ||
@@ -1681,7 +1682,7 @@ bool read_boundary(WireReader& reader, BoundaryFaceSpec& face) {
   std::uint8_t allow_backflow = 0U;
   std::uint16_t scalar_count = 0U;
   if (!reader.byte(flow) ||
-      flow > static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
+      flow > static_cast<std::uint8_t>(BoundaryKind::zero_gradient_mass_outlet) ||
       !reader.byte(thermal) ||
       thermal > static_cast<std::uint8_t>(BoundaryKind::heat_flux_wall) ||
       !reader.real3(face.velocity) || !reader.real3(face.direction) ||
