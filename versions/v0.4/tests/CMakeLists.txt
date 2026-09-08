@@ -260,10 +260,80 @@ target_link_libraries(v04_public_headers_test PRIVATE
   MPI::MPI_C)
 add_test(NAME v04_public_headers COMMAND v04_public_headers_test)
 
+add_executable(v04_models_chemistry_test unit/models_chemistry_test.cpp)
+target_include_directories(v04_models_chemistry_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+add_test(NAME v04_models_chemistry COMMAND v04_models_chemistry_test)
+
+if(HUNDUN_BUILD_PORTABLE_CANTERA)
+  if(NOT EXISTS "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
+    message(FATAL_ERROR "Portable Cantera tests require an explicit synthetic mechanism")
+  endif()
+  add_executable(v04_models_cantera_backend_test unit/models_cantera_backend_test.cpp)
+  target_link_libraries(v04_models_cantera_backend_test PRIVATE
+    hundun_v04_portable_cantera)
+  add_test(NAME v04_models_cantera_backend COMMAND v04_models_cantera_backend_test
+    "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
+  set_tests_properties(v04_models_cantera_backend PROPERTIES TIMEOUT 30)
+endif()
+
+add_executable(v04_models_combustion_test
+  unit/models_combustion_test.cpp)
+target_link_libraries(v04_models_combustion_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion COMMAND v04_models_combustion_test)
+
+add_executable(v04_models_combustion_allocation_test
+  unit/models_combustion_allocation_test.cpp)
+target_link_libraries(v04_models_combustion_allocation_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion_allocation COMMAND v04_models_combustion_allocation_test)
+
+add_executable(v04_models_combustion_common_source_test
+  unit/models_combustion_common_source_test.cpp)
+target_link_libraries(v04_models_combustion_common_source_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion_common_source COMMAND v04_models_combustion_common_source_test)
+
 add_executable(v04_models_spray_test
   unit/models_spray_test.cpp)
 target_link_libraries(v04_models_spray_test PRIVATE hundun_v04_test_core)
 add_test(NAME v04_models_spray COMMAND v04_models_spray_test)
+
+add_executable(v04_models_spray_parcel_test unit/models_spray_parcel_test.cpp)
+target_include_directories(v04_models_spray_parcel_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_parcel_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray_parcel COMMAND v04_models_spray_parcel_test)
+
+foreach(spray_slice IN ITEMS breakup mechanics source transfer)
+  add_executable(v04_models_spray_${spray_slice}_test
+    unit/models_spray_${spray_slice}_test.cpp)
+  target_include_directories(v04_models_spray_${spray_slice}_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  target_link_libraries(v04_models_spray_${spray_slice}_test PRIVATE
+    hundun_v04_test_core)
+  add_test(NAME v04_models_spray_${spray_slice}
+    COMMAND v04_models_spray_${spray_slice}_test)
+endforeach()
+
+add_executable(v04_models_spray_transaction_test mpi/models_spray_transaction_test.cpp)
+target_link_libraries(v04_models_spray_transaction_test PRIVATE hundun_v04_test_core)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_models_spray_transaction_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_models_spray_transaction_test>"
+      ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_spray_transaction_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} TIMEOUT 30)
+endforeach()
+
+add_executable(v04_models_spray_migration_test mpi/models_spray_migration_test.cpp)
+target_link_libraries(v04_models_spray_migration_test PRIVATE hundun_v04_test_core)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_models_spray_migration_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_models_spray_migration_test>"
+      ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_spray_migration_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} TIMEOUT 30)
+endforeach()
 
 add_executable(v04_mesh_ibm_quadratic_test
   unit/mesh_ibm_quadratic_test.cpp)
