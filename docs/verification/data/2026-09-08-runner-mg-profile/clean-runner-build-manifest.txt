@@ -1,0 +1,27 @@
+schema=HUNDUN_V04_BUILD_MANIFEST_V2
+head=84b9ace1d0772a5708b7e917c89094a0de357a50dea5f151c7214295924d3487
+tree=1411eb12cf76bd99dfc61aa6462778ef13f688816fd3405c522d7aaa8d5efa86
+core_source_clean=true
+core_dirty_summary=
+core_source_content_sha256=8611744a14f4abe179808ea1ebda73f47fff1f7d080a7f7c26a46907ac97e441
+c_compiler_id=GNU
+c_compiler_version=7.5.0
+c_compiler_flags=-O3 -DNDEBUG
+c_standard_default=11
+cxx_standard=17
+core_definitions=OMPI_SKIP_MPICXX=1,MPICH_SKIP_MPICXX=1
+mpi_c_compile_options=-pthread
+mpi_c_link_flags=-L/usr/lib/x86_64-linux-gnu/openmpi/lib -pthread
+compiler_id=Clang
+compiler_version=15.0.6
+compiler_flags=-stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -march=znver3 -mno-fma -ffp-contract=off -O3 -DNDEBUG
+link_flags=
+build_type=Release
+source_version=v0.4
+tests=ON
+asan=OFF
+ubsan=OFF
+hypre=OFF
+target=v04_thin_domain_runner
+entry_sha256=6709c3b46c5665b8ac832ab9dad17a35f55693365ee2be5c5a55ee849cb782fb
+target_source_clean=true

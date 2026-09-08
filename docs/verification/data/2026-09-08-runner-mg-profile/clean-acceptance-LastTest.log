@@ -1,0 +1,291 @@
+Start testing: Sep 08 10:22 CST
+----------------------------------------------------------
+31/367 Testing: v04_solver_observation_cli
+31/367 Test: v04_solver_observation_cli
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/solver_observe_cli_test.py" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/tools/v04_solver_observe.py"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_solver_observation_cli" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+streamed CLI traced peak bytes (8/2048 steps): [2840342, 3870428]
+solver observation CLI PASS (88 checks: frozen ranks/range, source identity, corruption, partial, streaming)
+<end of output>
+Test time =   4.13 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_observation_cli" end time: Sep 08 10:22 CST
+"v04_solver_observation_cli" time elapsed: 00:00:04
+----------------------------------------------------------
+
+32/367 Testing: v04_solver_mg_observation_cli
+32/367 Test: v04_solver_mg_observation_cli
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/solver_observe_mg_cli_test.py" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/tools/v04_solver_observe.py"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_solver_mg_observation_cli" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+MG observer synthetic ledger, details, partial and 33 rejection checks PASS
+<end of output>
+Test time =   1.56 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_observation_cli" end time: Sep 08 10:22 CST
+"v04_solver_mg_observation_cli" time elapsed: 00:00:01
+----------------------------------------------------------
+
+35/367 Testing: v04_thin_domain_runner_self_test
+35/367 Test: v04_thin_domain_runner_self_test
+Command: "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--self-test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_thin_domain_runner_self_test" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+PASS v04_thin_domain_runner_self_test
+<end of output>
+Test time =   0.46 sec
+----------------------------------------------------------
+Test Passed.
+"v04_thin_domain_runner_self_test" end time: Sep 08 10:22 CST
+"v04_thin_domain_runner_self_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+37/367 Testing: v04_runner_mg_log_completion_mpi_2
+37/367 Test: v04_runner_mg_log_completion_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_log_close_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--probe" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests/libv04_runner_log_failure_probe.so" "--mpi" "/usr/bin/mpiexec" "--ranks" "2" "--mg-only"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_mg_log_completion_mpi_2" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+baseline-off returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+disabled-observer returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]]
+baseline-0 returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+close-0-5 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+flush-0-5 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+close-0-28 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+flush-0-28 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+first-error-0 returncode=6 rank_exits=[[6, 2, 1, 1, 1], [6, 0, 0, 0, 0]]
+baseline-1 returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 2, 1, 0, 0]]
+close-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+flush-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+close-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+flush-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+first-error-1 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 1]]
+<end of output>
+Test time =  30.85 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_log_completion_mpi_2" end time: Sep 08 10:22 CST
+"v04_runner_mg_log_completion_mpi_2" time elapsed: 00:00:30
+----------------------------------------------------------
+
+47/367 Testing: v04_runner_mg_profile_mpi_1
+47/367 Test: v04_runner_mg_profile_mpi_1
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_1" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=1 steps=2 apply_attempts=[6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-zktv3_jd/audit
+<end of output>
+Test time =   8.20 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_1" end time: Sep 08 10:22 CST
+"v04_runner_mg_profile_mpi_1" time elapsed: 00:00:08
+----------------------------------------------------------
+
+48/367 Testing: v04_runner_statistics_epoch_mpi_1
+48/367 Test: v04_runner_statistics_epoch_mpi_1
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_1" start time: Sep 08 10:22 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=1 source_readonly=true
+<end of output>
+Test time =  14.51 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_1" end time: Sep 08 10:23 CST
+"v04_runner_statistics_epoch_mpi_1" time elapsed: 00:00:14
+----------------------------------------------------------
+
+49/367 Testing: v04_runner_mg_profile_mpi_2
+49/367 Test: v04_runner_mg_profile_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_2" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=2 steps=2 apply_attempts=[6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-c4i9s2oa/audit
+<end of output>
+Test time =  11.57 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_2" end time: Sep 08 10:23 CST
+"v04_runner_mg_profile_mpi_2" time elapsed: 00:00:11
+----------------------------------------------------------
+
+50/367 Testing: v04_runner_statistics_epoch_mpi_2
+50/367 Test: v04_runner_statistics_epoch_mpi_2
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_2" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=2 source_readonly=true
+<end of output>
+Test time =  12.59 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_2" end time: Sep 08 10:23 CST
+"v04_runner_statistics_epoch_mpi_2" time elapsed: 00:00:12
+----------------------------------------------------------
+
+51/367 Testing: v04_runner_mg_profile_mpi_4
+51/367 Test: v04_runner_mg_profile_mpi_4
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_mg_profile_mpi_4" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+MG CLI ranks=4 steps=2 apply_attempts=[6, 6, 6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-wc6yy51b/audit
+<end of output>
+Test time =   5.26 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_mg_profile_mpi_4" end time: Sep 08 10:23 CST
+"v04_runner_mg_profile_mpi_4" time elapsed: 00:00:05
+----------------------------------------------------------
+
+52/367 Testing: v04_runner_statistics_epoch_mpi_4
+52/367 Test: v04_runner_statistics_epoch_mpi_4
+Command: "/usr/bin/python3.6" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/versions/v0.4/tests/integration/runner_statistics_epoch_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_runner_statistics_epoch_mpi_4" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=4 source_readonly=true
+<end of output>
+Test time =  10.59 sec
+----------------------------------------------------------
+Test Passed.
+"v04_runner_statistics_epoch_mpi_4" end time: Sep 08 10:23 CST
+"v04_runner_statistics_epoch_mpi_4" time elapsed: 00:00:10
+----------------------------------------------------------
+
+256/367 Testing: v04_product_pressure_energy_retry_mpi_1
+256/367 Test: v04_product_pressure_energy_retry_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_1" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908338169e-14/1.0460406810870782e-10/0/2.4294555600856023e-32 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714286467246095e-08/5.4073846732826095e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=70/85
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384613495099614e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001450080592753 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001450080592753
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0060974987792746 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0060974987792746
+candidate-loop i=3 extrapolated_alpha=1.025122322581465 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.025122322581465
+candidate-loop i=4 extrapolated_alpha=1.0580625257236693 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0580625257236693
+candidate-loop i=5 extrapolated_alpha=1.1292512753606125 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.1292512753606125
+candidate-loop i=6 extrapolated_alpha=1.3042045678460812 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.3042045678460812
+candidate-loop i=7 extrapolated_alpha=1.8891962098200208 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.8891962098200208
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+candidate-loop i=9 extrapolated_alpha=1.0040868971907759 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0040868971907759
+warm-candidate-work status=0/0 baseline=10 extrapolation=8 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   1.14 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_1" end time: Sep 08 10:23 CST
+"v04_product_pressure_energy_retry_mpi_1" time elapsed: 00:00:01
+----------------------------------------------------------
+
+257/367 Testing: v04_product_pressure_energy_retry_mpi_2
+257/367 Test: v04_product_pressure_energy_retry_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_2" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/1.2687156813780412e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.4073846728786893e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=90/108
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001357076477417 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001357076477417
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0055573199903851 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0055573199903851
+candidate-loop i=3 extrapolated_alpha=1.0169532438415794 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0169532438415794
+candidate-loop i=4 extrapolated_alpha=1.0407498450995283 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0407498450995283
+candidate-loop i=5 extrapolated_alpha=1.090024989868605 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.090024989868605
+candidate-loop i=6 extrapolated_alpha=1.2034284034319145 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2034284034319145
+candidate-loop i=7 extrapolated_alpha=1.5192237111066726 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5192237111066726
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   1.02 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_2" end time: Sep 08 10:23 CST
+"v04_product_pressure_energy_retry_mpi_2" time elapsed: 00:00:01
+----------------------------------------------------------
+
+258/367 Testing: v04_product_pressure_energy_retry_mpi_4
+258/367 Test: v04_product_pressure_energy_retry_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908/build-accept/versions/v0.4/tests
+"v04_product_pressure_energy_retry_mpi_4" start time: Sep 08 10:23 CST
+Output:
+----------------------------------------------------------
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908212711e-14/1.0460406810870792e-10/0/1.1860467074584553e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714287331642688e-08/5.4073846735877291e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=94/114
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384597744234758e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001177869577977 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001177869577977
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0062044622551241 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0062044622551241
+candidate-loop i=3 extrapolated_alpha=1.0183935058560609 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0183935058560609
+candidate-loop i=4 extrapolated_alpha=1.044500271230395 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.044500271230395
+candidate-loop i=5 extrapolated_alpha=1.0988682293033274 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0988682293033274
+candidate-loop i=6 extrapolated_alpha=1.2258391820639332 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2258391820639332
+candidate-loop i=7 extrapolated_alpha=1.5937698014524755 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5937698014524755
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+<end of output>
+Test time =   0.98 sec
+----------------------------------------------------------
+Test Passed.
+"v04_product_pressure_energy_retry_mpi_4" end time: Sep 08 10:23 CST
+"v04_product_pressure_energy_retry_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 08 10:23 CST
+
+io_failure_audit =  61.70 sec*proc
+
+v04_focused =   7.10 sec*proc
+

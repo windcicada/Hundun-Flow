@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native/ProductDriver 已验，后者独立干净19/19通过。runner schema 5、独立布局、逐层/逐轮账目及CLI/关闭失败/sanitizer已通过开发回归，待源码提交后的干净验收与生产测量 |
+| 当前活动切片 | MG层级归因已完成干净13/13与单轮9500→9510；当前只评估Chebyshev pre=1保留最终缺陷时的中间direction写入是否可消去，尚无性能收益结论 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | MG关闭仍为 `observation_schema=4`；显式MG观测为5，读取器兼容3/4。旧数据不能补造缺失阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
-| 下一切片退出条件 | 在runner接入每-loop摘要及每-step层级sidecar，冷布局独立绑定完整rank/level身份；跨重试/组成sweep对账，输出关闭失败与partial不假报完整；不复制32层数据到每个loop |
-| 下一动作 | runner观测分项提交后执行候选干净验收，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
+| 下一切片退出条件 | 证明仅消去无消费者的中间写入；公开MG输出/失败/重建/MPI及工作量验证通过，不改FP求值、halo顺序或持久view；再做候选单轮产品窗口，若无总耗时收益则撤回实验 |
+| 下一动作 | 归档新版成本并检查单stage写入生命周期；先局部回归和工作量探针，不改平滑次数或容差。C2 refinement初猜保护、multidot和streamed stencil已上线，不重复实施 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -56,7 +56,7 @@ Halo/reduction/直接 MPI 是嵌套子项。保留 prepared epoch 入口共识�
 汇总与发布，关闭时不调用新计时器。目标测试包括 `v04_solver_mg_mpi_[124]`、
 `v04_solver_mg_update_contract_mpi_[24]` 及现有 reuse/line/coarse/Krylov 隔离入口。
 Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-profile.md)
-已落地；尚无产品逐层实测或性能收益结论，不能把公开接口回归当成替代验收。
+已落地；产品逐层实测见下文，尚无新算法性能收益结论，不能把公开接口回归当成替代验收。
 
 [ProductDriver 接线](../verification/2026-09-08-product-mg-profile.md) 使用一个4664字节
 固定baseline和200字节每-loop摘要；关闭仍有固定存储/报告拷贝成本，不宣称零开销。
@@ -64,11 +64,15 @@ Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-
 把solid-solid负零错误地当成权威流体通量；独立干净基线也失败。修正的是测试区域合同，
 没有改变生产normalizer或方法签名。
 
-[Runner/observer 接线](../verification/2026-09-08-runner-mg-profile.md) 的开发回归已完成：
-CLI与统计恢复链6/6，ASan+UBSan CLI 3/3；root及非零rank的新增日志关闭失败一致返回，
+[Runner/observer 接线](../verification/2026-09-08-runner-mg-profile.md) 已完成：
+CLI与统计恢复链6/6，ASan+UBSan CLI 3/3，独立干净13/13；root及非零rank的新增日志关闭失败一致返回，
 checkpoint字节不变。新observer有33项拒绝检查，旧88项保留。
 Native开关仍可rank-local；runner因文件/通信分支要求两个观测开关冷入口一致。
-生产规模的MG成本尚未测量，不用16³夹具推算Re3900加速。
+候选`461d763`单轮128-rank、9500→9510完成，总墙钟110.86 s；10步/70 loops/6层来源与账目完整。
+128份checkpoint、manifest、128份Visit及统计载荷与此前同起点criterion窗口逐字节一致。
+新generation仅属于pilot，不替换原SIGSTOP进程。
+后9步Native MG为2.053430 s/步，pre/post为0.703746/0.350072，terminal为0.200820；
+51.32%的MG成本在平滑，copy只有refill内的0.011250 s/步。新观测不是加速或COAST替代证明。
 
 ## 3. 基础流动模块台账
 
@@ -83,7 +87,7 @@ Native开关仍可rank-local；runner因文件/通信分支要求两个观测开
 | MPI、事务与公共接口 | MG 可选本地 counters 不再控制 collective；应用七项冷控制一致性、分配失败与共同回退已有针对性验收 | 不能据局部失败矩阵声称所有产品路径已穷举；ESF/parcel/migration 还没有加入当前共同事务 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | I/O、Restart 与完成状态 | 日志 flush/close 统一决定全 rank 完成；读取前大小检查、reader bulk 预算、失败不发布、同方法与 rank relayout 恢复已验 | 普通 CSV close 不等于 fsync；reader bulk 不是产品总峰值/RSS。新增模型身份与持久状态仍需扩展 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | 内存、工作区与生命周期 | 多标量 C++ 唯一分配、恢复/输出交叉存活、销毁重建和 MPI owned 资源已有小型 profile | 全产品硬峰值预算仍缺；MPI/libc、allocator 余量、arena 外数组、halo、image/staging 的同时活跃集合需统一。局部零泄漏计数不等于全进程上限 | [独占验收](../verification/2026-09-07-exclusive-module-acceptance.md) |
-| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐 loop 来源/覆盖/账目及 V4 RHS 真实阈值已验；MG层级接线已开发回归 | MG生产规模成本待测；已有guard触发率仍不可观测；64 loops/advance 溢出会拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md)、[MG接线](../verification/2026-09-08-runner-mg-profile.md) |
+| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐loop与V4阈值已验；MG层级接线干净验收及生产单轮成本已测 | 单stage中间写入消去仅为待测实验；已有guard触发率仍不可观测；64 loops/advance 溢出拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md)、[MG接线与实测](../verification/2026-09-08-runner-mg-profile.md) |
 | 构建与可执行身份 | 有 Git 身份的干净 checkout 可独立构建，普通最小 CLI 已运行 | 无 `.git` 源归档可构建但 run 在 `invalid_plan/10505` 被身份合同拒绝；归档来源身份尚无运行合同 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 
 两项关键量测限定：

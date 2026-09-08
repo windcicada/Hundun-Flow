@@ -2,7 +2,8 @@
 
 基于已验收的 [ProductDriver 接线](2026-09-08-product-mg-profile.md)，
 本切片只增加可选观测和读取器校验；没有更改方程、物性、dt、残差门槛、
-refinement 容量、方法历史签名或 checkpoint 格式。Re3900 生产测量尚未执行。
+refinement 容量、方法历史签名或 checkpoint 格式。独立干净验收13/13和单轮
+Re3900 9500→9510观测已完成；下文区分测得成本与尚未实施的优化。
 
 ## 接口和计数含义
 
@@ -77,9 +78,74 @@ CTest/故障 stderr 源日志已归档；退出记录 JSON 仅补仓库末尾换
 原 JSON SHA-256 为 `01081710965ff5795f10b8778a2da7ded5114b61f1338a41c75f7bef6cf4dcbd`。
 以上不是全仓库测试通过，也不是 COAST 替代或性能优化已完成。
 
-## 下一验收
+## 干净构建与生产窗口验收
 
-观测源码分项 DCO 提交后，从独立干净 checkout 构建 runner 并运行上述相关 CLI、
-observer 和 I/O 测试。确认身份与输出后，以单轮 Re3900 窗口定位 M 的细层平滑、
-粗层求解和通信成本，再只选一个有数据依据的最小优化。
+DCO源码提交 `2ea65b6`，干净验收HEAD `461d7631aa251969ddfc4e639bcadb74c640070c`，
+tree `e1e46205ca609ad32e35875bb30097c1b787b008`。
+独立checkout为 `/home/wyf/code_dev/.worktrees/hundun-flow-mg-runner-accept-20260908`；
+新Ninja Release目录 `build-accept`，Clang/libc++，`-march=znver3 -mno-fma -ffp-contract=off`，
+ASan/UBSan/Hypre关闭，测试开启，构建 `-j4`。未沿用开发目录的Ninja恢复日志。
+
+干净CTest **13/13通过，102.90 s**，范围为旧/新observer、runner self-test、
+MG CLI与统计epoch链各1/2/4 ranks、MG日志关闭故障2 ranks、ProductDriver retry各1/2/4 ranks。
+见[原始日志](data/2026-09-08-runner-mg-profile/clean-acceptance-LastTest.log)和
+[构建manifest](data/2026-09-08-runner-mg-profile/clean-runner-build-manifest.txt)。
+runner SHA-256 `50ae573d1b8a39e606310e4a7dcfd803cbed96decb772a7308f459ed847f711a`，
+manifest SHA-256 `8d4ba4897e575c185989720fcb76ef8d644510a269ff12fae58a67829157bfa2`。
+manifest中的head/tree是带既有前缀的SHA-256，不是明文Git SHA；已独立重算匹配。
+
+生产窗口仅运行一次，目录为
+`/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-mg-9500-9510-20260908`。
+使用原物理输入、原9500 checkpoint，128 ranks，显式performance/MG观测，精确续算10步。
+方法签名仍为 `12213963202598979269`；未执行方法恢复或清空统计。
+完整进程墙钟 **110.86 s** 包含恢复和末次Visit/checkpoint，不是十倍纯advance。
+
+- 10步BDF2、每步1次attempt、无retry；V5 observer验证全部128 ranks、10步、70 logical loops、6层。
+- 连续性最大 `2.617570949848936e-7`，能量最大 `8.805795074746012e-7`；EOS、质量目标和gauge报告为0。
+  流体温度 `299.9790418656781–300.023665045917 K`；固体占位区域极值和位置没有变化。
+- 末次128份Visit覆盖6070272个单元，字段/有限性/坐标/范围通过；runtime validator返回0；日志正常关闭并打印COMPLETED。
+- 新generation `generation-9510-158606054634033`。与此前criterion观测窗口的同一步比较，
+  **128份rank checkpoint、manifest、128份Visit、statistics及accumulator均逐字节一致**。
+  complete附件仅generation名称不同，两侧均正确指向各自清单；不是全目录逐字节相同。
+- 133份原checkpoint/统计来源文件及冻结程序/输入哈希前后匹配。原长测128 ranks仍SIGSTOP，
+  其已接受状态更前进，不能拿pilot 9510替换原进程。
+
+精确来源、命令、字节比较和产物哈希见[验收收据](data/2026-09-08-runner-mg-profile/PILOT_ACCEPTED.json)。
+读取核查脚本和成本汇总脚本一并归档。原始CSV与逐loop明细保留在上述运行目录和同级
+`mg-observation-20260908`；`FROZEN.sha256`未改写，后处理产物由独立`ANALYSIS.sha256`绑定。
+这是观测接线的验收，不是新的长期稳定性、全产品硬内存预算或COAST替代验收。
+
+## 新版成本排序与下一最小实验
+
+下表取9502–9510的9步，每步先对128 ranks取均值再平均；9501为恢复首步单独保留。
+这9步不是“统计稳态”。纯advance的逐步max-rank均值 **9.526839 s/步**；
+全部实际阈值、收缩率、C1/C2/refinement和6层分布见[数值表](data/2026-09-08-runner-mg-profile/cost-window.json)。
+
+| 成本 | s/步 | 解释 |
+|---|---:|---|
+| Krylov | 4.045411 | 包含A、M及正交化，不与其子项相加 |
+| A / M wrapper | 1.395209 / 2.054118 | M内部Native MG为2.053430 |
+| 候选装配 | 2.271481 | 独立于上述Krylov阶段 |
+| MG pre / post smoothing | 0.703746 / 0.350072 | 合计占Native MG的51.32%；最细层两项合计0.776889 |
+| MG restriction / prolongation | 0.306723 / 0.104016 | 互斥阶段 |
+| MG terminal | 0.200820 | 9.78%；不是当前最大项 |
+| MG六阶段之外 | 0.388052 | 包含入口/出口、初始化、最终projection等，尚未细分，不能全称为清零成本 |
+| MG halo wait / direct MPI / reduction | 0.353292 / 0.117029 / 0.065286 | 嵌套成本，不追加到六阶段总计；direct MPI并非全在terminal |
+| MG refill / 其中copy | 0.074407 / 0.011250 | copy已包含在refill，不直接swap存储 |
+| 最终动量 / terminal metrics / 边界账本 | 0.202341 / 0.005116 / 0.033148 | 单列新增数值审计成本，不取消检查 |
+
+独立residual阶段为0，因为最终缺陷已在pre smoothing内装配；prepared halo的control列为0
+不代表MG没有其他MPI一致性检查。实际分区为16×8×1；全局层尺寸为
+456×256×52、228×128×26、114×64×13、57×32×7、29×16×4、29×8×2。
+所有层line mask为0，生产policy是Chebyshev pre=1/post=2、F-cycle，不是公共结构默认的red/black。
+
+C2-r1平均32.33次迭代，而r0为20.11；两者M/apply分别11.405和11.737 ms。
+该证据支持先看工作次数与平滑单次成本，**不支持**提前spatial或放宽阈值。
+窗口仍无C2 spatial样本。未与COAST做新对照，不从110.86 s与旧墙钟差值声称加速。
+
+下一活动实验限定为Chebyshev单stage且保留最终缺陷的路径：检查中间direction写入
+是否在读取前被最终缺陷覆盖，尝试只消去这一项无消费者的写入。
+保留FP求值/有限性检查、copyback、view地址、halo顺序和全部残差门槛。
+先以公开Native MG回归及工作量探针验证，再决定是否值得进入单轮产品窗口；
+这不是已复现数值缺陷，也未承诺耗时收益。现有streamed stencil、multidot不重复实现。
 两相继续暂挂，当前没有接入任何燃烧或两相源码。
