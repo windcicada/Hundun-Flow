@@ -58,6 +58,11 @@ add_test(NAME v04_solver_mg_observation_cli
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/solver_observe_mg_cli_test.py"
     "${hundun_repository_root}/tools/v04_solver_observe.py")
 set_tests_properties(v04_solver_mg_observation_cli PROPERTIES TIMEOUT 30)
+add_test(NAME v04_solver_fgmres_observation_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/solver_observe_recovery_cli_test.py"
+    "${hundun_repository_root}/tools/v04_solver_observe.py")
+set_tests_properties(v04_solver_fgmres_observation_cli PROPERTIES TIMEOUT 30)
 
 add_executable(v04_mpi_observer_probe mpi/mpi_observer_probe.c)
 target_link_libraries(v04_mpi_observer_probe PRIVATE MPI::MPI_C ${CMAKE_DL_LIBS})
@@ -94,6 +99,14 @@ add_test(NAME v04_runner_mg_log_completion_mpi_2
     --probe "$<TARGET_FILE:v04_runner_log_failure_probe>"
     --mpi "${MPIEXEC_EXECUTABLE}" --ranks 2 --mg-only)
 set_tests_properties(v04_runner_mg_log_completion_mpi_2 PROPERTIES
+  PROCESSORS 2 TIMEOUT 120 RUN_SERIAL TRUE LABELS io_failure_audit)
+add_test(NAME v04_runner_fgmres_log_completion_mpi_2
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_log_close_cli_test.py"
+    --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+    --probe "$<TARGET_FILE:v04_runner_log_failure_probe>"
+    --mpi "${MPIEXEC_EXECUTABLE}" --ranks 2 --fgmres-only)
+set_tests_properties(v04_runner_fgmres_log_completion_mpi_2 PROPERTIES
   PROCESSORS 2 TIMEOUT 120 RUN_SERIAL TRUE LABELS io_failure_audit)
 
 add_test(NAME v04_target_identity
@@ -142,6 +155,13 @@ foreach(rank_count IN ITEMS 1 2 4)
       --binary "$<TARGET_FILE:v04_thin_domain_runner>"
       --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}")
   set_tests_properties(v04_runner_mg_profile_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 180 RUN_SERIAL TRUE)
+  add_test(NAME v04_runner_fgmres_recovery_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_mg_profile_cli_test.py"
+      --binary "$<TARGET_FILE:v04_thin_domain_runner>"
+      --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}" --fgmres-recovery)
+  set_tests_properties(v04_runner_fgmres_recovery_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 180 RUN_SERIAL TRUE)
   add_test(NAME v04_runner_statistics_epoch_mpi_${rank_count}
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"

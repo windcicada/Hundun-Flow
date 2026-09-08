@@ -28,6 +28,11 @@ MG_LEVELS = tuple(p + s for p in MG_PHASES for s in ("_calls", "_ns")) + (
     "halo_wait_ns", "halo_control_ns", "halo_control_calls")
 MG_LOOP = ("mg_enabled", "mg_complete") + tuple("mg_" + k for k in MG_TOTALS + MG_LEVELS) + (
     "mg_finest_pre_smooth_ns", "mg_finest_post_smooth_ns")
+FGMRES_COUNTS = ("unsafe_norms", "discarded_columns", "explicit_reorthogonalizations",
+                "unsafe_restarts", "happy_restarts", "length_restarts",
+                "initial_residual_applies", "arnoldi_applies", "unsafe_residual_applies",
+                "interior_residual_applies", "cycle_residual_applies")
+FGMRES_LOOP = ("fgmres_available", "fgmres_norm_restarts") + tuple("fgmres_" + k for k in FGMRES_COUNTS)
 
 
 def file_hash(path):
@@ -52,13 +57,22 @@ def metadata(root, legacy_ranks):
             raise ValueError("duplicate metadata key: " + key)
         values[key] = value
     schema = values.get("observation_schema")
-    if schema not in (None, "3", "4", "5"):
+    if schema not in (None, "3", "4", "5", "6"):
         raise ValueError("unsupported observation schema")
-    bound = schema in ("3", "4", "5")
+    bound = schema in ("3", "4", "5", "6")
     if schema == "5" and (values.get("observe_performance") != "1" or values.get("observe_mg_cost") != "1"):
         raise ValueError("MG observation flags missing from frozen metadata")
-    if schema != "5" and values.get("observe_mg_cost", "0") != "0":
+    if schema not in ("5", "6") and values.get("observe_mg_cost", "0") != "0":
         raise ValueError("MG observation needs schema 5")
+    if schema == "6":
+        if (values.get("observe_performance") != "1" or values.get("observe_fgmres_recovery") != "1" or
+                values.get("observe_mg_cost") not in ("0", "1") or
+                values.get("pressure_linear_algorithm") not in ("fgmres", "bicgstab", "pcg")):
+            raise ValueError("FGMRES observation flags/algorithm missing from frozen metadata")
+        if values["observe_mg_cost"] == "0" and "mg_layout_sha256" in values:
+            raise ValueError("disabled MG has a frozen layout")
+    elif values.get("observe_fgmres_recovery", "0") != "0":
+        raise ValueError("FGMRES observation needs schema 6")
     if bound:
         ranks = int(values["expected_ranks"])
         if legacy_ranks is not None and legacy_ranks != ranks:
@@ -71,7 +85,9 @@ def metadata(root, legacy_ranks):
     count = int(values["requested_steps"])
     if ranks <= 0 or ranks > 2**31 - 1 or first <= 0 or count <= 0 or first + count - 1 > 2**64 - 1:
         raise ValueError("invalid frozen rank/step range")
-    return ranks, first, first + count - 1, bound, file_hash(path), schema, values.get("mg_layout_sha256")
+    return (ranks, first, first + count - 1, bound, file_hash(path), schema,
+            values.get("mg_layout_sha256"), values.get("observe_mg_cost") == "1",
+            values.get("pressure_linear_algorithm") if schema == "6" else None)
 
 
 def mg_layout(path, ranks, digest):
@@ -167,7 +183,38 @@ def validate_mg_step(loops, batches, counts):
                 raise ValueError("MG finest attribution mismatch")
 
 
-def checked_rows(stream, source, loop, rank=None, require_criterion=False, require_mg=False):
+def validate_fgmres(row, algorithm):
+    if row['fgmres_available'] not in (0, 1):
+        raise ValueError('invalid FGMRES availability flag')
+    if any(row[k] == 2**64 - 1 for k in FGMRES_LOOP):
+        raise ValueError('saturated FGMRES counter')
+    counts = {k: row['fgmres_' + k] for k in FGMRES_COUNTS}
+    if not row['fgmres_available']:
+        if any(counts.values()):
+            raise ValueError('unavailable FGMRES observation must have zero counters')
+        if algorithm == 'fgmres' and (row['A_calls'] or row['M_calls'] or row['iterations'] or row['fgmres_norm_restarts']):
+            raise ValueError('FGMRES work has no recovery observation')
+        return
+    if algorithm != 'fgmres' or row['invoked'] != 1:
+        raise ValueError('FGMRES observation contradicts frozen algorithm/invocation')
+    if sum(counts[k] for k in FGMRES_COUNTS if k.endswith('_applies')) != row['A_calls']:
+        raise ValueError('FGMRES A-call categories do not reconcile')
+    if counts['unsafe_restarts'] + counts['happy_restarts'] != row['fgmres_norm_restarts']:
+        raise ValueError('FGMRES restart categories do not reconcile')
+    if (counts['initial_residual_applies'] > 1 or
+            counts['unsafe_residual_applies'] > counts['discarded_columns'] or
+            counts['discarded_columns'] > counts['unsafe_norms'] or
+            counts['unsafe_norms'] > counts['arnoldi_applies'] or
+            counts['unsafe_restarts'] > counts['unsafe_residual_applies'] or
+            counts['happy_restarts'] > counts['explicit_reorthogonalizations'] or
+            counts['happy_restarts'] + counts['length_restarts'] > counts['cycle_residual_applies'] or
+            counts['discarded_columns'] + counts['explicit_reorthogonalizations'] > counts['arnoldi_applies'] or
+            counts['arnoldi_applies'] > row['M_calls'] or row['iterations'] > counts['arnoldi_applies']):
+        raise ValueError('inconsistent FGMRES recovery event bounds')
+
+
+def checked_rows(stream, source, loop, rank=None, require_criterion=False, require_mg=False,
+                 recovery_algorithm=None):
     def lines():
         for line in stream:
             if not line.endswith("\n"):
@@ -189,6 +236,10 @@ def checked_rows(stream, source, loop, rank=None, require_criterion=False, requi
         raise ValueError("missing MG loop columns")
     if not require_mg and set(MG_LOOP).intersection(header):
         raise ValueError("MG loop columns need frozen schema 5")
+    if recovery_algorithm is not None and not set(FGMRES_LOOP).issubset(header):
+        raise ValueError('missing FGMRES loop columns')
+    if recovery_algorithm is None and set(FGMRES_LOOP).intersection(header):
+        raise ValueError('FGMRES loop columns need frozen schema 6')
     for raw in reader:
         if None in raw or any(v is None or v == "" for v in raw.values()):
             raise ValueError("malformed CSV row: " + stream.name)
@@ -208,6 +259,8 @@ def checked_rows(stream, source, loop, rank=None, require_criterion=False, requi
         if row["dropped_loops"]:
             raise ValueError("diagnostic loop capacity exceeded; attribution is incomplete")
         if loop:
+            if recovery_algorithm is not None:
+                validate_fgmres(row, recovery_algorithm)
             if require_mg:
                 if row["mg_enabled"] != 1 or row["mg_complete"] != 1:
                     raise ValueError("MG loop observation disabled/incomplete")
@@ -318,6 +371,13 @@ def summarize_step(step, loop_rows, performance, expected_ranks):
             summaries[-1]["mg_counts_by_rank"] = {
                 k: sorted({r[k] for r in group}) for k in MG_LOOP
                 if k.endswith("_calls") or k in ("mg_attempts", "mg_successes", "mg_failures")}
+        if 'fgmres_available' in group[0]:
+            if any(any(r[k] != group[0][k] for k in FGMRES_LOOP) for r in group):
+                raise ValueError('inconsistent per-rank FGMRES recovery observation')
+            summaries[-1]['fgmres_recovery'] = {
+                'available': bool(group[0]['fgmres_available']),
+                'counts_by_rank': {k[len('fgmres_'):]: sorted({r[k] for r in group})
+                                  for k in FGMRES_LOOP[1:]} if group[0]['fgmres_available'] else None}
     return summaries
 
 
@@ -327,12 +387,15 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
               "validated_steps": 0, "loop_count": 0}
     totals, samples = dict.fromkeys(ADDED, 0), 0
     schema = None  # Metadata itself may be invalid in an explicit partial read.
+    has_mg = False
     paths = sorted(root.glob("solver-rank-*.csv"))
     try:
-        ranks, first, last, bound, source, schema, mg_digest = metadata(root, expected_ranks)
-        if schema in ("4", "5"):
+        ranks, first, last, bound, source, schema, mg_digest, has_mg, recovery_algorithm = metadata(root, expected_ranks)
+        if schema in ("4", "5", "6"):
             result["schema"] = "HUNDUN_LOOP_OBSERVATION_V" + schema
         result.update(expected_rank_count=ranks, expected_step_range=[first, last])
+        if schema == '6':
+            result['pressure_linear_algorithm'] = recovery_algorithm
         if len(paths) != ranks:
             raise ValueError("per-rank files do not cover the frozen rank set")
         result["expected_ranks"] = list(range(ranks))
@@ -345,13 +408,15 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
             raise ValueError("per-rank files do not cover the frozen rank set")
         paths += [root / "performance.csv", root / "conservation.csv", root / "RUN.meta"]
         mg_paths = []
-        if schema == "5":
+        if has_mg:
             mg_paths = [root / "mg-rank-{}.csv".format(r) for r in range(ranks)]
             if set(root.glob("mg-rank-*.csv")) != set(mg_paths):
                 raise ValueError("MG files do not cover the frozen rank set")
             paths += mg_paths + [root / "mg-layout.meta"]
+        elif schema == '6' and (list(root.glob('mg-rank-*.csv')) or (root / 'mg-layout.meta').exists()):
+            raise ValueError('MG files present without frozen opt-in')
         stamps = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in paths}
-        if schema == "5":
+        if has_mg:
             mg_counts, geometry = mg_layout(root / "mg-layout.meta", ranks, mg_digest)
             mg_levels = {key: dict(value, visits=0, **dict.fromkeys(MG_LEVELS, 0))
                          for key, value in geometry.items()}
@@ -362,7 +427,8 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
             streams = [stack.enter_context((root / "solver-rank-{}.csv".format(r)).open()) for r in range(ranks)]
             streams.append(stack.enter_context((root / "performance.csv").open()))
             groups = [step_groups(checked_rows(s, source if bound else None, True, r,
-                                              schema in ("4", "5"), schema == "5"), 64)
+                                              schema in ("4", "5", "6"), has_mg,
+                                              recovery_algorithm), 64)
                       for r, s in enumerate(streams[:-1])]
             groups.append(step_groups(checked_rows(streams[-1], source if bound else None, False), ranks))
             mg_groups = [step_groups(checked_mg_rows(stack.enter_context(p.open()), source, r),
@@ -375,7 +441,7 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
                 performance = batches[-1][1]
                 summaries = summarize_step(step, loops, performance, expected)
                 mg_batches = [next(g, None) for g in mg_groups]
-                if schema == "5":
+                if has_mg:
                     if any(b is None or b[0] != step for b in mg_batches):
                         raise ValueError("missing/truncated MG step {}".format(step))
                     validate_mg_step(loops, mg_batches, mg_counts)
@@ -421,12 +487,18 @@ def summarize(root, allow_partial=False, expected_ranks=None, details=None):
         "Input memory is bounded by one step per rank; hashes use 1 MiB blocks",
         "Use --details-output for bounded output memory; default loops JSON grows with the window",
         "Independent maxima are never summed into step time; no physical thresholds change"]
-    if schema == "5":
+    if has_mg:
         result["scope"] += [
             "MG layout is cold ProductDriver authority; step level rows reconcile to compact loop totals",
             "MG six phases are disjoint subsets of apply; halo, reductions and direct MPI are nested",
             "MG totals and levels sum only validated steps; per-loop full level distribution is not retained",
             "MG observations exclude Fresh projection and refill/copy; no solver status is inferred from completeness"]
+    if schema == '6':
+        result['scope'] += [
+            'FGMRES recovery counters are rank-consistent per-loop observations, including failed attempts',
+            'Five A-call categories exclude recycle projection A; recovery restarts are not solver failures',
+            'Unavailable recovery is not zero measured work; non-FGMRES algorithms remain unavailable',
+            'No solver tolerances, iteration policy, checkpoint or method history changes']
     return result
 
 

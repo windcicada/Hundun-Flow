@@ -36,6 +36,7 @@ def main():
     parser.add_argument('--mpi', default='mpirun')
     parser.add_argument('--ranks', type=int, default=2)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--fgmres-recovery', action='store_true')
     args = parser.parse_args()
     root = args.output or Path(tempfile.mkdtemp(prefix='hundun-mg-cli-')) / 'audit'
     root.mkdir(parents=True, exist_ok=False)
@@ -60,13 +61,15 @@ def main():
                     'rho_ref 1\nu_ref 1\ndiameter 1\nspan 4\ncylinder_center_x 0\n'
                     'station_x_over_d 1.5\nend\n')
 
-    def run(name, enabled):
+    def run(name, enabled, recovery=False, case_root=case):
         path = root / name
         command = [args.mpi, '-n', str(args.ranks), str(args.binary.resolve()),
-                   '--spec', str(spec), '--case-root', str(case), '--run-root', str(path),
+                   '--spec', str(spec), '--case-root', str(case_root), '--run-root', str(path),
                    '--steps', '2', '--visit-interval', '0', '--observe-performance']
         if enabled:
             command.append('--observe-mg-cost')
+        if recovery:
+            command.append('--observe-fgmres-recovery')
         result = subprocess.run(command, env=os.environ.copy(), stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, universal_newlines=True, timeout=60)
         (root / (name + '.log')).write_text(result.stdout)
@@ -75,9 +78,10 @@ def main():
         return path
 
     off = run('off', False)
-    on = run('on', True)
+    on = run('on', True, args.fgmres_recovery)
     metadata = dict(line.split(' ', 1) for line in (on / 'RUN.meta').read_text().splitlines()[1:-1])
-    assert metadata['observation_schema'] == '5' and metadata['observe_mg_cost'] == '1'
+    assert metadata['observation_schema'] == ('6' if args.fgmres_recovery else '5')
+    assert metadata['observe_mg_cost'] == '1'
     assert metadata['expected_ranks'] == str(args.ranks)
     assert metadata['mg_layout_sha256'] == digest(on / 'mg-layout.meta')
     assert not (off / 'mg-layout.meta').exists() and not list(off.glob('mg-rank-*.csv'))
@@ -145,14 +149,73 @@ def main():
     assert observed['complete'] and observed['validated_steps'] == 2
     assert len(observed['mg']['levels']) == sum(counts.values())
     attempts = [r['attempts'] for r in observed['mg']['totals_by_rank']]
+    if args.fgmres_recovery:
+        alone = run('recovery-only', False, True)
+        assert checkpoint(alone) == checkpoint(off)
+        assert not (alone / 'mg-layout.meta').exists() and not list(alone.glob('mg-rank-*.csv'))
+        a_keys = ('initial_residual_applies', 'arnoldi_applies', 'unsafe_residual_applies',
+                  'interior_residual_applies', 'cycle_residual_applies')
+        for path in (on, alone):
+            meta = dict(line.split(' ', 1) for line in (path / 'RUN.meta').read_text().splitlines()[1:-1])
+            assert meta['observe_fgmres_recovery'] == '1'
+            assert meta['pressure_linear_algorithm'] == 'fgmres' and meta['observation_schema'] == '6'
+            seen = 0
+            for rank in range(args.ranks):
+                for row in rows(path / 'solver-rank-{}.csv'.format(rank)):
+                    assert int(row['fgmres_available']) == int(row['invoked'])
+                    assert sum(int(row['fgmres_' + k]) for k in a_keys) == int(row['A_calls'])
+                    assert int(row['fgmres_unsafe_restarts']) + int(row['fgmres_happy_restarts']) == int(row['fgmres_norm_restarts'])
+                    seen += int(row['fgmres_arnoldi_applies'])
+            assert seen > 0, 'fixture must execute actual Arnoldi work'
+            result = subprocess.run([sys.executable, str(observer), str(path)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15)
+            assert result.returncode == 0, result.stderr
+            report = json.loads(result.stdout)
+            assert report['complete'] and report['schema'] == 'HUNDUN_LOOP_OBSERVATION_V6'
+            assert ('mg' in report) == (path == on)
+            assert all(r['fgmres_recovery']['available'] for r in report['loops'])
+            print('FGMRES CLI {} ranks={} Arnoldi={} complete/checkpoint parity PASS'.format(path.name, args.ranks, seen))
+        assert all(not any(k.startswith('fgmres_') for k in row)
+                   for row in rows(off / 'solver-rank-0.csv'))
+        # Exercise the actual non-FGMRES producer, not just a synthetic CSV.
+        # The public case parser selects the matching unit-linear MG contract.
+        bicg_case = root / 'bicg-case'
+        shutil.copytree(str(case), str(bicg_case))
+        bicg_model = json.loads((bicg_case / 'case.json').read_text())
+        bicg_model['solver']['pressure_linear']['algorithm'] = 'bicgstab'
+        bicg_model['solver']['pressure_linear']['krylov_restart'] = 0
+        (bicg_case / 'case.json').write_text(json.dumps(bicg_model))
+        bicg_off = run('bicg-off', False, case_root=bicg_case)
+        bicg_on = run('bicg-on', False, True, bicg_case)
+        assert checkpoint(bicg_off) == checkpoint(bicg_on)
+        work = 0
+        for rank in range(args.ranks):
+            for row in rows(bicg_on / 'solver-rank-{}.csv'.format(rank)):
+                assert all(int(v) == 0 for k, v in row.items() if k.startswith('fgmres_'))
+                work += int(row['A_calls']) + int(row['M_calls'])
+        assert work > 0, 'non-FGMRES fixture must execute actual linear work'
+        result = subprocess.run([sys.executable, str(observer), str(bicg_on)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert report['complete'] and report['pressure_linear_algorithm'] == 'bicgstab'
+        assert all(r['fgmres_recovery'] == {'available': False, 'counts_by_rank': None}
+                   for r in report['loops'])
+        print('BiCGStab CLI ranks={} A+M={} unavailable recovery/checkpoint parity PASS'.format(args.ranks, work))
     # Both flags alter communication branches; inconsistent flags must reject
     # at the cold entrance, before creating output or running a time step.
     base = [str(args.binary.resolve()), '--spec', str(spec), '--case-root', str(case), '--steps', '1']
-    for name, left, right in (
+    contracts = [
             ('needs-performance', ['--observe-mg-cost'], None),
             ('duplicate-mg', ['--observe-performance', '--observe-mg-cost', '--observe-mg-cost'], None),
             ('mixed-mg', ['--observe-performance', '--observe-mg-cost'], ['--observe-performance']),
-            ('mixed-performance', ['--observe-performance'], [])):
+            ('mixed-performance', ['--observe-performance'], [])]
+    if args.fgmres_recovery:
+        contracts += [
+            ('needs-performance-fgmres', ['--observe-fgmres-recovery'], None),
+            ('duplicate-fgmres', ['--observe-performance', '--observe-fgmres-recovery', '--observe-fgmres-recovery'], None),
+            ('mixed-fgmres', ['--observe-performance', '--observe-fgmres-recovery'], ['--observe-performance'])]
+    for name, left, right in contracts:
         if right is not None and args.ranks < 2:
             continue
         path = root / name

@@ -1010,6 +1010,8 @@ bool run_retry_certificate(int rank) {
   // Only rank zero calls the setter. Other ranks retain the default policy.
   if (retry.status && profiling_enabled)
     profile_valid &= static_cast<bool>(retry.driver.set_pressure_mg_profiling(true));
+  if (retry.status && profiling_enabled)
+    profile_valid &= static_cast<bool>(retry.driver.set_pressure_recovery_observation(true));
   const auto cold_profile = retry.driver.pressure_mg_profile();
   profile_valid &= cold_profile.enabled == profiling_enabled &&
                    !cold_profile.initialized && cold_profile.cumulative == nullptr &&
@@ -1028,6 +1030,26 @@ bool run_retry_certificate(int rank) {
                    first_profile.level_count == cold_profile.level_count &&
                    mg_profile_window_matches(retry_first.pressure_energy_performance,
                                              {}, first_profile, profiling_enabled);
+  bool recovery_seen = false;
+  for (std::size_t n = 0U; n < retry_first.pressure_energy_performance.loop_count; ++n) {
+    const auto& loop = retry_first.pressure_energy_performance.loops[n];
+    const auto& r = loop.solve.fgmres_recovery;
+    const std::uint64_t calls = r.initial_residual_applies + r.arnoldi_applies +
+        r.unsafe_residual_applies + r.interior_residual_applies + r.cycle_residual_applies;
+    profile_valid &= r.available == (profiling_enabled && loop.solve.invoked);
+    if (profiling_enabled && loop.solve.invoked) {
+      recovery_seen = true;
+      profile_valid &= calls == loop.linear.operator_applies &&
+          r.unsafe_restarts + r.happy_restarts == loop.linear.norm_breakdown_restarts;
+    } else {
+      profile_valid &= calls == 0U && r.unsafe_norms == 0U &&
+          r.discarded_columns == 0U && r.explicit_reorthogonalizations == 0U &&
+          r.unsafe_restarts == 0U && r.happy_restarts == 0U && r.length_restarts == 0U;
+    }
+  }
+  profile_valid &= recovery_seen == profiling_enabled;
+  profile_valid &= expect(profile_valid, rank,
+      "ProductDriver exports opt-in FGMRES recovery reasons for each attempted pressure solve");
 
   DriverHarness control = make_driver(
       retry_model(kHalfDt, kHalfDt, 1U, UINT64_C(0x18000c301)), kHalfDt);
@@ -1042,6 +1064,15 @@ bool run_retry_certificate(int rank) {
                    control_first_view.cumulative != nullptr &&
                    mg_profile_window_matches(control_first.pressure_energy_performance,
                                              {}, control_first_profile, false);
+  for (std::size_t n = 0U; n < control_first.pressure_energy_performance.loop_count; ++n) {
+    const auto& r = control_first.pressure_energy_performance.loops[n].solve.fgmres_recovery;
+    profile_valid &= !r.available && r.initial_residual_applies == 0U &&
+        r.arnoldi_applies == 0U && r.unsafe_residual_applies == 0U &&
+        r.interior_residual_applies == 0U && r.cycle_residual_applies == 0U &&
+        r.unsafe_norms == 0U && r.discarded_columns == 0U &&
+        r.explicit_reorthogonalizations == 0U && r.unsafe_restarts == 0U &&
+        r.happy_restarts == 0U && r.length_restarts == 0U;
+  }
 
   PhysicalCommittedBits retry_at_first;
   PhysicalCommittedBits control_at_first;
@@ -1205,6 +1236,9 @@ bool run_retry_exhaustion_report(int rank) {
   if (profiling_enabled)
     profile_valid &= static_cast<bool>(
         driver.driver.set_pressure_mg_profiling(true));
+  if (profiling_enabled)
+    profile_valid &= static_cast<bool>(
+        driver.driver.set_pressure_recovery_observation(true));
   ExactCommittedBits before, after;
   const bool captured =
       driver.status && capture_exact_committed(driver.driver, before);
@@ -1227,6 +1261,13 @@ bool run_retry_exhaustion_report(int rank) {
                      !loop.attempt_status;
     if (loop.attempt >= 1U && loop.attempt <= 2U && loop.solve.invoked)
       ++rejected_solves[loop.attempt - 1U];
+    const auto& r = loop.solve.fgmres_recovery;
+    profile_valid &= r.available == (profiling_enabled && loop.solve.invoked);
+    if (r.available)
+      profile_valid &= r.initial_residual_applies + r.arnoldi_applies +
+          r.unsafe_residual_applies + r.interior_residual_applies +
+          r.cycle_residual_applies == loop.linear.operator_applies &&
+          r.unsafe_restarts + r.happy_restarts == loop.linear.norm_breakdown_restarts;
   }
   profile_valid &= rejected_solves[0U] > 0U && rejected_solves[1U] > 0U;
 
@@ -1272,6 +1313,8 @@ bool run_retry_exhaustion_report(int rank) {
   profile_valid &= state_unchanged();
   const Status source_set = driver.driver.set_pressure_mg_profiling(true);
   profile_valid &= source_set.code == StatusCode::invalid_plan;
+  profile_valid &= driver.driver.set_pressure_recovery_observation(true).code ==
+                   StatusCode::invalid_plan;
   profile_valid &= state_unchanged();
 
   const Status reset = moved.set_pressure_mg_profiling(profiling_enabled);
@@ -1286,6 +1329,7 @@ bool run_retry_exhaustion_report(int rank) {
   profile_valid &= state_unchanged();
   const Status disabled = moved.set_pressure_mg_profiling(false);
   profile_valid &= static_cast<bool>(disabled);
+  profile_valid &= static_cast<bool>(moved.set_pressure_recovery_observation(false));
   profile_valid &= state_unchanged();
   const auto disabled_view = moved.pressure_mg_profile();
   profile_valid &= !disabled_view.enabled && disabled_view.initialized &&
@@ -1317,6 +1361,8 @@ bool run_retry_exhaustion_report(int rank) {
   profile_valid &= state_unchanged();
   const Status empty_set = empty.set_pressure_mg_profiling(true);
   profile_valid &= empty_set.code == StatusCode::invalid_plan;
+  profile_valid &= empty.set_pressure_recovery_observation(true).code ==
+                   StatusCode::invalid_plan;
   profile_valid &= state_unchanged();
   const Status empty_level = empty.pressure_mg_level(0U, untouched);
   profile_valid &= empty_level.code == StatusCode::invalid_plan &&
@@ -1345,6 +1391,12 @@ bool run_retry_exhaustion_report(int rank) {
               << " mg-contract=" << profile_valid
               << " mg-profile-bytes=" << sizeof(MgSolveProfile) << '/'
               << sizeof(MgApplyProfile) << '\n';
+  if (rank == 0)
+    std::cout << "recovery-observation bytes=" << sizeof(FgmresRecoveryObservation)
+              << " solve-report=" << sizeof(PressureEnergySolveObservation)
+              << " attempt-capacity=" << kPressureEnergyGlobalizationTrajectoryCapacity
+              << " step-loop-capacity=" << report.pressure_energy_performance.loops.size()
+              << '\n';
   const bool profile_contract = expect(
       profile_valid, rank,
       "failed MG windows retain both attempts; move, reset, disable and cold "

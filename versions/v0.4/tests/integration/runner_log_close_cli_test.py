@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--first-only', action='store_true')
     parser.add_argument('--mg-only', action='store_true')
+    parser.add_argument('--fgmres-only', action='store_true')
     args = parser.parse_args()
     output = args.output or Path(tempfile.mkdtemp(prefix='hundun-log-close-')) / 'audit'
     output.mkdir(parents=True, exist_ok=False)
@@ -69,6 +70,8 @@ def main():
             command.append('--observe-performance')
             if args.mg_only:
                 command.append('--observe-mg-cost')
+            if args.fgmres_only:
+                command.append('--observe-fgmres-recovery')
         result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, universal_newlines=True, timeout=45)
         (output / (name + '.log')).write_text(result.stdout)
@@ -103,13 +106,15 @@ def main():
         return exits[target][1]
 
     run('baseline-off', 'force.csv', 0, False)
-    if not args.mg_only:
+    if not args.mg_only and not args.fgmres_only:
         run('force-close-eio', 'force.csv', 0, False, close_error=errno.EIO)
     if args.first_only:
         return
-    disabled = 'mg-rank-0.csv' if args.mg_only else 'performance.csv'
+    disabled = ('solver-rank-0.csv' if args.fgmres_only else
+                'mg-rank-0.csv' if args.mg_only else 'performance.csv')
     run('disabled-observer', disabled, 0, False, close_error=errno.ENOSPC)
-    streams = (('mg-rank-0.csv', 'mg-rank-{}.csv'.format(args.ranks - 1)) if args.mg_only else
+    streams = (('solver-rank-0.csv', 'solver-rank-{}.csv'.format(args.ranks - 1)) if args.fgmres_only else
+               ('mg-rank-0.csv', 'mg-rank-{}.csv'.format(args.ranks - 1)) if args.mg_only else
                ('force.csv', 'health.csv', 'conservation.csv', 'probe.csv',
                 'performance.csv', 'solver-rank-{}.csv'.format(args.ranks - 1)))
     for index, stream in enumerate(streams):

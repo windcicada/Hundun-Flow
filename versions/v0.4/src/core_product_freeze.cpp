@@ -2726,6 +2726,7 @@ struct ProductDriver::Impl {
   // The bounded per-loop report stores only a compact delta, never 32 levels.
   MgApplyProfile pressure_mg_profile_before{};
   bool pressure_mg_profiling{};
+  bool pressure_recovery_observation{};
   ConservativeEnthalpyEndpoint enthalpy_endpoint;
   std::optional<detail::ScalarMassRemap> scalar_remap;
   detail::ScalarMassRemap::Report scalar_remap_report{};
@@ -10317,7 +10318,9 @@ Status ProductDriver::Impl::execute_attempt(
           coupled = solve_epoch.solve_prepared(
               schur_operator,
               PisoPressureSolveContract::continuity_energy_coupled,
-              solve_control, product.reductions, &resources);
+              solve_control, product.reductions, &resources,
+              pressure_recovery_observation ? &capture.value.fgmres_recovery
+                                            : nullptr);
           solve_timer.phase(2U);
           // This accessor is written directly from the LinearSolveResult and
           // avoids copying the full PisoAttemptReport on every hot solve.  An
@@ -15161,6 +15164,13 @@ Status ProductDriver::set_pressure_mg_profiling(bool enabled) noexcept {
     if (!status) return status;
   }
   implementation_->pressure_mg_profiling = enabled;
+  return {};
+}
+
+Status ProductDriver::set_pressure_recovery_observation(bool enabled) noexcept {
+  if (implementation_ == nullptr || implementation_->time.has_active_proposal())
+    return {StatusCode::invalid_plan, kProductInput};
+  implementation_->pressure_recovery_observation = enabled;
   return {};
 }
 

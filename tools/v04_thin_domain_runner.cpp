@@ -79,6 +79,7 @@ struct Options {
   bool self_test{};
   bool observe_performance{};
   bool observe_mg_cost{};
+  bool observe_fgmres_recovery{};
   DriverCellTraceWindow trace_window{};
   bool restart_method_recovery{};
   bool have_restart_development_steps{};
@@ -209,6 +210,9 @@ bool parse_options(int argc, char** argv, Options& out) {
     } else if (token == "--observe-mg-cost") {
       if (out.observe_mg_cost) return false;
       out.observe_mg_cost = true;
+    } else if (token == "--observe-fgmres-recovery") {
+      if (out.observe_fgmres_recovery) return false;
+      out.observe_fgmres_recovery = true;
     } else if (token == "--restart-method-recovery") {
       if (out.restart_method_recovery) return false;
       out.restart_method_recovery = true;
@@ -275,6 +279,7 @@ bool parse_options(int argc, char** argv, Options& out) {
   if (out.have_restart_development_steps && !out.restart_method_recovery)
     return false;
   if (out.observe_mg_cost && !out.observe_performance) return false;
+  if (out.observe_fgmres_recovery && !out.observe_performance) return false;
   if (out.self_test)
     return !out.observe_performance && !out.dry_plan && out.spec.empty() &&
            out.case_root.empty() && out.run_root.empty() &&
@@ -1924,8 +1929,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   const std::uint64_t fingerprint = spec_fingerprint(spec);
   // Observation flags change cold/step communication branches, but are not
   // scientific identity and must not change restart/statistics fingerprints.
-  const auto control = mix(mix(fingerprint, options.observe_performance),
-                           options.observe_mg_cost);
+  const auto control = mix(mix(mix(fingerprint, options.observe_performance),
+                               options.observe_mg_cost),
+                           options.observe_fgmres_recovery);
   if (!consensus_u64(communicator, control)) {
     if (rank == 0) std::cerr << "spec_consensus_failure\n";
     return 3;
@@ -2048,6 +2054,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   if (!status) return 5;
   if (options.observe_mg_cost && !all_true(communicator,
       static_cast<bool>(driver.set_pressure_mg_profiling(true)))) return 5;
+  if (options.observe_fgmres_recovery && !all_true(communicator,
+      static_cast<bool>(driver.set_pressure_recovery_observation(true)))) return 5;
   CommittedOutputSnapshot snapshot;
   status = driver.committed_output_snapshot(snapshot);
   RuntimeGeometry runtime;
@@ -2219,7 +2227,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                     ? accumulator.epoch.source_manifest.data() : "none") << '\n'
              << "requested_steps " << options.steps << '\n'
              << "expected_ranks " << ranks << '\n'
-             << "observation_schema " << (options.observe_mg_cost ? 5 : 4) << '\n'
+             << "observation_schema "
+             << (options.observe_fgmres_recovery ? 6 : options.observe_mg_cost ? 5 : 4) << '\n'
              << "observation_start_ns "
              << std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count() << '\n'
@@ -2227,6 +2236,10 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "visit_interval " << options.visit_interval << '\n'
              << "observe_performance " << options.observe_performance << '\n'
              << "observe_mg_cost " << options.observe_mg_cost << '\n'
+             << "observe_fgmres_recovery " << options.observe_fgmres_recovery << '\n'
+             << "pressure_linear_algorithm "
+             << (model.solver.pressure.algorithm == LinearAlgorithm::fgmres ? "fgmres" :
+                 model.solver.pressure.algorithm == LinearAlgorithm::bicgstab ? "bicgstab" : "pcg") << '\n'
              << "trace_cell_count " << options.trace_window.count << '\n'
              << "trace_first_step " << options.trace_window.first_step << '\n'
              << "trace_last_step " << options.trace_window.last_step << '\n'
@@ -2338,6 +2351,12 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
               "direct_mpi_calls,direct_mpi_ns,halo_wait_ns,halo_control_ns,halo_control_calls,"
               "source_meta_sha256\n";
         }
+        if (options.observe_fgmres_recovery)
+          loop_performance << ",fgmres_available,fgmres_norm_restarts,fgmres_unsafe_norms,"
+              "fgmres_discarded_columns,fgmres_explicit_reorthogonalizations,"
+              "fgmres_unsafe_restarts,fgmres_happy_restarts,fgmres_length_restarts,"
+              "fgmres_initial_residual_applies,fgmres_arnoldi_applies,fgmres_unsafe_residual_applies,"
+              "fgmres_interior_residual_applies,fgmres_cycle_residual_applies";
         loop_performance << ",source_meta_sha256\n";
         return static_cast<bool>(loop_performance) &&
             (!options.observe_mg_cost || static_cast<bool>(mg_performance));
@@ -2513,6 +2532,15 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
                 << ',' << g.selected.global_normalized_energy << ',' << g.selected.alpha
                 << ',' << perf.dropped_loops;
             if (options.observe_mg_cost) write_mg_loop(loop_performance, solve.mg_apply);
+            if (options.observe_fgmres_recovery) {
+              const auto& r = solve.fgmres_recovery;
+              loop_performance << ',' << r.available << ',' << linear.norm_breakdown_restarts;
+              for (const auto count : {r.unsafe_norms, r.discarded_columns,
+                      r.explicit_reorthogonalizations, r.unsafe_restarts, r.happy_restarts,
+                      r.length_restarts, r.initial_residual_applies, r.arnoldi_applies,
+                      r.unsafe_residual_applies, r.interior_residual_applies, r.cycle_residual_applies})
+                loop_performance << ',' << count;
+            }
             loop_performance << ',' << observation_source.data() << '\n';
           }
           if (options.observe_mg_cost) {
@@ -3092,7 +3120,7 @@ void usage(int rank) {
       << "  v04_thin_domain_runner --spec PATH --case-root PATH "
          "--run-root PATH [--restart-root PATH] --steps N "
          "[--restart-method-recovery [--restart-development-steps N]] "
-         "[--visit-interval N] [--observe-performance [--observe-mg-cost]] "
+         "[--visit-interval N] [--observe-performance [--observe-mg-cost] [--observe-fgmres-recovery]] "
          "[--trace-cell i,j,k (at most twice) --trace-first N --trace-last N]\n";
 }
 

@@ -258,6 +258,7 @@ struct PressureEnergySolveObservation {
   std::uint64_t mg_refill_nanoseconds{}, mg_copy_nanoseconds{};
   std::uint64_t structured_wait_nanoseconds{}, structured_control_nanoseconds{};
   MgSolveProfile mg_apply{};
+  FgmresRecoveryObservation fgmres_recovery{};
 };
 
 struct PressureEnergyGlobalizationAttemptReport {
@@ -596,6 +597,11 @@ class ProductDriver {
   // MG compilation. Each call resets the observation epoch, not method state.
   // No allocation or communication; ranks may opt in independently.
   Status set_pressure_mg_profiling(bool enabled) noexcept;
+  // Rank-local opt-in at a quiescent boundary; records only FGMRES pressure/
+  // energy solves in the existing bounded per-loop report. Other algorithms
+  // remain unavailable, never fabricated as observed zero work. No method or
+  // persistent history changes; disabling affects subsequent solves only.
+  Status set_pressure_recovery_observation(bool enabled) noexcept;
   // Cumulative pressure/energy preconditioner work only (not Fresh projection
   // or coefficient refill/copy). Copy before advance/reset/initialization;
   // destruction/replacement invalidates the borrowed owner. Move transfers it.

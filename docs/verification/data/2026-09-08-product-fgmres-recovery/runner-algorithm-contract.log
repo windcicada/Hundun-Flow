@@ -1,0 +1,48 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 53
+    Start 53: v04_runner_fgmres_recovery_mpi_2
+
+53: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2" "--fgmres-recovery"
+53: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+53: Test timeout computed to be: 180
+53: FGMRES CLI on ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+53: FGMRES CLI recovery-only ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+53: Traceback (most recent call last):
+53:   File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py", line 237, in <module>
+53:     main()
+53:   File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py", line 187, in main
+53:     bicg_off = run('bicg-off', False, case_root=bicg_case)
+53:   File "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py", line 76, in run
+53:     assert result.returncode == 0, result.stdout
+53: AssertionError: -------------------------------------------------------
+53: Primary job  terminated normally, but 1 process returned
+53: a non-zero exit code.. Per user-direction, the job has been aborted.
+53: -------------------------------------------------------
+53: --------------------------------------------------------------------------
+53: mpiexec detected that one or more processes exited with non-zero status, thus causing
+53: the job to be terminated. The first process to do so was:
+53: 
+53:   Process name: [[56934,1],0]
+53:   Exit code:    4
+53: --------------------------------------------------------------------------
+53: 
+1/1 Test #53: v04_runner_fgmres_recovery_mpi_2 ...***Failed    8.10 sec
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   8.12 sec
+
+The following tests FAILED:
+	 53 - v04_runner_fgmres_recovery_mpi_2 (Failed)
+Errors while running CTest
+Output from these tests are in: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/Testing/Temporary/LastTest.log
+Use "--rerun-failed --output-on-failure" to re-run the failed cases verbosely.

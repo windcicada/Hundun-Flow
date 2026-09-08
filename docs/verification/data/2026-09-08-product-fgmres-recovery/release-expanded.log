@@ -1,0 +1,246 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/DartConfiguration.tcl
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_VERBOSE_OUTPUT] 
+Constructing a list of tests
+
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 33
+[HANDLER_OUTPUT] 
+    Start  33: v04_solver_fgmres_observation_cli
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+33: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/solver_observe_recovery_cli_test.py" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/tools/v04_solver_observe.py"
+
+33: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+33: Test timeout computed to be: 30
+33: V6 FGMRES observer: 28 rejection checks, independent work sums, optional MG, unsupported algorithm, partial whole-step output, streaming and source immutability PASS
+[HANDLER_OUTPUT] 
+1/8 Test  #33: v04_solver_fgmres_observation_cli .........
+   Passed    1.47 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 39
+
+[HANDLER_OUTPUT] 
+    Start  39: v04_runner_fgmres_log_completion_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+39: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_log_close_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--probe" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/libv04_runner_log_failure_probe.so" "--mpi" "/usr/bin/mpiexec" "--ranks" "2" "--fgmres-only"
+
+39: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+39: Test timeout computed to be: 120
+39: baseline-off returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+39: disabled-observer returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]]
+39: baseline-0 returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+39: close-0-5 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+39: flush-0-5 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+39: close-0-28 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+39: flush-0-28 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+39: first-error-0 returncode=6 rank_exits=[[6, 2, 1, 1, 1], [6, 0, 0, 0, 0]]
+39: baseline-1 returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 2, 1, 0, 0]]
+39: close-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+39: flush-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+39: close-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+39: flush-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+39: first-error-1 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 1]]
+[HANDLER_OUTPUT] 
+2/8 Test  #39: v04_runner_fgmres_log_completion_mpi_2 ....
+   Passed   30.56 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 50
+
+[HANDLER_OUTPUT] 
+    Start  50: v04_runner_fgmres_recovery_mpi_1
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+50: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "1" "--fgmres-recovery"
+
+50: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+50: Test timeout computed to be: 180
+50: FGMRES CLI on ranks=1 Arnoldi=6 complete/checkpoint parity PASS
+50: FGMRES CLI recovery-only ranks=1 Arnoldi=6 complete/checkpoint parity PASS
+50: MG CLI ranks=1 steps=2 apply_attempts=[6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-zto8qlys/audit
+[HANDLER_OUTPUT] 
+3/8 Test  #50: v04_runner_fgmres_recovery_mpi_1 ..........
+   Passed   14.33 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 53
+
+[HANDLER_OUTPUT] 
+    Start  53: v04_runner_fgmres_recovery_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+53: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "2" "--fgmres-recovery"
+
+53: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+53: Test timeout computed to be: 180
+53: FGMRES CLI on ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+53: FGMRES CLI recovery-only ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+53: MG CLI ranks=2 steps=2 apply_attempts=[6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-6s8oiu1c/audit
+[HANDLER_OUTPUT] 
+4/8 Test  #53: v04_runner_fgmres_recovery_mpi_2 ..........
+   Passed   14.65 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 56
+
+[HANDLER_OUTPUT] 
+    Start  56: v04_runner_fgmres_recovery_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+56: Test command: /usr/bin/python3.6 "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/versions/v0.4/tests/integration/runner_mg_profile_cli_test.py" "--binary" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/v04_thin_domain_runner" "--mpi" "/usr/bin/mpiexec" "--ranks" "4" "--fgmres-recovery"
+
+56: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+56: Test timeout computed to be: 180
+56: FGMRES CLI on ranks=4 Arnoldi=24 complete/checkpoint parity PASS
+56: FGMRES CLI recovery-only ranks=4 Arnoldi=24 complete/checkpoint parity PASS
+56: MG CLI ranks=4 steps=2 apply_attempts=[6, 6, 6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-z1dm417a/audit
+[HANDLER_OUTPUT] 
+5/8 Test  #56: v04_runner_fgmres_recovery_mpi_4 ..........
+   Passed    9.95 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 261
+
+[HANDLER_OUTPUT] 
+    Start 261: v04_product_pressure_energy_retry_mpi_1
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+261: Test command: /usr/bin/mpiexec "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+
+261: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+261: Test timeout computed to be: 180
+261: candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+261: refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908338169e-14/1.0460406810870782e-10/0/2.4294555600856023e-32 early-exit=2/1
+261: full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714286467246095e-08/5.4073846732826095e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+261: retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=70/85
+261: retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384613495099614e-28
+261: retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+261: recovery-observation bytes=96 solve-report=360 attempt-capacity=14 step-loop-capacity=64
+261: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+261: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+261: candidate-loop i=2 extrapolated_alpha=1.0001450080592753 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001450080592753
+261: warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+261: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+261: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+261: candidate-loop i=2 extrapolated_alpha=1.0060974987792746 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0060974987792746
+261: candidate-loop i=3 extrapolated_alpha=1.025122322581465 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.025122322581465
+261: candidate-loop i=4 extrapolated_alpha=1.0580625257236693 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0580625257236693
+261: candidate-loop i=5 extrapolated_alpha=1.1292512753606125 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.1292512753606125
+261: candidate-loop i=6 extrapolated_alpha=1.3042045678460812 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.3042045678460812
+261: candidate-loop i=7 extrapolated_alpha=1.8891962098200208 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.8891962098200208
+261: candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+261: candidate-loop i=9 extrapolated_alpha=1.0040868971907759 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0040868971907759
+261: warm-candidate-work status=0/0 baseline=10 extrapolation=8 ladder=3 incomplete=0 rejected_extrapolations=1
+[HANDLER_OUTPUT] 
+6/8 Test #261: v04_product_pressure_energy_retry_mpi_1 ...
+   Passed    1.17 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 262
+
+[HANDLER_OUTPUT] 
+    Start 262: v04_product_pressure_energy_retry_mpi_2
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+262: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+
+262: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+262: Test timeout computed to be: 180
+262: candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+262: refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/1.2687156813780412e-31 early-exit=2/1
+262: full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.4073846728786893e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+262: retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=90/108
+262: retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+262: retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+262: recovery-observation bytes=96 solve-report=360 attempt-capacity=14 step-loop-capacity=64
+262: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+262: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+262: candidate-loop i=2 extrapolated_alpha=1.0001357076477417 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001357076477417
+262: warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+262: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+262: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+262: candidate-loop i=2 extrapolated_alpha=1.0055573199903851 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0055573199903851
+262: candidate-loop i=3 extrapolated_alpha=1.0169532438415794 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0169532438415794
+262: candidate-loop i=4 extrapolated_alpha=1.0407498450995283 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0407498450995283
+262: candidate-loop i=5 extrapolated_alpha=1.090024989868605 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.090024989868605
+262: candidate-loop i=6 extrapolated_alpha=1.2034284034319145 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2034284034319145
+262: candidate-loop i=7 extrapolated_alpha=1.5192237111066726 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5192237111066726
+262: candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+262: warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+[HANDLER_OUTPUT] 
+7/8 Test #262: v04_product_pressure_energy_retry_mpi_2 ...
+   Passed    1.01 sec
+[HANDLER_VERBOSE_OUTPUT] 
+test 263
+
+[HANDLER_OUTPUT] 
+    Start 263: v04_product_pressure_energy_retry_mpi_4
+
+[HANDLER_VERBOSE_OUTPUT] 
+
+263: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_product_pressure_energy_retry_mpi_test"
+
+263: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+263: Test timeout computed to be: 180
+263: candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+263: refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908212711e-14/1.0460406810870792e-10/0/1.1860467074584553e-31 early-exit=2/1
+263: full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714287331642688e-08/5.4073846735877291e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+263: retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=94/114
+263: retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384597744234758e-28
+263: retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contract=1 mg-profile-bytes=200/4664
+263: recovery-observation bytes=96 solve-report=360 attempt-capacity=14 step-loop-capacity=64
+263: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+263: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+263: candidate-loop i=2 extrapolated_alpha=1.0001177869577977 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001177869577977
+263: warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+263: candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+263: candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+263: candidate-loop i=2 extrapolated_alpha=1.0062044622551241 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0062044622551241
+263: candidate-loop i=3 extrapolated_alpha=1.0183935058560609 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0183935058560609
+263: candidate-loop i=4 extrapolated_alpha=1.044500271230395 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.044500271230395
+263: candidate-loop i=5 extrapolated_alpha=1.0988682293033274 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0988682293033274
+263: candidate-loop i=6 extrapolated_alpha=1.2258391820639332 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2258391820639332
+263: candidate-loop i=7 extrapolated_alpha=1.5937698014524755 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5937698014524755
+263: candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+263: warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+[HANDLER_OUTPUT] 
+8/8 Test #263: v04_product_pressure_energy_retry_mpi_4 ...
+   Passed    0.97 sec
+[HANDLER_VERBOSE_OUTPUT] 
+
+The following tests passed:
+
+	v04_solver_fgmres_observation_cli
+	v04_runner_fgmres_log_completion_mpi_2
+	v04_runner_fgmres_recovery_mpi_1
+	v04_runner_fgmres_recovery_mpi_2
+	v04_runner_fgmres_recovery_mpi_4
+	v04_product_pressure_energy_retry_mpi_1
+	v04_product_pressure_energy_retry_mpi_2
+	v04_product_pressure_energy_retry_mpi_4
+[HANDLER_OUTPUT] 
+
+100% tests passed, 0 tests failed out of 8
+
+
+Label Time Summary:
+io_failure_audit    =  61.11 sec*proc (1 test)
+v04_focused         =   7.07 sec*proc (3 tests)
+
+Total Test time (real) =  74.12 sec

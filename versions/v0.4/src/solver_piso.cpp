@@ -10122,12 +10122,13 @@ Status PisoPressureSolveEpoch::solve_prepared(
     LinearOperator& exact_operator,
     PisoPressureSolveContract contract,
     ReductionEngine& reductions,
-    ResourceCounters* resources) noexcept {
+    ResourceCounters* resources,
+    FgmresRecoveryObservation* recovery_observation) noexcept {
   const LinearSolveControl control =
       prepared_.plan == nullptr ? LinearSolveControl{}
                                 : prepared_.plan->pressure_solve();
   return solve_prepared(exact_operator, contract, control, reductions,
-                        resources);
+                        resources, recovery_observation);
 }
 
 Status PisoPressureSolveEpoch::solve_prepared(
@@ -10135,7 +10136,11 @@ Status PisoPressureSolveEpoch::solve_prepared(
     PisoPressureSolveContract contract,
     const LinearSolveControl& solve_control,
     ReductionEngine& reductions,
-    ResourceCounters* resources) noexcept {
+    ResourceCounters* resources,
+    FgmresRecoveryObservation* recovery_observation) noexcept {
+  // Also reset on early lifecycle rejection or a non-FGMRES solve. This
+  // rank-local sink never changes collective control or accepted method state.
+  if (recovery_observation != nullptr) *recovery_observation = {};
   // This narrow authority describes only the LinearSolveResult produced by
   // the current invocation.  Early lifecycle rejection deliberately leaves
   // it unavailable; a recorded solve with no specific failing rank publishes
@@ -10308,7 +10313,8 @@ Status PisoPressureSolveEpoch::solve_prepared(
       bicgstab ? solve_bicgstab(exact_operator, preconditioner, invocation,
                                 workspace, reductions, resources)
                : solve_fgmres(exact_operator, preconditioner, invocation,
-                              workspace, reductions, resources);
+                              workspace, reductions, resources,
+                              recovery_observation);
   latest_solve_outcome_available_ = true;
   latest_solve_lowest_failing_rank_ = result.lowest_failing_rank;
   const auto record_refinement_result = [&](LinearSolveResult solve) noexcept {

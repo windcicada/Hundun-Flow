@@ -1,0 +1,14 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 31: v04_solver_observation_cli
+1/2 Test #31: v04_solver_observation_cli .......   Passed    4.16 sec
+    Start 32: v04_solver_mg_observation_cli
+2/2 Test #32: v04_solver_mg_observation_cli ....   Passed    1.60 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   5.77 sec

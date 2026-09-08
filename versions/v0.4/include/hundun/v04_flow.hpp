@@ -4274,13 +4274,15 @@ class PisoPressureSolveEpoch {
       LinearOperator& exact_operator,
       PisoPressureSolveContract contract,
       ReductionEngine& reductions,
-      ResourceCounters* resources = nullptr) noexcept;
+      ResourceCounters* resources = nullptr,
+      FgmresRecoveryObservation* recovery_observation = nullptr) noexcept;
   Status solve_prepared(
       LinearOperator& exact_operator,
       PisoPressureSolveContract contract,
       const LinearSolveControl& solve_control,
       ReductionEngine& reductions,
-      ResourceCounters* resources = nullptr) noexcept;
+      ResourceCounters* resources = nullptr,
+      FgmresRecoveryObservation* recovery_observation = nullptr) noexcept;
   Status record_stationary(
       const PisoPlan& plan,
       const PressureCorrectionCertificate& pressure,

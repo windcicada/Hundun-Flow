@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | MG层级归因已完成；单stage写入实验无总成本收益，已撤回。FGMRES恢复原因Native可选sink已通过RED→GREEN、ASan/UBSan 1/2/4-rank和独立干净14/14；下一步接ProductDriver/runner，不引入下一算法改动 |
+| 当前活动切片 | MG层级归因已完成；单stage写入实验无总成本收益，已撤回。FGMRES恢复原因Native已验，ProductDriver/runner V6已接线，开发Release 8/8、ASan/UBSan 4/4及真实非FGMRES合同通过；正在做独立干净验收，不引入下一算法改动 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
-| 兼容性 | MG关闭仍为 `observation_schema=4`；显式MG观测为5，读取器兼容3/4。旧数据不能补造缺失阈值或MG层级成本 |
+| 兼容性 | 仅performance为 `observation_schema=4`；显式MG为5，新恢复观测为6（MG可选），读取器兼容3–5。旧数据不能补造缺失原因、阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | 将现有norm_breakdown_restarts与实际分支、真实残差重建和额外A/M工作对齐；需要新观测时保持定长、默认关闭和失败回退；有局部证据后再选择一个最小优化 |
-| 下一动作 | 将已验Native观测接入逐loop有界输出，再取得目标loop的实测占比。当前尚无Re3900两类原因细分，不重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
+| 下一动作 | 完成接线的干净候选验收，再以新原因观测配置取得目标loop的实测占比。当前尚无Re3900两类原因细分，不重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -93,7 +93,14 @@ Native开关仍可rank-local；runner因文件/通信分支要求两个观测开
 非注入单位算子用例实际出现1次happy restart，不能把总计数统称数值失败。
 代码提交`74e262d`独立干净生产构建及Krylov/PISO等14/14通过（4.84 s），
 runner hash为`6ebc5559d54276cf17385e72eb02c7b0002925b0e0168c3334b58e9b15e0a78c`。
-当前尚未接入ProductDriver/Evidence/runner，也未测目标原因比例或改变算法。
+上述为Native切片的历史验收范围；后续接线见下文，仍未测目标原因比例或改变算法。
+
+[ProductDriver/runner V6接线](../verification/2026-09-08-product-fgmres-recovery-observation.md)
+已通过开发验收：Release 8/8、ASan/UBSan 4/4，旧reader 88/33 checks和新reader
+28项拒绝检查。实际BiCGStab CLI独立验证恢复unavailable而非伪造零样本。
+每个solve记录新增96字节，保持14-slot attempt和64-slot step上限；关闭仍有固定
+初始化/拷贝成本。新列复用既有stream，root/非零rank关闭失败和checkpoint字节
+等价均已验。下一步干净候选，不把此开发结果当128-rank或COAST替代证据。
 
 ## 3. 基础流动模块台账
 
