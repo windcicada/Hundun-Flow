@@ -120,6 +120,19 @@ int main(int argc, char **argv) {
   ok &= !workspace.prepare(MPI_COMM_WORLD, input).available;
   input.gas = &backend;
   input.reaction_enabled = true;
+  cell.inventory.gas_mass_kg = rank == 0 ? -1 : 1;
+  auto bad_exchange = workspace.prepare(MPI_COMM_WORLD, input);
+  ok &= !bad_exchange.available && bad_exchange.failure_module == 3 &&
+        bad_exchange.lowest_failing_rank == 0 && !bad_exchange.cells &&
+        !bad_exchange.parcels;
+  cell.inventory.gas_mass_kg = 1;
+  cell.tcr_trial.mode =
+      rank == 0 ? tcr::detail::Mode::validated : tcr::detail::Mode::off;
+  auto unvalidated = workspace.prepare(MPI_COMM_WORLD, input);
+  ok &= !unvalidated.available && unvalidated.failure_module == 5 &&
+        unvalidated.lowest_failing_rank == 0 && !unvalidated.cells &&
+        !unvalidated.parcels;
+  cell.tcr_trial.mode = tcr::detail::Mode::off;
   if (ranks > 1) {
     input.start_time_s = rank == 0 ? 0 : 1;
     auto interval_mismatch = workspace.prepare(MPI_COMM_WORLD, input);

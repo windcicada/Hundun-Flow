@@ -288,7 +288,7 @@ set_tests_properties(v04_models_spray_film_bridge PROPERTIES TIMEOUT 15)
 
 # Small portable validation cases: each manifest configuration is one test.
 # No Allrun, repetitions or implicit resource escalation.
-foreach(portable_validation IN ITEMS v1 v2)
+foreach(portable_validation IN ITEMS v1 v2 v2_tab)
   add_executable(v04_portable_${portable_validation} validation/portable_${portable_validation}.cpp)
   target_include_directories(v04_portable_${portable_validation} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
   target_link_libraries(v04_portable_${portable_validation} PRIVATE hundun_v04_test_core MPI::MPI_C)
@@ -307,7 +307,7 @@ foreach(portable_validation IN ITEMS v1 v2)
       string(REPLACE "@FIXTURE_DIR@" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures" portable_value "${portable_value}")
       list(APPEND portable_args "${portable_value}")
     endforeach()
-    if(portable_validation STREQUAL "v2")
+    if(portable_validation MATCHES "^v2")
       add_test(NAME v04_portable_${portable_validation}_${portable_id}
         COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${portable_ranks}
         ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_portable_${portable_validation}> ${MPIEXEC_POSTFLAGS} ${portable_args})
@@ -315,8 +315,9 @@ foreach(portable_validation IN ITEMS v1 v2)
       add_test(NAME v04_portable_${portable_validation}_${portable_id}
         COMMAND v04_portable_${portable_validation} ${portable_args})
     endif()
+    string(REGEX REPLACE "^v2.*" "v2" portable_label "${portable_validation}")
     set_tests_properties(v04_portable_${portable_validation}_${portable_id} PROPERTIES
-      TIMEOUT ${portable_timeout} PROCESSORS ${portable_ranks} LABELS "portable_${portable_validation}")
+      TIMEOUT ${portable_timeout} PROCESSORS ${portable_ranks} LABELS "portable_${portable_label}")
   endforeach()
 endforeach()
 

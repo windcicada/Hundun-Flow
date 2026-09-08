@@ -33,7 +33,7 @@ if(HUNDUN_BUILD_PORTABLE_CANTERA)
   # hundun_v04_core, authorize a source contribution, or enable reacting CLI.
   add_library(hundun_v04_portable_cantera STATIC EXCLUDE_FROM_ALL
     src/models_cantera.cpp src/models_combustion.cpp src/models_chemistry_adapter.cpp
-    src/models_spray_properties.cpp)
+    src/models_spray_properties.cpp src/models_esf.cpp)
   target_include_directories(hundun_v04_portable_cantera PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(hundun_v04_portable_cantera PRIVATE

@@ -2,6 +2,7 @@
 
 #include "hundun/v04_cantera.hpp"
 #include "models_chemistry_adapter_detail.hpp"
+#include "models_esf_detail.hpp"
 #include "models_spray_properties_detail.hpp"
 
 #include "../support/chemistry_test_support.hpp"
@@ -163,6 +164,34 @@ void test_neutral_gas_query_and_closure_bridge() {
   HUNDUN_CHECK_NEAR(delta_y[0] + delta_y[1], 0, 1e-13);
   HUNDUN_CHECK_NEAR(bounded.final_sample.enthalpy_j_per_kg,
                     query.enthalpy_j_per_kg, 1e-5);
+  esf::detail::Workspace persistent(2);
+  double fields[]{1, 0, query.enthalpy_j_per_kg, 1, 0, query.enthalpy_j_per_kg,
+                  1, 0, query.enthalpy_j_per_kg, 1, 0, query.enthalpy_j_per_kg};
+  double pressures[]{101325, 101325, 101325, 101325}, densities[4]{};
+  for (double &density : densities)
+    density = output.sample.density_kg_per_m3;
+  for (std::size_t n : {2U, 4U}) {
+    const auto ensemble = persistent.react(
+        {{query.revision, backend->closure_identity().fingerprint, n, 2,
+          fields},
+         query.revision,
+         &backend->closure_identity(),
+         &backend->gas_identity(),
+         pressures,
+         densities,
+         0,
+         1e-6},
+        *backend);
+    HUNDUN_CHECK(ensemble.status == portable::Status::success);
+    HUNDUN_CHECK(ensemble.chemistry_call_count == 2 * n);
+    if (ensemble.status == portable::Status::success) {
+      HUNDUN_CHECK_NEAR(ensemble.candidate.values[0], final_y[0], 1e-8);
+      HUNDUN_CHECK_NEAR(ensemble.candidate.values[0] +
+                            ensemble.candidate.values[1],
+                        1, 1e-13);
+      HUNDUN_CHECK(ensemble.candidate.values[2] == query.enthalpy_j_per_kg);
+    }
+  }
   chemistry::detail::BackendAdapter adapter(
       *backend, *backend, backend->closure_identity(), query.revision);
   combustion::CombustionClosureRequest r;

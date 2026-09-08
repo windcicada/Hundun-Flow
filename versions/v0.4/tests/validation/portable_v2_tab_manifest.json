@@ -1,0 +1,107 @@
+{
+  "manifest_version": 1,
+  "suite": "Stage V2 portable TAB to common composition",
+  "execution_gate": "Coordinator only, after P1-P8 implementation freeze; preparation is not a passing validation result",
+  "scope": "Real TAB oscillator and representative-size breakup, analytic no-transfer trajectory, ordinary-value P8 source/ESF/migration/snapshot composition. Not product CFD, a real fuel validation, or COAST replacement acceptance.",
+  "binary": "portable_v2_tab",
+  "configuration_policy": {
+    "one_invocation_per_configuration": true,
+    "repetitions": 1,
+    "timeout_s": 20,
+    "global_cells": [4, 4, 4],
+    "maximum_ranks": 4,
+    "cells_per_workspace": 64,
+    "parcel_capacity": 8,
+    "exchange_segment_capacity": 128,
+    "events_per_parcel": 8,
+    "segments_per_parcel": 16,
+    "attempts_per_parcel": 128,
+    "minimum_substep_s": 1e-12,
+    "no_timeout_expansion_or_automatic_retry": true,
+    "ownership": "Each rank supplies only its unique Cartesian patch cells. Real checked migration validates every candidate position/cell/owner; no replicated global gas inventory. This fixture does not claim inter-rank parcel motion coverage."
+  },
+  "provenance": [
+    {
+      "kind": "published equations",
+      "model": "TAB",
+      "document": "O'Rourke and Amsden 1987 LA-UR-87-2105-Rev",
+      "doi": "10.4271/872089",
+      "equations": ["14", "19", "20", "21", "22"],
+      "usage": "Equations and zero-rate analytic limit; no OpenFOAM implementation, scripts, dictionaries, or outputs used"
+    },
+    {
+      "kind": "HUNDUN owned contracts",
+      "interfaces": ["FixedTabEvolutionProvider", "FixedTabEventBreakupProvider", "CompositionWorkspace", "prepare_accepted_values", "restore_composition_values"],
+      "reference_generation": "Independent 60-digit Decimal arithmetic from pi, spherical mass/surface identities and analytic TAB radius ratio. Literal references fixed before suite execution; no implementation output used as a reference."
+    }
+  ],
+  "identity": {
+    "liquid_asset": "@FIXTURE_DIR@/synthetic-liquid-alpha.asset",
+    "asset_content_fnv1a64": "6004043157121730787",
+    "mechanism_sha256": "bd156f5dfa9a7a528525696097015cbf4afad6a5f27bf330c62516169b4dd1c1",
+    "phase": "synthetic-isomers-v1-ratebits-4611686018427387904",
+    "full_species_order": ["A", "B"],
+    "vapor_species": "A",
+    "vapor_species_index": 0,
+    "enthalpy_reference": "absolute-standard-formation-298.15K-v1",
+    "tab_model": "tab_linear_oscillator_v1",
+    "composition_model": "portable_source_transport_reaction_v1",
+    "migration_model": "parcel_candidate_migration_values_v2",
+    "chemistry_representation": "analytic synthetic isomer backend, explicit reaction_enabled=false",
+    "tci": "ESF N=2/4, zero turbulent diffusivity, uniform fields, TCR off",
+    "parcel_rng_seed": 998877,
+    "initial_revision": {"accepted_step": 0, "input_revision": 1, "algorithm_version": 1}
+  },
+  "inputs": {
+    "step_duration_s": 1e-6,
+    "steps": "One trigger interval then one continuous/restored comparison interval; replay is a state-equivalence check, not a retry with enlarged resources",
+    "gas": {"mass_kg_per_cell": 1, "volume_m3_per_cell": 1, "momentum_kg_m_per_s": [0, 0, 0], "Y": [0.01, 0.99], "absolute_h_j_per_kg": 101000, "pressure_pa": 118228.688979204018071428571429},
+    "fixed_tab_environment": {"far_velocity_m_per_s": [1, 0, 0], "far_density_kg_per_m3": 1, "slip_m_per_s": 0, "liquid_density_kg_per_m3": 800, "liquid_viscosity_pa_s": 0.001, "surface_tension_n_per_m": 0.025, "liquid_absolute_h_j_per_kg": -100000},
+    "parent": {"id": [8100, 42], "position_m": [0.25, 0.5, 0.5], "velocity_m_per_s": [1, 0, 0], "diameter_m": 1e-4, "multiplicity": 100, "temperature_k": 298.15, "age_s": 0.125, "tab_y": 1, "tab_y_dot_per_s": 0, "breakup_ordinal": 7},
+    "survivor": {"id": [8100, 43], "position_m": [3.25, 3.5, 3.5], "velocity_m_per_s": [1, 0, 0], "diameter_m": 1e-4, "multiplicity": 1, "temperature_k": 298.15, "age_s": 0.125, "tab_y": 0, "tab_y_dot_per_s": 0, "breakup_ordinal": 19},
+    "child_parcel_count": 2,
+    "child_identity_rule": "Full parent ID, accepted step, parent breakup ordinal and independent child domain define child IDs. New child identities start with breakup ordinal zero. The unbroken survivor retains ordinal 19.",
+    "kinematics_rule": "x_new=x_old+u*dt, age_new=age_old+dt, no force/heat/mass exchange. No events from geometry because all trajectories remain in their initial cells. TAB trigger occurs at t=0 and children must advance the complete remaining interval."
+  },
+  "references": {
+    "tab_radius_ratio_formula": "child_d/parent_d=1/(1+4/3)=3/7 at y=1, ydot=0",
+    "single_parent_droplet_mass_kg": "4.18879020478639098461685784437267051226289253250014109463327e-10",
+    "total_children_mass_kg": "4.18879020478639098461685784437267051226289253250014109463327e-8",
+    "child_diameter_m": "4.28571428571428571428571428571428571428571428571428571428571e-5",
+    "each_child_parcel_multiplicity": "635.185185185185185185185185185185185185185185185185185185185",
+    "parent_spherical_surface_j": "7.85398163397448309615660845819875721049292349843776455243735e-8",
+    "surface_increase_formula": "100*pi*sigma*d_parent^2*(7/3-1)",
+    "surface_increase_j": "1.04719755119659774615421446109316762806572313312503527365831e-7",
+    "deformation_consumed_j": "1.04719755119659774615421446109316762806572313312503527365831e-7",
+    "bulk_kinetic_increase_j": 0,
+    "breakup_energy_residual_j": 0,
+    "global_trigger_count_first_step": 1,
+    "global_trigger_count_next_step": 0,
+    "global_parent_count_final": 0,
+    "global_child_count_final": 2,
+    "global_survivor_count_final": 1,
+    "first_step_child_x_m": 0.250001,
+    "first_step_survivor_x_m": 3.250001,
+    "first_step_age_s": 0.125001,
+    "chemistry_calls": 0,
+    "gas_mass_momentum_Y_h": "Unchanged; breakup deformation is an internal parcel reservoir, not gas heating."
+  },
+  "tolerances": {
+    "comparison": "abs(actual-reference)<=absolute+relative*abs(reference), all floating values finite",
+    "mass_diameter_multiplicity": {"absolute": 0, "relative": 5e-13},
+    "deformation_and_surface_j": {"absolute": 1e-22, "relative": 5e-13},
+    "bulk_and_residual_j": {"absolute": 1e-22, "relative": 0},
+    "child_position_m_and_age_s": {"absolute": 2e-16, "relative": 0},
+    "survivor_position_m": {"absolute": 2e-15, "relative": 0},
+    "gas_specific_h_j_per_kg": {"absolute": 1e-10, "relative": 0},
+    "ids_counts_mass_momentum_Y_TAB_ordinal_restore_and_replay": "Exact where directly compared in harness; deterministic source-free state and ID equality must not be hidden by a tolerance."
+  },
+  "cases": [
+    {"id": "tab_n2_r1", "ranks": 1, "argv": ["2", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20},
+    {"id": "tab_n2_r2", "ranks": 2, "argv": ["2", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20},
+    {"id": "tab_n2_r4", "ranks": 4, "argv": ["2", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20},
+    {"id": "tab_n4_r1", "ranks": 1, "argv": ["4", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20},
+    {"id": "tab_n4_r2", "ranks": 2, "argv": ["4", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20},
+    {"id": "tab_n4_r4", "ranks": 4, "argv": ["4", "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"], "timeout_s": 20}
+  ]
+}

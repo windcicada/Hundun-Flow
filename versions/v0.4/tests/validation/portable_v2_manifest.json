@@ -2,6 +2,12 @@
   "format": "hundun-portable-v2-manifest-v1",
   "scope": "Portable module composition with prescribed gas and ordinary values. Not a product driver, MPI/Halo performance test, real-fuel validation or COAST replacement acceptance.",
   "execution_gate": "Coordinator must confirm complete P1-P8 before any V2 execution",
+  "cross_configuration_comparison": {
+    "program": "compare_portable_v2.py ctest-junit.xml",
+    "groups": "alpha/beta spray and analytic closed exchange, each N=2/4, ranks 1/2/4",
+    "contract": "bit-identical FNV1a64 per physical cell/parcel values with order-independent XOR; no rank ownership number in the observation",
+    "interpretation": "Reproducibility check only; analytic budgets and state validity remain independent physical tests"
+  },
   "execution": {
     "program": "portable_v2",
     "repetitions": 1,

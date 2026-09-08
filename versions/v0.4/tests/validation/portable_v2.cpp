@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <mpi.h>
@@ -573,6 +574,59 @@ bool budget_check(const std::array<double, 5> &before,
   }
   return check_all(ok, "global parcel+gas mass momentum H+K budget");
 }
+void emit_partition_invariant(const p::CompositionSnapshot &state,
+                              const char *key) {
+  std::uint64_t local = 0;
+  auto word = [](std::uint64_t &h, std::uint64_t w) {
+    for (unsigned i = 0; i < 8; ++i) {
+      h ^= (w >> (8 * i)) & 255;
+      h *= 1099511628211ULL;
+    }
+  };
+  auto real = [&](std::uint64_t &h, double x) {
+    std::uint64_t w = 0;
+    std::memcpy(&w, &x, sizeof w);
+    word(h, w);
+  };
+  for (const auto &c : state.cells) {
+    std::uint64_t h = 14695981039346656037ULL;
+    word(h, 1);
+    word(h, c.inventory.global_cell);
+    real(h, c.inventory.gas_mass_kg);
+    real(h, c.inventory.volume_m3);
+    real(h, c.pressure_pa);
+    for (double v : c.inventory.gas_momentum_kg_m_per_s)
+      real(h, v);
+    for (double v : c.fields)
+      real(h, v);
+    local ^= h;
+  }
+  for (const auto &p : state.parcels) {
+    std::uint64_t h = 14695981039346656037ULL;
+    word(h, 2);
+    word(h, p.parcel.id.high);
+    word(h, p.parcel.id.low);
+    word(h, p.parcel.owner_global_cell);
+    word(h, p.parcel.liquid_material_fingerprint);
+    real(h, p.parcel.droplet_mass_kg);
+    real(h, p.parcel.multiplicity);
+    real(h, p.parcel.droplet_diameter_m);
+    real(h, p.parcel.age_s);
+    real(h, p.parcel.temperature_k);
+    for (double v : p.parcel.position_m)
+      real(h, v);
+    for (double v : p.parcel.velocity_m_per_s)
+      real(h, v);
+    real(h, p.tab_deformation);
+    real(h, p.tab_deformation_rate_per_s);
+    word(h, p.breakup_ordinal);
+    local ^= h;
+  }
+  std::uint64_t global = 0;
+  MPI_Allreduce(&local, &global, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
+  if (rank_id == 0)
+    std::cout << key << '=' << global << '\n';
+}
 bool run_case(Fixture &fixture, bool faults) {
   p::CompositionWorkspace workspace(64, 8, 256, 2);
   const auto initial_copy = fixture.initial;
@@ -620,6 +674,7 @@ bool run_case(Fixture &fixture, bool faults) {
                  "stateful injectors have not been published by composition"))
     return false;
   auto accepted = std::move(first.values.candidate);
+  emit_partition_invariant(accepted, "partition_state_accepted1");
   std::uint64_t chemistry_calls = 0;
   MPI_Allreduce(&first.report.chemistry_calls, &chemistry_calls, 1,
                 MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
@@ -736,6 +791,8 @@ bool run_case(Fixture &fixture, bool faults) {
                                    resumed.values.candidate),
                  "continuous and restored next step agree exactly"))
     return false;
+  emit_partition_invariant(resumed.values.candidate,
+                           "partition_state_accepted2");
   return common_source(resumed.values.candidate) &&
          untouched_chemistry(resumed.values.candidate, fixture.beta, true) &&
          budget_check(initial_budget,
