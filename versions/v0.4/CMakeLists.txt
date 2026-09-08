@@ -276,6 +276,7 @@ set(hundun_v04_core_sources
   src/models_spray_source.cpp
   src/models_spray_transaction.cpp
   src/models_spray_transfer.cpp
+  src/models_spray_properties.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp
   src/parallel_ibm_donor.cpp

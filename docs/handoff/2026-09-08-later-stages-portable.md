@@ -41,7 +41,42 @@ field follow-up `coast/stage5-field-validation@8ffdf2b` 是只读供体身份，
 不是本分支祖先或新验收。历史 ESF 输运/IEM/Philox/TCR 与 field executor 尚未整体移植；
 它们和旧反应流 driver 的重写继续在本统一分支完成，不能将归集当成功能齐备。
 
-## 切片与退出条件
+## 当前实施包台账（2026-09-08）
+
+当前任务基线：`codex/stage4-6-coast-replacement@3d281086182865493a2daca63f4686e79147acf7`；
+tree `8006da6602526ca976c28d440e71b78e20bc609c`，parent `e8939c863d2deea1c1047a5742fc9cd358a3116f`。
+开工时 tracked/untracked 均为空。主线与 pressure-enthalpy 工作树只读，不自动合并或推送。
+
+共同接口冻结：`v04_portable.hpp` 的 Revision、GasIdentity、GasQueryProvider、
+ExchangeDelta；已有 composition/closure 指纹含义不变。数组均为完整 Ns；显式
+SHA/phase/组分顺序/元素矩阵/焓参考映射在准备阶段校验。查询支持 p,h,Y 与 p,T,Y，
+parcel 不接触 Cantera；HUNDUN 容量预分配，第三方内部资源行为单列。
+候选失败不可用；accepted step/revision/算法版本确定重试；快照只含已接受普通值。
+所有交换为区间积分总量、新减旧，multiplicity 与沉积权重各一次。
+
+协调者独占公开头、中央 CMake、共同源合同、本台账和归集提交。
+worker 独占其局部 cpp/detail.hpp 与 focused tests，在相同冻结提交的独立临时
+worktree 工作；不得写产品主线/旧供体，不提交、不改中央文件。接口变更先由协调者处理。
+物性/气膜已从 transfer 拆入 `models_spray_properties.cpp`，原 transfer selector 1/1 PASS。
+
+| 包 | 依赖 | 状态 | 实现与验收出口 | 移植后消费接口 / 持久状态 / 产品验收 |
+| --- | --- | --- | --- | --- |
+| P1 化学 | 冻结接口 | 待实施 | direct+解析 provider、显式映射、区间/净率/焓、批量容量和失败 | Ns−1/物性、源准入；机制身份；真实反应时序 |
+| P2 ESF | P1 真实组合 | 待实施 | Philox/Wiener、N=2/4 输运、exact IEM、通量修正 | 通量/梯度/边界；accepted fields/RNG；真实空间输运 |
+| P3 TCR | P2 | 待实施 | 统计映射、根可接受性/历史、折点/拒绝、证据准入 | cell/revision；branch history；真实统计反馈 |
+| P4 物性/气膜 | P1 | 待实施 | 焓积分、包读取/身份、两套合成包、完整气膜 | 气相采样；资产身份；用户真实燃料验收 |
+| P5 轨迹/事件 | P4/P6 | 待实施 | 自适应蒸发、重采样、统一事件/出口 H+K | 几何/采样/沉积；parcel accepted clocks；真实边界 |
+| P6 TAB | 冻结接口 | 待实施 | 粒径预测、表面/变形/体动能、子候选与 ID | 共同父子替换；TAB/ordinal；产品破碎预算 |
+| P7 生命周期 | P5/P6 组合 | 待实施 | 定位预检、容量、普通值快照、1/2/4 rank | 分区/共同提交/Restart；injector/parcel/RNG；恢复一致性 |
+| P8 组合 | P1–P7 | 待实施 | cell/ID/segment 有序汇总、非线性 K、公共源、共同候选 | rho*h-p/压力功/PISO/执行图；全参与者状态；联立验收 |
+
+所有 P→I 失败由产品适配映射为整次尝试拒绝；不得部分源发布。
+V1/V2 仅在包全部完成后运行：合成小算例，最多 12³/4 ranks，每配置一轮，
+显式超时与预登记绝对+相对容差。真实燃料、field/Halo、schema/Checkpoint/Restart/
+diagnostics/CLI、产品共同提交与 COAST 替代验收均只登记，不实施。
+以下是基线历史证据，不代表当前 P1–P8 已完成。
+
+## 基线切片与退出条件（历史）
 
 | 切片 | 当前工作 | 本地退出条件 / 后续适配 |
 | --- | --- | --- |
