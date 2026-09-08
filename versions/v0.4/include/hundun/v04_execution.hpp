@@ -407,12 +407,21 @@ class CartesianKernelPlan {
                         const CartesianGeometryPlan& geometry,
                         const MeshPatch& patch,
                         const BoundaryPlan& boundary,
-                        CartesianKernelPlan& out) noexcept;
+                        CartesianKernelPlan& out,
+                        bool physical_inlet_material = false) noexcept;
 
   GeometryKind geometry_kind() const noexcept { return geometry_kind_; }
   Int3 cells() const noexcept { return cells_; }
   std::uint8_t reach() const noexcept { return reach_; }
   double limiter() const noexcept { return limiter_; }
+  // Material ghost slots contain face coefficients here, not exterior-cell
+  // samples. Primitive stencil interpolation is unchanged.
+  bool physical_inlet_material(std::size_t axis, std::int32_t face) const noexcept {
+    const std::int32_t n = axis==0U ? cells_.x : (axis==1U ? cells_.y : cells_.z);
+    if (axis>=3U || (face!=0 && face!=n)) return false;
+    return (physical_inlet_material_mask_ & (1U << (2U*axis+(face==n ? 1U : 0U))))!=0U;
+  }
+  bool physical_inlet_material_enabled() const noexcept { return physical_inlet_material_enabled_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   const detail::CartesianMetricPacket& metric(
       std::size_t axis) const noexcept {
@@ -447,6 +456,8 @@ class CartesianKernelPlan {
   GeometryKind geometry_kind_{};
   double limiter_{1.0};
   std::uint8_t reach_{};
+  std::uint8_t physical_inlet_material_mask_{};
+  bool physical_inlet_material_enabled_{};
   std::vector<double> metric_faces_[3];
   std::vector<double> metric_centres_[3];
   std::vector<double> metric_widths_[3];

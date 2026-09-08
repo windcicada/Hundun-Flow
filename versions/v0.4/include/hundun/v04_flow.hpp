@@ -60,6 +60,7 @@ struct EquationPlanSpec {
   Span<const ScalarEquationSpec> scalars{};
   std::size_t maximum_cells_per_rank{};
   StageId closed_mass_service_stage{};
+  bool physical_inlet_material{};
 };
 
 struct EquationCompileDiagnostics {

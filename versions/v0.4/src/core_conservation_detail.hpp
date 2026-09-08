@@ -305,7 +305,9 @@ inline Status collect_boundary_balance(
                 kernels, material.thermal_conductivity, axis, face) *
                 (state.temperature.trial.unchecked(face, 0U) -
                  state.temperature.trial.unchecked(left, 0U));
-            const double mu = interpolate(material.effective_viscosity, 0U);
+            const double mu = kernels.physical_inlet_material(axis_index,normal)
+                ? material.effective_viscosity.unchecked(high ? face : left,0U)
+                : interpolate(material.effective_viscosity, 0U);
             const double normal_weight = positive_transmissibility(
                 kernels, material.effective_viscosity, axis, face);
             const double div = interpolate(gradient, 0U) +

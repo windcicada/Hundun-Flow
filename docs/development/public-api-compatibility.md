@@ -14,6 +14,22 @@
 
 ## v0.4 thermophysical physical-ghost certificate 迁移
 
+GTMC 开发修复增加显式 `BoundaryThermophysicalClosureKind::physical_inlet_face`
+模式；默认 `ghost_state` 保留旧数值契约。新模式仅对完整固定组分、定焓、
+压力外推的物理入口启用：p/h/Y 保持离散镜像，热物性由合法物理面状态计算。
+输出边界 material 槽存放面值，T 槽仍为 `2*T_face-T_owner` 离散镜像。
+`EquationPlanSpec::physical_inlet_material` 和 Cartesian kernel 的显式编译参数
+必须同时启用，才能将这些系数作为面值消费；旧独立 kernel 默认为单元外延系数。
+PISO / candidate 消费者检查两者契约一致。证书绑定新增模式和重建面值所依赖的
+owner/source 数值，不能沿用只绑定 ghost 的旧解释。
+
+`refresh_inlet_material` 用于 halo/零梯度及湍流更新后的入口系数重发布，不颁发
+跨阶段密度证书；空 output view 不写入。有效黏度中的 SGS 增量从 owner 外推，
+分子部分重新计算。内部物理状态、入口目标和 EOS 可行域不作截断或放宽。
+以上新字段追加在原有 aggregate 后，旧源码仍可编译；需完整重编译，不可混用
+新旧二进制布局。产品 method-history signature 已变更，不能把旧 V3 速率历史
+作为此算子的精确 BDF 历史；原始均值转移需重新生成当前 plan 的 V1 恢复点。
+
 `BoundaryGhostFieldAuthority` 保留原有 `field`、`revision`、`storage`、
 `revision_domain` 四字段的顺序和语义；精确 `base`、`replica` 身份只追加在
 其后。旧四字段 aggregate 初始化和五参数

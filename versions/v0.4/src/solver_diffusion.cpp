@@ -1192,7 +1192,9 @@ inline double diffusion_transmissibility(const CartesianKernelPlan& plan,
     return std::numeric_limits<double>::quiet_NaN();
   }
   return detail::metric_face_area<Uniform>(plan, Axis, face) /
-         (distance_left / gamma_left + distance_right / gamma_right);
+         (plan.physical_inlet_material(Axis,normal)
+              ? (distance_left+distance_right)/(normal==0 ? gamma_left : gamma_right)
+              : distance_left / gamma_left + distance_right / gamma_right);
 }
 
 bool valid_transport_invocation(const CartesianKernelPlan& plan,

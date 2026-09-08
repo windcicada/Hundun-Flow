@@ -11,7 +11,8 @@ with GCC 11.4 Release/tests OFF and run on 64 local ranks. The 100-step request
 failed before the first new commit; a separate one-step replay reproduced the
 same failure. The user subsequently authorized implementing the original
 COAST zero-gradient/mass-closure outlet semantics for development testing.
-This implementation is in progress; no new GTMC step has yet passed.
+That historical candidate was superseded: clean 0a9ed82 accepted one new GTMC
+step before the G22 failure. G23 below is the current repair candidate.
 Detailed receipts are outside the source tree:
 `/home/administrator/gtmc-hundun-port-20260908/candidate-f10f15a/RUN_STATUS.md`.
 
@@ -39,6 +40,105 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 ## Change inventory
 
 ### Outlet/patch development candidate follow-up
+
+- G23 (implementation under verification; user explicitly approved the
+  boundary-contract change after G22): distinguish discrete Dirichlet p/h/Y
+  mirrors from physical inlet-face thermodynamics. No composition clipping or
+  EOS/tolerance relaxation. Locations and reasons:
+  - `include/hundun/v04_boundary.hpp`, `src/bc_thermo.cpp`: append explicit
+    `physical_inlet_face` closure kind, leaving the legacy entry default intact.
+    Eligible locally owned fixed-composition inlets use the compiled Y target,
+    resolved h mirror/owner face target, and extrapolated pressure. Validate
+    physical owner and face by strict EOS, preserve p/h/Y mirrors, publish face
+    material in the boundary slots and 2*T_face-T_owner for the T stencil.
+    The shared inlet eligibility excludes walls, outlets and periodic/MPI faces.
+    Corners extend one deterministic inlet trace with clamped tangential indices.
+    Certificate kind, face-source/owner values and semantics bind the new
+    dependencies; corrupt mirrors and same-revision owner changes fail closed.
+  - Same BC files, `refresh_inlet_material`: generic later halo/zero-gradient
+    and turbulence publication would otherwise overwrite face coefficients.
+    Atomically reconstruct fixed-T/Y inlet material from owner pressure after
+    those operations. Preserve the owner SGS dynamic-viscosity addition
+    separately from face molecular viscosity. Optional output views restrict
+    writes, avoid rewriting certified density, and retain physical EOS guards.
+  - `include/hundun/v04_execution.hpp`, `include/hundun/v04_flow.hpp`,
+    `src/solver_cartesian.cpp`, `src/solver_equations.cpp`: explicit opt-in
+    equation/kernel material representation, bound by semantic fingerprints.
+    Legacy standalone kernels default to exterior-cell coefficient samples.
+  - `src/solver_diffusion.cpp`, `src/solver_equation_detail.hpp`: both the
+    conservative residual and implicit transmissibility use the same inlet
+    face coefficient over the mirror centre-to-centre distance. Primitive
+    gradients and interior/other-face harmonic interpolation are unchanged.
+    `src/solver_cartesian_detail.hpp`, `src/solver_momentum.cpp`,
+    `src/core_conservation_detail.hpp`: inlet cross-stress and development
+    viscous-work diagnostics consume the same face viscosity.
+    `src/solver_face_flux.cpp`: inlet reconstruction uses rho_face*U_face*A,
+    not interpolation of products involving mixed face/cell density samples.
+  - `src/core_product_freeze.cpp`: activate both contracts together at fresh,
+    live C1/C2 and candidate closures; propagate the kind in every consumer
+    binding. Refresh inlet materials after cold restart, momentum publication,
+    turbulence, candidate and final-rate derived-field boundary fills.
+    Bump `method_history_signature` with physical-inlet-face-thermophysics-v1;
+    do not reinterpret previous V3 histories under the changed boundary
+    operator. Full acceptance needs a freshly imported V1 primitive checkpoint.
+  - `src/solver_piso.cpp`, `src/solver_candidate_boundary.cpp`: reject a face
+    material certificate consumed under an exterior-cell kernel (or vice versa).
+  - `tests/unit/bc_thermo_test.cpp`: real scalar+enthalpy boundary fill followed
+    by closure failed before the fix in 0.35 s; after the first repair serial
+    and MPI-2 passed. Added owner/kind tamper, physical-pressure atomicity,
+    separate SGS/molecular refresh, and actual conservative diffusion vs
+    implicit-transmissibility oracles. Further integrated tests are in progress.
+  Existing outlet MPI-1/2/4 plus BC tests passed after the initial integration
+  (five tests, 1.94 s); later consumer/refresh revisions are not yet accepted.
+  Actual GTMC short-100 and medium-3000 remain unpassed. Do not use a dirty
+  build as acceptance or confuse these focused tests with the GTMC gates.
+  G23 integrated follow-up: 25 wider regressions initially failed during
+  initialization with 736. A launched GDB run of the real open scalar fixture
+  showed all relevant ghost widths were 2 (falsifying the width hypothesis),
+  but the new material refresh received pressure_reference=0 while its caller
+  `rebuild_cold_velocity_dependents(cold_pressure_reference=101325)` had the
+  correct state. The two new cold-path calls had accidentally used the not-yet
+  initialized runtime member instead of the supplied cold pressure reference.
+  Both now pass `cold_pressure_reference`; strict positive-pressure guards
+  and view-width checks remain unchanged. Evidence: external
+  `species-diagnostic-v1/refresh-width-gdb.log`. Wider tests must be rerun.
+  G23 padding follow-up: after the cold-reference fix, 18/24 scalar tests
+  passed; open EOS cases failed 737 at C1. GDB/targeted probes showed compiled
+  stencil reach=1 but allocated/certified ghosts=2. At xmin, Y(owner0)=
+  0.21916373024191385, Y(ghost1)=0.48083626975808613 correctly encode the
+  0.35 face target, while unused ghost2=0.21913417161825449 was not filled by
+  the one-layer Dirichlet operator. `bc_thermo.cpp::inlet_face_cell` now caps
+  the trace source layer at the compiled reach and extends that valid trace
+  into extra allocation padding. It does not alter stencil width or mirror
+  guards. The compact-stencil real-fill unit regression failed first in
+  0.35 s. All category probes/includes were removed after diagnosis.
+  The three variable-thermophysics scalar failures (5792 in the smallest-dt
+  passive case) also occur on an independently built unchanged 51e4a3a
+  baseline; baseline open MPI-1/2/4 passes. This separate pre-existing
+  globalization issue is not repaired or counted as passing here. Evidence:
+  `baseline-51-comparison.log`, `padding-reach-gdb.log`, `padding-red-test.log`.
+  After padding repair the open EOS case advances, but its old conservation
+  oracle still used molecular viscosity at the interior owner composition
+  instead of the newly authorized fixed inlet face composition/temperature.
+  `tests/integration/product_scalar_contract_experiment.cpp::open_budget`
+  now independently evaluates mu(T_inlet,Y_inlet) only on the fixed inlet;
+  conditional pressure-outlet backflow retains the old owner oracle. The
+  inventory tolerance remains 1e-12 and no computed solver flux is substituted
+  into the analytic oracle. This follows the same residual/transmissibility
+  face-coefficient regression above; rerun the open MPI-1/2/4 cases.
+  Final focused verification: all 21 scalar uniform/near_pure/open/ibm/
+  capacity/signed/restart cases on MPI-1/2/4 and both BC thermophysics tests
+  passed (23/23, 48.35 s); external `g23-final-focused-tests.log` records it.
+  Mass-balanced outlet MPI-1/2/4 also passed (3/3, 1.23 s), recorded in
+  `g23-final-outlet-tests.log`: 26 focused cases passed in total.
+  The old standalone stale-ghost-authority MPI-2 test also fails identically
+  on the clean, independently built 51e4a3a baseline (collective stale rejection
+  and rollback role-handle assertions, 0.38 s). See `baseline-authority-test.log`.
+  Along with the three variable-thermophysics cases, this is a documented
+  pre-existing regression, not a passing test or a speculative G23 repair.
+  Temporary probes are absent and `git diff --check` passed. Next gate is
+  clean Release rebuild of both CLI and importer, fresh V1 mean-state import,
+  and real GTMC short-100; these results do not establish actual acceptance.
 
 - G22 (diagnostic only): clean 0a9ed82 accepted the first real GTMC step,
   20001 at t=0.015465336638081572, dt=3.5115962230679085e-9. Its evidence row

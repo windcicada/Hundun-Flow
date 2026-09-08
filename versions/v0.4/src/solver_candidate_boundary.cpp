@@ -1522,7 +1522,10 @@ Status PressureEnergyCandidateBoundaryFinalizer::finalize(
       authority.corrector_ == 1U
           ? BoundaryThermophysicalGhostPhase::corrector_one
           : BoundaryThermophysicalGhostPhase::corrector_two};
-  local = input.thermophysical_boundary.certificate.matches(
+  local = (input.thermophysical_boundary.binding.closure_kind==
+               BoundaryThermophysicalClosureKind::physical_inlet_face)==
+                  impl.kernels->physical_inlet_material_enabled() &&
+          input.thermophysical_boundary.certificate.matches(
               *impl.boundary, thermo_context,
               input.thermophysical_boundary.binding)
               ? Status{}

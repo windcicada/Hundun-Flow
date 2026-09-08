@@ -64,7 +64,8 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
       "accepted-ibm-thermal-zero-normal-v3;momentum-rates-v1;"
       "thermal-inverse-representable-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
-      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2")) {
+      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2;"
+      "physical-inlet-face-thermophysics-v1")) {
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
@@ -3757,6 +3758,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     });
   if (status) {
     EquationPlanSpec equation_spec;
+    equation_spec.physical_inlet_material = true;
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
     equation_spec.pressure_perturbation = candidate->fields.pressure;
@@ -5609,6 +5611,15 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   status = product.reductions.consensus(status);
   if (!status) return status;
 
+  if (status)
+    status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        product.boundary, product.thermodynamics, product.transport,
+        cold_pressure_reference, as_const(trial_pressure),
+        {trial_density, {}, {}, {}, {}, molecular_viscosity, {}, {}},
+        effective_viscosity);
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+
   FieldView trial_enthalpy;
   FieldView trial_temperature;
   if (status)
@@ -5698,6 +5709,14 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
       }
     }
   }
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+
+  status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+      product.boundary, product.thermodynamics, product.transport,
+      cold_pressure_reference, as_const(trial_pressure),
+      {{}, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity, {}},
+      effective_viscosity);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6347,7 +6366,7 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
            as_const(initial_enthalpy_with_ghosts),
            {runtime.species_accepted.data(),
             runtime.species_accepted.size()},
-           authority},
+           authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
           {initial_density_with_ghosts, initial_temperature_with_ghosts,
            initial_heat_capacity, initial_compressibility,
            initial_enthalpy_compressibility, initial_molecular_viscosity,
@@ -8953,6 +8972,12 @@ Status ProductDriver::Impl::execute_attempt(
         prerequisite = apply_boundary_ghosts(
             BoundaryStage::pressure, product.boundary,
             {&trial_pressure, 1U}, boundary_values);
+      if (prerequisite)
+        prerequisite = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+            product.boundary, product.thermodynamics, product.transport,
+            attempt_pressure_reference, as_const(trial_pressure),
+            {trial_density, {}, {}, {}, {}, molecular_viscosity,
+             conductivity, enthalpy_diffusivity}, effective_viscosity);
     }
     prerequisite = product.reductions.consensus(prerequisite);
     if (prerequisite && product.ibm_momentum_donors.has_value()) {
@@ -9361,7 +9386,7 @@ Status ProductDriver::Impl::execute_attempt(
               {attempt_pressure_reference, as_const(trial_pressure),
                as_const(trial_enthalpy),
                {species_accepted.data(), species_accepted.size()},
-               authority},
+               authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
               {trial_density, trial_temperature, heat_capacity,
                compressibility, enthalpy_compressibility,
                molecular_viscosity, conductivity,
@@ -9439,7 +9464,13 @@ Status ProductDriver::Impl::execute_attempt(
           turbulence_input, effective_viscosity, turbulence_certificate);
     }
     if (product.transport.kernel() == TransportKernel::coast_native_air)
-      return refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
+      refreshed = refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
+    if (refreshed)
+      refreshed = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+          product.boundary, product.thermodynamics, product.transport,
+          attempt_pressure_reference, as_const(trial_pressure),
+          {{}, {}, {}, {}, {}, molecular_viscosity, conductivity,
+           enthalpy_diffusivity}, effective_viscosity);
     return product.reductions.consensus(refreshed);
   };
 
@@ -10027,7 +10058,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoIntermediateCertificate intermediate_one;
   if (status) attempt_stage = 41U;
   if (status)
@@ -11420,7 +11451,7 @@ Status ProductDriver::Impl::execute_attempt(
                           .data(),
                       pressure_energy_candidate_species_boundary_aliases
                           .size()},
-                     authority},
+                     authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
                     {pressure_energy_candidate_density,
                      pressure_energy_candidate_temperature,
                      pressure_energy_candidate_heat_capacity,
@@ -11632,6 +11663,16 @@ Status ProductDriver::Impl::execute_attempt(
                         kProductPressureEnergy + 209U};
 
         candidate_timer.phase(4U);
+        if (evaluated)
+          evaluated = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+              product.boundary, product.thermodynamics, product.transport,
+              artifacts.pressure_reference, as_const(pressure_energy_candidate_pressure),
+              {{}, {}, {}, {}, {}, pressure_energy_candidate_molecular_viscosity,
+               pressure_energy_candidate_thermal_conductivity,
+               pressure_energy_candidate_enthalpy_diffusivity},
+              pressure_energy_candidate_effective_viscosity);
+        evaluated = product.reductions.consensus(evaluated);
+        if (!evaluated) return evaluated;
         RevisionToken flux_revision = detail::product_mix(
             direction, product_double_bits(alpha));
         flux_revision = detail::product_mix(flux_revision, ordinal + 1U);
@@ -11776,7 +11817,8 @@ Status ProductDriver::Impl::execute_attempt(
                 semantic_enthalpy,
                 {pressure_energy_candidate_species_boundary_aliases.data(),
                  pressure_energy_candidate_species_boundary_aliases.size()},
-                as_const(pressure_energy_candidate_density)}},
+                as_const(pressure_energy_candidate_density),
+                BoundaryThermophysicalClosureKind::physical_inlet_face}},
               &product.candidate_finalizer_state_halo,
               as_const(candidate_flux),
               candidate_final_flux};
@@ -14194,7 +14236,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoIntermediateCertificate intermediate_two;
   if (status) attempt_stage = 51U;
   if (terminal_path_active)
@@ -14357,7 +14399,7 @@ Status ProductDriver::Impl::execute_attempt(
         {attempt_pressure_reference, as_const(trial_pressure),
          as_const(trial_enthalpy),
          {species_accepted.data(), species_accepted.size()},
-         as_const(trial_density)}};
+         as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
     PisoIntermediateCertificate refined_intermediate;
     // Once issued, the authority must be consumed even if the intervening
     // ghost/material refresh fails.  Passing that failure as prerequisite
@@ -14695,7 +14737,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoTerminalCertificate terminal;
   FinalForceCertificate force_certificate;
   if (terminal_path_active)
@@ -14895,6 +14937,13 @@ Status ProductDriver::Impl::execute_attempt(
       }
     }
   }
+  status = product.reductions.consensus(status);
+  if (status)
+    status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        product.boundary, product.thermodynamics, product.transport,
+        attempt_pressure_reference, as_const(trial_pressure),
+        {{}, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity,
+         enthalpy_diffusivity}, effective_viscosity);
   status = product.reductions.consensus(status);
   if (status && product.ibm_rate_donors.has_value()) {
     halo_count = 0U;

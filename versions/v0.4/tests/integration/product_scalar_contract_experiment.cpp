@@ -409,8 +409,14 @@ bool open_budget(bool species, bool reverse) {
       transport+=old_phi[side][f]*predictor_face+delta*correction_face;
       if(dirichlet) {
         MolecularTransportState material;
-        const double composition=before.scalar[cell];
-        if(!transport_plan.evaluate(initial(patch.begin.x+x,species,false).temperature,
+        // A fixed physical inlet now supplies its own molecular face state.
+        // Conditional pressure-outlet backflow keeps the old owner material
+        // contract. Keep the same conservation threshold and independent
+        // analytic flux oracle; do not read the solver's computed flux here.
+        const bool physical_inlet=!reverse && side==0;
+        const double composition=physical_inlet ? target : before.scalar[cell];
+        const double temperature=physical_inlet ? 320.0 : initial(patch.begin.x+x,species,false).temperature;
+        if(!transport_plan.evaluate(temperature,
             species ? Span<const double>{&composition,1U} : Span<const double>{},material)) { valid=false; continue; }
         diffusion+=2*material.viscosity*(target-before.scalar[cell])/width(0,patch.begin.x+x)*
             width(1,patch.begin.y+y)*width(2,patch.begin.z+z);

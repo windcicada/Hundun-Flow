@@ -261,12 +261,12 @@ double face_cross_traction(const CartesianKernelPlan& kernels,
   const Int3 left = axis_offset(face, axis, -1);
   const double mu_face =
       kernels.geometry_kind() == GeometryKind::uniform
-          ? detail::metric_interpolate_face<true>(
+          ? detail::metric_interpolate_material_face<true>(
                 kernels, axis,
                 axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
                 viscosity.unchecked(left, 0U),
                 viscosity.unchecked(face, 0U))
-          : detail::metric_interpolate_face<false>(
+          : detail::metric_interpolate_material_face<false>(
                 kernels, axis,
                 axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
                 viscosity.unchecked(left, 0U),

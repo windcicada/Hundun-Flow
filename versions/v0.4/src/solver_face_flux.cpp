@@ -106,7 +106,7 @@ Status reconstruct_axis(const CartesianKernelPlan& plan,
     for (std::int32_t y = face_begin.y; y < face_end.y; ++y) {
       for (std::int32_t x = face_begin.x; x < face_end.x; ++x) {
         const Int3 face{x, y, z};
-        const double rate =
+        double rate =
             detail::metric_interpolate_face<Uniform>(
                 plan, Axis, axis_index<Axis>(face),
                 cell_product(density, velocity,
@@ -115,6 +115,16 @@ Status reconstruct_axis(const CartesianKernelPlan& plan,
                              velocity_component),
                 cell_product(density, velocity, face, velocity_component)) *
             detail::metric_face_area<Uniform>(plan, Axis, face);
+        const auto normal=axis_index<Axis>(face);
+        if (plan.physical_inlet_material(Axis,normal)) {
+          const Int3 left=set_axis<Axis>(face,normal-1);
+          const Int3 ghost=normal==0 ? left : face;
+          rate=density.unchecked(ghost,0U)*
+              detail::metric_interpolate_face<Uniform>(plan,Axis,normal,
+                  velocity.unchecked(left,velocity_component),
+                  velocity.unchecked(face,velocity_component))*
+              detail::metric_face_area<Uniform>(plan,Axis,face);
+        }
         if (!std::isfinite(rate)) {
           return {StatusCode::numerical_failure, kFaceNumerical};
         }

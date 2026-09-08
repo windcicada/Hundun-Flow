@@ -471,6 +471,7 @@ bool thermophysical_boundary_tokens(
     const BoundaryThermophysicalGhostUse& use, ConstFieldView density,
     PlanFingerprint expected_thermodynamics,
     PlanFingerprint expected_transport,
+    bool physical_inlet_material,
     ThermophysicalBoundaryTokens& tokens) noexcept {
   tokens = {};
   if (!context.valid() || context.numeric_boundary != boundary.revision() ||
@@ -512,6 +513,8 @@ bool thermophysical_boundary_tokens(
     return true;
   }
   const BoundaryThermophysicalGhostBinding& binding = use.binding;
+  if ((binding.closure_kind==BoundaryThermophysicalClosureKind::physical_inlet_face)!=physical_inlet_material)
+    return false;
   if (use.certificate.thermodynamics() != expected_thermodynamics ||
       use.certificate.transport() != expected_transport ||
       !same_field_identity(binding.density, density) ||
@@ -2790,6 +2793,7 @@ Status PressureVelocityCoupler::refresh_impl(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, as_const(input.density),
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           thermophysical_boundary);
   const bool closed_reference =
       impl.pressure_reference_kind == PressureReferenceKind::closed_mass;
@@ -3074,6 +3078,7 @@ Status PressureVelocityCoupler::refresh_impl(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, as_const(density_with_ghosts),
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           revalidated_thermophysical_boundary) ||
       revalidated_thermophysical_boundary.semantics !=
           thermophysical_boundary.semantics ||
@@ -8559,6 +8564,7 @@ Status PressureVelocityCoupler::audit_pending_final(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, input.density,
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           thermophysical_boundary) &&
       (entirely_periodic(*impl.boundary) ||
        same_field_identity(

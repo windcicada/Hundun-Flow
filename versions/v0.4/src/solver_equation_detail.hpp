@@ -366,7 +366,9 @@ inline double positive_transmissibility(const CartesianKernelPlan& kernels,
     return std::numeric_limits<double>::quiet_NaN();
   }
   return face_area(kernels, axis, face) /
-         (left_distance / left_value + right_distance / right_value);
+         (kernels.physical_inlet_material(static_cast<std::size_t>(axis),normal)
+              ? (left_distance+right_distance)/(normal==0 ? left_value : right_value)
+              : left_distance / left_value + right_distance / right_value);
 }
 
 inline double diffusion_diagonal(const CartesianKernelPlan& kernels,
