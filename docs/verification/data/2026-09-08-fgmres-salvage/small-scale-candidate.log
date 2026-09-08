@@ -1,0 +1,17 @@
+FGMRES_SMALL_SCALE scale=1e-08 status=6 iterations=32 A=38 M=32 unsafe=17 discarded=0 explicit=17 residual=6.42724e-08 error=1
+rank 0 FAIL: small-scaled nonsymmetric system meets its true-residual contract within the requested work budget
+FGMRES_SMALL_SCALE scale=1e-06 status=6 iterations=32 A=38 M=32 unsafe=21 discarded=0 explicit=21 residual=6.42724e-06 error=1
+rank 0 FAIL: small-scaled nonsymmetric system meets its true-residual contract within the requested work budget
+FGMRES_SMALL_SCALE scale=0.0001 status=6 iterations=32 A=38 M=32 unsafe=4 discarded=0 explicit=4 residual=0.000642724 error=1
+rank 0 FAIL: small-scaled nonsymmetric system meets its true-residual contract within the requested work budget
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[9935,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

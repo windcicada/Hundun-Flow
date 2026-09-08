@@ -1,0 +1,55 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/DartConfiguration.tcl
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 287
+    Start 287: v04_solver_krylov_mpi_1
+
+287: Test command: /usr/bin/mpiexec "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+287: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests
+287: Test timeout computed to be: 90
+287: FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=44 A=53 M=44 unsafe=6 discarded=5 explicit=6 reported_residual=3.12402e-18 residual=3.12402e-18 error=8.23642e-11
+287: FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=44 A=61 M=44 unsafe=9 discarded=9 explicit=0 reported_residual=3.68775e-16 residual=3.68775e-16 error=1.22615e-10
+287: FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=37 A=51 M=37 unsafe=8 discarded=8 explicit=0 reported_residual=3.66048e-14 residual=3.66048e-14 error=8.54427e-11
+287: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+1/3 Test #287: v04_solver_krylov_mpi_1 ..........   Passed    0.32 sec
+test 289
+    Start 289: v04_solver_krylov_mpi_2
+
+289: Test command: /usr/bin/mpiexec "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+289: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests
+289: Test timeout computed to be: 90
+289: FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=44 A=58 M=44 unsafe=9 discarded=7 explicit=6 reported_residual=3.28914e-18 residual=3.28914e-18 error=8.55817e-11
+289: FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=44 A=58 M=44 unsafe=9 discarded=9 explicit=0 reported_residual=3.09652e-16 residual=3.09652e-16 error=6.97041e-11
+289: FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=38 A=52 M=38 unsafe=10 discarded=10 explicit=0 reported_residual=4.85469e-14 residual=4.85469e-14 error=8.86068e-11
+289: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+2/3 Test #289: v04_solver_krylov_mpi_2 ..........   Passed    0.30 sec
+test 291
+    Start 291: v04_solver_krylov_mpi_4
+
+291: Test command: /usr/bin/mpiexec "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests/v04_solver_krylov_mpi_test"
+291: Working Directory: /home/wyf/code_dev/.worktrees/hundun-flow-fgmres-salvage-trial-20260908/build-trial/versions/v0.4/tests
+291: Test timeout computed to be: 90
+291: FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=42 A=54 M=42 unsafe=8 discarded=6 explicit=7 reported_residual=2.98631e-18 residual=2.98631e-18 error=7.89392e-11
+291: FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=43 A=54 M=43 unsafe=5 discarded=5 explicit=0 reported_residual=3.20689e-16 residual=3.20689e-16 error=9.07684e-11
+291: FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=37 A=49 M=37 unsafe=5 discarded=5 explicit=0 reported_residual=3.23273e-14 residual=3.23273e-14 error=8.44024e-11
+291: FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+3/3 Test #291: v04_solver_krylov_mpi_4 ..........   Passed    0.34 sec
+
+The following tests passed:
+	v04_solver_krylov_mpi_1
+	v04_solver_krylov_mpi_2
+	v04_solver_krylov_mpi_4
+
+100% tests passed, 0 tests failed out of 3
+
+Label Time Summary:
+v04_focused    =   2.27 sec*proc (3 tests)
+
+Total Test time (real) =   0.98 sec

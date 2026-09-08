@@ -1,0 +1,3 @@
+FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=44 A=53 M=44 unsafe=6 discarded=5 explicit=6 residual=3.12402e-18 error=8.23642e-11
+FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=44 A=61 M=44 unsafe=9 discarded=9 explicit=0 residual=3.68775e-16 error=1.22615e-10
+FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=37 A=51 M=37 unsafe=8 discarded=8 explicit=0 residual=3.66048e-14 error=8.54427e-11

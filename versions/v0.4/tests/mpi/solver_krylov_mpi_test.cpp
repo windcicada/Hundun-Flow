@@ -1503,6 +1503,54 @@ bool test_breakdown_maxiter_and_stale_identity(MPI_Comm communicator,
   return all_true(passed, communicator);
 }
 
+bool test_fgmres_small_scaled_operator(MPI_Comm communicator, int rank) {
+  bool passed = true;
+  for (double scale : {1.0e-8, 1.0e-6, 1.0e-4}) {
+    SolveFixture fixture;
+    const bool ready = initialize_fixture(
+        communicator, LinearAlgorithm::fgmres, 12U, fixture);
+    if (!all_true(ready, communicator)) return false;
+    fill_system(fixture, -1.2 * scale, 3.0 * scale, -0.7 * scale);
+    TridiagonalOperator op(communicator, fixture.local, fixture.expected,
+                          -1.2 * scale, 3.0 * scale, -0.7 * scale, false);
+    ScalingPreconditioner fixed(fixture.expected, 1.0, false);
+    // A local experiment, not a new product iteration cap. The pre-change
+    // baseline needs 37-44 iterations on these legal systems.
+    auto selected = control(80U, 12U);
+    selected.absolute_tolerance = 1.0e-26;
+    FgmresRecoveryObservation observation;
+    LinearSolveResult result;
+    std::size_t allocations = 0U;
+    const auto before = snapshot_solution(fixture.solution.view);
+    {
+      allocation_observer::Guard guard;
+      result = solve_fgmres(op, fixed, invocation(fixture, selected),
+          fixture.workspace, fixture.reductions, nullptr, &observation);
+      allocations = allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    const auto oracle = independent_true_residual(fixture, communicator,
+        -1.2 * scale, 3.0 * scale, -0.7 * scale);
+    const double error = global_error(fixture, communicator);
+    if (rank == 0) std::cerr << "FGMRES_SMALL_SCALE scale=" << scale
+        << " status=" << static_cast<unsigned>(result.status.code)
+        << " iterations=" << result.iterations << " A=" << result.operator_applies
+        << " M=" << result.preconditioner_applies
+        << " unsafe=" << observation.unsafe_norms
+        << " discarded=" << observation.discarded_columns
+        << " explicit=" << observation.explicit_reorthogonalizations
+        << " reported_residual=" << result.final_true_residual
+        << " residual=" << oracle.residual << " error=" << error << '\n';
+    passed &= expect(result.status && residual_is_accepted(oracle, selected) &&
+        residual_report_matches(result.final_true_residual, oracle) && error < 1.0e-8 &&
+        allocations == 0U && op.calls() == result.operator_applies &&
+        fixed.calls() == result.preconditioner_applies,
+        rank, "small-scaled nonsymmetric system meets its true-residual contract within the requested work budget");
+    if (!result.status) passed &= expect(same_solution(fixture.solution.view, before),
+        rank, "failed small-scaled solve cannot publish an incomplete candidate");
+  }
+  return all_true(passed, communicator);
+}
+
 bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
   bool passed = true;
   {
@@ -4628,6 +4676,13 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   bool passed = size == 1 || size == 2 || size == 4;
+  if (argc == 2 && std::string_view(argv[1]) == "--small-scaled") {
+    passed &= test_fgmres_small_scaled_operator(MPI_COMM_WORLD, rank);
+    const bool global = all_true(passed, MPI_COMM_WORLD);
+    MPI_Finalize();
+    return global ? 0 : 1;
+  }
+  passed &= test_fgmres_small_scaled_operator(MPI_COMM_WORLD, rank);
   passed &= test_reported_true_residual_criterion(MPI_COMM_WORLD, rank);
   passed &= test_pcg_spd_and_zero_rhs(MPI_COMM_WORLD, rank);
   passed &= test_nonsymmetric_solvers(MPI_COMM_WORLD, rank);
