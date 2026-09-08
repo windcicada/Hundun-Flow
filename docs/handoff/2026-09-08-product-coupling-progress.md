@@ -185,6 +185,18 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - 这些是 native product 所需的采样/通信适配器；ProductCompiler 的 spray 拒绝仍保留，
   尚未共同提交 parcel/注射器，也尚未发布喷雾气相源。完整合并和圆柱恢复仍未执行。
 
+## 喷雾与 TCR 的组合持久状态
+
+- 原生 `ProductSprayHistory` 将 parcel 完整整数 ID、TAB、破碎序号和注射器余量/序号按
+  所在全局单元编码为 Restart V5；可同时携带每单元 120 字节 TCR 分支历史。
+- 注射器恢复与 TCR 字节恢复均先暂存，统一 preflight 后才发布；迟到的 TCR 身份错误
+  可撤回全部暂存状态。热阶段编码、恢复与提交不分配，初始容量计入所有自有缓冲。
+- 实际 RestartWriter/Reader 的 1→4、4→1 恢复逐字节核对组合状态，覆盖大于 2^53 的
+  ID/序号。原 ESF/TCR CLI 路径同步复核。Clang 13/13、GCC11/Cantera 14/14 PASS，
+  日志 `spray-history-final-{clang,gcc}.log`。
+- 父运行时仍须核对恢复位置/液体身份、全局 ID，并将这些暂存状态接入气相唯一事务。
+  当前仍未启用 spray 产品配置，完整合并和圆柱恢复尚未执行。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

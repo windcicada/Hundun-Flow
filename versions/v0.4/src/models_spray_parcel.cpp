@@ -779,6 +779,23 @@ InjectionReport DeterministicInjector::begin_trial(
   return report_;
 }
 
+Status
+DeterministicInjector::stage_restore(InjectorCommittedState state) noexcept {
+  if (!configured_)
+    return failure(StatusCode::invalid_plan,
+                   ParcelOperationDetail::injector_not_configured);
+  if (trial_active_)
+    return failure(StatusCode::rejected_step,
+                   ParcelOperationDetail::trial_already_active);
+  if (!valid_injector_spec(spec_, state))
+    return failure(StatusCode::invalid_case,
+                   ParcelOperationDetail::invalid_snapshot);
+  trial_state_ = state;
+  report_ = {};
+  trial_active_ = true;
+  return {};
+}
+
 Status DeterministicInjector::preflight_commit() const noexcept {
   if (!trial_active_) {
     return failure(StatusCode::rejected_step,

@@ -191,6 +191,16 @@ public:
 
   [[nodiscard]] InjectionReport begin_trial(std::uint64_t accepted_step,
                                             double duration_s) noexcept;
+  // Stage validated restart counters without changing the accepted injector.
+  // Publication and rollback use the same protocol as an injection attempt.
+  [[nodiscard]] Status stage_restore(InjectorCommittedState state) noexcept;
+  [[nodiscard]] bool
+  prepared_state(InjectorCommittedState &out) const noexcept {
+    if (!trial_active_)
+      return false;
+    out = trial_state_;
+    return true;
+  }
   [[nodiscard]] Status preflight_commit() const noexcept;
   // Precondition: preflight_commit() just succeeded and no intervening
   // mutation occurred. A synchronized shared-finish wrapper normally calls

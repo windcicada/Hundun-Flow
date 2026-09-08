@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "core_spray_history_detail.hpp"
+#include "core_tcr_history_detail.hpp"
 #include "models_spray_parcel_detail.hpp"
 
 #include <cmath>
@@ -310,6 +312,229 @@ bool same_report(const InjectionReport& left, const InjectionReport& right) {
          left.residual_mass_after_kg == right.residual_mass_after_kg;
 }
 
+bool test_native_spray_history(bool coupled_tcr) {
+  using namespace hundun::v04;
+  hundun::v04::detail::ProductSprayHistory history;
+  hundun::v04::detail::ProductTcrHistory tcr;
+  if (coupled_tcr)
+    tcr.configure(9001, 8, -1);
+  const auto stage_tcr = [&] {
+    if (!coupled_tcr)
+      return true;
+    for (std::size_t cell = 0; cell < 8; ++cell) {
+      const auto &old = tcr.accepted(cell);
+      tcr::detail::TrialRequest request;
+      request.expected_revision = old.revision;
+      request.mode = tcr::detail::Mode::experimental;
+      request.initialization_sign = -1;
+      request.mapping = {tcr::detail::Status::success,
+                         {.25, 1},
+                         tcr::detail::kReactantMoleFractionMappingIdentity};
+      const auto trial = tcr::detail::prepare(old, request);
+      if (!tcr.stage(cell, trial, 0))
+        return false;
+    }
+    tcr.seal();
+    return true;
+  };
+  auto spec = base_injector();
+  spec.owner_global_cell = 7;
+  const InjectorCommittedState original{.25, UINT64_C(9007199254740993)};
+  DeterministicInjector injector;
+  if (!injector.reserve(4) || !injector.configure(spec, original))
+    return false;
+  DeterministicInjector *injections[]{&injector};
+  const Int3 global{2, 2, 2};
+  const MeshPatch patch{{0, 0, 0}, global, {1, 1, 1}, {0, 0, 0}};
+  if (!history.configure(8001, patch, global, 4,
+                         spec.liquid_material_fingerprint, {injections, 1},
+                         tcr.snapshot(), 1U << 20))
+    return false;
+  const auto save = [](RestartCellRecordsView records, std::uint64_t step) {
+    RestartImage image;
+    image.source_format_version = 5;
+    image.step = step;
+    image.backward_euler_recovery = false;
+    image.cell_record_identity = records.identity;
+    image.cell_record_bytes = records.record_bytes;
+    if (records.values.size)
+      image.cell_records.assign(records.values.data,
+                                records.values.data + records.values.size);
+    image.cell_record_lengths.assign(records.variable_cell_bytes.data,
+                                     records.variable_cell_bytes.data +
+                                         records.variable_cell_bytes.size);
+    return image;
+  };
+  const auto initial = save(history.snapshot(), 0);
+  if (!injector.begin_trial(0, 1).succeeded())
+    return false;
+  std::array<hundun::v04::detail::ProductSprayHistory::Parcel, 2> parcels;
+  if (!injector.candidate_at(0, parcels[0].parcel) ||
+      !injector.candidate_at(1, parcels[1].parcel))
+    return false;
+  parcels[0].parcel.owner_global_cell = 0;
+  parcels[0].tab_deformation = -.25;
+  parcels[0].tab_deformation_rate_per_s = 12;
+  parcels[0].breakup_ordinal = UINT64_C(9007199254740997);
+  parcels[1].breakup_ordinal = UINT64_MAX - 1;
+  if (!stage_tcr())
+    return false;
+  hot_allocation_count = 0;
+  count_hot_allocations = true;
+  const auto staged = history.stage_next({parcels.data(), parcels.size()}, 0,
+                                         tcr.prepared_snapshot());
+  const auto ready = history.preflight_commit();
+  count_hot_allocations = false;
+  auto accepted = save(history.snapshot(), 0);
+  bool passed = expect(staged && ready && hot_allocation_count == 0 &&
+                           history.accepted_parcels().size == 0 &&
+                           history.prepared_parcels().size == 2 &&
+                           accepted.cell_records == initial.cell_records &&
+                           injector.committed_state() == original,
+                       "native parcel, encoded history and injector counters "
+                       "remain pending together");
+  if (!passed)
+    return false;
+  history.discard();
+  tcr.discard();
+  passed &= expect(!history.preflight_commit() && !injector.trial_active() &&
+                       injector.committed_state() == original,
+                   "gas rejection withdraws all pending spray participants");
+  if (!injector.begin_trial(0, 1).succeeded() || !stage_tcr() ||
+      !history.stage_next({parcels.data(), parcels.size()}, 0,
+                          tcr.prepared_snapshot()) ||
+      !history.preflight_commit())
+    return false;
+  history.commit();
+  tcr.commit();
+  auto image = save(history.snapshot(), 1);
+  const auto emitted = injector.committed_state();
+  passed &= expect(history.accepted_parcels().size == 2 &&
+                       emitted.next_ordinal == original.next_ordinal + 2 &&
+                       image.cell_record_lengths[0] ==
+                           24 + 144 + (coupled_tcr ? 120 : 0) &&
+                       image.cell_record_lengths[7] ==
+                           24 + 144 + 24 + (coupled_tcr ? 120 : 0),
+                   "one publication advances parcels and exact counters into "
+                   "cell-partitioned V5 records");
+  if (!expect(bool(history.stage_restore(initial)),
+              "initial complete-history snapshot stages"))
+    return false;
+  if (!tcr.stage_restore_records(history.prepared_tcr_records(), 0))
+    return false;
+  history.commit();
+  tcr.commit();
+  auto corrupt = image;
+  corrupt.cell_records[0] = 2; // embedded cell step disagrees with native clock
+  passed &= expect(
+      !history.stage_restore(corrupt) && history.accepted_parcels().size == 0 &&
+          injector.committed_state() == original,
+      "corrupt cell clock rejects before any parcel or injector is restored");
+  hot_allocation_count = 0;
+  count_hot_allocations = true;
+  const auto restore = history.stage_restore(image);
+  const auto restore_ready = history.preflight_commit();
+  const auto tcr_restore =
+      tcr.stage_restore_records(history.prepared_tcr_records(), 1);
+  count_hot_allocations = false;
+  passed &= expect(restore && restore_ready && tcr_restore &&
+                       hot_allocation_count == 0 &&
+                       injector.committed_state() == original &&
+                       history.accepted_parcels().size == 0,
+                   "valid V5 restore stages all spray state without allocation "
+                   "or early publication");
+  if (!restore || !restore_ready || !tcr_restore)
+    return false;
+  history.commit();
+  tcr.commit();
+  const auto restored = history.accepted_parcels();
+  passed &= expect(
+      restored.size == 2 &&
+          same_parcel(restored.data[0].parcel, parcels[0].parcel) &&
+          same_parcel(restored.data[1].parcel, parcels[1].parcel) &&
+          restored.data[0].tab_deformation == -.25 &&
+          restored.data[0].tab_deformation_rate_per_s == 12 &&
+          restored.data[0].breakup_ordinal == UINT64_C(9007199254740997) &&
+          restored.data[1].breakup_ordinal == UINT64_MAX - 1 &&
+          injector.committed_state() == emitted,
+      "V5 restore preserves full parcel IDs, TAB and uint64 breakup/injection "
+      "lineage");
+  if (coupled_tcr) {
+    auto damaged = image;
+    damaged.cell_records[24 + 64] ^=
+        1; // valid outer record, wrong TCR mapping identity
+    const auto parcel_restore = history.stage_restore(damaged);
+    const auto tcr_restore =
+        tcr.stage_restore_records(history.prepared_tcr_records(), 1);
+    history.discard();
+    tcr.discard();
+    const auto unchanged = history.snapshot();
+    passed &=
+        expect(parcel_restore && !tcr_restore && !injector.trial_active() &&
+                   injector.committed_state() == emitted &&
+                   unchanged.values.size == image.cell_records.size() &&
+                   std::equal(image.cell_records.begin(),
+                              image.cell_records.end(), unchanged.values.data),
+               "late typed TCR rejection withdraws prepared injector/parcel "
+               "restore without changing accepted bytes");
+  }
+  if (coupled_tcr)
+    passed &= expect(tcr.accepted(7).revision.accepted_step == 1 &&
+                         tcr.accepted(7).branch_sign == -1 &&
+                         std::abs(tcr.accepted(7).control - 1.0 / 3) < 1e-14,
+                     "combined V5 payload restores typed TCR branch history "
+                     "with spray state");
+  return passed;
+}
+
+bool test_staged_injector_restore() {
+  DeterministicInjector injector, reference;
+  const auto spec = base_injector();
+  const InjectorCommittedState original{.25, 100};
+  const InjectorCommittedState restored{.375, UINT64_C(9007199254740993)};
+  if (!injector.reserve(4) || !injector.configure(spec, original) ||
+      !reference.reserve(4) || !reference.configure(spec, restored))
+    return false;
+  InjectorCommittedState candidate;
+  hot_allocation_count = 0;
+  count_hot_allocations = true;
+  const auto staged = injector.stage_restore(restored);
+  const auto prepared = injector.prepared_state(candidate);
+  const auto preflight = injector.preflight_commit();
+  count_hot_allocations = false;
+  bool passed =
+      expect(staged && prepared && preflight && candidate == restored &&
+                 injector.committed_state() == original &&
+                 injector.candidate_count() == 0 && hot_allocation_count == 0,
+             "restore counters stage without injecting parcels or publishing "
+             "accepted state");
+  if (!passed)
+    return false;
+  passed &= expect(
+      injector.rollback_trial() && injector.committed_state() == original &&
+          !injector.prepared_state(candidate),
+      "failed native restore can withdraw prepared injector counters");
+  passed &=
+      expect(!injector.stage_restore({-1, 7}) && !injector.trial_active() &&
+                 injector.committed_state() == original,
+             "invalid restart remainder leaves injector untouched");
+  passed &=
+      expect(injector.stage_restore(restored) && injector.commit_trial() &&
+                 injector.committed_state() == restored,
+             "restart publication preserves counters above 2^53 exactly");
+  const auto a = injector.begin_trial(42, 1), b = reference.begin_trial(42, 1);
+  passed &= expect(a.succeeded() && b.succeeded() && same_report(a, b),
+                   "restored counters produce the same next injection report");
+  for (std::size_t i = 0; i < a.parcel_count; ++i) {
+    SprayParcelState x, y;
+    passed &=
+        expect(injector.candidate_at(i, x) && reference.candidate_at(i, y) &&
+                   same_parcel(x, y),
+               "post-restore injector emits exact reference parcel identities");
+  }
+  return passed;
+}
+
 bool test_injector_residual_retry_and_identity() {
   static_assert(!std::is_move_constructible<DeterministicInjector>::value,
                 "moving an active injector would invalidate its trial state");
@@ -561,6 +786,9 @@ int main() {
       !prepare_parcel_lifecycle_restore(snapshot.values,revision,2,0).available,
       "unknown RNG, stale revision and capacity shortages cannot publish partial restore");
   passed &= test_injector_residual_retry_and_identity();
+  passed &= test_staged_injector_restore();
+  passed &= test_native_spray_history(false);
+  passed &= test_native_spray_history(true);
   passed &= test_micro_mass_residual_scale();
   passed &= test_cone_zero_flow_and_capacity_failure();
   return passed ? 0 : 1;

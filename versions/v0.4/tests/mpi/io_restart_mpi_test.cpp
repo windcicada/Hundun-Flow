@@ -4,6 +4,8 @@
 #include "hundun/v04_io.hpp"
 
 #include "../support/piso_fixture.hpp"
+#include "core_spray_history_detail.hpp"
+#include "core_tcr_history_detail.hpp"
 #include "io_restart_detail.hpp"
 
 #include <mpi.h>
@@ -664,6 +666,181 @@ std::vector<std::uint8_t> variable_records(const MeshPatch &patch,
   return values;
 }
 
+struct SprayHistoryFixture {
+  detail::ProductSprayHistory history;
+  detail::ProductTcrHistory tcr;
+  spray::detail::DeterministicInjector injector;
+  std::vector<detail::ProductSprayHistory::Parcel> parcels;
+  bool owns_injector{};
+  bool initialize(MeshPatch patch, bool advance) {
+    const auto count =
+        std::size_t(patch.cells.x) * patch.cells.y * patch.cells.z;
+    tcr.configure(991, count, -1);
+    owns_injector =
+        patch.begin.x == 0 && patch.begin.y == 0 && patch.begin.z == 0;
+    spray::detail::DeterministicInjector *pointer = &injector;
+    if (owns_injector) {
+      spray::detail::InjectorSpec spec;
+      spec.seed = 93;
+      spec.injector_id = 77;
+      spec.axis = {1, 0, 0};
+      spec.mass_flow_rate_kg_per_s = .5;
+      spec.represented_mass_per_parcel_kg = 1;
+      spec.droplet_mass_kg = 1e-9;
+      spec.droplet_diameter_m = 1e-4;
+      spec.temperature_k = 300;
+      spec.liquid_material_fingerprint = 123;
+      spec.owner_global_cell = 0;
+      if (!injector.reserve(2) ||
+          !injector.configure(spec, {.25, UINT64_C(9007199254740993)}))
+        return false;
+    }
+    if (!history.configure(
+            990, patch, kGlobal, 2 * count, 123,
+            {owns_injector ? &pointer : nullptr, owns_injector ? 1U : 0U},
+            tcr.snapshot(), 1U << 24))
+      return false;
+    if (!advance)
+      return true;
+    for (int z = 0; z < patch.cells.z; ++z)
+      for (int y = 0; y < patch.cells.y; ++y)
+        for (int x = 0; x < patch.cells.x; ++x) {
+          const std::uint64_t global =
+              (x + patch.begin.x) +
+              kGlobal.x *
+                  ((y + patch.begin.y) + kGlobal.y * (z + patch.begin.z));
+          for (unsigned j = 0; j < global % 3; ++j) {
+            detail::ProductSprayHistory::Parcel v;
+            v.parcel.id = {UINT64_C(9007199254741001) + global, j + 1};
+            v.parcel.position_m = {(x + patch.begin.x + .5) / kGlobal.x,
+                                   (y + patch.begin.y + .5) / kGlobal.y,
+                                   (z + patch.begin.z + .5) / kGlobal.z};
+            v.parcel.velocity_m_per_s = {.1, -.2, .3};
+            v.parcel.droplet_mass_kg = 1e-9;
+            v.parcel.droplet_diameter_m = 1e-4;
+            v.parcel.multiplicity = 2;
+            v.parcel.temperature_k = 300 + .1 * global;
+            v.parcel.liquid_material_fingerprint = 123;
+            v.parcel.owner_global_cell = global;
+            v.parcel.age_s = .01;
+            v.tab_deformation = -.25;
+            v.tab_deformation_rate_per_s = global + .5;
+            v.breakup_ordinal = UINT64_MAX - global - j;
+            parcels.push_back(v);
+          }
+        }
+    for (std::size_t i = 0; i < count; ++i) {
+      tcr::detail::TrialRequest request;
+      request.expected_revision = tcr.accepted(i).revision;
+      request.mode = tcr::detail::Mode::experimental;
+      request.initialization_sign = -1;
+      request.mapping = {tcr::detail::Status::success,
+                         {.25, 1},
+                         tcr::detail::kReactantMoleFractionMappingIdentity};
+      if (!tcr.stage(i, tcr::detail::prepare(tcr.accepted(i), request), 0))
+        return false;
+    }
+    tcr.seal();
+    if (owns_injector && !injector.begin_trial(0, 1).succeeded())
+      return false;
+    if (!history.stage_next({parcels.data(), parcels.size()}, 0,
+                            tcr.prepared_snapshot()) ||
+        !history.preflight_commit())
+      return false;
+    history.commit();
+    tcr.commit();
+    return true;
+  }
+};
+
+bool spray_history_repartition(MPI_Comm world, int writers, int readers,
+                               const fs::path &directory) {
+  int rank = 0;
+  MPI_Comm_rank(world, &rank);
+  MPI_Comm writer = MPI_COMM_NULL, reader = MPI_COMM_NULL;
+  MPI_Comm_split(world, rank < writers ? 0 : MPI_UNDEFINED, rank, &writer);
+  bool passed = true;
+  if (writer != MPI_COMM_NULL) {
+    ExactFixture fields;
+    SprayHistoryFixture spray;
+    passed =
+        fields.initialize(writer) && spray.initialize(fields.base.patch, true);
+    int all_ready = passed ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &all_ready, 1, MPI_INT, MPI_MIN, writer);
+    passed = all_ready != 0;
+    if (passed) {
+      auto snapshot = fields.snapshot();
+      snapshot.step = 1;
+      snapshot.time = .01;
+      snapshot.method_history_signature = 993;
+      snapshot.cell_records = spray.history.snapshot();
+      passed = bool(RestartWriter::write(writer, directory, snapshot));
+    }
+    MPI_Comm_free(&writer);
+  }
+  MPI_Barrier(world);
+  MPI_Comm_split(world, rank < readers ? 0 : MPI_UNDEFINED, rank, &reader);
+  if (reader != MPI_COMM_NULL) {
+    ExactFixture fixture;
+    SprayHistoryFixture restored, reference;
+    passed &= fixture.initialize(reader) &&
+              restored.initialize(fixture.base.patch, false) &&
+              reference.initialize(fixture.base.patch, true);
+    const std::array<RestartExpectedField, 4> fields{
+        {{RestartFieldRole::velocity, 0, 3},
+         {RestartFieldRole::pressure_perturbation, 1, 1},
+         {RestartFieldRole::enthalpy, 2, 1},
+         {RestartFieldRole::independent_species, 3, 1}}};
+    const std::array<RestartExpectedField, 2> rates{
+        {{RestartFieldRole::enthalpy_nonadvective_rate, 10, 1},
+         {RestartFieldRole::scalar_nonadvective_rate, 11, 1}}};
+    RestartExpected expected{kGlobal,
+                             fixture.base.patch,
+                             kPlan,
+                             kSchema,
+                             kGeometry,
+                             {fields.data(), fields.size()},
+                             {rates.data(), rates.size()}};
+    expected.cell_record_identity = 990;
+    expected.cell_record_bytes = 0;
+    RestartImage image;
+    const auto read = RestartReader::load(reader, directory, expected, image);
+    passed &= read && image.history_compatibility(993) ==
+                          RestartHistoryCompatibility::compatible;
+    if (read) {
+      const auto prepared = restored.history.stage_restore(image);
+      const auto tcr = restored.tcr.stage_restore_records(
+          restored.history.prepared_tcr_records(), image.step);
+      passed &= prepared && tcr && restored.history.preflight_commit();
+      if (prepared && tcr && restored.history.preflight_commit()) {
+        restored.history.commit();
+        restored.tcr.commit();
+        const auto a = restored.history.snapshot(),
+                   b = reference.history.snapshot();
+        passed &=
+            a.values.size == b.values.size &&
+            a.variable_cell_bytes.size == b.variable_cell_bytes.size &&
+            std::equal(a.values.data, a.values.data + a.values.size,
+                       b.values.data) &&
+            std::equal(a.variable_cell_bytes.data,
+                       a.variable_cell_bytes.data + a.variable_cell_bytes.size,
+                       b.variable_cell_bytes.data);
+        if (restored.owns_injector)
+          passed &= restored.injector.committed_state() ==
+                    reference.injector.committed_state();
+      }
+    }
+    MPI_Comm_free(&reader);
+  }
+  MPI_Barrier(world);
+  int okay = passed ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &okay, 1, MPI_INT, MPI_MIN, world);
+  if (!okay && rank == 0)
+    std::cerr << "FAIL: native spray/TCR variable-cell repartition " << writers
+              << "->" << readers << '\n';
+  return okay != 0;
+}
+
 bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
                         const fs::path &directory, bool variable = false,
                         bool empty = false) {
@@ -1264,6 +1441,10 @@ int main(int argc, char** argv) {
     MPI_Finalize();
     return global ? 0 : 1;
   }
+  passed &= spray_history_repartition(MPI_COMM_WORLD, 1, 4,
+                                      base / "spray-one-to-four");
+  passed &= spray_history_repartition(MPI_COMM_WORLD, 4, 1,
+                                      base / "spray-four-to-one");
   passed &=
       record_repartition(MPI_COMM_WORLD, 1, 4, base / "records-one-to-four");
   passed &=

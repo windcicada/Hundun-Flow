@@ -36,6 +36,13 @@ public:
                                                accepted_bytes_.size()}}
                      : RestartCellRecordsView{};
   }
+  RestartCellRecordsView prepared_snapshot() const noexcept {
+    return pending_ ? RestartCellRecordsView{identity_,
+                                             record_bytes,
+                                             {trial_bytes_.data(),
+                                              trial_bytes_.size()}}
+                    : RestartCellRecordsView{};
+  }
   const tcr::detail::History &accepted(std::size_t cell) const noexcept {
     return accepted_[cell];
   }
@@ -76,10 +83,23 @@ public:
       return {};
     if (image.source_format_version != 4 || image.backward_euler_recovery)
       return invalid();
+    return stage_restore_records(
+        {image.cell_records.data(), image.cell_records.size()}, image.step);
+  }
+  // A combined V5 owner has already checked its outer model identity/format
+  // and exact native clock; this still validates every typed TCR history.
+  Status stage_restore_records(Span<const std::uint8_t> records,
+                               std::uint64_t step) noexcept {
+    discard();
+    if (records.size != accepted_bytes_.size() ||
+        (records.size && !records.data))
+      return invalid();
+    if (!enabled())
+      return {};
     for (std::size_t i = 0; i < accepted_.size(); ++i) {
       auto &history = trial_[i];
-      if (!decode(image.cell_records.data() + i * record_bytes, history) ||
-          history.revision.accepted_step != image.step ||
+      if (!decode(records.data + i * record_bytes, history) ||
+          history.revision.accepted_step != step ||
           history.revision.input_revision == 0 ||
           !tcr::detail::restore(history, history.revision).available ||
           (history.initialized &&
@@ -89,8 +109,7 @@ public:
              history.initialization_sign != initialization_sign_))))
         return invalid();
     }
-    std::copy(image.cell_records.begin(), image.cell_records.end(),
-              trial_bytes_.begin());
+    std::copy(records.data, records.data + records.size, trial_bytes_.begin());
     seal();
     return {};
   }
