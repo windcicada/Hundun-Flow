@@ -225,6 +225,27 @@ inline double product_pressure_aitken_initial_alpha(
   return std::min(kPressureEnergyAitkenMaximumAlpha, alpha);
 }
 
+class ProductPressureExtrapolationBackoff {
+ public:
+  double propose(double previous_merit, double current_merit,
+                 double previous_alpha) noexcept {
+    // Keep the existing stagnation criterion, but retain its evidence for
+    // this C2 sequence. A good unit step is not evidence that the preceding
+    // stalled norm-based extrapolation has become useful again.
+    if (std::isfinite(previous_merit) && previous_merit > 0.0 &&
+        std::isfinite(current_merit) && current_merit > 0.0 &&
+        previous_alpha > 1.0 &&
+        previous_alpha <= kPressureEnergyAitkenMaximumAlpha &&
+        current_merit >= 0.9 * previous_merit)
+      stalled_ = true;
+    return stalled_ ? 1.0 : product_pressure_aitken_initial_alpha(
+                                 previous_merit, current_merit, previous_alpha);
+  }
+
+ private:
+  bool stalled_{};
+};
+
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
 inline constexpr std::size_t
     kPressureEnergyCandidateGlobalizationSampleCapacity = 25U;

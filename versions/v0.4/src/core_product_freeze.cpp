@@ -14318,6 +14318,7 @@ Status ProductDriver::Impl::execute_attempt(
       pressure_energy_loop_merit(candidate_loop_one,
                                  pressure_energy_previous_merit);
   std::uint8_t refinement_iteration = 1U;
+  detail::ProductPressureExtrapolationBackoff refinement_extrapolation;
   while (status && pressure_energy_candidate_scope &&
          !pressure_energy_refinement_converged &&
          refinement_iteration <= kPressureEnergyRefinementCapacity) {
@@ -14433,7 +14434,7 @@ Status ProductDriver::Impl::execute_attempt(
     const double refinement_extrapolated_alpha =
         pressure_energy_previous_merit_available &&
                 pressure_energy_current_merit_available
-            ? detail::product_pressure_aitken_initial_alpha(
+            ? refinement_extrapolation.propose(
                   pressure_energy_previous_merit,
                   pressure_energy_current_merit,
                   candidate_loop_two.selected_alpha)

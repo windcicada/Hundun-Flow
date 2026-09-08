@@ -45,6 +45,59 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G28 (proposal-control repair under verification; G26 formal run continues
+  unchanged): retain failed extrapolation evidence within one C2 refinement
+  sequence. G27 replay after the conductivity fix shows a different blocker:
+  step20003's first attempt ends C=3.8641036332585927e-15 above16eps, while
+  E=3.7392707733662907e-15 passes. Selected alpha≈1.45 steps repeatedly
+  contract C by only≈0.9 versus≈0.3 for unit steps; the stateless proposal
+  forgets the stall after one unit step and re-enables extrapolation.
+  Controlled all-unit A/B at identical dt/tolerances/12-refinement capacity
+  accepts the original BDF2 target4.0453588489742308e-8 without retry, versus
+  baseline BE retry at half dt. Matched O2/no-LTO builds: max-rank step time
+  339.529691023s baseline versus290.818829346s unit probe. Reports are bounded:
+  baseline64/dropped28, unit64/dropped16; full first-sweep prefixes retained,
+  not complete all-sweep performance traces. This proves a repeated proposal
+  penalty, not the sign of the full residual-vector contraction.
+  Locations/reasons relative to `versions/v0.4/`:
+  `src/core_product_freeze_detail.hpp:228` adds per-sequence backoff, retaining
+  the EXISTING0.9 stagnation criterion only after a selected extrapolated
+  step; a successful unit step no longer clears that evidence.
+  `src/core_product_freeze.cpp:14321` / `:14437` C2 setup/proposal sites instantiate
+  a fresh state per sequence and route proposals through it. No extra field,
+  MPI collective, tolerance, cap, equation, source or boundary change.
+  `tests/integration/core_product_freeze_test.cpp:280` adds the observed
+  stall→unit sequence, persistent backoff and independent-sequence reset.
+  The test was run against a stateless wrapper BEFORE the fix and fails
+  exactly the two persistence assertions (`remaining-retries-g27/backoff-red.log`).
+  The production candidate preserves useful extrapolation; it does NOT keep
+  the diagnostic probe's unconditional alpha1 or#if0 code. New stateful
+  regression plus core freeze/retry/thermal-halo checks pass7/7 (10.86s).
+  Wider scalar/temporal/history checks pass30/33 (169.78s); only the already
+  established variable-thermo MPI1/2/4 cases fail. Both PISO and SIMPLE temporal
+  convergence and explicit method-history recovery tests pass. Total this
+  candidate:37/40 selected tests pass; the separate known stale-authority MPI2
+  issue was not repaired or relabeled as passing.
+  Actual original-step replay also passes: step20003, BDF2,
+  dt4.0453588489742308e-8, no retry, C1.5099564507076483e-15,
+  E1.4737215044035024e-15, exit0. The first sweep retains the original initial
+  extrapolations, sees the stalled alpha1.465 at refinement4, then uses unit
+  steps through convergence at refinement11. Bounded report64/dropped33;
+  only retained prefixes can be attributed. Max-rank step412.675340466s is
+  LONGER than baseline339.529691023s, while advancing twice its accepted
+  physical interval and preserving BDF2. Do not claim an absolute per-step
+  speedup; the all-unit diagnostic remains faster but is not this candidate.
+  Method-history physical
+  state/rate/flux semantics are unchanged; this only selects nonlinear trial
+  proposals before the same exact acceptance gates.
+  A new signed/clean acceptance build may therefore continue an exactly
+  read-back G26 V3 checkpoint under require_compatible, with no BE history
+  rebuild. It must independently commit100 short-test steps; earlier G26
+  counts are not concatenated. Medium3000 follows only after evidence and
+  exact native current/previous state/rate/flux readback gates pass.
+  External diagnostics and temporary-probe patch are retained in
+  `/home/administrator/gtmc-hundun-port-20260908/remaining-retries-g27/`.
+
 - G26 (development fix under verification; based on clean `fcfc524`):
   exchange generic-mixture thermal material on MPI/periodic neighbor slabs.
   G25 diagnostic root cause: candidate conductivity ghosts stayed at initial
