@@ -1,0 +1,55 @@
+{
+  "service": "hundun-re3900-integrated-long-20260908.service",
+  "service_state": "MainPID=165884\nActiveState=active\nSubState=running\n",
+  "source_head": "f4f04eccc4f159cf7aa55e4244cb36b7e642cb77",
+  "source_step": 10510,
+  "target_step": 35000,
+  "run_root": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/long-integrated-35000-20260908",
+  "startup_verified": true,
+  "long_run_complete": false,
+  "health_step_range": [
+    10511,
+    10522
+  ],
+  "bdf2_steps": 12,
+  "retries": 0,
+  "terminal_maxima": {
+    "eos": 0.0,
+    "continuity": 2.8302423439211935e-07,
+    "energy": 9.296890369296903e-07,
+    "closed_mass": 0.0,
+    "gauge": 0.0
+  },
+  "restart_anchor": {
+    "kind": "restart",
+    "previous_step": 10510,
+    "previous_time": 0.14513166797853047,
+    "restart_manifest_sha256": "26b46f940a8ffb451b3342821b1da2313ea0362c5c59924b736905c5f21b950f",
+    "history": {
+      "source_format_version": 3,
+      "source_signature": 12213963202598979269,
+      "target_signature": 12213963202598979269,
+      "policy": "require_compatible"
+    }
+  },
+  "observer_validated_steps": 13,
+  "observer_issues": [
+    "missing/truncated expected step 10524"
+  ],
+  "ranks": 128,
+  "ranks_rss_sum_kib": 27325004,
+  "next_checkpoint_and_visit_step": 11000,
+  "source_and_frozen_hashes_unchanged": true,
+  "evidence_partial_tail_bytes_excluded": 0,
+  "checksums": {
+    "PILOT_ACCEPTED.json": "87abaf035a701c42c870b8ddcf630e97c4db373966607d5f19f858172c34d276",
+    "FROZEN.sha256": "752d96b97b25a83f66cd744c19348871e9c9bd77bd8017c4a4fb3a25f6e2de86",
+    "SOURCE-LONG.sha256": "548f0a0b984f3e5264e141a2bf03995797882f8e57e253b20c856535939111b8",
+    "startup-observation.json": "5424a84417bc03c37fa0c2a60833d3be262c45eea8c0c52f521e0af423fa0d54"
+  },
+  "limitations": [
+    "Read-only asynchronous snapshot; CSV streams can stop on different steps.",
+    "Raw evidence retained; only complete JSONL records submitted to runtime validator.",
+    "RSS is a single process-sum snapshot, not leak or memory-trend acceptance."
+  ]
+}

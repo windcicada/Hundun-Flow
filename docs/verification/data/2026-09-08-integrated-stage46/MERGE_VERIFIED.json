@@ -1,0 +1,44 @@
+{
+  "head": "f4f04eccc4f159cf7aa55e4244cb36b7e642cb77",
+  "tree": "f29dae4f4d3c71e22d435d31f407d5dcb0ffc24e",
+  "parents": [
+    "25b3ea952e8441175243e2cf5ca3d1f3a9a827f2",
+    "f3ad77b0b0aa2105ff946a5a4680400ee41f1177"
+  ],
+  "base": "86542bb96678ec844ae5ac95d8f6391993da239e",
+  "overlap": [
+    "versions/v0.4/tests/CMakeLists.txt"
+  ],
+  "donor_files": 83,
+  "main_files": 139,
+  "disjoint_files_preserved": true,
+  "manifest": {
+    "schema": "HUNDUN_V04_BUILD_MANIFEST_V2",
+    "head": "18ded2242e8becf2303eda50532f50c3c06a9233e9a84b85b304c7f177789090",
+    "tree": "fc8665c27225a20fe96f1f68944b7881472cf5ee7ecbd545b0bf15e49441f435",
+    "core_source_clean": "true",
+    "core_dirty_summary": "",
+    "core_source_content_sha256": "9c36f0fbb5a1644135d57d01cc863ea6098a6dc7c44782882ab2f5b84a83e4d2",
+    "c_compiler_id": "GNU",
+    "c_compiler_version": "7.5.0",
+    "c_compiler_flags": "-O3 -DNDEBUG",
+    "c_standard_default": "11",
+    "cxx_standard": "17",
+    "core_definitions": "OMPI_SKIP_MPICXX=1,MPICH_SKIP_MPICXX=1",
+    "mpi_c_compile_options": "-pthread",
+    "mpi_c_link_flags": "-L/usr/lib/x86_64-linux-gnu/openmpi/lib -pthread",
+    "compiler_id": "Clang",
+    "compiler_version": "15.0.6",
+    "compiler_flags": "-stdlib=libc++ -isystem /home/wyf/.local/opt/hundun-toolchain/clang/include/c++/v1 -march=znver3 -mno-fma -ffp-contract=off -O3 -DNDEBUG",
+    "link_flags": "",
+    "build_type": "Release",
+    "source_version": "v0.4",
+    "tests": "ON",
+    "asan": "OFF",
+    "ubsan": "OFF",
+    "hypre": "OFF",
+    "target": "v04_thin_domain_runner",
+    "entry_sha256": "9fc306bd5a24f814b98219850c81d0d2400d71fc12f25b2f3a62b6a49215aa3a",
+    "target_source_clean": "true"
+  }
+}

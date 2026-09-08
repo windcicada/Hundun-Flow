@@ -1,0 +1,947 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="(empty)"
+	tests="111"
+	failures="0"
+	disabled="0"
+	skipped="6"
+	hostname=""
+	time="200"
+	timestamp="2026-09-08T15:44:31"
+	>
+	<testcase name="v04_solver_observation_cli" classname="v04_solver_observation_cli" time="4.1973" status="run">
+		<properties/>
+		<system-out>streamed CLI traced peak bytes (8/2048 steps): [2852768, 3882626]
+solver observation CLI PASS (88 checks: frozen ranks/range, source identity, corruption, partial, streaming)
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_mg_observation_cli" classname="v04_solver_mg_observation_cli" time="1.59004" status="run">
+		<properties/>
+		<system-out>MG observer synthetic ledger, details, partial and 33 rejection checks PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_fgmres_observation_cli" classname="v04_solver_fgmres_observation_cli" time="1.41266" status="run">
+		<properties/>
+		<system-out>V6 FGMRES observer: 28 rejection checks, independent work sums, optional MG, unsupported algorithm, partial whole-step output, streaming and source immutability PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_fgmres_log_completion_mpi_2" classname="v04_runner_fgmres_log_completion_mpi_2" time="31.5944" status="run">
+		<properties>
+			<property name="cmake_labels" value="io_failure_audit"/>
+		</properties>
+		<system-out>baseline-off returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+disabled-observer returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]]
+baseline-0 returncode=0 rank_exits=[[0, 2, 1, 0, 0], [0, 0, 0, 0, 0]]
+close-0-5 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+flush-0-5 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+close-0-28 returncode=6 rank_exits=[[6, 2, 1, 0, 1], [6, 0, 0, 0, 0]]
+flush-0-28 returncode=6 rank_exits=[[6, 2, 1, 1, 0], [6, 0, 0, 0, 0]]
+first-error-0 returncode=6 rank_exits=[[6, 2, 1, 1, 1], [6, 0, 0, 0, 0]]
+baseline-1 returncode=0 rank_exits=[[0, 0, 0, 0, 0], [0, 2, 1, 0, 0]]
+close-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+flush-1-5 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+close-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 0, 1]]
+flush-1-28 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 0]]
+first-error-1 returncode=6 rank_exits=[[6, 0, 0, 0, 0], [6, 2, 1, 1, 1]]
+</system-out>
+	</testcase>
+	<testcase name="v04_app_restart_policy_cli_mpi_1" classname="v04_app_restart_policy_cli_mpi_1" time="26.2638" status="run">
+		<properties/>
+		<system-out>PASS ordinary CLI history chain ranks=1
+</system-out>
+	</testcase>
+	<testcase name="v04_app_restart_policy_cli_mpi_2" classname="v04_app_restart_policy_cli_mpi_2" time="23.3718" status="run">
+		<properties/>
+		<system-out>PASS ordinary CLI history chain ranks=2
+</system-out>
+	</testcase>
+	<testcase name="v04_app_restart_policy_cli_mpi_4" classname="v04_app_restart_policy_cli_mpi_4" time="8.27856" status="run">
+		<properties/>
+		<system-out>PASS ordinary CLI history chain ranks=4
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_fgmres_recovery_mpi_1" classname="v04_runner_fgmres_recovery_mpi_1" time="17.6724" status="run">
+		<properties/>
+		<system-out>FGMRES CLI on ranks=1 Arnoldi=6 complete/checkpoint parity PASS
+FGMRES CLI recovery-only ranks=1 Arnoldi=6 complete/checkpoint parity PASS
+BiCGStab CLI ranks=1 A+M=20 unavailable recovery/checkpoint parity PASS
+MG CLI ranks=1 steps=2 apply_attempts=[6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-_b6joh9i/audit
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_statistics_epoch_mpi_1" classname="v04_runner_statistics_epoch_mpi_1" time="14.5197" status="run">
+		<properties/>
+		<system-out>epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=1 source_readonly=true
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_fgmres_recovery_mpi_2" classname="v04_runner_fgmres_recovery_mpi_2" time="18.0523" status="run">
+		<properties/>
+		<system-out>FGMRES CLI on ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+FGMRES CLI recovery-only ranks=2 Arnoldi=12 complete/checkpoint parity PASS
+BiCGStab CLI ranks=2 A+M=40 unavailable recovery/checkpoint parity PASS
+MG CLI ranks=2 steps=2 apply_attempts=[6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-m2x_37yu/audit
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_statistics_epoch_mpi_2" classname="v04_runner_statistics_epoch_mpi_2" time="13.1906" status="run">
+		<properties/>
+		<system-out>epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=2 source_readonly=true
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_fgmres_recovery_mpi_4" classname="v04_runner_fgmres_recovery_mpi_4" time="10.8837" status="run">
+		<properties/>
+		<system-out>FGMRES CLI on ranks=4 Arnoldi=24 complete/checkpoint parity PASS
+FGMRES CLI recovery-only ranks=4 Arnoldi=24 complete/checkpoint parity PASS
+BiCGStab CLI ranks=4 A+M=80 unavailable recovery/checkpoint parity PASS
+MG CLI ranks=4 steps=2 apply_attempts=[6, 6, 6, 6] layout/loop/level identities, observer, checkpoint parity and cold flag contract PASS output=/tmp/hundun-mg-cli-pzx3xytu/audit
+</system-out>
+	</testcase>
+	<testcase name="v04_runner_statistics_epoch_mpi_4" classname="v04_runner_statistics_epoch_mpi_4" time="11.4352" status="run">
+		<properties/>
+		<system-out>epoch source_samples=2 exact_samples=4 method_start_samples=0 method_end_samples=0
+PASS runner statistics epoch ranks=4 source_readonly=true
+</system-out>
+	</testcase>
+	<testcase name="v04_public_headers" classname="v04_public_headers" time="0.00463906" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_chemistry" classname="v04_models_chemistry" time="0.00273491" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_chemistry_adapter" classname="v04_models_chemistry_adapter" time="0.00454996" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_properties" classname="v04_models_spray_properties" time="0.00467307" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_film_bridge" classname="v04_models_spray_film_bridge" time="0.00458376" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_alpha_steps_1" classname="v04_portable_v1_chemistry_alpha_steps_1" time="0.00381618" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.36787944117144233
+temperature_k=363.21205588285574
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_alpha_steps_2" classname="v04_portable_v1_chemistry_alpha_steps_2" time="0.00429272" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.36787944117144233
+temperature_k=363.21205588285574
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_alpha_steps_4" classname="v04_portable_v1_chemistry_alpha_steps_4" time="0.00436726" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.36787944117144233
+temperature_k=363.21205588285574
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_beta_steps_1" classname="v04_portable_v1_chemistry_beta_steps_1" time="0.00361936" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.22313016014842979
+temperature_k=364.73915332096414
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_beta_steps_2" classname="v04_portable_v1_chemistry_beta_steps_2" time="0.00387908" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.22313016014842982
+temperature_k=364.73915332096414
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_chemistry_beta_steps_4" classname="v04_portable_v1_chemistry_beta_steps_4" time="0.00356584" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>reactant_mass_fraction=0.22313016014842985
+temperature_k=364.73915332096414
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n2_steps_1" classname="v04_portable_v1_iem_n2_steps_1" time="0.00355986" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295152
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n2_steps_2" classname="v04_portable_v1_iem_n2_steps_2" time="0.00353217" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295133
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n2_steps_4" classname="v04_portable_v1_iem_n2_steps_4" time="0.00357694" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295145
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n4_steps_1" classname="v04_portable_v1_iem_n4_steps_1" time="0.00359633" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295152
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n4_steps_2" classname="v04_portable_v1_iem_n4_steps_2" time="0.00341793" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295133
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_iem_n4_steps_4" classname="v04_portable_v1_iem_n4_steps_4" time="0.00391193" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>species_variance=0.012180175491295145
+mean_enthalpy_j_per_kg=200
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_tcr_root_tracking" classname="v04_portable_v1_tcr_root_tracking" time="0.00373927" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>tcr_control=0.13962038997193676
+tcr_control=0.22570811482256822
+tcr_control=0.33333333333333331
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_heating_steps_10" classname="v04_portable_v1_heating_steps_10" time="0.00370213" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>temperature_k=371.42620612748181
+absolute_reference_error_k=4.6493683555581811e-05
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_heating_steps_20" classname="v04_portable_v1_heating_steps_20" time="0.00364667" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>temperature_k=371.42624101358632
+absolute_reference_error_k=1.1607579040173732e-05
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_heating_steps_40" classname="v04_portable_v1_heating_steps_40" time="0.00372104" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>temperature_k=371.42624972124861
+absolute_reference_error_k=2.8999167511756241e-06
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_evaporation_steps_10" classname="v04_portable_v1_evaporation_steps_10" time="0.00368841" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>diameter_squared_m2=9.6536476262456419e-09
+gas_mass_gain_kg=8.0896600016468702e-11
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_evaporation_steps_20" classname="v04_portable_v1_evaporation_steps_20" time="0.00373481" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>diameter_squared_m2=9.6536476262456551e-09
+gas_mass_gain_kg=8.08966000164656e-11
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_evaporation_steps_40" classname="v04_portable_v1_evaporation_steps_40" time="0.00373416" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>diameter_squared_m2=9.6536476262456254e-09
+gas_mass_gain_kg=8.0896600016472218e-11
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_ballistic" classname="v04_portable_v1_ballistic" time="0.0036205" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>x_m=4.9999999999999991
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_static_ibm_rebound" classname="v04_portable_v1_static_ibm_rebound" time="0.301516" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>collision_time_s=0.49999999999999978
+final_x_m=2.5
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_tab_oscillator" classname="v04_portable_v1_tab_oscillator" time="0.00360193" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>deformation=0.24694475550436151
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v1_tab_representative_split" classname="v04_portable_v1_tab_representative_split" time="0.00359625" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v1"/>
+		</properties>
+		<system-out>representative_diameter_m=3.9473684210526309e-05
+energy_residual_j=2.6469779601696886e-23
+V1_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n2_r1" classname="v04_portable_v2_spray_alpha_n2_r1" time="0.285996" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=10042133842618664690
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202739e-05
+total_h_plus_k_j=5.5416395857548588
+first_step_sampler_queries=216
+physical_parcels_migrated=0
+partition_state_accepted2=3839791384212484452
+mass_residual_kg=0
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.3883271696202746e-05
+total_h_plus_k_j=5.5416395857548606
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n2_r2" classname="v04_portable_v2_spray_alpha_n2_r2" time="0.297646" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=10042133842618664690
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202733e-05
+total_h_plus_k_j=5.5416395857548562
+first_step_sampler_queries=216
+physical_parcels_migrated=1
+partition_state_accepted2=3839791384212484452
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=5.3883271696202739e-05
+total_h_plus_k_j=5.5416395857548562
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n2_r4" classname="v04_portable_v2_spray_alpha_n2_r4" time="0.303001" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=10042133842618664690
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=5.3883271696202719e-05
+total_h_plus_k_j=5.5416395857548544
+first_step_sampler_queries=216
+physical_parcels_migrated=2
+partition_state_accepted2=3839791384212484452
+mass_residual_kg=6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202726e-05
+total_h_plus_k_j=5.5416395857548544
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n4_r1" classname="v04_portable_v2_spray_alpha_n4_r1" time="0.28486" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7150081350584889938
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202739e-05
+total_h_plus_k_j=5.5416395857548588
+first_step_sampler_queries=216
+physical_parcels_migrated=0
+partition_state_accepted2=11632431879499632272
+mass_residual_kg=0
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.3883271696202746e-05
+total_h_plus_k_j=5.5416395857548606
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n4_r2" classname="v04_portable_v2_spray_alpha_n4_r2" time="0.286461" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7150081350584889938
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202733e-05
+total_h_plus_k_j=5.5416395857548562
+first_step_sampler_queries=216
+physical_parcels_migrated=1
+partition_state_accepted2=11632431879499632272
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=5.3883271696202739e-05
+total_h_plus_k_j=5.5416395857548562
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_alpha_n4_r4" classname="v04_portable_v2_spray_alpha_n4_r4" time="0.300362" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7150081350584889938
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=5.3883271696202719e-05
+total_h_plus_k_j=5.5416395857548544
+first_step_sampler_queries=216
+physical_parcels_migrated=2
+partition_state_accepted2=11632431879499632272
+mass_residual_kg=6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202726e-05
+total_h_plus_k_j=5.5416395857548544
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n2_r1" classname="v04_portable_v2_spray_beta_n2_r1" time="0.281721" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=6988300611768301763
+mass_residual_kg=-1.3552527156068805e-20
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.388342877583542e-05
+total_h_plus_k_j=11.919355257081866
+first_step_sampler_queries=216
+physical_parcels_migrated=0
+partition_state_accepted2=12392353642410796523
+mass_residual_kg=-2.0328790734103208e-20
+energy_residual_j=0
+total_mass_kg=5.3883428775835413e-05
+total_h_plus_k_j=11.919355257081865
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n2_r2" classname="v04_portable_v2_spray_beta_n2_r2" time="0.288579" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=6988300611768301763
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883428775835413e-05
+total_h_plus_k_j=11.919355257081861
+first_step_sampler_queries=216
+physical_parcels_migrated=1
+partition_state_accepted2=12392353642410796523
+mass_residual_kg=0
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.388342877583542e-05
+total_h_plus_k_j=11.919355257081863
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n2_r4" classname="v04_portable_v2_spray_beta_n2_r4" time="0.30136" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=6988300611768301763
+mass_residual_kg=6.7762635780344027e-21
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.3883428775835399e-05
+total_h_plus_k_j=11.919355257081859
+first_step_sampler_queries=216
+physical_parcels_migrated=2
+partition_state_accepted2=12392353642410796523
+mass_residual_kg=1.3552527156068805e-20
+energy_residual_j=0
+total_mass_kg=5.3883428775835406e-05
+total_h_plus_k_j=11.919355257081858
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n4_r1" classname="v04_portable_v2_spray_beta_n4_r1" time="0.27936" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7242609953994292787
+mass_residual_kg=-1.3552527156068805e-20
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.388342877583542e-05
+total_h_plus_k_j=11.919355257081866
+first_step_sampler_queries=216
+physical_parcels_migrated=0
+partition_state_accepted2=6761999842335897199
+mass_residual_kg=-2.0328790734103208e-20
+energy_residual_j=0
+total_mass_kg=5.3883428775835413e-05
+total_h_plus_k_j=11.919355257081865
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n4_r2" classname="v04_portable_v2_spray_beta_n4_r2" time="0.291347" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7242609953994292787
+mass_residual_kg=-6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883428775835413e-05
+total_h_plus_k_j=11.919355257081861
+first_step_sampler_queries=216
+physical_parcels_migrated=1
+partition_state_accepted2=6761999842335897199
+mass_residual_kg=0
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.388342877583542e-05
+total_h_plus_k_j=11.919355257081863
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_spray_beta_n4_r4" classname="v04_portable_v2_spray_beta_n4_r4" time="0.303511" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7242609953994292787
+mass_residual_kg=6.7762635780344027e-21
+energy_residual_j=1.7763568394002505e-15
+total_mass_kg=5.3883428775835399e-05
+total_h_plus_k_j=11.919355257081859
+first_step_sampler_queries=216
+physical_parcels_migrated=2
+partition_state_accepted2=6761999842335897199
+mass_residual_kg=1.3552527156068805e-20
+energy_residual_j=0
+total_mass_kg=5.3883428775835406e-05
+total_h_plus_k_j=11.919355257081858
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n2_r1" classname="v04_portable_v2_closed_analytic_n2_r1" time="0.27484" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=9349168762593369887
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.199999999999989
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n2_r2" classname="v04_portable_v2_closed_analytic_n2_r2" time="0.292179" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=9349168762593369887
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.200000000000003
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n2_r4" classname="v04_portable_v2_closed_analytic_n2_r4" time="0.30161" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=9349168762593369887
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.200000000000003
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n4_r1" classname="v04_portable_v2_closed_analytic_n4_r1" time="0.284829" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=15429446757398685243
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.199999999999989
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n4_r2" classname="v04_portable_v2_closed_analytic_n4_r2" time="0.283386" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=15429446757398685243
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.200000000000003
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_closed_analytic_n4_r4" classname="v04_portable_v2_closed_analytic_n4_r4" time="0.300469" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=15429446757398685243
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=64.200000000000003
+total_h_plus_k_j=6444000.25
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_fault_alpha_n4_r4" classname="v04_portable_v2_fault_alpha_n4_r4" time="0.305104" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>partition_state_accepted1=7150081350584889938
+mass_residual_kg=0
+energy_residual_j=0
+total_mass_kg=5.3883271696202719e-05
+total_h_plus_k_j=5.5416395857548544
+first_step_sampler_queries=216
+physical_parcels_migrated=2
+partition_state_accepted2=11632431879499632272
+mass_residual_kg=6.7762635780344027e-21
+energy_residual_j=0
+total_mass_kg=5.3883271696202726e-05
+total_h_plus_k_j=5.5416395857548544
+V2_CASE_PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n2_r1" classname="v04_portable_v2_tab_tab_n2_r1" time="0.282616" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=2 ranks=1 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n2_r2" classname="v04_portable_v2_tab_tab_n2_r2" time="0.28616" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=2 ranks=2 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n2_r4" classname="v04_portable_v2_tab_tab_n2_r4" time="0.305238" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=2 ranks=4 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n4_r1" classname="v04_portable_v2_tab_tab_n4_r1" time="0.282102" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=4 ranks=1 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n4_r2" classname="v04_portable_v2_tab_tab_n4_r2" time="0.279936" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=4 ranks=2 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_portable_v2_tab_tab_n4_r4" classname="v04_portable_v2_tab_tab_n4_r4" time="0.310913" status="run">
+		<properties>
+			<property name="cmake_labels" value="portable_v2"/>
+		</properties>
+		<system-out>PASS portable_v2_tab N=4 ranks=4 children=2 deformation_j=1.0471975511965979e-07 surface_j=1.0471975511965979e-07 bulk_j=0 residual_j=0
+</system-out>
+	</testcase>
+	<testcase name="v04_models_exchange_routing_mpi_1" classname="v04_models_exchange_routing_mpi_1" time="0.279622" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_exchange_routing_mpi_2" classname="v04_models_exchange_routing_mpi_2" time="0.289687" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_exchange_routing_mpi_4" classname="v04_models_exchange_routing_mpi_4" time="0.303216" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_portable_composition_mpi_1" classname="v04_models_portable_composition_mpi_1" time="0.281931" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_portable_composition_mpi_2" classname="v04_models_portable_composition_mpi_2" time="0.280936" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_portable_composition_mpi_4" classname="v04_models_portable_composition_mpi_4" time="0.302901" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_combustion" classname="v04_models_combustion" time="0.00369906" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_esf" classname="v04_models_esf" time="0.00346481" status="run">
+		<properties/>
+		<system-out>ESF focused PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_esf_reaction" classname="v04_models_esf_reaction" time="0.00423117" status="run">
+		<properties/>
+		<system-out>ESF persistent reaction PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_esf_backend" classname="v04_models_esf_backend" time="0.00491554" status="run">
+		<properties/>
+		<system-out>P1 P2 analytic ensemble PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_tcr" classname="v04_models_tcr" time="0.00453352" status="run">
+		<properties/>
+		<system-out>TCR focused PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_exchange_batch" classname="v04_models_exchange_batch" time="0.00444685" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_combustion_allocation" classname="v04_models_combustion_allocation" time="0.00429415" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_combustion_common_source" classname="v04_models_combustion_common_source" time="0.00403027" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray" classname="v04_models_spray" time="0.00393955" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_parcel" classname="v04_models_spray_parcel" time="0.00371704" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_breakup" classname="v04_models_spray_breakup" time="0.00371013" status="run">
+		<properties/>
+		<system-out>models_spray_breakup_test: PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_spray_mechanics" classname="v04_models_spray_mechanics" time="0.297963" status="run">
+		<properties/>
+		<system-out>PASS: spray mechanics detail
+</system-out>
+	</testcase>
+	<testcase name="v04_models_spray_source" classname="v04_models_spray_source" time="0.00369525" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_transfer" classname="v04_models_spray_transfer" time="0.00396867" status="run">
+		<properties/>
+		<system-out>models_spray_transfer_test: PASS
+</system-out>
+	</testcase>
+	<testcase name="v04_models_spray_events" classname="v04_models_spray_events" time="0.00647395" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_transaction_mpi_1" classname="v04_models_spray_transaction_mpi_1" time="0.274705" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_transaction_mpi_2" classname="v04_models_spray_transaction_mpi_2" time="0.286277" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_transaction_mpi_4" classname="v04_models_spray_transaction_mpi_4" time="0.299264" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_migration_mpi_1" classname="v04_models_spray_migration_mpi_1" time="0.27788" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_migration_mpi_2" classname="v04_models_spray_migration_mpi_2" time="0.302387" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_models_spray_migration_mpi_4" classname="v04_models_spray_migration_mpi_4" time="0.301237" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_authority" classname="v04_solver_piso_authority" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_solver_piso_authority_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_mutation" classname="v04_solver_piso_mutation" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_solver_piso_mutation_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_checkerboard" classname="v04_solver_piso_checkerboard" time="0.29105" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_checkerboard_mpi_2" classname="v04_solver_piso_checkerboard_mpi_2" time="0.276939" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_checkerboard_mpi_4" classname="v04_solver_piso_checkerboard_mpi_4" time="0.298716" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_temporal_order" classname="v04_solver_piso_temporal_order" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_solver_piso_temporal_order_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_mpi_1" classname="v04_solver_piso_mpi_1" time="0.47829" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_mpi_2" classname="v04_solver_piso_mpi_2" time="0.40579" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_mpi_4" classname="v04_solver_piso_mpi_4" time="0.373045" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_1" classname="v04_product_pressure_energy_retry_mpi_1" time="1.14387" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908338169e-14/1.0460406810870782e-10/0/2.4294555600856023e-32 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714286467246095e-08/5.4073846732826095e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=70/85
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384613495099614e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contr...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_2" classname="v04_product_pressure_energy_retry_mpi_2" time="0.982642" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/1.2687156813780412e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.4073846728786893e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=90/108
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-cont...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_4" classname="v04_product_pressure_energy_retry_mpi_4" time="0.99586" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908212711e-14/1.0460406810870792e-10/0/1.1860467074584553e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714287331642688e-08/5.4073846735877291e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=94/114
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384597744234758e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-cont...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_restart_method_history" classname="v04_product_restart_method_history" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties/>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_product_pressure_energy_temporal_convergence_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_mg_krylov_isolation" classname="v04_solver_mg_krylov_isolation" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_solver_mg_krylov_isolation_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_krylov_basis_update" classname="v04_solver_krylov_basis_update" time="0" status="notrun">
+		<skipped message="Unable to find executable"/>
+		<properties/>
+		<system-out>Unable to find executable: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated/versions/v0.4/tests/v04_solver_krylov_basis_update_test</system-out>
+	</testcase>
+	<testcase name="v04_solver_krylov_mpi_1" classname="v04_solver_krylov_mpi_1" time="0.29456" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=44 A=53 M=44 unsafe=6 discarded=5 explicit=6 reported_residual=3.12402e-18 residual=3.12402e-18 error=8.23642e-11
+FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=44 A=61 M=44 unsafe=9 discarded=9 explicit=0 reported_residual=3.68775e-16 residual=3.68775e-16 error=1.22615e-10
+FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=37 A=51 M=37 unsafe=8 discarded=8 explicit=0 reported_residual=3.66048e-14 residual=3.66048e-14 error=8.54427e-11
+FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_krylov_mpi_2" classname="v04_solver_krylov_mpi_2" time="0.310582" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=44 A=58 M=44 unsafe=9 discarded=7 explicit=6 reported_residual=3.28914e-18 residual=3.28914e-18 error=8.55817e-11
+FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=44 A=58 M=44 unsafe=9 discarded=9 explicit=0 reported_residual=3.09652e-16 residual=3.09652e-16 error=6.97041e-11
+FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=38 A=52 M=38 unsafe=10 discarded=10 explicit=0 reported_residual=4.85469e-14 residual=4.85469e-14 error=8.86068e-11
+FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_krylov_mpi_4" classname="v04_solver_krylov_mpi_4" time="0.335701" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>FGMRES_SMALL_SCALE scale=1e-08 status=0 iterations=42 A=54 M=42 unsafe=8 discarded=6 explicit=7 reported_residual=2.98631e-18 residual=2.98631e-18 error=7.89392e-11
+FGMRES_SMALL_SCALE scale=1e-06 status=0 iterations=43 A=54 M=43 unsafe=5 discarded=5 explicit=0 reported_residual=3.20689e-16 residual=3.20689e-16 error=9.07684e-11
+FGMRES_SMALL_SCALE scale=0.0001 status=0 iterations=37 A=49 M=37 unsafe=5 discarded=5 explicit=0 reported_residual=3.23273e-14 residual=3.23273e-14 error=8.44024e-11
+FGMRES_RECOVERY identity iterations=2 happy_restarts=1 unsafe_restarts=0 A=5 sink_bytes=96
+</system-out>
+	</testcase>
+</testsuite>

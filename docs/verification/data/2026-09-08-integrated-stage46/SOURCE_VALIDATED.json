@@ -1,0 +1,33 @@
+{
+  "source": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/integrated-stage46-20260908/source-10500",
+  "generation": "generation-10500-176021483306485",
+  "manifest": {
+    "sha256": "046c8e672e55896d90c1ad75d5eb969b6ca24772b9caae0bba184d15c9038b50",
+    "step": 10500,
+    "time": 0.14499357885581063,
+    "backward_euler_recovery": false,
+    "source_format_version": 3,
+    "method_history_signature": 12213963202598979269
+  },
+  "files": 133,
+  "rank_files": 128,
+  "visit_files": 128,
+  "statistics_epoch": {
+    "start_step": 7000,
+    "development_steps": 10000,
+    "sampling_start_step": 17001,
+    "reset_reason": "method_recovery"
+  },
+  "last_complete_health_step": 10601,
+  "terminal_maxima": {
+    "eos": 0.0,
+    "continuity": 3.6274593868231333e-07,
+    "energy": 9.99167804732518e-07,
+    "closed_mass": 0.0,
+    "gauge": 0.0
+  },
+  "old_service": "hundun-re3900-observed-long-20260908.service",
+  "old_main_pid": 142362,
+  "replay_from": 10500,
+  "old_run_complete": false
+}

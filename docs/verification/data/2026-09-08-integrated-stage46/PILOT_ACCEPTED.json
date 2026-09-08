@@ -1,0 +1,43 @@
+{
+  "source_head": "f4f04eccc4f159cf7aa55e4244cb36b7e642cb77",
+  "pilot_step_range": [
+    10501,
+    10510
+  ],
+  "bdf2_steps": 10,
+  "retries": 0,
+  "terminal_maxima": {
+    "eos": 0.0,
+    "continuity": 2.5462782876084995e-07,
+    "energy": 9.728335760201628e-07,
+    "closed_mass": 0.0,
+    "gauge": 0.0
+  },
+  "statistics_epoch": {
+    "start_step": 7000,
+    "development_steps": 10000,
+    "sampling_start_step": 17001,
+    "reset_reason": "method_recovery"
+  },
+  "new_wall_seconds": 106.13,
+  "control_wall_seconds": 111.18,
+  "performance_acceptance": false,
+  "control_payload_byte_equality": true,
+  "files_compared": 260,
+  "observer_complete": true,
+  "observer_loops": 63,
+  "ranks": 128,
+  "runtime_validator_exit": 0,
+  "checksums": {
+    "pilot-output.json": "17e4ce54ae3e3da7d69cdaa0ed97aa3d4f10fb07d974924741fe218603701a2a",
+    "pilot-observation.json": "b525352cd59b98b851c9b8ceab44a2b7e6409f5002655e601d5bf3d83ae951bb",
+    "control-observation.json": "60aa91e37c9725df20b9f93b0eb5e1ff9fd6a012e1f0a60bf38f911d6132a106",
+    "CONTROL_COMPARISON.json": "7e83c23f5622b4045ef24b230d812fb3767b0331dcb813a331848cd8fd60f0e1",
+    "SOURCE-LONG.sha256": "548f0a0b984f3e5264e141a2bf03995797882f8e57e253b20c856535939111b8"
+  },
+  "limits": [
+    "Portable modules are merged and tested; cylinder keeps original single-phase configuration.",
+    "No full coupled chemistry/spray, long-run stability or COAST-replacement acceptance is claimed.",
+    "Solid extrema and full VTK finite values checked; not a separate source-to-final solid payload audit."
+  ]
+}

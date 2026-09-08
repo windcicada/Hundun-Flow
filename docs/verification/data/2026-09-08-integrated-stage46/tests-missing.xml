@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="(empty)"
+	tests="6"
+	failures="0"
+	disabled="0"
+	skipped="0"
+	hostname=""
+	time="3"
+	timestamp="2026-09-08T15:49:51"
+	>
+	<testcase name="v04_solver_piso_authority" classname="v04_solver_piso_authority" time="0.883239" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>full-refresh missing norms C_p/C_h/E_p/E_h=0.0937906/0.111995/47181.7/56306.3
+full-refresh epsilon=0.0008 mismatch-relative-error Cp/Ch/Ep/Eh=0.000265431/5.74242e-07/0.000264915/7.68262e-09
+full-refresh epsilon=0.0004 mismatch-relative-error Cp/Ch/Ep/Eh=6.63579e-05/1.43563e-07/6.62287e-05/1.92189e-09
+full-refresh epsilon=0.0002 mismatch-relative-error Cp/Ch/Ep/Eh=1.65894e-05/3.59891e-08/1.65572e-05/4.9303e-10
+full-refresh epsilon=0.0001 mismatch-relative-error Cp/Ch/Ep/Eh=4.14744e-06/8.91984e-09/4.13935e-06/2.43101e-10
+full-refresh epsilon=5e-05 mismatch-relative-error Cp/Ch/Ep/Eh=1.03696e-06/2.16322e-09/1.03477e-06/4.71275e-10
+full-refresh epsilon=2.5e-05 mismatch-relative-error Cp/Ch/Ep/Eh=2.58735e-07/1.09038e-09/2.58715e-07/8.23565e-10
+full-refresh finest norms fd Cp/Ch/Ep/Eh=8065.99/3.51183/4.0492e+09/316.222 frozen=8065.99/3.51005/4.0492e+09/56514.7 mismatch=0.0937906/0.111995/47181.7/56306.3
+full-refresh mixed mismatch-relative-error C/E=5.30333e-07/1.66135e-07
+full-refresh C2 byte-copy equal=1 face-FD-...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_mutation" classname="v04_solver_piso_mutation" time="0.305415" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_piso_temporal_order" classname="v04_solver_piso_temporal_order" time="0.287293" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_product_restart_method_history" classname="v04_product_restart_method_history" time="1.91682" status="run">
+		<properties/>
+		<system-out>method_mass original=1.1030948920068615 saved=1.1030948920069716 restored=1.1030948920069716 source_complete=1
+exact_method status=0/0 attempts=1 proposal_bdf=2 fallback=0
+method_history unsigned_rejected=1 signed_exact_bdf=2 method_recovery_bdf=1,2 rebuilt_rate_payload_equal=1 recovery_attempts=1,1 recovery_status=0/0 passed=1
+</system-out>
+	</testcase>
+	<testcase name="v04_solver_mg_krylov_isolation" classname="v04_solver_mg_krylov_isolation" time="0.316056" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_solver_krylov_basis_update" classname="v04_solver_krylov_basis_update" time="0.0408911" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+</testsuite>

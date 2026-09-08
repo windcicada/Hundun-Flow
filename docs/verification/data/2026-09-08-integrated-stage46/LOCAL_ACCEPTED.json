@@ -1,0 +1,22 @@
+{
+  "source_head": "f4f04eccc4f159cf7aa55e4244cb36b7e642cb77",
+  "source_tree": "f29dae4f4d3c71e22d435d31f407d5dcb0ffc24e",
+  "unique_checks": 111,
+  "passed": 111,
+  "initial_notrun": 6,
+  "initial_reason": "six executable targets omitted from build list; built and executed once afterwards",
+  "portable_focused": 32,
+  "portable_v1": 23,
+  "portable_v2": 25,
+  "flow_restart_observation": 31,
+  "cantera": "optional separate ABI-specific backend unchanged from donor; not rebuilt in this Clang/libc++ product configuration",
+  "manifest_identity_verified": true,
+  "checksums": {
+    "build.log": "ad8e8467e423342524730f370440adc2d5e897e94e9e6471ae8cad8655cf1742",
+    "build-missing.log": "4a8f85f4a6874ce4fcc38fd7f1ec0a215ed76f1118a3dd8eef0062917e484b5b",
+    "tests.xml": "d8f9c3d2985b98bf8a17f60dc4b7f76ff8491e7ae1b3b996f7a547aa0da2313c",
+    "tests-missing.xml": "cbde25716373eb8b63b0d17de9224cdb2ff0fa1a8fdefca5f26f2f099bf3a6d6",
+    "FROZEN.sha256": "752d96b97b25a83f66cd744c19348871e9c9bd77bd8017c4a4fb3a25f6e2de86",
+    "SOURCE.sha256": "8b5e950f72dda8eb1a018896c266b96dba38bb5f22510ccaf28594a9a0e0fbc4"
+  }
+}
