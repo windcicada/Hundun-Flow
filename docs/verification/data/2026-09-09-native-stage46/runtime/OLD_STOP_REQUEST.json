@@ -1,0 +1,660 @@
+{
+  "at": "2026-09-09T04:35:40.550158",
+  "service": "hundun-re3900-integrated-long-20260908.service",
+  "state": "MainPID=165884\nControlGroup=/user.slice/user-1000.slice/user@1000.service/hundun-re3900-integrated-long-20260908.service\nActiveState=active\nSubState=running\n",
+  "processes": [
+    {
+      "pid": 165884,
+      "state": "Ts",
+      "comm": "time"
+    },
+    {
+      "pid": 165897,
+      "state": "Tl",
+      "comm": "mpirun"
+    },
+    {
+      "pid": 165902,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165903,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165904,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165905,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165906,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165907,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165909,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165917,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165923,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165927,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165928,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165929,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165930,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165931,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165939,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165941,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165942,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165947,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165951,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165953,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165958,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165963,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165964,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165965,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165966,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165969,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165976,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165977,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165978,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165979,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165986,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165989,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165990,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 165996,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166000,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166001,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166002,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166003,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166010,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166013,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166015,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166021,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166024,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166025,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166026,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166027,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166036,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166041,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166042,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166043,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166044,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166049,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166050,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166053,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166057,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166063,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166064,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166068,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166072,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166073,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166074,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166078,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166083,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166085,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166087,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166092,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166095,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166097,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166098,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166099,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166100,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166103,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166109,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166113,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166117,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166121,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166122,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166124,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166126,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166129,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166134,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166139,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166142,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166144,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166146,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166147,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166150,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166155,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166157,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166162,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166166,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166169,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166170,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166171,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166173,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166179,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166183,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166186,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166192,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166197,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166198,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166199,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166200,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166201,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166205,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166211,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166214,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166217,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166218,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166219,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166223,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166227,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166230,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166235,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166238,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166241,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166242,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166245,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166247,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166251,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166254,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166259,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166262,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166265,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166266,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166269,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166272,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    },
+    {
+      "pid": 166275,
+      "state": "Tl",
+      "comm": "v04_thin_domain"
+    }
+  ],
+  "last_complete_health_step": 10577,
+  "durable_restart_step": 10510,
+  "reason": "Native coupling accepted and mainline integrated; replace paused old program."
+}

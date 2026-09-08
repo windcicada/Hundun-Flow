@@ -1,0 +1,8 @@
+{
+  "at": "2026-09-09T04:36:09.794602",
+  "service": "hundun-re3900-integrated-long-20260908.service",
+  "state": "MainPID=0\nResult=success\nActiveState=inactive\nSubState=dead\n",
+  "remaining_processes": [],
+  "locks_released": true,
+  "old_output_preserved": true
+}

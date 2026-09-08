@@ -1,0 +1,120 @@
+{
+  "same_restart_source": 10500,
+  "final_step": 10510,
+  "checkpoint_and_visit_payloads_byte_identical": true,
+  "files_compared": 260,
+  "physical_and_stable_revision_csv_rows_equal": {
+    "health.csv": 10,
+    "force.csv": 10,
+    "probe.csv": 30,
+    "conservation.csv": 10
+  },
+  "process_bound_certificate_values": {
+    "10501": {
+      "certificate_state": [
+        "106231621259481257",
+        "9583696968455407289"
+      ],
+      "certificate_terminal_state": [
+        "6703103876901703016",
+        "3201148153066759464"
+      ]
+    },
+    "10502": {
+      "certificate_state": [
+        "12482066522142606771",
+        "10217592310917012739"
+      ],
+      "certificate_terminal_state": [
+        "17655348356476982407",
+        "11420995362912064551"
+      ]
+    },
+    "10503": {
+      "certificate_state": [
+        "15529266192740249220",
+        "11152729354032438644"
+      ],
+      "certificate_terminal_state": [
+        "17426014327766055445",
+        "1222956909302377269"
+      ]
+    },
+    "10504": {
+      "certificate_state": [
+        "1455503497262545745",
+        "5593486733023142593"
+      ],
+      "certificate_terminal_state": [
+        "10229268247046236303",
+        "4077333307569169039"
+      ]
+    },
+    "10505": {
+      "certificate_state": [
+        "13449613275480469828",
+        "10709903174322185236"
+      ],
+      "certificate_terminal_state": [
+        "7850595855784899167",
+        "13769921439715828447"
+      ]
+    },
+    "10506": {
+      "certificate_state": [
+        "18017755567416290858",
+        "17634962618814395898"
+      ],
+      "certificate_terminal_state": [
+        "6839715734257727196",
+        "17271980706517279004"
+      ]
+    },
+    "10507": {
+      "certificate_state": [
+        "4655585589838450611",
+        "11149269599246908355"
+      ],
+      "certificate_terminal_state": [
+        "7780155597539478792",
+        "10889345317579898504"
+      ]
+    },
+    "10508": {
+      "certificate_state": [
+        "13507101094042425931",
+        "14726992845413859547"
+      ],
+      "certificate_terminal_state": [
+        "12399293928501668645",
+        "917233154250180357"
+      ]
+    },
+    "10509": {
+      "certificate_state": [
+        "17074734032960341649",
+        "7975795004548278241"
+      ],
+      "certificate_terminal_state": [
+        "15006033679948582912",
+        "11955676754982909536"
+      ]
+    },
+    "10510": {
+      "certificate_state": [
+        "13189087123473013216",
+        "15883315031242937168"
+      ],
+      "certificate_terminal_state": [
+        "15300648518026733902",
+        "420611259116377806"
+      ]
+    }
+  },
+  "completion_equal_except_generation": true,
+  "notes": [
+    "One run per program from the same immutable source; this is compatibility evidence, not a performance speedup claim.",
+    "Generation names and candidate provenance remain distinct.",
+    "Force certificate_terminal_state hashes rank-local field bindings including base addresses (solver_piso.cpp:451,642,8544,9063); certificate_state incorporates it (solver_ibm_force.cpp:132). They are process-bound authority, not portable physical checksums; both retained, not rewritten."
+  ]
+}

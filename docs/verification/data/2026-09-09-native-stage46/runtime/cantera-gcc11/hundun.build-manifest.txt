@@ -1,0 +1,29 @@
+schema=HUNDUN_V04_BUILD_MANIFEST_V2
+head=dc977562a6b95c7625e4214c8d9961dd7b774625803dad572f3a6111f8e2213f
+tree=6b5b127e14c9151d8ebefcbb3cf481d73e4be461d76acd3a507768ec3b412009
+core_source_clean=true
+core_dirty_summary=
+core_source_content_sha256=0b7c7ee6f9eb51b63c9233f250159e5c177ce7a1abb06db5c66b58080e46d507
+c_compiler_id=GNU
+c_compiler_version=11.4.0
+c_compiler_flags=-O3 -DNDEBUG
+c_standard_default=17
+cxx_standard=17
+core_definitions=OMPI_SKIP_MPICXX=1,MPICH_SKIP_MPICXX=1
+mpi_c_compile_options=
+mpi_c_link_flags=
+compiler_id=GNU
+compiler_version=11.4.0
+compiler_flags=-march=znver3 -mno-fma -ffp-contract=off -O3 -DNDEBUG
+link_flags=
+build_type=Release
+source_version=v0.4
+tests=ON
+asan=OFF
+ubsan=OFF
+hypre=OFF
+reacting_cantera=ON
+cantera_shared_sha256=093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760
+target=hundun
+entry_sha256=3a1856ed7e9316b0e95d9b0f5c1f5ec65dc2110841e4c472bec0657395ed6137
+target_source_clean=true

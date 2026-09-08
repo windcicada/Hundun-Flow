@@ -1,0 +1,28 @@
+{
+  "accepted_at": "2026-09-09T04:40:09.650977",
+  "source_head": "83db41df2ec9c351c71e3aebe812509ddfd7262b",
+  "executable_sha256": "16dd8e972b1ac4459e2d517135993ed047251304ffb0acdedd2ad75ab361fcc3",
+  "service": "hundun-re3900-coupled-pilot-20260909.service",
+  "service_state": "MainPID=0\nResult=success\nExecMainStatus=0\nActiveState=inactive\n",
+  "complete": true,
+  "step_range": [
+    10501,
+    10510
+  ],
+  "ranks": 128,
+  "retries": 0,
+  "bdf2_steps": 10,
+  "control_payloads_byte_identical": 260,
+  "physical_and_stable_revision_csv_equal": true,
+  "runtime_validator_passed": true,
+  "observer_complete": true,
+  "source_and_frozen_hashes_unchanged": true,
+  "long_run_complete": false,
+  "checksums": {
+    "PILOT_AUDIT.json": "2aba199408c06a96866a1d6172adf0f3bc7c49142b9899fe5aeaa57e6401e7e6",
+    "CONTROL_COMPARISON.json": "4ac78ad7e21ec0d1a23cf0aadc029a267554a1cd6858f8a9fb4bae8294dab69c",
+    "pilot-observation.json": "7d8fd90061039e722ca96d16061def2e800b22445665f12f5597abd3df94abb1",
+    "FROZEN.sha256": "80b80e9c96026a045a62dee496eea49c39146e50ab53fd1be5114dbdd3b439b5",
+    "LOCAL_ACCEPTED.json": "bd3e026acc15f810216d1ffe0828dc040bf0a55f0dded8c73adf754a68881576"
+  }
+}

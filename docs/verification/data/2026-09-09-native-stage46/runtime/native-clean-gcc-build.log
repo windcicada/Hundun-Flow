@@ -1,0 +1,10 @@
+-- Configuring done (0.6s)
+-- Generating done (0.2s)
+-- Build files have been written to: /tmp/build
+[  5%] Built target hundun_v04_portable_cantera
+[  5%] Building CXX object CMakeFiles/hundun_v04_core.dir/src/app_identity.cpp.o
+[  5%] Linking CXX static library libhundun_v04_core.a
+[100%] Built target hundun_v04_core
+[100%] Building CXX object CMakeFiles/hundun.dir/src/app_main.cpp.o
+[100%] Linking CXX executable hundun
+[100%] Built target hundun

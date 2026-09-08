@@ -1,0 +1,28 @@
+{
+  "accepted_at": "2026-09-09T04:34:28.736153",
+  "source_head": "83db41df2ec9c351c71e3aebe812509ddfd7262b",
+  "source_tree": "5a1af1fca46e903402393bea63effce8ad086c3c",
+  "source_content_sha256": "0b7c7ee6f9eb51b63c9233f250159e5c177ce7a1abb06db5c66b58080e46d507",
+  "source_clean": true,
+  "native_coupling_complete": true,
+  "clang_tests_passed": 205,
+  "gcc_cantera_tests_passed": 67,
+  "clean_cantera_ibm_restart_cli_passed": true,
+  "verified_manifests": {
+    "build-integrated/versions/v0.4/generated/core.build-manifest.txt": "bf2caca2132da99d831219df0340c3121f678b0fad5782012bf7c3b692af3d58",
+    "build-integrated/versions/v0.4/generated/hundun.build-manifest.txt": "24ebfbea425e8c3df78f15f64036e7470e956d5361795be7cbbac5820d133ca0",
+    "build-integrated/versions/v0.4/generated/v04_thin_domain_runner.build-manifest.txt": "d636563f98b83d8470c111a5db579077c039d88a62222448d3109da770f5a308",
+    "build-integrated-cantera/generated/core.build-manifest.txt": "e1471ba7701b7aa4b5ecd9db03a41046efcccebffd1b9f63ef9456e30bf393d8",
+    "build-integrated-cantera/generated/hundun.build-manifest.txt": "4df57bde83e6640da46ed6644d8914a06a70eba2ada1cda3778f468e6e8d6610"
+  },
+  "runner_sha256": "16dd8e972b1ac4459e2d517135993ed047251304ffb0acdedd2ad75ab361fcc3",
+  "hundun_clang_sha256": "558797334402e53e83c9289ced2750fb47eeb65b922a210814d9edc0e78a7178",
+  "hundun_gcc_cantera_sha256": "350a5773e7b3bb346ea03b440a9712c49696871c80e703b2bd59aeeaddc16c5d",
+  "restart_sources_verified": {
+    "10500": 133,
+    "10510": 133
+  },
+  "cantera_rootfs": "/home/wyf/code_dev/.hundun-flow-preflight/stage4-p0/source/rootfs-jammy-attempt-2-openmpi-fontconfig-postinst-recovery",
+  "cantera_package": "/home/wyf/code_dev/.hundun-flow-preflight/stage4-p0/artifact/cantera-3.2.0-gcc11-release-v4",
+  "long_run_complete": false
+}

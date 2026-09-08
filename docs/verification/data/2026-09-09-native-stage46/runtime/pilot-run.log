@@ -1,0 +1,8 @@
+2026-09-09T04:36:13+08:00
+Native coupled source=83db41df2ec9c351c71e3aebe812509ddfd7262b; exact restart=10500; diagnostic target=10510; no method recovery
+ibm_reconstruction policy=adaptive_order boundary_linear=0/8840 surface_linear=4/6912 expanded=2448
+CHECKPOINT step=10510 time=0.14513166797853047 samples=0
+COMPLETED steps=10 final_step=10510 samples=0
+real 107.85
+user 12531.08
+sys 151.59

@@ -1,0 +1,76 @@
+{
+  "schema": "HUNDUN_RE3900_FGMRES_PILOT_AUDIT_V1",
+  "complete": true,
+  "step_range": [
+    10501,
+    10510
+  ],
+  "steps": 10,
+  "ranks": 128,
+  "attempts_per_step": 1,
+  "bdf1_steps": 0,
+  "bdf2_steps": 10,
+  "terminal_maxima": {
+    "eos": 0.0,
+    "continuity": 2.5462782876084995e-07,
+    "energy": 9.728335760201628e-07,
+    "closed_mass": 0.0,
+    "gauge": 0.0
+  },
+  "fluid_ranges": {
+    "T": [
+      299.9814617371073,
+      300.02291793261884
+    ],
+    "p": [
+      107115.40785411955,
+      107142.13719087589
+    ],
+    "rho": [
+      1.2390005395044152,
+      1.239247738741801
+    ]
+  },
+  "solid_extrema": {
+    "solid_placeholder_count": "75920",
+    "solid_placeholder_p_min": "107136.1006180746",
+    "solid_placeholder_p_min_cell": "48886",
+    "solid_placeholder_p_max": "107136.1006180746",
+    "solid_placeholder_p_max_cell": "48886",
+    "solid_placeholder_T_min": "283.73383941160648",
+    "solid_placeholder_T_min_cell": "1815907",
+    "solid_placeholder_T_max": "369.47241586806183",
+    "solid_placeholder_T_max_cell": "986443",
+    "solid_placeholder_rho_min": "1.0061876204134474",
+    "solid_placeholder_rho_min_cell": "986443",
+    "solid_placeholder_rho_max": "1.3102369872470192",
+    "solid_placeholder_rho_max_cell": "1815907"
+  },
+  "traces": [],
+  "visit_files": 128,
+  "visit_cells": 6070272,
+  "visit_fields": [
+    [
+      "U",
+      3
+    ],
+    [
+      "pi",
+      1
+    ],
+    [
+      "h",
+      1
+    ]
+  ],
+  "checkpoint_rank_files": 128,
+  "completion_generation": "generation-10510-223640804102967",
+  "inherited_statistics_epoch": {
+    "start_step": 7000,
+    "development_steps": 10000,
+    "sampling_start_step": 17001,
+    "reset_reason": "method_recovery"
+  },
+  "checkpoint_all_solid_check": "regional extrema checked; full rank payload comparison is recorded separately in CONTROL_COMPARISON.json",
+  "statistical_validation": false
+}

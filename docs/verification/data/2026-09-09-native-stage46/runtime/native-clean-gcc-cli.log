@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /tmp/build
+Test project /tmp/build
+    Start 529: v04_coupled_restart_cli_reacting-spray-esf-ibm-cantera
+1/1 Test #529: v04_coupled_restart_cli_reacting-spray-esf-ibm-cantera ...   Passed   12.58 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =  12.59 sec
