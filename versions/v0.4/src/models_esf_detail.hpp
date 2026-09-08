@@ -78,6 +78,13 @@ struct ReactionRequest {
 class Workspace {
 public:
   explicit Workspace(std::size_t species_capacity);
+  std::uint64_t owned_bytes() const noexcept {
+    std::uint64_t bytes = sizeof(*this);
+    for (const auto *v : {&candidate_, &transported_, &means_, &variances_,
+                          &next_y_, &species_delta_, &mean_species_delta_})
+      bytes += v->capacity() * sizeof(double);
+    return bytes;
+  }
   Report advance(const Request &) noexcept;
   // Persistent field chemistry, exactly two half-intervals per field.
   Report react(const ReactionRequest &,

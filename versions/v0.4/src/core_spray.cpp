@@ -23,7 +23,7 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                      RestartCellRecordsView tcr) {
   if (!model.spray)
     return {};
-  if (enabled() || model.reaction.esf || !reaction.gas_query() ||
+  if (enabled() || !reaction.gas_query() ||
       model.time.scheme != TimeScheme::backward_euler)
     return invalid();
   // The initial native gas/ESF transport contract is periodic.
@@ -215,6 +215,67 @@ ProductSpray::configure_collective(MPI_Comm comm,
   if (status)
     owned_bytes_ = local_bytes_ + advance_->owned_bytes();
   return status;
+}
+Status ProductSpray::configure_source_transport(
+    Span<const RemoteDonorFieldSpec> fields) {
+  if (!enabled() || source_halo_bound_ || fields.size == 0)
+    return invalid();
+  const RemoteDonorTargets targets{
+      geometry_->fingerprint(),
+      2,
+      periodic_,
+      {halo_cells_.data(), halo_cells_.size()},
+      {halo_indices_.data(), halo_indices_.size()}};
+  auto status = RemoteDonorExchangePlan::analyze_cells(
+      comm_, geometry_->global_cells(), patch_, targets, fields, 10,
+      source_halo_);
+  if (!status)
+    return status;
+  const auto stats = source_halo_.stats();
+  status = agree(stats.peer_messages > UINT32_MAX - halo_.stats().peer_messages
+                     ? invalid() : Status{});
+  if (!status)
+    return status;
+  const auto bytes = (stats.received_cells + stats.supplied_cells) * 256 +
+                     2 * stats.bytes_per_exchange;
+  status = agree(owned_bytes_ > maximum_bytes_ ||
+                         bytes > maximum_bytes_ - owned_bytes_
+                     ? Status{StatusCode::allocation_failure, 10342}
+                     : Status{});
+  if (status)
+    status = source_halo_.bind(comm_);
+  if (status) {
+    owned_bytes_ += bytes;
+    source_halo_bound_ = true;
+  }
+  return status;
+}
+Status ProductSpray::exchange_source_transport(
+    Span<FieldView> fields, RevisionToken boundary,
+    Span<ThermophysicalGhostAuthority> ghosts) noexcept {
+  auto status = agree(source_halo_bound_ && ghosts.size == fields.size &&
+                              ghosts.data && boundary
+                          ? Status{}
+                          : invalid());
+  if (status)
+    status =
+        agree(source_halo_.preflight_exchange(10, {fields.data, fields.size}));
+  if (status)
+    status = source_halo_.exchange(10, fields);
+  if (!status)
+    return status;
+  for (std::size_t i = 0; i < fields.size; ++i) {
+    const auto f = fields.data[i];
+    ghosts.data[i] = {reinterpret_cast<std::uintptr_t>(&source_halo_),
+                      f.field,
+                      f.revision,
+                      f.storage_identity,
+                      f.revision_domain,
+                      geometry_->topology_revision(),
+                      boundary,
+                      2};
+  }
+  return {};
 }
 Status ProductSpray::prepare(portable::Revision revision, double duration,
                              double pressure_reference, ConstFieldView density,

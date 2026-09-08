@@ -105,6 +105,12 @@ method_history_signature(bool transported_scalars, bool reacting = false,
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
+  if (spray && esf)
+    for (char byte :
+         std::string_view(";p8-source-before-transport-tcr-chemistry-be-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
   return hash;
 }
 constexpr std::uint64_t kFnvOffset = UINT64_C(1469598103934665603);
@@ -582,6 +588,9 @@ struct ProductFields {
     std::size_t catalog_slot{};
   };
   std::vector<FieldId> esf_fields;
+  std::vector<FieldId> post_esf_fields, post_scalars, post_scalar_rates;
+  FieldId post_density{}, post_enthalpy{}, post_enthalpy_rate{},
+      post_transport{}, post_diffusivity{};
   std::uint8_t esf_components{};
   FieldId esf_transport{}, coupled_mass_source{}, coupled_enthalpy_source{},
       coupled_momentum_source{};
@@ -895,6 +904,42 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     if (!status)
       return status;
   }
+  if (model.spray && model.reaction.esf) {
+    const auto scalar = [&](const std::string &name, std::uint8_t components,
+                            std::uint8_t width, FieldId &id) {
+      return require(registry, name.c_str(), components, width, id);
+    };
+    status = scalar("post_source_density", 1, 0, fields.post_density);
+    if (status)
+      status = scalar("post_source_h", 1, ghosts, fields.post_enthalpy);
+    if (status)
+      status =
+          scalar("post_source_h_diffusion", 1, 0, fields.post_enthalpy_rate);
+    if (status)
+      status =
+          scalar("post_source_transport", 4, ghosts, fields.post_transport);
+    if (status)
+      status =
+          scalar("post_source_diffusivity", 1, ghosts, fields.post_diffusivity);
+    for (std::size_t i = 0; i < fields.scalars.size() && status; ++i) {
+      FieldId value{}, rate{};
+      status =
+          scalar("post_source_scalar_" + std::to_string(i), 1, ghosts, value);
+      if (status)
+        status = scalar("post_source_scalar_diffusion_" + std::to_string(i), 1,
+                        0, rate);
+      fields.post_scalars.push_back(value);
+      fields.post_scalar_rates.push_back(rate);
+    }
+    for (std::size_t f = 0; f < fields.esf_fields.size() && status; ++f) {
+      FieldId field{};
+      status = scalar("post_source_esf_" + std::to_string(f),
+                      fields.esf_components, ghosts, field);
+      fields.post_esf_fields.push_back(field);
+    }
+    if (!status)
+      return status;
+  }
   (void)mg;
   return {};
 }
@@ -918,9 +963,9 @@ bool state_field(FieldId field, const ProductFields& fields) noexcept {
              fields.scalar_nonadvective_rates.end();
 }
 
-Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
-                     const SchemeSpec& schemes,
-                     Int3 local_shape, std::size_t local_cells,
+Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
+                     const SchemeSpec &schemes, Int3 local_shape,
+                     std::size_t local_cells,
                      RemoteDonorExchangeStats pressure_donors,
                      RemoteDonorExchangeStats candidate_pressure_donors,
                      RemoteDonorExchangeStats candidate_velocity_donors,
@@ -929,7 +974,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                      RemoteDonorExchangeStats momentum_donors,
                      RemoteDonorExchangeStats rate_donors,
                      RemoteDonorExchangeStats force_donors,
-                     FrozenExecutionGraph& graph) {
+                     RemoteDonorExchangeStats spray_donors,
+                     FrozenExecutionGraph &graph) {
   std::size_t default_workspace = 0U;
   std::size_t momentum_workspace = 0U;
   std::size_t predictor_halo_bytes = 0U;
@@ -1233,22 +1279,31 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   const FieldAccessSpec work_schur_energy_response{
       fields.schur_energy_response, StateVisibility::workspace};
   std::vector<GraphFieldSpec> declarations{
-      {trial_rho, ghosts, false}, {trial_u, ghosts, true},
-      {trial_pi, ghosts, true},  {trial_h, ghosts, false},
-      {trial_t, ghosts, false},   {accepted_rho, 0U, true},
-      {accepted_u, 0U, true},     {accepted_h, ghosts, true},
+      {trial_rho, ghosts, false},
+      {trial_u, ghosts, true},
+      {trial_pi, ghosts, true},
+      {trial_h, ghosts, false},
+      {trial_t, ghosts, false},
+      {accepted_rho, 0U, true},
+      {accepted_u, 0U, true},
+      {accepted_h, ghosts, true},
       {accepted_h_rate, 0U, true},
       {trial_h_rate, 0U, false},
       {trial_mu, 1U, false},
-      {trial_mu_eff, ghosts, false}, {trial_grad, ghosts, false},
-      {work_lambda, 1U, false}, {work_cp, 0U, false},
-      {work_drho_dp, 0U, false}, {work_drho_dh, 0U, false},
+      {trial_mu_eff, ghosts, false},
+      {trial_grad, ghosts, false},
+      {work_lambda, 1U, false},
+      {work_cp, 0U, false},
+      {work_drho_dp, 0U, false},
+      {work_drho_dh, 0U, false},
       {work_lambda_cp, 1U, false},
-      {work_predictor_rho, 0U, false}, {work_predictor_n, 0U, false},
+      {work_predictor_rho, 0U, false},
+      {work_predictor_n, 0U, false},
       {work_predictor_nm1, 1U, false},
       {work_predictor_low, ghosts, false},
       {work_scalar_diffusivity, 1U, false},
-      {work_r_au, 1U, true}, {work_h_by_a, ghosts, true},
+      {work_r_au, 1U, true},
+      {work_h_by_a, ghosts, true},
       {work_pressure_gradient, 1U, true},
       {work_pressure_correction, ghosts, true},
       {work_momentum_diagonal, 0U, false},
@@ -1301,6 +1356,19 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   }
   for (FieldId source : fields.reaction_sources)
     declarations.push_back({{source, StateVisibility::workspace}, 0U, false});
+  if (!fields.post_esf_fields.empty()) {
+    for (auto id : {fields.post_density, fields.post_enthalpy_rate})
+      declarations.push_back({{id, StateVisibility::workspace}, 0, false});
+    for (auto id :
+         {fields.post_enthalpy, fields.post_transport, fields.post_diffusivity})
+      declarations.push_back({{id, StateVisibility::workspace}, ghosts, false});
+    for (auto id : fields.post_esf_fields)
+      declarations.push_back({{id, StateVisibility::workspace}, ghosts, false});
+    for (auto id : fields.post_scalars)
+      declarations.push_back({{id, StateVisibility::workspace}, ghosts, false});
+    for (auto id : fields.post_scalar_rates)
+      declarations.push_back({{id, StateVisibility::workspace}, 0, false});
+  }
   for (FieldId field : fields.esf_fields) {
     declarations.push_back({{field, StateVisibility::accepted}, ghosts, true});
     declarations.push_back({{field, StateVisibility::trial}, ghosts, false});
@@ -1398,6 +1466,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
   if (fields.coupled_momentum_source) {
     predictor_reads.push_back({fields.velocity, StateVisibility::accepted});
     predictor_reads.push_back({fields.pressure, StateVisibility::accepted});
+    // U/p sampling ghosts are supplied by the separately bound complete
+    // donor fringe, rather than this stage's primary face Halo packet.
     predictor_writes.push_back(
         {fields.coupled_momentum_source, StateVisibility::workspace});
     for (FieldId field : fields.coupled_species_sources)
@@ -1405,10 +1475,27 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     for (FieldId field : fields.coupled_total_species_sources)
       predictor_writes.push_back({field, StateVisibility::workspace});
   }
+  if (!fields.post_esf_fields.empty()) {
+    for (auto id :
+         {fields.post_density, fields.post_enthalpy, fields.post_enthalpy_rate,
+          fields.post_transport, fields.post_diffusivity})
+      predictor_writes.push_back({id, StateVisibility::workspace});
+    for (auto id : fields.post_esf_fields)
+      predictor_writes.push_back({id, StateVisibility::workspace});
+    for (auto id : fields.post_scalars)
+      predictor_writes.push_back({id, StateVisibility::workspace});
+    for (auto id : fields.post_scalar_rates)
+      predictor_writes.push_back({id, StateVisibility::workspace});
+  }
+  std::uint64_t predictor_messages = 0, predictor_bytes = 0;
+  if (!checked_add_u64(12U, spray_donors.peer_messages, predictor_messages) ||
+      !checked_add_u64(predictor_route_halo_bytes,
+                       spray_donors.bytes_per_exchange, predictor_bytes))
+    return {StatusCode::invalid_plan, kProductAnalysis};
   status = register_mutating(
       10U, std::move(predictor_reads), std::move(predictor_writes),
       std::move(predictor_ghosts),
-      {12U, predictor_route_halo_bytes, 0U, 0U, 0U, 128U, 0U}, false);
+      {predictor_messages, predictor_bytes, 0U, 0U, 0U, 128U, 0U}, false);
   if (status) {
     StageSpec contribution_one;
     contribution_one.id = 12U;
@@ -3720,6 +3807,22 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = candidate->spray.configure_collective(
           communicator, {fields.data(), fields.size()});
   }
+  if (status && candidate->spray.enabled() && candidate->esf.enabled()) {
+    std::vector<RemoteDonorFieldSpec> fields;
+    status = product_local_stage(communicator, [&] {
+      fields.push_back({candidate->fields.post_enthalpy, 1});
+      for (auto id : candidate->fields.post_scalars)
+        fields.push_back({id, 1});
+      for (auto id : candidate->fields.post_esf_fields)
+        fields.push_back({id, candidate->fields.esf_components});
+      fields.push_back({candidate->fields.post_transport, 4});
+      return Status{};
+    });
+    if (status)
+      status = candidate->spray.configure_source_transport(
+          {fields.data(), fields.size()});
+  }
+
   if (!status)
     return status;
   candidate->phases[1U] = ProductFreezePhase::capability_registration;
@@ -3741,33 +3844,34 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     if (legacy_mg_field != candidate->fields.mg_arena)
       return {StatusCode::invalid_plan, kProductBinding};
     candidate->legacy_mg_schema_fingerprint = legacy_registry.fingerprint();
-    status = compile_graph(
-        candidate->fields, ghosts, model.schemes, candidate->patch.cells, local_cells,
-        candidate->ibm_pressure_donors.has_value()
-            ? candidate->ibm_pressure_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_candidate_pressure_donors.has_value()
-            ? candidate->ibm_candidate_pressure_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_candidate_velocity_donors.has_value()
-            ? candidate->ibm_candidate_velocity_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_candidate_rate_donors.has_value()
-            ? candidate->ibm_candidate_rate_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_gradient_donors.has_value()
-            ? candidate->ibm_gradient_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_momentum_donors.has_value()
-            ? candidate->ibm_momentum_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_rate_donors.has_value()
-            ? candidate->ibm_rate_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->ibm_force_donors.has_value()
-            ? candidate->ibm_force_donors->stats()
-            : RemoteDonorExchangeStats{},
-        candidate->graph);
+    status =
+        compile_graph(candidate->fields, ghosts, model.schemes,
+                      candidate->patch.cells, local_cells,
+                      candidate->ibm_pressure_donors.has_value()
+                          ? candidate->ibm_pressure_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_candidate_pressure_donors.has_value()
+                          ? candidate->ibm_candidate_pressure_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_candidate_velocity_donors.has_value()
+                          ? candidate->ibm_candidate_velocity_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_candidate_rate_donors.has_value()
+                          ? candidate->ibm_candidate_rate_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_gradient_donors.has_value()
+                          ? candidate->ibm_gradient_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_momentum_donors.has_value()
+                          ? candidate->ibm_momentum_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_rate_donors.has_value()
+                          ? candidate->ibm_rate_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->ibm_force_donors.has_value()
+                          ? candidate->ibm_force_donors->stats()
+                          : RemoteDonorExchangeStats{},
+                      candidate->spray.halo_stats(), candidate->graph);
     std::vector<SnapshotFieldSpec> snapshots{{candidate->fields.velocity, 3U},
                                              {candidate->fields.pressure, 1U},
                                              {candidate->fields.enthalpy, 1U}};
@@ -3909,9 +4013,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = ArenaLayout::compile(candidate->schema,
                                     {requests.data(), requests.size()},
                                     candidate->layout);
-    if (status && candidate->spray.enabled()) {
+    if (status && (candidate->spray.enabled() || candidate->esf.enabled())) {
       const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
-      const auto model_bytes = candidate->spray.owned_bytes();
+      const auto model_bytes =
+          candidate->spray.owned_bytes() + candidate->esf.owned_bytes();
       if (model_bytes > limit || candidate->layout.total_doubles() >
               (limit - model_bytes) / sizeof(double))
         status = {StatusCode::allocation_failure, kProductAllocation};
@@ -8452,6 +8557,121 @@ Status ProductDriver::Impl::execute_attempt(
         species_rate_history[s].current = as_const(spray_sources[s]);
     }
   }
+  FieldView post_h, post_rho, post_cache, post_h_rate, post_diffusivity;
+  std::array<FieldView, UINT8_MAX> post_species{}, post_passives{},
+      post_species_rates{}, post_passive_rates{};
+  std::array<ConstFieldView, UINT8_MAX> post_species_read{},
+      post_passive_read{};
+  std::array<ThermophysicalGhostAuthority, UINT8_MAX> post_species_ghosts{},
+      post_passive_ghosts{};
+  std::array<FieldView, 4> post_esf{};
+  std::array<ConstFieldView, 4> post_esf_read{};
+  ThermophysicalGhostAuthority post_h_ghost;
+  if (status && product.spray.enabled() && product.esf.enabled()) {
+    status = runtime_write_view(product.fields.post_enthalpy, post_h);
+    if (status)
+      status = runtime_write_view(product.fields.post_density, post_rho);
+    if (status)
+      status = runtime_write_view(product.fields.post_transport, post_cache);
+    if (status)
+      status =
+          runtime_write_view(product.fields.post_enthalpy_rate, post_h_rate);
+    if (status)
+      status =
+          runtime_write_view(product.fields.post_diffusivity, post_diffusivity);
+    std::size_t ns = 0, np = 0;
+    for (std::size_t i = 0; i < product.fields.scalars.size() && status; ++i) {
+      const bool species =
+          product.fields.scalar_roles[i] == TransportedScalarRole::species;
+      auto &field = species ? post_species[ns] : post_passives[np];
+      auto &rate = species ? post_species_rates[ns] : post_passive_rates[np];
+      status = runtime_write_view(product.fields.post_scalars[i], field);
+      if (status)
+        status = runtime_write_view(product.fields.post_scalar_rates[i], rate);
+      if (species)
+        ++ns;
+      else
+        ++np;
+    }
+    const auto nf = product.fields.esf_fields.size();
+    for (std::size_t f = 0; f < nf && status; ++f)
+      status =
+          runtime_write_view(product.fields.post_esf_fields[f], post_esf[f]);
+    if (status)
+      status = product.esf.deposit_sources(
+          product.spray.exchange(), product.reaction, product.thermodynamics,
+          product.transport, {step.accepted_step, step.generation, 1},
+          rho_history.accepted, pressure_history.accepted, pressure_reference,
+          {esf_accepted.data(), nf}, esf_transport, post_rho,
+          {post_esf.data(), nf}, {post_species.data(), ns}, post_h, post_cache);
+    if (status)
+      for (std::size_t p = 0; p < np; ++p)
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x) {
+              const Int3 c{x, y, z};
+              post_passives[p].unchecked(c, 0) =
+                  rho_history.accepted.unchecked(c, 0) *
+                  passive_accepted[p].unchecked(c, 0) /
+                  post_rho.unchecked(c, 0);
+            }
+    status = product.reductions.consensus(status);
+    std::array<FieldView, UINT8_MAX + 8> exchanged{};
+    std::array<ThermophysicalGhostAuthority, UINT8_MAX + 8> authorities{};
+    std::size_t count = 0;
+    exchanged[count++] = post_h;
+    ns = 0;
+    np = 0;
+    for (auto role : product.fields.scalar_roles)
+      exchanged[count++] = role == TransportedScalarRole::species
+                               ? post_species[ns++]
+                               : post_passives[np++];
+    for (std::size_t f = 0; f < nf; ++f)
+      exchanged[count++] = post_esf[f];
+    exchanged[count++] = post_cache;
+    if (status)
+      status = product.spray.exchange_source_transport(
+          {exchanged.data(), count}, product.boundary.revision(),
+          {authorities.data(), count});
+    if (status) {
+      // The exchange certifies the registered workspaces; semantic aliases
+      // retain their storage/revision when supplied to native h/Y operators.
+      post_h = exchanged[0];
+      post_h.field = product.fields.enthalpy;
+      post_h_ghost = authorities[0];
+      post_h_ghost.field = post_h.field;
+      ns = 0;
+      np = 0;
+      for (std::size_t i = 0; i < product.fields.scalars.size(); ++i) {
+        auto field = exchanged[i + 1];
+        field.field = product.fields.scalars[i];
+        auto ghost = authorities[i + 1];
+        ghost.field = field.field;
+        if (product.fields.scalar_roles[i] == TransportedScalarRole::species) {
+          post_species[ns] = field;
+          post_species_read[ns] = as_const(field);
+          post_species_ghosts[ns++] = ghost;
+        } else {
+          post_passives[np] = field;
+          post_passive_read[np] = as_const(field);
+          post_passive_ghosts[np++] = ghost;
+        }
+      }
+      for (std::size_t f = 0; f < nf; ++f)
+        post_esf_read[f] =
+            as_const(exchanged[1 + product.fields.scalars.size() + f]);
+      post_cache = exchanged[count - 1];
+      status = product.esf.source_diffusion(
+          product.equations.kernels(), as_const(post_cache), as_const(post_h),
+          {post_species_read.data(), ns}, post_h_rate,
+          {post_species_rates.data(), ns}, {post_passive_read.data(), np},
+          {post_passive_rates.data(), np}, post_diffusivity);
+      for (std::size_t i = 0; i < ns; ++i)
+        species_rate_history[i].accepted = as_const(post_species_rates[i]);
+      for (std::size_t i = 0; i < np; ++i)
+        passive_rate_history[i].accepted = as_const(post_passive_rates[i]);
+    }
+  }
   std::array<FieldView, UINT8_MAX> esf_sources{};
   if (status && product.esf.enabled()) {
     FieldView mass;
@@ -8468,12 +8688,19 @@ Status ProductDriver::Impl::execute_attempt(
     if (status)
       status = product.esf.prepare(
           product.equations.kernels(), product.reaction, product.thermodynamics,
-          {esf_accepted.data(), product.fields.esf_fields.size()},
-          {esf_trial.data(), product.fields.esf_fields.size()}, esf_transport,
-          rho_history.accepted, pressure_history.accepted,
-          {species_accepted.data(), species_accepted.size()},
-          enthalpy_history.accepted, pressure_reference, accepted_flux,
-          time.time(), step.dt, step.accepted_step, step.generation,
+          {product.spray.enabled() ? post_esf_read.data() : esf_accepted.data(),
+           product.fields.esf_fields.size()},
+          {esf_trial.data(), product.fields.esf_fields.size()},
+          product.spray.enabled() ? as_const(post_cache) : esf_transport,
+          product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,
+          pressure_history.accepted,
+          {product.spray.enabled() ? post_species_read.data()
+                                   : species_accepted.data(),
+           species_accepted.size()},
+          product.spray.enabled() ? as_const(post_h)
+                                  : enthalpy_history.accepted,
+          pressure_reference, accepted_flux, time.time(), step.dt,
+          step.accepted_step, step.generation,
           {esf_sources.data(), product.fields.reaction_sources.size()});
     if (status)
       for (std::size_t s = 0; s < species_rate_history.size(); ++s)
@@ -8492,6 +8719,10 @@ Status ProductDriver::Impl::execute_attempt(
       species_rate_history[s].current = as_const(combined_sources[s]);
     }
   }
+  // Chemistry/transport can fail locally; no rank may enter the parcel
+  // history collective while a peer has already left the coupled candidate.
+  if (product.spray.enabled())
+    status = product.reductions.consensus(status);
   if (status && product.spray.enabled())
     status = product.spray.stage(product.esf.tcr_history.prepared_snapshot());
   ThermophysicalPredictorInput predictor_input;
@@ -8532,6 +8763,18 @@ Status ProductDriver::Impl::execute_attempt(
       species_rate_history.data(), species_rate_history.size()};
   predictor_input.passive_scalar_nonadvective_rhs = {
       passive_rate_history.data(), passive_rate_history.size()};
+  if (product.spray.enabled() && product.esf.enabled()) {
+    predictor_input.enthalpy_nonadvective_rhs.accepted = as_const(post_h_rate);
+    predictor_input.post_source_transport = {
+        product.spray.fingerprint(),
+        step.generation,
+        as_const(post_h),
+        {post_species_read.data(), species_accepted.size()},
+        {post_passive_read.data(), passive_accepted.size()},
+        post_h_ghost,
+        {post_species_ghosts.data(), species_accepted.size()},
+        {post_passive_ghosts.data(), passive_accepted.size()}};
+  }
   predictor_input.enthalpy_ghosts = enthalpy_ghosts;
   predictor_input.species_ghosts = {species_ghosts.data(),
                                     species_ghosts.size()};

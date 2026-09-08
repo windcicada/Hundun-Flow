@@ -214,6 +214,16 @@ std::uint64_t predictor_state_hash(
     for (std::size_t i = 0; i < input.passive_scalar_nonadvective_rhs.size; ++i)
       mix_view(input.passive_scalar_nonadvective_rhs.data[i].current);
   }
+  if (input.post_source_transport.source_identity != 0U) {
+    const auto &post = input.post_source_transport;
+    hash = hash_mix(hash, post.source_identity);
+    hash = hash_mix(hash, post.time);
+    mix_view(post.enthalpy);
+    for (std::size_t i = 0; i < post.species.size; ++i)
+      mix_view(post.species.data[i]);
+    for (std::size_t i = 0; i < post.passive_scalars.size; ++i)
+      mix_view(post.passive_scalars.data[i]);
+  }
   mix_view(input.density_accepted);
   mix_view(input.enthalpy_accepted);
   if (input.bdf.order == 2U) {
@@ -464,15 +474,19 @@ Status collective_status(MPI_Comm communicator, Status local, int rank,
   return published;
 }
 
-Status collective_high_state(MPI_Comm communicator, Status local,
-                             bool locally_admissible, int rank, int size,
-                             bool& globally_admissible,
-                             ThermophysicalPredictorFailure& local_failure,
-                             ThermophysicalPredictorFailure& selected_failure) noexcept {
-  std::array<int, 2U> values{{local ? size : rank,
-                             locally_admissible ? 1 : 0}};
+Status collective_high_state(
+    MPI_Comm communicator, Status local, bool locally_admissible, int rank,
+    int size, PlanFingerprint source_identity, RevisionToken source_time,
+    bool &globally_admissible, ThermophysicalPredictorFailure &local_failure,
+    ThermophysicalPredictorFailure &selected_failure) noexcept {
+  // Pack source-state agreement into the existing high-state collective.
+  // Complemented lanes recover both extrema without another MPI operation.
+  std::array<std::uint64_t, 6U> values{
+      {std::uint64_t(local ? size : rank),
+       locally_admissible ? UINT64_C(1) : UINT64_C(0), source_identity,
+       UINT64_MAX - source_identity, source_time, UINT64_MAX - source_time}};
   if (MPI_Allreduce(MPI_IN_PLACE, values.data(),
-                    static_cast<int>(values.size()), MPI_INT, MPI_MIN,
+                    static_cast<int>(values.size()), MPI_UINT64_T, MPI_MIN,
                     communicator) != MPI_SUCCESS) {
     return {StatusCode::mpi_failure, kPredictorPlan};
   }
@@ -495,6 +509,9 @@ Status collective_high_state(MPI_Comm communicator, Status local,
     }
     return published;
   }
+  if (values[2] != UINT64_MAX - values[3] ||
+      values[4] != UINT64_MAX - values[5])
+    return {StatusCode::invalid_plan, kPredictorPlan};
   globally_admissible = values[1U] != 0;
   return {};
 }
@@ -1149,9 +1166,11 @@ Status ThermophysicalPredictorPlan::predict(
         output.independent_species, output.passive_scalars);
   }
   bool globally_high_admissible = false;
-  Status consensus = collective_high_state(
-      communicator, local, locally_high_admissible, rank, size,
-      globally_high_admissible, failure, failure);
+  Status consensus =
+      collective_high_state(communicator, local, locally_high_admissible, rank,
+                            size, input.post_source_transport.source_identity,
+                            input.post_source_transport.time,
+                            globally_high_admissible, failure, failure);
   if (!consensus) return publish_failure(consensus);
   ++blocking_collectives;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -3057,6 +3076,47 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     return {StatusCode::invalid_plan, kPredictorPlan};
   }
 
+  const auto &post = input.post_source_transport;
+  const bool source_first = post.source_identity != 0U;
+  if (source_first) {
+    if (second_order || post.source_identity != mass_source_identity_ ||
+        post.time != input.time || post.species.size != species_.size() ||
+        post.passive_scalars.size != passive_scalars_.size() ||
+        post.species_ghosts.size != species_.size() ||
+        post.passive_ghosts.size != passive_scalars_.size() ||
+        (post.species.size &&
+         (!post.species.data || !post.species_ghosts.data)) ||
+        (post.passive_scalars.size &&
+         (!post.passive_scalars.data || !post.passive_ghosts.data)))
+      return {StatusCode::invalid_plan, kPredictorPlan};
+    const auto valid_transport =
+        [&](ConstFieldView view, ThermophysicalGhostAuthority ghosts,
+            FieldId field, std::uint8_t reach) noexcept {
+          return view.field == field &&
+                 detail::valid_cell_view(view, cells_, 0U, 1U, reach) &&
+                 ghost_authority_matches(ghosts, view, input.geometry,
+                                         input.boundary, reach) &&
+                 ghosts.exchange_plan == post.enthalpy_ghosts.exchange_plan;
+        };
+    if (!valid_transport(post.enthalpy, post.enthalpy_ghosts, enthalpy_,
+                         enthalpy_reach_))
+      return {StatusCode::invalid_plan, kPredictorPlan};
+    for (std::size_t i = 0; i < post.species.size; ++i)
+      if (!valid_transport(post.species.data[i], post.species_ghosts.data[i],
+                           species_[i], species_reach_))
+        return {StatusCode::invalid_plan, kPredictorPlan};
+    for (std::size_t i = 0; i < post.passive_scalars.size; ++i)
+      if (!valid_transport(post.passive_scalars.data[i],
+                           post.passive_ghosts.data[i], passive_scalars_[i],
+                           passive_scalar_reach_))
+        return {StatusCode::invalid_plan, kPredictorPlan};
+  } else if (post.time != 0U || !empty_field(post.enthalpy) ||
+             post.species.size || post.passive_scalars.size ||
+             post.enthalpy_ghosts.valid() || post.species_ghosts.size ||
+             post.passive_ghosts.size) {
+    return {StatusCode::invalid_plan, kPredictorPlan};
+  }
+
   for (std::size_t i = 0U; i < species_.size(); ++i) {
     const PredictorRateHistory rate =
         input.species_nonadvective_rhs.data[i];
@@ -3202,6 +3262,16 @@ Status ThermophysicalPredictorPlan::predict_high_local(
          detail::cell_face_views_overlap(view, as_const(output.paired_mass_flux.y)) ||
          detail::cell_face_views_overlap(view, as_const(output.paired_mass_flux.z))));
   };
+  if (source_first) {
+    if (source_aliases_output(post.enthalpy))
+      return {StatusCode::invalid_plan, kPredictorPlan};
+    for (std::size_t i = 0; i < post.species.size; ++i)
+      if (source_aliases_output(post.species.data[i]))
+        return {StatusCode::invalid_plan, kPredictorPlan};
+    for (std::size_t i = 0; i < post.passive_scalars.size; ++i)
+      if (source_aliases_output(post.passive_scalars.data[i]))
+        return {StatusCode::invalid_plan, kPredictorPlan};
+  }
   if (source_aliases_output(input.mass_source.rate) ||
       source_aliases_output(input.enthalpy_nonadvective_rhs.current) ||
       aliases_any_output(input.density_accepted) ||
@@ -3288,6 +3358,19 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   }
 
   const KernelBox box{{0, 0, 0}, cells_};
+  if (source_first) {
+    bool finite = detail::finite_face_neighbour_slabs(post.enthalpy, box, 0U,
+                                                      1U, enthalpy_reach_);
+    for (std::size_t i = 0; i < post.species.size; ++i)
+      finite &= detail::finite_face_neighbour_slabs(post.species.data[i], box,
+                                                    0U, 1U, species_reach_);
+    for (std::size_t i = 0; i < post.passive_scalars.size; ++i)
+      finite &= detail::finite_face_neighbour_slabs(
+          post.passive_scalars.data[i], box, 0U, 1U, passive_scalar_reach_);
+    if (!finite)
+      return {StatusCode::numerical_failure, kPredictorNumerical};
+  }
+
   if ((input.mass_source.identity != 0U &&
        !detail::finite_field_box(input.mass_source.rate, box, 0U, 1U)) ||
       (!rate_is_zero(input.enthalpy_nonadvective_rhs.current) &&
@@ -3521,15 +3604,22 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     }
   }
 
-  const auto predict_quantity = [&](ConstFieldView accepted,
-                                    ConstFieldView previous,
-                                    PredictorRateHistory nonadvective_rhs,
-                                    ConvectionScheme convection,
-                                    FieldView predicted,
-                                    ThermophysicalPredictorFailureField
-                                        field_kind,
-                                    std::uint32_t field_index) noexcept -> Status {
-    const std::array<ConstFieldView, 1U> accepted_reads{accepted};
+  const auto predict_quantity =
+      [&](ConstFieldView accepted, ConstFieldView previous,
+          PredictorRateHistory nonadvective_rhs, ConvectionScheme convection,
+          FieldView predicted, ThermophysicalPredictorFailureField field_kind,
+          std::uint32_t field_index) noexcept -> Status {
+    ConstFieldView transported = accepted;
+    if (source_first) {
+      if (field_kind == ThermophysicalPredictorFailureField::enthalpy)
+        transported = post.enthalpy;
+      else if (field_kind ==
+               ThermophysicalPredictorFailureField::independent_species)
+        transported = post.species.data[field_index];
+      else
+        transported = post.passive_scalars.data[field_index];
+    }
+    const std::array<ConstFieldView, 1U> accepted_reads{transported};
     const std::array<FieldView, 1U> accepted_writes{
         output.accepted_advection_workspace};
     const KernelInvocation accepted_call{

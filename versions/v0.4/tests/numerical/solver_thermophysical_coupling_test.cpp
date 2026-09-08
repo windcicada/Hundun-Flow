@@ -719,9 +719,88 @@ bool test_bdf2_predictor_and_mutations(bool source_enabled = false) {
     fill(species_source, -1e6);
     const Status rejected = fixture.equations.thermophysical_predictor().predict(
         MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
-    return passed && expect(!rejected && rho_n.bytes == accepted_before &&
-                            certificate.state == marker.state,
-                            "inadmissible coupled source rejects without clipping or committing");
+    passed &= expect(
+        !rejected && rho_n.bytes == accepted_before &&
+            certificate.state == marker.state,
+        "inadmissible coupled source rejects without clipping or committing");
+    // Independent linear source-first transport oracle. Only spatial donors
+    // change: accepted temporal history must not become the deposited state.
+    fill(species_source, 0.1);
+    input.bdf = {10., -10., 0., 1U};
+    input.density_previous = {};
+    input.enthalpy_previous = {};
+    const std::array<ConstFieldView, 1> empty_previous{};
+    input.species_previous = {empty_previous.data(), 1};
+    input.mass_flux_previous = {};
+    input.enthalpy_nonadvective_rhs.previous = {};
+    species_rhs[0].previous = {};
+    attach_ghost_authority(fixture, input, ghost_history);
+    auto post_h = make_field(kEnthalpy, cells, 2, 820);
+    auto post_y = make_field(kSpecies, cells, 2, 821);
+    for (int z = -2; z < cells.z + 2; ++z)
+      for (int y = -2; y < cells.y + 2; ++y)
+        for (int x = -2; x < cells.x + 2; ++x) {
+          const double coordinate = (x + .5) / n;
+          post_h.view.unchecked({x, y, z}, 0) = 300000 + 1000 * coordinate;
+          post_y.view.unchecked({x, y, z}, 0) = .2 + .01 * coordinate;
+        }
+    const std::array<ConstFieldView, 1> post_species{as_const(post_y.view)};
+    const std::array<ThermophysicalGhostAuthority, 1> post_ghosts{
+        make_ghost_authority(post_species[0], input.geometry, input.boundary,
+                             0xBEEF)};
+    input.post_source_transport = {input.mass_source.identity,
+                                   input.time,
+                                   as_const(post_h.view),
+                                   {post_species.data(), 1},
+                                   {},
+                                   make_ghost_authority(as_const(post_h.view),
+                                                        input.geometry,
+                                                        input.boundary, 0xBEEF),
+                                   {post_ghosts.data(), 1},
+                                   {}};
+    const auto h_saved = h_n.bytes, y_saved = y_n.bytes;
+    auto moved = fixture.equations.thermophysical_predictor().predict(
+        MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
+    passed &= expect(bool(moved) &&
+                         close(h_star.view.unchecked({1, 1, 1}, 0),
+                               (300000 + .1 * (3000 + 10000 - 300)) / 1.02) &&
+                         close(y_star.view.unchecked({1, 1, 1}, 0),
+                               (.2 + .1 * (.03 + .1 - .003)) / 1.02) &&
+                         h_saved == h_n.bytes && y_saved == y_n.bytes,
+                     "BE transports post-source gradients and retains "
+                     "pre-source temporal inventory");
+    const auto transported_input = input.post_source_transport;
+    const auto transported_output = h_star.bytes;
+    const auto transported_certificate = certificate;
+    const auto refuses = [&](std::string_view name) {
+      const auto rejected =
+          fixture.equations.thermophysical_predictor().predict(
+              MPI_COMM_SELF, {}, input, output, {}, diagnostics, certificate);
+      return expect(
+          !rejected && h_star.bytes == transported_output &&
+              same_certificate(certificate, transported_certificate) &&
+              h_n.bytes == h_saved && y_n.bytes == y_saved,
+          name);
+    };
+    ++input.post_source_transport.time;
+    passed &= refuses(
+        "post-source transport rejects stale attempt time before publishing");
+    input.post_source_transport = transported_input;
+    ++input.post_source_transport.enthalpy_ghosts.state;
+    passed &= refuses("post-source transport requires fresh Halo authority");
+    input.post_source_transport = transported_input;
+    input.post_source_transport.source_identity = 0;
+    passed &= refuses("orphan transport state cannot bypass source admission");
+    input.post_source_transport = transported_input;
+    ++input.post_source_transport.source_identity;
+    passed &=
+        refuses("transport source owner must match the frozen gas exchange");
+    input.post_source_transport = transported_input;
+    post_h.view.unchecked({-1, 1, 1}, 0) =
+        std::numeric_limits<double>::quiet_NaN();
+    passed &= refuses("post-source transport preflights every required ghost "
+                      "before output mutation");
+    return passed;
   }
 
   const std::vector<double> h_snapshot = h_star.bytes;

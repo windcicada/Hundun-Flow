@@ -568,6 +568,19 @@ struct ScalarAdmissibleInterval {
   double upper{};
 };
 
+// Source-first BE composition transports these already deposited intensive
+// values while retaining the original accepted rho*q in the time derivative.
+// Current exchange sources are still applied once in conserved form. The
+// caller supplies diffusion rates evaluated at this same transport state.
+struct PredictorTransportState {
+  PlanFingerprint source_identity{};
+  RevisionToken time{};
+  ConstFieldView enthalpy{};
+  Span<const ConstFieldView> species{}, passive_scalars{};
+  ThermophysicalGhostAuthority enthalpy_ghosts{};
+  Span<const ThermophysicalGhostAuthority> species_ghosts{}, passive_ghosts{};
+};
+
 struct ThermophysicalPredictorInput {
   double dt{};
   BdfCoefficients bdf{};
@@ -600,6 +613,7 @@ struct ThermophysicalPredictorInput {
   // Borrowed geometry storage and its values remain immutable for this plan.
   Span<const std::uint8_t> cell_activity{};
   ConservativeMassSourceView mass_source{};
+  PredictorTransportState post_source_transport{};
 };
 
 struct ThermophysicalPredictorOutput {

@@ -3,6 +3,7 @@
 #include "core_reaction_detail.hpp"
 #include "core_tcr_history_detail.hpp"
 #include "models_esf_detail.hpp"
+#include "models_exchange_batch_detail.hpp"
 
 namespace hundun::v04::detail {
 // Persistent fields live in native StateLayers; typed TCR histories are staged
@@ -21,6 +22,10 @@ public:
     count_ = std::size_t(cells.x) * cells.y * cells.z;
     c_z_ = model.reaction.mixing_c_z;
     sc_t_ = model.reaction.turbulent_schmidt;
+    for (const auto &scalar : model.transported_scalars)
+      if (scalar.role == TransportedScalarRole::passive_scalar)
+        passive_schmidt_.push_back(
+            {scalar.molecular_schmidt, scalar.turbulent_schmidt});
     species_scheme_ = model.schemes.species;
     enthalpy_scheme_ = model.schemes.enthalpy;
     if (!gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
@@ -122,6 +127,25 @@ public:
       return numerical();
     return {};
   }
+  std::uint64_t owned_bytes() const noexcept {
+    if (!enabled())
+      return 0;
+    std::uint64_t bytes =
+        sizeof(*this) + workspace_->owned_bytes() + tcr_history.owned_bytes() +
+        reactants_.capacity() * sizeof(std::size_t) +
+        passive_schmidt_.capacity() * sizeof(std::array<double, 2>) +
+        (spec_.initial_species_offsets.capacity() +
+         spec_.tcr.progress_weights.capacity()) *
+            sizeof(double) +
+        spec_.tcr.reactants.capacity() * sizeof(std::string);
+    for (const auto &name : spec_.tcr.reactants)
+      bytes += name.capacity() + 1;
+    for (const auto *v :
+         {&rates_, &gradients_, &scratch_, &mass_divergence_, &tuple_, &means_,
+          &independent_, &diffusion_, &enthalpies_, &query_rates_})
+      bytes += v->capacity() * sizeof(double);
+    return bytes;
+  }
   bool enabled() const noexcept { return bool(workspace_); }
   ProductTcrHistory tcr_history;
   double offset(std::size_t f, std::size_t s) const noexcept {
@@ -214,6 +238,135 @@ public:
           cache.unchecked(cell, 1) = turbulent / (sc_t_ * density);
         }
     return {};
+  }
+  // Apply one common conservative exchange to every stochastic field before
+  // querying TCR or forming any transport gradient. These are workspace views;
+  // accepted native fields and the gas transaction remain untouched.
+  Status deposit_sources(const portable::ExchangeBatchReport &exchange,
+                         const ProductReactionSources &gas,
+                         const ThermodynamicsPlan &thermo,
+                         const TransportPlan &transport,
+                         portable::Revision revision, ConstFieldView density,
+                         ConstFieldView pi, double reference,
+                         Span<const ConstFieldView> fields,
+                         ConstFieldView accepted_cache, FieldView post_density,
+                         Span<FieldView> post_fields,
+                         Span<FieldView> post_species, FieldView post_enthalpy,
+                         FieldView post_cache) noexcept {
+    if (!enabled() || !exchange.available || exchange.cell_count != count_ ||
+        !exchange.cells || fields.size != spec_.fields ||
+        post_fields.size != spec_.fields || post_species.size != ns_ - 1)
+      return invalid();
+    const auto mapping = gas.species_indices();
+    std::size_t i = 0;
+    for (int z = 0; z < cells_.z; ++z)
+      for (int y = 0; y < cells_.y; ++y)
+        for (int x = 0; x < cells_.x; ++x, ++i) {
+          const Int3 cell{x, y, z};
+          const auto &row = exchange.cells[i];
+          const double mass = density.unchecked(cell, 0) * row.volume_m3;
+          const double next = row.gas.gas_mass_candidate_kg;
+          if (!(mass > 0) || !(next > 0) || !(row.volume_m3 > 0) ||
+              std::abs(next - mass - row.gas.gas_mass_delta_kg) >
+                  1e-12 * std::max(mass, next))
+            return numerical();
+          const double new_density = row.gas.gas_mass_delta_kg == 0
+                                         ? density.unchecked(cell, 0)
+                                         : next / row.volume_m3;
+          post_density.unchecked(cell, 0) = new_density;
+          std::fill(means_.begin(), means_.end(), 0.);
+          for (std::size_t f = 0; f < spec_.fields; ++f) {
+            auto *tuple = tuple_.data() + f * stride_;
+            for (std::size_t c = 0; c < stride_; ++c) {
+              const double delta =
+                  c == ns_ ? row.gas.gas_thermochemical_enthalpy_delta_j
+                           : row.gas_species_mass_delta_kg[c];
+              tuple[c] =
+                  row.gas.gas_mass_delta_kg == 0 && delta == 0
+                      ? fields.data[f].unchecked(cell, c)
+                      : (mass * fields.data[f].unchecked(cell, c) + delta) /
+                            next;
+              means_[c] += tuple[c] / spec_.fields;
+            }
+            portable::GasSample sample;
+            auto status =
+                query(gas, thermo, tuple, reference + pi.unchecked(cell, 0),
+                      revision, sample);
+            if (!status)
+              return status;
+            for (std::size_t c = 0; c < stride_; ++c)
+              post_fields.data[f].unchecked(cell, c) = tuple[c];
+          }
+          for (std::size_t s = 0; s < mapping.size; ++s) {
+            independent_[s] = means_[mapping.data[s]];
+            post_species.data[s].unchecked(cell, 0) = independent_[s];
+          }
+          post_enthalpy.unchecked(cell, 0) = means_[ns_];
+          portable::GasSample sample;
+          auto status =
+              query(gas, thermo, means_.data(),
+                    reference + pi.unchecked(cell, 0), revision, sample);
+          MolecularTransportState intrinsic;
+          if (status)
+            status = transport.evaluate(
+                sample.temperature_k,
+                {independent_.data(), independent_.size()}, intrinsic);
+          if (!status)
+            return status;
+          // Accepted Dt and rho recover the accepted eddy viscosity without
+          // observing workspaces modified by a rejected gas iteration.
+          const double turbulent = accepted_cache.unchecked(cell, 1) * sc_t_ *
+                                   density.unchecked(cell, 0);
+          const double gamma =
+              intrinsic.conductivity / sample.cp_j_per_kg_k + turbulent / sc_t_;
+          if (!std::isfinite(gamma) || gamma <= 0 ||
+              !std::isfinite(turbulent) || turbulent < 0)
+            return numerical();
+          post_cache.unchecked(cell, 0) = gamma;
+          post_cache.unchecked(cell, 1) = turbulent / (sc_t_ * new_density);
+          post_cache.unchecked(cell, 2) = intrinsic.viscosity;
+          post_cache.unchecked(cell, 3) = turbulent;
+        }
+    return {};
+  }
+  Status source_diffusion(const CartesianKernelPlan &kernels,
+                          ConstFieldView post_cache, ConstFieldView enthalpy,
+                          Span<const ConstFieldView> species,
+                          FieldView enthalpy_rate,
+                          Span<FieldView> species_rates,
+                          Span<const ConstFieldView> passives,
+                          Span<FieldView> passive_rates,
+                          FieldView diffusivity) noexcept {
+    if (species.size != ns_ - 1 || species_rates.size != species.size ||
+        passives.size != passive_schmidt_.size() ||
+        passive_rates.size != passives.size)
+      return invalid();
+    auto gamma = post_cache;
+    gamma.components = 1;
+    const auto evaluate = [&](ConstFieldView field, FieldView rate) noexcept {
+      KernelInvocation call{{&field, 1}, {&rate, 1}, {{0, 0, 0}, cells_}, 0, 0,
+                            1,           0};
+      return cartesian_diffusion(kernels, gamma, call);
+    };
+    auto status = evaluate(enthalpy, enthalpy_rate);
+    for (std::size_t s = 0; s < species.size && status; ++s)
+      status = evaluate(species.data[s], species_rates.data[s]);
+    for (std::size_t s = 0; s < passives.size && status; ++s) {
+      for (int z = -2; z < cells_.z + 2; ++z)
+        for (int y = -2; y < cells_.y + 2; ++y)
+          for (int x = -2; x < cells_.x + 2; ++x) {
+            const Int3 c{x, y, z};
+            diffusivity.unchecked(c, 0) =
+                post_cache.unchecked(c, 2) / passive_schmidt_[s][0] +
+                post_cache.unchecked(c, 3) / passive_schmidt_[s][1];
+          }
+      const auto field = passives.data[s];
+      auto rate = passive_rates.data[s];
+      KernelInvocation call{{&field, 1}, {&rate, 1}, {{0, 0, 0}, cells_}, 0, 0,
+                            1,           0};
+      status = cartesian_diffusion(kernels, as_const(diffusivity), call);
+    }
+    return status;
   }
   Status prepare(const CartesianKernelPlan &kernels,
                  const ProductReactionSources &gas,
@@ -541,6 +694,7 @@ private:
   Int3 cells_{};
   std::size_t ns_{}, stride_{}, count_{};
   double c_z_{}, sc_t_{};
+  std::vector<std::array<double, 2>> passive_schmidt_;
   ConvectionScheme species_scheme_{}, enthalpy_scheme_{};
   std::unique_ptr<esf::detail::Workspace> workspace_;
   std::vector<double> rates_, gradients_, scratch_, mass_divergence_, tuple_,

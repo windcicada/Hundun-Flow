@@ -11,10 +11,23 @@
 #include <vector>
 using namespace hundun::v04;
 namespace {
-class Gas final : public portable::GasQueryProvider {
+class Gas final : public portable::GasQueryProvider,
+                  public portable::GasAdvanceProvider {
 public:
   chemistry::detail::AnalyticIsomerBackend backend;
   std::uint64_t calls{}, fail_at{};
+  bool fail_half{};
+  unsigned half_calls{};
+  portable::Status
+  advance_gas(const portable::GasAdvanceQuery &q,
+              portable::GasAdvanceOutput &out) noexcept override {
+    if (fail_half && ++half_calls == 2)
+      return portable::Status::provider_failure;
+    return backend.advance_gas(q, out);
+  }
+  ProductCouplingBindings bindings() noexcept {
+    return {this, this, &backend.closure_identity()};
+  }
   const portable::GasIdentity &gas_identity() const noexcept override {
     return backend.gas_identity();
   }
@@ -43,7 +56,8 @@ double real(const std::uint8_t *p) {
   std::memcpy(&v, &b, 8);
   return v;
 }
-std::vector<double> snapshot(const RestartSnapshot &s) {
+std::vector<double> snapshot(const RestartSnapshot &s,
+                             bool normalized = false) {
   std::vector<double> v{s.time,
                         s.dt,
                         s.pressure_reference,
@@ -54,11 +68,36 @@ std::vector<double> snapshot(const RestartSnapshot &s) {
                       s.previous_rate_fields})
     for (std::size_t f = 0; f < fields.size; ++f) {
       auto q = fields.data[f].values;
+      double scale = 1.;
+      if (normalized) {
+        const double pressure = 101325.,
+                     density = pressure * 28 / (kUniversalGasConstant * 400);
+        switch (fields.data[f].role) {
+        case RestartFieldRole::velocity:
+          scale = std::sqrt(pressure / density);
+          break;
+        case RestartFieldRole::pressure_perturbation:
+        case RestartFieldRole::pressure_absolute:
+          scale = pressure;
+          break;
+        case RestartFieldRole::enthalpy:
+          scale = pressure / density;
+          break;
+        case RestartFieldRole::enthalpy_nonadvective_rate:
+          scale = pressure / s.dt;
+          break;
+        case RestartFieldRole::scalar_nonadvective_rate:
+          scale = density / s.dt;
+          break;
+        default:
+          break;
+        }
+      }
       for (int z = 0; z < q.interior.z; ++z)
         for (int y = 0; y < q.interior.y; ++y)
           for (int x = 0; x < q.interior.x; ++x)
             for (unsigned c = 0; c < q.components; ++c)
-              v.push_back(q.unchecked({x, y, z}, c));
+              v.push_back(q.unchecked({x, y, z}, c) / scale);
     }
   for (auto flux : {s.final_mass_flux, s.previous_mass_flux})
     for (auto q : {flux.x, flux.y, flux.z})
@@ -66,14 +105,31 @@ std::vector<double> snapshot(const RestartSnapshot &s) {
         for (int y = 0; y < q.extents.y; ++y)
           for (int x = 0; x < q.extents.x; ++x)
             v.push_back(q.unchecked({x, y, z}));
-  for (std::size_t i = 0; i < s.cell_records.values.size; ++i)
-    v.push_back(s.cell_records.values.data[i]);
+  std::size_t offset = 0;
+  for (std::size_t cell = 0; cell < s.cell_records.variable_cell_bytes.size;
+       ++cell) {
+    const auto length = s.cell_records.variable_cell_bytes.data[cell];
+    const auto *row = s.cell_records.values.data + offset;
+    offset += length;
+    const auto tcr = length >= 24 ? u64(row + 16, 4) : 0;
+    for (std::size_t i = 0; i < length;) {
+      const auto history_offset = i >= 24 ? i - 24 : SIZE_MAX;
+      if (normalized && tcr == 120 &&
+          (history_offset == 24 || history_offset == 32 ||
+           history_offset == 40 || history_offset == 48 ||
+           history_offset == 80 || history_offset == 88)) {
+        v.push_back(real(row + i));
+        i += 8;
+      } else
+        v.push_back(row[i++]);
+    }
+  }
   for (std::size_t i = 0; i < s.cell_records.variable_cell_bytes.size; ++i)
     v.push_back(s.cell_records.variable_cell_bytes.data[i]);
   return v;
 }
 bool inventory(const RestartSnapshot &s, int rank) {
-  ConstFieldView h, p, u, Y;
+  ConstFieldView h, p, u, Y, passive;
   for (std::size_t i = 0; i < s.fields.size; ++i) {
     auto f = s.fields.data[i];
     switch (f.role) {
@@ -89,12 +145,15 @@ bool inventory(const RestartSnapshot &s, int rank) {
     case RestartFieldRole::independent_species:
       Y = f.values;
       break;
+    case RestartFieldRole::transported_scalar:
+      passive = f.values;
+      break;
     default:
       break;
     }
   }
   // Independent constant-cp EOS from the fixture: equal MW=28, h_A-h_B=1e5.
-  std::array<double, 7> local{}, global{};
+  std::array<double, 8> local{}, global{};
   const double V =
       1. / (s.global_cells.x * s.global_cells.y * s.global_cells.z);
   for (int z = 0; z < h.interior.z; ++z)
@@ -114,7 +173,32 @@ bool inventory(const RestartSnapshot &s, int rank) {
         local[0] += rho * V;
         local[1] += (rho * (H + K) - P) * V;
         local[5] += rho * V;
+        if (passive.base)
+          local[7] += rho * V * passive.unchecked(c, 0);
       }
+  bool ensemble_ok = true;
+  std::size_t fields = 0;
+  for (std::size_t f = 0; f < s.fields.size; ++f)
+    if (s.fields.data[f].role == RestartFieldRole::stochastic_field)
+      ++fields;
+  if (fields)
+    for (int z = 0; z < h.interior.z; ++z)
+      for (int y = 0; y < h.interior.y; ++y)
+        for (int x = 0; x < h.interior.x; ++x) {
+          const Int3 c{x, y, z};
+          double mean_y = 0, mean_h = 0;
+          for (std::size_t f = 0; f < s.fields.size; ++f)
+            if (s.fields.data[f].role == RestartFieldRole::stochastic_field) {
+              const auto field = s.fields.data[f].values;
+              mean_y += field.unchecked(c, 0) / fields;
+              mean_h += field.unchecked(c, 2) / fields;
+            }
+          ensemble_ok &= std::abs(mean_y - Y.unchecked(c, 0)) < 2e-12 &&
+                         std::abs(mean_h - h.unchecked(c, 0)) <
+                             2e-12 * std::max(1., std::abs(h.unchecked(c, 0)));
+        }
+  if (!agree(ensemble_ok))
+    return false;
   auto records = s.cell_records;
   std::size_t offset = 0;
   bool valid = true;
@@ -146,7 +230,7 @@ bool inventory(const RestartSnapshot &s, int rank) {
   }
   if (!agree(valid))
     return false;
-  MPI_Allreduce(local.data(), global.data(), 7, MPI_DOUBLE, MPI_SUM,
+  MPI_Allreduce(local.data(), global.data(), 8, MPI_DOUBLE, MPI_SUM,
                 MPI_COMM_WORLD);
   const double initial_mass = 101325 * 28 / (kUniversalGasConstant * 400);
   const double injected = 1e-4 * s.step,
@@ -165,7 +249,8 @@ bool inventory(const RestartSnapshot &s, int rank) {
          std::abs(global[2] - 2 * injected) < 1e-9 &&
          std::abs(global[3]) < 1e-9 && std::abs(global[4]) < 1e-9 &&
          std::abs(global[5] - s.closed_mass_target) < 1e-10 &&
-         global[6] == s.step;
+         global[6] == s.step &&
+         (!passive.base || std::abs(global[7] + 2 * initial_mass) < 1e-10);
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -183,13 +268,14 @@ int main(int argc, char **argv) {
     auto create = [&](Gas &gas, ProductDriver &driver) {
       CompiledCasePlan plan;
       auto r = ProductCompiler::compile(MPI_COMM_WORLD, model, argv[1], plan,
-                                        {&gas});
+                                        gas.bindings());
       if (r)
         r = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
-      double y = .01;
+      std::array<double, 2> initial_scalars{.01, -2};
       DriverInitialState init;
       init.temperature = 400;
-      init.transported_scalars = {&y, 1};
+      init.transported_scalars = {initial_scalars.data(),
+                                  model.transported_scalars.size()};
       if (r)
         r = driver.initialize(init);
       return r;
@@ -207,6 +293,37 @@ int main(int argc, char **argv) {
     if (ok) {
       status = retry.advance({1, 1, 1, 1, 1}, report);
       ok = agree(bool(status) && report.accepted);
+    }
+    if (ok && model.reaction.esf) {
+      RestartSnapshot first;
+      status = reference.committed_restart_snapshot(first);
+      ok = agree(bool(status));
+      if (ok) {
+        std::size_t offset = 0;
+        int enriched = 0;
+        bool valid = true;
+        for (std::size_t cell = 0;
+             cell < first.cell_records.variable_cell_bytes.size; ++cell) {
+          const auto bytes = first.cell_records.variable_cell_bytes.data[cell];
+          const auto *row = first.cell_records.values.data + offset;
+          offset += bytes;
+          if (bytes < 144 || u64(row + 16, 4) != 120) {
+            valid = false;
+            continue;
+          }
+          const auto eta = real(row + 24 + 24);
+          valid &= eta >= .01 - 1e-13;
+          if (eta > .01 + 1e-13)
+            ++enriched;
+        }
+        int total = 0;
+        MPI_Allreduce(&enriched, &total, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        // Initial gas/field mean is exactly .01 everywhere. The actual
+        // trilinear deposition enriches eight cells before TCR observes eta.
+        ok = agree(valid && total == 8);
+        if (!ok && rank == 0)
+          std::cerr << "TCR post-source enriched cells=" << total << '\n';
+      }
     }
     if (ok) {
       reference_gas.calls = 0;
@@ -306,8 +423,9 @@ int main(int argc, char **argv) {
       ProductDriver restored;
       CompiledCasePlan restored_plan;
       if (status)
-        status = ProductCompiler::compile(MPI_COMM_WORLD, model, argv[1],
-                                          restored_plan, {&restored_gas});
+        status =
+            ProductCompiler::compile(MPI_COMM_WORLD, model, argv[1],
+                                     restored_plan, restored_gas.bindings());
       if (status)
         status = ProductDriver::create(MPI_COMM_WORLD, std::move(restored_plan),
                                        restored);
@@ -351,6 +469,58 @@ int main(int argc, char **argv) {
           status = restored.committed_restart_snapshot(actual);
         if (ok)
           ok = agree(bool(status) && snapshot(actual) == snapshot(accepted));
+      }
+      if (ok && model.reaction.esf) {
+        const auto saved = snapshot(accepted);
+        reference_gas.half_calls = 0;
+        reference_gas.fail_half = rank == 0;
+        auto failure = reference.advance({1, 1, 1, 1, 1}, report);
+        ok = agree(!failure && !report.accepted);
+        if (rank == 0)
+          std::cerr << "second half status=" << unsigned(failure.code) << ':'
+                    << failure.detail << " accepted=" << report.accepted
+                    << " halves=" << reference_gas.half_calls << '\n';
+        reference_gas.fail_half = false;
+        RestartSnapshot after;
+        if (ok)
+          status = reference.committed_restart_snapshot(after);
+        if (ok)
+          ok = agree(bool(status) && snapshot(after) == saved);
+        if (ok)
+          status = reference.advance({1, 1, 1, 1, 1}, report);
+        if (ok)
+          ok = agree(bool(status) && report.accepted);
+        if (ok)
+          status = restored.advance({1, 1, 1, 1, 1}, report);
+        if (ok)
+          ok = agree(bool(status) && report.accepted);
+        RestartSnapshot control;
+        if (ok)
+          status = reference.committed_restart_snapshot(after);
+        if (ok && status)
+          status = restored.committed_restart_snapshot(control);
+        if (ok) {
+          // Restart drops numerical warm starts. Compare the same dimensionless
+          // SI scales as the native reacting restart oracle. TCR numerical
+          // history uses doubles; parcel values and integer records stay exact.
+          const auto a = snapshot(after, true), b = snapshot(control, true);
+          bool same = a.size() == b.size();
+          for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+            same &= std::abs(a[i] - b[i]) <=
+                    2e-12 * std::max({1., std::abs(a[i]), std::abs(b[i])});
+          if (!same)
+            for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+              if (std::abs(a[i] - b[i]) >
+                  2e-12 * std::max({1., std::abs(a[i]), std::abs(b[i])})) {
+                std::cerr.precision(17);
+                std::cerr << "second half retry rank=" << rank << " index=" << i
+                          << " after=" << a[i] << " control=" << b[i] << '\n';
+                break;
+              }
+          ok = agree(bool(status) && same);
+        }
+        if (!ok && rank == 0)
+          std::cerr << "P8 second-half rejection/retry diverged\n";
       }
       MPI_Barrier(MPI_COMM_WORLD);
       if (rank == 0)

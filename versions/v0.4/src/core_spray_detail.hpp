@@ -14,6 +14,9 @@ public:
                          const CartesianGeometryPlan &, MeshPatch, int rank,
                          RestartCellRecordsView tcr);
   Status configure_collective(MPI_Comm, Span<const RemoteDonorFieldSpec>);
+  Status configure_source_transport(Span<const RemoteDonorFieldSpec>);
+  Status exchange_source_transport(Span<FieldView>, RevisionToken boundary,
+                                   Span<ThermophysicalGhostAuthority>) noexcept;
   Status prepare(portable::Revision, double duration, double pressure_reference,
                  ConstFieldView density, FieldView pressure, FieldView enthalpy,
                  FieldView velocity,
@@ -36,7 +39,15 @@ public:
   bool enabled() const noexcept { return identity_ != 0; }
   PlanFingerprint fingerprint() const noexcept { return identity_; }
   std::uint64_t owned_bytes() const noexcept { return owned_bytes_; }
-  RemoteDonorExchangeStats halo_stats() const noexcept { return halo_.stats(); }
+  RemoteDonorExchangeStats halo_stats() const noexcept {
+    auto result = halo_.stats();
+    const auto source = source_halo_.stats();
+    result.received_cells += source.received_cells;
+    result.supplied_cells += source.supplied_cells;
+    result.bytes_per_exchange += source.bytes_per_exchange;
+    result.peer_messages += source.peer_messages;
+    return result;
+  }
   portable::ExchangeBatchReport exchange() const noexcept {
     return advance_ ? advance_->exchange() : portable::ExchangeBatchReport{};
   }
@@ -65,6 +76,8 @@ private:
   std::vector<FieldView> halo_views_;
   std::vector<ConstFieldView> species_views_;
   RemoteDonorExchangePlan halo_;
+  RemoteDonorExchangePlan source_halo_;
+  bool source_halo_bound_{};
   spray::detail::ParcelMigrationPlan restore_migration_;
   portable::Revision revision_{};
 };

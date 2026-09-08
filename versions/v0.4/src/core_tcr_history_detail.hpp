@@ -28,6 +28,12 @@ public:
       encode(accepted_[i], accepted_bytes_.data() + i * record_bytes);
     }
   }
+  std::uint64_t owned_bytes() const noexcept {
+    return sizeof(*this) +
+           (accepted_.capacity() + trial_.capacity()) *
+               sizeof(tcr::detail::History) +
+           accepted_bytes_.capacity() + trial_bytes_.capacity();
+  }
   bool enabled() const noexcept { return identity_ != 0; }
   RestartCellRecordsView snapshot() const noexcept {
     return enabled() ? RestartCellRecordsView{identity_,

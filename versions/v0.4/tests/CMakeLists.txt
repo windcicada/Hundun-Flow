@@ -1932,6 +1932,14 @@ foreach(spray_ranks IN ITEMS 1 2 4)
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-mean")
   set_tests_properties(v04_product_spray_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_esf_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf")
+  set_tests_properties(v04_product_spray_esf_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_esf_passive_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-passive")
+  set_tests_properties(v04_product_spray_esf_passive_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
 endforeach()
 
 add_executable(v04_product_reaction_mpi_test mpi/product_reaction_mpi_test.cpp)
@@ -1997,14 +2005,17 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-esf reacting-tcr-experimental reacting-spray-mean)
+set(coupled_cli_cases reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
-  list(APPEND coupled_cli_cases reacting-cantera-esf)
+  list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera)
 endif()
 foreach(coupled_case IN LISTS coupled_cli_cases)
   set(coupled_initial_state "101325,300,0,0,0,0.25")
-  if(coupled_case STREQUAL "reacting-spray-mean")
+  if(coupled_case MATCHES "^reacting-spray-")
     set(coupled_initial_state "101325,400,0,0,0,0.01")
+  endif()
+  if(coupled_case STREQUAL "reacting-spray-esf-passive")
+    set(coupled_initial_state "101325,400,0,0,0,0.01,-2")
   endif()
   add_test(NAME v04_coupled_restart_cli_${coupled_case}
     COMMAND "${CMAKE_COMMAND}"

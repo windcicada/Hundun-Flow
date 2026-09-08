@@ -1,0 +1,18 @@
+HUNDUN_LIQUID_ASSET_V1
+units SI
+source HUNDUN-independent-synthetic-alpha-not-real-fuel
+gas_sha b0037fc6285e4ff17d100414ee6cc81c86d27a7b690b9b12a2c002b14ab61ccd
+gas_phase synthetic-gas
+gas_species 2 A B
+enthalpy_reference absolute-standard-formation-298.15K-v1
+vapor A
+molecular_weight 28.014
+temperature_range 280 400
+liquid_reference 298.15 -100000
+density constant 298.15 800 0 0 0
+cp constant 298.15 1000 0 0 0
+latent constant 298.15 200000 0 0 0
+surface_tension constant 298.15 0.025 0 0 0
+viscosity constant 298.15 0.001 0 0 0
+saturation antoine 0 0 0 6000
+end
