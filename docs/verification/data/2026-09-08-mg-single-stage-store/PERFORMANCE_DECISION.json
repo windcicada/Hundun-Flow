@@ -1,0 +1,648 @@
+{
+  "schema": "HUNDUN_MG_SINGLE_STAGE_PERFORMANCE_DECISION_V1",
+  "decision": "withdraw_algorithm_experiment",
+  "reason": "No total wall-time gain in the only permitted candidate round.",
+  "scientific_and_payload_checks_passed": true,
+  "rounds_per_configuration": 1,
+  "metrics": {
+    "baseline": {
+      "process_wall_seconds": 110.86,
+      "mean_max_rank_advance_seconds": 9.526838825111112,
+      "rank_mean_krylov_seconds_per_step": 4.0454108340199655,
+      "rank_mean_candidate_seconds_per_step": 2.2714812039982637,
+      "rank_mean_mg_seconds_per_step": 2.0534300564262153,
+      "rank_mean_mg_finest_pre_seconds_per_step": 0.5251527020598958,
+      "mg": {
+        "rank_step_mean_seconds": {
+          "apply_ns": 2.0534300564262153,
+          "reduction_ns": 0.06528616351649305
+        },
+        "phases_seconds": {
+          "pre_smooth_ns": 0.7037464566918403,
+          "residual_ns": 0.0,
+          "restriction_ns": 0.30672330462413194,
+          "prolongation_ns": 0.10401626036545139,
+          "post_smooth_ns": 0.3500722777395833,
+          "terminal_ns": 0.20081960355989584
+        },
+        "phases_fraction_of_mg_apply": {
+          "pre_smooth_ns": 0.34271752012661144,
+          "residual_ns": 0.0,
+          "restriction_ns": 0.14937119658117426,
+          "prolongation_ns": 0.05065488353982752,
+          "post_smooth_ns": 0.17048171504260937,
+          "terminal_ns": 0.0977971482064511
+        },
+        "nested_communication_seconds": {
+          "direct_mpi_ns": 0.11702932125520833,
+          "halo_wait_ns": 0.35329169184548614,
+          "halo_control_ns": 0.0
+        },
+        "levels": [
+          {
+            "level": 0,
+            "global_shape": [
+              456,
+              256,
+              52
+            ],
+            "local_shapes": [
+              [
+                28,
+                32,
+                52
+              ],
+              [
+                29,
+                32,
+                52
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.5251527020598958,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.19671166446961805,
+              "prolongation_ns": 0.05887093112065973,
+              "post_smooth_ns": 0.2517361507048611,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0,
+              "halo_wait_ns": 0.1348446889904514,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 178.77777777777777,
+              "pre_smooth_calls": 178.77777777777777,
+              "residual_calls": 0.0,
+              "restriction_calls": 178.77777777777777,
+              "prolongation_calls": 178.77777777777777,
+              "post_smooth_calls": 178.77777777777777,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 0.0,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 1,
+            "global_shape": [
+              228,
+              128,
+              26
+            ],
+            "local_shapes": [
+              [
+                14,
+                16,
+                26
+              ],
+              [
+                15,
+                16,
+                26
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.08265253585763889,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.06557774690538194,
+              "prolongation_ns": 0.019005200977430557,
+              "post_smooth_ns": 0.06411517400086805,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.006595927665798611,
+              "halo_wait_ns": 0.08439282884114582,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 357.55555555555554,
+              "pre_smooth_calls": 357.55555555555554,
+              "residual_calls": 0.0,
+              "restriction_calls": 357.55555555555554,
+              "prolongation_calls": 357.55555555555554,
+              "post_smooth_calls": 357.55555555555554,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 715.1111111111111,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 2,
+            "global_shape": [
+              114,
+              64,
+              13
+            ],
+            "local_shapes": [
+              [
+                7,
+                8,
+                13
+              ],
+              [
+                8,
+                8,
+                13
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.04648798812413195,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.024265736097222223,
+              "prolongation_ns": 0.007854801377604166,
+              "post_smooth_ns": 0.015866572307291667,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0032469393602430553,
+              "halo_wait_ns": 0.05582143563888889,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 536.3333333333334,
+              "pre_smooth_calls": 536.3333333333334,
+              "residual_calls": 0.0,
+              "restriction_calls": 536.3333333333334,
+              "prolongation_calls": 536.3333333333334,
+              "post_smooth_calls": 536.3333333333334,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 1430.2222222222222,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 3,
+            "global_shape": [
+              57,
+              32,
+              7
+            ],
+            "local_shapes": [
+              [
+                3,
+                4,
+                7
+              ],
+              [
+                4,
+                4,
+                7
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.028755932272569444,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.012323992909722222,
+              "prolongation_ns": 0.005994112235243056,
+              "post_smooth_ns": 0.008528435203125,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0025468165572916663,
+              "halo_wait_ns": 0.03835394510850695,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 715.1111111111111,
+              "pre_smooth_calls": 715.1111111111111,
+              "residual_calls": 0.0,
+              "restriction_calls": 715.1111111111111,
+              "prolongation_calls": 715.1111111111111,
+              "post_smooth_calls": 715.1111111111111,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 2145.3333333333335,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 4,
+            "global_shape": [
+              29,
+              16,
+              4
+            ],
+            "local_shapes": [
+              [
+                1,
+                2,
+                4
+              ],
+              [
+                2,
+                2,
+                4
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.02069729837760417,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.0078441642421875,
+              "prolongation_ns": 0.012291214654513887,
+              "post_smooth_ns": 0.0098259455234375,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.00244326584375,
+              "halo_wait_ns": 0.030902270159722224,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 893.8888888888889,
+              "pre_smooth_calls": 893.8888888888889,
+              "residual_calls": 0.0,
+              "restriction_calls": 893.8888888888889,
+              "prolongation_calls": 893.8888888888889,
+              "post_smooth_calls": 893.8888888888889,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 2860.4444444444443,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 5,
+            "global_shape": [
+              29,
+              8,
+              2
+            ],
+            "local_shapes": [
+              [
+                1,
+                1,
+                2
+              ],
+              [
+                2,
+                1,
+                2
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.0,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.0,
+              "prolongation_ns": 0.0,
+              "post_smooth_ns": 0.0,
+              "terminal_ns": 0.20081960355989584,
+              "direct_mpi_ns": 0.102196371828125,
+              "halo_wait_ns": 0.008976523106770834,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 1072.6666666666667,
+              "pre_smooth_calls": 0.0,
+              "residual_calls": 0.0,
+              "restriction_calls": 0.0,
+              "prolongation_calls": 0.0,
+              "post_smooth_calls": 0.0,
+              "terminal_calls": 1072.6666666666667,
+              "direct_mpi_calls": 2860.4444444444443,
+              "halo_control_calls": 0.0
+            }
+          }
+        ],
+        "outside_six_phases_seconds": 0.3880521534453125,
+        "scope": "Native pressure M only. Six phases are disjoint; communication is nested. No per-loop full hierarchy reconstruction."
+      },
+      "counts": {
+        "invoked": 63,
+        "iterations": 1609,
+        "A_calls": 2358,
+        "M_calls": 1609,
+        "baseline_candidates": 63,
+        "extrapolated_candidates": 33,
+        "ladder_candidates": 37,
+        "incomplete_candidates": 0
+      }
+    },
+    "candidate": {
+      "process_wall_seconds": 111.97,
+      "mean_max_rank_advance_seconds": 9.601104317555556,
+      "rank_mean_krylov_seconds_per_step": 4.085974842872396,
+      "rank_mean_candidate_seconds_per_step": 2.294283053809896,
+      "rank_mean_mg_seconds_per_step": 2.1001708087473956,
+      "rank_mean_mg_finest_pre_seconds_per_step": 0.4724030862864584,
+      "mg": {
+        "rank_step_mean_seconds": {
+          "apply_ns": 2.1001708087473956,
+          "reduction_ns": 0.0615727139921875
+        },
+        "phases_seconds": {
+          "pre_smooth_ns": 0.7108645130329861,
+          "residual_ns": 0.0,
+          "restriction_ns": 0.33962628400868056,
+          "prolongation_ns": 0.10779994141753473,
+          "post_smooth_ns": 0.352283278078125,
+          "terminal_ns": 0.20352941755729165
+        },
+        "phases_fraction_of_mg_apply": {
+          "pre_smooth_ns": 0.33847937990194565,
+          "residual_ns": 0.0,
+          "restriction_ns": 0.16171364852520914,
+          "prolongation_ns": 0.05132913045383667,
+          "post_smooth_ns": 0.167740298365654,
+          "terminal_ns": 0.09691088777616266
+        },
+        "nested_communication_seconds": {
+          "direct_mpi_ns": 0.11900425919444443,
+          "halo_wait_ns": 0.4484877654791667,
+          "halo_control_ns": 0.0
+        },
+        "levels": [
+          {
+            "level": 0,
+            "global_shape": [
+              456,
+              256,
+              52
+            ],
+            "local_shapes": [
+              [
+                28,
+                32,
+                52
+              ],
+              [
+                29,
+                32,
+                52
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.47240308628645833,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.2007369736440972,
+              "prolongation_ns": 0.06052076986805555,
+              "post_smooth_ns": 0.2511180111675347,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0,
+              "halo_wait_ns": 0.13606924216753472,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 178.77777777777777,
+              "pre_smooth_calls": 178.77777777777777,
+              "residual_calls": 0.0,
+              "restriction_calls": 178.77777777777777,
+              "prolongation_calls": 178.77777777777777,
+              "post_smooth_calls": 178.77777777777777,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 0.0,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 1,
+            "global_shape": [
+              228,
+              128,
+              26
+            ],
+            "local_shapes": [
+              [
+                14,
+                16,
+                26
+              ],
+              [
+                15,
+                16,
+                26
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.0970792855407986,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.07588198179253472,
+              "prolongation_ns": 0.01974113951822917,
+              "post_smooth_ns": 0.06465299877777778,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.006620092216145833,
+              "halo_wait_ns": 0.11186331190017361,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 357.55555555555554,
+              "pre_smooth_calls": 357.55555555555554,
+              "residual_calls": 0.0,
+              "restriction_calls": 357.55555555555554,
+              "prolongation_calls": 357.55555555555554,
+              "post_smooth_calls": 357.55555555555554,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 715.1111111111111,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 2,
+            "global_shape": [
+              114,
+              64,
+              13
+            ],
+            "local_shapes": [
+              [
+                7,
+                8,
+                13
+              ],
+              [
+                8,
+                8,
+                13
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.06806748893229167,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.035969287555555556,
+              "prolongation_ns": 0.008292639916666667,
+              "post_smooth_ns": 0.016080984730034723,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0032882872430555557,
+              "halo_wait_ns": 0.0897339077326389,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 536.3333333333334,
+              "pre_smooth_calls": 536.3333333333334,
+              "residual_calls": 0.0,
+              "restriction_calls": 536.3333333333334,
+              "prolongation_calls": 536.3333333333334,
+              "post_smooth_calls": 536.3333333333334,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 1430.2222222222222,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 3,
+            "global_shape": [
+              57,
+              32,
+              7
+            ],
+            "local_shapes": [
+              [
+                3,
+                4,
+                7
+              ],
+              [
+                4,
+                4,
+                7
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.04764775276041666,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.016785075379340274,
+              "prolongation_ns": 0.006444004078993056,
+              "post_smooth_ns": 0.009093532776041666,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.002648751660590278,
+              "halo_wait_ns": 0.0623867912109375,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 715.1111111111111,
+              "pre_smooth_calls": 715.1111111111111,
+              "residual_calls": 0.0,
+              "restriction_calls": 715.1111111111111,
+              "prolongation_calls": 715.1111111111111,
+              "post_smooth_calls": 715.1111111111111,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 2145.3333333333335,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 4,
+            "global_shape": [
+              29,
+              16,
+              4
+            ],
+            "local_shapes": [
+              [
+                1,
+                2,
+                4
+              ],
+              [
+                2,
+                2,
+                4
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.02566689951302083,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.010252965637152778,
+              "prolongation_ns": 0.012801388035590278,
+              "post_smooth_ns": 0.011337750626736112,
+              "terminal_ns": 0.0,
+              "direct_mpi_ns": 0.0026176717994791667,
+              "halo_wait_ns": 0.03924028412239584,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 893.8888888888889,
+              "pre_smooth_calls": 893.8888888888889,
+              "residual_calls": 0.0,
+              "restriction_calls": 893.8888888888889,
+              "prolongation_calls": 893.8888888888889,
+              "post_smooth_calls": 893.8888888888889,
+              "terminal_calls": 0.0,
+              "direct_mpi_calls": 2860.4444444444443,
+              "halo_control_calls": 0.0
+            }
+          },
+          {
+            "level": 5,
+            "global_shape": [
+              29,
+              8,
+              2
+            ],
+            "local_shapes": [
+              [
+                1,
+                1,
+                2
+              ],
+              [
+                2,
+                1,
+                2
+              ]
+            ],
+            "rank_step_mean_seconds": {
+              "apply_ns": 0.0,
+              "reduction_ns": 0.0,
+              "pre_smooth_ns": 0.0,
+              "residual_ns": 0.0,
+              "restriction_ns": 0.0,
+              "prolongation_ns": 0.0,
+              "post_smooth_ns": 0.0,
+              "terminal_ns": 0.20352941755729165,
+              "direct_mpi_ns": 0.1038294562751736,
+              "halo_wait_ns": 0.009194228345486112,
+              "halo_control_ns": 0.0
+            },
+            "rank_step_mean_calls": {
+              "visits": 1072.6666666666667,
+              "pre_smooth_calls": 0.0,
+              "residual_calls": 0.0,
+              "restriction_calls": 0.0,
+              "prolongation_calls": 0.0,
+              "post_smooth_calls": 0.0,
+              "terminal_calls": 1072.6666666666667,
+              "direct_mpi_calls": 2860.4444444444443,
+              "halo_control_calls": 0.0
+            }
+          }
+        ],
+        "outside_six_phases_seconds": 0.3860673746527772,
+        "scope": "Native pressure M only. Six phases are disjoint; communication is nested. No per-loop full hierarchy reconstruction."
+      },
+      "counts": {
+        "invoked": 63,
+        "iterations": 1609,
+        "A_calls": 2358,
+        "M_calls": 1609,
+        "baseline_candidates": 63,
+        "extrapolated_candidates": 33,
+        "ladder_candidates": 37,
+        "incomplete_candidates": 0
+      }
+    }
+  },
+  "limitations": [
+    "Not a statistical estimate of long-term slowdown or speedup.",
+    "Finest pre decreased, but inclusive MG/advance/process costs did not.",
+    "Communication is nested; increased wait has no established causal attribution.",
+    "Original frozen long run remains stopped; no COAST comparison or two-phase integration."
+  ],
+  "source_sha256": {
+    "compare-cost.py": "3119dc86e901d5b1f66b994fc8efb52148577787feb5b7156d37675bd4ae123b",
+    "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/mg-observation-20260908/PILOT_ACCEPTED.json": "a04270dc0c3fd7c6cf0e197f43a3632df30443b73615afacf62220bfe1afcef7",
+    "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/mg-observation-20260908/cost-summary.json": "363991bfa7ff60371a69de8f194504356f1a0a9c6d7477910e71ca73e5fc65c6",
+    "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/mg-single-stage-20260908/PILOT_ACCEPTED.json": "97bd0678a9ad05c3063582697fa4481c9cdc2924d765ed26d41c8d6f03f765b8",
+    "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/mg-single-stage-20260908/cost-summary.json": "fb0058594939cc8e2e2fda6a0197a1c61f4dcff353e86fb2a665b0e4cedaeb42"
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "schema": "HUNDUN_MG_SINGLE_STAGE_NUMERICAL_ACCEPTANCE_V1",
+  "scope": "Single-stage store candidate: numerical and payload checks only; performance decision recorded separately.",
+  "source_commit": "ed9b09ab2a019a7957030844e5437421351fd044",
+  "source_tree": "867be9a0697f71c1aed8953c5ad08f31fda917b3",
+  "runner_sha256": "a6f2f2d201bf1067e0bebc99bf2a560c85b852680dc48da18c0d16dbd8ea90fa",
+  "runner_build_manifest_sha256": "4269d8279ab316f60e93ec9e5ee79071f33b38fae1aa8c05d32cf2b6d8636ba4",
+  "retained_method_signature": 12213963202598979269,
+  "source_generation": "generation-9500-139424060480232",
+  "output_generation": "generation-9510-161548994678342",
+  "window": {
+    "start_step": 9500,
+    "end_step": 9510,
+    "ranks": 128,
+    "rounds": 1,
+    "method_recovery": false
+  },
+  "process_wall_seconds": 111.97,
+  "clean_release_tests": {
+    "passed": 20,
+    "total": 20,
+    "wall_seconds": 34.5
+  },
+  "physical_audit": {
+    "steps": 10,
+    "ranks": 128,
+    "bdf1_steps": 0,
+    "bdf2_steps": 10,
+    "terminal_maxima": {
+      "eos": 0.0,
+      "continuity": 2.617570949848936e-07,
+      "energy": 8.805795074746012e-07,
+      "closed_mass": 0.0,
+      "gauge": 0.0
+    },
+    "fluid_ranges": {
+      "T": [
+        299.9790418656781,
+        300.023665045917
+      ],
+      "p": [
+        107114.70444352923,
+        107142.07143345375
+      ],
+      "rho": [
+        1.238967326204426,
+        1.2392473944722178
+      ]
+    }
+  },
+  "payload_equivalence": {
+    "comparison_root": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-mg-9500-9510-20260908",
+    "rank_checkpoint": {
+      "files": 128,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "f487753213a00961924b399fb92eee9efb0927377a0ba258e43a889a4ed7e067"
+    },
+    "manifest": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "4505302d06335db637afa0b002810b8b12f4e702cce041da7156cbc204c39f40"
+    },
+    "visit": {
+      "files": 128,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "ecd3e349ca01b38d5612818df42b6810bdd96db7bc30d61e6f6827428b82008a"
+    },
+    "accumulator": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "1cf2b46c939a51e96c407337eb541af4af8ea4fdd92128d51129d5d19710720b"
+    },
+    "statistics": {
+      "files": 1,
+      "byte_equal": true,
+      "sorted_sha256_manifest_digest": "eb8352343d3901b365765f54ceaa31f6399bcbcb41d04d694b3495c4636b77e4"
+    },
+    "solver_nontiming_columns": {
+      "ranks": 128,
+      "rows_per_rank": 70,
+      "all_equal": true,
+      "excluded": [
+        "source_meta_sha256",
+        "*_ns"
+      ]
+    },
+    "completion_difference": "Only restart_generation differs; each names its own verified generation."
+  },
+  "runtime_validation": {
+    "command": [
+      "/usr/bin/python3",
+      "/home/wyf/code_dev/.worktrees/hundun-flow-mg-single-stage-accept-20260908/tools/v04_evidence_validate.py",
+      "runtime",
+      "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-mg-single-stage-9500-9510-20260908/evidence.jsonl",
+      "--run-start-manifest",
+      "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/long-thermodynamic-35000-20260907/Restart/generation-9500-139424060480232/manifest.bin"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "source_files_unchanged": 133,
+  "artifacts_sha256": {
+    "finalize-observation.py": "6f2391b7d8db0da854cc26839d2c14de71d97770de949f3c702a57d7e5e7818e",
+    "mg-single-stage-20260908/summarize-cost.py": "66446d5ca235271a202d0b98bc96a23cc97c2d8d1369c46f25b2e4f3ea246f5a",
+    "mg-single-stage-20260908/cost-summary.json": "fb0058594939cc8e2e2fda6a0197a1c61f4dcff353e86fb2a665b0e4cedaeb42",
+    "mg-single-stage-20260908/observation.json": "a36919bb3a68884ab6831158372017fa0f358ca1672da5c2e1424d56c4dd7b08",
+    "mg-single-stage-20260908/loops.jsonl": "a95fd8e074e6b19ef81340c0268900caf32415f8d1d4519dea02a2814b153f70",
+    "mg-single-stage-20260908/pilot-output-verified.json": "727aebd9368f0b21c22604e6807494b09a79f5b60f65f003ab71fa40fb522c94",
+    "mg-single-stage-20260908/SOURCE.sha256": "70bb974019348b4a4f67755b14f2c5db6ca4a0ac4e78b9b46ce0140ff3e0037b",
+    "mg-single-stage-20260908/FROZEN.sha256": "7e07606c23ab80acbc4e9fa3bea0dff8516899e2661a9cbac586c4e8b5341cfe",
+    "/home/wyf/code_dev/.worktrees/hundun-flow-mg-single-stage-accept-20260908/build-accept/Testing/Temporary/LastTest.log": "1b01e5941ea900e6c32dc658d8ab1f92cbf50db188311599258fccdd7f0ce906",
+    "pilot-mg-single-stage-9500-9510-20260908.log": "341c6c552b7f49bb69356d0629cdd48dc545ed67ce9759f2358f2eae487b9c3a"
+  },
+  "limitations": [
+    "One baseline and one candidate window; no repeats or long-term speed guarantee.",
+    "Solid regional extrema checked; no new source-to-final solid-only payload comparison.",
+    "Original long-run processes remain paused beyond this pilot endpoint; do not replace them.",
+    "Stage 6/two-phase integration remains deferred."
+  ]
+}

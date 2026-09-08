@@ -1,6 +1,7 @@
 # 单stage预平滑的中间方向写入实验
 
-状态：局部数值与sanitizer回归通过，**尚未完成干净构建和产品性能接受**。
+状态：**算法实验已撤回**。局部、sanitizer和干净构建验收通过；单轮产品数值等价，
+但完整墙钟和advance没有收益，故恢复基线实现，保留新增回归及证据。
 本轮只评估这一项性能候选，没有新增物理模块；两相继续暂挂。
 
 ## 测量依据与最小范围
@@ -31,7 +32,7 @@ pre/post平滑占Native MG的51.32%，最细层pre为0.525153 s/步。
 
 这是有源码数据流依据的性能实验，不是一个已发生的数值故障修复。
 不存在“旧版算错、新版算对”的RED；不为制造RED而断言私有函数调用次数。
-实际性能接受信号是同物理窗口的完整墙钟与已有MG成本，尚待候选单轮测量。
+实际性能接受信号是同物理窗口的完整墙钟与已有MG成本，测量结果见后文。
 从已测level visits和单元数可推算逻辑写入槽位，但没有测硬件store流量，
 不能将缓存中的重复写入直接当成DDR带宽或峰值内存节省。
 
@@ -57,11 +58,65 @@ pre/post平滑占Native MG的51.32%，最细层pre为0.525153 s/步。
 所以以上不能充当新可执行文件的发布身份；必须在独立干净checkout再次构建验收。
 没有改变当前Re3900物性、网格、dt、残差门槛、refinement或checkpoint持久化合同。
 
-## 待接受步骤
+## 干净验收与单轮产品结果
 
-候选分项DCO提交后，以相同Clang/Release参数从干净checkout构建，复核相关公开测试及真实CLI。
-通过后仅运行一次128-rank、9500→9510，保持原输入和MG观测开关；
-使用已完成的MG观测窗口作为同配置基线，不再重复基线或三轮取中位数。
-先比全部rank checkpoint、Visit、统计、守恒、工作次数，再看完整墙钟和分层成本。
-无总成本收益则撤回算法实验；小幅单轮差值不外推为长期加速保证。
-未完成这些步骤前不恢复长测、不推送、不标为可替代COAST。
+候选DCO提交 `ed9b09ab2a019a7957030844e5437421351fd044`，
+tree `867be9a0697f71c1aed8953c5ad08f31fda917b3`。
+独立干净checkout `/home/wyf/code_dev/.worktrees/hundun-flow-mg-single-stage-accept-20260908`，
+新Ninja Release、Clang15/libc++、`-march=znver3 -mno-fma -ffp-contract=off`，`-j4`，
+tests开启，ASan/UBSan/Hypre关闭；构建没有开发Ninja日志恢复问题。
+全部MG测试、ProductDriver retry1/2/4及真实runner MG CLI1/2/4，**20/20通过，34.50 s**。
+见[干净日志](data/2026-09-08-mg-single-stage-store/clean-acceptance-LastTest.log)与
+[manifest](data/2026-09-08-mg-single-stage-store/clean-build-manifest.txt)。
+runner SHA-256为 `a6f2f2d201bf1067e0bebc99bf2a560c85b852680dc48da18c0d16dbd8ea90fa`，
+manifest为 `4269d8279ab316f60e93ec9e5ee79071f33b38fae1aa8c05d32cf2b6d8636ba4`；
+head/tree前缀摘要已独立重算，源码清洁标志为true。
+
+冻结配置、程序和检查器后，只运行一次128-rank、9500→9510，仍为原网格、变物性、dt、
+阈值和MG观测开关。运行目录是
+`/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/pilot-mg-single-stage-9500-9510-20260908`；
+原始观测和收据在同级 `mg-single-stage-20260908`。基线为已经完成的MG观测窗口，未再跑基线。
+
+10步BDF2、无retry，128 ranks/70 logical loops/6层账目完整；runtime validator返回0。
+末次generation为 `generation-9510-161548994678342`，Visit和日志正常完成。
+**128份rank checkpoint、manifest、128份Visit、statistics、accumulator与基线逐字节一致**；
+每rank全部70行solver的非计时列（排除来源hash和`*_ns`）也完全一致。
+complete附件仅合法generation名称不同。133份原checkpoint/统计文件与全部冻结输入哈希不变。
+见[数值/载荷收据](data/2026-09-08-mg-single-stage-store/PILOT_ACCEPTED.json)。
+
+| 相同口径 | 基线 | 候选 |
+|---|---:|---:|
+| 完整进程墙钟 / s | 110.86 | 111.97 |
+| 9502–9510逐步max-rank advance均值 / s | 9.526839 | 9.601104 |
+| rank-mean Native MG / s每步 | 2.053430 | 2.100171 |
+| rank-mean MG最细层pre / s每步 | 0.525153 | 0.472403 |
+| rank-mean MG全部层pre / s每步 | 0.703746 | 0.710865 |
+| rank-mean MG嵌套halo wait / s每步 | 0.353292 | 0.448488 |
+| 后9步iterations / A / M | 1609 / 2358 / 1609 | 1609 / 2358 / 1609 |
+
+最细层pre局部变快，但全部层pre、MG、advance和完整墙钟没有改善。
+未剔除较慢loop、未增加重复轮次，也不把单轮通信等待差值归因于某个已证实的系统或算法原因。
+按预定规则撤回，而不是将该窗口外推为长期变慢百分比。
+[性能决定及完整分层数值](data/2026-09-08-mg-single-stage-store/PERFORMANCE_DECISION.json)
+绑定两侧来源与成本hash。
+
+后处理首版`finalize-observation.py`曾因脚本生成时的字符串替换产生SyntaxError，
+发生在Python执行前，没有生成收据或改写运行数据；原错误副本保存在audit目录，
+修正后只重跑这一步读取核查，未重复CFD。来源和后处理hash分别由不变的FROZEN与新增ANALYSIS绑定。
+复用的物理核查器输出含旧“observation-only”描述，本候选的实际范围以本报告和数值收据为准：
+它是性能实验；固体只新增区域极值核查，未再做源9500到终9510的固体专用全载荷检查。
+归档脚本保留当次audit路径合同，不是离开原始数据目录即可运行的通用程序。
+
+## 撤回确认与后续
+
+只撤回`solver_mg.cpp`中的算法改动，保留单stage异常覆盖。
+该文件与实验前`5b993ea`逐字节相同，SHA-256
+`f37cd9be2053715138fe91136a955bfcb60826c6e02128a96ded905150772555`。
+恢复后Chebyshev及MG MPI1/2/4 **4/4通过，1.60 s**，见
+[日志](data/2026-09-08-mg-single-stage-store/withdrawn-LastTest.log)。
+没有再次运行相同128-rank配置。实验冻结程序与数据保留只读，不移作生产验收标签。
+
+下一项先回到C2-r1工作次数：基线后9步记录58次`norm_breakdown_restarts`，
+须核对该计数的实际分支和与真实残差重建的关系，再判断是否存在可减少的重复工作。
+计数较多不等于已发生数值不稳定；不先放宽阈值、删保护或更换求解器。
+原长测仍暂停，没有推送，也未宣布COAST替代完成。

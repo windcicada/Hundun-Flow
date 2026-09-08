@@ -1,0 +1,66 @@
+Start testing: Sep 08 11:32 CST
+----------------------------------------------------------
+266/367 Testing: v04_solver_mg_chebyshev
+266/367 Test: v04_solver_mg_chebyshev
+Command: "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_mg_chebyshev_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_solver_mg_chebyshev" start time: Sep 08 11:32 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.34 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_chebyshev" end time: Sep 08 11:32 CST
+"v04_solver_mg_chebyshev" time elapsed: 00:00:00
+----------------------------------------------------------
+
+275/367 Testing: v04_solver_mg_mpi_1
+275/367 Test: v04_solver_mg_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_solver_mg_mpi_1" start time: Sep 08 11:32 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.37 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_1" end time: Sep 08 11:32 CST
+"v04_solver_mg_mpi_1" time elapsed: 00:00:00
+----------------------------------------------------------
+
+276/367 Testing: v04_solver_mg_mpi_2
+276/367 Test: v04_solver_mg_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_solver_mg_mpi_2" start time: Sep 08 11:32 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_2" end time: Sep 08 11:32 CST
+"v04_solver_mg_mpi_2" time elapsed: 00:00:00
+----------------------------------------------------------
+
+277/367 Testing: v04_solver_mg_mpi_4
+277/367 Test: v04_solver_mg_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes/versions/v0.4/tests
+"v04_solver_mg_mpi_4" start time: Sep 08 11:32 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.49 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_4" end time: Sep 08 11:32 CST
+"v04_solver_mg_mpi_4" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 08 11:32 CST
+
+v04_focused =   3.44 sec*proc
+

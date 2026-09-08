@@ -29,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 当前活动切片 | MG层级归因已完成干净13/13与单轮9500→9510；当前只评估Chebyshev pre=1保留最终缺陷时的中间direction写入是否可消去，尚无性能收益结论 |
+| 当前活动切片 | MG层级归因已完成；单stage写入实验干净20/20、单轮数值等价但无总成本收益，已撤回。当前先核查C2-r1的Krylov递推恢复计数及真实残差重建来源，不引入下一算法改动 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | MG关闭仍为 `observation_schema=4`；显式MG观测为5，读取器兼容3/4。旧数据不能补造缺失阈值或MG层级成本 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
-| 下一切片退出条件 | 证明仅消去无消费者的中间写入；公开MG输出/失败/重建/MPI及工作量验证通过，不改FP求值、halo顺序或持久view；再做候选单轮产品窗口，若无总耗时收益则撤回实验 |
-| 下一动作 | 归档新版成本并检查单stage写入生命周期；先局部回归和工作量探针，不改平滑次数或容差。C2 refinement初猜保护、multidot和streamed stencil已上线，不重复实施 |
+| 下一切片退出条件 | 将现有norm_breakdown_restarts与实际分支、真实残差重建和额外A/M工作对齐；需要新观测时保持定长、默认关闭和失败回退；有局部证据后再选择一个最小优化 |
+| 下一动作 | 先读现有loop/Evidence与Krylov恢复路径，不再重复已结束的128-rank配置。C2初猜保护、multidot和streamed stencil已上线，不重复实施、不放宽容差 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -74,6 +74,18 @@ Native开关仍可rank-local；runner因文件/通信分支要求两个观测开
 后9步Native MG为2.053430 s/步，pre/post为0.703746/0.350072，terminal为0.200820；
 51.32%的MG成本在平滑，copy只有refill内的0.011250 s/步。新观测不是加速或COAST替代证明。
 
+[单stage中间写入实验](../verification/2026-09-08-mg-single-stage-store.md)已闭合并撤回：
+候选`ed9b09a`干净20/20、ASan/UBSan5/5，通过128-rank同起点窗口的全部输出字节和
+非计时solver列比较；总墙钟110.86→111.97 s，后9步advance均值9.526839→9.601104 s。
+未显示总成本收益，不追加重复轮次。源MG文件恢复实验前内容，撤回后4/4通过；
+保留新增单stage异常回归与全部证据。下一项使用基线r1的58次递推恢复记录作定位入口，
+不能把该计数直接称为58次数值失败。
+
+下一入口的静态核查：`solver_krylov.cpp::solve_fgmres()` 在
+`unsafe_recurrence && column!=0`结束当前有效子空间后，以及`happy_breakdown`未达到最终
+容差但仍有进展时，都会增加同一个`norm_breakdown_restarts`；普通restart和column=0的
+显式重正交化不等价于该计数。现有58次不能区分这两个来源，尚不据此决定数值改动。
+
 ## 3. 基础流动模块台账
 
 状态含义：**已修并验证**限定于已引用的历史候选和用例，本次仅只读复核；**实测限制**有数值证据；**静态缺口**由接口或调用链确认；**待测优化**尚无收益结论。后续代码变化只使受影响的证据重新待验，不抹去历史失败和通过记录。
@@ -87,7 +99,7 @@ Native开关仍可rank-local；runner因文件/通信分支要求两个观测开
 | MPI、事务与公共接口 | MG 可选本地 counters 不再控制 collective；应用七项冷控制一致性、分配失败与共同回退已有针对性验收 | 不能据局部失败矩阵声称所有产品路径已穷举；ESF/parcel/migration 还没有加入当前共同事务 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | I/O、Restart 与完成状态 | 日志 flush/close 统一决定全 rank 完成；读取前大小检查、reader bulk 预算、失败不发布、同方法与 rank relayout 恢复已验 | 普通 CSV close 不等于 fsync；reader bulk 不是产品总峰值/RSS。新增模型身份与持久状态仍需扩展 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 | 内存、工作区与生命周期 | 多标量 C++ 唯一分配、恢复/输出交叉存活、销毁重建和 MPI owned 资源已有小型 profile | 全产品硬峰值预算仍缺；MPI/libc、allocator 余量、arena 外数组、halo、image/staging 的同时活跃集合需统一。局部零泄漏计数不等于全进程上限 | [独占验收](../verification/2026-09-07-exclusive-module-acceptance.md) |
-| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard 已存在；逐loop与V4阈值已验；MG层级接线干净验收及生产单轮成本已测 | 单stage中间写入消去仅为待测实验；已有guard触发率仍不可观测；64 loops/advance 溢出拒绝完整证据，尚无分段输出 | [最新观测成本](../verification/2026-09-08-linear-criterion-observation.md)、[MG接线与实测](../verification/2026-09-08-runner-mg-profile.md) |
+| Krylov、MG 与性能观测 | 批量归约、融合 basis update / multidot、r1 guard已存在；V4阈值及MG层级观测已验；单stage写入实验无总收益已撤回 | C2-r1递推恢复来源待细分，guard触发率仍不可观测；64 loops/advance 溢出拒绝完整证据，尚无分段输出 | [阈值成本](../verification/2026-09-08-linear-criterion-observation.md)、[MG实测](../verification/2026-09-08-runner-mg-profile.md)、[撤回实验](../verification/2026-09-08-mg-single-stage-store.md) |
 | 构建与可执行身份 | 有 Git 身份的干净 checkout 可独立构建，普通最小 CLI 已运行 | 无 `.git` 源归档可构建但 run 在 `invalid_plan/10505` 被身份合同拒绝；归档来源身份尚无运行合同 | [I/O 与接口验收](../verification/2026-09-07-e0fd326-io-contract-audit.md) |
 
 两项关键量测限定：

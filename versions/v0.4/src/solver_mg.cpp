@@ -2362,7 +2362,7 @@ double chebyshev_stream_direction(const double* direction, std::size_t index,
   return previous_factor * direction[index] + scaled;
 }
 
-template <bool StageZero, bool StoreDirection>
+template <bool StageZero>
 std::uint32_t chebyshev_stream_cell(
     const PointRowView& row, std::int32_t nx, const double* rhs,
     const double* direction, double* residual, double* next, std::size_t index,
@@ -2378,12 +2378,12 @@ std::uint32_t chebyshev_stream_cell(
       static_cast<std::uint32_t>(!std::isfinite(scaled)) |
       static_cast<std::uint32_t>(!std::isfinite(next_direction)) |
       static_cast<std::uint32_t>(!std::isfinite(next_solution));
-  if constexpr (StoreDirection) residual[index] = next_direction;
+  residual[index] = next_direction;
   next[index] = next_solution;
   return invalid_mask;
 }
 
-template <bool StageZero, bool StoreDirection>
+template <bool StageZero>
 std::uint32_t chebyshev_stream_bulk_kernel(
     const PointRowView& row, const double* rhs, const double* direction,
     double* residual, double* next, std::int32_t begin, std::int32_t end,
@@ -2407,14 +2407,14 @@ std::uint32_t chebyshev_stream_bulk_kernel(
         static_cast<std::uint32_t>(!std::isfinite(scaled)) |
         static_cast<std::uint32_t>(!std::isfinite(next_direction)) |
         static_cast<std::uint32_t>(!std::isfinite(next_solution));
-    if constexpr (StoreDirection) residual[index] = next_direction;
+    residual[index] = next_direction;
     next[index] = next_solution;
     invalid_mask |= cell_invalid;
   }
   return invalid_mask;
 }
 
-template <bool StageZero, bool StoreDirection>
+template <bool StageZero>
 std::uint32_t chebyshev_stream_row(
     const PointRowView& row, std::int32_t nx, const double* rhs,
     const double* direction, double* residual, double* next,
@@ -2422,33 +2422,31 @@ std::uint32_t chebyshev_stream_row(
   std::uint32_t invalid_mask = 0U;
   if (nx <= 2) {
     for (std::int32_t i = 0; i < nx; ++i) {
-      invalid_mask |= chebyshev_stream_cell<StageZero, StoreDirection>(
+      invalid_mask |= chebyshev_stream_cell<StageZero>(
           row, nx, rhs, direction, residual, next,
           static_cast<std::size_t>(i), previous_factor, residual_factor);
     }
     return invalid_mask;
   }
-  invalid_mask |= chebyshev_stream_cell<StageZero, StoreDirection>(
+  invalid_mask |= chebyshev_stream_cell<StageZero>(
       row, nx, rhs, direction, residual, next, 0U, previous_factor,
       residual_factor);
-  invalid_mask |= chebyshev_stream_bulk_kernel<StageZero, StoreDirection>(
+  invalid_mask |= chebyshev_stream_bulk_kernel<StageZero>(
       row, rhs, direction, residual, next, 1, nx - 1, previous_factor,
       residual_factor);
-  invalid_mask |= chebyshev_stream_cell<StageZero, StoreDirection>(
+  invalid_mask |= chebyshev_stream_cell<StageZero>(
       row, nx, rhs, direction, residual, next,
       static_cast<std::size_t>(nx - 1), previous_factor, residual_factor);
   return invalid_mask;
 }
 
-template <bool StageZero, bool StoreDirection, class Implementation>
+template <bool StageZero, class Implementation>
 std::uint32_t chebyshev_stream_stage(
     Implementation& implementation, const detail::MgLevelStorage& level,
     ConstFieldView current, ConstFieldView rhs, FieldView residual,
     FieldView next, const double* diagonal, const double* x_coefficient,
     const double* y_coefficient, const double* z_coefficient, Int3 cells,
     double previous_factor, double residual_factor) noexcept {
-  static_assert(StoreDirection || StageZero,
-                "Only a single first-stage direction may be unpublished");
   std::uint32_t invalid_mask = 0U;
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
@@ -2465,7 +2463,7 @@ std::uint32_t chebyshev_stream_stage(
       double* const residual_row =
           residual.base + static_cast<std::size_t>(k) * residual.stride_z +
           static_cast<std::size_t>(j) * residual.stride_y;
-      invalid_mask |= chebyshev_stream_row<StageZero, StoreDirection>(
+      invalid_mask |= chebyshev_stream_row<StageZero>(
           row, cells.x, rhs_row, residual_row, residual_row, next_row,
           previous_factor, residual_factor);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -2920,22 +2918,13 @@ Status chebyshev_point_smooth_streamed(Implementation& implementation,
       previous_rho = rho;
     }
 
-    if (stages == 1U && retain_final_defect) {
-      // No recurrence consumes this direction. Copyback and halo exchange
-      // use only solution/temporary, then the retained stencil overwrites
-      // every residual interior cell with the final defect. Preserve the
-      // computed direction and all finite checks, but omit its dead store.
-      invalid_mask |= chebyshev_stream_stage<true, false>(
-          implementation, level, as_const(current), as_const(rhs), residual,
-          next, diagonal, x_coefficient, y_coefficient, z_coefficient, cells,
-          previous_factor, residual_factor);
-    } else if (polynomial_stage == 0U) {
-      invalid_mask |= chebyshev_stream_stage<true, true>(
+    if (polynomial_stage == 0U) {
+      invalid_mask |= chebyshev_stream_stage<true>(
           implementation, level, as_const(current), as_const(rhs), residual,
           next, diagonal, x_coefficient, y_coefficient, z_coefficient, cells,
           previous_factor, residual_factor);
     } else {
-      invalid_mask |= chebyshev_stream_stage<false, true>(
+      invalid_mask |= chebyshev_stream_stage<false>(
           implementation, level, as_const(current), as_const(rhs), residual,
           next, diagonal, x_coefficient, y_coefficient, z_coefficient, cells,
           previous_factor, residual_factor);
