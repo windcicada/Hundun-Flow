@@ -2,12 +2,44 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "../support/candidate_boundary_fixture.hpp"
+#include "../support/product_fixture.hpp"
+#include "hundun/v04_app.hpp"
 #include <mpi.h>
 #include <cmath>
 #include <iostream>
+#include <utility>
 
 using namespace hundun::v04;
 using namespace hundun::v04::test;
+
+bool terminal_product_test() {
+  auto model = product_model({8, 8, 8});
+  model.pressure_reference = PressureReferenceKind::boundary_absolute;
+  auto& inlet = model.boundaries[0];
+  inlet.flow_kind = BoundaryKind::velocity_inlet;
+  inlet.velocity = {0.5, 0.0, 0.0};
+  inlet.temperature = 315.0;
+  inlet.pressure = 98000.0;
+  auto& outlet = model.boundaries[1];
+  outlet.flow_kind = BoundaryKind::zero_gradient_mass_outlet;
+  outlet.pressure = 98000.0;
+  CompiledCasePlan plan;
+  Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+  ProductDriver driver;
+  if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  DriverInitialState initial;
+  initial.pressure_reference = 98000.0;
+  initial.temperature = 315.0;
+  initial.velocity = {0.5, 0.0, 0.0};
+  if (status) status = driver.initialize(initial);
+  DriverStepReport step;
+  if (status) status = driver.advance({1.,1.,1.,1.,1.}, step);
+  const bool passed = status && step.accepted;
+  if (!passed) std::cerr << "FAIL: Neumann outlet terminal product "
+      << unsigned(status.code) << '/' << status.detail
+      << " stage=" << step.failed_stage << '\n';
+  return passed;
+}
 
 int run() {
   int rank = 0;
@@ -181,7 +213,7 @@ int patch_test() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const int result = run() | patch_test();
+  const int result = run() | patch_test() | (terminal_product_test() ? 0 : 1);
   MPI_Finalize();
   return result;
 }

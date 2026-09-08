@@ -1956,9 +1956,13 @@ Status local_pressure_outlet_closure(
     if (face_index >= boundary_specs.size())
       return {StatusCode::invalid_plan, kProductBinding};
     const BoundaryFaceSpec& spec = boundary_specs[face_index];
-    if (spec.flow_kind != BoundaryKind::pressure_outlet) continue;
-    if (span.relation != BoundaryRelation::dirichlet ||
-        span.value_source != BoundaryValueSource::resolved_scalar ||
+    if (!is_candidate_transport_outlet(spec.flow_kind)) continue;
+    const bool neumann =
+        spec.flow_kind == BoundaryKind::zero_gradient_mass_outlet;
+    if (span.relation != (neumann ? BoundaryRelation::zero_gradient
+                                 : BoundaryRelation::dirichlet) ||
+        span.value_source != (neumann ? BoundaryValueSource::none
+                                     : BoundaryValueSource::resolved_scalar) ||
         span.field != pressure_perturbation.field ||
         span.component_begin != 0U || span.component_count != 1U ||
         !std::isfinite(spec.pressure) || spec.pressure <= 0.0) {
@@ -1979,8 +1983,17 @@ Status local_pressure_outlet_closure(
             0.5 * (pressure_perturbation.unchecked(owner, 0U) +
                    pressure_perturbation.unchecked(ghost, 0U));
         double residual = 0.0;
+        // The Neumann outlet declares an EOS reference, not a fixed face
+        // pressure. Audit its actual ghost/owner equality; do not invent a
+        // Dirichlet sample or bypass the mandatory open-boundary witness.
+        const double observed = neumann
+            ? pressure_reference + pressure_perturbation.unchecked(ghost, 0U)
+            : face_absolute_pressure;
+        const double target = neumann
+            ? pressure_reference + pressure_perturbation.unchecked(owner, 0U)
+            : spec.pressure;
         if (hf_coast_common_terminal_outlet_v1(
-                face_absolute_pressure, spec.pressure, &residual) != 0)
+                observed, target, &residual) != 0)
           return {StatusCode::numerical_failure, kProductBinding};
         maximum = std::max(maximum, residual);
         if (samples == std::numeric_limits<std::uint64_t>::max())

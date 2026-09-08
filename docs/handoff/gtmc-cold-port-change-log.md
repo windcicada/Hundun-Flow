@@ -40,6 +40,24 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G19: clean 25f4812 formal-v3 single-step reached both pressure-energy gates
+  (C=1.67053076098e-15, E=2.92562756237e-11, attempt 7, dt=7.02319244614e-9),
+  then failed stage 60 / invalid_plan 1503 after 3:40.56, zero accepted steps.
+  A new 8x8x8 real ProductDriver regression in
+  `versions/v0.4/tests/mpi/solver_mass_balanced_outlet_mpi_test.cpp` reproduces
+  exactly stage 60 / 1503 in 0.40 s. Launching this test under GDB and breaking
+  at `solver_piso.cpp:8904` observed closed=false, global_sum[4]=0 and
+  global_max[3]=0: all preceding terminal bindings passed, but the mandatory
+  open-boundary closure witness was absent. Root cause:
+  `src/core_product_freeze.cpp::local_pressure_outlet_closure` only counted
+  pressure_outlet. It now validates the compiled Neumann relation/value source
+  and audits actual ghost-versus-owner absolute pressure for
+  zero_gradient_mass_outlet. Ordinary pressure-outlet face-versus-prescribed
+  pressure audit is unchanged. The mandatory nonempty witness and all terminal
+  tolerances remain intact. No stored-history semantics or probe added.
+  Real terminal-product plus existing outlet/patch regressions pass on MPI
+  1/2/4 (0.39/0.41/0.43 s). Full-size rerun pending; this is not acceptance.
+
 - G18: clean ae435c4 passed native import but actual formal-v3 one-step failed
   after 5:50.20, zero accepted steps (stage 54 / 10210, nine attempts). G17
   reduced energy to 7.3898770144e-12, below its 1e-10 gate; continuity stalled
