@@ -1425,6 +1425,14 @@ Status assemble_target_coupled_enthalpy_residual(
   Status status = cartesian_target_convection(
       *plan.kernels_, plan.convection_, context.mass_flux, convection);
   if (!status) return status;
+  // Match the full assembly: a prescribed internal inlet transports h_in,
+  // not a reconstruction through the arbitrary solid-side placeholder.
+  if (context.immersed_interface != nullptr) {
+    status = context.immersed_interface->add_source_convection_correction(
+        {IbmInterfaceInletFieldKind::enthalpy, 0U}, plan.convection_,
+        state.enthalpy.trial, 1.0, residual, box);
+    if (!status) return status;
+  }
 
   const std::array<ConstFieldView, 1U> thermal_reads{state.temperature.trial};
   const std::array<FieldView, 1U> diffusion_writes{workspace.diffusion};

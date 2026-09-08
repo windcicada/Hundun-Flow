@@ -77,7 +77,7 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
       hash *= UINT64_C(1099511628211);
     }
   if (inlet_patches)
-    for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v1")) {
+    for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v2")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }

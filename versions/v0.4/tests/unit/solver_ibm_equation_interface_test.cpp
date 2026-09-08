@@ -644,6 +644,50 @@ bool test_prescribed_interface_mass_flux() {
     passed &= expect(report.advective_cfl.valid() &&
         std::abs(report.advective_cfl.absolute_max - context.dt * prescribed_phi / (2.0 * volume)) < 1e-15,
         "source inflow contributes exactly to absolute CFL without opening MG face");
+
+    // GTMC's nonlinear candidate replay must see the same fixed h_in as the
+    // full energy assembly which forms its Newton direction.
+    auto h = make_force_field(spec.enthalpy, cells, 1U, reach, 1301U, 1401U);
+    auto temperature = make_force_field(spec.temperature, cells, 1U, reach, 1302U, 1402U);
+    auto kappa = make_force_field(90U, cells, 1U, reach, 1303U, 1403U);
+    auto e_diagonal = make_force_field(91U, cells, 1U, 0U, 1304U, 1404U);
+    auto e_rhs = make_force_field(92U, cells, 1U, 0U, 1305U, 1405U);
+    auto e_residual = make_force_field(93U, cells, 1U, 0U, 1306U, 1406U);
+    auto replay = make_force_field(94U, cells, 1U, 0U, 1307U, 1407U);
+    auto pressure_work = make_force_field(95U, cells, 1U, 0U, 1308U, 1408U);
+    auto viscous_work = make_force_field(96U, cells, 1U, 0U, 1309U, 1409U);
+    auto conduction = make_force_field(97U, cells, 1U, 0U, 1310U, 1410U);
+    std::fill(h.storage.begin(), h.storage.end(), 1000.0);
+    std::fill(temperature.storage.begin(), temperature.storage.end(), 300.0);
+    std::fill(kappa.storage.begin(), kappa.storage.end(), 0.02);
+    std::fill(grad.storage.begin(), grad.storage.end(), 0.0);
+    state.enthalpy = {as_const(h.view), as_const(h.view), as_const(h.view)};
+    state.temperature = {as_const(temperature.view), as_const(temperature.view), as_const(temperature.view)};
+    state.pressure_reference = 101325.0;
+    state.accepted_pressure_reference = state.previous_pressure_reference = 101325.0;
+    material.thermal_conductivity = material.enthalpy_diffusivity = as_const(kappa.view);
+    context.thermo = thermo.fingerprint();
+    context.scope = EquationAssemblyScope::target_coupled;
+    context.provisional_mass_flux = false;
+    const EquationSystemView energy_system{e_diagonal.view, e_rhs.view, e_residual.view,
+                                           ax.view, ay.view, az.view};
+    EquationAssemblyCertificate full_energy, replay_energy;
+    const Status full_status = assemble_enthalpy(equations.enthalpy(), state, material,
+        as_const(grad.view), {}, context, energy_system, full_energy);
+    const Status replay_status = assemble_target_coupled_enthalpy_residual(
+        equations.enthalpy(), state, material, as_const(grad.view), context,
+        replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy);
+    passed &= expect(full_status && replay_status, "both source-bearing energy paths assemble");
+    const Int3 source_cell = source_link.fluid_local_index;
+    const double expected_energy = -prescribed_phi * sources[0].enthalpy;
+    const double full_value = e_residual.view.unchecked(source_cell,0U);
+    const double replay_value = replay.view.unchecked(source_cell,0U);
+    if (std::abs(full_value-replay_value) > 1e-12)
+      std::cerr << "source energy full=" << full_value << " replay=" << replay_value
+                << " expected=" << expected_energy << '\n';
+    passed &= expect(std::abs(full_value-expected_energy) < 1e-12 &&
+        std::abs(replay_value-full_value) < 1e-12 && e_residual.storage == replay.storage,
+        "full and candidate energy residuals use the same prescribed inlet enthalpy");
   }
   return passed;
 }

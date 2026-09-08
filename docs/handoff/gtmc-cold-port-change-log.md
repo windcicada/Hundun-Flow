@@ -40,6 +40,43 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G17: the shortened G16 full-size probe reproduced the same failure in
+  1:51.68 (one attempt instead of nine), with worst energy cell (85,80,90),
+  on the internal methane source plane, residual -6.4836 W. Source inspection
+  confirmed `src/solver_enthalpy.cpp::assemble_enthalpy_impl` applies
+  `add_source_convection_correction`, but
+  `assemble_target_coupled_enthalpy_residual` omitted it. The candidate replay
+  therefore reconstructed h through a solid placeholder instead of using h_in,
+  while the linear direction used the prescribed source. A real assembly
+  regression in `tests/unit/solver_ibm_equation_interface_test.cpp` failed in
+  0.48 s: full residual -1.254 W, candidate -0.00278667 W for the identical
+  state and flux. Adding the same source correction to the candidate path
+  made it pass (0.59 s). The regression also compares the complete residual
+  arrays. The final no-probe batch passed all three tests: source interface,
+  existing enthalpy terms, and app initialization/restart (8.49 s combined).
+  The G16 probe and its direct includes were removed; its exact patch
+  and rank logs are preserved outside source in `energy-diagnostic-v1`.
+  `core_product_freeze.cpp::method_history_signature` bumps the source-state
+  convection component v1 to v2 for patch cases. No tolerances were changed.
+  Actual formal v3 advancement must now be rerun; this unit pass is not GTMC
+  short/medium acceptance.
+
+- G16 (active diagnosis, not a numerical repair): clean candidate 521232f
+  imported/read back on 64 ranks, then its actual one-step run failed after
+  7:35.88 with no accepted step. The earlier stage-44 outlet guard was passed;
+  last failure is stage 54 / rejected-step 10210 after C2 and 12 pressure-energy
+  refinements. Energy stalls near 2.04129538e-5 while continuity descends.
+  `src/core_product_freeze.cpp` temporarily adds an environment-gated
+  `[DEBUG-gtmc-energy]` probe at the already-scanned worst energy cell for
+  alpha 0/1; it reports state, residual, correction and six-face flux with no
+  extra collective or field mutation. Direct `<cstdio>/<cstdlib>` includes
+  support the probe. It must be removed after diagnosis. A separate
+  `case-energy-diagnostic-v1` clamps dt to the final failing dt and disallows
+  smaller retries to shorten the reproducer; it is explicitly NOT acceptance.
+  Formal v3 inputs/tolerances are unchanged. Current hypotheses are missing
+  outlet-flux energy derivative, inlet energy residual/Jacobian mismatch, or
+  mismatched live-versus-candidate energy state; none is yet confirmed.
+
 - G15: the committed b6eb072 64-rank native import crashed before writing a
   restart. The same crash was minimized to the real 4-rank outlet/patch test
   (0.39 s). `addr2line` located `PressureEnergyCandidateBoundaryFinalizer::bind`;
