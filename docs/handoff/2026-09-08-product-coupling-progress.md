@@ -110,6 +110,21 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - 本增量仍为周期域 BE、无 IBM；显式折点证据及折点后续接尚未接入产品。
   validated 不因产品测试通过而获得科学授权。完整 Stage 5/6 合并与圆柱恢复仍未执行。
 
+## 真实 Cantera ESF 与 CLI 重启验收
+
+- 新增真实 Cantera ESF 原创合成机理 fixture，经真实 PH 两段化学、共同输运、空间扰动与
+  磁盘恢复验证。原 `rtol=1e-10` 的化学积分使气相组分解析误差为 1.27e-10；该解析验证
+  fixture 显式改用 rtol=1e-13、atol=1e-17，原 2e-12 断言保持不变。1/2/4 ranks 通过。
+- CLI 首次实测发现 Restart 冻结服务容量遗漏 ESF accepted/previous 元组、输运缓存和
+  TCR 字节记录；现已按最大 patch 包络计入，保留每项乘加溢出检查。未绕开写出容量限制。
+- 第二个 CLI 阻断为运行证据仍只接受 Restart V1–V3。C++ 证据生产者和独立 Python
+  validator 现在接受 V4，验证非零模型记录身份/宽度和原方法签名/manifest 完整性。
+- 三种真实 CLI：ESF、TCR experimental、Cantera ESF，均新算两步、写 checkpoint、
+  以 1→4 ranks 续算两步，再将证据与起算 manifest 独立核对。
+- 最终 Clang focused 29/29 PASS；GCC11/Cantera focused 28/28 PASS，包括原模式回归、
+  新真实 Cantera ESF 3 项、CLI 3 项和 evidence workflow 自检。
+- 仍未作为完整合并发布。喷雾 parcel 的变长持久状态和原生质量/动量/焓耦合正在接线。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

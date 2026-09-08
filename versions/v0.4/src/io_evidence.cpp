@@ -163,11 +163,16 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
     if (anchor.source_format_version != 0U) {
       const bool rebuild = anchor.history_policy == RestartHistoryPolicy::rebuild_method_history;
       const bool missing = anchor.source_format_version == 1U;
-      if (anchor.source_format_version > 3U || anchor.target_history_signature == 0U ||
-          (anchor.source_format_version < 3U ? anchor.source_history_signature != 0U
-                                            : anchor.source_history_signature == 0U) ||
-          (!rebuild && anchor.history_policy != RestartHistoryPolicy::require_compatible) ||
-          (!rebuild && !missing && anchor.source_history_signature != anchor.target_history_signature) ||
+      if (anchor.source_format_version > 4U ||
+          anchor.target_history_signature == 0U ||
+          (anchor.source_format_version < 3U
+               ? anchor.source_history_signature != 0U
+               : anchor.source_history_signature == 0U) ||
+          (!rebuild &&
+           anchor.history_policy != RestartHistoryPolicy::require_compatible) ||
+          (!rebuild && !missing &&
+           anchor.source_history_signature !=
+               anchor.target_history_signature) ||
           (first && record.restart_recovery != (missing || rebuild)))
         return false;
     }

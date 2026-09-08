@@ -3706,12 +3706,30 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       if (!detail::product_checked_multiply(envelope,
             static_cast<std::size_t>(extent) + 1U, envelope))
         return {StatusCode::invalid_plan, kProductAnalysis};
+    std::size_t model_components = 0U, model_record_bytes = 0U;
+    if (candidate->esf.enabled() &&
+        (!detail::product_checked_multiply(
+             candidate->fields.esf_fields.size(),
+             model.thermophysics.species.size() + 1U, model_components) ||
+         !detail::product_checked_add(model_components, 2U, model_components) ||
+         !detail::product_checked_multiply(model_components, 2U,
+                                           model_components) ||
+         !detail::product_checked_multiply(
+             envelope, candidate->esf.tcr_history.snapshot().record_bytes,
+             model_record_bytes)))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     if (!detail::product_checked_multiply(candidate->fields.scalars.size(), 4U,
                                           restart_components) ||
-        !detail::product_checked_add(restart_components, 18U, restart_components) ||
-        !detail::product_field_bytes(envelope, restart_components, restart_bulk) ||
-        !detail::product_checked_multiply(static_cast<std::size_t>(restart_ranks),
-                                          160U, root_metadata) ||
+        !detail::product_checked_add(restart_components, model_components,
+                                     restart_components) ||
+        !detail::product_checked_add(restart_components, 18U,
+                                     restart_components) ||
+        !detail::product_field_bytes(envelope, restart_components,
+                                     restart_bulk) ||
+        !detail::product_checked_add(restart_bulk, model_record_bytes,
+                                     restart_bulk) ||
+        !detail::product_checked_multiply(
+            static_cast<std::size_t>(restart_ranks), 160U, root_metadata) ||
         !detail::product_checked_add(root_metadata, 65536U, root_metadata) ||
         !detail::product_checked_add(restart_bulk, root_metadata, restart_bulk))
       return {StatusCode::invalid_plan, kProductAnalysis};

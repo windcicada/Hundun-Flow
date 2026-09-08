@@ -1966,3 +1966,31 @@ foreach(tcr_mode IN ITEMS shadow experimental)
     set_tests_properties(v04_product_tcr_${tcr_mode}_mpi_${rank_count} PROPERTIES TIMEOUT 60 PROCESSORS ${rank_count})
   endforeach()
 endforeach()
+
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  foreach(rank_count IN ITEMS 1 2 4)
+    add_test(NAME v04_product_cantera_esf_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-esf" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(v04_product_cantera_esf_mpi_${rank_count} PROPERTIES TIMEOUT 60 PROCESSORS ${rank_count})
+  endforeach()
+endif()
+
+set(coupled_cli_cases reacting-esf reacting-tcr-experimental)
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  list(APPEND coupled_cli_cases reacting-cantera-esf)
+endif()
+foreach(coupled_case IN LISTS coupled_cli_cases)
+  add_test(NAME v04_coupled_restart_cli_${coupled_case}
+    COMMAND "${CMAKE_COMMAND}"
+      "-DPRODUCT=$<TARGET_FILE:hundun>"
+      "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+      "-DNUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+      "-DCASE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${coupled_case}"
+      "-DPROBE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/coupled-cli-${coupled_case}"
+      "-DPYTHON=${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "-DVALIDATOR=${hundun_repository_root}/tools/v04_evidence_validate.py"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/integration/coupled_restart_cli_test.cmake")
+  set_tests_properties(v04_coupled_restart_cli_${coupled_case} PROPERTIES TIMEOUT 60 PROCESSORS 4)
+endforeach()

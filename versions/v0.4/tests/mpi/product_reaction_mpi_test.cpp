@@ -211,14 +211,17 @@ int main(int argc, char **argv) {
       status = CaseCompiler::load_and_compile(MPI_COMM_WORLD, case_root, model);
     EsfGas esf_gas;
     const bool esf = model.reaction.mode == ReactionMode::esf_tpdf;
+    const bool external_esf =
+        esf && model.reaction.representation !=
+                   ReactionSpec::Representation::direct_cantera;
     const bool tcr = esf && model.reaction.esf->tcr.mode != TcrMode::off;
     CompiledCasePlan plan;
     if (status)
       status = ProductCompiler::compile(
           MPI_COMM_WORLD, model, case_root, plan,
-          esf ? esf_gas.bindings()
-              : (case_root.empty() ? ProductCouplingBindings{&gas}
-                                   : ProductCouplingBindings{}));
+          external_esf ? esf_gas.bindings()
+                       : (case_root.empty() ? ProductCouplingBindings{&gas}
+                                            : ProductCouplingBindings{}));
     okay = collective(static_cast<bool>(status));
     if (!okay && rank == 0)
       std::cerr << "reaction compile failed " << unsigned(status.code) << ":"
@@ -339,6 +342,10 @@ int main(int argc, char **argv) {
                          4;
         expected_variance += std::pow(offset * relaxation * half * half, 2) / 4;
       }
+      if (rank == 0 && !external_esf &&
+          std::abs(accepted_y - (0.25 + density_delta / rho)) >= 2e-12)
+        std::cerr << std::scientific << "Cantera ESF source error="
+                  << accepted_y - (0.25 + density_delta / rho) << "\n";
       okay &= std::abs(accepted_y - (0.25 + density_delta / rho)) < 2e-12;
       std::vector<ConstFieldView> ensemble;
       for (std::size_t i = 0; i < snap.fields.size; ++i)
@@ -360,6 +367,10 @@ int main(int argc, char **argv) {
                 okay &= a >= 0 && b >= 0 && std::abs(a + b - 1) < 2e-12;
               }
               okay &= std::abs(mean - accepted_y) < 2e-12;
+              if (rank == 0 && !external_esf && x == 0 && y == 0 && z == 0 &&
+                  std::abs(variance - expected_variance) >= 2e-12)
+                std::cerr << "Cantera ESF variance error="
+                          << variance - expected_variance << "\n";
               okay &= std::abs(variance - expected_variance) < 2e-12;
             }
       }
@@ -418,7 +429,8 @@ int main(int argc, char **argv) {
       if (status)
         status = ProductCompiler::compile(
             MPI_COMM_WORLD, model, case_root, restored_plan,
-            esf ? restored_esf.bindings()
+            external_esf
+                ? restored_esf.bindings()
                 : (case_root.empty() ? ProductCouplingBindings{&restored_gas}
                                      : ProductCouplingBindings{}));
       if (status)
@@ -526,7 +538,7 @@ int main(int argc, char **argv) {
       if (okay) okay = collective(bool(restored.committed_restart_snapshot(before)) &&
                                  accepted == physical_values(before));
     }
-    if (okay && esf) {
+    if (okay && external_esf) {
       const auto accepted = physical_values(snap);
       esf_gas.fail_half = rank == 0;
       status = driver.advance({1, 1, 1, 1, 1}, report);
@@ -673,8 +685,9 @@ int main(int argc, char **argv) {
       EsfGas spatial_gas;
       CompiledCasePlan spatial_plan;
       ProductDriver spatial;
-      status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
-                                        spatial_plan, spatial_gas.bindings());
+      status = ProductCompiler::compile(
+          MPI_COMM_WORLD, model, case_root, spatial_plan,
+          external_esf ? spatial_gas.bindings() : ProductCouplingBindings{});
       if (status)
         status = ProductDriver::create(MPI_COMM_WORLD, std::move(spatial_plan),
                                        spatial);
