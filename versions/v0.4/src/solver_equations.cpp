@@ -6,6 +6,7 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -161,6 +162,10 @@ PlanFingerprint compute_semantic_fingerprint(
   hash = hash_mix(hash, static_cast<std::uint8_t>(spec.pressure_reference));
   hash = hash_mix(hash, spec.maximum_cells_per_rank);
   hash = hash_mix(hash, spec.closed_mass_service_stage);
+  if (spec.mass_source_identity != 0U) {
+    hash = hash_mix(hash, UINT64_C(0x6d61737373726331));
+    hash = hash_mix(hash, spec.mass_source_identity);
+  }
   hash = hash_mix(hash, spec.scalars.size);
   for (std::size_t index = 0U; index < spec.scalars.size; ++index) {
     const ScalarEquationSpec& scalar = spec.scalars.data[index];
@@ -313,6 +318,13 @@ RevisionToken state_revision(const EquationStateView& state) noexcept {
   hash = hash_mix(hash, double_bits(state.pressure_reference));
   hash = hash_mix(hash, double_bits(state.accepted_pressure_reference));
   hash = hash_mix(hash, double_bits(state.previous_pressure_reference));
+  if (state.mass_source.identity != 0U) {
+    hash = hash_mix(hash, state.mass_source.identity);
+    hash = hash_mix(hash, state.mass_source.time);
+    hash = hash_mix(hash, state.mass_source.rate.revision);
+    hash = hash_mix(hash, state.mass_source.rate.storage_identity);
+    hash = hash_mix(hash, state.mass_source.rate.revision_domain);
+  }
   return finish_hash(hash);
 }
 
@@ -561,6 +573,7 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   kernels_ = std::move(other.kernels_);
   continuity_.cells_ = other.continuity_.cells_;
   continuity_.density_ = other.continuity_.density_;
+  continuity_.mass_source_identity_ = other.continuity_.mass_source_identity_;
   continuity_.velocity_ = other.continuity_.velocity_;
   continuity_.pressure_reference_ = other.continuity_.pressure_reference_;
   continuity_.geometry_revision_ = other.continuity_.geometry_revision_;
@@ -789,6 +802,7 @@ Status EquationPlanSet::compile(
 
     candidate.continuity_.cells_ = patch.cells;
     candidate.continuity_.density_ = spec.density;
+    candidate.continuity_.mass_source_identity_ = spec.mass_source_identity;
     candidate.continuity_.velocity_ = spec.velocity;
     candidate.continuity_.pressure_reference_ = spec.pressure_reference;
     candidate.continuity_.geometry_revision_ = geometry.topology_revision();
@@ -1020,11 +1034,15 @@ Status assemble_continuity_impl(
     return {StatusCode::invalid_plan, kEquationAssembly};
   }
   KernelBox box{};
-  if (!valid_context(*plan.kernels_, context, box) ||
+  if (!detail::valid_mass_source(state.mass_source, plan.mass_source_identity_,
+                                  context.time, plan.cells_) ||
+      !valid_context(*plan.kernels_, context, box) ||
       (!allow_partial && !detail::full_equation_box(box, plan.cells_)) ||
       !detail::valid_cell_view(system.residual, plan.cells_, 0U, 1U) ||
       !detail::finite_face_flux(context.mass_flux, box) ||
       detail::output_aliases_flux(system, false, context.mass_flux) ||
+      (state.mass_source.identity != 0U &&
+       detail::field_views_overlap(state.mass_source.rate, as_const(system.residual))) ||
       detail::field_views_overlap(state.density.trial,
                                   as_const(system.residual)) ||
       detail::field_views_overlap(state.density.accepted,
@@ -1046,7 +1064,7 @@ Status assemble_continuity_impl(
         const double volume = detail::cell_volume(*plan.kernels_, cell);
         const double value =
             (context.bdf.a0 * trial + context.bdf.a1 * accepted +
-             context.bdf.a2 * previous) * volume;
+             context.bdf.a2 * previous - detail::mass_source_rate(state.mass_source, cell)) * volume;
         if (!std::isfinite(trial) || !std::isfinite(accepted) ||
             !std::isfinite(previous) || trial <= 0.0 || accepted <= 0.0 ||
             previous <= 0.0 || !std::isfinite(value)) {
@@ -1080,7 +1098,8 @@ Status assemble_continuity_impl(
             context.bdf.a2 * state.density.previous.unchecked(cell, 0U);
         const double volume = detail::cell_volume(*plan.kernels_, cell);
         const double value =
-            (system.residual.unchecked(cell, 0U) + unsteady) * volume;
+            (system.residual.unchecked(cell, 0U) + unsteady -
+             detail::mass_source_rate(state.mass_source, cell)) * volume;
         if (!std::isfinite(value)) {
           return {StatusCode::numerical_failure, kEquationNumerical};
         }

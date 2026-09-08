@@ -36,6 +36,7 @@ struct PressureAssemblyBinding {
   PisoIntermediateCertificate current{};
   BoundaryThermophysicalGhostContext thermophysical_context{};
   PlanFingerprint geometry_fingerprint{};
+  PlanFingerprint mass_source_identity{};
 };
 
 Status assemble_pressure_system_impl(

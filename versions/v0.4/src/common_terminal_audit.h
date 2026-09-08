@@ -7,6 +7,19 @@
 extern "C" {
 #endif
 
+/* Target-step mass source in kg/(m^3 s); v1 is the zero-source ABI. */
+int hf_coast_common_terminal_cell_v2(
+    double rho, double rho_eos, double rho_accepted, double rho_previous,
+    double volume, double bdf_a0, double bdf_a1, double bdf_a2,
+    double flux_x_minus, double flux_x_plus, double flux_y_minus,
+    double flux_y_plus, double flux_z_minus, double flux_z_plus,
+    double mass_source_density, double pressure_perturbation, int closed_mass,
+    double drho_dp_at_fixed_h_y, double *eos_residual,
+    double *continuity_residual, double *mass_contribution,
+    double *volume_contribution, double *absolute_pressure_perturbation,
+    double *compressibility_pressure_moment,
+    double *compressibility_weight);
+
 int hf_coast_common_terminal_cell_v1(
     double rho, double rho_eos, double rho_accepted, double rho_previous,
     double volume, double bdf_a0, double bdf_a1, double bdf_a2,

@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "../support/piso_fixture.hpp"
+#include "../../src/common_terminal_audit.h"
 
 #include <mpi.h>
 
@@ -127,7 +128,7 @@ bool expect(bool condition, std::string_view description) {
 
 bool test_hot_numeric_refresh_and_atomic_failure() {
   PeriodicPisoFixture fixture;
-  bool passed = expect(fixture.initialize(8), "PISO hot fixture compiles cold");
+  bool passed = expect(fixture.initialize(8, MPI_COMM_SELF, false, CouplingKind::piso, 0x50415243U), "PISO hot fixture compiles cold");
   if (!passed) {
     return false;
   }
@@ -145,6 +146,8 @@ bool test_hot_numeric_refresh_and_atomic_failure() {
   fill(previous, 0.7);
   fill(drho_dp, 0.02);
   fill(correction, 1.0);
+  OwnedField mass_source = make_field(92U, cells, 1U, 0U, 6108U, 7108U);
+  fill(mass_source, 0.25);
 
   const BdfCoefficients bdf{10.0, -15.0, 5.0, 2U};
   PisoIntermediateInput intermediate_input =
@@ -164,11 +167,20 @@ bool test_hot_numeric_refresh_and_atomic_failure() {
   pressure_input.time = intermediate_input.momentum.time;
   pressure_input.geometry = intermediate_input.momentum.geometry;
   pressure_input.numeric_boundary = intermediate_input.numeric_boundary;
+  pressure_input.mass_source = {as_const(mass_source.view), 0x50415243U, pressure_input.time};
   const PressureCorrectionSystemView system{diagonal.view, rhs.view};
   PressureCorrectionCertificate pressure;
   passed &= expect(static_cast<bool>(fixture.coupler.assemble_pressure_system(
                        pressure_input, system, pressure)),
                    "PISO pressure numeric warms");
+
+  const Int3 probe{1, 1, 1};
+  const double volume = 1.0 / (cells.x * cells.y * cells.z);
+  const double expected_rhs = -volume *
+      (bdf.a0 * fixture.density.view.unchecked(probe, 0U) +
+       bdf.a1 * 0.9 + bdf.a2 * 0.7 - 0.25);
+  passed &= expect(std::abs(rhs.view.unchecked(probe, 0U) - expected_rhs) < 1e-14,
+                   "pressure consumes current mass source in kg/m3/s");
 
   const std::array<HaloFieldSpec, 1U> operator_fields{{
       {correction_field, 1U, 1U}}};
@@ -217,6 +229,7 @@ bool test_hot_numeric_refresh_and_atomic_failure() {
             intermediate_input.pressure_reference;
         pressure_input.density_trial = as_const(fixture.density.view);
         pressure_input.time = intermediate_input.momentum.time;
+        pressure_input.mass_source.time = pressure_input.time;
         status = fixture.coupler.assemble_pressure_system(
             pressure_input, system, pressure);
       }
@@ -245,6 +258,18 @@ bool test_hot_numeric_refresh_and_atomic_failure() {
                        pressure_operator.coefficient_storage_address() ==
                            coefficient_address,
                    "hot refresh preserves workspace and coefficient addresses");
+
+  PressureCorrectionInput wrong_source = pressure_input;
+  ++wrong_source.mass_source.identity;
+  fill(diagonal, -61.0);
+  fill(rhs, -63.0);
+  PressureCorrectionCertificate bad_source_certificate = pressure;
+  passed &= expect(!fixture.coupler.assemble_pressure_system(
+                       wrong_source, system, bad_source_certificate) &&
+                       diagonal.view.unchecked(probe, 0U) == -61.0 &&
+                       rhs.view.unchecked(probe, 0U) == -63.0 &&
+                       bad_source_certificate.state == pressure.state,
+                   "foreign mass source rejected before numeric publication");
 
   const PressureCorrectionCertificate marker = pressure;
   PressureCorrectionInput foreign_thermophysical = pressure_input;
@@ -279,13 +304,40 @@ bool test_hot_numeric_refresh_and_atomic_failure() {
   return passed;
 }
 
+bool test_source_terminal_balance() {
+  double eos = -1, continuity = -1, mass = -1, volume = -1;
+  double pi = -1, moment = -1, weight = -1;
+  // d(rho)/dt=2, zero face flux; a source of 2 balances the cell.
+  const int status = hf_coast_common_terminal_cell_v2(
+      1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
+      0, 0, 0, 0, 0, 0, 2.0, 0, 0, 0,
+      &eos, &continuity, &mass, &volume, &pi, &moment, &weight);
+  bool passed = expect(status == 0 && continuity < 1e-15 &&
+                       std::abs(mass - 0.15) < 1e-15,
+                       "terminal continuity includes source without changing physical mass");
+  const int missing = hf_coast_common_terminal_cell_v2(
+      1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
+      0, 0, 0, 0, 0, 0, 0.0, 0, 0, 0,
+      &eos, &continuity, &mass, &volume, &pi, &moment, &weight);
+  passed &= expect(missing == 0 && continuity > 0.08,
+                   "missing mass source remains visible to terminal gate");
+  continuity = -17;
+  const int invalid = hf_coast_common_terminal_cell_v2(
+      1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
+      0, 0, 0, 0, 0, 0, std::numeric_limits<double>::quiet_NaN(), 0, 0, 0,
+      &eos, &continuity, &mass, &volume, &pi, &moment, &weight);
+  return passed && expect(invalid != 0 && continuity == -17,
+                          "nonfinite source cannot publish terminal metrics");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
-  const bool passed = test_hot_numeric_refresh_and_atomic_failure();
+  const bool passed = test_hot_numeric_refresh_and_atomic_failure() &&
+                      test_source_terminal_balance();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

@@ -282,12 +282,14 @@ double flux_z(Int3 global_face) {
          0.019 * global_face.z;
 }
 
-bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
+bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank, bool source_enabled = false) {
   Dependencies dependencies;
   EquationPlanSet plan;
+  EquationPlanSpec spec = plan_spec();
+  spec.mass_source_identity = source_enabled ? 0x50415243U : 0U;
   bool passed = expect(make_dependencies(world, dependencies) &&
                            static_cast<bool>(compile(
-                               world, dependencies, plan_spec(), plan)),
+                               world, dependencies, spec, plan)),
                        rank, "tensor-stretched equation plan compiles for numerical oracle");
   if (!passed) {
     return false;
@@ -298,9 +300,12 @@ bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
                               10000U + static_cast<unsigned>(rank));
   OwnedField residual = make_field(30U, cells, 1U, 0U, 102U,
                                    11000U + static_cast<unsigned>(rank));
+  OwnedField source = make_field(31U, cells, 1U, 0U, 104U,
+                                 12000U + static_cast<unsigned>(rank));
   for (std::int32_t k = 0; k < cells.z; ++k) {
     for (std::int32_t j = 0; j < cells.y; ++j) {
       for (std::int32_t i = 0; i < cells.x; ++i) {
+        source.view.unchecked({i, j, k}, 0U) = 0.2 + 0.01 * (patch.begin.x + i);
         rho.view.unchecked({i, j, k}, 0U) =
             rho_at({patch.begin.x + i, patch.begin.y + j,
                     patch.begin.z + k});
@@ -353,6 +358,7 @@ bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
   context.scope = EquationAssemblyScope::momentum_predictor;
   context.mass_flux = as_const(flux);
   context.provisional_mass_flux = true;
+  if (source_enabled) state.mass_source = {as_const(source.view), spec.mass_source_identity, context.time};
   EquationSystemView system;
   system.residual = residual.view;
   EquationAssemblyCertificate certificate;
@@ -369,10 +375,15 @@ bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
         const Int3 local{i, j, k};
         const Int3 global{patch.begin.x + i, patch.begin.y + j,
                           patch.begin.z + k};
+        const double volume =
+            (dependencies.geometry.x().faces().data[global.x + 1] - dependencies.geometry.x().faces().data[global.x]) *
+            (dependencies.geometry.y().faces().data[global.y + 1] - dependencies.geometry.y().faces().data[global.y]) *
+            (dependencies.geometry.z().faces().data[global.z + 1] - dependencies.geometry.z().faces().data[global.z]);
         const double expected =
             flux_x({global.x + 1, global.y, global.z}) - flux_x(global) +
             flux_y({global.x, global.y + 1, global.z}) - flux_y(global) +
-            flux_z({global.x, global.y, global.z + 1}) - flux_z(global);
+            flux_z({global.x, global.y, global.z + 1}) - flux_z(global) -
+            (source_enabled ? volume * (0.2 + 0.01 * global.x) : 0.0);
         const double actual = residual.view.unchecked(local, 0U);
         passed &= expect(std::isfinite(actual) &&
                              std::abs(actual - expected) <=
@@ -404,6 +415,15 @@ bool test_distributed_continuity_global_id_oracle(MPI_Comm world, int rank) {
           certificate_unchanged,
       rank,
       "BDF coefficients mismatched with dt fail before assembly mutation");
+  if (source_enabled) {
+    const std::vector<double> saved = residual.bytes;
+    const auto saved_certificate = certificate;
+    source.view.unchecked({cells.x - 1, cells.y - 1, cells.z - 1}, 0U) =
+        std::numeric_limits<double>::quiet_NaN();
+    const Status invalid_source = assemble_continuity(plan.continuity(), state, context, system, certificate);
+    passed &= expect(!invalid_source && residual.bytes == saved && certificate.state == saved_certificate.state,
+                     rank, "nonfinite last-cell mass source rejects before continuity mutation");
+  }
   return passed;
 }
 
@@ -2441,6 +2461,7 @@ int main(int argc, char** argv) {
                                                            size);
   passed &= test_collective_atomic_failure(MPI_COMM_WORLD, rank, size);
   passed &= test_distributed_continuity_global_id_oracle(MPI_COMM_WORLD, rank);
+  passed &= test_distributed_continuity_global_id_oracle(MPI_COMM_WORLD, rank, true);
   passed &= test_distributed_momentum_tensor_stretched_oracle(MPI_COMM_WORLD,
                                                               rank);
   passed &= test_conservative_momentum_predictor_limiter(MPI_COMM_WORLD,

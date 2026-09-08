@@ -9,6 +9,7 @@
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
 #include "solver_piso_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1801,6 +1802,8 @@ struct PressureVelocityCoupler::Impl {
       MgCorrectionScaling::residual_minimizing};
   double eos_tolerance{};
   double continuity_tolerance{};
+  PlanFingerprint mass_source_identity{};
+  ConservativeMassSourceView current_mass_source{};
   double energy_tolerance{};
   double closed_mass_tolerance{};
   double gauge_tolerance{};
@@ -2489,6 +2492,7 @@ Status PressureVelocityCoupler::bind(
   candidate->mg_correction_scaling = plan.mg_correction_scaling_;
   candidate->eos_tolerance = plan.eos_tolerance_;
   candidate->continuity_tolerance = plan.continuity_tolerance_;
+  candidate->mass_source_identity = equations.continuity().mass_source_identity();
   candidate->energy_tolerance = plan.energy_tolerance_;
   candidate->closed_mass_tolerance = plan.closed_mass_tolerance_;
   candidate->gauge_tolerance = plan.gauge_tolerance_;
@@ -3912,11 +3916,16 @@ Status PressureVelocityCoupler::assemble_pressure_system(
     impl.pressure_correction = {};
     return {StatusCode::invalid_plan, kPisoPressureBoundary};
   }
+  if (impl.mass_source_identity != 0U && input.intermediate.corrector == 2U &&
+      !detail::same_mass_source(input.mass_source, impl.current_mass_source)) {
+    return {StatusCode::invalid_plan, kPisoCoupler};
+  }
   const detail::PressureAssemblyBinding binding{
       impl.kernels, impl.workspace, impl.cells, impl.fingerprint,
       impl.pressure_reference_plan, impl.current,
       impl.current_thermophysical_context,
-      impl.pressure_boundary.certificate().geometry_fingerprint};
+      impl.pressure_boundary.certificate().geometry_fingerprint,
+      impl.mass_source_identity};
   PressureCorrectionCertificate candidate;
   const Status status = detail::assemble_pressure_system_impl(
       binding, input, system, candidate);
@@ -3927,6 +3936,7 @@ Status PressureVelocityCoupler::assemble_pressure_system(
     impl.pressure_correction = {};
     return status;
   }
+  impl.current_mass_source = input.mass_source;
   impl.current_pressure_reference = input.pressure_reference;
   impl.current_pressure_work = candidate;
   if (candidate.corrector == 2U) {
@@ -8577,6 +8587,9 @@ Status PressureVelocityCoupler::audit_pending_final(
            corrected_pending.pressure_compressibility,
            input.drho_dp_h_y));
   const bool valid =
+      detail::valid_mass_source(input.mass_source, impl.mass_source_identity,
+                                input.pressure_reference.time, cells) &&
+      detail::same_mass_source(input.mass_source, impl.current_mass_source) &&
       input.correction.valid() && input.correction.corrector == 2U &&
       input.correction.plan == impl.fingerprint &&
       input.correction.face_flux == pending_flux.revision_ &&
@@ -8752,9 +8765,10 @@ Status PressureVelocityCoupler::audit_pending_final(
                      authority_failure ? kPisoCoupler : kPisoNumerical};
             continue;
           }
-          if (hf_coast_common_terminal_cell_v1(
+          if (hf_coast_common_terminal_cell_v2(
                   rho, eos, rho_n, rho_nm1, volume, input.bdf.a0,
                   input.bdf.a1, input.bdf.a2, fxm, fxp, fym, fyp, fzm, fzp,
+                  detail::mass_source_rate(input.mass_source, cell),
                   pi, closed ? 1 : 0, compressibility, &eos_residual,
                   &continuity_residual, &mass_contribution,
                   &volume_contribution, &absolute_pi,
@@ -8863,7 +8877,7 @@ Status PressureVelocityCoupler::audit_pending_final(
       const double fzp = flux.z.unchecked({cell.x, cell.y, cell.z + 1});
       const double unsteady =
           volume * (input.bdf.a0 * rho + input.bdf.a1 * rho_n +
-                    input.bdf.a2 * rho_nm1);
+                    input.bdf.a2 * rho_nm1 - detail::mass_source_rate(input.mass_source, cell));
       const double divergence =
           (fxp - fxm) + (fyp - fym) + (fzp - fzm);
       const double scale =
@@ -8871,7 +8885,7 @@ Status PressureVelocityCoupler::audit_pending_final(
           std::abs(volume * input.bdf.a1 * rho_n) +
           std::abs(volume * input.bdf.a2 * rho_nm1) + std::abs(fxm) +
           std::abs(fxp) + std::abs(fym) + std::abs(fyp) + std::abs(fzm) +
-          std::abs(fzp);
+          std::abs(fzp) + std::abs(volume * detail::mass_source_rate(input.mass_source, cell));
       const Int3 global{impl.patch.begin.x + cell.x,
                         impl.patch.begin.y + cell.y,
                         impl.patch.begin.z + cell.z};
@@ -9394,6 +9408,7 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
   const bool bdf2 = input.bdf.order == 2U;
   if (!detail::valid_cell_view(correction, cells, 0U, 1U, 1U) ||
       !detail::valid_cell_view(true_residual, cells, 0U, 1U, 0U) ||
+      !detail::valid_mass_source(input.mass_source, impl.mass_source_identity, input.time, cells) ||
       input.intermediate.corrector != 2U ||
       input.intermediate.dependency != pressure.intermediate ||
       input.intermediate.thermophysical_boundary_semantics !=
@@ -9523,10 +9538,11 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
         double absolute_pressure = 0.0;
         double pressure_moment = 0.0;
         double pressure_weight = 0.0;
-        if (hf_coast_common_terminal_cell_v1(
+        if (hf_coast_common_terminal_cell_v2(
                 rho, rho, rho_n, rho_nm1,
                 detail::cell_volume(*impl.kernels, cell), input.bdf.a0,
                 input.bdf.a1, input.bdf.a2, fxm, fxp, fym, fyp, fzm, fzp,
+                detail::mass_source_rate(input.mass_source, cell),
                 0.0, 0, 0.0, &eos_residual, &continuity_residual, &mass,
                 &volume_sum, &absolute_pressure, &pressure_moment,
                 &pressure_weight) != 0) {
@@ -9566,7 +9582,7 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
           const double volume = detail::cell_volume(*impl.kernels, cell);
           const double unsteady =
               volume * (input.bdf.a0 * rho + input.bdf.a1 * rho_n +
-                        input.bdf.a2 * rho_nm1);
+                        input.bdf.a2 * rho_nm1 - detail::mass_source_rate(input.mass_source, cell));
           const double flux_sum = (fxp - fxm) + (fyp - fym) + (fzp - fzm);
           const double raw_continuity = unsteady + flux_sum;
           const double scale =
@@ -9574,7 +9590,8 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
               std::abs(volume * input.bdf.a1 * rho_n) +
               std::abs(volume * input.bdf.a2 * rho_nm1) + std::abs(fxm) +
               std::abs(fxp) + std::abs(fym) + std::abs(fyp) +
-              std::abs(fzm) + std::abs(fzp);
+              std::abs(fzm) + std::abs(fzp) +
+              std::abs(volume * detail::mass_source_rate(input.mass_source, cell));
           const double denominator =
               std::max(scale, std::numeric_limits<double>::min());
           const double unscaled_metric =
@@ -9753,7 +9770,7 @@ Status PressureVelocityCoupler::capture_pressure_failure_provenance(
           detail::cell_volume(*impl.kernels, limiting_cell);
       const double storage =
           volume * (input.bdf.a0 * rho + input.bdf.a1 * rho_n +
-                    input.bdf.a2 * rho_nm1);
+                    input.bdf.a2 * rho_nm1 - detail::mass_source_rate(input.mass_source, limiting_cell));
       const ConstFaceFluxView flux =
           as_const(impl.workspace.phi_h_by_a);
       const double fxm = flux.x.unchecked(limiting_cell);

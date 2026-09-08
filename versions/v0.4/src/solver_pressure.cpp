@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "solver_piso_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -162,6 +163,7 @@ Status assemble_pressure_system_impl(
       valid_bdf_coefficients(input.bdf) && input.bdf.a0 > 0.0 &&
       valid_cell_view(input.density_trial, cells, 0U, 1U, 0U) &&
       valid_history &&
+      valid_mass_source(input.mass_source, binding.mass_source_identity, input.time, cells) &&
       valid_cell_view(input.drho_dp_h_y, cells, 0U, 1U, 0U) &&
       valid_cell_view(system.diagonal, cells, 0U, 1U) &&
       valid_cell_view(system.rhs, cells, 0U, 1U) &&
@@ -185,7 +187,8 @@ Status assemble_pressure_system_impl(
       return {StatusCode::invalid_plan, kPressureAssembly};
     }
   }
-  if (bdf2 && aliases_output(input.density_previous, system)) {
+  if ((bdf2 && aliases_output(input.density_previous, system)) ||
+      (input.mass_source.identity != 0U && aliases_output(input.mass_source.rate, system))) {
     return {StatusCode::invalid_plan, kPressureAssembly};
   }
   const ConstFaceFieldView faces[]{x, y, z, phi.x, phi.y, phi.z};
@@ -201,6 +204,7 @@ Status assemble_pressure_system_impl(
       (bdf2 &&
        !finite_field_box(input.density_previous, box, 0U, 1U)) ||
       !finite_field_box(input.drho_dp_h_y, box, 0U, 1U) ||
+      (input.mass_source.identity != 0U && !finite_field_box(input.mass_source.rate, box, 0U, 1U)) ||
       !finite_nonnegative_faces(x) || !finite_nonnegative_faces(y) ||
       !finite_nonnegative_faces(z) || !finite_faces(phi.x) ||
       !finite_faces(phi.y) || !finite_faces(phi.z)) {
@@ -221,7 +225,7 @@ Status assemble_pressure_system_impl(
         const double volume = cell_volume(*binding.kernels, cell);
         const double density_defect =
             volume * (input.bdf.a0 * rho + input.bdf.a1 * rho_n +
-                      input.bdf.a2 * rho_nm1);
+                      input.bdf.a2 * rho_nm1 - mass_source_rate(input.mass_source, cell));
         const double diagonal = input.bdf.a0 * volume * derivative +
                                 face_sum(x, y, z, cell);
         const double rhs = -(density_defect + outward_flux(phi, cell));
@@ -247,7 +251,7 @@ Status assemble_pressure_system_impl(
             volume *
             (input.bdf.a0 * input.density_trial.unchecked(cell, 0U) +
              input.bdf.a1 * input.density_accepted.unchecked(cell, 0U) +
-             input.bdf.a2 * rho_nm1);
+             input.bdf.a2 * rho_nm1 - mass_source_rate(input.mass_source, cell));
         system.diagonal.unchecked(cell, 0U) =
             input.bdf.a0 * volume *
                 input.drho_dp_h_y.unchecked(cell, 0U) +
@@ -265,6 +269,11 @@ Status assemble_pressure_system_impl(
   state = mix_view(state, input.density_accepted);
   if (bdf2) state = mix_view(state, input.density_previous);
   state = mix_view(state, input.drho_dp_h_y);
+  if (input.mass_source.identity != 0U) {
+    state = mix_view(state, input.mass_source.rate);
+    state = hash_mix(state, input.mass_source.identity);
+    state = hash_mix(state, input.mass_source.time);
+  }
   state = hash_mix(state, double_bits(input.bdf.a0));
   state = hash_mix(state, double_bits(input.bdf.a1));
   state = hash_mix(state, double_bits(input.bdf.a2));

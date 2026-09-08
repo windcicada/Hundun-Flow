@@ -164,7 +164,8 @@ class PeriodicPisoFixture {
   bool initialize(std::int32_t cell_count,
                   MPI_Comm communicator = MPI_COMM_SELF,
                   bool multispecies = false,
-                  CouplingKind coupling = CouplingKind::piso) {
+                  CouplingKind coupling = CouplingKind::piso,
+                  PlanFingerprint mass_source_identity = 0U) {
     if (cell_count < 2) {
       return false;
     }
@@ -260,6 +261,7 @@ class PeriodicPisoFixture {
     }};
     EquationPlanSpec equation_spec;
     equation_spec.density = 0U;
+    equation_spec.mass_source_identity = mass_source_identity;
     equation_spec.velocity = 1U;
     equation_spec.pressure_perturbation = 2U;
     equation_spec.enthalpy = 3U;

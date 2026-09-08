@@ -10,12 +10,12 @@ static int finite_nonnegative(double value) {
   return isfinite(value) && value >= 0.0;
 }
 
-int hf_coast_common_terminal_cell_v1(
+int hf_coast_common_terminal_cell_v2(
     double rho, double rho_eos, double rho_accepted, double rho_previous,
     double volume, double bdf_a0, double bdf_a1, double bdf_a2,
     double flux_x_minus, double flux_x_plus, double flux_y_minus,
     double flux_y_plus, double flux_z_minus, double flux_z_plus,
-    double pressure_perturbation, int closed_mass,
+    double mass_source_density, double pressure_perturbation, int closed_mass,
     double drho_dp_at_fixed_h_y, double *eos_residual,
     double *continuity_residual, double *mass_contribution,
     double *volume_contribution, double *absolute_pressure_perturbation,
@@ -37,6 +37,7 @@ int hf_coast_common_terminal_cell_v1(
       !isfinite(flux_x_minus) || !isfinite(flux_x_plus) ||
       !isfinite(flux_y_minus) || !isfinite(flux_y_plus) ||
       !isfinite(flux_z_minus) || !isfinite(flux_z_plus) ||
+      !isfinite(mass_source_density) ||
       !isfinite(pressure_perturbation) ||
       (closed_mass && !(drho_dp_at_fixed_h_y > 0.0)) ||
       (closed_mass && !isfinite(drho_dp_at_fixed_h_y))) {
@@ -52,10 +53,10 @@ int hf_coast_common_terminal_cell_v1(
           fabs(volume * bdf_a1 * rho_accepted) +
           fabs(volume * bdf_a2 * rho_previous) + fabs(flux_x_minus) +
           fabs(flux_x_plus) + fabs(flux_y_minus) + fabs(flux_y_plus) +
-          fabs(flux_z_minus) + fabs(flux_z_plus);
+          fabs(flux_z_minus) + fabs(flux_z_plus) + fabs(volume * mass_source_density);
   if (scale < DBL_MIN) scale = DBL_MIN;
   eos = fabs(rho - rho_eos) / fmax(1.0, fabs(rho_eos));
-  continuity = fabs(unsteady + flux_sum) / scale;
+  continuity = fabs(unsteady + flux_sum - volume * mass_source_density) / scale;
   if (!finite_nonnegative(eos) || !finite_nonnegative(continuity)) return 1;
 
   *eos_residual = eos;
@@ -69,6 +70,26 @@ int hf_coast_common_terminal_cell_v1(
   *compressibility_weight =
       closed_mass ? volume * drho_dp_at_fixed_h_y : 0.0;
   return 0;
+}
+
+int hf_coast_common_terminal_cell_v1(
+    double rho, double rho_eos, double rho_accepted, double rho_previous,
+    double volume, double bdf_a0, double bdf_a1, double bdf_a2,
+    double flux_x_minus, double flux_x_plus, double flux_y_minus,
+    double flux_y_plus, double flux_z_minus, double flux_z_plus,
+    double pressure_perturbation, int closed_mass,
+    double drho_dp_at_fixed_h_y, double *eos_residual,
+    double *continuity_residual, double *mass_contribution,
+    double *volume_contribution, double *absolute_pressure_perturbation,
+    double *compressibility_pressure_moment,
+    double *compressibility_weight) {
+  return hf_coast_common_terminal_cell_v2(
+      rho, rho_eos, rho_accepted, rho_previous, volume, bdf_a0, bdf_a1, bdf_a2,
+      flux_x_minus, flux_x_plus, flux_y_minus, flux_y_plus, flux_z_minus,
+      flux_z_plus, 0.0, pressure_perturbation, closed_mass, drho_dp_at_fixed_h_y,
+      eos_residual, continuity_residual, mass_contribution, volume_contribution,
+      absolute_pressure_perturbation, compressibility_pressure_moment,
+      compressibility_weight);
 }
 
 int hf_coast_common_terminal_finalize_v1(

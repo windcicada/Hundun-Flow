@@ -60,6 +60,8 @@ struct EquationPlanSpec {
   Span<const ScalarEquationSpec> scalars{};
   std::size_t maximum_cells_per_rank{};
   StageId closed_mass_service_stage{};
+  // Zero disables interphase mass exchange. Frozen model identity otherwise.
+  PlanFingerprint mass_source_identity{};
 };
 
 struct EquationCompileDiagnostics {
@@ -70,6 +72,15 @@ struct PrimitiveHistory {
   ConstFieldView trial{};
   ConstFieldView accepted{};
   ConstFieldView previous{};
+};
+
+// Current target-step conservative mass rate [kg/(m^3 s)]. Empty only when
+// the compiled equation plan disables mass exchange. The provider owns storage
+// and keeps this revision immutable through both correctors and final audit.
+struct ConservativeMassSourceView {
+  ConstFieldView rate{};
+  PlanFingerprint identity{};
+  RevisionToken time{};
 };
 
 struct EquationStateView {
@@ -83,6 +94,7 @@ struct EquationStateView {
   Span<const PrimitiveHistory> passive_scalars{};
   double accepted_pressure_reference{};
   double previous_pressure_reference{};
+  ConservativeMassSourceView mass_source{};
 };
 
 struct EquationMaterialView {
@@ -961,6 +973,7 @@ class ContinuityEquationPlan {
   ContinuityEquationPlan& operator=(ContinuityEquationPlan&&) = delete;
 
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
+  PlanFingerprint mass_source_identity() const noexcept { return mass_source_identity_; }
   Int3 cells() const noexcept { return cells_; }
   PressureReferenceKind pressure_reference() const noexcept {
     return pressure_reference_;
@@ -984,6 +997,7 @@ class ContinuityEquationPlan {
       PressureReferenceKind::boundary_absolute};
   RevisionToken geometry_revision_{};
   PlanFingerprint fingerprint_{};
+  PlanFingerprint mass_source_identity_{};
 };
 
 class MomentumEquationPlan {
@@ -2561,6 +2575,7 @@ struct PressureCorrectionInput {
   RevisionToken time{};
   RevisionToken geometry{};
   RevisionToken numeric_boundary{};
+  ConservativeMassSourceView mass_source{};
 };
 
 struct PressureCorrectionSystemView {
@@ -2817,6 +2832,7 @@ struct PisoTerminalAuditInput {
   // topology's 0/1 fluid mask so solid control volumes do not enter norms.
   Span<const std::uint8_t> active{};
   BoundaryThermophysicalGhostUse thermophysical_boundary{};
+  ConservativeMassSourceView mass_source{};
 };
 
 struct PisoTerminalCertificate {
