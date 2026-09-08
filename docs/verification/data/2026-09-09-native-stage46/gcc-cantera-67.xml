@@ -1,0 +1,419 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="(empty)"
+	tests="67"
+	failures="0"
+	disabled="0"
+	skipped="0"
+	hostname=""
+	time="141"
+	timestamp="2026-09-08T20:17:39"
+	>
+	<testcase name="v04_public_headers" classname="v04_public_headers" time="0.00116582" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_1" classname="v04_product_pressure_energy_retry_mpi_1" time="1.42014" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908338169e-14/1.0460406810870782e-10/0/2.4294555600856023e-32 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714286467246098e-08/5.4073846732826122e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=70/85
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384613495099614e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contr...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_2" classname="v04_product_pressure_energy_retry_mpi_2" time="1.23175" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/2.1460190780756228e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.407384672878688e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=90/108
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-contr...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pressure_energy_retry_mpi_4" classname="v04_product_pressure_energy_retry_mpi_4" time="1.33734" status="run">
+		<properties>
+			<property name="cmake_labels" value="v04_focused"/>
+		</properties>
+		<system-out>candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908212711e-14/1.0460406810870792e-10/0/1.1860467074584553e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714287331642688e-08/5.4073846735877291e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=1 mg-applies=94/114
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384597744234758e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2 mg-cont...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_mpi_1" classname="v04_product_spray_mpi_1" time="0.661048" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.1282630445941288e-15 energy_error=-6.4688538259360939e-07 momentum_error=3.1333984885917321e-15 gas_target_error=-6.2172489379008766e-15 parcels=2
+late failure 5:10214 query=1591/1592
+step=3 mass_error=-4.807027172148981e-15 energy_error=-6.4686719269957393e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-4.8849813083506888e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_wall_mpi_1" classname="v04_product_spray_wall_mpi_1" time="0.56623" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.0172407421316132e-15 energy_error=-3.0559021979570389e-10 momentum_error=-0.00079899502479132539 gas_target_error=-6.2172489379008766e-15 parcels=2
+late failure 5:10214 query=1699/1700
+step=3 mass_error=-6.1392948016991689e-15 energy_error=-4.0927261579781771e-10 momentum_error=-0.0011976987738093088 gas_target_error=-6.2172489379008766e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_ibm_mpi_1" classname="v04_product_spray_ibm_mpi_1" time="3.65036" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-7.1274637667567697e-15 energy_error=-1.5515979612246156e-09 momentum_error=-0.00079828906843600837 gas_target_error=-7.2164496600635175e-15 parcels=2
+late failure 5:10214 query=6407/6408
+step=3 mass_error=-7.1384955238618097e-15 energy_error=-5.6861608754843473e-09 momentum_error=-0.0011959422586251855 gas_target_error=-7.1054273576010019e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_wale_mpi_1" classname="v04_product_spray_esf_ibm_wale_mpi_1" time="5.97561" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-7.0164414642942541e-15 energy_error=-1.558873918838799e-09 momentum_error=-0.00079828907003678951 gas_target_error=-7.1054273576010019e-15 parcels=2
+late failure 5:10216 query=132039/132040
+step=3 mass_error=-6.9164509189367784e-15 energy_error=-5.6807039072737098e-09 momentum_error=-0.0011959422626635586 gas_target_error=-6.8833827526759706e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_mpi_1" classname="v04_product_spray_esf_ibm_mpi_1" time="5.79779" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.7943968593692228e-15 energy_error=-1.5661498764529824e-09 momentum_error=-0.00079828907002649479 gas_target_error=-6.8833827526759706e-15 parcels=2
+late failure 5:10216 query=132039/132040
+step=3 mass_error=-7.0274732213992941e-15 energy_error=-5.7116267271339893e-09 momentum_error=-0.0011959422625899326 gas_target_error=-6.9944050551384862e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_wall_mpi_1" classname="v04_product_spray_esf_wall_mpi_1" time="0.771923" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.2392853470566445e-15 energy_error=-3.0559021979570389e-10 momentum_error=-0.00079899502563437466 gas_target_error=-6.3282712403633923e-15 parcels=2
+late failure 5:10216 query=10403/10404
+step=3 mass_error=-6.3613394066242002e-15 energy_error=-3.9108272176235914e-10 momentum_error=-0.0011976987759151417 gas_target_error=-6.4392935428259079e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_mpi_1" classname="v04_product_spray_esf_mpi_1" time="0.791474" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-5.7951961372065819e-15 energy_error=-6.4692721934989095e-07 momentum_error=3.1333984885917321e-15 gas_target_error=-5.8841820305133297e-15 parcels=2
+late failure 5:10216 query=10295/10296
+step=3 mass_error=-5.140094079536528e-15 energy_error=-6.4688902057241648e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-5.2180482157382357e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_passive_mpi_1" classname="v04_product_spray_esf_passive_mpi_1" time="0.787616" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-5.7951961372065819e-15 energy_error=-6.4692721934989095e-07 momentum_error=3.1333984885917321e-15 gas_target_error=-5.8841820305133297e-15 parcels=2
+late failure 5:10216 query=10295/10296
+step=3 mass_error=-5.140094079536528e-15 energy_error=-6.4688902057241648e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-5.2180482157382357e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_mpi_2" classname="v04_product_spray_mpi_2" time="0.545758" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-1.7983932485560183e-15 energy_error=-6.4689993450883776e-07 momentum_error=3.1333442784831078e-15 gas_target_error=-1.8873791418627661e-15 parcels=2
+late failure 5:10214 query=1335/1336
+step=3 mass_error=-3.3068166260807885e-17 energy_error=-6.4688356360420585e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-1.1102230246251565e-16 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_wall_mpi_2" classname="v04_product_spray_wall_mpi_2" time="0.560776" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-3.5747500879562688e-15 energy_error=-2.0918378140777349e-10 momentum_error=-0.00079899502479132539 gas_target_error=-3.5527136788005009e-15 parcels=2
+late failure 5:10214 query=1443/1444
+step=3 mass_error=-3.3637372401362775e-15 energy_error=-3.7471181713044643e-10 momentum_error=-0.0011976987738093088 gas_target_error=-3.4416913763379853e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_ibm_mpi_2" classname="v04_product_spray_ibm_mpi_2" time="2.14874" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-7.2384860692192854e-15 energy_error=-6.4756022766232491e-10 momentum_error=-0.00079828906843600837 gas_target_error=-7.3274719625260332e-15 parcels=2
+late failure 5:10214 query=2015/2016
+step=3 mass_error=-6.5833840115492315e-15 energy_error=-4.778485163114965e-09 momentum_error=-0.0011959422586251857 gas_target_error=-6.6613381477509392e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_wale_mpi_2" classname="v04_product_spray_esf_ibm_wale_mpi_2" time="3.54366" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-7.2384860692192854e-15 energy_error=-6.5483618527650833e-10 momentum_error=-0.00079828907003678961 gas_target_error=-7.3274719625260332e-15 parcels=2
+late failure 5:10216 query=64831/64832
+step=3 mass_error=-6.5833840115492315e-15 energy_error=-4.7712092055007815e-09 momentum_error=-0.0011959422626635586 gas_target_error=-6.6613381477509392e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_mpi_2" classname="v04_product_spray_esf_ibm_mpi_2" time="3.40744" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-7.2384860692192854e-15 energy_error=-6.6575012169778347e-10 momentum_error=-0.00079828907002649479 gas_target_error=-7.3274719625260332e-15 parcels=2
+late failure 5:10216 query=64831/64832
+step=3 mass_error=-6.8054286164742628e-15 energy_error=-4.8094079829752445e-09 momentum_error=-0.0011959422625899326 gas_target_error=-6.7723604502134549e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_wall_mpi_2" classname="v04_product_spray_esf_wall_mpi_2" time="0.714071" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-3.5747500879562688e-15 energy_error=-2.2009771782904863e-10 momentum_error=-0.00079899502563437466 gas_target_error=-3.5527136788005009e-15 parcels=2
+late failure 5:10216 query=5795/5796
+step=3 mass_error=-3.3637372401362775e-15 energy_error=-3.8198777474462986e-10 momentum_error=-0.0011976987759151417 gas_target_error=-3.5527136788005009e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_mpi_2" classname="v04_product_spray_esf_mpi_2" time="0.697698" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-2.0204378534810497e-15 energy_error=-6.4693449530750513e-07 momentum_error=3.1333442784831078e-15 gas_target_error=-2.1094237467877974e-15 parcels=2
+late failure 5:10216 query=5687/5688
+step=3 mass_error=-2.5511277118583919e-16 energy_error=-6.4690902945585549e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-2.2204460492503131e-16 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_passive_mpi_2" classname="v04_product_spray_esf_passive_mpi_2" time="0.696808" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-2.0204378534810497e-15 energy_error=-6.4693449530750513e-07 momentum_error=3.1333442784831078e-15 gas_target_error=-2.1094237467877974e-15 parcels=2
+late failure 5:10216 query=5687/5688
+step=3 mass_error=-2.5511277118583919e-16 energy_error=-6.4690902945585549e-07 momentum_error=1.4478002130502432e-14 gas_target_error=-2.2204460492503131e-16 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_mpi_4" classname="v04_product_spray_mpi_4" time="0.600103" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=8.6614201054435735e-16 energy_error=-6.4689811551943421e-07 momentum_error=3.1333984885917321e-15 gas_target_error=8.8817841970012523e-16 parcels=2
+late failure 5:10214 query=1207/1208
+step=3 mass_error=8.5511025343931735e-16 energy_error=-6.4688720158301294e-07 momentum_error=1.4478002130502432e-14 gas_target_error=8.8817841970012523e-16 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_wall_mpi_4" classname="v04_product_spray_wall_mpi_4" time="0.583371" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-2.2036409155767878e-17 energy_error=-2.1827872842550278e-10 momentum_error=-0.00079899502479132539 gas_target_error=0 parcels=2
+late failure 5:10214 query=1315/1316
+step=3 mass_error=-1.4409046872332354e-16 energy_error=-3.6743585951626301e-10 momentum_error=-0.0011976987738093088 gas_target_error=-1.1102230246251565e-16 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_ibm_mpi_4" classname="v04_product_spray_ibm_mpi_4" time="1.59483" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.5723522544441915e-15 energy_error=-1.255102688446641e-09 momentum_error=-0.00079828906843600837 gas_target_error=-6.5503158452884236e-15 parcels=2
+late failure 5:10214 query=1007/1008
+step=3 mass_error=-6.3613394066242002e-15 energy_error=-5.3551048040390015e-09 momentum_error=-0.0011959422586251857 gas_target_error=-6.4392935428259079e-15 parcels=3
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_wale_mpi_4" classname="v04_product_spray_esf_ibm_wale_mpi_4" time="2.30867" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.5723522544441915e-15 energy_error=-1.2623786460608244e-09 momentum_error=-0.00079828907003678951 gas_target_error=-6.6613381477509392e-15 parcels=2
+late failure 5:10216 query=32415/32416
+step=3 mass_error=-6.4723617090867158e-15 energy_error=-5.3623807616531849e-09 momentum_error=-0.0011959422626635586 gas_target_error=-6.4392935428259079e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_ibm_mpi_4" classname="v04_product_spray_esf_ibm_mpi_4" time="2.25376" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-6.5723522544441915e-15 energy_error=-1.2769305612891912e-09 momentum_error=-0.00079828907002649479 gas_target_error=-6.5503158452884236e-15 parcels=2
+late failure 5:10216 query=32415/32416
+step=3 mass_error=-6.3613394066242002e-15 energy_error=-5.4096744861453772e-09 momentum_error=-0.0011959422625899326 gas_target_error=-6.3282712403633923e-15 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_wall_mpi_4" classname="v04_product_spray_esf_wall_mpi_4" time="0.662412" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=-2.2036409155767878e-17 energy_error=-2.1645973902195692e-10 momentum_error=-0.00079899502563437466 gas_target_error=-1.1102230246251565e-16 parcels=2
+late failure 5:10216 query=3491/3492
+step=3 mass_error=-1.4409046872332354e-16 energy_error=-3.6743585951626301e-10 momentum_error=-0.0011976987759151417 gas_target_error=-2.2204460492503131e-16 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_mpi_4" classname="v04_product_spray_esf_mpi_4" time="0.676885" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=8.6614201054435735e-16 energy_error=-6.4693813328631222e-07 momentum_error=3.1333984885917321e-15 gas_target_error=7.7715611723760958e-16 parcels=2
+late failure 5:10216 query=3383/3384
+step=3 mass_error=8.5511025343931735e-16 energy_error=-6.469053914770484e-07 momentum_error=1.4478002130502432e-14 gas_target_error=8.8817841970012523e-16 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_spray_esf_passive_mpi_4" classname="v04_product_spray_esf_passive_mpi_4" time="0.691782" status="run">
+		<properties/>
+		<system-out>step=2 mass_error=8.6614201054435735e-16 energy_error=-6.4693813328631222e-07 momentum_error=3.1333984885917321e-15 gas_target_error=7.7715611723760958e-16 parcels=2
+late failure 5:10216 query=3383/3384
+step=3 mass_error=8.5511025343931735e-16 energy_error=-6.469053914770484e-07 momentum_error=1.4478002130502432e-14 gas_target_error=8.8817841970012523e-16 parcels=3
+second half status=5:10216 accepted=0 halves=2
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_mpi_1" classname="v04_product_reaction_mpi_1" time="0.512039" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_mpi_2" classname="v04_product_reaction_mpi_2" time="0.522401" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_mpi_4" classname="v04_product_reaction_mpi_4" time="0.52953" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_case_mpi_1" classname="v04_product_reaction_case_mpi_1" time="0.536827" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_case_mpi_2" classname="v04_product_reaction_case_mpi_2" time="0.469562" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_reaction_case_mpi_4" classname="v04_product_reaction_case_mpi_4" time="0.524641" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pasr_case_mpi_1" classname="v04_product_pasr_case_mpi_1" time="0.514007" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pasr_case_mpi_2" classname="v04_product_pasr_case_mpi_2" time="0.515316" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_pasr_case_mpi_4" classname="v04_product_pasr_case_mpi_4" time="0.537011" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_case_mpi_1" classname="v04_product_cantera_case_mpi_1" time="0.501369" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_case_mpi_2" classname="v04_product_cantera_case_mpi_2" time="0.516314" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_case_mpi_4" classname="v04_product_cantera_case_mpi_4" time="0.525229" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_esf_case_mpi_1" classname="v04_product_esf_case_mpi_1" time="0.562765" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_esf_case_mpi_2" classname="v04_product_esf_case_mpi_2" time="0.523811" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_esf_case_mpi_4" classname="v04_product_esf_case_mpi_4" time="0.564855" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_shadow_mpi_1" classname="v04_product_tcr_shadow_mpi_1" time="0.736284" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_shadow_mpi_2" classname="v04_product_tcr_shadow_mpi_2" time="0.603335" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_shadow_mpi_4" classname="v04_product_tcr_shadow_mpi_4" time="0.675715" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_experimental_mpi_1" classname="v04_product_tcr_experimental_mpi_1" time="0.678677" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_experimental_mpi_2" classname="v04_product_tcr_experimental_mpi_2" time="0.623337" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_tcr_experimental_mpi_4" classname="v04_product_tcr_experimental_mpi_4" time="0.642471" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_esf_mpi_1" classname="v04_product_cantera_esf_mpi_1" time="1.81657" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_esf_mpi_2" classname="v04_product_cantera_esf_mpi_2" time="1.16566" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_product_cantera_esf_mpi_4" classname="v04_product_cantera_esf_mpi_4" time="0.876759" status="run">
+		<properties/>
+		<system-out>PASS: product reaction changes accepted species; provider failure rolls back full step
+</system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-esf-ibm" classname="v04_coupled_restart_cli_reacting-esf-ibm" time="4.76023" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-ibm" classname="v04_coupled_restart_cli_reacting-spray-esf-ibm" time="5.96597" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-wall" classname="v04_coupled_restart_cli_reacting-spray-esf-wall" time="4.94151" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-outlet" classname="v04_coupled_restart_cli_reacting-spray-esf-outlet" time="4.9045" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-ibm" classname="v04_coupled_restart_cli_reacting-spray-ibm" time="4.68111" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-outlet" classname="v04_coupled_restart_cli_reacting-spray-outlet" time="4.07651" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-wall" classname="v04_coupled_restart_cli_reacting-spray-wall" time="4.18276" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-esf" classname="v04_coupled_restart_cli_reacting-esf" time="5.09374" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-tcr-experimental" classname="v04_coupled_restart_cli_reacting-tcr-experimental" time="4.77635" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-mean" classname="v04_coupled_restart_cli_reacting-spray-mean" time="4.48773" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf" classname="v04_coupled_restart_cli_reacting-spray-esf" time="4.28325" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-passive" classname="v04_coupled_restart_cli_reacting-spray-esf-passive" time="4.52416" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-cantera-esf" classname="v04_coupled_restart_cli_reacting-cantera-esf" time="5.58883" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-cantera" classname="v04_coupled_restart_cli_reacting-spray-esf-cantera" time="5.56147" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+	<testcase name="v04_coupled_restart_cli_reacting-spray-esf-ibm-cantera" classname="v04_coupled_restart_cli_reacting-spray-esf-ibm-cantera" time="13.0877" status="run">
+		<properties/>
+		<system-out></system-out>
+	</testcase>
+</testsuite>

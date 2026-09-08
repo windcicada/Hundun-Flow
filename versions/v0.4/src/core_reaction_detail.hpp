@@ -23,6 +23,12 @@ public:
                    const std::filesystem::path &case_root) {
     if (!valid_reaction_spec(model.reaction))
       return invalid();
+    fold_provider_ = bindings.tcr_fold;
+    fold_identity_ = fold_provider_ ? fold_provider_->fingerprint() : 0;
+    if (fold_provider_ &&
+        (model.reaction.mode != ReactionMode::esf_tpdf || !model.reaction.esf ||
+         model.reaction.esf->tcr.mode == TcrMode::off || fold_identity_ == 0))
+      return invalid();
     if (model.reaction.mode == ReactionMode::none)
       return bindings.gas_query == nullptr && bindings.gas_advance == nullptr &&
                      bindings.chemistry_identity == nullptr
@@ -192,6 +198,10 @@ public:
       std::memcpy(&bits, &spec.tcr.weak_rate_threshold, sizeof(bits));
       integer(bits);
     }
+    if (fold_provider_) {
+      string("native-tcr-explicit-fold-evidence-v1");
+      integer(fold_identity_);
+    }
     fingerprint_ = h ? h : 1;
     provider_ = bindings.gas_query;
     return {};
@@ -213,6 +223,10 @@ public:
   }
   std::size_t dependent_index() const noexcept { return dependent_; }
 
+  const ProductTcrFoldProvider *fold_provider() const noexcept {
+    return fold_provider_;
+  }
+  PlanFingerprint fold_identity() const noexcept { return fold_identity_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   Status bind(Span<const FieldId> conserved,
               Span<const FieldId> source) noexcept {
@@ -406,6 +420,8 @@ private:
   combustion::ChemistryIdentity closure_;
   portable::GasIdentity identity_;
   PlanFingerprint fingerprint_{};
+  const ProductTcrFoldProvider *fold_provider_{};
+  PlanFingerprint fold_identity_{};
   ReactionMode mode_{ReactionMode::none};
   double mixing_c_z_{1.0}, turbulent_schmidt_{0.7};
   std::size_t dependent_{};

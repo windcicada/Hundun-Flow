@@ -1,0 +1,18 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+    Start 503: v04_product_tcr_shadow_mpi_1
+1/6 Test #503: v04_product_tcr_shadow_mpi_1 .........   Passed    1.08 sec
+    Start 504: v04_product_tcr_shadow_mpi_2
+2/6 Test #504: v04_product_tcr_shadow_mpi_2 .........   Passed    0.93 sec
+    Start 505: v04_product_tcr_shadow_mpi_4
+3/6 Test #505: v04_product_tcr_shadow_mpi_4 .........   Passed    0.98 sec
+    Start 506: v04_product_tcr_experimental_mpi_1
+4/6 Test #506: v04_product_tcr_experimental_mpi_1 ...   Passed    1.03 sec
+    Start 507: v04_product_tcr_experimental_mpi_2
+5/6 Test #507: v04_product_tcr_experimental_mpi_2 ...   Passed    0.98 sec
+    Start 508: v04_product_tcr_experimental_mpi_4
+6/6 Test #508: v04_product_tcr_experimental_mpi_4 ...   Passed    0.98 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Total Test time (real) =   6.00 sec

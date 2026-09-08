@@ -1,0 +1,27 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+    Start 506: v04_product_tcr_experimental_mpi_1
+1/1 Test #506: v04_product_tcr_experimental_mpi_1 ...***Failed    2.74 sec
+fold witness defect did not roll back: 1
+native TCR fold continuation failed
+FAIL: product reaction changes accepted species; provider failure rolls back full step
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[7379,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   2.76 sec
+
+The following tests FAILED:
+	506 - v04_product_tcr_experimental_mpi_1 (Failed)
+Errors while running CTest

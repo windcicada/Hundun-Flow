@@ -91,6 +91,36 @@ class CompiledCasePlan {
   Impl* implementation_{};
 };
 
+// An explicit source-control continuation witness. This interface transports
+// evidence; it never infers a fold or a departure branch from endpoint roots.
+struct ProductTcrFoldQuery {
+  std::uint64_t global_cell{};
+  portable::Revision history_revision{}, input_revision{};
+  bool initialized{};
+  double accepted_eta{}, accepted_rate_ratio{}, eta{}, rate_ratio{};
+  int accepted_branch_sign{};
+};
+struct ProductTcrFoldEvidence {
+  bool supplied{};
+  PlanFingerprint source_identity{};
+  std::uint64_t global_cell{};
+  portable::Revision history_revision{}, input_revision{};
+  double eta{}, rate_ratio{};
+  int departure_sign{};
+};
+class ProductTcrFoldProvider {
+public:
+  virtual ~ProductTcrFoldProvider() = default;
+  // Stable content/algorithm identity, included in the product/restart
+  // contract.
+  virtual PlanFingerprint fingerprint() const noexcept = 0;
+  // Pure, bounded, allocation-free query of immutable evidence. Providers must
+  // not advance an independent clock/history. The native transaction owns all
+  // accepted branch/fold history; repeated attempts query the same evidence.
+  virtual Status query(const ProductTcrFoldQuery &,
+                       ProductTcrFoldEvidence &) const noexcept = 0;
+};
+
 // Borrowed, exclusive-lane providers. Their owners must outlive the compiled
 // plan and its driver. Case identity and species/thermo binding are validated
 // collectively before a provider can supply a product source.
@@ -98,6 +128,7 @@ struct ProductCouplingBindings {
   portable::GasQueryProvider* gas_query{};
   portable::GasAdvanceProvider *gas_advance{};
   const combustion::ChemistryIdentity *chemistry_identity{};
+  const ProductTcrFoldProvider *tcr_fold{};
 };
 
 class ProductCompiler {

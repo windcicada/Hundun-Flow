@@ -3506,7 +3506,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   if (status)
     status = product_local_stage(communicator, [&] {
       return candidate->esf.configure(model, candidate->reaction,
-                                      candidate->patch.cells);
+                                      candidate->patch,
+                                      candidate->geometry.global_cells());
     });
   CpuExecutionRequest cpu_request;
   cpu_request.threads_per_rank = 1U;

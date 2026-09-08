@@ -1,0 +1,423 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+        Start  31: v04_solver_observation_cli
+  1/205 Test  #31: v04_solver_observation_cli ...........................   Passed    4.16 sec
+        Start  32: v04_solver_mg_observation_cli
+  2/205 Test  #32: v04_solver_mg_observation_cli ........................   Passed    1.59 sec
+        Start  33: v04_solver_fgmres_observation_cli
+  3/205 Test  #33: v04_solver_fgmres_observation_cli ....................   Passed    1.38 sec
+        Start  39: v04_runner_fgmres_log_completion_mpi_2
+  4/205 Test  #39: v04_runner_fgmres_log_completion_mpi_2 ...............   Passed   29.68 sec
+        Start  42: v04_app_restart_policy_cli_mpi_1
+  5/205 Test  #42: v04_app_restart_policy_cli_mpi_1 .....................   Passed   26.87 sec
+        Start  44: v04_app_restart_policy_cli_mpi_2
+  6/205 Test  #44: v04_app_restart_policy_cli_mpi_2 .....................   Passed   20.11 sec
+        Start  46: v04_app_restart_policy_cli_mpi_4
+  7/205 Test  #46: v04_app_restart_policy_cli_mpi_4 .....................   Passed    8.44 sec
+        Start  50: v04_runner_fgmres_recovery_mpi_1
+  8/205 Test  #50: v04_runner_fgmres_recovery_mpi_1 .....................   Passed   18.39 sec
+        Start  51: v04_runner_statistics_epoch_mpi_1
+  9/205 Test  #51: v04_runner_statistics_epoch_mpi_1 ....................   Passed   16.06 sec
+        Start  53: v04_runner_fgmres_recovery_mpi_2
+ 10/205 Test  #53: v04_runner_fgmres_recovery_mpi_2 .....................   Passed   22.04 sec
+        Start  54: v04_runner_statistics_epoch_mpi_2
+ 11/205 Test  #54: v04_runner_statistics_epoch_mpi_2 ....................   Passed   18.10 sec
+        Start  56: v04_runner_fgmres_recovery_mpi_4
+ 12/205 Test  #56: v04_runner_fgmres_recovery_mpi_4 .....................   Passed   14.51 sec
+        Start  57: v04_runner_statistics_epoch_mpi_4
+ 13/205 Test  #57: v04_runner_statistics_epoch_mpi_4 ....................   Passed   13.14 sec
+        Start  65: v04_product_restart_storage_mpi_1
+ 14/205 Test  #65: v04_product_restart_storage_mpi_1 ....................   Passed    0.96 sec
+        Start  66: v04_product_restart_storage_mpi_2
+ 15/205 Test  #66: v04_product_restart_storage_mpi_2 ....................   Passed    1.22 sec
+        Start  67: v04_product_restart_storage_mpi_4
+ 16/205 Test  #67: v04_product_restart_storage_mpi_4 ....................   Passed    1.15 sec
+        Start 136: v04_public_headers
+ 17/205 Test #136: v04_public_headers ...................................   Passed    0.00 sec
+        Start 137: v04_models_chemistry
+ 18/205 Test #137: v04_models_chemistry .................................   Passed    0.00 sec
+        Start 138: v04_models_chemistry_adapter
+ 19/205 Test #138: v04_models_chemistry_adapter .........................   Passed    0.00 sec
+        Start 139: v04_models_spray_properties
+ 20/205 Test #139: v04_models_spray_properties ..........................   Passed    0.00 sec
+        Start 140: v04_models_spray_film_bridge
+ 21/205 Test #140: v04_models_spray_film_bridge .........................   Passed    0.00 sec
+        Start 141: v04_product_spray_advance_mpi_1
+ 22/205 Test #141: v04_product_spray_advance_mpi_1 ......................   Passed    0.31 sec
+        Start 142: v04_product_spray_boundary_1_mpi_1
+ 23/205 Test #142: v04_product_spray_boundary_1_mpi_1 ...................   Passed    0.28 sec
+        Start 143: v04_product_spray_boundary_2_mpi_1
+ 24/205 Test #143: v04_product_spray_boundary_2_mpi_1 ...................   Passed    0.28 sec
+        Start 144: v04_product_spray_boundary_3_mpi_1
+ 25/205 Test #144: v04_product_spray_boundary_3_mpi_1 ...................   Passed    0.29 sec
+        Start 145: v04_product_spray_boundary_4_mpi_1
+ 26/205 Test #145: v04_product_spray_boundary_4_mpi_1 ...................   Passed    0.28 sec
+        Start 146: v04_product_spray_advance_mpi_2
+ 27/205 Test #146: v04_product_spray_advance_mpi_2 ......................   Passed    0.29 sec
+        Start 147: v04_product_spray_boundary_1_mpi_2
+ 28/205 Test #147: v04_product_spray_boundary_1_mpi_2 ...................   Passed    0.30 sec
+        Start 148: v04_product_spray_boundary_2_mpi_2
+ 29/205 Test #148: v04_product_spray_boundary_2_mpi_2 ...................   Passed    0.31 sec
+        Start 149: v04_product_spray_boundary_3_mpi_2
+ 30/205 Test #149: v04_product_spray_boundary_3_mpi_2 ...................   Passed    0.30 sec
+        Start 150: v04_product_spray_boundary_4_mpi_2
+ 31/205 Test #150: v04_product_spray_boundary_4_mpi_2 ...................   Passed    0.29 sec
+        Start 151: v04_product_spray_advance_mpi_4
+ 32/205 Test #151: v04_product_spray_advance_mpi_4 ......................   Passed    0.31 sec
+        Start 152: v04_product_spray_boundary_1_mpi_4
+ 33/205 Test #152: v04_product_spray_boundary_1_mpi_4 ...................   Passed    0.31 sec
+        Start 153: v04_product_spray_boundary_2_mpi_4
+ 34/205 Test #153: v04_product_spray_boundary_2_mpi_4 ...................   Passed    0.31 sec
+        Start 154: v04_product_spray_boundary_3_mpi_4
+ 35/205 Test #154: v04_product_spray_boundary_3_mpi_4 ...................   Passed    0.30 sec
+        Start 155: v04_product_spray_boundary_4_mpi_4
+ 36/205 Test #155: v04_product_spray_boundary_4_mpi_4 ...................   Passed    0.30 sec
+        Start 156: v04_portable_v1_chemistry_alpha_steps_1
+ 37/205 Test #156: v04_portable_v1_chemistry_alpha_steps_1 ..............   Passed    0.00 sec
+        Start 157: v04_portable_v1_chemistry_alpha_steps_2
+ 38/205 Test #157: v04_portable_v1_chemistry_alpha_steps_2 ..............   Passed    0.00 sec
+        Start 158: v04_portable_v1_chemistry_alpha_steps_4
+ 39/205 Test #158: v04_portable_v1_chemistry_alpha_steps_4 ..............   Passed    0.00 sec
+        Start 159: v04_portable_v1_chemistry_beta_steps_1
+ 40/205 Test #159: v04_portable_v1_chemistry_beta_steps_1 ...............   Passed    0.00 sec
+        Start 160: v04_portable_v1_chemistry_beta_steps_2
+ 41/205 Test #160: v04_portable_v1_chemistry_beta_steps_2 ...............   Passed    0.00 sec
+        Start 161: v04_portable_v1_chemistry_beta_steps_4
+ 42/205 Test #161: v04_portable_v1_chemistry_beta_steps_4 ...............   Passed    0.00 sec
+        Start 162: v04_portable_v1_iem_n2_steps_1
+ 43/205 Test #162: v04_portable_v1_iem_n2_steps_1 .......................   Passed    0.00 sec
+        Start 163: v04_portable_v1_iem_n2_steps_2
+ 44/205 Test #163: v04_portable_v1_iem_n2_steps_2 .......................   Passed    0.00 sec
+        Start 164: v04_portable_v1_iem_n2_steps_4
+ 45/205 Test #164: v04_portable_v1_iem_n2_steps_4 .......................   Passed    0.00 sec
+        Start 165: v04_portable_v1_iem_n4_steps_1
+ 46/205 Test #165: v04_portable_v1_iem_n4_steps_1 .......................   Passed    0.00 sec
+        Start 166: v04_portable_v1_iem_n4_steps_2
+ 47/205 Test #166: v04_portable_v1_iem_n4_steps_2 .......................   Passed    0.00 sec
+        Start 167: v04_portable_v1_iem_n4_steps_4
+ 48/205 Test #167: v04_portable_v1_iem_n4_steps_4 .......................   Passed    0.00 sec
+        Start 168: v04_portable_v1_tcr_root_tracking
+ 49/205 Test #168: v04_portable_v1_tcr_root_tracking ....................   Passed    0.00 sec
+        Start 169: v04_portable_v1_heating_steps_10
+ 50/205 Test #169: v04_portable_v1_heating_steps_10 .....................   Passed    0.00 sec
+        Start 170: v04_portable_v1_heating_steps_20
+ 51/205 Test #170: v04_portable_v1_heating_steps_20 .....................   Passed    0.00 sec
+        Start 171: v04_portable_v1_heating_steps_40
+ 52/205 Test #171: v04_portable_v1_heating_steps_40 .....................   Passed    0.00 sec
+        Start 172: v04_portable_v1_evaporation_steps_10
+ 53/205 Test #172: v04_portable_v1_evaporation_steps_10 .................   Passed    0.00 sec
+        Start 173: v04_portable_v1_evaporation_steps_20
+ 54/205 Test #173: v04_portable_v1_evaporation_steps_20 .................   Passed    0.00 sec
+        Start 174: v04_portable_v1_evaporation_steps_40
+ 55/205 Test #174: v04_portable_v1_evaporation_steps_40 .................   Passed    0.00 sec
+        Start 175: v04_portable_v1_ballistic
+ 56/205 Test #175: v04_portable_v1_ballistic ............................   Passed    0.00 sec
+        Start 176: v04_portable_v1_static_ibm_rebound
+ 57/205 Test #176: v04_portable_v1_static_ibm_rebound ...................   Passed    0.30 sec
+        Start 177: v04_portable_v1_tab_oscillator
+ 58/205 Test #177: v04_portable_v1_tab_oscillator .......................   Passed    0.00 sec
+        Start 178: v04_portable_v1_tab_representative_split
+ 59/205 Test #178: v04_portable_v1_tab_representative_split .............   Passed    0.00 sec
+        Start 179: v04_portable_v2_spray_alpha_n2_r1
+ 60/205 Test #179: v04_portable_v2_spray_alpha_n2_r1 ....................   Passed    0.28 sec
+        Start 180: v04_portable_v2_spray_alpha_n2_r2
+ 61/205 Test #180: v04_portable_v2_spray_alpha_n2_r2 ....................   Passed    0.31 sec
+        Start 181: v04_portable_v2_spray_alpha_n2_r4
+ 62/205 Test #181: v04_portable_v2_spray_alpha_n2_r4 ....................   Passed    0.30 sec
+        Start 182: v04_portable_v2_spray_alpha_n4_r1
+ 63/205 Test #182: v04_portable_v2_spray_alpha_n4_r1 ....................   Passed    0.28 sec
+        Start 183: v04_portable_v2_spray_alpha_n4_r2
+ 64/205 Test #183: v04_portable_v2_spray_alpha_n4_r2 ....................   Passed    0.29 sec
+        Start 184: v04_portable_v2_spray_alpha_n4_r4
+ 65/205 Test #184: v04_portable_v2_spray_alpha_n4_r4 ....................   Passed    0.31 sec
+        Start 185: v04_portable_v2_spray_beta_n2_r1
+ 66/205 Test #185: v04_portable_v2_spray_beta_n2_r1 .....................   Passed    0.28 sec
+        Start 186: v04_portable_v2_spray_beta_n2_r2
+ 67/205 Test #186: v04_portable_v2_spray_beta_n2_r2 .....................   Passed    0.28 sec
+        Start 187: v04_portable_v2_spray_beta_n2_r4
+ 68/205 Test #187: v04_portable_v2_spray_beta_n2_r4 .....................   Passed    0.32 sec
+        Start 188: v04_portable_v2_spray_beta_n4_r1
+ 69/205 Test #188: v04_portable_v2_spray_beta_n4_r1 .....................   Passed    0.28 sec
+        Start 189: v04_portable_v2_spray_beta_n4_r2
+ 70/205 Test #189: v04_portable_v2_spray_beta_n4_r2 .....................   Passed    0.28 sec
+        Start 190: v04_portable_v2_spray_beta_n4_r4
+ 71/205 Test #190: v04_portable_v2_spray_beta_n4_r4 .....................   Passed    0.30 sec
+        Start 191: v04_portable_v2_closed_analytic_n2_r1
+ 72/205 Test #191: v04_portable_v2_closed_analytic_n2_r1 ................   Passed    0.28 sec
+        Start 192: v04_portable_v2_closed_analytic_n2_r2
+ 73/205 Test #192: v04_portable_v2_closed_analytic_n2_r2 ................   Passed    0.29 sec
+        Start 193: v04_portable_v2_closed_analytic_n2_r4
+ 74/205 Test #193: v04_portable_v2_closed_analytic_n2_r4 ................   Passed    0.30 sec
+        Start 194: v04_portable_v2_closed_analytic_n4_r1
+ 75/205 Test #194: v04_portable_v2_closed_analytic_n4_r1 ................   Passed    0.28 sec
+        Start 195: v04_portable_v2_closed_analytic_n4_r2
+ 76/205 Test #195: v04_portable_v2_closed_analytic_n4_r2 ................   Passed    0.28 sec
+        Start 196: v04_portable_v2_closed_analytic_n4_r4
+ 77/205 Test #196: v04_portable_v2_closed_analytic_n4_r4 ................   Passed    0.30 sec
+        Start 197: v04_portable_v2_fault_alpha_n4_r4
+ 78/205 Test #197: v04_portable_v2_fault_alpha_n4_r4 ....................   Passed    0.33 sec
+        Start 198: v04_portable_v2_tab_tab_n2_r1
+ 79/205 Test #198: v04_portable_v2_tab_tab_n2_r1 ........................   Passed    0.28 sec
+        Start 199: v04_portable_v2_tab_tab_n2_r2
+ 80/205 Test #199: v04_portable_v2_tab_tab_n2_r2 ........................   Passed    0.29 sec
+        Start 200: v04_portable_v2_tab_tab_n2_r4
+ 81/205 Test #200: v04_portable_v2_tab_tab_n2_r4 ........................   Passed    0.31 sec
+        Start 201: v04_portable_v2_tab_tab_n4_r1
+ 82/205 Test #201: v04_portable_v2_tab_tab_n4_r1 ........................   Passed    0.28 sec
+        Start 202: v04_portable_v2_tab_tab_n4_r2
+ 83/205 Test #202: v04_portable_v2_tab_tab_n4_r2 ........................   Passed    0.29 sec
+        Start 203: v04_portable_v2_tab_tab_n4_r4
+ 84/205 Test #203: v04_portable_v2_tab_tab_n4_r4 ........................   Passed    0.30 sec
+        Start 204: v04_models_exchange_routing_mpi_1
+ 85/205 Test #204: v04_models_exchange_routing_mpi_1 ....................   Passed    0.28 sec
+        Start 205: v04_models_exchange_routing_mpi_2
+ 86/205 Test #205: v04_models_exchange_routing_mpi_2 ....................   Passed    0.29 sec
+        Start 206: v04_models_exchange_routing_mpi_4
+ 87/205 Test #206: v04_models_exchange_routing_mpi_4 ....................   Passed    0.30 sec
+        Start 207: v04_models_portable_composition_mpi_1
+ 88/205 Test #207: v04_models_portable_composition_mpi_1 ................   Passed    0.28 sec
+        Start 208: v04_models_portable_composition_mpi_2
+ 89/205 Test #208: v04_models_portable_composition_mpi_2 ................   Passed    0.29 sec
+        Start 209: v04_models_portable_composition_mpi_4
+ 90/205 Test #209: v04_models_portable_composition_mpi_4 ................   Passed    0.31 sec
+        Start 210: v04_models_combustion
+ 91/205 Test #210: v04_models_combustion ................................   Passed    0.00 sec
+        Start 211: v04_models_esf
+ 92/205 Test #211: v04_models_esf .......................................   Passed    0.00 sec
+        Start 212: v04_models_esf_reaction
+ 93/205 Test #212: v04_models_esf_reaction ..............................   Passed    0.00 sec
+        Start 213: v04_models_esf_backend
+ 94/205 Test #213: v04_models_esf_backend ...............................   Passed    0.00 sec
+        Start 214: v04_models_tcr
+ 95/205 Test #214: v04_models_tcr .......................................   Passed    0.00 sec
+        Start 215: v04_models_exchange_batch
+ 96/205 Test #215: v04_models_exchange_batch ............................   Passed    0.00 sec
+        Start 216: v04_models_combustion_allocation
+ 97/205 Test #216: v04_models_combustion_allocation .....................   Passed    0.00 sec
+        Start 217: v04_models_combustion_common_source
+ 98/205 Test #217: v04_models_combustion_common_source ..................   Passed    0.00 sec
+        Start 218: v04_models_spray
+ 99/205 Test #218: v04_models_spray .....................................   Passed    0.00 sec
+        Start 219: v04_models_spray_parcel
+100/205 Test #219: v04_models_spray_parcel ..............................   Passed    0.00 sec
+        Start 220: v04_models_spray_breakup
+101/205 Test #220: v04_models_spray_breakup .............................   Passed    0.00 sec
+        Start 221: v04_models_spray_mechanics
+102/205 Test #221: v04_models_spray_mechanics ...........................   Passed    0.29 sec
+        Start 222: v04_models_spray_source
+103/205 Test #222: v04_models_spray_source ..............................   Passed    0.00 sec
+        Start 223: v04_models_spray_transfer
+104/205 Test #223: v04_models_spray_transfer ............................   Passed    0.00 sec
+        Start 224: v04_models_spray_events
+105/205 Test #224: v04_models_spray_events ..............................   Passed    0.01 sec
+        Start 225: v04_models_spray_transaction_mpi_1
+106/205 Test #225: v04_models_spray_transaction_mpi_1 ...................   Passed    0.28 sec
+        Start 226: v04_models_spray_transaction_mpi_2
+107/205 Test #226: v04_models_spray_transaction_mpi_2 ...................   Passed    0.29 sec
+        Start 227: v04_models_spray_transaction_mpi_4
+108/205 Test #227: v04_models_spray_transaction_mpi_4 ...................   Passed    0.30 sec
+        Start 228: v04_models_spray_migration_mpi_1
+109/205 Test #228: v04_models_spray_migration_mpi_1 .....................   Passed    0.32 sec
+        Start 229: v04_models_spray_migration_mpi_2
+110/205 Test #229: v04_models_spray_migration_mpi_2 .....................   Passed    0.29 sec
+        Start 230: v04_models_spray_migration_mpi_4
+111/205 Test #230: v04_models_spray_migration_mpi_4 .....................   Passed    0.31 sec
+        Start 235: v04_solver_enthalpy_terms
+112/205 Test #235: v04_solver_enthalpy_terms ............................   Passed    0.94 sec
+        Start 242: v04_solver_thermophysical_coupling
+113/205 Test #242: v04_solver_thermophysical_coupling ...................   Passed    0.46 sec
+        Start 248: v04_solver_thermophysical_idp
+114/205 Test #248: v04_solver_thermophysical_idp ........................   Passed    0.29 sec
+        Start 249: v04_solver_thermophysical_idp_mpi_2
+115/205 Test #249: v04_solver_thermophysical_idp_mpi_2 ..................   Passed    0.31 sec
+        Start 250: v04_solver_thermophysical_ghost_authority_mpi_2
+116/205 Test #250: v04_solver_thermophysical_ghost_authority_mpi_2 ......   Passed    0.29 sec
+        Start 251: v04_solver_piso_authority
+117/205 Test #251: v04_solver_piso_authority ............................   Passed    0.85 sec
+        Start 260: v04_solver_piso_mutation
+118/205 Test #260: v04_solver_piso_mutation .............................   Passed    0.31 sec
+        Start 261: v04_solver_piso_checkerboard
+119/205 Test #261: v04_solver_piso_checkerboard .........................   Passed    0.29 sec
+        Start 262: v04_solver_piso_checkerboard_mpi_2
+120/205 Test #262: v04_solver_piso_checkerboard_mpi_2 ...................   Passed    0.28 sec
+        Start 263: v04_solver_piso_checkerboard_mpi_4
+121/205 Test #263: v04_solver_piso_checkerboard_mpi_4 ...................   Passed    0.30 sec
+        Start 264: v04_solver_piso_temporal_order
+122/205 Test #264: v04_solver_piso_temporal_order .......................   Passed    0.29 sec
+        Start 265: v04_solver_ibm_pressure_operator
+123/205 Test #265: v04_solver_ibm_pressure_operator .....................   Passed    0.59 sec
+        Start 266: v04_solver_ibm_equation_interface
+124/205 Test #266: v04_solver_ibm_equation_interface ....................   Passed    0.39 sec
+        Start 267: v04_solver_ibm_scalar_mms
+125/205 Test #267: v04_solver_ibm_scalar_mms ............................   Passed   15.86 sec
+        Start 268: v04_solver_ibm_force_oracle
+126/205 Test #268: v04_solver_ibm_force_oracle ..........................   Passed    0.77 sec
+        Start 269: v04_solver_ibm_force_mutation
+127/205 Test #269: v04_solver_ibm_force_mutation ........................   Passed    0.59 sec
+        Start 273: v04_solver_piso_mpi_1
+128/205 Test #273: v04_solver_piso_mpi_1 ................................   Passed    0.47 sec
+        Start 274: v04_solver_piso_mpi_2
+129/205 Test #274: v04_solver_piso_mpi_2 ................................   Passed    0.42 sec
+        Start 275: v04_solver_piso_mpi_4
+130/205 Test #275: v04_solver_piso_mpi_4 ................................   Passed    0.38 sec
+        Start 276: v04_solver_ibm_physical_boundary_flux_mpi_1
+131/205 Test #276: v04_solver_ibm_physical_boundary_flux_mpi_1 ..........   Passed    1.69 sec
+        Start 277: v04_solver_ibm_physical_boundary_flux_mpi_2
+132/205 Test #277: v04_solver_ibm_physical_boundary_flux_mpi_2 ..........   Passed    1.27 sec
+        Start 278: v04_solver_ibm_physical_boundary_flux_mpi_4
+133/205 Test #278: v04_solver_ibm_physical_boundary_flux_mpi_4 ..........   Passed    0.82 sec
+        Start 279: v04_solver_ibm_force_mpi_1
+134/205 Test #279: v04_solver_ibm_force_mpi_1 ...........................   Passed    0.44 sec
+        Start 280: v04_solver_ibm_force_mpi_2
+135/205 Test #280: v04_solver_ibm_force_mpi_2 ...........................   Passed    0.36 sec
+        Start 281: v04_solver_ibm_force_mpi_4
+136/205 Test #281: v04_solver_ibm_force_mpi_4 ...........................   Passed    0.35 sec
+        Start 355: v04_product_pressure_energy_retry_mpi_1
+137/205 Test #355: v04_product_pressure_energy_retry_mpi_1 ..............   Passed    1.16 sec
+        Start 356: v04_product_pressure_energy_retry_mpi_2
+138/205 Test #356: v04_product_pressure_energy_retry_mpi_2 ..............   Passed    1.01 sec
+        Start 357: v04_product_pressure_energy_retry_mpi_4
+139/205 Test #357: v04_product_pressure_energy_retry_mpi_4 ..............   Passed    0.98 sec
+        Start 360: v04_product_restart_method_history
+140/205 Test #360: v04_product_restart_method_history ...................   Passed    1.82 sec
+        Start 369: v04_solver_mg_krylov_isolation
+141/205 Test #369: v04_solver_mg_krylov_isolation .......................   Passed    0.32 sec
+        Start 370: v04_solver_krylov_basis_update
+142/205 Test #370: v04_solver_krylov_basis_update .......................   Passed    0.04 sec
+        Start 381: v04_solver_krylov_mpi_1
+143/205 Test #381: v04_solver_krylov_mpi_1 ..............................   Passed    0.29 sec
+        Start 383: v04_solver_krylov_mpi_2
+144/205 Test #383: v04_solver_krylov_mpi_2 ..............................   Passed    0.30 sec
+        Start 385: v04_solver_krylov_mpi_4
+145/205 Test #385: v04_solver_krylov_mpi_4 ..............................   Passed    0.33 sec
+        Start 441: v04_app_case
+146/205 Test #441: v04_app_case .........................................   Passed    0.33 sec
+        Start 442: v04_app_case_broadcast_1
+147/205 Test #442: v04_app_case_broadcast_1 .............................   Passed    0.28 sec
+        Start 443: v04_app_case_broadcast_2
+148/205 Test #443: v04_app_case_broadcast_2 .............................   Passed    0.29 sec
+        Start 444: v04_app_case_broadcast_4
+149/205 Test #444: v04_app_case_broadcast_4 .............................   Passed    0.30 sec
+        Start 445: v04_app_case_allocation_mpi_1
+150/205 Test #445: v04_app_case_allocation_mpi_1 ........................   Passed    0.29 sec
+        Start 446: v04_app_case_allocation_mpi_2
+151/205 Test #446: v04_app_case_allocation_mpi_2 ........................   Passed    0.30 sec
+        Start 467: v04_product_spray_mpi_1
+152/205 Test #467: v04_product_spray_mpi_1 ..............................   Passed    0.69 sec
+        Start 468: v04_product_spray_wall_mpi_1
+153/205 Test #468: v04_product_spray_wall_mpi_1 .........................   Passed    0.67 sec
+        Start 469: v04_product_spray_ibm_mpi_1
+154/205 Test #469: v04_product_spray_ibm_mpi_1 ..........................   Passed    3.13 sec
+        Start 470: v04_product_spray_esf_ibm_wale_mpi_1
+155/205 Test #470: v04_product_spray_esf_ibm_wale_mpi_1 .................   Passed    5.05 sec
+        Start 471: v04_product_spray_esf_ibm_mpi_1
+156/205 Test #471: v04_product_spray_esf_ibm_mpi_1 ......................   Passed    4.94 sec
+        Start 472: v04_product_spray_esf_wall_mpi_1
+157/205 Test #472: v04_product_spray_esf_wall_mpi_1 .....................   Passed    0.79 sec
+        Start 473: v04_product_spray_esf_mpi_1
+158/205 Test #473: v04_product_spray_esf_mpi_1 ..........................   Passed    0.80 sec
+        Start 474: v04_product_spray_esf_passive_mpi_1
+159/205 Test #474: v04_product_spray_esf_passive_mpi_1 ..................   Passed    0.80 sec
+        Start 475: v04_product_spray_mpi_2
+160/205 Test #475: v04_product_spray_mpi_2 ..............................   Passed    0.71 sec
+        Start 476: v04_product_spray_wall_mpi_2
+161/205 Test #476: v04_product_spray_wall_mpi_2 .........................   Passed    0.67 sec
+        Start 477: v04_product_spray_ibm_mpi_2
+162/205 Test #477: v04_product_spray_ibm_mpi_2 ..........................   Passed    2.09 sec
+        Start 478: v04_product_spray_esf_ibm_wale_mpi_2
+163/205 Test #478: v04_product_spray_esf_ibm_wale_mpi_2 .................   Passed    3.06 sec
+        Start 479: v04_product_spray_esf_ibm_mpi_2
+164/205 Test #479: v04_product_spray_esf_ibm_mpi_2 ......................   Passed    3.12 sec
+        Start 480: v04_product_spray_esf_wall_mpi_2
+165/205 Test #480: v04_product_spray_esf_wall_mpi_2 .....................   Passed    0.75 sec
+        Start 481: v04_product_spray_esf_mpi_2
+166/205 Test #481: v04_product_spray_esf_mpi_2 ..........................   Passed    0.73 sec
+        Start 482: v04_product_spray_esf_passive_mpi_2
+167/205 Test #482: v04_product_spray_esf_passive_mpi_2 ..................   Passed    0.72 sec
+        Start 483: v04_product_spray_mpi_4
+168/205 Test #483: v04_product_spray_mpi_4 ..............................   Passed    0.71 sec
+        Start 484: v04_product_spray_wall_mpi_4
+169/205 Test #484: v04_product_spray_wall_mpi_4 .........................   Passed    0.94 sec
+        Start 485: v04_product_spray_ibm_mpi_4
+170/205 Test #485: v04_product_spray_ibm_mpi_4 ..........................   Passed    2.24 sec
+        Start 486: v04_product_spray_esf_ibm_wale_mpi_4
+171/205 Test #486: v04_product_spray_esf_ibm_wale_mpi_4 .................   Passed    2.13 sec
+        Start 487: v04_product_spray_esf_ibm_mpi_4
+172/205 Test #487: v04_product_spray_esf_ibm_mpi_4 ......................   Passed    2.10 sec
+        Start 488: v04_product_spray_esf_wall_mpi_4
+173/205 Test #488: v04_product_spray_esf_wall_mpi_4 .....................   Passed    0.73 sec
+        Start 489: v04_product_spray_esf_mpi_4
+174/205 Test #489: v04_product_spray_esf_mpi_4 ..........................   Passed    0.74 sec
+        Start 490: v04_product_spray_esf_passive_mpi_4
+175/205 Test #490: v04_product_spray_esf_passive_mpi_4 ..................   Passed    0.71 sec
+        Start 491: v04_product_reaction_mpi_1
+176/205 Test #491: v04_product_reaction_mpi_1 ...........................   Passed    0.60 sec
+        Start 492: v04_product_reaction_mpi_2
+177/205 Test #492: v04_product_reaction_mpi_2 ...........................   Passed    0.61 sec
+        Start 493: v04_product_reaction_mpi_4
+178/205 Test #493: v04_product_reaction_mpi_4 ...........................   Passed    1.06 sec
+        Start 494: v04_product_reaction_case_mpi_1
+179/205 Test #494: v04_product_reaction_case_mpi_1 ......................   Passed    0.62 sec
+        Start 495: v04_product_reaction_case_mpi_2
+180/205 Test #495: v04_product_reaction_case_mpi_2 ......................   Passed    0.62 sec
+        Start 496: v04_product_reaction_case_mpi_4
+181/205 Test #496: v04_product_reaction_case_mpi_4 ......................   Passed    0.66 sec
+        Start 497: v04_product_pasr_case_mpi_1
+182/205 Test #497: v04_product_pasr_case_mpi_1 ..........................   Passed    0.61 sec
+        Start 498: v04_product_pasr_case_mpi_2
+183/205 Test #498: v04_product_pasr_case_mpi_2 ..........................   Passed    0.63 sec
+        Start 499: v04_product_pasr_case_mpi_4
+184/205 Test #499: v04_product_pasr_case_mpi_4 ..........................   Passed    0.61 sec
+        Start 500: v04_product_esf_case_mpi_1
+185/205 Test #500: v04_product_esf_case_mpi_1 ...........................   Passed    0.66 sec
+        Start 501: v04_product_esf_case_mpi_2
+186/205 Test #501: v04_product_esf_case_mpi_2 ...........................   Passed    0.84 sec
+        Start 502: v04_product_esf_case_mpi_4
+187/205 Test #502: v04_product_esf_case_mpi_4 ...........................   Passed    0.67 sec
+        Start 503: v04_product_tcr_shadow_mpi_1
+188/205 Test #503: v04_product_tcr_shadow_mpi_1 .........................   Passed    1.03 sec
+        Start 504: v04_product_tcr_shadow_mpi_2
+189/205 Test #504: v04_product_tcr_shadow_mpi_2 .........................   Passed    0.95 sec
+        Start 505: v04_product_tcr_shadow_mpi_4
+190/205 Test #505: v04_product_tcr_shadow_mpi_4 .........................   Passed    0.96 sec
+        Start 506: v04_product_tcr_experimental_mpi_1
+191/205 Test #506: v04_product_tcr_experimental_mpi_1 ...................   Passed    1.02 sec
+        Start 507: v04_product_tcr_experimental_mpi_2
+192/205 Test #507: v04_product_tcr_experimental_mpi_2 ...................   Passed    1.14 sec
+        Start 508: v04_product_tcr_experimental_mpi_4
+193/205 Test #508: v04_product_tcr_experimental_mpi_4 ...................   Passed    0.99 sec
+        Start 509: v04_coupled_restart_cli_reacting-esf-ibm
+194/205 Test #509: v04_coupled_restart_cli_reacting-esf-ibm .............   Passed    3.39 sec
+        Start 510: v04_coupled_restart_cli_reacting-spray-esf-ibm
+195/205 Test #510: v04_coupled_restart_cli_reacting-spray-esf-ibm .......   Passed    4.57 sec
+        Start 511: v04_coupled_restart_cli_reacting-spray-esf-wall
+196/205 Test #511: v04_coupled_restart_cli_reacting-spray-esf-wall ......   Passed    3.47 sec
+        Start 512: v04_coupled_restart_cli_reacting-spray-esf-outlet
+197/205 Test #512: v04_coupled_restart_cli_reacting-spray-esf-outlet ....   Passed    3.67 sec
+        Start 513: v04_coupled_restart_cli_reacting-spray-ibm
+198/205 Test #513: v04_coupled_restart_cli_reacting-spray-ibm ...........   Passed    4.21 sec
+        Start 514: v04_coupled_restart_cli_reacting-spray-outlet
+199/205 Test #514: v04_coupled_restart_cli_reacting-spray-outlet ........   Passed    3.59 sec
+        Start 515: v04_coupled_restart_cli_reacting-spray-wall
+200/205 Test #515: v04_coupled_restart_cli_reacting-spray-wall ..........   Passed    3.96 sec
+        Start 516: v04_coupled_restart_cli_reacting-esf
+201/205 Test #516: v04_coupled_restart_cli_reacting-esf .................   Passed    3.86 sec
+        Start 517: v04_coupled_restart_cli_reacting-tcr-experimental
+202/205 Test #517: v04_coupled_restart_cli_reacting-tcr-experimental ....   Passed    3.12 sec
+        Start 518: v04_coupled_restart_cli_reacting-spray-mean
+203/205 Test #518: v04_coupled_restart_cli_reacting-spray-mean ..........   Passed    3.33 sec
+        Start 519: v04_coupled_restart_cli_reacting-spray-esf
+204/205 Test #519: v04_coupled_restart_cli_reacting-spray-esf ...........   Passed    3.06 sec
+        Start 520: v04_coupled_restart_cli_reacting-spray-esf-passive
+205/205 Test #520: v04_coupled_restart_cli_reacting-spray-esf-passive ...   Passed    3.01 sec
+
+100% tests passed, 0 tests failed out of 205
+
+Label Time Summary:
+io_failure_audit       =  59.37 sec*proc (1 test)
+portable_v1            =   0.38 sec*proc (23 tests)
+portable_v2            =  17.99 sec*proc (25 tests)
+scalar-conservation    =  15.86 sec*proc (1 test)
+v04_focused            =  52.80 sec*proc (33 tests)
+
+Total Test time (real) = 347.61 sec

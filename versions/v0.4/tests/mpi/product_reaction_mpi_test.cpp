@@ -71,7 +71,7 @@ class EsfGas final : public portable::GasQueryProvider,
                      public portable::GasAdvanceProvider {
 public:
   chemistry::detail::AnalyticIsomerBackend backend;
-  bool fail_half{}, zero_progress{};
+  bool fail_half{}, zero_progress{}, hold_composition{};
   unsigned half_calls{};
   std::uint64_t advance_calls{}, fail_query_after_halves{};
   const portable::GasIdentity &gas_identity() const noexcept override {
@@ -94,6 +94,24 @@ public:
     ++advance_calls;
     if (fail_half && ++half_calls == 3)
       return portable::Status::provider_failure;
+    // A conservative identity interval isolates the continuation witness from
+    // changing eta. Rate queries remain available to construct actual eta/R.
+    if (hold_composition) {
+      double d[2], h[2], w[2];
+      portable::GasQueryOutput sample{{}, d, h, w, 2};
+      const auto status = backend.query_gas(q.state, sample);
+      if (status != portable::Status::success)
+        return status;
+      for (unsigned i = 0; i < 2; ++i) {
+        out.final_mass_fractions[i] = q.state.mass_fractions[i];
+        out.integrated_species_density_delta_kg_per_m3[i] = 0;
+      }
+      out.final_sample = sample.sample;
+      out.completed_duration_s = q.duration_s;
+      out.internal_step_count = 1;
+      out.integrated_heat_release_j_per_m3 = 0;
+      return portable::Status::success;
+    }
     return backend.advance_gas(q, out);
   }
   ProductCouplingBindings bindings() noexcept {
@@ -177,6 +195,212 @@ bool collective(bool okay) {
   int a = okay, b = 0;
   MPI_Allreduce(&a, &b, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
   return b;
+}
+class FoldWitness final : public ProductTcrFoldProvider {
+public:
+  int defect{};
+  PlanFingerprint identity{UINT64_C(9007199254741011)};
+  PlanFingerprint fingerprint() const noexcept override { return identity; }
+  Status query(const ProductTcrFoldQuery &q,
+               ProductTcrFoldEvidence &out) const noexcept override {
+    out = {};
+    if (q.global_cell != 0 || !q.initialized ||
+        q.history_revision.accepted_step != 1)
+      return {};
+    if (defect == 4)
+      return {StatusCode::numerical_failure, 12345};
+    // Manufactured continuation at eta=1/4: R rises from 1 to 4/3 and
+    // returns to 1 on the upper branch. It is a contract witness, not CFD
+    // evidence for an automatically detected physical fold.
+    out = {true,
+           identity,
+           q.global_cell,
+           q.history_revision,
+           q.input_revision,
+           .25,
+           4. / 3,
+           1};
+    if (defect == 1)
+      ++out.global_cell;
+    if (defect == 2)
+      ++out.input_revision.input_revision;
+    if (defect == 3)
+      ++out.source_identity;
+    if (defect == 5)
+      ++out.history_revision.input_revision;
+    if (defect == 6)
+      out.rate_ratio = 1;
+    return {};
+  }
+};
+bool native_fold_continuation(const ValidatedModel &model,
+                              const std::filesystem::path &case_root,
+                              const std::filesystem::path &root,
+                              DriverInitialState initial, int rank) {
+  EsfGas gas, restored_gas;
+  gas.hold_composition = restored_gas.hold_composition = true;
+  FoldWitness witness, restored_witness;
+  ProductDriver driver, restored;
+  auto create = [&](EsfGas &backend, FoldWitness &fold, ProductDriver &out) {
+    auto bindings = backend.bindings();
+    bindings.tcr_fold = &fold;
+    CompiledCasePlan plan;
+    auto status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
+                                           plan, bindings);
+    if (status)
+      status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), out);
+    return status;
+  };
+  auto status = create(gas, witness, driver);
+  if (status)
+    status = driver.initialize(initial);
+  DriverStepReport report;
+  if (status)
+    status = driver.advance({1, 1, 1, 1, 1}, report);
+  if (!collective(bool(status) && report.accepted))
+    return false;
+  RestartSnapshot before;
+  status = driver.committed_restart_snapshot(before);
+  if (!collective(bool(status)))
+    return false;
+  const auto saved = physical_values(before);
+  const auto variance_at_origin = [](const RestartSnapshot &snapshot) {
+    double mean = 0, variance = 0;
+    unsigned n = 0;
+    for (std::size_t i = 0; i < snapshot.fields.size; ++i)
+      if (snapshot.fields.data[i].role == RestartFieldRole::stochastic_field) {
+        mean += snapshot.fields.data[i].values.unchecked({0, 0, 0}, 0);
+        ++n;
+      }
+    mean /= n;
+    for (std::size_t i = 0; i < snapshot.fields.size; ++i)
+      if (snapshot.fields.data[i].role == RestartFieldRole::stochastic_field) {
+        const double delta =
+            snapshot.fields.data[i].values.unchecked({0, 0, 0}, 0) - mean;
+        variance += delta * delta / n;
+      }
+    return variance;
+  };
+  const double old_variance = variance_at_origin(before);
+  double gamma = 0;
+  for (std::size_t i = 0; i < before.fields.size; ++i)
+    if (before.fields.data[i].role == RestartFieldRole::stochastic_transport)
+      gamma = before.fields.data[i].values.unchecked({0, 0, 0}, 0);
+  const double rho = initial.pressure_reference * 28 /
+                     (kUniversalGasConstant * initial.temperature);
+  const double delta =
+      std::cbrt((model.mesh.upper.x - model.mesh.lower.x) *
+                (model.mesh.upper.y - model.mesh.lower.y) *
+                (model.mesh.upper.z - model.mesh.lower.z) /
+                (double(before.global_cells.x) * before.global_cells.y *
+                 before.global_cells.z));
+  // At kappa=1, uniform fields, zero advection/turbulence and identity
+  // chemistry, the target variance follows this exact IEM decay.
+  const double expected_variance =
+      old_variance *
+      std::exp(-before.dt * 2 * gamma /
+               (rho * model.reaction.mixing_c_z * delta * delta));
+
+  for (int defect = 1; defect <= 6; ++defect) {
+    witness.defect = rank == 0 ? defect : 0;
+    status = driver.advance({1, 1, 1, 1, 1}, report);
+    bool rejected = !status && !report.accepted;
+    RestartSnapshot after;
+    if (rejected)
+      status = driver.committed_restart_snapshot(after);
+    rejected &= bool(status) && physical_values(after) == saved;
+    if (!collective(rejected)) {
+      if (rank == 0)
+        std::cerr << "fold witness defect did not roll back: " << defect
+                  << '\n';
+      return false;
+    }
+  }
+  witness.defect = 0;
+  status = driver.advance({1, 1, 1, 1, 1}, report);
+  if (!collective(bool(status) && report.accepted))
+    return false;
+  RestartSnapshot folded;
+  status = driver.committed_restart_snapshot(folded);
+  if (!collective(bool(status)))
+    return false;
+  const auto u64 = [](const std::uint8_t *p, unsigned n = 8) {
+    std::uint64_t v = 0;
+    for (unsigned b = 0; b < n; ++b)
+      v |= std::uint64_t(p[b]) << (8 * b);
+    return v;
+  };
+  const auto real = [&](const std::uint8_t *p) {
+    const auto bits = u64(p);
+    double v;
+    std::memcpy(&v, &bits, 8);
+    return v;
+  };
+  bool valid = true;
+  const auto cells = folded.patch.cells;
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x) {
+        const auto i = std::size_t(x) +
+                       std::size_t(cells.x) * (y + std::size_t(cells.y) * z);
+        const auto *row = folded.cell_records.values.data + 120 * i;
+        const bool target = x + folded.patch.begin.x == 0 &&
+                            y + folded.patch.begin.y == 0 &&
+                            z + folded.patch.begin.z == 0;
+        valid &= u64(row) == 2 && u64(row + 72) == (target ? 1 : 0);
+        if (target)
+          valid &=
+              u64(row + 56, 4) == 2 && std::abs(real(row + 40) - .5) < 2e-12 &&
+              std::abs(real(row + 48) - 1) < 2e-12 && real(row + 80) == .25 &&
+              real(row + 88) == 4. / 3 && u64(row + 96) == 1;
+      }
+  if (!collective(valid))
+    return false;
+  const bool owns_origin = folded.patch.begin.x == 0 &&
+                           folded.patch.begin.y == 0 &&
+                           folded.patch.begin.z == 0;
+  if (!collective(!owns_origin || std::abs(variance_at_origin(folded) -
+                                           expected_variance) < 2e-12)) {
+    if (rank == 0)
+      std::cerr << "fold departure did not drive native IEM variance\n";
+    return false;
+  }
+  const auto folded_values = physical_values(folded);
+  status = RestartWriter::write(MPI_COMM_WORLD, root, folded);
+  if (status)
+    status = create(restored_gas, restored_witness, restored);
+  RestartExpected expected;
+  if (status)
+    status = restored.restart_expected(expected);
+  RestartImage image;
+  if (status)
+    status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
+  if (status)
+    status = restored.initialize_restart(image);
+  RestartSnapshot after;
+  if (status)
+    status = restored.committed_restart_snapshot(after);
+  if (!collective(bool(status) && physical_values(after) == folded_values))
+    return false;
+  status = restored.advance({1, 1, 1, 1, 1}, report);
+  if (!collective(bool(status) && report.accepted))
+    return false;
+  status = restored.committed_restart_snapshot(after);
+  if (!collective(bool(status)))
+    return false;
+  for (std::size_t i = 0; i < after.cell_records.values.size; i += 120)
+    valid &= u64(after.cell_records.values.data + i) == 3 &&
+             u64(after.cell_records.values.data + i + 72) ==
+                 u64(folded.cell_records.values.data + i + 72);
+  if (!collective(valid))
+    return false;
+  // A different evidence authority cannot restore this accepted branch history.
+  ProductDriver wrong;
+  restored_witness.identity += 2;
+  status = create(restored_gas, restored_witness, wrong);
+  if (status)
+    status = wrong.initialize_restart(image);
+  return collective(!status);
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -677,6 +901,12 @@ int main(int argc, char **argv) {
       }
       if (!okay && rank == 0)
         std::cerr << "TCR integer history continuation failed\n";
+    }
+    if (okay && tcr && external_esf) {
+      okay = native_fold_continuation(model, case_root, root / "fold", initial,
+                                      rank);
+      if (!okay && rank == 0)
+        std::cerr << "native TCR fold continuation failed\n";
     }
     if (okay && esf && !tcr) {
       // Restart carries a zero-mean sinusoidal composition disturbance across

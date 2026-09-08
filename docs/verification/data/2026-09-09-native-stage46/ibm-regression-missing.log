@@ -1,0 +1,42 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-integrated-stage4-6-re3900/build-integrated
+      Start 265: v04_solver_ibm_pressure_operator
+ 1/16 Test #265: v04_solver_ibm_pressure_operator ..............   Passed    0.62 sec
+      Start 266: v04_solver_ibm_equation_interface
+ 2/16 Test #266: v04_solver_ibm_equation_interface .............   Passed    0.39 sec
+      Start 267: v04_solver_ibm_scalar_mms
+ 3/16 Test #267: v04_solver_ibm_scalar_mms .....................   Passed   15.89 sec
+      Start 268: v04_solver_ibm_force_oracle
+ 4/16 Test #268: v04_solver_ibm_force_oracle ...................   Passed    0.76 sec
+      Start 269: v04_solver_ibm_force_mutation
+ 5/16 Test #269: v04_solver_ibm_force_mutation .................   Passed    0.60 sec
+      Start 276: v04_solver_ibm_physical_boundary_flux_mpi_1
+ 6/16 Test #276: v04_solver_ibm_physical_boundary_flux_mpi_1 ...   Passed    1.68 sec
+      Start 277: v04_solver_ibm_physical_boundary_flux_mpi_2
+ 7/16 Test #277: v04_solver_ibm_physical_boundary_flux_mpi_2 ...   Passed    1.29 sec
+      Start 278: v04_solver_ibm_physical_boundary_flux_mpi_4
+ 8/16 Test #278: v04_solver_ibm_physical_boundary_flux_mpi_4 ...   Passed    0.82 sec
+      Start 279: v04_solver_ibm_force_mpi_1
+ 9/16 Test #279: v04_solver_ibm_force_mpi_1 ....................   Passed    0.44 sec
+      Start 280: v04_solver_ibm_force_mpi_2
+10/16 Test #280: v04_solver_ibm_force_mpi_2 ....................   Passed    0.37 sec
+      Start 281: v04_solver_ibm_force_mpi_4
+11/16 Test #281: v04_solver_ibm_force_mpi_4 ....................   Passed    0.35 sec
+      Start 442: v04_app_case_broadcast_1
+12/16 Test #442: v04_app_case_broadcast_1 ......................   Passed    0.28 sec
+      Start 443: v04_app_case_broadcast_2
+13/16 Test #443: v04_app_case_broadcast_2 ......................   Passed    0.29 sec
+      Start 444: v04_app_case_broadcast_4
+14/16 Test #444: v04_app_case_broadcast_4 ......................   Passed    0.31 sec
+      Start 445: v04_app_case_allocation_mpi_1
+15/16 Test #445: v04_app_case_allocation_mpi_1 .................   Passed    0.29 sec
+      Start 446: v04_app_case_allocation_mpi_2
+16/16 Test #446: v04_app_case_allocation_mpi_2 .................   Passed    0.31 sec
+
+100% tests passed, 0 tests failed out of 16
+
+Label Time Summary:
+scalar-conservation    =  15.89 sec*proc (1 test)
+v04_focused            =  29.29 sec*proc (13 tests)
+
+Total Test time (real) =  24.71 sec

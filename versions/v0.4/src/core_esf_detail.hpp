@@ -13,9 +13,13 @@ namespace hundun::v04::detail {
 class ProductEsf {
 public:
   Status configure(const ValidatedModel &model,
-                   const ProductReactionSources &gas, Int3 cells) {
+                   const ProductReactionSources &gas, MeshPatch patch,
+                   Int3 global_cells) {
     if (!model.reaction.esf)
       return {};
+    const auto cells = patch.cells;
+    begin_ = patch.begin;
+    global_cells_ = global_cells;
     spec_ = *model.reaction.esf;
     cells_ = cells;
     ns_ = gas.gas_identity().species_names.size();
@@ -574,6 +578,40 @@ public:
                                    : tcr::detail::Mode::experimental;
             tcr_request.initialization_sign =
                 history.initialized ? 0 : spec_.tcr.initialization_sign;
+            if (gas.fold_provider() &&
+                mapped.status == tcr::detail::Status::success) {
+              const auto *provider = gas.fold_provider();
+              const auto global_cell =
+                  std::uint64_t(x + begin_.x) +
+                  std::uint64_t(global_cells_.x) *
+                      (std::uint64_t(y + begin_.y) +
+                       std::uint64_t(global_cells_.y) * (z + begin_.z));
+              const ProductTcrFoldQuery query{
+                  global_cell,        history.revision,
+                  revision,           history.initialized,
+                  history.input.eta,  history.input.rate_ratio,
+                  mapped.input.eta,   mapped.input.rate_ratio,
+                  history.branch_sign};
+              ProductTcrFoldEvidence evidence;
+              if (provider->fingerprint() != gas.fold_identity())
+                return invalid();
+              status = provider->query(query, evidence);
+              if (!status)
+                return status;
+              if (provider->fingerprint() != gas.fold_identity())
+                return invalid();
+              if (evidence.supplied) {
+                if (evidence.source_identity != gas.fold_identity() ||
+                    evidence.global_cell != global_cell ||
+                    evidence.history_revision != history.revision ||
+                    evidence.input_revision != revision)
+                  return invalid();
+                tcr_request.fold = {true,
+                                    history.revision,
+                                    {evidence.eta, evidence.rate_ratio},
+                                    evidence.departure_sign};
+              }
+            }
             const auto candidate = tcr::detail::prepare(history, tcr_request);
             if (!candidate.available)
               return {StatusCode::numerical_failure,
@@ -789,7 +827,7 @@ private:
   }
   std::vector<std::size_t> reactants_;
   EsfSpec spec_;
-  Int3 cells_{};
+  Int3 cells_{}, begin_{}, global_cells_{};
   std::size_t ns_{}, stride_{}, count_{};
   double c_z_{}, sc_t_{};
   std::vector<std::array<double, 2>> passive_schmidt_;
